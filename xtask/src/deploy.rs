@@ -1,4 +1,4 @@
-//! `cargo xtask deploy --config <file> [--branch <name>] [--pinned-only]`
+//! `cargo xtask deploy --config <file> [--branch <name>] [--pinned-only] [--dry-run]`
 //! and `cargo xtask teardown --config <file> --branch <name>`
 //! (docs/cloudflare-v1.md, decisions 4 and 20).
 //!
@@ -22,6 +22,8 @@
 //! fragments are `<name>--b.<zone>` (one wildcard DNS record
 //! and certificate cover them all). Its repos are named `b--…` in the
 //! code.storage org, so it never touches another deployment's.
+//! With `saas`, the public suffix is separate from the provider zone;
+//! exact custom hostnames replace wildcard routes (docs/saas-hosting.md).
 //!
 //! A deployment of its own names its hosts instead of a zone: the
 //! platform's (`platform_host`) and the fragments' suffix
@@ -50,6 +52,9 @@ struct Deployment {
     /// A branch deployment's zone, which its routes are on: its platform is
     /// `<branch>.<zone>`. A deployment of its own names none (refused).
     zone: Option<String>,
+    /// Exact Cloudflare for SaaS hosts under an externally managed public
+    /// suffix. Only branch deployments take this; routes stay in `zone`.
+    saas: Option<Saas>,
     /// The platform's host and the fragments' suffix, for a deployment of
     /// its own (production: `fragment.club`, `fragment.boats`): each a
     /// zone's own name on the account (the same one, for one zone for
@@ -327,6 +332,45 @@ fn makes_endpoint(d: &Deployment, branch: Option<&str>) -> bool {
     branch.is_some() && d.stripe.as_ref().is_some_and(|s| s.key_file.is_some())
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Saas {
+    public_suffix: String,
+    /// A proxied, originless AAAA 100:: record in the provider zone. Set
+    /// it as the SaaS fallback origin before pointing public DNS at it.
+    fallback_origin: String,
+    /// Platform plus fragment hosts, never a wildcard. Provision their
+    /// certificates through Cloudflare for SaaS and CNAMEs at their DNS
+    /// provider separately; a Worker route alone provides neither.
+    hostnames: Vec<String>,
+}
+
+fn dns_name(name: &str) -> bool {
+    name.len() <= 253 && name.contains('.') && name.split('.').all(|label| {
+        !label.is_empty() && label.len() <= 63 && !label.starts_with('-') && !label.ends_with('-')
+            && label.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    })
+}
+
+/// Fail before vendor calls on an incomplete or overly broad SaaS route
+/// list. A hostname must be this platform or one of this branch's apps.
+fn saas_routes(saas: &Saas, zone: &str, branch: &str) -> Result<Vec<String>> {
+    anyhow::ensure!(dns_name(zone) && dns_name(&saas.public_suffix), "zone and saas.public_suffix must be lower-case DNS names");
+    anyhow::ensure!(dns_name(&saas.fallback_origin) && saas.fallback_origin.ends_with(&format!(".{zone}")), "saas.fallback_origin must be a host inside the provider zone");
+    anyhow::ensure!((1..=100).contains(&saas.hostnames.len()), "saas.hostnames must list 1-100 exact hosts; check the account's remaining hostname allowance separately");
+    let platform = format!("{branch}.{}", saas.public_suffix);
+    let ending = format!("--{branch}.{}", saas.public_suffix);
+    let mut seen = std::collections::BTreeSet::new();
+    for host in &saas.hostnames {
+        anyhow::ensure!(dns_name(host) && seen.insert(host), "invalid or duplicate saas hostname: {host}");
+        let app = host.strip_suffix(&ending).is_some_and(fragment_proto::valid_fragment_name);
+        anyhow::ensure!(host == &platform || app, "saas hostname {host} is not the platform or an app on branch {branch}");
+        anyhow::ensure!(host != zone && host != &saas.fallback_origin, "a public SaaS hostname must differ from the provider zone and fallback origin");
+    }
+    anyhow::ensure!(seen.contains(&platform), "saas.hostnames must include the platform {platform}");
+    Ok(saas.hostnames.iter().map(|host| format!("{host}/*")).collect())
+}
+
 /// The store secrets the deployment's Workers are bound to, by name.
 fn bound(d: &Deployment) -> Result<devstack::store::Bound> {
     bound_for(d, None)
@@ -486,6 +530,18 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
         (Some(b), None, None) => {
             anyhow::ensure!(valid_branch(b), "a branch is 1-16 of a-z, 0-9 and single dashes inside, not {b:?}");
             let zone = d.zone.as_deref().context("a --branch deploys at <branch>.<zone>: the config names its zone")?;
+            let suffix = d.saas.as_ref().map_or(zone, |s| s.public_suffix.as_str());
+            let (routes, dns) = match &d.saas {
+                Some(s) => (
+                    saas_routes(s, zone, b)?.into_iter().map(|pattern| Route { pattern, zone: zone.into() }).collect(),
+                    vec![crate::dns::Wanted { zone: zone.into(), name: s.fallback_origin.clone() }],
+                ),
+                None => (
+                    vec![Route { pattern: format!("{b}.{zone}/*"), zone: zone.into() }, Route { pattern: format!("*--{b}.{zone}/*"), zone: zone.into() }],
+                    // one wildcard covers every branch's platform and fragments
+                    vec![crate::dns::Wanted { zone: zone.into(), name: format!("*.{zone}") }],
+                ),
+            };
             Ok(Names {
                 cell: format!("fragment-{b}"),
                 jobs: format!("fragment-jobs-{b}"),
@@ -493,16 +549,16 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
                 dead: format!("fragment-deliveries-dead-{b}"),
                 ledger: format!("fragment-ledger-{b}"),
                 bucket: format!("fragment-blobs-{b}"),
-                platform_host: format!("{b}.{zone}"),
-                suffix: zone.to_string(),
+                platform_host: format!("{b}.{suffix}"),
+                suffix: suffix.into(),
                 label_suffix: Some(format!("--{b}")),
-                routes: vec![Route { pattern: format!("{b}.{zone}/*"), zone: zone.into() }, Route { pattern: format!("*--{b}.{zone}/*"), zone: zone.into() }],
-                // one wildcard covers every branch's platform and fragments
-                dns: vec![crate::dns::Wanted { zone: zone.into(), name: format!("*.{zone}") }],
+                routes,
+                dns,
                 repo_prefix: Some(format!("{b}--")),
             })
         }
         (None, Some(platform), Some(suffix)) => {
+            anyhow::ensure!(d.saas.is_none(), "saas requires a --branch deployment, not platform_host or fragment_suffix");
             if let Some(zone) = &d.zone {
                 bail!("zone ({zone}) is a branch deployment's: a deployment of its own is on its hosts' zones, platform_host's and fragment_suffix's. Remove it");
             }
@@ -591,6 +647,10 @@ pub(crate) fn secrets_of(config: &Path) -> Result<SecretsOf> {
 /// secrets' names, and its models (`models_of`, through `bound`).
 fn checked(d: Deployment) -> Result<Deployment> {
     check_names(&bound(&d)?)?;
+    if let Some(p) = &d.default_plan {
+        anyhow::ensure!(matches!(p.as_str(), "guest" | "seat" | "seat_always_on"), "default_plan is guest, seat or seat_always_on, not {p:?}");
+    }
+    anyhow::ensure!(d.ai_gateway.as_deref() != Some("default"), "ai_gateway names the deployment's own gateway: `default` makes one that logs");
     if let Some(c) = &d.computers {
         if !c.images.contains_key(&c.default_image) {
             bail!("computers: the default image {:?} is not one of its images", c.default_image);
@@ -618,21 +678,24 @@ struct Args {
     branch: Option<String>,
     /// A deploy's `--pinned-only` (`pinned_only`).
     pinned_only: bool,
+    /// A deploy's `--dry-run` (`deploy_plan`).
+    dry_run: bool,
 }
 
 fn args(rest: &[String]) -> Result<Args> {
-    let usage = || anyhow::anyhow!("usage: cargo xtask deploy --config <file> [--branch <name>] [--pinned-only] | teardown --config <file> --branch <name>");
-    let (mut config, mut branch, mut pinned_only) = (None, None, false);
+    let usage = || anyhow::anyhow!("usage: cargo xtask deploy --config <file> [--branch <name>] [--pinned-only] [--dry-run] | teardown --config <file> --branch <name>");
+    let (mut config, mut branch, mut pinned_only, mut dry_run) = (None, None, false, false);
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--config" => config = Some(PathBuf::from(it.next().ok_or_else(usage)?)),
             "--branch" => branch = Some(it.next().ok_or_else(usage)?.clone()),
             "--pinned-only" => pinned_only = true,
+            "--dry-run" => dry_run = true,
             _ => return Err(usage()),
         }
     }
-    Ok(Args { config: config.ok_or_else(usage)?, branch, pinned_only })
+    Ok(Args { config: config.ok_or_else(usage)?, branch, pinned_only, dry_run })
 }
 
 /// `--pinned-only`, CI's deploy (.github/workflows/ci.yml): every computer
@@ -774,20 +837,41 @@ pub fn stripe(rest: &[String]) -> Result<()> {
     }
 }
 
+/// No credential read, vendor call, build or mutation. Store IDs are
+/// discovered by the real preflight, so this is a plan only.
+fn deploy_plan(d: &Deployment, n: &Names, branch: Option<&str>) -> Result<Value> {
+    Ok(json!({
+        "status": "plan only; no access, billing, DNS or TLS verified",
+        "platform_url": format!("https://{}", n.platform_host),
+        "fragment_suffix": n.suffix,
+        "label_suffix": n.label_suffix,
+        "provider_zone": d.zone,
+        "routes": n.routes.iter().map(|r| json!({ "pattern": r.pattern, "zone_name": r.zone })).collect::<Vec<_>>(),
+        "dns": n.dns.iter().map(|w| json!({ "zone": w.zone, "name": w.name, "type": "AAAA", "content": "100::", "proxied": true })).collect::<Vec<_>>(),
+        "workers": [n.cell], "workflow": n.jobs,
+        "queues": [n.dead, n.deliveries, n.ledger], "bucket": n.bucket,
+        "repo_prefix": n.repo_prefix,
+        "secret_names": named_secrets(&bound_for(d, branch)?),
+        "stripe_branch_endpoint": makes_endpoint(d, branch).then(|| crate::stripe::endpoint_url(&format!("https://{}", n.platform_host))),
+        "saas_provisioning": d.saas.as_ref().map(|s| json!({ "fallback_origin": s.fallback_origin, "custom_hostnames": s.hostnames, "external_dns_target": s.fallback_origin })),
+    }))
+}
+
 pub fn deploy(rest: &[String]) -> Result<()> {
-    let Args { config, branch, pinned_only: pinned } = args(rest)?;
+    let Args { config, branch, pinned_only: pinned, dry_run } = args(rest)?;
     let d = load(&config)?;
     if pinned {
         pinned_only(&d)?;
     }
     let n = names(&d, branch.as_deref())?;
+    test_secret_file(&d, branch.as_deref())?;
+    if dry_run {
+        println!("{}", serde_json::to_string_pretty(&deploy_plan(&d, &n, branch.as_deref())?)?);
+        return Ok(());
+    }
     // the two local files are read before anything is built or made
     let dns_token = d.dns_token_file.as_deref().map(read_secret).transpose()?;
     let test_secret = test_secret_file(&d, branch.as_deref())?.map(read_test_secret).transpose()?;
-    if let Some(p) = &d.default_plan {
-        anyhow::ensure!(matches!(p.as_str(), "guest" | "seat" | "seat_always_on"), "default_plan is guest, seat or seat_always_on, not {p:?}");
-    }
-    anyhow::ensure!(d.ai_gateway.as_deref() != Some("default"), "ai_gateway names the deployment's own gateway: `default` makes one that logs");
     let bound = bound_for(&d, branch.as_deref())?;
     let tools = devstack::Tools::locate()?;
     // and every store secret the Worker is bound to is there (read-only)
@@ -1022,7 +1106,7 @@ pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
     let d = load(&config)?;
     // a deployment of its own takes no --branch: production never runs it
     let n = names(&d, Some(&branch)).context("the hosted lane runs on a branch deployment (a preview)")?;
-    // a branch's suffix is its zone
+    // SaaS keeps public URLs under its public suffix, not the routing zone.
     let mut args = vec!["--hosted".to_string(), "--zone".into(), n.suffix, "--branch".into(), branch.clone()];
     if let Some(file) = test_secret_file(&d, Some(&branch))? {
         args.extend(["--secret-file".to_string(), expand(file).to_string_lossy().into_owned()]);
@@ -1053,8 +1137,9 @@ pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
 /// the deployment's own blob grace and left: R2 refuses to delete a bucket
 /// with objects in it. Irreversible: ask before running it.
 pub fn teardown(rest: &[String]) -> Result<()> {
-    let Args { config, branch, pinned_only } = args(rest)?;
+    let Args { config, branch, pinned_only, dry_run } = args(rest)?;
     anyhow::ensure!(!pinned_only, "--pinned-only is a deploy's: a teardown builds nothing");
+    anyhow::ensure!(!dry_run, "--dry-run is a deploy's: a teardown has no plan to print");
     let d = load(&config)?;
     anyhow::ensure!(branch.is_some(), "teardown removes a branch deployment: name its --branch");
     let n = names(&d, branch.as_deref())?;
@@ -1097,6 +1182,7 @@ mod tests {
         Deployment {
             account_id: "acct".into(),
             zone: (platform.is_none() && suffix.is_none()).then(|| "finite.place".into()),
+            saas: None,
             platform_host: platform.map(str::to_string),
             fragment_suffix: suffix.map(str::to_string),
             dns_token_file: None,
@@ -1242,6 +1328,142 @@ mod tests {
         zoneless.zone = None;
         let refused = names(&zoneless, Some("dev")).err().map(|e| e.to_string()).unwrap_or_default();
         assert!(refused.contains("names its zone"), "{refused}");
+    }
+
+    fn saas_deployment() -> Deployment {
+        let mut d = deployment(None, None);
+        d.zone = Some("ratemymdp.com".into());
+        d.saas = Some(Saas {
+            public_suffix: "lwn.lol".into(),
+            fallback_origin: "service.ratemymdp.com".into(),
+            hostnames: vec!["fragments.lwn.lol".into(), "midnight-conservatory--k3x9--fragments.lwn.lol".into()],
+        });
+        d
+    }
+
+    #[test]
+    fn saas_routes_are_exact_and_public_urls_do_not_use_the_provider_zone() {
+        let d = saas_deployment();
+        let n = names(&d, Some("fragments")).unwrap();
+        assert_eq!(n.platform_host, "fragments.lwn.lol");
+        assert_eq!(n.suffix, "lwn.lol");
+        assert_eq!(n.label_suffix.as_deref(), Some("--fragments"));
+        assert_eq!(n.repo_prefix.as_deref(), Some("fragments--"));
+        assert_eq!(n.cell, "fragment-fragments");
+        assert_eq!(n.routes, [Route { pattern: "fragments.lwn.lol/*".into(), zone: "ratemymdp.com".into() }, Route { pattern: "midnight-conservatory--k3x9--fragments.lwn.lol/*".into(), zone: "ratemymdp.com".into() }]);
+        assert_eq!(n.dns, [crate::dns::Wanted { zone: "ratemymdp.com".into(), name: "service.ratemymdp.com".into() }]);
+        let cell = worker_config(&d, &n, "store", "revision", &devstack::repo_root()).unwrap();
+        assert_eq!(cell["routes"], json!([
+            { "pattern": "fragments.lwn.lol/*", "zone_name": "ratemymdp.com" },
+            { "pattern": "midnight-conservatory--k3x9--fragments.lwn.lol/*", "zone_name": "ratemymdp.com" },
+        ]));
+        assert_eq!(cell["vars"]["FRAGMENT_HOST_SUFFIX"], "lwn.lol");
+        assert_eq!(cell["vars"]["FRAGMENT_PLATFORM_URL"], "https://fragments.lwn.lol");
+        assert_eq!(cell["workers_dev"], false);
+        assert_eq!(cell["preview_urls"], false);
+        assert!(cell.get("containers").is_none());
+        let plan = deploy_plan(&d, &n, Some("fragments")).unwrap();
+        assert_eq!(plan["workers"], json!(["fragment-fragments"]));
+        assert_eq!(plan["routes"], cell["routes"]);
+        assert!(plan["stripe_branch_endpoint"].is_null());
+    }
+
+    #[test]
+    fn saas_uses_current_fragment_names_and_dns_label_bounds() {
+        for name in ["todo--k3x9", "9-board--aaaa", "brief--9999"] {
+            let mut d = saas_deployment();
+            d.saas.as_mut().unwrap().hostnames.push(format!("{name}--fragments.lwn.lol"));
+            assert!(names(&d, Some("fragments")).is_ok(), "{name}");
+        }
+        for name in ["todo--alex", "todo--demoowner", "todo--0000", "todo--1234", "todo--abc", "todo--abcde", "todo.alex"] {
+            let mut d = saas_deployment();
+            d.saas.as_mut().unwrap().hostnames.push(format!("{name}--fragments.lwn.lol"));
+            assert!(names(&d, Some("fragments")).is_err(), "{name}");
+        }
+        let mut d = saas_deployment();
+        let hosts = &mut d.saas.as_mut().unwrap().hostnames;
+        hosts.push(format!("{}--k3x9--fragments.lwn.lol", "a".repeat(46)));
+        assert!(names(&d, Some("fragments")).is_ok(), "63-byte host label");
+        d.saas.as_mut().unwrap().hostnames[2] = format!("{}--k3x9--fragments.lwn.lol", "a".repeat(47));
+        assert!(names(&d, Some("fragments")).is_err(), "64-byte host label");
+        d.saas.as_mut().unwrap().hostnames.pop();
+        d.zone = None;
+        assert!(names(&d, Some("fragments")).is_err(), "SaaS still requires a provider zone");
+    }
+
+    #[test]
+    fn saas_plan_keeps_stripe_endpoints_on_the_public_platform() {
+        let mut d = saas_deployment();
+        d.stripe = Some(StripeDeploy { key: "stripe-key".into(), webhook_secret: "stripe-webhook".into(), portal: None, tax: None, key_file: Some("/nonexistent/stripe-key".into()), api: None });
+        let n = names(&d, Some("fragments")).unwrap();
+        let plan = deploy_plan(&d, &n, Some("fragments")).unwrap();
+        assert_eq!(plan["stripe_branch_endpoint"], crate::stripe::endpoint_url("https://fragments.lwn.lol"));
+        assert!(plan["secret_names"].as_array().unwrap().iter().any(|s| s == &json!(["stripe.key", "stripe-key"])));
+        assert!(!plan["secret_names"].as_array().unwrap().iter().any(|s| s[0] == "stripe.webhook_secret"));
+        d.stripe.as_mut().unwrap().key_file = None;
+        let plan = deploy_plan(&d, &n, Some("fragments")).unwrap();
+        assert!(plan["stripe_branch_endpoint"].is_null());
+        assert!(plan["secret_names"].as_array().unwrap().iter().any(|s| s == &json!(["stripe.webhook_secret", "stripe-webhook"])));
+    }
+
+    #[test]
+    fn saas_refuses_unrelated_ambiguous_and_wildcard_hosts() {
+        for bad in ["*", "*.lwn.lol", "*--fragments.lwn.lol", "unrelated.example.com", "other.lwn.lol", "todo--alex--other.lwn.lol", "nested.todo--alex--fragments.lwn.lol", "todo--alex--fragments.lwn.lol/path", "TODO--alex--fragments.lwn.lol", "todo--alex--fragments.lwn.lol.", "service.ratemymdp.com", "fragments.lwn.lol"] {
+            let mut d = saas_deployment();
+            d.saas.as_mut().unwrap().hostnames.push(bad.into());
+            assert!(names(&d, Some("fragments")).is_err(), "{bad}");
+        }
+        let mut d = saas_deployment();
+        d.saas.as_mut().unwrap().hostnames.remove(0);
+        assert!(names(&d, Some("fragments")).is_err(), "platform omitted");
+        for bad in ["ratemymdp.com", "service.ratemymdp.com.evil.org", "service.notratemymdp.com", "*.ratemymdp.com"] {
+            let mut d = saas_deployment();
+            d.saas.as_mut().unwrap().fallback_origin = bad.into();
+            assert!(names(&d, Some("fragments")).is_err(), "{bad}");
+        }
+        let mut d = saas_deployment();
+        d.platform_host = Some("fragments.lwn.lol".into());
+        d.fragment_suffix = Some("lwn.lol".into());
+        d.zone = None;
+        assert!(names(&d, None).is_err(), "SaaS without a branch is refused");
+        assert!(names(&d, Some("fragments")).is_err());
+    }
+
+    #[test]
+    fn saas_hosted_checks_use_the_public_suffix() {
+        let v = json!({
+            "account_id": "acct", "zone": "ratemymdp.com",
+            "saas": { "public_suffix": "lwn.lol", "fallback_origin": "service.ratemymdp.com", "hostnames": ["fragments.lwn.lol"] },
+            "host_secret": "host", "codestorage": { "org": "alex", "private_key": "storage" },
+            "workos": { "client_id": "client", "api_key": "key" }
+        });
+        let path = config_file("saas-hosted", &v);
+        let args: Vec<String> = ["--hosted", "--config", path.to_str().unwrap(), "--branch", "fragments", "--dry-run", "--max-paid-calls", "0"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(hosted_e2e_args(&args).unwrap(), ["--hosted", "--zone", "lwn.lol", "--branch", "fragments", "--dry-run", "--max-paid-calls", "0"]);
+    }
+
+    #[test]
+    fn dry_run_validates_config_without_reading_credentials() {
+        let mut v = json!({
+            "account_id": "acct", "zone": "ratemymdp.com",
+            "saas": { "public_suffix": "lwn.lol", "fallback_origin": "service.ratemymdp.com", "hostnames": ["fragments.lwn.lol"] },
+            "host_secret": "host", "codestorage": { "org": "alex", "private_key": "storage" },
+            "workos": { "client_id": "client", "api_key": "key" },
+            "dns_token_file": "/nonexistent/saas-dns-token",
+            "test_secret_file": "/nonexistent/saas-test-secret"
+        });
+        let run = |v: &Value| {
+            let path = config_file("saas-dry-run", v);
+            deploy(&["--config".into(), path.to_string_lossy().into_owned(), "--branch".into(), "fragments".into(), "--dry-run".into()])
+        };
+        assert!(run(&v).is_ok(), "dry-run reads no credential or store");
+        v["default_plan"] = json!("not-a-plan");
+        assert!(run(&v).is_err(), "dry-run must refuse invalid plans");
+        v["default_plan"] = json!("guest");
+        v["ai_gateway"] = json!("default");
+        assert!(run(&v).is_err(), "dry-run must refuse a logging gateway");
+        v.as_object_mut().unwrap().remove("ai_gateway");
+        assert!(run(&v).is_ok());
     }
 
     /// A deployment of its own is on two zones: the platform's route and

@@ -29,6 +29,8 @@
   // teardown, reads the account's KV namespaces).
   "account_id": "0123456789abcdef0123456789abcdef",
   "zone": "example.dev",
+  // For exact Cloudflare for SaaS hosts with external public DNS, use
+  // `saas` (docs/saas-hosting.md). `zone` then remains the provider zone.
   // A Cloudflare API token with Zone · DNS · Edit on the zone (or both):
   // with it, a deploy makes the records its routes need when they are
   // missing. Without it, make them by hand. A file: it is the deploying
