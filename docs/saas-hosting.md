@@ -17,7 +17,8 @@ name Secrets Store entries, never values):
     "fallback_origin": "service.ratemymdp.com",
     "hostnames": [
       "fragments.lwn.lol",
-      "midnight-conservatory--k3x9--fragments.lwn.lol"
+      "midnight-conservatory--k3x9--fragments.lwn.lol",
+      "0123456789abcdef01234567--computer--fragments.lwn.lol"
     ]
   }
 }
@@ -27,7 +28,17 @@ name Secrets Store entries, never values):
 Upstream removed usernames (decision 47): create each app through the platform
 and use its returned full name, such as `midnight-conservatory--k3x9`, to
 provision its exact hostname. Legacy `<label>--<username>` hosts are not aliases.
-List every intended app host. With branch `fragments`, resources
+List every intended app host and computer host. A computer's ID is
+`computer:<24 lower-case hex>`; use the ID returned by the computers API
+to provision `<24 hex>--computer--fragments.lwn.lol`. Its screen and port
+ticket URLs use that exact origin. Adding the route grants no access:
+the runtime still requires the computer owner's signed request or its
+existing ticket/session authorization. A computers-enabled deployment's
+app-only hostname list cannot serve its computers' screen or port URLs.
+Provision each intended computer's exact hostname when its ID is known;
+do not substitute an agent fragment's name or a wildcard.
+
+With branch `fragments`, resources
 are named `fragment-fragments`,
 `fragment-jobs-fragments`, `fragment-blobs-fragments`, and the three queues
 `fragment-deliveries-fragments`, `fragment-deliveries-dead-fragments` and
@@ -83,7 +94,9 @@ set a parent-domain session cookie to work around login issues.
 Wait for hostname and SSL status to become active, then verify actual HTTPS
 and the deployment revision at `/healthz`. Test real AuthKit sign-in,
 callback and logout; navigate each app, connect its WebSocket, inspect
-host-only cookies, and check outsider and cross-app denials. Probe unrelated
+host-only cookies, and check outsider and cross-app denials. For each
+provisioned computer, open its screen through an owner-issued port ticket
+and confirm an unauthenticated request is refused. Probe unrelated
 provider hosts to confirm they do not serve platform endpoints. Source
 tests and successful provisioning alone are not live acceptance.
 

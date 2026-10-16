@@ -339,7 +339,7 @@ struct Saas {
     /// A proxied, originless AAAA 100:: record in the provider zone. Set
     /// it as the SaaS fallback origin before pointing public DNS at it.
     fallback_origin: String,
-    /// Platform plus fragment hosts, never a wildcard. Provision their
+    /// Platform, fragment and computer hosts, never a wildcard. Provision their
     /// certificates through Cloudflare for SaaS and CNAMEs at their DNS
     /// provider separately; a Worker route alone provides neither.
     hostnames: Vec<String>,
@@ -353,7 +353,7 @@ fn dns_name(name: &str) -> bool {
 }
 
 /// Fail before vendor calls on an incomplete or overly broad SaaS route
-/// list. A hostname must be this platform or one of this branch's apps.
+/// list. A hostname must be this platform or one of this branch's apps or computers.
 fn saas_routes(saas: &Saas, zone: &str, branch: &str) -> Result<Vec<String>> {
     anyhow::ensure!(dns_name(zone) && dns_name(&saas.public_suffix), "zone and saas.public_suffix must be lower-case DNS names");
     anyhow::ensure!(dns_name(&saas.fallback_origin) && saas.fallback_origin.ends_with(&format!(".{zone}")), "saas.fallback_origin must be a host inside the provider zone");
@@ -363,8 +363,10 @@ fn saas_routes(saas: &Saas, zone: &str, branch: &str) -> Result<Vec<String>> {
     let mut seen = std::collections::BTreeSet::new();
     for host in &saas.hostnames {
         anyhow::ensure!(dns_name(host) && seen.insert(host), "invalid or duplicate saas hostname: {host}");
-        let app = host.strip_suffix(&ending).is_some_and(fragment_proto::valid_fragment_name);
-        anyhow::ensure!(host == &platform || app, "saas hostname {host} is not the platform or an app on branch {branch}");
+        let resource = host.strip_suffix(&ending).is_some_and(|label| {
+            fragment_proto::valid_fragment_name(label) || fragment_proto::computer::computer_of_label(label).is_some()
+        });
+        anyhow::ensure!(host == &platform || resource, "saas hostname {host} is not the platform, an app or a computer on branch {branch}");
         anyhow::ensure!(host != zone && host != &saas.fallback_origin, "a public SaaS hostname must differ from the provider zone and fallback origin");
     }
     anyhow::ensure!(seen.contains(&platform), "saas.hostnames must include the platform {platform}");
@@ -1389,6 +1391,52 @@ mod tests {
         d.saas.as_mut().unwrap().hostnames.pop();
         d.zone = None;
         assert!(names(&d, Some("fragments")).is_err(), "SaaS still requires a provider zone");
+    }
+
+    #[test]
+    fn saas_computer_routes_use_canonical_labels_and_the_public_suffix() {
+        let id = "computer:0123456789abcdef01234567";
+        let label = fragment_proto::computer::computer_label(id).unwrap();
+        let host = format!("{label}--fragments.lwn.lol");
+        let mut d = saas_deployment();
+        d.computers = Some(serde_json::from_value(json!({
+            "default_image": "hermes",
+            "images": { "hermes": { "dockerfile": "images/hermes/Dockerfile", "build_context": "." } }
+        })).unwrap());
+        d.saas.as_mut().unwrap().hostnames.push(host.clone());
+        let n = names(&d, Some("fragments")).unwrap();
+        let cell = worker_config(&d, &n, "store", "revision", &devstack::repo_root()).unwrap();
+        let exact = json!({ "pattern": format!("{host}/*"), "zone_name": "ratemymdp.com" });
+        assert_eq!(cell["routes"][2], exact);
+        assert_eq!(cell["vars"]["FRAGMENT_HOST_SUFFIX"], "lwn.lol");
+        assert_eq!(cell["vars"]["FRAGMENT_HOST_LABEL_SUFFIX"], "--fragments");
+        assert_eq!(cell["vars"]["FRAGMENT_COMPUTER_IMAGE"], "hermes");
+        assert_eq!(cell["workers_dev"], false);
+        assert_eq!(cell["preview_urls"], false);
+        let plan = deploy_plan(&d, &n, Some("fragments")).unwrap();
+        assert_eq!(plan["routes"][2], exact);
+        assert_eq!(plan["saas_provisioning"]["custom_hostnames"][2], host);
+        assert_eq!(n.dns, [crate::dns::Wanted { zone: "ratemymdp.com".into(), name: "service.ratemymdp.com".into() }]);
+    }
+
+    #[test]
+    fn saas_refuses_malformed_computer_hosts_and_other_branches() {
+        for bad in [
+            "0123456789abcdef0123456--computer--fragments.lwn.lol",
+            "0123456789abcdef012345678--computer--fragments.lwn.lol",
+            "0123456789abcdef0123456g--computer--fragments.lwn.lol",
+            "0123456789ABCDEF01234567--computer--fragments.lwn.lol",
+            "0123456789abcdef01234567--computer.lwn.lol",
+            "0123456789abcdef01234567--computer--other.lwn.lol",
+            "0123456789abcdef01234567--computer--fragments.other.example",
+            "nested.0123456789abcdef01234567--computer--fragments.lwn.lol",
+            "*--computer--fragments.lwn.lol",
+            "0123456789abcdef01234567--computer--computer--fragments.lwn.lol",
+        ] {
+            let mut d = saas_deployment();
+            d.saas.as_mut().unwrap().hostnames.push(bad.into());
+            assert!(names(&d, Some("fragments")).is_err(), "{bad}");
+        }
     }
 
     #[test]
