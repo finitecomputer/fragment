@@ -1139,12 +1139,16 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     }
     s.ok("and the open chat names its agent", names(&placeholder), json!({ "fragment": open, "placeholder": placeholder }));
     let _ = b.screenshot(&page, &shots.join("phone-chat.png"));
-    // the list: the sidebar over the chat, its + the launcher, bottom right
+    // the list: the sidebar over the chat, its + the launcher, bottom right.
+    // Its answer carries whether the tap arrived and each change of the
+    // layout's classes (`log`): this check fails now and then, the sidebar
+    // left closed, and the log says whether it never opened or was closed.
+    b.eval(&page, "(() => { const l = document.getElementById('layout'); const log = (window.__layoutLog = [[Math.round(performance.now()), l.className]]); new MutationObserver(() => log.push([Math.round(performance.now()), l.className])).observe(l, { attributes: true, attributeFilter: ['class'] }); document.getElementById('toggle-left').addEventListener('click', () => log.push([Math.round(performance.now()), 'click']), true); return true; })()")?;
     b.click(&page, "#toggle-left")?;
     // (once the list has slid in: its + is fixed within it while it moves)
     let fab_expr = "(() => { const r = document.getElementById('sidebar-new-chat').getBoundingClientRect(); return r.width >= 44 && r.right > innerWidth - 40 && r.bottom > innerHeight - 60; })()";
     let list = b.until(&page, &format!("document.getElementById('layout').classList.contains('left-open') && document.querySelector('.sidebar-shell').getBoundingClientRect().width >= innerWidth - 2 && {fab_expr}"), wait);
-    let fab = b.eval(&page, &format!("({{ fab: {fab_expr}, at: (() => {{ const r = document.getElementById('sidebar-new-chat').getBoundingClientRect(); return [r.left, r.top, r.width, innerWidth, innerHeight]; }})() }})"))?;
+    let fab = b.eval(&page, &format!("({{ fab: {fab_expr}, at: (() => {{ const r = document.getElementById('sidebar-new-chat').getBoundingClientRect(); return [r.left, r.top, r.width, innerWidth, innerHeight]; }})(), log: window.__layoutLog ?? null }})"))?;
     let _ = b.screenshot(&page, &shots.join("phone-list.png"));
     s.ok("on a phone the list covers the chat, its + the launcher at its bottom right, a thumb's size", list && fab["fab"] == true, &fab);
     b.eval(&page, "(document.getElementById('scrim').click(), true)")?;
