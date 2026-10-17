@@ -592,9 +592,9 @@ card: "Asked <name>", where its model runs when the shell's roster says
 (`runsOn`: "<model> · <provider>", its title saying that is outside
 the platform and what it is sent goes there, or "On the platform"),
 what the step says it was sent (cut where its arguments were; each
-`[PLACEHOLDER]` marked), and how it goes: working while the step runs,
-or while the roster says that agent works and this is the chat's newest
-hand-off to it; done after; "didn't go through" when the step failed.
+`[PLACEHOLDER]` marked), and how it went: "Sending…" while the step
+runs, "Sent" after (never "Done": the teammate may still be working),
+"Didn't go through" when the step failed.
 Framed, "See the hand-off" asks the shell to open the chat it went to
 (`{fragment: "open-handoff", identity, via}`, `via` "ask" or
 "message": docs/api.md). A step that names no agent

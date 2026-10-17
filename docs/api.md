@@ -2482,14 +2482,12 @@ windows, then Add, open beside the chat on a
 desktop's width, a sheet from the bottom on a phone. **Their other
 agents are the one agent's team** (decision 62, proposed): a row each,
 one level down under it (`#team`: indented, smaller and quieter than the
-person's chats), under "Your team", which folds them away (the open
-chat's teammate kept) and says who works while folded; past five, four
-show and "Show all" the rest. A row opens that agent's own chat with the
+person's chats), under "Your team". A row opens that agent's own chat with the
 person (else its newest other chat with them, else a new one), chosen
 as pressed; it is marked while one of its chats is open, those listed
 under it: its other chats with the person (any chat of theirs with it
 alone), then its hand-offs (`fragment ask`'s pairs, "Hand-offs from
-<agent>"). It says when it works, its unread with the person (its
+<agent>"). It says its unread with the person (its
 hand-offs count none: its agents' talk, which the one agent reports),
 and a globe
 when its model runs outside the platform (its `agent.json`: the
@@ -2503,9 +2501,7 @@ teammate's own chat, `<label>-chat`, any other of the person's with it
 alone, and the hand-offs) never list in the person's list; search still
 finds them. A prompt the shell puts in a
 composer goes to the open chat when it is the person's own, never a
-teammate's. Who works the shell reads from those
-chats' `work` (a turn started and not ended), every 4 s while shown, at
-most 12 chats. New chats, Enter and the launcher stay the one agent's.
+teammate's. New chats, Enter and the launcher stay the one agent's.
 **Add teaches
 how to ask for an app** (Paul, 2026-10-14: "rather than spawning generic
 apps we teach the user how to prompt for new apps"): a window of ways to

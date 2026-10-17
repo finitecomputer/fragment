@@ -946,13 +946,6 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let opened = open_team_chat(&mut b, &page, &reader_id)?;
     let titled = b.until(&page, &format!("document.getElementById('chat-title').textContent === 'Reader' && document.querySelector({})?.getAttribute('aria-current') === 'page'", js(&reader_team)), wait);
     s.ok("its row opens its own chat with the person, and is marked while it is open", opened && titled, b.eval(&page, "({ title: document.getElementById('chat-title').textContent, team: document.getElementById('team').innerText })")?);
-    // "Your team" folds the rows away, the open chat's teammate kept, and
-    // unfolds them
-    b.click(&page, "#team .team-head")?;
-    let folded = b.until(&page, &format!("document.querySelector('#team .team-head').getAttribute('aria-expanded') === 'false' && document.querySelectorAll('#team .team-row').length === 1 && !!document.querySelector({})", js(&reader_team)), wait);
-    b.click(&page, "#team .team-head")?;
-    let unfolded = b.until(&page, "document.querySelector('#team .team-head').getAttribute('aria-expanded') === 'true'", wait);
-    s.ok("\"Your team\" folds the team away but the open chat's teammate, and unfolds it", folded && unfolded, b.eval(&page, "document.getElementById('team').innerText")?);
     // another chat of theirs with the Reader alone (as New chat with it makes
     // one) is the Reader's too: under its row, never among their chats
     let made = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "label": "reading-notes", "template": "chat", "title": "Reading notes" })), &[])?;

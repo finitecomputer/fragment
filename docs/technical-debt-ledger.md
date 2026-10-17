@@ -1335,29 +1335,20 @@ fragment.club until cutover (decisions 34–35).
   which reopens decisions 13 and 44, Paul's), or the person is told
   plainly that this care is all there is and accepts it.
 
-## The shell reads who of the team works from its chats' work, every 4 s
+## The shell finds the team's chats by their labels
 
 - **Observed:** 2026-10-16, the team under the person's one agent
   (docs/cloudflare-v1.md, decision 62, proposed; docs/api.md, The shell).
-  Nothing tells a page that an agent is working: the shell lists the
-  team's chats (a teammate's own chat, `<label>-chat`, and `fragment
-  ask`'s pairs, both found by label, as the Bot Chat is) and reads each
-  one's `work` after its cursor every 4 s while shown, at most 12 chats;
-  a turn started and not ended (30 minutes at most) is that agent
-  working. Where each agent's model runs it reads from `agent.json`, at
+  The shell files a chat under a teammate by its label: a teammate's own
+  chat, `<label>-chat`, and `fragment ask`'s pairs, as the Bot Chat is
+  found. Where each agent's model runs it reads from `agent.json`, at
   most once a minute.
-- **Shortcut:** polling, and labels for which chats are the team's.
-- **Risk:** a team of busy chats costs up to 24 requests a poll; a chat
-  named by hand like a pair is filed under the team; a teammate's work in
-  a chat that is no team chat (a group the person made) never rings its
-  face.
-- **First proof:** a person with a team of several agents and many
-  hand-offs: the shell's requests climb with them, or a face stays still
-  while its agent answers in a group chat.
-- **Delete when:** the person's list says what each of their agents is
-  doing (its row, fed as previews are: the Principal's watch), and a
-  chat's fragment names its kind of chat (own, hand-off, group) instead
-  of its label saying it.
+- **Shortcut:** labels for which chats are the team's.
+- **Risk:** a chat named by hand like a pair is filed under the team.
+- **First proof:** a person's own chat labelled like a hand-off, missing
+  from their list.
+- **Delete when:** a chat's fragment names its kind of chat (own,
+  hand-off, group) instead of its label saying it.
 
 ## A fenced agent's fence is the platform's alone
 

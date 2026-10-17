@@ -1307,19 +1307,11 @@ export function mount(root) {
     }
     return b;
   }
-  // the newest hand-off to `identity` in this chat: the one its teammate's
-  // work (the shell's roster says) is for
-  function newestHandoff(identity) {
-    let newest = null;
-    for (const t of state.turns.values()) for (const s of t.steps.values()) if (handoffOf(s)?.r?.identity === identity && (!newest || s.n > newest.n)) newest = s;
-    return newest;
-  }
   function handoffNode(t, s, h) {
     const key = `h:${t.id}:${s.step}`;
-    // the step returns once the question is posted (or, with `--wait`, its
-    // answer read): its teammate's own work, while it lasts, is the card's
-    const theirs = !!h.r?.working && newestHandoff(h.r.identity) === s;
-    const how = s.ok === false ? "failed" : theirs || (s.ok !== true && running(t)) ? "running" : "done";
+    // the step ends once the question is posted (or, with `--wait`, its
+    // answer read): "Sent", never "Done", since the teammate may still work
+    const how = s.ok === false ? "failed" : s.ok !== true && running(t) ? "running" : "done";
     const where = h.r?.runsOn ?? null;
     const sig = JSON.stringify([how, h.name, h.brief, where, h.r?.identity ?? null, !!rosterOrigin]);
     return [
@@ -1339,7 +1331,7 @@ export function mount(root) {
         }
         const said = el("span", "handoff-state");
         said.innerHTML = svg(how === "failed" ? "x" : how === "done" ? "check" : "loader", how === "running" ? "spin" : "");
-        said.append(how === "failed" ? "Didn't go through" : how === "done" ? "Done" : "Working on it…");
+        said.append(how === "failed" ? "Didn't go through" : how === "done" ? "Sent" : "Sending…");
         head.append(said);
         card.append(head);
         if (h.brief) card.append(briefNode(h.brief));

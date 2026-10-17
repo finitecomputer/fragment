@@ -1240,8 +1240,8 @@ these other providers."
       sidebar): its other agents are its team, a row each one step down
       under it (Austin, 2026-10-16: "first class ui … STILL having them be
       SLIGHTLY lower"), each opening its own chat with the person, marked
-      while open with its hand-offs under it, saying when it works and
-      when its model runs outside the platform; "Your team" folds them.
+      while open with its hand-offs under it, saying when its model runs
+      outside the platform.
       Their own chats and the hand-offs among the person's agents leave
       the person's list. Talking to a teammate directly skips the default
       agent's care, so a chat whose lead runs outside the platform says
@@ -1249,7 +1249,7 @@ these other providers."
       go through: "DeepSeek V4.1 Flash · OpenRouter"). In a chat, each
       hand-off is a card: who was asked, "<model> · <provider>" when it
       is outside the platform, what it was sent with
-      its placeholders marked, working or done, and "See the hand-off",
+      its placeholders marked, sent, and "See the hand-off",
       which opens the chat it went to beside it (docs/api.md, The shell;
       docs/chat-records.md, The page). A hand-off the default agent only
       describes shows no card: on a local run, it once said Polisher had

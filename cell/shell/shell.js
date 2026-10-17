@@ -333,7 +333,7 @@ const roster = () => {
   return [...state.agents.values()].map((a) => {
     const picture = agentFace(a.fragment, a.identity).picture;
     const where = runsOn.get(a.fragment);
-    return { identity: a.identity, fragment: a.fragment, name: a.name || labelOf(a.fragment), title: titleOf(a.fragment), ...(picture ? { picture: new URL(picture, location.origin).href } : {}), ...(phase ? { phase } : {}), ...(where ? { runsOn: where } : {}), ...(isWorking(a) ? { working: true } : {}) };
+    return { identity: a.identity, fragment: a.fragment, name: a.name || labelOf(a.fragment), title: titleOf(a.fragment), ...(picture ? { picture: new URL(picture, location.origin).href } : {}), ...(phase ? { phase } : {}), ...(where ? { runsOn: where } : {}) };
   });
 };
 let rosterSent = "";
@@ -737,106 +737,24 @@ const whereItRuns = (a) => {
   return r?.on === "own" ? `${r.model} · ${r.provider}, outside the platform` : r ? "On the platform's models" : "";
 };
 
-// Who of the team is working: a turn it started on one of its chats'
-// `work` (docs/chat-records.md) and has not ended, read every TEAM_POLL_MS
-// while the page is shown, from at most TEAM_CHATS_MAX of its newest
-// chats, each from TEAM_TAIL records back at first and after its cursor
-// since. A turn started TEAM_TURN_STALE_MS ago counts no more: one cut
-// short leaves no end.
-const TEAM_POLL_MS = 4000;
-const TEAM_CHATS_MAX = 12;
-const TEAM_TAIL = 40;
-const TEAM_TURN_STALE_MS = 30 * 60 * 1000;
-const teamWork = new Map(); // chat -> { after, open: Map<turn, { agent, at }> }
-async function readTeamWork() {
-  const names = teamAgents().flatMap(teamChats).sort(newest).slice(0, TEAM_CHATS_MAX).map((f) => f.name);
-  for (const name of [...teamWork.keys()]) if (!names.includes(name)) teamWork.delete(name);
-  // bounded: TEAM_CHATS_MAX chats, two reads each at most
-  for (const name of names) {
-    let w = teamWork.get(name);
-    if (!w) {
-      const listed = await api("GET", `/api/f/${seg(name)}/channels`).catch(() => null);
-      const seq = listed?.channels?.find((c) => c.name === "work")?.seq ?? 0;
-      w = { after: Math.max(0, seq - TEAM_TAIL), open: new Map() };
-      teamWork.set(name, w);
-    }
-    const page = await api("GET", `/api/f/${seg(name)}/channels/work?after=${w.after}`).catch(() => null);
-    for (const r of page?.records ?? []) {
-      w.after = Math.max(w.after, r.seq);
-      const b = r.body ?? {};
-      if (b.kind === "turn.start" && typeof b.turn === "string") w.open.set(b.turn, { agent: b.agent ?? r.principal, at: r.at });
-      else if (b.kind === "turn.end") w.open.delete(b.turn);
-    }
-  }
-}
-function isWorking(a) {
-  const now = Date.now();
-  for (const w of teamWork.values()) for (const t of w.open.values()) if (t.agent === a.identity && now - t.at < TEAM_TURN_STALE_MS) return true;
-  return false;
-}
-let teamTimer = 0;
-let teamStarted = false;
-async function teamTick() {
-  clearTimeout(teamTimer);
-  if (!document.hidden && teamAgents().length) {
-    const before = JSON.stringify(teamAgents().map(isWorking));
-    await readTeamWork().catch(() => {});
-    if (JSON.stringify(teamAgents().map(isWorking)) !== before) {
-      renderChats();
-      rosterChanged();
-    }
-  }
-  teamTimer = setTimeout(teamTick, TEAM_POLL_MS);
-}
-const namesOf = (agents) => {
-  const names = agents.map((a) => titleOf(a.fragment));
-  return names.length <= 2 ? names.join(" and ") : `${names.slice(0, 2).join(", ")} and ${names.length - 2} more`;
-};
 // The team under the one agent, a step down from it: indented under it, a
 // smaller row each, quieter than the person's chats. A row opens that
-// agent's own chat with the person, and says when it works, its new
-// messages, and when its model runs outside the platform; its ⋯ says
-// where, and offers its hand-offs, a change asked of the one agent, and
-// its profile. The open chat's teammate (its own chat, another of the
-// person's with it alone, or a hand-off it is in) is marked, those chats
-// listed under it. TEAM_SHOWN rows show at
-// first (the open one's always), the rest behind "Show all"; "Your team"
-// folds them away (the open one's stays), saying who works.
-const TEAM_SHOWN = 4;
-const TEAM_FOLDED = "shell.team.folded.v1";
-let teamAll = false;
+// agent's own chat with the person, and says its new messages and when its
+// model runs outside the platform; its ⋯ says where, and offers its
+// hand-offs, a change asked of the one agent, its screen, its fence and its
+// profile. The open chat's teammate (its own chat, another of the person's
+// with it alone, or a hand-off it is in) is marked, those chats listed
+// under it.
 function renderTeam() {
   const team = state.guest ? [] : teamAgents();
   const box = $("team");
   box.hidden = !team.length;
   if (!team.length) return patch(box, []);
-  const folded = store.get(TEAM_FOLDED, false) === true;
   const open = state.page ? null : byName(state.current);
   const here = teammateOf(open);
-  const busy = team.filter(isWorking);
-  const head = el("button", "team-head");
-  head.type = "button";
+  const head = el("div", "team-head", "Your team");
   head.dataset.key = "team-head";
-  head.setAttribute("aria-expanded", String(!folded));
-  head.innerHTML = svg("chevron");
-  head.append(el("span", "team-head-label", "Your team"));
-  if (folded && busy.length) head.append(el("span", "team-head-busy", `${namesOf(busy)} ${busy.length === 1 ? "is" : "are"} working…`));
-  else if (folded) head.append(el("span", "team-head-count", String(team.length)));
-  if (folded && team.some((a) => teamUnread(a) > 0)) head.append(el("span", "team-dot"));
-  head.onclick = () => { store.set(TEAM_FOLDED, !folded); renderTeam(); };
-  // folded, the open chat's teammate still shows: where the person is
-  if (folded) return patch(box, [head, ...(here ? teamRow(here, true, open) : [])]);
-  const cut = !teamAll && team.length > TEAM_SHOWN + 1;
-  const listed = cut ? team.filter((a, i) => i < TEAM_SHOWN || a.identity === here?.identity) : team;
-  const rows = listed.flatMap((a) => teamRow(a, a.identity === here?.identity, open));
-  if (team.length > TEAM_SHOWN + 1) {
-    const more = el("button", "team-more-rows", cut ? `Show all ${team.length}` : "Show fewer");
-    more.type = "button";
-    more.dataset.key = "team-more-rows";
-    more.onclick = () => { teamAll = cut; renderTeam(); };
-    rows.push(more);
-  }
-  patch(box, [head, ...rows]);
+  patch(box, [head, ...team.flatMap((a) => teamRow(a, a.identity === here?.identity, open))]);
 }
 // What a teammate said to the person and they have not yet seen: its own
 // chat's unread and its other chats' with them (none on the open one).
@@ -863,7 +781,6 @@ function askerOf(f, a) {
 }
 function teamRow(a, active, open) {
   const title = titleOf(a.fragment);
-  const working = isWorking(a);
   const where = runsOn.get(a.fragment);
   const unread = teamUnread(a);
   const itsChat = agentsOwnChat(a.fragment);
@@ -872,7 +789,7 @@ function teamRow(a, active, open) {
   const mine = active && !!itsChat && open?.name === itsChat.name;
   const row = el("div", `team-row${mine ? " active" : active ? " here" : ""}`);
   row.dataset.key = `team:${a.identity}`;
-  const go = el("button", `team-open${working ? " working" : ""}`);
+  const go = el("button", "team-open");
   go.type = "button";
   go.setAttribute("aria-current", mine ? "page" : "false");
   const face = el("span", "team-face");
@@ -893,10 +810,7 @@ function teamRow(a, active, open) {
     go.append(lock);
     said.push("fenced: it can't act for you or use your connections");
   }
-  if (working) {
-    go.append(el("span", "team-working", "Working"));
-    said.push("working");
-  } else if (unread) {
+  if (unread) {
     const n = el("span", "unread", unread >= UNREAD_MAX ? "99+" : String(unread));
     n.setAttribute("aria-hidden", "true");
     go.append(n);
@@ -949,7 +863,7 @@ function openTeamMenu(a, trigger) {
   const handoffs = handoffsTo(a);
   const by = handoffs[0] && askerOf(handoffs[0], a);
   openMenu(trigger, [
-    { heading: title, note: [isWorking(a) ? "Working now" : "", whereItRuns(a), a.fenced ? "Fenced" : ""].filter(Boolean).join(" · ") },
+    { heading: title, note: [whereItRuns(a), a.fenced ? "Fenced" : ""].filter(Boolean).join(" · ") },
     ...(handoffs.length ? [{ icon: "team", text: by ? `Hand-offs from ${titleOf(by.fragment)}` : "Its hand-offs", onClick: () => { openChat(handoffs[0].name); leaveSidebar(); } }] : []),
     ...(primary?.identity ? [{ icon: "rename", text: `Ask ${titleOf(primary.fragment)} to change it`, onClick: () => composeApp(`Change how ${title} works: `) }] : []),
     ...(state.computer ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(a.fragment) }] : []),
@@ -3305,10 +3219,6 @@ async function load(changed = false) {
   markSeen();
   renderAgentFaces();
   readRunsOn().catch(() => {});
-  if (!teamStarted) {
-    teamStarted = true;
-    teamTick();
-  }
   for (const f of chats()) if (own(f) && f.title === UNTITLED && f.preview) titleFromFirst(f.name);
   const touched = changed ? new Set(state.fragments.filter((f) => before.get(f.name) !== JSON.stringify(f)).map((f) => f.name)) : null;
   cardsLoad.wait = 0;
