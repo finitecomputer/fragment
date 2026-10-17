@@ -1141,10 +1141,15 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = b.screenshot(&page, &shots.join("phone-chat.png"));
     // the list: the sidebar over the chat, its + the launcher, bottom right.
     // Its answer carries whether the tap arrived and each change of the
-    // layout's classes (`log`): this check fails now and then, the sidebar
-    // left closed, and the log says whether it never opened or was closed.
-    b.eval(&page, "(() => { const l = document.getElementById('layout'); const log = (window.__layoutLog = [[Math.round(performance.now()), l.className]]); new MutationObserver(() => log.push([Math.round(performance.now()), l.className])).observe(l, { attributes: true, attributeFilter: ['class'] }); document.getElementById('toggle-left').addEventListener('click', () => log.push([Math.round(performance.now()), 'click']), true); return true; })()")?;
+    // layout's classes (`log`). A tap this soon after the reload (half a
+    // second in) can land before the page takes input: the log then shows
+    // no click and no change, and only then is it tapped again, so a second
+    // tap never closes a sidebar the first opened.
+    b.eval(&page, "(() => { const l = document.getElementById('layout'); const log = (window.__layoutLog = [[Math.round(performance.now()), l.className]]); new MutationObserver((ms) => { for (const m of ms) log.push([Math.round(performance.now()), `${m.oldValue} -> ${l.className}`]); }).observe(l, { attributes: true, attributeFilter: ['class'], attributeOldValue: true }); document.getElementById('toggle-left').addEventListener('click', () => log.push([Math.round(performance.now()), 'click']), true); return true; })()")?;
     b.click(&page, "#toggle-left")?;
+    if !b.until(&page, "window.__layoutLog.some((e) => e[1] === 'click')", std::time::Duration::from_secs(2)) {
+        b.click(&page, "#toggle-left")?;
+    }
     // (once the list has slid in: its + is fixed within it while it moves)
     let fab_expr = "(() => { const r = document.getElementById('sidebar-new-chat').getBoundingClientRect(); return r.width >= 44 && r.right > innerWidth - 40 && r.bottom > innerHeight - 60; })()";
     let list = b.until(&page, &format!("document.getElementById('layout').classList.contains('left-open') && document.querySelector('.sidebar-shell').getBoundingClientRect().width >= innerWidth - 2 && {fab_expr}"), wait);
