@@ -49,7 +49,7 @@ pub struct Agent {
     #[serde(default)]
     pub credentials: Vec<Credential>,
     /// Fenced (docs/cloudflare-v1.md, decision 63, proposed): it acts as
-    /// itself alone, and an image runs its commands in a sandbox of its own
+    /// itself alone, so an image names no one for it to act for
     /// (docs/computers.md, "A fenced agent in our Hermes image").
     #[serde(default)]
     pub fenced: bool,

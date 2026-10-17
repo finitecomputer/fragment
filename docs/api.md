@@ -2496,7 +2496,7 @@ when its model runs outside the platform (its `agent.json`: the
 platform's models, or "<model> · <provider>, outside the platform"); its ⋯ says
 where, and offers its hand-offs, "Ask <agent> to change it" (put in the
 one agent's chat's composer, not sent), its screen, its fence ("Fence
-it", or, fenced, "Let it see your things…", which asks its person first,
+it", or, fenced, "Let it act for you…", which asks its person first,
 in the shell's own dialog, saying what it would reach: decision 63,
 proposed; a fenced row shows a lock), and its profile. Their chats (a
 teammate's own chat, `<label>-chat`, any other of the person's with it

@@ -30,8 +30,8 @@ pub struct Change {
     /// credentials file are written again, nothing restarted.
     pub credentials: Vec<Agent>,
     /// Still here, fenced or let go since (decision 63, proposed): its
-    /// sandbox made or taken down, its work given to its user or back, and
-    /// its profile written again (fence.rs), nothing restarted.
+    /// profile written again (its `.env` naming its owner or no one) and
+    /// its Bot Mode roster with it, nothing restarted.
     pub fenced: Vec<Agent>,
 }
 

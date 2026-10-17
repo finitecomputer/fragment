@@ -772,7 +772,7 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
             // `for` as `signer_of` does everywhere else (`may_act_for`)
             let view = ask_registry(env, &calls::Fence { agent: agent.clone(), fenced: b.fenced, acting_for: acting_for.clone(), by: by() }).await?;
             // its computer is told at once: it gives a fenced agent no
-            // connection, and its image a sandbox
+            // connection, and its image names no one for it to act for
             let owner = view.owner.as_deref().ok_or_else(|| CellError::host(format!("the agent {agent} has no owner")))?;
             computer::agent_fenced(env, owner, &agent, view.fenced).await?;
             json_answer(&view)

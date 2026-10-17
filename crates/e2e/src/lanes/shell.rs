@@ -977,8 +977,8 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         b.eval(&page, "[...document.querySelectorAll('#stack iframe')].map((f) => f.dataset.src)")?,
     );
     // its ⋯ fences it (decision 63, proposed): a lock on its row, its
-    // computer's view says so; fenced, "Let it see your things…" asks in the
-    // shell's own dialog, and Let it see them lifts it
+    // computer's view says so; fenced, "Let it act for you…" asks in the
+    // shell's own dialog, and Let it act for you lifts it
     let more = format!("#team .team-row[data-key={}] .team-more", js(&format!("team:{reader_id}")));
     let lock = format!("document.querySelector({})", js(&format!("#team .team-row[data-key={}] .team-fenced", js(&format!("team:{reader_id}")))));
     b.click(&page, &more)?;
@@ -986,7 +986,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let view = shell(api, &session, "GET", "/api/computers", None, &[])?;
     let viewed = view.body["computers"][0]["agents"].as_array().into_iter().flatten().any(|a| a["identity"] == reader_id.as_str() && a["fenced"] == true);
     b.click(&page, &more)?;
-    let asked = menu_item(&mut b, &page, "Let it see your things…")? && b.until(&page, "document.getElementById('unfence-dialog').open && document.getElementById('unfence-title').textContent === 'Let Reader see your things?'", wait);
+    let asked = menu_item(&mut b, &page, "Let it act for you…")? && b.until(&page, "document.getElementById('unfence-dialog').open && document.getElementById('unfence-title').textContent === 'Let Reader act for you?'", wait);
     b.eval(&page, "(document.getElementById('unfence-go').click(), true)")?;
     let lifted = b.until(&page, &format!("!{lock} && !document.getElementById('unfence-dialog').open"), wait);
     s.ok(

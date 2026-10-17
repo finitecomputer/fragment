@@ -57,9 +57,9 @@ pub struct ComputerAgent {
     /// role's specialization rather than a wall.
     #[serde(default)]
     pub connections: Option<Vec<String>>,
-    /// Fenced (decision 63, proposed): it acts as itself alone, is given no
-    /// connection, and its image runs its commands in a sandbox of its own
-    /// (docs/computers.md, "A fenced agent in our Hermes image").
+    /// Fenced (decision 63, proposed): it acts as itself alone and is given
+    /// no connection (docs/computers.md, "A fenced agent in our Hermes
+    /// image").
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fenced: bool,
     /// The guest's view only (`GET /api/computer`): each credential the

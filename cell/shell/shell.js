@@ -891,7 +891,7 @@ function teamRow(a, active, open) {
     lock.innerHTML = svg("lock");
     lock.title = FENCED_SAYS;
     go.append(lock);
-    said.push("fenced: it sees only what it is sent and what is shared with it");
+    said.push("fenced: it can't act for you or use your connections");
   }
   if (working) {
     go.append(el("span", "team-working", "Working"));
@@ -954,7 +954,7 @@ function openTeamMenu(a, trigger) {
     ...(primary?.identity ? [{ icon: "rename", text: `Ask ${titleOf(primary.fragment)} to change it`, onClick: () => composeApp(`Change how ${title} works: `) }] : []),
     ...(state.computer ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(a.fragment) }] : []),
     a.fenced
-      ? { icon: "lock", text: "Let it see your things…", onClick: () => unfence(a) }
+      ? { icon: "lock", text: "Let it act for you…", onClick: () => unfence(a) }
       : { icon: "lock", text: "Fence it", onClick: () => setFence(a, true) },
     { icon: "agent", text: "Its profile", onClick: () => openApp(a.fragment) },
   ]);
@@ -963,7 +963,7 @@ function openTeamMenu(a, trigger) {
 // ---- a teammate's fence (decision 63, proposed): fenced, it acts as
 // itself alone, seeing only what it is sent and what is shared with it;
 // its owner puts one up or lets it go, which the shell asks about first ----
-const FENCED_SAYS = "Fenced: it can't act for you, so it sees only what it's sent and what's shared with it";
+const FENCED_SAYS = "Fenced: it can't act for you or use your connections. It still runs on your computer, beside your other agents";
 async function setFence(a, fenced) {
   try {
     await api("PUT", `/api/identities/${seg(a.identity)}/fenced`, { fenced });
@@ -979,8 +979,8 @@ const unfenceDialog = $("unfence-dialog");
 function unfence(a) {
   const who = titleOf(a.fragment);
   const where = runsOn.get(a.fragment);
-  $("unfence-title").textContent = `Let ${who} see your things?`;
-  $("unfence-text").textContent = `${who} would reach your chats, files and apps, and your connections, as your other agents do${where?.on === "own" ? `, and what it reads would go to ${where.provider}, outside the platform` : ""}.`;
+  $("unfence-title").textContent = `Let ${who} act for you?`;
+  $("unfence-text").textContent = `${who} could act for you, reaching your chats, files, apps and connections, as your other agents do${where?.on === "own" ? `, and what it reads would go to ${where.provider}, outside the platform` : ""}.`;
   unfenceDialog.dataset.identity = a.identity;
   unfenceDialog.showModal();
   $("unfence-cancel").focus();
