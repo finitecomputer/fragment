@@ -1179,7 +1179,10 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let rest = rest.to_vec();
             billing::route(req, env, cfg, &url, &rest).await
         }
-        (_, ["api", "seat"]) => orgs::seat(req, env, &url).await,
+        (_, ["api", "seat", rest @ ..]) => {
+            let rest = rest.to_vec();
+            orgs::seat(req, env, &url, &rest).await
+        }
         (_, ["api", "org", rest @ ..]) => {
             let rest = rest.to_vec();
             orgs::org(req, env, cfg, &url, &rest).await
