@@ -2111,8 +2111,8 @@ internet; its computer only names no one for it.
   (each profile's `.env`: placeholders, never a credential), reach the
   computer's own services (another agent's browser, Hermes' API), and
   call the computer's egress, which signs as whichever of its agents a
-  request names (docs/technical-debt-ledger.md, "A fenced agent's fence
-  is the platform's alone").
+  request names (docs/technical-debt-ledger.md, "A teammate on another
+  provider is kept out by a prompt and the platform's fence").
 
 ### Hermes' container guesses
 

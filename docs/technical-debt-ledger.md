@@ -1312,29 +1312,6 @@ fragment.club until cutover (decisions 34–35).
   config), told to every agent with its teammates (`GET /api/computer`),
   and the skill reads that.
 
-## The default agent's care for its owner's private things is a prompt
-
-- **Observed:** 2026-10-16, decision 62 (proposed). The agents-finite
-  skill tells a person's default agent what never to hand a teammate on
-  another provider; decision 44 keeps a person's agents unfenced on their
-  one computer (one Linux user, root through sudo, every profile's files
-  readable, the egress signing as whichever agent a request names, and
-  each agent acting for its owner reaching all their fragments).
-- **Shortcut:** the care is the default agent's, in its skill and its
-  job; nothing on the platform stops a teammate on another provider from
-  reading what the default agent kept from it.
-- **Risk:** a teammate on another provider, misled by a page it reads,
-  reads the default agent's transcripts, memories or its owner's chats,
-  and its provider has them.
-- **First proof:** a hosted run in which a teammate on an own-provider
-  model, asked to, reads another profile's `state.db` or a chat it is not
-  in, acting for its owner.
-- **Delete when:** a teammate on another provider runs where its owner's
-  data is not (a computer of its own, as an identity outside its owner's
-  umbrella that reaches only what it is handed: the "contractor" shape,
-  which reopens decisions 13 and 44, Paul's), or the person is told
-  plainly that this care is all there is and accepts it.
-
 ## The shell finds the team's chats by their labels
 
 - **Observed:** 2026-10-16, the team under the person's one agent
@@ -1350,21 +1327,27 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** a chat's fragment names its kind of chat (own,
   hand-off, group) instead of its label saying it.
 
-## A fenced agent's fence is the platform's alone
+## A teammate on another provider is kept out by a prompt and the platform's fence
 
-- **Observed:** decision 63 (proposed). The platform refuses a fenced
-  agent's `for` and gives it no connection, and its computer names no
-  one for it, but its commands run as the `hermes` user beside every
-  other agent's (Austin chose this over a sandbox per agent with no
-  internet, 2026-10-17).
-- **Risk:** a fenced agent's commands can read the other agents' work and
-  Hermes' home, and call the computer's egress, which signs as whichever
-  of its agents a request names: as its owner's default agent, it acts
-  for its owner. A fenced agent that tries, or a page that talks it
-  into trying, reaches what the fence keeps from it.
+- **Observed:** decisions 62 and 63 (proposed). The agents-finite skill
+  tells a person's default agent what never to hand a teammate on
+  another provider (placeholders, never the details). The platform
+  refuses a fenced teammate's `for` and its connections (the swap asks
+  the registry), but its commands run as the `hermes` user beside every
+  other agent's (decision 44's one computer; Austin chose this over a
+  sandbox per agent with no internet, 2026-10-17).
+- **Shortcut:** the care is the default agent's, in its prompt; the
+  computer does not enforce the fence.
+- **Risk:** a fenced teammate, or a page that talks it into it, reads the
+  other agents' work and transcripts and Hermes' home (each profile's
+  `.env`: another agent's placeholders), or calls the computer's egress,
+  which signs as whichever of its agents a request names: as its owner's
+  default agent, it acts for its owner, and its provider has what it
+  read. A default agent that misjudges what is private hands it over
+  itself.
 - **First proof:** a fenced agent's command that reads another agent's
   work, or calls the platform naming another agent.
-- **Delete when:** the computer enforces the fence: the agent's commands
-  as a user of its own with the internet through a filter (decision 63's
-  box, in git history, with a filter added), or an egress that tells its
-  agents apart.
+- **Delete when:** the computer enforces the fence (the agent's commands
+  as a user of its own with the internet through a filter: decision 63's
+  box, in git history, with a filter added; or an egress that tells its
+  agents apart), or the teammate runs where its owner's data is not.
