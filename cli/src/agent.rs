@@ -218,14 +218,12 @@ pub fn settings_of(c: &Client, agent: &str) -> Result<Option<Value>> {
     }
 }
 
-/// Writes `files` to `agent` in one commit, keyed by what it writes and
-/// what those files hold now (a retry commits once; going back to an
-/// earlier text, A then B then A, is a change of its own), and puts them
-/// live.
+/// Writes `files` to `agent` in one commit, and puts them live. The write
+/// is keyed afresh each call, so a transport retry commits once and every
+/// call is its own change (a job changed back to an earlier text included).
 fn write_live(c: &Client, agent: &str, files: &[Value], message: &str) -> Result<()> {
-    let now = files.iter().map(|f| read_file(c, agent, f["path"].as_str().unwrap_or_default())).collect::<Result<Vec<_>>>()?;
-    let key = format!("agent-{}", &hex::encode(<sha2::Sha256 as sha2::Digest>::digest(serde_json::to_vec(&json!([files, now]))?))[..16]);
-    c.call(c.post_json(&format!("/api/f/{agent}/files"), &json!({ "files": files, "message": message, "key": key }))?)?;
+    let key = format!("agent-{:016x}", rand::random::<u64>());
+    c.call(c.post_json_by_id(&format!("/api/f/{agent}/files"), &json!({ "files": files, "message": message, "key": key }))?)?;
     c.call(c.post_json(&format!("/api/f/{agent}/deploy"), &json!({ "note": message }))?)?;
     Ok(())
 }
