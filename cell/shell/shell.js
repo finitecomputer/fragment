@@ -724,9 +724,13 @@ async function readRunsOn() {
   const due = [...state.agents.values()].filter((a) => !(Date.now() - (runsOnAt.get(a.fragment) ?? 0) < RUNS_ON_EVERY_MS));
   if (!due.length) return;
   for (const a of due) runsOnAt.set(a.fragment, Date.now());
-  const read = await Promise.all(due.map((a) => api("GET", `/api/f/${seg(a.fragment)}/file?path=agent.json`).catch(() => null)));
+  const read = await Promise.all(due.map((a) => api("GET", `/api/f/${seg(a.fragment)}/file?path=agent.json`).then((settings) => ({ settings }), (e) => ({ missing: e instanceof ApiError && e.status === 404 }))));
   due.forEach((a, i) => {
-    const m = read[i]?.model;
+    // a read that failed says nothing: what was known stands (none, while
+    // never read), and the next load reads it again; no agent.json is the
+    // platform's tiers
+    if (!read[i].settings && !read[i].missing) return runsOnAt.delete(a.fragment);
+    const m = read[i].settings?.model;
     runsOn.set(a.fragment, typeof m?.provider === "string" && typeof m?.id === "string" ? { on: "own", provider: providerName(m.provider), model: modelName(m.id) } : { on: "platform" });
   });
   renderChats();

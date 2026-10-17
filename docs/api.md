@@ -2576,7 +2576,7 @@ a message in it, unless it was renamed first.
 shell made of a fragment its person owns (the open chat, an app's window)
 may `postMessage({fragment: "agents?"})` to it; the shell answers that
 frame, at that fragment's own origin only (its status's canonical URL),
-`{fragment: "agents", agents: [{identity, fragment, name, title, picture?, phase?, runsOn?, working?}]}`: the
+`{fragment: "agents", agents: [{identity, fragment, name, title, picture?, phase?, runsOn?}]}`: the
 agents its person's computer runs, `name` the label that `@mentions`
 each, `title` and `picture` (an absolute address) what each shows by
 (Identities, "An agent's name and picture"), and `phase` that computer's as the platform last said (`asleep`,
@@ -2584,9 +2584,8 @@ each, `title` and `picture` (an absolute address) what each shows by
 has read it); `runsOn` where its model calls go, `{on: "platform"}` or
 `{on: "own", model, provider}` (a model of its owner's own provider,
 outside the platform, as its `agent.json` says; `model` and `provider`
-by their names for people: "DeepSeek V4.1 Flash", "OpenRouter"), and
-`working: true` while it works
-(decision 62, proposed). A frame may ask `{fragment: "open-handoff",
+by their names for people: "DeepSeek V4.1 Flash", "OpenRouter"; decision
+62, proposed). A frame may ask `{fragment: "open-handoff",
 identity, via}` for one of them: the shell opens the chat a hand-off to
 it went to beside the frame, and answers nothing. `via: "ask"` (`fragment
 ask`'s) went to its chat with the agent that asked, the frame's chat's own
