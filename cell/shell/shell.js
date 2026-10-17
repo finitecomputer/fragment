@@ -724,10 +724,22 @@ async function readRunsOn() {
   const due = [...state.agents.values()].filter((a) => !(Date.now() - (runsOnAt.get(a.fragment) ?? 0) < RUNS_ON_EVERY_MS));
   if (!due.length) return;
   for (const a of due) runsOnAt.set(a.fragment, Date.now());
-  const read = await Promise.all(due.map((a) => api("GET", `/api/f/${seg(a.fragment)}/file?path=agent.json`).then((settings) => ({ settings }), (e) => ({ missing: e instanceof ApiError && e.status === 404 }))));
+  // read here, not through `api()`, which takes a body it cannot parse for
+  // `{}`: a read that failed, or a body that is no JSON, says nothing
+  const read = await Promise.all(
+    due.map(async (a) => {
+      const r = await fetch(`/api/f/${seg(a.fragment)}/file?path=agent.json`, { headers: { "x-fragment-shell": "1" }, credentials: "same-origin" }).catch(() => null);
+      if (r?.status === 404) return { missing: true };
+      try {
+        return r?.ok ? { settings: JSON.parse(await r.text()) } : {};
+      } catch {
+        return {};
+      }
+    }),
+  );
   due.forEach((a, i) => {
-    // a read that failed says nothing: what was known stands (none, while
-    // never read), and the next load reads it again; no agent.json is the
+    // what was known stands when a read says nothing (none, while never
+    // read), and the next load reads it again; no agent.json is the
     // platform's tiers
     if (!read[i].settings && !read[i].missing) return runsOnAt.delete(a.fragment);
     const m = read[i].settings?.model;
