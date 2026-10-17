@@ -1094,7 +1094,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         );
         let r = allow(&owner, Value::Null)?;
         s.ok("null gives it every provider its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
-        for label in SWAP_CHECKS.iter().chain(MODEL_CHECKS).chain(&["narrowed, it is refused a provider its owner has"]) {
+        for label in SWAP_CHECKS.iter().chain(MODEL_CHECKS).chain(&["narrowed, it is refused a provider its owner has", "fenced, it is refused its owner's connection with the placeholder it kept"]) {
             s.skip(label, "it needs the stub's fetch, and the fakes' accounts and providers behind the swap");
         }
     } else {
@@ -1120,6 +1120,17 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok("narrowed, it is refused a provider its owner has", said.starts_with("fetched 403") && said.contains("may not use google") && s.upstream.seen().len() == seen_before, &said);
         let r = allow(&owner, Value::Null)?;
         s.ok("null gives it every provider its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
+        // fenced (decision 63, proposed), the placeholder it kept is refused
+        // at the swap, whatever its narrowing; let go, it is its again
+        let fence = |fenced: bool| api.signed(&owner, "PUT", &format!("/api/identities/{identity}/fenced"), Some(&json!({ "fenced": fenced })));
+        let r = fence(true)?;
+        anyhow::ensure!(r.status == 200, "fencing the agent: {r}");
+        let seen_before = s.upstream.seen().len();
+        let said = fetched(s, 39, &format!("fetch http://{SWAP_CONNECTION_HOST}/drive/v3/files with {}", placeholder(s, &id, &agent_name, SWAP_CONNECTION)))?;
+        replies_so_far += 1;
+        let r = fence(false)?;
+        anyhow::ensure!(r.status == 200, "letting the agent go: {r}");
+        s.ok("fenced, it is refused its owner's connection with the placeholder it kept", said.starts_with("fetched 403") && said.contains("is fenced") && s.upstream.seen().len() == seen_before, &said);
     }
 
     // the model intercept: the agent's call is the platform's model route, its owner paying

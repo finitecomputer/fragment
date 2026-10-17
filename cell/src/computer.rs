@@ -2289,7 +2289,8 @@ impl ComputerCell {
     /// removed since) is refused. An agent may use every provider its owner
     /// has unless its owner narrowed it to a list (decision 44: a person's
     /// agents are not fenced from each other, so the list is a role's
-    /// specialization, not a wall).
+    /// specialization, not a wall). A fenced agent (decision 63, proposed)
+    /// is refused every connection, whatever placeholder it kept from before.
     async fn credentials(&self, b: CredentialsAsk) -> CellResult<Value> {
         if b.placeholders.is_empty() || b.placeholders.len() > swap::PLACEHOLDERS_MAX {
             return Err(CellError::invalid(format!("ask for 1 to {} placeholders", swap::PLACEHOLDERS_MAX)));
@@ -2320,9 +2321,17 @@ impl ComputerCell {
         let owner = row["owner"].as_str().unwrap_or_default().to_string();
         let identity = row["identity"].as_str().unwrap_or_default().to_string();
         let narrowed = stored_connections(row["connections"].as_str().unwrap_or_default(), agent)?;
+        // a connection acts as its owner: the registry says whether the agent
+        // is fenced now (decision 63, proposed), never this computer's copy,
+        // which a fence crossing an assignment can leave behind
+        let connects = b.placeholders.iter().any(|p| self.cfg.providers.get(&p.provider).is_some_and(|pr| pr.kind == Kind::Connection));
+        let fenced = connects && crate::ask_registry(&self.env, &crate::registry::calls::View { identity: Some(identity.clone()), by: crate::registry::calls::By::Identity(owner.clone()) }).await?.fenced;
         let mut secrets = vec![];
         for p in &b.placeholders {
             let provider = self.cfg.providers.get(&p.provider).expect("checked above");
+            if !catalog::fenced_may_use(provider.kind, fenced) {
+                return Err(CellError::new(ErrorCode::Forbidden, format!("{agent} is fenced: it is given no connection, {} among them (decision 63)", provider.name)));
+            }
             if !may_use(&narrowed, &provider.name) {
                 let list = narrowed.as_deref().unwrap_or_default();
                 return Err(CellError::new(
@@ -2452,7 +2461,6 @@ impl ComputerCell {
     }
 }
 
-/// The internal call `path` with `body` on computer `id`.
 /// Tells `owner`'s computer that their agent `identity` is fenced or let go
 /// (decision 63, proposed), as the registry has it now: a computer not made
 /// yet reads it as it assigns the agent.
@@ -2465,6 +2473,7 @@ pub(crate) async fn agent_fenced(env: &Env, owner: &str, identity: &str, fenced:
     }
 }
 
+/// The internal call `path` with `body` on computer `id`.
 pub(crate) async fn ask(env: &Env, id: &str, path: &str, body: &Value) -> CellResult<Value> {
     crate::routed::ask_object(env, "COMPUTER", id, path, body).await
 }
