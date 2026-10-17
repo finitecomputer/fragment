@@ -337,7 +337,7 @@ enum Cmd {
         agent: Option<String>,
         /// Make a new agent with this label (its @name), running on your
         /// computer, with a chat of its own with you: give it --name and --job
-        #[arg(long, value_name = "LABEL", requires_all = ["name", "job"], conflicts_with_all = ["picture", "no_picture", "start", "stop", "no_model"])]
+        #[arg(long, value_name = "LABEL", requires_all = ["name", "job"], conflicts_with_all = ["picture", "no_picture", "start", "stop", "no_model", "fence", "no_fence"])]
         new: Option<String>,
         /// Its new name
         #[arg(long, value_name = "NAME")]
@@ -367,8 +367,8 @@ enum Cmd {
         /// Stop it on your computer (its fragment, job and memories are kept)
         #[arg(long)]
         stop: bool,
-        /// Fence it: it acts as itself alone, reaching only what it is sent
-        /// and what is shared with it (--model on your own provider fences it)
+        /// Fence it: it never acts for you and gets none of your connections;
+        /// it still runs on your computer (--model on your own provider fences it)
         #[arg(long, conflicts_with = "no_fence")]
         fence: bool,
         /// Let it go (its owner only)
@@ -2017,7 +2017,7 @@ fn run(cli: Cli) -> Result<()> {
             println!("{} ({}) runs on your computer, on {}", made.agent, made.name, made.runs_on.said());
             println!("its own chat with you: {}{}", made.chat, if made.left_chat { " (made by this agent, which left it: the new agent leads it)" } else { "" });
             if made.fenced {
-                println!("fenced: it acts as itself alone, and reaches only what it is sent and what is shared with it (its owner lets it go)");
+                println!("fenced: it never acts for you and gets none of your connections; it still runs on your computer (its owner lets it go)");
             }
             println!("brief it: fragment ask {label} \"…\" --wait");
         }
@@ -2067,7 +2067,7 @@ fn run(cli: Cli) -> Result<()> {
             }
             println!("runs on {}", runs_on.said());
             if fenced == Some(true) {
-                println!("fenced: it acts as itself alone, and reaches only what it is sent and what is shared with it (its owner lets it go)");
+                println!("fenced: it never acts for you and gets none of your connections; it still runs on your computer (its owner lets it go)");
             }
             match running {
                 Some(true) => println!("running on your computer"),

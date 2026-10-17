@@ -218,10 +218,13 @@ pub fn settings_of(c: &Client, agent: &str) -> Result<Option<Value>> {
     }
 }
 
-/// Writes `files` to `agent` in one commit, keyed by what it writes (the
-/// same change sent again commits nothing twice), and puts them live.
+/// Writes `files` to `agent` in one commit, keyed by what it writes and
+/// what those files hold now (a retry commits once; going back to an
+/// earlier text, A then B then A, is a change of its own), and puts them
+/// live.
 fn write_live(c: &Client, agent: &str, files: &[Value], message: &str) -> Result<()> {
-    let key = format!("agent-{}", &hex::encode(<sha2::Sha256 as sha2::Digest>::digest(serde_json::to_vec(files)?))[..16]);
+    let now = files.iter().map(|f| read_file(c, agent, f["path"].as_str().unwrap_or_default())).collect::<Result<Vec<_>>>()?;
+    let key = format!("agent-{}", &hex::encode(<sha2::Sha256 as sha2::Digest>::digest(serde_json::to_vec(&json!([files, now]))?))[..16]);
     c.call(c.post_json(&format!("/api/f/{agent}/files"), &json!({ "files": files, "message": message, "key": key }))?)?;
     c.call(c.post_json(&format!("/api/f/{agent}/deploy"), &json!({ "note": message }))?)?;
     Ok(())
@@ -260,13 +263,11 @@ pub struct Made {
     pub left_chat: bool,
 }
 
-/// Makes `new` one of the signer's (an agent: its owner's) agents,
-/// running on their computer, with a chat of its own.
-/// Fences the agent `identity` (decision 63, proposed): one on its owner's
-/// own provider acts as itself alone, on the platform and on its computer.
-/// Its owner's agent fences, and never lets one go: its owner does.
-pub fn fence(c: &Client, identity: &str) -> Result<bool> {
-    let v = c.call(c.put_json(&format!("/api/identities/{identity}/fenced"), &json!({ "fenced": true }))?).with_context(|| format!("fencing {identity}"))?;
+/// Fences the agent `identity` or lets it go (decision 63, proposed): its
+/// owner either way, their agent fencing only. Answers whether it is
+/// fenced now.
+fn put_fence(c: &Client, identity: &str, fenced: bool) -> Result<bool> {
+    let v = c.call(c.put_json(&format!("/api/identities/{identity}/fenced"), &json!({ "fenced": fenced }))?)?;
     Ok(v["fenced"] == true)
 }
 
@@ -277,15 +278,13 @@ fn identity_of(c: &Client, agent: &str) -> Result<String> {
     status["npub"].as_str().map(str::to_string).ok_or_else(|| coded(Code::ServerError, format!("{agent}'s status names no npub")))
 }
 
-/// Fences `agent` or lets it go (`fenced`): its owner either way, their
-/// agent fencing only. Answers whether it is fenced now.
+/// `put_fence` for the agent fragment `agent`, by its identity.
 pub fn set_fence(c: &Client, agent: &str, fenced: bool) -> Result<bool> {
     let identity = identity_of(c, agent)?;
-    let v = c.call(c.put_json(&format!("/api/identities/{identity}/fenced"), &json!({ "fenced": fenced }))?).map_err(|e| match e.downcast_ref::<CodedError>() {
+    put_fence(c, &identity, fenced).map_err(|e| match e.downcast_ref::<CodedError>() {
         Some(ce) if ce.code == Code::NotFound => coded(Code::NotFound, format!("{agent} has never run, so it has no identity to fence yet: start it first (`fragment agent {agent} --start`)")),
         _ => e,
-    })?;
-    Ok(v["fenced"] == true)
+    })
 }
 
 /// Whether settings put an agent on its owner's own provider, outside the
@@ -295,6 +294,8 @@ pub fn outside(settings: &Value) -> bool {
     matches!(runs_on(Some(settings)), RunsOn::Own { .. })
 }
 
+/// Makes `new` one of the signer's (an agent: its owner's) agents,
+/// running on their computer, with a chat of its own.
 pub fn make(c: &Client, new: &New) -> Result<Made> {
     let label = new.label.trim();
     let chat_label = format!("{label}{OWN_CHAT}");
@@ -331,7 +332,7 @@ pub fn make(c: &Client, new: &New) -> Result<Made> {
     // on its owner's own provider: fenced before its job, its model or its
     // chat exist, so no turn of its runs unfenced (its identity is made as
     // its computer takes it, just above)
-    let fenced = if outside(&settings) { fence(c, &identity)? } else { false };
+    let fenced = outside(&settings) && put_fence(c, &identity, true).with_context(|| format!("fencing {agent}"))?;
     let files = [json!({ "path": "SOUL.md", "text": job }), json!({ "path": "agent.json", "text": format!("{}\n", serde_json::to_string_pretty(&settings)?) })];
     write_live(c, &agent, &files, "a new agent")?;
 

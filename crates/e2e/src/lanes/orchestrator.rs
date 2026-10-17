@@ -355,11 +355,22 @@ fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     let bad = s.cli(api, &home, &["agent", "--new", "Not A Label", "--name", "X", "--job", "y"]);
     let high = s.cli(api, &home, &["agent", &agent, "--tier", "high"]);
     let model = s.cli(api, &home, &["agent", &agent, "--model", "claude"]);
+    // a new agent is fenced by its model alone (`--model <provider>:<id>`)
+    let new_fenced = s.cli(api, &home, &["agent", "--new", &s.name("ash"), "--name", "Ash", "--job", "y", "--fence"]);
     s.ok(
-        "a bad label, the refused tier and a model without its provider are usage mistakes (exit 2), nothing written",
-        [&bad, &high, &model].iter().all(|o| o.status.code() == Some(2)),
-        json!([bad.status.code(), high.status.code(), model.status.code()]),
+        "a bad label, the refused tier, a model without its provider and `--new` with `--fence` are usage mistakes (exit 2), nothing written",
+        [&bad, &high, &model, &new_fenced].iter().all(|o| o.status.code() == Some(2)),
+        json!([bad.status.code(), high.status.code(), model.status.code(), new_fenced.status.code()]),
     );
+    // a job changed and changed back is written each time (B, A, then B
+    // again: the same text as an earlier write, never a replay of it)
+    let minutes = "You keep the oak grove's minutes.";
+    for text in [minutes, job, minutes] {
+        s.cli_json(api, &home, &["agent", &agent, "--job", text, "--json"])?;
+    }
+    let soul = api.signed(&me, "GET", &format!("/api/f/{agent}/file?path=SOUL.md"), None)?;
+    s.ok("a job changed back to an earlier one is written again, not taken for a replay", soul.status == 200 && soul.text.trim() == minutes, json!({ "soul": soul.text }));
+    s.cli_json(api, &home, &["agent", &agent, "--job", job, "--json"])?;
 
     // keeping it: its model, its tier again, stopped and started
     let own = s.cli_json(api, &home, &["agent", &agent, "--model", "openrouter:anthropic/claude-sonnet-5.5", "--json"])?;
