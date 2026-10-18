@@ -66,6 +66,65 @@ pub struct ComputerAgent {
     /// agent may use now, its placeholder in its environment variables.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credentials: Vec<AgentCredential>,
+    /// Its owner's view only: what its guest last said it is doing, per
+    /// chat (docs/computers.md, "What its agents are doing"). Best-effort.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub activity: Vec<AgentActivity>,
+}
+
+/// What an agent is doing in one chat, as its computer's guest said it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentActivity {
+    pub chat: String,
+    pub state: ActivityState,
+    /// Whom a `waiting` turn waits on: an identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waits_on: Option<String>,
+}
+
+/// An agent's turns in a chat, the most pressing first: one waits on
+/// someone (a card, or their words), else one runs, else one waits to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityState {
+    Waiting,
+    Working,
+    Queued,
+}
+
+impl ActivityState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ActivityState::Waiting => "waiting",
+            ActivityState::Working => "working",
+            ActivityState::Queued => "queued",
+        }
+    }
+}
+
+/// One entry of a guest's report: an agent fragment it runs, in a chat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityEntry {
+    pub agent: String,
+    pub chat: String,
+    pub state: ActivityState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waits_on: Option<String>,
+}
+
+/// A guest's report on its keepalive: `{type: "activity", v: 1, agents,
+/// more}` (docs/computers.md, "What its agents are doing").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ActivityReport {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub v: u32,
+    pub agents: Vec<ActivityEntry>,
+    #[serde(default)]
+    pub more: u32,
 }
 
 /// The model route's models' ids by the route's names
@@ -262,6 +321,10 @@ pub struct ComputerView {
     /// Its agents, in the order it took them: its owner's first is first
     /// (the shell's one agent: docs/api.md, The shell).
     pub agents: Vec<ComputerAgent>,
+    /// Its owner's view only: activity entries its guest left out (past
+    /// `ACTIVITY_MAX`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub activity_more: u32,
     /// Its own origin, where its ports are served.
     pub origin: String,
     /// The guest's view only: every environment variable a credential of
@@ -501,6 +564,10 @@ pub fn valid_port_path(path: &str) -> bool {
     path.starts_with('/') && path.len() <= PORT_PATH_MAX_BYTES && visible && !path.contains("//") && segments
 }
 
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -544,7 +611,7 @@ mod tests {
         assert_eq!(all.connections, None);
         let narrowed: AgentConnections = serde_json::from_str(r#"{"connections":["github"]}"#).unwrap();
         assert_eq!(narrowed.connections, Some(vec!["github".to_string()]));
-        let agent = ComputerAgent { fragment: "juniper.paul".into(), identity: "id:a".into(), name: "juniper".into(), owner: "id:p".into(), connections: None, fenced: false, credentials: vec![] };
+        let agent = ComputerAgent { fragment: "juniper.paul".into(), identity: "id:a".into(), name: "juniper".into(), owner: "id:p".into(), connections: None, fenced: false, credentials: vec![], activity: vec![] };
         let v = serde_json::to_value(&agent).unwrap();
         assert_eq!(v["connections"], serde_json::Value::Null, "the default is named, as null");
         assert!(v.get("credentials").is_none(), "the owner's view names no placeholder");

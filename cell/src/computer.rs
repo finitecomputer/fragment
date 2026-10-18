@@ -46,9 +46,9 @@
 //!   a start) fails at its next write.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use fragment_core::access;
+use fragment_core::{access, activity};
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{
     alive, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Socket, Step, Wake, ALIVE_MS, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
@@ -58,7 +58,7 @@ use fragment_core::ledger::{Meter, MeterRow, Month, Release, Reserve, Settle, Sp
 use fragment_core::own_signin;
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
-use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
+use fragment_proto::computer::{valid_computer_id, valid_port_path, ActivityState, AgentActivity, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
 use fragment_proto::{ErrorCode, IdentityKind};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -102,6 +102,7 @@ const FRAME_COOKIE: &str = "fragment_computer_frame";
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL, connections TEXT NOT NULL DEFAULT 'null', fenced INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS activity (agent TEXT NOT NULL, chat TEXT NOT NULL, state TEXT NOT NULL, waits_on TEXT, PRIMARY KEY (agent, chat));
 CREATE TABLE IF NOT EXISTS awake (from_ms INTEGER PRIMARY KEY, to_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS tickets (hash TEXT PRIMARY KEY, port INTEGER NOT NULL, identity TEXT NOT NULL, expires_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, identity TEXT NOT NULL, expires_at INTEGER NOT NULL);
@@ -133,6 +134,11 @@ const STATES_RETRY_MS: i64 = 10_000;
 
 /// Agent fragments one computer runs.
 const AGENTS_MAX: u64 = 16;
+/// A keepalive frame read as a ping, at most (anything longer is a report).
+const PING_MAX_BYTES: usize = 64;
+/// A keepalive's close reason, at most (WebSocket's 123 bytes, in characters
+/// that are one byte each).
+const CLOSE_REASON_MAX: usize = 120;
 /// A ticket is spent within this, once.
 const TICKET_TTL_MS: i64 = 2 * 60_000;
 /// A browser's session on a computer's origin.
@@ -290,6 +296,16 @@ enum MetaKey {
     /// (`fragment_core::computer::Images`): the reference its pinned name
     /// stood for as it last looked, and the version its owner put off.
     Images,
+    /// The last keepalive's number: each is numbered as it opens.
+    KeepaliveConn,
+    /// The keepalive whose report the `activity` rows are
+    /// (`<generation>:<number>`): what its agents are doing comes from it
+    /// alone, and goes as it closes.
+    ActivityReporter,
+    /// When the last report was taken (ms).
+    ActivityAt,
+    /// Entries the last report left out.
+    ActivityMore,
 }
 
 impl MetaKey {
@@ -308,6 +324,10 @@ impl MetaKey {
             MetaKey::AliveCheck => "alive_check",
             MetaKey::WorkosUser => "workos_user",
             MetaKey::Images => "images",
+            MetaKey::KeepaliveConn => "keepalive_conn",
+            MetaKey::ActivityReporter => "activity_reporter",
+            MetaKey::ActivityAt => "activity_at",
+            MetaKey::ActivityMore => "activity_more",
         }
     }
 }
@@ -412,10 +432,12 @@ impl DurableObject for ComputerCell {
     }
 
     async fn websocket_message(&self, ws: WebSocket, message: WebSocketIncomingMessage) -> Result<()> {
-        // the keepalive says nothing the cell needs; a ping is answered
+        // on the keepalive: a ping, answered, or what its agents are doing
         if let WebSocketIncomingMessage::String(s) = message {
-            if serde_json::from_str::<Value>(&s).is_ok_and(|v| v["type"] == "ping") {
+            if s.len() <= PING_MAX_BYTES && serde_json::from_str::<Value>(&s).is_ok_and(|v| v["type"] == "ping") {
                 ws.send_with_str(r#"{"type":"pong"}"#)?;
+            } else if let Err(e) = self.activity_said(&ws, &s).await {
+                console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "activity": "failed", "error": e.message }));
             }
         }
         Ok(())
@@ -747,13 +769,14 @@ impl ComputerCell {
     /// wake while a start is under way) applies its own event between, and
     /// the generations keep a late report from changing anything.
     async fn drive(&self, first: Event) -> CellResult<Option<String>> {
-        let told = self.notices()?;
+        let told = (self.notices()?, self.activity_shown()?);
         // a deploy since its last look is news, told as any change is
         self.look_logged().await;
         let refused = self.drive_events(first).await;
-        // what its owner is told changed: their open pages read it again
-        // (whatever the events did, a step that failed half way included)
-        if self.notices().is_ok_and(|now| now != told) {
+        // what its owner is told changed (a notice, or what its agents are
+        // doing: a start that ended takes it away): their open pages read it
+        // again (whatever the events did, a step that failed half way included)
+        if self.notices().is_ok_and(|now| now != told.0) || self.activity_shown().is_ok_and(|now| now != told.1) {
             self.tell_owner().await;
         }
         refused
@@ -1534,6 +1557,7 @@ impl ComputerCell {
                 connections,
                 fenced: r["fenced"].as_i64().unwrap_or(0) != 0,
                 credentials: vec![],
+                activity: vec![],
             });
         }
         Ok(agents)
@@ -1546,8 +1570,13 @@ impl ComputerCell {
     /// the model route's models' ids, as the deployment names them now.
     async fn guest_view(&self) -> CellResult<ComputerView> {
         let mut view = self.view()?;
-        // what its owner is told is theirs (its guest reads `restored`)
+        // what its owner is told is theirs (its guest reads `restored`), and
+        // so is what its agents are doing, which the guest itself said
         view.notices = vec![];
+        view.activity_more = 0;
+        for a in &mut view.agents {
+            a.activity = vec![];
+        }
         view.models = Some(self.cfg.models.ids_by_name());
         let catalog = &self.cfg.providers;
         view.credential_env = catalog.env_names();
@@ -1760,6 +1789,12 @@ impl ComputerCell {
             },
         };
         let images = self.images()?;
+        // what each agent is doing, as its guest last said it (best-effort)
+        let (mut doing, activity_more) = self.activity_shown()?;
+        let mut agents = self.agents()?;
+        for a in &mut agents {
+            a.activity = doing.remove(&a.fragment).unwrap_or_default();
+        }
         Ok(ComputerView {
             computer: id,
             owner: self.must(MetaKey::Owner)?,
@@ -1770,7 +1805,8 @@ impl ComputerCell {
             generation: life.generation(),
             why,
             notices: notices(&life, &saves, &images, &self.rules()),
-            agents: self.agents()?,
+            agents,
+            activity_more,
             origin,
             credential_env: vec![],
             models: None,
@@ -2134,6 +2170,8 @@ impl ComputerCell {
                     None => self.rows("DELETE FROM agents WHERE fragment = ? RETURNING fragment", vec![b.fragment.as_str().into()])?,
                 };
                 assert!(gone.len() <= 1, "a computer runs a fragment once");
+                // what it was doing goes with it
+                self.exec("DELETE FROM activity WHERE agent = ?", vec![b.fragment.as_str().into()])?;
                 let view = self.view()?;
                 if !gone.is_empty() {
                     // its owner's pages read its agents again (an agent
@@ -2409,11 +2447,125 @@ impl ComputerCell {
         self.exec(&format!("DELETE FROM {table} WHERE hash NOT IN (SELECT hash FROM {table} ORDER BY expires_at DESC LIMIT {max})"), vec![])
     }
 
+    /// A keepalive's start and number, from its tags (`g<generation>`,
+    /// `c<number>`); none for a socket from before keepalives were numbered.
+    fn keepalive_of(&self, ws: &WebSocket) -> Option<(u64, u64)> {
+        let tags = self.state.get_tags(ws);
+        let num = |prefix: char| tags.iter().find_map(|t| t.strip_prefix(prefix).and_then(|n| n.parse::<u64>().ok()));
+        Some((num('g')?, num('c')?))
+    }
+
+    /// The keepalive whose report the `activity` rows are.
+    fn reporter(&self) -> CellResult<Option<(u64, u64)>> {
+        Ok(self.meta(MetaKey::ActivityReporter)?.and_then(|r| {
+            let (g, c) = r.split_once(':')?;
+            Some((g.parse().ok()?, c.parse().ok()?))
+        }))
+    }
+
+    /// What its agents are doing as its owner's view shows it, by agent
+    /// fragment, and the entries left out: the report of a keepalive of the
+    /// start that runs now; none when it runs none.
+    fn activity_shown(&self) -> CellResult<(BTreeMap<String, Vec<AgentActivity>>, u32)> {
+        let running = self.lifecycle()?.running();
+        if running.is_none() || self.reporter()?.map(|(g, _)| g) != running {
+            return Ok((BTreeMap::new(), 0));
+        }
+        let mut doing: BTreeMap<String, Vec<AgentActivity>> = BTreeMap::new();
+        for r in self.rows("SELECT agent, chat, state, waits_on FROM activity ORDER BY agent, chat", vec![])? {
+            let state = match r["state"].as_str() {
+                Some("waiting") => ActivityState::Waiting,
+                Some("working") => ActivityState::Working,
+                Some("queued") => ActivityState::Queued,
+                other => return Err(CellError::host(format!("an activity row's state {other:?}"))),
+            };
+            let agent = r["agent"].as_str().unwrap_or_default().to_string();
+            let chat = r["chat"].as_str().unwrap_or_default().to_string();
+            doing.entry(agent).or_default().push(AgentActivity { chat, state, waits_on: r["waits_on"].as_str().map(str::to_string) });
+        }
+        let more = if doing.is_empty() { 0 } else { self.meta(MetaKey::ActivityMore)?.and_then(|m| m.parse().ok()).unwrap_or(0) };
+        Ok((doing, more))
+    }
+
+    /// What the guest says its agents are doing (docs/computers.md, "What
+    /// its agents are doing"): taken only from the newest keepalive of the
+    /// start that runs, checked whole (`fragment_core::activity::check`).
+    /// One that is wrong closes its keepalive (1008) and changes nothing;
+    /// one too soon after the last is not taken. A change of what its
+    /// owner's view shows tells their open pages.
+    async fn activity_said(&self, ws: &WebSocket, frame: &str) -> CellResult<()> {
+        if self.wiped.get() {
+            return Ok(());
+        }
+        let Some((generation, number)) = self.keepalive_of(ws) else { return Ok(()) };
+        if self.lifecycle()?.running() != Some(generation) {
+            return Ok(());
+        }
+        if self.reporter()?.is_some_and(|(g, n)| g == generation && n > number) {
+            return Ok(());
+        }
+        let runs: BTreeSet<String> = self.rows("SELECT fragment FROM agents", vec![])?.iter().filter_map(|r| r["fragment"].as_str().map(str::to_string)).collect();
+        let (entries, more) = match activity::check(frame, &runs) {
+            Ok(said) => said,
+            Err(refusal) => {
+                let why = refusal.message();
+                console_error!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "activity": "refused", "why": why }));
+                let reason: String = why.chars().filter(char::is_ascii).take(CLOSE_REASON_MAX).collect();
+                let _ = ws.close(Some(1008), Some(reason));
+                return Ok(());
+            }
+        };
+        let now = js::now_ms();
+        if activity::too_soon(&entries, self.meta(MetaKey::ActivityAt)?.and_then(|t| t.parse().ok()), now) {
+            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "activity": "too_soon" }));
+            return Ok(());
+        }
+        let before = self.activity_shown()?;
+        // the report whole, in one write (nothing awaits between)
+        self.exec("DELETE FROM activity", vec![])?;
+        for e in &entries {
+            let waits_on = e.waits_on.as_deref().map_or(SqlStorageValue::Null, SqlStorageValue::from);
+            self.exec(
+                "INSERT INTO activity (agent, chat, state, waits_on) VALUES (?, ?, ?, ?)",
+                vec![e.agent.as_str().into(), e.chat.as_str().into(), e.state.as_str().into(), waits_on],
+            )?;
+        }
+        self.set_meta(MetaKey::ActivityReporter, &format!("{generation}:{number}"))?;
+        self.set_meta(MetaKey::ActivityAt, &now.to_string())?;
+        self.set_meta(MetaKey::ActivityMore, &more.to_string())?;
+        if self.activity_shown()? != before {
+            self.tell_owner().await;
+        }
+        Ok(())
+    }
+
+    /// A keepalive closed or failed: when its report is the one shown, it
+    /// goes, and its owner's open pages are told.
+    async fn activity_gone(&self, ws: &WebSocket) -> CellResult<()> {
+        let Some(keepalive) = self.keepalive_of(ws) else { return Ok(()) };
+        if self.reporter()? != Some(keepalive) {
+            return Ok(());
+        }
+        let before = self.activity_shown()?;
+        self.exec("DELETE FROM activity", vec![])?;
+        self.delete_meta(MetaKey::ActivityReporter)?;
+        self.delete_meta(MetaKey::ActivityMore)?;
+        if self.activity_shown()? != before {
+            self.tell_owner().await;
+        }
+        Ok(())
+    }
+
     /// A keepalive closed: it counts only if its container is the running one.
     async fn keepalive_closed(&self, ws: &WebSocket) {
         let current = self.lifecycle().map(|l| format!("g{}", l.generation())).unwrap_or_default();
         if !self.state.get_tags(ws).contains(&current) {
             return;
+        }
+        // its report goes with it (a close and an error both come: the
+        // second finds none)
+        if let Err(e) = self.activity_gone(ws).await {
+            console_error!("{}", json!({ "computer": "activity-gone", "error": e.message }));
         }
         if let Err(e) = self.drive(Event::Closed { socket: Socket::Keepalive }).await {
             console_error!("{}", json!({ "computer": "keepalive-closed", "error": e.message }));
@@ -2427,9 +2579,12 @@ impl ComputerCell {
             return Err(CellError::invalid("the keepalive is a WebSocket"));
         }
         let pair = WebSocketPair::new()?;
-        // tagged with its container's start: a late close from an earlier one counts for nothing
+        // tagged with its container's start (a late close from an earlier one
+        // counts for nothing) and its own number (an older one's report too)
         let generation = format!("g{}", self.lifecycle()?.generation());
-        self.state.accept_websocket_with_tags(&pair.server, &["keepalive", &generation]);
+        let number = self.meta(MetaKey::KeepaliveConn)?.and_then(|n| n.parse::<u64>().ok()).unwrap_or(0) + 1;
+        self.set_meta(MetaKey::KeepaliveConn, &number.to_string())?;
+        self.state.accept_websocket_with_tags(&pair.server, &["keepalive", &generation, &format!("c{number}")]);
         self.drive(Event::Opened { socket: Socket::Keepalive }).await?;
         Ok(Response::from_websocket(pair.client)?)
     }
