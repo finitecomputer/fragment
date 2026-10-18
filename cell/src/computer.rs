@@ -300,8 +300,6 @@ enum MetaKey {
     /// (`<generation>:<number>`): what its agents are doing comes from it
     /// alone, and goes as it closes.
     ActivityReporter,
-    /// When the last report was taken (ms).
-    ActivityAt,
     /// Entries the last report left out.
     ActivityMore,
 }
@@ -324,7 +322,6 @@ impl MetaKey {
             MetaKey::Images => "images",
             MetaKey::KeepaliveConn => "keepalive_conn",
             MetaKey::ActivityReporter => "activity_reporter",
-            MetaKey::ActivityAt => "activity_at",
             MetaKey::ActivityMore => "activity_more",
         }
     }
@@ -2491,11 +2488,10 @@ impl ComputerCell {
     /// What the guest says its agents are doing (docs/computers.md, "What
     /// its agents are doing"): taken only from the newest keepalive of the
     /// start that runs, checked whole (`fragment_core::activity::check`).
-    /// One that is wrong changes nothing, and its keepalive is told why
-    /// (`{type: "refused", why}`) and stays open: it holds the computer
-    /// awake, which a report never risks. One too soon after that
-    /// keepalive's last is not taken. A change of what its owner's view
-    /// shows tells their open pages.
+    /// One that is wrong changes nothing and is logged; its keepalive stays
+    /// open: it holds the computer awake, which a report never risks. Each
+    /// is taken as it comes (its guest spaces them). A change of what its
+    /// owner's view shows tells their open pages.
     async fn activity_said(&self, ws: &WebSocket, frame: &str) -> CellResult<()> {
         if self.wiped.get() {
             return Ok(());
@@ -2509,24 +2505,10 @@ impl ComputerCell {
         let (entries, more) = match activity::check(frame, &runs) {
             Ok(said) => said,
             Err(refusal) => {
-                let why = refusal.message();
-                console_error!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "activity": "refused", "why": why }));
-                let _ = ws.send_with_str(json!({ "type": "refused", "code": "malformed", "why": why }).to_string());
+                console_error!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "activity": "refused", "why": refusal.message() }));
                 return Ok(());
             }
         };
-        let now = js::now_ms();
-        // spaced by keepalive: a new one's first report is always taken
-        let last = match self.reporter()? {
-            Some(r) if r == (generation, number) => self.meta(MetaKey::ActivityAt)?.and_then(|t| t.parse().ok()),
-            _ => None,
-        };
-        if activity::too_soon(&entries, last, now) {
-            // sent a second apart, it can still come sooner: its guest says
-            // it again a second on (docs/bridge.md)
-            let _ = ws.send_with_str(json!({ "type": "refused", "code": "too_soon", "why": "a report a second after the last at most: say it again" }).to_string());
-            return Ok(());
-        }
         let before = self.activity_shown()?;
         // the report whole, in one write (nothing awaits between)
         self.exec("DELETE FROM activity", vec![])?;
@@ -2538,7 +2520,6 @@ impl ComputerCell {
             )?;
         }
         self.set_meta(MetaKey::ActivityReporter, &format!("{generation}:{number}"))?;
-        self.set_meta(MetaKey::ActivityAt, &now.to_string())?;
         self.set_meta(MetaKey::ActivityMore, &more.to_string())?;
         if self.activity_shown()? != before {
             self.tell_owner().await;

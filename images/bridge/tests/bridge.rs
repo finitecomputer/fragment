@@ -1393,23 +1393,3 @@ async fn it_says_what_its_agents_are_doing() {
     });
     bridge.stop().await;
 }
-
-/// Goal: a report the cell answers as too soon (sent a second apart, it can
-/// arrive sooner) is said again a second on, so the last one is heard
-/// even when nothing changes after it.
-#[tokio::test]
-async fn a_report_that_came_too_soon_is_said_again() {
-    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
-    let chat = fake.chat("talk", &["juniper"]);
-    let dir = support::dir("activity-again");
-    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
-    following(&fake, 2).await;
-    let waiting = json!([{ "agent": "juniper--k3x9", "chat": chat, "state": "waiting", "waitsOn": "npub1paul" }]);
-    fake.with(|w| w.refuse_activity = Some(waiting.clone()));
-    fake.say(&chat, &person("paul"), json!({ "text": "do something risky" }));
-    // the card's wait is said, refused as too soon, and said again though
-    // nothing changed after it
-    fake.until(WAIT, "the card's wait said twice", |w| w.activity.iter().filter(|(_, f)| f["agents"] == waiting).count() == 2).await;
-    fake.with(|w| assert!(w.refuse_activity.is_none(), "it was refused once"));
-    bridge.stop().await;
-}

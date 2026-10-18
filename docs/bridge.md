@@ -331,11 +331,10 @@ waiting, working, queued, then by agent and chat, at most `ACTIVITY_MAX`
 doing"). A step that changes none of that (a draft, a tool's progress)
 says nothing new. The driver sends the newest on the keepalive as it
 opens and at each change, at most once a second, and an empty list
-before it closes the keepalive as idle. One the computer answers as too
-soon (`{type: "refused", code: "too_soon"}`: sent a second apart, two can
-arrive closer) it sends again a second on, the newest then; one refused
-as wrong (`malformed`) is logged, not sent again unchanged. A restart's engine starts from
-its own turns: what the last life said goes with its keepalive.
+before it closes the keepalive as idle. The computer takes each as it
+comes and answers none (one it refuses is in its log). A restart's
+engine starts from its own turns: what the last life said goes with its
+keepalive.
 
 ## The turn after a cut one is told
 

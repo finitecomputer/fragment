@@ -13,14 +13,11 @@ use fragment_proto::computer::{ActivityEntry, ActivityReport};
 pub const ACTIVITY_MAX: usize = 64;
 /// A report's frame, at most, read before it is parsed.
 pub const ACTIVITY_REPORT_MAX_BYTES: usize = 16 * 1024;
-/// The least time between two reports that are not empty, which a guest
-/// that keeps time never breaks (it sends at most one a second).
-pub const ACTIVITY_SPACING_MS: i64 = 1_000;
 /// The report's version this cell reads.
 pub const ACTIVITY_VERSION: u32 = 1;
 
 /// Why a report is refused: what the computer keeps does not change, and
-/// its keepalive is told so (and stays open).
+/// its keepalive stays open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActivityRefusal {
     /// Past `ACTIVITY_REPORT_MAX_BYTES`.
@@ -104,14 +101,6 @@ pub fn heard(from: Keepalive, running: Option<u64>, newest: u64) -> bool {
 /// its report is the one shown (`reporter`).
 pub fn clears(from: Keepalive, reporter: Option<Keepalive>) -> bool {
     reporter == Some(from)
-}
-
-/// Whether a report that is not empty comes too soon after the last one
-/// taken from the same keepalive (`last_ms`), at `now_ms`. An empty one
-/// always comes in time: it clears; and a keepalive's first is never too
-/// soon (its guest sends it as the keepalive opens).
-pub fn too_soon(entries: &[ActivityEntry], last_ms: Option<i64>, now_ms: i64) -> bool {
-    !entries.is_empty() && last_ms.is_some_and(|last| now_ms - last < ACTIVITY_SPACING_MS)
 }
 
 #[cfg(test)]
@@ -201,16 +190,5 @@ mod tests {
         assert!(clears(new, Some(new)));
         assert!(!clears(old, Some(new)), "an older one closing takes nothing away");
         assert!(!clears(new, None), "closed twice (a close and an error), the second finds none");
-    }
-
-    /// A report that is not empty within a second of the last is too soon;
-    /// an empty one never is, and the first never is.
-    #[test]
-    fn reports_are_spaced_but_a_clear_is_not() {
-        let one = vec![ActivityEntry { agent: "juniper--k3x9".into(), chat: "talk--k3x9".into(), state: Working, waits_on: None }];
-        assert!(!too_soon(&one, None, 1_000));
-        assert!(too_soon(&one, Some(1_000), 1_999));
-        assert!(!too_soon(&one, Some(1_000), 2_000));
-        assert!(!too_soon(&[], Some(1_000), 1_001));
     }
 }
