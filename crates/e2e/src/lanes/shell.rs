@@ -987,6 +987,27 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         fenced && viewed && asked && lifted,
         json!({ "fenced": fenced, "viewed": viewed, "asked": asked, "lifted": lifted }),
     );
+    // what it is doing, as its computer's guest says on its keepalive
+    // (docs/computers.md, "What its agents are doing"): a card in its other
+    // chat waits on the person, which its row and its ⋯ say live, with no
+    // reload; answered, they say nothing of it again
+    let doing = format!("(document.querySelector({})?.textContent ?? null)", js(&format!("#team .team-row[data-key={}] .team-doing", js(&format!("team:{reader_id}")))));
+    let r = shell(api, &session, "POST", &format!("/api/f/{notes}/channels/chat"), Some(&json!({ "id": "doing-1", "body": { "text": "approve this, please" } })), &[])?;
+    anyhow::ensure!(r.status == 200, "asking the Reader in its other chat: {r}");
+    let waiting = b.until(&page, &format!("{doing} === 'Waiting for you'"), agent_wait);
+    let _ = b.screenshot(&page, &shots.join("desktop-team-waiting.png"));
+    b.click(&page, &more)?;
+    let listed_doing = b.until(&page, "[...document.querySelectorAll('#menu button')].some((b) => b.textContent === 'Waiting for you in Reading notes')", wait);
+    b.press(&page, "Escape", false)?;
+    let work = shell(api, &session, "GET", &format!("/api/f/{notes}/channels/work"), None, &[])?;
+    let prompt = work.body["records"].as_array().into_iter().flatten().rev().find(|r| r["body"]["kind"] == "turn.prompt").and_then(|r| r["body"]["prompt"].as_str()).unwrap_or("").to_string();
+    let r = shell(api, &session, "POST", &format!("/api/f/{notes}/channels/chat"), Some(&json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": "once" } })), &[])?;
+    let cleared = r.status == 200 && b.until(&page, &format!("{doing} === null"), agent_wait);
+    s.ok(
+        "a teammate's row and its ⋯ say what it is doing, live: waiting for the person while its card waits in its other chat, then nothing once it is answered",
+        waiting && listed_doing && cleared,
+        json!({ "waiting": waiting, "menu": listed_doing, "prompt": prompt, "cleared": cleared, "row": b.eval(&page, &doing)? }),
+    );
     let _ = s.eventually(wait, || b.eval_in_frame(&page, &reader_chat, "!!document.querySelector('.msg.agent:not(.streaming)')").ok() == Some(Value::Bool(true)));
     unread_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
     new_chat_ui(s, api, &mut b, &page, &me, &shots)?;

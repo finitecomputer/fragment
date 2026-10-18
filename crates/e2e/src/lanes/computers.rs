@@ -1044,6 +1044,15 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let card = work.iter().find(|r| r["body"]["kind"] == "turn.prompt").cloned().unwrap_or_default();
         let prompt = card["body"]["prompt"].as_str().unwrap_or("").to_string();
         s.ok("a prompt is a card on work, asking the agent's owner", asked && card["body"]["asks"] == api.identity(&owner)?.as_str(), &card);
+        // what its agents are doing, as its guest says on its keepalive
+        // (docs/computers.md, "What its agents are doing"): its owner's view
+        let agent_in_view = || -> Value {
+            let v = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
+            v["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == agent_name.as_str()).cloned()).unwrap_or(Value::Null)
+        };
+        let waiting = json!([{ "chat": chat_name, "state": "waiting", "waitsOn": api.identity(&owner)? }]);
+        let shown = s.eventually(wake, || agent_in_view()["activity"] == waiting);
+        s.ok("while its card waits, its owner's view says the agent waits on them in that chat", shown, agent_in_view());
         let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": "once" } });
         let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&answer))?;
         s.ok("its owner answers it", r.status == 200, &r);
@@ -1051,6 +1060,8 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let closed = work_of(&records(api, &owner, &chat_name, "work"), &turn).iter().any(|r| r["body"]["kind"] == "turn.prompt.closed" && r["body"]["outcome"] == "answered");
         s.ok("the turn goes on approved, the card closed", approved && closed, json!(work_of(&records(api, &owner, &chat_name, "work"), &turn)));
         replies_so_far += 1;
+        let gone = s.eventually(wake, || agent_in_view().get("activity").is_none());
+        s.ok("its turn over, the view says nothing of it (its guest's empty report, then its keepalive let go)", gone, agent_in_view());
 
         // a reply carries a file, one of the chat's blobs
         let r = say(13, "draw me something")?;

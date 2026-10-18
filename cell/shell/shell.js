@@ -753,12 +753,32 @@ const whereItRuns = (a) => {
   return r?.on === "own" ? `${r.model} · ${r.provider}, outside the platform` : r ? "On the platform's models" : "";
 };
 
+// What a teammate is doing, as its computer last said it (each agent's
+// `activity` in the computer's view, best-effort: docs/computers.md, "What
+// its agents are doing"): the most pressing of its chats, or none. None
+// while this page's list socket is shut: it would not hear the change.
+const DOING_SAYS = { you: "Waiting for you", waiting: "Waiting", working: "Working", queued: "Queued" };
+const DOING_IN = { you: "Waiting for you in", waiting: "Waiting in", working: "Working in", queued: "Queued in" };
+const doingOfEntry = (x) => (x.state === "waiting" && x.waitsOn === state.me?.id ? "you" : x.state);
+// the list socket (`watchList`, below): declared here, as the team reads it
+const watching = { on: false, socket: null, wait: 1000, timer: null, settle: null };
+const listLive = () => watching.socket?.readyState === WebSocket.OPEN;
+function doingOf(a) {
+  if (!listLive()) return null;
+  const said = (a.activity ?? []).map(doingOfEntry);
+  return ["you", "waiting", "working", "queued"].find((d) => said.includes(d)) ?? null;
+}
+// its chats, the most pressing first: what its ⋯ lists
+const ORDER = ["you", "waiting", "working", "queued"];
+const doingChats = (a) => (listLive() ? (a.activity ?? []).map((x) => ({ chat: x.chat, doing: doingOfEntry(x) })).sort((x, y) => ORDER.indexOf(x.doing) - ORDER.indexOf(y.doing)) : []);
+const DOING_LISTED = 5;
+
 // The team under the one agent, a step down from it: indented under it, a
 // smaller row each, quieter than the person's chats. A row opens that
-// agent's own chat with the person, and says its new messages and when its
-// model runs outside the platform; its ⋯ says where, and offers its
-// hand-offs, a change asked of the one agent, its screen, its fence and its
-// profile. The open chat's teammate (its own chat, another of the person's
+// agent's own chat with the person, and says what it is doing, its new
+// messages and when its model runs outside the platform; its ⋯ says where
+// and what it is doing in which chats, and offers its hand-offs, a change
+// asked of the one agent, its screen, its fence and its profile. The open chat's teammate (its own chat, another of the person's
 // with it alone, or a hand-off it is in) is marked, those chats listed
 // under it.
 function renderTeam() {
@@ -805,7 +825,8 @@ function teamRow(a, active, open) {
   const mine = active && !!itsChat && open?.name === itsChat.name;
   const row = el("div", `team-row${mine ? " active" : active ? " here" : ""}`);
   row.dataset.key = `team:${a.identity}`;
-  const go = el("button", "team-open");
+  const doing = doingOf(a);
+  const go = el("button", `team-open${doing ? ` doing-${doing}` : ""}`);
   go.type = "button";
   go.setAttribute("aria-current", mine ? "page" : "false");
   const face = el("span", "team-face");
@@ -826,7 +847,10 @@ function teamRow(a, active, open) {
     go.append(lock);
     said.push("fenced: it can't act for you or use your connections");
   }
-  if (unread) {
+  if (doing) {
+    go.append(el("span", `team-doing ${doing}`, DOING_SAYS[doing]));
+    said.push(DOING_SAYS[doing].toLowerCase());
+  } else if (unread) {
     const n = el("span", "unread", unread >= UNREAD_MAX ? "99+" : String(unread));
     n.setAttribute("aria-hidden", "true");
     go.append(n);
@@ -843,7 +867,9 @@ function teamRow(a, active, open) {
   more.setAttribute("aria-expanded", String(!!menuFor && !menuClosing && menuFor.button.dataset.team === a.identity));
   more.dataset.team = a.identity;
   more.dataset.tooltip = "More";
-  more.onclick = () => openTeamMenu(a, more);
+  // looked up as pressed: a row kept unchanged keeps its handler, and what
+  // its agent is doing may have moved to another chat since
+  more.onclick = () => openTeamMenu(state.agents.get(a.identity) ?? a, more);
   row.append(go, more);
   if (!active) return [row];
   const others = otherChatsOf(a).map((f) => {
@@ -879,7 +905,11 @@ function openTeamMenu(a, trigger) {
   const handoffs = handoffsTo(a);
   const by = handoffs[0] && askerOf(handoffs[0], a);
   openMenu(trigger, [
-    { heading: title, note: [whereItRuns(a), a.fenced ? "Fenced" : ""].filter(Boolean).join(" · ") },
+    { heading: title, note: [DOING_SAYS[doingOf(a)] ?? "", whereItRuns(a), a.fenced ? "Fenced" : ""].filter(Boolean).join(" · ") },
+    ...doingChats(a)
+      .filter((x) => byName(x.chat))
+      .slice(0, DOING_LISTED)
+      .map((x) => ({ icon: "team", text: `${DOING_IN[x.doing]} ${titleOf(x.chat)}`, onClick: () => { openChat(x.chat); leaveSidebar(); } })),
     ...(handoffs.length ? [{ icon: "team", text: by ? `Hand-offs from ${titleOf(by.fragment)}` : "Its hand-offs", onClick: () => { openChat(handoffs[0].name); leaveSidebar(); } }] : []),
     ...(primary?.identity ? [{ icon: "rename", text: `Ask ${titleOf(primary.fragment)} to change it`, onClick: () => composeApp(`Change how ${title} works: `) }] : []),
     ...(state.computer ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(a.fragment) }] : []),
@@ -3251,7 +3281,6 @@ async function load(changed = false) {
 // wait (1 s, doubling to 30 s); each opening reads the list again, for
 // what changed while it was shut.
 const LIST_SETTLE_MS = 200;
-const watching = { on: false, socket: null, wait: 1000, timer: null, settle: null };
 function listChanged() {
   clearTimeout(watching.settle);
   watching.settle = setTimeout(() => load(true).catch(() => {}), LIST_SETTLE_MS);
@@ -3273,6 +3302,8 @@ function watchList() {
   };
   ws.onclose = () => {
     watching.socket = null;
+    // what the team is doing goes until the socket is back to hear it
+    renderTeam();
     watching.timer = setTimeout(watchList, watching.wait * (0.5 + Math.random()));
     watching.wait = Math.min(watching.wait * 2, 30_000);
   };

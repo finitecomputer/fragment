@@ -590,6 +590,14 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .team-outside svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; }
 .team-fenced { display: grid; place-items: center; flex: none; color: var(--text-tertiary); }
 .team-fenced svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; }
+/* what a teammate is doing, as its computer last said */
+.team-doing { flex: none; font-size: 11px; font-weight: 600; color: var(--text-tertiary); }
+.team-doing.working { color: var(--success); }
+.team-doing.you { color: var(--accent-blue); }
+.team-open.doing-working .team-face::after { content: ""; position: absolute; inset: -3px; border-radius: 50%; border: 2px solid var(--success); animation: team-working 1.6s ease-in-out infinite; pointer-events: none; }
+.team-open.doing-you .team-face::after { content: ""; position: absolute; inset: -3px; border-radius: 50%; border: 2px solid var(--accent-blue); pointer-events: none; }
+@keyframes team-working { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .team-open.doing-working .team-face::after { animation: none; } }
 .team-open .unread { min-width: 18px; height: 18px; padding: 0 5px; font-size: 10px; line-height: 18px; }
 .team-more { width: 26px; height: 26px; margin-right: 2px; opacity: 0; transition: opacity .12s, background .12s; }
 .team-more svg { width: 16px; height: 16px; fill: currentColor; }
