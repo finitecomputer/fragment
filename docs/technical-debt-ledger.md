@@ -1327,6 +1327,24 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** a chat's fragment names its kind of chat (own,
   hand-off, group) instead of its label saying it.
 
+## What an agent is doing is what its guest last said
+
+- **Observed:** 2026-10-17, the team's status (decision 62, proposed;
+  docs/computers.md, "What its agents are doing"). The guest says on its
+  keepalive what its agents are doing; the computer keeps the newest
+  report and clears it as that keepalive closes or its start ends.
+- **Shortcut:** no lease: nothing renews a report while work goes on, so
+  nothing expires one either.
+- **Risk:** a keepalive that hangs open without closing (a container the
+  platform has not yet seen fail, an engine wedged with its socket open)
+  shows its agents working until it closes or the start ends; a page
+  that missed the push shows the old status until its next change or
+  its list socket reconnects. A guest can say anything of its own agents.
+- **First proof:** a teammate shown working long after its chat shows its
+  turn ended.
+- **Delete when:** reports carry a lease the guest renews while busy and
+  the computer expires, or a turn's own records feed the status.
+
 ## A teammate on another provider is kept out by a prompt and the platform's fence
 
 - **Observed:** decisions 62 and 63 (proposed). The agents-finite skill

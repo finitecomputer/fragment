@@ -301,6 +301,40 @@ address; `FRAGMENT_SUPPORT_URL`, given with `GET /api/computers` as
 one, the notice shows the computer's id and the platform's words, to give
 whoever runs it.
 
+## What its agents are doing
+
+Its guest says what its agents are doing, and its owner's view shows it
+(decision 62, proposed: the shell's team). It is best-effort: what the
+guest last said, never proof that work runs or finished, and none said
+means none reported.
+
+- **Who says it.** The guest, on its keepalive (`GET
+  /api/computer/keepalive`, below), as a text frame: `{type: "activity",
+  v: 1, agents: [{agent, chat, state, waitsOn?}], more}`. One entry per
+  agent fragment and chat with a turn not ended: `waiting` when a turn
+  there waits on a card or on someone's words (`waitsOn`: whom, an
+  identity), else `working` when one runs, else `queued` (admitted, not
+  yet run). Ordered waiting, working, queued, then by agent and chat; at
+  most `ACTIVITY_MAX` (64) entries, `more` counting those left out. Sent
+  as each keepalive opens, then at each change, at most once a second
+  (the newest), and an empty list before the guest closes it as idle.
+- **What the computer takes.** Only from the newest keepalive of the
+  start that runs (each is numbered as it opens): an older keepalive's
+  frames, or one of an earlier start, change nothing. A frame past
+  `ACTIVITY_REPORT_MAX_BYTES` (16 KiB), malformed, naming an agent this
+  computer does not run, or naming one agent and chat twice closes that
+  keepalive (1008) and changes nothing. A list that is not empty, sooner
+  than a second after the last one taken, is not taken (a guest that
+  keeps time never sends one).
+- **When it goes.** As its keepalive closes or fails, as the start ends
+  (asleep, won't wake, a new start), and, for one agent, as it is
+  unassigned. A sleep the keepalive cancels does not end it.
+- **Who sees it.** Its owner: `GET /api/computers` and `GET
+  /api/computers/{id}` give each agent its `activity: [{chat, state,
+  waitsOn?}]`, and `activityMore` when entries were left out. The
+  guest's own view never has it. A change of what the owner's view shows
+  tells their open pages, as a notice does.
+
 ## Stable and canary
 
 A new image reaches a few people first, and everyone after it has proved
@@ -743,7 +777,9 @@ expires within 30 days. The container application is the deployment's
   - `GET /api/computer/keepalive` (a WebSocket): while it is open the
     computer stays awake. Hold it while busy, and while a turn waits on
     its card, until the card is answered or expires (decision 42 as
-    amended; docs/bridge.md, "A card keeps its computer awake").
+    amended; docs/bridge.md, "A card keeps its computer awake"). On it
+    the guest says what its agents are doing (above, "What its agents
+    are doing"), and may send `{type: "ping"}` (answered `pong`).
 - A subscription with `{channel, wake: true}` (in place of `url`), sent
   as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
   computer on each new record (the fragment asks the computer itself just

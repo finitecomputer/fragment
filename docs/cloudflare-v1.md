@@ -1240,8 +1240,10 @@ these other providers."
       sidebar): its other agents are its team, a row each one step down
       under it (Austin, 2026-10-16: "first class ui … STILL having them be
       SLIGHTLY lower"), each opening its own chat with the person, marked
-      while open with its hand-offs under it, saying when its model runs
-      outside the platform.
+      while open with its hand-offs under it, saying what it is doing
+      (waiting for the person, working, queued: its computer's guest says
+      so on its keepalive, docs/computers.md, "What its agents are doing")
+      and when its model runs outside the platform.
       Their own chats and the hand-offs among the person's agents leave
       the person's list. Talking to a teammate directly skips the default
       agent's care, so a chat whose lead runs outside the platform says
