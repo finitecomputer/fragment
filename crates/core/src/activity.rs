@@ -1,8 +1,9 @@
 //! What a computer's agents are doing, as its guest says it on its
 //! keepalive (docs/computers.md, "What its agents are doing"; decision 62,
 //! proposed). The guest is less trusted than the cell: its report is read
-//! as untrusted input, checked whole, and taken or refused whole. What it
-//! says is shown to the computer's owner and grants nothing.
+//! as untrusted input, checked whole, and taken or refused whole (never
+//! its keepalive: that holds the computer awake). What it says is shown to
+//! the computer's owner and grants nothing.
 
 use std::collections::BTreeSet;
 
@@ -18,8 +19,8 @@ pub const ACTIVITY_SPACING_MS: i64 = 1_000;
 /// The report's version this cell reads.
 pub const ACTIVITY_VERSION: u32 = 1;
 
-/// Why a report is refused: its keepalive is closed (1008), and what the
-/// computer keeps does not change.
+/// Why a report is refused: what the computer keeps does not change, and
+/// its keepalive is told so (and stays open).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActivityRefusal {
     /// Past `ACTIVITY_REPORT_MAX_BYTES`.
@@ -29,8 +30,6 @@ pub enum ActivityRefusal {
     Malformed(String),
     /// Past `ACTIVITY_MAX` entries.
     TooMany,
-    /// An agent this computer does not run.
-    NotHere(String),
     /// A chat that is no fragment's name, or a `waitsOn` that is no
     /// identity, or one on a state that waits on no one.
     BadEntry(String),
@@ -44,17 +43,17 @@ impl ActivityRefusal {
             ActivityRefusal::TooLarge => format!("an activity report is at most {ACTIVITY_REPORT_MAX_BYTES} bytes"),
             ActivityRefusal::Malformed(e) => format!("not an activity report (type \"activity\", v {ACTIVITY_VERSION}): {e}"),
             ActivityRefusal::TooMany => format!("an activity report holds at most {ACTIVITY_MAX} entries (count the rest in `more`)"),
-            ActivityRefusal::NotHere(agent) => format!("this computer does not run {agent}"),
             ActivityRefusal::BadEntry(why) => format!("an activity entry: {why}"),
             ActivityRefusal::Twice(key) => format!("{key} is reported twice"),
         }
     }
 }
 
-/// Reads and checks a report: every agent one of `runs` (the agent
-/// fragments this computer runs now), each agent and chat once. Its
-/// entries come back ordered by agent and chat, so the same report said
-/// twice is the same.
+/// Reads and checks a report, each agent and chat once. An entry of an
+/// agent this computer does not run now (not one of `runs`: unassigned a
+/// moment ago, which its guest has not yet read) is left out, not refused.
+/// Its entries come back ordered by agent and chat, so the same report
+/// said twice is the same.
 pub fn check(frame: &str, runs: &BTreeSet<String>) -> Result<(Vec<ActivityEntry>, u32), ActivityRefusal> {
     if frame.len() > ACTIVITY_REPORT_MAX_BYTES {
         return Err(ActivityRefusal::TooLarge);
@@ -68,9 +67,6 @@ pub fn check(frame: &str, runs: &BTreeSet<String>) -> Result<(Vec<ActivityEntry>
     }
     let mut seen = BTreeSet::new();
     for e in &report.agents {
-        if !runs.contains(&e.agent) {
-            return Err(ActivityRefusal::NotHere(e.agent.clone()));
-        }
         if !fragment_proto::valid_fragment_name(&e.chat) {
             return Err(ActivityRefusal::BadEntry(format!("{:?} is no fragment's name", e.chat)));
         }
@@ -87,14 +83,15 @@ pub fn check(frame: &str, runs: &BTreeSet<String>) -> Result<(Vec<ActivityEntry>
             return Err(ActivityRefusal::Twice(format!("{} in {}", e.agent, e.chat)));
         }
     }
-    let mut entries = report.agents;
+    let mut entries: Vec<ActivityEntry> = report.agents.into_iter().filter(|e| runs.contains(&e.agent)).collect();
     entries.sort_by(|a, b| (&a.agent, &a.chat).cmp(&(&b.agent, &b.chat)));
     Ok((entries, report.more))
 }
 
 /// Whether a report that is not empty comes too soon after the last one
-/// taken (`last_ms`), at `now_ms`. An empty one always comes in time: it
-/// clears.
+/// taken from the same keepalive (`last_ms`), at `now_ms`. An empty one
+/// always comes in time: it clears; and a keepalive's first is never too
+/// soon (its guest sends it as the keepalive opens).
 pub fn too_soon(entries: &[ActivityEntry], last_ms: Option<i64>, now_ms: i64) -> bool {
     !entries.is_empty() && last_ms.is_some_and(|last| now_ms - last < ACTIVITY_SPACING_MS)
 }
@@ -140,6 +137,10 @@ mod tests {
         assert_eq!(check(&frame(json!([])), &runs()).expect("an empty report clears").0, vec![]);
         let more = json!({ "type": "activity", "v": 1, "agents": [], "more": 3 }).to_string();
         assert_eq!(check(&more, &runs()).expect("taken").1, 3);
+        // an agent unassigned a moment ago, which its guest still runs: left out
+        let gone = frame(json!([{ "agent": "oak--k3x9", "chat": "talk--k3x9", "state": "working" }, { "agent": "juniper--k3x9", "chat": "talk--k3x9", "state": "working" }]));
+        let (kept, _) = check(&gone, &runs()).expect("taken");
+        assert_eq!(kept.iter().map(|e| e.agent.as_str()).collect::<Vec<_>>(), vec!["juniper--k3x9"]);
     }
 
     /// Invalid: each refusal, the report refused whole.
@@ -159,12 +160,11 @@ mod tests {
         }
         let many: Vec<_> = (0..=ACTIVITY_MAX).map(|i| json!({ "agent": "juniper--k3x9", "chat": format!("c{i}--k3x9"), "state": "working" })).collect();
         assert_eq!(refused(json!(many)), ActivityRefusal::TooMany);
-        assert_eq!(refused(json!([ok, { "agent": "oak--k3x9", "chat": "talk--k3x9", "state": "working" }])), ActivityRefusal::NotHere("oak--k3x9".into()));
         assert!(matches!(refused(json!([{ "agent": "juniper--k3x9", "chat": "Not A Name", "state": "working" }])), ActivityRefusal::BadEntry(_)));
         assert!(matches!(refused(json!([{ "agent": "juniper--k3x9", "chat": "talk--k3x9", "state": "waiting", "waitsOn": "paul" }])), ActivityRefusal::BadEntry(_)));
         assert!(matches!(refused(json!([{ "agent": "juniper--k3x9", "chat": "talk--k3x9", "state": "working", "waitsOn": PAUL }])), ActivityRefusal::BadEntry(_)));
         assert_eq!(refused(json!([ok, ok])), ActivityRefusal::Twice("juniper--k3x9 in talk--k3x9".into()));
-        for r in [ActivityRefusal::TooLarge, ActivityRefusal::TooMany, ActivityRefusal::NotHere("x".into())] {
+        for r in [ActivityRefusal::TooLarge, ActivityRefusal::TooMany, ActivityRefusal::Twice("x".into())] {
             assert!(!r.message().is_empty());
         }
     }

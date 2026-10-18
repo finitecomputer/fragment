@@ -321,11 +321,13 @@ means none reported.
 - **What the computer takes.** Only from the newest keepalive of the
   start that runs (each is numbered as it opens): an older keepalive's
   frames, or one of an earlier start, change nothing. A frame past
-  `ACTIVITY_REPORT_MAX_BYTES` (16 KiB), malformed, naming an agent this
-  computer does not run, or naming one agent and chat twice closes that
-  keepalive (1008) and changes nothing. A list that is not empty, sooner
-  than a second after the last one taken, is not taken (a guest that
-  keeps time never sends one).
+  `ACTIVITY_REPORT_MAX_BYTES` (16 KiB), malformed, or naming one agent
+  and chat twice changes nothing, and the keepalive is told why
+  (`{type: "refused", why}`) and stays open: it holds the computer awake,
+  which a report never risks. An entry of an agent the computer does not
+  run (unassigned a moment ago) is left out. A list that is not empty,
+  sooner than a second after the last one taken from the same keepalive,
+  is not taken (a guest that keeps time never sends one).
 - **When it goes.** As its keepalive closes or fails, as the start ends
   (asleep, won't wake, a new start), and, for one agent, as it is
   unassigned. A sleep the keepalive cancels does not end it.

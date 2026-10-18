@@ -136,9 +136,7 @@ const STATES_RETRY_MS: i64 = 10_000;
 const AGENTS_MAX: u64 = 16;
 /// A keepalive frame read as a ping, at most (anything longer is a report).
 const PING_MAX_BYTES: usize = 64;
-/// A keepalive's close reason, at most (WebSocket's 123 bytes, in characters
-/// that are one byte each).
-const CLOSE_REASON_MAX: usize = 120;
+
 /// A ticket is spent within this, once.
 const TICKET_TTL_MS: i64 = 2 * 60_000;
 /// A browser's session on a computer's origin.
@@ -2490,9 +2488,11 @@ impl ComputerCell {
     /// What the guest says its agents are doing (docs/computers.md, "What
     /// its agents are doing"): taken only from the newest keepalive of the
     /// start that runs, checked whole (`fragment_core::activity::check`).
-    /// One that is wrong closes its keepalive (1008) and changes nothing;
-    /// one too soon after the last is not taken. A change of what its
-    /// owner's view shows tells their open pages.
+    /// One that is wrong changes nothing, and its keepalive is told why
+    /// (`{type: "refused", why}`) and stays open: it holds the computer
+    /// awake, which a report never risks. One too soon after that
+    /// keepalive's last is not taken. A change of what its owner's view
+    /// shows tells their open pages.
     async fn activity_said(&self, ws: &WebSocket, frame: &str) -> CellResult<()> {
         if self.wiped.get() {
             return Ok(());
@@ -2510,13 +2510,17 @@ impl ComputerCell {
             Err(refusal) => {
                 let why = refusal.message();
                 console_error!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "activity": "refused", "why": why }));
-                let reason: String = why.chars().filter(char::is_ascii).take(CLOSE_REASON_MAX).collect();
-                let _ = ws.close(Some(1008), Some(reason));
+                let _ = ws.send_with_str(json!({ "type": "refused", "why": why }).to_string());
                 return Ok(());
             }
         };
         let now = js::now_ms();
-        if activity::too_soon(&entries, self.meta(MetaKey::ActivityAt)?.and_then(|t| t.parse().ok()), now) {
+        // spaced by keepalive: a new one's first report is always taken
+        let last = match self.reporter()? {
+            Some(r) if r == (generation, number) => self.meta(MetaKey::ActivityAt)?.and_then(|t| t.parse().ok()),
+            _ => None,
+        };
+        if activity::too_soon(&entries, last, now) {
             console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "activity": "too_soon" }));
             return Ok(());
         }
