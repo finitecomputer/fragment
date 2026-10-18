@@ -825,7 +825,7 @@ function teamRow(a, active, open) {
   const row = el("div", `team-row${mine ? " active" : active ? " here" : ""}`);
   row.dataset.key = `team:${a.identity}`;
   const doing = doingOf(a);
-  const go = el("button", `team-open${doing ? ` doing-${doing}` : ""}`);
+  const go = el("button", "team-open");
   go.type = "button";
   go.setAttribute("aria-current", mine ? "page" : "false");
   const face = el("span", "team-face");
