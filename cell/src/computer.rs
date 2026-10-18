@@ -300,8 +300,6 @@ enum MetaKey {
     /// (`<generation>:<number>`): what its agents are doing comes from it
     /// alone, and goes as it closes.
     ActivityReporter,
-    /// Entries the last report left out.
-    ActivityMore,
 }
 
 impl MetaKey {
@@ -322,7 +320,6 @@ impl MetaKey {
             MetaKey::Images => "images",
             MetaKey::KeepaliveConn => "keepalive_conn",
             MetaKey::ActivityReporter => "activity_reporter",
-            MetaKey::ActivityMore => "activity_more",
         }
     }
 }
@@ -1568,7 +1565,6 @@ impl ComputerCell {
         // what its owner is told is theirs (its guest reads `restored`), and
         // so is what its agents are doing, which the guest itself said
         view.notices = vec![];
-        view.activity_more = 0;
         for a in &mut view.agents {
             a.activity = vec![];
         }
@@ -1785,7 +1781,7 @@ impl ComputerCell {
         };
         let images = self.images()?;
         // what each agent is doing, as its guest last said it (best-effort)
-        let (mut doing, activity_more) = self.activity_shown()?;
+        let mut doing = self.activity_shown()?;
         let mut agents = self.agents()?;
         for a in &mut agents {
             a.activity = doing.remove(&a.fragment).unwrap_or_default();
@@ -1801,7 +1797,6 @@ impl ComputerCell {
             why,
             notices: notices(&life, &saves, &images, &self.rules()),
             agents,
-            activity_more,
             origin,
             credential_env: vec![],
             models: None,
@@ -2462,12 +2457,12 @@ impl ComputerCell {
     }
 
     /// What its agents are doing as its owner's view shows it, by agent
-    /// fragment, and the entries left out: the report of a keepalive of the
-    /// start that runs now; none when it runs none.
-    fn activity_shown(&self) -> CellResult<(BTreeMap<String, Vec<AgentActivity>>, u32)> {
+    /// fragment: the report of a keepalive of the start that runs now; none
+    /// when it runs none.
+    fn activity_shown(&self) -> CellResult<BTreeMap<String, Vec<AgentActivity>>> {
         let running = self.lifecycle()?.running();
         if running.is_none() || self.reporter()?.map(|(g, _)| g) != running {
-            return Ok((BTreeMap::new(), 0));
+            return Ok(BTreeMap::new());
         }
         let mut doing: BTreeMap<String, Vec<AgentActivity>> = BTreeMap::new();
         for r in self.rows("SELECT agent, chat, state, waits_on FROM activity ORDER BY agent, chat", vec![])? {
@@ -2481,8 +2476,7 @@ impl ComputerCell {
             let chat = r["chat"].as_str().unwrap_or_default().to_string();
             doing.entry(agent).or_default().push(AgentActivity { chat, state, waits_on: r["waits_on"].as_str().map(str::to_string) });
         }
-        let more = if doing.is_empty() { 0 } else { self.meta(MetaKey::ActivityMore)?.and_then(|m| m.parse().ok()).unwrap_or(0) };
-        Ok((doing, more))
+        Ok(doing)
     }
 
     /// What the guest says its agents are doing (docs/computers.md, "What
@@ -2502,7 +2496,7 @@ impl ComputerCell {
             return Ok(());
         }
         let runs: BTreeSet<String> = self.rows("SELECT fragment FROM agents", vec![])?.iter().filter_map(|r| r["fragment"].as_str().map(str::to_string)).collect();
-        let (entries, more) = match activity::check(frame, &runs) {
+        let entries = match activity::check(frame, &runs) {
             Ok(said) => said,
             Err(refusal) => {
                 console_error!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "activity": "refused", "why": refusal.message() }));
@@ -2520,7 +2514,6 @@ impl ComputerCell {
             )?;
         }
         self.set_meta(MetaKey::ActivityReporter, &format!("{generation}:{number}"))?;
-        self.set_meta(MetaKey::ActivityMore, &more.to_string())?;
         if self.activity_shown()? != before {
             self.tell_owner().await;
         }
@@ -2537,7 +2530,6 @@ impl ComputerCell {
         let before = self.activity_shown()?;
         self.exec("DELETE FROM activity", vec![])?;
         self.delete_meta(MetaKey::ActivityReporter)?;
-        self.delete_meta(MetaKey::ActivityMore)?;
         if self.activity_shown()? != before {
             self.tell_owner().await;
         }

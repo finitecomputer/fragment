@@ -18,7 +18,7 @@ pub const ANSWER_MAX_BYTES: usize = 2 * 1024 * 1024;
 pub const AGENTS_MAX: usize = 32;
 /// What it says its agents are doing holds at most this many entries, one
 /// per agent and chat (docs/computers.md, "What its agents are doing"); the
-/// rest are counted (`more`). The cell refuses a report past it.
+/// least pressing are left out. The cell refuses a report past it.
 pub const ACTIVITY_MAX: usize = 64;
 /// It says what its agents are doing at most this often (the newest): the
 /// cell takes each as it comes, and adds no limit of its own.

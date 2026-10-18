@@ -305,39 +305,32 @@ whoever runs it.
 
 Its guest says what its agents are doing, and its owner's view shows it
 (decision 62, proposed: the shell's team). It is best-effort: what the
-guest last said, never proof that work runs or finished, and none said
-means none reported.
+guest last said, never proof that work runs or finished.
 
-- **Who says it.** The guest, on its keepalive (`GET
-  /api/computer/keepalive`, below), as a text frame: `{type: "activity",
-  v: 1, agents: [{agent, chat, state, waitsOn?}], more}`. One entry per
-  agent fragment and chat with a turn not ended: `waiting` when a turn
-  there waits on a card or on someone's words (`waitsOn`: whom, an
-  identity), else `working` when one runs, else `queued` (admitted, not
-  yet run). Ordered waiting, working, queued, then by agent and chat; at
-  most `ACTIVITY_MAX` (64) entries, `more` counting those left out. Sent
-  as each keepalive opens, then at each change, at most once a second
-  (the newest), and an empty list before the guest closes it as idle.
-- **What the computer takes.** Only from the newest keepalive opened, of
-  the start that runs (each is numbered as it opens): an older keepalive
-  still open, or one of an earlier start, changes nothing, before or
-  after the newest reports or closes. Each one heard replaces the last,
-  as it comes: the guest spaces them, and the computer adds no limit of
-  its own (its guest can already tell its owner's pages of a change by
-  writing a chat's message). A frame past `ACTIVITY_REPORT_MAX_BYTES`
-  (16 KiB), malformed, or naming one agent and chat twice changes
-  nothing and is logged; the keepalive stays open: it holds the computer
-  awake, which a report never risks. No report is answered. An entry of
-  an agent the computer does not run (unassigned a moment ago) is left
-  out.
+- **Who says it.** The guest, on its keepalive (below), as a text frame:
+  `{type: "activity", v: 1, agents: [{agent, chat, state, waitsOn?}]}`,
+  one entry per agent fragment and chat with a turn not ended, its most
+  pressing: `waiting` (on a card or on someone's words; `waitsOn`, whom,
+  an identity), else `working`, else `queued`. At most `ACTIVITY_MAX`
+  (64) entries, the least pressing left out. Sent as each keepalive
+  opens, then at each change at most once a second, and empty before the
+  guest closes it as idle.
+- **What the computer takes.** Each report from the newest keepalive of
+  the start that runs (each is numbered as it opens) replaces the last;
+  one from an older keepalive, or an earlier start's, changes nothing. A
+  frame past `ACTIVITY_REPORT_MAX_BYTES` (16 KiB), malformed, or naming
+  one agent and chat twice changes nothing and is logged; the keepalive
+  stays open (it holds the computer awake). None is answered, and the
+  computer sets no pace of its own: the guest's is the only one (the
+  debt ledger). An entry of an agent the computer does not run
+  (unassigned a moment ago) is left out.
 - **When it goes.** As its keepalive closes or fails, as the start ends
   (asleep, won't wake, a new start), and, for one agent, as it is
   unassigned. A sleep the keepalive cancels does not end it.
 - **Who sees it.** Its owner: `GET /api/computers` and `GET
   /api/computers/{id}` give each agent its `activity: [{chat, state,
-  waitsOn?}]`, and `activityMore` when entries were left out. The
-  guest's own view never has it. A change of what the owner's view shows
-  tells their open pages, as a notice does.
+  waitsOn?}]`; the guest's own view never has it. A change of what the
+  owner's view shows tells their open pages, as a notice does.
 
 ## Stable and canary
 

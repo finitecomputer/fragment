@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 
 use fragment_proto::computer::{ActivityEntry, ActivityReport};
 
-/// Entries a report holds at most (the guest counts the rest in `more`).
+/// Entries a report holds at most (the guest leaves out the least pressing).
 pub const ACTIVITY_MAX: usize = 64;
 /// A report's frame, at most, read before it is parsed.
 pub const ACTIVITY_REPORT_MAX_BYTES: usize = 16 * 1024;
@@ -39,7 +39,7 @@ impl ActivityRefusal {
         match self {
             ActivityRefusal::TooLarge => format!("an activity report is at most {ACTIVITY_REPORT_MAX_BYTES} bytes"),
             ActivityRefusal::Malformed(e) => format!("not an activity report (type \"activity\", v {ACTIVITY_VERSION}): {e}"),
-            ActivityRefusal::TooMany => format!("an activity report holds at most {ACTIVITY_MAX} entries (count the rest in `more`)"),
+            ActivityRefusal::TooMany => format!("an activity report holds at most {ACTIVITY_MAX} entries"),
             ActivityRefusal::BadEntry(why) => format!("an activity entry: {why}"),
             ActivityRefusal::Twice(key) => format!("{key} is reported twice"),
         }
@@ -51,7 +51,7 @@ impl ActivityRefusal {
 /// moment ago, which its guest has not yet read) is left out, not refused.
 /// Its entries come back ordered by agent and chat, so the same report
 /// said twice is the same.
-pub fn check(frame: &str, runs: &BTreeSet<String>) -> Result<(Vec<ActivityEntry>, u32), ActivityRefusal> {
+pub fn check(frame: &str, runs: &BTreeSet<String>) -> Result<Vec<ActivityEntry>, ActivityRefusal> {
     if frame.len() > ACTIVITY_REPORT_MAX_BYTES {
         return Err(ActivityRefusal::TooLarge);
     }
@@ -82,7 +82,7 @@ pub fn check(frame: &str, runs: &BTreeSet<String>) -> Result<(Vec<ActivityEntry>
     }
     let mut entries: Vec<ActivityEntry> = report.agents.into_iter().filter(|e| runs.contains(&e.agent)).collect();
     entries.sort_by(|a, b| (&a.agent, &a.chat).cmp(&(&b.agent, &b.chat)));
-    Ok((entries, report.more))
+    Ok(entries)
 }
 
 /// A keepalive: the start it belongs to and its number, as the computer
@@ -116,7 +116,7 @@ mod tests {
     }
 
     fn frame(agents: serde_json::Value) -> String {
-        json!({ "type": "activity", "v": 1, "agents": agents, "more": 0 }).to_string()
+        json!({ "type": "activity", "v": 1, "agents": agents }).to_string()
     }
 
     /// Valid: entries of the agents it runs, in any order, come back
@@ -130,8 +130,7 @@ mod tests {
             { "agent": "juniper--k3x9", "chat": "talk--k3x9", "state": "waiting", "waitsOn": PAUL },
             { "agent": "juniper--k3x9", "chat": "notes--k3x9", "state": "working" },
         ]));
-        let (entries, more) = check(&said, &runs()).expect("taken");
-        assert_eq!(more, 0);
+        let entries = check(&said, &runs()).expect("taken");
         let got: Vec<(&str, &str, _)> = entries.iter().map(|e| (e.agent.as_str(), e.chat.as_str(), e.state)).collect();
         assert_eq!(got, vec![("juniper--k3x9", "notes--k3x9", Working), ("juniper--k3x9", "talk--k3x9", Waiting), ("maple--k3x9", "maple-chat--k3x9", Queued)]);
         assert_eq!(entries[1].waits_on.as_deref(), Some(PAUL));
@@ -140,13 +139,11 @@ mod tests {
             { "agent": "maple--k3x9", "chat": "maple-chat--k3x9", "state": "queued" },
             { "agent": "juniper--k3x9", "chat": "talk--k3x9", "state": "waiting", "waitsOn": PAUL },
         ]));
-        assert_eq!(check(&reordered, &runs()).expect("taken").0, entries, "the same report is the same");
-        assert_eq!(check(&frame(json!([])), &runs()).expect("an empty report clears").0, vec![]);
-        let more = json!({ "type": "activity", "v": 1, "agents": [], "more": 3 }).to_string();
-        assert_eq!(check(&more, &runs()).expect("taken").1, 3);
+        assert_eq!(check(&reordered, &runs()).expect("taken"), entries, "the same report is the same");
+        assert_eq!(check(&frame(json!([])), &runs()).expect("an empty report clears"), vec![]);
         // an agent unassigned a moment ago, which its guest still runs: left out
         let gone = frame(json!([{ "agent": "oak--k3x9", "chat": "talk--k3x9", "state": "working" }, { "agent": "juniper--k3x9", "chat": "talk--k3x9", "state": "working" }]));
-        let (kept, _) = check(&gone, &runs()).expect("taken");
+        let kept = check(&gone, &runs()).expect("taken");
         assert_eq!(kept.iter().map(|e| e.agent.as_str()).collect::<Vec<_>>(), vec!["juniper--k3x9"]);
     }
 

@@ -1356,7 +1356,7 @@ fn activity_on(w: &World, id: u64) -> Vec<Value> {
 
 /// Goal (docs/bridge.md, "What it says its agents are doing"): on its
 /// keepalive the bridge says what its agents are doing: each frame a whole
-/// report (`{type: "activity", v: 1, agents, more}`), the newest as the
+/// report (`{type: "activity", v: 1, agents}`), the newest as the
 /// keepalive opens, a card's wait on the agent's owner, and an empty
 /// report before it lets the keepalive go. Restart of the socket: a
 /// keepalive dropped mid-turn (a deploy) is held again and told the whole
@@ -1372,7 +1372,7 @@ async fn it_says_what_its_agents_are_doing() {
     let waiting = json!([{ "agent": "juniper--k3x9", "chat": chat, "state": "waiting", "waitsOn": "npub1paul" }]);
     fake.until(WAIT, "the card's wait said", |w| w.activity.last().is_some_and(|(_, f)| f["agents"] == waiting)).await;
     let (first, frame) = fake.with(|w| w.activity[0].clone());
-    assert_eq!((frame["type"].as_str(), frame["v"].as_u64(), frame["more"].as_u64()), (Some("activity"), Some(1), Some(0)), "a whole report: {frame}");
+    assert_eq!((frame["type"].as_str(), frame["v"].as_u64()), (Some("activity"), Some(1)), "a whole report: {frame}");
     assert!(frame["agents"].as_array().is_some_and(|a| a.len() == 1 && a[0]["agent"] == "juniper--k3x9"), "said as the keepalive opened: {frame}");
 
     // the keepalive dropped (a deploy): held again, and told it whole at once

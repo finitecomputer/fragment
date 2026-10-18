@@ -2497,7 +2497,7 @@ fn what_its_agents_do_is_said_as_it_changes() {
     assert!(e.activity().is_empty());
 }
 
-/// Bound: past `ACTIVITY_MAX` entries the rest are counted, the most
+/// Bound: past `ACTIVITY_MAX` entries the rest are left out, the most
 /// pressing kept. Restart: a new life says what its own turns do, its
 /// queued ones kept.
 #[test]
@@ -2509,7 +2509,7 @@ fn what_it_says_is_bounded_and_a_new_life_says_its_own() {
         said_in(&mut e, &a, &v, &format!("c{i:03}--k3x9"), 1, "hi", T0);
     }
     let now = e.activity();
-    assert_eq!((now.agents.len(), now.more), (limits::ACTIVITY_MAX, 1), "{} chats at once", limits::ACTIVITY_MAX + 1);
+    assert_eq!(now.agents.len(), limits::ACTIVITY_MAX, "{} chats at once", limits::ACTIVITY_MAX + 1);
 
     // a turn queued behind one that runs, then a restart
     let mut e = engine(std::slice::from_ref(&a));

@@ -74,7 +74,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | Method and path | Body | Reads |
 |---|---|---|
 | `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute, and within a second of a change to the ready file (below) |
-| `GET /api/computer/keepalive` (no agent), WebSocket | `{type: "activity", v: 1, agents, more}` | held while a turn waits to run, runs, or waits on its card (below, "A card keeps its computer awake"); on it, what its agents are doing (below, "What it says its agents are doing") |
+| `GET /api/computer/keepalive` (no agent), WebSocket | `{type: "activity", v: 1, agents}` | held while a turn waits to run, runs, or waits on its card (below, "A card keeps its computer awake"); on it, what its agents are doing (below, "What it says its agents are doing") |
 | `GET /api/fragments` | | `{fragments: [{name, role}]}`: what the agent follows, listed at start, on a `joined` of it (as the agent the engine runs, no read of the computer first), and every 5 minutes. A listing a read of which fails with no answer, a 429 or a 5xx is asked again after a jittered backoff (from 1 s, at most 30 s) until it answers: the list, or only the fragments whose channels did not read; what was found meanwhile is followed, so one fragment that fails keeps the agent from no other. One listing an agent at a time: a newer one takes the place of one under way |
 | `GET /api/f/{f}/channels` | | `{channels: [{name, post, seq}]}`: a postable `chat` is a chat; the agent's own `tasks` |
 | `GET /api/f/{f}/members` | | `{members: [{principal, kind, addedAt}]}`: the lead (first `kind: agent` by `addedAt`), and when this agent joined; read again after 30 s, and at once after a `joined` of one of the computer's agents to that fragment (so its lead never answers an `@mention` of an agent that just joined) |
@@ -322,19 +322,14 @@ docs/explorations/pi-durable.md, and the debt ledger.
 ## What it says its agents are doing
 
 The engine says, at the end of each step, what its open turns are doing
-(`Engine::activity`): per agent and chat, `waiting` when a turn there
-waits on a card (`Waiting`: `waitsOn` its agent's owner, who answers
-cards) or on its asker's words (`asking`: `waitsOn` its asker); else
-`working` when one is `Running`; else `queued`. Ordered
-waiting, working, queued, then by agent and chat, at most `ACTIVITY_MAX`
-(64), `more` counting the rest (docs/computers.md, "What its agents are
-doing"). A step that changes none of that (a draft, a tool's progress)
-says nothing new. The driver sends the newest on the keepalive as it
-opens and at each change, at most once a second, and an empty list
-before it closes the keepalive as idle. The computer takes each as it
-comes and answers none (one it refuses is in its log). A restart's
-engine starts from its own turns: what the last life said goes with its
-keepalive.
+(`Engine::activity`), per agent and chat the most pressing: `waiting`
+when a turn there waits on a card (`Waiting`: `waitsOn` its agent's
+owner, who answers cards) or on its asker's words (`asking`: `waitsOn`
+its asker); else `working` when one is `Running`; else `queued`. A step
+that changes none of that (a draft, a tool's progress) says nothing new.
+The driver sends it on the keepalive, as often as docs/computers.md
+("What its agents are doing") says. A restart's engine starts from its
+own turns: what the last life said goes with its keepalive.
 
 ## The turn after a cut one is told
 

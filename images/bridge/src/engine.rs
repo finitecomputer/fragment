@@ -380,23 +380,22 @@ pub struct Doings {
     pub waits_on: Option<String>,
 }
 
-/// What its agents are doing: at most `ACTIVITY_MAX` entries, waiting
-/// first, then working, then queued, each by agent and chat; `more`, the
-/// entries left out.
+/// What its agents are doing: waiting first, then working, then queued,
+/// each by agent and chat; at most `ACTIVITY_MAX` entries, the least
+/// pressing left out.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Activity {
     pub agents: Vec<Doings>,
-    pub more: u32,
 }
 
 impl Activity {
     pub fn is_empty(&self) -> bool {
-        self.agents.is_empty() && self.more == 0
+        self.agents.is_empty()
     }
 
-    /// The keepalive's frame: `{type: "activity", v: 1, agents, more}`.
+    /// The keepalive's frame: `{type: "activity", v: 1, agents}`.
     pub fn frame(&self) -> String {
-        serde_json::json!({ "type": "activity", "v": 1, "agents": self.agents, "more": self.more }).to_string()
+        serde_json::json!({ "type": "activity", "v": 1, "agents": self.agents }).to_string()
     }
 }
 
@@ -626,9 +625,8 @@ impl Engine {
         }
         let mut agents: Vec<Doings> = by.into_iter().map(|((agent, chat), (state, waits_on))| Doings { agent, chat, state, waits_on }).collect();
         agents.sort_by(|a, b| (a.state, &a.agent, &a.chat).cmp(&(b.state, &b.agent, &b.chat)));
-        let more = agents.len().saturating_sub(limits::ACTIVITY_MAX);
         agents.truncate(limits::ACTIVITY_MAX);
-        Activity { agents, more: u32::try_from(more).expect("open turns are bounded (TURNS_OPEN_MAX)") }
+        Activity { agents }
     }
 
     fn finish(&mut self) -> Step {

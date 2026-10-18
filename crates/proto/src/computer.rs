@@ -114,8 +114,8 @@ pub struct ActivityEntry {
     pub waits_on: Option<String>,
 }
 
-/// A guest's report on its keepalive: `{type: "activity", v: 1, agents,
-/// more}` (docs/computers.md, "What its agents are doing").
+/// A guest's report on its keepalive: `{type: "activity", v: 1, agents}`
+/// (docs/computers.md, "What its agents are doing").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ActivityReport {
@@ -123,8 +123,6 @@ pub struct ActivityReport {
     pub kind: String,
     pub v: u32,
     pub agents: Vec<ActivityEntry>,
-    #[serde(default)]
-    pub more: u32,
 }
 
 /// The model route's models' ids by the route's names
@@ -321,10 +319,6 @@ pub struct ComputerView {
     /// Its agents, in the order it took them: its owner's first is first
     /// (the shell's one agent: docs/api.md, The shell).
     pub agents: Vec<ComputerAgent>,
-    /// Its owner's view only: activity entries its guest left out (past
-    /// `ACTIVITY_MAX`).
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub activity_more: u32,
     /// Its own origin, where its ports are served.
     pub origin: String,
     /// The guest's view only: every environment variable a credential of
@@ -562,10 +556,6 @@ pub fn valid_port_path(path: &str) -> bool {
     let visible = path.bytes().all(|b| (0x21..=0x7e).contains(&b) && b != b'#' && b != b'\\');
     let segments = path.split('?').next().unwrap_or("").split('/').all(|s| s != "." && s != "..");
     path.starts_with('/') && path.len() <= PORT_PATH_MAX_BYTES && visible && !path.contains("//") && segments
-}
-
-fn is_zero(n: &u32) -> bool {
-    *n == 0
 }
 
 #[cfg(test)]

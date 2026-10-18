@@ -1334,16 +1334,21 @@ fragment.club until cutover (decisions 34–35).
   keepalive what its agents are doing; the computer keeps the newest
   report and clears it as that keepalive closes or its start ends.
 - **Shortcut:** no lease: nothing renews a report while work goes on, so
-  nothing expires one either.
+  nothing expires one either. No pace or meter of the computer's own:
+  it writes each report its guest sends, where a chat's message (which
+  also tells the owner's pages) is metered and write-checked.
 - **Risk:** a keepalive that hangs open without closing (a container the
   platform has not yet seen fail, an engine wedged with its socket open)
   shows its agents working until it closes or the start ends; a page
   that missed the push shows the old status until its next change or
-  its list socket reconnects. A guest can say anything of its own agents.
+  its list socket reconnects. A guest can say anything of its own agents,
+  as often as it likes: one that sends without pause costs a write of up
+  to 64 rows each, unmetered.
 - **First proof:** a teammate shown working long after its chat shows its
-  turn ended.
-- **Delete when:** reports carry a lease the guest renews while busy and
-  the computer expires, or a turn's own records feed the status.
+  turn ended; a computer's rows written far past its turns'.
+- **Delete when:** a turn's own records feed the status; or reports
+  carry a lease the guest renews while busy and the computer expires,
+  and are metered as a chat's message is.
 
 ## A teammate on another provider is kept out by a prompt and the platform's fence
 
