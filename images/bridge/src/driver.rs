@@ -1459,6 +1459,16 @@ async fn keepalive(api: Api, mut hold: watch::Receiver<bool>, mut doing: watch::
                         crate::ev!("keepalive.lost");
                         break;
                     }
+                    // a report that came too soon (sent a second apart, it can
+                    // arrive sooner) is said again a second on; one refused
+                    // as wrong is logged, never said again unchanged
+                    Some(Ok(Message::Text(t))) => {
+                        let v: Value = serde_json::from_str(&t).unwrap_or(Value::Null);
+                        if v["type"] == "refused" {
+                            crate::ev!("keepalive.refused", { "code": v["code"], "why": v["why"] });
+                            owed |= v["code"] == "too_soon";
+                        }
+                    }
                     Some(Ok(_)) => {}
                 },
                 _ = crate::net::stopped(&mut stop2) => {

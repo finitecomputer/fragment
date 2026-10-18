@@ -79,6 +79,9 @@ pub struct World {
     /// What the bridge said on its keepalives, in order (each frame's JSON:
     /// its activity reports, docs/bridge.md), by keepalive.
     pub activity: Vec<(u64, Value)>,
+    /// A report to answer once as the cell answers one that came too soon:
+    /// the first whose `agents` is this.
+    pub refuse_activity: Option<Value>,
     /// Every request, as `METHOD path`.
     pub calls: Vec<String>,
     /// Every request as an agent: `METHOD path`, its query, the agent it
@@ -445,7 +448,18 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
                             Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                             Some(Ok(Message::Text(t))) => {
                                 let said = serde_json::from_str::<Value>(&t).unwrap_or(Value::Null);
-                                world.lock().unwrap().activity.push((id, said));
+                                let refuse = {
+                                    let mut w = world.lock().unwrap();
+                                    let refuse = w.refuse_activity.as_ref().is_some_and(|a| *a == said["agents"]);
+                                    if refuse {
+                                        w.refuse_activity = None;
+                                    }
+                                    w.activity.push((id, said));
+                                    refuse
+                                };
+                                if refuse {
+                                    let _ = sink.send(Message::Text(json!({ "type": "refused", "code": "too_soon", "why": "as the cell says it" }).to_string().into())).await;
+                                }
                             }
                             _ => {}
                         },
