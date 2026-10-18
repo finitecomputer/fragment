@@ -20,8 +20,8 @@ pub const AGENTS_MAX: usize = 32;
 /// per agent and chat (docs/computers.md, "What its agents are doing"); the
 /// rest are counted (`more`). The cell refuses a report past it.
 pub const ACTIVITY_MAX: usize = 64;
-/// It says what its agents are doing at most this often (the newest), so
-/// the cell takes every report (it refuses one sooner than a second).
+/// It says what its agents are doing at most this often (the newest): the
+/// cell takes each as it comes, and adds no limit of its own.
 pub const ACTIVITY_SEND_MS: u64 = 1_000;
 
 /// The fragments one agent follows (its chats, and its own fragment), at

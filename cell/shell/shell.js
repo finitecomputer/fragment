@@ -755,22 +755,21 @@ const whereItRuns = (a) => {
 
 // What a teammate is doing, as its computer last said it (each agent's
 // `activity` in the computer's view, best-effort: docs/computers.md, "What
-// its agents are doing"): the most pressing of its chats, or none. None
-// while this page's list socket is shut: it would not hear the change.
+// its agents are doing"): its chats, the most pressing first (what its ⋯
+// lists), the first its row's. None while this page's list socket is shut:
+// it would not hear the change.
 const DOING_SAYS = { you: "Waiting for you", waiting: "Waiting", working: "Working", queued: "Queued" };
-const DOING_IN = { you: "Waiting for you in", waiting: "Waiting in", working: "Working in", queued: "Queued in" };
-const doingOfEntry = (x) => (x.state === "waiting" && x.waitsOn === state.me?.id ? "you" : x.state);
+const DOING_ORDER = Object.keys(DOING_SAYS);
 // the list socket (`watchList`, below): declared here, as the team reads it
 const watching = { on: false, socket: null, wait: 1000, timer: null, settle: null };
 const listLive = () => watching.socket?.readyState === WebSocket.OPEN;
-function doingOf(a) {
-  if (!listLive()) return null;
-  const said = (a.activity ?? []).map(doingOfEntry);
-  return ["you", "waiting", "working", "queued"].find((d) => said.includes(d)) ?? null;
-}
-// its chats, the most pressing first: what its ⋯ lists
-const ORDER = ["you", "waiting", "working", "queued"];
-const doingChats = (a) => (listLive() ? (a.activity ?? []).map((x) => ({ chat: x.chat, doing: doingOfEntry(x) })).sort((x, y) => ORDER.indexOf(x.doing) - ORDER.indexOf(y.doing)) : []);
+const doingChats = (a) =>
+  listLive()
+    ? (a.activity ?? [])
+        .map((x) => ({ chat: x.chat, doing: x.state === "waiting" && x.waitsOn === state.me?.id ? "you" : x.state }))
+        .sort((x, y) => DOING_ORDER.indexOf(x.doing) - DOING_ORDER.indexOf(y.doing))
+    : [];
+const doingOf = (a) => doingChats(a)[0]?.doing ?? null;
 const DOING_LISTED = 5;
 
 // The team under the one agent, a step down from it: indented under it, a
@@ -909,7 +908,7 @@ function openTeamMenu(a, trigger) {
     ...doingChats(a)
       .filter((x) => byName(x.chat))
       .slice(0, DOING_LISTED)
-      .map((x) => ({ icon: "team", text: `${DOING_IN[x.doing]} ${titleOf(x.chat)}`, onClick: () => { openChat(x.chat); leaveSidebar(); } })),
+      .map((x) => ({ icon: "team", text: `${DOING_SAYS[x.doing]} in ${titleOf(x.chat)}`, onClick: () => { openChat(x.chat); leaveSidebar(); } })),
     ...(handoffs.length ? [{ icon: "team", text: by ? `Hand-offs from ${titleOf(by.fragment)}` : "Its hand-offs", onClick: () => { openChat(handoffs[0].name); leaveSidebar(); } }] : []),
     ...(primary?.identity ? [{ icon: "rename", text: `Ask ${titleOf(primary.fragment)} to change it`, onClick: () => composeApp(`Change how ${title} works: `) }] : []),
     ...(state.computer ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(a.fragment) }] : []),
