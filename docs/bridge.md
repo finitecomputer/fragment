@@ -323,8 +323,9 @@ docs/explorations/pi-durable.md, and the debt ledger.
 
 The engine says, at the end of each step, what its open turns are doing
 (`Engine::activity`): per agent and chat, `waiting` when a turn there
-waits on a card (`Waiting`) or on its asker's words (`asking`), `waitsOn`
-its asker; else `working` when one is `Running`; else `queued`. Ordered
+waits on a card (`Waiting`: `waitsOn` its agent's owner, who answers
+cards) or on its asker's words (`asking`: `waitsOn` its asker); else
+`working` when one is `Running`; else `queued`. Ordered
 waiting, working, queued, then by agent and chat, at most `ACTIVITY_MAX`
 (64), `more` counting the rest (docs/computers.md, "What its agents are
 doing"). A step that changes none of that (a draft, a tool's progress)

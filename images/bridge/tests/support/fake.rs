@@ -76,6 +76,9 @@ pub struct World {
     /// Keepalive sockets open now, and each open (true) and close (false).
     pub keepalive_open: u32,
     pub keepalive_log: Vec<bool>,
+    /// What the bridge said on its keepalives, in order (each frame's JSON:
+    /// its activity reports, docs/bridge.md), by keepalive.
+    pub activity: Vec<(u64, Value)>,
     /// Every request, as `METHOD path`.
     pub calls: Vec<String>,
     /// Every request as an agent: `METHOD path`, its query, the agent it
@@ -438,7 +441,14 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
                             Some(m) => { let close = matches!(m, Message::Close(_)); let _ = sink.send(m).await; if close { break; } }
                             None => break,
                         },
-                        m = stream.next() => match m { Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break, _ => {} },
+                        m = stream.next() => match m {
+                            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                            Some(Ok(Message::Text(t))) => {
+                                let said = serde_json::from_str::<Value>(&t).unwrap_or(Value::Null);
+                                world.lock().unwrap().activity.push((id, said));
+                            }
+                            _ => {}
+                        },
                     }
                 }
                 let mut w = world.lock().unwrap();

@@ -287,6 +287,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(256);
     let (event_tx, mut event_rx) = mpsc::channel::<Event>(1024);
     let (keep_tx, keep_rx) = watch::channel(false);
+    let (doing_tx, doing_rx) = watch::channel(engine::Activity::default());
     let shared = Arc::new(Shared::default());
 
     // The runtime starts at once (Hermes dials it while the bridge reads the
@@ -327,7 +328,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
 
     let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight });
     let runtime_lane = RuntimeLane::spawn(api.clone(), cmd_tx, cfg.media_dir.clone());
-    tokio::spawn(keepalive(api.clone(), keep_rx, stop.clone()));
+    tokio::spawn(keepalive(api.clone(), keep_rx, doing_rx, stop.clone()));
     let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), discovering: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()) };
 
     let act = |engine: &Engine, step: engine::Step| -> Result<(), BridgeError> {
@@ -345,6 +346,9 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                 Effect::Keepalive(on) => {
                     crate::ev!("keepalive", { "hold": on });
                     let _ = keep_tx.send(on);
+                }
+                Effect::Activity(doing) => {
+                    let _ = doing_tx.send(doing);
                 }
                 Effect::Discover { agent, joined } => {
                     if let Some(fragment) = joined {
@@ -1385,8 +1389,11 @@ async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: A
 // ---- keepalive ----
 
 /// Holds `GET /api/computer/keepalive` open while `hold` is true, and only
-/// then (decision 39: the computer stays awake while it is open).
-async fn keepalive(api: Api, mut hold: watch::Receiver<bool>, stop: watch::Receiver<bool>) {
+/// then (decision 39: the computer stays awake while it is open). On it,
+/// what its agents are doing (`doing`, docs/bridge.md): the newest as it
+/// opens, then at each change at most every `ACTIVITY_SEND_MS`, and an
+/// empty one before it closes it as idle.
+async fn keepalive(api: Api, mut hold: watch::Receiver<bool>, mut doing: watch::Receiver<engine::Activity>, stop: watch::Receiver<bool>) {
     let mut backoff = Backoff::default();
     // bounded by the bridge's life: one connection per pass
     loop {
@@ -1415,15 +1422,37 @@ async fn keepalive(api: Api, mut hold: watch::Receiver<bool>, stop: watch::Recei
         crate::ev!("keepalive.held");
         let (mut sink, mut stream) = ws.split();
         let mut stop2 = stop.clone();
+        // the newest as it opens (a change while it opened included)
+        let mut said = doing.borrow_and_update().clone();
+        let mut said_at = Instant::now();
+        let mut owed = sink.send(Message::Text(said.frame().into())).await.is_err();
         // bounded by the socket, `hold`, or `stop`
         loop {
+            let wait = Duration::from_millis(limits::ACTIVITY_SEND_MS).saturating_sub(said_at.elapsed());
             tokio::select! {
                 r = hold.changed() => {
                     if r.is_err() || !*hold.borrow() {
+                        // idle: it says so before it lets go
+                        let _ = sink.send(Message::Text(engine::Activity::default().frame().into())).await;
                         let _ = sink.close().await;
                         crate::ev!("keepalive.dropped");
                         break;
                     }
+                }
+                r = doing.changed(), if !owed => {
+                    if r.is_err() {
+                        return;
+                    }
+                    owed = *doing.borrow() != said;
+                }
+                _ = tokio::time::sleep(wait), if owed => {
+                    said = doing.borrow_and_update().clone();
+                    said_at = Instant::now();
+                    if sink.send(Message::Text(said.frame().into())).await.is_err() {
+                        crate::ev!("keepalive.lost");
+                        break;
+                    }
+                    owed = false;
                 }
                 m = stream.next() => match m {
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {

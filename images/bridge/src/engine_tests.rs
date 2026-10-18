@@ -1542,7 +1542,7 @@ impl World {
                     };
                     self.tells.push(Told { life: self.lives, turn, seq, claim, held });
                 }
-                Effect::Draft { .. } | Effect::Keepalive(_) | Effect::Discover { .. } | Effect::Runtime(Command::Aside { .. }) => {}
+                Effect::Draft { .. } | Effect::Keepalive(_) | Effect::Activity(_) | Effect::Discover { .. } | Effect::Runtime(Command::Aside { .. }) => {}
             }
         }
     }
@@ -2416,4 +2416,108 @@ fn a_crash_that_drops_a_turns_end_leaves_nothing_open() {
     }
     assert_eq!(w.ends(&running)[0]["error"], LOST, "the one the crash cut is lost");
     w.check().unwrap();
+}
+
+// ---- what its agents are doing (docs/bridge.md) ----
+
+/// The last thing a step (with its answers) said its agents are doing.
+fn doing(s: &Step) -> Option<Activity> {
+    s.effects.iter().rev().find_map(|e| match e { Effect::Activity(a) => Some(a.clone()), _ => None })
+}
+
+/// `said`, in `chat`: a message from `npub1paul`.
+fn said_in(e: &mut Engine, a: &Agent, v: &ChatView, chat: &str, seq: u64, text: &str, now: u64) -> Step {
+    let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: chat.into(), record: rec(seq, "npub1paul", json!({ "text": text })), view: Some(v.clone()), since: 0 }, now);
+    answered(e, s, now)
+}
+
+fn entry(agent: &str, chat: &str, state: Doing, waits_on: Option<&str>) -> Doings {
+    Doings { agent: agent.into(), chat: chat.into(), state, waits_on: waits_on.map(str::to_string) }
+}
+
+/// Goal: the engine says what its agents are doing as it changes, per
+/// agent and chat, the most pressing first: a turn that runs is working;
+/// one behind it in the same chat changes nothing; the same agent in
+/// another chat is working there too; a card waits on the agent's owner,
+/// a question on its asker; as its turns end, it says so, down to none. A
+/// draft or a tool's progress says nothing new (replay: the same is not
+/// said twice).
+#[test]
+fn what_its_agents_do_is_said_as_it_changes() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    assert!(e.activity().is_empty(), "a fresh engine does nothing");
+
+    let first = said(&mut e, &a, &v, 1, "npub1skyler", json!({ "text": "hi" }), T0);
+    let turn = started(&first).expect("started").turn;
+    assert_eq!(doing(&first).expect("said").agents, vec![entry("juniper--k3x9", "talk--k3x9", Doing::Working, None)]);
+    assert_eq!(doing(&ev(&mut e, Event::Draft { turn: turn.clone(), text: "He".into() }, T0 + 1)), None, "a draft changes nothing");
+    assert_eq!(doing(&said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "and then?" }), T0 + 2)), None, "a turn queued behind it changes nothing");
+
+    let other = said_in(&mut e, &a, &v, "notes--k3x9", 1, "notes", T0 + 3);
+    let notes = started(&other).expect("its other chat runs beside it").turn;
+    assert_eq!(
+        doing(&other).expect("said").agents,
+        vec![entry("juniper--k3x9", "notes--k3x9", Doing::Working, None), entry("juniper--k3x9", "talk--k3x9", Doing::Working, None)],
+        "one agent works in two chats at once"
+    );
+
+    // a card (in notes, asked by paul) waits on the agent's owner; a
+    // question (in talk, asked by skyler) waits on its asker
+    let options = vec![PromptOption { id: "once".into(), label: "Allow once".into(), style: None, words: false }];
+    let card = ev(&mut e, Event::Prompt { turn: notes.clone(), prompt: "ab12.0011".into(), text: "Run rm?".into(), options, ttl_ms: None }, T0 + 4);
+    assert_eq!(
+        doing(&card).expect("said").agents,
+        vec![entry("juniper--k3x9", "notes--k3x9", Doing::Waiting, Some("npub1paul")), entry("juniper--k3x9", "talk--k3x9", Doing::Working, None)],
+        "a card waits on the agent's owner, and comes first"
+    );
+    ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: "Which one?".into() }, T0 + 5);
+    let asked = ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 5);
+    assert_eq!(
+        doing(&asked).expect("said").agents,
+        vec![entry("juniper--k3x9", "notes--k3x9", Doing::Waiting, Some("npub1paul")), entry("juniper--k3x9", "talk--k3x9", Doing::Waiting, Some("npub1skyler"))],
+        "a question waits on its asker"
+    );
+
+    // as its turns end, it says so; the queued one runs next
+    let ended = ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 6);
+    started(&ended).expect("the queued one runs");
+    assert_eq!(
+        doing(&ended).expect("said").agents,
+        vec![entry("juniper--k3x9", "notes--k3x9", Doing::Waiting, Some("npub1paul")), entry("juniper--k3x9", "talk--k3x9", Doing::Working, None)],
+        "talk's question is gone and its queued turn runs: working there now"
+    );
+    let all: Vec<String> = e.state().turns.values().filter(|t| t.phase != Phase::Ended).map(|t| t.id.clone()).collect();
+    let mut last = None;
+    for (i, t) in all.iter().enumerate() {
+        last = doing(&ev(&mut e, Event::End { turn: t.clone(), outcome: Outcome::Idle }, T0 + 7 + i as u64)).or(last);
+    }
+    assert_eq!(last, Some(Activity::default()), "none, said once its last turn ends");
+    assert!(e.activity().is_empty());
+}
+
+/// Bound: past `ACTIVITY_MAX` entries the rest are counted, the most
+/// pressing kept. Restart: a new life says what its own turns do, its
+/// queued ones kept.
+#[test]
+fn what_it_says_is_bounded_and_a_new_life_says_its_own() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    for i in 0..=limits::ACTIVITY_MAX {
+        said_in(&mut e, &a, &v, &format!("c{i:03}--k3x9"), 1, "hi", T0);
+    }
+    let now = e.activity();
+    assert_eq!((now.agents.len(), now.more), (limits::ACTIVITY_MAX, 1), "{} chats at once", limits::ACTIVITY_MAX + 1);
+
+    // a turn queued behind one that runs, then a restart
+    let mut e = engine(std::slice::from_ref(&a));
+    said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "first" }), T0);
+    said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "second" }), T0 + 1);
+    let saved = e.state().clone();
+    let mut next = Engine::new(saved, Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 600_000 }, "fedcba9876543210fedcba9876543210").expect("its state");
+    next.step(Input::Agents(vec![a.clone()]), T0 + 2);
+    next.recover(T0 + 2);
+    assert_eq!(next.activity().agents, vec![entry("juniper--k3x9", "talk--k3x9", Doing::Queued, None)], "the cut turn is gone; the queued one waits to run");
 }

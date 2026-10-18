@@ -1348,3 +1348,48 @@ async fn commands_and_quotes() {
     });
     bridge.stop().await;
 }
+
+/// What `w`'s keepalive `id` was told of the agents, each frame's `agents`.
+fn activity_on(w: &World, id: u64) -> Vec<Value> {
+    w.activity.iter().filter(|(k, _)| *k == id).map(|(_, f)| f["agents"].clone()).collect()
+}
+
+/// Goal (docs/bridge.md, "What it says its agents are doing"): on its
+/// keepalive the bridge says what its agents are doing: each frame a whole
+/// report (`{type: "activity", v: 1, agents, more}`), the newest as the
+/// keepalive opens, a card's wait on the agent's owner, and an empty
+/// report before it lets the keepalive go. Restart of the socket: a
+/// keepalive dropped mid-turn (a deploy) is held again and told the whole
+/// report at once.
+#[tokio::test]
+async fn it_says_what_its_agents_are_doing() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("activity");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 2).await;
+    fake.say(&chat, &person("paul"), json!({ "text": "do something risky" }));
+    let waiting = json!([{ "agent": "juniper--k3x9", "chat": chat, "state": "waiting", "waitsOn": "npub1paul" }]);
+    fake.until(WAIT, "the card's wait said", |w| w.activity.last().is_some_and(|(_, f)| f["agents"] == waiting)).await;
+    let (first, frame) = fake.with(|w| w.activity[0].clone());
+    assert_eq!((frame["type"].as_str(), frame["v"].as_u64(), frame["more"].as_u64()), (Some("activity"), Some(1), Some(0)), "a whole report: {frame}");
+    assert!(frame["agents"].as_array().is_some_and(|a| a.len() == 1 && a[0]["agent"] == "juniper--k3x9"), "said as the keepalive opened: {frame}");
+
+    // the keepalive dropped (a deploy): held again, and told it whole at once
+    fake.drop_sockets();
+    fake.until(WAIT, "held again", |w| w.keepalive_log.iter().filter(|o| **o).count() == 2 && w.keepalive_open == 1).await;
+    fake.until(WAIT, "told at once", |w| w.activity.iter().any(|(k, _)| *k != first)).await;
+    let again = fake.with(|w| w.activity.iter().find(|(k, _)| *k != first).cloned()).expect("a frame on the new keepalive");
+    assert_eq!(again.1["agents"], waiting, "the new keepalive is told the whole report first");
+
+    // answered: the turn ends, an empty report, then the keepalive goes
+    let id = fake.with(|w| w.bodies(&chat, "work", "turn.prompt")[0]["prompt"].as_str().unwrap().to_string());
+    fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": id, "option": "once" }));
+    fake.until(WAIT, "let go", |w| w.keepalive_open == 0 && w.keepalive_log.last() == Some(&false)).await;
+    fake.with(|w| {
+        let told = activity_on(w, again.0);
+        assert_eq!(told.last(), Some(&json!([])), "none, said before it let go: {told:?}");
+        assert!(told.iter().all(|a| a.as_array().is_some_and(|a| a.len() <= 1)), "one agent, one chat: {told:?}");
+    });
+    bridge.stop().await;
+}

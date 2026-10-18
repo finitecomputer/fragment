@@ -347,9 +347,57 @@ pub enum Effect {
     Runtime(Command),
     /// Hold the keepalive socket (true) or drop it.
     Keepalive(bool),
+    /// What its agents are doing changed (`Engine::activity`): say it on
+    /// the keepalive.
+    Activity(Activity),
     /// List the agent's fragments again (it joined one: `joined`, whose
     /// members changed, so every view of it read before is stale).
     Discover { agent: String, joined: Option<String> },
+}
+
+/// What a turn's agent is doing in its chat, as the computer is told
+/// (docs/bridge.md, "What it says its agents are doing"), the most
+/// pressing first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Doing {
+    /// A turn waits on a card, or on its asker's words.
+    Waiting,
+    /// A turn runs.
+    Working,
+    /// A turn waits to run.
+    Queued,
+}
+
+/// One entry of what its agents are doing: an agent fragment in a chat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Doings {
+    pub agent: String,
+    pub chat: String,
+    pub state: Doing,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waits_on: Option<String>,
+}
+
+/// What its agents are doing: at most `ACTIVITY_MAX` entries, waiting
+/// first, then working, then queued, each by agent and chat; `more`, the
+/// entries left out.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Activity {
+    pub agents: Vec<Doings>,
+    pub more: u32,
+}
+
+impl Activity {
+    pub fn is_empty(&self) -> bool {
+        self.agents.is_empty() && self.more == 0
+    }
+
+    /// The keepalive's frame: `{type: "activity", v: 1, agents, more}`.
+    pub fn frame(&self) -> String {
+        serde_json::json!({ "type": "activity", "v": 1, "agents": self.agents, "more": self.more }).to_string()
+    }
 }
 
 /// One step's result.
@@ -391,6 +439,8 @@ pub struct Engine {
     agents: Vec<Agent>,
     views: HashMap<String, ChatView>,
     keepalive: bool,
+    /// What it last said its agents are doing.
+    activity: Activity,
     /// Turns that ran here and ended lately, oldest first (at most
     /// `ENDED_HOPS_MAX`, each for `ENDED_HOPS_MS`): a reply of one read after
     /// it was let go is one hop past it (`hop_of`). Never written to `/data`.
@@ -464,6 +514,7 @@ impl Engine {
             agents: Vec::new(),
             views: HashMap::new(),
             keepalive: false,
+            activity: Activity::default(),
             ended: VecDeque::new(),
             forgotten: BTreeMap::new(),
             menu: &[],
@@ -553,6 +604,33 @@ impl Engine {
         self.now = self.now.max(now);
     }
 
+    /// What its agents are doing now: per agent and chat with a turn not
+    /// ended, the most pressing of its turns there (waiting on a card, which
+    /// its agent's owner answers, or on its asker's words; else running;
+    /// else queued).
+    pub fn activity(&self) -> Activity {
+        let mut by: BTreeMap<(String, String), (Doing, Option<String>)> = BTreeMap::new();
+        for t in self.state.turns.values() {
+            let owner = || self.agents.iter().find(|a| a.fragment == t.agent).map(|a| a.owner.clone());
+            let doing = match t.phase {
+                Phase::Waiting => (Doing::Waiting, owner()),
+                Phase::Running if t.asking => (Doing::Waiting, Some(t.asker.clone())),
+                Phase::Running => (Doing::Working, None),
+                Phase::Queued => (Doing::Queued, None),
+                Phase::Ended => continue,
+            };
+            let key = (t.agent.clone(), t.fragment.clone());
+            if by.get(&key).is_none_or(|had| doing.0 < had.0) {
+                by.insert(key, doing);
+            }
+        }
+        let mut agents: Vec<Doings> = by.into_iter().map(|((agent, chat), (state, waits_on))| Doings { agent, chat, state, waits_on }).collect();
+        agents.sort_by(|a, b| (a.state, &a.agent, &a.chat).cmp(&(b.state, &b.agent, &b.chat)));
+        let more = agents.len().saturating_sub(limits::ACTIVITY_MAX);
+        agents.truncate(limits::ACTIVITY_MAX);
+        Activity { agents, more: u32::try_from(more).expect("open turns are bounded (TURNS_OPEN_MAX)") }
+    }
+
     fn finish(&mut self) -> Step {
         // a turn waiting on its card holds the computer too, until the card
         // is answered or expires: an idle sleep would cut it
@@ -560,6 +638,11 @@ impl Engine {
         if busy != self.keepalive {
             self.keepalive = busy;
             self.out.push(Effect::Keepalive(busy));
+        }
+        let doing = self.activity();
+        if doing != self.activity {
+            self.activity = doing.clone();
+            self.out.push(Effect::Activity(doing));
         }
         assert!(self.state.turns.len() <= limits::TURNS_OPEN_MAX, "admission bounds the open turns");
         for id in &self.claiming {

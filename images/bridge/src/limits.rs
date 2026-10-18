@@ -16,6 +16,13 @@ pub const ANSWER_MAX_BYTES: usize = 2 * 1024 * 1024;
 /// a handful; past this the computer's guest refuses to start rather than
 /// thrash.
 pub const AGENTS_MAX: usize = 32;
+/// What it says its agents are doing holds at most this many entries, one
+/// per agent and chat (docs/computers.md, "What its agents are doing"); the
+/// rest are counted (`more`). The cell refuses a report past it.
+pub const ACTIVITY_MAX: usize = 64;
+/// It says what its agents are doing at most this often (the newest), so
+/// the cell takes every report (it refuses one sooner than a second).
+pub const ACTIVITY_SEND_MS: u64 = 1_000;
 
 /// The fragments one agent follows (its chats, and its own fragment), at
 /// most: each is a socket held open while awake, and the platform allows a
