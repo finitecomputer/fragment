@@ -318,16 +318,18 @@ means none reported.
   most `ACTIVITY_MAX` (64) entries, `more` counting those left out. Sent
   as each keepalive opens, then at each change, at most once a second
   (the newest), and an empty list before the guest closes it as idle.
-- **What the computer takes.** Only from the newest keepalive of the
-  start that runs (each is numbered as it opens): an older keepalive's
-  frames, or one of an earlier start, change nothing. A frame past
+- **What the computer takes.** Only from the newest keepalive opened, of
+  the start that runs (each is numbered as it opens): an older keepalive
+  still open, or one of an earlier start, changes nothing, before or
+  after the newest reports or closes. A frame past
   `ACTIVITY_REPORT_MAX_BYTES` (16 KiB), malformed, or naming one agent
   and chat twice changes nothing, and the keepalive is told why
-  (`{type: "refused", why}`) and stays open: it holds the computer awake,
-  which a report never risks. An entry of an agent the computer does not
-  run (unassigned a moment ago) is left out. A list that is not empty,
-  sooner than a second after the last one taken from the same keepalive,
-  is not taken (a guest that keeps time never sends one).
+  (`{type: "refused", code: "malformed", why}`) and stays open: it holds
+  the computer awake, which a report never risks. An entry of an agent
+  the computer does not run (unassigned a moment ago) is left out. A list
+  that is not empty, sooner than a second after the last one taken from
+  the same keepalive, is not taken and is answered `code: "too_soon"`:
+  the guest says it again a second on.
 - **When it goes.** As its keepalive closes or fails, as the start ends
   (asleep, won't wake, a new start), and, for one agent, as it is
   unassigned. A sleep the keepalive cancels does not end it.

@@ -2168,8 +2168,11 @@ impl ComputerCell {
                     None => self.rows("DELETE FROM agents WHERE fragment = ? RETURNING fragment", vec![b.fragment.as_str().into()])?,
                 };
                 assert!(gone.len() <= 1, "a computer runs a fragment once");
-                // what it was doing goes with it
-                self.exec("DELETE FROM activity WHERE agent = ?", vec![b.fragment.as_str().into()])?;
+                // what it was doing goes with it (an earlier life of the name
+                // unassigned late takes nothing from the agent that has it now)
+                if !gone.is_empty() {
+                    self.exec("DELETE FROM activity WHERE agent = ?", vec![b.fragment.as_str().into()])?;
+                }
                 let view = self.view()?;
                 if !gone.is_empty() {
                     // its owner's pages read its agents again (an agent
@@ -2498,10 +2501,8 @@ impl ComputerCell {
             return Ok(());
         }
         let Some((generation, number)) = self.keepalive_of(ws) else { return Ok(()) };
-        if self.lifecycle()?.running() != Some(generation) {
-            return Ok(());
-        }
-        if self.reporter()?.is_some_and(|(g, n)| g == generation && n > number) {
+        let newest = self.meta(MetaKey::KeepaliveConn)?.and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+        if !activity::heard((generation, number), self.lifecycle()?.running(), newest) {
             return Ok(());
         }
         let runs: BTreeSet<String> = self.rows("SELECT fragment FROM agents", vec![])?.iter().filter_map(|r| r["fragment"].as_str().map(str::to_string)).collect();
@@ -2510,7 +2511,7 @@ impl ComputerCell {
             Err(refusal) => {
                 let why = refusal.message();
                 console_error!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "activity": "refused", "why": why }));
-                let _ = ws.send_with_str(json!({ "type": "refused", "why": why }).to_string());
+                let _ = ws.send_with_str(json!({ "type": "refused", "code": "malformed", "why": why }).to_string());
                 return Ok(());
             }
         };
@@ -2521,7 +2522,9 @@ impl ComputerCell {
             _ => None,
         };
         if activity::too_soon(&entries, last, now) {
-            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "activity": "too_soon" }));
+            // sent a second apart, it can still come sooner: its guest says
+            // it again a second on (docs/bridge.md)
+            let _ = ws.send_with_str(json!({ "type": "refused", "code": "too_soon", "why": "a report a second after the last at most: say it again" }).to_string());
             return Ok(());
         }
         let before = self.activity_shown()?;
@@ -2547,7 +2550,7 @@ impl ComputerCell {
     /// goes, and its owner's open pages are told.
     async fn activity_gone(&self, ws: &WebSocket) -> CellResult<()> {
         let Some(keepalive) = self.keepalive_of(ws) else { return Ok(()) };
-        if self.reporter()? != Some(keepalive) {
+        if !activity::clears(keepalive, self.reporter()?) {
             return Ok(());
         }
         let before = self.activity_shown()?;

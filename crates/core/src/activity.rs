@@ -88,6 +88,24 @@ pub fn check(frame: &str, runs: &BTreeSet<String>) -> Result<(Vec<ActivityEntry>
     Ok((entries, report.more))
 }
 
+/// A keepalive: the start it belongs to and its number, as the computer
+/// numbers each as it opens.
+pub type Keepalive = (u64, u64);
+
+/// Whether a report from keepalive `from` is read at all: only from the
+/// newest keepalive opened (`newest`, its number), of the start that runs
+/// now (`running`). An older one still open, or one of an earlier start,
+/// says nothing, so it never brings back what the newest replaced.
+pub fn heard(from: Keepalive, running: Option<u64>, newest: u64) -> bool {
+    running == Some(from.0) && from.1 == newest
+}
+
+/// Whether keepalive `from` closing takes away what is shown: only when
+/// its report is the one shown (`reporter`).
+pub fn clears(from: Keepalive, reporter: Option<Keepalive>) -> bool {
+    reporter == Some(from)
+}
+
 /// Whether a report that is not empty comes too soon after the last one
 /// taken from the same keepalive (`last_ms`), at `now_ms`. An empty one
 /// always comes in time: it clears; and a keepalive's first is never too
@@ -167,6 +185,22 @@ mod tests {
         for r in [ActivityRefusal::TooLarge, ActivityRefusal::TooMany, ActivityRefusal::Twice("x".into())] {
             assert!(!r.message().is_empty());
         }
+    }
+
+    /// Replacement: only the newest keepalive of the running start is
+    /// heard; an older one still open, or one of an earlier start, is not,
+    /// before or after the newest reports or closes. A close takes away only
+    /// the report shown.
+    #[test]
+    fn only_the_newest_keepalive_is_heard() {
+        let (old, new) = ((7, 1), (7, 2));
+        assert!(heard(new, Some(7), 2));
+        assert!(!heard(old, Some(7), 2), "an older one is not heard, even before the newest says anything");
+        assert!(!heard((6, 2), Some(7), 2), "nor one of an earlier start");
+        assert!(!heard(new, None, 2), "nor any, with no start running");
+        assert!(clears(new, Some(new)));
+        assert!(!clears(old, Some(new)), "an older one closing takes nothing away");
+        assert!(!clears(new, None), "closed twice (a close and an error), the second finds none");
     }
 
     /// A report that is not empty within a second of the last is too soon;
