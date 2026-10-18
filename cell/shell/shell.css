@@ -571,7 +571,7 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 
 /* One agent, a quiet list of conversations, and an app dock on the desktop. */
 /* Its team (decision 62, proposed): the agents it keeps, one level down, a
-   face each, ringed while one works, and a line that says who. */
+   face each, and a line that says who and what it is doing. */
 /* the team (decision 62, proposed): a step down from the one agent,
    indented under it, a smaller and quieter row each than the chats */
 .team { display: flex; flex-direction: column; gap: 1px; min-width: 0; margin: -2px 0 10px 22px; padding-left: 8px; border-left: 2px solid var(--border); }

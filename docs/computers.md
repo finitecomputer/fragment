@@ -311,10 +311,11 @@ guest last said, never proof that work runs or finished.
   `{type: "activity", v: 1, agents: [{agent, chat, state, waitsOn?}]}`,
   one entry per agent fragment and chat with a turn not ended, its most
   pressing: `waiting` (on a card or on someone's words; `waitsOn`, whom,
-  an identity), else `working`, else `queued`. At most `ACTIVITY_MAX`
-  (64) entries, the least pressing left out. Sent as each keepalive
-  opens, then at each change at most once a second, and empty before the
-  guest closes it as idle.
+  an identity), else `working`, else `queued`. Ordered waiting, working,
+  queued, then by agent and chat; at most `ACTIVITY_MAX` (64) entries,
+  the rest left out. Sent as each keepalive opens, then at each change
+  at most once a second (the newest then), and empty before the guest
+  closes it as idle.
 - **What the computer takes.** Each report from the newest keepalive of
   the start that runs (each is numbered as it opens) replaces the last;
   one from an older keepalive, or an earlier start's, changes nothing. A
