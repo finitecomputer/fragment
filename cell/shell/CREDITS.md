@@ -1,5 +1,7 @@
 # Credits
 
+- `finite-logo.svg`: Finite's logo supplied by Skyler (2026-10-18),
+  copied unchanged above the splash and welcome cards.
 - `wallpaper.jpg` and `wallpaper-dark.jpg`: light and dark landscapes supplied
   by Skyler (2026-10-13), copied unchanged from `landscapebg-lightmode.jpeg`
   and `landscapebg-darkmode.jpeg` at their original 2616×1632 resolution.

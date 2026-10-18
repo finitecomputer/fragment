@@ -754,12 +754,12 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let agent_wait = std::time::Duration::from_secs(120);
     // signed out, settings is the shell asking them to sign in, and back to settings
     let page = b.open(&format!("{}/settings", api.base))?;
-    let asked = b.until(&page, "document.querySelector('#first-run-card a.primary')?.getAttribute('href') === '/auth/login?return=%2Fsettings'", wait);
+    let asked = b.until(&page, "document.querySelector('#first-run-card a.primary')?.getAttribute('href') === '/auth/login?screen_hint=sign-up&return=%2Fsettings'", wait);
     s.ok("signed out, /settings is the shell asking them to sign in, and to come back to settings", asked, b.eval(&page, "document.body.innerText.slice(0, 200)")?);
     let other = b.eval(&page, "(() => { const f = document.querySelector('#first-run-card form[action]'); return { method: f?.getAttribute('method'), action: f?.getAttribute('action'), says: f?.textContent }; })()")?;
     s.ok(
-        "and offers another account: a form posting to /auth/switch, back to settings too",
-        other["method"] == "post" && other["action"] == "/auth/switch?return=%2Fsettings" && other["says"] == "Use another account",
+        "and offers Sign In: a form posting to /auth/switch, back to settings too",
+        other["method"] == "post" && other["action"] == "/auth/switch?screen_hint=sign-in&return=%2Fsettings" && other["says"] == "Sign In",
         &other,
     );
     b.close(page)?;
