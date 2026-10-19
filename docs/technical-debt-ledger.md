@@ -1312,18 +1312,27 @@ fragment.club until cutover (decisions 34–35).
   config), told to every agent with its teammates (`GET /api/computer`),
   and the skill reads that.
 
-## A teammate on another provider is kept out by a prompt
+## A teammate on another provider is kept out by a prompt and the platform's fence
 
-- **Observed:** decision 62 (proposed). The agents-finite skill tells a
-  person's default agent what never to hand a teammate on another
-  provider (placeholders, never the details). Nothing else keeps that
-  teammate out: it runs on its owner's computer beside every other agent,
-  acting for its owner as they do (decision 44).
-- **Shortcut:** the care is the default agent's, in its prompt.
-- **Risk:** a default agent that misjudges what is private hands it over
-  itself; and the teammate, or a page that talks it into it, reaches all
-  its owner reaches, and its provider has what it read.
-- **First proof:** a teammate on another provider that reads or sends its
-  owner's private things it was never handed.
-- **Delete when:** such a teammate acts as itself alone (a fence the
-  platform keeps), or runs where its owner's data is not.
+- **Observed:** decisions 62 and 63 (proposed). The agents-finite skill
+  tells a person's default agent what never to hand a teammate on
+  another provider (placeholders, never the details). The platform
+  refuses a fenced teammate's `for` and its connections (the swap asks
+  the registry), but its commands run as the `hermes` user beside every
+  other agent's (decision 44's one computer; Austin chose this over a
+  sandbox per agent with no internet, 2026-10-17).
+- **Shortcut:** the care is the default agent's, in its prompt; the
+  computer does not enforce the fence.
+- **Risk:** a fenced teammate, or a page that talks it into it, reads the
+  other agents' work and transcripts and Hermes' home (each profile's
+  `.env`: another agent's placeholders), or calls the computer's egress,
+  which signs as whichever of its agents a request names: as its owner's
+  default agent, it acts for its owner, and its provider has what it
+  read. A default agent that misjudges what is private hands it over
+  itself.
+- **First proof:** a fenced agent's command that reads another agent's
+  work, or calls the platform naming another agent.
+- **Delete when:** the computer enforces the fence (the agent's commands
+  as a user of its own with the internet through a filter: decision 63's
+  box, in git history, with a filter added; or an egress that tells its
+  agents apart), or the teammate runs where its owner's data is not.

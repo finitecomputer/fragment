@@ -775,6 +775,9 @@ speaking Cloudflare's APIs) returns once this product works.
       for them (decision 62, proposed), and the care it takes for its
       owner's private things around a teammate on another provider is no
       wall either.
+    - the one wall among them is a fence (decision 63, proposed): an
+      agent its owner, or their agent, fences acts as itself alone, on
+      the platform and on its computer.
 
 ### People: npubs, emails, no usernames (Paul, 2026-10-08)
 
@@ -1233,10 +1236,10 @@ these other providers."
       provider only when its owner asked or agreed.
     - **What this is not.** Decision 44 stands: a person's agents share
       their computer, so the care above is the default agent's, in its
-      prompt, and nothing walls it off on the computer (the debt ledger:
-      "A teammate on another provider is kept out by a prompt"). Which
-      models count as trusted is read from `agent.json` by convention (the
-      ledger: "Which
+      prompt; decision 63 adds the platform's fence, still no wall on the
+      computer (the debt ledger: "A teammate on another provider is kept
+      out by a prompt and the platform's fence"). Which models count as
+      trusted is read from `agent.json` by convention (the ledger: "Which
       of an agent's teammates is trusted is read from its agent.json").
 
     *Status, 2026-10-17 (local runs on real models: one run each, so
@@ -1275,7 +1278,79 @@ these other providers."
        61), and the prototype trusts whatever the tiers run on. Trust as
        the deployment's own fact (its `models` config, told to agents)
        would replace the convention.
-    3. Whether a teammate on another provider gets a wall, not only care.
+    3. Whether a teammate on another provider gets a wall, not only care:
+       decision 63 proposes one on the same computer.
+
+### A teammate on another provider is fenced (proposed: Austin, 2026-10-17; Paul's to decide)
+
+Austin: each teammate on a provider that is not trusted gets "its own
+workspace … in order for it to not have access to all the user's data,
+but only really have its own profile, its own data, and it only works
+really through the orchestrator or the main user, anyone shared with
+it". And on a computer of its own each: "that cost would scale terribly
+… Already bots in Hermes are separated by profiles. Is there a Hermes
+native boundary that we can leverage here?"
+
+63. **A teammate on another provider is fenced** (proposed; built
+    on branch `claude/bots-fence`, stacked on decision 62's, not merged). It
+    answers decision 62's third question with a wall that costs no
+    computer: the agent stays on its owner's computer, in its own Hermes
+    profile, and on the platform reaches only what is its own or is
+    handed to it.
+    - **On the platform, it acts as itself alone.** A fenced agent (the
+      registry's `identities.fenced`) never acts `for` anyone: a request
+      naming `for` is 403 where the signature is resolved, wherever `for`
+      is honored (`fragment_core::access::may_act_for`), so it shares
+      nothing, starts no agent, and reaches nothing by its owner's
+      access. Its own memberships stand: its agent fragment (its
+      memories, which its computer syncs as itself), its own chat with
+      its owner, each hand-off chat `fragment ask` adds it to, and what
+      anyone shares with it by its npub (decision 36: an agent added by
+      its npub is that agent alone). It is given no connection (its
+      owner's mail, calendar, files: decision 37), only the operator's
+      keys and its own model's.
+    - **Who fences it.** Its owner fences it or lets it go (`PUT
+      /api/identities/{agent}/fenced`, and the shell's team menu). Their
+      agent, acting for them, fences another of their agents, never
+      itself, and never lets one go (`fragment_core::access::may_fence`):
+      the default agent fences each teammate it puts on another provider
+      before it runs (`fragment agent --new … --model <provider>:<id>`,
+      `fragment agent <agent> --model …`), and only the person lifts it.
+    - **On its computer, any agent's profile, naming no one.** The fence
+      is the platform's (docs/computers.md, "A fenced agent in our Hermes
+      image"). Its profile is any agent's: the same tools, the internet,
+      its own work directory, run as the `hermes` user beside the rest.
+      Its terminal is given no owner to act for (no `FRAGMENT_FOR` in its
+      `.env`, written again within seconds when the fence changes, read
+      at its next command), and it is in no Bot Mode roster, whose
+      `message_agent` acts for its owner: it is reached by its chats. The
+      computer does not enforce the fence: its commands can read the
+      other agents' work and Hermes' home, and the computer's egress, which
+      signs as whichever of its agents a request names, would sign as
+      another (docs/technical-debt-ledger.md, "A teammate on another
+      provider is kept out by a prompt and the platform's fence").
+    - **What it does not change.** Decision 62's care stands: its
+      provider reads all it is sent, so the default agent still sends it
+      placeholders. Decision 44 stands for every unfenced agent.
+
+    *Status, 2026-10-17 (built, local).* As above, tested by the
+    orchestrator, computers and shell-ui lanes, the images' Docker lane
+    (`a_fenced_agent_names_no_one_to_act_for`), and the real-Hermes lane:
+    the lead fences a teammate from its terminal, the teammate's next
+    turns name no one, and the platform refuses it its owner named by
+    hand. A sandbox per fenced agent (a Linux user of its own, no
+    network) was built and tested first, then cut: Austin chose the
+    internet over the box ("I didnt want it to have no internet?"). It is
+    in git history ("images: a fenced agent runs as its own user, in a
+    sandbox of its own"). Not yet on a preview.
+
+    **For Paul to decide:**
+    1. Whether a teammate on another provider is fenced, and by default
+       (decision 62's third question).
+    2. Whether the computer enforces the fence too: the box again, with
+       the internet through a filter that refuses the computer's own
+       services and its egress (Hermes' terminal over `ssh` to the
+       agent's user, as built), or the egress telling its agents apart.
 
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 
