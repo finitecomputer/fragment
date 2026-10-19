@@ -3,7 +3,9 @@
 //! depends on them: channels with seq, idempotent posts by id (409 for
 //! another body), drafts fanned out on `__live`, `__live` paging from a
 //! cursor, wake subscriptions, members, `GET /api/computer`, the keepalive
-//! socket, blobs, and a fragment's files. Levers drop every socket (a
+//! socket, blobs, and a fragment's files; and what `fragment ask` does from
+//! an agent's terminal: a chat made (its maker added as an editor, as the
+//! platform adds it), an agent added to one or leaving it. Levers drop every socket (a
 //! deploy), take the API down, fail posts, fail reads of the computer and of
 //! an agent's list, and break a fragment's channels.
 //!
@@ -485,6 +487,30 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         };
     }
 
+    // a chat made for the agent's owner, as `fragment ask` makes one: its
+    // owner, then its maker as an editor (the platform adds it), and
+    // `joined` on the maker's `tasks`
+    if p.as_slice() == ["api", "fragments"] && method == Method::POST {
+        let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+        let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        let (Some(name), Some(owner)) = (v["name"].as_str().map(str::to_string), acting_for.clone()) else { return refuse(StatusCode::BAD_REQUEST, "a chat named in full, made for the agent's owner") };
+        if v["template"] != "chat" {
+            return refuse(StatusCode::BAD_REQUEST, "the fake makes chats alone");
+        }
+        let mut w = world.lock().unwrap();
+        if w.fragments.contains_key(&name) {
+            return refuse(StatusCode::CONFLICT, "that name is taken");
+        }
+        let (made_at, joined_at) = (w.now(), w.now());
+        let mut f = Frag { kind: "chat".into(), title: v["title"].as_str().unwrap_or("").to_string(), ..Frag::default() };
+        f.members.push(Member { principal: owner.clone(), role: "owner".into(), kind: "person".into(), added_at: made_at });
+        f.members.push(Member { principal: me.clone(), role: "editor".into(), kind: "agent".into(), added_at: joined_at });
+        f.channels.insert("chat".into(), Chan { post: Some("viewer".into()), ..Chan::default() });
+        f.channels.insert("work".into(), Chan { post: Some("editor".into()), ..Chan::default() });
+        w.fragments.insert(name.clone(), f);
+        w.append(&agent, "tasks", &owner, json!({ "kind": "joined", "fragment": name }));
+        return answer(StatusCode::OK, json!({ "name": name, "npub": "npub1chat", "owner": owner, "visibility": "members", "viewToken": "", "inboxToken": "", "repo": "", "canonical": "" }));
+    }
     if p.as_slice() == ["api", "fragments"] {
         let mut w = world.lock().unwrap();
         if w.fail_lists > 0 {
@@ -522,6 +548,24 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         (Method::GET, ["members"]) => {
             let list: Vec<Value> = f.members.iter().map(|m| json!({ "principal": m.principal, "role": m.role, "kind": m.kind, "addedAt": m.added_at, "addedBy": "npub1paul" })).collect();
             answer(StatusCode::OK, json!({ "members": list }))
+        }
+        // its owner's agent adds an agent of the computer (an editor), which
+        // is told `joined` on its own `tasks`, as the platform tells it
+        (Method::PUT, ["members", id]) => {
+            let owns = acting_for.as_deref().is_some_and(|o| f.members.iter().any(|m| m.principal == o && m.role == "owner"));
+            let agent = w.computer["agents"].as_array().and_then(|l| l.iter().find(|a| a["identity"] == *id)).and_then(|a| a["fragment"].as_str()).map(str::to_string);
+            let (Some(added), true) = (agent, owns) else { return refuse(StatusCode::FORBIDDEN, "the fake: its owner's agent adds an agent of the computer") };
+            let (id, owner) = (id.to_string(), acting_for.clone().unwrap_or_default());
+            if !f.members.iter().any(|m| m.principal == id) {
+                let at = w.now();
+                w.fragments.get_mut(&fragment).unwrap().members.push(Member { principal: id.clone(), role: "editor".into(), kind: "agent".into(), added_at: at });
+                w.append(&added, "tasks", &owner, json!({ "kind": "joined", "fragment": fragment }));
+            }
+            answer(StatusCode::OK, json!({ "principal": id, "role": "editor" }))
+        }
+        (Method::DELETE, ["members", "me"]) => {
+            w.fragments.get_mut(&fragment).unwrap().members.retain(|m| m.principal != me);
+            answer(StatusCode::OK, json!({ "ok": true }))
         }
         (Method::GET, ["subscriptions"]) => {
             let mine: Vec<Value> = f.subscriptions.iter().filter(|s| s["principal"] == me).cloned().collect();

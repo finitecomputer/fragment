@@ -1069,7 +1069,12 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** a delivery's wait is the journal's: the keeper, at its
   start, finds each claim of its own left unsettled and settles it from
   the teammate's chat (the hand-off's record is `dm-<delivery>`), and the
-  sender's wake comes from that receipt rather than from a process.
+  sender's wake comes from that receipt rather than from a process. Or
+  the keeper names the sender's turn as `back` on each delivery
+  (docs/chat-records.md, "An agent's ask"), as `fragment ask` does since
+  2026-10-18, once Hermes' delivery says which turn sent it. Then the
+  bridge wakes the sender from its state and the journal, which a sleep
+  keeps, and neither process waits.
 
 ## Own keys are kept by the person's computer
 

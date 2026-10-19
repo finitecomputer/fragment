@@ -1205,6 +1205,29 @@ these other providers."
       chat (`<label>-chat`, its Bot Chat), which the making agent then
       leaves so the new one leads it. `fragment agent <agent> --job …
       --tier … --model … --start --stop` keeps it.
+    - **An answer comes back to the agent that asked** (Austin,
+      2026-10-18, on a local run: the default agent was "falling asleep
+      on the job and leaving the other bots hanging").
+      - **What was wrong:** `fragment ask` posted the brief and returned.
+        The teammate's answer named no one, so nothing woke the asker.
+        The default agent heard of each finished job only when its person
+        asked "Where are we at here?". Fenced teammates are out of Bot
+        Mode, so `message_agent` could not reach them either.
+      - **Now:** an agent's question names the turn it was asked from
+        (`back`, from what Hermes gives each command). When the teammate's
+        turn ends (answered, stopped, or cut by a restart), the bridge
+        gives the asker a turn in that turn's chat, with what the teammate
+        said, at the ask's hop (docs/bridge.md, "Agents asking each
+        other"). This is Hermes' own rule for `message_agent`, here
+        for fenced teammates too. It is kept in the bridge's state and the
+        journal, so a sleep keeps it.
+      - **The hand-off chat:** a chat made for a question adds the
+        teammate first, so the person's own words there reach it.
+      - **What agents are told** (computer.md): every agent finishes its
+        turn rather than wait. It stops and says what blocks it rather
+        than sleep and retry (a teammate retried a failing sync for over
+        an hour). The default agent acts on each answer that comes back
+        (agents-finite).
     - **The default agent is told so, in every turn.** Its job (the
       shell's `firstSoul`, its `SOUL.md`) says who it is (Austin,
       2026-10-17: "it itself is smart"): the person's main agent and
@@ -1280,6 +1303,12 @@ these other providers."
        would replace the convention.
     3. Whether a teammate on another provider gets a wall, not only care:
        decision 63 proposes one on the same computer.
+    4. Whether 3 asks in a row (`HOPS_MAX`) are enough for a default
+       agent working on its own. An answer coming back is no new hop, so
+       it may run three rounds of asks for each message of its person's,
+       then must report to them. Raising it lets longer chains run
+       unattended. The chat's budget (20 agent turns in 5 minutes) holds
+       either way.
 
 ### A teammate on another provider is fenced (proposed: Austin, 2026-10-17; Paul's to decide)
 

@@ -61,6 +61,15 @@
 //! - A chat's agents start at most `AGENT_TURNS_PER_CHAT_MAX` turns of each
 //!   other in `AGENT_TURNS_WINDOW_MS` (the causing records' times, kept in
 //!   the state); past it a hand-off is refused, its end saying why.
+//! - An answer comes back to the agent that asked (Hermes' rule for
+//!   `message_agent`, for every ask): an agent's ask that names a turn of
+//!   its own (`back`, as `fragment ask` posts it), a turn this bridge runs
+//!   or ended lately, once the asked agent's turn of it
+//!   ends (answered, stopped, or cut by a restart), gives the asker a turn
+//!   in that chat (`answer_back`): what the asked agent said, at the hop of
+//!   the ask, so asking again goes one deeper and the chain stops at
+//!   `HOPS_MAX`. Its cause is the asked turn's claim, so it is one turn in
+//!   any life.
 //! - An agent's `tasks` hears only its own fragment (its cron, the
 //!   platform's `joined`) and its owner: another agent acting for the owner
 //!   starts no routine there.
@@ -188,8 +197,10 @@ pub enum ClaimAnswer {
     /// answer names it: the journal before it says what the turn is told of
     /// the agent's turn before it there (note.rs).
     Ours { seq: Option<u64> },
-    /// 409: another life's claim holds the id.
-    Theirs,
+    /// 409: another life's claim holds the id; `seq`, where that claim is
+    /// on the chat's `work`, when the journal said (an asked turn's answer
+    /// back is caused by it).
+    Theirs { seq: Option<u64> },
     /// 403 or 404: the agent may not post on the chat's `work` (it left
     /// the chat, or its owner holds it below editor). Nothing runs, nothing
     /// can be recorded there, and the turn is dropped, as a fragment the
@@ -220,6 +231,29 @@ pub struct OpenReply {
     pub part: u32,
     pub text: String,
     pub files: Vec<LocalFile>,
+}
+
+/// Where an asked turn's answer goes back to (`Turn::back`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Back {
+    /// The chat its asker asked from: the asker's answer turn is there.
+    pub chat: String,
+    /// Its claim's place on its chat's `work`, once handed: the cause of
+    /// its asker's answer turn. None until then, or when the platform's
+    /// answer did not say; a turn that never ran answers nothing back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<u64>,
+    /// What it said so far: its replies, joined, at most
+    /// `ANSWER_BACK_MAX_BYTES` (more is cut).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub said: String,
+    /// Files its replies carried.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub files: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// A turn the bridge admitted.
@@ -265,6 +299,11 @@ pub struct Turn {
     /// The seq on `chat` of the message its message quotes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<u64>,
+    /// An agent of this computer asked it from a turn of its own and wants
+    /// the answer back in that turn's chat (`Message::back`): at its end,
+    /// the asker gets a turn there (`Engine::answer_back`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back: Option<Back>,
     #[serde(skip)]
     pub open: Option<OpenReply>,
 }
@@ -281,6 +320,9 @@ enum Ask<'a> {
     /// A command its menu refuses with these words: both its records, and
     /// the end says why; the runtime never hears it.
     Refused(&'a str),
+    /// What an agent it asked said, back to it in the chat it asked from
+    /// (`Engine::answer_back`): a hand-off, at the hop of the ask.
+    Answer,
 }
 
 impl Turn {
@@ -657,9 +699,18 @@ impl Engine {
                     return;
                 }
                 if let Some(hop) = hop {
-                    let asker_name = view.names.get(&record.principal).cloned().unwrap_or_else(|| "someone".into());
+                    let asker_name = self.name_of(&view, &record.principal);
                     let cause = Cause { fragment: fragment.to_string(), channel: record.channel.clone(), seq: record.seq };
+                    // an agent's ask from a turn of its own: its answer goes
+                    // back to that turn's chat
+                    let back = m.back.as_deref().filter(|_| hop > 0).and_then(|t| self.asking_turn(&record.principal, t)).map(|(chat, _)| chat);
+                    let id = records::turn_id(&agent.fragment, &cause.fragment, &cause.channel, cause.seq);
                     self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &m, hop, Ask::Message);
+                    // admitted, not refused: it answers back once it has run
+                    if let (Some(chat), Some(t)) = (back, self.state.turns.get_mut(&id).filter(|t| t.phase != Phase::Ended)) {
+                        crate::ev!("turn.back", { "turn": id, "asker": t.asker, "chat": chat });
+                        t.back = Some(Back { chat, claim: None, said: String::new(), files: 0 });
+                    }
                 }
             }
             Said::Stop { turn } => self.stop(agent, fragment, &record.principal, turn.as_deref()),
@@ -750,7 +801,7 @@ impl Engine {
             if !m.to.iter().any(|t| t == &agent.identity) {
                 return None;
             }
-            let hop = self.hop_of(fragment, principal, m.turn.as_deref(), m.hop);
+            let hop = self.hop_of(fragment, principal, m.turn.as_deref(), m.back.as_deref(), m.hop);
             if hop > limits::HOPS_MAX {
                 crate::ev!("handoff.too_deep", { "agent": agent.fragment, "fragment": fragment, "from": principal, "hop": hop, "claimed": m.hop });
                 return None;
@@ -773,14 +824,17 @@ impl Engine {
     /// agent of this computer it is one past the turn the agent is in: its
     /// turn running in this chat, or the turn here the record names (`turn`)
     /// when that ended within `ENDED_HOPS_MS` (a reply read after its turn
-    /// was let go); and its deepest turn running elsewhere (a post from a
-    /// turn into another chat, as `fragment ask` makes), the deeper of the
-    /// two; in no turn at all, the last hop allowed: answered once, handing
-    /// on nothing. So a post made around the bridge (the CLI, the API: no
-    /// `hop`, or `hop: 0`, and no `turn`) counts as the reply would. Another
-    /// computer's agent, whose turns this bridge cannot see, is one hop at
-    /// least, as it claims; the chat's budget holds it too.
-    fn hop_of(&self, fragment: &str, principal: &str, named: Option<&str>, claimed: u32) -> u32 {
+    /// was let go); the turn its ask names as the one it asks from
+    /// (`back`, in any chat), running or ended within `ENDED_HOPS_MS` (an
+    /// ask read just after its turn ended); and its deepest turn running
+    /// elsewhere (a post from a turn into another chat, as `fragment ask`
+    /// makes): the deepest of them; in no turn at all, the last hop allowed:
+    /// answered once, handing on nothing. So a post made around the bridge
+    /// (the CLI, the API: no `hop`, or `hop: 0`, and no `turn`) counts as the
+    /// reply would. Another computer's agent, whose turns this bridge cannot
+    /// see, is one hop at least, as it claims; the chat's budget holds it
+    /// too.
+    fn hop_of(&self, fragment: &str, principal: &str, named: Option<&str>, back: Option<&str>, claimed: u32) -> u32 {
         let Some(poster) = self.agents.iter().find(|a| a.identity == principal) else {
             return claimed.max(1);
         };
@@ -790,8 +844,9 @@ impl Engine {
             let named = named?;
             self.ended.iter().rev().filter(fresh).find(|e| e.id == named && e.agent == poster.fragment && e.fragment == fragment).map(|e| e.hop)
         });
+        let asking = back.and_then(|t| self.asking_turn(principal, t)).map(|(_, hop)| hop);
         let elsewhere = self.state.turns.values().filter(running).filter(|t| t.fragment != fragment).map(|t| t.hop).max();
-        let from = here.into_iter().chain(elsewhere).max().unwrap_or(limits::HOPS_MAX - 1);
+        let from = here.into_iter().chain(asking).chain(elsewhere).max().unwrap_or(limits::HOPS_MAX - 1);
         from.saturating_add(1).max(claimed)
     }
 
@@ -844,7 +899,8 @@ impl Engine {
             panic!("turn {id} admitted twice: the cursor of {} is behind its turns", cursor_key(&agent.fragment, &cause.fragment, &cause.channel));
         }
         let routine = ask == Ask::Routine;
-        assert!(ask == Ask::Message || hop == 0, "a routine or a command is its owner's ask, no hand-off");
+        assert!(matches!(ask, Ask::Message | Ask::Answer) || hop == 0, "a routine or a command is its owner's ask, no hand-off");
+        assert!(ask != Ask::Answer || hop > 0, "an answer back is a hand-off");
         let waiting = self.state.turns.values().filter(|t| t.agent == agent.fragment && t.fragment == fragment && t.phase == Phase::Queued).count();
         let refusal = if let Ask::Refused(why) = ask {
             Some(why.to_string())
@@ -881,6 +937,7 @@ impl Engine {
             asking: false,
             command: matches!(ask, Ask::Command | Ask::Refused(_)),
             reply_to: m.reply_to,
+            back: None,
             open: None,
         };
         self.dirty = true;
@@ -998,13 +1055,18 @@ impl Engine {
         assert!(self.state.turns.get(id).is_some_and(|t| t.phase == Phase::Queued), "a turn being claimed is held, queued: {id}");
         match answer {
             ClaimAnswer::Ours { seq } => self.hand(id, seq),
-            ClaimAnswer::Theirs => {
+            ClaimAnswer::Theirs { seq } => {
                 // It owes its end as lost (a 409 itself when that life ended
                 // it, and let go then like any answered end).
                 let t = self.state.turns.get_mut(id).expect("checked");
                 let end = Owed { id: records::work_id(id, "end"), body: records::turn_end(id, &Outcome::Error(LOST.into())) };
                 t.phase = Phase::Ended;
                 t.owed = vec![end.clone()];
+                // an asked turn that life ran answers back, caused by that
+                // life's claim: the same turn that life's answer would be
+                if let Some(b) = t.back.as_mut() {
+                    b.claim = seq;
+                }
                 let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
                 self.dirty = true;
                 crate::ev!("turn.lost", { "turn": id, "agent": agent, "why": "another life claimed it" });
@@ -1019,6 +1081,7 @@ impl Engine {
                 assert!(newest.len() <= limits::NOTE_FORGOTTEN_MAX, "a note names its newest forgotten turns");
                 self.owe(&agent, &fragment, id, end);
                 self.pump(&agent, &fragment);
+                self.answer_back(id, &Outcome::Error(LOST.into()));
             }
             ClaimAnswer::Refused => {
                 let t = self.state.turns.remove(id).expect("checked");
@@ -1055,6 +1118,9 @@ impl Engine {
         let t = self.state.turns.get_mut(id).expect("checked");
         t.phase = Phase::Running;
         t.last_ms = now;
+        if let Some(b) = t.back.as_mut() {
+            b.claim = claim_seq;
+        }
         self.dirty = true;
         let start = TurnStart {
             turn: id.to_string(),
@@ -1104,7 +1170,7 @@ impl Engine {
         t.last_ms = self.now;
         self.dirty = true;
         crate::ev!("turn.told", { "turn": id, "seq": seq });
-        let by_name = view.names.get(principal).cloned().unwrap_or_else(|| "someone".into());
+        let by_name = self.name_of(view, principal);
         self.out.push(Effect::Runtime(Command::Tell { turn: id, seq, by: principal.to_string(), by_name, text: records::cut_bytes(&m.text, limits::MESSAGE_TEXT_MAX_BYTES) }));
         true
     }
@@ -1361,6 +1427,11 @@ impl Engine {
             return;
         }
         t.replies += 1;
+        if let Some(b) = t.back.as_mut() {
+            let joined = if b.said.is_empty() { open.text.trim().to_string() } else { format!("{}\n\n{}", b.said, open.text.trim()) };
+            b.said = records::cut_bytes(&joined, limits::ANSWER_BACK_MAX_BYTES);
+            b.files = b.files.saturating_add(u32::try_from(open.files.len()).unwrap_or(u32::MAX));
+        }
         self.dirty = true;
         let (agent, fragment, n, hop) = (t.agent.clone(), t.fragment.clone(), t.replies, t.hop);
         // A reply that names another agent of the chat hands off to it.
@@ -1437,6 +1508,61 @@ impl Engine {
         self.owe(&agent, &fragment, id, end);
         self.draft(&agent, &fragment, id, None);
         self.pump(&agent, &fragment);
+        self.answer_back(id, &outcome);
+    }
+
+    /// An asked turn that ran here is over (`Turn::back`): its asker, an
+    /// agent of this computer, gets a turn in the chat it asked from, told
+    /// what the asked agent said and how its turn ended, at the hop of the
+    /// ask (so asking again is one deeper), counted in that chat's budget.
+    /// It is asked as the asker's owner (who may stop it and answer it, as
+    /// for a routine), by the asked agent's name. Its cause is the asked
+    /// turn's claim on its chat's `work`, so the same answer is one turn in
+    /// any life: another life's claim of it is a 409.
+    fn answer_back(&mut self, id: &str, outcome: &Outcome) {
+        let t = &self.state.turns[id];
+        let Some(back) = t.back.clone() else { return };
+        let Some(claim) = back.claim else {
+            crate::ev!("answer.unsent", { "turn": id, "why": "the platform did not say where its claim is" });
+            return;
+        };
+        let Some(asker) = self.agents.iter().find(|a| a.identity == t.asker).cloned() else {
+            crate::ev!("answer.unsent", { "turn": id, "why": "its asker is no longer on this computer" });
+            return;
+        };
+        let name = self.agent(&t.agent).map_or_else(|| label(&t.agent).to_string(), |a| a.name.clone());
+        let cause = Cause { fragment: t.fragment.clone(), channel: records::WORK.to_string(), seq: claim };
+        let answer = records::turn_id(&asker.fragment, &cause.fragment, &cause.channel, cause.seq);
+        if self.state.turns.contains_key(&answer) {
+            crate::ev!("answer.unsent", { "turn": id, "why": "its answer turn is held already" });
+            return;
+        }
+        let m = Message { text: answer_text(&name, &t.fragment, outcome, &back.said, back.files), ..Message::default() };
+        let (hop, at) = (t.hop, i64::try_from(self.now).unwrap_or(i64::MAX));
+        crate::ev!("answer.back", { "turn": id, "answer": answer, "agent": asker.fragment, "chat": back.chat });
+        self.admit(&asker, &back.chat, cause, at, &asker.owner, name, &m, hop, Ask::Answer);
+    }
+
+    /// The turn of its own an agent of this computer names as the one it
+    /// asks from (`back`): its chat and hop, when this bridge runs it, or
+    /// ended it within `ENDED_HOPS_MS` (an ask read just after it ended).
+    /// A turn of another agent's, or one ended longer ago, is none: so an
+    /// ask is answered back only where its asker was.
+    fn asking_turn(&self, principal: &str, turn: &str) -> Option<(String, u32)> {
+        let poster = self.agents.iter().find(|a| a.identity == principal)?;
+        let running = self.state.turns.get(turn).filter(|t| t.agent == poster.fragment && t.active()).map(|t| (t.fragment.clone(), t.hop));
+        running.or_else(|| {
+            let fresh = |e: &&EndedTurn| self.now.saturating_sub(e.at) <= limits::ENDED_HOPS_MS;
+            self.ended.iter().rev().filter(fresh).find(|e| e.id == turn && e.agent == poster.fragment).map(|e| (e.fragment.clone(), e.hop))
+        })
+    }
+
+    /// What to call a record's writer: an agent of this computer by its
+    /// name, anyone else as the chat's view names them ("someone" when it
+    /// cannot).
+    fn name_of(&self, view: &ChatView, principal: &str) -> String {
+        let agent = self.agents.iter().find(|a| a.identity == principal).map(|a| a.name.clone());
+        agent.or_else(|| view.names.get(principal).cloned()).unwrap_or_else(|| "someone".into())
     }
 
     // ---- time ----
@@ -1494,6 +1620,24 @@ impl Engine {
     }
 }
 
+/// What an asker's answer turn is told (`Engine::answer_back`): who
+/// answered what it asked, in which chat, how that turn ended, and what it
+/// said there.
+fn answer_text(name: &str, chat: &str, outcome: &Outcome, said: &str, files: u32) -> String {
+    let head = match outcome {
+        Outcome::Idle => format!("{name} answered what you asked it in {chat}:"),
+        Outcome::Stopped => format!("{name} was stopped before it finished what you asked it in {chat}. It said:"),
+        Outcome::Error(why) => format!("{name} could not finish what you asked it in {chat} ({why}). It said:"),
+    };
+    let said = if said.trim().is_empty() { "(nothing)" } else { said };
+    let files = match files {
+        0 => String::new(),
+        1 => format!("\n\n(It sent a file, in {chat}.)"),
+        n => format!("\n\n(It sent {n} files, in {chat}.)"),
+    };
+    format!("{head}\n\n{said}{files}")
+}
+
 /// Whether `agent` answers to `@word`: its name, or its fragment's label.
 fn answers_to(agent: &Agent, word: &str) -> bool {
     agent.name.to_ascii_lowercase() == word || label(&agent.fragment).to_ascii_lowercase() == word
@@ -1514,9 +1658,19 @@ pub fn check(state: &State) -> Result<(), Corrupt> {
         if records::turn_id(&t.agent, &t.cause.fragment, &t.cause.channel, t.cause.seq) != t.id {
             return Err(Corrupt(format!("turn {id} is not its cause's")));
         }
+        // an answer back is caused on `work`, which no cursor follows
+        let answer = t.cause.channel == records::WORK;
         let cursor = state.cursors.get(&cursor_key(&t.agent, &t.cause.fragment, &t.cause.channel)).copied().unwrap_or(0);
-        if cursor < t.cause.seq {
+        if !answer && cursor < t.cause.seq {
             return Err(Corrupt(format!("turn {id} is past its channel's cursor {cursor}")));
+        }
+        if answer && (t.hop == 0 || t.routine || t.back.is_some()) {
+            return Err(Corrupt(format!("turn {id} is an answer back, so a hand-off that answers nothing back: hop {}, routine {}, back {}", t.hop, t.routine, t.back.is_some())));
+        }
+        if let Some(b) = &t.back {
+            if b.said.len() > limits::ANSWER_BACK_MAX_BYTES || t.hop == 0 {
+                return Err(Corrupt(format!("turn {id} answers back to {} past its bounds", b.chat)));
+            }
         }
         if t.order == 0 || t.order > state.admitted {
             return Err(Corrupt(format!("turn {id}'s order {} is not an admission", t.order)));

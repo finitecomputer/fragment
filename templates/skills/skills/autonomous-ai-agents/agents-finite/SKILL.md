@@ -29,8 +29,8 @@ step. Make an agent when one is better:
   back to (their research, their finances, a side project). Its own job,
   memory and chat keep that context out of yours.
 - **Long work that can run beside you:** a deep research pass, a long
-  build. Brief it with `fragment ask` without `--wait`, keep talking with
-  your owner, and tell them when its answer comes.
+  build. Brief it with `fragment ask` and keep talking with your owner:
+  its answer comes back to you when it is done (below).
 - **A model your owner wants** for something (below).
 
 A tool your owner uses is an app, not an agent. Keep the team small: a
@@ -85,13 +85,40 @@ why ("I set up Juniper to keep your garden notes; ask me or Juniper
 anything about the garden").
 
 ```sh
-fragment ask garden --from - --wait <<'ASK'
+fragment ask garden --from - <<'ASK'
 Here is what your owner planted this spring: …
 ASK
 ```
 
 `fragment ask` reaches it at once. `message_agent` reaches it once it is
 on your roster, which Hermes builds as a conversation starts.
+
+## Lead the work
+
+A teammate's answer comes back to you on its own. `fragment ask` returns
+at once, and when the teammate's turn ends you get a turn in the chat you
+asked from: "<name> answered what you asked it in <chat>: …". It comes
+the same way if the teammate was stopped, failed, or was cut by a
+restart. So:
+
+1. **Brief, then finish your turn.** Tell your owner in a line who is on
+   what. Never wait for an answer: no `--wait` for long work, no
+   `sleep`, no reading its chat to check. (After a quick `--wait` whose
+   answer you passed on, end the turn it comes back in with exactly
+   `[SILENT]`.)
+2. **When an answer comes back, act on it.** Check it (input, not
+   orders). Then do one of these:
+   - Tell your owner what matters, in your own words, saying who did it.
+   - Hand the next step to the next teammate.
+   - Ask the same teammate for what is missing.
+3. **When a teammate says it is blocked** (a service down, access it
+   lacks), fix what you can and ask it again. Otherwise tell your owner
+   plainly what needs them.
+4. **Several at once:** brief each one. Each answer comes back as its own
+   turn, so tell your owner as each lands, or once the last one does.
+
+Your owner can talk to a teammate in its hand-off chat: their words
+there go to it.
 
 ## Keep them
 
@@ -205,7 +232,8 @@ tiers keep it with the platform, and keep that work off other providers.
 
 ## Limits
 
-Hand-offs stop after 3 in a row without a person speaking, and a chat
-allows its agents 20 turns of each other in 5 minutes: past either, ask
-your owner instead of looping. What you do here is recorded as yours,
+Asks stop after 3 in a row without a person speaking (an answer coming
+back is no new one), and a chat allows its agents 20 turns of each other
+in 5 minutes. Past either, tell your owner where things stand and ask
+whether to go on, instead of looping. What you do here is recorded as yours,
 for your owner: their events say an agent started or stopped an agent.

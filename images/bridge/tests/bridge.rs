@@ -669,7 +669,7 @@ async fn an_agent_that_left_is_not_followed_by_its_listing() {
 
 /// Goal (decision 8): in a group, the lead (the first agent added) answers
 /// a message naming no one; an `@mention` picks who answers; a reply that
-/// names another agent hands off to it.
+/// names another agent hands off to it, which knows that agent by name.
 #[tokio::test]
 async fn a_group_mention_picks_the_agent() {
     let fake = Fake::start("127.0.0.1:0", &["juniper", "rowan"]).await;
@@ -693,7 +693,7 @@ async fn a_group_mention_picks_the_agent() {
         let r = replies(w, &group);
         assert_eq!(r[2]["to"], json!(["npub1rowan"]), "juniper's reply hands off");
         assert_eq!(r[2]["hop"], 1);
-        assert!(r[3]["text"].as_str().unwrap().starts_with("echo: [someone]"), "rowan answers juniper's message");
+        assert!(r[3]["text"].as_str().unwrap().starts_with("echo: [juniper]"), "rowan answers juniper's message, knowing it by name");
     });
     bridge.stop().await;
 }

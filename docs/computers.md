@@ -2098,7 +2098,9 @@ internet; its computer only names no one for it.
   agent alone; told its owner by hand, the platform refuses it (403).
 - **No Bot Mode.** It is in no Bot Mode roster (bots.rs), whose
   `message_agent` acts for its owner, and the boot looks up no Bot Chat
-  for it: it is reached by its chats.
+  for it: it is reached by its chats, as `fragment ask` reaches it, whose
+  answer comes back to the agent that asked (docs/bridge.md, "Agents
+  asking each other").
 - **Fenced or let go while awake.** The boot reads the change with its
   agents (every 3 s) and writes the profile again; nothing restarts.
   Hermes reads a profile's `.env` at each turn and passes it to each

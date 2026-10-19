@@ -217,9 +217,11 @@ deep (docs/chat-records.md, "An agent's reply"):
   that chat, or the one there the record's `turn` names when that ended
   within `ENDED_HOPS_MS` (remembered, never written: a reply read just
   after its turn was let go); and its deepest turn running anywhere else,
-  the deeper of the two; in none at all, `HOPS_MAX` (answered, handing on
-  nothing). A CLI post names no turn, so a turn just ended does not count
-  for it (`an_ended_turn_counts_only_for_the_reply_that_names_it`). A record's `hop` only raises it. So a post made
+  the turn an ask's `back` names (running, or ended within
+  `ENDED_HOPS_MS`); the deepest of them; in none at all, `HOPS_MAX`
+  (answered, handing on nothing). A CLI post that names no turn does not
+  count from one just ended
+  (`an_ended_turn_counts_only_for_the_reply_that_names_it`). A record's `hop` only raises it. So a post made
   around the bridge (the CLI, the API, a script the agent left running)
   resets nothing: `a_hand_off_loop_stops_at_the_cap` runs the same
   A, B, A, B loop with each hand-off posted by its turn as the CLI does (no
@@ -238,6 +240,56 @@ deep (docs/chat-records.md, "An agent's reply"):
   (`a_chats_agents_have_a_budget`: valid, past it, a person never
   counted, replay, restart, another chat's own, the window sliding). A
   state from before the budget loads with none.
+- **An answer comes back to the agent that asked.** This is Hermes' rule
+  for `message_agent`, made the bridge's for every ask: the asker finishes
+  its turn, and the answer wakes it. An agent's message whose `back`
+  names a turn of its own asks from that turn's chat (that chat itself,
+  for `fragment ask --chat` there).
+  `fragment ask` names the turn its runtime runs it in (in our Hermes
+  image, the turn's message id, which Hermes gives each command). The
+  bridge takes it only for a turn of the asker's it runs or ended within
+  `ENDED_HOPS_MS` (an ask read just after its asker finished counts from
+  that turn), so an answer never goes to another chat its asker happens
+  to be busy in. That chat is kept with the asked turn
+  (`Turn::back`), with what the asked agent says (at most
+  `ANSWER_BACK_MAX_BYTES`, its files counted). The asked turn may end
+  answered, stopped, timed out, or cut by a restart. Once it ends, the
+  asker gets a turn in that chat (`answer_back`):
+  - **What it is told:** who answered, where, how that turn ended, and
+    what it said.
+  - **Who asks it:** the asker's owner, by the asked agent's name, so its
+    owner may stop it and answer its cards, as for a routine.
+  - **Its hop:** the ask's own, so asking again goes one deeper and the
+    chain stops at `HOPS_MAX`. It is counted in that chat's budget.
+  - **Its cause:** the asked turn's claim on its chat's `work`. So the
+    same answer is one turn in any life: a life that restored `/data`
+    from before makes the same turn, and the first life's claim holds it
+    (409).
+
+  A life whose claim of the asked turn is a 409 (it restored `/data`
+  saved before that claim) reads where the other life's claim is, and
+  answers back as lost by it: the same turn that life made, if it made
+  one (`driver.rs` `claim_of_theirs`, its reads tried again on a
+  transport error, 429 or 5xx).
+
+  Not kept across a restart: which of its turns an asker ended lately,
+  as for the hop above (never written to `/data`). So an ask the next
+  life reads first, after its asker's turn ended in the life before,
+  comes back nowhere and is the last hop. That takes a restart in the
+  seconds between the asker finishing and its ask being read; an idle
+  sleep waits 20 minutes.
+
+  Nothing comes back for an ask without `back` (the Bot Mode keeper's:
+  Hermes wakes the sender itself; a reply's @name, which carries its
+  `turn`, not `back`), or a person's message. Nor for a turn that never
+  ran, or an asker that left the computer.
+  Tests: `an_answer_comes_back_to_the_agent_that_asked`,
+  `an_answer_goes_back_to_the_chat_its_ask_names`,
+  `an_ask_within_one_chat_comes_back_there`,
+  `an_ask_read_as_its_asker_finished_still_comes_back`,
+  `what_answers_nothing_back`, `an_answer_cut_by_a_restart_comes_back_once`,
+  `an_asked_turn_another_life_ran_answers_back_once`, and with real Hermes,
+  tests/docker.rs `an_answer_comes_back_to_the_agent_that_asked`.
 - **`tasks` is the agent's own.** A routine or `joined` starts anything
   only from the agent fragment's own key (not an identity: its cron, the
   platform) or its owner; another agent acting for the owner, who may post

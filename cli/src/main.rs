@@ -294,8 +294,9 @@ enum Cmd {
     /// Ask another of your agents (an agent: of its owner's) something, in
     /// a chat of the two of you and your owner, made the first time (a
     /// person: their direct chat with it), or in --chat; prints the chat
-    /// and the question's record. Its answer comes in that chat; --wait
-    /// prints it
+    /// and the question's record. Its answer comes in that chat; an agent
+    /// asking gets it back on its own, as a turn in the chat it asked from
+    /// (so it finishes its turn rather than wait); --wait prints it
     Ask {
         /// The agent: its label or fragment (`fred`, `fred--k3x9`), or its identity
         agent: String,
@@ -1994,7 +1995,9 @@ fn run(cli: Cli) -> Result<()> {
                         }
                     }
                 }
+                (None, Some(s)) if v.back => println!("no answer in {s} s: it comes back to you on its own, in the chat you asked from, once {} is done: finish your turn", v.asked.name),
                 (None, Some(s)) => println!("no answer in {s} s: it comes in {} (`fragment channel {} chat --after {}`)", v.chat, v.chat, v.record["seq"]),
+                (None, None) if v.back => println!("its answer comes back to you on its own, in the chat you asked from, once {} is done: finish your turn, and don't wait or check for it", v.asked.name),
                 (None, None) => println!("its answer comes in {} (`--wait` waits for it)", v.chat),
             }
         }
@@ -2035,7 +2038,11 @@ fn run(cli: Cli) -> Result<()> {
             if made.fenced {
                 println!("fenced: it never acts for you and gets none of your connections; it still runs on your computer (its owner lets it go)");
             }
-            println!("brief it: fragment ask {label} \"…\" --wait");
+            if c.agent().is_some() {
+                println!("brief it: fragment ask {label} \"…\" (its answer comes back to you on its own)");
+            } else {
+                println!("brief it: fragment ask {label} \"…\" --wait");
+            }
         }
         Cmd::Agent { agent, new: None, name, picture, no_picture, job, job_from, tier, model, no_model, start, stop, fence, no_fence } => {
             let job = job_given(job, job_from)?;

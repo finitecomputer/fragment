@@ -59,6 +59,10 @@ pub struct Message {
     pub hop: u32,
     /// The seq on `chat` of the message it quotes (a person's reply to it).
     pub reply_to: Option<u64>,
+    /// An agent's ask names the turn of its own it asks from (`fragment
+    /// ask`): when the asked agent's turn of it ends, the asker gets a turn
+    /// in that turn's chat (engine.rs, `answer_back`).
+    pub back: Option<String>,
 }
 
 /// A command for an agent's runtime (`{kind: "command"}`), from a person:
@@ -242,7 +246,12 @@ fn message(o: &Map<String, Value>) -> Said {
             None => return Said::Other,
         },
     };
-    Said::Message(Message { text, to, attachments, turn, hop, reply_to })
+    let back = match o.get("back") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(t)) if valid_post_id(t) => Some(t.clone()),
+        Some(_) => return Said::Other,
+    };
+    Said::Message(Message { text, to, attachments, turn, hop, reply_to, back })
 }
 
 /// Reads a `tasks` record's body.
@@ -622,6 +631,11 @@ mod tests {
         // a reply names its turn and may hand off
         let Said::Message(r) = said(&json!({ "text": "ok", "turn": "abc", "to": ["npub1b"], "hop": 2 })) else { panic!() };
         assert_eq!((r.turn.as_deref(), r.hop), (Some("abc"), 2));
+        // an agent's ask may want its answer back; absent or null, it does not
+        let Said::Message(asked) = said(&json!({ "text": "how?", "to": ["npub1b"], "back": "t-asking" })) else { panic!() };
+        assert_eq!(asked.back.as_deref(), Some("t-asking"));
+        let Said::Message(plain) = said(&json!({ "text": "how?", "back": null })) else { panic!() };
+        assert!(plain.back.is_none() && r.back.is_none());
         // invalid shapes are never guessed at
         for bad in [
             json!(12),
@@ -634,6 +648,9 @@ mod tests {
             json!({ "text": "x", "attachments": [{ "sha256": "a".repeat(64), "size": 0, "type": "a", "name": "b" }] }),
             json!({ "text": "x", "turn": "has space" }),
             json!({ "text": "x", "hop": -1 }),
+            json!({ "text": "x", "back": true }),
+            json!({ "text": "x", "back": "has space" }),
+            json!({ "text": "x", "back": 1 }),
             json!({ "kind": "draft", "text": "x" }),
             json!({ "kind": 3 }),
         ] {
