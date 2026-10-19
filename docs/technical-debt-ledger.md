@@ -1235,6 +1235,21 @@ fragment.club until cutover (decisions 34–35).
   needs a compatibility date of 2026-03-24 or later, where the cell's is
   2026-01-01 (moving it brings ~25 flags, `delete_all_deletes_alarm` and
   `websocket_close_reason_byte_limit` among them).
+  Re-checked 2026-10-19 (the review of code we wrote where something off
+  the shelf exists), and kept: quick actions still cannot take this shot.
+  Cloudflare's docs (the product is now Browser Run) still have no local
+  `quickAction` (only `wrangler dev --remote`, which the e2e's node is
+  not), and its screenshot answers with the image alone: no console
+  messages, exceptions or log entries, which the page's report (status's
+  `page`, `page.errors`; cec664ad, a day after this entry) is made of
+  (`card::Heard` hears `Runtime.exceptionThrown`,
+  `Runtime.consoleAPICalled` and `Log.entryAdded`). `@cloudflare/puppeteer`
+  in the shim, on the same session routes, was weighed and not taken: it
+  swaps about 200 lines of plumbing here for a library the Worker bundles
+  and every isolate evaluates as it starts, for a shot once a deploy; the
+  shim would make the shot's decisions (its waits, its qualities), which
+  the shim leaves to Rust; and the session, its keep-alive billing and
+  the events `Heard` reads would all stay.
 - **Risk:** the CDP client is ours to keep speaking Browser Rendering's
   session routes as `@cloudflare/puppeteer` does; a change there fails
   every try (`card.failed`) while the pages serve on. The deployment pays
@@ -1242,10 +1257,13 @@ fragment.club until cutover (decisions 34–35).
   Assumptions).
 - **First proof:** `card.failed` events on a preview whose message is a
   CDP or session error.
-- **Delete when:** `wrangler dev` answers `quickAction` locally (or a fake
-  at the vendor boundary stands in for it there, `FRAGMENT_BROWSER_URL`
-  as `FRAGMENT_AI_URL` does for the model route) and the cell's
-  compatibility date reaches 2026-03-24: `take` becomes one
+- **Delete when:** a quick action reports what the page said as it
+  loaded (its exceptions, console errors and log entries), or the page's
+  report comes from somewhere else; `wrangler dev` answers `quickAction`
+  locally (or a fake at the vendor boundary stands in for it there,
+  `FRAGMENT_BROWSER_URL` as `FRAGMENT_AI_URL` does for the model route);
+  and the cell's compatibility date reaches 2026-03-24 (a change in the
+  runtime's behaviour its pull request names): `take` becomes one
   `quickAction("screenshot", …)` billed from `X-Browser-Ms-Used`, and the
   session's acquire and release, `Cdp`, `billed_ms`'s keep-alive and the
   concurrent-browser assumption go.
