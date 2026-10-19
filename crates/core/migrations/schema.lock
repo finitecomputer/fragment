@@ -5,7 +5,7 @@
 # steps make. Never edit it by hand.
 
 step Fragment 1 baseline 6f010c0c276b4871
-step Fragment 2 listed 4a67c68c80018104
+step Fragment 2 listed 464da803484efc23
 step Registry 1 baseline fd5a79e5c834a15d
 step Principal 1 baseline 28b4d4bf3f8cdb71
 step Principal 2 listed 09e5aab70c4f7f61
@@ -36,7 +36,7 @@ Fragment table file_commits: CREATE TABLE file_commits (key TEXT PRIMARY KEY, sh
 Fragment table index_outbox: CREATE TABLE index_outbox ( principal TEXT PRIMARY KEY, role TEXT, version INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL)
 Fragment table invites: CREATE TABLE invites ( email TEXT PRIMARY KEY, role TEXT NOT NULL, expires_at INTEGER NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL)
 Fragment table joined_outbox: CREATE TABLE joined_outbox ( principal TEXT PRIMARY KEY, owner TEXT NOT NULL, added_at INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL)
-Fragment table listed: CREATE TABLE listed ( channel TEXT NOT NULL, principal TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, kind TEXT NOT NULL, fields TEXT NOT NULL, PRIMARY KEY (channel, principal))
+Fragment table listed: CREATE TABLE listed ( channel TEXT NOT NULL, principal TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, kind TEXT NOT NULL, fields TEXT NOT NULL, last INTEGER NOT NULL, PRIMARY KEY (channel, principal))
 Fragment table members: CREATE TABLE members ( principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL, kind TEXT, owner TEXT)
 Fragment index members_owner: CREATE INDEX members_owner ON members (owner) WHERE owner IS NOT NULL
 Fragment table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)

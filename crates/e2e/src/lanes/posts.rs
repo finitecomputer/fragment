@@ -234,6 +234,12 @@ pub(super) fn listed_of(api: &Api, keys: &Keys, name: &str) -> Vec<(String, Stri
     row["listed"].as_array().map(|l| l.iter().map(|r| (text(&r["channel"]), text(&r["principal"]), text(&r["kind"]), r["fields"].clone())).collect()).unwrap_or_default()
 }
 
+/// `json` committed as the fragment's manifest, and deployed.
+fn redeploy(s: &Suite, c: &Value, json: &str) {
+    s.commit(c, &[("fragment.json", Some(json.as_bytes()))]);
+    s.deploy(c);
+}
+
 /// The next frame a list's socket is told within `wait`, or none.
 fn told_within(w: &mut Socket, wait: Duration) -> Option<Value> {
     w.patience(wait).ok()?;
@@ -245,12 +251,14 @@ fn told_within(w: &mut Socket, wait: Duration) -> Option<Value> {
 /// A channel's `listed` (docs/api.md, Listed records): each member's newest
 /// record of a listed kind rides the rows of the members whose role reads
 /// its channel. Goal: a list follows what a fragment's members are doing,
-/// told to their open page as it changes, and never shows a member what
-/// their role may not read, nor what a member who left did. Method: a
-/// fragment with an agents' channel any member reads and a desk only
-/// editors read; its owner, a viewer, an editor, an outsider and the
-/// owner's agent; each one's list read signed, and the viewer's watched
-/// with their key, as the CLI watches.
+/// told to their open page as it changes and a few times a burst, never
+/// one a record; it never shows a member what their role may not read,
+/// nor what a member who left did, nor what is listed no more. Method: a fragment with an agents'
+/// channel any member reads and a desk only editors read; its owner, a
+/// viewer, an editor, an outsider and the owner's agent; each one's list
+/// read signed, and the viewer's watched with their key, as the CLI does.
+/// Each check is one only the mechanism it names makes pass: a re-send the
+/// change would cause anyway is not counted as the proof.
 fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let name = s.named(api, owner, "listed")?;
     let c = s.create(api, owner, &name)?;
@@ -262,8 +270,7 @@ fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         let r = set_role(who, role)?;
         anyhow::ensure!(r.status == 200, "adding {who} as {role}: {r}");
     }
-    s.commit(&c, &[("fragment.json", Some(LISTED_JSON.as_bytes()))]);
-    s.deploy(&c);
+    redeploy(s, &c, LISTED_JSON);
     let r = api.signed(owner, "GET", &format!("/api/f/{name}/channels"), None)?;
     let declared = r.body["channels"].as_array().and_then(|l| l.iter().find(|c| c["name"] == "work").map(|c| c["listed"].clone())).unwrap_or_default();
     s.ok(
@@ -293,7 +300,7 @@ fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let step = work("w2", json!({ "kind": "turn.step", "turn": "t1", "step": 1 }))?;
     let same = work("w3", json!({ "kind": "turn.start", "turn": "t2", "agent": agent_id, "asker": viewer_id }))?;
     let again = work("w1", json!({ "kind": "turn.start", "turn": "t1", "agent": agent_id, "asker": viewer_id }))?;
-    let quiet = told_within(&mut tab, Duration::from_secs(3));
+    let quiet = told_within(&mut tab, Duration::from_millis(limits::LISTED_MIN_GAP_MS as u64 + 2000));
     let mine = row_of(api, &viewer, &name);
     s.ok(
         "records that show nothing new move nothing: a kind not listed, the same kind again, a post replayed (the page is told nothing; the row keeps the first's time)",
@@ -310,10 +317,31 @@ fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         json!({ "told": changed, "listed": shown }),
     );
 
+    // a burst of moves is a send or two, the last with the newest record
+    let t0 = std::time::Instant::now();
+    let kinds = ["turn.start", "turn.end", "turn.start", "turn.end", "turn.start", "turn.end"];
+    for (i, kind) in kinds.iter().enumerate() {
+        let r = work(&format!("b{i}"), json!({ "kind": kind, "turn": format!("b{i}") }))?;
+        anyhow::ensure!(r.status == 200, "the burst's post {i}: {r}");
+    }
+    let burst = t0.elapsed();
+    let mut frames = 0;
+    while told_within(&mut tab, Duration::from_millis(limits::LISTED_MIN_GAP_MS as u64 + 2000)).is_some() {
+        frames += 1;
+    }
+    // a burst that outlasts a gap may take one send more a gap
+    let allowed = 2 + burst.as_millis() as i64 / limits::LISTED_MIN_GAP_MS;
+    let last = listed_of(api, &viewer, &name);
+    s.ok(
+        &format!("a burst of {} moves within a gap is told at most twice, not once a record, and the row ends on the newest", kinds.len()),
+        frames >= 1 && frames <= allowed && last.first().is_some_and(|r| r.2 == "turn.end"),
+        json!({ "frames": frames, "allowed": allowed, "burstMs": burst.as_millis() as u64, "listed": last }),
+    );
+
     // the desk is the editors': the viewer's row never carries it
     let note = post(api, &editor, &name, "desk", "d1", json!({ "kind": "note", "text": "the budget is 4k" }))?;
     let owners = s.eventually(Duration::from_secs(10), || listed_of(api, owner, &name).iter().any(|r| r.0 == "desk"));
-    let quiet = told_within(&mut tab, Duration::from_secs(3));
+    let quiet = told_within(&mut tab, Duration::from_millis(limits::LISTED_MIN_GAP_MS as u64 + 2000));
     let (theirs, editors) = (listed_of(api, &viewer, &name), listed_of(api, &editor, &name));
     let outside = row_of(api, &outsider, &name);
     s.ok(
@@ -338,11 +366,11 @@ fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         up.status == 200 && told_up.is_some() && raised.iter().any(|r| r.0 == "desk") && down.status == 200 && lowered,
         json!({ "raised": raised, "lowered": listed_of(api, &editor, &name) }),
     );
+    tab.close();
 
     // a deploy that tightens a channel's read takes it from the rows that may no longer read it
     let tightened = LISTED_JSON.replacen(r#""work":{"read":"viewer""#, r#""work":{"read":"editor""#, 1);
-    s.commit(&c, &[("fragment.json", Some(tightened.as_bytes()))]);
-    s.deploy(&c);
+    redeploy(s, &c, &tightened);
     let gone = s.eventually(Duration::from_secs(20), || listed_of(api, &editor, &name).is_empty());
     let (kept, owners) = (listed_of(api, &viewer, &name), listed_of(api, owner, &name));
     s.ok(
@@ -352,9 +380,8 @@ fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     );
 
     // an invalid listed is refused at deploy, and what was installed stands
-    let bad = LISTED_JSON.replacen(r#""kinds":["note"]"#, r#""kinds":["a note"]"#, 1);
-    s.commit(&c, &[("fragment.json", Some(bad.as_bytes()))]);
-    s.deploy(&c);
+    let bad = tightened.replacen(r#""kinds":["note"]"#, r#""kinds":["a note"]"#, 1);
+    redeploy(s, &c, &bad);
     let status = api.status(owner, &name)?;
     s.ok(
         "a listed kind that is no kind is refused at deploy, saying why, and the rows keep what they carried",
@@ -362,15 +389,84 @@ fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         &status.body["code"],
     );
 
-    // a member who leaves takes their listed records from every row
-    let r = api.signed(owner, "DELETE", &format!("/api/f/{name}/members/{agent_id}"), None)?;
-    let left = s.eventually(Duration::from_secs(20), || listed_of(api, owner, &name).iter().all(|r| r.1 != agent_id) && listed_of(api, &viewer, &name).iter().all(|r| r.1 != agent_id));
+    // a person who leaves takes their record from every other row: the
+    // other editor's row is sent again only because of it
+    let r = api.signed(owner, "DELETE", &format!("/api/f/{name}/members/{editor_id}"), None)?;
+    let left = s.eventually(Duration::from_secs(20), || listed_of(api, &viewer, &name).iter().all(|r| r.1 != editor_id));
     s.ok(
-        "a member removed takes their listed records from every row; the editor's note stays",
-        r.status == 200 && left && listed_of(api, owner, &name).iter().any(|r| r.1 == editor_id),
-        json!({ "owner": listed_of(api, owner, &name), "viewer": listed_of(api, &viewer, &name) }),
+        "a person removed takes their listed record from another member's row (the desk's note), which nothing else sends again",
+        r.status == 200 && left,
+        json!({ "other": listed_of(api, &viewer, &name) }),
     );
-    tab.close();
+    // a kind listed no more leaves every row, and is dropped from what the
+    // fragment keeps: listed again, it starts from its next record, never
+    // the old one (which only the drop keeps from coming back)
+    let ends = |json: &str| json.replacen(r#""kinds":["turn.start","turn.asked","turn.end"]"#, r#""kinds":["turn.start","turn.asked"]"#, 1);
+    redeploy(s, &c, &ends(&tightened));
+    let dropped = s.eventually(Duration::from_secs(20), || listed_of(api, owner, &name).iter().all(|r| r.0 != "work"));
+    redeploy(s, &c, &tightened);
+    let relisted = s.eventually(Duration::from_secs(20), || {
+        let r = api.signed(owner, "GET", &format!("/api/f/{name}/channels"), None).ok();
+        r.is_some_and(|r| r.body["channels"].as_array().is_some_and(|l| l.iter().any(|c| c["name"] == "work" && c["listed"]["kinds"].as_array().is_some_and(|k| k.len() == 3))))
+    });
+    // the install sent every row again: an old turn.end kept would show now
+    std::thread::sleep(Duration::from_millis(limits::LISTED_MIN_GAP_MS as u64));
+    let after = listed_of(api, owner, &name);
+    let next = work("n1", json!({ "kind": "turn.end", "turn": "n1" }))?;
+    let fresh = s.eventually(Duration::from_secs(20), || listed_of(api, owner, &name).iter().any(|r| r.0 == "work" && r.2 == "turn.end"));
+    s.ok(
+        "a kind listed no more leaves every row; listed again, the old record does not come back, and the next one shows",
+        dropped && relisted && after.iter().all(|r| r.0 != "work") && next.status == 200 && fresh,
+        json!({ "afterRelisting": after, "now": listed_of(api, owner, &name) }),
+    );
+
+    // a listing dropped, and a channel removed, take theirs from every row
+    let mine = post(api, owner, &name, "desk", "d2", json!({ "kind": "note", "text": "mine" }))?;
+    let noted = s.eventually(Duration::from_secs(10), || listed_of(api, owner, &name).iter().any(|r| r.0 == "desk"));
+    anyhow::ensure!(mine.status == 200 && noted, "the owner's note: {mine}");
+    let without_desk = r#"{"channels":{"work":{"read":"editor","post":"editor","from":"agent","listed":{"kinds":["turn.start","turn.asked","turn.end"],"fields":["asks"]}}}}"#;
+    redeploy(s, &c, without_desk);
+    let no_desk = s.eventually(Duration::from_secs(20), || !listed_of(api, owner, &name).iter().any(|r| r.0 == "desk"));
+    s.ok("a deploy that removes a listed channel takes its records from every row", no_desk && listed_of(api, owner, &name).iter().any(|r| r.0 == "work"), json!(listed_of(api, owner, &name)));
+    redeploy(s, &c, r#"{"channels":{"work":{"read":"editor","post":"editor","from":"agent"}}}"#);
+    let none = s.eventually(Duration::from_secs(20), || listed_of(api, owner, &name).is_empty() && listed_of(api, &viewer, &name).is_empty());
+    s.ok("one that drops a channel's listed (the channel kept) takes its records from every row", none, json!([listed_of(api, owner, &name), listed_of(api, &viewer, &name)]));
+    listed_posters(s, api)
+}
+
+/// A listed channel keeps its `LISTED_POSTERS_MAX` posters seen latest.
+/// Goal: past the bound the poster seen longest ago goes, and one who
+/// posts the same again (moving nothing) still counts as seen. Method: one
+/// more agent member than the bound, each posting once in turn, the first
+/// posting the same again before the last.
+fn listed_posters(s: &mut Suite, api: &Api) -> Result<()> {
+    let owner = api.person()?;
+    let name = s.named(api, &owner, "listed-many")?;
+    let c = s.create(api, &owner, &name)?;
+    s.commit(&c, &[("fragment.json", Some(br#"{"channels":{"wall":{"post":"editor","listed":{"kinds":["mood"]}}}}"#))]);
+    s.deploy(&c);
+    let mut posters = vec![];
+    for _ in 0..=limits::LISTED_POSTERS_MAX {
+        let (keys, id) = super::delegation::agent_of(api, &owner)?;
+        let r = api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{id}"), Some(&json!({ "role": "editor" })))?;
+        anyhow::ensure!(r.status == 200, "adding a poster: {r}");
+        posters.push((keys, id));
+    }
+    let mood = |i: usize, id: &str| post(api, &posters[i].0, &name, "wall", id, json!({ "kind": "mood", "n": i }));
+    for i in 0..limits::LISTED_POSTERS_MAX {
+        let r = mood(i, "m1")?;
+        anyhow::ensure!(r.status == 200, "poster {i}: {r}");
+    }
+    let again = mood(0, "m2")?;
+    let last = mood(limits::LISTED_POSTERS_MAX, "m1")?;
+    let ids = |l: Vec<(String, String, String, Value)>| l.into_iter().map(|r| r.1).collect::<Vec<_>>();
+    let full = s.eventually(Duration::from_secs(20), || ids(listed_of(api, &owner, &name)).contains(&posters[limits::LISTED_POSTERS_MAX].1));
+    let shown = ids(listed_of(api, &owner, &name));
+    s.ok(
+        &format!("past {} posters the one seen longest ago goes: the second (the first posted the same again, and stays)", limits::LISTED_POSTERS_MAX),
+        again.status == 200 && last.status == 200 && full && shown.len() == limits::LISTED_POSTERS_MAX && shown.contains(&posters[0].1) && !shown.contains(&posters[1].1),
+        json!({ "shown": shown.len(), "first": shown.contains(&posters[0].1), "second": shown.contains(&posters[1].1) }),
+    );
     Ok(())
 }
 

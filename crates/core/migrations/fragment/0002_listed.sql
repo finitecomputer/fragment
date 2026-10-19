@@ -5,4 +5,4 @@
 CREATE TABLE IF NOT EXISTS code_channel_listed (channel TEXT PRIMARY KEY, kinds TEXT NOT NULL, fields TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS listed (
   channel TEXT NOT NULL, principal TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, kind TEXT NOT NULL,
-  fields TEXT NOT NULL, PRIMARY KEY (channel, principal));
+  fields TEXT NOT NULL, last INTEGER NOT NULL, PRIMARY KEY (channel, principal));

@@ -165,6 +165,11 @@ pub mod limits {
     /// than the one sent, so a list tells a poster still at it from one
     /// gone quiet to within a minute.
     pub const LISTED_FRESH_MS: i64 = 60_000;
+    /// A fragment sends its listed records' rows at most once in this
+    /// long: a move within it waits for its end and goes with every move
+    /// till then, so an agent's turn costs a few fan-outs to its members'
+    /// lists, not one a record.
+    pub const LISTED_MIN_GAP_MS: i64 = 3_000;
     /// Fragments `GET /api/access` asks for their members and invites, at
     /// most: those someone else is in or invited to, the first listed
     /// first. Past it, a fragment's row has its counts alone (its share

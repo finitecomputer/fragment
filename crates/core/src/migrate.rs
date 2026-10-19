@@ -568,7 +568,8 @@ mod tests {
     /// Principal's: an object at version 1 with rows migrates to 2, keeps
     /// its rows, and holds the tables the cell writes listed records to,
     /// as it writes them (cell/src/listed.rs, principal.rs); the restart
-    /// after runs nothing. Method: each class's baseline alone, a row
+    /// after runs nothing; a delete's or a wipe's `remake` empties them.
+    /// Method: each class's baseline alone, a row
     /// written, then its class as declared, and a listed record written
     /// and read back.
     #[test]
@@ -580,9 +581,12 @@ mod tests {
         assert_eq!(migrated(&fragment, &FRAGMENT, 2), Ok(Ran::Migrated { from: 1, version: 2 }));
         assert_eq!(fragment.count("SELECT COUNT(*) FROM members WHERE principal = 'npub1a'"), 1, "its member stays");
         fragment.exec("INSERT INTO code_channel_listed (channel, kinds, fields) VALUES ('work', '[\"turn.start\"]', '[\"asks\"]')").expect("a channel's listed");
-        fragment.exec("INSERT INTO listed (channel, principal, seq, at, kind, fields) VALUES ('work', 'npub1a', 3, 9, 'turn.start', '{}')").expect("a member's listed record");
+        fragment.exec("INSERT INTO listed (channel, principal, seq, at, kind, fields, last) VALUES ('work', 'npub1a', 3, 9, 'turn.start', '{}', 3)").expect("a member's listed record");
         assert_eq!(fragment.count("SELECT COUNT(*) FROM listed l JOIN code_channel_listed c ON c.channel = l.channel WHERE l.principal = 'npub1a'"), 1);
         assert_eq!(migrated(&fragment, &FRAGMENT, 3), Ok(Ran::Current { version: 2 }), "a restart runs nothing");
+        let remade = remake(&fragment, &FRAGMENT).expect("a delete's remake");
+        assert!(remade.contains(&"listed".to_string()) && remade.contains(&"code_channel_listed".to_string()), "a delete empties step 2's tables too: {remade:?}");
+        assert_eq!(fragment.count("SELECT COUNT(*) FROM listed") + fragment.count("SELECT COUNT(*) FROM code_channel_listed"), 0);
 
         let list = Lite::new();
         let baseline = Class { steps: &[step!("baseline", "principal/0001_baseline.sql")], ..PRINCIPAL };
@@ -593,6 +597,9 @@ mod tests {
         list.exec("INSERT INTO listed (fragment, records) VALUES ('chat--k3x9', '[]')").expect("a row's listed records");
         assert_eq!(list.count("SELECT COUNT(*) FROM memberships m JOIN listed l ON l.fragment = m.fragment"), 1, "its row stays, beside its listed records");
         assert_eq!(migrated(&list, &PRINCIPAL, 3), Ok(Ran::Current { version: 2 }));
+        let remade = remake(&list, &PRINCIPAL).expect("a wipe's remake");
+        assert!(remade.contains(&"listed".to_string()), "a wipe empties step 2's table too: {remade:?}");
+        assert_eq!(list.count("SELECT COUNT(*) FROM listed"), 0);
     }
 
     /// Goal: #369's `fenced` columns (its `columns.rs` adds them if missing

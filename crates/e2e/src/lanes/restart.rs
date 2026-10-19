@@ -203,13 +203,16 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         access_after == access_before,
         format!("{access_before} → {access_after}"),
     );
+    // the row a member added now gets is made from the fragment's own copy:
+    // only a copy that survived the restart carries the agent's turn
     let listed_after = posts::listed_of(&api, &owner, &busy);
-    let r = api.signed(&owner, "DELETE", &format!("/api/f/{busy}/members/{hand_id}"), None)?;
-    let taken = s.eventually(Duration::from_secs(20), || posts::listed_of(&api, &owner, &busy).is_empty());
+    let newcomer = api.person()?;
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{busy}/members/{}", api.identity(&newcomer)?), Some(&json!({ "role": "viewer" })))?;
+    let theirs = s.eventually(Duration::from_secs(20), || posts::listed_of(&api, &newcomer, &busy) == listed_after);
     s.ok(
-        "after a restart a list keeps what an agent was doing, and the fragment its own copy: the agent's leaving takes its record from the row",
-        listed_before.as_ref() == Some(&listed_after) && r.status == 200 && taken,
-        json!({ "before": listed_before, "after": listed_after, "removed": r.status }),
+        "after a restart a list keeps what an agent was doing, and the fragment its own copy: a member added after it is sent the agent's turn",
+        listed_before.as_ref() == Some(&listed_after) && r.status == 200 && theirs,
+        json!({ "before": listed_before, "after": listed_after, "newcomer": posts::listed_of(&api, &newcomer, &busy) }),
     );
     s.ai.say_next(&["A small piece of something larger."]);
     api.signed(&owner, "POST", &format!("/api/f/{tooled}/replay"), Some(&json!({ "run": tools_held["id"] })))?;

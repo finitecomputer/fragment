@@ -69,6 +69,20 @@ pub fn moves(kept: Option<&Kept>, shown: &Shown, seq: i64, at: i64) -> bool {
     kept.shown != *shown || at - kept.at >= limits::LISTED_FRESH_MS
 }
 
+/// What a kept record shows under `decl` as installed now: nothing when
+/// its kind is listed no more, and only the fields listed still. The copy
+/// may be older than the install (its rebuild failed, or has not run), so
+/// every row is made through this.
+pub fn still(decl: &ListedDecl, kept: Shown) -> Option<Shown> {
+    if !decl.kinds.contains(&kept.kind) {
+        return None;
+    }
+    let Shown { kind, mut fields } = kept;
+    fields.retain(|field, _| decl.fields.contains(field));
+    assert!(fields.len() <= decl.fields.len(), "a record shows the fields listed, at most");
+    Some(Shown { kind, fields })
+}
+
 /// The listed records a row at `role` carries: of `all` (each with the
 /// role that may read its channel, as the channel's one read check
 /// answered, and the newest first), those its role may read, at most
@@ -135,6 +149,19 @@ mod tests {
         assert!(moves(Some(&kept), &shown_of("turn.start", &[("turn", "t2")]), 5, 1001), "another field is sent at once");
         assert!(!moves(Some(&kept), &shown_of("turn.end", &[]), 4, 9_999_999), "the record kept, again, sends nothing");
         assert!(!moves(Some(&kept), &shown_of("turn.end", &[]), 3, 9_999_999), "an older record never undoes a newer one");
+    }
+
+    /// Goal: a kept record older than the install shows only what is
+    /// listed now. Method: one kept record under declarations that drop its
+    /// kind, a field, or neither.
+    #[test]
+    fn a_kept_record_shows_only_what_is_listed_still() {
+        let kept = shown_of("turn.asked", &[("asks", "npub1p"), ("turn", "t1")]);
+        assert_eq!(still(&decl(), kept.clone()), Some(kept.clone()), "listed as it was: the same");
+        let fewer = ListedDecl { kinds: vec!["turn.asked".into()], fields: vec!["asks".into()] };
+        assert_eq!(still(&fewer, kept.clone()), Some(shown_of("turn.asked", &[("asks", "npub1p")])), "a field listed no more is dropped");
+        let other = ListedDecl { kinds: vec!["turn.end".into()], fields: vec!["asks".into(), "turn".into()] };
+        assert_eq!(still(&other, kept), None, "a kind listed no more shows nothing");
     }
 
     /// Goal: a row carries only the records of channels its role may read,

@@ -2820,9 +2820,11 @@ it already holds, and polls no fragment. The platform never reads what a
 kind means: a chat's `work` lists its turns, and the shell reads them as
 working or waiting (docs/chat-records.md).
 
-- **What is listed.** A record's kind is its body's `kind`, a string (a
-  post's record kind is always `message`); one of a kind its channel
-  lists is a listed record, as `{channel, principal, kind, fields?, at}`
+- **What is listed.** A record's kind is its body's `kind`, a string,
+  and only that: a post's record kind is always `message`, and a record
+  an app's mutation or job publishes under a kind of its own
+  (`call.publish(channel, body, kind)`) is listed only when its body
+  names the kind too. One of a kind its channel lists is a listed record, as `{channel, principal, kind, fields?, at}`
   (`ListedRecord`): its poster, its body's listed fields that are
   strings, each cut to 128 characters (`LISTED_VALUE_MAX_CHARS`; a field
   absent or of another type is left out), and when it was posted. Only a
@@ -2834,18 +2836,25 @@ working or waiting (docs/chat-records.md).
   the same a minute after the one sent (`LISTED_FRESH_MS`), so its `at`
   is never more than a minute behind while its poster keeps at it.
   Back-to-back records that show nothing new send nothing, and a post
-  replayed appends nothing, so it sends nothing. The person's open pages
-  are told (`/api/fragments/watch`'s `changed`).
-- **The fence.** Each row carries only the listed records of the
-  channels its role may read (the channel's one read check, the same
-  that guards its records), so a member who may not read a channel never
-  sees what it lists. A role changed, a member removed, and a deploy that
-  changes a channel's `read` or `listed` each send the rows again: the
-  rows that may no longer read it lose it, and a member who leaves takes
-  their own listed records with them. An agent's list read `for` someone
-  carries none of theirs. A deploy that changes what a channel lists
-  makes the records kept again from the channel's records, so a chat
-  installed from a newer template shows what its agents are doing now.
+  replayed appends nothing, so it sends nothing. A fragment sends these
+  rows at most once in 3 s (`LISTED_MIN_GAP_MS`): a move within that
+  waits for its end, from the fragment's alarm, and goes with every move
+  till then, so an agent's turn costs its members' lists a few sends, not
+  one a record. The person's open pages are told
+  (`/api/fragments/watch`'s `changed`). A channel keeps its 16 posters
+  seen latest: a record that shows nothing new still counts as seen.
+- **The fence.** Each row is made as it is sent, from what is installed
+  then: only the channels that list now, the kinds and fields they list
+  now, and only those the row's role may read (the channel's one read
+  check, the same that guards its records), so a member who may not read
+  a channel never sees what it lists. A role changed, a member removed,
+  and a deploy that changes a channel's `read` or `listed` (or removes
+  the channel) each send the rows again: the rows that may no longer
+  read it lose it, and a member who leaves takes their own listed
+  records with them. An agent's list read `for` someone carries none of
+  theirs. What is listed no more is dropped from what the fragment keeps,
+  and history is never read back: a kind listed later (a chat installed
+  from a newer template) starts from its next record.
 
 ## Computers (docs/computers.md, phase 4)
 
