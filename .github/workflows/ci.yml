@@ -10,25 +10,33 @@
 # with its own build and node; the `e2e` job is green when every shard is.
 #
 # Caches are restored on every run and saved only from master's pushes (a
-# PR reads master's). Rust's are Swatinem/rust-cache's, keyed by the job,
-# rustc, and every Cargo.toml and Cargo.lock, and saved at the job's end
-# with only the dependencies' builds: a checkout's fresh mtimes rebuild the
-# workspace's own crates anyway. It is given the target directories by name
-# (`cache-targets: false`), not `target` whole: its cleaning would leave
-# target/tools an empty tree, which xtask would take for the pinned Node.
-# The pinned Node and the JavaScript caches are actions/cache's, each key
-# naming what it holds below, saved right after the step that fills it.
+# PR reads master's, and so does production's). Rust's are
+# Swatinem/rust-cache's, keyed by the job (the e2e's by a key it shares
+# with `deploy`, which restores it), rustc, and every Cargo.toml and
+# Cargo.lock, and saved at the job's end with only the dependencies'
+# builds: a checkout's fresh mtimes rebuild the workspace's own crates
+# anyway. It is given the target directories by name (`cache-targets:
+# false`), not `target` whole: its cleaning would leave target/tools an
+# empty tree, which xtask would take for the pinned Node. The pinned Node
+# and the JavaScript caches are actions/cache's, each key naming what it
+# holds below, saved right after the step that fills it.
+#
+# A green push deploys (`deploy`, below): master's to the preview,
+# production's to production.
 name: ci
 
 on:
   push:
-    branches: [master]
+    branches: [master, production]
   pull_request:
   workflow_dispatch:
 
+# a pull request's newer run cancels its older one; a push's run is never
+# cancelled, as it may be deploying: a newer push's waits for it (and
+# replaces one already waiting)
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
@@ -85,10 +93,11 @@ jobs:
       # (target/release), xtask (target/debug), and the cell's wasm32 builds;
       # worker-build itself (~/.cargo/bin; its version is in the key) and the
       # tools it fetches (wasm-bindgen at the lockfile's version, wasm-opt,
-      # esbuild). The first shard saves it, even from a red run.
+      # esbuild). The first shard saves it, even from a red run; `deploy`
+      # restores it (its key shared, not the job's: the same inputs there).
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: worker-build-${{ env.WORKER_BUILD_VERSION }}
+          shared-key: e2e-build-worker-build-${{ env.WORKER_BUILD_VERSION }}
           workspaces: |
             . -> target
             cell -> target
@@ -157,4 +166,110 @@ jobs:
     timeout-minutes: 5
     steps:
       - run: test "${{ needs.e2e-shard.result }}" = success || { echo "a shard's job failed (${{ needs.e2e-shard.result }}); its log says where"; exit 1; }
+
+  # Continuous deployment, on a green push: master's to the preview
+  # (`--branch preview`), production's to production. Only Paul updates
+  # `production` (a protected branch): his push, or the pull request he
+  # merges into it, is the approval. Each deploys from a GitHub environment
+  # of its name, `preview` or `production`, which the repo's settings let
+  # only its branch use, and which holds the variable DEPLOY_HOST (its
+  # platform's host) and the secrets DEPLOY_CONFIG (the whole deploy
+  # config, JSONC: names and paths, a secret only so the public repo's
+  # logs never show it; in base64, below), CLOUDFLARE_API_TOKEN
+  # (wrangler's, and the DNS token), the preview's PREVIEW_TEST_SECRET,
+  # and, optional, CLOUDFLARE_ACCOUNT_ID (below). Every computer image is
+  # pinned by digest (`--pinned-only`): a runner builds none
+  # (xtask/src/deploy.rs, `pinned_only`, says why).
+  deploy:
+    needs: [check, e2e]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/production')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    environment: ${{ github.ref_name == 'production' && 'production' || 'preview' }}
+    # one deploy at a time to each, never cancelled mid-way
+    concurrency:
+      group: deploy-${{ github.ref_name }}
+      cancel-in-progress: false
+    env:
+      # xtask/src/build.rs, WORKER_BUILD_VERSION
+      WORKER_BUILD_VERSION: 0.8.5
+    steps:
+      # the deploy reads its commit, and needs no git credentials
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      # the e2e's cache, restored and never saved here: a deploy builds what
+      # its build does (xtask in target/debug, the cell's wasm32 builds,
+      # worker-build and its tools). Every input but save-if is the e2e
+      # shards' own, as the paths are part of the cache's version.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: e2e-build-worker-build-${{ env.WORKER_BUILD_VERSION }}
+          workspaces: |
+            . -> target
+            cell -> target
+          cache-targets: false
+          cache-directories: |
+            target/debug
+            target/release
+            cell/target
+            ~/.cache/worker-build
+          save-if: false
+      - uses: actions/cache/restore@v4
+        with:
+          path: target/tools
+          key: node-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs') }}
+      - run: worker-build --version | grep -qF "$WORKER_BUILD_VERSION" || cargo install worker-build --version "$WORKER_BUILD_VERSION" --locked
+      # the config, and the two files it reads by path, at the paths a CI
+      # config names (deploy/example.jsonc): the token, its DNS token too,
+      # and the preview's test secret, each 0600. printf is the shell's
+      # own, so no value is ever a process's argument, and nothing here
+      # echoes one. The config is set as one line of base64 (`base64 -w0 <
+      # <file> | gh secret set DEPLOY_CONFIG --env <environment>`): the
+      # runner masks each line of a secret too, and a config's lines of `{`
+      # or `}` alone would mask every brace in the job's logs.
+      # CLOUDFLARE_ACCOUNT_ID is named only to be masked: the runner masks
+      # every secret a job names, wherever it appears in the job's logs
+      # (wrangler's and xtask's registry paths and URLs); unset, it is empty
+      # and masks nothing.
+      - env:
+          DEPLOY_CONFIG: ${{ secrets.DEPLOY_CONFIG }}
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          PREVIEW_TEST_SECRET: ${{ secrets.PREVIEW_TEST_SECRET }}
+          CLOUDFLARE_ACCOUNT_ID_MASKED: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          umask 077
+          for v in DEPLOY_CONFIG DEPLOY_HOST CLOUDFLARE_API_TOKEN; do
+            test -n "${!v}" || { echo "the environment of $GITHUB_REF_NAME's deploy has no $v"; exit 1; }
+          done
+          if ! printf '%s' "$DEPLOY_CONFIG" | base64 -d > "$RUNNER_TEMP/deploy.jsonc" || ! test -s "$RUNNER_TEMP/deploy.jsonc"; then
+            echo "the environment of $GITHUB_REF_NAME's deploy has a DEPLOY_CONFIG that is no config in base64: set it with base64 -w0 < <file> | gh secret set DEPLOY_CONFIG --env <environment>"
+            exit 1
+          fi
+          mkdir -p ~/.config/fragment/secrets
+          printf '%s\n' "$CLOUDFLARE_API_TOKEN" > ~/.config/fragment/secrets/cloudflare-api-token
+          if [ -n "$PREVIEW_TEST_SECRET" ]; then printf '%s\n' "$PREVIEW_TEST_SECRET" > ~/.config/fragment/secrets/preview-test-secret; fi
+      - run: cargo xtask deploy --config "$RUNNER_TEMP/deploy.jsonc" --pinned-only ${{ github.ref_name == 'master' && '--branch preview' || '' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      # the deployment answers with this commit: /healthz's x-fragment-deploy
+      # is the deploy's `git rev-parse --short=12 HEAD`. A route can 522 for
+      # seconds after a deploy, so it is asked every 10 s, twelve times.
+      - env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+        run: |
+          want=${GITHUB_SHA::12}
+          for _ in $(seq 12); do
+            got=$(curl -sI --max-time 10 "https://$DEPLOY_HOST/healthz" | tr -d '\r' | sed -n 's/^x-fragment-deploy: *//Ip')
+            case "$got" in "$want"*) echo "https://$DEPLOY_HOST answers with $got"; exit 0 ;; esac
+            sleep 10
+          done
+          echo "https://$DEPLOY_HOST/healthz answers with ${got:-no x-fragment-deploy}, not $want"
+          exit 1
 
