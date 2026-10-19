@@ -585,6 +585,12 @@ iframe[data-blocked] { display: none; }
 .menu.agent-menu button { min-height: 34px; border-radius: 8px; font-size: 13px; }
 .sidebar-agent .title { flex: 1; text-align: left; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-agent-mark { display: flex; flex: none; }
+/* its name, and under it what it is doing, as its chats' rows in the list say */
+.sidebar-agent-named { display: flex; flex: 1; flex-direction: column; justify-content: center; min-width: 0; }
+.sidebar-agent-named .title { flex: none; }
+.sidebar-agent .agent-doing { font-size: 11px; font-weight: 600; line-height: 14px; text-align: left; color: var(--text-tertiary); }
+.sidebar-agent .agent-doing.working { color: var(--success); }
+.sidebar-agent .agent-doing.you { color: var(--accent-blue); }
 .sidebar-agent-mark .agent-avatar { width: 26px; height: 26px; }
 .sidebar-new-chat { --edge-light: 0; width: 32px; height: 32px; border: 1px solid transparent; border-radius: 50%; background: transparent; }
 .sidebar-new-chat:hover { background: transparent; }

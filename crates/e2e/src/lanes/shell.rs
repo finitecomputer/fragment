@@ -935,6 +935,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("at a desktop's width the sidebar shows beside the chat", sidebar, "");
     s.ok("the chat frame's accessible name cannot show a tooltip over its contents; the chat's title carries it", b.eval(&page, "(() => { const f = [...document.querySelectorAll('#frames iframe')].find(f => !f.hidden); const n = document.getElementById('chat-title'); return !!f && !f.hasAttribute('title') && f.getAttribute('aria-label') === n.textContent && n.title === n.textContent; })()")? == true, "");
     let _ = b.screenshot(&page, &shots.join("desktop-chat.png"));
+    doing_ui(s, api, &mut b, &page, &session, &chat, &shots)?;
 
     // another agent of theirs, made elsewhere (the CLI, or an agent): the
     // shell has no list of agents (one agent: Paul, 2026-10-13), so it
@@ -2054,6 +2055,56 @@ fn said_hello(s: &Suite, api: &Api, session: &str, chat: &str, agent: &str, wait
         !seen.is_empty() && seen.iter().all(|r| r["principal"] == agent) && seen.iter().any(|r| r["body"]["text"].as_str().is_some_and(|t| t.starts_with("echo: [your routine] ")))
     });
     (hello, seen.iter().map(|r| json!({ "principal": r["principal"], "body": r["body"] })).collect())
+}
+
+/// What their agent is doing, from its chats' rows in the list (docs/api.md,
+/// "Listed records"; cell/shell/shell.js `doingChats`). Goal: the agent's
+/// row and its menu say it live, with no reload and no read of `work`, and
+/// say nothing once it is done. Method: the stub's agent in the first chat,
+/// asked for a card (`approve`) and then a question in words (`ask-me`),
+/// each answered as the person, the row watched in Chrome throughout.
+fn doing_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, chat: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let agent_wait = std::time::Duration::from_secs(120);
+    let doing = "(document.querySelector('#sidebar-agent .agent-doing')?.textContent ?? null)";
+    let say = |id: &str, body: Value| shell(api, session, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": id, "body": body })), &[]);
+    let quiet = b.until(page, &format!("{doing} === null"), agent_wait);
+    anyhow::ensure!(quiet, "the agent's row says it is doing something before it is asked anything: {}", b.eval(page, doing)?);
+
+    // a card waits for the person: its owner answers it
+    let r = say("doing-card", json!({ "text": "approve this, please" }))?;
+    anyhow::ensure!(r.status == 200, "asking for a card: {r}");
+    let waiting = b.until(page, &format!("{doing} === 'Waiting for you'"), agent_wait);
+    let _ = b.screenshot(page, &shots.join("desktop-agent-waiting.png"));
+    let label = b.eval(page, "document.getElementById('sidebar-agent')?.getAttribute('aria-label') ?? null")?;
+    b.click(page, "#sidebar-agent")?;
+    let menu = format!("[...document.querySelectorAll('#menu button')].some((b) => b.textContent === {})", js(&format!("Waiting for you in {FIRST_CHAT}")));
+    let listed = b.until(page, &menu, wait);
+    b.press(page, "Escape", false)?;
+    let work = shell(api, session, "GET", &format!("/api/f/{chat}/channels/work?after=0&limit=1000"), None, &[])?;
+    let card = work.body["records"].as_array().into_iter().flatten().rev().find(|r| r["body"]["kind"] == "turn.prompt").cloned().unwrap_or_default();
+    let prompt = card["body"]["prompt"].as_str().unwrap_or("").to_string();
+    let answer = json!({ "kind": "prompt_response", "prompt": prompt, "option": "once", "agent": card["principal"], "turn": card["body"]["turn"] });
+    let r = say(&format!("pr:{prompt}"), answer)?;
+    let cleared = r.status == 200 && b.until(page, &format!("{doing} === null"), agent_wait);
+    s.ok(
+        "while its card waits, their agent's row says \"Waiting for you\" with no reload (and says so to a screen reader), its menu names the chat, and once it is answered the row says nothing",
+        waiting && label.as_str().is_some_and(|l| l.contains("waiting for you")) && listed && cleared,
+        json!({ "waiting": waiting, "label": label, "menu": listed, "prompt": prompt, "cleared": cleared, "row": b.eval(page, doing)? }),
+    );
+
+    // a question in words waits on whoever asked it: the person
+    let r = say("doing-ask", json!({ "text": "ask-me a name" }))?;
+    anyhow::ensure!(r.status == 200, "asking for a question: {r}");
+    let asked = b.until(page, &format!("{doing} === 'Waiting for you'"), agent_wait);
+    let r = say("doing-told", json!({ "text": "Basil" }))?;
+    let told = r.status == 200 && b.until(page, &format!("{doing} === null"), agent_wait);
+    s.ok(
+        "a question it asks the person says \"Waiting for you\" too, until their next message answers it",
+        asked && told,
+        json!({ "asked": asked, "told": told, "row": b.eval(page, doing)? }),
+    );
+    Ok(())
 }
 
 /// The replies on a chat's `chat` from `agent` whose text holds `said`.

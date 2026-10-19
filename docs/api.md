@@ -2570,7 +2570,7 @@ Its sidebar is the person's list, one read (Skyler, 2026-10-12; Paul,
 2026-10-13): their **one agent** above (their first, the one the first
 run makes: the first their computer took, as its view lists its agents in
 the order it took them; a menu of New chat, Rename, its profile and its
-screen), then their chats (kind `chat`) as
+screen), saying what it is doing (below), then their chats (kind `chat`) as
 one flat list, newest first (by the row's `previewAt`; one with nothing
 said yet above them all), less the ones they archived (`PUT
 /api/fragments/{name}/archived`, above). Its apps (kind `app` or `brain`)
@@ -2610,6 +2610,22 @@ row the same as before keeps its element). Only the apps whose rows the
 change touched have their card read again. A socket that closes is opened again after a
 jittered wait (1 s, doubling to 30 s), and each opening reads the list
 again, for what changed while it was shut.
+**What their agent is doing** is its chats' rows' `listed` (Listed
+records, below: each agent's newest record of a turn's kind on a chat's
+`work`), so it is live on the same socket and reads no chat. The shell
+reads a turn as the chat's page does: `turn.start`, `turn.step` or
+`turn.prompt.closed` is Working, an open card (`turn.prompt`) is Waiting
+for you (its owner answers its cards), a question (`turn.asked`) is
+Waiting for you when it `asks` them and Waiting when it asks someone else,
+and `turn.end` is nothing. The agent's row says the most pressing (for
+you, then waiting, then working), and its menu names up to five chats
+where it is so ("Waiting for you in Garden talk"), each opening it. It
+says nothing while their computer is not awake (its turns stop with it)
+or the page's socket is shut (it would not hear the change), nor of a
+record past the bridge's own bound on a turn that says nothing (15
+minutes working, an hour waiting, each a minute more for the list's own
+lag). A message waiting for its turn has no record yet, so queued is not
+said.
 A chat's row shows its `unread` as a count ("99+" at the list's bound),
 but the open chat's: the chat shown in the middle column, while the page
 is on screen, is marked seen (`PUT /api/fragments/{name}/seen`) as it
