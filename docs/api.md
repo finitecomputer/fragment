@@ -2187,6 +2187,13 @@ data and never a page of the fragment's: its HTML is sandboxed the same
 way (its `GET`, its `HEAD`, a blessed template's data); its other types
 are not (a PDF must open in the browser's viewer).
 
+The platform's own host answers the same way (lib.rs `platform_origin`):
+every answer, a page, a redirect, a callback's, the API's JSON or an
+error, carries `X-Content-Type-Options: nosniff`, and `Referrer-Policy:
+same-origin` unless it names its own (sign-in's hand-offs send none; the
+shell's pages say theirs). A computer's origin passes its guest's answers
+as they are: its pages are the image's own.
+
 `__live` and `__watch` are also served in place at `/f/<name>/…` for the
 CLI. A socket has no CORS, and every fragment's origin is one site with
 the others, so a page on another fragment's could open one with this

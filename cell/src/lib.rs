@@ -1009,7 +1009,7 @@ fn moved(to: &str) -> CellResult<Response> {
     Ok(resp)
 }
 
-pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellResult<Response> {
+pub(crate) async fn route(req: Request, env: &Env, ctx: &Context) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     // as its client named it: signatures, links, and cookies name the https URL
     let url = fragment_nip98::arrived_url(req.url()?, req.headers().get("x-forwarded-proto")?.as_deref());
@@ -1030,6 +1030,35 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
         };
         return computer::serve_host(req, env, &url, &id, signer).await;
     }
+    // everything else is the platform's own answer, an error's included,
+    // with the platform's headers (`platform_origin`)
+    let answered = match platform_answer(req, env, ctx, cfg, url).await {
+        Ok(resp) => resp,
+        Err(e) => e.response()?,
+    };
+    platform_origin(answered)
+}
+
+/// The headers every answer of the platform's own host carries (a page,
+/// sign-in's and `/cli`'s, a callback's, the API's JSON, a refusal): no
+/// type sniffing, and no referrer beyond the origin unless the answer chose
+/// its own (sign-in's hand-offs send none; the shell's pages say theirs). A
+/// computer's origin is left as its guest answers: its pages are the
+/// image's own.
+fn platform_origin(resp: Response) -> CellResult<Response> {
+    let h = resp.headers().clone();
+    h.set("x-content-type-options", "nosniff")?;
+    if !h.has("referrer-policy")? {
+        h.set("referrer-policy", "same-origin")?;
+    }
+    Ok(resp.with_headers(h))
+}
+
+/// The platform's own routes, on its host (and a name under the suffix
+/// that is no fragment's).
+async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'static Config, url: Url) -> CellResult<Response> {
+    let path = url.path().to_string();
+    let host = url.host_str().filter(|h| !cfg.is_platform_host(h));
     // the suffix's own name, with the platform elsewhere, is the platform's
     if host.is_some_and(|h| cfg.is_suffix(h)) {
         return moved(&format!("{}{}", cfg.platform(), path_and_query(&url)));
