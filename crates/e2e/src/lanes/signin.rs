@@ -518,6 +518,17 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         &page,
     );
     s.ok("and no page may frame it: a fragment's page could lay its button under a click", unframed(&page), framing(&page));
+    // the platform's own answers carry its headers (lib.rs `platform_origin`):
+    // no sniffing, and a referrer no farther than the origin unless the answer
+    // chose its own (sign-in's hand-offs send none)
+    let platform_guarded = |r: &crate::api::Reply| r.header("x-content-type-options") == "nosniff" && ["same-origin", "no-referrer"].contains(&r.header("referrer-policy").as_str());
+    let callback = api.unsigned("GET", &format!("/api/connections/{}/callback?code=x&state=nope", crate::SWAP_ROUTER), None)?;
+    let refusal = api.unsigned("GET", "/api/fragments", None)?;
+    s.ok(
+        "the platform's answers carry nosniff and a referrer policy: /cli's page and its sign-in redirect, an own-key callback's refusal, the API's error",
+        platform_guarded(&page) && platform_guarded(&r) && platform_guarded(&callback) && refusal.status == 401 && platform_guarded(&refusal),
+        json!({ "cli": [page.header("x-content-type-options"), page.header("referrer-policy")], "redirect": [r.header("x-content-type-options"), r.header("referrer-policy")], "callback": [callback.status, callback.header("x-content-type-options"), callback.header("referrer-policy")], "api": [refusal.header("x-content-type-options"), refusal.header("referrer-policy")] }),
+    );
     let linked = with_session(api, "GET", &format!("/cli?key={cli_npub}&code={}&proof=x", url_enc(&code)), &person)?;
     s.ok(
         "no link fills it in: a key and a code in its address show the same empty page",
