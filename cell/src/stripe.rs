@@ -46,16 +46,29 @@ pub async fn client(env: &Env, cfg: &Config) -> CellResult<Stripe> {
 
 impl Stripe {
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> CellResult<T> {
-        self.send(Method::Get, path, None, None).await
+        Self::parse(path, self.send(Method::Get, path, None, None).await?)
+    }
+
+    /// A DELETE: Stripe's take no idempotency key, each being idempotent of
+    /// itself (a subscription's cancel; its caller fetches it first).
+    pub async fn delete<T: DeserializeOwned>(&self, path: &str) -> CellResult<T> {
+        Self::parse(path, self.send(Method::Delete, path, None, None).await?)
     }
 
     /// A POST, once by `idempotency` (Stripe answers a repeat as the first).
     pub async fn post<T: DeserializeOwned>(&self, path: &str, form: &Form, idempotency: &str) -> CellResult<T> {
         assert!(!idempotency.is_empty() && idempotency.len() <= 255, "an idempotency key is 1-255 characters");
-        self.send(Method::Post, path, Some(form.encode()), Some(idempotency)).await
+        Self::parse(path, self.send(Method::Post, path, Some(form.encode()), Some(idempotency)).await?)
     }
 
-    async fn send<T: DeserializeOwned>(&self, method: Method, path: &str, body: Option<String>, idempotency: Option<&str>) -> CellResult<T> {
+    /// An answer's body, read as `T`: the one generic step, so each type
+    /// read costs the cell's Wasm a parse, not a copy of `send`.
+    fn parse<T: DeserializeOwned>(path: &str, body: Vec<u8>) -> CellResult<T> {
+        serde_json::from_slice(&body).map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("Stripe's answer to {path}: {e}")))
+    }
+
+    /// One call to Stripe: its 200's body, or why not.
+    async fn send(&self, method: Method, path: &str, body: Option<String>, idempotency: Option<&str>) -> CellResult<Vec<u8>> {
         assert!(path.starts_with("/v1/"), "a Stripe path is the API's: {path}");
         let headers = Headers::new();
         headers.set("authorization", &format!("Bearer {}", self.key))?;
@@ -77,7 +90,7 @@ impl Stripe {
             return Err(CellError::new(ErrorCode::UpstreamFailed, format!("Stripe's answer to {path} is over {ANSWER_MAX_BYTES} bytes")));
         }
         if a.status == 200 {
-            return serde_json::from_slice(&a.body).map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("Stripe's answer to {path}: {e}")));
+            return Ok(a.body);
         }
         let why = serde_json::from_slice::<Refusal>(&a.body).ok().map(|r| format!("{}: {}", r.error.kind.unwrap_or_default(), r.error.message.unwrap_or_default()));
         let why = why.unwrap_or_else(|| "no reason given".into());

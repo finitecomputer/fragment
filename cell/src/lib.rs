@@ -216,14 +216,26 @@ pub(crate) fn authenticate(req: &Request, url: &Url, payload: Payload<'_>) -> Ce
 /// answer that does not decode is `registry_unavailable`: nothing signed
 /// is decided without it (docs/finite-integration.md, rule 7).
 pub(crate) async fn ask_registry<C: Call>(env: &Env, call: &C) -> CellResult<C::Answer> {
-    let unavailable = |why: String| CellError::new(ErrorCode::RegistryUnavailable, format!("the identity registry did not answer ({why}); try again shortly"));
     let body = serde_json::to_string(call).map_err(|e| CellError::host(format!("a registry call: {e}")))?;
+    // the one generic step is reading the answer: every call type costs
+    // the cell's Wasm a parse, not a copy of the round trip
+    let bytes = registry_round_trip(env, C::PATH, body).await?;
+    let answer = serde_json::from_slice::<C::Answer>(&bytes).map_err(|e| registry_unavailable(format!("its answer: {e}")))?;
+    C::checked(answer)
+}
+
+fn registry_unavailable(why: String) -> CellError {
+    CellError::new(ErrorCode::RegistryUnavailable, format!("the identity registry did not answer ({why}); try again shortly"))
+}
+
+/// One call to the registry at `path`: its 200's body, or its refusal.
+async fn registry_round_trip(env: &Env, path: &str, body: String) -> CellResult<Vec<u8>> {
     let ask = || async {
         let headers = Headers::new();
         headers.set("content-type", "application/json")?;
         let mut init = RequestInit::new();
         init.with_method(Method::Post).with_headers(headers).with_body(Some(body.as_str().into()));
-        let req = Request::new_with_init(&format!("https://registry.internal{}", C::PATH), &init)?;
+        let req = Request::new_with_init(&format!("https://registry.internal{path}"), &init)?;
         let mut resp = env.durable_object("REGISTRY")?.get_by_name(registry::NAME)?.fetch_with_request(req).await?;
         let status = resp.status_code();
         let bytes = resp.bytes().await?;
@@ -233,15 +245,14 @@ pub(crate) async fn ask_registry<C: Call>(env: &Env, call: &C) -> CellResult<C::
     // inside it, a connection dropped mid-answer), and its calls are not
     // idempotent (a second Mint is a second redemption, a second
     // RegisterAgent may answer as a replay what the first one made).
-    let (status, bytes) = ask().await.map_err(|e| unavailable(e.to_string()))?;
+    let (status, bytes) = ask().await.map_err(|e| registry_unavailable(e.to_string()))?;
     if status == 200 {
-        let answer = serde_json::from_slice::<C::Answer>(&bytes).map_err(|e| unavailable(format!("its answer: {e}")))?;
-        return C::checked(answer);
+        return Ok(bytes);
     }
     match serde_json::from_slice::<ErrorBody>(&bytes) {
         Ok(e) if status < 500 => Err(CellError::new(e.error, e.message)),
-        Ok(e) => Err(unavailable(e.message)),
-        Err(_) => Err(unavailable(format!("status {status}"))),
+        Ok(e) => Err(registry_unavailable(e.message)),
+        Err(_) => Err(registry_unavailable(format!("status {status}"))),
     }
 }
 
@@ -1179,7 +1190,10 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let rest = rest.to_vec();
             billing::route(req, env, cfg, &url, &rest).await
         }
-        (_, ["api", "seat"]) => orgs::seat(req, env, &url).await,
+        (_, ["api", "seat", rest @ ..]) => {
+            let rest = rest.to_vec();
+            orgs::seat(req, env, &url, &rest).await
+        }
         (_, ["api", "org", rest @ ..]) => {
             let rest = rest.to_vec();
             orgs::org(req, env, cfg, &url, &rest).await
