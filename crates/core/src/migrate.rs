@@ -108,7 +108,7 @@ macro_rules! step {
 
 pub const FRAGMENT: Class = Class {
     name: "Fragment",
-    steps: &[step!("baseline", "fragment/0001_baseline.sql")],
+    steps: &[step!("baseline", "fragment/0001_baseline.sql"), step!("listed", "fragment/0002_listed.sql")],
     variants: &[Variant {
         name: "members",
         sql: "CREATE TABLE members ( principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL, kind TEXT, owner TEXT, people_only INTEGER NOT NULL DEFAULT 0)",
@@ -120,7 +120,12 @@ pub const FRAGMENT: Class = Class {
 
 pub const REGISTRY: Class = Class { name: "Registry", steps: &[step!("baseline", "registry/0001_baseline.sql")], variants: &[], kept: &[] };
 
-pub const PRINCIPAL: Class = Class { name: "Principal", steps: &[step!("baseline", "principal/0001_baseline.sql")], variants: &[], kept: &["wiped"] };
+pub const PRINCIPAL: Class = Class {
+    name: "Principal",
+    steps: &[step!("baseline", "principal/0001_baseline.sql"), step!("listed", "principal/0002_listed.sql")],
+    variants: &[],
+    kept: &["wiped"],
+};
 
 pub const LEDGER: Class = Class { name: "Ledger", steps: &[step!("baseline", "ledger/0001_baseline.sql")], variants: &[], kept: &["wiped"] };
 
@@ -498,6 +503,9 @@ mod tests {
         Class { name: "Fragment", steps, variants: FRAGMENT.variants, kept: FRAGMENT.kept }
     }
 
+    /// The fragment's class as it stood at its baseline alone: version 1,
+    /// whatever steps the fragment's own class has since.
+    const ONE: &[Step] = &[step!("baseline", "fragment/0001_baseline.sql")];
     const TWO: &[Step] = &[step!("baseline", "fragment/0001_baseline.sql"), STEP_TWO];
     const THREE: &[Step] = &[step!("baseline", "fragment/0001_baseline.sql"), STEP_TWO, STEP_THREE];
     const BROKEN: &[Step] = &[step!("baseline", "fragment/0001_baseline.sql"), STEP_TWO, FAILING];
@@ -546,7 +554,7 @@ mod tests {
     #[test]
     fn a_v1_object_with_rows_migrates_and_keeps_them() {
         let db = Lite::new();
-        assert_eq!(migrated(&db, &FRAGMENT, 1), Ok(Ran::Made { version: 1 }));
+        assert_eq!(migrated(&db, &with(ONE), 1), Ok(Ran::Made { version: 1 }));
         db.exec("INSERT INTO members (principal, role, added_by, added_at) VALUES ('npub1a', 'owner', 'npub1a', 5)").expect("a member");
         assert_eq!(migrated(&db, &with(TWO), 2), Ok(Ran::Migrated { from: 1, version: 2 }));
         assert_eq!(db.count("SELECT COUNT(*) FROM members WHERE principal = 'npub1a' AND role = 'owner' AND fenced = 0"), 1, "the row survives, the column at its default");
@@ -554,6 +562,44 @@ mod tests {
         let held = held(&db, &FRAGMENT).expect("held");
         assert_eq!(held.iter().map(|h| (h.version, h.at)).collect::<Vec<_>>(), [(1, 1), (2, 2), (3, 3)], "each step kept as it ran");
         assert_eq!(db.count("SELECT COUNT(*) FROM sqlite_master WHERE name = 'members_fenced'"), 1);
+    }
+
+    /// Goal: listed records' step 2 of the Fragment's and of the
+    /// Principal's: an object at version 1 with rows migrates to 2, keeps
+    /// its rows, and holds the tables the cell writes listed records to,
+    /// as it writes them (cell/src/listed.rs, principal.rs); the restart
+    /// after runs nothing; a delete's or a wipe's `remake` empties them.
+    /// Method: each class's baseline alone, a row
+    /// written, then its class as declared, and a listed record written
+    /// and read back.
+    #[test]
+    fn listed_records_are_step_two_of_a_fragment_and_a_list() {
+        let fragment = Lite::new();
+        assert_eq!(migrated(&fragment, &with(ONE), 1), Ok(Ran::Made { version: 1 }));
+        fragment.exec("INSERT INTO members (principal, role, added_by, added_at) VALUES ('npub1a', 'owner', 'npub1a', 5)").expect("a member");
+        assert_eq!(FRAGMENT.steps[1].name, "listed");
+        assert_eq!(migrated(&fragment, &FRAGMENT, 2), Ok(Ran::Migrated { from: 1, version: 2 }));
+        assert_eq!(fragment.count("SELECT COUNT(*) FROM members WHERE principal = 'npub1a'"), 1, "its member stays");
+        fragment.exec("INSERT INTO code_channel_listed (channel, kinds, fields) VALUES ('work', '[\"turn.start\"]', '[\"asks\"]')").expect("a channel's listed");
+        fragment.exec("INSERT INTO listed (channel, principal, seq, at, kind, fields, last) VALUES ('work', 'npub1a', 3, 9, 'turn.start', '{}', 3)").expect("a member's listed record");
+        assert_eq!(fragment.count("SELECT COUNT(*) FROM listed l JOIN code_channel_listed c ON c.channel = l.channel WHERE l.principal = 'npub1a'"), 1);
+        assert_eq!(migrated(&fragment, &FRAGMENT, 3), Ok(Ran::Current { version: 2 }), "a restart runs nothing");
+        let remade = remake(&fragment, &FRAGMENT).expect("a delete's remake");
+        assert!(remade.contains(&"listed".to_string()) && remade.contains(&"code_channel_listed".to_string()), "a delete empties step 2's tables too: {remade:?}");
+        assert_eq!(fragment.count("SELECT COUNT(*) FROM listed") + fragment.count("SELECT COUNT(*) FROM code_channel_listed"), 0);
+
+        let list = Lite::new();
+        let baseline = Class { steps: &[step!("baseline", "principal/0001_baseline.sql")], ..PRINCIPAL };
+        assert_eq!(migrated(&list, &baseline, 1), Ok(Ran::Made { version: 1 }));
+        list.exec("INSERT INTO memberships (fragment, role, incarnation, version) VALUES ('chat--k3x9', 'owner', 1, 1)").expect("a row");
+        assert_eq!(PRINCIPAL.steps[1].name, "listed");
+        assert_eq!(migrated(&list, &PRINCIPAL, 2), Ok(Ran::Migrated { from: 1, version: 2 }));
+        list.exec("INSERT INTO listed (fragment, records) VALUES ('chat--k3x9', '[]')").expect("a row's listed records");
+        assert_eq!(list.count("SELECT COUNT(*) FROM memberships m JOIN listed l ON l.fragment = m.fragment"), 1, "its row stays, beside its listed records");
+        assert_eq!(migrated(&list, &PRINCIPAL, 3), Ok(Ran::Current { version: 2 }));
+        let remade = remake(&list, &PRINCIPAL).expect("a wipe's remake");
+        assert!(remade.contains(&"listed".to_string()), "a wipe empties step 2's table too: {remade:?}");
+        assert_eq!(list.count("SELECT COUNT(*) FROM listed"), 0);
     }
 
     /// Goal: #369's `fenced` columns (its `columns.rs` adds them if missing
@@ -587,7 +633,7 @@ mod tests {
     #[test]
     fn a_failing_step_rolls_back_and_the_version_stays() {
         let db = Lite::new();
-        migrated(&db, &FRAGMENT, 1).expect("v1");
+        migrated(&db, &with(ONE), 1).expect("v1");
         let failed = migrated(&db, &with(BROKEN), 2);
         assert!(matches!(&failed, Err(SchemaError::StepFailed { version: 3, name: "fails", .. })), "{failed:?}");
         assert!(failed.unwrap_err().to_string().contains("no such table: no_such_table"));
@@ -604,7 +650,7 @@ mod tests {
     #[test]
     fn a_restart_mid_migration_runs_again_idempotently() {
         let db = Lite::new();
-        migrated(&db, &FRAGMENT, 1).expect("v1");
+        migrated(&db, &with(ONE), 1).expect("v1");
         db.exec("INSERT INTO members (principal, role, added_by, added_at) VALUES ('npub1a', 'owner', 'npub1a', 5)").expect("a member");
         db.harness("BEGIN");
         assert_eq!(migrate(&db, &with(THREE), 2), Ok(Ran::Migrated { from: 1, version: 3 }));
@@ -623,7 +669,7 @@ mod tests {
     fn a_future_version_is_refused() {
         let db = Lite::new();
         migrated(&db, &with(THREE), 1).expect("v3");
-        let refused = migrated(&db, &FRAGMENT, 2);
+        let refused = migrated(&db, &with(ONE), 2);
         assert_eq!(refused, Err(SchemaError::Newer { class: "Fragment", held: 3, known: 1 }));
         assert!(refused.unwrap_err().to_string().contains("newer than this code's 1"));
         assert_eq!(held(&db, &FRAGMENT).expect("held").len(), 3, "unchanged");
@@ -715,7 +761,7 @@ mod tests {
         db.exec(FRAGMENT.steps[0].sql).expect("as it ran before versions");
         db.exec("ALTER TABLE members ADD COLUMN people_only INTEGER NOT NULL DEFAULT 0").expect("people-only's column");
         db.exec("INSERT INTO members (principal, role, added_by, added_at, people_only) VALUES ('npub1a', 'owner', 'npub1a', 5, 1)").expect("a member");
-        assert_eq!(migrated(&db, &FRAGMENT, 7), Ok(Ran::Adopted { fixed: vec!["members"], version: 1 }));
+        assert_eq!(migrated(&db, &FRAGMENT, 7), Ok(Ran::Adopted { fixed: vec!["members"], version: FRAGMENT.steps.len() as u32 }), "adopted at 1, then its later steps run");
         assert!(!db.columns("members").contains(&"people_only".to_string()));
         assert_eq!(db.count("SELECT COUNT(*) FROM members"), 1);
     }

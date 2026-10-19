@@ -184,8 +184,9 @@ pub(crate) fn view(sql: SqlStorage, class: &'static Class) -> CellResult<Value> 
 ///
 /// - `schema`: its steps (`view`), and the columns of `members` and `runs`;
 /// - `schema-rerun`: its migration run again, as a start runs it;
-/// - `schema-unversion`: an object from before versions (no `_schema`),
-///   as `people-only` one from the days of people-only shares, as
+/// - `schema-unversion`: an object from before versions (no `_schema`,
+///   and only step 1's objects: the tables and indexes later steps made
+///   go), as `people-only` one from the days of people-only shares, as
 ///   `before-code` one from before `runs.code` (#178);
 /// - `schema-try`: its steps and one `step` more of the e2e's, `adds` a
 ///   column to `members`, or `fails` once it has made a table: a code's
@@ -215,6 +216,18 @@ pub(crate) fn fragment_lever(raw: &JsValue, sql: SqlStorage, id: &str, op: &str,
                 Some("before-code") => "ALTER TABLE runs DROP COLUMN code;",
                 Some(other) => return Err(CellError::invalid(format!("no shape {other}: people-only or before-code"))),
             };
+            // an object from before versions holds step 1's objects alone:
+            // the tables and indexes later steps made go first (a later
+            // step's column would need its own undoing here)
+            let first = migrate::declared(class.steps[0].sql);
+            let held = migrate::objects(&Sql(sql.clone()), class).map_err(|e| CellError::host(e.to_string()))?;
+            for o in held.iter().filter(|o| !first.iter().any(|f| f.kind == o.kind && f.name == o.name)) {
+                match o.kind.as_str() {
+                    "table" => sql.exec(&format!("DROP TABLE IF EXISTS {}", o.name), None)?,
+                    "index" => sql.exec(&format!("DROP INDEX IF EXISTS {}", o.name), None)?,
+                    other => return Err(CellError::invalid(format!("a later step's {other} {}: this lever drops tables and indexes", o.name))),
+                };
+            }
             sql.exec(&format!("DROP TABLE _schema; {plant}"), None)?;
             Ok(json!({ "members": columns(&sql, "members")?, "runs": columns(&sql, "runs")? }))
         }

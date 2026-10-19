@@ -1093,7 +1093,7 @@ title opening its share sheet.
 | `PUT /api/fragments/{name}/archived` | any signer, for a fragment they hold a role on | `{archived: bool}` → `{name, archived}`: the signer's own view of it (the shell leaves it out of its sidebar; search still finds it), kept in their list's row and nowhere else, so no one else's list or the fragment changes. The same again answers the same. A bare label names nothing (404: a fragment is named in full); a fragment they hold no role on, or none of that name, is 404; a name that is none, or a body without a boolean `archived`, 400. It goes when they leave the fragment (back in, it is not archived), or the fragment is made again. Not honored for `for` |
 | `PUT /api/fragments/{name}/seen` | any signer, for a fragment they hold a role on | no body → `{name, unread: 0}` (`Seen`): the signer has seen its messages, up to the newest their search holds (Search, below), so their row counts none `unread` until another comes; kept beside their list's row and nowhere else, so no one else's list or the fragment changes. The place never goes back: the same again answers the same and tells no page; a mark that moved it tells the signer's list sockets (`changed`). A bare label names nothing (404, as for archiving); a fragment they hold no role on, or none of that name, is 404; a name that is none, or any body, 400. It goes when they leave the fragment (back in, every message it still logs for them is unread), or the fragment is made again. Not honored for `for` |
 | `GET /api/search?q=` | any signer | → `{fragments: [ListedFragment], messages: [{fragment, channel, seq, at, snippet}]}` (`SearchAnswer`): the signer's fragments whose title or label hold every word of `q`, then the messages that do, newest first, from fragments they hold a role on now, archived ones included (The shell, Search, below). `q` once, at most 256 bytes and 8 words (400 past either, or without it). Not honored for `for` |
-| `GET /api/fragments` | any signer | → `{fragments: [{name, role, kind, title?, picture?, agents?, preview?, previewAt?, unread?, sharing?, archived?}]}` (`archived: true` on the ones the signer archived); `picture`, an agent fragment's only: where its picture is served (Identities, "An agent's name and picture"), as its last install said; `agents`: its agent members, the first added (a chat's lead) first, at most 16 (`LISTED_AGENTS_MAX`), as the fragment last sent them (an agent's joining or leaving sends every row; a row sent before rows named them has none until it is sent again); `preview`, a chat's only: the first line with words of its newest message the signer's search holds (Search, below), at most 160 bytes, none when it holds none; `previewAt`, with `preview`: when that message was said (ms since the epoch, as a record's `at`); `unread`, a chat's only: its messages the signer's search holds after the last they marked seen (`PUT …/seen`, above; all of them before any mark), at most 100 (`LISTED_UNREAD_MAX`), left out at 0; a search entry names no author, so a message of the signer's own counts until they mark it; `sharing` on the signer's own fragments only: `{visibility, members, guests, invites}` (guests: members who are neither the owner nor an agent of theirs; invites: those waiting on an email, as of that change, absent in a row sent before they were counted; an invite met, revoked, or run out is such a change, the last sent by the fragment's alarm at its expiry), as the fragment last sent it with a change to its members, invites or visibility (who they are: `GET /api/access`, below); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) and `owned: true` on those that identity owns |
+| `GET /api/fragments` | any signer | → `{fragments: [{name, role, kind, title?, picture?, agents?, preview?, previewAt?, unread?, sharing?, archived?, listed?}]}` (`archived: true` on the ones the signer archived); `picture`, an agent fragment's only: where its picture is served (Identities, "An agent's name and picture"), as its last install said; `agents`: its agent members, the first added (a chat's lead) first, at most 16 (`LISTED_AGENTS_MAX`), as the fragment last sent them (an agent's joining or leaving sends every row; a row sent before rows named them has none until it is sent again); `preview`, a chat's only: the first line with words of its newest message the signer's search holds (Search, below), at most 160 bytes, none when it holds none; `previewAt`, with `preview`: when that message was said (ms since the epoch, as a record's `at`); `unread`, a chat's only: its messages the signer's search holds after the last they marked seen (`PUT …/seen`, above; all of them before any mark), at most 100 (`LISTED_UNREAD_MAX`), left out at 0; a search entry names no author, so a message of the signer's own counts until they mark it; `sharing` on the signer's own fragments only: `{visibility, members, guests, invites}` (guests: members who are neither the owner nor an agent of theirs; invites: those waiting on an email, as of that change, absent in a row sent before they were counted; an invite met, revoked, or run out is such a change, the last sent by the fragment's alarm at its expiry), as the fragment last sent it with a change to its members, invites or visibility (who they are: `GET /api/access`, below); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) and `owned: true` on those that identity owns, with none of that identity's `listed`; `listed`: what its members are doing, each member's newest record of a kind one of its channels lists that the signer's role there may read, the newest first, at most 16 (Listed records, below), left out when there are none |
 | `GET /api/access` | a person (not an agent) | → who may open each fragment they own, by email (Sharing, "Who has access to what") |
 | `GET /api/fragments/watch` | any signer; the shell with its session (below) | a WebSocket, upgraded; anything else is 400. It answers `{type: "hello"}`, then `{type: "changed"}` each time the signer's list changes: a fragment made, shared with them, changed (its title, kind, agents, sharing, their role), left or deleted, their archiving, and a chat's message new to their search (its preview) (principal.rs, Watching). A frame names nothing: the page reads `GET /api/fragments` again with its own credential, so a socket that outlives its session learns only that something changed. The platform session counts only on the platform's host with the platform's exact `Origin` (a browser names its page on every upgrade; a fragment's page, one site with the platform, is refused like no one: 401). A list holds `LIST_WATCHERS_MAX` (16) at once; one more is 429. It reads nothing from the client. Not honored for `for` |
 | `DELETE /api/f/{name}` | the owner (never an agent) | → `{ok, deleted}` once the fragment is gone: from then it is 404 to everyone, its owner's list no longer has it, and its name can be made again. Its other members' lists, the app's database and the blobs go after, by the fragment's alarm (seconds; each part retried, backing off, until done: one that fails ten tries in a row, or is refused, is held and tried daily, its last error kept, as the `ended` lever shows), so a delete answers as soon at `MEMBERS_MAX` members as at one: it tells at most one round of lists itself (32 at once). An agent fragment's agent leaves its computer with them (`computer/unassign`, that agent alone: its owner's agents, a chat's @ roster and Settings run it no more, nor does its guest, and it is counted in the computer's cap no more; its owner's list is told) and the registry names it by the fragment no more (Identities, "An agent's name and picture"; its identity stays, its key held by no one); a computer gone (its owner's wipe) is done. A fragment made again meanwhile under the name is untouched by the old one's cleanup: a new agent of its own, assigned again, keeps its place, and its lists' rows show its own face (none until it has one: an app, untitled), never the ended life's. The repo stays |
@@ -1131,7 +1131,7 @@ title opening its share sheet.
 | `POST /api/f/{name}/subscriptions` | a member who may read the channel | `{channel, url}` → `{id, channel, url}`: each new record of the channel is POSTed to `url` through the delivery queue as `{type: "record", fragment, channel, record}` (unsigned: the URL is the subscriber's capability; egress-checked; at most 32 a fragment; a 404 or 410 drops it; a removed member's go with it) |
 | `GET /api/f/{name}/subscriptions` | a member (the owner sees all) | → `{subscriptions: [{id, principal, channel, url, createdAt}]}` |
 | `DELETE /api/f/{name}/subscriptions/{id}` | its subscriber, or the owner | → `{ok, removed}` |
-| `GET /api/f/{name}/channels` | viewer | → `{channels: [{name, read, post, signedIn, from, seq}]}`: `events`, `ops`, `inbox`, and the app's (`post`: who may post, or null; `signedIn`: only people signed in; `from`: only members of that kind, `person` or `agent`, or null) |
+| `GET /api/f/{name}/channels` | viewer | → `{channels: [{name, read, post, signedIn, from, listed, seq}]}`: `events`, `ops`, `inbox`, and the app's (`post`: who may post, or null; `signedIn`: only people signed in; `from`: only members of that kind, `person` or `agent`, or null; `listed`: `{kinds, fields?}`, what its members' lists show of it, or null) |
 | `GET /api/f/{name}/channels/{channel}?after=\|before=&limit=` | the channel's reader | → `{channel, records: [{channel, seq, at, principal, kind, body}], next}` (at most 1000 a page, always ascending by seq). `after` (default 0) reads forwards; `before` reads the nearest records with seq strictly less than its cursor. Pass `next` as the same cursor for the next page: the last seq forwards, the first seq backwards (the input cursor if empty). Supplying both cursors, a negative or malformed cursor, or a malformed limit is 400. |
 | `POST /api/f/{name}/channels/{channel}` | the channel's `post` role | `{id, body}` → `{record, replayed}` (`Posted`): the platform appends `body` (any JSON, at most 64 KiB of it; 413) as a record of kind `message` naming the poster, with no app code; it reaches sockets, subscriptions, and the channel's triggers as a mutation's record does. The same id and body again answer that record and append nothing (a retry also finishes what the first try left: its deliveries, its triggers' runs); the same id with another body, or on another channel, is 409 (ids are the poster's, kept as long as the record). A channel without a `post` role, and `events`, `ops`, and `inbox`, refuse posts (403); one that says `signedIn` refuses an anonymous poster (401); one that says `from` refuses every poster but a member of that kind posting as itself (403: a member of the other kind, a non-member, an anonymous visitor, and an agent acting `for` someone), and its drafts the same. A poster holding only `public` spends a public call (Serving, `__op`) |
 | `PUT /api/f/{name}/channels/{channel}/draft` | the channel's `post` role | `{turn, text}` → `{ok}`: a record its poster is writing, its whole text so far (at most 64 KiB), shown to the sockets following the channel at once (a `draft` frame on `__live`) and never stored; `text: null` stops it. The record its poster then writes with the same `turn` replaces it on a page. At most 10 a second across the fragment (429 past that: the poster's next carries the whole text anyway); `turn` is `^[A-Za-z0-9._:-]{1,128}$` |
@@ -1207,7 +1207,15 @@ the code the fragment's own.
   an agent's step (docs/chat-records.md). Such a channel keeps its
   newest 10 000 records (`limits::POSTED_KEPT`; the oldest go, whoever
   appended them, and with them their posts' ids), as `events` and `ops`
-  keep theirs; the number is not declarable yet.
+  keep theirs; the number is not declarable yet. `"listed": {"kinds":
+  [...], "fields": [...]}` puts each member's newest record of those
+  kinds on its members' rows in their lists, with those fields of its
+  body (Listed records, below): a chat's `work` lists its turns' kinds
+  and `asks`, so a list says what its agents are doing. 1 to 8 kinds
+  (`^[A-Za-z0-9._-]{1,64}$`) and at most 4 fields
+  (`^[A-Za-z][A-Za-z0-9_]{0,31}$`, never `kind`), each named once
+  (`limits::LISTED_KINDS_MAX`, `LISTED_FIELDS_MAX`); anything else is
+  refused at deploy, naming the channel.
 - `kind` is `query`, `mutation`, or `job` (below); a job's `role`
   defaults to `editor`.
 - `description` says what the operation does and what it answers, for
@@ -2801,6 +2809,52 @@ message, or whose entries went past the total, shows none.
 The shell's launcher (The shell, above) shows the chats and apps found,
 then the messages; a message opens its chat (or app). It does not scroll to the message: the
 chat's page has no way to be told one yet.
+
+### Listed records
+
+A channel that declares `listed` (Apps, above) puts what each of a
+fragment's members is doing on its members' rows in their lists
+(`GET /api/fragments`'s `listed`), so a page that shows a person's list
+(the shell's sidebar) follows every fragment's people on the list socket
+it already holds, and polls no fragment. The platform never reads what a
+kind means: a chat's `work` lists its turns, and the shell reads them as
+working or waiting (docs/chat-records.md).
+
+- **What is listed.** A record's kind is its body's `kind`, a string,
+  and only that: a post's record kind is always `message`, and a record
+  an app's mutation or job publishes under a kind of its own
+  (`call.publish(channel, body, kind)`) is listed only when its body
+  names the kind too. One of a kind its channel lists is a listed record, as `{channel, principal, kind, fields?, at}`
+  (`ListedRecord`): its poster, its body's listed fields that are
+  strings, each cut to 128 characters (`LISTED_VALUE_MAX_CHARS`; a field
+  absent or of another type is left out), and when it was posted. Only a
+  member's records are listed, each member's newest of each channel, and
+  a channel keeps its 16 latest posters' (`LISTED_POSTERS_MAX`).
+- **When rows go.** A listed record goes to the lists, from the index
+  outbox that carries each row (Control API, above), when it shows
+  something the one sent did not (another kind, or another field), or
+  the same a minute after the one sent (`LISTED_FRESH_MS`), so its `at`
+  is never more than a minute behind while its poster keeps at it.
+  Back-to-back records that show nothing new send nothing, and a post
+  replayed appends nothing, so it sends nothing. A fragment sends these
+  rows at most once in 3 s (`LISTED_MIN_GAP_MS`): a move within that
+  waits for its end, from the fragment's alarm, and goes with every move
+  till then, so an agent's turn costs its members' lists a few sends, not
+  one a record. The person's open pages are told
+  (`/api/fragments/watch`'s `changed`). A channel keeps its 16 posters
+  seen latest: a record that shows nothing new still counts as seen.
+- **The fence.** Each row is made as it is sent, from what is installed
+  then: only the channels that list now, the kinds and fields they list
+  now, and only those the row's role may read (the channel's one read
+  check, the same that guards its records), so a member who may not read
+  a channel never sees what it lists. A role changed, a member removed,
+  and a deploy that changes a channel's `read` or `listed` (or removes
+  the channel) each send the rows again: the rows that may no longer
+  read it lose it, and a member who leaves takes their own listed
+  records with them. An agent's list read `for` someone carries none of
+  theirs. What is listed no more is dropped from what the fragment keeps,
+  and history is never read back: a kind listed later (a chat installed
+  from a newer template) starts from its next record.
 
 ## Computers (docs/computers.md, phase 4)
 

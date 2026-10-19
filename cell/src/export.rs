@@ -1311,6 +1311,7 @@ impl PrincipalCell {
                     sharing: None,
                     archived: false,
                     owned: false,
+                    listed: vec![],
                 })
             })
             .collect();

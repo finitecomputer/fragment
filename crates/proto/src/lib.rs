@@ -147,6 +147,29 @@ pub mod limits {
     /// A chat's unread messages its row counts, at most: past it the count
     /// stops (the shell shows this many as "99+").
     pub const LISTED_UNREAD_MAX: u32 = 100;
+    /// A channel's `listed` (`ListedDecl`): the kinds of record it lists,
+    /// at most (`valid_listed_kind`).
+    pub const LISTED_KINDS_MAX: usize = 8;
+    /// The body's fields a listed record carries to a list, at most
+    /// (`valid_listed_field`).
+    pub const LISTED_FIELDS_MAX: usize = 4;
+    /// A listed field's value: a longer string is cut to this many
+    /// characters (an npub is 63).
+    pub const LISTED_VALUE_MAX_CHARS: usize = 128;
+    /// The posters a listed channel keeps the newest record of, at most
+    /// (the one who posted longest ago goes first), and the listed records
+    /// a row in a person's list carries, at most (the newest first).
+    pub const LISTED_POSTERS_MAX: usize = 16;
+    /// How far a listed record's time may fall behind while its poster
+    /// posts the same again: the newest is sent once it is this much newer
+    /// than the one sent, so a list tells a poster still at it from one
+    /// gone quiet to within a minute.
+    pub const LISTED_FRESH_MS: i64 = 60_000;
+    /// A fragment sends its listed records' rows at most once in this
+    /// long: a move within it waits for its end and goes with every move
+    /// till then, so an agent's turn costs a few fan-outs to its members'
+    /// lists, not one a record.
+    pub const LISTED_MIN_GAP_MS: i64 = 3_000;
     /// Fragments `GET /api/access` asks for their members and invites, at
     /// most: those someone else is in or invited to, the first listed
     /// first. Past it, a fragment's row has its counts alone (its share
@@ -899,6 +922,12 @@ pub struct ListedFragment {
     /// the role the agent acts with there), as no name says any more.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub owned: bool,
+    /// What its members are doing, as its channels that declare `listed`
+    /// last said (each member's newest such record, the newest first, at
+    /// most `limits::LISTED_POSTERS_MAX`): only those of channels this
+    /// row's role may read; none when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub listed: Vec<ListedRecord>,
 }
 
 /// `PUT /api/fragments/{name}/archived`: the signer's own view of a
@@ -1420,6 +1449,58 @@ pub struct ChannelDecl {
     /// `None`: whoever holds the `post` role.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<IdentityKind>,
+    /// Its members' lists show each member's newest record of these kinds
+    /// (`"listed": {"kinds": [...], "fields": [...]}`): what a chat's agents
+    /// are doing, on their people's rows. The platform never reads what a
+    /// kind means: it is the template's. `None`: nothing is listed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listed: Option<ListedDecl>,
+}
+
+/// A channel's `listed`: the kinds of record whose newest, each member's,
+/// its members' lists show, and the fields of its body they carry. A
+/// record's kind here is its body's `kind` (a string), as a template
+/// writes it (a post's record kind is always `message`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListedDecl {
+    /// 1 to `limits::LISTED_KINDS_MAX`, each `valid_listed_kind`, no repeats.
+    pub kinds: Vec<String>,
+    /// At most `limits::LISTED_FIELDS_MAX`, each `valid_listed_field`, no
+    /// repeats; a body's field that is no string is left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<String>,
+}
+
+/// A listed record as a person's list carries it (`ListedFragment.listed`):
+/// a member's newest record of a kind its channel lists, sent to the lists
+/// of the members whose role may read that channel, and to no one else's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListedRecord {
+    pub channel: String,
+    /// Who posted it: a member of the fragment.
+    pub principal: String,
+    /// Its body's `kind`.
+    pub kind: String,
+    /// Its body's listed fields that are strings, each cut to
+    /// `limits::LISTED_VALUE_MAX_CHARS` characters.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub fields: std::collections::BTreeMap<String, String>,
+    /// When it was posted (ms); a poster who posts the same again moves it
+    /// at most `limits::LISTED_FRESH_MS` behind.
+    pub at: i64,
+}
+
+/// A listed kind: `^[A-Za-z0-9._-]{1,64}$` (a chat's `turn.start`).
+pub fn valid_listed_kind(kind: &str) -> bool {
+    !kind.is_empty() && kind.len() <= 64 && kind.bytes().all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+}
+
+/// A listed field: `^[A-Za-z][A-Za-z0-9_]{0,31}$`, and never `kind`, which
+/// every listed record names already.
+pub fn valid_listed_field(field: &str) -> bool {
+    let b = field.as_bytes();
+    !b.is_empty() && b.len() <= 32 && b[0].is_ascii_alphabetic() && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_') && field != "kind"
 }
 
 /// One record in a channel. Records are appended by the platform (`events`,
@@ -1911,15 +1992,40 @@ mod tests {
     fn a_channel_without_post_reads_and_writes_as_before() {
         // code stored before posts (the code row's JSON columns) decodes
         let old: ChannelDecl = serde_json::from_str(r#"{"read":"viewer"}"#).unwrap();
-        assert_eq!(old, ChannelDecl { read: Role::Viewer, post: None, signed_in: false, from: None });
+        assert_eq!(old, ChannelDecl { read: Role::Viewer, post: None, signed_in: false, from: None, listed: None });
         assert_eq!(serde_json::to_string(&old).unwrap(), r#"{"read":"viewer"}"#);
-        let postable = ChannelDecl { read: Role::Public, post: Some(Role::Public), signed_in: true, from: None };
+        let postable = ChannelDecl { read: Role::Public, post: Some(Role::Public), signed_in: true, from: None, listed: None };
         assert_eq!(serde_json::from_str::<ChannelDecl>(&serde_json::to_string(&postable).unwrap()).unwrap(), postable);
-        let agents = ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(IdentityKind::Agent) };
+        let agents = ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(IdentityKind::Agent), listed: None };
         assert_eq!(serde_json::to_string(&agents).unwrap(), r#"{"read":"viewer","post":"editor","from":"agent"}"#);
         assert_eq!(serde_json::from_str::<ChannelDecl>(&serde_json::to_string(&agents).unwrap()).unwrap(), agents, "its posters' kind reads back");
         assert!(serde_json::from_str::<PostRecord>(r#"{"id":"a","body":1,"kind":"x"}"#).is_err(), "a post names only its id and body");
         assert!(serde_json::from_str::<PostRecord>(r#"{"id":"a"}"#).is_err(), "a post has a body");
+    }
+
+    /// A channel's `listed` reads back as it was written, and says nothing
+    /// when there is none; a listed record's fields go when there are none.
+    #[test]
+    fn a_listed_channel_reads_and_writes() {
+        let listed = ListedDecl { kinds: vec!["turn.start".into(), "turn.asked".into()], fields: vec!["asks".into()] };
+        let work = ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(IdentityKind::Agent), listed: Some(listed) };
+        let text = serde_json::to_string(&work).unwrap();
+        assert_eq!(text, r#"{"read":"viewer","post":"editor","from":"agent","listed":{"kinds":["turn.start","turn.asked"],"fields":["asks"]}}"#);
+        assert_eq!(serde_json::from_str::<ChannelDecl>(&text).unwrap(), work);
+        let bare: ListedDecl = serde_json::from_str(r#"{"kinds":["a"]}"#).unwrap();
+        assert!(bare.fields.is_empty() && serde_json::to_string(&bare).unwrap() == r#"{"kinds":["a"]}"#, "no fields: none written");
+        assert!(serde_json::from_str::<ListedDecl>(r#"{"kinds":["a"],"what":1}"#).is_err(), "a listed names only kinds and fields");
+        let record = ListedRecord { channel: "work".into(), principal: "npub1x".into(), kind: "turn.end".into(), fields: Default::default(), at: 5 };
+        assert_eq!(serde_json::to_string(&record).unwrap(), r#"{"channel":"work","principal":"npub1x","kind":"turn.end","at":5}"#);
+    }
+
+    #[test]
+    fn listed_kinds_and_fields() {
+        assert!(valid_listed_kind("turn.prompt.closed") && valid_listed_kind("A-b_c.9") && valid_listed_kind(&"k".repeat(64)));
+        assert!(!valid_listed_kind("") && !valid_listed_kind(&"k".repeat(65)) && !valid_listed_kind("turn start") && !valid_listed_kind("é"));
+        assert!(valid_listed_field("asks") && valid_listed_field("a_1") && valid_listed_field(&"f".repeat(32)));
+        assert!(!valid_listed_field("") && !valid_listed_field("1a") && !valid_listed_field("a.b") && !valid_listed_field(&"f".repeat(33)));
+        assert!(!valid_listed_field("kind"), "every listed record names its kind already");
     }
 
     #[test]
@@ -1973,15 +2079,15 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, owned: false }] };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, owned: false, listed: vec![] }] };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes-k3x9", "role": "owner", "kind": "app" }] }));
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1, invites: Some(2) };
         let listed = FragmentList {
-            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, owned: false }],
+            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
         };
         assert_eq!(
             value(&listed),
-            serde_json::json!({ "fragments": [{ "name": "todo-k3x9", "role": "owner", "kind": "chat", "title": "Todo", "agents": ["npub1juniper"], "preview": "hi", "previewAt": 1_760_000_000_000_i64, "unread": 3, "sharing": { "visibility": "link", "members": 3, "guests": 1, "invites": 2 }, "archived": true }] })
+            serde_json::json!({ "fragments": [{ "name": "todo-k3x9", "role": "owner", "kind": "chat", "title": "Todo", "agents": ["npub1juniper"], "preview": "hi", "previewAt": 1_760_000_000_000_i64, "unread": 3, "sharing": { "visibility": "link", "members": 3, "guests": 1, "invites": 2 }, "archived": true, "listed": [{ "channel": "work", "principal": "npub1juniper", "kind": "turn.asked", "fields": { "asks": "npub1me" }, "at": 1_760_000_000_001_i64 }] }] })
         );
         // a row not archived leaves the flag out, and reads back so
         let read: ListedFragment = serde_json::from_value(serde_json::json!({ "name": "notes-k3x9", "role": "viewer" })).unwrap();

@@ -60,8 +60,8 @@ use fragment_core::access::{Purpose, Standing};
 use fragment_core::effects::{self, Effect};
 use fragment_core::npub;
 use fragment_proto::{
-    limits, valid_channel_name, valid_op_id, ChannelPage, ChannelRecord, ErrorCode, IdentityKind, PostRecord, Posted, PutDraft, Role, BUILTIN_CHANNELS,
-    POST_KIND,
+    limits, valid_channel_name, valid_op_id, ChannelDecl, ChannelPage, ChannelRecord, ErrorCode, IdentityKind, PostRecord, Posted, PutDraft, Role,
+    BUILTIN_CHANNELS, POST_KIND,
 };
 use futures_util::lock::{Mutex, OwnedMutexGuard};
 use serde::Deserialize;
@@ -256,6 +256,10 @@ impl FragmentCell {
         if declared.is_some() {
             self.log_search(self.channel_read_role(channel)?, channel, seq, now, body)?;
         }
+        // and, of a kind it lists, to its members' lists (listed.rs)
+        if let Some(listed) = declared.as_ref().and_then(|d| d.listed.as_ref()) {
+            self.list_record(channel, listed, principal, seq, now, body)?;
+        }
         if let Some(kept) = kept {
             assert!(kept >= 1, "a channel keeps the record just appended");
             self.exec(
@@ -323,7 +327,8 @@ impl FragmentCell {
     /// one source of that rule. Every path that shows a channel's records
     /// asks here, and compares the caller's role to the answer: the channel
     /// API, `__channel`, live sockets, subscriptions (a person's and an
-    /// agent's), search's fence, and a run's input (`input_shown`).
+    /// agent's), search's fence, a run's input (`input_shown`), and the
+    /// listed records each list row carries (listed.rs).
     pub(crate) fn channel_read_role(&self, channel: &str) -> CellResult<Role> {
         if BUILTIN_CHANNELS.contains(&channel) {
             return Ok(Role::Viewer);
@@ -554,17 +559,18 @@ impl FragmentCell {
     pub(crate) fn channels(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
         let mut out: Vec<Value> = vec![];
-        let mut add = |name: &str, read: Role, post: Option<Role>, signed_in: bool, from: Option<IdentityKind>| -> CellResult<()> {
+        let mut add = |name: &str, decl: &ChannelDecl| -> CellResult<()> {
             let last = self.rows("SELECT MAX(seq) AS n FROM records WHERE channel = ?", vec![name.into()])?;
             let seq = last.first().and_then(|r| r["n"].as_i64()).unwrap_or(0);
-            out.push(json!({ "name": name, "read": read, "post": post, "signedIn": signed_in, "from": from, "seq": seq }));
+            out.push(json!({ "name": name, "read": decl.read, "post": decl.post, "signedIn": decl.signed_in, "from": decl.from, "listed": decl.listed, "seq": seq }));
             Ok(())
         };
+        let builtin = ChannelDecl { read: Role::Viewer, post: None, signed_in: false, from: None, listed: None };
         for b in BUILTIN_CHANNELS {
-            add(b, Role::Viewer, None, false, None)?;
+            add(b, &builtin)?;
         }
         for (name, decl) in self.declared_channels()? {
-            add(&name, decl.read, decl.post, decl.signed_in, decl.from)?;
+            add(&name, &decl)?;
         }
         json_response(&json!({ "channels": out }))
     }
