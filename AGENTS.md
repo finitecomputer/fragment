@@ -52,10 +52,11 @@ image's agent runtime.
 ## Commands
 
 The cell (`cell/`, Rust on Workers), the CLI (`cli/`), and the harness
-(`xtask/`, `crates/`). All tooling is Rust; the repo has no shell or
-Python tooling. Its JavaScript from npm is wrangler and the Sandbox SDK
-the cell's shim bundles, pinned in `package.json`; every page's script is
-first-party source.
+(`xtask/`, `crates/`). Tooling is Rust, and JavaScript's own tools come
+through `package.json` on xtask's pinned Node ("Choosing tools", below);
+the repo has no shell or Python tooling. Its JavaScript from npm is
+wrangler and the Sandbox SDK the cell's shim bundles, pinned in
+`package.json`; every page's script is first-party source.
 
 - One-time setup: `cargo install worker-build --version 0.8.5 --locked`,
   `rustup target add wasm32-unknown-unknown`, an LLVM clang that compiles
@@ -323,3 +324,22 @@ first-party source.
   `ci/` are refused). The coordinating session reviews and merges a PR
   once its CI is green. Deploys, adding a remote, deleting Sprites, DNS,
   and anything else irreversible are Paul's to approve.
+
+## Choosing tools
+
+Paul, 2026-10-19, after a review of the code we wrote ourselves where
+something off the shelf exists:
+
+- **Prefer what already exists.** When an idiomatic Cloudflare feature, a
+  standard crate or a well-kept library simplifies the stack, use it and
+  delete ours. Code of our own needs a reason a reader finds beside it
+  (the cell's wasm budget, a Workers limit, a security property): in a
+  comment, a decision, or a debt-ledger entry.
+- **A build step is acceptable when it buys significant simplification or
+  safety:** a type checker, a linter, a bundler for code that would
+  otherwise be copied by hand. Pages are served as the source in git
+  today. JavaScript's tools come through `package.json` on xtask's pinned
+  Node, as wrangler does, never from a developer's own install.
+- **One concern per pull request.** A fix for one finding, one swap, one
+  convergence: separable changes go up separately, so each stays small
+  to review and to revert.
