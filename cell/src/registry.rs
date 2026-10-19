@@ -104,7 +104,12 @@ pub struct RegistryCell {
     /// CLI codes asked for this minute, by each address and in all
     /// (`POST /cli/begin`: `limits::CLI_BEGINS_PER_MINUTE_MAX`, and the
     /// fleet's `cli_begins_per_ip_minute`). In memory: a restart forgets
-    /// them, which costs at most a minute's more.
+    /// them, which costs at most a minute's more. Not a Workers rate
+    /// limiting binding for the addresses: the fleet's count must be one
+    /// counter here all the same (the binding counts per location, and
+    /// lags), and the binding's limit and account-wide namespace are fixed
+    /// in its config, which each branch copy, the dev stack and the e2e's
+    /// node would need rendered apart.
     cli_begins: RefCell<fragment_core::ratelimit::Rate>,
 }
 

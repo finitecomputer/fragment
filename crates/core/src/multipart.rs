@@ -2,6 +2,13 @@
 //! body of the model route's transcriptions (crate::transcribe), a file and
 //! a few fields. Pure and bounded: each part is a slice of the body, never
 //! a copy, and a body out of shape is refused whole, saying where.
+//!
+//! Ours rather than the runtime's `Request::form_data()`: the route's
+//! NIP-98 signature binds the body's hash, so the cell reads the bytes
+//! into its Wasm whatever parses them (`read_body`, bounded as it
+//! streams). The runtime's parser would need them copied back out to
+//! JavaScript and the audio copied in again, up to 10 MiB each way, and
+//! would refuse a malformed form without saying how.
 
 /// Parts one body holds at most: OpenAI's transcription form has six.
 pub const PARTS_MAX: usize = 16;
