@@ -1,5 +1,14 @@
-//! A small blocking HTTP/1.1 server and client over std TCP: enough for a
-//! fake service (one request per connection) and a client for its tests.
+//! A small blocking HTTP/1.1 server over std TCP, enough for a fake
+//! service (one request per connection), and `post`, a client for the
+//! fakes' own calls (the Stripe fake's deliveries) and their tests, on
+//! reqwest.
+//!
+//! The server is ours rather than a crate's (tiny_http's, say) for what a
+//! fake must also do that a server for real use does not: close a
+//! connection with no answer at all (`Response::unanswered`, an answer
+//! lost on its way back), where tiny_http answers 500 for a request it
+//! drops, and hand the socket over after a head to write a body that
+//! never ends (`Response::endless`).
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -251,169 +260,59 @@ pub fn decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// The most of an answer `post` reads, head and body: a test's answer
-/// is a few hundred bytes, and one past this is a bug, not a slow server.
+/// The most of an answer's body `post` reads: a test's answer is a few
+/// hundred bytes, and one past this is a bug, not a slow server.
 pub const ANSWER_BYTES_MAX: usize = 1024 * 1024;
 
-/// POSTs to an `http://` URL; the answer's status, or why it failed.
+/// How long `post` waits for its connection, and then for each read.
+const POST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How deep `post` reads an error's causes for its message.
+const CAUSES_MAX: usize = 8;
+
+/// POSTs to an `http://` URL; the answer's status once its body is read
+/// whole, or why it failed (a refused connection, a head that is no HTTP,
+/// a body cut short of its framing).
 ///
-/// It returns as soon as the answer is complete (its head, then its body
-/// by Content-Length, or to the chunked terminator) and drops the socket.
-/// Reading to the end of the stream is not "complete": workerd's HTTP
+/// It returns as soon as the answer is complete, by its Content-Length or
+/// its last chunk, rather than when the server closes: workerd's HTTP
 /// server holds a connection open for a next request for 5 s after an
-/// answer (KJ's pipeline timeout), whatever `connection: close` asked, so a
-/// client that waits for the server to close waits 5 s on every delivery.
-/// Only an answer that declares no length is read to the end, as HTTP/1.1
-/// says it must be.
+/// answer (KJ's pipeline timeout), whatever `connection: close` asked.
+/// And each call has a connection of its own, never one kept from the call
+/// before: workerd closes it after those 5 s, and a request written onto
+/// it as it closes is lost (the e2e's `POOL_IDLE` says the same).
 pub fn post(url: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<u16, String> {
-    let rest = url.strip_prefix("http://").ok_or("only http:// URLs")?;
-    let (authority, path) = rest.split_once('/').map(|(a, p)| (a, format!("/{p}"))).unwrap_or((rest, "/".into()));
-    let mut stream = TcpStream::connect(authority).map_err(|e| e.to_string())?;
-    stream.set_read_timeout(Some(Duration::from_secs(30))).map_err(|e| e.to_string())?;
-    let mut req = format!("POST {path} HTTP/1.1\r\nhost: {authority}\r\ncontent-length: {}\r\nconnection: close\r\n", body.len());
+    if !url.starts_with("http://") {
+        return Err("only http:// URLs".into());
+    }
+    let client = reqwest::blocking::Client::builder().pool_max_idle_per_host(0).connect_timeout(POST_TIMEOUT).timeout(POST_TIMEOUT).build().map_err(|e| why(&e))?;
+    let mut request = client.post(url).body(body.to_vec());
     for (k, v) in headers {
-        req.push_str(&format!("{k}: {v}\r\n"));
+        request = request.header(*k, *v);
     }
-    req.push_str("\r\n");
-    stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
-    stream.write_all(body).map_err(|e| e.to_string())?;
-    read_answer(&mut stream)
-}
-
-/// How an answer's body ends (RFC 9112, 6.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Framing {
-    /// No body: a 1xx, 204 or 304.
-    Empty,
-    Length(usize),
-    Chunked,
-    /// No length declared: the body ends when the server closes.
-    Close,
-}
-
-/// Reads one answer from `stream`, to its last byte and no further: its
-/// status, or why it is not a whole HTTP/1.1 answer.
-fn read_answer(stream: &mut impl Read) -> Result<u16, String> {
-    let mut answer = Answer { buf: Vec::new(), at: 0, stream };
-    let head_end = answer.until(b"\r\n\r\n")?;
-    let head = String::from_utf8_lossy(&answer.buf[..head_end]).into_owned();
-    answer.at = head_end;
-    let mut lines = head.split("\r\n");
-    let status_line = lines.next().unwrap_or("");
-    let status: u16 = match status_line.split_whitespace().collect::<Vec<_>>().as_slice() {
-        [version, code, ..] if version.starts_with("HTTP/1.") => code.parse().map_err(|_| format!("no HTTP status in {status_line:?}"))?,
-        _ => return Err(format!("no HTTP status in {:?}", status_line.chars().take(80).collect::<String>())),
-    };
-    let header = |name: &str| lines.clone().filter_map(|l| l.split_once(':')).find(|(k, _)| k.trim().eq_ignore_ascii_case(name)).map(|(_, v)| v.trim().to_string());
-    let framing = match (status, header("transfer-encoding"), header("content-length")) {
-        (100..=199 | 204 | 304, _, _) => Framing::Empty,
-        (_, Some(te), _) if te.to_ascii_lowercase().ends_with("chunked") => Framing::Chunked,
-        (_, _, Some(n)) => Framing::Length(n.parse().map_err(|_| format!("a Content-Length that is no number: {n:?}"))?),
-        (_, _, None) => Framing::Close,
-    };
-    match framing {
-        Framing::Empty => {}
-        Framing::Length(n) => answer.take(n)?,
-        Framing::Chunked => answer.chunks()?,
-        Framing::Close => answer.rest()?,
+    let answer = request.send().map_err(|e| why(&e))?;
+    let status = answer.status().as_u16();
+    let mut read = Vec::new();
+    answer.take(ANSWER_BYTES_MAX as u64 + 1).read_to_end(&mut read).map_err(|e| format!("reading the body: {}", why(&e)))?;
+    if read.len() > ANSWER_BYTES_MAX {
+        return Err(format!("an answer of more than {ANSWER_BYTES_MAX} bytes"));
     }
-    assert!(answer.buf.len() <= ANSWER_BYTES_MAX, "an answer is read within its bound");
     Ok(status)
 }
 
-/// An answer as it arrives: what was read (`buf`), and how far it is parsed (`at`).
-struct Answer<'a, R: Read> {
-    buf: Vec<u8>,
-    at: usize,
-    stream: &'a mut R,
-}
-
-impl<R: Read> Answer<'_, R> {
-    /// Reads more; an error when the server closed first, or the answer
-    /// outgrew its bound.
-    fn more(&mut self, what: &str) -> Result<(), String> {
-        let mut tmp = [0u8; 16384];
-        let n = self.stream.read(&mut tmp).map_err(|e| format!("reading {what}: {e}"))?;
-        if n == 0 {
-            return Err(format!("the server closed the connection before {what} ended"));
-        }
-        self.buf.extend_from_slice(&tmp[..n]);
-        if self.buf.len() > ANSWER_BYTES_MAX {
-            return Err(format!("an answer of more than {ANSWER_BYTES_MAX} bytes"));
-        }
-        Ok(())
+/// An error and its causes, each after a colon: reqwest's own message
+/// names only the request, its cause says what went wrong.
+fn why(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut cause = e.source();
+    // bounded: CAUSES_MAX causes at most
+    for _ in 0..CAUSES_MAX {
+        let Some(c) = cause else { break };
+        out.push_str(": ");
+        out.push_str(&c.to_string());
+        cause = c.source();
     }
-
-    /// The end of the first `marker` at or after `at`, reading until it comes.
-    fn until(&mut self, marker: &[u8]) -> Result<usize, String> {
-        // bounded: each pass reads at least a byte, and `more` stops at ANSWER_BYTES_MAX
-        loop {
-            if let Some(i) = self.buf[self.at..].windows(marker.len()).position(|w| w == marker) {
-                return Ok(self.at + i + marker.len());
-            }
-            self.more("the answer's head")?;
-        }
-    }
-
-    /// `n` more bytes past `at`, which then ends past them.
-    fn take(&mut self, n: usize) -> Result<(), String> {
-        if n > ANSWER_BYTES_MAX {
-            return Err(format!("a body of {n} bytes, more than {ANSWER_BYTES_MAX}"));
-        }
-        // bounded: each pass reads at least a byte, and `more` stops at ANSWER_BYTES_MAX
-        while self.buf.len() < self.at + n {
-            self.more("the body")?;
-        }
-        self.at += n;
-        Ok(())
-    }
-
-    /// A chunked body, to its last chunk and the trailers' blank line.
-    fn chunks(&mut self) -> Result<(), String> {
-        // bounded: a chunk is a byte at least, and `more` stops at ANSWER_BYTES_MAX
-        loop {
-            let line_end = self.until(b"\r\n")?;
-            let line = String::from_utf8_lossy(&self.buf[self.at..line_end - 2]).into_owned();
-            self.at = line_end;
-            let size = line.split(';').next().unwrap_or("").trim();
-            let size = usize::from_str_radix(size, 16).map_err(|_| format!("a chunk size that is no number: {line:?}"))?;
-            if size == 0 {
-                break;
-            }
-            self.take(size)?;
-            let end = self.until(b"\r\n")?;
-            if end != self.at + 2 {
-                return Err("a chunk longer than its size".into());
-            }
-            self.at = end;
-        }
-        // the trailers, each a line, then a blank one
-        loop {
-            let line_end = self.until(b"\r\n")?;
-            let blank = line_end == self.at + 2;
-            self.at = line_end;
-            if blank {
-                return Ok(());
-            }
-        }
-    }
-
-    /// A body with no length: to the end of the stream, which the server ends.
-    fn rest(&mut self) -> Result<(), String> {
-        let mut tmp = [0u8; 16384];
-        // bounded: each pass reads at least a byte, and the check stops at ANSWER_BYTES_MAX
-        loop {
-            let n = self.stream.read(&mut tmp).map_err(|e| format!("reading the body: {e}"))?;
-            if n == 0 {
-                self.at = self.buf.len();
-                return Ok(());
-            }
-            self.buf.extend_from_slice(&tmp[..n]);
-            if self.buf.len() > ANSWER_BYTES_MAX {
-                return Err(format!("an answer of more than {ANSWER_BYTES_MAX} bytes"));
-            }
-        }
-    }
+    out
 }
 
 #[cfg(test)]
@@ -495,6 +394,7 @@ mod tests {
             assert!(r.is_err(), "{r:?} for {}", String::from_utf8_lossy(answer));
         }
         let (url, _hold) = server(b"SMTP ready\r\n\r\n", 64, true);
-        assert!(timed(&url).0.is_err_and(|e| e.contains("no HTTP status")));
+        let r = timed(&url).0;
+        assert!(r.as_ref().is_err_and(|e| e.contains("invalid HTTP version")), "{r:?}");
     }
 }
