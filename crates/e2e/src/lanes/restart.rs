@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use super::ai_tools;
 use super::app::ship;
 use super::jobs;
+use super::posts;
 use super::signin::{site_cookie, who};
 use crate::api::Api;
 use crate::Suite;
@@ -87,6 +88,18 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let r2 = api.signed(&owner, "PUT", &format!("/api/f/{paid}/cap"), Some(&cap))?;
     anyhow::ensure!(r.status == 200 && r2.status == 200, "ledger setup: {r} {r2}");
     let balance = api.signed(&owner, "GET", "/api/ledger", None)?.body["balanceMicros"].clone();
+    // what a fragment's members are doing (listed.rs): the fragment's own
+    // copy of its agent's newest turn, and the owner's row that carries it
+    let busy = s.named(&api, &owner, "restart-listed")?;
+    let bc = s.create(&api, &owner, &busy)?;
+    let (hand, hand_id) = super::delegation::agent_of(&api, &owner)?;
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{busy}/members/{hand_id}"), Some(&json!({ "role": "editor" })))?;
+    s.commit(&bc, &[("fragment.json", Some(posts::LISTED_JSON.as_bytes()))]);
+    s.deploy(&bc);
+    let asked = json!({ "id": "r1", "body": { "kind": "turn.asked", "turn": "t1", "asks": owner_id } });
+    let r2 = api.signed(&hand, "POST", &format!("/api/f/{busy}/channels/work"), Some(&asked))?;
+    let listed_before = s.eventually(Duration::from_secs(20), || !posts::listed_of(&api, &owner, &busy).is_empty()).then(|| posts::listed_of(&api, &owner, &busy));
+    anyhow::ensure!(r.status == 200 && r2.status == 200 && listed_before.as_ref().is_some_and(|l| l[0].2 == "turn.asked"), "listed setup: {r} {r2} {listed_before:?}");
     // a paused operation: its pause is a row, not a cached list
     let r = api.signed(&owner, "POST", &format!("/api/f/{paid}/pause"), Some(&json!({ "op": "summarize", "paused": true })))?;
     anyhow::ensure!(r.status == 200, "pause setup: {r}");
@@ -189,6 +202,14 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         "after a restart the access view answers as it did: who is in, by email, and the invite waiting",
         access_after == access_before,
         format!("{access_before} → {access_after}"),
+    );
+    let listed_after = posts::listed_of(&api, &owner, &busy);
+    let r = api.signed(&owner, "DELETE", &format!("/api/f/{busy}/members/{hand_id}"), None)?;
+    let taken = s.eventually(Duration::from_secs(20), || posts::listed_of(&api, &owner, &busy).is_empty());
+    s.ok(
+        "after a restart a list keeps what an agent was doing, and the fragment its own copy: the agent's leaving takes its record from the row",
+        listed_before.as_ref() == Some(&listed_after) && r.status == 200 && taken,
+        json!({ "before": listed_before, "after": listed_after, "removed": r.status }),
     );
     s.ai.say_next(&["A small piece of something larger."]);
     api.signed(&owner, "POST", &format!("/api/f/{tooled}/replay"), Some(&json!({ "run": tools_held["id"] })))?;

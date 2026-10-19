@@ -16,7 +16,10 @@ use std::collections::BTreeMap;
 
 use fragment_core::tree::{self, Indexed, TreeDiff};
 use fragment_core::{face, manifest, npub, site};
-use fragment_proto::{limits, valid_repo_path, ChannelDecl, ChannelRecord, ErrorCode, FragmentKind, IdentityKind, OpDecl, OpKind, Role, TriggerDecl, TriggerOn};
+use fragment_proto::{
+    limits, valid_listed_field, valid_listed_kind, valid_repo_path, ChannelDecl, ChannelRecord, ErrorCode, FragmentKind, IdentityKind, ListedDecl, OpDecl, OpKind, Role,
+    TriggerDecl, TriggerOn,
+};
 use fragment_templates::{blessed, File};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -106,6 +109,16 @@ fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
             assert!(d.post.is_some(), "a checked manifest names its posters' kind beside a post role");
             sql.exec("INSERT INTO code_channel_from (channel, from_kind) VALUES (?, ?)", vec![channel.as_str().into(), from.as_str().into()])?;
         }
+        // what its members' lists show of it, a table of its own too
+        if let Some(listed) = &d.listed {
+            assert!(!listed.kinds.is_empty() && listed.kinds.len() <= limits::LISTED_KINDS_MAX, "a checked manifest lists a bounded number of kinds");
+            assert!(listed.fields.len() <= limits::LISTED_FIELDS_MAX, "a checked manifest lists a bounded number of fields");
+            let names = |n: &[String]| serde_json::to_string(n).expect("names serialize");
+            sql.exec(
+                "INSERT INTO code_channel_listed (channel, kinds, fields) VALUES (?, ?, ?)",
+                vec![channel.as_str().into(), names(&listed.kinds).into(), names(&listed.fields).into()],
+            )?;
+        }
     }
     for (i, t) in code.triggers.iter().enumerate() {
         let (kind, target) = t.on.parts();
@@ -121,12 +134,13 @@ fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
     assert_eq!(count("code_op_descriptions")?, code.operations.values().filter(|d| d.description.is_some()).count(), "every description is stored");
     assert_eq!(count("code_channels")?, code.channels.len(), "every channel is stored");
     assert_eq!(count("code_channel_from")?, code.channels.values().filter(|d| d.from.is_some()).count(), "every channel's posters' kind is stored");
+    assert_eq!(count("code_channel_listed")?, code.channels.values().filter(|d| d.listed.is_some()).count(), "every channel's listed is stored");
     assert_eq!(count("code_triggers")?, code.triggers.len(), "every trigger is stored");
     Ok(())
 }
 
 fn clear_installed(sql: &SqlStorage) -> Result<()> {
-    for table in ["code_ops", "code_op_descriptions", "code_channels", "code_channel_from", "code_triggers"] {
+    for table in ["code_ops", "code_op_descriptions", "code_channels", "code_channel_from", "code_channel_listed", "code_triggers"] {
         sql.exec(&format!("DELETE FROM {table}"), None)?;
     }
     Ok(())
@@ -171,11 +185,15 @@ struct ChannelRow {
     signed_in: i64,
     /// From `code_channel_from`, joined (`CHANNELS`).
     from_kind: Option<String>,
+    /// From `code_channel_listed`, joined (`CHANNELS`): JSON arrays of names.
+    listed_kinds: Option<String>,
+    listed_fields: Option<String>,
 }
 
-/// The installed channels' rows, each with its posters' kind (a table of
-/// its own: crates/core/migrations/fragment).
-const CHANNELS: &str = "SELECT c.channel, c.read, c.post, c.signed_in, f.from_kind FROM code_channels c LEFT JOIN code_channel_from f ON f.channel = c.channel";
+/// The installed channels' rows, each with its posters' kind and what its
+/// members' lists show of it (tables of their own: crates/core/migrations/fragment).
+const CHANNELS: &str = "SELECT c.channel, c.read, c.post, c.signed_in, f.from_kind, l.kinds AS listed_kinds, l.fields AS listed_fields
+  FROM code_channels c LEFT JOIN code_channel_from f ON f.channel = c.channel LEFT JOIN code_channel_listed l ON l.channel = c.channel";
 
 fn channel_decl(row: ChannelRow) -> CellResult<(String, ChannelDecl)> {
     let role = |key: &str, text: &str| Role::parse(text).ok_or_else(|| stored(&format!("channel {}", row.channel), format!("{key} {text:?}")));
@@ -185,7 +203,25 @@ fn channel_decl(row: ChannelRow) -> CellResult<(String, ChannelDecl)> {
         None => None,
         Some(k) => Some(IdentityKind::parse(k).ok_or_else(|| stored(&format!("channel {}", row.channel), format!("from {k:?}")))?),
     };
-    Ok((row.channel, ChannelDecl { read, post, signed_in: row.signed_in != 0, from }))
+    let listed = match (row.listed_kinds.as_deref(), row.listed_fields.as_deref()) {
+        (None, None) => None,
+        (Some(kinds), Some(fields)) => {
+            let names = |text: &str| serde_json::from_str::<Vec<String>>(text).map_err(|e| stored(&format!("channel {}", row.channel), format!("listed: {e}")));
+            let listed = ListedDecl { kinds: names(kinds)?, fields: names(fields)? };
+            // written from a checked manifest: anything else is corruption
+            let valid = !listed.kinds.is_empty()
+                && listed.kinds.len() <= limits::LISTED_KINDS_MAX
+                && listed.fields.len() <= limits::LISTED_FIELDS_MAX
+                && listed.kinds.iter().all(|k| valid_listed_kind(k))
+                && listed.fields.iter().all(|f| valid_listed_field(f));
+            if !valid {
+                return Err(stored(&format!("channel {}", row.channel), "its listed kinds or fields"));
+            }
+            Some(listed)
+        }
+        _ => return Err(stored(&format!("channel {}", row.channel), "listed holds kinds without fields, or fields without kinds")),
+    };
+    Ok((row.channel, ChannelDecl { read, post, signed_in: row.signed_in != 0, from, listed }))
 }
 
 #[derive(Deserialize)]
@@ -301,6 +337,7 @@ impl FragmentCell {
             (_, live) => {
                 self.install_code(live).await?;
                 self.search_fence()?;
+                self.listed_fence()?;
             }
         }
         match pin {
@@ -583,6 +620,7 @@ impl FragmentCell {
             let live = self.meta(MetaKey::PinLive)?;
             self.install_code(live.as_deref()).await?;
             self.search_fence()?;
+            self.listed_fence()?;
         }
         // the release's cron triggers, if it declares any, are due from now
         self.schedule().await

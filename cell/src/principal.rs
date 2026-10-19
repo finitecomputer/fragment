@@ -71,7 +71,7 @@ use std::cell::Cell;
 
 use fragment_core::npub;
 use fragment_core::search::{self, Query};
-use fragment_proto::{limits, valid_channel_name, Archived, ErrorCode, FragmentKind, FragmentList, ListedFragment, MessageHit, Role, SearchAnswer, Seen, Sharing};
+use fragment_proto::{limits, valid_channel_name, Archived, ErrorCode, FragmentKind, FragmentList, ListedFragment, ListedRecord, MessageHit, Role, SearchAnswer, Seen, Sharing};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use worker::wasm_bindgen::{JsCast, JsValue};
@@ -89,11 +89,13 @@ const HELLO: &str = r#"{"type":"hello"}"#;
 /// What a watching socket is told of a change: no more.
 const CHANGED: &str = r#"{"type":"changed"}"#;
 
-/// The columns `/list` and a search read of a row, a chat's newest search
+/// The columns `/list` and a search read of a row, its listed records
+/// (`listed`), a chat's newest search
 /// entry (`said`, and when: `said_at`), read by its place in its fragment's log, and its entries
 /// after the place its person last saw (`unread`), counted up to the one
 /// bound number (`limits::LISTED_UNREAD_MAX`, `listed_binds`).
 const LISTED: &str = "SELECT fragment AS name, role, sharing, face, archived,
+  (SELECT records FROM listed l WHERE l.fragment = m.fragment) AS listed,
   CASE WHEN json_extract(face, '$.kind') = 'chat'
     THEN (SELECT text FROM search_entries e WHERE e.fragment = m.fragment ORDER BY e.n DESC LIMIT 1) END AS said,
   CASE WHEN json_extract(face, '$.kind') = 'chat'
@@ -152,6 +154,11 @@ struct IndexChange {
     /// every row a role names.
     #[serde(default)]
     searched: Option<Vec<String>>,
+    /// What its members are doing (listed.rs in the fragment): the listed
+    /// records of the channels this row's role may read, on every row a
+    /// role names; none, or absent, takes away what the row showed.
+    #[serde(default)]
+    listed: Vec<ListedRecord>,
 }
 
 /// What a person's list shows of a fragment.
@@ -177,6 +184,7 @@ struct Listed {
     sharing: Option<String>,
     face: Option<String>,
     archived: i64,
+    listed: Option<String>,
     said: Option<String>,
     said_at: Option<i64>,
     unread: i64,
@@ -503,6 +511,13 @@ impl PrincipalCell {
         if c.face.as_ref().is_some_and(|f| f.agents.len() > limits::LISTED_AGENTS_MAX || !f.agents.iter().all(|a| npub::is_identity(a))) {
             return Err(CellError::invalid(format!("{}'s agents are more than a row names, or not identities", c.fragment)));
         }
+        if c.listed.len() > limits::LISTED_POSTERS_MAX || !c.listed.iter().all(fragment_core::listed::valid) {
+            return Err(CellError::invalid(format!("{}'s listed records are more than a row carries, or not ones a fragment sends", c.fragment)));
+        }
+        // only a row a role names carries what its fragment's people do
+        if c.role.is_none() && !c.listed.is_empty() {
+            return Err(CellError::invalid(format!("{}'s change removes this person and carries listed records", c.fragment)));
+        }
         let stored = self.rows("SELECT incarnation, version FROM memberships WHERE fragment = ?", vec![c.fragment.as_str().into()])?;
         let (newer, reborn) = match stored.first() {
             None => (true, false),
@@ -550,6 +565,18 @@ impl PrincipalCell {
                 SqlStorageValue::Integer(i64::from(gone)),
             ],
         )?;
+        // what its people are doing is the change's whole, as its face is:
+        // a row without any shows none
+        match c.listed.is_empty() {
+            true => self.rows("DELETE FROM listed WHERE fragment = ?", vec![c.fragment.as_str().into()])?,
+            false => {
+                let records = serde_json::to_string(&c.listed).map_err(|e| CellError::host(format!("listed: {e}")))?;
+                self.rows(
+                    "INSERT INTO listed (fragment, records) VALUES (?, ?) ON CONFLICT (fragment) DO UPDATE SET records = excluded.records",
+                    vec![c.fragment.as_str().into(), records.into()],
+                )?
+            }
+        };
         if gone {
             self.rows("DELETE FROM search_entries WHERE fragment = ?", vec![c.fragment.as_str().into()])?;
             self.rows("DELETE FROM seen WHERE fragment = ?", vec![c.fragment.as_str().into()])?;
@@ -757,5 +784,11 @@ fn listed(r: Listed) -> CellResult<ListedFragment> {
     let preview_at = preview.as_ref().and(r.said_at);
     let unread = u32::try_from(r.unread).ok().filter(|n| *n <= limits::LISTED_UNREAD_MAX);
     let unread = unread.ok_or_else(|| CellError::host(format!("{}'s unread count {} is outside its bound", r.name, r.unread)))?;
-    Ok(ListedFragment { name: r.name, role: r.role, kind, title, picture, agents, preview, preview_at, unread, sharing, archived: r.archived != 0, owned: false })
+    let listed: Vec<ListedRecord> = match r.listed.as_deref().map(serde_json::from_str) {
+        Some(Ok(records)) => records,
+        Some(Err(e)) => return Err(CellError::host(format!("{}'s stored listed records: {e}", r.name))),
+        None => vec![],
+    };
+    assert!(listed.len() <= limits::LISTED_POSTERS_MAX, "a row carries what it took, a bounded number");
+    Ok(ListedFragment { name: r.name, role: r.role, kind, title, picture, agents, preview, preview_at, unread, sharing, archived: r.archived != 0, owned: false, listed })
 }

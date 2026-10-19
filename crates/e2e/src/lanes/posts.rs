@@ -2,8 +2,9 @@
 //! `post` role takes records the platform appends for the poster, with no
 //! app code at all. Checked in the `channels` section (the rules: the role,
 //! the replay, the size, a channel without one, the deploy check, the
-//! public call budget, who hears a post, and a channel's posters' kind,
-//! `from`) and the `browser` section
+//! public call budget, who hears a post, a channel's posters' kind,
+//! `from`, and what its members' lists show of it, `listed`) and the
+//! `browser` section
 //! (`fragment.post` from a page).
 
 use std::time::Duration;
@@ -209,7 +210,168 @@ pub fn posts(s: &mut Suite, api: &Api) -> Result<()> {
 
     heard(s, api, &owner, &stranger)?;
     posters_kind(s, api, &owner)?;
+    listed(s, api, &owner)?;
     retention(s, api, &owner)
+}
+
+/// A fragment with a channel its agents post to that any member reads, and
+/// a desk only its editors read, both `listed`.
+pub(super) const LISTED_JSON: &str = r#"{"channels":{
+  "work":{"read":"viewer","post":"editor","from":"agent","listed":{"kinds":["turn.start","turn.asked","turn.end"],"fields":["asks"]}},
+  "desk":{"read":"editor","post":"editor","listed":{"kinds":["note"],"fields":["text"]}}}}"#;
+
+/// `keys`' row of `name` in their list, or null when it lists none.
+pub(super) fn row_of(api: &Api, keys: &Keys, name: &str) -> Value {
+    let r = api.signed(keys, "GET", "/api/fragments", None).ok();
+    r.and_then(|r| r.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == name).cloned())).unwrap_or(Value::Null)
+}
+
+/// What `keys`' row of `name` lists: `[(channel, principal, kind, fields)]`,
+/// the newest first.
+pub(super) fn listed_of(api: &Api, keys: &Keys, name: &str) -> Vec<(String, String, String, Value)> {
+    let row = row_of(api, keys, name);
+    let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
+    row["listed"].as_array().map(|l| l.iter().map(|r| (text(&r["channel"]), text(&r["principal"]), text(&r["kind"]), r["fields"].clone())).collect()).unwrap_or_default()
+}
+
+/// The next frame a list's socket is told within `wait`, or none.
+fn told_within(w: &mut Socket, wait: Duration) -> Option<Value> {
+    w.patience(wait).ok()?;
+    let frame = w.next().ok();
+    let _ = w.patience(Duration::from_secs(5));
+    frame
+}
+
+/// A channel's `listed` (docs/api.md, Listed records): each member's newest
+/// record of a listed kind rides the rows of the members whose role reads
+/// its channel. Goal: a list follows what a fragment's members are doing,
+/// told to their open page as it changes, and never shows a member what
+/// their role may not read, nor what a member who left did. Method: a
+/// fragment with an agents' channel any member reads and a desk only
+/// editors read; its owner, a viewer, an editor, an outsider and the
+/// owner's agent; each one's list read signed, and the viewer's watched
+/// with their key, as the CLI watches.
+fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let name = s.named(api, owner, "listed")?;
+    let c = s.create(api, owner, &name)?;
+    let (viewer, editor, outsider) = (api.person()?, api.person()?, api.person()?);
+    let (viewer_id, editor_id) = (api.identity(&viewer)?, api.identity(&editor)?);
+    let (agent, agent_id) = super::delegation::agent_of(api, owner)?;
+    let set_role = |who: &str, role: &str| api.signed(owner, "PUT", &format!("/api/f/{name}/members/{who}"), Some(&json!({ "role": role })));
+    for (who, role) in [(viewer_id.as_str(), "viewer"), (editor_id.as_str(), "editor"), (agent_id.as_str(), "editor")] {
+        let r = set_role(who, role)?;
+        anyhow::ensure!(r.status == 200, "adding {who} as {role}: {r}");
+    }
+    s.commit(&c, &[("fragment.json", Some(LISTED_JSON.as_bytes()))]);
+    s.deploy(&c);
+    let r = api.signed(owner, "GET", &format!("/api/f/{name}/channels"), None)?;
+    let declared = r.body["channels"].as_array().and_then(|l| l.iter().find(|c| c["name"] == "work").map(|c| c["listed"].clone())).unwrap_or_default();
+    s.ok(
+        "a channel's listed is installed, and the channel list names it",
+        declared == json!({ "kinds": ["turn.start", "turn.asked", "turn.end"], "fields": ["asks"] }),
+        &r,
+    );
+
+    // the viewer's open page (a key's socket), past what setting up told it
+    let url = format!("{}/api/fragments/watch", api.base);
+    let (mut tab, _) = Socket::connect(api, &url, Some(&viewer), None, None)?;
+    tab.expect("hello")?;
+    while told_within(&mut tab, Duration::from_secs(2)).is_some() {}
+    let work = |id: &str, body: Value| post(api, &agent, &name, "work", id, body);
+    let start = work("w1", json!({ "kind": "turn.start", "turn": "t1", "agent": agent_id, "asker": viewer_id }))?;
+    let changed = told_within(&mut tab, Duration::from_secs(10));
+    let mine = row_of(api, &viewer, &name);
+    let at = start.body["record"]["at"].clone();
+    s.ok(
+        "an agent's listed record reaches a member's row, its kind and when, and their open page is told at once",
+        start.status == 200
+            && changed == Some(json!({ "type": "changed" }))
+            && mine["listed"] == json!([{ "channel": "work", "principal": agent_id, "kind": "turn.start", "at": at }]),
+        json!({ "told": changed, "row": mine }),
+    );
+
+    let step = work("w2", json!({ "kind": "turn.step", "turn": "t1", "step": 1 }))?;
+    let same = work("w3", json!({ "kind": "turn.start", "turn": "t2", "agent": agent_id, "asker": viewer_id }))?;
+    let again = work("w1", json!({ "kind": "turn.start", "turn": "t1", "agent": agent_id, "asker": viewer_id }))?;
+    let quiet = told_within(&mut tab, Duration::from_secs(3));
+    let mine = row_of(api, &viewer, &name);
+    s.ok(
+        "records that show nothing new move nothing: a kind not listed, the same kind again, a post replayed (the page is told nothing; the row keeps the first's time)",
+        step.status == 200 && same.status == 200 && again.body["replayed"] == true && quiet.is_none() && mine["listed"][0]["at"] == at && mine["listed"].as_array().map(Vec::len) == Some(1),
+        json!({ "told": quiet, "row": mine }),
+    );
+
+    let asked = work("w4", json!({ "kind": "turn.asked", "turn": "t2", "asks": viewer_id, "text": "never listed" }))?;
+    let changed = told_within(&mut tab, Duration::from_secs(10));
+    let shown = listed_of(api, &viewer, &name);
+    s.ok(
+        "another kind moves it, with its listed fields and no others",
+        asked.status == 200 && changed.is_some() && shown == [("work".to_string(), agent_id.clone(), "turn.asked".to_string(), json!({ "asks": viewer_id }))],
+        json!({ "told": changed, "listed": shown }),
+    );
+
+    // the desk is the editors': the viewer's row never carries it
+    let note = post(api, &editor, &name, "desk", "d1", json!({ "kind": "note", "text": "the budget is 4k" }))?;
+    let owners = s.eventually(Duration::from_secs(10), || listed_of(api, owner, &name).iter().any(|r| r.0 == "desk"));
+    let quiet = told_within(&mut tab, Duration::from_secs(3));
+    let (theirs, editors) = (listed_of(api, &viewer, &name), listed_of(api, &editor, &name));
+    let outside = row_of(api, &outsider, &name);
+    s.ok(
+        "a channel only editors read lists to the owner's and the editor's rows alone: the viewer's row carries none of it and their page is told nothing; an outsider's list has no row",
+        note.status == 200
+            && owners
+            && editors.iter().any(|r| r.0 == "desk" && r.1 == editor_id && r.3 == json!({ "text": "the budget is 4k" }))
+            && theirs.iter().all(|r| r.0 == "work")
+            && quiet.is_none()
+            && outside.is_null(),
+        json!({ "viewer": theirs, "editor": editors, "told": quiet, "outsider": outside }),
+    );
+
+    // a role changed sends the row again: given, then taken
+    let up = set_role(&viewer_id, "editor")?;
+    let told_up = told_within(&mut tab, Duration::from_secs(10));
+    let raised = listed_of(api, &viewer, &name);
+    let down = set_role(&editor_id, "viewer")?;
+    let lowered = s.eventually(Duration::from_secs(10), || listed_of(api, &editor, &name).iter().all(|r| r.0 != "desk"));
+    s.ok(
+        "a role changed sends the member's row again: raised to editor it carries the desk; lowered to viewer it no longer does",
+        up.status == 200 && told_up.is_some() && raised.iter().any(|r| r.0 == "desk") && down.status == 200 && lowered,
+        json!({ "raised": raised, "lowered": listed_of(api, &editor, &name) }),
+    );
+
+    // a deploy that tightens a channel's read takes it from the rows that may no longer read it
+    let tightened = LISTED_JSON.replacen(r#""work":{"read":"viewer""#, r#""work":{"read":"editor""#, 1);
+    s.commit(&c, &[("fragment.json", Some(tightened.as_bytes()))]);
+    s.deploy(&c);
+    let gone = s.eventually(Duration::from_secs(20), || listed_of(api, &editor, &name).is_empty());
+    let (kept, owners) = (listed_of(api, &viewer, &name), listed_of(api, owner, &name));
+    s.ok(
+        "a deploy that tightens work's read to editors takes its record from the row of the member now a viewer (none left), and the editors' rows keep it",
+        gone && kept.iter().any(|r| r.0 == "work") && owners.iter().any(|r| r.0 == "work"),
+        json!({ "now a viewer": listed_of(api, &editor, &name), "now an editor": kept, "owner": owners }),
+    );
+
+    // an invalid listed is refused at deploy, and what was installed stands
+    let bad = LISTED_JSON.replacen(r#""kinds":["note"]"#, r#""kinds":["a note"]"#, 1);
+    s.commit(&c, &[("fragment.json", Some(bad.as_bytes()))]);
+    s.deploy(&c);
+    let status = api.status(owner, &name)?;
+    s.ok(
+        "a listed kind that is no kind is refused at deploy, saying why, and the rows keep what they carried",
+        status.body["code"]["error"].as_str().is_some_and(|e| e.contains("channels.desk.listed.kinds has \"a note\", which is no kind")) && listed_of(api, owner, &name) == owners,
+        &status.body["code"],
+    );
+
+    // a member who leaves takes their listed records from every row
+    let r = api.signed(owner, "DELETE", &format!("/api/f/{name}/members/{agent_id}"), None)?;
+    let left = s.eventually(Duration::from_secs(20), || listed_of(api, owner, &name).iter().all(|r| r.1 != agent_id) && listed_of(api, &viewer, &name).iter().all(|r| r.1 != agent_id));
+    s.ok(
+        "a member removed takes their listed records from every row; the editor's note stays",
+        r.status == 200 && left && listed_of(api, owner, &name).iter().any(|r| r.1 == editor_id),
+        json!({ "owner": listed_of(api, owner, &name), "viewer": listed_of(api, &viewer, &name) }),
+    );
+    tab.close();
+    Ok(())
 }
 
 /// A channel that says `"from": "agent"` (a chat's `work`) takes posts and

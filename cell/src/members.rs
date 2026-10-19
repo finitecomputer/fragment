@@ -177,11 +177,19 @@ impl FragmentCell {
 
     /// Every list's row is sent again: its owner's and each member's.
     pub(crate) fn reindex(&self) -> CellResult<()> {
+        self.reindex_readers(Role::Public)
+    }
+
+    /// The rows of everyone whose role is at least `read` are sent again:
+    /// its owner's, and each such member's (a listed record of a channel
+    /// they read moved: listed.rs). The others' rows carry nothing of it.
+    pub(crate) fn reindex_readers(&self, read: Role) -> CellResult<()> {
         let owner = self.must(MetaKey::Owner)?;
         self.index_change(&owner, Some(Role::Owner))?;
+        // bounded by MEMBERS_MAX
         for r in self.rows("SELECT principal, role FROM members", vec![])? {
             let (Some(p), Some(role)) = (r["principal"].as_str(), r["role"].as_str().and_then(Role::parse)) else { continue };
-            if p != owner {
+            if p != owner && role >= read {
                 self.index_change(p, Some(role))?;
             }
         }
@@ -241,6 +249,13 @@ impl FragmentCell {
             Ok(agents) => agents,
             Err(e) => return console_error!("{name}: its agents did not read ({:?}): {}", e.code, e.message),
         };
+        if let Err(e) = self.listed_fence() {
+            console_error!("{name}: its listed records were not fenced to what its channels list now ({:?}): {}", e.code, e.message);
+        }
+        let listed = match self.listed_records() {
+            Ok(listed) => listed,
+            Err(e) => return console_error!("{name}: its listed records did not read ({:?}): {}", e.code, e.message),
+        };
         let due = self
             .rows(
                 "SELECT principal, role, version, attempts FROM index_outbox WHERE next_at <= ? ORDER BY version DESC LIMIT ?",
@@ -258,10 +273,12 @@ impl FragmentCell {
                 "incarnation": incarnation.parse::<i64>().unwrap_or(0),
                 "version": version,
             });
-            // every row a role names: the channels searched, and the
-            // fragment's face and its agents, as they are now
-            if row["role"].is_string() {
+            // every row a role names: the channels searched, the
+            // fragment's face and its agents, and the listed records of the
+            // channels its role reads, as they are now
+            if let Some(role) = row["role"].as_str().and_then(Role::parse) {
                 body["searched"] = json!(searched);
+                body["listed"] = json!(fragment_core::listed::for_role(&listed, role));
                 if let Ok(Some(face)) = self.meta(MetaKey::Face) {
                     body["face"] = serde_json::from_str(&face).unwrap_or(Value::Null);
                     body["face"]["agents"] = json!(agents);
@@ -566,6 +583,7 @@ impl FragmentCell {
         let removed = self.rows("SELECT owner, kind FROM members WHERE principal = ?", vec![target.as_str().into()])?;
         let owner = removed.first().and_then(|r| r["owner"].as_str()).map(str::to_string);
         self.exec("DELETE FROM members WHERE principal = ?", vec![target.as_str().into()])?;
+        self.listed_left(&target)?;
         self.drop_subscriptions(&target)?;
         self.agent_removed(&target)?;
         self.index_change(&target, None)?;

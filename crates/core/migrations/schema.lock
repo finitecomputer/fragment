@@ -5,8 +5,10 @@
 # steps make. Never edit it by hand.
 
 step Fragment 1 baseline 6f010c0c276b4871
+step Fragment 2 listed 4a67c68c80018104
 step Registry 1 baseline fd5a79e5c834a15d
 step Principal 1 baseline 28b4d4bf3f8cdb71
+step Principal 2 listed 09e5aab70c4f7f61
 step Ledger 1 baseline 6d5c6ebad64a53b2
 step Computer 1 baseline 0f429c07654198e6
 
@@ -15,6 +17,7 @@ Fragment table charges: CREATE TABLE charges ( ref TEXT PRIMARY KEY, run INTEGER
 Fragment index charges_run: CREATE INDEX charges_run ON charges (run)
 Fragment table code: CREATE TABLE code ( id INTEGER PRIMARY KEY CHECK (id = 1), sha TEXT NOT NULL, loader_id TEXT NOT NULL, source TEXT NOT NULL, cpu_ms INTEGER NOT NULL, installed_at INTEGER NOT NULL, modules TEXT NOT NULL DEFAULT '{}')
 Fragment table code_channel_from: CREATE TABLE code_channel_from (channel TEXT PRIMARY KEY, from_kind TEXT NOT NULL)
+Fragment table code_channel_listed: CREATE TABLE code_channel_listed (channel TEXT PRIMARY KEY, kinds TEXT NOT NULL, fields TEXT NOT NULL)
 Fragment table code_channels: CREATE TABLE code_channels (channel TEXT PRIMARY KEY, read TEXT NOT NULL, post TEXT, signed_in INTEGER NOT NULL DEFAULT 0)
 Fragment table code_op_descriptions: CREATE TABLE code_op_descriptions (op TEXT PRIMARY KEY, description TEXT NOT NULL)
 Fragment table code_ops: CREATE TABLE code_ops (op TEXT PRIMARY KEY, kind TEXT NOT NULL, role TEXT NOT NULL, input TEXT, ephemeral INTEGER NOT NULL DEFAULT 0)
@@ -33,6 +36,7 @@ Fragment table file_commits: CREATE TABLE file_commits (key TEXT PRIMARY KEY, sh
 Fragment table index_outbox: CREATE TABLE index_outbox ( principal TEXT PRIMARY KEY, role TEXT, version INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL)
 Fragment table invites: CREATE TABLE invites ( email TEXT PRIMARY KEY, role TEXT NOT NULL, expires_at INTEGER NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL)
 Fragment table joined_outbox: CREATE TABLE joined_outbox ( principal TEXT PRIMARY KEY, owner TEXT NOT NULL, added_at INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL)
+Fragment table listed: CREATE TABLE listed ( channel TEXT NOT NULL, principal TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, kind TEXT NOT NULL, fields TEXT NOT NULL, PRIMARY KEY (channel, principal))
 Fragment table members: CREATE TABLE members ( principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL, kind TEXT, owner TEXT)
 Fragment index members_owner: CREATE INDEX members_owner ON members (owner) WHERE owner IS NOT NULL
 Fragment table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
@@ -127,6 +131,7 @@ Principal table export_levers: CREATE TABLE export_levers (name TEXT PRIMARY KEY
 Principal table export_parts: CREATE TABLE export_parts (export TEXT NOT NULL, part INTEGER NOT NULL, etag TEXT NOT NULL, PRIMARY KEY (export, part))
 Principal table export_tail: CREATE TABLE export_tail (export TEXT NOT NULL, n INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (export, n))
 Principal table exports: CREATE TABLE exports ( id TEXT PRIMARY KEY, person TEXT NOT NULL, state TEXT NOT NULL, started_at INTEGER NOT NULL, ready_at INTEGER, expires_at INTEGER, size INTEGER, error TEXT, job TEXT, upload TEXT, requests INTEGER NOT NULL DEFAULT 0, downloads INTEGER NOT NULL DEFAULT 0, gone_at INTEGER, metered INTEGER NOT NULL DEFAULT 0)
+Principal table listed: CREATE TABLE listed (fragment TEXT PRIMARY KEY, records TEXT NOT NULL)
 Principal table memberships: CREATE TABLE memberships ( fragment TEXT PRIMARY KEY, role TEXT, incarnation INTEGER NOT NULL, version INTEGER NOT NULL, sharing TEXT, face TEXT, archived INTEGER NOT NULL DEFAULT 0, searched TEXT)
 Principal table search_entries: CREATE TABLE search_entries ( id INTEGER PRIMARY KEY, fragment TEXT NOT NULL, n INTEGER NOT NULL, channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, text TEXT NOT NULL, UNIQUE (fragment, n))
 Principal index search_entries_at: CREATE INDEX search_entries_at ON search_entries (at, id)

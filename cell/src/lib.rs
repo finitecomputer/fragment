@@ -49,6 +49,7 @@ mod js;
 mod keys;
 mod ledger;
 mod levers;
+mod listed;
 mod live;
 mod mail;
 mod members;
@@ -613,9 +614,11 @@ async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<Fragmen
         .into_iter()
         .filter_map(|f| {
             let cap = access::Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied() };
-            // the asker's own view (their search's preview and unread, their archiving) stays theirs
+            // the asker's own view (their search's preview and unread, their
+            // archiving) stays theirs, as do the listed records their role
+            // reads: the agent's capped role may read less
             let owned = f.role == Role::Owner;
-            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, owned, ..f })
+            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, owned, listed: vec![], ..f })
         })
         .collect();
     Ok(FragmentList { fragments })

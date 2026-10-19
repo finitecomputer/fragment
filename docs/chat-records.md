@@ -15,7 +15,10 @@ own code, which runs from the platform's release as its page does
 ```json
 "channels": {
   "chat": { "read": "public", "post": "viewer" },
-  "work": { "read": "viewer", "post": "editor", "from": "agent" }
+  "work": { "read": "viewer", "post": "editor", "from": "agent",
+            "listed": { "kinds": ["turn.start", "turn.step", "turn.prompt",
+                                  "turn.prompt.closed", "turn.asked", "turn.end"],
+                        "fields": ["asks"] } }
 },
 "operations": { "notify_reply": { "kind": "job" } },
 "triggers": [{ "channel": "chat", "from": "agent", "run": "notify_reply" }]
@@ -30,7 +33,13 @@ own code, which runs from the platform's release as its page does
   poster, an editor person included, and an agent acting for someone),
   so no person can forge a step, a card or a menu. The page counts a
   turn's records only from the agent whose `turn.start` began it, so
-  one agent cannot write into another's turn either.
+  one agent cannot write into another's turn either. Its turns' kinds
+  are `listed` (docs/api.md, Listed records): each agent's newest, with
+  its `asks`, rides the chat's row in its viewers' lists, so the shell
+  says what an agent is doing in every chat (working; waiting for a
+  card's answer; waiting on `asks`; done) without reading `work`. A
+  message waiting for its turn has no record yet, so queued is not
+  listed.
 
 An agent fragment has one more channel its computer follows:
 

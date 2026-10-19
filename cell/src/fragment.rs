@@ -106,6 +106,9 @@ pub struct FragmentCell {
     /// A record woke an idle search cursor, and the alarm is not armed for
     /// it yet (search.rs `log_search`; `after_answer` arms it).
     pub(crate) search_woke: Cell<bool>,
+    /// A record moved what its members' lists show (listed.rs
+    /// `list_record`): `after_answer` sends the rows.
+    pub(crate) listed_moved: Cell<bool>,
     /// What a write leaves for after its answer is asked for, and has not
     /// begun (`later`).
     pub(crate) later_asked: Cell<bool>,
@@ -142,6 +145,7 @@ impl DurableObject for FragmentCell {
             standing: RefCell::new(None),
             meter_armed: Cell::new(-1),
             search_woke: Cell::new(false),
+            listed_moved: Cell::new(false),
             later_asked: Cell::new(false),
             launching: futures_util::lock::Mutex::new(()),
             dw_noted: RefCell::new(None),
@@ -321,6 +325,9 @@ pub(crate) enum MetaKey {
     /// An agent fragment's picture as live's install read it (`<sha256>
     /// <type> <commit>`): what `computer/picture` answers.
     Picture,
+    /// The channels that list records, their kinds, fields and read
+    /// roles, as the rows last carried them (listed.rs `listed_fence`).
+    Listed,
     /// The channels its people's search holds, as the rows last named
     /// them (search.rs `search_fence`): a JSON array of names.
     Searched,
@@ -397,6 +404,7 @@ impl MetaKey {
             MetaKey::Blessed => "blessed",
             MetaKey::Face => "face",
             MetaKey::Picture => "picture",
+            MetaKey::Listed => "listed",
             MetaKey::Searched => "searched",
             MetaKey::CodeError => "code_error",
             MetaKey::BlobsGcAt => "blobs_gc_at",
@@ -1310,6 +1318,13 @@ impl FragmentCell {
             }
         }
         laps.lap("search");
+        // a record that moved what lists show: their rows go now, not at
+        // the alarm's next pass (what this round leaves, the alarm sends)
+        let listed = self.listed_moved.replace(false);
+        if listed {
+            self.flush_index().await;
+        }
+        laps.lap("listed");
         // side by side: a wake waits on its computer's start, and a launch
         // waits on no wake
         let t0 = js::now_ms();
@@ -1318,8 +1333,8 @@ impl FragmentCell {
         let ((drained, drain_ms), (launched, launch_ms)) = futures_util::future::join(drain, launch).await;
         laps.took("drain", drain_ms);
         laps.took("launch", launch_ms);
-        if searched || drained.queued + drained.woken + launched > 0 {
-            laps.log("later", json!({ "fragment": self.name().ok(), "queued": drained.queued, "woken": drained.woken, "launched": launched }));
+        if searched || listed || drained.queued + drained.woken + launched > 0 {
+            laps.log("later", json!({ "fragment": self.name().ok(), "listed": listed, "queued": drained.queued, "woken": drained.woken, "launched": launched }));
         }
     }
 

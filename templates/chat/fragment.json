@@ -2,7 +2,13 @@
   "kind": "chat",
   "channels": {
     "chat": { "read": "public", "post": "viewer" },
-    "work": { "read": "viewer", "post": "editor", "from": "agent" }
+    "work": {
+      "read": "viewer", "post": "editor", "from": "agent",
+      "listed": {
+        "kinds": ["turn.start", "turn.step", "turn.prompt", "turn.prompt.closed", "turn.asked", "turn.end"],
+        "fields": ["asks"]
+      }
+    }
   },
   "operations": {
     "notify_reply": { "kind": "job" }
