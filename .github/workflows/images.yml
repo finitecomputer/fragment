@@ -9,6 +9,10 @@
 #   builds or runs (`changes` below: images/hermes, images/bridge,
 #   images/stub, the images' manifest and lock, or this workflow), on pull
 #   requests and on master's pushes, and on every run by hand.
+#
+# Their Rust cache (the registry and images/target's dependencies) is
+# Swatinem/rust-cache's, one key for both jobs, saved only from master's
+# pushes by `check` (a PR reads master's), as ci.yml's.
 name: images
 
 on:
@@ -34,49 +38,38 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            images/target
-          key: images-${{ runner.os }}-${{ hashFiles('images/Cargo.lock') }}
-          restore-keys: images-${{ runner.os }}-
+          shared-key: images
+          workspaces: images -> target
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
   # Whether the Docker lane runs: a change to what it builds or runs. Its own
   # job, since a job's `if` reads only another job's outputs. The changed
-  # files are the pull request's (as its `paths` filter reads them), or the
-  # push's from its `before`; a push the compare cannot list whole (a new
-  # branch, 300 files or more) and a run by hand run the lane.
+  # files are the pull request's (from the API, every page), or the push's
+  # since its `before` (by git, hence the checkout); a run by hand runs the
+  # lane whatever it says.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       docker: ${{ steps.paths.outputs.docker }}
     steps:
+      - uses: actions/checkout@v4
       - id: paths
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT: ${{ github.event_name }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-          BEFORE: ${{ github.event.before }}
-          AFTER: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          lane='^(images/(hermes|bridge|stub)/|images/Cargo\.(toml|lock)$|\.github/workflows/images\.yml$)'
-          if [ "$EVENT" = pull_request ]; then
-            files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename')
-          elif [ "$EVENT" = push ] && [ -n "${BEFORE//0/}" ]; then
-            files=$(gh api "repos/$REPO/compare/$BEFORE...$AFTER" --jq '.files[].filename')
-            [ "$(printf '%s\n' "$files" | grep -c .)" -lt 300 ] || files=".github/workflows/images.yml"
-          else
-            files=".github/workflows/images.yml"
-          fi
-          printf 'changed:\n%s\n' "$files"
-          if printf '%s\n' "$files" | grep -qE "$lane"; then echo docker=true; else echo docker=false; fi | tee -a "$GITHUB_OUTPUT"
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            docker:
+              - images/hermes/**
+              - images/bridge/**
+              - images/stub/**
+              - images/Cargo.toml
+              - images/Cargo.lock
+              - .github/workflows/images.yml
 
   # The Docker lane. The images are built first by the runner's own Docker
   # (its BuildKit, straight into its image store, under the tags the tests
@@ -103,7 +96,7 @@ jobs:
   docker:
     name: docker (real Hermes)
     needs: changes
-    if: needs.changes.outputs.docker == 'true'
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.docker == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     defaults:
@@ -112,15 +105,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      # the check job's cache (the registry and images/target), read only
-      - uses: actions/cache/restore@v4
+      # the check job's cache, read only
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            images/target
-          key: images-${{ runner.os }}-${{ hashFiles('images/Cargo.lock') }}
-          restore-keys: images-${{ runner.os }}-
+          shared-key: images
+          workspaces: images -> target
+          cache-bin: false
+          save-if: false
       - run: cargo test -p fragment-bridge --test docker --locked --no-run
       - name: the runner
         run: nproc; free -g; df -h /; docker version --format '{{.Server.Version}}'
