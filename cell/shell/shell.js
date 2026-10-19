@@ -603,7 +603,8 @@ function renderHeading() {
 }
 // A chat's unread, as its row shows them: none on the open one (it is
 // being seen), and past the count's bound "99+" (the list counts at most
-// UNREAD_MAX: proto's `LISTED_UNREAD_MAX`).
+// UNREAD_MAX: proto's `LISTED_UNREAD_MAX`, held to it by a host test,
+// xtask/src/guards.rs `the_shell_copies_its_limits`).
 const UNREAD_MAX = 100;
 function unreadMark(f) {
   const n = f.name === state.current && !state.page ? 0 : f.unread ?? 0;
@@ -633,10 +634,13 @@ function primaryAgent() {
 // message waiting for its turn has no record yet, so queued is not said.
 // None while their computer is not awake (its turns stop with it) or this
 // page's list socket is shut (it would not hear the change), and none past
-// the bridge's own bound on a turn that says nothing (images/bridge
-// limits.rs: `TURN_IDLE_MS_MAX`, 15 minutes; a turn waiting on someone
-// waits as long as a card, `PROMPT_TTL_MS_DEFAULT`, an hour), each a minute
-// more for the list's own lag (proto's `LISTED_FRESH_MS`). A listed field's
+// the bridge's own bound on a turn that says nothing (15 minutes; a turn
+// waiting on someone waits as long as a card, an hour), each a minute more
+// for the list's own lag. Those three are copies, named as their sources
+// name them (proto's limits; images/bridge/src/limits.rs), each held to its
+// source by a host test (xtask/src/guards.rs, `the_shell_copies_its_limits`).
+// The list's turn kinds are the chat's records (docs/chat-records.md):
+// the shell reads them as the bridge writes them. A listed field's
 // value is any text an agent wrote (up to 128 characters): `asks` is only
 // compared with the person's id here, never shown; what is shown is these
 // words and the chat's title, as text (`el`'s textContent), never markup.
@@ -644,7 +648,9 @@ const DOING_SAYS = { you: "Waiting for you", waiting: "Waiting", working: "Worki
 const DOING_ORDER = Object.keys(DOING_SAYS);
 const DOING_OF_KIND = { "turn.start": "working", "turn.step": "working", "turn.prompt.closed": "working", "turn.prompt": "you", "turn.asked": "asked" };
 const LISTED_FRESH_MS = 60_000;
-const DOING_QUIET_MS = { working: 15 * 60_000 + LISTED_FRESH_MS, waiting: 60 * 60_000 + LISTED_FRESH_MS };
+const TURN_IDLE_MS_MAX = 15 * 60_000;
+const PROMPT_TTL_MS_DEFAULT = 60 * 60_000;
+const DOING_QUIET_MS = { working: TURN_IDLE_MS_MAX + LISTED_FRESH_MS, waiting: PROMPT_TTL_MS_DEFAULT + LISTED_FRESH_MS };
 // the chats its menu names, at most
 const DOING_LISTED = 5;
 // the list socket (`watchList`, below): declared here, as the sidebar reads it

@@ -105,4 +105,34 @@ mod tests {
         let levers = BTreeMap::from([("principal.rs".to_string(), 2), ("schema.rs".to_string(), 7)]);
         assert_eq!(found, levers, "a schema changes by a step of its class's (crates/core/src/migrate.rs says how), not in the cell");
     }
+
+    /// The value of a constant whose expression is integer literals
+    /// multiplied (`15 * 60_000`, `60 * 60 * 1000`): `name` declared once in
+    /// `text`, as `<head> <name><sep>` up to its `;`.
+    fn constant(text: &str, head: &str, name: &str, sep: &str) -> i64 {
+        let at = format!("{head} {name}{sep}");
+        let lines: Vec<&str> = text.lines().filter(|l| l.trim_start().starts_with(&at)).collect();
+        assert_eq!(lines.len(), 1, "{name} is declared once");
+        let expr = lines[0].trim_start()[at.len()..].trim_end().trim_end_matches(';');
+        expr.split('*').map(|n| n.trim().replace('_', "").parse::<i64>().unwrap_or_else(|_| panic!("{name}'s `{expr}` is integer literals multiplied"))).product()
+    }
+
+    /// Goal: the limits the shell copies (it reads no config of the cell's
+    /// that carries them) say what their sources say, so the sidebar never
+    /// drifts from them silently: proto's `LISTED_FRESH_MS` and
+    /// `LISTED_UNREAD_MAX`, and the bridge's `TURN_IDLE_MS_MAX` and
+    /// `PROMPT_TTL_MS_DEFAULT` (images/bridge/src/limits.rs: images/ is a
+    /// workspace of its own, so its file is read). Method: each copy and
+    /// each Rust source, read and evaluated.
+    #[test]
+    fn the_shell_copies_its_limits() {
+        let root = crate::devstack::repo_root();
+        let shell = std::fs::read_to_string(root.join("cell/shell/shell.js")).expect("the shell reads");
+        let bridge = std::fs::read_to_string(root.join("images/bridge/src/limits.rs")).expect("the bridge's limits read");
+        assert_eq!(constant(&shell, "const", "LISTED_FRESH_MS", " = "), fragment_proto::limits::LISTED_FRESH_MS);
+        assert_eq!(constant(&shell, "const", "UNREAD_MAX", " = "), i64::from(fragment_proto::limits::LISTED_UNREAD_MAX));
+        for name in ["TURN_IDLE_MS_MAX", "PROMPT_TTL_MS_DEFAULT"] {
+            assert_eq!(constant(&shell, "const", name, " = "), constant(&bridge, "pub const", name, ": u64 = "), "the shell's {name} is the bridge's");
+        }
+    }
 }
