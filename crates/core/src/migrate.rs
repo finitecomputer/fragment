@@ -38,16 +38,10 @@
 //!    `crates/core/migrations/schema.lock`, and commit both. `cargo xtask
 //!    check` fails until the lock names every step as declared.
 //!
-//! For example, the two `fenced` columns of #369, which its
-//! `cell/src/columns.rs` adds if missing as objects start, are a step of
-//! the Registry's and one of the Computer's, and `columns.rs` goes. Two
-//! files of one line each, `registry/0002_identities_fenced.sql` (`ALTER
-//! TABLE identities ADD COLUMN fenced INTEGER NOT NULL DEFAULT 0;`) and
-//! `computer/0002_agents_fenced.sql` (`ALTER TABLE agents ADD COLUMN
-//! fenced INTEGER NOT NULL DEFAULT 0;`), are declared after the baselines:
-//! `step!("identities_fenced", "registry/0002_identities_fenced.sql")` in
-//! `REGISTRY`, and `step!("agents_fenced", "computer/0002_agents_fenced.sql")`
-//! in `COMPUTER`. The baselines' `CREATE TABLE`s stay as they are.
+//! For example, decision 63's `fenced` columns are the Registry's
+//! `0003_identities_fenced.sql` and the Computer's
+//! `0002_agents_fenced.sql`: ordinary `ALTER TABLE` steps after their
+//! existing history. The baselines' `CREATE TABLE`s stay as they are.
 //!
 //! Never edit, renumber or remove a step once it is merged: objects hold
 //! steps by number and SHA, and refuse code whose history differs. Two
@@ -118,7 +112,7 @@ pub const FRAGMENT: Class = Class {
     kept: &["ended", "ended_index", "ended_repos", "ended_agents", "ended_errors"],
 };
 
-pub const REGISTRY: Class = Class { name: "Registry", steps: &[step!("baseline", "registry/0001_baseline.sql"), step!("connection_signins", "registry/0002_connection_signins.sql")], variants: &[], kept: &[] };
+pub const REGISTRY: Class = Class { name: "Registry", steps: &[step!("baseline", "registry/0001_baseline.sql"), step!("connection_signins", "registry/0002_connection_signins.sql"), step!("identities_fenced", "registry/0003_identities_fenced.sql")], variants: &[], kept: &[] };
 
 pub const PRINCIPAL: Class = Class {
     name: "Principal",
@@ -129,7 +123,7 @@ pub const PRINCIPAL: Class = Class {
 
 pub const LEDGER: Class = Class { name: "Ledger", steps: &[step!("baseline", "ledger/0001_baseline.sql")], variants: &[], kept: &["wiped"] };
 
-pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql")], variants: &[], kept: &["wiped"] };
+pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql"), step!("agents_fenced", "computer/0002_agents_fenced.sql")], variants: &[], kept: &["wiped"] };
 
 /// Every platform class, as the lock lists them.
 pub const CLASSES: [&Class; 5] = [&FRAGMENT, &REGISTRY, &PRINCIPAL, &LEDGER, &COMPUTER];
@@ -635,29 +629,33 @@ mod tests {
         assert_eq!(fragment.count("SELECT COUNT(*) FROM record_schedules"), 0);
     }
 
-    /// Goal: #369's `fenced` columns (its `columns.rs` adds them if missing
-    /// as objects start) are ordinary steps, as the module doc shows: a
-    /// Registry and a Computer at their baseline, rows in them, take them
-    /// and keep their rows at the column's default. Method: the two steps
-    /// as the doc writes them, after each class's baseline.
+    /// Goal: the real Registry and Computer histories add the fence to
+    /// existing rows, defaulting to unfenced, and keep it across restart.
+    /// Method: migrate from the previous production steps, then change
+    /// the fence and run the current history again.
     #[test]
     fn the_fenced_columns_are_ordinary_steps() {
-        const REGISTRY_FENCED: &[Step] = &[step!("baseline", "registry/0001_baseline.sql"), Step { name: "identities_fenced", sql: "ALTER TABLE identities ADD COLUMN fenced INTEGER NOT NULL DEFAULT 0;\n" }];
-        const COMPUTER_FENCED: &[Step] = &[step!("baseline", "computer/0001_baseline.sql"), Step { name: "agents_fenced", sql: "ALTER TABLE agents ADD COLUMN fenced INTEGER NOT NULL DEFAULT 0;\n" }];
         let registry = Lite::new();
-        let baseline = Class { steps: &REGISTRY.steps[..1], ..REGISTRY };
-        migrated(&registry, &baseline, 1).expect("a registry at its baseline");
+        let before = Class { steps: &REGISTRY.steps[..2], ..REGISTRY };
+        migrated(&registry, &before, 1).expect("a registry before fencing");
         registry.exec("INSERT INTO identities (id, kind, created_at) VALUES ('npub1a', 'agent', 1)").expect("an identity");
-        let fenced = Class { steps: REGISTRY_FENCED, ..REGISTRY };
-        assert_eq!(migrated(&registry, &fenced, 2), Ok(Ran::Migrated { from: 1, version: 2 }));
+        let known = REGISTRY.steps.len() as u32;
+        assert_eq!(migrated(&registry, &REGISTRY, 2), Ok(Ran::Migrated { from: 2, version: known }));
         assert_eq!(registry.count("SELECT COUNT(*) FROM identities WHERE id = 'npub1a' AND fenced = 0"), 1);
+        registry.exec("UPDATE identities SET fenced = 1 WHERE id = 'npub1a'").expect("fence it");
+        assert_eq!(migrated(&registry, &REGISTRY, 3), Ok(Ran::Current { version: known }));
+        assert_eq!(registry.count("SELECT COUNT(*) FROM identities WHERE id = 'npub1a' AND fenced = 1"), 1);
 
         let computer = Lite::new();
-        migrated(&computer, &COMPUTER, 1).expect("a computer");
+        let before = Class { steps: &COMPUTER.steps[..1], ..COMPUTER };
+        migrated(&computer, &before, 1).expect("a computer before fencing");
         computer.exec("INSERT INTO agents (fragment, identity, owner, added_at) VALUES ('f', 'npub1a', 'npub1o', 1)").expect("an agent");
-        let fenced = Class { steps: COMPUTER_FENCED, ..COMPUTER };
-        assert_eq!(migrated(&computer, &fenced, 2), Ok(Ran::Migrated { from: 1, version: 2 }));
+        let known = COMPUTER.steps.len() as u32;
+        assert_eq!(migrated(&computer, &COMPUTER, 2), Ok(Ran::Migrated { from: 1, version: known }));
         assert_eq!(computer.count("SELECT COUNT(*) FROM agents WHERE fragment = 'f' AND connections = 'null' AND fenced = 0"), 1);
+        computer.exec("UPDATE agents SET fenced = 1 WHERE fragment = 'f'").expect("fence its view");
+        assert_eq!(migrated(&computer, &COMPUTER, 3), Ok(Ran::Current { version: known }));
+        assert_eq!(computer.count("SELECT COUNT(*) FROM agents WHERE fragment = 'f' AND fenced = 1"), 1);
     }
 
     /// Goal: a step that fails rolls every step of that start back (the

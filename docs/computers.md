@@ -2180,7 +2180,9 @@ persisted)".
   install -g` are how an agent installs software. The computer is one
   person's VM with no secret in it (decisions 13, 43), and one person's
   agents are not fenced from each other (decision 44), so root inside it
-  opens nothing of anyone else's.
+  opens nothing of anyone else's. A fenced agent (decision 63, proposed)
+  runs as the `hermes` user too: its fence is the platform's ("A fenced
+  agent in our Hermes image", below).
 - **How long an install lasts.** `/data` is the only place a computer
   keeps; an install outside it lasts until the computer's next start from
   its image (a crash, or an image update), and a wake from a snapshot
@@ -2206,6 +2208,32 @@ persisted)".
   intercept catches (decision 43); the image keeps apt's lists as of its
   build, and a `.deb` on disk installs offline. An intranet computer
   needs an apt mirror (and PyPI's and npm's) named in the image.
+
+### A fenced agent in our Hermes image
+
+Decision 63 (proposed): an agent its owner, or their agent, fences acts
+as itself alone. The fence is the platform's: it refuses the agent's
+`for` (docs/api.md), and its computer's guest view says `fenced` and
+gives it no connection. On the computer it is any agent's profile under
+the same gateway, as the `hermes` user, with the same tools and the
+internet; its computer only names no one for it.
+
+- **Its terminal names no one to act for.** Its profile's `.env` has
+  no `FRAGMENT_FOR`, so the fragment CLI in its terminal acts as the
+  agent alone; told its owner by hand, the platform refuses it (403).
+- **Fenced or let go while awake.** The boot reads the change with its
+  agents (every 3 s) and writes the profile again; nothing restarts.
+  Hermes reads a profile's `.env` at each turn and passes it to each
+  command (`terminal.env_passthrough`), so its next command names no one,
+  or its owner again; the Docker lane's
+  `a_fenced_agent_names_no_one_to_act_for` checks it.
+- **What the computer does not enforce.** Its commands run as the
+  `hermes` user, so they can read the other agents' work and Hermes' home
+  (each profile's `.env`: placeholders, never a credential), reach the
+  computer's own services (another agent's browser, Hermes' API), and
+  call the computer's egress, which signs as whichever of its agents a
+  request names (docs/technical-debt-ledger.md, "A teammate on another
+  provider is kept out by a prompt and the platform's fence").
 
 ### Hermes' container guesses
 

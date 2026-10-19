@@ -848,6 +848,7 @@ fragment agent garden-keeper --model openrouter:anthropic/claude-sonnet-5.5   # 
 fragment agent garden-keeper --no-model            # its tier again
 fragment agent garden-keeper --stop                # stopped: its fragment, job and memories kept
 fragment agent garden-keeper --start               # running again
+fragment agent garden-keeper --fence               # acts as itself alone; only its owner can --no-fence
 fragment agent garden-keeper                       # its name, where its model calls go, whether it runs
 ```
 
@@ -873,6 +874,13 @@ its owner's own provider, outside the platform. An agent never starts or
 stops itself, and the platform refuses (403) every other computer route
 to an agent, starting or stopping acting for anyone but its owner, and
 any of it while its owner holds it below them.
+
+An agent on its owner's own provider is fenced (decision 63, proposed):
+`--model` fences it before publishing that model, and `--fence` fences
+any agent. Its requests naming `for` are refused (403), so it reaches its
+own memberships and receives no connection. Its terminal has no
+`FRAGMENT_FOR`. `--no-model` keeps the fence; only its owner can release
+it with `--no-fence`. `fragment agent <agent> --json` says `fenced`.
 
 ### Routines
 
@@ -981,6 +989,7 @@ fragment ask <agent> <text> | --from FILE|- [--chat C] [--wait [S]] [--id ID]
 fragment mcp <name> [--write]            # its described operations as an MCP server's tools, over stdio
 fragment agent [<agent>] [--name N] [--picture FILE | --no-picture] [--job T | --job-from FILE|-]
 fragment agent [<agent>] [--tier cheap|medium] [--model PROVIDER:ID | --no-model] [--start | --stop]
+fragment agent [<agent>] [--fence | --no-fence]
 fragment agent --new <label> [--name N] --job T | --job-from FILE|- [--tier cheap|medium] [--model PROVIDER:ID]
 fragment schedule add [<name>] --cron "<m h dom mon dow>" --channel C --record JSON
 fragment schedule add [<name>] --cron "<m h dom mon dow>" --routine TEXT --chat C   # an agent's routine, on its tasks

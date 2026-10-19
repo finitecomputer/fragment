@@ -73,6 +73,11 @@ pub struct ComputerAgent {
     /// its tier (docs/computers.md, "An agent's own model").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_providers: Vec<String>,
+    /// Fenced (decision 63, proposed): it acts as itself alone and is given
+    /// no connection (docs/computers.md, "A fenced agent in our Hermes
+    /// image").
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fenced: bool,
     /// The guest's view only (`GET /api/computer`): each credential the
     /// agent may use now, its placeholder in its environment variables.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -555,7 +560,7 @@ mod tests {
         assert_eq!(all.connections, None);
         let narrowed: AgentConnections = serde_json::from_str(r#"{"connections":["github"]}"#).unwrap();
         assert_eq!(narrowed.connections, Some(vec!["github".to_string()]));
-        let agent = ComputerAgent { fragment: "juniper.paul".into(), identity: "id:a".into(), name: "juniper".into(), owner: "id:p".into(), connections: None, model_providers: vec![], credentials: vec![] };
+        let agent = ComputerAgent { fragment: "juniper.paul".into(), identity: "id:a".into(), name: "juniper".into(), owner: "id:p".into(), connections: None, model_providers: vec![], fenced: false, credentials: vec![] };
         let v = serde_json::to_value(&agent).unwrap();
         assert_eq!(v["connections"], serde_json::Value::Null, "the default is named, as null");
         assert!(v.get("credentials").is_none(), "the owner's view names no placeholder");

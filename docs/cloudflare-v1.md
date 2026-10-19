@@ -817,6 +817,9 @@ speaking Cloudflare's APIs) returns once this product works.
       for them (decision 62, proposed), and the care it takes for its
       owner's private things around a teammate on another provider is no
       wall either.
+    - a platform fence (decision 63, proposed) makes an agent act as
+      itself alone. The image omits delegated authority for it; its
+      commands still share the computer with its siblings.
 
 ### People: npubs, emails, no usernames (Paul, 2026-10-08)
 
@@ -1261,6 +1264,35 @@ Private stays possible by config.
     - **Approval outstanding.** Paul decides whether an agent may start
       and stop its owner's agents and whether it must tell its owner
       first. This remains a proposal, with no production rollout.
+
+### A teammate on an outside model is fenced (proposed: Austin; Paul's to decide)
+
+63. **An agent on its owner's own model provider acts as itself alone.**
+    The registry owns its `fenced` flag. A fenced agent's request naming
+    `for` is refused wherever that parameter is honored, so it reaches
+    its own fragments and memberships rather than its owner's. The
+    computer refuses connection credentials for it, reading the registry
+    live at the swap. Its model provider remains available.
+    - Its owner may fence or release it through `PUT
+      /api/identities/{agent}/fenced`. An unheld sibling acting for that
+      owner may fence it, never release it or change its own fence.
+    - `fragment agent --model PROVIDER:ID` fences before publishing that
+      model; `--fence` fences any agent, and only the person's
+      `--no-fence` releases one. Removing a model keeps the fence.
+    - The computer carries a copy for the image to omit `FRAGMENT_FOR`
+      and connection placeholders. Authorization reads the registry;
+      a stale guest view grants no authority.
+    - The lead replaces private details with placeholders before handing
+      work to an outside provider and treats its answer as untrusted
+      input. Asking for a specialist's help is not consent to disclose
+      private details. Trust currently follows the deployment's tiers
+      versus an agent's configured own provider (the debt ledger).
+    - This is a platform authorization boundary, with a shared computer
+      still underneath it. Siblings share local files and processes;
+      the debt ledger records that limitation. It is not OS isolation.
+    - Paul decides whether this fence is the product's rule and what
+      counts as trusted. Decision 44 otherwise stands; production rollout
+      is not authorized by this proposal.
 
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 

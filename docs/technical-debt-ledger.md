@@ -1455,3 +1455,55 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** Cloudflare fixes #362 and a canary round shows no
   `snapshot: "dead"` across its snapshot wakes; or snapshots go
   (`FRAGMENT_COMPUTER_SNAPSHOTS=off`), when the wait goes with them.
+
+## Which of an agent's teammates is trusted is read from its agent.json
+
+- **Observed:** 2026-10-16, a person's default agent keeping the rest
+  (docs/cloudflare-v1.md, decision 62, proposed). The default agent keeps
+  the person's private things from a teammate whose model is outside the
+  platform. Nothing on the platform says which models are trusted: the
+  agents-finite skill and `fragment agent --json` (`runsOn`) read the
+  teammate's `agent.json`, a `model` (a provider its owner connected:
+  OpenRouter's catalog) untrusted and the platform's tiers trusted.
+- **Shortcut:** every tier the deployment runs counts as trusted, the
+  default agent's own included, whatever runs it (Finite's tiers run on
+  GLM-5.3 Flash through the platform's OpenRouter key since 2026-10-15,
+  Finite Private by config: decision 61). A `model` counts as untrusted
+  while it is named, even when its computer runs the agent on its tier
+  (its owner disconnected the provider).
+- **Risk:** a tier that runs outside what the person would call private
+  is trusted all the same. The skill classifies what `agent.json` names,
+  never whether that model is trusted, so a teammate the skill calls
+  trusted may be on a model no one checked.
+- **First proof:** a deployment whose `models` put a tier on a provider
+  its operator does not call private, and a default agent handing that
+  tier's teammate what the skill says to keep from others.
+- **Delete when:** trust is the deployment's own fact (its `models`
+  config names which slots and providers are trusted, decision 61's
+  config), told to every agent with its teammates (`GET /api/computer`),
+  and the skill reads that.
+
+## A teammate on another provider is kept out by a prompt and the platform's fence
+
+- **Observed:** decisions 62 and 63 (proposed). The agents-finite skill
+  tells a person's default agent what never to hand a teammate on
+  another provider (placeholders, never the details). The platform
+  refuses a fenced teammate's `for` and its connections (the swap asks
+  the registry), but its commands run as the `hermes` user beside every
+  other agent's (decision 44's one computer; Austin chose this over a
+  sandbox per agent with no internet, 2026-10-17).
+- **Shortcut:** the care is the default agent's, in its prompt; the
+  computer does not enforce the fence.
+- **Risk:** a fenced teammate, or a page that talks it into it, reads the
+  other agents' work and transcripts and Hermes' home (each profile's
+  `.env`: another agent's placeholders), or calls the computer's egress,
+  which signs as whichever of its agents a request names: as its owner's
+  default agent, it acts for its owner, and its provider has what it
+  read. A default agent that misjudges what is private hands it over
+  itself.
+- **First proof:** a fenced agent's command that reads another agent's
+  work, or calls the platform naming another agent.
+- **Delete when:** the computer enforces the fence (the agent's commands
+  as a user of its own with the internet through a filter: decision 63's
+  box, in git history, with a filter added; or an egress that tells its
+  agents apart), or the teammate runs where its owner's data is not.
