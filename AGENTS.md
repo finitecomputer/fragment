@@ -286,14 +286,16 @@ first-party source.
   sections run the stub image under `wrangler dev`, which needs Docker.
 - `.github/workflows/ci.yml` runs `check`, the e2e's four shards (`e2e
   shard k/4`), and `e2e`, green when they all are, on Linux. Its caches
-  restore on every run and save only from master's pushes (each key's
-  contents are named in the workflow). `images.yml` runs `images/`'s
+  restore on every run and save only from master's pushes (each one's
+  contents are named in the workflow): Rust's through
+  `Swatinem/rust-cache`, the pinned Node's and the JavaScript caches
+  through `actions/cache`. `images.yml` runs `images/`'s
   `check` on every change there, and `docker`, the Docker lane above
   (both images built, then every `--ignored` test of docker.rs on them,
   in parallel; about 13 minutes), on pull requests and master's
   pushes that touch images/hermes, images/bridge, images/stub, the
-  images' manifest or lock, or the workflow (its `changes` job reads what
-  changed), and on a run by hand. It keeps no layer cache: the workflow
+  images' manifest or lock, or the workflow (its `changes` job, through
+  `dorny/paths-filter`), and on a run by hand. It keeps no layer cache: the workflow
   says why. `release.yml` builds the CLI for macOS and Linux.
 - Master deploys to Cloudflare (`xtask deploy`): branch copies on a dev
   zone (master's preview is `preview.finite.build`), and production
