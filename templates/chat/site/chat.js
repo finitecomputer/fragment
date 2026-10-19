@@ -246,6 +246,19 @@ function el(tag, cls, text) {
 
 const time = (at) => new Date(at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 const capital = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+/// Where an agent's model calls go, as the shell's roster says it
+/// (decision 62, proposed): the platform's models, or a model of its
+/// owner's own provider (by its name for people), outside the platform;
+/// none when it says neither.
+function runsOnOf(v) {
+  if (v?.on === "platform") return { on: "platform" };
+  if (v?.on === "own" && typeof v.model === "string" && v.model.length <= 80 && typeof v.provider === "string" && v.provider.length <= 40) return { on: "own", model: v.model, provider: v.provider };
+  return null;
+}
+// what a person reads of a model outside the platform: the model, and the
+// provider its calls go through
+const ownTag = (r) => `${r.model} · ${r.provider}`;
+const ownSays = (who, r) => `${who} runs on ${r.model} through ${r.provider}, outside the platform: what it is sent goes to ${r.provider}.`;
 const plural = (n, one) => `${n} ${one}${n === 1 ? "" : "s"}`;
 
 function size(bytes) {
@@ -1003,6 +1016,33 @@ export function mount(root) {
       input.placeholder = "Write your first message…";
       $("note").textContent = "Send turns on once your agent is in this chat.";
     } else if (setup) $("note").textContent = "";
+    outsideNote(first);
+  }
+  // A chat whose lead runs outside the platform (the shell's roster says
+  // where: decision 62, proposed) says so where its person writes: what
+  // they send goes to that model's provider, and no agent of theirs takes
+  // their private things out first. Only on a note no other line holds.
+  function outsideNote(first) {
+    const note = $("note");
+    const shown = note.dataset.outside;
+    const ours = shown !== undefined && note.textContent === shown;
+    if (shown !== undefined && !ours) {
+      delete note.dataset.outside;
+      note.removeAttribute("title");
+    }
+    if (note.childNodes.length && !ours) return;
+    const r = first ? state.roster.find((x) => x.identity === first)?.runsOn : null;
+    const text = canPost() && !setupHolds() && r?.on === "own" ? ownTag(r) : "";
+    if (ours && shown === text) return;
+    if (!text) {
+      delete note.dataset.outside;
+      note.removeAttribute("title");
+      return note.replaceChildren();
+    }
+    note.dataset.outside = text;
+    note.title = ownSays(who(first).name, r);
+    note.innerHTML = svg("globe", "outside-mark");
+    note.append(text);
   }
 
   function messageNode(m) {
@@ -2005,7 +2045,7 @@ export function mount(root) {
       state.roster = d.agents
         .filter((a) => a && typeof a.identity === "string" && a.identity.startsWith("npub1") && typeof a.name === "string" && HANDLE.test(a.name))
         .slice(0, ROSTER_MAX)
-        .map((a) => ({ identity: a.identity, name: a.name, title: typeof a.title === "string" && a.title ? a.title : capital(a.name), picture: typeof a.picture === "string" && /^https?:\/\//.test(a.picture) ? a.picture : null, phase: ["asleep", "starting", "awake", "sleeping", "wont_wake"].includes(a.phase) ? a.phase : null }));
+        .map((a) => ({ identity: a.identity, name: a.name, title: typeof a.title === "string" && a.title ? a.title : capital(a.name), picture: typeof a.picture === "string" && /^https?:\/\//.test(a.picture) ? a.picture : null, phase: ["asleep", "starting", "awake", "sleeping", "wont_wake"].includes(a.phase) ? a.phase : null, runsOn: runsOnOf(a.runsOn) }));
       if (d.setup && typeof d.setup === "object" && Array.isArray(d.setup.steps)) {
         setup = {
           steps: d.setup.steps

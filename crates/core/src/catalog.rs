@@ -267,6 +267,18 @@ pub fn valid_name(name: &str) -> bool {
         && !name.ends_with('-')
 }
 
+/// The model of its owner's own provider an agent's `agent.json` names
+/// (`{"model": {"provider", "id"}}`), when it names one well: a provider's
+/// name and an id of 1 to `MODEL_ID_MAX_BYTES` printable bytes, no space.
+/// Anything else (no JSON, no `model`, half a model) names none: the agent
+/// runs on its tier, as its computer runs it.
+pub fn agent_model(agent_json: &[u8]) -> Option<fragment_proto::computer::AgentModel> {
+    let v: serde_json::Value = serde_json::from_slice(agent_json).ok()?;
+    let (provider, id) = (v["model"]["provider"].as_str()?, v["model"]["id"].as_str()?);
+    let id_ok = (1..=MODEL_ID_MAX_BYTES).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_graphic());
+    (valid_name(provider) && id_ok).then(|| fragment_proto::computer::AgentModel { provider: provider.to_string(), id: id.to_string() })
+}
+
 /// A host a credential is for: a lower-case DNS name with a dot (no port,
 /// no wildcard).
 pub fn valid_host(host: &str) -> bool {
@@ -543,6 +555,24 @@ impl Catalog {
 
 #[cfg(test)]
 mod tests {
+    /// Goal: where an agent's model calls go is read from its agent.json as
+    /// its computer reads it. Valid: a provider and an id (an id may hold a
+    /// colon). Invalid: no JSON, no model, half a model, a bad provider, an
+    /// id with a space or past its bound name none. Replay: the same text
+    /// reads the same.
+    #[test]
+    fn an_agent_json_names_its_owners_model_or_none() {
+        let sonnet = br#"{"tier":"cheap","model":{"provider":"openrouter","id":"anthropic/claude-sonnet-5.5"}}"#;
+        let m = agent_model(sonnet).expect("a model");
+        assert_eq!((m.provider.as_str(), m.id.as_str()), ("openrouter", "anthropic/claude-sonnet-5.5"));
+        assert_eq!(agent_model(sonnet), Some(m), "the same text, the same model");
+        assert!(agent_model(br#"{"model":{"provider":"openrouter","id":"z-ai/glm-5.3:free"}}"#).is_some());
+        let long = format!(r#"{{"model":{{"provider":"openrouter","id":"{}"}}}}"#, "x".repeat(MODEL_ID_MAX_BYTES + 1));
+        for bad in [&b"not json"[..], br#"{"tier":"medium"}"#, br#"{"model":{"provider":"openrouter"}}"#, br#"{"model":{"provider":"Open Router","id":"x"}}"#, br#"{"model":{"provider":"openrouter","id":"a b"}}"#, br#"{"model":{"provider":"openrouter","id":""}}"#, long.as_bytes()] {
+            assert_eq!(agent_model(bad), None, "{}", String::from_utf8_lossy(bad));
+        }
+    }
+
 
     /// Goal: a fenced agent is given no connection, and every other kind
     /// as an unfenced one is (decision 63, proposed).

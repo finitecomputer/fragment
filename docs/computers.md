@@ -1311,6 +1311,12 @@ offered (decision 60 says why, with the vendors' words).
   --model openrouter:<id>` (and `--no-model`), when its owner asked or
   agreed (decision 62, proposed: the agents-finite skill, which treats a
   teammate on its owner's own provider as outside the platform).
+- **What the platform shows of it.** The agent fragment keeps the
+  `model` its `agent.json` names at main, read as its main moves, and
+  tells its computer when it changes; the computer's view gives each agent
+  its `model` (decision 62, proposed), which the shell shows as where its
+  model calls go. It says what `agent.json` names, not whether its owner
+  has that provider connected.
 - **Our Hermes image** reads each agent's `agent.json` again every 10 s
   while awake, and whenever its credentials change. When the agent's
   credentials hold the named provider with a `modelBase`, its profile's
@@ -1367,7 +1373,8 @@ container from outside. By convention the screen is a page on port 6080
 `/p/6080/?agent=<agent fragment>` (a ticket that lands there: `POST
 …/ports/6080/ticket {path: "/?agent=…"}`), from a chat with the agent
 ("Its screen" in the chat's menu), or with the agent picked from a group
-chat's menu ("<name>'s screen"), or from settings. The platform carries
+chat's menu ("<name>'s screen"), or from a teammate's ⋯ in the shell's
+team ("Its screen"), or from settings. The platform carries
 the query and reads nothing in it: which desktop is that agent's, and
 the refusal of an agent the computer does not run, are the image's. The
 page is served at the port's root and reaches its sockets by relative
@@ -2340,8 +2347,9 @@ for a host) and finds the same `HOME`, `~` and modes.
   lands on `?agent=` and refuses a path off its port, and an agent's
   screen's control socket through the port (refused for an agent not on
   the computer, 404, and for no name, 400: the image's answers); the
-  `shell-ui` lane's chat menus (a direct chat's "Its screen", a group's
-  screen per agent), each frame landing on `?agent=<that agent>`. The
+  `shell-ui` lane's menus (a direct chat's "Its screen", a group's
+  screen per agent, a teammate's ⋯), each frame landing on
+  `?agent=<that agent>`. The
   hosted `agent-smoke` checks that its chat's agent's screen is the one
   served: the RFB stream's desktop is that agent's (`hermes:<profile>`),
   the page names it, and another agent's is refused.

@@ -155,7 +155,9 @@ impl FragmentCell {
                     None => format!("runs on {}", b.computer),
                 };
                 self.event("computer.assigned", &summary, data);
-                Ok(json!({ "identity": identity }))
+                // where its model calls go, as its agent.json last said
+                let model = self.meta(MetaKey::AgentModel)?.and_then(|m| serde_json::from_str::<Value>(&m).ok());
+                Ok(json!({ "identity": identity, "model": model }))
             }
             "unassign" => {
                 let b: Assign = serde_json::from_value(body.clone()).map_err(|e| CellError::invalid(format!("body: {e}")))?;

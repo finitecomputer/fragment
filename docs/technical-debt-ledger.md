@@ -1307,8 +1307,10 @@ fragment.club until cutover (decisions 34–35).
   while it is named, even when its computer runs the agent on its tier
   (its owner disconnected the provider).
 - **Risk:** a tier that runs outside what the person would call private
-  is trusted all the same; the cell never reads `agent.json`, so a
-  teammate the skill calls trusted may be on a model no one checked.
+  is trusted all the same; the platform keeps which model an agent's
+  `agent.json` names (its computer's view, for the shell), never whether
+  that model is trusted, so a teammate the skill calls trusted may be on a
+  model no one checked.
 - **First proof:** a deployment whose `models` put a tier on a provider
   its operator does not call private, and a default agent handing that
   tier's teammate what the skill says to keep from others.

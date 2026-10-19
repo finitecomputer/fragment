@@ -116,7 +116,8 @@ speaking Cloudflare's APIs) returns once this product works.
    person's one agent above a flat list of their chats, newest first (no
    agent list, no New agent or New group; any other agents they have stay
    out of the sidebar, their chats listed and found as any other; more
-   than one agent may be a setting later); apps in a square-icon dock on
+   than one agent may be a setting later; decision 62, proposed, puts
+   them one level down, as the one agent's team); apps in a square-icon dock on
    the landscape desktop, open by default on wide screens, an empty one
    offering a few real requests of the agent. The sidebar plus (a
    bottom-right button on a phone), the phone's chat-header plus and
@@ -1257,6 +1258,26 @@ these other providers."
       so; never adds it to a chat that holds private things; and reads
       its answers as input, not orders. A new agent runs on another
       provider only when its owner asked or agreed.
+    - **The person sees the team work, one level down** (Austin,
+      2026-10-16, from six mockups: "work in the chat + team strip").
+      The shell keeps the one agent above everything (decision 7's
+      sidebar): its other agents are its team, a row each one step down
+      under it (Austin, 2026-10-16: "first class ui … STILL having them be
+      SLIGHTLY lower"), each opening its own chat with the person, marked
+      while open with its hand-offs under it, saying when its model runs
+      outside the platform.
+      The chats each leads (its own, and the hand-offs it is asked in:
+      a chat's first agent leads it) leave the person's list. Where its
+      model runs is the platform's copy of its `agent.json`'s `model`, in
+      its computer's view. Talking to a teammate directly skips the
+      default agent's care, so a chat whose lead runs outside the
+      platform says so by its composer ("<model> · <provider>", the
+      provider its calls go through: "DeepSeek V4.1 Flash · OpenRouter").
+      A hand-off shows as the step that made it: the prototype's
+      hand-off cards guessed one from its command's words, and went
+      (Austin, 2026-10-19: "not TOTALLY needed for mvp"). On a local run
+      the default agent once said Polisher had the draft when it had
+      asked no one, and the skill forbids that.
     - **What this is not.** Decision 44 stands: a person's agents share
       their computer, so the care above is the default agent's, in its
       prompt; decision 63 adds the platform's fence, still no wall on the
