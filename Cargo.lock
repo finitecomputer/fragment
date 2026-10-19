@@ -624,6 +624,7 @@ dependencies = [
  "hex",
  "hkdf",
  "p256",
+ "reqwest",
  "serde",
  "serde_json",
  "sha1",
