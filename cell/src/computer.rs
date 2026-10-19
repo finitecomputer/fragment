@@ -89,27 +89,6 @@ const AGENT_HEADER: &str = "x-fragment-agent";
 const SESSION_COOKIE: &str = "fragment_computer";
 const FRAME_COOKIE: &str = "fragment_computer_frame";
 
-/// `agents.connections` is JSON: `null`, every provider the owner has
-/// (decision 44), or a list that narrows it. An agent's row names it as
-/// it is made (`computer/assign`), so the column's default is never read.
-/// `uses` counts each agent's calls to each provider a month (`Month`'s
-/// index) and what they were charged; `own_keys` holds the owner's own
-/// keys, sealed for this object; `own_signins` the sign-ins to an own key's
-/// provider under way (`fragment_core::own_signin`): each nonce's hash, its
-/// provider, its verifier sealed, until it expires or is finished, once.
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL, connections TEXT NOT NULL DEFAULT 'null');
-CREATE TABLE IF NOT EXISTS awake (from_ms INTEGER PRIMARY KEY, to_ms INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS tickets (hash TEXT PRIMARY KEY, port INTEGER NOT NULL, identity TEXT NOT NULL, expires_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, identity TEXT NOT NULL, expires_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS uses (month INTEGER NOT NULL, provider TEXT NOT NULL, agent TEXT NOT NULL, calls INTEGER NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, provider, agent));
-CREATE TABLE IF NOT EXISTS own_keys (provider TEXT PRIMARY KEY, sealed TEXT NOT NULL, set_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS own_signins (nonce TEXT PRIMARY KEY, provider TEXT NOT NULL, sealed TEXT NOT NULL, expires_at INTEGER NOT NULL);
-";
-/// The one row a wiped computer keeps: when it was wiped. Apart from
-/// `SCHEMA`, whose tables the wipe drops.
-const WIPED_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS wiped (at INTEGER NOT NULL);";
 /// R2 pages (up to 1000 keys each) one `computer/wipe` deletes under its
 /// saves' prefix; the rest are the next call's.
 const WIPE_PAGES_PER_CALL: usize = 10;
@@ -366,6 +345,8 @@ pub struct ComputerCell {
     /// The start this isolate judged dead and destroys: its exit is that
     /// start's own failure, which it reports (`exit_of`).
     dead: std::cell::Cell<Option<u64>>,
+    /// Its schema as it started (schema.rs): ready, or refused.
+    schema: crate::schema::Schema,
 }
 
 impl DurableObject for ComputerCell {
@@ -373,10 +354,8 @@ impl DurableObject for ComputerCell {
         let raw: JsValue = state._inner().into();
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         let sql = state.storage().sql();
-        sql.exec(SCHEMA, None).expect("the Computer schema applies");
-        sql.exec(WIPED_SCHEMA, None).expect("the wiped row's schema applies");
-        let marks: Vec<Value> = sql.exec("SELECT COUNT(*) AS n FROM wiped", None).and_then(|c| c.to_array()).expect("the wiped row reads");
-        let wiped = marks.first().and_then(|r| r["n"].as_i64()).expect("COUNT answers a row") > 0;
+        let schema = crate::schema::Schema::start(&raw, sql.clone(), &fragment_core::migrate::COMPUTER, &state.id().to_string());
+        let wiped = schema.wiped(&sql);
         let cfg = Config::from_env(&env);
         ComputerCell {
             state,
@@ -388,6 +367,7 @@ impl DurableObject for ComputerCell {
             wiped: std::cell::Cell::new(wiped),
             heard_ms: std::cell::Cell::new(None),
             dead: std::cell::Cell::new(None),
+            schema,
         }
     }
 
@@ -399,6 +379,9 @@ impl DurableObject for ComputerCell {
     }
 
     async fn alarm(&self) -> Result<Response> {
+        if self.schema.refused_alarm(&self.state, None).await? {
+            return Response::ok("");
+        }
         if !self.wiped.get() && self.meta(MetaKey::Id).ok().flatten().is_some() {
             if let Err(e) = self.drive(Event::Alarm).await {
                 console_error!("{{\"computer\":\"alarm\",\"error\":{}}}", json!(e.message));
@@ -1802,11 +1785,7 @@ impl ComputerCell {
         let (objects, more) = js::blob_delete_under(&self.env, &self.backups_prefix(), WIPE_PAGES_PER_CALL).await?;
         if !more {
             // one step, no await: its record emptied, the mark kept
-            let sql = self.sql();
-            for table in fragment_core::ddl::tables(SCHEMA) {
-                sql.exec(&format!("DROP TABLE IF EXISTS {table}"), None)?;
-            }
-            sql.exec(SCHEMA, None)?;
+            crate::schema::remake(self.sql(), &fragment_core::migrate::COMPUTER)?;
             assert!(self.meta(MetaKey::Id)?.is_none() && self.saves()?.every_record().is_empty(), "a wiped computer keeps no record");
         }
         console_log!("{}", json!({ "computer": id, "wipe": if more { "partly" } else { "done" }, "records": records.len(), "objects": objects }));
@@ -1876,6 +1855,9 @@ impl ComputerCell {
     /// past its time.
     async fn lever(&self, b: &TestLever) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "only a test fleet pulls a computer's levers");
+        if b.op == "schema" {
+            return crate::schema::view(self.sql(), &fragment_core::migrate::COMPUTER);
+        }
         let id = self.must(MetaKey::Id)?;
         match b.op.as_str() {
             "fail-saves" => {
@@ -1965,9 +1947,15 @@ impl ComputerCell {
 
     async fn route(&self, mut req: Request) -> CellResult<Response> {
         let path = req.path();
-        // a wiped computer answers as none, its wipe's own calls aside
-        if self.wiped.get() && !matches!(path.as_str(), "/computer/wipe" | "/computer/wipe-view") {
+        // a wiped computer answers as none, its wipe's own calls aside;
+        // those end one that refuses its schema too, and the levers' look
+        // at its schema answers on it (schema.rs)
+        let wipe = matches!(path.as_str(), "/computer/wipe" | "/computer/wipe-view");
+        if self.wiped.get() && !wipe {
             return Err(wiped_computer());
+        }
+        if !wipe && path != "/computer/test" {
+            self.schema.ready()?;
         }
         match req.headers().get(KIND_HEADER)?.as_deref() {
             Some("keepalive") => return self.keepalive(&req).await,
@@ -2251,6 +2239,9 @@ impl ComputerCell {
             }
             "computer/test" if self.cfg.test_hooks => {
                 let b: TestLever = body_json(&mut req).await?;
+                if b.op != "schema" {
+                    self.schema.ready()?;
+                }
                 json_response(&self.lever(&b).await?)
             }
             "computer/tab" => {

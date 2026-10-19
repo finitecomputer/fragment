@@ -79,39 +79,6 @@ use worker::*;
 
 use crate::error::{CellError, CellResult};
 
-pub(crate) const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS memberships (
-  fragment TEXT PRIMARY KEY, role TEXT, incarnation INTEGER NOT NULL, version INTEGER NOT NULL,
-  sharing TEXT, face TEXT, archived INTEGER NOT NULL DEFAULT 0, searched TEXT);
-CREATE TABLE IF NOT EXISTS search_entries (
-  id INTEGER PRIMARY KEY, fragment TEXT NOT NULL, n INTEGER NOT NULL, channel TEXT NOT NULL, seq INTEGER NOT NULL,
-  at INTEGER NOT NULL, text TEXT NOT NULL, UNIQUE (fragment, n));
-CREATE INDEX IF NOT EXISTS search_entries_at ON search_entries (at, id);
-CREATE VIRTUAL TABLE IF NOT EXISTS search_text USING fts5(
-  text, content = 'search_entries', content_rowid = 'id', tokenize = 'unicode61 remove_diacritics 2');
-CREATE TRIGGER IF NOT EXISTS search_entries_added AFTER INSERT ON search_entries BEGIN
-  INSERT INTO search_text (rowid, text) VALUES (new.id, new.text);
-END;
-CREATE TRIGGER IF NOT EXISTS search_entries_dropped AFTER DELETE ON search_entries BEGIN
-  INSERT INTO search_text (search_text, rowid, text) VALUES ('delete', old.id, old.text);
-END;
-CREATE TABLE IF NOT EXISTS seen (fragment TEXT PRIMARY KEY, n INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS exports (
-  id TEXT PRIMARY KEY, person TEXT NOT NULL, state TEXT NOT NULL, started_at INTEGER NOT NULL,
-  ready_at INTEGER, expires_at INTEGER, size INTEGER, error TEXT, job TEXT, upload TEXT,
-  requests INTEGER NOT NULL DEFAULT 0, downloads INTEGER NOT NULL DEFAULT 0, gone_at INTEGER, metered INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS export_tail (export TEXT NOT NULL, n INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (export, n));
-CREATE TABLE IF NOT EXISTS export_parts (export TEXT NOT NULL, part INTEGER NOT NULL, etag TEXT NOT NULL, PRIMARY KEY (export, part));
-CREATE TABLE IF NOT EXISTS export_blobs (export TEXT NOT NULL, fragment TEXT NOT NULL, sha TEXT NOT NULL, PRIMARY KEY (export, fragment, sha));
-CREATE TABLE IF NOT EXISTS export_levers (name TEXT PRIMARY KEY, value INTEGER);
-";
-
-/// The one row a wiped list keeps: when it was wiped. Apart from `SCHEMA`,
-/// whose tables a wipe drops.
-const WIPED_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS wiped (at INTEGER NOT NULL);";
-/// `SCHEMA`'s full-text table, which `ddl::tables` does not read (a virtual
-/// table): a wipe drops it beside the rest.
-const SEARCH_TEXT: &str = "search_text";
 /// The rows one `wipe/view` page lists.
 const WIPE_VIEW_PAGE: i64 = 200;
 
@@ -147,6 +114,8 @@ pub struct PrincipalCell {
     pub(crate) wiped: Cell<bool>,
     /// The fleet has test levers (`FRAGMENT_TEST_SECRET`): `test/…` answers.
     pub(crate) test_hooks: bool,
+    /// Its schema as it started (schema.rs): ready, or refused.
+    pub(crate) schema: crate::schema::Schema,
 }
 
 /// `wipe/view`'s body: the page of rows after `after` (a fragment's name).
@@ -271,12 +240,10 @@ impl DurableObject for PrincipalCell {
         let raw: JsValue = state._inner().into();
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         let sql = state.storage().sql();
-        sql.exec(SCHEMA, None).expect("the Principal schema applies");
-        sql.exec(WIPED_SCHEMA, None).expect("the wiped row's schema applies");
-        let marks: Vec<Value> = sql.exec("SELECT COUNT(*) AS n FROM wiped", None).and_then(|c| c.to_array()).expect("the wiped row reads");
-        let wiped = marks.first().and_then(|r| r["n"].as_i64()).expect("COUNT answers a row") > 0;
+        let schema = crate::schema::Schema::start(&raw, sql.clone(), &fragment_core::migrate::PRINCIPAL, &state.id().to_string());
+        let wiped = schema.wiped(&sql);
         let test_hooks = crate::config::Config::from_env(&env).test_hooks;
-        PrincipalCell { state, raw, env, wiped: Cell::new(wiped), test_hooks }
+        PrincipalCell { state, raw, env, wiped: Cell::new(wiped), test_hooks, schema }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -288,6 +255,9 @@ impl DurableObject for PrincipalCell {
 
     // its person's export, built a slice at a time (export.rs)
     async fn alarm(&self) -> Result<Response> {
+        if self.schema.refused_alarm(&self.state, None).await? {
+            return Response::ok("ok");
+        }
         self.export_alarm().await;
         Response::ok("ok")
     }
@@ -330,6 +300,12 @@ impl PrincipalCell {
 
     async fn route(&self, mut req: Request) -> CellResult<Response> {
         let url = req.url()?;
+        // the levers' view of its schema answers on a list that refuses it
+        if req.path() == "/test/schema" && self.test_hooks {
+            return Ok(Response::from_json(&crate::schema::view(self.sql(), &fragment_core::migrate::PRINCIPAL)?)?);
+        }
+        // a wipe ends a list that refuses its schema too, and a wiped
+        // list answers as one, refused or not (schema.rs)
         if let Some(route) = req.path().strip_prefix("/wipe/") {
             // only a wipe's orchestrator sets the header (routed.rs `marker`)
             if req.headers().get(crate::wipe::WIPE_HEADER)?.is_none() {
@@ -342,6 +318,9 @@ impl PrincipalCell {
                 return Ok(Response::from_json(&self.wipe_exports(&body).await?)?);
             }
             return Ok(Response::from_json(&self.wipe(&route, &body)?)?);
+        }
+        if !self.wiped.get() {
+            self.schema.ready()?;
         }
         // the router's levers (`/api/test/list`, `/api/test/export`), on fleets with them only
         if req.path() == "/test/export" && self.test_hooks {
@@ -407,10 +386,11 @@ impl PrincipalCell {
     }
 
     /// The test levers on a list (`POST /api/test/list {identity, op}`):
-    /// `before-searched` makes it a list from before its rows named the
-    /// channels searched (#186), whose table never gained the column (the
-    /// lists on p5, 2026-10-08: every newer change to one is refused, 500).
-    /// Answers its columns.
+    /// `before-searched` makes it a list from before schema versions and
+    /// before its rows named the channels searched (#186), whose table never
+    /// gained the column (the lists on p5, 2026-10-08: every newer change
+    /// to one is refused, 500), as this start goes on; the next refuses it,
+    /// a reset required (schema.rs). Answers its columns.
     fn test_lever(&self, op: &str) -> CellResult<Value> {
         assert!(self.test_hooks, "a list's levers answer on fleets with them only");
         let columns = |sql: &SqlStorage| -> CellResult<Vec<String>> {
@@ -421,7 +401,7 @@ impl PrincipalCell {
         match op {
             "before-searched" => {
                 if columns(&sql)?.iter().any(|c| c == "searched") {
-                    sql.exec("ALTER TABLE memberships DROP COLUMN searched", None)?;
+                    sql.exec("DROP TABLE IF EXISTS _schema; ALTER TABLE memberships DROP COLUMN searched", None)?;
                 }
                 let now = columns(&sql)?;
                 assert!(!now.iter().any(|c| c == "searched"), "the list is one from before the column");
@@ -470,11 +450,7 @@ impl PrincipalCell {
                 let rows = self.count("SELECT COUNT(*) AS n FROM memberships", vec![])?;
                 // one step, no await: emptied and marked, or neither
                 let sql = self.sql();
-                for table in fragment_core::ddl::tables(SCHEMA) {
-                    sql.exec(&format!("DROP TABLE IF EXISTS {table}"), None)?;
-                }
-                sql.exec(&format!("DROP TABLE IF EXISTS {SEARCH_TEXT}"), None)?;
-                sql.exec(SCHEMA, None)?;
+                crate::schema::remake(sql.clone(), &fragment_core::migrate::PRINCIPAL)?;
                 if !self.wiped.get() {
                     sql.exec("INSERT INTO wiped (at) VALUES (?)", vec![SqlStorageValue::Integer(crate::js::now_ms())])?;
                 }

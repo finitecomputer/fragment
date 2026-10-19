@@ -90,8 +90,14 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   `.cjs` git tracks or would add, less the vendored ones) through `node
   --check` on the pinned Node, each as a module or a classic script as
   it is loaded (`xtask/src/js_syntax.rs`: its `VENDORED` and `CLASSIC`
-  lists), naming each file and line that does not parse; then host tests
-  and clippy (host and wasm), warnings denied.
+  lists), naming each file and line that does not parse; that the
+  schema lock (`crates/core/migrations/schema.lock`) is what the
+  platform Durable Objects' steps make (`xtask/src/schema_lock.rs`); then
+  host tests and clippy (host and wasm), warnings denied.
+- `cargo xtask schema-lock`: appends the Durable Objects' new schema
+  steps, and what they make, to the lock; it refuses to change or drop a
+  locked step. A schema changes only by a new step (docs/MODEL.md,
+  Schemas; `crates/core/src/migrate.rs` says how).
 - `cargo xtask e2e [--only <section>[,...] | --except <section>[,...]]`:
   builds `cell/` and the CLI, then runs `crates/e2e` against
   a fresh `wrangler dev` node (workerd) and the in-process fakes, which
@@ -102,7 +108,7 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
   brain, doc, push, ai, ledger, transcribe, finite-private, orgs, billing,
   billing-page, trials, admin, admin-page, shell, computers, chat,
-  shell-ui, wipe, hermes, agent-smoke, sync, restart;
+  shell-ui, wipe, hermes, agent-smoke, sync, migrations, restart;
   `crates/e2e/src/lanes/mod.rs`). `finite-private` starts its own node
   shaped as Finite's deployment (`cheap` on Finite Private, `medium` on
   OpenRouter with its provider routing, both the model fake's

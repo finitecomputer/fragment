@@ -208,14 +208,6 @@ impl Call for CustomerOf {
     type Answer = Customer;
 }
 
-pub(super) const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS checkouts (
-  session TEXT PRIMARY KEY, org TEXT NOT NULL, person TEXT NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS org_payers (
-  org TEXT PRIMARY KEY, person TEXT NOT NULL, subscription TEXT NOT NULL);
-CREATE INDEX IF NOT EXISTS org_payers_person ON org_payers (person);
-";
-
 /// An org's billing columns.
 #[derive(Deserialize)]
 struct BillingRow {

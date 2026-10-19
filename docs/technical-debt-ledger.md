@@ -171,16 +171,57 @@ fragment.club until cutover (decisions 34–35).
   fragment is made again). A wipe no longer waits on its person's own lists
   (ended.rs), so this holds no wipe; everything else of such an object
   stays refused.
+- **Since 2026-10-19** schemas are versioned steps (docs/MODEL.md,
+  Schemas; `fragment_core::migrate`): a column is a step that reaches
+  every object, `cargo xtask check` fails one added any other way (the
+  schema lock), and an object from before versions is adopted only when
+  its tables are step 1's. Such an object, made before one of those
+  columns, now refuses every call as it starts (`schema_refused`, "reset
+  required", naming its table), not only the statements that name the
+  column; a delete or a wipe still ends it (a Registry aside), and a
+  fragment's delete makes its object current again.
 - **Risk:** p5's (and the e2e preview's) objects made before those
-  columns stay broken until they are made again. A fragment its owner's
-  frozen list never took is one a wipe does not find (the entry above).
-- **First proof:** a list that refuses an index change with `no column
-  named searched` (the wipe's report names it; `POST /api/test/list
-  {op: before-searched}` makes one).
+  columns stay refused until they are reset. A Registry so made refuses
+  the whole deployment. A fragment its owner's frozen list never took is
+  one a wipe does not find (the entry above).
+- **First proof:** an object answering `schema_refused` "reset
+  required" (its log line `{"schema": …, "refused": …}` names it), or
+  before this deploy a list that refuses an index change with `no column
+  named searched` (`POST /api/test/list {op: before-searched}` makes one).
 - **Delete when:** the deployments that hold such objects are reset (or
-  those objects deleted: Paul's call, a hard cut), and a check refuses a
-  column added to an existing table without a migration or a reset the
-  deploy enforces.
+  those objects deleted: Paul's call, a hard cut).
+
+## Objects made before schema versions are adopted, a variant fixed
+
+- **Observed:** 2026-10-19, versioned schemas (docs/MODEL.md, Schemas).
+  Every object deployed before then holds tables and no `_schema`:
+  `migrate::adopt` runs step 1 on it and compares what it then holds
+  with what step 1 makes, text for text, and `Class::variants` names the
+  one shape known to differ harmlessly (a fragment's
+  `members.people_only`, from 2026-10-03 to 2026-10-13), fixed by
+  dropping the column. Production (finite.chat) starts with none.
+- **Risk:** none beyond its code: an object adopted is one step 1 makes
+  exactly; one that is not is refused, never guessed at.
+- **First proof:** an adoption's log line (`{"schema": …, "ran":
+  "adopted at 1 …"}`), or the e2e's `migrations` section.
+- **Delete when:** the deployments made before 2026-10-19 (the e2e
+  preview, p5, preview.finite.build) are reset or retired: an idle object
+  adopts only when it next starts, so nothing else says every one has.
+
+## An app facet's operation ledger has no schema version
+
+- **Observed:** 2026-10-19. The platform's table in each app facet's
+  SQLite (`_fragment_ops`, cell/platform.mjs) is made with `CREATE TABLE
+  IF NOT EXISTS` as the facet starts; the platform objects' steps
+  (`fragment_core::migrate`) do not reach it, and the schema lock does
+  not name it (an app facet's database is its author's).
+- **Risk:** a column added to it reaches no facet made before, which
+  then refuses every mutation that names it, as the platform objects'
+  did before their steps.
+- **First proof:** a mutation answering `no such column` from
+  `_fragment_ops` after a deploy that changed it.
+- **Delete when:** the facet's ledger takes versioned steps of its own,
+  or its shape is held by a check as the platform objects' are.
 
 ## The browser half of web push is not driven by a test
 

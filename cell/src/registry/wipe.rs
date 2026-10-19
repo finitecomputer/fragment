@@ -35,19 +35,6 @@ use fragment_proto::wipe::OrgFound;
 use super::calls::{WipeBegin, WipeBilled, WipeBilling, WipeDone, WipeFacts, WipeLook, WipePicture, WipeStep};
 use super::*;
 
-/// The wipes' record, beside the Registry's own tables. `wiped_orgs`
-/// holds the orgs a wipe's `billing` step settled (ids and counts, nothing
-/// of anyone), until its last step.
-pub(super) const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS wipes (
-  identity TEXT PRIMARY KEY, done INTEGER NOT NULL, started_at INTEGER NOT NULL, by TEXT NOT NULL, finished_at INTEGER);
-CREATE TABLE IF NOT EXISTS wiped_agents (
-  identity TEXT NOT NULL, agent TEXT NOT NULL, PRIMARY KEY (identity, agent));
-CREATE TABLE IF NOT EXISTS wiped_orgs (
-  identity TEXT NOT NULL, org TEXT NOT NULL, ended INTEGER NOT NULL, canceled INTEGER NOT NULL, lapsed INTEGER NOT NULL,
-  PRIMARY KEY (identity, org));
-";
-
 /// The names a `billing` step's note lists of those whose seats end.
 const LAPSES_NAMED_MAX: usize = 10;
 /// The orgs a wiped person may pay for at once (their own, and those whose

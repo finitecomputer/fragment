@@ -83,4 +83,25 @@ mod tests {
         assert_eq!(uses(&files, "\"computer/signed-in\""), only("computer.rs", 2), "the computer's signed-in is asked through signed_in alone (and answered by the computer)");
         assert!(Path::new(&crate::devstack::repo_root().join("crates/core/src/roundtrip.rs")).exists());
     }
+
+    /// Goal: a platform object's schema changes only through its class's
+    /// steps (crates/core/migrations, run by fragment_core::migrate), which
+    /// the schema lock holds: no statement of the cell's makes, alters or
+    /// drops a table, an index or a trigger, but the test levers that plant
+    /// the shapes the runner must tell apart (schema.rs, and a list's
+    /// `before-searched`). A `CREATE TABLE IF NOT EXISTS` in a module, as
+    /// every object's schema was until 2026-10-19, never reaches an object
+    /// made before it. Method: the cell's source, read.
+    #[test]
+    fn the_cell_changes_no_schema_outside_its_steps() {
+        let files = cell_sources();
+        let mut found: BTreeMap<String, usize> = BTreeMap::new();
+        for needle in ["CREATE TABLE", "CREATE INDEX", "CREATE UNIQUE INDEX", "CREATE VIRTUAL TABLE", "CREATE TRIGGER", "ALTER TABLE", "DROP TABLE", "DROP INDEX", "DROP TRIGGER"] {
+            for (file, n) in uses(&files, needle) {
+                *found.entry(file).or_default() += n;
+            }
+        }
+        let levers = BTreeMap::from([("principal.rs".to_string(), 2), ("schema.rs".to_string(), 5)]);
+        assert_eq!(found, levers, "a schema changes by a step of its class's (crates/core/src/migrate.rs says how), not in the cell");
+    }
 }

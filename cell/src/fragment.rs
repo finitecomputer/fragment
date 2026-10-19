@@ -77,101 +77,6 @@ const ALARM_SOON_MS: i64 = 50;
 /// … or than this after it failed.
 const ALARM_RETRY_MS: i64 = 30_000;
 
-/// A life's tables: a delete drops them all and makes them again empty
-/// (ended.rs), keeping only the ended lives' own (`ended::SCHEMA`).
-///
-/// A table here never gains a column: `CREATE TABLE IF NOT EXISTS` adds
-/// none to an object made before it, which then refuses every statement
-/// naming it (docs/technical-debt-ledger.md, "Objects made before a
-/// column…"). A new fact gets a table of its own, as operations'
-/// descriptions did (`code_op_descriptions`, beside `code_ops`).
-pub(crate) const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS members (
-  principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL,
-  kind TEXT, owner TEXT);
-CREATE INDEX IF NOT EXISTS members_owner ON members (owner) WHERE owner IS NOT NULL;
-CREATE TABLE IF NOT EXISTS invites (
-  email TEXT PRIMARY KEY, role TEXT NOT NULL, expires_at INTEGER NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS index_outbox (
-  principal TEXT PRIMARY KEY, role TEXT, version INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS search_log (
-  n INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, text TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS search_outbox (
-  principal TEXT PRIMARY KEY, sent INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER);
-CREATE INDEX IF NOT EXISTS search_outbox_due ON search_outbox (next_at);
-CREATE TABLE IF NOT EXISTS joined_outbox (
-  principal TEXT PRIMARY KEY, owner TEXT NOT NULL, added_at INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS secrets (
-  name TEXT PRIMARY KEY, sealed TEXT NOT NULL, set_by TEXT NOT NULL, set_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS secret_hosts (
-  name TEXT NOT NULL, host TEXT NOT NULL, PRIMARY KEY (name, host));
-CREATE TABLE IF NOT EXISTS records (
-  channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, principal TEXT NOT NULL, kind TEXT NOT NULL,
-  body TEXT NOT NULL, op TEXT, idx INTEGER, outboxed INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (channel, seq));
-CREATE UNIQUE INDEX IF NOT EXISTS records_effect ON records (op, idx) WHERE op IS NOT NULL;
-CREATE TABLE IF NOT EXISTS tree (
-  ref TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL, mode TEXT NOT NULL, last_commit TEXT NOT NULL,
-  PRIMARY KEY (ref, path));
-CREATE TABLE IF NOT EXISTS code (
-  id INTEGER PRIMARY KEY CHECK (id = 1), sha TEXT NOT NULL, loader_id TEXT NOT NULL, source TEXT NOT NULL,
-  cpu_ms INTEGER NOT NULL, installed_at INTEGER NOT NULL,
-  modules TEXT NOT NULL DEFAULT '{}');
-CREATE TABLE IF NOT EXISTS code_ops (op TEXT PRIMARY KEY, kind TEXT NOT NULL, role TEXT NOT NULL, input TEXT, ephemeral INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS code_op_descriptions (op TEXT PRIMARY KEY, description TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS code_channels (channel TEXT PRIMARY KEY, read TEXT NOT NULL, post TEXT, signed_in INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS code_channel_from (channel TEXT PRIMARY KEY, from_kind TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS code_triggers (idx INTEGER PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT NULL, run TEXT NOT NULL, from_kind TEXT);
-CREATE INDEX IF NOT EXISTS code_triggers_on ON code_triggers (kind, target);
-CREATE TABLE IF NOT EXISTS runs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, via TEXT NOT NULL, trigger TEXT, principal TEXT NOT NULL,
-  role TEXT NOT NULL, depth INTEGER NOT NULL, call_id TEXT, input_sha TEXT, input TEXT NOT NULL, status TEXT NOT NULL,
-  attempt INTEGER NOT NULL, output TEXT, error TEXT, created_at INTEGER NOT NULL, launched_at INTEGER, finished_at INTEGER,
-  code TEXT);
-CREATE UNIQUE INDEX IF NOT EXISTS runs_call ON runs (principal, call_id) WHERE call_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS runs_status ON runs (status, op);
-CREATE TABLE IF NOT EXISTS steps (
-  run INTEGER NOT NULL, attempt INTEGER NOT NULL, idx INTEGER NOT NULL, kind TEXT NOT NULL, value TEXT, error TEXT,
-  CHECK ((value IS NULL) <> (error IS NULL)), PRIMARY KEY (run, attempt, idx));
-CREATE TABLE IF NOT EXISTS schedules (idx INTEGER PRIMARY KEY, op TEXT NOT NULL, cron TEXT NOT NULL, next_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS paused_ops (op TEXT PRIMARY KEY, by TEXT NOT NULL, at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS op_breakers (op TEXT PRIMARY KEY, reset_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS file_commits (key TEXT PRIMARY KEY, sha TEXT NOT NULL, at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS own_commits (sha TEXT PRIMARY KEY, depth INTEGER NOT NULL, at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS blobs (
-  sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL, mime TEXT);
-CREATE TABLE IF NOT EXISTS pointers (
-  ref TEXT NOT NULL, path TEXT NOT NULL, sha TEXT NOT NULL, size INTEGER NOT NULL, PRIMARY KEY (ref, path));
-CREATE TABLE IF NOT EXISTS subs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, principal TEXT NOT NULL, channel TEXT NOT NULL, url TEXT NOT NULL,
-  created_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS push_subs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL,
-  who TEXT NOT NULL, principal TEXT NOT NULL, created_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS sent (key TEXT PRIMARY KEY, at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS pending (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT, ledger_id TEXT NOT NULL UNIQUE, op TEXT NOT NULL, principal TEXT NOT NULL,
-  depth INTEGER NOT NULL, tries INTEGER NOT NULL, next_at INTEGER NOT NULL, at INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS pending_due ON pending (next_at);
-CREATE TABLE IF NOT EXISTS delivery_outbox (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL CHECK (kind IN ('record', 'push')),
-  sub INTEGER, channel TEXT, seq INTEGER, who TEXT, body TEXT,
-  after_sub INTEGER NOT NULL DEFAULT 0, upto_sub INTEGER NOT NULL DEFAULT 0,
-  attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS delivery_outbox_due ON delivery_outbox (next_at);
-CREATE INDEX IF NOT EXISTS delivery_outbox_waiting ON delivery_outbox (id) WHERE attempts > 0;
-CREATE TABLE IF NOT EXISTS charges (
-  ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, held INTEGER NOT NULL, at INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS charges_run ON charges (run);
-CREATE TABLE IF NOT EXISTS paid (
-  key TEXT PRIMARY KEY, run INTEGER NOT NULL, result TEXT NOT NULL, usage TEXT, settled INTEGER NOT NULL, at INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS paid_run ON paid (run);
-CREATE TABLE IF NOT EXISTS meter_requests (minute INTEGER PRIMARY KEY, count INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS meter_rows (ref TEXT PRIMARY KEY, row TEXT NOT NULL, batch INTEGER);
-CREATE INDEX IF NOT EXISTS meter_rows_batch ON meter_rows (batch);
-CREATE TABLE IF NOT EXISTS meter_batches (id INTEGER PRIMARY KEY AUTOINCREMENT, sent_at INTEGER);
-";
-
 #[durable_object]
 pub struct FragmentCell {
     pub(crate) state: State,
@@ -209,6 +114,8 @@ pub struct FragmentCell {
     pub(crate) launching: futures_util::lock::Mutex<()>,
     /// The code version and UTC day it last noted a dynamic worker for.
     pub(crate) dw_noted: RefCell<Option<(String, i64)>>,
+    /// Its schema as it started (schema.rs): ready, or refused.
+    pub(crate) schema: crate::schema::Schema,
 }
 
 impl DurableObject for FragmentCell {
@@ -216,8 +123,7 @@ impl DurableObject for FragmentCell {
         let raw: JsValue = state._inner().into();
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         let sql = state.storage().sql();
-        sql.exec(SCHEMA, None).expect("the Fragment schema applies");
-        sql.exec(crate::ended::SCHEMA, None).expect("the ended lives' schema applies");
+        let schema = crate::schema::Schema::start(&raw, sql.clone(), &fragment_core::migrate::FRAGMENT, &state.id().to_string());
         let cfg = Config::from_env(&env);
         let rate = fragment_core::ratelimit::Rate::new(limits::PUBLIC_CALLS_PER_MIN, limits::PUBLIC_CALLS_PER_MIN_FRAGMENT);
         let app = crate::ops::app_loader(&raw, env.as_ref(), sql.clone());
@@ -239,6 +145,7 @@ impl DurableObject for FragmentCell {
             later_asked: Cell::new(false),
             launching: futures_util::lock::Mutex::new(()),
             dw_noted: RefCell::new(None),
+            schema,
         }
     }
 
@@ -250,6 +157,14 @@ impl DurableObject for FragmentCell {
     }
 
     async fn alarm(&self) -> Result<Response> {
+        if self.schema.refused() {
+            // a delete's cleanup goes on, refused or not: it ends in its
+            // storage's release, which makes the fragment current (ended.rs)
+            self.drain_ended().await;
+            let due = self.ended_due_at().ok().flatten();
+            self.schema.refused_alarm(&self.state, due).await?;
+            return Response::ok("");
+        }
         if let Err(e) = self.on_alarm().await {
             self.event("alarm.failed", &e.message, json!({ "code": e.code }));
             // Whatever is due, a failing alarm tries again no sooner than
@@ -852,6 +767,25 @@ impl FragmentCell {
 
     async fn route(&self, mut req: Request) -> CellResult<Response> {
         let path = req.path();
+        if path == "/test/fragment" && self.cfg.test_hooks {
+            let body: Value = body_json(&mut req).await?;
+            // its schema's levers answer on a fragment that refuses its
+            // schema, as does the look at its ended lives' cleanup
+            if let Some(op) = body["op"].as_str().filter(|op| op.starts_with("schema")) {
+                let shape = body["shape"].as_str().or(body["step"].as_str());
+                return json_response(&crate::schema::fragment_lever(&self.raw, self.sql(), &self.state.id().to_string(), op, shape)?);
+            }
+            if body["op"] != "ended" {
+                self.schema.ready()?;
+            }
+            return json_response(&self.test_fragment(&body).await?);
+        }
+        // a fragment that refuses its schema still ends: its owner's
+        // delete and a wipe's end remove everything (schema.rs)
+        let ends = path.starts_with("/wipe/") || (req.method() == Method::Delete && path == "/delete");
+        if !ends {
+            self.schema.ready()?;
+        }
         if path == "/test/keys" && self.cfg.test_hooks {
             // this cell's own sealing: the e2e checks that what one
             // fragment seals another cannot open
@@ -862,10 +796,6 @@ impl FragmentCell {
                 _ => return Err(CellError::invalid("op is seal {plaintext} or open {sealed}")),
             };
             return json_response(&answer);
-        }
-        if path == "/test/fragment" && self.cfg.test_hooks {
-            let body: Value = body_json(&mut req).await?;
-            return json_response(&self.test_fragment(&body).await?);
         }
         if let Some(step) = path.strip_prefix("/job/") {
             // Only this script's Workflow sets the header; the router never passes it.

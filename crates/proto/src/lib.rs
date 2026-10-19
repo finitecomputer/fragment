@@ -544,6 +544,12 @@ pub enum ErrorCode {
     /// 403: a computer's swap found no account to swap in: the agent's
     /// owner has not connected that provider, or must connect it again.
     NotConnected,
+    /// 500: the platform's object refuses its code's schema (fragment_core::
+    /// migrate): it holds a newer version (a rollback), another code's step,
+    /// or tables from before versions that need a reset. It answers nothing
+    /// else until newer code is deployed or an operator resets it; the
+    /// message names it and why.
+    SchemaRefused,
 }
 
 impl ErrorCode {
@@ -557,7 +563,7 @@ impl ErrorCode {
             ErrorCode::TooLarge => 413,
             ErrorCode::AppFailed => 422,
             ErrorCode::RateLimited => 429,
-            ErrorCode::HostFailed => 500,
+            ErrorCode::HostFailed | ErrorCode::SchemaRefused => 500,
             ErrorCode::UpstreamFailed => 502,
             ErrorCode::RegistryUnavailable => 503,
             ErrorCode::BudgetUsedUp => 402,

@@ -43,14 +43,6 @@ use super::calls::{By, Call};
 use super::orgs::{not_found, MemberRow};
 use super::*;
 
-pub(super) const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS quantity_syncs (
-  org TEXT PRIMARY KEY, since INTEGER NOT NULL, due INTEGER NOT NULL, tries INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS stripe_cancels (
-  subscription TEXT PRIMARY KEY, org TEXT NOT NULL, why TEXT NOT NULL, since INTEGER NOT NULL, due INTEGER NOT NULL, tries INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS stripe_cancels_org ON stripe_cancels (org);
-";
-
 /// `POST /orgs/seats/add`: an admin offers a paid seat to `email`, of the
 /// kind sold (any other is refused); one of the org's members takes it at once.
 #[derive(Serialize, Deserialize)]

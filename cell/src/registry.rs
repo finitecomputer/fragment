@@ -34,6 +34,7 @@ use fragment_proto::{limits, ErrorCode, Identity, IdentityKind, IdentityView, Ke
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use worker::wasm_bindgen::{JsCast, JsValue};
 use worker::*;
 
 use crate::config::Config;
@@ -62,26 +63,6 @@ pub use signin::SESSION_TTL_MS;
 
 /// The fleet's one registry cell.
 pub const NAME: &str = "registry";
-
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS identities (
-  id TEXT PRIMARY KEY, kind TEXT NOT NULL, owner TEXT, created_at INTEGER NOT NULL, held TEXT);
-CREATE INDEX IF NOT EXISTS identities_owner ON identities (owner) WHERE owner IS NOT NULL;
-CREATE TABLE IF NOT EXISTS keys (
-  key TEXT PRIMARY KEY, identity TEXT NOT NULL, added_at INTEGER NOT NULL, added_by TEXT NOT NULL, revoked_at INTEGER);
-CREATE INDEX IF NOT EXISTS keys_identity ON keys (identity);
-CREATE TABLE IF NOT EXISTS subjects (
-  issuer TEXT NOT NULL, subject TEXT NOT NULL, identity TEXT NOT NULL, linked_at INTEGER NOT NULL, email TEXT NOT NULL,
-  signed_in_at INTEGER NOT NULL, PRIMARY KEY (issuer, subject));
-CREATE INDEX IF NOT EXISTS subjects_identity ON subjects (identity);
-CREATE INDEX IF NOT EXISTS subjects_email ON subjects (email);
-CREATE TABLE IF NOT EXISTS person_keys (
-  identity TEXT PRIMARY KEY, sealed TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS pictures (
-  identity TEXT PRIMARY KEY, sha TEXT NOT NULL, mime TEXT NOT NULL, set_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS agent_fragments (
-  identity TEXT PRIMARY KEY, fragment TEXT NOT NULL);
-";
 
 #[durable_object]
 pub struct RegistryCell {
@@ -112,24 +93,20 @@ pub struct RegistryCell {
     /// in its config, which each branch copy, the dev stack and the e2e's
     /// node would need rendered apart.
     cli_begins: RefCell<fragment_core::ratelimit::Rate>,
+    /// Its schema as it started (schema.rs): ready, or refused, which
+    /// refuses every sign-in and key until newer code or a reset.
+    schema: crate::schema::Schema,
 }
 
 impl DurableObject for RegistryCell {
     fn new(state: State, env: Env) -> Self {
-        state.storage().sql().exec(SCHEMA, None).expect("the Registry schema applies");
-        state.storage().sql().exec(signin::SCHEMA, None).expect("the sign-in schema applies");
-        state.storage().sql().exec(wipe::SCHEMA, None).expect("the wipes' schema applies");
-        state.storage().sql().exec(invites::SCHEMA, None).expect("the invites' schema applies");
-        state.storage().sql().exec(orgs::SCHEMA, None).expect("the orgs' schema applies");
-        state.storage().sql().exec(billing::SCHEMA, None).expect("the billing schema applies");
-        state.storage().sql().exec(seats::SCHEMA, None).expect("the seats' schema applies");
-        state.storage().sql().exec(offers::SCHEMA, None).expect("the offers' schema applies");
-        state.storage().sql().exec(trials::SCHEMA, None).expect("the trials' schema applies");
-        state.storage().sql().exec(admin::SCHEMA, None).expect("the admin log's schema applies");
+        let raw: JsValue = state._inner().into();
+        let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
+        let schema = crate::schema::Schema::start(&raw, state.storage().sql(), &fragment_core::migrate::REGISTRY, &state.id().to_string());
         let cfg = Config::from_env(&env);
         assert!(cfg.signins_pending_max >= 1, "a fresh sign-in always fits under the cap");
         let cli_begins = RefCell::new(fragment_core::ratelimit::Rate::new(cfg.cli_begins_per_ip_minute, limits::CLI_BEGINS_PER_MINUTE_MAX));
-        RegistryCell { state, env, cfg, down: Cell::new(false), down_for: RefCell::new(None), calls: Cell::new(0), hold_ms: Cell::new(0), cli_begins }
+        RegistryCell { state, env, cfg, down: Cell::new(false), down_for: RefCell::new(None), calls: Cell::new(0), hold_ms: Cell::new(0), cli_begins, schema }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -145,6 +122,9 @@ impl DurableObject for RegistryCell {
     /// is logged and arms its next itself; failing that too, the alarm
     /// fails and the node retries it.
     async fn alarm(&self) -> Result<Response> {
+        if self.schema.refused_alarm(&self.state, None).await? {
+            return Response::ok("");
+        }
         if let Err(e) = self.sweep_alarm().await {
             console_error!("the registry's sweep failed ({:?}): {}", e.code, e.message);
             self.sweep_later().await.map_err(|e| Error::RustError(e.message))?;
@@ -743,6 +723,7 @@ impl RegistryCell {
             TestHook::E2eSignIn(asked) => Ok(json!(self.e2e_sign_in(&asked.email, asked.paid_calls).await?)),
             TestHook::E2ePeople(page) => Ok(json!(self.e2e_people(page.after.as_deref())?)),
             TestHook::E2eIs(identity) => Ok(json!({ "e2e": self.is_e2e(&identity)? })),
+            TestHook::Schema => crate::schema::view(self.state.storage().sql(), &fragment_core::migrate::REGISTRY),
         }
     }
 
@@ -753,8 +734,13 @@ impl RegistryCell {
             if !self.cfg.test_hooks {
                 return Err(CellError::new(ErrorCode::NotFound, "no route /test"));
             }
-            return reply::<TestHook>(self.test_hook(body(&bytes)?).await);
+            let hook: TestHook = body(&bytes)?;
+            if !matches!(hook, TestHook::Schema) {
+                self.schema.ready()?;
+            }
+            return reply::<TestHook>(self.test_hook(hook).await);
         }
+        self.schema.ready()?;
         self.calls.set(self.calls.get() + 1);
         let hold = self.hold_ms.replace(0);
         if hold > 0 {

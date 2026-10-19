@@ -482,6 +482,9 @@ pub(crate) enum TestHook {
     /// Whether an identity is an e2e person (`{e2e}`): a branch's ledger
     /// levers reach no one else.
     E2eIs(String),
+    /// The steps its schema holds (schema.rs `view`), answered by a
+    /// registry that refuses its schema too.
+    Schema,
 }
 
 /// `TestHook::E2eSignIn`: who, and the paid calls they are lent (the

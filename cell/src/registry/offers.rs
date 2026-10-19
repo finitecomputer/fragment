@@ -32,14 +32,6 @@ use super::calls::{By, Call};
 use super::orgs::{fresh_id, not_found, MemberRow, MEMBER_COLUMNS};
 use super::*;
 
-pub(super) const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS offer_mails (
-  org TEXT NOT NULL, day INTEGER NOT NULL, mailed INTEGER NOT NULL, PRIMARY KEY (org, day));
-CREATE TABLE IF NOT EXISTS offer_answers (
-  offer TEXT PRIMARY KEY, person TEXT NOT NULL, at INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS offer_answers_person ON offer_answers (person);
-";
-
 const DAY_MS: i64 = 24 * 3600 * 1000;
 /// How long a merged offer's answer is kept for a replay of its accept.
 const ANSWERS_KEPT_MS: i64 = 7 * DAY_MS;

@@ -253,6 +253,7 @@ Every change is checked against this table.
 | Manifest and declared operations | `fragment.json` in git | the cell's copy at the pin; an invalid one at a new pin keeps the last good and says why (`status.code.error`) |
 | Members, roles, invites | the fragment's supervisor | grants and revokes are transactional; `events` records each. The registry keeps each invite waiting on an email against that email, to meet it at a sign-in: a pointer the fragment overrules (one with none waiting is forgotten); a claim the fragment could not take is tried again by the registry's alarm, bounded, then waits on the next sign-in |
 | Cell state (supervisor tables, the operation ledger, channels, the app's SQL) | the Durable Objects' own storage | none |
+| A platform object's schema: its tables, and the steps that made them | its class's steps, `crates/core/migrations/<class>/` (Schemas, below) | each object's `_schema` holds the steps it took (number, name, SHA, ran or adopted) and refuses code whose steps differ (`schema_refused`); `crates/core/migrations/schema.lock` locks each step and what the steps make, and `cargo xtask check` holds the tree to it. An app facet's SQLite is its author's |
 | Large file bytes (1 MiB or more) | R2 (`BLOBS`), keyed by SHA-256 | git holds a pointer; a sync resolves it; a blob no branch tip references is deleted |
 | Identities (npubs) and their keys, each person's own key (sealed), sign-ins and their verified emails, agents' owners, sessions | the registry (fragment's BANKS: docs/cloudflare-v1.md, decisions 45 to 50) | an identity's npub never changes; an email names at most one person; sessions and caches name an identity and never outlive a revocation; cookies hold only tokens, the registry their hashes |
 | A person's wipe: how far it got, and that it locks them | the registry's `wipes` (docs/api.md, Operators) | a wiped person's ledger, list and computer each keep one row saying so, and take nothing more |
@@ -278,6 +279,59 @@ Every change is checked against this table.
 
 No file bytes persist in the cell's SQLite: a file lives in git or, at
 1 MiB and above, in R2 under its hash, named by a pointer in git.
+
+## Schemas: the platform objects' steps
+
+Each platform Durable Object class (`Fragment`'s supervisor, `Registry`,
+`Principal`, `Ledger`, `Computer`) declares its schema as numbered steps,
+one SQL file each under `crates/core/migrations/<class>/`, run by
+`fragment_core::migrate` as an object starts, in one transaction: a new
+object takes them all, an older one the steps it lacks, and one that
+fails rolls them all back. Step 1 is each class's schema as it stood on
+2026-10-19; an object made before then (none holds a version) is adopted
+at 1 only when what it holds is step 1's, text for text, or a shape the
+class names with its fix (a fragment's `members.people_only`). An object
+refuses its code (`schema_refused`, on every call, naming it and why)
+when it holds a newer version (a rollback), another code's step of the
+same number (another branch's), or tables from before versions that are
+not step 1's: a reset is the operator's call, and nothing is guessed.
+A wipe's or a delete's tables are dropped and made again as the object
+holds them (`migrate::remake`), so they keep every step's shape.
+
+What removes everything still runs on a refused object: a fragment's
+delete (its cleanup, and the release of its storage after, which makes
+the object current again), and a wipe's end of a fragment, a list, a
+ledger or a computer (a wiped one answers as wiped). The Registry, the
+deployment's one, refuses everything, its wipe steps included (those
+delete a person's rows by name, and could miss a newer step's table):
+if it ever refuses, its recovery is Paul's call, and no operator reset
+exists for it. A refused object's alarm wakes again, at most every five
+minutes, only where newer code could take it (a newer version, another
+code's step, a step that failed), never for a reset required.
+
+**No rollback below the versions (#383) once any class has a step 2.**
+Code from before them ignores `_schema`, runs its step 1 as it always
+did, and its wipes and deletes make tables again from that text,
+dropping a later step's columns under a `_schema` that still names them.
+A rollback to code that has versions is refused as above, object by
+object, until it is rolled forward.
+
+To change a schema, add a step: the file
+`crates/core/migrations/<class>/<NNNN>_<name>.sql` (an `ALTER TABLE …
+ADD COLUMN`, a new table or index, or a table rebuilt), its `step!` at
+the end of the class's `steps` (crates/core/src/migrate.rs, whose
+module doc says it in full), then `cargo xtask schema-lock`, and commit
+the three. A step is never edited, renumbered or removed once merged;
+`cargo xtask check` fails a schema changed any other way: the lock
+against the steps, the lock against master's, step for step (CI names
+master: a pull request's base, or what a push moved it from), and a
+statement in the cell that makes, alters or drops a table
+(xtask/src/guards.rs). The lock's SQLite refuses what a Durable
+Object's does (PRAGMAs that write, a transaction's or a savepoint's
+statements, ATTACH, TEMP objects), so no step that would fail there
+locks; and each class's schema as the deployments ran it before
+versions is checked in (`crates/core/migrations/deployed`) and must
+adopt.
 
 ## Limits (initial; each enforced and tested)
 

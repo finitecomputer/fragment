@@ -75,36 +75,6 @@ const SWEEP_AGAIN_MS: i64 = 1000;
 
 const _: () = assert!(limits::SIGNINS_PENDING_MAX_DEFAULT >= 1 && limits::SITE_SESSIONS_PER_FRAGMENT_MAX >= 1 && limits::REDEMPTIONS_PER_SESSION_MAX >= 1);
 
-/// The expiry columns are indexed for the sweep, and a site session's
-/// `(parent, fragment, created_at)` for its bound. `embedder` is a frame's.
-pub(super) const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS logins (
-  state TEXT PRIMARY KEY, return_to TEXT NOT NULL, link_to TEXT, created_at INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS logins_created ON logins (created_at);
-CREATE TABLE IF NOT EXISTS sessions (
-  hash TEXT PRIMARY KEY, identity TEXT NOT NULL, fragment TEXT, parent TEXT, workos_sid TEXT,
-  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, revoked_at INTEGER, embedder TEXT);
-CREATE INDEX IF NOT EXISTS sessions_parent_fragment ON sessions (parent, fragment, created_at) WHERE parent IS NOT NULL;
-CREATE INDEX IF NOT EXISTS sessions_expires ON sessions (expires_at);
-CREATE TABLE IF NOT EXISTS redemptions (
-  hash TEXT PRIMARY KEY, session TEXT NOT NULL, fragment TEXT NOT NULL, return_to TEXT NOT NULL,
-  expires_at INTEGER NOT NULL, embedder TEXT);
-CREATE INDEX IF NOT EXISTS redemptions_session ON redemptions (session, expires_at);
-CREATE INDEX IF NOT EXISTS redemptions_expires ON redemptions (expires_at);
-CREATE TABLE IF NOT EXISTS consents (
-  identity TEXT NOT NULL, fragment TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (identity, fragment));
-CREATE INDEX IF NOT EXISTS consents_at ON consents (identity, at);
-CREATE TABLE IF NOT EXISTS e2e_days (
-  day INTEGER PRIMARY KEY, people INTEGER NOT NULL, paid_calls INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS cli_codes (
-  code TEXT PRIMARY KEY, key TEXT NOT NULL, created_at INTEGER NOT NULL, asked_place TEXT, asked_agent TEXT);
-CREATE INDEX IF NOT EXISTS cli_codes_created ON cli_codes (created_at);
-CREATE INDEX IF NOT EXISTS cli_codes_key ON cli_codes (key);
-CREATE TABLE IF NOT EXISTS cli_misses (
-  identity TEXT PRIMARY KEY, misses INTEGER NOT NULL, since INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS cli_misses_since ON cli_misses (since);
-";
-
 pub(super) fn sha(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
