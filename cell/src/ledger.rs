@@ -39,22 +39,6 @@ use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::js;
 
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS head (id INTEGER PRIMARY KEY CHECK (id = 1), ledger TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS entries (ref TEXT PRIMARY KEY, at_ms INTEGER NOT NULL, held INTEGER NOT NULL, entry TEXT NOT NULL);
-CREATE INDEX IF NOT EXISTS entries_at ON entries (at_ms);
-CREATE TABLE IF NOT EXISTS batches (id TEXT PRIMARY KEY, digest TEXT NOT NULL, answer TEXT NOT NULL, at_ms INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS batches_at ON batches (at_ms);
-CREATE TABLE IF NOT EXISTS commands (id TEXT PRIMARY KEY, command TEXT NOT NULL, at_ms INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS spend (month INTEGER NOT NULL, fragment TEXT NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, fragment));
-CREATE TABLE IF NOT EXISTS caps (fragment TEXT PRIMARY KEY, micros INTEGER NOT NULL);
-";
-
-/// The one row a wiped ledger keeps: when it was wiped. Apart from
-/// `SCHEMA`, whose tables a wipe drops.
-const WIPED_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS wiped (at INTEGER NOT NULL);";
-
 /// The person a ledger call is for; only platform code sets it, and the
 /// ledger keeps the first it is told and refuses another.
 pub const PAYER_HEADER: &str = "x-fragment-payer";
@@ -89,6 +73,8 @@ pub struct LedgerCell {
     armed: Cell<Option<i64>>,
     /// Its person was wiped (`wiped`'s row, read as it starts).
     wiped: Cell<bool>,
+    /// Its schema as it started (schema.rs): ready, or refused.
+    schema: crate::schema::Schema,
 }
 
 impl DurableObject for LedgerCell {
@@ -96,12 +82,10 @@ impl DurableObject for LedgerCell {
         let raw: JsValue = state._inner().into();
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         let sql = state.storage().sql();
-        sql.exec(SCHEMA, None).expect("the Ledger schema applies");
-        sql.exec(WIPED_SCHEMA, None).expect("the wiped row's schema applies");
-        let marks: Vec<Value> = sql.exec("SELECT COUNT(*) AS n FROM wiped", None).and_then(|c| c.to_array()).expect("the wiped row reads");
-        let wiped = marks.first().and_then(|r| r["n"].as_i64()).expect("COUNT answers a row") > 0;
+        let schema = crate::schema::Schema::start(&raw, sql.clone(), &fragment_core::migrate::LEDGER, &state.id().to_string());
+        let wiped = schema.wiped(&sql);
         let cfg = Config::from_env(&env);
-        LedgerCell { state, raw, cfg, armed: Cell::new(None), wiped: Cell::new(wiped) }
+        LedgerCell { state, raw, cfg, armed: Cell::new(None), wiped: Cell::new(wiped), schema }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -114,7 +98,7 @@ impl DurableObject for LedgerCell {
 
     async fn alarm(&self) -> Result<Response> {
         // a wiped ledger has nothing to sweep (its alarm went with it)
-        if self.wiped.get() {
+        if self.schema.refused_alarm(&self.state, None).await? || self.wiped.get() {
             return Response::ok("");
         }
         if let Err(e) = self.swept().await {
@@ -210,6 +194,8 @@ pub enum TestHook {
     Totals,
     PaidCalls { max: Option<u64> },
     LegacySeat { seat: SeatState, seq: u64 },
+    /// The steps its schema holds (schema.rs `view`).
+    Schema,
 }
 
 impl Route for core::Reserve {
@@ -596,6 +582,8 @@ impl LedgerCell {
     }
 
     async fn route(&self, mut req: Request) -> Result<Value, Failed> {
+        // a wipe ends a ledger that refuses its schema too, and a wiped
+        // ledger answers as one, refused or not (schema.rs)
         if let Some(route) = req.path().strip_prefix("/wipe/") {
             // only a wipe's orchestrator sets the header (routed.rs `marker`)
             if req.headers().get(crate::wipe::WIPE_HEADER)?.is_none() {
@@ -606,6 +594,7 @@ impl LedgerCell {
         if self.wiped.get() {
             return Err(Failed::Refused(Refused::Wiped));
         }
+        self.schema.ready()?;
         let payer = req.headers().get(PAYER_HEADER)?.filter(|p| fragment_core::npub::is_identity(p)).ok_or_else(|| CellError::host("a ledger call names its payer"))?;
         match self.meta("payer")? {
             None => self.set_meta("payer", &payer)?,
@@ -704,10 +693,7 @@ impl LedgerCell {
                 let had = held()?;
                 // one step, no await: emptied and marked, or neither
                 let sql = self.sql();
-                for table in fragment_core::ddl::tables(SCHEMA) {
-                    sql.exec(&format!("DROP TABLE IF EXISTS {table}"), None)?;
-                }
-                sql.exec(SCHEMA, None)?;
+                crate::schema::remake(sql.clone(), &fragment_core::migrate::LEDGER)?;
                 if !self.wiped.get() {
                     sql.exec("INSERT INTO wiped (at) VALUES (?)", vec![SqlStorageValue::Integer(js::now_ms())])?;
                 }
@@ -743,6 +729,7 @@ impl LedgerCell {
     async fn test_hook(&self, hook: TestHook) -> Result<Value, Failed> {
         assert!(self.cfg.test_hooks, "test hooks answer on test fleets only");
         match hook {
+            TestHook::Schema => Ok(crate::schema::view(self.sql(), &fragment_core::migrate::LEDGER)?),
             TestHook::PaidCalls { max } => {
                 let max = match max {
                     Some(max) => max,

@@ -11,12 +11,6 @@ use serde::Serialize;
 use super::calls::Call;
 use super::*;
 
-pub(super) const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS admin_log (
-  n INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, operator TEXT NOT NULL, action TEXT NOT NULL,
-  target TEXT NOT NULL, detail TEXT NOT NULL);
-";
-
 /// People and orgs a page lists; the log's entries a page shows.
 pub(crate) const ADMIN_PAGE: u32 = 100;
 /// The log's entries kept (the oldest go).

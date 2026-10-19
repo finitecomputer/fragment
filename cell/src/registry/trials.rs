@@ -19,16 +19,6 @@ use super::calls::Call;
 use super::orgs::not_found;
 use super::*;
 
-pub(super) const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS trial_codes (
-  id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, name TEXT NOT NULL, kind TEXT NOT NULL, days INTEGER NOT NULL,
-  capacity INTEGER NOT NULL, expires_at INTEGER, active INTEGER NOT NULL, revision INTEGER NOT NULL,
-  created_at INTEGER NOT NULL, created_by TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS trial_uses (
-  person TEXT PRIMARY KEY, code TEXT NOT NULL, at INTEGER NOT NULL, expires_at INTEGER NOT NULL, subscription TEXT);
-CREATE INDEX IF NOT EXISTS trial_uses_code ON trial_uses (code, expires_at);
-";
-
 /// `POST /trials/new`: an operator's new code (`by`, for the record).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct TrialNew {

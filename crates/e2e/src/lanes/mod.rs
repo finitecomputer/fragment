@@ -33,6 +33,7 @@ mod levers;
 mod ledger;
 mod limits;
 mod members;
+mod migrations;
 mod notes;
 mod orgs;
 mod plane;
@@ -131,6 +132,7 @@ const LANES: &[Lane] = &[
     bot_mode::bot_mode,
     checkout::checkout,
     sync::folder_sync,
+    migrations::migrations,
     restart::restart,
 ];
 
@@ -152,7 +154,7 @@ const LANES: &[Lane] = &[
 /// passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [
     &["shell", "computers", "export", "hermes", "agent-smoke", "agent-ask", "agent-restart", "bot-mode", "checkout"],
-    &["finite-private", "chat", "shell-ui", "wipe", "sync", "restart"],
+    &["finite-private", "chat", "shell-ui", "wipe", "sync", "migrations", "restart"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "faces", "isolation", "frames",

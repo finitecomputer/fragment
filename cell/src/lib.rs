@@ -62,6 +62,7 @@ mod publish;
 mod push;
 mod registry;
 mod routed;
+mod schema;
 mod search;
 mod runs_on;
 mod serve;

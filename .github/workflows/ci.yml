@@ -57,6 +57,12 @@ jobs:
         with:
           path: target/tools
           key: node-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs') }}
+      # the schema lock master holds, which this tree's keeps step for
+      # step (xtask/src/schema_lock.rs): a pull request's base, or the
+      # master a push moved on from
+      - run: git fetch --no-tags --depth=1 origin "$BASE" && echo "FRAGMENT_SCHEMA_BASE=FETCH_HEAD" >> "$GITHUB_ENV"
+        env:
+          BASE: ${{ github.event_name == 'push' && github.event.before || github.base_ref || 'master' }}
       - run: cargo xtask check
 
   e2e-shard:

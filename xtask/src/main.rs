@@ -30,8 +30,13 @@
 //!                    and agent-restart upgrades into and back
 //!   check            every first-party JavaScript file parses (node --check;
 //!                    xtask/src/js_syntax.rs) and none turns a string into
-//!                    markup or code (xtask/src/html_sinks.rs), then host
-//!                    tests and clippy, warnings denied
+//!                    markup or code (xtask/src/html_sinks.rs), the schema
+//!                    lock is what the Durable Objects' steps make
+//!                    (xtask/src/schema_lock.rs), then host tests and
+//!                    clippy, warnings denied
+//!   schema-lock      appends the Durable Objects' new schema steps to
+//!                    crates/core/migrations/schema.lock, refusing to change
+//!                    or drop a locked one (crates/core/src/migrate.rs)
 //!   secret set <name> --config <file> [--from-file <path>]
 //!   secret gen <name> --config <file>
 //!   secret list --config <file>
@@ -75,6 +80,7 @@ mod html_sinks;
 mod js_syntax;
 #[cfg(test)]
 mod markdown_dom;
+mod schema_lock;
 mod secret;
 mod stripe;
 
@@ -406,6 +412,7 @@ fn check() -> Result<()> {
     let root = devstack::repo_root();
     no_conflict_markers(&root)?;
     no_html_sinks(&root)?;
+    schema_lock::holds(&root)?;
     let read = |path: &str| std::fs::read_to_string(root.join(path)).with_context(|| format!("read {path}"));
     let copies = ["cli/GUIDE.md", "README.md", "cell/shell/shell.js"].map(|path| read(path).map(|text| (path, text)));
     let copies: Vec<(&str, String)> = copies.into_iter().collect::<Result<_>>()?;
@@ -462,11 +469,12 @@ fn main() -> Result<()> {
         Some("try") => try_template(&args[1..]),
         Some("e2e") => e2e(&args[1..]),
         Some("check") => check(),
+        Some("schema-lock") => schema_lock::write(&devstack::repo_root()),
         Some("secret") => secret::secret(&args[1..]),
         Some("deploy") => deploy::deploy(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
         Some("stripe") => deploy::stripe(&args[1..]),
-        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
     }
 }
 

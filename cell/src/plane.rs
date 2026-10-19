@@ -101,7 +101,7 @@ fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
         let post = d.post.map_or(SqlStorageValue::Null, |p| p.as_str().into());
         let signed_in = SqlStorageValue::Integer(d.signed_in.into());
         sql.exec("INSERT INTO code_channels (channel, read, post, signed_in) VALUES (?, ?, ?, ?)", vec![channel.as_str().into(), d.read.as_str().into(), post, signed_in])?;
-        // its posters' kind, a table of its own (fragment.rs `SCHEMA`)
+        // its posters' kind, a table of its own (crates/core/migrations/fragment)
         if let Some(from) = d.from {
             assert!(d.post.is_some(), "a checked manifest names its posters' kind beside a post role");
             sql.exec("INSERT INTO code_channel_from (channel, from_kind) VALUES (?, ?)", vec![channel.as_str().into(), from.as_str().into()])?;
@@ -144,7 +144,7 @@ struct OpRow {
 }
 
 /// The installed operations' rows, each with its description (a table of
-/// its own: fragment.rs `SCHEMA`).
+/// its own: crates/core/migrations/fragment).
 const OPS: &str = "SELECT o.op, o.kind, o.role, o.input, o.ephemeral, d.description FROM code_ops o LEFT JOIN code_op_descriptions d ON d.op = o.op";
 
 /// One way to fail for a stored row that does not decode: the cell wrote
@@ -174,7 +174,7 @@ struct ChannelRow {
 }
 
 /// The installed channels' rows, each with its posters' kind (a table of
-/// its own: fragment.rs `SCHEMA`).
+/// its own: crates/core/migrations/fragment).
 const CHANNELS: &str = "SELECT c.channel, c.read, c.post, c.signed_in, f.from_kind FROM code_channels c LEFT JOIN code_channel_from f ON f.channel = c.channel";
 
 fn channel_decl(row: ChannelRow) -> CellResult<(String, ChannelDecl)> {

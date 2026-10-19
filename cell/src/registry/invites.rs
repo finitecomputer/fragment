@@ -26,17 +26,6 @@ use super::RegistryCell;
 use crate::error::{CellError, CellResult};
 use crate::js;
 
-pub(super) const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS invites_waiting (
-  email TEXT NOT NULL, fragment TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (email, fragment));
-CREATE INDEX IF NOT EXISTS invites_waiting_expiry ON invites_waiting (expires_at);
-CREATE TABLE IF NOT EXISTS invite_mails (
-  sharer TEXT NOT NULL, day INTEGER NOT NULL, mailed INTEGER NOT NULL, PRIMARY KEY (sharer, day));
-CREATE TABLE IF NOT EXISTS invite_claims (
-  email TEXT NOT NULL, fragment TEXT NOT NULL, due INTEGER NOT NULL, failed INTEGER NOT NULL, PRIMARY KEY (email, fragment));
-CREATE INDEX IF NOT EXISTS invite_claims_due ON invite_claims (due);
-";
-
 const DAY_MS: i64 = 24 * 3600 * 1000;
 
 /// Fragments a sign-in, or a run of the alarm, tells at once that it met

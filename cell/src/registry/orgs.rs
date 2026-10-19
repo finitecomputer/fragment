@@ -32,28 +32,6 @@ use super::calls::{Call, By};
 use super::offers::Yes;
 use super::*;
 
-pub(super) const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS orgs (
-  id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL, created_by TEXT NOT NULL, status TEXT,
-  customer TEXT UNIQUE, subscription TEXT UNIQUE, items TEXT, period_end INTEGER, trial_end INTEGER,
-  cancel_at_end INTEGER NOT NULL DEFAULT 0, event_at INTEGER, synced_at INTEGER);
-CREATE INDEX IF NOT EXISTS orgs_synced ON orgs (synced_at) WHERE subscription IS NOT NULL;
-CREATE TABLE IF NOT EXISTS org_members (
-  id TEXT PRIMARY KEY, org TEXT NOT NULL, person TEXT UNIQUE, email TEXT NOT NULL, admin INTEGER NOT NULL,
-  seat TEXT, comped INTEGER NOT NULL, sleeps INTEGER NOT NULL, added_at INTEGER NOT NULL, added_by TEXT NOT NULL);
-CREATE INDEX IF NOT EXISTS org_members_org ON org_members (org);
--- an org offers an email once; a member's own row may share the email of
--- an offer to them (an admin's place offered to someone in it, 2026-10-17)
-DROP INDEX IF EXISTS org_members_org_email;
-CREATE UNIQUE INDEX IF NOT EXISTS org_members_offer_email ON org_members (org, email) WHERE person IS NULL;
-CREATE INDEX IF NOT EXISTS org_members_offers ON org_members (email, added_at) WHERE person IS NULL;
-CREATE TABLE IF NOT EXISTS plan_syncs (
-  person TEXT PRIMARY KEY, since INTEGER NOT NULL, due INTEGER NOT NULL, tries INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS plan_syncs_due ON plan_syncs (due);
-CREATE TABLE IF NOT EXISTS plan_seq (
-  one INTEGER PRIMARY KEY CHECK (one = 1), seq INTEGER NOT NULL);
-";
-
 // ------------------------------------------------------------- calls
 
 /// `POST /orgs/comp`: an operator (`by`, for the record; the router checked
