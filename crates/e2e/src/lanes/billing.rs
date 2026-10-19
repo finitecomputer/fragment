@@ -589,6 +589,35 @@ fn buys(s: &Suite, api: &Api, keys: &Keys) -> Result<String> {
     Ok(org_of(api, keys))
 }
 
+/// Calls a wipe may take here to finish.
+const WIPE_CALLS_MAX: usize = 5;
+
+/// The wipe of the identity `who`, called again until its report says it
+/// is wiped (its own completion signal), as `fragment operator wipe --yes`
+/// calls it: each call goes on where the last stopped, so a step that
+/// waits (its `billing` step, while a push a late webhook queued for its
+/// org is still to land) is done by a later call. At most
+/// `WIPE_CALLS_MAX` calls, none waiting on a clock. Answers the last
+/// report, and every step each call ran, in order.
+fn wipe_until_done(api: &Api, wiper: &Keys, who: &str) -> Result<(crate::api::Reply, Vec<Value>)> {
+    let mut ran = vec![];
+    // bounded: WIPE_CALLS_MAX calls
+    for call in 1..=WIPE_CALLS_MAX {
+        let r = api.signed(wiper, "POST", &format!("/api/people/{who}/wipe"), Some(&json!({ "confirm": who })))?;
+        ran.extend(r.body["ran"].as_array().cloned().unwrap_or_default());
+        if r.status != 200 || r.body["state"] == "wiped" || call == WIPE_CALLS_MAX {
+            return Ok((r, ran));
+        }
+        println!("      (the wipe of {who} goes on in call {}: {} waited: {})", call + 1, r.body["next"], billing_ran(&ran)["note"]);
+    }
+    unreachable!("the last call answers")
+}
+
+/// The `billing` step a wipe's calls ran last (`Null`: none ran it).
+fn billing_ran(ran: &[Value]) -> Value {
+    ran.iter().rev().find(|x| x["step"] == "billing").cloned().unwrap_or(Value::Null)
+}
+
 /// `who` answers the offer `id` (`accept` or `decline`).
 fn answer(api: &Api, who: &Keys, id: &str, verb: &str) -> Result<crate::api::Reply> {
     api.signed(who, "POST", &format!("/api/seat/offers/{id}/{verb}"), Some(&json!({})))
@@ -837,8 +866,8 @@ fn wiped(s: &mut Suite, api: &Api, payer: &Keys) -> Result<()> {
         api
     };
     s.stripe.fail("DELETE", "/v1/subscriptions/", false);
-    let r = api.signed(&wiper, "POST", &format!("/api/people/{wes_id}/wipe"), Some(&json!({ "confirm": wes_id })))?;
-    let billing = r.body["ran"].as_array().and_then(|l| l.iter().find(|x| x["step"] == "billing")).cloned().unwrap_or(Value::Null);
+    let (r, ran) = wipe_until_done(api, &wiper, &wes_id)?;
+    let billing = billing_ran(&ran);
     let org_gone = s.eventually(PUSHED, || api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{w_org}"), None).is_ok_and(|r| r.status == 404));
     let lapsed = s.eventually(PUSHED, || ledger(api, &xi)["seat"] == "canceled");
     s.ok(
@@ -866,12 +895,12 @@ fn wiped(s: &mut Suite, api: &Api, payer: &Keys) -> Result<()> {
     let pushed = s.eventually(PUSHED, || count(s) == paid);
     let dry = api.signed(&wiper, "GET", &format!("/api/people/{yuki_id}/wipe"), None)?;
     let found = dry.body["found"]["orgs"][0].clone();
-    let r = api.signed(&wiper, "POST", &format!("/api/people/{yuki_id}/wipe"), Some(&json!({ "confirm": yuki_id })))?;
+    let (r, ran) = wipe_until_done(api, &wiper, &yuki_id)?;
     let down = s.eventually(PUSHED, || count(s) == paid - 1);
     s.ok(
         LEAVES,
         pushed && found["org"] == p_org.as_str() && found["ends"] == false && found["cancels"] == false && r.body["state"] == "wiped" && down && s.stripe.subscription(&p_sub).is_some_and(|x| x.status == "active"),
-        json!({ "found": found, "count": count(s), "paid": paid }),
+        json!({ "found": found, "count": count(s), "paid": paid, "state": r.body["state"], "next": r.body["next"], "billing": billing_ran(&ran) }),
     );
 
     // who pays, wiped, while another admin keeps their org
@@ -889,7 +918,7 @@ fn wiped(s: &mut Suite, api: &Api, payer: &Keys) -> Result<()> {
     let prorated = s.eventually(PUSHED, || !s.stripe.pending_items(&z_sub).is_empty());
     let dry = api.signed(&wiper, "GET", &format!("/api/people/{zed_id}/wipe"), None)?;
     let found = dry.body["found"]["orgs"][0].clone();
-    let r = api.signed(&wiper, "POST", &format!("/api/people/{zed_id}/wipe"), Some(&json!({ "confirm": zed_id })))?;
+    let (r, ran) = wipe_until_done(api, &wiper, &zed_id)?;
     let canceled = s.eventually(PUSHED, || s.stripe.subscription(&z_sub).is_some_and(|x| x.status == "canceled"));
     let forgotten = s.eventually(PUSHED, || {
         let o = listed_org(s, api, &z_org);
@@ -910,7 +939,7 @@ fn wiped(s: &mut Suite, api: &Api, payer: &Keys) -> Result<()> {
             && org_of(api, &yan) == z_org
             && seat(api, &yan)["admin"] == true
             && portal.status == 403,
-        json!({ "found": found, "org": listed_org(s, api, &z_org), "portal": portal.body }),
+        json!({ "found": found, "org": listed_org(s, api, &z_org), "portal": portal.body, "state": r.body["state"], "billing": billing_ran(&ran) }),
     );
     Ok(())
 }
