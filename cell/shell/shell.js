@@ -603,7 +603,8 @@ function renderHeading() {
 }
 // A chat's unread, as its row shows them: none on the open one (it is
 // being seen), and past the count's bound "99+" (the list counts at most
-// UNREAD_MAX: proto's `LISTED_UNREAD_MAX`).
+// UNREAD_MAX: proto's `LISTED_UNREAD_MAX`, held to it by a host test,
+// xtask/src/guards.rs `the_shell_copies_its_limits`).
 const UNREAD_MAX = 100;
 function unreadMark(f) {
   const n = f.name === state.current && !state.page ? 0 : f.unread ?? 0;
@@ -624,6 +625,62 @@ function primaryAgent() {
   const f = state.fragments.find((x) => x.kind === "agent" && own(x));
   return f ? { fragment: f.name, identity: null } : null;
 }
+// What the person's agents are doing, from their chats' rows in the list
+// (docs/api.md, "Listed records"): each agent's newest record of a turn's
+// kind on a chat's `work` (docs/chat-records.md), which the shell reads as
+// the chat's page reads a turn. Started, a step, or a card answered is
+// working; a card open waits for the person (its owner answers its cards);
+// a question waits on whoever it asks (`asks`); an end is nothing. A
+// message waiting for its turn has no record yet, so queued is not said.
+// None while their computer is not awake (its turns stop with it) or this
+// page's list socket is shut (it would not hear the change), and none past
+// the bridge's own bound on a turn that says nothing (15 minutes; a turn
+// waiting on someone waits as long as a card, an hour), each a minute more
+// for the list's own lag. Those three are copies, named as their sources
+// name them (proto's limits; images/bridge/src/limits.rs), each held to its
+// source by a host test (xtask/src/guards.rs, `the_shell_copies_its_limits`).
+// The list's turn kinds are the chat's records (docs/chat-records.md):
+// the shell reads them as the bridge writes them. A listed field's
+// value is any text an agent wrote (up to 128 characters): `asks` is only
+// compared with the person's id here, never shown; what is shown is these
+// words and the chat's title, as text (`el`'s textContent), never markup.
+const DOING_SAYS = { you: "Waiting for you", waiting: "Waiting", working: "Working" };
+const DOING_ORDER = Object.keys(DOING_SAYS);
+const DOING_OF_KIND = { "turn.start": "working", "turn.step": "working", "turn.prompt.closed": "working", "turn.prompt": "you", "turn.asked": "asked" };
+const LISTED_FRESH_MS = 60_000;
+const TURN_IDLE_MS_MAX = 15 * 60_000;
+const PROMPT_TTL_MS_DEFAULT = 60 * 60_000;
+const DOING_QUIET_MS = { working: TURN_IDLE_MS_MAX + LISTED_FRESH_MS, waiting: PROMPT_TTL_MS_DEFAULT + LISTED_FRESH_MS };
+// the chats its menu names, at most
+const DOING_LISTED = 5;
+// the list socket (`watchList`, below): declared here, as the sidebar reads it
+const watching = { on: false, socket: null, wait: 1000, timer: null, settle: null };
+const listLive = () => watching.socket?.readyState === WebSocket.OPEN;
+// The chats where agent `identity` is doing something, the most pressing
+// first (waiting for the person, then on someone, then working), the
+// newest first within each; each with when it stops counting (`until`).
+function doingChats(identity) {
+  if (!identity || !listLive() || state.computer?.phase !== "awake") return [];
+  const now = Date.now();
+  const out = [];
+  for (const f of chats()) {
+    for (const r of f.listed ?? []) {
+      const kind = r.channel === "work" && r.principal === identity ? DOING_OF_KIND[r.kind] : undefined;
+      if (!kind) continue;
+      const doing = kind === "asked" ? (r.fields?.asks === state.me?.id ? "you" : "waiting") : kind;
+      const until = r.at + DOING_QUIET_MS[doing === "working" ? "working" : "waiting"];
+      if (until > now) out.push({ chat: f.name, doing, at: r.at, until });
+    }
+  }
+  return out.sort((x, y) => DOING_ORDER.indexOf(x.doing) - DOING_ORDER.indexOf(y.doing) || y.at - x.at);
+}
+// The sidebar says it again as the first of what it shows stops counting.
+let doingTimer = 0;
+function doingAgain(doing) {
+  clearTimeout(doingTimer);
+  const next = Math.min(...doing.map((x) => x.until));
+  if (Number.isFinite(next)) doingTimer = setTimeout(renderChats, Math.max(1000, next - Date.now()));
+}
 // Newest first: a chat by when its newest message was said (its row's
 // `previewAt`); one with nothing said yet (just made) above them all.
 const newest = (a, b) => (b.previewAt ?? Infinity) - (a.previewAt ?? Infinity) || (a.name < b.name ? -1 : 1);
@@ -631,17 +688,24 @@ function renderChats() {
   const primary = primaryAgent();
   const agentRows = [];
   if (primary) {
+    const doing = doingChats(primary.identity);
+    doingAgain(doing);
+    const says = DOING_SAYS[doing[0]?.doing];
     const row = el("button", "agent-heading sidebar-agent");
     row.id = "sidebar-agent";
     row.type = "button";
     row.dataset.key = primary.fragment;
-    row.setAttribute("aria-label", `${titleOf(primary.fragment)}: your agent's menu`);
+    row.setAttribute("aria-label", `${titleOf(primary.fragment)}${says ? `, ${says.toLowerCase()}` : ""}: your agent's menu`);
     row.setAttribute("aria-haspopup", "menu");
     row.setAttribute("aria-controls", "menu");
     row.setAttribute("aria-expanded", String(!!menuFor && menuFor.button === $("sidebar-agent")));
     const face = el("span", "sidebar-agent-mark");
     face.append(avatar(agentFace(primary.fragment, primary.identity), "small"));
-    row.append(face, el("strong", "title", titleOf(primary.fragment)));
+    // its name, and under it what it is doing, so the name keeps its room
+    const named = el("span", "sidebar-agent-named");
+    named.append(el("strong", "title", titleOf(primary.fragment)));
+    if (says) named.append(el("span", `agent-doing ${doing[0].doing}`, says));
+    row.append(face, named);
     row.onclick = () => openPrimaryMenu(row);
     agentRows.push(row);
   }
@@ -665,12 +729,17 @@ function renderChats() {
   });
   patch($("chats"), rows.length ? rows : [el("div", "empty-row", chats().length ? "Every chat is archived" : state.guest ? "Chats shared with you show here" : "Your chats will appear here")]);
 }
-// The agent's own menu: another chat with it, its name, its profile and
-// its screen. A chat's own (Rename, Invite, Archive) is the chat's ⋯.
+// The agent's own menu: where it is doing something (each chat opens),
+// another chat with it, its name, its profile and its screen. A chat's own
+// (Rename, Invite, Archive) is the chat's ⋯. What it is doing is read as
+// it opens, not from when its row was drawn.
 function openPrimaryMenu(trigger) {
   const primary = primaryAgent();
   if (!primary) return;
   openMenu(trigger, [
+    ...doingChats(primary.identity)
+      .slice(0, DOING_LISTED)
+      .map((x) => ({ icon: "agent", text: `${DOING_SAYS[x.doing]} in ${titleOf(x.chat)}`, onClick: () => { openChat(x.chat); leaveSidebar(); } })),
     ...(primary.identity && !state.guest ? [{ icon: "newChat", text: "New chat", onClick: () => newChat(primary.identity) }] : []),
     { icon: "rename", text: "Rename…", onClick: () => rename(primary.fragment) },
     { icon: "agent", text: "Its profile", onClick: () => openApp(primary.fragment) },
@@ -1496,6 +1565,7 @@ function computerIs(v) {
   if (!v?.computer) return;
   state.computer = v;
   renderComputer();
+  renderChats();
   rosterChanged();
 }
 
@@ -2945,7 +3015,6 @@ async function load(changed = false) {
 // wait (1 s, doubling to 30 s); each opening reads the list again, for
 // what changed while it was shut.
 const LIST_SETTLE_MS = 200;
-const watching = { on: false, socket: null, wait: 1000, timer: null, settle: null };
 function listChanged() {
   clearTimeout(watching.settle);
   watching.settle = setTimeout(() => load(true).catch(() => {}), LIST_SETTLE_MS);
@@ -2967,6 +3036,8 @@ function watchList() {
   };
   ws.onclose = () => {
     watching.socket = null;
+    // what the agent is doing goes until the socket is back to hear it
+    renderChats();
     watching.timer = setTimeout(watchList, watching.wait * (0.5 + Math.random()));
     watching.wait = Math.min(watching.wait * 2, 30_000);
   };
