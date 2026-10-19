@@ -861,7 +861,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let soul = shell(api, &session, "GET", &format!("/api/f/{}/file?path=SOUL.md", own_named(api, &session, &first_label)?), None, &[])?;
     s.ok(
         "its first agent's job (its SOUL.md) says what it does and never its name",
-        soul.status == 200 && soul.text.contains("default agent") && !first_name.is_empty() && !soul.text.contains(&first_name),
+        soul.status == 200 && soul.text.contains("main agent") && !first_name.is_empty() && !soul.text.contains(&first_name),
         json!({ "name": first_name, "soul": soul.text }),
     );
     let settings = shell(api, &session, "GET", &format!("/api/f/{}/file?path=agent.json", own_named(api, &session, &first_label)?), None, &[])?;
@@ -1095,12 +1095,21 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     }
     s.ok("and the open chat names its agent", names(&placeholder), json!({ "fragment": open, "placeholder": placeholder }));
     let _ = b.screenshot(&page, &shots.join("phone-chat.png"));
-    // the list: the sidebar over the chat, its + the launcher, bottom right
+    // the list: the sidebar over the chat, its + the launcher, bottom right.
+    // Its answer carries whether the tap arrived and each change of the
+    // layout's classes (`log`). A tap this soon after the reload (half a
+    // second in) can land before the page takes input: the log then shows
+    // no click and no change, and only then is it tapped again, so a second
+    // tap never closes a sidebar the first opened.
+    b.eval(&page, "(() => { const l = document.getElementById('layout'); const log = (window.__layoutLog = [[Math.round(performance.now()), l.className]]); new MutationObserver((ms) => { for (const m of ms) log.push([Math.round(performance.now()), `${m.oldValue} -> ${l.className}`]); }).observe(l, { attributes: true, attributeFilter: ['class'], attributeOldValue: true }); document.getElementById('toggle-left').addEventListener('click', () => log.push([Math.round(performance.now()), 'click']), true); return true; })()")?;
     b.click(&page, "#toggle-left")?;
+    if !b.until(&page, "window.__layoutLog.some((e) => e[1] === 'click')", std::time::Duration::from_secs(2)) {
+        b.click(&page, "#toggle-left")?;
+    }
     // (once the list has slid in: its + is fixed within it while it moves)
     let fab_expr = "(() => { const r = document.getElementById('sidebar-new-chat').getBoundingClientRect(); return r.width >= 44 && r.right > innerWidth - 40 && r.bottom > innerHeight - 60; })()";
     let list = b.until(&page, &format!("document.getElementById('layout').classList.contains('left-open') && document.querySelector('.sidebar-shell').getBoundingClientRect().width >= innerWidth - 2 && {fab_expr}"), wait);
-    let fab = b.eval(&page, &format!("({{ fab: {fab_expr}, at: (() => {{ const r = document.getElementById('sidebar-new-chat').getBoundingClientRect(); return [r.left, r.top, r.width, innerWidth, innerHeight]; }})() }})"))?;
+    let fab = b.eval(&page, &format!("({{ fab: {fab_expr}, at: (() => {{ const r = document.getElementById('sidebar-new-chat').getBoundingClientRect(); return [r.left, r.top, r.width, innerWidth, innerHeight]; }})(), log: window.__layoutLog ?? null }})"))?;
     let _ = b.screenshot(&page, &shots.join("phone-list.png"));
     s.ok("on a phone the list covers the chat, its + the launcher at its bottom right, a thumb's size", list && fab["fab"] == true, &fab);
     b.eval(&page, "(document.getElementById('scrim').click(), true)")?;
@@ -1236,7 +1245,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     let named = profile
         && s.eventually(wait, || {
             seen = b.eval_in_frame(page, &its_page, "({ name: document.getElementById('name')?.textContent ?? null, title: document.title, soul: document.getElementById('soul')?.textContent ?? '', text: document.body.innerText })").unwrap_or(Value::Null);
-            seen["name"] == "Frankie" && seen["soul"].as_str().is_some_and(|t| t.contains("default agent"))
+            seen["name"] == "Frankie" && seen["soul"].as_str().is_some_and(|t| t.contains("main agent"))
         });
     let text = seen["text"].as_str().unwrap_or("");
     let _ = b.screenshot(page, &shots.join("agent-page-renamed.png"));
@@ -1990,7 +1999,7 @@ fn skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let got: Vec<(String, String)> = serde_json::from_str(b.eval(page, shown)?.as_str().unwrap_or("[]")).unwrap_or_default();
     s.ok(
         &format!("settings' Skills lists the managed set by category ({} skills), exactly the skills fragment's files", want.len()),
-        listed && want.len() == 12 && got == want && got.iter().any(|(c, n)| c == "software-development" && n == "apps-finite"),
+        listed && want.len() == 13 && got == want && got.iter().any(|(c, n)| c == "software-development" && n == "apps-finite") && got.iter().any(|(c, n)| c == "autonomous-ai-agents" && n == "agents-finite"),
         json!({ "shown": got.len(), "files": want.len(), "missing": want.iter().filter(|w| !got.contains(w)).collect::<Vec<_>>(), "extra": got.iter().filter(|g| !want.contains(g)).collect::<Vec<_>>() }),
     );
     // an agent's own skill, from its fragment, shows beside it
@@ -2812,6 +2821,12 @@ fn ask_cli(s: &mut Suite, api: &Api, me: &Person) -> Result<()> {
         again["replayed"] == true && again["record"]["seq"] == r["record"]["seq"] && again["answer"]["turn"] == r["answer"]["turn"] && !again["answer"]["turn"].is_null(),
         &again,
     );
+    // a question from a file is posted as it is (no shell expands it)
+    let raw = "what did the $5 plan say about `cron` and \"quotes\"?";
+    let file = home.join("question.md");
+    std::fs::write(&file, raw)?;
+    let from = s.cli_json(api, &home, &["ask", "reader", "--from", &file.to_string_lossy(), "--json"])?;
+    s.ok("`fragment ask --from FILE` asks what the file says, as written", from["record"]["body"]["text"] == raw && from["record"]["body"]["to"] == json!([reader]), &from);
     let made = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": "ask-here", "template": "chat", "title": "Ask here" })), &[])?;
     let here = made.body["name"].as_str().unwrap_or("").to_string();
     let r = s.cli_json(api, &home, &["ask", "reader", "and here?", "--chat", &here, "--wait", "60", "--json"])?;

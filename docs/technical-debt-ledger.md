@@ -1024,9 +1024,11 @@ fragment.club until cutover (decisions 34–35).
   same). A chat's name has a suffix of its own, so it is looked up at a
   boot, as agents come, and every few seconds while one is missing.
   Nothing on the platform says which chat is an agent's.
-- **Risk:** an agent made another way (the CLI, the API) has no Bot Chat
+- **Risk:** an agent made another way (the API by hand) has no Bot Chat
   of ours, and Hermes makes one of its own that the person never sees; a
   person with two chats of that label (one made by hand) may get either.
+  `fragment agent --new`, which a person's default agent uses to make
+  their other agents (decision 62, proposed), makes it as the shell does.
 - **First proof:** a bot whose roster and `message_agent` never appear in
   its own chat (no `botmode.titled` event for it, or no
   `botmode.chat_found`).
@@ -1283,3 +1285,45 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** Cloudflare fixes #362 and a canary round shows no
   `snapshot: "dead"` across its snapshot wakes; or snapshots go
   (`FRAGMENT_COMPUTER_SNAPSHOTS=off`), when the wait goes with them.
+
+## Which of an agent's teammates is trusted is read from its agent.json
+
+- **Observed:** 2026-10-16, a person's default agent keeping the rest
+  (docs/cloudflare-v1.md, decision 62, proposed). The default agent keeps
+  the person's private things from a teammate whose model is outside the
+  platform. Nothing on the platform says which models are trusted: the
+  agents-finite skill and `fragment agent --json` (`runsOn`) read the
+  teammate's `agent.json`, a `model` (a provider its owner connected:
+  OpenRouter's catalog) untrusted and the platform's tiers trusted.
+- **Shortcut:** every tier the deployment runs counts as trusted, the
+  default agent's own included, whatever runs it (Finite's tiers run on
+  GLM-5.3 Flash through the platform's OpenRouter key since 2026-10-15,
+  Finite Private by config: decision 61). A `model` counts as untrusted
+  while it is named, even when its computer runs the agent on its tier
+  (its owner disconnected the provider).
+- **Risk:** a tier that runs outside what the person would call private
+  is trusted all the same; the cell never reads `agent.json`, so a
+  teammate the skill calls trusted may be on a model no one checked.
+- **First proof:** a deployment whose `models` put a tier on a provider
+  its operator does not call private, and a default agent handing that
+  tier's teammate what the skill says to keep from others.
+- **Delete when:** trust is the deployment's own fact (its `models`
+  config names which slots and providers are trusted, decision 61's
+  config), told to every agent with its teammates (`GET /api/computer`),
+  and the skill reads that.
+
+## A teammate on another provider is kept out by a prompt
+
+- **Observed:** decision 62 (proposed). The agents-finite skill tells a
+  person's default agent what never to hand a teammate on another
+  provider (placeholders, never the details). Nothing else keeps that
+  teammate out: it runs on its owner's computer beside every other agent,
+  acting for its owner as they do (decision 44).
+- **Shortcut:** the care is the default agent's, in its prompt.
+- **Risk:** a default agent that misjudges what is private hands it over
+  itself; and the teammate, or a page that talks it into it, reaches all
+  its owner reaches, and its provider has what it read.
+- **First proof:** a teammate on another provider that reads or sends its
+  owner's private things it was never handed.
+- **Delete when:** such a teammate acts as itself alone (a fence the
+  platform keeps), or runs where its owner's data is not.
