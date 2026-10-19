@@ -10,8 +10,10 @@
 //! Who pays (billing.rs `org_payers`: the person whose Checkout made its
 //! subscription) is no other admin's to remove, and their seat no other's
 //! to take; only they open its billing (the portal renews it, and changes
-//! its card); and as they go (stepping down, leaving, moving, wiped) its
-//! subscription is canceled at once and, once that lands, the org forgets
+//! its card); and while its subscription lives they stay: they step down,
+//! leave or move only once it has ended (offers.rs `depart`; Alex's rule,
+//! Paul's call, 2026-10-18). A handoff is an operator's, by hand. A wiped
+//! payer's subscription is canceled, and once that lands the org forgets
 //! their customer (`forget_payer`). No card pays for an org its owner no
 //! longer manages, and no one else uses its owner's customer.
 //!
@@ -31,7 +33,7 @@
 //! member's going (leaving, moving, wiped) that leaves none cancels it at
 //! once.
 
-use fragment_core::org::{Status, ADMINS_PER_ORG_MAX, SYNC_BATCH, SYNC_RETRY_MS};
+use fragment_core::org::{Departure, Status, ADMINS_PER_ORG_MAX, SYNC_BATCH, SYNC_RETRY_MS};
 use fragment_core::stripe::{self as core_stripe, Push, Snapshot, Subscription};
 use fragment_proto::org::{OrgMember, SeatKind};
 use serde::Serialize;
@@ -117,9 +119,10 @@ impl Call for RemoveAdmin {
 /// its own after-word in `run_cancels`.
 /// No paid seat is left of its org.
 pub(super) const WHY_NO_SEAT: &str = "no paid seat is left";
-/// Its payer went (stepped down, left, moved, or was wiped): once it
-/// lands, the org forgets their customer (`forget_payer`).
-pub(super) const WHY_PAYER: &str = "its payer went";
+/// Its payer was wiped and the org goes on without them (a payer's own
+/// going is refused while it lives: offers.rs `depart`): once it lands,
+/// the org forgets their customer (`forget_payer`).
+pub(super) const WHY_PAYER_WIPED: &str = "its payer was wiped";
 /// Its org ended (with a wipe, or a move of its last person).
 pub(super) const WHY_ENDED: &str = "its org ended";
 /// A paid Checkout whose buyer could not take its seat.
@@ -376,20 +379,17 @@ impl RegistryCell {
         if m.admin == 0 {
             return Err(not_found(format!("{} is no admin", b.member)));
         }
-        // an admin's place offered is withdrawn; a member's is guarded
+        // a member's admin's place goes through the one change to a place
+        // (offers.rs `depart`: who pays stays while it lives, and the last
+        // admin of others stays); who pays is no other admin's to remove
         if m.person.is_some() {
-            if self.count("SELECT COUNT(*) AS n FROM org_members WHERE org = ? AND admin = 1 AND person IS NOT NULL", vec![m.org.as_str().into()])? <= 1 {
-                return Err(CellError::invalid("an org keeps one admin at least: add another first"));
-            }
             if self.payers_own(&m, &who.id)? {
                 return Err(CellError::new(ErrorCode::Forbidden, format!("{} pays for this org: only they step down as its admin", m.email)));
             }
-            // who pays, stepping down, stops paying at once: no card pays for
-            // an org its owner no longer manages
-            if self.pays_for(&m.org, &who.id)? && m.person.as_deref() == Some(who.id.as_str()) {
-                self.cancel_for_payer(&m.org)?;
-            }
+            self.depart(&m, Departure::StepDown)?;
+            return m.wire(None);
         }
+        // an admin's place offered is withdrawn (a seat offered with it stays)
         if m.seat.is_some() {
             self.exec("UPDATE org_members SET admin = 0 WHERE id = ?", vec![m.id.as_str().into()])?;
         } else {
@@ -629,7 +629,7 @@ impl RegistryCell {
         }
     }
 
-    /// The org forgets the customer of a payer who went, once their
+    /// The org forgets the customer of a payer who was wiped, once their
     /// subscription's cancel landed: its billing columns and who paid go
     /// (only while that subscription is still its own), so no one left in
     /// it opens that customer's portal or buys on it. Its admins buy again
@@ -683,7 +683,7 @@ impl RegistryCell {
                     if let Some(c) = copy.filter(|c| current.as_deref() == Some(c.id.as_str())) {
                         self.apply_subscription_copy(&r.org, &c, None)?;
                     }
-                    if r.why == WHY_PAYER {
+                    if r.why == WHY_PAYER_WIPED {
                         self.forget_payer(&r.org, &r.subscription)?;
                     }
                     self.drop_if_empty(&r.org)?;

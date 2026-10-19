@@ -904,8 +904,10 @@ Paul's (its slice 10).
     once its first Checkout is paid; an org's seats and admins' places
     are offers, theirs once they accept them; who pays is no other
     admin's to remove, only they open its billing (a default from the
-    review of #367, Paul's to reverse), and their going cancels its
-    subscription at once (docs/billing.md, "The model").
+    review of #367, Paul's to reverse), and while its subscription
+    lives they stay (Alex's rule, Paul's call, 2026-10-18: they cancel
+    it first; a handoff is an operator's, by hand; docs/billing.md, "The
+    model").
 52. **Seats are paid or comped, held or pending.** A seat is `seat`
     ($100) or `seat_always_on` ($200; since 2026-10-15 the only one
     sold, decision 25's status), held by an npub or pending on an

@@ -76,6 +76,11 @@ fragment.club until cutover (decisions 34–35).
   tools still to land.
 - **Shortcut:** `CELL_WASM_MAX_BYTES` is 6.5 MB (xtask/src/build.rs), so
   the launch week's features land without squeezing.
+- **2026-10-19:** master with #365 and #366 was 6.38 MB, and #367 took it
+  18 KB over. #367 made the registry's and Stripe's round trips
+  non-generic (`ask_registry` and the Stripe client parse their answer in
+  the one generic step, so a call type no longer copies a whole async
+  round trip): 6.34 MB with #367's 134 KB.
 - **Risk:** every isolate copies the Wasm's data into its memory and
   every deploy uploads it: a bigger cell starts slower and leaves less
   memory to requests, and a budget moved once is easier to move again.

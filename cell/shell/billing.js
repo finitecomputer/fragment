@@ -82,7 +82,7 @@ function offers(mine, done) {
     const from = o.from ? ` (${o.from})` : "";
     box.append(el("p", null, `${o.org.name}${from} offers you ${offered(o)}.`));
     const away = mine.org && mine.org.id !== o.org.id;
-    const alone = mine.admin ? "; if no one else is in it, it ends too, its subscription canceled at once" : "";
+    const alone = mine.admin ? "; if no one else is in it, it ends too (who pays cancels its billing first)" : "";
     const said = away
       ? `Accepting moves you: your place in ${mine.org.name} ends${mine.seat ? ", with its seat" : ""}${alone}.`
       : "Nothing of it is yours until you accept it.";
@@ -269,8 +269,8 @@ function portal() {
 /**
  * An admin's org (`GET /api/org`'s): its seats and admins, and, to who pays
  * (`pays`), Stripe's portal; `offer`, what a seat added costs. Who pays's
- * own seat and place are theirs alone to give up, and their stepping down
- * cancels its subscription at once.
+ * own seat and place are theirs alone to give up, and while its
+ * subscription lives they stay (the platform says to cancel it first).
  */
 function orgSection(org, offer, pays) {
   const { el, section, actionLine } = h;
@@ -296,7 +296,6 @@ function orgSection(org, offer, pays) {
     }
     if (m.admin && org.members.filter((x) => x.admin && x.person).length > 1 && (!payer || pays)) {
       actions.append(button("Not admin", async () => {
-        if (payer && !confirm("You pay for this org: stepping down cancels its subscription now, and its paid seats stop. Go on?")) return;
         await h.api("DELETE", `/api/org/admins/${encodeURIComponent(m.id)}`);
         await h.reopen();
       }));

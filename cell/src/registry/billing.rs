@@ -270,14 +270,6 @@ impl RegistryCell {
         Ok(self.row::<Row>("SELECT person FROM org_payers WHERE org = ?", vec![org.into()])?.map(|r| r.person))
     }
 
-    /// `org`'s payer goes (steps down, leaves, moves, or is wiped): their
-    /// card stops at once. Its subscription's cancel is queued, and once it
-    /// lands the org forgets their customer (seats.rs `run_cancels`).
-    pub(super) fn cancel_for_payer(&self, org: &str) -> CellResult<()> {
-        let sub = self.org_sub(org)?.and_then(|s| s.subscription).ok_or_else(|| CellError::host(format!("{org}'s payer goes, and it has no subscription")))?;
-        self.queue_cancel(&sub, org, super::seats::WHY_PAYER)
-    }
-
     /// `person`'s Checkout made `org`'s subscription: they pay for it.
     fn set_payer(&self, org: &str, person: &str, subscription: &str) -> CellResult<()> {
         self.exec(

@@ -17,13 +17,14 @@
 //! offer: they are in it by their yes, and leave it by their own (`leave`,
 //! or stepping down as its admin).
 //!
-//! Accepting while in another org is a move (`fragment_core::org::moving`):
-//! alone there (offers aside), that org ends with them, its offers
-//! withdrawn; else they go, unless they are its last admin while other
-//! people are in it. Their old seat goes with their old row, and a card's
-//! owner who goes stops paying: its subscription is canceled at once.
+//! Accepting while in another org is a move, one of the departures `depart`
+//! makes (`fragment_core::org::departing`): alone there (offers aside), that
+//! org ends with them, its offers withdrawn; else they go, unless they are
+//! its last admin while other people are in it, or pay for it while its
+//! subscription lives (they cancel it first). Their old seat goes with
+//! their old row.
 
-use fragment_core::org::{self, Going, Place, OFFERS_PER_EMAIL_MAX, OFFER_MAILS_PER_ORG_DAILY_MAX};
+use fragment_core::org::{self, Change, Departure, Place, Stuck, OFFERS_PER_EMAIL_MAX, OFFER_MAILS_PER_ORG_DAILY_MAX};
 use fragment_proto::org::{MySeat, OfferedSeat, SeatKind};
 use serde::Serialize;
 
@@ -241,31 +242,41 @@ impl RegistryCell {
         let person = m.person.as_deref().ok_or_else(|| CellError::host(format!("{} is an offer, not a member's place", m.id)))?;
         let admins = self.count("SELECT COUNT(*) AS n FROM org_members WHERE org = ? AND admin = 1 AND person IS NOT NULL", vec![m.org.as_str().into()])?;
         let others = self.count("SELECT COUNT(*) AS n FROM org_members WHERE org = ? AND id != ? AND person IS NOT NULL", vec![m.org.as_str().into(), m.id.as_str().into()])?;
-        let place = Place { admin: m.admin != 0, admins, others, pays: self.pays_for(&m.org, person)? };
+        let place = Place { admin: m.admin != 0, seat: m.seat.is_some(), admins, others, pays: self.pays_for(&m.org, person)? };
         assert!(!place.admin || place.admins >= 1, "an admin who said yes is one of its admins");
         Ok(place)
     }
 
-    /// `person` goes from their org (`m`, their row) for another's offer
-    /// (`fragment_core::org::moving`), unless that leaves its people with no
-    /// admin: their row goes, or, alone there, every row of it (its offers
-    /// withdrawn); their card stops paying for it at once; and its count is
-    /// pushed (an org left with no one is dropped once nothing of it bills).
-    fn go_from(&self, m: &MemberRow) -> CellResult<()> {
-        let from = self.stored_org(&m.org)?;
+    /// The one change to a member's own place in their org: leaving,
+    /// stepping down as its admin, or moving to another's offer
+    /// (`fragment_core::org::departing`). Whoever pays for it stays while
+    /// its subscription lives (they cancel it first, or an operator hands
+    /// its billing on by hand); the last admin of other people stays.
+    /// Otherwise their row goes, or keeps its seat without the admin's
+    /// place, or, alone there, the whole org goes with its offers; their
+    /// plan and the org's count are pushed (an org with no paid seat left
+    /// has its subscription canceled; one with no one is dropped).
+    pub(super) fn depart(&self, m: &MemberRow, how: Departure) -> CellResult<Change> {
+        let person = m.person.as_deref().ok_or_else(|| CellError::host(format!("{} is an offer: an offer is withdrawn, not departed", m.id)))?;
         let place = self.place_of(m)?;
-        let gone = org::moving(place).map_err(|stuck| conflict(stuck.message(&from.name)))?;
-        if place.pays {
-            self.cancel_for_payer(&m.org)?;
+        let change = org::departing(place, how).map_err(|stuck| {
+            let name = self.stored_org(&m.org).map(|o| o.name).unwrap_or_else(|_| m.org.clone());
+            match stuck {
+                Stuck::Admin => CellError::invalid(stuck.message(&name)),
+                Stuck::Pays | Stuck::LastAdmin => conflict(stuck.message(&name)),
+            }
+        })?;
+        match change {
+            Change::EndOrg => self.exec("DELETE FROM org_members WHERE org = ?", vec![m.org.as_str().into()])?,
+            Change::Delete => self.exec("DELETE FROM org_members WHERE id = ?", vec![m.id.as_str().into()])?,
+            Change::Unadmin => self.exec("UPDATE org_members SET admin = 0 WHERE id = ?", vec![m.id.as_str().into()])?,
         }
-        match gone.going {
-            Going::Ends => self.exec("DELETE FROM org_members WHERE org = ?", vec![m.org.as_str().into()])?,
-            Going::Leaves => self.exec("DELETE FROM org_members WHERE id = ?", vec![m.id.as_str().into()])?,
+        if m.seat.is_some() && change != Change::Unadmin {
+            self.queue_sync(person)?;
         }
-        if let Some(p) = m.person.as_deref().filter(|_| m.seat.is_some()) {
-            self.queue_sync(p)?;
-        }
-        self.queue_quantities(&m.org)
+        self.queue_quantities(&m.org)?;
+        assert!(change == Change::Unadmin || self.member_of(person)?.is_none(), "a member who went holds no row there");
+        Ok(change)
     }
 
     /// An offer of `who`'s own org's (an admin's place for them, or one to
@@ -330,7 +341,7 @@ impl RegistryCell {
         match self.member_of(&who.id)? {
             Some(mine) if mine.org == offer.org => self.merge(&mine, &offer)?,
             Some(mine) => {
-                self.go_from(&mine)?;
+                self.depart(&mine, Departure::Move)?;
                 self.enroll(&offer, Yes::Accepted(&who.id))?;
             }
             None => {
@@ -354,19 +365,7 @@ impl RegistryCell {
     fn leave(&self, b: LeaveOrg) -> CellResult<MySeat> {
         let who = self.person_by(&b.by)?;
         let m = self.member_of(&who.id)?.ok_or_else(|| CellError::invalid("you are in no org"))?;
-        if m.admin != 0 {
-            let o = self.stored_org(&m.org)?;
-            return Err(CellError::invalid(format!("you admin {}: step down as its admin first, then leave", o.name)));
-        }
-        // who pays (stepped down, their card still on it) stops paying as they go
-        if self.pays_for(&m.org, &who.id)? {
-            self.cancel_for_payer(&m.org)?;
-        }
-        self.exec("DELETE FROM org_members WHERE id = ?", vec![m.id.as_str().into()])?;
-        if m.seat.is_some() {
-            self.queue_sync(&who.id)?;
-        }
-        self.queue_quantities(&m.org)?;
+        self.depart(&m, Departure::Leave)?;
         self.my_seat(&who.id)
     }
 

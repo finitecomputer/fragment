@@ -344,7 +344,7 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     let gone = api.signed(&dee, "GET", "/api/org", None)?;
     s.ok("who pays removes another admin; one with no seat leaves the org with it", r.status == 200 && gone.status == 403 && seat(api, &dee)["org"].is_null(), &r);
     let last_admin = api.signed(&ann, "DELETE", &format!("/api/org/admins/{ann_row}"), None)?;
-    s.ok("the last admin stays (400)", last_admin.status == 400, &last_admin);
+    s.ok("the last admin, who pays, stays (409: cancel its billing first)", last_admin.status == 409 && last_admin.message().contains("cancel its subscription"), &last_admin);
 
     // ---- credit packs: $25, kept until spent, once by their Checkout
     let purchased = |k: &Keys| ledger(api, k)["purchasedMicros"].as_i64().unwrap_or(-1);
@@ -436,27 +436,32 @@ fn listed_org(s: &Suite, api: &Api, org: &str) -> Value {
     all["orgs"].as_array().into_iter().flatten().find(|o| o["id"] == org).cloned().unwrap_or(Value::Null)
 }
 
-/// Who pays (the review of #367): their seat and admin's place are no
-/// other admin's, and only they open its billing; stepping down, though
-/// their subscription is set to end at its period's end (theirs to renew),
-/// cancels it at once, deletes its pending prorations, and the org forgets
-/// their customer; the lapsed org's offer is refused; and another admin
-/// buying it again bills a customer of their own.
+/// Who pays (the review of #367; Alex's rule, Paul's call, 2026-10-18):
+/// their seat and admin's place are no other admin's, and only they open
+/// its billing; while its subscription lives (set to end at its period's
+/// end too) they stay: their leave, step-down and move are each refused,
+/// saying to cancel first; a non-payer admin goes as they will; once it
+/// has ended the payer goes too; the lapsed org's offer is refused; and
+/// another admin buying it again bills a customer of their own.
 fn payer_goes(s: &mut Suite, api: &Api) -> Result<()> {
     let pia = api.person()?;
+    let pia_id = api.identity(&pia)?;
     let p_org = buys(s, api, &pia)?;
     let p_sub = subscription_of(s, &p_org).context("the payer's subscription")?;
     let pia_customer = s.stripe.subscription(&p_sub).map(|x| x.customer).unwrap_or_default();
     let quin = api.person()?;
     let r = api.signed(&pia, "POST", "/api/org/admins", Some(&json!({ "email": Api::email_of(&quin) })))?;
     answer(api, &quin, r.body["admin"]["id"].as_str().unwrap_or(""), "accept")?;
+    let uri = api.person()?;
+    let r = api.signed(&pia, "POST", "/api/org/admins", Some(&json!({ "email": Api::email_of(&uri) })))?;
+    answer(api, &uri, r.body["admin"]["id"].as_str().unwrap_or(""), "accept")?;
     let rho = api.person()?;
     let r = api.signed(&quin, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(&rho) })))?;
     answer(api, &rho, r.body["seat"]["id"].as_str().unwrap_or(""), "accept")?;
-    let prorated = s.eventually(PUSHED, || !s.stripe.pending_items(&p_sub).is_empty());
     let view = api.signed(&quin, "GET", "/api/org", None)?;
-    let pia_id = api.identity(&pia)?;
-    let pia_row = view.body["members"].as_array().into_iter().flatten().find(|m| m["person"] == pia_id.as_str()).and_then(|m| m["id"].as_str()).unwrap_or("").to_string();
+    let row_of = |id: &str| view.body["members"].as_array().into_iter().flatten().find(|m| m["person"] == id).and_then(|m| m["id"].as_str()).unwrap_or("").to_string();
+    let pia_row = row_of(&pia_id);
+    let uri_row = row_of(&api.identity(&uri)?);
     let seat_taken = api.signed(&quin, "DELETE", &format!("/api/org/seats/{pia_row}"), None)?;
     let place_taken = api.signed(&quin, "DELETE", &format!("/api/org/admins/{pia_row}"), None)?;
     let theirs = api.signed(&quin, "POST", "/api/billing/portal", Some(&json!({})))?;
@@ -467,36 +472,59 @@ fn payer_goes(s: &mut Suite, api: &Api) -> Result<()> {
         json!([seat_taken.body, place_taken.body, theirs.body, own.status]),
     );
 
+    // a non-payer admin goes as they will, its subscription live: by
+    // stepping down (an admin's leave is refused until then)
+    let leaves = api.signed(&uri, "POST", "/api/seat/leave", Some(&json!({})))?;
+    let stepped = api.signed(&uri, "DELETE", &format!("/api/org/admins/{uri_row}"), None)?;
+    let gone = s.eventually(PUSHED, || org_of(api, &uri).is_empty());
+    s.ok(
+        "an admin who does not pay leaves only by stepping down first (400); stepping down while its subscription lives, holding no seat, they are out of the org",
+        leaves.status == 400 && leaves.message().contains("step down") && stepped.status == 200 && gone && seat(api, &uri)["org"].is_null(),
+        json!([leaves.body, stepped.body]),
+    );
+
+    // who pays stays while it lives, and while it is set to end
+    let tia = api.person()?;
+    buys(s, api, &tia)?;
+    let r = api.signed(&tia, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(&pia) })))?;
+    let to_pia = r.body["seat"]["id"].as_str().unwrap_or("").to_string();
+    let tries = || -> Result<Vec<crate::api::Reply>> {
+        Ok(vec![
+            api.signed(&pia, "POST", "/api/seat/leave", Some(&json!({})))?,
+            api.signed(&pia, "DELETE", &format!("/api/org/admins/{pia_row}"), None)?,
+            answer(api, &pia, &to_pia, "accept")?,
+        ])
+    };
+    let refused = |r: &[crate::api::Reply]| r.iter().all(|r| r.status == 409 && r.message().contains("cancel its subscription")) && org_of(api, &pia) == p_org && seat(api, &pia)["admin"] == true;
+    let live = tries()?;
+    s.ok("who pays stays while its subscription lives: their leave, step-down and move are each refused (409), saying to cancel it first", refused(&live), json!(live.iter().map(|r| &r.body).collect::<Vec<_>>()));
+    s.stripe.set_cancel_at_end(&p_sub, true).map_err(anyhow::Error::msg)?;
+    let set = s.eventually(PUSHED, || listed_org(s, api, &p_org)["cancelAtEnd"] == true);
+    let ending = tries()?;
+    s.ok(
+        "and while it is set to end at its period's end (theirs to renew): each is refused still, and the subscription bills on, not canceled",
+        set && refused(&ending) && s.stripe.subscription(&p_sub).is_some_and(|x| x.status == "active"),
+        json!(ending.iter().map(|r| &r.body).collect::<Vec<_>>()),
+    );
+
     // an offer waiting, answered after the org lapses
     let sam = api.person()?;
     let r = api.signed(&quin, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(&sam) })))?;
     let sam_offer = r.body["seat"]["id"].as_str().unwrap_or("").to_string();
-    // set to end at its period's end (the portal's), still theirs to renew: they step down
-    s.stripe.set_cancel_at_end(&p_sub, true).map_err(anyhow::Error::msg)?;
-    let set = s.eventually(PUSHED, || listed_org(s, api, &p_org)["cancelAtEnd"] == true);
-    let stepped = api.signed(&pia, "DELETE", &format!("/api/org/admins/{pia_row}"), None)?;
-    let canceled = s.eventually(PUSHED, || s.stripe.subscription(&p_sub).is_some_and(|x| x.status == "canceled"));
-    let forgotten = s.eventually(PUSHED, || {
-        let o = listed_org(s, api, &p_org);
-        o["customer"].is_null() && o["subscription"].is_null() && o["id"] == p_org.as_str()
-    });
+    // the period ends: it is canceled; who paid goes now
+    s.stripe.set_status(&p_sub, "canceled").map_err(anyhow::Error::msg)?;
     let lapsed = s.eventually(PUSHED, || seat(api, &rho)["seat"]["good"] == false);
+    let stepped = api.signed(&pia, "DELETE", &format!("/api/org/admins/{pia_row}"), None)?;
+    let left = api.signed(&pia, "POST", "/api/seat/leave", Some(&json!({})))?;
     s.ok(
-        "who pays steps down, their subscription set to end at its period's end: it is canceled at once, its pending prorations deleted, the org forgets their customer (kept at Stripe), and its paid seats lapse",
-        set && stepped.status == 200
-            && prorated
-            && canceled
-            && s.stripe.pending_items(&p_sub).is_empty()
-            && forgotten
-            && s.stripe.customers().contains(&pia_customer)
-            && lapsed
-            && seat(api, &pia)["pays"] == false,
-        json!({ "stepped": stepped.body, "org": listed_org(s, api, &p_org), "pending": s.stripe.pending_items(&p_sub) }),
+        "once its subscription has ended, who paid steps down and leaves: they are out of the org, its paid seats lapsed",
+        lapsed && stepped.status == 200 && left.status == 200 && seat(api, &pia)["org"].is_null() && seat(api, &pia)["pays"] == false,
+        json!([stepped.body, left.body]),
     );
     let late = answer(api, &sam, &sam_offer, "accept")?;
     let portal = api.signed(&quin, "POST", "/api/billing/portal", Some(&json!({})))?;
     s.ok(
-        "the lapsed org's offer is refused (400) until it pays again, and its billing is no one's (403)",
+        "the lapsed org's offer is refused (400) until it pays again, and its billing is no one else's (403)",
         late.status == 400 && late.message().contains("pays for nothing") && seat(api, &sam)["org"].is_null() && portal.status == 403,
         json!([late.body, portal.body]),
     );
@@ -509,7 +537,7 @@ fn payer_goes(s: &mut Suite, api: &Api) -> Result<()> {
     let pays = s.eventually(PUSHED, || seat(api, &quin)["seat"]["good"] == true);
     let again = subscription_of(s, &p_org).and_then(|id| s.stripe.subscription(&id)).map(|x| x.customer).unwrap_or_default();
     s.ok(
-        "another admin buys the org again on a customer of their own (its email theirs), never the one who went's, for its paid seats and theirs; now they pay",
+        "another admin buys the org again on a customer of their own (its email theirs), never who paid before's, for its paid seats and theirs; now they pay",
         r.status == 200
             && !asked.form.contains_key("customer")
             && asked.form.get("customer_email") == Some(&Api::email_of(&quin))
@@ -571,8 +599,9 @@ fn answer(api: &Api, who: &Keys, id: &str, verb: &str) -> Result<crate::api::Rep
 /// no one, at an offer or a sign-in, until they accept; someone offered
 /// buys their own seat on a customer of their own, never the offering
 /// org's; they decline; and their own yes elsewhere moves them unless it
-/// leaves people with no admin (the last admin is refused), an org of one
-/// ending with them, its subscription canceled, and one with only offers
+/// leaves people with no admin (the last admin is refused) or they pay for
+/// their org while its subscription lives (they cancel first); an org of
+/// one, its billing ended, ending with them, and one with only offers
 /// waiting too, the offers withdrawn. A seat's holder leaves by their own
 /// yes. Answers a person whose org pays, for `wiped`'s offers.
 fn consent(s: &mut Suite, api: &Api) -> Result<Keys> {
@@ -664,17 +693,27 @@ fn consent(s: &mut Suite, api: &Api) -> Result<Keys> {
         json!([declined.body, twice.status]),
     );
 
-    // 5. alone in their own org, a move ends it, its subscription canceled
+    // 5. paying for their own org, they stay until its subscription ends;
+    // then, alone in it, a move ends it
     let r = api.signed(&mal, "POST", "/api/org/seats", Some(&json!({ "email": vic_email })))?;
     let to_vic = r.body["seat"]["id"].as_str().unwrap_or("").to_string();
     let b_customer = s.stripe.subscription(&b_sub).map(|x| x.customer).unwrap_or_default();
+    let refused = answer(api, &vic, &to_vic, "accept")?;
+    s.stripe.set_status(&b_sub, "canceled").map_err(anyhow::Error::msg)?;
+    let lapsed = s.eventually(PUSHED, || seat(api, &vic)["seat"]["good"] == false);
     let moved = answer(api, &vic, &to_vic, "accept")?;
-    let canceled = s.eventually(PUSHED, || s.stripe.subscription(&b_sub).is_some_and(|x| x.status == "canceled"));
     let ended = s.eventually(PUSHED, || api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{b_org}"), None).is_ok_and(|r| r.status == 404));
     s.ok(
-        "alone in their own org, they accept another's seat: their org ends with them, its subscription canceled at once, its Stripe customer kept, and they hold the seat offered",
-        moved.status == 200 && moved.body["seat"]["id"] == to_vic.as_str() && moved.body["org"]["id"] == a_org.as_str() && canceled && ended && s.stripe.customers().contains(&b_customer),
-        json!({ "moved": moved.body, "subscription": s.stripe.subscription(&b_sub).map(|x| x.status) }),
+        "who pays for their own org stays while its subscription lives (409: cancel it first); once it has ended, alone in it, they accept another's seat: their org ends with them, its Stripe customer kept, and they hold the seat offered",
+        refused.status == 409
+            && refused.message().contains("cancel its subscription")
+            && lapsed
+            && moved.status == 200
+            && moved.body["seat"]["id"] == to_vic.as_str()
+            && moved.body["org"]["id"] == a_org.as_str()
+            && ended
+            && s.stripe.customers().contains(&b_customer),
+        json!({ "refused": refused.body, "moved": moved.body }),
     );
 
     // 6. a seat's holder leaves by their own yes; an admin steps down first
@@ -683,8 +722,8 @@ fn consent(s: &mut Suite, api: &Api) -> Result<Keys> {
     let twice = api.signed(&vic, "POST", "/api/seat/leave", Some(&json!({})))?;
     let admin_leaves = api.signed(&mal, "POST", "/api/seat/leave", Some(&json!({})))?;
     s.ok(
-        "a seat's holder who is no admin leaves: their seat ends and they are in no org; leaving again is 400; an admin leaves only by stepping down first (400)",
-        left.status == 200 && left.body["org"].is_null() && gone && twice.status == 400 && admin_leaves.status == 400 && admin_leaves.message().contains("step down"),
+        "a seat's holder who is no admin leaves: their seat ends and they are in no org; leaving again is 400; who pays for their org is refused leaving (409: cancel first)",
+        left.status == 200 && left.body["org"].is_null() && gone && twice.status == 400 && admin_leaves.status == 409 && admin_leaves.message().contains("cancel its subscription"),
         json!([left.body, twice.status, admin_leaves.body]),
     );
 
@@ -705,7 +744,7 @@ fn consent(s: &mut Suite, api: &Api) -> Result<Keys> {
     );
 
     // 8. offers are no one yet: the last admin of an org with only an offer
-    // waiting moves, and their org ends, the offer withdrawn
+    // waiting moves (its billing ended), and their org ends, the offer withdrawn
     let uma = api.person()?;
     let u_org = buys(s, api, &uma)?;
     let u_sub = subscription_of(s, &u_org).context("the org's subscription")?;
@@ -713,13 +752,15 @@ fn consent(s: &mut Suite, api: &Api) -> Result<Keys> {
     let r = api.signed(&uma, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(&vee) })))?;
     let to_vee = r.body["seat"]["id"].as_str().unwrap_or("").to_string();
     let offered = seat(api, &vee)["offered"].as_array().is_some_and(|o| o.iter().any(|o| o["id"] == to_vee.as_str()));
+    s.stripe.set_status(&u_sub, "canceled").map_err(anyhow::Error::msg)?;
+    let lapsed = s.eventually(PUSHED, || seat(api, &uma)["seat"]["good"] == false);
     let r = api.signed(&mal, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(&uma) })))?;
     let moved = answer(api, &uma, r.body["seat"]["id"].as_str().unwrap_or(""), "accept")?;
-    let canceled = s.eventually(PUSHED, || s.stripe.subscription(&u_sub).is_some_and(|x| x.status == "canceled"));
+    let ended = s.eventually(PUSHED, || api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{u_org}"), None).is_ok_and(|r| r.status == 404));
     let withdrawn = seat(api, &vee)["offered"].as_array().is_some_and(|o| o.iter().all(|o| o["id"] != to_vee.as_str()));
     s.ok(
-        "offers are no one yet: the last admin of an org with only an offer waiting moves, their org ends (its subscription canceled), and the offer is withdrawn",
-        offered && moved.status == 200 && org_of(api, &uma) == a_org && canceled && withdrawn,
+        "offers are no one yet: the last admin of an org with only an offer waiting, its billing ended, moves; their org ends, and the offer is withdrawn",
+        offered && lapsed && moved.status == 200 && org_of(api, &uma) == a_org && ended && withdrawn,
         json!({ "moved": moved.body, "vee": seat(api, &vee) }),
     );
     Ok(mal)
@@ -741,7 +782,7 @@ fn wiped(s: &mut Suite, api: &Api, payer: &Keys) -> Result<()> {
     const WAITS: &str = "M4: Stripe failing its cancel, the billing step takes their place, says it waits on Stripe, and is not done; an offer to them meanwhile is refused (404: being wiped)";
     const RESUMED: &str = "M4: run again (after a restart mid-step, locally), the billing step goes on where it stopped and the wipe finishes: the subscription canceled, its Stripe customer kept, the org gone, and the other's seat ended";
     const LEAVES: &str = "M4: a seat's holder wiped leaves their org going on: the dry run says so, and its seats' count is pushed down";
-    const SURVIVES: &str = "M4: who pays, wiped, while another admin keeps their org: the dry run says it goes on, its subscription canceled; it is, the org forgets their customer, and its admin opens no billing of theirs";
+    const SURVIVES: &str = "M4: who pays, wiped, while another admin keeps their org: the dry run says it goes on, its subscription canceled; it is, its pending prorations deleted, the org forgets their customer, and its admin opens no billing of theirs";
     if !s.runs("billing", &[Need::Operator]) {
         for label in [ENDS, WAITS, RESUMED, LEAVES, SURVIVES] {
             s.skip(label, "it needs an operator key no person holds (a wipe's)");
@@ -842,6 +883,10 @@ fn wiped(s: &mut Suite, api: &Api, payer: &Keys) -> Result<()> {
     let yan = api.person()?;
     let r = api.signed(&zed, "POST", "/api/org/admins", Some(&json!({ "email": Api::email_of(&yan) })))?;
     answer(api, &yan, r.body["admin"]["id"].as_str().unwrap_or(""), "accept")?;
+    // a seat offered: its proration pending on the payer's customer
+    let xen = format!("billing-xen-{}@e2e.test", &Keys::generate().pubkey_hex()[..10]);
+    api.signed(&zed, "POST", "/api/org/seats", Some(&json!({ "email": xen })))?;
+    let prorated = s.eventually(PUSHED, || !s.stripe.pending_items(&z_sub).is_empty());
     let dry = api.signed(&wiper, "GET", &format!("/api/people/{zed_id}/wipe"), None)?;
     let found = dry.body["found"]["orgs"][0].clone();
     let r = api.signed(&wiper, "POST", &format!("/api/people/{zed_id}/wipe"), Some(&json!({ "confirm": zed_id })))?;
@@ -858,6 +903,8 @@ fn wiped(s: &mut Suite, api: &Api, payer: &Keys) -> Result<()> {
             && found["cancels"] == true
             && r.body["state"] == "wiped"
             && canceled
+            && prorated
+            && s.stripe.pending_items(&z_sub).is_empty()
             && forgotten
             && s.stripe.customers().contains(&z_customer)
             && org_of(api, &yan) == z_org

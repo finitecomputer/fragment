@@ -167,30 +167,47 @@ the dashboard. Worth taking:
 - **A move.** Accepting an offer while in another org moves them: their
   old row goes, its seat with it (prorated). Alone there (offers are no
   one: they do not count), that org ends, every offer it made
-  withdrawn, its subscription canceled at once. Their going is refused
-  only when they are the last admin of an org other people are in (no
-  one would manage it: `fragment_core::org::moving`).
+  withdrawn. Their going is refused when they are the last admin of an
+  org other people are in (no one would manage it), or pay for it while
+  its subscription lives (below). Leaving, stepping down and moving are
+  one change, under one rule (`fragment_core::org::departing`, applied by
+  registry/offers.rs `depart`).
 - **Leaving.** A seat's holder who is no admin leaves by their own yes
   (`POST /api/seat/leave`): their seat goes, prorated. An admin steps
   down first.
 - **Who pays** is the person whose Checkout made the org's subscription
-  (the registry's `org_payers`), while it has not ended (one set to
-  cancel at its period's end still counts: it may be renewed).
+  (the registry's `org_payers`).
   - No other admin removes them as an admin, or takes their seat (403).
   - **Only they open its billing** (Stripe's portal, which renews the
     subscription and changes its card and email); its other admins
     manage its seats in the shell, never its billing. This is the
     default the review of #367 set, Paul's to reverse.
-  - As they go (stepping down, leaving, moving, or wiped), the
-    subscription is canceled at once, its pending prorations deleted
-    (below), and once that lands the org forgets their customer (kept at
-    Stripe for its invoices): no one left in it opens that customer's
-    portal or buys on it.
-  - Another admin buys the org again (it pays for nothing now) on a
-    customer of their own, and then pays for it.
+  - **While its subscription lives they stay** (Alex's suggestion, Paul's
+    call, 2026-10-18: "don't get too fancy with it, this is an edge case
+    and will rarely come up"). One set to cancel at its period's end
+    still lives (it may be renewed). Their leave, step-down and move are
+    each refused (409), saying to cancel it first or have an operator
+    hand its billing to someone else. They cancel it in Payment and
+    invoices; once it has ended they go as anyone does.
+  - A wipe is the exception: it cancels their subscription at once ("A
+    wipe", below), and once that lands the org forgets their customer
+    (kept at Stripe for its invoices).
+  - Another admin buys a lapsed org again on a customer of their own (only
+    its last payer buys on its customer), and then pays for it.
 
   So no card pays for an org its owner no longer manages, and no admin
   can give themselves the paid seat and drop the card's owner.
+
+  **Handing billing to someone else is by hand** (no handoff flow is
+  built). An operator, asked by the payer:
+  1. cancels the subscription at once in Stripe's dashboard (refunding
+     unused time there, if any, by hand), or has the payer cancel it in
+     Payment and invoices, where it ends with the period;
+  2. once Stripe says it ended (the webhook marks the org lapsed: its
+     paid seats stop until step 3), the old payer steps down or leaves;
+  3. the new payer, an admin of the org (offered the admin's place and
+     accepted), buys it again in the shell (Billing's "Pay again"): a
+     Checkout on a customer of their own, for the org's paid seats.
 - **A seat is `paid` or `comped`.**
   - Paid seats are counted on the org's one Stripe subscription.
   - Comped seats are an operator's, outside Stripe: the team, friends,
@@ -253,8 +270,9 @@ once Stripe has it all (`fragment_core::org::wiped`):
   the step's note.
 - **An org they pay for** (their Checkout made its subscription, and it
   has not ended) has its subscription canceled at once even when it goes
-  on without them, as when a payer goes any other way: its other paid
-  seats lapse until its admins buy again (on a customer of their own),
+  on without them (a payer's own going is refused while it lives; a
+  wipe is never refused): its other paid seats lapse until its admins buy
+  again (on a customer of their own),
   and once the cancel lands the org forgets the wiped person's customer.
   A wiped person's card is charged nothing more.
 - **Any other** goes on without them, its seats' count pushed.
@@ -297,7 +315,8 @@ the move if it ever outgrows that, not before.
   payer buys again on it, anyone else on a customer of their own (which
   the org then keeps), and no Checkout ever names another org's (the
   audit's H1: an org made before payment once put a victim's card on an
-  attacker's customer). The org forgets it once its payer goes.
+  attacker's customer). The org forgets it once a wiped payer's cancel
+  lands.
   Customers are never looked up by email: finite-mono has its own
   customers with the same emails. A customer is never deleted: an org
   that ends, or a wipe, keeps it for its invoices and drops the
@@ -327,8 +346,8 @@ the move if it ever outgrows that, not before.
     payer buying an org again; Checkout makes the customer), or the
     org's own `customer` when its last payer buys it again, for its paid
     seats (`quantity`), so Stripe's page shows the whole. Only an admin
-    of their org that pays for nothing (lapsed, its payer gone, or
-    comped and ended) buys again in it.
+    of their org that pays for nothing (lapsed, its wiped payer's
+    subscription canceled, or comped and ended) buys again in it.
   - Paid, it makes the org, its buyer its admin and its paid seat's
     holder, and who pays (`apply_checkout`). A Checkout paid whose buyer
     can no longer take its seat (they joined another org meanwhile, left
@@ -671,7 +690,8 @@ for a seat once someone holds one:
   - offer an admin's place;
   - open "Payment and invoices" (Stripe's portal), only who pays (its
     other admins see neither it nor a way to take who pays's seat or
-    place; who pays stepping down is warned it cancels at once).
+    place; who pays is told, stepping down while its subscription lives,
+    to cancel it first).
 
   The table shows once someone besides its admin is in the org (a seat,
   held or invited, or another admin). An admin alone in it, who pays for
@@ -785,12 +805,14 @@ The shell offers a guest nothing to make.
     - no paid seat left cancels at once (`stripe_cancels`); an org with
       no one goes once nothing of it bills;
     - a wipe's `billing` step;
-    - after the review of #367 (same day): who pays is whoever's card
-      may still be charged, and their going cancels at once; only they
-      open billing (a default for Paul); the org's customer is its
-      payer's, forgotten when they go; an admin's place is offered even
-      to a member; pending prorations deleted on a cancel; an orphan
-      subscription found or canceled.
+    - after the review of #367: only who pays opens billing (a default
+      for Paul); the org's customer is its payer's, forgotten once a
+      wiped payer's cancel lands; an admin's place is offered even to a
+      member; pending prorations deleted on a cancel; an orphan
+      subscription found or canceled;
+    - Alex's rule (Paul, 2026-10-18): while its subscription lives, who
+      pays stays (leaving, stepping down and moving are one rule, each
+      refused), and a handoff is an operator's, by hand.
 
 ## Decided (Paul, 2026-10-08)
 
@@ -810,6 +832,7 @@ Paul took every recommendation. In docs/cloudflare-v1.md:
 | What is sold (Paul, 2026-10-15) | the $200 always-on seat and the $25 pack; no $100 seat | 25 (its status) |
 | Teams (Paul, 2026-10-17) | kept: several admins, seats for others; nobody joins an org without accepting | 51 (its status) |
 | Who opens an org's billing (the review of #367, a default) | only who pays for it; its other admins manage seats, never billing; Paul's to reverse | 51 (its status) |
+| A payer's going (Alex, Paul's call, 2026-10-18) | refused while its subscription lives (cancel first); a handoff is by hand, an operator's; a wipe still cancels | 51 (its status) |
 | A wipe's subscription (Paul, 2026-10-17) | canceled at once; the Stripe customer kept (invoices, tax, refunds), the link to it dropped | 53 (its status) |
 | Trials | our codes on Stripe's trial; time-held places | 56 |
 | A $200 computer | awake by default, "let it sleep" | 57 |

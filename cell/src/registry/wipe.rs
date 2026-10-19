@@ -346,9 +346,9 @@ impl RegistryCell {
             };
             found.push(OrgFound { org: o.id, name: o.name, ends: w.ends, cancels, lapses });
         }
-        // bounded: a payer who goes stops paying at once, so a person pays
-        // for their own org and those whose cancel is still on its way; past
-        // PAID_ORGS_MAX the wipe fails, saying so, rather than skip one
+        // bounded: a payer stays in their org while its subscription lives,
+        // so a person pays for their own and none past it but legacy rows;
+        // past PAID_ORGS_MAX the wipe fails, saying so, rather than skip one
         let paid = self.rows::<OrgIdRow>(
             "SELECT p.org FROM org_payers p JOIN orgs o ON o.id = p.org AND o.subscription = p.subscription WHERE p.person = ? ORDER BY p.org LIMIT ?",
             vec![person.into(), SqlStorageValue::Integer(PAID_ORGS_MAX as i64 + 1)],
@@ -417,7 +417,7 @@ impl RegistryCell {
             }
             if f.cancels {
                 let sub = self.org_sub(&f.org)?.and_then(|s| s.subscription).ok_or_else(|| CellError::host(format!("{} cancels a subscription it lacks", f.org)))?;
-                self.queue_cancel(&sub, &f.org, if f.ends { super::seats::WHY_ENDED } else { super::seats::WHY_PAYER })?;
+                self.queue_cancel(&sub, &f.org, if f.ends { super::seats::WHY_ENDED } else { super::seats::WHY_PAYER_WIPED })?;
             }
             // an org ended is dropped once its cancel lands; one they left
             // has its count pushed; one canceled for them is left as it is
