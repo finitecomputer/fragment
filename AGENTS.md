@@ -298,8 +298,12 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
 - `.github/workflows/ci.yml` runs `check`, the e2e's four shards (`e2e
   shard k/4`), and `e2e`, green when they all are, on Linux, and then, on
   a push to master or `production` that both are green for, `deploy`
-  (below). Its caches restore on every run and save only from master's
-  pushes (each one's contents are named in the workflow): Rust's through
+  (below). A push to `production` of a commit master already proved (a
+  run of ci.yml on a push to master of that SHA succeeded, its preview
+  deploy included) skips them and deploys at once: its first job,
+  `proven`, asks the API (Paul, 2026-10-20). Its caches restore on
+  every run and save only from master's pushes (each one's contents are
+  named in the workflow): Rust's through
   `Swatinem/rust-cache`, the pinned Node's and the JavaScript caches
   through `actions/cache`. A push's run is never cancelled by a newer
   one, which waits (a pull request's is). `images.yml` runs `images/`'s
@@ -317,8 +321,12 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   fragments on `*.finite.place`, in Finite's production account: Paul,
   2026-10-16). Only Paul updates `production` (protected: no force push,
   no deletion): his push, or the pull request he merges into it, is the
-  approval of a production deploy. Each deploys from a GitHub
-  environment, `preview` or `production`, that only its branch may use,
+  approval of a production deploy. Promoting a commit master's run has
+  proved green deploys in minutes; anything else (a hotfix pushed
+  straight to `production`, a commit whose master run is red or still
+  running) runs the full tests first, about 20 minutes. Each deploys
+  from a GitHub environment, `preview` or `production`, that only its
+  branch may use,
   holding the variable `DEPLOY_HOST` (its platform's host, whose
   `/healthz` must then answer the commit) and the secrets `DEPLOY_CONFIG`
   (the whole deploy config, names and paths: a secret so the public

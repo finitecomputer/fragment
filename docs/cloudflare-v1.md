@@ -76,7 +76,11 @@ speaking Cloudflare's APIs) returns once this product works.
    (.github/workflows/ci.yml, `deploy`): master's to the preview
    (`preview.finite.build`), and the `production` branch's to
    production. Only Paul updates `production`: his push, or the pull
-   request he merges into it, is a production deploy's approval. Each
+   request he merges into it, is a production deploy's approval.
+   Promoting a commit master's run has proved green deploys in minutes,
+   untested again (ci.yml's `proven`); anything else, a hotfix pushed
+   straight there or a commit whose master run is red or still running,
+   runs the full tests first (Paul, 2026-10-20). Each
    deploys from a GitHub environment (`preview`, `production`) that only
    its branch may use, holding its config whole (the secret
    `DEPLOY_CONFIG`: names and paths, as a stranger's file is, kept out

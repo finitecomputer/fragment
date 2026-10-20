@@ -412,9 +412,11 @@ config names two images (xtask/src/deploy.rs, `computers.images`):
   account's). Its first deploy builds `hermes` from the release commit;
   its line is then pinned to the digest that deploy names, and its own
   canary group goes ahead of it as the preview's does. CI deploys it from
-  the `production` branch, its images pinned as the preview's are: one
-  reaches its registry by a deploy by hand (Paul's), and its digest then
-  its line in production's `DEPLOY_CONFIG`.
+  the `production` branch (in minutes for a commit master's run proved
+  green, ci.yml's `proven`; after the full tests otherwise), its images
+  pinned as the preview's are: one reaches its registry by a deploy by
+  hand (Paul's), and its digest then its line in production's
+  `DEPLOY_CONFIG`.
 
 ### One round
 
