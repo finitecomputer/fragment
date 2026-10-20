@@ -1125,7 +1125,8 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
             && seen["importing"] == "hidden"
             && seen["errors"] == json!([])
             && seen["card"].as_str().is_some_and(|t| {
-                t.contains("Agents that work for you")
+                t.contains("Welcome to Finite")
+                    && t.contains("Superintelligent agents for you and your organization")
                     && t.contains(&format!("{seat_price} a month, always on"))
                     && t.contains(&format!("{included} of credit included each month"))
                     && t.contains(&format!("{pack} a pack"))
@@ -1424,9 +1425,15 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let code = code.body["code"].as_str().unwrap_or("").to_string();
     let nobody = b.another_context()?;
     let out = b.open_in(&nobody, &format!("{}/welcome?trial={code}", api.base))?;
-    let href = format!("/auth/login?return=%2Fwelcome%3Ftrial%3D{code}");
-    let asked = view(&mut b, &out, &format!("document.querySelector('#first-run-card a.primary')?.getAttribute('href') === {href:?}"), wait);
-    s.ok("signed out, a trial's link asks them to sign in, and to come back to the welcome with its code", asked, b.eval(&out, "document.querySelector('#first-run-card a.primary')?.getAttribute('href') ?? null")?);
+    let to_welcome = format!("%2Fwelcome%3Ftrial%3D{code}");
+    let (up, back_in) = (format!("/auth/login?screen_hint=sign-up&return={to_welcome}"), format!("/auth/switch?screen_hint=sign-in&return={to_welcome}"));
+    let asked = view(&mut b, &out, &format!("document.querySelector('#first-run-card a.primary')?.getAttribute('href') === {up:?}"), wait);
+    let offered = b.eval(&out, "({ up: document.querySelector('#first-run-card a.primary')?.getAttribute('href') ?? null, in: document.querySelector('#first-run-card form[action^=\"/auth/switch\"]')?.getAttribute('action') ?? null })")?;
+    s.ok(
+        "signed out, a trial's link offers Sign Up and Sign In, each coming back to the welcome with its code",
+        asked && offered == json!({ "up": up, "in": back_in }),
+        &offered,
+    );
     b.close(out)?;
     let jo = guest(api, "billing-page-trial")?;
     let session = api.sign_in(&Api::email_of(&jo))?;

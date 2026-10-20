@@ -762,6 +762,10 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         other["method"] == "post" && other["action"] == "/auth/switch?screen_hint=sign-in&return=%2Fsettings" && other["says"] == "Sign In",
         &other,
     );
+    // evidence for a person: the signed-out page, on a desktop and a phone
+    let _ = b.screenshot(&page, &shots.join("signed-out.png"));
+    b.viewport(&page, 375, 812, true)?;
+    let _ = b.screenshot(&page, &shots.join("phone-375-signed-out.png"));
     b.close(page)?;
 
     let email = format!("shell-ui-{}@e2e.test", crate::api::now_s());
