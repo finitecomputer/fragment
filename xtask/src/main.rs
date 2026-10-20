@@ -57,6 +57,10 @@
 //!                    push it to the registry of the account CLOUDFLARE_ACCOUNT_ID
 //!                    names, then print the digest a config pins it at
 //!                    (xtask/src/image.rs; the Image workflow runs it)
+//!   image copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>]
+//!                    copy an image another account's registry holds
+//!                    (FROM_CLOUDFLARE_ACCOUNT_ID's) into that one, byte for
+//!                    byte (skopeo), its digest checked unchanged: a promotion
 //!   teardown --config <file> --branch <name>
 //!                    remove a branch deployment (irreversible)
 //!   stripe check|setup --config <file> [--branch <name>] [--webhook-secret-file <path>]
@@ -483,7 +487,7 @@ fn main() -> Result<()> {
         Some("teardown") => deploy::teardown(&args[1..]),
         Some("stripe") => deploy::stripe(&args[1..]),
         Some("image") => image::image(&args[1..]),
-        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
     }
 }
 

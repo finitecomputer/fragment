@@ -86,8 +86,9 @@ speaking Cloudflare's APIs) returns once this product works.
    `DEPLOY_CONFIG`: names and paths, as a stranger's file is, kept out
    of the public repo's logs) and its Cloudflare token; its images are
    pinned by digest (`xtask deploy --pinned-only`), and one is built by
-   the Image workflow, run by hand (docs/computers.md, "Stable and
-   canary").
+   the Image workflow, run by hand, and copied by it, at its digest,
+   into production's registry once a round proves it (docs/computers.md,
+   "Stable and canary").
 4. **Self-deploy without forking.** Configuration lives in a file
    outside the repo: domains, the WorkOS environment, AI Gateway,
    pricing, the code.storage organization, and the default computer

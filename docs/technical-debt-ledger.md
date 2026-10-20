@@ -153,13 +153,15 @@ fragment.club until cutover (decisions 34–35).
   digest at every deploy, which tells every computer on that image an
   update is ready (docs/computers.md, "What changes a version").
 - **Shortcut:** CI deploys with `--pinned-only` (xtask/src/deploy.rs),
-  which refuses a config with an image built from the tree. The canary,
-  and production's next stable, are built and pushed by the Image
-  workflow (.github/workflows/image.yml, run by hand: `cargo xtask image
-  push`, since 2026-10-20), on a runner with no layer cache, so each run
-  makes a new digest and pushes the whole base, tried up to four times.
-  The digest its summary names is copied into the file the environment's
-  `DEPLOY_CONFIG` is set from, and the secret set again from it.
+  which refuses a config with an image built from the tree. The canary
+  is built and pushed by the Image workflow (.github/workflows/image.yml,
+  run by hand: `cargo xtask image push`, since 2026-10-20), on a runner
+  with no layer cache, so each build makes a new digest and pushes the
+  whole base, tried up to four times; production's next stable is the
+  round's proven image, copied by it at its digest (`cargo xtask image
+  copy`). The digest its summary names is copied into the file the
+  environment's `DEPLOY_CONFIG` is set from, and the secret set again
+  from it.
 - **Risk:** the secret (never read back) and its file drift: a canary
   pushed and not pinned in the secret is put back at the secret's digest
   by master's next deploy, telling the canary group of an update no round

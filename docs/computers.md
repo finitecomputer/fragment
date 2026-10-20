@@ -376,7 +376,7 @@ instead: `"hermes-canary": { "dockerfile": "images/hermes/Dockerfile",
   group (the finite team, by npub, an email found with `fragment operator
   people --q`) is the operators', outside the repo.
 - **Where a digest comes from.** The Image workflow's summary names the
-  reference it pushed (`registry.cloudflare.com/<account>/<repository>@sha256:…`)
+  reference it pushed or copied (`registry.cloudflare.com/<account>/<repository>@sha256:…`)
   and the config line that pins it; a deploy names each image's reference as
   wrangler prepares it (`hermes-canary is ready to run`, then
   `registry.cloudflare.com/…@sha256:…`); and an operator's view of a person
@@ -384,7 +384,8 @@ instead: `"hermes-canary": { "dockerfile": "images/hermes/Dockerfile",
   computer runs and the one its next start runs (`references.running`,
   `references.next`); the version Settings shows is a digest's first 12
   hex digits.
-- **Promotion**: the canary's digest becomes stable's line, and a deploy.
+- **Promotion**: the canary's digest becomes stable's line, and a deploy
+  (production's: that digest copied into its registry first, below).
   Every computer on stable then runs another version than the one its
   next start runs: asleep, its next wake takes it (from the image and its
   save: the snapshot is of the old image), paying the new image's pull;
@@ -421,15 +422,20 @@ instead: `"hermes-canary": { "dockerfile": "images/hermes/Dockerfile",
   in both), but the rule does not read each release's schema.
 - **Production** keeps its images in its own account's registry, which
   holds none of the preview's digests (the deploy refuses another
-  account's). Its first deploy builds `hermes` from the release commit;
-  its line is then pinned to the digest that deploy names, and its own
-  canary group goes ahead of it as the preview's does. CI deploys it from
-  the `production` branch (in minutes for a commit master's run proved
-  green, ci.yml's `proven`; after the full tests otherwise), its images
-  pinned as the preview's are: one reaches its registry by the Image
-  workflow run from `production` with `environment` production (into
-  `fragment-computer-hermes`), and its digest then its line in
-  production's `DEPLOY_CONFIG`.
+  account's). CI deploys it from the `production` branch (in minutes for
+  a commit master's run proved green, ci.yml's `proven`; after the full
+  tests otherwise), its images pinned as the preview's are. **Its
+  promotion is a copy** (Paul, 2026-10-20): the image a round proved on
+  the preview, the very digest its canary computers ran, copied byte for
+  byte into production's registry (`fragment-computer-hermes`) by the
+  Image workflow run from `production` with `environment` production and
+  `from` that reference (`cargo xtask image copy`: skopeo, with
+  `--preserve-digests`, then the copy's manifest held to the source's
+  digest), and that digest then `hermes`'s line in production's
+  `DEPLOY_CONFIG` (One round, step 8). A run without `from` builds
+  production's tree instead, warning that its digest is not the
+  canary's: with no layer cache, a build is a new image of the same
+  inputs, which no round proved.
 
 ### One round
 
@@ -492,6 +498,22 @@ the canary group is pinned to `hermes-canary`.
 7. **Or roll back**: `fragment operator pin <npub> hermes` for each of the
    group (a Hermes release is forward only, above); after a promotion,
    the commented line back, the secret set again, and a deploy.
+8. **Production takes the proven image**, copied, never rebuilt: the
+   Image workflow run from `production` (Actions, image, Run workflow:
+   branch `production`, `environment` production, `from` the reference
+   step 6 promoted, as step 1's summary wrote it, with `<account>`;
+   `tag` empty for its digest's first 12 hex digits, the version
+   Settings shows). It mints pull credentials for the preview's registry
+   with production's `PREVIEW_REGISTRY_TOKEN` and push credentials for
+   production's with its own token, copies the image registry to
+   registry, and refuses a copy whose manifest is not the source's
+   digest; its summary names
+   `registry.cloudflare.com/<account>/fragment-computer-hermes@sha256:…`,
+   the same digest, and the line
+   `"hermes": { "image": "…" }`, which becomes stable's in the file
+   production's `DEPLOY_CONFIG` is set from (the old line kept
+   commented), and the secret is set again (`--env production`). Paul's
+   next push to `production` deploys it.
 
 ## The guest's contract
 

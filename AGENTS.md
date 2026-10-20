@@ -287,8 +287,16 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   base's layer is 1.4 GB), then prints the reference a config pins it at
   (`registry.cloudflare.com/<account>/<repository>@sha256:<64 hex>`,
   read from the registry's digest and held to deploy.rs's `pinned_ok`)
-  and its config line (xtask/src/image.rs). The Image workflow runs it
-  (below).
+  and its config line (xtask/src/image.rs). `cargo xtask image copy
+  hermes --from <reference> --repository <name> --tag <tag>` builds
+  nothing: it copies an image another account's registry holds (the
+  source's account and token in `FROM_CLOUDFLARE_ACCOUNT_ID` and
+  `FROM_CLOUDFLARE_API_TOKEN`; `<account>` may stand for it in the
+  reference) byte for byte, through skopeo (`--preserve-digests`, each
+  side's login minted by wrangler, in a file of its own: both are
+  registry.cloudflare.com, where one Docker login holds one), and
+  refuses a copy whose manifest is not the source's digest. The Image
+  workflow runs both (below).
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
   logic, host-tested; sealing at rest is `seal.rs`), `crates/nip98`,
   `crates/templates` (the release's files: `templates/`, the shell's,
@@ -325,15 +333,22 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   `dorny/paths-filter`), and on a run by hand. It keeps no layer cache: the workflow
   says why. `release.yml` builds the CLI for macOS and Linux.
   `image.yml`, the Image workflow, runs only by hand (Actions, image, Run
-  workflow: `environment` preview or production, `tag`, empty for the
-  commit's first 12 hex digits): `cargo xtask image push` in that
+  workflow: `environment` preview or production, `from`, `tag`) in that
   GitHub environment, for its `CLOUDFLARE_API_TOKEN` and
   `CLOUDFLARE_ACCOUNT_ID` (required there), from the branch that deploys
   it (master for the preview, `production` for production; any other
   is refused), to the repository the deploys made
   (`fragment-preview-computer-hermes-canary`,
-  `fragment-computer-hermes`). Its summary names the digest and the
-  `computers.images` line to pin it with, the account masked.
+  `fragment-computer-hermes`). Without `from` it builds and pushes
+  (`cargo xtask image push`; `tag` empty for the commit's first 12 hex
+  digits): the preview's canary, or, warned that its digest is not the
+  canary's, production's. With `from`, production's alone, a proven
+  preview reference, it copies it (`cargo xtask image copy`, with
+  production's `PREVIEW_REGISTRY_TOKEN` and `PREVIEW_ACCOUNT_ID`; `tag`
+  empty for the digest's first 12 hex digits): a promotion keeps the
+  digest the round proved (Paul, 2026-10-20). Its summary names the
+  digest and the `computers.images` line to pin it with, the account
+  masked.
 - CI deploys to Cloudflare (ci.yml's `deploy`: `xtask deploy
   --pinned-only`) on every green push: master's to its preview,
   `preview.finite.build` (`--branch preview`, a branch copy on the dev
@@ -361,9 +376,10 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   `~/.config/fragment/secrets/cloudflare-api-token` and
   `…/preview-test-secret` (deploy/example.jsonc). Every image a CI
   config names is pinned by digest: a canary is built and pushed by the
-  Image workflow (above), and the digest its summary names then pinned
-  in the environment's `DEPLOY_CONFIG` (docs/computers.md, "One
-  round"). Other branches' copies deploy by hand.
+  Image workflow (above), production's stable copied by it from the
+  preview's registry, and the digest its summary names then pinned in
+  the environment's `DEPLOY_CONFIG` (docs/computers.md, "One round").
+  Other branches' copies deploy by hand.
   fragment.club (the celld fleet on Fly) deploys only from the `celld`
   branch (tag `celld-final`) until cutover: its fleet file, node image
   and docs/operate.md's commands are that branch's. Deploys to the
