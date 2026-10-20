@@ -153,8 +153,10 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; }
 .frames { flex: 1; min-height: 0; position: relative; border-top: 1px solid var(--border); }
 .frames > iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; }
 .notice { margin: 12vh auto 0; max-width: 28rem; padding: 24px; text-align: center; color: var(--text-secondary); }
-.notice strong { display: block; color: var(--text-primary); font-size: 17px; margin-bottom: 6px; }
+.notice > strong { display: block; color: var(--text-primary); font-size: 17px; margin-bottom: 6px; }
 .notice a, .notice button { color: var(--accent-blue); background: none; border: 0; padding: 0; text-decoration: underline; }
+.notice-row { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 0 8px; }
+.notice-row form { margin: 0; }
 /* what the person should know of their computer (shell.js renderComputer):
    a band over the chat or settings, one row a notice */
 .computer-notices { display: flex; flex-direction: column; gap: 8px; padding: 0 14px 10px; }
@@ -367,10 +369,12 @@ iframe[data-blocked] { display: none; }
 .frame-note .notice span { display: block; }
 .page-title { font-weight: 700; margin: 0 auto; }
 /* first run (sign in, the welcome, a seat's step): one card on the
-   landscape, as the launcher's panel is (Skyler's design) */
+   landscape, as the launcher's panel is (Skyler's design), never wider
+   than the screen (its min-width: at 320 px the grid sized it to the
+   trial code's row, past the screen's edge) */
 .first-run { position: relative; isolation: isolate; height: 100%; overflow-y: auto; display: grid; place-items: safe center; padding: max(24px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(24px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); background: transparent; }
 .first-run::before { content: ""; position: fixed; inset: 0; z-index: -1; background: var(--wallpaper); transform: scaleX(-1); pointer-events: none; }
-.first-run-card { width: min(100%, 480px); display: flex; flex-direction: column; gap: 14px; padding: 30px 30px 24px; border: 1px solid var(--border-strong); border-radius: 28px; background: var(--bg-sidebar); box-shadow: 0 24px 60px rgba(0,0,0,.22); }
+.first-run-card { width: min(100%, 480px); min-width: 0; display: flex; flex-direction: column; gap: 14px; padding: 30px 30px 24px; border: 1px solid var(--border-strong); border-radius: 28px; background: var(--bg-sidebar); box-shadow: 0 24px 60px rgba(0,0,0,.22); }
 .first-run-card .brand { font-weight: 700; font-size: 15px; margin-bottom: 10px; padding: 0; }
 @media (max-width: 520px) { .first-run { padding: max(16px, env(safe-area-inset-top, 0px)) 12px max(16px, env(safe-area-inset-bottom, 0px)); align-items: safe end; } .first-run-card { padding: 24px 20px 20px; border-radius: 24px; } }
 .first-run-card > .primary, .first-run-card > .quiet { align-self: flex-start; }
@@ -409,8 +413,12 @@ iframe[data-blocked] { display: none; }
 @media (prefers-reduced-motion: reduce) { .creating-steps li.doing::before { animation: none; } }
 .first-run-card .creating-steps { margin: 6px 0; padding: 14px 16px; border: 1px solid var(--border-strong); border-radius: 18px; background: var(--surface-muted); }
 .welcome-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-top: 10px; font-size: 13px; }
-.welcome-foot > .muted { margin-right: auto; }
 .welcome-foot form { margin: 0; }
+/* who is signed in, to someone with no seat (shell.js noSeatSaid): the
+   welcome's, Billing's, and a guest's home's */
+.no-seat { overflow-wrap: anywhere; }
+.welcome-foot > .no-seat { flex-basis: 100%; font-size: 14px; line-height: 1.45; }
+.notice > .no-seat { margin: 12px 0 0; }
 /* Settings use the full work area, with quiet section navigation and readable rows. */
 .layout.settings-view .chat { grid-column: 3 / 6; }
 .layout.settings-view .viewer, .layout.settings-view #gutter-right, .layout.settings-view .toggle-right { display: none; }
@@ -487,6 +495,10 @@ iframe[data-blocked] { display: none; }
   .settings-info .settings-key { flex: none; }
   .settings-control { flex: none; max-width: 58%; }
   .settings-key { flex: none; }
+  /* a line whose buttons go under it (who is signed in, and a guest's seat) */
+  .settings-section .settings-stack { flex-wrap: wrap; row-gap: 10px; }
+  .settings-stack .settings-control { flex: 1 1 100%; max-width: none; justify-content: flex-start; }
+  .settings-stack .settings-actions { justify-content: flex-start; }
   .settings-intro { padding-bottom: 4px; }
   .settings-section { margin-top: 60px; padding: 6px 16px 12px; border-radius: 16px; }
 }

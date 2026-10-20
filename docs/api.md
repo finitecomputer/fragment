@@ -2515,14 +2515,18 @@ its `offer` (Seats and orgs). A guest makes nothing (decision 49), so the
 shell offers them nothing to
 make: once something is shared with them, their home is what is shared
 (a chat in the middle, else the first app in its window), beside a note
-of what a guest may do and what a seat gives, whose Get a seat opens the
-welcome, which offers the seat to any guest, one whose seat ended and
+of what a guest may do, what a seat gives, and who is signed in
+(docs/billing.md, "Who is signed in"), whose Get a seat opens the
+welcome and whose Use another account switches; the welcome offers the
+seat to any guest, one whose seat ended and
 who keeps their chats too; their settings are their Billing, their
 account, then Your data. Its
-settings hold the person's account (email, sign-ins, identity id,
-picture, `/auth/link` to add another sign-in, a POST to
-`/auth/logout`), their Billing (cell/shell/billing.js: for a guest, Get
-a seat, to the welcome; a seat's kind,
+settings hold the person's account (who is signed in, their latest
+sign-in's email, beside a POST to `/auth/logout` and one to
+`/auth/switch`, Use another account; their sign-ins when they have
+several; identity id; picture; `/auth/link` to add another sign-in),
+their Billing (cell/shell/billing.js: for a guest, who is signed in,
+Get a seat, to the welcome, and Use another account; a seat's kind,
 org, trial's end and lapse, "let it sleep" for an always-on seat, this month's
 credit and a credit pack; for an org's admin, its seats and admins to add,
 change and remove, and Stripe's portal, the org shown once someone else

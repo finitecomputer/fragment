@@ -628,8 +628,19 @@ settings page)").
   month, always on, its time not metered, $100 of credit included each
   month) and a trial-code field, then Checkout, a line on what more
   credit costs once they hold a seat ($25 a pack, kept until spent), and
-  who is signed in, with Sign out: one card on the landscape, as the
-  launcher's panel is (Skyler's look).
+  who is signed in, with Use another account and Sign out: one card on
+  the landscape, as the launcher's panel is (Skyler's look).
+- **Who is signed in** is said wherever someone is told they have no
+  seat (the welcome, an invitee's home, Billing's guest state; shell.js
+  `noSeatSaid`): "You're signed in as **<email>**. This account has no
+  seat. If your team gave you a seat under another email, use another
+  account.", their latest sign-in's email, with **Use another account**
+  (`POST /auth/switch`, docs/api.md, Sign-in), which ends this session
+  and the one WorkOS holds in the browser, so the next sign-in asks who
+  is signing in. A browser's autofill once signed someone in by email
+  code as an address their comped seat was not under (2026-10-20, in
+  production): a new guest, offered a seat to buy, who thought sign-in
+  was broken.
 - **What comes back to it:** Checkout's return
   (`?checkout=<session>`), its Back (`?checkout=canceled`, said), and a
   mailed trial's link (`?trial=<code>`, filled in). Signed out, sign-in
@@ -658,8 +669,9 @@ settings page)").
   to the first run, or home with a chat of their own. A Checkout's
   return for someone with a chat of their own is applied, then home.
 - **An invitee** (a guest someone shared something with) lands on what
-  was shared: home, with a note of what a guest may do and what a seat
-  gives. Its "Get a seat" opens the welcome, whose "Not now" goes back.
+  was shared: home, with a note of what a guest may do, what a seat
+  gives, and who is signed in. Its "Get a seat" opens the welcome, whose
+  "Not now" goes back; its "Use another account" switches.
   So does Billing's for a guest whose seat ended (removed, or a comp
   ended): they keep their chats, and the welcome offers them the seat.
 - **Who is a guest, and what it costs:** `GET /api/seat` alone says
@@ -673,8 +685,9 @@ settings page)").
 Settings gains **Billing**, which replaces the read-only Credit section,
 for a seat once someone holds one:
 
-- **A guest** sees what a seat gives and its price, and "Get a seat",
-  which opens the welcome.
+- **A guest** sees what a seat gives and its price, who is signed in,
+  and "Get a seat", which opens the welcome, beside "Use another
+  account".
 - **A seat holder** sees their seat, its kind, who provides it, this
   month's usage and credit, and "Buy $25 of credit" (its `offer`'s price). On `seat_always_on`
   it adds "let it sleep". One who is no admin has "Leave" beside their

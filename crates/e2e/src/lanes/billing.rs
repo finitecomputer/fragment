@@ -1332,6 +1332,16 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
         landed && row == json!("Garden plans") && found && makes == json!([]),
         json!({ "row": row, "makes": makes }),
     );
+    // which email is signed in, in bold, and another account, beside the seat
+    let who = b.eval(&page, super::shell::NO_SEAT_SEEN)?;
+    s.ok(
+        "beside it they are told which email is signed in, in bold, that it has no seat, and offered Use another account (back home) after Get a seat",
+        who["said"] == json!([super::shell::no_seat_said(&Api::email_of(&bea))])
+            && who["bold"] == json!([Api::email_of(&bea)])
+            && who["switches"] == json!([["/auth/switch?return=%2F", "post", "Use another account"]])
+            && b.eval(&page, "[...document.querySelectorAll('#notice .notice-row > *')].map((e) => e.textContent)")? == json!(["Get a seat", "Use another account"]),
+        &who,
+    );
     if !act(s, &mut b, &page, "the guest's Get a seat", &click("#notice .allow"))? {
         return Ok(());
     }
