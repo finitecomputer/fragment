@@ -15,7 +15,7 @@ use fragment_templates::File;
 use worker::*;
 
 use crate::config::Config;
-use crate::error::CellResult;
+use crate::error::{CellError, CellResult};
 
 /// A file's validator: its bytes' hash (a release changes them).
 fn etag(f: &File) -> String {
@@ -42,8 +42,14 @@ fn frame_src(cfg: &Config, url: &Url) -> String {
 
 /// `GET /`, `GET /settings` and `GET /welcome`: the shell's page, for
 /// anyone (signed out, it asks them to sign in; the shell opens the view
-/// its path names).
-pub async fn page(env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
+/// its path names), naming the release that answers it
+/// (`fragment_templates::shell_page`): its script reloads at a safe moment
+/// once a later answer names another (docs/api.md, The shell). A few KiB,
+/// read whole to fill it.
+pub async fn page(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
+    // its bytes are checked against their hash as they are read: UTF-8, as the release's index.html is
+    let bytes = crate::assets::read(env, page_file("index.html")).await?;
+    let filled = fragment_templates::shell_page(std::str::from_utf8(&bytes).map_err(|_| CellError::host("the release's shell page is not UTF-8"))?, &crate::levers::answered_release(cfg, req));
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;
     h.set("cache-control", "no-store")?;
@@ -58,7 +64,7 @@ pub async fn page(env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
     // a page that opens it in a window keeps no hold on it, as on every platform page
     h.set("cross-origin-opener-policy", "same-origin")?;
     h.set("referrer-policy", "strict-origin-when-cross-origin")?;
-    crate::assets::body(env, page_file("index.html"), h).await
+    Ok(Response::ok(filled)?.with_headers(h))
 }
 
 /// `GET /admin`: the operators' admin page (decision 59), to the platform

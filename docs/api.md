@@ -47,7 +47,7 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_COMPUTER_UNSAVED_MAX_MS` | how long a computer whose sleep's save keeps failing stays awake, its container kept, before it sleeps unsaved (the deploy config's `computers.unsaved_max_ms`; default 1800000, thirty minutes; docs/computers.md, "Saves and what a wake restores") |
 | `FRAGMENT_SUPPORT_URL` | where a person whose computer will not start gets help (the deploy config's `support_url`): an `https:` page or a `mailto:` address, at most 512 visible characters, refused at the node's first request otherwise; `GET /api/computers` gives it as `support`, and the shell links it (docs/computers.md, "What its owner is told"). Unset, none |
 | `FRAGMENT_OPERATORS` | identities and keys that grant credit and set plans, seats and overdrafts, and wipe a person (Operators, below); a key listed is an operator's whether or not anyone holds it |
-| `FRAGMENT_DEPLOY_ID` | which deployment this is (default `dev`); `GET /healthz` answers it in `x-fragment-deploy`. `cargo xtask deploy` sets the deploy's commit (`git rev-parse --short=12 HEAD`; a tree with uncommitted changes adds `-dirty-<unix seconds>`, so two such deploys differ). It is the release every call between the Worker and its objects carries, and each object admits only its own (docs/MODEL.md, Calls between releases): 1 to 64 of letters, digits, `.`, `_` and `-`, or the isolate does not start |
+| `FRAGMENT_DEPLOY_ID` | which deployment this is (default `dev`); every answer of the platform's host names it in `x-fragment-deploy` (`GET /healthz`'s among them, which CD checks), and the shell's page in its meta, so a page left open reloads once the platform under it changed (The shell, "A new release"). `cargo xtask deploy` sets the deploy's commit (`git rev-parse --short=12 HEAD`; a tree with uncommitted changes adds `-dirty-<unix seconds>`, so two such deploys differ). It is the release every call between the Worker and its objects carries, and each object admits only its own (docs/MODEL.md, Calls between releases): 1 to 64 of letters, digits, `.`, `_` and `-`, or the isolate does not start |
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake); sign-in is on where the `WORKOS_CLIENT` secret is bound (below), and answers 500 where it is not |
 | `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (required; production's is https://finite.chat, on no fragment's domain, and the CLI's default host). Every push's VAPID token names it as its contact (`sub`, RFC 8292) |
 | `FRAGMENT_SIGNINS_PENDING_MAX` | sign-ins begun and not finished that the registry keeps (default 100000; at least 1): a sign-in is kept through this many later starts, so the oldest is let go only past this many starts in its ten minutes (Sign-in, below) |
@@ -105,6 +105,15 @@ registry's are no route (404); a local fleet's reach everything.
 | `POST /api/test/mail` | a local fleet's only (a preview's mail is real): `{to, subject, text}` → `{messageId}`, one message as the platform sends it (Mail, below), to the mail fake |
 | `POST /api/test/export` | `{identity, op, steps?}` (on a preview, an e2e person's): a lever on that person's export (Export, below). `pace` with `steps` lets their build take at most that many more steps (a copy's piece, a page of records, a fragment's facts…), then wait, a second at a time, until it is let go (`steps: null`): a build held part way, as a crash or a restart finds one. `piece` with `steps` (1024 to 8 MiB, or `null`) holds an entry of unknown size that many bytes at a time before putting it aside, so a small export puts its entries aside in many pieces, as a large one does. `cap` with `steps` (bytes, or `null`) makes their archive's limit that many bytes, so a small export meets it → `{pace}`, `{piece}` or `{cap}` |
 | `POST /api/test/registry` | a local fleet's only: `{down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls, skewed}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), and how many it refused for their release (not among `calls`), `{skewFor: {path, times}}` makes it answer the next `times` calls (at most 100; 0 answers them again) to one of its inner paths (`/login/exchange`: a sign-in's callback) as a registry of another release would, each refused unread (503 `deploying`) by the check every call into an object meets, as a deploy going out does (docs/MODEL.md, Calls between releases), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, `{downFor: {path, times}}` makes it answer 503 to the next `times` calls (at most 100; 0 answers them again) to one of its inner paths (`/orgs/sync`: a computer's making asking for its seat's push), as `{down}` does, the rest answered, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it), and `"schema"` answers the steps its schema holds, as the list's `schema` does, on a registry that refuses its schema too |
+
+One hook is no route: on a local fleet with a test secret, a request
+whose `fragment_e2e_release` cookie names a release's id is answered as
+that release (cell/src/levers.rs `answered_release`): the
+`x-fragment-deploy` of every answer of the platform's host, and the
+shell's page's meta, name it, so a browser meets a deploy (The shell,
+"A new release") and no one else's answers change. A cookie naming no
+release is the node's own; calls between the Worker and its objects keep
+its own; a preview's and production's answers are always their own.
 
 A request body is at most what the zone's Cloudflare plan takes (100 MB
 on Free and Pro), below the 256 MiB a blob route allows (debt ledger).
@@ -2848,6 +2857,48 @@ zone). Anything else opens nothing. The chat's page asks so from the
 "The page"). An app's window offers Reload, Open in a new tab
 (`/auth/fragment`) and, in More, Copy link (its canonical URL). On a
 phone the viewer is a sheet from the bottom.
+
+**A new release, under an open page** (Paul, 2026-10-20: after the
+day's deploys one chat would not load in his home screen's app, and did
+in a tab of its own, until the app was quit). A page outlives a deploy:
+a home screen's app or a tab left open runs the shell, and its chats'
+pages, of the release it loaded with while the platform under it moves
+on. So the page names the release that answered it (`<meta
+name="fragment-release">`, filled in as it is served), every answer of
+the platform's host names its own (`x-fragment-deploy`), and the page
+reads that on every answer it reads, and asks for it (`HEAD /healthz`)
+as it is shown again (`visibilitychange`), comes back from the
+back-forward cache (`pageshow`) or comes online, at most once a minute.
+Once an answer names another release, the page reloads whole, its chats'
+and apps' frames with it, where it was (its path, its open chat, its
+apps' windows, each at the page it opened), at the next safe moment: at
+once while it is hidden, or as it is shown again, when nothing in it is
+unsent; else when the person next opens a chat or an app; else once
+nothing in it is unsent and no one has touched it for two minutes.
+Before it reloads it asks each chat's page whose hello (`agents?`) it
+had what it holds (`{fragment: "unsent?", ask}`, at the fragment's
+origin; answered at once, its socket up or not, `{fragment: "unsent",
+ask, text, held, idleMs}`): `text` the composer's words, which a reload
+keeps; `held` whether it holds what a reload could not keep (files, a
+voice memo, a quote, a card's answer, a message the platform has not
+taken or one that failed); `idleMs` since its person last touched it. A
+reload keeps each chat's words in the tab (`sessionStorage`, a day at
+most, 32 chats' at most) and gives them back to that chat's page once it
+says hello again (`{fragment: "restore-unsent", text}`, taken only from
+its parent at the platform's origin, by someone who may post there, and
+put in an empty composer or before what was typed since, never over it;
+answered `{fragment: "unsent-restored"}`, after which the tab keeps them
+no more). **Nothing unsent is lost**: no reload while a chat's page holds
+what it could not keep, while one that said hello does not answer within
+2 s, while one of the page's dialogs or its menu is open, words are typed
+in its own fields, a prompt is on its way to a chat or a write of its own
+is still going, nor without the tab's storage. **No loop**: a release is
+reloaded for at most three times, a minute apart (a reload may still
+meet the old release while a deploy goes out), and the release a reload
+left is no reason to reload for ten minutes (a deploy's old side answers
+for a while); what the page waits to reload for is its root's
+`data-release-next`. A fragment's page open in a tab of its own is not
+the shell's, and does not reload so.
 
 **On a phone it is an app** (Paul, 2026-10-13: "staying strictly in the
 viewport"). The page itself never scrolls, bounces or zooms: its html and

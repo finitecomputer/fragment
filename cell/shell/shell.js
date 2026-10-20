@@ -80,13 +80,22 @@ class ApiError extends Error {
     this.code = code;
   }
 }
+// this page's writes still going: a reload for a new release waits for them
+let writing = 0;
 async function api(method, path, body) {
   const headers = { "x-fragment-shell": "1" };
   if (body !== undefined) headers["content-type"] = "application/json";
-  const r = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: "same-origin" });
-  const out = await r.json().catch(() => ({}));
-  if (!r.ok) throw new ApiError(r.status, out.error, out.message || r.statusText);
-  return out;
+  const writes = method !== "GET";
+  if (writes) writing++;
+  try {
+    const r = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: "same-origin" });
+    heard(r);
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok) throw new ApiError(r.status, out.error, out.message || r.statusText);
+    return out;
+  } finally {
+    if (writes) writing--;
+  }
 }
 
 const byName = (name) => state.fragments.find((f) => f.name === name);
@@ -233,6 +242,8 @@ addEventListener("message", (event) => {
   const [title, text, go, target] = BLOCKED[d.why](titleOf(d.name));
   const href = d.why === "signed-out" ? `/auth/login?return=${encodeURIComponent(location.pathname)}` : `/auth/fragment?name=${encodeURIComponent(d.name)}&return=/`;
   frame.dataset.blocked = d.why;
+  // no chat's page is in it: it holds nothing unsent
+  greeted.delete(frame);
   const allow = el("a", "allow", go);
   Object.assign(allow, { href, target, rel: "noopener" });
   const notice = el("div", "notice");
@@ -246,6 +257,7 @@ addEventListener("focus", () => {
   for (const frame of document.querySelectorAll("iframe[data-blocked]")) {
     delete frame.dataset.blocked;
     blockedNote(frame)?.remove();
+    greeted.delete(frame);
     frame.src = frame.dataset.src;
   }
 });
@@ -875,6 +887,7 @@ function openChat(name, push = true) {
   renderChats();
   markSeen();
   prewake();
+  navigated();
 }
 
 // ---- apps: every other fragment, each a window in the viewer ----
@@ -894,6 +907,7 @@ async function loadCard(name) {
   const headers = { "x-fragment-shell": "1" };
   if (known) headers["if-none-match"] = known.etag;
   const r = await fetch(`/api/f/${seg(name)}/card`, { headers, credentials: "same-origin" });
+  heard(r);
   if (r.status === 304) return "same";
   if (r.status === 404 && !known) return "none";
   if (!r.ok) return "same";
@@ -1024,6 +1038,7 @@ function openApp(name, path = "/") {
       },
     ],
   });
+  navigated();
 }
 
 // ---- archiving: the person's own view (their list's row), not the fragment's ----
@@ -1897,7 +1912,14 @@ async function openSettings(push = true) {
   file.onchange = async () => {
     const f = file.files?.[0];
     if (!f) return;
-    const r = await fetch("/api/identities/me/picture", { method: "PUT", headers: { "x-fragment-shell": "1", "content-type": f.type }, body: f, credentials: "same-origin" });
+    writing++;
+    let r;
+    try {
+      r = await fetch("/api/identities/me/picture", { method: "PUT", headers: { "x-fragment-shell": "1", "content-type": f.type }, body: f, credentials: "same-origin" });
+      heard(r);
+    } finally {
+      writing--;
+    }
     if (r.ok) {
       state.me = await api("GET", "/api/identities/me");
       openSettings(false);
@@ -3100,6 +3122,306 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden && watching.on && !watching.socket) watchList();
 });
 
+// ---- a new release: the page reloads itself at a safe moment ----
+// A page outlives a deploy: a home screen's app or a tab left open runs the
+// shell, and its chats' pages, of the release it loaded with while the
+// platform under it moves on (Paul's phone, 2026-10-20: after the day's
+// deploys one chat would not load in the home screen's app, and did in a
+// tab of its own, until the app was quit). So the page names the release
+// that answered it (index.html's meta, `RELEASE`), every answer of the
+// platform names its own (`x-fragment-deploy`), and once one names another
+// the page reloads whole, its chats' and apps' frames with it, where it
+// was (its path, its chat, its apps' windows), at the next safe moment:
+//
+//   - at once while it is hidden, or as it is shown again, when nothing in
+//     it is unsent;
+//   - else when the person next opens a chat or an app: each chat's
+//     unsent words are kept in this tab for the reload, and given back to
+//     its page when it is open again;
+//   - else once nothing in it is unsent and no one has touched it for
+//     RELEASE_IDLE_MS.
+//
+// Never while something could not be kept: a chat's page holding files, a
+// voice memo, a quote, a card's answer, or a message the platform has not
+// taken; a chat's page that said hello and does not answer; one of this
+// page's dialogs or its menu open, words typed in its own fields, a prompt
+// on its way to a chat, or a write still going; nor without this tab's
+// storage, which keeps the words and the reload (no loop: below). Each
+// release is reloaded for at most RELEASE_TRIES times, RELEASE_AGAIN_MS
+// apart (a reload can still meet the old release), and the release a
+// reload left is no reason to reload for RELEASE_LEFT_MS (a deploy's old
+// side answers for a while). The page asks for itself (`HEAD /healthz`)
+// as it is shown again, comes back from the back-forward cache or comes
+// online, at most once a RELEASE_LOOK_MS; it hears every answer it reads.
+const RELEASE_ID = /^[A-Za-z0-9._-]{1,64}$/;
+const RELEASE_HEADER = "x-fragment-deploy";
+const RELEASE_LOOK_MS = 60_000;
+// an answer heard this soon after the page loaded or was shown again is
+// heard as it was shown
+const RELEASE_RETURNED_MS = 5_000;
+const RELEASE_IDLE_MS = 2 * 60_000;
+// while one waits on screen, how often it asks whether now is quiet
+const RELEASE_QUIET_EVERY_MS = 15_000;
+const RELEASE_LEFT_MS = 10 * 60_000;
+const RELEASE_TRIES = 3;
+const RELEASE_AGAIN_MS = 60_000;
+// a chat's page answers at once; one that says nothing in this long is not risked
+const UNSENT_ANSWER_MS = 2_000;
+// a chat's composer holds at most its TEXT_MAX_BYTES (32 KiB), as characters
+const UNSENT_TEXT_MAX = 32 * 1024;
+// words kept for a chat not opened again since are let go after a day, and
+// a tab keeps at most this many chats' (more is not risked: no reload)
+const UNSENT_KEPT_MS = 24 * 60 * 60_000;
+const UNSENT_KEPT_MAX = 32;
+const WINDOWS_KEPT_MAX = 16;
+// a click that opens a chat from the launcher closes its dialog first
+const NAVIGATED_SETTLE_MS = 400;
+const RELOADED_KEY = "shell.release.v1"; // {from, to, at, tries}: this tab's last reload for a release
+const UNSENT_KEY = "shell.unsent.v1"; // chat -> {text, at}: words kept for a chat's page
+const WINDOWS_KEY = "shell.windows.v1"; // [{name, path}]: the app windows to open again
+// this tab's own storage, which a reload keeps
+const tab = {
+  get(key, fallback) { try { return JSON.parse(sessionStorage.getItem(key)) ?? fallback; } catch { return fallback; } },
+  set(key, value) { try { sessionStorage.setItem(key, JSON.stringify(value)); return true; } catch { return false; } },
+  drop(key) { try { sessionStorage.removeItem(key); } catch {} },
+};
+const RELEASE = document.querySelector('meta[name="fragment-release"]')?.content ?? "";
+// mine: the release this page is (none, an unfilled page: it never reloads);
+// next: the release it waits to reload for; shownAt: when it loaded, or
+// was last shown again
+const release = { mine: RELEASE_ID.test(RELEASE) ? RELEASE : null, next: null, lookedAt: 0, shownAt: Date.now(), asking: false, timer: null, reloading: false };
+
+// An answer of the platform's, heard: one naming a release to reload for
+// is waited on (`reloadWhenSafe`).
+function heard(r) {
+  const id = r.headers.get(RELEASE_HEADER);
+  if (!release.mine || !id || id === release.mine || id === release.next || !RELEASE_ID.test(id) || !reloadsFor(id)) return;
+  release.next = id;
+  // what it waits for, for whoever looks (the e2e, a person's devtools)
+  document.documentElement.dataset.releaseNext = id;
+  if (document.hidden) return void reloadWhenSafe("hidden");
+  releaseWaits();
+  // heard as the page loads or is shown again (its list read anew, say)
+  if (Date.now() - release.shownAt < RELEASE_RETURNED_MS) reloadWhenSafe("returned");
+}
+function lastReload() {
+  const r = tab.get(RELOADED_KEY, null);
+  return r && typeof r.from === "string" && typeof r.to === "string" && Number.isFinite(r.at) && Number.isInteger(r.tries) ? r : null;
+}
+// Whether another release is one to reload for: not the one this tab's
+// last reload left while that deploy may still be going out, nor one it
+// reloaded for and still is not, RELEASE_TRIES times or within
+// RELEASE_AGAIN_MS of the last.
+function reloadsFor(id) {
+  const last = lastReload();
+  if (!last) return true;
+  const since = Date.now() - last.at;
+  if (id === last.from && since < RELEASE_LEFT_MS) return false;
+  return !(id === last.to && (last.tries >= RELEASE_TRIES || since < RELEASE_AGAIN_MS));
+}
+
+// The person's own doings in this page (a chat's page counts its own).
+let touchedAt = Date.now();
+for (const type of ["pointerdown", "keydown", "wheel", "touchstart", "input"]) addEventListener(type, () => { touchedAt = Date.now(); }, { capture: true, passive: true });
+// the fields of this page the person typed in
+const TYPED = new Set(["text", "search", "email", "url", "tel", "password", "number"]);
+const typedIn = new Set();
+document.addEventListener("input", (e) => {
+  const f = e.target;
+  if (f instanceof HTMLTextAreaElement || (f instanceof HTMLInputElement && TYPED.has(f.type))) typedIn.add(f);
+}, true);
+// What this page itself holds that a reload would lose.
+function shellHolds() {
+  for (const f of typedIn) if (!f.isConnected) typedIn.delete(f);
+  const typed = [...typedIn].some((f) => f.value.trim() && f.getClientRects().length > 0);
+  return typed || !!document.querySelector("dialog[open]") || !menu.hidden || writing > 0 || composing.size > 0 || !!pendingLaunch || starting;
+}
+
+// The chats' frames whose page said hello (`agents?`, which the chat's
+// page sends as it starts, before its composer takes a word): only these
+// can hold anything unsent, and each is asked. One sent elsewhere (a
+// sign-in it could not make, tried again) is no longer one.
+const greeted = new WeakSet();
+addEventListener("message", (event) => {
+  if (event.data?.fragment !== "agents?") return;
+  const frame = [...state.frames.values()].find((f) => f.contentWindow === event.source);
+  if (!frame) return;
+  greeted.add(frame);
+  giveBack(frame);
+});
+let unsentAsks = 0;
+const unsentWaiting = new Map(); // ask -> { win, origin, done }
+// What a chat's page holds unsent (`{fragment: "unsent?", ask}`, answered
+// `{fragment: "unsent", ask, text, held, idleMs}`), or null when it does
+// not answer in time.
+async function askUnsent(name, frame) {
+  let origin;
+  try {
+    origin = await originOf(name);
+  } catch {
+    return null;
+  }
+  const win = frame.contentWindow;
+  if (!win) return null;
+  const ask = ++unsentAsks;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => done(null), UNSENT_ANSWER_MS);
+    const done = (answer) => {
+      clearTimeout(timer);
+      unsentWaiting.delete(ask);
+      resolve(answer);
+    };
+    unsentWaiting.set(ask, { win, origin, done });
+    win.postMessage({ fragment: "unsent?", ask }, origin);
+  });
+}
+addEventListener("message", (event) => {
+  const d = event.data;
+  const waiting = d?.fragment === "unsent" && unsentWaiting.get(d.ask);
+  if (!waiting || event.source !== waiting.win || event.origin !== waiting.origin) return;
+  const answered = typeof d.text === "string" && d.text.length <= UNSENT_TEXT_MAX && typeof d.held === "boolean" && Number.isFinite(d.idleMs);
+  waiting.done(answered ? { text: d.text.trim() ? d.text : "", held: d.held, idleMs: Math.max(0, d.idleMs) } : null);
+});
+// Every greeted chat's: {texts: chat -> its words, held, idleMs}, or null
+// when one did not answer (what it holds is not known, so not risked).
+async function unsentInChats() {
+  const asked = [...state.frames].filter(([, frame]) => frame.isConnected && greeted.has(frame));
+  const answers = await Promise.all(asked.map(([name, frame]) => askUnsent(name, frame)));
+  if (answers.includes(null)) return null;
+  return { texts: new Map(asked.map(([name], i) => [name, answers[i].text])), held: answers.some((a) => a.held), idleMs: Math.min(Infinity, ...answers.map((a) => a.idleMs)) };
+}
+
+// Reloads for `release.next` if `moment` is a safe one: "hidden" (the page
+// is), "returned" (it was just shown again), "idle" (on screen, a while
+// untouched) or "navigated" (the person opened a chat or an app).
+async function reloadWhenSafe(moment) {
+  if (!release.next || release.asking || release.reloading || shellHolds()) return;
+  release.asking = true;
+  try {
+    const unsent = await unsentInChats();
+    if (!unsent || unsent.held || shellHolds()) return;
+    const typed = [...unsent.texts.values()].some(Boolean);
+    const quiet = Date.now() - touchedAt >= RELEASE_IDLE_MS && unsent.idleMs >= RELEASE_IDLE_MS;
+    const safe = { hidden: !typed, returned: !typed, idle: !typed && quiet, navigated: true }[moment];
+    if (safe) reloadFor(release.next, unsent.texts);
+  } finally {
+    release.asking = false;
+  }
+}
+// The words kept for chats' pages, less those past UNSENT_KEPT_MS.
+function keptUnsent() {
+  const kept = tab.get(UNSENT_KEY, {});
+  const fresh = {};
+  for (const [name, k] of Object.entries(kept && typeof kept === "object" ? kept : {})) {
+    if (typeof k?.text === "string" && k.text && Number.isFinite(k.at) && Date.now() - k.at < UNSENT_KEPT_MS) fresh[name] = k;
+  }
+  return fresh;
+}
+// The app windows open, each at the page it opened (`openApp`).
+function openWindows() {
+  return viewer.keys.filter((k) => k.startsWith("app:")).slice(0, WINDOWS_KEPT_MAX).map((key) => {
+    const src = document.querySelector(`#stack .pane[data-key="${CSS.escape(key)}"] iframe`)?.dataset.src ?? "";
+    return { name: key.slice("app:".length), path: new URL(src, location.origin).searchParams.get("return") || "/" };
+  });
+}
+// The reload: the chats' words, the windows and the reload itself kept in
+// this tab first (the reload last, so none happens unrecorded), or none.
+function reloadFor(id, texts) {
+  const kept = keptUnsent();
+  for (const [name, text] of texts) if (text) kept[name] = { text, at: Date.now() };
+  if (Object.keys(kept).length > UNSENT_KEPT_MAX) return;
+  const last = lastReload();
+  const tries = last?.to === id ? last.tries + 1 : 1;
+  if (!tab.set(UNSENT_KEY, kept) || !tab.set(WINDOWS_KEY, openWindows()) || !tab.set(RELOADED_KEY, { from: release.mine, to: id, at: Date.now(), tries })) return;
+  release.reloading = true;
+  location.reload();
+}
+// A greeted chat's page is given back the words kept for it
+// (`{fragment: "restore-unsent", text}`), until it says it has them.
+async function giveBack(frame) {
+  const name = frame.dataset.fragment;
+  const kept = keptUnsent()[name];
+  if (!kept) return;
+  let origin;
+  try {
+    origin = await originOf(name);
+  } catch {
+    return;
+  }
+  frame.contentWindow?.postMessage({ fragment: "restore-unsent", text: kept.text }, origin);
+}
+addEventListener("message", async (event) => {
+  if (event.data?.fragment !== "unsent-restored") return;
+  const frame = [...state.frames.values()].find((f) => f.contentWindow === event.source);
+  const name = frame?.dataset.fragment;
+  if (!name) return;
+  try {
+    if (event.origin !== (await originOf(name))) return;
+  } catch {
+    return;
+  }
+  const kept = keptUnsent();
+  if (!kept[name]) return;
+  delete kept[name];
+  tab.set(UNSENT_KEY, kept);
+});
+// The windows the reload kept, taken as the page loads (a later reload by
+// hand opens none), and open again once its chat is (on settings, which
+// fill the work area, they are let go).
+const keptWindows = tab.get(WINDOWS_KEY, []);
+tab.drop(WINDOWS_KEY);
+function reopenWindows(settings) {
+  if (settings || !Array.isArray(keptWindows)) return;
+  for (const w of keptWindows.slice(0, WINDOWS_KEPT_MAX)) {
+    if (typeof w?.name === "string" && FRAGMENT_NAME.test(w.name) && typeof w.path === "string" && w.path.startsWith("/")) openApp(w.name, w.path);
+  }
+}
+
+// while it waits on screen, it asks again now and then whether now is quiet
+function releaseWaits() {
+  clearTimeout(release.timer);
+  if (!release.next || document.hidden) return;
+  release.timer = setTimeout(async () => {
+    await reloadWhenSafe("idle");
+    releaseWaits();
+  }, RELEASE_QUIET_EVERY_MS);
+}
+// the person opened a chat or an app: once the click has settled
+function navigated() {
+  if (release.next) setTimeout(() => reloadWhenSafe("navigated"), NAVIGATED_SETTLE_MS);
+}
+// Asks the platform which release it is now (`HEAD /healthz`), at most
+// once a RELEASE_LOOK_MS, then tries `moment`.
+async function lookForRelease(moment) {
+  if (!release.next && release.mine && Date.now() - release.lookedAt >= RELEASE_LOOK_MS) {
+    release.lookedAt = Date.now();
+    try {
+      heard(await fetch("/healthz", { method: "HEAD", cache: "no-store" }));
+    } catch {
+      // offline (a phone just woken): its coming online asks again
+      release.lookedAt = 0;
+      return;
+    }
+  }
+  await reloadWhenSafe(moment);
+}
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    release.shownAt = Date.now();
+    releaseWaits();
+    lookForRelease("returned");
+  } else {
+    clearTimeout(release.timer);
+    reloadWhenSafe("hidden");
+  }
+});
+addEventListener("pageshow", (e) => {
+  if (!e.persisted) return;
+  release.shownAt = Date.now();
+  lookForRelease(document.hidden ? "hidden" : "returned");
+});
+addEventListener("online", () => lookForRelease(document.hidden ? "hidden" : "idle"));
+
 async function start(open) {
   let me;
   try {
@@ -3129,6 +3451,8 @@ async function start(open) {
   else if (pick) openChat(pick);
   else if (state.guest) guestHome(mine.offer);
   else notice("No chats yet", "Make an agent to start.");
+  // after a reload for a new release, its windows where they were
+  reopenWindows(settings);
   prewake();
 }
 

@@ -2353,8 +2353,39 @@ export function mount(root) {
       if (typeof d.mobile === "boolean") document.documentElement.dataset.mobile = String(d.mobile);
     }
     else if (d && d.fragment === "compose" && typeof d.text === "string") compose(event, d.text);
+    else if (d && d.fragment === "unsent?" && Number.isInteger(d.ask)) window.parent.postMessage(holds(d.ask), event.origin);
+    else if (d && d.fragment === "restore-unsent" && typeof d.text === "string") restoreUnsent(event, d.text);
     else fromShell(event);
   });
+  // ---- the shell's reload for a new release (docs/api.md, The shell): it
+  // asks what this page holds unsent first, and gives back after the
+  // reload the words it kept. The ask is answered at once, to the parent
+  // that asked (only the platform's page frames this one), whatever the
+  // page's socket is doing: a page that never got its hello still says it
+  // holds nothing, so a shell stuck on an old release can reload. ----
+  let touchedAt = Date.now();
+  for (const type of ["pointerdown", "keydown", "wheel", "touchstart", "input", "scroll"]) addEventListener(type, () => { touchedAt = Date.now(); }, { capture: true, passive: true });
+  // `text`: the composer's words (a reload keeps them); `held`: what it
+  // could not keep (files, a voice memo, a quote, a card's answer, a
+  // message the platform has not taken, or one that failed); `idleMs`:
+  // since the person last touched the page
+  function holds(ask) {
+    const held = attachments.length > 0 || !!recording || sending || state.sending.size > 0 || state.failed.size > 0 || !!state.replyTo || state.answering.size > 0 || [...state.typed.values()].some((t) => t.trim());
+    return { fragment: "unsent", ask, text: input.value.trim() ? input.value : "", held, idleMs: Date.now() - touchedAt };
+  }
+  // The words this page held before the reload, back in its composer: in
+  // place of nothing, or before what was typed since (never over it). Taken
+  // only from its parent at the platform's origin, for someone who may
+  // post here; then the shell keeps them no more.
+  function restoreUnsent(event, text) {
+    fragment.me().then((hello) => {
+      if (event.origin !== hello.platform || !canPost() || input.disabled) return;
+      if (!text.trim() || text.length > TEXT_MAX_BYTES) return;
+      if (!input.value.includes(text)) input.value = input.value.trim() ? `${text}\n${input.value}` : text;
+      grow();
+      window.parent.postMessage({ fragment: "unsent-restored" }, hello.platform);
+    });
+  }
   // asks once: a shell that is its owner's answers (and again on a change)
   if (framed) window.parent.postMessage({ fragment: "agents?" }, "*");
   addEventListener("keydown", event => {

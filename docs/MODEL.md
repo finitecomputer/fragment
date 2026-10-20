@@ -267,6 +267,7 @@ Every change is checked against this table.
 | Cell state (supervisor tables, the operation ledger, channels, the app's SQL) | the Durable Objects' own storage | none |
 | A platform object's schema: its tables, and the steps that made them | its class's steps, `crates/core/migrations/<class>/` (Schemas, below) | each object's `_schema` holds the steps it took (number, name, SHA, ran or adopted) and refuses code whose steps differ (`schema_refused`); `crates/core/migrations/schema.lock` locks each step and what the steps make, and `cargo xtask check` holds the tree to it. An app facet's SQLite is its author's |
 | The release a call between the Worker and an object (or two objects) was made by | the caller's `FRAGMENT_DEPLOY_ID`, its deploy's commit (Calls between releases, below) | stamped on each call (`x-fragment-release`) and checked first by the object, which refuses another's (503 `deploying`) before it acts; never stored |
+| The release a browser's page of the platform runs, and the one under it now | the shell's page as it was answered (its `<meta name="fragment-release">`, filled with the answering `FRAGMENT_DEPLOY_ID`), and every answer of the platform's host (`x-fragment-deploy`) | the page compares the two on each answer it reads and reloads once they differ, at a safe moment (docs/api.md, The shell, "A new release"); its tab keeps its last such reload (`sessionStorage`: from, to, when, how often), so a deploy's old side answering again, or a reload that met it, is no loop, and the words unsent in its chats until their pages have them back |
 | Large file bytes (1 MiB or more) | R2 (`BLOBS`), keyed by SHA-256 | git holds a pointer; a sync resolves it; a blob no branch tip references is deleted |
 | Identities (npubs) and their keys, each person's own key (sealed), sign-ins and their verified emails, agents' owners, sessions | the registry (fragment's BANKS: docs/cloudflare-v1.md, decisions 45 to 50) | an identity's npub never changes; an email names at most one person; sessions and caches name an identity and never outlive a revocation; cookies hold only tokens, the registry their hashes |
 | A person's wipe: how far it got, and that it locks them | the registry's `wipes` (docs/api.md, Operators) | a wiped person's ledger, list and computer each keep one row saying so, and take nothing more |
@@ -412,6 +413,17 @@ written by one release is read by the next, so its shape stays readable
 its steps, above). The first deploy of the check met callers that named
 no release, refused like any other, and old objects that checked
 nothing, as before it.
+
+A browser's page outlives a deploy too, and it is no call: the shell (and
+the chats' pages it frames, the release's own) runs the release it
+loaded with for as long as its tab or its home screen's app stays open,
+against whatever the platform runs now. So its page names the release
+that answered it, every answer of the platform's host names its own
+(`x-fragment-deploy`, what `/healthz` says), and the page reloads itself
+once they differ, at a safe moment: never over anything unsent, and
+never in a loop, the deploy's old side answering again included
+(docs/api.md, The shell, "A new release"). Until it reloads it asks the
+API as the release it loaded with did, as any older client does.
 
 ## Limits (initial; each enforced and tested)
 
