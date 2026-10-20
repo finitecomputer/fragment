@@ -124,8 +124,9 @@ refuses authorization without redirecting or importing. Then use only the
 separately approved staging test above. Provider status remaining Disabled is
 not evidence that the new callback/import works live.
 
-Rollback: first disable new connection starts by removing `connection_oauth`
-from that environment's catalog through the normal deployment path. Preserve
+Rollback: first disable new connection starts by removing both `connection_oauth`
+and its provider-row `key` from that environment's catalog through the normal
+deployment path. An orphan `key` is rejected by deployment validation. Preserve
 Registry schema step 2 in any rollback build: deploying a pre-step worker onto
 the upgraded Registry is refused by the schema guard and can break sign-in.
 Use a reviewed forward fix or revert of feature code retaining the migration,
