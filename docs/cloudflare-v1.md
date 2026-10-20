@@ -715,6 +715,26 @@ speaking Cloudflare's APIs) returns once this product works.
     and the generic rule of decision 39 wakes the computer. Agents add
     and change routines with the fragment CLI (a skill).
 
+    Status, 2026-10-20 (branch `claude/agent-routines`; Paul, in
+    production: asked to "check it every hour and ping me if ikea gets
+    back", his agent found no scheduler and started a loop in its
+    container, which died at the next restart). Built as a generic
+    fragment primitive, not an agent's (Paul: "I want to make sure we're
+    making generic fragment logic and not something only hermes can
+    use"; "for basic crons the agent shouldn't need to build a new
+    fragment, it would just add schedule to itself"): **scheduled
+    records**. Any fragment's editors add data schedules at run time
+    (`{cron, channel, record}`, at most 32, at most every 15 minutes, a
+    record of at most 4 KiB), each appending its record to one of the
+    fragment's own channels, as the fragment, at each minute its cron
+    names; the same alarm pass fires them as its code's cron triggers.
+    A routine is one on the agent's own `tasks` (`{kind: "routine",
+    text, chat}`), which the agent, an editor of its own fragment, adds
+    with `fragment schedule add --routine`. What must run without the
+    agent is an app's cron trigger and its job. Our Hermes image's
+    platform skill teaches both, and its `hermes` refuses `hermes cron`.
+    docs/api.md, "Scheduled records".
+
 ### The generic pieces that make the rule work (Paul, 2026-10-02)
 
 39. **A subscription wakes a computer, and the guest says when it is

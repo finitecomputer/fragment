@@ -1615,6 +1615,7 @@ impl PrincipalCell {
             members: vec![],
             invites: vec![],
             secrets: vec![],
+            schedules: vec![],
             files: core::FilesCounted::default(),
             database: None,
             channels: vec![],
@@ -1691,6 +1692,10 @@ impl PrincipalCell {
         match self.read_json(person, name, "secrets", "").await? {
             Ok(n) => meta.secrets = n["secrets"].as_array().into_iter().flatten().filter_map(|s| s["name"].as_str().map(str::to_string)).collect(),
             Err(e) => skip_meta(&mut meta, "secrets", &e),
+        }
+        match self.read_json(person, name, "schedules", "").await? {
+            Ok(mut l) => meta.schedules = if let Value::Array(list) = l["schedules"].take() { list } else { vec![] },
+            Err(e) => skip_meta(&mut meta, "schedules", &e),
         }
         match self.read_json(person, name, "channels", "").await? {
             Ok(c) => {

@@ -128,6 +128,29 @@ agent's computer counts the hand-offs: three in a row without a person
 stop, and a chat allows its agents 20 turns of each other in 5 minutes
 (docs: chat records).
 
+Anything an agent is to do later or again ("check it every hour", "every
+weekday at 8") is a schedule on itself: a scheduled record on its own
+agent fragment's `tasks` (Scheduled records, below), which the platform
+keeps and fires through every restart and sleep of its computer. Never
+a background loop, `sleep`, crontab or `hermes cron` on the computer:
+they die with it. The agent is an editor of its own fragment, so it adds
+one as any editor does; on a computer `fragment schedule` acts on the
+agent's own fragment unless another is named, and `--routine` builds the
+routine record:
+
+```
+fragment schedule add --routine "Check the shelf; tell me once it is in stock" --chat chat--k3x9 --cron "0 * * * *"
+fragment schedule list
+fragment schedule pause 3        # it fires no more until resumed
+fragment schedule resume 3       # from its next minute, none it missed
+fragment schedule rm 3
+```
+
+At each minute `--cron` names, the agent is asked the text in `--chat`
+(a chat it is in) as its owner, who pays for the turn. What should run
+without the agent (a frequent mechanical check, or a job for other
+people) is an app with a cron trigger and a job instead.
+
 ## The model in one screen
 
 - **Files.** One git repo per fragment (on code.storage). `main` is the
@@ -806,6 +829,45 @@ Its `@name`, the word that mentions it, stays its label. Its runtime's
 own files (Hermes' `profile.yaml`) are written from its name: never edit
 them to rename it.
 
+An agent's routines are what it does on a schedule, each in a chat it is
+in, asked as you: scheduled records on its agent fragment's `tasks`
+(Scheduled records, below), so no restart or sleep of its computer loses
+one. Ask your agent in its chat ("every morning at 8, …"), or add one
+yourself; its page lists them:
+
+```
+fragment schedule add juniper--k3x9 --routine "Summarize my calendar" --chat juniper-chat--k3x9 --cron "0 8 * * mon-fri"
+fragment schedule list juniper--k3x9            # each one's id, when in words, its channel and record
+fragment schedule pause|resume|rm juniper--k3x9 <id>
+```
+
+## Scheduled records
+
+Any fragment's editors can schedule a record on one of its channels at
+run time, with no deploy: at each minute the cron names (UTC), the
+fragment appends the record there, as itself. Whatever follows that
+channel takes it from there: its triggers run their jobs from it, its
+pages show it live, a computer following it wakes. A code-declared cron
+trigger (`fragment.json`) is the app's own and made again at each
+deploy; a scheduled record is data its people (and agents) add and
+change, kept across deploys.
+
+```
+fragment schedule add my-app --cron "0 9 * * mon-fri" --channel reminders --record '{"text":"standup"}'
+fragment schedule list my-app        # viewers: each one's id, when in words, its channel and record
+fragment schedule pause|resume|rm my-app <id>
+```
+
+Its cron is five fields in UTC (weekdays 1 = Sunday … 7 = Saturday, or by
+name: `mon-fri`), at most every 15 minutes (an app's own cron trigger
+runs more often); its record any JSON of at most 4 KiB; its channel one
+the fragment declares, that takes posts from whoever holds its post role
+(not a `from` channel), a role you hold; at most 32 a fragment. The same
+one added again is that one (`--json`'s `replayed`); a fire the platform
+came to late is one fire. `--json`: `{schedule: {id, cron, said, channel,
+record, createdBy, createdAt, paused, nextAt?, lastAt?}, replayed}` for an
+add, `{schedules: […]}` for a list; a page reads them at `__schedules`.
+
 ## Secrets
 
 ```
@@ -871,6 +933,9 @@ fragment rm <name>                       fragment guide|skill
 fragment ask <agent> <text> [--chat C] [--wait [S]] [--id ID]
 fragment mcp <name> [--write]            # its described operations as an MCP server's tools, over stdio
 fragment agent [<agent>] [--name N] [--picture FILE | --no-picture]
+fragment schedule add [<name>] --cron "<m h dom mon dow>" --channel C --record JSON
+fragment schedule add [<name>] --cron "<m h dom mon dow>" --routine TEXT --chat C   # an agent's routine, on its tasks
+fragment schedule list [<name>]          fragment schedule pause|resume|rm [<name>] <id>
 fragment operator key <file>
 fragment operator wipe <email|npub> [--dry-run | --yes] [--key-file F]
 fragment operator people [--q Q] [--after A] [--key-file F]

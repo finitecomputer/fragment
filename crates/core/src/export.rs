@@ -472,6 +472,10 @@ pub struct FragmentMeta {
     pub invites: Vec<Value>,
     /// Its secrets' names: their values never leave.
     pub secrets: Vec<String>,
+    /// Its scheduled records, as its viewers list them (docs/api.md,
+    /// "Scheduled records"); absent when it has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schedules: Vec<Value>,
     /// Its files at `ref` (main's commit), and their bytes.
     pub files: FilesCounted,
     /// Its app's tables, their rows counted; `None` without app code.

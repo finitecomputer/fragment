@@ -47,4 +47,13 @@ impl From<fragment_core::stripe::NotSold> for CellError {
     }
 }
 
+/// A scheduled record its bounds refuse (`fragment_core::schedule`): 400,
+/// 403 below its channel's post role, or 413 for its record's size, saying
+/// which.
+impl From<fragment_core::schedule::Refusal> for CellError {
+    fn from(r: fragment_core::schedule::Refusal) -> CellError {
+        CellError::new(r.code(), r.to_string())
+    }
+}
+
 pub type CellResult<T> = Result<T, CellError>;

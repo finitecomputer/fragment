@@ -6,6 +6,7 @@
 
 step Fragment 1 baseline 6f010c0c276b4871
 step Fragment 2 listed 464da803484efc23
+step Fragment 3 record_schedules 90308e727fc4ce8b
 step Registry 1 baseline fd5a79e5c834a15d
 step Principal 1 baseline 28b4d4bf3f8cdb71
 step Principal 2 listed 09e5aab70c4f7f61
@@ -53,6 +54,8 @@ Fragment table pending: CREATE TABLE pending ( seq INTEGER PRIMARY KEY AUTOINCRE
 Fragment index pending_due: CREATE INDEX pending_due ON pending (next_at)
 Fragment table pointers: CREATE TABLE pointers ( ref TEXT NOT NULL, path TEXT NOT NULL, sha TEXT NOT NULL, size INTEGER NOT NULL, PRIMARY KEY (ref, path))
 Fragment table push_subs: CREATE TABLE push_subs ( id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL, who TEXT NOT NULL, principal TEXT NOT NULL, created_at INTEGER NOT NULL)
+Fragment table record_schedules: CREATE TABLE record_schedules ( id INTEGER PRIMARY KEY AUTOINCREMENT, cron TEXT NOT NULL, channel TEXT NOT NULL, body TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, next_at INTEGER, last_at INTEGER)
+Fragment index record_schedules_due: CREATE INDEX record_schedules_due ON record_schedules (next_at) WHERE next_at IS NOT NULL
 Fragment table records: CREATE TABLE records ( channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, principal TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, op TEXT, idx INTEGER, outboxed INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (channel, seq))
 Fragment index records_effect: CREATE UNIQUE INDEX records_effect ON records (op, idx) WHERE op IS NOT NULL
 Fragment table runs: CREATE TABLE runs ( id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, via TEXT NOT NULL, trigger TEXT, principal TEXT NOT NULL, role TEXT NOT NULL, depth INTEGER NOT NULL, call_id TEXT, input_sha TEXT, input TEXT NOT NULL, status TEXT NOT NULL, attempt INTEGER NOT NULL, output TEXT, error TEXT, created_at INTEGER NOT NULL, launched_at INTEGER, finished_at INTEGER, code TEXT)

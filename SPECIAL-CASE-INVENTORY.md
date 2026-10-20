@@ -29,7 +29,7 @@ a vendor's product beyond the credential it holds.
 
 Every fragment gets these routes (docs/api.md, Serving), and none of
 them knows what a fragment is for: `__fragment.js`, `__fragment.css`
-and `__markdown.js`, `__signin` and `__signout`, `__op`, `__live` and `__watch`, `__people`, `__members`,
+and `__markdown.js`, `__signin` and `__signout`, `__op`, `__live` and `__watch`, `__people`, `__members`, `__schedules`,
 `__blob`, `__files` and `__file` (the vault UI), `__sw.js` and
 `__push-*`, `__preview.svg`, people's pictures
 (`/api/users/{u}/picture`), and the frame-session redeem path the

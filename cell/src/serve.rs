@@ -289,6 +289,11 @@ impl FragmentCell {
             // added): viewers and up, as the API's list
             self.reader(&mut facts, caller, link, Role::Viewer).await?;
             json_response(&self.member_list()?)?
+        } else if path == "__schedules" {
+            // its scheduled records, for a page (schedules.rs): viewers and
+            // up, as the API's list
+            let caller = self.reader(&mut facts, caller, link, Role::Viewer).await?;
+            json_response(&self.schedule_list(&caller)?)?
         } else if let Some(sha) = path.strip_prefix("__blob/") {
             match req.method() {
                 // one of this fragment's blobs by its hash (blobs.rs): viewers and up

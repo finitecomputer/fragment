@@ -31,3 +31,8 @@ h2 { font-size: 13px; font-weight: 600; letter-spacing: .04em; text-transform: u
 .skills { list-style: none; padding: 0; margin: 0; }
 .skills li { padding: 8px 0; border-bottom: 1px solid var(--border); }
 .muted { color: var(--text-tertiary); }
+/* Its routines (agent.js `routines`): when, then what it is asked. */
+.routines { list-style: none; padding: 0; margin: 0; }
+.routines li { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.routines p { margin: 0; overflow-wrap: anywhere; }
+.routines .when { color: var(--text-secondary); font-size: 13px; }

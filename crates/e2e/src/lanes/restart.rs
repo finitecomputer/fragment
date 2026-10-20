@@ -66,6 +66,10 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.eventually(Duration::from_secs(30), || api.op(&owner, &paid, "notes", "q", json!({})).is_ok_and(|r| r.status == 200));
     let r = api.op(&owner, &paid, "summarize", "before", json!({ "text": "before the restart" }))?;
     jobs::settle(&api, &owner, &paid, jobs::started(&r), &["succeeded"], Duration::from_secs(40));
+    // a scheduled record (docs/api.md, "Scheduled records"), due next new year
+    let scheduled = api.signed(&owner, "POST", &format!("/api/f/{paid}/schedules"), Some(&json!({ "cron": "0 0 1 1 *", "channel": "talk", "record": { "text": "kept" } })))?;
+    anyhow::ensure!(scheduled.status == 200, "a scheduled record: {scheduled}");
+    let paid_npub = api.status(&owner, &paid)?.body["npub"].as_str().unwrap_or("").to_string();
     // A held run bought its first decision, but the second was refused.
     // Restart and replay must reuse the first decision's durable receipt.
     let decider = s.named(&api, &owner, "restart-decide")?;
@@ -173,6 +177,15 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
 
     s.stop()?;
     let api = s.start(false)?;
+    let kept = api.signed(&owner, "GET", &format!("/api/f/{paid}/schedules"), None)?;
+    let kept_talk = |api: &Api| jobs::records(api, &owner, &paid, "talk").into_iter().filter(|r| r["body"] == json!({ "text": "kept" })).collect::<Vec<_>>();
+    let lever = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": paid, "op": "cron-now" })))?;
+    let fired = s.eventually(Duration::from_secs(30), || kept_talk(&api).len() == 1);
+    s.ok(
+        "after a restart a fragment's scheduled record is kept as it was, and fires, as the fragment",
+        kept.body["schedules"] == json!([scheduled.body["schedule"]]) && lever.body["records"] == 1 && fired && kept_talk(&api)[0]["principal"] == paid_npub.as_str(),
+        json!({ "kept": kept.body, "lever": lever.body, "talk": kept_talk(&api) }),
+    );
     let typed = api.type_code(&member_session, &pending_code)?;
     let pressed = api.add_code(&member_session, &pending_code)?;
     let theirs = api.signed(&pending_key, "GET", "/api/identities/me", None)?;

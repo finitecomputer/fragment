@@ -19,8 +19,11 @@
 //! its owner on its own origin through a one-time ticket, in a tab or in a
 //! frame of the platform's page (frames.rs, `computer_ports`), and no one
 //! else.
-//! A routine, its agent fragment's cron, wakes it asleep, and so does its
-//! agent being added to a new chat, which it then follows at once. A $200
+//! Its agent's routines are scheduled records on its own agent fragment
+//! (decision 38), which its owner and the agent itself (that fragment's
+//! editor) add; a restart of the computer, or of the platform, keeps them;
+//! one due wakes it asleep, and so does its agent being added to a new
+//! chat, which it then follows at once. A $200
 //! seat's computer stays awake unless its owner lets it sleep, and one made
 //! while the registry fails the ask for its seat's push fails its making,
 //! and made again, stays awake all the same.
@@ -64,15 +67,6 @@ pub(super) fn turn_of(agent: &str, fragment: &str, channel: &str, seq: i64) -> S
 pub(super) fn work_of(recs: &[Value], turn: &str) -> Vec<Value> {
     recs.iter().filter(|r| r["body"]["turn"] == turn).cloned().collect()
 }
-
-/// The agent fragment's app: its routine, which its cron runs.
-pub(super) fn routine_app(chat: &str) -> String {
-    format!(
-        "import {{ DurableObject }} from \"cloudflare:workers\";\nexport class App extends DurableObject {{\n  routine(input, call) {{\n    call.publish(\"tasks\", {{ kind: \"routine\", text: \"water the plants\", chat: {chat:?} }});\n    return {{ ok: true }};\n  }}\n}}\n"
-    )
-}
-
-pub(super) const ROUTINE_JSON: &[u8] = br#"{ "operations": { "routine": { "kind": "mutation", "role": "editor" } }, "channels": { "tasks": { "read": "editor", "post": "editor" } }, "triggers": [{ "cron": "* * * * *", "run": "routine" }] }"#;
 
 /// The `joined` records on an agent fragment's `tasks` for `fragment`
 /// (docs/chat-records.md): the platform posts one when the agent is added.
@@ -876,8 +870,182 @@ fn made_while_its_seat_sync_fails(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
+/// An agent's routine (docs/chat-records.md, `tasks`): the record a
+/// scheduled record on its own fragment's `tasks` appends, as `fragment
+/// schedule add --routine` builds it.
+pub(super) fn routine(text: &str, chat: &str) -> Value {
+    json!({ "kind": "routine", "text": text, "chat": chat })
+}
+
+/// The routines on an agent fragment's `tasks`: what its scheduled records
+/// appended.
+pub(super) fn fired(api: &Api, owner: &crate::Keys, agent: &str) -> Vec<Value> {
+    records(api, owner, agent, "tasks").into_iter().filter(|r| r["body"]["kind"] == "routine").collect()
+}
+
+/// The `cron-now` lever on a fragment: each of its cron schedules, and each
+/// of its scheduled records not paused, due at once (`{due, records}`).
+pub(super) fn cron_now(api: &Api, fragment: &str) -> Result<crate::api::Reply> {
+    api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": fragment, "op": "cron-now" })))
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
+/// The computer put to sleep, asked until it is (a turn's last record may
+/// wake it again): whether it slept, and its last view.
+fn put_to_sleep(s: &Suite, api: &Api, owner: &crate::Keys, id: &str) -> (bool, Value) {
+    std::thread::sleep(QUEUE_DRAIN);
+    let mut last = Value::Null;
+    let slept = s.eventually(Duration::from_secs(90), || {
+        let r = api.signed(owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})));
+        last = r.as_ref().map(|r| r.body.clone()).unwrap_or(Value::Null);
+        last["phase"] == "asleep"
+    });
+    (slept, last)
+}
+
+/// What the routine checks act on: the lane's computer, its agent and chat.
+struct Routined<'a> {
+    owner: &'a crate::Keys,
+    owner_id: &'a str,
+    id: &'a str,
+    chat: &'a str,
+    agent: &'a str,
+    /// The agent fragment's own npub: who its scheduled records append as.
+    agent_npub: &'a str,
+    identity: &'a str,
+    scripted: bool,
+    wake: Duration,
+}
+
+const ROUTINE_AGENT_CHECKS: [&str; 4] = [
+    "the agent schedules a routine on itself through its computer (its own fragment's editor, acting for its owner): it is who added it",
+    "the agent's own schedule is held to the same bounds, saying why",
+    "the agent lists its fragment's schedules",
+    "the agent removes its own schedule",
+];
+
+/// An agent's routines (decision 38): scheduled records on its own agent
+/// fragment's `tasks` (docs/api.md, "Scheduled records"), which its owner
+/// adds with the CLI's `--routine` and the agent adds to itself through its
+/// computer, as that fragment's editor, no agent special case anywhere.
+/// One is kept through its computer's restart; due (the `cron-now`
+/// lever), its record wakes the sleeping computer, and the agent does it in
+/// its chat; removed, it fires no more. (The bounds, pauses and an app's
+/// trigger are the triggers section's, on an app.) Starts awake; ends
+/// awake, its schedules gone.
+fn routine_checks(s: &mut Suite, api: &Api, c: &Routined, say: &dyn Fn(u32, &str) -> Result<crate::api::Reply>) -> Result<()> {
+    let path = format!("/api/f/{}/schedules", c.agent);
+    let list = |api: &Api| api.signed(c.owner, "GET", &path, None).ok().and_then(|r| r.body["schedules"].as_array().cloned()).unwrap_or_default();
+    // its owner, with the CLI's routine: due next new year, so only the lever makes it due
+    let home = s.dir("computers-cli");
+    let config = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment");
+    std::fs::create_dir_all(&config)?;
+    std::fs::write(config.join("config.json"), json!({ "secret_key": c.owner.secret_hex() }).to_string())?;
+    let cli = |s: &Suite, args: &[&str]| -> (Option<i32>, Value) {
+        let out = s.cli(api, &home, args);
+        (out.status.code(), serde_json::from_slice(&out.stdout).unwrap_or_default())
+    };
+    let (exit, r) = cli(s, &["schedule", "add", c.agent, "--routine", "water the plants", "--chat", c.chat, "--cron", "0 0 1 1 *", "--json"]);
+    let first = r["data"]["schedule"].clone();
+    let r1 = first["id"].as_i64().unwrap_or(0);
+    s.ok(
+        "its owner schedules a routine on its agent (`fragment schedule add --routine`): the routine record on its tasks, its schedule in words, its owner as who added it",
+        exit == Some(0)
+            && r["data"]["replayed"] == false
+            && r1 > 0
+            && first["channel"] == "tasks"
+            && first["record"] == routine("water the plants", c.chat)
+            && first["said"] == "every year on January 1 at 00:00 UTC"
+            && first["createdBy"] == c.owner_id
+            && first["nextAt"].as_i64().is_some_and(|n| n > now_ms()),
+        &r,
+    );
+    let (exit, listed) = cli(s, &["schedule", "list", c.agent, "--json"]);
+    let (refused_exit, refused) = cli(s, &["schedule", "add", c.agent, "--routine", "look again", "--chat", c.chat, "--cron", "*/5 * * * *", "--json"]);
+    s.ok(
+        "`fragment schedule list` lists it; a bound the platform refuses is the CLI's invalid_request (exit 1)",
+        exit == Some(0) && listed["data"]["schedules"] == json!([first]) && refused_exit == Some(1) && refused["error"]["code"] == "invalid_request",
+        json!({ "listed": listed, "refused": refused }),
+    );
+
+    // the agent itself, as `fragment schedule` on its computer asks: through
+    // its egress, acting for its owner, as its own fragment's editor (the
+    // stub's `schedule` command)
+    if c.scripted {
+        let answer = |s: &Suite, n: u32, text: &str| -> Result<String> {
+            let r = say(n, text)?;
+            anyhow::ensure!(r.status == 200, "the message m{n} to the chat: {r}");
+            let turn = turn_of(c.agent, c.chat, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
+            let of = || agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity).into_iter().find(|x| x["body"]["turn"] == turn.as_str());
+            s.eventually(c.wake, || of().is_some());
+            Ok(of().and_then(|x| x["body"]["text"].as_str().map(str::to_string)).unwrap_or_default())
+        };
+        let said = answer(s, 300, "schedule add 30 9 * * mon-fri check the shelf")?;
+        let r2: i64 = said.strip_prefix("schedule added ").and_then(|n| n.trim().parse().ok()).unwrap_or(0);
+        let theirs = list(api).into_iter().find(|x| x["id"] == r2).unwrap_or_default();
+        s.ok(
+            ROUTINE_AGENT_CHECKS[0],
+            r2 > 0 && theirs["createdBy"] == c.identity && theirs["channel"] == "tasks" && theirs["record"] == routine("check the shelf", c.chat) && theirs["said"] == "every Monday to Friday at 09:30 UTC",
+            json!({ "said": said, "schedule": theirs }),
+        );
+        let too_often = answer(s, 301, "schedule add */5 * * * * look again")?;
+        s.ok(ROUTINE_AGENT_CHECKS[1], too_often.starts_with("schedule refused") && too_often.contains("at most every 15 minutes") && list(api).len() == 2, &too_often);
+        let listed = answer(s, 302, "schedule list")?;
+        s.ok(ROUTINE_AGENT_CHECKS[2], listed.contains(&format!("{r1} 0 0 1 1 * by {}", c.owner_id)) && listed.contains(&format!("{r2} 30 9 * * mon-fri by {}", c.identity)), &listed);
+        let rm = answer(s, 303, &format!("schedule rm {r2}"))?;
+        s.ok(ROUTINE_AGENT_CHECKS[3], rm == format!("schedule removed {r2}") && list(api).iter().all(|x| x["id"] != r2), &rm);
+    } else {
+        for label in ROUTINE_AGENT_CHECKS {
+            s.skip(label, "it needs the stub's scripted runtime to ask as the agent");
+        }
+    }
+
+    // a restart of its computer (Paul, 2026-10-20: the loop an agent started
+    // in it died at the next one) touches no schedule: they are its fragment's
+    let generation = api.signed(c.owner, "GET", &format!("/api/computers/{}", c.id), None)?.body["generation"].as_u64().unwrap_or(0);
+    let r = api.patient(c.wake + Duration::from_secs(60)).signed(c.owner, "POST", &format!("/api/computers/{}/restart", c.id), Some(&json!({ "generation": generation })))?;
+    s.ok("its computer restarts, and its routine is kept as it was", r.status == 200 && r.body["phase"] == "awake" && list(api) == vec![first.clone()], json!({ "restart": r.body, "schedules": list(api) }));
+
+    // asleep, due: its record on tasks wakes the computer, and the agent does it in the chat
+    let (slept, last) = put_to_sleep(s, api, c.owner, c.id);
+    s.ok("asleep, it waits for its routine", slept, &last);
+    let before = fired(api, c.owner, c.agent).len();
+    let replied_before = agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity).len();
+    let lever = cron_now(api, c.agent)?;
+    let woke = s.eventually(c.wake, || phase(api, c.owner, c.id) == "awake");
+    let done = |recs: &[Value]| {
+        agent_replies(recs, c.identity).iter().skip(replied_before).any(|r| match c.scripted {
+            true => r["body"]["text"].as_str().is_some_and(|t| t.contains("[your routine] water the plants")),
+            false => said_something(r),
+        })
+    };
+    let ran = s.eventually(c.wake + Duration::from_secs(60), || done(&records(api, c.owner, c.chat, "chat")));
+    let posted = fired(api, c.owner, c.agent);
+    s.ok(
+        "due, its schedule appends the routine on the agent's tasks, once, as the agent fragment itself",
+        lever.body["records"] == 1 && posted.len() == before + 1 && posted.last().is_some_and(|p| p["principal"] == c.agent_npub && p["body"] == routine("water the plants", c.chat)),
+        json!({ "lever": lever.body, "fired": posted }),
+    );
+    s.ok("which wakes the sleeping computer, and the agent does it in the chat, asked by its owner", woke && ran, json!(agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity)));
+
+    // removed, it fires no more
+    let (exit, rm) = cli(s, &["schedule", "rm", c.agent, &r1.to_string(), "--json"]);
+    let before = fired(api, c.owner, c.agent).len();
+    let lever = cron_now(api, c.agent)?;
+    std::thread::sleep(Duration::from_secs(3));
+    s.ok(
+        "removed (`fragment schedule rm`), it fires no more",
+        exit == Some(0) && rm["data"]["removed"] == r1 && lever.body["records"] == 0 && fired(api, c.owner, c.agent).len() == before && list(api).is_empty(),
+        json!({ "removed": rm, "lever": lever.body }),
+    );
+    Ok(())
+}
+
 pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("computers", &[crate::Need::Computers, crate::Need::Models]) {
+    if !s.section("computers", &[crate::Need::Computers, crate::Need::Models, crate::Need::Levers]) {
         return Ok(());
     }
     // a hosted run's owner pays a real model, from the run's budget
@@ -1443,28 +1611,20 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/subscriptions"), Some(&json!({ "channel": "chat", "wake": true })))?;
     s.ok("a wake subscription from outside a computer is no wake (it names no URL)", r.status == 400, &r);
 
-    // a routine: its agent fragment's cron, on time, wakes it asleep
-    s.commit(&agent, &[("app.mjs", Some(routine_app(&chat_name).as_bytes())), ("fragment.json", Some(ROUTINE_JSON))]);
-    s.deploy(&agent);
-    std::thread::sleep(QUEUE_DRAIN);
-    // its cron runs every minute, so a routine may wake it before it sleeps:
-    // asked until asleep, and only a routine after that counts
-    let mut last = Value::Null;
-    let slept = s.eventually(Duration::from_secs(90), || {
-        let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})));
-        last = r.as_ref().map(|r| r.body.clone()).unwrap_or(Value::Null);
-        last["phase"] == "asleep"
-    });
-    s.ok("asleep, it waits for its routine", slept, &last);
-    // the stub says the routine's text; a real model says what it likes, in a reply of its own
-    let replied_before = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len();
-    let routine = |recs: &[Value]| match scripted {
-        true => agent_replies(recs, &identity).iter().skip(replied_before).any(|r| echoed(r, "water the plants")),
-        false => agent_replies(recs, &identity).iter().skip(replied_before).any(said_something),
+    // its routines (decision 38): scheduled records on its own agent
+    // fragment, which that fragment's alarm fires, each fire waking it asleep
+    let routined = Routined {
+        owner: &owner,
+        owner_id: &owner_id,
+        id: &id,
+        chat: &chat_name,
+        agent: &agent_name,
+        agent_npub: &agent_npub,
+        identity: &identity,
+        scripted,
+        wake,
     };
-    let ran = s.eventually(Duration::from_secs(150) + if scripted { Duration::ZERO } else { wake }, || routine(&records(api, &owner, &chat_name, "chat")));
-    s.ok("its cron's routine wakes it, and the agent does it in the chat", ran, "");
-    api.signed(&owner, "POST", &format!("/api/f/{agent_name}/pause"), Some(&json!({ "op": "routine", "paused": true })))?;
+    routine_checks(s, api, &routined, &|n, text| say(n, text))?;
 
     // asleep, its agent added to a new chat wakes it, and it follows that
     // chat before anyone speaks there (Paul, 2026-10-03)
@@ -1519,14 +1679,17 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     // the platform crashes while it is awake: a new isolate takes the
-    // computer over (lesson 6), and it answers what comes next, once
+    // computer over (lesson 6), and it answers what comes next, once; its
+    // agent's routine, the platform's own data, is kept, and fires
+    let routines_of = format!("/api/f/{agent_name}/schedules");
+    let r = api.signed(&owner, "POST", &routines_of, Some(&json!({ "cron": "0 0 1 1 *", "channel": "tasks", "record": routine("water the plants again", &chat_name) })))?;
+    let kept = r.body["schedule"].clone();
     api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
     s.crash()?;
     let api = s.start(false)?;
     let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": "m40", "body": { "text": "after the crash" } })))?;
     s.ok("after a crash of the platform, a message to the chat", r.status == 200, &r);
-    // its own turn's replies: a routine's, on its cron minute, may land in
-    // the same window and is no second answer
+    // its own turn's replies
     let turn = turn_of(&agent_name, &chat_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
     let its = |api: &Api| agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().filter(|r| r["body"]["turn"] == turn.as_str()).collect::<Vec<_>>();
     let after = s.eventually(wake, || its(&api).len() == 1);
@@ -1537,6 +1700,17 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         after && replies.len() == 1 && replies[0]["body"]["text"].as_str().is_some_and(|t| t.contains("after the crash")),
         json!(replies),
     );
+    let listed = api.signed(&owner, "GET", &routines_of, None)?;
+    let replied_before = agent_replies(&records(&api, &owner, &chat_name, "chat"), &identity).len();
+    let lever = cron_now(&api, &agent_name)?;
+    let again = |api: &Api| agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().skip(replied_before).any(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("[your routine] water the plants again")));
+    let ran = s.eventually(wake, || again(&api));
+    s.ok(
+        "after a crash of the platform its agent's scheduled routine is kept as it was, and fires",
+        kept["id"].is_i64() && listed.body["schedules"] == json!([kept]) && lever.body["records"] == 1 && ran,
+        json!({ "kept": kept, "listed": listed.body, "lever": lever.body }),
+    );
+    api.signed(&owner, "DELETE", &format!("{routines_of}/{}", kept["id"]), None)?;
     std::thread::sleep(QUEUE_DRAIN);
 
     // a $200 seat's computer stays awake unless its owner lets it sleep

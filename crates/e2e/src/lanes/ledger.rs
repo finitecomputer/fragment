@@ -25,7 +25,8 @@ use crate::Suite;
 const LEDGER_APP: &[u8] = include_bytes!("../../fixtures/ledger.mjs");
 const LEDGER_JSON: &[u8] = include_bytes!("../../fixtures/ledger.json");
 /// A fragment whose cron (due next new year, unless a test makes it due)
-/// and file trigger each run a mutation, and a read `landed` asks.
+/// and file trigger each run a mutation, and a read `landed` asks; and a
+/// channel its scheduled record appends to.
 const TRIGGERS_APP: &[u8] = br#"import { DurableObject } from "cloudflare:workers";
 export class App extends DurableObject {
   tick() { return { ok: true }; }
@@ -35,6 +36,7 @@ export class App extends DurableObject {
 "#;
 const TRIGGERS_JSON: &[u8] = br#"{
   "operations": { "tick": { "kind": "mutation" }, "filed": { "kind": "mutation" }, "notes": { "kind": "query", "role": "viewer" } },
+  "channels": { "pings": { "read": "viewer", "post": "editor" } },
   "triggers": [{ "cron": "0 0 1 1 *", "run": "tick" }, { "files": "notes/**", "run": "filed" }]
 }"#;
 /// GLM-5.3 Flash: the cheap tier's model and the route's vision model
@@ -447,9 +449,13 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     };
     let blocked = |op: &str, via: &str| runs(op).into_iter().find(|r| r["via"] == via && r["status"] == "blocked" && r["error"].as_str().is_some_and(|e| e.contains("read-only")));
     let succeeded = |op: &str, via: &str| runs(op).iter().filter(|r| r["via"] == via && r["status"] == "succeeded").count();
+    // and a scheduled record (docs/api.md, "Scheduled records"), due next new year too
+    let pings = || super::jobs::records(api, &owner, &trig, "pings").len();
+    let scheduled = api.signed(&owner, "POST", &format!("/api/f/{trig}/schedules"), Some(&json!({ "cron": "0 0 1 1 *", "channel": "pings", "record": { "ping": true } })))?;
     lever(api, &trig, "cron-now", json!({}))?;
     let ran = s.eventually(wait, || succeeded("tick", "cron") == 1);
-    s.ok("before, its cron runs (a mutation, as the fragment)", ran, json!(runs("tick")));
+    let pinged = s.eventually(wait, || pings() == 1);
+    s.ok("before, its cron runs (a mutation, as the fragment), and its scheduled record appends", ran && scheduled.status == 200 && pinged, json!({ "tick": runs("tick"), "scheduled": scheduled.body }));
     let back = m(&ledger(api, &owner), "balanceMicros").unsigned_abs() as i64 + USD;
     command(&owner_id, "grant", json!({ "id": "g-back", "micros": back, "by": op_id, "why": "back above zero" }))?;
     let v = ledger(api, &owner);
@@ -486,6 +492,17 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     lever(api, &trig, "cron-now", json!({}))?;
     let cron = s.eventually(wait, || blocked("tick", "cron").is_some());
     s.ok("past the overdraft its cron starts no run: the tick is a blocked run, saying why", cron && succeeded("tick", "cron") == 1, json!(runs("tick")));
+    let said = || {
+        api.signed(&owner, "GET", &format!("/api/f/{trig}/events?tail=50"), None)
+            .ok()
+            .and_then(|r| r.body["events"].as_array().and_then(|l| l.iter().find(|e| e["kind"] == "schedules.blocked").cloned()))
+    };
+    let told = s.eventually(wait, || said().is_some());
+    s.ok(
+        "nor does its scheduled record append: one event says why",
+        told && pings() == 1 && said().is_some_and(|e| e["summary"].as_str().is_some_and(|t| t.contains("did not fire") && t.contains("read-only"))),
+        json!({ "event": said(), "pings": pings() }),
+    );
     s.commit(&tc, &[("notes/past.md", Some(b"past the overdraft"))]);
     let filed = s.eventually(wait, || blocked("filed", "files").is_some());
     s.ok("nor does a file trigger, for a commit to main from outside", filed && succeeded("filed", "files") == 0, json!(runs("filed")));
@@ -504,7 +521,8 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let cron = s.eventually(wait, || succeeded("tick", "cron") == 2);
     s.commit(&tc, &[("notes/after.md", Some(b"after the top-up"))]);
     let filed = s.eventually(wait, || succeeded("filed", "files") == 1);
-    s.ok("and its cron and file triggers start runs again", cron && filed, json!({ "tick": runs("tick"), "filed": runs("filed") }));
+    let pinged = s.eventually(wait, || pings() == 2);
+    s.ok("and its cron and file triggers start runs again, and its scheduled record appends", cron && filed && pinged, json!({ "tick": runs("tick"), "filed": runs("filed"), "pings": pings() }));
     let r = api.signed(&owner, "POST", &format!("/api/f/{trig}/replay"), Some(&json!({ "run": held })))?;
     let replayed = s.eventually(wait, || {
         api.signed(&owner, "GET", &format!("/api/f/{trig}/runs/{held}"), None).is_ok_and(|r| r.body["status"] == "succeeded" && r.body["attempt"] == 2)

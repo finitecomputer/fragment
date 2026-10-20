@@ -92,4 +92,26 @@ async function main() {
   }
 }
 
+// Its routines: the scheduled records on its own `tasks` that ask it
+// something (`{kind: "routine", text, chat}`: docs/chat-records.md), as
+// the platform keeps them (`__schedules`, docs/api.md "Scheduled records":
+// its viewers', as every fragment's). Each says when in words, the next
+// time in this page's own clock, the chat it is done in, and what it is
+// asked. Read only: its owner asks the agent, and the agent adds them
+// (`fragment schedule add --routine`).
+async function routines() {
+  const list = ((await json("__schedules"))?.schedules ?? []).filter((s) => s.channel === "tasks" && s.record?.kind === "routine");
+  if (!list.length) return;
+  const rows = list.map((s) => {
+    const next = s.nextAt ? `next ${new Date(s.nextAt).toLocaleString()}` : "paused";
+    const when = Object.assign(document.createElement("p"), { className: "when", textContent: `${s.said} · in ${s.record.chat} · ${next}` });
+    const item = document.createElement("li");
+    item.append(when, Object.assign(document.createElement("p"), { textContent: s.record.text }));
+    return item;
+  });
+  document.getElementById("routines").replaceChildren(...rows);
+  document.getElementById("routines-section").hidden = false;
+}
+
 main();
+routines();

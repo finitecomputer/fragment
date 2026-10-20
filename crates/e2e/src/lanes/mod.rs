@@ -147,9 +147,8 @@ const LANES: &[Lane] = &[
 /// Balanced by measured time (each section's, as its shard's log prints
 /// it, on CI's runners; run 37534339123): `computers` alone is about 4
 /// minutes, so its shard holds little else, and the others are about 3
-/// minutes each. The slow ones vary from run to run: `computers` waits up
-/// to a minute for its routine's cron minute, and `channels` fills 10 000
-/// records. Shard 3 holds `triggers` and the sections from the cron
+/// minutes each. The slow ones vary from run to run: `channels` fills
+/// 10 000 records. Shard 3 holds `triggers` and the sections from the cron
 /// fragment's deploy (after `effects`) up to it, so its first cron minute
 /// passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [

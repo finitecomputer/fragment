@@ -22,5 +22,8 @@ is chosen by its identity (`site/agent-color.js`, which the chat
 template's page and the shell link to), never stored.
 
 The `tasks` channel is what its computer follows besides its chats
-(docs/chat-records.md): routines, and the platform's `joined` record when
-the agent is added to a fragment.
+(docs/chat-records.md): its routines, and the platform's `joined`
+record when the agent is added to a fragment. A routine is a scheduled
+record on this fragment's `tasks` (docs/api.md, "Scheduled records";
+`fragment schedule add --routine`), which the agent, an editor of its own
+fragment, adds to itself; its page lists them (`__schedules`, read only).
