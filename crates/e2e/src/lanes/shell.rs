@@ -1214,9 +1214,16 @@ fn release_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &
     b.set_cookie(&format!("{}/", api.base), RELEASE_COOKIE, "")?;
     // the page as the node's own release answers it, its composer emptied
     let _ = b.eval_in_frame(page, chat, "(() => { const t = document.getElementById('text'); if (t) { t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); } return true; })()");
-    b.reload(page)?;
-    b.until(page, "!document.getElementById('layout').hidden && !!document.querySelector('#frames iframe')", std::time::Duration::from_secs(30));
+    reload_shell(b, page)?;
     checked
+}
+
+/// The shell reloaded by hand, and up again: its new page's layout shown
+/// and a chat's frame in it (the old page, marked, is not taken for it).
+fn reload_shell(b: &mut Browser, page: &Page) -> Result<bool> {
+    b.eval(page, "(window.__before_reload = true, true)")?;
+    b.reload(page)?;
+    Ok(b.until(page, "!window.__before_reload && !document.getElementById('layout').hidden && !!document.querySelector('#frames iframe')", std::time::Duration::from_secs(30)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1251,8 +1258,8 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
 
     // the shell, fresh on the node's own release: its first chat open, empty, and an app's window
     b.set_cookie(&platform, RELEASE_COOKIE, "")?;
-    b.reload(page)?;
-    b.until(page, "!document.getElementById('layout').hidden && !!document.querySelector('#frames iframe')", wait);
+    let fresh = reload_shell(b, page)?;
+    anyhow::ensure!(fresh && b.until(page, &format!("!!document.querySelector({})", js(&row(chat))), wait), "the shell reloaded, its first chat listed");
     b.click(page, &row(chat))?;
     b.eval(page, &format!("(document.querySelector({})?.click(), true)", js(&format!("#apps [data-key=\"app:{app}\"]"))))?;
     let set = b.until(page, &format!("{} && {window}", shown(chat)), wait) && s.eventually(wait, || b.eval_in_frame(page, chat, COMPOSER_READY).ok() == Some(Value::Bool(true)));
