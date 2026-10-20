@@ -102,6 +102,9 @@ struct Deployment {
     /// (`FRAGMENT_SUPPORT_URL`): an `https:` page or a `mailto:` address
     /// (`fragment_core::computer::support_url_ok`), linked from the shell.
     support_url: Option<String>,
+    /// Verified emails for support chat. The first owns and pays for the chats.
+    #[serde(default)]
+    support_team: Vec<String>,
     /// The address the platform's mail comes from (`FRAGMENT_MAIL_FROM`;
     /// cell/src/mail.rs), on a domain onboarded to Cloudflare Email
     /// Sending (`wrangler email sending enable <domain>`). Without it, the
@@ -613,6 +616,9 @@ fn checked(d: Deployment) -> Result<Deployment> {
     if let Some(u) = d.support_url.as_deref().filter(|u| !fragment_core::computer::support_url_ok(u)) {
         bail!("support_url: {u:?} is no https: page or mailto: address of at most {} visible characters", fragment_core::computer::SUPPORT_URL_MAX_BYTES);
     }
+    if d.support_team.len() > 16 || d.support_team.iter().any(|e| !fragment_core::mail::valid_address(e)) {
+        bail!("support_team: at most 16 plain email addresses");
+    }
     if let Some(f) = &d.mail_from {
         fragment_core::mail::Sender::parse(f).map_err(|e| anyhow::anyhow!("mail_from: {e}"))?;
     }
@@ -953,6 +959,9 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, roo
     if let Some(u) = &d.support_url {
         v.insert("FRAGMENT_SUPPORT_URL".into(), json!(u));
     }
+    if !d.support_team.is_empty() {
+        v.insert("FRAGMENT_SUPPORT_TEAM".into(), json!(d.support_team.join(",")));
+    }
     if let Some(f) = &d.mail_from {
         v.insert("FRAGMENT_MAIL_FROM".into(), json!(f.trim()));
     }
@@ -1117,6 +1126,7 @@ mod tests {
             models: None,
             default_plan: None,
             support_url: None,
+            support_team: vec![],
             mail_from: None,
             computers: None,
             providers: vec![],
@@ -1750,5 +1760,19 @@ mod tests {
         let d = load(&config_file("support-named", &v)).unwrap();
         let n = names(&d, Some("p5")).unwrap();
         assert_eq!(worker_config(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap()["vars"]["FRAGMENT_SUPPORT_URL"], "mailto:help@example.dev");
+    }
+
+    #[test]
+    fn support_staff_is_explicit_bounded_and_rendered() {
+        let mut d = deployment(None, None);
+        let n = names(&d, Some("p5")).unwrap();
+        assert!(worker_config(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap()["vars"].get("FRAGMENT_SUPPORT_TEAM").is_none());
+        d.support_team = vec!["skyler@finite.vip".into(), "paul@finite.vip".into()];
+        assert_eq!(worker_config(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap()["vars"]["FRAGMENT_SUPPORT_TEAM"], "skyler@finite.vip,paul@finite.vip");
+        d.support_team = vec!["not an email".into()];
+        assert!(checked(d).is_err());
+        let mut d = deployment(None, None);
+        d.support_team = vec!["a@example.com".into(); 17];
+        assert!(checked(d).is_err());
     }
 }

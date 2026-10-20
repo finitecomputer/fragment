@@ -301,6 +301,7 @@ impl RegistryCell {
         self.exec(&format!("DELETE FROM consents WHERE {THEIRS}"), theirs(identity))?;
         self.exec(&format!("DELETE FROM agent_fragments WHERE {THEIRS}"), theirs(identity))?;
         self.exec("DELETE FROM subjects WHERE identity = ?", vec![identity.into()])?;
+        self.exec("DELETE FROM support_threads WHERE person = ? OR owner = ?", vec![identity.into(), identity.into()])?;
         self.exec("DELETE FROM pictures WHERE identity = ?", vec![identity.into()])?;
         self.exec("DELETE FROM invite_mails WHERE sharer = ?", vec![identity.into()])?;
         self.wipe_orgs(identity)?;

@@ -1524,7 +1524,7 @@ export function mount(root) {
       cached("empty", sig, () => {
         const wrap = el("div", "empty");
         wrap.append(agents[0] ? face(agents[0], who(agents[0]), "large") : avatar(colorOf(null), "large"), el("h2", null, names.length ? names.join(", ") : "New chat"));
-        wrap.append(el("p", null, !canPost() ? "Nothing has been said here yet." : names.length ? "A fresh start. What should we work on together?" : "No agent is in this chat yet."));
+        wrap.append(el("p", null, !canPost() ? "Nothing has been said here yet." : names.length ? "A fresh start. What should we work on together?" : "Start a conversation. Everyone in this chat can reply."));
         if (canPost() && names.length) {
           const chips = el("div", "suggestions");
           for (const s of SUGGESTIONS) {

@@ -75,6 +75,8 @@ pub struct Config {
     /// a `mailto:` address (`fragment_core::computer::support_url_ok`).
     /// Unset, the shell shows them what to tell whoever runs it.
     pub support_url: Option<String>,
+    /// Verified emails of the support team; the first owns and pays for its chats.
+    pub support_team: Vec<String>,
     /// `FRAGMENT_POLL_INTERVAL_S`: a busy fragment's pass, and the poll backstop (default 300).
     pub poll_interval_ms: i64,
     /// `FRAGMENT_EGRESS_LOCAL=allow`: jobs may fetch private and loopback
@@ -281,6 +283,11 @@ impl Config {
                 assert!(fragment_core::computer::support_url_ok(&u), "FRAGMENT_SUPPORT_URL is an https: page or a mailto: address, not {u:?}");
                 u
             }),
+            support_team: var(env, "FRAGMENT_SUPPORT_TEAM").map(|v| {
+                let emails: Vec<String> = v.split(',').map(|s| s.trim().to_ascii_lowercase()).collect();
+                assert!(emails.len() <= 16 && emails.iter().all(|s| fragment_core::mail::valid_address(s)), "FRAGMENT_SUPPORT_TEAM: at most 16 email addresses");
+                emails
+            }).unwrap_or_default(),
             poll_interval_ms: var(env, "FRAGMENT_POLL_INTERVAL_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(300) * 1000,
             egress_local,
             blob_grace_ms: var(env, "FRAGMENT_BLOB_GRACE_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(7 * 24 * 3600) * 1000,
