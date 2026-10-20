@@ -70,6 +70,7 @@ mod runs_on;
 mod serve;
 mod share;
 mod shell;
+mod support;
 mod stripe;
 mod subscriptions;
 mod wipe;
@@ -618,10 +619,15 @@ async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<Fragmen
     let (askers, own, owners) = futures_util::future::join3(listed(env, asker), listed(env, &agent.id), listed(env, owner)).await;
     let roles = |l: FragmentList| -> HashMap<String, Role> { l.fragments.into_iter().map(|f| (f.name, f.role)).collect() };
     let (own, owners) = (roles(own?), roles(owners?));
-    let fragments = askers?
+    let askers = askers?;
+    let protected = ask_registry(env, &registry::support::Protected { names: askers.fragments.iter().map(|f| f.name.clone()).collect() }).await?;
+    let fragments = askers
         .fragments
         .into_iter()
         .filter_map(|f| {
+            if protected.contains(&f.name) && !own.contains_key(&f.name) {
+                return None;
+            }
             let cap = access::Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied() };
             // the asker's own view (their search's preview and unread, their
             // archiving) stays theirs, as do the listed records their role
@@ -1118,7 +1124,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         },
         // the shell, for everyone: signed out it asks them to sign in;
         // `/settings` opens its settings, `/welcome` a new person's welcome
-        (Method::Get, [""] | ["settings"] | ["welcome"]) => shell::page(&req, env, cfg, &url).await,
+        (Method::Get, [""] | ["settings"] | ["welcome"] | ["support"]) => shell::page(&req, env, cfg, &url).await,
         // the operators' admin page: to anyone else, the 404 below
         (Method::Get, ["admin"]) => shell::admin_page(&req, env, cfg, &url).await,
         (_, ["auth", ..] | ["cli"] | ["cli", "begin" | "approve"]) => {
@@ -1211,6 +1217,10 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         (_, ["api", "seat", rest @ ..]) => {
             let rest = rest.to_vec();
             orgs::seat(req, env, &url, &rest).await
+        }
+        (_, ["api", "support", rest @ ..]) => {
+            let rest = rest.to_vec();
+            support::route(req, env, cfg, &url, &rest).await
         }
         (_, ["api", "org", rest @ ..]) => {
             let rest = rest.to_vec();

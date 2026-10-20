@@ -16,6 +16,7 @@ import { appIcon, icon } from "./icons.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
 import { createViewer } from "./viewer.js";
 import { billingSections, returning, seatGives, seatOffer } from "./billing.js";
+import { createSupport } from "./support.js";
 
 const $ = (id) => document.getElementById(id);
 // New agents run on the cheap tier: GLM-5.3 Flash, DeepSeek V4 Flash its fallback (Paul, 2026-10-09).
@@ -613,7 +614,7 @@ function renderHeading() {
   $("new-chat").hidden = !open || state.guest || !primaryAgent()?.identity;
   $("chat-options").hidden = !open;
   if (!open) return;
-  const title = titleOf(state.current);
+  const title = support.title(state.current) || titleOf(state.current);
   $("chat-title").textContent = title;
   $("chat-title").title = title;
   const frame = state.frames.get(state.current);
@@ -735,16 +736,38 @@ function renderChats() {
     $(id).dataset.tooltip = `${launcherLabel} (⌘K)`;
     $(id).setAttribute("aria-label", launcherLabel);
   }
-  const rows = shown(chats()).sort(newest).map((f) => {
+  const supportThreads = new Map(support.threads().map(t => [t.name, t]));
+  const all = new Map(chats().map(f => [f.name, f]));
+  // Staff see incoming conversations even before opening one grants their
+  // membership. Use the ordinary chat rows, with no separate inbox renderer.
+  for (const t of supportThreads.values()) {
+    if (!all.has(t.name)) all.set(t.name, { name: t.name, preview: t.preview, previewAt: t.at, unread: t.unread });
+  }
+  const rows = shown([...all.values()]).sort(newest).map((f) => {
+    const ticket = supportThreads.get(f.name);
     const active = f.name === state.current && !state.page;
     const row = el("button", `row chat-row${active ? " active" : ""}`);
     row.type = "button";
     row.dataset.key = `chat:${f.name}`;
     row.setAttribute("aria-current", active ? "page" : "false");
-    row.append(el("span", "label", titleOf(f.name)), ...unreadMark(f));
-    row.onclick = () => { openChat(f.name); leaveSidebar(); };
+    const label = el("span", "label", ticket ? ticket.email || "Support conversation" : titleOf(f.name));
+    if (ticket) {
+      row.classList.add("support-chat-row");
+      const copy = el("span", "chat-row-copy");
+      copy.append(label, el("span", "chat-row-preview", f.preview || ticket.preview || "New support conversation"));
+      row.append(copy);
+    } else row.append(label);
+    row.append(...unreadMark(f));
+    row.onclick = () => { if (ticket) support.openThread(f.name); else openChat(f.name); leaveSidebar(); };
     return row;
   });
+  if (support.hasMore()) {
+    const more = el("button", "row support-more", "More support conversations");
+    more.type = "button";
+    more.dataset.key = "support:more";
+    more.onclick = async () => { more.disabled = true; try { await support.more(); } finally { more.disabled = false; } };
+    rows.push(more);
+  }
   patch($("chats"), rows.length ? rows : [el("div", "empty-row", chats().length ? "Every chat is archived" : state.guest ? "Chats shared with you show here" : "Your chats will appear here")]);
 }
 // The agent's own menu: where it is doing something (each chat opens),
@@ -869,6 +892,7 @@ const agentsOwnChat = (agent) => chats().find((f) => own(f) && labelOf(f.name) =
 
 function openChat(name, push = true) {
   if (!byName(name)) return;
+  support.chatOpened(name);
   if (push) at("/");
   state.page = null;
   $("layout").classList.remove("settings-view");
@@ -1860,6 +1884,8 @@ function renderSettingsPage(page, sections) {
   page.onscroll();
 }
 async function openSettings(push = true) {
+  support.close();
+  $("settings-page").classList.remove("support-page");
   if (push) at(SETTINGS);
   state.page = "Settings";
   $("layout").classList.add("settings-view");
@@ -2721,6 +2747,23 @@ async function skillsSection() {
   return s;
 }
 $("settings").onclick = () => openSettings().catch((e) => notice("Settings did not open", e.message));
+const support = createSupport({ api, openChat, load, current: () => state.page ? null : state.current,
+  changed() { renderChats(); renderHeading(); },
+  showPage() {
+    at("/support");
+    state.page = "Support";
+    $("first-run").hidden = true;
+    $("layout").hidden = false;
+    $("layout").classList.add("settings-view");
+    $("frames").hidden = true;
+    const page = $("settings-page");
+    page.classList.add("support-page");
+    page.hidden = false;
+    renderHeading();
+    leaveSidebar();
+    return page;
+  },
+});
 
 // ---- first run: sign in, a seat, then the default agent is made
 // (decision 10); it never goes through settings ----
@@ -3074,6 +3117,7 @@ async function load(changed = false) {
   rosterChanged();
   markSeen();
   renderAgentFaces();
+  support.refresh().catch(() => {});
   for (const f of chats()) if (own(f) && f.title === UNTITLED && f.preview) titleFromFirst(f.name);
   const touched = changed ? new Set(state.fragments.filter((f) => before.get(f.name) !== JSON.stringify(f)).map((f) => f.name)) : null;
   cardsLoad.wait = 0;
@@ -3434,6 +3478,11 @@ async function start(open) {
   const [, mine] = await Promise.all([load(), api("GET", "/api/seat").catch(() => null)]);
   setGuest(!!mine?.guest);
   watchList();
+  if (!open && location.pathname === "/support") {
+    $("first-run").hidden = true;
+    $("layout").hidden = false;
+    return support.open();
+  }
   if (!open && location.pathname === WELCOME) return welcome();
   // the first agent is made at home; settings open as asked, chats or not;
   // a guest makes nothing (decision 49): with nothing shared with them,

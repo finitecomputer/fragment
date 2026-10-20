@@ -4,6 +4,7 @@
   // config from this one (names, routes, the bucket and queues), so a
   // binding is declared here once.
   "name": "fragment",
+  "vars": { "FRAGMENT_SUPPORT_TEAM": "skyler@finite.vip,paul@finite.vip,austin@finite.vip,alexlwn@finite.vip" },
   // entry.mjs is the JavaScript shim around the Rust build (build/index.js):
   // it declares the Durable Object, WorkerEntrypoint and Workflow classes and
   // forwards to Rust, which workers-rs does not wrap for these.

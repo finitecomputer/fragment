@@ -126,6 +126,21 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; }
 .menu button:hover, .menu button:focus-visible { background: var(--bg-hover); outline: none; }
 .menu svg { width: var(--icon-size); height: var(--icon-size); color: var(--text-secondary); }
 .row.settings { color: var(--text-secondary); text-decoration: none; }
+.sidebar-footer { display: flex; align-items: center; gap: 8px; }
+.sidebar-footer .settings { flex: 1; min-width: 0; }
+#support { position: relative; flex: none; color: var(--text-secondary); }
+#support.has-unread::after { content: ""; position: absolute; right: 4px; top: 4px; width: 6px; height: 6px; background: currentColor; border-radius: 50%; }
+.support-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 8px 20px; font-size: 12px; color: var(--text-secondary); border-bottom: 1px solid var(--border); }
+.support-banner[hidden] { display: none; }
+.support-banner a { margin-left: auto; color: inherit; }
+.page.support-page { padding: 28px; overflow: auto; }
+.support-empty { display: flex; min-height: 60vh; max-width: 360px; margin: auto; flex-direction: column; justify-content: center; align-items: center; text-align: center; gap: 12px; }
+.support-eyebrow { font-size: 11px; letter-spacing: .12em; color: var(--text-tertiary); }
+.support-empty h1 { margin: 0; font-size: 24px; font-weight: 500; letter-spacing: -.03em; }
+.support-empty p { margin: 0; color: var(--text-secondary); line-height: 1.6; }
+.support-empty a { margin-top: 12px; color: var(--text-secondary); font-size: 12px; }
+.support-info dt { font-size: 12px; color: var(--text-secondary); margin-top: 16px; }
+.support-info dd { margin: 4px 0 16px; overflow-wrap: anywhere; }
 .row.settings svg { width: var(--icon-size); height: var(--icon-size); fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 /* the share sheet's dialog: the sheet's own card colors (share.rs, its
    --surface), the frame its whole width and as tall as it says (shell.js `share`) */
@@ -627,6 +642,12 @@ iframe[data-blocked] { display: none; }
 #chats { gap: 2px; padding: 0 0 6px; }
 #chats .chat-row { width: 100%; min-height: 32px; padding: 4px 10px; font-size: 14px; color: var(--text-secondary); }
 #chats .chat-row.active { color: var(--text-primary); }
+#chats .support-chat-row { min-height: 58px; padding-top: 9px; padding-bottom: 9px; }
+.chat-row-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 4px; }
+.chat-row-copy .label { flex: none; }
+.chat-row-preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 1.4; color: var(--text-tertiary); }
+.support-chat-row:has(.unread) .label { font-weight: 600; color: var(--text-primary); }
+#chats .support-more { color: var(--text-tertiary); font-size: 12px; }
 @media (max-width: 760px) {
   .sidebar-top { min-height: 32px; }
   .sidebar-new-chat { position: fixed; z-index: 12; right: 24px; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); width: 56px; height: 56px; border: 0; background: #fff; color: #202020; box-shadow: 0 4px 16px rgba(0,0,0,.18), 0 0 0 1px rgba(0,0,0,.06); }

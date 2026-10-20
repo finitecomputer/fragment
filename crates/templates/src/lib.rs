@@ -100,8 +100,9 @@ pub fn shell_page(text: &str, release: &str) -> String {
 /// each with its content type: of the rest of cell/shell/, its pages are
 /// served at their own paths, and its credits and licenses not at all.
 #[cfg(feature = "platform")]
-const SHELL_PUBLISHED: [(&str, &str); 17] = [
+const SHELL_PUBLISHED: [(&str, &str); 18] = [
     ("shell.js", "text/javascript; charset=utf-8"),
+    ("support.js", "text/javascript; charset=utf-8"),
     ("shell.css", "text/css; charset=utf-8"),
     ("layout.js", "text/javascript; charset=utf-8"),
     ("viewer.js", "text/javascript; charset=utf-8"),

@@ -56,6 +56,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let email = format!("shell-{}@e2e.test", crate::api::now_s());
     let session = api.sign_in(&email)?;
+    support_chat(s, api, &session)?;
 
     // the shell's own requests act as the signed-in person
     let r = shell(api, &session, "GET", "/api/identities/me", None, &[])?;
@@ -194,6 +195,69 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     search_follows_reading(s, api)?;
     unread_and_seen(s, api, &session)?;
     list_watch(s, api, &session, &id)
+}
+
+/// Support's directory authorizes independently of the operator/billing API.
+fn support_chat(s: &mut Suite, api: &Api, customer: &str) -> Result<()> {
+    let skyler = api.sign_in("skyler@finite.vip")?;
+    let paul = api.sign_in("paul@finite.vip")?;
+    let stranger = api.sign_in("support-stranger@e2e.test")?;
+    let send = |session: &str, method, path: &str, body: Option<&Value>| shell(api, session, method, path, body, &[]);
+    let made = send(customer, "POST", "/api/support", None)?;
+    let name = made.body["name"].as_str().context("support created a named chat")?;
+    let person = made.body["person"].as_str().context("support names its customer")?;
+    let again = send(customer, "POST", "/api/support", None)?;
+    s.ok("support retries return one private chat per person", made.status == 200 && again.body["name"] == name, &again);
+    let directory = send(&paul, "GET", "/api/support", None)?;
+    s.ok("support staff see incoming customer threads", directory.body["staff"] == true && directory.body["threads"].as_array().is_some_and(|v| v.iter().any(|t| t["name"] == name)), &directory);
+    let info = format!("/api/support/{person}/info");
+    let refused = send(&stranger, "GET", &info, None)?;
+    let self_info = send(customer, "GET", &info, None)?;
+    s.ok("customer details are staff-only, including for the customer", refused.status == 403 && self_info.status == 403, &refused);
+    let details = send(&skyler, "GET", &info, None)?;
+    s.ok("staff can read email, organization and agent details", details.status == 200 && details.body["email"].is_string() && details.body["agents"].is_array(), &details);
+    let refused = send(&stranger, "POST", &format!("/api/support/{person}"), None)?;
+    s.ok("another user cannot join a support thread", refused.status == 403, &refused);
+    let path = format!("/api/f/{name}/channels/chat");
+    let message = json!({ "id": "support-question", "body": { "text": "My agent will not wake up" } });
+    let said = send(customer, "POST", &path, Some(&message))?;
+    let replay = send(customer, "POST", &path, Some(&message))?;
+    s.ok("a customer posts to support without an agent; a retried message is one record", said.status == 200 && replay.body["record"] == said.body["record"] && replay.body["replayed"] == true, &replay);
+    let reply = send(&paul, "POST", &path, Some(&json!({ "id": "support-reply", "body": { "text": "Paul here — I can help." } })))?;
+    let read = send(customer, "GET", &path, None)?;
+    s.ok("a staff reply reaches the customer's chat", reply.status == 200 && read.body["records"].as_array().is_some_and(|v| v.iter().any(|r| r["body"]["text"] == "Paul here — I can help.")), &read);
+    let denied = send(&stranger, "GET", &path, None)?;
+    s.ok("a stranger cannot read the support transcript", denied.status == 403 || denied.status == 404, &denied);
+    // Both the customer's and the staff owner's agents must be explicitly
+    // invited, even when asking on behalf of their human owner.
+    for session in [customer, skyler.as_str()] {
+        let keys = fragment_nip98::Keys::generate();
+        api.approve(session, &keys)?;
+        let owner = api.identity(&keys)?;
+        let (agent, agent_id) = super::delegation::agent_of(api, &keys)?;
+        let read = api.signed(&agent, "GET", &format!("{path}?for={owner}"), None)?;
+        s.ok("a human's agent cannot inherit support transcript access", read.status == 403, &read);
+        let direct = api.signed(&agent, "GET", &path, None)?;
+        s.ok("an uninvited agent cannot read support as itself", direct.status == 403, &direct);
+        let files = api.signed(&agent, "GET", &format!("/api/f/{name}/files?for={owner}"), None)?;
+        s.ok("support files also refuse inherited agent access", files.status == 403, &files);
+        let list = api.signed(&agent, "GET", &format!("/api/fragments?for={owner}"), None)?;
+        s.ok("support is absent from an uninvited agent's delegated list", list.status == 200 && list.body["fragments"].as_array().is_some_and(|fs| fs.iter().all(|f| f["name"] != name)), &list);
+        let member = format!("/api/f/{name}/members/{agent_id}");
+        let add = api.signed(&agent, "PUT", &format!("{member}?for={owner}"), Some(&json!({"role": "viewer"})))?;
+        s.ok("an agent cannot invite itself into support on a human's behalf", add.status == 403, &add);
+        let added = send(&skyler, "PUT", &member, Some(&json!({"role": "viewer"})))?;
+        let read = api.signed(&agent, "GET", &format!("{path}?for={owner}"), None)?;
+        s.ok("a human can explicitly give a bot access to support", added.status == 200 && read.status == 200, &read);
+        let share = api.signed(&agent, "PUT", &format!("/api/f/{name}/visibility?for={owner}"), Some(&json!({"visibility": "public"})))?;
+        s.ok("an invited agent cannot publish support on its owner's behalf", share.status == 403, &share);
+        let removed = send(&skyler, "DELETE", &member, None)?;
+        let read = api.signed(&agent, "GET", &format!("{path}?for={owner}"), None)?;
+        s.ok("removing the bot removes support access despite its owner's membership", removed.status == 200 && read.status == 403, &read);
+    }
+    let csrf = shell(api, customer, "POST", "/api/support", None, &[("sec-fetch-site", "same-site".into())])?;
+    s.ok("a fragment's origin cannot provision support through the shell session", csrf.status == 401, &csrf);
+    Ok(())
 }
 
 /// A chat's `unread` in a person's list (docs/api.md, Control API): the

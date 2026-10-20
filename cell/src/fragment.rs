@@ -889,6 +889,21 @@ impl FragmentCell {
         // Every route below is the router's: decoded once, from headers only it sets.
         let Routed { name: routed_name, url, signed, credential } = Routed::from_headers(req.headers())?;
         let caller = Caller { signed, unresolved: credential, url, site: path.starts_with("/serve/") };
+        // Support is person-to-person unless a human explicitly adds an agent.
+        // Resolve site credentials too, so files and sockets obey the same rule.
+        let mut caller = self.identified(&caller, &routed_name).await?.into_owned();
+        if caller.signed.as_ref().is_some_and(|s| s.kind == fragment_proto::IdentityKind::Agent) {
+            let protected = crate::ask_registry(&self.env, &crate::registry::support::Protected { names: vec![routed_name.clone()] }).await?;
+            if !protected.is_empty() {
+                let agent = caller.signed.as_mut().expect("the agent checked above");
+                if self.member_role(&agent.id)?.is_none() {
+                    return Err(CellError::new(ErrorCode::Forbidden, "support chats require a human to explicitly add the agent"));
+                }
+                // Even an invited agent cannot borrow a human's ownership to
+                // invite other agents, publish the chat, or expand its access.
+                agent.acting_for = None;
+            }
+        }
         // every request the router hands a fragment is its owner's to pay for
         self.count_request();
         self.meter_soon().await;

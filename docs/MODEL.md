@@ -260,6 +260,7 @@ Every change is checked against this table.
 
 | Thing | Source of truth | Copies must be |
 |---|---|---|
+| A user's support conversation | Registry `support_threads`: one reserved name and owner per customer; messages and members in that chat fragment | Human-only by default: agents need explicit membership and cannot borrow human access or sharing authority. The shell's inbox is a paged view; email, org and bot names are read from their existing sources, never copied into the directory |
 | File bytes, their history, `main` and `live` | code.storage git | a local folder is a disposable working copy |
 | Tree index (path, size, SHA per pinned commit) | derived from git | in the cell's SQLite; names its pinned SHA; moved by the platform's own moves (its commits, a deploy), a writer's refresh after its push, or the poll backstop |
 | Manifest and declared operations | `fragment.json` in git | the cell's copy at the pin; an invalid one at a new pin keeps the last good and says why (`status.code.error`) |

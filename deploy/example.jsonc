@@ -143,6 +143,9 @@
   // or a mailto address, linked from the shell's notice. Without it, the
   // shell shows them what to tell whoever runs the deployment.
   // "support_url": "mailto:help@example.dev",
+  // Support chat's verified accounts; the first owns/pays for private chat fragments.
+  // That account must sign in and hold a seat before the first support chat.
+  // "support_team": ["skyler@finite.vip", "paul@finite.vip", "austin@finite.vip", "alexlwn@finite.vip"],
   // The sender the platform's mail (invites, seats) comes from: a bare
   // address or an unquoted Name <address> (no comments or lists), on a
   // domain onboarded to Cloudflare Email Sending (`wrangler email sending

@@ -152,6 +152,14 @@ speaking Cloudflare's APIs) returns once this product works.
    agent's bridge implement this through ordinary channels. Other
    people collaborate with you in other fragments, not in chats.
 
+   Support exception (Skyler, 2026-10-19): the sidebar's support icon
+   opens a private human chat with Finite's support team, one per user.
+   Staff see a shared inbox and a staff-only account-info control. These
+   are ordinary chat fragments, owned and paid for by the configured
+   support lead, usable without an agent. The registry reserves their
+   names; the shell uses the existing chat page and channels. The fallback
+   is support@finite.computer (docs/api.md, Support).
+
    Status, 2026-10-07 (branch `claude/agents-ask-each-other`): a chat's
    `@` lists all of its owner's agents, the chat's first; one not in the
    chat is added (an editor, by the shell once its person confirms it in

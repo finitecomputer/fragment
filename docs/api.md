@@ -1,5 +1,57 @@
 # fragment wire contract
 
+## Support
+
+`/support` is the shell's support entry. The footer icon opens a user's
+private conversation or, for support staff, an incoming conversation.
+Staff see each customer thread in the ordinary left-hand chat list, named
+by customer email with a message preview and unread count. The email
+fallback is `support@finite.computer`. Support works without a computer.
+
+`FRAGMENT_SUPPORT_TEAM` is a comma-separated list of at most 16 verified
+account emails (`support_team` in the deployment config). It is empty
+unless configured. Local dev names skyler@finite.vip, paul@finite.vip,
+austin@finite.vip and alexlwn@finite.vip. The first account must have
+signed in and be allowed to create fragments: it owns and pays for the
+support chats. Support staff gain no billing/operator privileges.
+
+| Route | Who | Answer |
+|---|---|---|
+| `GET /api/support?after=<cursor>` | person | `{staff, threads, next}`: their own thread, or staff's directory, newest-created first, 50 per page; rows name `person`, `name`, `email`, `preview`, `at`, `unread` |
+| `POST /api/support` | person | Opens or creates their one thread; `{name, person, staff}` |
+| `POST /api/support/<person>` | that person or support staff | Opens the existing thread and ensures the currently registered team and customer are members |
+| `GET /api/support/<person>/info` | support staff | Current `email`, `org`, `agents` (their live names), only for a person with a support thread |
+
+These requests take no body. They use the same authenticated caller and
+same-origin shell checks as other APIs; agents cannot use them. Staff
+eligibility is resolved from verified emails on every request. A staff
+member who first signs in later joins a conversation when opening it.
+Changing the team config does not revoke existing fragment memberships:
+the owner must revoke those through the membership API as well.
+
+The registry reserves one random fragment name per user before any
+asynchronous work. Repeated opens resume that reservation. The directory
+holds no messages or copied customer details. The private chat fragment
+holds membership and its ordinary `chat` channel, including message
+idempotency and unread tracking. The first staff account owns it; everyone
+else is a viewer who can post, but cannot change code or membership.
+Provisioning refuses a conversation whose ownership or privacy changed.
+Support is human-only by default: agents cannot inherit access from a
+customer or staff member, including through `for=<person>`, and uninvited
+support threads are omitted from delegated fragment lists. A human owner
+must explicitly add an agent as a member. In support, an invited agent
+acts only with its own membership, never borrowed human authority to share
+or publish the conversation. Removing it revokes future access; it cannot
+erase anything the agent already read. This applies to existing support
+threads too, using the registry's directory rather than a name convention.
+The chat template does not copy human messages into agent runtime memory
+or brains. Inviting a bot gives it transcript access and may let its runtime
+retain what it reads; selectively copying a message to a brain or another
+chat is a separate, deliberate human action.
+Deleting the owner or customer removes their directory entry; the normal
+wipe removes owned fragments and memberships. The shell polls the directory
+every 15 seconds while visible, and chat messages use existing live channels.
+
 The cell (`cell/`, Rust on Cloudflare Workers) answers everything below;
 the CLI and the browser library are its clients. Errors are `{"error":
 "<code>", "message": "..."}` (codes in `crates/proto`). A platform object
