@@ -41,6 +41,7 @@ pub mod ratelimit;
 pub mod registry;
 pub mod release;
 pub mod roundtrip;
+pub mod schedule;
 pub mod schema;
 pub mod seal;
 pub mod search;

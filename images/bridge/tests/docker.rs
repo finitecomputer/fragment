@@ -1713,7 +1713,10 @@ async fn a_tools_temp_files_are_its_work() {
 /// sets PATH anew, without the image's `/opt/hermes/bin`; the image puts
 /// `hermes` in `/usr/local/bin` (images/hermes/Dockerfile). Pinned that
 /// it is the image's that the terminal finds, so the day Hermes' login
-/// shell keeps the image's PATH this fails and that file goes.
+/// shell keeps the image's PATH this fails and that file goes. Invalid
+/// (Paul, 2026-10-20: an agent asked to check something hourly had no
+/// scheduler that lasted): `hermes cron` in its terminal is refused (exit
+/// 2), saying to add a schedule (`fragment schedule add`) instead.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn an_agent_runs_hermes_by_name() {
@@ -1747,6 +1750,13 @@ async fn an_agent_runs_hermes_by_name() {
     }
     let found = said(&terminal, "found");
     assert_eq!(found, "/usr/local/bin/hermes", "its terminal found Hermes' CLI at {found:?}: at /opt/hermes/bin/hermes, Hermes' login shell keeps the image's PATH now, and /usr/local/bin/hermes (images/hermes/Dockerfile) can go");
+    // Hermes' own scheduler is off (decision 38): in its terminal, `hermes
+    // cron` is refused, pointing at the platform's routines; `--version`
+    // passed through above
+    let cron = tool_said(&fake, &chat, &c, "run: hermes cron list 2>&1; echo cron-exit=$?").await;
+    eprintln!("by name: hermes cron said {cron:?}");
+    assert_eq!(said(&cron, "cron-exit"), "2", "the image's hermes refuses `hermes cron`: {cron:?}");
+    assert!(cron.contains("fragment schedule add --routine"), "and says to add a schedule instead: {cron:?}");
 }
 
 /// Goal (Paul on p5, 2026-10-09: "'other' type your answer for questions

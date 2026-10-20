@@ -752,6 +752,27 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let (exit, v) = refused(s, &["call", &name, "measure", "--input", "@/nowhere/at-all.json", "--json"]);
     s.ok("a file that is not there is invalid_usage (exit 2)", exit == Some(2) && v["error"]["code"] == "invalid_usage", &v);
+    // `fragment schedule` (docs/api.md, "Scheduled records"; the triggers
+    // section adds, fires and removes them on an app, the computers section
+    // an agent's): off a computer it names its fragment, a record is JSON,
+    // and an app lists none and keeps none on a channel that takes no posts
+    let (unnamed_exit, unnamed) = refused(s, &["schedule", "list", "--json"]);
+    let (listed_exit, listed) = refused(s, &["schedule", "list", &name, "--json"]);
+    let (bad_exit, bad) = refused(s, &["schedule", "add", &name, "--cron", "0 * * * *", "--channel", "room", "--record", "{not json", "--json"]);
+    let (room_exit, room) = refused(s, &["schedule", "add", &name, "--cron", "0 * * * *", "--channel", "room", "--record", r#"{"said":"hi"}"#, "--json"]);
+    s.ok(
+        "fragment schedule: no fragment named off a computer, and a record that is no JSON, are invalid_usage (exit 2); an app lists none, and schedules none on a channel that takes no posts (invalid_request, exit 1)",
+        unnamed_exit == Some(2)
+            && unnamed["error"]["code"] == "invalid_usage"
+            && bad_exit == Some(2)
+            && bad["error"]["code"] == "invalid_usage"
+            && listed_exit == Some(0)
+            && listed["data"]["schedules"] == json!([])
+            && room_exit == Some(1)
+            && room["error"]["code"] == "invalid_request"
+            && room["error"]["message"].as_str().is_some_and(|m| m.contains("takes no posts")),
+        json!({ "unnamed": unnamed, "bad": bad, "listed": listed, "room": room }),
+    );
     // `fragment mcp`: the described operations as an MCP server's tools, over stdio
     let mcp = |write: bool, calls: &[(&str, Value)]| -> Result<Vec<Value>> {
         let mut args = vec!["mcp", name.as_str()];

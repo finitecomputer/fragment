@@ -262,8 +262,10 @@ pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64, screen_i
     // bridge's prompt does. Slash confirmations stay off: `/new` from the
     // menu asks nothing.
     y.push_str(&format!("approvals:\n  mode: \"off\"\n  timeout: {card_timeout_s}\n  destructive_slash_confirm: false\n"));
-    // Hermes' own cron is off: an agent's routines are its fragment's cron
-    // (decision 38). A clarify's card waits as long as the bridge's prompt
+    // Hermes' own cron is off: an agent's routines are scheduled records on
+    // its own agent fragment (decision 38: `fragment schedule`, which the
+    // platform skill's page teaches; the image's `hermes` refuses `cron`,
+    // images/hermes/Dockerfile). A clarify's card waits as long as the bridge's prompt
     // does, as an approval's (Hermes' default is an hour, the bridge's too).
     y.push_str(&format!("agent:\n  disabled_toolsets: [\"cronjob\"]\n  clarify_timeout: {card_timeout_s}\n"));
     // The agent asks its people about outcomes alone, in plain words

@@ -88,6 +88,12 @@ Bodies are JSON. `api.rs` has one method for each.
 | `PUT /api/f/{f}/blobs/{sha256}` | the bytes, `content-type` the file's | a reply's files, before its record |
 | `GET /api/f/{f}/blobs/{sha256}` | | a message's files (at most 25 MiB), checked against their hash |
 
+The script runtime (the stub's) also calls, as its agent acting for its
+owner, `GET|POST /api/f/{agent}/schedules?for=` and `DELETE
+/api/f/{agent}/schedules/{id}?for=` on its own fragment (its `schedule`
+command: docs/api.md, "Scheduled records"), as `fragment schedule` does
+on a computer.
+
 `hermes-boot` also calls, as each agent, on its own fragment:
 `GET /api/f/{agent}/files`, `GET /api/f/{agent}/file?path=` (its
 `SOUL.md`, `memories/`, `skills/`, `agent.json`), and

@@ -558,10 +558,12 @@ impl FragmentCell {
                 json!({ "ok": true })
             }
             Some("cron-now") => {
-                // every schedule due now, so a test need not wait for its minute
+                // every cron schedule and every scheduled record not
+                // paused due now, so a test need not wait for its minute
                 let due = self.rows("UPDATE schedules SET next_at = ? RETURNING idx", vec![SqlStorageValue::Integer(js::now_ms())])?.len();
+                let records = self.records_due_now()?;
                 self.schedule().await?;
-                json!({ "due": due })
+                json!({ "due": due, "records": records })
             }
             Some("poll-now") => {
                 // the next alarm is a poll pass (the blob collection's), so a

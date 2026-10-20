@@ -259,10 +259,20 @@ COPY --from=cli /out/fragment /usr/local/bin/fragment
 # Debian's /etc/profile sets a user's PATH to /usr/local/bin:/usr/bin:/bin:…,
 # dropping the image's /opt/hermes/bin, which Hermes puts first. Upstream
 # links its other tools into /usr/local/bin (node, npm, python3, rg,
-# ffmpeg), not hermes.
+# ffmpeg), not hermes. Hermes' own scheduler is off (decision 38: an
+# agent's routines are scheduled records on its own fragment, `fragment
+# schedule`), so the shim
+# refuses `cron` anywhere among its words, saying what to run instead: a job
+# Hermes kept in the container would die at its next restart or sleep.
 COPY --chmod=755 <<'EOF' /usr/local/bin/hermes
 #!/bin/sh
 # Hermes' CLI on a login shell's PATH (images/hermes/Dockerfile).
+for word in "$@"; do
+  if [ "$word" = cron ]; then
+    echo 'hermes cron is off on a Fragment computer: anything later or recurring is a schedule on yourself, which the platform keeps through restarts and sleeps: fragment schedule add --routine "what to do" --chat <chat> --cron "0 * * * *" (fragment schedule --help)' >&2
+    exit 2
+  fi
+done
 exec /opt/hermes/bin/hermes "$@"
 EOF
 COPY images/hermes/preload.py /opt/fragment/preload.py

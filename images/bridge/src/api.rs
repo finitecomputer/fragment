@@ -481,6 +481,27 @@ impl Api {
         Ok(v["commit"].as_str().unwrap_or("").to_string())
     }
 
+    /// `GET /api/f/{name}/schedules?for=`: a fragment's scheduled records
+    /// (docs/api.md, "Scheduled records"), as the agent acting for its
+    /// owner, as `fragment schedule list` asks on a computer. The script
+    /// runtime's `schedule` (the stub's).
+    pub async fn schedules(&self, agent: &str, owner: &str, fragment: &str) -> Result<Value, ApiError> {
+        self.json(Method::GET, &format!("/api/f/{}/schedules?for={}", name(fragment)?, encode(owner)), Some(agent), None).await
+    }
+
+    /// `POST /api/f/{name}/schedules?for= {cron, channel, record}`: a
+    /// scheduled record, as the agent acting for its owner (`{schedule,
+    /// replayed}`).
+    pub async fn add_schedule(&self, agent: &str, owner: &str, fragment: &str, cron: &str, channel: &str, record: &Value) -> Result<Value, ApiError> {
+        let body = json!({ "cron": cron, "channel": channel, "record": record });
+        self.json(Method::POST, &format!("/api/f/{}/schedules?for={}", name(fragment)?, encode(owner)), Some(agent), Some(body)).await
+    }
+
+    /// `DELETE /api/f/{name}/schedules/{id}?for=`: one of them removed.
+    pub async fn remove_schedule(&self, agent: &str, owner: &str, fragment: &str, id: u64) -> Result<Value, ApiError> {
+        self.json(Method::DELETE, &format!("/api/f/{}/schedules/{id}?for={}", name(fragment)?, encode(owner)), Some(agent), None).await
+    }
+
     /// `GET /f/{name}/__live`, as the agent.
     pub async fn live(&self, agent: &str, fragment: &str) -> Result<ClientWs, String> {
         let fragment = name(fragment).map_err(|e| e.to_string())?;

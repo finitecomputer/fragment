@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use sha2::{Digest, Sha256};
 
-use super::computers::{agent_replies, newest_save, phase, routine_app, told, turn_of, work_of, AGENT_JSON, CHAT_JSON, QUEUE_DRAIN, ROUTINE_JSON};
+use super::computers::{agent_replies, cron_now, newest_save, phase, told, turn_of, work_of, AGENT_JSON, CHAT_JSON, QUEUE_DRAIN};
 use super::jobs::records;
 use crate::api::{Api, Call, Socket};
 use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_ENV, SWAP_CONNECTION_HOST, SWAP_KEYS};
@@ -29,8 +29,8 @@ pub const SECTION: &str = "hermes";
 const WAKE: Duration = Duration::from_secs(300);
 /// One Hermes turn against the scripted model.
 const TURN: Duration = Duration::from_secs(120);
-/// A routine's cron minute, and the wake it starts.
-const ROUTINE: Duration = Duration::from_secs(420);
+/// A routine made due, to Hermes' reply: the wake it starts, and its turn.
+const ROUTINE: Duration = Duration::from_secs(WAKE.as_secs() + TURN.as_secs());
 /// An agent assigned to the awake computer, to its first reply: the image
 /// reads its agents every 3 s, writes the new one's profile, and has its
 /// gateway serve it; its bridge follows the agent within a second of that
@@ -794,21 +794,31 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     std::thread::sleep(Duration::from_secs(5));
     s.ok("and the lead does not", agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == lead_before, "");
 
-    // a routine: the second agent's cron wakes the sleeping computer on time.
-    // Its cron runs each minute from its deploy: one answered awake first,
-    // so the sleep comes a minute before the next
-    s.commit(&maple, &[("fragment.json", Some(ROUTINE_JSON)), ("app.mjs", Some(routine_app(&chat_name).as_bytes()))]);
-    s.deploy(&maple);
-    let routines =|| agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id).into_iter().filter(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("water the plants"))).count();
-    let awake_routines = routines();
-    s.eventually(ROUTINE, || routines() > awake_routines);
+    // a routine (decision 38): the second agent adds its own with the
+    // fragment CLI in its terminal, as its platform skill teaches (the
+    // scripted model runs the command); asleep, the routine due (the lever:
+    // it is due next new year) wakes the computer, and Hermes does it in the
+    // lead's chat
+    let r = api.signed(&owner, "POST", &format!("/api/f/{grove_name}/channels/chat"), Some(&json!({ "id": "g3", "body": { "text": format!("run: fragment schedule add --routine 'water the plants' --chat {chat_name} --cron '0 0 1 1 *'") } })))?;
+    let added = turn_of(&maple_name, &grove_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
+    s.eventually(TURN, || grove_ended(&added).is_some());
+    let theirs = api.signed(&owner, "GET", &format!("/api/f/{maple_name}/schedules"), None)?;
+    s.ok(
+        "Hermes schedules a routine on itself with `fragment schedule add --routine` in its terminal, as the agent, acting for its owner",
+        theirs.body["schedules"].as_array().is_some_and(|l| {
+            l.len() == 1 && l[0]["createdBy"] == maple_id.as_str() && l[0]["channel"] == "tasks" && l[0]["record"] == json!({ "kind": "routine", "text": "water the plants", "chat": chat_name })
+        }),
+        json!({ "schedules": theirs.body, "reply": maple_reply(&added) }),
+    );
+    let routines = || agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id).into_iter().filter(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("water the plants"))).count();
     std::thread::sleep(QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     let r = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?;
     s.ok("asleep, it waits for the routine", r.body["phase"] == "asleep", &r);
     let routine_before = routines();
+    let lever = cron_now(api, &maple_name)?;
     let ran = s.eventually(ROUTINE, || routines() > routine_before);
-    s.ok("its cron's routine wakes it, and Hermes does it in the chat", ran, json!(agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id)));
+    s.ok("its routine, due, wakes it, and Hermes does it in the chat", lever.body["records"] == 1 && ran, json!(agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id)));
 
     std::thread::sleep(QUEUE_DRAIN);
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;

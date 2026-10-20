@@ -675,10 +675,18 @@ in an hour pauses its push (the debt ledger has both).
 { "kind": "routine", "text": "Water the plants", "chat": "<chat fragment>" }
 ```
 
-A routine (decision 38): the agent fragment's cron posts it, which wakes
-the computer; the agent takes it as a turn in `chat`, asked by its
-owner. One older than an hour when its computer first reads it is
-skipped, as cron skips a missed run.
+A routine (decision 38): a scheduled record on the agent fragment's
+`tasks` (docs/api.md, "Scheduled records"; `fragment schedule add
+--routine`, which builds this body) appends it, as the fragment itself,
+at each minute its cron names, keyed by the schedule and that minute,
+which wakes the computer; the agent takes it as a turn in `chat`, asked
+by its owner. One older than an hour when its computer first reads it is
+skipped, as cron skips a missed run. Whoever may edit the agent fragment
+may schedule one: its owner, the agent itself (an editor of its own
+fragment), and the owner's other agents acting for the owner, each with
+the owner's authority there. Such a fire starts a turn at no hop, so
+where a hop count cannot bound a loop, the schedule's own bounds do (at
+most every 15 minutes, 32 a fragment).
 
 **The agent's hello.** The shell posts one as its owner, with the id
 `hello`, once it has made an agent and added it to its chat (the first

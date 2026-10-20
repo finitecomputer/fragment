@@ -36,6 +36,7 @@
 //!   GET    /api/runs?status=&op=  /api/runs/<id>   viewer
 //!   POST   /api/replay  POST /api/pause   editor
 //!   GET    /api/triggers                  viewer
+//!   GET /api/schedules   viewer; POST /api/schedules  PUT|DELETE /api/schedules/<id>   editor (schedules.rs)
 //!   POST   /api/inbox                     the inbox token (no signature)
 //!   *      /serve/<path>                  the site, `__files`, `__file`, `__op`, `__watch`
 //!   POST   /job/advance|effect|finish     a run's Workflow (jobs.rs); never routed from outside
@@ -1009,6 +1010,18 @@ impl FragmentCell {
                 self.pause(&caller, body)
             }
             (Method::Get, ["api", "triggers"]) => self.triggers_api(&caller),
+            // its scheduled records (schedules.rs): viewers list, editors change
+            (Method::Get, ["api", "schedules"]) => self.schedules_api(&caller),
+            (Method::Post, ["api", "schedules"]) => {
+                let body = body_json(&mut req).await?;
+                self.add_schedule(&caller, body).await
+            }
+            (Method::Put, ["api", "schedules", id]) => {
+                let body = body_json(&mut req).await?;
+                let id = id.to_string();
+                self.set_schedule(&caller, &id, body).await
+            }
+            (Method::Delete, ["api", "schedules", id]) => self.remove_schedule(&caller, id),
             // its app's database, for its owner (export.rs)
             (Method::Get, ["api", "database"]) => self.database(&caller, query("table"), query("offset")).await,
             (Method::Post, ["api", "subscriptions"]) => {
@@ -1224,7 +1237,7 @@ impl FragmentCell {
 
     /// The alarm runs an ended life's cleanup (ended.rs) whether or not a
     /// life was made since; then the life's index, search, joined and
-    /// delivery outboxes, due schedules, queued runs, and the pass: the
+    /// delivery outboxes, due schedules (the code's and its records'), queued runs, and the pass: the
     /// trims, the poll backstop (while the pins may lag), the blob
     /// collection, running runs checked, and the storage sample. The next
     /// pass is a day away, or within the poll interval while the fragment

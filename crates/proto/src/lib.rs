@@ -207,6 +207,30 @@ pub mod limits {
     pub const AUTO_PAUSE_WINDOW_MS: i64 = 10 * 60 * 1000;
     /// … or after this many triggered runs within an hour.
     pub const TRIGGERED_RUNS_PER_HOUR: u64 = 120;
+    /// A fragment's scheduled records (docs/api.md, "Scheduled records"):
+    /// data schedules its editors add at run time, at most this many. The
+    /// same bound as its code's triggers (`TRIGGERS_MAX`): a list a person
+    /// reads, and a small alarm pass. What their fires start is its
+    /// owner's ledger's to bound.
+    pub const RECORD_SCHEDULES_MAX: usize = 32;
+    /// The closest two fires of one scheduled record may be, in minutes:
+    /// every 15 at most often. A record is what wakes a computer that
+    /// follows its channel (an agent's `tasks`: a turn of model calls, and
+    /// a computer that then stays awake 20 idle minutes, docs/computers.md)
+    /// and what starts an app's channel triggers' runs, all its owner's to
+    /// pay for, and a schedule is added at run time, by any editor (an
+    /// agent among them), with no deploy. At 15 minutes one already keeps
+    /// a computer awake around the clock (about $46 a month at
+    /// `2vcpu-6gib`'s $0.064224 an hour) and makes 96 turns a day; every 5
+    /// minutes would make 288 and buy no freshness a person notices. What
+    /// must run more often is code's: an app's cron trigger and its job,
+    /// which the trigger breakers watch (`TRIGGERED_RUNS_PER_HOUR`).
+    pub const RECORD_SCHEDULE_EVERY_MIN_MINUTES: i64 = 15;
+    /// A scheduled record's body, as JSON: an instruction of a paragraph or
+    /// two (an agent's routine) or a small payload a job reads, well under
+    /// a channel record's `RECORD_BODY_MAX_BYTES`, and every fire stores
+    /// it again.
+    pub const RECORD_SCHEDULE_BODY_MAX_BYTES: usize = 4 * 1024;
     /// Sign-ins begun and not yet finished that the platform keeps when the
     /// fleet does not say (`FRAGMENT_SIGNINS_PENDING_MAX`): each is good for
     /// ten minutes, so the oldest is let go only past about 166 starts a
@@ -1758,6 +1782,62 @@ pub struct RunList {
 pub struct SetPaused {
     pub op: String,
     pub paused: bool,
+}
+
+/// `POST /api/f/<name>/schedules` (editor): a scheduled record (docs/api.md,
+/// "Scheduled records"): at each minute `cron` names (UTC), the fragment
+/// appends `record` to its channel `channel`, as itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddSchedule {
+    pub cron: String,
+    pub channel: String,
+    pub record: Value,
+}
+
+/// `PUT /api/f/<name>/schedules/<id>` (editor): a schedule paused (it fires
+/// no more until resumed) or resumed (from its next minute after now).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetSchedule {
+    pub paused: bool,
+}
+
+/// A scheduled record, as a fragment's viewers read it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Schedule {
+    pub id: i64,
+    pub cron: String,
+    /// Its schedule in words (`fragment_core::schedule::said`).
+    pub said: String,
+    pub channel: String,
+    /// The record's body each fire appends.
+    pub record: Value,
+    /// Who added it (an editor).
+    pub created_by: String,
+    pub created_at: i64,
+    pub paused: bool,
+    /// When it fires next (ms since the epoch); none while paused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_at: Option<i64>,
+    /// When it last fired; none before its first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_at: Option<i64>,
+}
+
+/// `GET /api/f/<name>/schedules` (viewer): oldest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleList {
+    pub schedules: Vec<Schedule>,
+}
+
+/// An add's answer: the schedule, and whether the same one was there
+/// already (the same cron, channel and record: added again, it is that one).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleAdded {
+    pub schedule: Schedule,
+    pub replayed: bool,
 }
 
 /// `POST /api/f/<name>/replay` (editor): runs a held or blocked run again

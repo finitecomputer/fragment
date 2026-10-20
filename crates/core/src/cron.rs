@@ -123,6 +123,32 @@ impl Cron {
         }
     }
 
+    /// The fewest minutes between two of its fires: the gaps between the
+    /// minutes of a day its minute and hour fields name, and the gap from a
+    /// day's last to the next day's first, counted as though every next day
+    /// fired. Never more than the truth (its day fields only take fires
+    /// away), so a bound on how often it fires holds against it
+    /// (`crate::schedule`).
+    pub fn closest_minutes(&self) -> i64 {
+        // bounded: the minutes of one day
+        let times: Vec<i64> = (0..24).filter(|h| self.hour & (1 << h) != 0).flat_map(|h| (0..60).filter(|m| self.minute & (1 << m) != 0).map(move |m| h * 60 + m)).collect();
+        assert!(!times.is_empty() && times.len() <= 24 * 60, "a parsed schedule names some minute of the day: {self:?}");
+        let across_midnight = times[0] + 24 * 60 - times[times.len() - 1];
+        times.windows(2).map(|w| w[1] - w[0]).fold(across_midnight, i64::min)
+    }
+
+    /// When a schedule fires after its fire due at `at`, seen at `now`: its
+    /// first minute after both, so a fire the alarm came to late is the one
+    /// fire, and the minutes it missed are skipped, as cron skips a missed
+    /// run. A resumed schedule's is the same, `at` its resume. The one rule
+    /// for a code's cron trigger and a scheduled record (`crate::schedule`).
+    /// `None`: it never fires again within `next_after`'s years.
+    pub fn next_fire(&self, at: i64, now: i64) -> Option<i64> {
+        let next = self.next_after(at.max(now))?;
+        assert!(next > at && next > now, "a schedule's next fire is after its last and after now");
+        Some(next)
+    }
+
     /// The first minute strictly after `after_ms` (Unix ms) that matches,
     /// within about eight years; `None` if there is none.
     pub fn next_after(&self, after_ms: i64) -> Option<i64> {
@@ -187,6 +213,36 @@ mod tests {
 
     fn civil_days(y: i64, m: u32, d: u32) -> i64 {
         (0..40_000).find(|&n| civil(n) == (y, m, d)).unwrap()
+    }
+
+    /// Valid: the closest two fires within a day, across midnight, and of a
+    /// schedule that fires once a day. Its day fields never make it more
+    /// than the truth.
+    #[test]
+    fn closest_minutes() {
+        let closest = |expr: &str| Cron::parse(expr).unwrap().closest_minutes();
+        assert_eq!(closest("* * * * *"), 1);
+        assert_eq!(closest("*/15 * * * *"), 15);
+        assert_eq!(closest("0 * * * *"), 60);
+        assert_eq!(closest("0,10 * * * *"), 10);
+        assert_eq!(closest("*/25 * * * *"), 10, ":50 to the next hour's :00");
+        assert_eq!(closest("0 9 * * *"), 24 * 60);
+        assert_eq!(closest("0 9 * * mon"), 24 * 60, "a week apart in truth: never more than that");
+        assert_eq!(closest("0 0,23 * * *"), 60, "23:00 to midnight");
+        assert_eq!(closest("59 23 * * *"), 24 * 60);
+        assert_eq!(closest("30 9,17 * * mon-fri"), 8 * 60);
+    }
+
+    /// Restart: a fire the alarm came to late (a node restarted, a deploy)
+    /// is one fire, and the minutes it missed are skipped; on time, the next
+    /// is its next minute; resumed, it fires from its next minute after now.
+    #[test]
+    fn a_late_fire_skips_what_it_missed() {
+        let hourly = Cron::parse("0 * * * *").unwrap();
+        let due = NOW / 3_600_000 * 3_600_000 + 3_600_000; // 13:00
+        assert_eq!(hourly.next_fire(due, due + 5_000), Some(due + 3_600_000), "on time: the next hour");
+        assert_eq!(hourly.next_fire(due, due + 150 * MINUTE_MS), Some(due + 3 * 3_600_000), "two and a half hours late: 16:00, not 14:00 or 15:00");
+        assert_eq!(hourly.next_fire(NOW, NOW), Some(due), "resumed at 12:34: 13:00");
     }
 
     #[test]

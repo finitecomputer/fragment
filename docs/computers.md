@@ -831,7 +831,9 @@ expires within 30 days. The container application is the deployment's
 - What a guest follows, by convention (docs/chat-records.md): for each
   agent, `chat` of every fragment it is a member of whose channels
   include a postable `chat` (a chat), and `tasks` of the agent's own
-  fragment (its routines, and `joined` when it is added to a fragment).
+  fragment (its routines, which its scheduled records append as that
+  fragment: docs/api.md, "Scheduled records"; and `joined` when it is
+  added to a fragment).
   The list comes from `GET /api/fragments` and `GET /api/f/{name}/channels`
   as the agent, read again every 5 minutes and on `joined`, and within
   seconds when a read of it fails (the bridge's backoff, docs/bridge.md):
@@ -2110,7 +2112,16 @@ and how a runtime finds them, is the image's.
   upstream links its other tools into `/usr/local/bin` (node, npm,
   python3, rg, ffmpeg), not `hermes`. execute_code's scripts keep the
   gateway's PATH. The Docker lane's `an_agent_runs_hermes_by_name` runs
-  it each way.
+  it each way. Hermes' own scheduler is off (decision 38; its `cronjob`
+  toolset is disabled), so `/usr/local/bin/hermes` refuses `cron` among
+  its words (exit 2), saying to add a schedule on itself instead
+  (`fragment schedule add --routine`: docs/api.md, "Scheduled records"),
+  and passes every other
+  command through; the platform skill's page says the same ("Later, and
+  again"), and its description has an agent load it for anything later or
+  recurring. execute_code's scripts, which reach `/opt/hermes/bin/hermes`
+  by the gateway's PATH, are not refused: the page is what keeps an agent
+  from them.
 - **Its credentials** (Connections and operator keys, above):
   `hermes-boot` writes each agent's placeholders into its profile's `.env`
   under their variables (`PERPLEXITY_API_KEY=fck_perplexity_…`), which

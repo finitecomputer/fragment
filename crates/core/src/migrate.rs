@@ -108,7 +108,7 @@ macro_rules! step {
 
 pub const FRAGMENT: Class = Class {
     name: "Fragment",
-    steps: &[step!("baseline", "fragment/0001_baseline.sql"), step!("listed", "fragment/0002_listed.sql")],
+    steps: &[step!("baseline", "fragment/0001_baseline.sql"), step!("listed", "fragment/0002_listed.sql"), step!("record_schedules", "fragment/0003_record_schedules.sql")],
     variants: &[Variant {
         name: "members",
         sql: "CREATE TABLE members ( principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL, kind TEXT, owner TEXT, people_only INTEGER NOT NULL DEFAULT 0)",
@@ -578,13 +578,14 @@ mod tests {
         assert_eq!(migrated(&fragment, &with(ONE), 1), Ok(Ran::Made { version: 1 }));
         fragment.exec("INSERT INTO members (principal, role, added_by, added_at) VALUES ('npub1a', 'owner', 'npub1a', 5)").expect("a member");
         assert_eq!(FRAGMENT.steps[1].name, "listed");
-        assert_eq!(migrated(&fragment, &FRAGMENT, 2), Ok(Ran::Migrated { from: 1, version: 2 }));
+        let to_two = with(&FRAGMENT.steps[..2]);
+        assert_eq!(migrated(&fragment, &to_two, 2), Ok(Ran::Migrated { from: 1, version: 2 }));
         assert_eq!(fragment.count("SELECT COUNT(*) FROM members WHERE principal = 'npub1a'"), 1, "its member stays");
         fragment.exec("INSERT INTO code_channel_listed (channel, kinds, fields) VALUES ('work', '[\"turn.start\"]', '[\"asks\"]')").expect("a channel's listed");
         fragment.exec("INSERT INTO listed (channel, principal, seq, at, kind, fields, last) VALUES ('work', 'npub1a', 3, 9, 'turn.start', '{}', 3)").expect("a member's listed record");
         assert_eq!(fragment.count("SELECT COUNT(*) FROM listed l JOIN code_channel_listed c ON c.channel = l.channel WHERE l.principal = 'npub1a'"), 1);
-        assert_eq!(migrated(&fragment, &FRAGMENT, 3), Ok(Ran::Current { version: 2 }), "a restart runs nothing");
-        let remade = remake(&fragment, &FRAGMENT).expect("a delete's remake");
+        assert_eq!(migrated(&fragment, &to_two, 3), Ok(Ran::Current { version: 2 }), "a restart runs nothing");
+        let remade = remake(&fragment, &to_two).expect("a delete's remake");
         assert!(remade.contains(&"listed".to_string()) && remade.contains(&"code_channel_listed".to_string()), "a delete empties step 2's tables too: {remade:?}");
         assert_eq!(fragment.count("SELECT COUNT(*) FROM listed") + fragment.count("SELECT COUNT(*) FROM code_channel_listed"), 0);
 
@@ -600,6 +601,38 @@ mod tests {
         let remade = remake(&list, &PRINCIPAL).expect("a wipe's remake");
         assert!(remade.contains(&"listed".to_string()), "a wipe empties step 2's table too: {remade:?}");
         assert_eq!(list.count("SELECT COUNT(*) FROM listed"), 0);
+    }
+
+    /// Goal: scheduled records are step 3 of the Fragment's
+    /// (cell/src/schedules.rs): a fragment at version 2 with rows migrates
+    /// to 3, keeps its rows and its code's cron schedules, and holds the
+    /// table the cell keeps its data schedules in, as it writes and reads
+    /// them (a paused one with no `next_at`); the restart after runs
+    /// nothing; a delete's `remake` empties it.
+    /// Method: the fragment's first two steps alone, a member and a code
+    /// schedule written, then its class as declared, and data schedules
+    /// written and read back.
+    #[test]
+    fn record_schedules_are_step_three_of_a_fragment() {
+        let fragment = Lite::new();
+        let known = FRAGMENT.steps.len() as u32;
+        assert_eq!(migrated(&fragment, &with(&FRAGMENT.steps[..2]), 1), Ok(Ran::Made { version: 2 }));
+        fragment.exec("INSERT INTO members (principal, role, added_by, added_at) VALUES ('npub1a', 'owner', 'npub1a', 5)").expect("a member");
+        fragment.exec("INSERT INTO schedules (idx, op, cron, next_at) VALUES (0, 'tick', '* * * * *', 60000)").expect("a code schedule");
+        assert_eq!(FRAGMENT.steps[2].name, "record_schedules");
+        assert_eq!(migrated(&fragment, &FRAGMENT, 2), Ok(Ran::Migrated { from: 2, version: known }));
+        let kept = fragment.count("SELECT COUNT(*) FROM members WHERE principal = 'npub1a'") + fragment.count("SELECT COUNT(*) FROM schedules");
+        assert_eq!(kept, 2, "its member and its code's schedule stay");
+        fragment
+            .exec("INSERT INTO record_schedules (cron, channel, body, created_by, created_at, next_at) VALUES ('0 * * * *', 'tasks', '{\"kind\":\"routine\"}', 'npub1a', 5, 3600000)")
+            .expect("a data schedule");
+        fragment.exec("INSERT INTO record_schedules (cron, channel, body, created_by, created_at) VALUES ('0 9 * * *', 'notes', '{}', 'npub1a', 6)").expect("a paused one");
+        assert_eq!(fragment.count("SELECT COUNT(*) FROM record_schedules WHERE next_at <= 3600000"), 1, "the due one, by its index");
+        assert_eq!(fragment.count("SELECT COUNT(*) FROM record_schedules WHERE next_at IS NULL"), 1, "the paused one");
+        assert_eq!(migrated(&fragment, &FRAGMENT, 3), Ok(Ran::Current { version: known }), "a restart runs nothing");
+        let remade = remake(&fragment, &FRAGMENT).expect("a delete's remake");
+        assert!(remade.contains(&"record_schedules".to_string()), "a delete empties its data schedules: {remade:?}");
+        assert_eq!(fragment.count("SELECT COUNT(*) FROM record_schedules"), 0);
     }
 
     /// Goal: #369's `fenced` columns (its `columns.rs` adds them if missing

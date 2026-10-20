@@ -62,6 +62,14 @@
 //!   `<words>`, sent inline, is, on clef-omni. The reply is `decided:
 //!   <model id> snack <probability>`, or `decide refused: <status> <its
 //!   first 300 characters>`;
+//! - `schedule add <minute> <hour> <day> <month> <weekday> <text>`,
+//!   `schedule list`, `schedule rm <id>`: the agent's scheduled records on
+//!   its own fragment through the platform, as the agent acting for its
+//!   owner (`fragment schedule` on a computer; docs/api.md, "Scheduled
+//!   records"), `add` a routine in this chat: the reply is `schedule added
+//!   <id>` (`schedule had <id>`: the same one was there), `schedules: <id>
+//!   <cron> by <who>; …`, `schedule removed <id>`, or `schedule refused:
+//!   <the refusal>`;
 //! - a message with attachments: the reply names them;
 //! - a turn told something first (`TurnStart::note`: its agent's turn before
 //!   it in the chat was cut by a restart): the reply ends with
@@ -337,6 +345,59 @@ async fn think(agent: &str, key: Option<&str>, on: Option<&str>, said: &str) -> 
     tokio::time::timeout(Duration::from_millis(crate::limits::HTTP_TIMEOUT_MS), call).await.map_err(|_| "the model did not answer".to_string())?
 }
 
+/// What `schedule …` asks: `add` (its cron's five fields, then its text),
+/// `list`, or `rm <id>`.
+#[derive(Debug, PartialEq)]
+enum ScheduleAsk {
+    Add { cron: String, text: String },
+    List,
+    Rm(u64),
+    Unsaid,
+}
+
+fn schedule_words(rest: &str) -> ScheduleAsk {
+    let words: Vec<&str> = rest.split_whitespace().collect();
+    match words.as_slice() {
+        ["add", m, h, d, mo, w, text @ ..] if !text.is_empty() => ScheduleAsk::Add { cron: [*m, *h, *d, *mo, *w].join(" "), text: text.join(" ") },
+        ["list"] => ScheduleAsk::List,
+        ["rm", id] => id.parse().map_or(ScheduleAsk::Unsaid, ScheduleAsk::Rm),
+        _ => ScheduleAsk::Unsaid,
+    }
+}
+
+/// `schedule add <minute> <hour> <day> <month> <weekday> <text>`,
+/// `schedule list`, `schedule rm <id>`: the agent's scheduled records on its
+/// own fragment (docs/api.md, "Scheduled records"), through the platform as
+/// the agent acting for its owner, as `fragment schedule` asks on a
+/// computer; `add` a routine in this chat (`{kind: "routine", text, chat}`
+/// on its `tasks`, as `--routine` builds it). The reply: `schedule added
+/// <id>` (`schedule had <id>`: the same one was there), `schedules: <id>
+/// <cron> by <who>; …`, `schedule removed <id>`, or `schedule refused: <the
+/// platform's refusal>`.
+async fn schedule(agent: &crate::runtime::Agent, chat: &str, rest: &str) -> String {
+    let api = match std::env::var("FRAGMENT_API").map_err(|_| "no FRAGMENT_API".to_string()).and_then(|a| crate::api::Api::new(&a)) {
+        Ok(api) => api,
+        Err(e) => return format!("schedule failed: {e}"),
+    };
+    let (me, owner) = (agent.fragment.as_str(), agent.owner.as_str());
+    let asked = match schedule_words(rest) {
+        ScheduleAsk::Add { cron, text } => {
+            let routine = serde_json::json!({ "kind": "routine", "text": text, "chat": chat });
+            api.add_schedule(me, owner, me, &cron, "tasks", &routine).await.map(|v| {
+                let id = &v["schedule"]["id"];
+                if v["replayed"] == true { format!("schedule had {id}") } else { format!("schedule added {id}") }
+            })
+        }
+        ScheduleAsk::List => api.schedules(me, owner, me).await.map(|v| {
+            let listed: Vec<String> = v["schedules"].as_array().into_iter().flatten().map(|r| format!("{} {} by {}", r["id"], r["cron"].as_str().unwrap_or(""), r["createdBy"].as_str().unwrap_or(""))).collect();
+            format!("schedules: {}", listed.join("; "))
+        }),
+        ScheduleAsk::Rm(id) => api.remove_schedule(me, owner, me, id).await.map(|v| format!("schedule removed {}", v["removed"])),
+        ScheduleAsk::Unsaid => return "say `schedule add <minute> <hour> <day> <month> <weekday> <text>`, `schedule list` or `schedule rm <id>`".into(),
+    };
+    asked.unwrap_or_else(|e| format!("schedule refused: {e}"))
+}
+
 /// `models`: the ids the intercept lists (`GET /v1/models`, naming no
 /// agent, as Hermes' `/model` asks it), and the computer's view's.
 async fn models() -> Result<String, String> {
@@ -584,6 +645,9 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
             Err(e) => format!("transcribe refused: {e}"),
         };
     }
+    if let Some(rest) = ts.text.strip_prefix("schedule ") {
+        reply = schedule(&ts.agent, &ts.fragment, rest).await;
+    }
     if let Some(rest) = ts.text.strip_prefix("decide ") {
         reply = match decide(&ts.agent.fragment, rest).await {
             Ok(answer) => format!("decided: {answer}"),
@@ -718,6 +782,18 @@ mod tests {
         assert_eq!(fetch_words("fetch http://a.test/x with fck_p_00 as basic api").unwrap(), ("http://a.test/x", "fck_p_00", Place::Basic("api")));
         for bad in ["fetch http://a.test/x", "fetch http://a.test/x with", "fetch http://a.test/x with $K in", "fetch http://a.test/x with $K as basic"] {
             assert!(fetch_words(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// `schedule`'s grammar: `add` with five cron fields and words, `list`,
+    /// `rm <id>`; anything else says how.
+    #[test]
+    fn schedule_reads_what_it_asks() {
+        assert_eq!(schedule_words("add 30 9 * * mon-fri check  the shelf"), ScheduleAsk::Add { cron: "30 9 * * mon-fri".into(), text: "check the shelf".into() });
+        assert_eq!(schedule_words("list"), ScheduleAsk::List);
+        assert_eq!(schedule_words("rm 7"), ScheduleAsk::Rm(7));
+        for unsaid in ["", "add 0 * * * *", "add 0 * * *", "rm", "rm seven", "rm 1 2", "list all", "remove 3"] {
+            assert_eq!(schedule_words(unsaid), ScheduleAsk::Unsaid, "{unsaid:?}");
         }
     }
 

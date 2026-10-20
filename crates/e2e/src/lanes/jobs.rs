@@ -14,6 +14,7 @@ use fragment_proto::{limits, ErrorCode};
 use serde_json::{json, Value};
 
 use super::app::ship;
+use super::computers::cron_now;
 use crate::api::{Api, Call, Reply};
 use crate::Suite;
 
@@ -545,6 +546,148 @@ fn channel_run_inputs(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     Ok(())
 }
 
+/// Scheduled records (docs/api.md, "Scheduled records") on an app: data
+/// schedules its editors add at run time, each appending a record to one of
+/// its channels as the fragment itself, where its channel trigger runs a
+/// job from it. Viewers list them and add none; each bound refused with a
+/// typed error; the same one added again is that one; an install keeps
+/// them; due (the `cron-now` lever), one fires once; paused it fires
+/// nothing, resumed it fires again; removed, it fires no more; and a
+/// fragment keeps at most 32.
+fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
+    let (owner, editor, viewer, stranger) = (api.person()?, api.person()?, api.person()?, api.person()?);
+    let (name, c) = jobs_fragment(s, api, &owner, "schedules", |m| {
+        m["channels"]["pings"] = json!({ "read": "viewer", "post": "editor" });
+        m["channels"]["desk"] = json!({ "read": "viewer", "post": "owner" });
+        m["channels"]["work"] = json!({ "read": "viewer", "post": "editor", "from": "agent" });
+        m["triggers"].as_array_mut().expect("the fixture's triggers").push(json!({ "channel": "pings", "run": "ingest" }));
+    })?;
+    for (who, role) in [(&editor, "editor"), (&viewer, "viewer")] {
+        api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", who.pubkey_hex()), Some(&json!({ "role": role })))?;
+    }
+    let (own, editor_id) = (api.status(&owner, &name)?.body["npub"].as_str().unwrap_or("").to_string(), api.identity(&editor)?);
+    let path = format!("/api/f/{name}/schedules");
+    let list = || api.signed(&owner, "GET", &path, None).ok().and_then(|r| r.body["schedules"].as_array().cloned()).unwrap_or_default();
+    let add = |who: &Keys, cron: &str, channel: &str, record: Value| api.signed(who, "POST", &path, Some(&json!({ "cron": cron, "channel": channel, "record": record })));
+    let pinged = || records(api, &owner, &name, "pings");
+    let water = json!({ "source": "schedule", "payload": "water the plants" });
+
+    let (seen, added, stranger_seen) = (api.signed(&viewer, "GET", &path, None)?, add(&viewer, "0 0 1 1 *", "pings", water.clone())?, api.signed(&stranger, "GET", &path, None)?);
+    s.ok(
+        "a viewer lists its scheduled records and adds none (403); a stranger lists none",
+        seen.status == 200 && seen.body["schedules"] == json!([]) && added.status == 403 && stranger_seen.status == 403,
+        json!([seen.body, added.body, stranger_seen.body]),
+    );
+    let big = json!({ "t": "w".repeat(limits::RECORD_SCHEDULE_BODY_MAX_BYTES) });
+    let refusals = [
+        ("not five fields", "0 * * *", "pings", water.clone(), 400, "five fields"),
+        ("every 5 minutes", "*/5 * * * *", "pings", water.clone(), 400, "at most every 15 minutes"),
+        ("a record past 4 KiB", "0 * * * *", "pings", big, 413, "at most 4096"),
+        ("a channel it does not declare", "0 * * * *", "nowhere", water.clone(), 400, "declares no channel"),
+        ("the platform's own", "0 * * * *", "events", water.clone(), 400, "takes no posts"),
+        ("a channel that takes no posts", "0 * * * *", "feed", water.clone(), 400, "takes no posts"),
+        ("a channel only one kind of member posts on", "0 * * * *", "work", water.clone(), 400, "only its members of one kind"),
+        ("a channel only its owner posts on", "0 * * * *", "desk", water.clone(), 403, "needs the owner role"),
+    ];
+    let (mut each, mut said) = (true, vec![]);
+    for (why, cron, channel, record, status, says) in refusals {
+        let r = add(&editor, cron, channel, record)?;
+        let code = match status {
+            413 => "too_large",
+            403 => "forbidden",
+            _ => "invalid_request",
+        };
+        each &= r.status == status && r.error() == code && r.message().contains(says);
+        said.push(json!({ "why": why, "status": r.status, "body": r.body }));
+    }
+    s.ok("its bounds refuse a schedule with a typed error saying which, and keep nothing", each && list().is_empty(), json!(said));
+
+    // an editor adds one, due next new year: only the lever makes it due
+    let r = add(&editor, "0 0 1 1 *", "pings", water.clone())?;
+    let first = r.body["schedule"].clone();
+    let id = first["id"].as_i64().unwrap_or(0);
+    s.ok(
+        "an editor schedules a record on one of its channels: its schedule in words, when it fires next, who added it",
+        r.status == 200
+            && r.body["replayed"] == false
+            && id > 0
+            && first["said"] == "every year on January 1 at 00:00 UTC"
+            && first["channel"] == "pings"
+            && first["record"] == water
+            && first["createdBy"] == editor_id.as_str()
+            && first["paused"] == false
+            && first["nextAt"].as_i64().is_some_and(|n| n > now_ms()),
+        &r,
+    );
+    let again = add(&owner, " 0 0 1 1  * ", "pings", json!({ "payload": "water the plants", "source": "schedule" }))?;
+    s.ok(
+        "the same schedule added again is that one, added once (its cron's spacing and its record's key order aside)",
+        again.status == 200 && again.body["replayed"] == true && again.body["schedule"]["id"] == id && list().len() == 1,
+        &again,
+    );
+    s.commit(&c, &[("site/index.html", Some(b"<p>a new install</p>\n"))]);
+    s.deploy(&c);
+    s.ok("an install of new code keeps it (its code's cron triggers are made again; its records' schedules are its data)", list() == vec![first.clone()], json!(list()));
+
+    // due: it appends its record as the fragment, once, and the trigger's job runs from it
+    let before = pinged().len();
+    let lever = cron_now(api, &name)?;
+    let ran = s.eventually(long, || runs(api, &owner, &name, "&op=ingest").iter().any(|r| r["via"] == "channel" && r["trigger"] == "pings" && r["status"] == "succeeded"));
+    let recs = pinged();
+    s.ok(
+        "due, it appends its record on its channel, once, as the fragment itself",
+        lever.body["records"] == 1 && recs.len() == before + 1 && recs.last().is_some_and(|x| x["principal"] == own.as_str() && x["body"] == water),
+        json!({ "lever": lever.body, "records": recs }),
+    );
+    let items = api.op(&owner, &name, "items", "q", json!({}))?;
+    s.ok(
+        "and the channel's trigger runs its job from it, as any record's",
+        ran && items.body["result"].as_array().is_some_and(|l| l.iter().any(|x| x == &json!({ "text": "water the plants", "source": "schedule" }))),
+        &items,
+    );
+    let moved = list().into_iter().next().unwrap_or_default();
+    s.ok("then it moves on to its next minute, and says when it last fired", moved["nextAt"] == first["nextAt"] && moved["lastAt"].is_i64(), &moved);
+
+    // paused it fires nothing; resumed it fires again; removed, no more
+    let put = |who: &Keys, paused: bool| api.signed(who, "PUT", &format!("{path}/{id}"), Some(&json!({ "paused": paused })));
+    let (by_viewer, p, p2) = (put(&viewer, true)?, put(&editor, true)?, put(&editor, true)?);
+    let before = pinged().len();
+    let lever = cron_now(api, &name)?;
+    std::thread::sleep(Duration::from_secs(3));
+    s.ok(
+        "paused by an editor (a viewer may not), it names no next time, and fires nothing",
+        by_viewer.status == 403 && p.status == 200 && p.body["schedule"]["paused"] == true && p.body["schedule"].get("nextAt").is_none() && p2.body == p.body && lever.body["records"] == 0 && pinged().len() == before,
+        json!({ "viewer": by_viewer.body, "paused": p.body, "lever": lever.body }),
+    );
+    let resumed = put(&editor, false)?;
+    let lever = cron_now(api, &name)?;
+    let fired = s.eventually(long, || pinged().len() == before + 1);
+    s.ok("resumed, it fires again", resumed.body["schedule"]["paused"] == false && lever.body["records"] == 1 && fired, json!({ "resumed": resumed.body, "lever": lever.body }));
+    let (by_viewer, rm, gone) = (api.signed(&viewer, "DELETE", &format!("{path}/{id}"), None)?, api.signed(&editor, "DELETE", &format!("{path}/{id}"), None)?, api.signed(&editor, "DELETE", &format!("{path}/{id}"), None)?);
+    let before = pinged().len();
+    let lever = cron_now(api, &name)?;
+    std::thread::sleep(Duration::from_secs(3));
+    s.ok(
+        "removed by an editor (a viewer may not), it fires no more; removed again, 404",
+        by_viewer.status == 403 && rm.status == 200 && rm.body["removed"] == id && gone.status == 404 && lever.body["records"] == 0 && pinged().len() == before && list().is_empty(),
+        json!({ "viewer": by_viewer.body, "removed": rm.body, "again": gone.status }),
+    );
+
+    // at most 32 a fragment; the same one again at the bound is still that one
+    let filled: Vec<i64> = (1..=limits::RECORD_SCHEDULES_MAX).filter_map(|n| add(&editor, "0 0 1 1 *", "pings", json!({ "n": n })).ok().and_then(|r| r.body["schedule"]["id"].as_i64())).collect();
+    let (over, still) = (add(&editor, "0 0 1 1 *", "pings", json!({ "n": 0 }))?, add(&editor, "0 0 1 1 *", "pings", json!({ "n": 1 }))?);
+    s.ok(
+        "a fragment keeps at most 32 scheduled records: the next is refused, saying so, and the same one again is still that one",
+        filled.len() == limits::RECORD_SCHEDULES_MAX && over.status == 400 && over.message().contains("the most it may") && still.body["replayed"] == true,
+        json!({ "over": over.body, "filled": filled.len() }),
+    );
+    Ok(())
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
 pub fn triggers(s: &mut Suite, api: &Api, cron: Option<Result<Option<Cron>, String>>) -> Result<()> {
     if !s.section("triggers", TRIGGERS_NEEDS) {
         return Ok(());
@@ -797,6 +940,8 @@ pub fn triggers(s: &mut Suite, api: &Api, cron: Option<Result<Option<Cron>, Stri
         refused_at.map(|(i, r)| format!("{i}: {r}")).unwrap_or_default(),
     );
     s.ok("the event log says the inbox was full", events(api, &owner, &full).iter().any(|e| e["kind"] == "inbox.rejected"), "no inbox.rejected");
+
+    scheduled_records(s, api, long)?;
 
     // cron, last: its fragment was deployed before the sections ahead of
     // this one, so a full run has passed a minute boundary by now; alone,

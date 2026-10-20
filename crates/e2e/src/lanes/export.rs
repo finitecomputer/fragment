@@ -159,6 +159,11 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "making the chat: {r}");
     s.owned(&r.body, &paul);
     api.signed(&paul, "PUT", &format!("/api/f/{chat_name}/members/{agent_id}"), Some(&json!({ "role": "editor" })))?;
+    // a routine of its, in that chat: a scheduled record on its tasks
+    // (docs/api.md, "Scheduled records"), due next new year: no run fires it
+    let routine = json!({ "kind": "routine", "text": "water the garden", "chat": chat_name });
+    let scheduled = api.signed(&paul, "POST", &format!("/api/f/{agent_name}/schedules"), Some(&json!({ "cron": "0 0 1 1 *", "channel": "tasks", "record": routine })))?;
+    anyhow::ensure!(scheduled.status == 200, "a scheduled routine of the agent's: {scheduled}");
     let pic_sha = sha256_hex(PICTURE);
     let up = api.call(Call {
         method: "PUT",
@@ -363,6 +368,12 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     );
     s.ok("the file a record attaches, by its hash", files.get(&frag(&chat_name, &format!("blobs/{pic_sha}"))).map(Vec::as_slice) == Some(PICTURE), "");
     s.ok("an agent's soul is its fragment's file", files.get(&frag(&agent_name, "files/SOUL.md")).map(Vec::as_slice) == Some(SOUL), "");
+    let agent_meta = json_at(&files, &frag(&agent_name, "meta.json"));
+    s.ok(
+        "a fragment's scheduled records are in its meta, as its viewers list them (an agent's routine); one with none names none",
+        agent_meta["schedules"] == json!([scheduled.body["schedule"]]) && meta.get("schedules").is_none(),
+        &agent_meta["schedules"],
+    );
     let hex = computer.strip_prefix("computer:").unwrap_or("");
     let cmeta = json_at(&files, &format!("{root}/computers/{hex}/meta.json"));
     let stored: Vec<(String, bool)> = records_of_save

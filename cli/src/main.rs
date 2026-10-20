@@ -341,6 +341,16 @@ enum Cmd {
         #[arg(long)]
         no_picture: bool,
     },
+    /// A fragment's scheduled records: at each minute a cron names (UTC),
+    /// it appends a record to one of its channels, as itself, which its
+    /// channel triggers, pages and the computers following it take from
+    /// there (an agent's routine is one on its own `tasks`). Editors add
+    /// and change them, viewers list them; on an agent's computer the
+    /// fragment is the agent's own unless named
+    Schedule {
+        #[command(subcommand)]
+        sub: ScheduleCmd,
+    },
     /// Write one text file to main through the platform (no folder, no git):
     /// what an agent on a computer uses. `fragment deploy` puts it live.
     Write {
@@ -546,6 +556,111 @@ fn standing_text(s: &Standing) -> String {
         Standing::AgentsStopped { why } => format!("agents and AI are stopped ({})", serde_json::to_value(why).unwrap_or_default().as_str().unwrap_or("")),
         Standing::ReadOnly { why } => format!("your fragments are read-only ({})", serde_json::to_value(why).unwrap_or_default().as_str().unwrap_or("")),
     }
+}
+
+#[derive(Subcommand)]
+enum ScheduleCmd {
+    /// Add one: at each minute --cron names (UTC), the fragment appends
+    /// --record to --channel, as itself; or, an agent's routine, it asks
+    /// the agent --routine in --chat, as its owner (the record `{kind:
+    /// "routine", text, chat}` on its `tasks`). The same one added again
+    /// is that one
+    Add {
+        /// The fragment (on an agent's computer, the agent's own unless named)
+        fragment: Option<String>,
+        /// When: five fields in UTC, minute hour day month weekday
+        /// (weekdays by name: `mon-fri`), at most every 15 minutes:
+        /// "0 * * * *" every hour, "30 8 * * mon-fri" weekdays at 08:30 UTC
+        #[arg(long)]
+        cron: String,
+        /// The channel it appends to (one that takes posts)
+        #[arg(long, requires = "record", conflicts_with_all = ["routine", "chat"])]
+        channel: Option<String>,
+        /// The record's body, as JSON (at most 4 KiB)
+        #[arg(long, requires = "channel")]
+        record: Option<String>,
+        /// An agent's routine: what it is to do each time
+        #[arg(long, requires = "chat")]
+        routine: Option<String>,
+        /// An agent's routine: the chat it is done in, one the agent is in
+        #[arg(long, requires = "routine")]
+        chat: Option<String>,
+    },
+    /// List them: each one's id, schedule, channel and record
+    List {
+        /// The fragment (on an agent's computer, the agent's own unless named)
+        fragment: Option<String>,
+    },
+    /// Remove one: it fires no more
+    Rm {
+        /// [FRAGMENT] ID
+        #[arg(num_args = 1..=2, value_names = ["FRAGMENT", "ID"], required = true)]
+        args: Vec<String>,
+    },
+    /// Pause one: it fires no more until resumed
+    Pause {
+        /// [FRAGMENT] ID
+        #[arg(num_args = 1..=2, value_names = ["FRAGMENT", "ID"], required = true)]
+        args: Vec<String>,
+    },
+    /// Resume one: from its next minute (none it missed)
+    Resume {
+        /// [FRAGMENT] ID
+        #[arg(num_args = 1..=2, value_names = ["FRAGMENT", "ID"], required = true)]
+        args: Vec<String>,
+    },
+}
+
+/// The fragment `fragment schedule` acts on: the one named, else the agent
+/// this CLI acts as on a computer (its own agent fragment).
+fn schedule_fragment(agent: Option<&api::AgentMode>, named: Option<String>, verb: &str) -> Result<String> {
+    named
+        .or_else(|| agent.map(|m| m.agent.clone()))
+        .ok_or_else(|| usage(format!("name the fragment: `fragment schedule {verb} my-app …` (on an agent's computer, the agent's own unless named)")))
+}
+
+/// `[FRAGMENT] X` (`fragment schedule rm|pause|resume`): the fragment
+/// (`schedule_fragment`), and X.
+fn fragment_and(agent: Option<&api::AgentMode>, mut args: Vec<String>, verb: &str) -> Result<(String, String)> {
+    let last = args.pop().ok_or_else(|| usage(format!("fragment schedule {verb} needs a schedule's id")))?;
+    if args.len() > 1 {
+        return Err(usage(format!("fragment schedule {verb} takes a fragment and a schedule's id")));
+    }
+    Ok((schedule_fragment(agent, args.pop(), verb)?, last))
+}
+
+/// What `fragment schedule add` appends, and where: `--channel` and
+/// `--record` as given, or an agent's routine (`--routine` and `--chat`)
+/// on its `tasks` (docs/chat-records.md).
+fn scheduled_record(channel: Option<String>, record: Option<String>, routine: Option<String>, chat: Option<String>) -> Result<(String, Value)> {
+    match (channel, record, routine, chat) {
+        (Some(channel), Some(record), None, None) => {
+            let record: Value = serde_json::from_str(&record).map_err(|e| usage(format!("--record is the record's body as JSON: {e}")))?;
+            Ok((channel, record))
+        }
+        (None, None, Some(text), Some(chat)) => Ok(("tasks".to_string(), json!({ "kind": "routine", "text": text, "chat": chat }))),
+        _ => Err(usage("say what to append: --channel <channel> --record '<json>', or an agent's --routine '<what to do>' --chat <chat>")),
+    }
+}
+
+/// `fragment schedule pause|resume [FRAGMENT] ID`.
+fn set_schedule(c: &api::Client, j: bool, args: Vec<String>, paused: bool) -> Result<()> {
+    let (fragment, id) = fragment_and(c.agent(), args, if paused { "pause" } else { "resume" })?;
+    let v = c.call(c.put_json(&format!("/api/f/{fragment}/schedules/{}", encode_q(&id)), &fragment_proto::SetSchedule { paused })?)?;
+    json_exit(j, &v);
+    let s: fragment_proto::Schedule = serde_json::from_value(v["schedule"].clone()).map_err(|e| anyhow!("the platform's schedule: {e}"))?;
+    print_schedule(&s);
+    Ok(())
+}
+
+/// A schedule as `fragment schedule` prints it.
+fn print_schedule(s: &fragment_proto::Schedule) {
+    let when = match s.next_at {
+        Some(at) => format!("next {}", chrono_like(at.max(0) as u64 / 1000)),
+        None => "paused".to_string(),
+    };
+    println!("#{}\t{}\ton {}\t{when}", s.id, s.said, s.channel);
+    println!("  {}", s.record.to_string().chars().take(200).collect::<String>());
 }
 
 #[derive(Subcommand)]
@@ -2008,6 +2123,37 @@ fn run(cli: Cli) -> Result<()> {
                 _ => {}
             }
         }
+        Cmd::Schedule { sub } => match sub {
+            ScheduleCmd::Add { fragment, cron, channel, record, routine, chat } => {
+                let fragment = schedule_fragment(c.agent(), fragment, "add")?;
+                let (channel, record) = scheduled_record(channel, record, routine, chat)?;
+                let v: fragment_proto::ScheduleAdded = c.call_as(c.post_json(&format!("/api/f/{fragment}/schedules"), &fragment_proto::AddSchedule { cron, channel, record })?)?;
+                json_exit(j, &v);
+                println!("{} schedule #{} on {fragment}: {}, on {}", if v.replayed { "already had" } else { "added" }, v.schedule.id, v.schedule.said, v.schedule.channel);
+                if let Some(at) = v.schedule.next_at {
+                    println!("next {}", chrono_like(at.max(0) as u64 / 1000));
+                }
+            }
+            ScheduleCmd::List { fragment } => {
+                let fragment = schedule_fragment(c.agent(), fragment, "list")?;
+                let v: fragment_proto::ScheduleList = c.call_as(c.get(&format!("/api/f/{fragment}/schedules"))?)?;
+                json_exit(j, &v);
+                for s in &v.schedules {
+                    print_schedule(s);
+                }
+                if v.schedules.is_empty() {
+                    println!("(no schedules)");
+                }
+            }
+            ScheduleCmd::Rm { args } => {
+                let (fragment, id) = fragment_and(c.agent(), args, "rm")?;
+                let v = c.call(c.delete(&format!("/api/f/{fragment}/schedules/{}", encode_q(&id)))?)?;
+                json_exit(j, &v);
+                println!("removed schedule #{id} from {fragment}");
+            }
+            ScheduleCmd::Pause { args } => set_schedule(&c, j, args, true)?,
+            ScheduleCmd::Resume { args } => set_schedule(&c, j, args, false)?,
+        },
         Cmd::Visibility { name, value } => {
             let visibility = match value {
                 None => c.call_as::<FragmentStatus>(c.get(&format!("/api/f/{name}/status"))?)?.visibility,
@@ -2167,6 +2313,35 @@ mod tests {
 
     fn code_of(r: Result<impl std::fmt::Debug>) -> Code {
         classify_err(&r.expect_err("a failure"))
+    }
+
+    /// Goal: `fragment schedule`'s fragment and record. Valid: a fragment
+    /// named, an agent on a computer leaving its own out, a record as
+    /// given, and an agent's routine on its `tasks`. Invalid: no fragment
+    /// named off a computer, nothing to append, a record that is no JSON
+    /// (each invalid_usage, saying how).
+    #[test]
+    fn a_schedule_names_its_fragment_and_its_record() {
+        let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let some = |s: &str| Some(s.to_string());
+        let on_computer = api::AgentMode { agent: "juniper--k3x9".into(), acting_for: None };
+        assert_eq!(schedule_fragment(None, some("todo--k3x9"), "add").unwrap(), "todo--k3x9");
+        assert_eq!(schedule_fragment(Some(&on_computer), None, "add").unwrap(), "juniper--k3x9", "an agent's own");
+        assert_eq!(schedule_fragment(Some(&on_computer), some("todo--k3x9"), "add").unwrap(), "todo--k3x9", "a name given wins");
+        assert_eq!(fragment_and(Some(&on_computer), words(&["3"]), "rm").unwrap(), ("juniper--k3x9".into(), "3".into()));
+        assert_eq!(fragment_and(None, words(&["todo--k3x9", "3"]), "rm").unwrap(), ("todo--k3x9".into(), "3".into()));
+        assert_eq!(scheduled_record(some("pings"), some(r#"{"n":1}"#), None, None).unwrap(), ("pings".into(), json!({ "n": 1 })));
+        assert_eq!(
+            scheduled_record(None, None, some("water the plants"), some("talk--k3x9")).unwrap(),
+            ("tasks".into(), json!({ "kind": "routine", "text": "water the plants", "chat": "talk--k3x9" }))
+        );
+        let alone = schedule_fragment(None, None, "list");
+        assert!(alone.as_ref().is_err_and(|e| e.to_string().contains("name the fragment")), "{alone:?}");
+        assert_eq!(code_of(alone), Code::InvalidUsage);
+        assert_eq!(code_of(fragment_and(None, vec![], "rm")), Code::InvalidUsage);
+        assert_eq!(code_of(fragment_and(None, words(&["a--k3x9", "b", "c"]), "rm")), Code::InvalidUsage);
+        assert_eq!(code_of(scheduled_record(None, None, None, None)), Code::InvalidUsage);
+        assert_eq!(code_of(scheduled_record(some("pings"), some("{not json"), None, None)), Code::InvalidUsage);
     }
 
     /// Goal: the agent mode is on only when the computer names an agent, and
