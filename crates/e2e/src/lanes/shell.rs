@@ -762,6 +762,15 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         other["method"] == "post" && other["action"] == "/auth/switch?screen_hint=sign-in&return=%2Fsettings" && other["says"] == "Sign In",
         &other,
     );
+    let logo = b.eval(
+        &page,
+        "(async () => { const i = document.querySelector('#first-run .first-run-logo'); if (!i) return null; const drawn = await i.decode().then(() => true, () => false); const r = await fetch(i.src); return { src: i.getAttribute('src'), drawn, status: r.status, type: r.headers.get('content-type') }; })()",
+    )?;
+    s.ok(
+        "above it, Finite's logo, drawn: one of the shell's published files",
+        logo == json!({ "src": "/__shell/finite-logo.svg", "drawn": true, "status": 200, "type": "image/svg+xml" }),
+        &logo,
+    );
     // evidence for a person: the signed-out page, on a desktop and a phone
     let _ = b.screenshot(&page, &shots.join("signed-out.png"));
     b.viewport(&page, 375, 812, true)?;
