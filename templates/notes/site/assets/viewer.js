@@ -184,10 +184,28 @@ function renderRecent() {
 }
 
 // ---------- content ----------
-function show(note) {
+// The note the viewer drew, and what each of its links and pictures
+// resolved to as it did (a tree refresh asks them again).
+let drawn = { note: null, asked: [] };
+
+function show(note, asked = []) {
   $("#content").replaceChildren(note);
+  drawn = { note, asked };
   setActive();
 }
+
+// A link or picture hook that keeps, in `asked`, each answer it gives.
+const noting = (asked, hook) => (target, kind) => {
+  const answer = hook(target, kind);
+  asked.push({ hook, target, kind, was: JSON.stringify(answer) });
+  return answer;
+};
+
+// Whether the note on show would be drawn otherwise on the tree as it is
+// now: one of its links or pictures resolves to another file, or to one
+// where there was none (a note it links or a picture it embeds came or
+// went). A page another script drew over it (the brain's search) is not.
+const outdated = () => !!drawn.note?.isConnected && drawn.asked.some((a) => JSON.stringify(a.hook(a.target, a.kind)) !== a.was);
 
 // A page of the viewer's own: a title and a line of hint.
 function shellNote(title, ...hint) {
@@ -236,8 +254,9 @@ async function open(path) {
   if (n !== opening) return;
   if (/\.(md|markdown)$/i.test(path)) {
     const note = el("div", "note md");
-    note.append(markdown(withoutFrontMatter(text), { resolve: linksFrom(folder(path)), image: picture(folder(path)) }));
-    show(note);
+    const asked = [];
+    note.append(markdown(withoutFrontMatter(text), { resolve: noting(asked, linksFrom(folder(path))), image: noting(asked, picture(folder(path))) }));
+    show(note, asked);
     document.title = path.split("/").pop().replace(/\.md$/i, "") + " — vault";
     return;
   }
@@ -271,7 +290,9 @@ document.addEventListener(
 );
 
 // live updates: the room's state names the files that changed; the tree
-// refreshes in place, and the open note again if it was one of them
+// refreshes in place, and the open note again if it was one of them or if
+// the new tree resolves one of its links or pictures otherwise (other
+// files' coming and going leaves it as drawn)
 let lastPing = 0;
 let refreshTimer = null;
 function scheduleRefresh(paths) {
@@ -285,7 +306,7 @@ function scheduleRefresh(paths) {
       renderTree();
       renderRecent();
       const cur = decode(location.hash.replace(/^#\/?/, ""));
-      if (cur && paths.includes(cur)) route();
+      if ((cur && paths.includes(cur)) || outdated()) route();
       else setActive();
     } catch {}
   }, 60);
