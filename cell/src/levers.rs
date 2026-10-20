@@ -135,7 +135,7 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             }
             let lever = serde_json::json!({ "op": t.op, "steps": t.steps });
             let req = routed::internal_request("test/export", &lever.to_string())?;
-            Ok(env.durable_object("PRINCIPAL")?.get_by_name(&t.identity)?.fetch_with_request(req).await?)
+            crate::routed::send(env, "PRINCIPAL", &t.identity, req).await
         }
         (Method::Post, [hook @ ("keys" | "fragment")]) => {
             /// The fragment a lever's body names (the rest is the fragment's to read).
@@ -150,7 +150,7 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             }
             let body = String::from_utf8(body).map_err(|_| CellError::invalid("body: not UTF-8"))?;
             let inner = routed::internal_request(&format!("test/{hook}"), &body)?;
-            Ok(env.durable_object("FRAGMENT")?.get_by_name(&target.fragment)?.fetch_with_request(inner).await?)
+            crate::routed::send(env, "FRAGMENT", &target.fragment, inner).await
         }
         (Method::Post, ["computer"]) => {
             /// `{computer, op, times?, on?, ms?, freeze?}`: a lever on that

@@ -56,11 +56,12 @@ export class Registry extends DurableObject {
 // `env.FILES` bound to one fragment by `props`: the app cannot name another.
 // Both it and the job driver call the supervisor's internal routes through
 // `rs.InternalRoute.request` (routed.rs), which marks the request as that route
-// expects: the JavaScript names no header.
+// expects and stamps it with this release (an object refuses another's:
+// docs/MODEL.md, "Calls between releases"): the JavaScript names no header.
 export class Files extends WorkerEntrypoint {
   async #ask(op, body) {
     const { fragment } = this.ctx.props;
-    return this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(`cap/files/${op}`, JSON.stringify(body)));
+    return this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `cap/files/${op}`, JSON.stringify(body)));
   }
 
   async #answer(op, body) {
@@ -94,8 +95,8 @@ export class Job extends WorkflowEntrypoint {
     const delay = Math.max(1, Number(this.env.FRAGMENT_JOB_RETRY_DELAY_S) || 10);
     const retrying = { retries: { limit: 4, delay: `${delay} seconds`, backoff: "exponential" }, timeout: "5 minutes" };
     const post = async (path, body) => {
-      const call = rs.InternalRoute.request(`job/${path}`, JSON.stringify({ incarnation, run, attempt, ...body }));
-      const resp = await this.env.FRAGMENT.getByName(fragment).fetch(call);
+      const call = JSON.stringify({ incarnation, run, attempt, ...body });
+      const resp = await this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(this.env, `job/${path}`, call));
       const out = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(out.message || `job/${path} answered ${resp.status}`);
       return out;
@@ -476,7 +477,7 @@ class ContainerHost {
 export class Computer extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
-    const report = (path, body) => this.rs.fetch(rs.InternalRoute.request(path, JSON.stringify(body)));
+    const report = (path, body) => this.rs.fetch(rs.InternalRoute.request(env, path, JSON.stringify(body)));
     Object.defineProperty(ctx, "computerHost", { value: new ContainerHost(ctx, env, report) });
     this.rs = new rs.ComputerCell(ctx, env);
   }

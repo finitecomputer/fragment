@@ -89,6 +89,9 @@ impl DurableObject for LedgerCell {
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
+        if let Some(refused) = crate::routed::refused(&req, &self.cfg.deploy_id)? {
+            return Ok(refused);
+        }
         match self.route(req).await {
             Ok(answer) => Response::from_json(&answer),
             Err(Failed::Refused(why)) => refusal(why),
@@ -816,7 +819,7 @@ pub async fn ask<R: Route>(env: &Env, payer: &str, request: &R) -> Result<R::Ans
     let mut init = RequestInit::new();
     init.with_method(Method::Post).with_headers(headers).with_body(Some(body.into()));
     let req = Request::new_with_init(&format!("https://ledger.internal{}", R::PATH), &init)?;
-    let mut resp = env.durable_object("LEDGER")?.get_by_name(payer)?.fetch_with_request(req).await?;
+    let mut resp = crate::routed::send(env, "LEDGER", payer, req).await?;
     let status = resp.status_code();
     let bytes = resp.bytes().await?;
     if status == 200 {

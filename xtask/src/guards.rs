@@ -106,6 +106,40 @@ mod tests {
         assert_eq!(found, levers, "a schema changes by a step of its class's (crates/core/src/migrate.rs says how), not in the cell");
     }
 
+    /// Goal: a change to a call's shape between the Worker and a platform
+    /// object, or between two objects, ships safely across a deploy
+    /// (fragment_core::release; docs/MODEL.md, "Calls between releases"):
+    /// every call into an object goes out through routed.rs, which stamps
+    /// it with its caller's release, and every object's `fetch` checks
+    /// that first, so another release's call is refused before it acts
+    /// (2026-10-20: an old Registry exchanged a sign-in's WorkOS code for a
+    /// new Worker that could not read its answer). The JavaScript calls
+    /// the supervisor only with requests `InternalRoute.request` makes from
+    /// its env, which stamps them too. Method: the cell's source, read.
+    #[test]
+    fn every_call_into_an_object_carries_its_release() {
+        let files = cell_sources();
+        assert_eq!(uses(&files, "durable_object("), only("routed.rs", 1), "an object is reached through routed::send alone");
+        assert_eq!(uses(&files, "fetch_with_request("), only("routed.rs", 1), "and called there alone, stamped");
+        let objects = [("fragment.rs", "FragmentCell"), ("registry.rs", "RegistryCell"), ("principal.rs", "PrincipalCell"), ("ledger.rs", "LedgerCell"), ("computer.rs", "ComputerCell")];
+        for (file, class) in objects {
+            let text = &files[file];
+            let at = text.find(&format!("impl DurableObject for {class} {{")).unwrap_or_else(|| panic!("{class} is a Durable Object"));
+            let fetch = text[at..].find("    async fn fetch(&self, req: Request) -> Result<Response> {\n").unwrap_or_else(|| panic!("{class} answers fetch")) + at;
+            let first = text[fetch..].lines().nth(1).unwrap_or_default();
+            assert!(first.trim_start().starts_with("if let Some(refused) = crate::routed::refused(&req, "), "{class}'s fetch checks its caller's release before anything else, not: {first}");
+        }
+        let checked: BTreeMap<String, usize> = objects.iter().map(|(file, _)| (file.to_string(), 1)).collect();
+        assert_eq!(uses(&files, "routed::refused(&req, "), checked, "each object checks once, in its fetch");
+        let entry = std::fs::read_to_string(crate::devstack::repo_root().join("cell/entry.mjs")).expect("entry.mjs reads");
+        let code: Vec<&str> = entry.lines().filter(|l| !l.trim_start().starts_with("//")).collect();
+        assert_eq!(code.iter().filter(|l| l.contains(" extends DurableObject {")).count(), objects.len(), "the platform's objects are the five checked above");
+        let made: Vec<&&str> = code.iter().filter(|l| l.contains("InternalRoute.request(")).collect();
+        assert!(made.len() >= 3 && made.iter().all(|l| l.contains("InternalRoute.request(this.env, ") || l.contains("InternalRoute.request(env, ")), "the JavaScript's internal calls are stamped from its env: {made:?}");
+        let called: Vec<&&str> = code.iter().filter(|l| l.contains("getByName(")).collect();
+        assert!(!called.is_empty() && called.iter().all(|l| l.contains(".fetch(rs.InternalRoute.request(this.env, ")), "the JavaScript calls an object with a stamped request alone: {called:?}");
+    }
+
     /// The value of a constant whose expression is integer literals
     /// multiplied (`15 * 60_000`, `60 * 60 * 1000`): `name` declared once in
     /// `text`, as `<head> <name><sep>` up to its `;`.

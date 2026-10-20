@@ -361,6 +361,15 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
 - `cargo xtask dev` runs `wrangler dev` on `cell/`, which rebuilds when it
   changes; the e2e runs a staged copy (`target/e2e/<run>/cell`) with its own
   variables, state and dev registry, so the two can run at once.
+- A change to a call's shape between the Worker and a Durable Object (or
+  between two objects) ships safely: every call carries its caller's
+  release (`FRAGMENT_DEPLOY_ID`, the deploy's commit) and the object
+  refuses another release's (503 `deploying`) before it acts, so callers
+  and callees of different releases refuse each other during a deploy and
+  the caller asks again (docs/MODEL.md, Calls between releases). Call an
+  object only through `routed::send`/`send_again` (xtask's guard). What
+  outlives a deploy (a queue message, a stored row) is not a call: its
+  shape stays readable by the next release.
 - The remote is `fragment-rs`, github.com/finitecomputer/fragment: work goes
   up as a branch and a pull request against `master` (branch names under
   `ci/` are refused). The coordinating session reviews and merges a PR

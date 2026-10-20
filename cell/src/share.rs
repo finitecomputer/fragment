@@ -270,7 +270,7 @@ pub(crate) async fn ask(env: &Env, url: &Url, name: &str, who: &Signed, method: 
         init.with_body(Some(b.to_string().into()));
     }
     let req = Request::new_with_init(&format!("https://fragment.internal{inner}"), &init)?;
-    let mut resp = env.durable_object("FRAGMENT")?.get_by_name(name)?.fetch_with_request(req).await?;
+    let mut resp = crate::routed::send(env, "FRAGMENT", name, req).await?;
     let status = resp.status_code();
     let v: Value = resp.json().await.map_err(|e| CellError::host(format!("{inner} answered {status}, not JSON: {e}")))?;
     if status == 200 {

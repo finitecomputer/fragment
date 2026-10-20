@@ -666,12 +666,30 @@ fn ensure(cmd: &mut Command, what: &str) -> Result<()> {
     bail!("{what}: {}", text.trim())
 }
 
+/// The deploy's id (`FRAGMENT_DEPLOY_ID`): its commit, which is also its
+/// release, the one id every call between its Worker and its objects
+/// carries (fragment_core::release). A tree with changes not committed is
+/// marked with the deploy's second as well, so two such deploys of one
+/// commit are two releases, never one whose calls the other admits.
 fn git_head() -> Result<String> {
     let out = Command::new("git").args(["rev-parse", "--short=12", "HEAD"]).current_dir(devstack::repo_root()).output()?;
     anyhow::ensure!(out.status.success(), "git rev-parse HEAD");
     let dirty = Command::new("git").args(["status", "--porcelain"]).current_dir(devstack::repo_root()).output()?;
     let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    Ok(if dirty.stdout.is_empty() { sha } else { format!("{sha}-dirty") })
+    let at_s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    let id = deploy_id(&sha, !dirty.stdout.is_empty(), at_s);
+    anyhow::ensure!(fragment_core::release::valid(&id), "the deploy's id {id:?} is a release's (fragment_core::release::valid)");
+    Ok(id)
+}
+
+/// A deploy's id from its commit, whether its tree has changes not
+/// committed, and when it is made (seconds): `<sha>`, or `<sha>-dirty-<s>`.
+fn deploy_id(sha: &str, dirty: bool, at_s: u64) -> String {
+    if dirty {
+        format!("{sha}-dirty-{at_s}")
+    } else {
+        sha.to_string()
+    }
 }
 
 /// A file only its owner reads, removed when dropped.
@@ -1053,6 +1071,19 @@ pub fn teardown(rest: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A deploy's id is its commit, which `/healthz` answers and CD checks;
+    /// an uncommitted tree's is that deploy's alone, so two of one commit
+    /// are two releases. Both are releases' ids.
+    #[test]
+    fn a_deploy_id_names_one_release() {
+        assert_eq!(deploy_id("bc8b87e7a1b2", false, 1_760_918_400), "bc8b87e7a1b2");
+        assert_eq!(deploy_id("bc8b87e7a1b2", false, 1), deploy_id("bc8b87e7a1b2", false, 2), "a commit deployed again is one release");
+        let (a, b) = (deploy_id("bc8b87e7a1b2", true, 1_760_918_400), deploy_id("bc8b87e7a1b2", true, 1_760_918_401));
+        assert_eq!(a, "bc8b87e7a1b2-dirty-1760918400");
+        assert_ne!(a, b, "two uncommitted trees of one commit are two releases");
+        assert!(fragment_core::release::valid(&a) && fragment_core::release::valid(&deploy_id(&"f".repeat(12), true, u64::MAX)));
+    }
 
     /// A branch config (on the zone finite.place) with neither host, else a
     /// deployment of its own's (no zone).

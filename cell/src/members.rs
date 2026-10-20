@@ -218,16 +218,17 @@ impl FragmentCell {
             let mut init = RequestInit::new();
             init.with_method(Method::Post).with_headers(headers).with_body(Some(body.to_string().into()));
             let req = Request::new_with_init("https://principal.internal/index", &init)?;
-            let mut resp = self.env.durable_object("PRINCIPAL")?.get_by_name(principal)?.fetch_with_request(req).await?;
+            let mut resp = crate::routed::send(&self.env, "PRINCIPAL", principal, req).await?;
             let status = resp.status_code();
             // what a list says of a change it did not take (its error's message)
             let detail = if status == 200 { String::new() } else { resp.text().await.unwrap_or_default() };
-            Ok::<(u16, String), worker::Error>((status, detail))
+            Ok::<(u16, String), CellError>((status, detail))
         }
         .await;
         match sent {
             Ok((status, detail)) => fragment_core::ended::list_told(Some(status), &detail),
-            Err(e) => fragment_core::ended::list_told(None, &e.to_string()),
+            // a list of another release refused it unread (a deploy going out): a later try's
+            Err(e) => fragment_core::ended::list_told(None, &e.message),
         }
     }
 

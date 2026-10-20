@@ -216,7 +216,12 @@ pub(crate) fn authenticate(req: &Request, url: &Url, payload: Payload<'_>) -> Ce
 /// the body, and the answer are one definition both ends compile against).
 /// Its refusals pass through; not reaching it, a failure inside it, or an
 /// answer that does not decode is `registry_unavailable`: nothing signed
-/// is decided without it (docs/finite-integration.md, rule 7).
+/// is decided without it (docs/finite-integration.md, rule 7). A registry
+/// of another release refuses the call before it reads it, and is asked
+/// again a few times, then is `deploying` (routed.rs, `send_again`): a
+/// deploy going out never has one release act and the other read its
+/// answer (2026-10-20: an old Registry exchanged a WorkOS code and answered
+/// a shape the new Worker could not read).
 pub(crate) async fn ask_registry<C: Call>(env: &Env, call: &C) -> CellResult<C::Answer> {
     let body = serde_json::to_string(call).map_err(|e| CellError::host(format!("a registry call: {e}")))?;
     // the one generic step is reading the answer: every call type costs
@@ -232,22 +237,25 @@ fn registry_unavailable(why: String) -> CellError {
 
 /// One call to the registry at `path`: its 200's body, or its refusal.
 async fn registry_round_trip(env: &Env, path: &str, body: String) -> CellResult<Vec<u8>> {
-    let ask = || async {
+    let make = || {
         let headers = Headers::new();
         headers.set("content-type", "application/json")?;
         let mut init = RequestInit::new();
         init.with_method(Method::Post).with_headers(headers).with_body(Some(body.as_str().into()));
-        let req = Request::new_with_init(&format!("https://registry.internal{path}"), &init)?;
-        let mut resp = env.durable_object("REGISTRY")?.get_by_name(registry::NAME)?.fetch_with_request(req).await?;
-        let status = resp.status_code();
-        let bytes = resp.bytes().await?;
-        Ok::<_, worker::Error>((status, bytes))
+        Ok(Request::new_with_init(&format!("https://registry.internal{path}"), &init)?)
     };
     // Asked once: a throw may come after the registry acted (a failure
     // inside it, a connection dropped mid-answer), and its calls are not
     // idempotent (a second Mint is a second redemption, a second
-    // RegisterAgent may answer as a replay what the first one made).
-    let (status, bytes) = ask().await.map_err(|e| registry_unavailable(e.to_string()))?;
+    // RegisterAgent may answer as a replay what the first one made). Its
+    // refusal of this release alone is asked again: that one acted on nothing.
+    let mut resp = match routed::send_again(env, "REGISTRY", registry::NAME, make).await {
+        Ok(resp) => resp,
+        Err(e) if e.code == ErrorCode::Deploying => return Err(e),
+        Err(e) => return Err(registry_unavailable(e.message)),
+    };
+    let status = resp.status_code();
+    let bytes = resp.bytes().await.map_err(|e| registry_unavailable(e.to_string()))?;
     if status == 200 {
         return Ok(bytes);
     }
@@ -522,7 +530,7 @@ async fn watch_list(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellRe
     let mut init = RequestInit::new();
     init.with_method(Method::Get).with_headers(headers);
     let watch = Request::new_with_init("https://principal.internal/watch", &init)?;
-    Ok(env.durable_object("PRINCIPAL")?.get_by_name(&identity)?.fetch_with_request(watch).await?)
+    crate::routed::send(env, "PRINCIPAL", &identity, watch).await
 }
 
 /// Whether `maker`'s ledger lets them make a fragment (`Spend::Create`):
@@ -597,7 +605,7 @@ pub(crate) fn json_answer<T: serde::Serialize>(v: &T) -> CellResult<Response> {
 /// An identity's fragments, as its `Principal` cell lists them.
 pub(crate) async fn listed(env: &Env, identity: &str) -> CellResult<FragmentList> {
     let list = Request::new("https://principal.internal/list", Method::Get)?;
-    Ok(env.durable_object("PRINCIPAL")?.get_by_name(identity)?.fetch_with_request(list).await?.json().await?)
+    Ok(crate::routed::send(env, "PRINCIPAL", identity, list).await?.json().await?)
 }
 
 /// `GET /api/fragments?for=<asker>`, signed by an agent: the fragments it
@@ -863,8 +871,7 @@ async fn forward(env: &Env, req: &Request, body: Option<worker::wasm_bindgen::Js
         init.with_body(body);
     }
     let inner = Request::new_with_init(&format!("https://fragment.internal{}", f.inner), &init)?;
-    let stub = env.durable_object("FRAGMENT")?.get_by_name(&f.routed.name)?;
-    Ok(stub.fetch_with_request(inner).await?)
+    routed::send(env, "FRAGMENT", &f.routed.name, inner).await
 }
 
 /// Whether a request is a browser's navigation to a page (its `Accept`
@@ -1141,7 +1148,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
                 return json_answer(&reachable(env, &principal, asker).await?);
             }
             let list = Request::new("https://principal.internal/list", Method::Get)?;
-            Ok(env.durable_object("PRINCIPAL")?.get_by_name(&principal.id)?.fetch_with_request(list).await?)
+            crate::routed::send(env, "PRINCIPAL", &principal.id, list).await
         }
         // the signer's own view of a fragment of theirs (principal.rs): it
         // changes nothing of the fragment's, nor anyone else's list
@@ -1154,7 +1161,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let mut init = RequestInit::new();
             init.with_method(Method::Put).with_body(Some(inner.into()));
             let put = Request::new_with_init("https://principal.internal/archived", &init)?;
-            Ok(env.durable_object("PRINCIPAL")?.get_by_name(&who.identity.id)?.fetch_with_request(put).await?)
+            crate::routed::send(env, "PRINCIPAL", &who.identity.id, put).await
         }
         // the signer has seen a chat's messages (principal.rs): their own
         // view again, so their row counts none of them unread
@@ -1169,7 +1176,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let mut init = RequestInit::new();
             init.with_method(Method::Put).with_body(Some(inner.into()));
             let put = Request::new_with_init("https://principal.internal/seen", &init)?;
-            Ok(env.durable_object("PRINCIPAL")?.get_by_name(&who.identity.id)?.fetch_with_request(put).await?)
+            crate::routed::send(env, "PRINCIPAL", &who.identity.id, put).await
         }
         // search over the signer's own list (principal.rs): agents need none,
         // and acting for someone (`for`) is not honored here
@@ -1182,7 +1189,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let mut inner = Url::parse("https://principal.internal/search").map_err(|e| CellError::host(e.to_string()))?;
             inner.query_pairs_mut().append_pair("q", &q);
             let search = Request::new(inner.as_str(), Method::Get)?;
-            Ok(env.durable_object("PRINCIPAL")?.get_by_name(&who.identity.id)?.fetch_with_request(search).await?)
+            crate::routed::send(env, "PRINCIPAL", &who.identity.id, search).await
         }
         // a person's export of everything that is theirs (export.rs)
         (_, ["api", "export", rest @ ..]) => {

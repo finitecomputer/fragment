@@ -434,7 +434,7 @@ async fn consume_one(raw: RawMessage, env: &Env) {
     let body = serde_json::to_string(&acked).expect("an acknowledgement serializes");
     let heard = async {
         let req = routed::internal_request("meter/acked", &body)?;
-        let resp = env.durable_object("FRAGMENT")?.get_by_name(&b.source)?.fetch_with_request(req).await?;
+        let resp = crate::routed::send(env, "FRAGMENT", &b.source, req).await?;
         Ok::<u16, CellError>(resp.status_code())
     };
     match heard.await {

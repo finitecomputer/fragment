@@ -15,16 +15,24 @@
 //! routed requests: they carry no caller and no URL, and the supervisor
 //! answers them before it decodes a `Routed`. `internal_request` builds
 //! them, for Rust and for `entry.mjs`.
+//!
+//! Every call into a platform object goes out through `send` (or
+//! `send_again`), here alone (xtask's guard), stamped with this release,
+//! and every object's `fetch` checks it first (`refused`): a call from
+//! another release is refused before anything is done, so a change to a
+//! call's shape ships safely across the seconds a deploy takes
+//! (fragment_core::release; docs/MODEL.md, "Calls between releases").
 
 use std::ops::Deref;
 
-use fragment_core::npub;
-use fragment_proto::{routed, valid_fragment_name, ErrorCode, Identity, IdentityKind};
+use fragment_core::{npub, release};
+use fragment_proto::{routed, valid_fragment_name, ErrorBody, ErrorCode, Identity, IdentityKind};
 use serde::{Deserialize, Serialize};
 // the macro's generated code names `wasm_bindgen`: worker's re-export
-use worker::wasm_bindgen::{self, prelude::*};
-use worker::{Env, Headers, Method, Request, RequestInit, Response, Url};
+use worker::wasm_bindgen::{self, prelude::*, JsCast};
+use worker::{console_log, Delay, Env, Headers, Method, Request, RequestInit, Response, Url};
 
+use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::registry::calls;
 
@@ -217,11 +225,85 @@ pub(crate) fn internal_request(path: &str, body: &str) -> CellResult<Request> {
     Ok(Request::new_with_init(&format!("https://fragment.internal/{path}"), &init)?)
 }
 
+/// Stamps a call into a platform object with this release (`release::HEADER`).
+fn stamp(req: &Request, env: &Env) -> CellResult<()> {
+    req.headers().set(release::HEADER, &Config::from_env(env).deploy_id)?;
+    Ok(())
+}
+
+/// The object's side, the first thing every platform object's `fetch`
+/// does: a call from a release other than `own` (its own, `deploy_id`), or
+/// naming none, is answered here, 503 `deploying` marked as this refusal
+/// (`release::REFUSED`), before anything is read or done; `None` admits it.
+pub(crate) fn refused(req: &Request, own: &str) -> worker::Result<Option<Response>> {
+    let caller = req.headers().get(release::HEADER)?;
+    let Err(skew) = release::admit(caller.as_deref(), own) else { return Ok(None) };
+    console_log!("{}", serde_json::json!({ "event": "release.refused", "caller": skew.caller, "callee": skew.callee, "path": req.path() }));
+    let mut resp = CellError::new(ErrorCode::Deploying, skew.message()).response()?;
+    resp.headers_mut().set(release::REFUSED, own)?;
+    Ok(Some(resp))
+}
+
+/// What one call into an object came to: its answer, or its refusal of
+/// this release (which did nothing).
+enum Sent {
+    Answered(Response),
+    Refused(CellError),
+}
+
+async fn sent(env: &Env, binding: &str, name: &str, req: Request) -> CellResult<Sent> {
+    stamp(&req, env)?;
+    let mut resp = env.durable_object(binding)?.get_by_name(name)?.fetch_with_request(req).await?;
+    // an app's answer passed through with the mark would only be its own
+    // request's refusal, as `serve::REFUSAL`'s would
+    if resp.status_code() != 503 || !resp.headers().has(release::REFUSED)? {
+        return Ok(Sent::Answered(resp));
+    }
+    let message = match resp.json::<ErrorBody>().await {
+        Ok(b) if b.error == ErrorCode::Deploying => b.message,
+        _ => format!("{binding} {name} runs another release: a deploy is going out; try again in a few seconds"),
+    };
+    Ok(Sent::Refused(CellError::new(ErrorCode::Deploying, message)))
+}
+
+/// One call into the Durable Object `name` of `binding` (the only way the
+/// cell calls one), stamped with this release: its answer, whatever it
+/// is, or `deploying` when the object runs another release and refused it.
+/// Asked once: for a request that cannot be made again (a body streamed
+/// through, a socket's upgrade), or whose caller retries on its own.
+pub(crate) async fn send(env: &Env, binding: &str, name: &str, req: Request) -> CellResult<Response> {
+    match sent(env, binding, name, req).await? {
+        Sent::Answered(resp) => Ok(resp),
+        Sent::Refused(e) => Err(e),
+    }
+}
+
+/// `send`, asked again while the object refuses this release (it did
+/// nothing, so asking again is safe, however the call acts), after
+/// `release::again_after_ms`'s waits: at most `release::ASKS` asks, then
+/// `deploying`. `make` makes each ask's request. Only the object's own
+/// refusal is asked again: a `deploying` it answers from a call of its
+/// own is its answer, as it may have acted before that call.
+pub(crate) async fn send_again(env: &Env, binding: &str, name: &str, make: impl Fn() -> CellResult<Request>) -> CellResult<Response> {
+    // bounded: `again_after_ms` is `None` past `release::ASKS` refusals
+    for refused in 1.. {
+        let e = match sent(env, binding, name, make()?).await? {
+            Sent::Answered(resp) => return Ok(resp),
+            Sent::Refused(e) => e,
+        };
+        match release::again_after_ms(refused) {
+            Some(ms) => Delay::from(std::time::Duration::from_millis(ms)).await,
+            None => return Err(e),
+        }
+    }
+    unreachable!("the asks are bounded")
+}
+
 /// The internal call `path` with a JSON `body` on the Durable Object
 /// `name` of `binding`: its JSON answer, or its refusal as it named it.
 pub(crate) async fn ask_object(env: &Env, binding: &str, name: &str, path: &str, body: &serde_json::Value) -> CellResult<serde_json::Value> {
-    let req = internal_request(path, &body.to_string())?;
-    let mut resp = env.durable_object(binding)?.get_by_name(name)?.fetch_with_request(req).await?;
+    let body = body.to_string();
+    let mut resp = send_again(env, binding, name, || internal_request(path, &body)).await?;
     let status = resp.status_code();
     let v: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
     if status == 200 {
@@ -235,21 +317,23 @@ pub(crate) async fn ask_object(env: &Env, binding: &str, name: &str, path: &str,
 /// The internal call `path` on the Durable Object `name` of `binding`, its
 /// answer as it is (a picture's bytes, or its refusal).
 pub(crate) async fn fetch_object(env: &Env, binding: &str, name: &str, path: &str) -> CellResult<Response> {
-    let req = internal_request(path, "{}")?;
-    Ok(env.durable_object(binding)?.get_by_name(name)?.fetch_with_request(req).await?)
+    send_again(env, binding, name, || internal_request(path, "{}")).await
 }
 
-/// `internal_request` for `entry.mjs` (the job driver and the `Files`
-/// capability), so the JavaScript names no header. A class with a static
-/// method, because worker-build exports classes by name and a free
-/// function only as a method of the Worker's entrypoint.
+/// `internal_request` for `entry.mjs` (the job driver, the `Files`
+/// capability and a computer's reports to itself), stamped with the
+/// release of `env` (the caller's), so the JavaScript names no header. A
+/// class with a static method, because worker-build exports classes by
+/// name and a free function only as a method of the Worker's entrypoint.
 #[wasm_bindgen(wasm_bindgen = worker::wasm_bindgen)]
 pub struct InternalRoute;
 
 #[wasm_bindgen]
 impl InternalRoute {
-    pub fn request(path: &str, body: &str) -> Result<worker::web_sys::Request, JsValue> {
+    pub fn request(env: JsValue, path: &str, body: &str) -> Result<worker::web_sys::Request, JsValue> {
+        let env: Env = env.unchecked_into();
         let req = internal_request(path, body).map_err(|e| JsValue::from_str(&e.message))?;
+        stamp(&req, &env).map_err(|e| JsValue::from_str(&e.message))?;
         // the handle, not JavaScript's `Request.clone()` (which tees the body)
         Ok(Clone::clone(req.inner()))
     }
