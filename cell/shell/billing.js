@@ -29,7 +29,9 @@ export function seatGives(offer) {
 
 /**
  * The shell's helpers this module uses: `{api, el}` for the welcome, and
- * `{section, line, usd, reopen}` besides for settings.
+ * `{section, line, actionLine, usd, reopen}` besides for settings, with
+ * `noSeatSaid` (who is signed in, said to a guest) and `switchForm` (Use
+ * another account).
  */
 let h = null;
 
@@ -231,10 +233,13 @@ export async function billingSections(helpers, ledger, mine, back) {
     }
   } else if (mine.guest) {
     billing.append(el("p", "muted", `You are a guest: you see and edit what is shared with you. ${seatGives(offer)}`));
-    // the seats and a trial code are the welcome's, as a new person's are
+    // the seats and a trial code are the welcome's, as a new person's are;
+    // or the account a seat of theirs waits under (who is signed in, said)
     const get = el("a", "quiet", "Get a seat");
     get.href = "/welcome";
-    billing.append(actionLine("Seat", get));
+    const ways = actionLine("Seat", get, h.switchForm("/settings"));
+    ways.classList.add("settings-stack");
+    billing.append(h.noSeatSaid(), ways);
   } else {
     // no seat of theirs: the deployment's plan gives everyone one
     billing.append(line("Seat", `${KIND[ledger?.plan] ?? "A seat"}, given to everyone here`));

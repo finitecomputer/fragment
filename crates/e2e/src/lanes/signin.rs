@@ -1188,6 +1188,22 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
+/// Presses the shell's "Use another account" (`button`, on `page`) while
+/// WorkOS holds a session as `email` in the browser (the fake's `hold`, as
+/// AuthKit's cookie on its own domain does): the switch reaches WorkOS
+/// under the shell's CSP and ends that session, and the browser comes back
+/// to the shell signed out, its platform cookie gone. Said as `what`;
+/// answers whether it did.
+pub(super) fn switched_out(s: &mut Suite, browser: &mut crate::browser::Browser, page: &crate::browser::Page, button: &str, email: &str, what: &str) -> Result<bool> {
+    let held = s.workos.hold(email, 3600);
+    browser.eval(page, "window.__beforeSwitch = true")?;
+    browser.click(page, button)?;
+    let back = browser.until(page, "!window.__beforeSwitch && document.querySelector('#first-run-card a.primary')?.textContent === 'Sign in'", Duration::from_secs(15));
+    let out = back && s.workos.held().is_none() && s.workos.ended().contains(&held) && !browser.cookies()?.iter().any(|c| c["name"] == "fragment_session");
+    s.ok(what, out, format!("returned: {back}"));
+    Ok(out)
+}
+
 /// Chromium applies a form's CSP to HTTP redirects too. Drive the shell's
 /// real button so a successful POST alone cannot hide a blocked WorkOS logout.
 fn browser_logout(s: &mut Suite, api: &Api) -> Result<()> {
@@ -1231,20 +1247,7 @@ fn browser_logout(s: &mut Suite, api: &Api) -> Result<()> {
     if !signed_out {
         return Ok(());
     }
-    let held = s.workos.hold(emails[0], 3600);
-    browser.eval(&page, "window.__beforeSwitch = true")?;
-    browser.click(&page, "form[action^='/auth/switch'] button")?;
-    let switched_out = browser.until(
-        &page,
-        "!window.__beforeSwitch && document.querySelector('#first-run-card a.primary')?.textContent === 'Sign in'",
-        wait,
-    );
-    s.ok(
-        "Use another account reaches WorkOS under the shell's CSP and ends its held session",
-        switched_out && s.workos.held().is_none() && s.workos.ended().contains(&held) && !browser.cookies()?.iter().any(|c| c["name"] == "fragment_session"),
-        format!("returned: {switched_out}"),
-    );
-    if !switched_out {
+    if !switched_out(s, &mut browser, &page, "form[action^='/auth/switch'] button", emails[0], "Use another account reaches WorkOS under the shell's CSP and ends its held session")? {
         return Ok(());
     }
     browser.click(&page, "#first-run-card a.primary")?;

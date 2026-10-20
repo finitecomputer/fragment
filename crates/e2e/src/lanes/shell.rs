@@ -721,10 +721,13 @@ fn fill(selector: &str, value: &str) -> String {
 /// first run (the first agent), the agent's chat framed and
 /// signed in on its own origin with the agent's answer in it, a second
 /// agent, an app's window, settings (at `/settings`, which the address
-/// keeps), and the phone's layout. The agents run on the stub image
-/// (Docker), as the computers section's do.
+/// keeps), the phone's layout, and last a guest told who is signed in, who
+/// uses another account to sign in to this seat (`guest_ui`). The agents
+/// run on the stub image (Docker), as the computers section's do.
 pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("shell-ui", &[crate::Need::Chrome, crate::Need::LocalDocker]) {
+    // (the fakes and the deployment: a guest the operator's key makes,
+    // signed out of the WorkOS fake's held session: `guest_ui`)
+    if !s.section("shell-ui", &[crate::Need::Chrome, crate::Need::LocalDocker, crate::Need::Fakes, crate::Need::Deployment]) {
         return Ok(());
     }
     let Some(mut b) = s.browser()? else {
@@ -1030,6 +1033,12 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
             && has("#settings-page form[method=post][action='/auth/logout'] button"),
         &text[..text.len().min(600)],
     );
+    let account = b.eval(&page, ACCOUNT_SEEN)?;
+    s.ok(
+        "settings' Account says who is signed in, the email in bold, beside Sign out and Use another account (back to settings); a seat's holder is told nothing a guest is",
+        account_shows(&account, &email) && account["noSeat"] == json!([]) && !text.contains("You are a guest"),
+        &account,
+    );
     // a prompt for Claude Code or Codex naming this platform's own llms.txt,
     // copied whole; the CLI's install folded below it
     let prompt = format!("Read {}/llms.txt and help me build: ", api.base);
@@ -1149,7 +1158,156 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     phone_ui(s, api, &mut b, &page, &session, &shots)?;
     // last: it renames the person's first agent, which the checks above name
     faces_ui(s, api, &mut b, &page, &me, &chat, &shots)?;
+    // a guest, in this browser, who then signs in to this seat
+    b.close(page)?;
+    guest_ui(s, api, &mut b, &email, &shots)?;
     println!("      (screenshots: {})", shots.display());
+    Ok(())
+}
+
+/// What a guest is told of who is signed in (shell.js `noSeatSaid`), for `email`.
+pub(super) fn no_seat_said(email: &str) -> String {
+    format!("You're signed in as {email}. This account has no seat. If your team gave you a seat under another email, use another account.")
+}
+
+/// What the page shows of who is signed in to someone with no seat: each
+/// line of it shown, its bold parts, and each "Use another account" shown
+/// (its action, method and words).
+pub(super) const NO_SEAT_SEEN: &str = "({ said: [...document.querySelectorAll('.no-seat')].filter((p) => p.getClientRects().length).map((p) => p.textContent), \
+    bold: [...document.querySelectorAll('.no-seat strong')].filter((p) => p.getClientRects().length).map((b) => b.textContent), \
+    switches: [...document.querySelectorAll('form[action^=\"/auth/switch\"]')].filter((f) => f.getClientRects().length).map((f) => [f.getAttribute('action'), f.getAttribute('method'), f.textContent]) })";
+
+/// Settings' Account's line of who is signed in: its label, the email in
+/// bold, its forms (action, method, words), and any no-seat line on the page.
+const ACCOUNT_SEEN: &str = "(() => { const w = document.querySelector('#settings-page .settings-who'); \
+    return { label: w?.querySelector('.settings-key')?.textContent ?? null, email: w?.querySelector('.settings-value strong')?.textContent ?? null, \
+    actions: [...(w?.querySelectorAll('form') ?? [])].map((f) => [f.getAttribute('action'), f.getAttribute('method'), f.textContent]), \
+    noSeat: [...document.querySelectorAll('.no-seat')].map((p) => p.textContent) }; })()";
+
+/// `ACCOUNT_SEEN` says `email` is signed in, beside Sign out and Use another account.
+fn account_shows(seen: &Value, email: &str) -> bool {
+    seen["label"] == "Signed in as"
+        && seen["email"] == email
+        && seen["actions"] == json!([["/auth/logout", "post", "Sign out"], ["/auth/switch?return=%2Fsettings", "post", "Use another account"]])
+}
+
+/// Who is signed in, and another account, inside a phone's screen: the
+/// page no wider than it, and no line of who is signed in, nor Use another
+/// account (nor its words), past its edges.
+const NO_SEAT_FITS: &str = "(() => { const d = document.documentElement; const p = document.getElementById('settings-page'); \
+    const parts = [...document.querySelectorAll('.no-seat, .no-seat *, form[action^=\"/auth/switch\"], form[action^=\"/auth/switch\"] *, .settings-who, .settings-who *')].filter((e) => e.getClientRects().length); \
+    const out = parts.filter((e) => { const r = e.getBoundingClientRect(); return r.left < -1 || r.right > innerWidth + 1 || e.scrollWidth > e.clientWidth + 1; }).map((e) => `${e.tagName} ${e.className} ${e.textContent.slice(0, 40)}`); \
+    const page = p && !p.hidden ? [p.scrollWidth, p.clientWidth] : null; \
+    return { ok: parts.length > 0 && out.length === 0 && d.scrollWidth <= innerWidth && (!page || page[0] <= page[1]), parts: parts.length, out, wide: d.scrollWidth, width: innerWidth, page }; })()";
+
+/// Who is signed in, to a guest (2026-10-20, in production: a browser's
+/// autofill signed someone in by email code as an address their seat was
+/// not under, a new guest, and they thought sign-in broken). The welcome,
+/// settings' Billing and its Account say which email is signed in, that it
+/// has no seat, and offer Use another account (a form to `/auth/switch`),
+/// at a desktop's width and on a phone (320 to 430 px: nothing past the
+/// screen's edges). Pressed while WorkOS holds the guest's session in the
+/// browser, it ends that session and this one, as the signin section's
+/// switch does; Sign in then asks who is signing in, and `seat_email`
+/// signs in to their seat, whose home and settings say nothing a guest is
+/// told.
+fn guest_ui(s: &mut Suite, api: &Api, b: &mut Browser, seat_email: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    // a guest: the e2e's people are seats, so the operator makes one a guest
+    let guest = format!("shell-ui-guest-{}@e2e.test", crate::api::now_s());
+    let session = api.sign_in(&guest)?;
+    let id = super::signin::who(api, &session)?["id"].as_str().context("a signed-in guest")?.to_string();
+    let op = api.sign_in("operator@e2e.test")?;
+    let _ = api.approve(&op, &s.operator);
+    let r = api.signed(&s.operator, "POST", &format!("/api/ledger/{id}/plan"), Some(&json!({ "id": guest, "plan": "guest" })))?;
+    anyhow::ensure!(r.status == 200, "making a guest: {r}");
+    b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
+    let page = b.open(&format!("{}/", api.base))?;
+    let said = no_seat_said(&guest);
+    let welcome = "location.pathname === '/welcome' && !!document.querySelector('#first-run-card .no-seat')";
+    let settings = "location.pathname === '/settings' && /You are a guest/.test(document.getElementById('settings-page').innerText) && !!document.querySelector('#settings-page .settings-who')";
+    // on a phone, from 320 px to 430 px
+    let mut bad: Vec<Value> = Vec::new();
+    for w in [320u32, 375, 430] {
+        b.viewport(&page, w, 812, true)?;
+        for (place, path, ready) in [("welcome", "/welcome", welcome), ("settings", "/settings", settings)] {
+            b.eval(&page, &format!("(location.assign({path:?}), true)"))?;
+            let shown = b.until(&page, ready, wait);
+            if place == "settings" {
+                b.eval(&page, "(document.querySelector('#settings-page .settings-who')?.scrollIntoView({ block: 'center' }), true)")?;
+            }
+            let fits = b.eval(&page, NO_SEAT_FITS)?;
+            if !shown || fits["ok"] != true {
+                bad.push(json!({ "width": w, "place": place, "shown": shown, "seen": fits }));
+            }
+            if w == 320 {
+                let _ = b.screenshot(&page, &shots.join(format!("phone-{w}-guest-{place}.png")));
+            }
+        }
+    }
+    s.ok(
+        "at 320, 375 and 430 px on a phone, the welcome and settings keep who is signed in and Use another account inside the screen, the page no wider than it",
+        bad.is_empty(),
+        json!(bad),
+    );
+    // at a desktop's width: the welcome
+    b.viewport(&page, 1280, 800, false)?;
+    b.eval(&page, "(location.assign('/'), true)")?;
+    let welcomed = b.until(&page, welcome, wait);
+    let seen = b.eval(&page, NO_SEAT_SEEN)?;
+    s.ok(
+        "a guest's welcome says which email is signed in, in bold, that it has no seat, and offers Use another account: a form posting to /auth/switch, back to the welcome",
+        welcomed && seen["said"] == json!([said]) && seen["bold"] == json!([guest]) && seen["switches"] == json!([["/auth/switch?return=%2Fwelcome", "post", "Use another account"]]),
+        &seen,
+    );
+    let _ = b.screenshot(&page, &shots.join("guest-welcome.png"));
+    // settings: Billing's guest state, then Account
+    b.eval(&page, "(location.assign('/settings'), true)")?;
+    let still = "document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)";
+    let settled = b.until(&page, &format!("{settings} && {still}"), wait);
+    let seen = b.eval(&page, NO_SEAT_SEEN)?;
+    let account = b.eval(&page, ACCOUNT_SEEN)?;
+    let get = b.eval(&page, "[...document.querySelectorAll('#settings-page a')].filter((a) => a.textContent === 'Get a seat').map((a) => a.getAttribute('href'))")?;
+    let back = json!(["/auth/switch?return=%2Fsettings", "post", "Use another account"]);
+    s.ok(
+        "a guest's settings: Billing says which email is signed in, that it has no seat, beside Get a seat and Use another account; Account says who is signed in, in bold, beside Sign out and Use another account",
+        settled && seen["said"] == json!([said]) && seen["switches"] == json!([back, back]) && get == json!(["/welcome"]) && account_shows(&account, &guest),
+        json!({ "seen": seen, "account": account, "get": get }),
+    );
+    let _ = b.screenshot(&page, &shots.join("guest-settings.png"));
+    // settings' Use another account, with WorkOS holding the guest's
+    // session in the browser (as their autofilled sign-in left it)
+    let pressed = super::signin::switched_out(
+        s,
+        b,
+        &page,
+        "#settings-page .settings-who form[action^='/auth/switch'] button",
+        &guest,
+        "settings' Use another account, pressed while WorkOS holds the guest's session, reaches WorkOS under the shell's CSP and ends it: the browser comes back signed out",
+    )?;
+    s.ok("and the guest's session here ended with it", super::signin::who(api, &session)?.is_null(), "");
+    if !pressed {
+        b.close(page)?;
+        return Ok(());
+    }
+    // Sign in asks who is signing in now: the seat's email, to its seat
+    b.click(&page, "#first-run-card a.primary")?;
+    let asked = b.until(&page, "!!document.querySelector('input[name=login_hint]')", wait);
+    b.eval(&page, &format!("(document.querySelector('input[name=login_hint]').value = {}, true)", js(seat_email)))?;
+    b.click(&page, "button")?;
+    let home = b.until(&page, "location.pathname === '/' && !document.getElementById('layout').hidden && !!document.querySelector('#frames iframe')", wait);
+    let told = b.eval(&page, "({ noSeat: document.querySelectorAll('.no-seat').length, notice: document.getElementById('notice').hidden ? null : document.getElementById('notice').innerText })")?;
+    b.click(&page, "#settings")?;
+    let settled = b.until(&page, "location.pathname === '/settings' && !!document.querySelector('#settings-page .settings-who')", wait);
+    let account = b.eval(&page, ACCOUNT_SEEN)?;
+    let text = b.eval(&page, "document.getElementById('settings-page').innerText")?;
+    s.ok(
+        "then Sign in asks who is signing in, and the seat's email lands home on their seat, told nothing a guest is; settings say that email is signed in",
+        asked && home && settled && told == json!({ "noSeat": 0, "notice": null }) && account_shows(&account, seat_email) && account["noSeat"] == json!([]) && !text.as_str().unwrap_or("").contains("You are a guest"),
+        json!({ "home": told, "account": account }),
+    );
+    let _ = b.screenshot(&page, &shots.join("guest-switched-to-seat.png"));
+    b.close(page)?;
     Ok(())
 }
 

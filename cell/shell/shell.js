@@ -155,13 +155,14 @@ function patch(box, rows) {
   while (box.children.length > next.length) box.lastElementChild.remove();
 }
 
+// `text`: a line, or lines and elements; `action`: one, or several in a row
 function notice(title, text, action = null) {
   const n = $("notice");
   n.replaceChildren(el("strong", null, title));
-  if (text) n.append(el("span", null, text));
+  if (text) n.append(...[text].flat().map((t) => (typeof t === "string" ? el("span", null, t) : t)));
   if (action) {
-    const row = el("div");
-    row.append(action);
+    const row = el("div", "notice-row");
+    row.append(...[action].flat());
     n.append(row);
   }
   n.hidden = false;
@@ -1834,7 +1835,7 @@ async function openSettings(push = true) {
   renderChats();
   leaveSidebar();
   // a credit pack's Checkout returning, before the ledger is read
-  const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => openSettings(false) };
+  const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => openSettings(false), noSeatSaid, switchForm };
   const back = await returning(billingHelpers);
   const [ledger, mySeat, linked, uses, access] = await Promise.all([
     api("GET", "/api/ledger").catch(() => null),
@@ -1845,13 +1846,22 @@ async function openSettings(push = true) {
   ]);
   if (mySeat) setGuest(mySeat.guest);
   const emails = (state.me.subjects ?? []).map((x) => x.email).filter(Boolean);
+  // who is signed in (their latest sign-in's email), signing out, and
+  // another account: a seat may wait under another email
+  const signout = el("form");
+  signout.method = "post";
+  signout.action = "/auth/logout";
+  const out = el("button", "quiet", "Sign out");
+  out.type = "submit";
+  signout.append(out);
+  const ways = el("span", "settings-actions");
+  ways.append(signout, switchForm(SETTINGS));
+  const who = line("Signed in as", "", ways);
+  who.classList.add("settings-who", "settings-stack");
+  who.querySelector(".settings-value").append(state.me.email ? el("strong", null, state.me.email) : "—");
   const id = line("Identity", state.me.id);
   id.lastChild.classList.add("mono");
-  const account = section(
-    "Account",
-    line(emails.length > 1 ? "Sign-ins" : "Signed in as", emails.join(", ") || "—"),
-    id,
-  );
+  const account = section("Account", who, id);
   // a picture: PNG, JPEG, WebP or GIF, at most 256 KiB (PUT /api/identities/me/picture)
   const picture = el("label", "quiet picture");
   const shown = el("img");
@@ -1873,16 +1883,11 @@ async function openSettings(push = true) {
     } else picture.querySelector("span").textContent = (await r.json().catch(() => ({}))).message || "That picture was not taken";
   };
   account.append(actionLine("Picture", picture));
-  // another sign-in (an email, a provider) that is this person too, and signing out
+  // their sign-ins, when there are several, and another (an email, a
+  // provider) that is this person too
   const link = el("a", "quiet", "Add another sign-in");
   link.href = `/auth/link?return=${encodeURIComponent(SETTINGS)}`;
-  const signout = el("form");
-  signout.method = "post";
-  signout.action = "/auth/logout";
-  const out = el("button", "quiet", "Sign out");
-  out.type = "submit";
-  signout.append(out);
-  account.append(actionLine("Sign-ins", link), actionLine("Session", signout));
+  account.append(emails.length > 1 ? line("Sign-ins", emails.join(", "), link) : actionLine("Sign-ins", link));
   // the person's seat, credit and org (billing.js), and why agents stop
   const billing = await billingSections(billingHelpers, ledger, mySeat, back);
   // everything that is theirs, to download (a guest's too: what is shared
@@ -2676,19 +2681,36 @@ function firstRun(...children) {
 const PITCH = "Agents that work for you, and the apps they make.";
 function signIn() {
   // back to this view, with what its address carries (a mailed trial's code)
-  const back = encodeURIComponent(location.pathname + location.search);
+  const back = location.pathname + location.search;
   const go = el("a", "primary", "Sign in");
-  go.href = `/auth/login?return=${back}`;
-  // WorkOS keeps its own sign-in in the browser (clearing this site's data
-  // leaves it), and Sign in comes back as that account without asking: a
-  // switch ends it there, so the next sign-in asks who is signing in
+  go.href = `/auth/login?return=${encodeURIComponent(back)}`;
+  firstRun(el("h1", null, PITCH), el("p", "muted", "Sign in to start."), go, switchForm(back));
+}
+// "Use another account" (`POST /auth/switch`, docs/api.md, Sign-in), back
+// to `back`: WorkOS keeps its own sign-in in the browser (clearing this
+// site's data leaves it), and Sign in comes back as that account without
+// asking. A switch ends this session here, if there is one, and that one
+// there, so the next sign-in asks who is signing in. A form: the shell's
+// `form-action 'self'` lets the browser leave for WorkOS only from the
+// page its answer is.
+function switchForm(back, cls = "quiet") {
   const other = el("form");
   other.method = "post";
-  other.action = `/auth/switch?return=${back}`;
-  const use = el("button", "quiet", "Use another account");
+  other.action = `/auth/switch?return=${encodeURIComponent(back)}`;
+  const use = el("button", cls, "Use another account");
   use.type = "submit";
   other.append(use);
-  firstRun(el("h1", null, PITCH), el("p", "muted", "Sign in to start."), go, other);
+  return other;
+}
+// Who is signed in, wherever someone is told they have no seat (a guest:
+// `GET /api/seat`): a browser's autofill can sign someone in as an email
+// their seat is not under, a new guest, whose seat waits under the other
+// (2026-10-20, in production). The email is their latest sign-in's.
+function noSeatSaid() {
+  const p = el("p", "no-seat");
+  if (state.me.email) p.append("You're signed in as ", el("strong", null, state.me.email), ". ");
+  p.append("This account has no seat. If your team gave you a seat under another email, use another account.");
+  return p;
 }
 // A new person's welcome (docs/billing.md, "The shell"): what this is, the
 // one seat and a trial code, then Stripe's Checkout, whose return comes
@@ -2722,8 +2744,10 @@ async function welcome() {
   imports.type = "button";
   imports.dataset.slot = "import";
   imports.hidden = true;
+  // who is signed in, and another account (back here, its trial code kept)
+  const trial = q.get("trial");
   const foot = el("div", "welcome-foot");
-  foot.append(el("span", "muted", `Signed in as ${state.me.email}`));
+  foot.append(noSeatSaid(), switchForm(trial ? `${WELCOME}?trial=${encodeURIComponent(trial)}` : WELCOME));
   // someone shared something with them first: it is still theirs to open
   if (state.fragments.length) {
     const home = el("a", "quiet", "Not now");
@@ -2741,7 +2765,7 @@ async function welcome() {
     el("h1", null, PITCH),
     el("p", "muted", "Your own agent, on a computer of its own: it does what you ask, and makes apps you can share. Take a seat, or start a trial, to begin."),
     ...(back === "canceled" ? [el("p", null, "Checkout was canceled: nothing was bought.")] : []),
-    ...seatOffer({ api, el }, mine, q.get("trial")),
+    ...seatOffer({ api, el }, mine, trial),
     imports,
     foot,
   );
@@ -3089,7 +3113,8 @@ function setGuest(guest) {
   renderHeading();
 }
 // With no chat to show: the first app shared with them in its window, and
-// beside it what a guest may do, and what a seat gives (the welcome's).
+// beside it what a guest may do, what a seat gives (the welcome's), and
+// who is signed in, with another account.
 function guestHome(offer) {
   const app = shown(apps())[0];
   if (app) openApp(app.name);
@@ -3100,7 +3125,7 @@ function guestHome(offer) {
     at(WELCOME);
     welcome().catch((err) => notice("This page did not load", err.message));
   };
-  notice("You're a guest", `You see and edit what people share with you: it shows in the sidebar as they share it. ${seatGives(offer)}`, seat);
+  notice("You're a guest", [`You see and edit what people share with you: it shows in the sidebar as they share it. ${seatGives(offer)}`, noSeatSaid()], [seat, switchForm("/", "allow")]);
 }
 
 start().catch((e) => {
