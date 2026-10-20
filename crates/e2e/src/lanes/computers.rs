@@ -329,6 +329,9 @@ fn bound_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
     let took = t0.elapsed();
     let kept = lever(api, c.id, "saves")?;
     let why = r.body["why"].as_str().unwrap_or("");
+    // the backups share the bound, so it names what was left of it when the
+    // hung one began: the whole bound, or a millisecond or so less (CI saw 4999)
+    let named = why.split("no answer within ").nth(1).and_then(|t| t.split(" ms").next()).and_then(|n| n.parse::<u128>().ok());
     // the hold (the stub answers at once) and the unhold are seconds more
     s.ok(
         BOUND_CHECKS[2],
@@ -336,7 +339,7 @@ fn bound_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
             && r.body["phase"] == "awake"
             && r.body["generation"] == generation
             && why.contains("could not save")
-            && why.contains(&format!("no answer within {} ms", bound.as_millis()))
+            && named.is_some_and(|ms| ms <= bound.as_millis() && ms + 1_000 > bound.as_millis())
             && newest_save(api, c.id) == before
             && kept.body["unsavedSince"].is_i64()
             && kept.body["hangBackups"].as_u64() == Some(bound.as_millis() as u64)
