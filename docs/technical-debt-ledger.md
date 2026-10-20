@@ -1052,29 +1052,29 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** Hermes lets an install leave its default profile out
   of the roster, or our gateway's own profile is an agent's.
 
-## A bot's answer to a teammate outlives the teammate's wait only while awake
+## The keeper finds the turn a bot messaged from by reading its chat
 
-- **Observed:** 2026-10-08, Bot Mode in our Hermes image (the keeper,
-  `images/hermes/botmode.py`). A bot's `message_agent` waits for its
-  teammate's answer in a background process of Hermes' (up to 30
-  minutes), and the keeper delivers the message by a `fragment ask --wait`
-  of its own. Neither is saved: a sleep, a crash or a restart while the
-  teammate's turn runs ends both. Hermes keeps the delivery's claim for
-  good (its receipts never expire), and nothing settles it.
-- **Risk:** the sender never hears the answer, and never tells its owner;
-  the answer is in the teammate's chat, and the sender's owner sees it
-  there only if they look.
-- **First proof:** a hosted run where a computer sleeps while one bot's
-  teammate is still answering it, and the sender's chat says nothing more.
-- **Delete when:** a delivery's wait is the journal's: the keeper, at its
-  start, finds each claim of its own left unsettled and settles it from
-  the teammate's chat (the hand-off's record is `dm-<delivery>`), and the
-  sender's wake comes from that receipt rather than from a process. Or
-  the keeper names the sender's turn as `back` on each delivery
-  (docs/chat-records.md, "An agent's ask"), as `fragment ask` does since
-  2026-10-18, once Hermes' delivery says which turn sent it. Then the
-  bridge wakes the sender from its state and the journal, which a sleep
-  keeps, and neither process waits.
+- **Observed:** 2026-10-20, Bot Mode in our Hermes image (the keeper,
+  `images/hermes/botmode.py`). Hermes' delivery of a `message_agent`
+  message names its sender (`bot:<profile>`), not the turn it was sent
+  from, which the keeper names as the ask's `back` so the answer comes
+  back to the sender (docs/chat-records.md, "An agent's ask"). So the
+  keeper reads it from the sender's own chat: its newest `turn.start`
+  there, read back from `work`'s newest record (`message_agent` runs only
+  in a Bot Chat, and the bridge runs one of an agent's turns in a chat at
+  a time), and whether it runs or ended within 4 minutes.
+- **Risk:** a message taken after the sender's turn ended and its next
+  began there (its owner spoke in that second) is asked from that next
+  turn: its answer still comes back to the sender's own chat, but at that
+  turn's hop. One taken long after it was sent (the keeper stopped a while)
+  asks nothing back, and its sender is told the answer stays in its
+  teammate's chat. A turn read wrong is a lost answer, not a wrong one.
+- **First proof:** a hosted run where a bot's `message_agent` message is
+  posted with no `back` (`botmode.delivered`'s `how: "none"`) though its
+  sender's turn was running.
+- **Delete when:** Hermes' delivery names the sender's session message
+  id (`HERMES_SESSION_MESSAGE_ID`, which `fragment ask` reads), and the
+  keeper names that.
 
 ## Own keys are kept by the person's computer
 

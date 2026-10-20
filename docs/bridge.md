@@ -241,8 +241,10 @@ deep (docs/chat-records.md, "An agent's reply"):
   counted, replay, restart, another chat's own, the window sliding). A
   state from before the budget loads with none.
 - **An answer comes back to the agent that asked.** This is Hermes' rule
-  for `message_agent`, made the bridge's for every ask: the asker finishes
-  its turn, and the answer wakes it. An agent's message whose `back`
+  for `message_agent`, made the bridge's for every ask (our Hermes
+  image's `message_agent` among them: its Bot Mode keeper posts each
+  message as an ask): the asker finishes its turn, and the answer wakes
+  it. An agent's message whose `back`
   names a turn of its own asks from that turn's chat (that chat itself,
   for `fragment ask --chat` there).
   `fragment ask` names the turn its runtime runs it in (in our Hermes

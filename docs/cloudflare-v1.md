@@ -1183,7 +1183,7 @@ to protect PII and also keep things that are too sensitive … away from
 these other providers."
 
 62. **A person's default agent keeps their other agents** (proposed; built
-    on branch `claude/bots-run` and the three stacked on it, not merged,
+    on branch `claude/bots-run` and the four stacked on it, not merged,
     from the prototype on `claude/orchestrator`). The person
     talks to one agent (decision 7's sidebar); it makes the others when a
     job deserves one, briefs them, keeps their jobs and models current,
@@ -1222,6 +1222,15 @@ these other providers."
         other"). This is Hermes' own rule for `message_agent`, here
         for fenced teammates too. It is kept in the bridge's state and the
         journal, so a sleep keeps it.
+      - **Bot Mode rides it too** (Austin, 2026-10-20: keep Bot Mode, and
+        frame both ways through the skill). The image's keeper posts each
+        `message_agent` message as an ask from its sender's turn, so its
+        answer comes back the same way, kept through a sleep or a restart,
+        where Hermes' own wait gave up after 30 minutes and died with its
+        process (docs/computers.md, "Bot Mode in our Hermes image").
+        Agents are told one rule (computer.md): a teammate on your roster,
+        `message_agent`; anyone else (from another chat, one just made,
+        one fenced), `fragment ask`.
       - **The hand-off chat:** a chat made for a question adds the
         teammate first, so the person's own words there reach it.
       - **What agents are told** (computer.md): every agent finishes its

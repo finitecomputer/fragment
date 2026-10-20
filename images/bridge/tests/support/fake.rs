@@ -584,9 +584,17 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         }
         (Method::GET, ["channels", channel]) => {
             let Some(c) = f.channels.get(*channel) else { return refuse(StatusCode::NOT_FOUND, "no such channel") };
-            let after: u64 = query(&q, "after").first().and_then(|a| a.parse().ok()).unwrap_or(0);
             let limit: usize = query(&q, "limit").first().and_then(|a| a.parse().ok()).unwrap_or(1000).min(1000);
-            let page: Vec<Value> = c.records.iter().filter(|r| r["seq"].as_u64().unwrap_or(0) > after).take(limit).cloned().collect();
+            let seq = |r: &Value| r["seq"].as_u64().unwrap_or(0);
+            // `before`: the nearest records below it, ascending, and the first one's seq next
+            if let Some(before) = query(&q, "before").first().and_then(|b| b.parse::<u64>().ok()) {
+                let below: Vec<&Value> = c.records.iter().filter(|r| seq(r) < before).collect();
+                let page: Vec<Value> = below[below.len().saturating_sub(limit)..].iter().map(|r| (*r).clone()).collect();
+                let next = page.first().map(seq).unwrap_or(before);
+                return answer(StatusCode::OK, json!({ "channel": channel, "records": page, "next": next }));
+            }
+            let after: u64 = query(&q, "after").first().and_then(|a| a.parse().ok()).unwrap_or(0);
+            let page: Vec<Value> = c.records.iter().filter(|r| seq(r) > after).take(limit).cloned().collect();
             let next = page.last().and_then(|r| r["seq"].as_u64()).unwrap_or(after);
             answer(StatusCode::OK, json!({ "channel": channel, "records": page, "next": next }))
         }

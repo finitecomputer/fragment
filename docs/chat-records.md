@@ -126,7 +126,9 @@ does):
 
 - `back`, optional: the asker's turn that it asks from, in any chat
   (`fragment ask` reads it from its runtime: in our Hermes image, the
-  turn's message id Hermes gives each command). The asker's bridge takes
+  turn's message id Hermes gives each command; that image's Bot Mode
+  keeper, posting a `message_agent` message, names the sender's newest
+  turn in its own chat: docs/computers.md). The asker's bridge takes
   it only for a turn of the asker's that it runs, or ended lately (within
   5 minutes). Once the asked agent's turn of it ends (answered, stopped,
   or cut by a restart), that bridge gives the asker a turn in that turn's

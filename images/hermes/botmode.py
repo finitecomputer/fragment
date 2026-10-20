@@ -5,7 +5,7 @@
 # A bot's `message_agent` reaches its teammate's Bot Chat (its own chat with
 # its owner, whose session the image's hook titles "Bot Chat") through
 # Hermes' own path: a turn of Hermes' own outside the gateway, so outside
-# the bridge, unless that Bot Chat has a live owner (v0.21.6:
+# the bridge, unless that Bot Chat has a live owner (v0.21.7:
 # tools/bot_mode_dm.py, tools/bot_live_delivery.py; Hermes Desktop is one).
 # The keeper is that owner, for each bot in the boot's bots file, about
 # once a second:
@@ -14,22 +14,37 @@
 #   titled "Bot Chat", when that session is its own chat's) as its live
 #   owner: an active-session lease marked `bot_live_delivery_consumer`,
 #   so a teammate's message is queued in the bot's mailbox;
-# - it takes each message queued there and posts it into the bot's own
-#   chat as the teammate that sent it, a hand-off to the bot (its `to` names
-#   the bot; acting as the sender for their owner, as `fragment ask` does,
-#   but adding the sender to no chat), so the bot's answer is an ordinary
-#   turn of the bridge's in that chat, which its owner sees; once that turn
-#   ends, its replies settle the delivery, which wakes the sender.
+# - it takes each message queued there and posts it into the bot's own chat
+#   as the teammate that sent it, naming the bot (`to`) and the sender's
+#   turn it was sent from (`back`): an agent's ask, as `fragment ask` posts
+#   one (docs/chat-records.md, "An agent's ask"), but adding the sender to
+#   no chat. So the bot's answer is an ordinary turn of the bridge's in its
+#   own chat, which its owner sees, and once that turn ends the bridge
+#   gives the sender a turn in its own chat with the answer (images/bridge,
+#   engine.rs `answer_back`), from its state and journal, which a sleep or
+#   a restart keeps; nothing waits for it;
+# - it settles the delivery at once. That ends Hermes' wait for it (the
+#   sender's background process), whose end wakes the sender: a turn of its
+#   own after the one that sent the message, told to say nothing.
+#
+# Hermes' delivery names no turn of the sender's, so the keeper reads it
+# from the sender's own chat, where `message_agent` runs (a Bot Chat only):
+# the sender's newest turn there, since the bridge runs one turn of an
+# agent's in a chat at a time. A turn too old for the bridge to answer back
+# to (a message taken long after it was sent) gives no `back`: the sender
+# is told the answer stays in its teammate's chat.
 #
 # A bot answers a teammate once. Hermes' roster tells a bot that a teammate
-# messaged to answer with `message_agent`, and its sender is woken by the
-# delivery's answer as well, so each said it twice (the sender relaying the
-# answer again, the teammate acknowledging that). So the posted message
-# ends with a line telling the bot its reply there goes back on its own;
-# and when it messages its sender back anyway while answering it, both
-# deliveries are settled with their answer under a line telling the woken
-# bot it has had it already: to end its turn with Hermes' `[SILENT]`
-# (gateway/response_filters.py), which its gateway says nothing for.
+# messaged to answer with `message_agent`, but its answer goes back on its
+# own. So the posted message ends with a line telling the bot to answer
+# there; and a message it sends that teammate anyway while answering it
+# (its newest turn's cause is that teammate's message) is posted as a
+# reply: with no `back`, so nothing more goes back and forth.
+#
+# A delivery the keeper claimed and never settled (it stopped between the
+# two: a sleep, a crash) is finished once the keeper holds that bot's Bot
+# Chat again: posted under the same id (`dm-<delivery>`, which the platform
+# answers as a replay), then settled.
 #
 # It writes nothing while the platform holds the computer (`FRAGMENT_HOLD`),
 # so a save never copies a mailbox or a lease it is writing.
@@ -40,7 +55,6 @@ import json
 import os
 import re
 import sys
-import threading
 import time
 import urllib.error
 import urllib.parse
@@ -56,45 +70,43 @@ HOLD = os.environ.get("FRAGMENT_HOLD", "/run/computer/hold")
 API = os.environ.get("FRAGMENT_API", "http://api.fragment.internal").rstrip("/")
 TITLE = "Bot Chat"
 EVERY_S = 1.0
-# How long a teammate's answer is waited for (`fragment ask`'s longest
-# wait): Hermes' sender waits 30 minutes at most on its side too
-# (tools/bot_mode_dm.py). It is looked for this often.
-ANSWER_WAIT_S = 1800
-POLL_S = 2.0
 # One request to the platform, at most this long.
 CALL_S = 30
-# Pages of a channel one look reads, at most (1000 records each), and how
-# far back a message posted before (a replay of the same post) has its
-# turn looked for (`fragment ask`'s REPLAY_BACK_RECORDS).
+# The sender's chat's `work`, read back from its newest record for the
+# sender's newest turn: this many records a page, at most PAGES_MAX pages.
+PAGE_RECORDS = 200
 PAGES_MAX = 10
-PAGE_RECORDS = 1000
-REPLAY_BACK = 2000
-# A bot that messages its sender back while answering it does so in its
-# turn, which has ended by the time its own answer is read: its message is
-# taken within the keeper's next pass, so an answer waits this long for it.
-REPLIED_WAIT_S = 3.0
+# The bridge answers back to a turn that runs, or that ended within 5
+# minutes (images/bridge, limits.rs `ENDED_HOPS_MS`); a turn ended longer
+# ago than this is taken as too old (the margin: the platform's clock,
+# which stamps a record, is not the computer's).
+FRESH_MS = 4 * 60 * 1000
+# Messages taken from one bot's mailbox in a pass, at most.
+TAKE_MAX = 16
 # The line a teammate's message ends with, in the chat it is posted to.
 ANSWER_HERE = "\n\n(Your reply here goes back to {name} on its own: answer here, and don't message_agent {name} about this.)"
-# What a woken bot is told above an answer it has had already.
-HAD_IT = {
-    "answered": "{name} also messaged you this answer directly, in your own chat, and you passed it on there. If it adds nothing for your person, end this turn with exactly [SILENT].",
-    "reply": "{name} read your message in their own chat and answered there. If this asks nothing more of you, end this turn with exactly [SILENT].",
+# The line a reply ends with: a message sent by a bot answering its asker.
+REPLY = "\n\n({name} sent you this while answering what you asked it. Its answer also comes back to you on its own: pass on only what is new.)"
+# What the sender is told when its delivery is settled, as a turn of its own
+# after the one that sent it (`{name}` is the teammate's).
+SETTLED = {
+    "back": "{name} has your message, in its own chat, and its answer comes back to you on its own, as a turn of yours: so end this turn with exactly [SILENT].",
+    "reply": "{name} has your message, in its own chat, and your answer goes back to {name} on its own: so end this turn with exactly [SILENT].",
+    "none": "{name} has your message, in its own chat ({chat}), and answers there: its answer comes back to you only if it messages you. If your owner is waiting on it, tell them where to look.",
 }
 # Hermes' attribution of a teammate's message (tools/bot_mode_dm.py): the
 # sender's friendly name.
 ATTRIBUTION = re.compile(r"Message from \S+ (.+?) \(@[^)]+\): ")
-# Messages being delivered at once, per bot at most: past it the rest wait
-# in its mailbox (the bridge runs one of the bot's turns in a chat at a
-# time anyway).
-IN_FLIGHT_MAX = 4
-# What a delivery's answer carries back, in characters at most (Hermes'
-# message bound, tools/bot_mode_dm.py's MESSAGE_MAX_CHARS).
-REPLY_MAX_CHARS = 16000
+# A delivery's id (tools/bot_live_delivery.py, `_delivery_id`).
+DELIVERY_ID = re.compile(r"[0-9a-f]{32,64}")
 
 from hermes_state import SessionDB  # noqa: E402
 from hermes_cli.active_sessions import release_active_session, try_acquire_active_session  # noqa: E402
 from tools.bot_failure_reasons import classify_agent_error  # noqa: E402
-from tools.bot_live_delivery import claim_pending_delivery, complete_delivery, find_canonical_live_owner, has_mailbox  # noqa: E402
+from tools.bot_live_delivery import (  # noqa: E402
+    DELIVERY_DIR_NAME, claim_pending_delivery, complete_delivery, find_canonical_live_owner, has_mailbox,
+    read_delivery_result,
+)
 
 
 def ev(event, **fields):
@@ -147,8 +159,8 @@ class Owner:
         self.live = "fragment-bot-mode:" + bot["profile"]
         self.session = None
         self.lease = None
-        self.in_flight = 0
-        self.lock = threading.Lock()
+        # whether a claim a keeper before this one left unsettled was looked for
+        self.recovered = False
 
     def pin(self):
         """The owner a delivery for this bot is pinned to (tools/bot_live_delivery.py)."""
@@ -182,6 +194,10 @@ class Owner:
 class Refused(Exception):
     """The platform answered a request, and refused it."""
 
+    def __init__(self, status, text):
+        super().__init__(text)
+        self.status = status
+
 
 def call(method, path, sender, body=None):
     """One request to the platform as `sender` (an agent of this computer), acting for its owner."""
@@ -192,83 +208,50 @@ def call(method, path, sender, body=None):
         with urllib.request.urlopen(urllib.request.Request(url, data=data, method=method, headers=headers), timeout=CALL_S) as r:
             return json.loads(r.read() or b"null")
     except urllib.error.HTTPError as e:
-        raise Refused(f"{method} {path.split('?')[0]}: {e.code} {e.read()[:300].decode(errors='replace')}") from None
+        raise Refused(e.code, f"{method} {path.split('?')[0]}: {e.code} {e.read()[:300].decode(errors='replace')}") from None
 
 
-def bodies_after(chat, channel, after, sender):
-    """The records of `channel` after `after` (at most PAGES_MAX pages), and the cursor after them."""
-    out, cursor = [], after
-    # bounded: PAGES_MAX pages
-    for _ in range(PAGES_MAX):
-        page = call("GET", f"/api/f/{chat}/channels/{channel}?after={cursor}", sender)
-        records = page.get("records") or []
-        out += [r for r in records if isinstance(r, dict) and isinstance(r.get("body"), dict)]
-        following = page.get("next", cursor)
-        if following <= cursor or len(records) < PAGE_RECORDS:
-            return out, max(cursor, following)
-        cursor = following
-    return out, cursor
+def records_of(page):
+    return [r for r in page.get("records") or [] if isinstance(r, dict) and isinstance(r.get("body"), dict)]
 
 
-def hand_off(bot, sender, message, post):
-    """`message` posted into the bot's own chat as `sender` (id `post`), naming the bot, as `fragment
-    ask` posts a question (cli/src/ask.rs), but adding no one to the chat; then, once the bot's turn
-    of it ends, its replies' text and its error, or (None, why) when it has not ended in ANSWER_WAIT_S."""
-    chat, me = bot["chat"], bot["identity"]
+def newest_turn(sender):
+    """The sender's newest turn in its own chat, the one its `message_agent` ran in: its
+    `turn.start`'s body, and whether the bridge still answers back to it (it runs, or it ended
+    within FRESH_MS); (None, False) when the sender has no turn there."""
+    chat, me = sender["chat"], sender["identity"]
     listed = call("GET", f"/api/f/{chat}/channels", sender)["channels"]
-    work_seq = next((c.get("seq") or 0 for c in listed if c.get("name") == "work"), 0)
-    posted = call("POST", f"/api/f/{chat}/channels/chat", sender, {"id": post, "body": {"text": message, "to": [me]}})
-    seq = posted["record"]["seq"]
-    # a replay's turn may have run already: read `work` back for it
-    cursor = max(0, work_seq - REPLAY_BACK) if posted.get("replayed") else work_seq
-    turn, seen, deadline = None, [], time.monotonic() + ANSWER_WAIT_S
-    # bounded by the deadline: one look every POLL_S
-    while True:
-        more, cursor = bodies_after(chat, "work", cursor, sender)
-        seen += [r["body"] for r in more]
-        if turn is None:
-            turn = next((b.get("turn") for b in seen if b.get("kind") == "turn.start" and b.get("agent") == me and (b.get("cause") or {}).get("channel") == "chat" and (b.get("cause") or {}).get("seq") == seq), None)
-        if turn is not None:
-            end = next((b for b in seen if b.get("kind") == "turn.end" and b.get("turn") == turn), None)
-            if end is not None:
-                said, _ = bodies_after(chat, "chat", seq, sender)
-                text = "\n\n".join(r["body"].get("text") or "" for r in said if r.get("principal") == me and r["body"].get("turn") == turn and r["body"].get("kind") in (None, "message")).strip()
-                return text, (end.get("error") or f"its turn ended {end.get('outcome')}") if end.get("outcome") != "idle" else None
-            # only its own records matter from here
-            seen = [b for b in seen if b.get("turn") == turn]
-        else:
-            # the start may be in a later page; a record of no turn of its is none of ours
-            seen = [b for b in seen if b.get("agent") == me]
-        if time.monotonic() >= deadline:
-            return None, f"no answer within {ANSWER_WAIT_S} s; it will be in {chat}"
-        time.sleep(POLL_S)
+    cursor = next((c.get("seq") or 0 for c in listed if c.get("name") == "work"), 0) + 1
+    ends = {}
+    # bounded: PAGES_MAX pages, read back from the newest record
+    for _ in range(PAGES_MAX):
+        if cursor <= 1:
+            break
+        page = call("GET", f"/api/f/{chat}/channels/work?before={cursor}&limit={PAGE_RECORDS}", sender)
+        records = records_of(page)
+        for r in reversed(records):
+            body = r["body"]
+            if body.get("kind") == "turn.end":
+                ends.setdefault(body.get("turn"), r)
+            elif body.get("kind") == "turn.start" and body.get("agent") == me and isinstance(body.get("turn"), str):
+                end = ends.get(body["turn"])
+                return body, end is None or int(time.time() * 1000) - int(end.get("at") or 0) <= FRESH_MS
+        following = page.get("next", cursor)
+        if not records or following >= cursor:
+            break
+        cursor = following
+    return None, False
 
 
-class Exchanges:
-    """The deliveries being answered now, so a bot's message to its sender while it answers them is
-    known for an answer of its: delivery id -> {sender, recipient, answered, reply_to}."""
-
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.by_id = {}
-
-    def open(self, delivery, sender, recipient):
-        """A delivery from `sender` to `recipient` taken: whether it answers one of `recipient`'s to
-        `sender` being answered now (then that one is marked as answered directly)."""
-        with self.lock:
-            answering = next((d for d, x in self.by_id.items() if x["sender"] == recipient and x["recipient"] == sender), None)
-            if answering is not None:
-                self.by_id[answering]["answered"] = True
-            self.by_id[delivery] = {"sender": sender, "recipient": recipient, "answered": False, "reply_to": answering}
-            return answering is not None
-
-    def close(self, delivery):
-        """The delivery's state, let go."""
-        with self.lock:
-            return self.by_id.pop(delivery, None) or {}
-
-
-EXCHANGES = Exchanges()
+def asker_of(sender, start):
+    """Who wrote the record that caused the turn `start` begins, when that is a message in the
+    sender's own chat; None otherwise."""
+    cause = start.get("cause") or {}
+    seq = cause.get("seq")
+    if cause.get("channel") != "chat" or cause.get("fragment") not in (None, sender["chat"]) or not isinstance(seq, int) or seq < 1:
+        return None
+    page = call("GET", f"/api/f/{sender['chat']}/channels/chat?after={seq - 1}&limit=1", sender)
+    return next((r.get("principal") for r in records_of(page) if r.get("seq") == seq), None)
 
 
 def name_of(message, fallback):
@@ -290,66 +273,88 @@ def bot_name(bot):
 
 
 def deliver(bot, sender, owner, claimed):
-    """A teammate's message, posted into the bot's own chat as the teammate, and its answer settling it."""
+    """A teammate's message, posted into the bot's own chat as the teammate (asked from its newest
+    turn, a reply, or neither: `how`), and its delivery settled."""
     delivery = claimed["delivery_id"]
     t = time.time()
-    status, reply, error, reason, had = "failed", "", "", "", None
+    status, reply, error, reason, how = "failed", "", "", "", None
     try:
         if sender is None:
             error = "the sender is no agent of this computer"
         else:
             them = name_of(claimed["message"], sender["agent"].split(".")[0])
-            text, failed = hand_off(bot, sender, claimed["message"] + ANSWER_HERE.format(name=them), "dm-" + delivery[:32])
-            if failed is None or text:
-                status, reply = "settled", (text or "")[:REPLY_MAX_CHARS]
-                if failed:
-                    reply = f"{reply}\n\n({failed})".strip()
+            start, fresh = newest_turn(sender)
+            body = {"text": claimed["message"], "to": [bot["identity"]]}
+            if start is not None and asker_of(sender, start) == bot["identity"]:
+                how = "reply"
+                body["text"] += REPLY.format(name=them)
+            elif fresh:
+                how = "back"
+                body["text"] += ANSWER_HERE.format(name=them)
+                body["back"] = start["turn"]
             else:
-                error = failed
+                how = "none"
+            try:
+                call("POST", f"/api/f/{bot['chat']}/channels/chat", sender, {"id": "dm-" + delivery[:32], "body": body})
+            except Refused as e:
+                # posted before under this id (a claim finished again), its body then another
+                if e.status != 409:
+                    raise
+            status, reply = "settled", SETTLED[how].format(name=bot_name(bot), chat=bot["chat"])
     except Exception as e:  # the delivery is settled whatever went wrong
         error = f"{type(e).__name__}: {e}"[:600]
     if status == "failed":
         reason = classify_agent_error(error)
-    else:
-        # a message back from the bot to its sender, sent in the turn just
-        # read, is taken within the keeper's next pass
-        time.sleep(REPLIED_WAIT_S)
-    exchange = EXCHANGES.close(delivery)
-    if status == "settled":
-        had = "reply" if exchange.get("reply_to") else "answered" if exchange.get("answered") else None
-        if had is not None:
-            reply = HAD_IT[had].format(name=bot_name(bot)) + "\n\n" + reply
     until_unheld()
     try:
         complete_delivery(owner.home, delivery, status=status, reply=reply, error=error, reason=reason)
     except Exception as e:
         ev("settle_failed", agent=bot["agent"], delivery=delivery, error=f"{type(e).__name__}: {e}"[:300])
-    ev("delivered", agent=bot["agent"], sender=sender["agent"] if sender else None, delivery=delivery, status=status, reason=reason or None, had=had, ms=int((time.time() - t) * 1000))
-    with owner.lock:
-        owner.in_flight -= 1
+    ev("delivered", agent=bot["agent"], sender=sender["agent"] if sender else None, delivery=delivery, status=status, how=how, reason=reason or None, ms=int((time.time() - t) * 1000))
+
+
+def sender_of(claimed, bots):
+    """The bot of this computer that sent a delivery, or None."""
+    author = str((claimed.get("author") or {}).get("id") or "")
+    return next((b for b in bots if "bot:" + b["profile"] == author), None)
+
+
+def left_claimed(owner):
+    """The deliveries in the bot's mailbox claimed and never settled: a keeper's before this one."""
+    root = Path(owner.home) / "runtime" / DELIVERY_DIR_NAME
+    found = []
+    for path in sorted(root.glob("*.json")):
+        if DELIVERY_ID.fullmatch(path.stem) is None:
+            continue
+        try:
+            record = read_delivery_result(owner.home, path.stem)
+        except Exception:
+            continue
+        if record is not None and record.get("status") == "claimed" and isinstance(record.get("message"), str):
+            found.append(record)
+    return found
 
 
 def take(bot, bots, owner):
-    """Each message queued for the bot, taken and delivered, up to IN_FLIGHT_MAX at once."""
+    """Each message queued for the bot, delivered (up to TAKE_MAX a pass), after any a keeper before
+    this one claimed and left."""
     if not has_mailbox(owner.home):
         return
-    # bounded: IN_FLIGHT_MAX deliveries in flight
-    while True:
-        with owner.lock:
-            if owner.in_flight >= IN_FLIGHT_MAX:
-                return
+    if not owner.recovered:
+        owner.recovered = True
+        for claimed in left_claimed(owner):
+            ev("recovered", agent=bot["agent"], delivery=claimed["delivery_id"])
+            deliver(bot, sender_of(claimed, bots), owner, claimed)
+    # bounded: TAKE_MAX a pass
+    for _ in range(TAKE_MAX):
         if held():
             return
         claimed = claim_pending_delivery(owner.home, owner.pin())
         if claimed is None:
             return
-        author = str((claimed.get("author") or {}).get("id") or "")
-        sender = next((b for b in bots if "bot:" + b["profile"] == author), None)
-        replying = EXCHANGES.open(claimed["delivery_id"], sender["agent"] if sender else None, bot["agent"])
-        ev("taken", agent=bot["agent"], sender=sender["agent"] if sender else None, delivery=claimed["delivery_id"], replying=replying)
-        with owner.lock:
-            owner.in_flight += 1
-        threading.Thread(target=deliver, args=(bot, sender, owner, claimed), name="deliver-" + claimed["delivery_id"][:12], daemon=True).start()
+        sender = sender_of(claimed, bots)
+        ev("taken", agent=bot["agent"], sender=sender["agent"] if sender else None, delivery=claimed["delivery_id"])
+        deliver(bot, sender, owner, claimed)
 
 
 def main():

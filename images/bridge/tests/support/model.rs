@@ -23,8 +23,8 @@
 //! - `dm: <teammate>: <message>` is a `message_agent` call (Hermes' Bot
 //!   Mode, in a Bot Chat), and its answer quotes what the tool said; a
 //!   teammate's reply carried back to it (a message holding another
-//!   bot's `scripted: …` answer to a `Message from …`, not as its start: a
-//!   delivery's completion) is answered `scripted: relayed: <that reply>`;
+//!   bot's `scripted: …` answer to a `Message from …`, not as its start: an
+//!   answer back) is answered `scripted: relayed: <that reply>`;
 //!   a teammate's message saying `dm back` is answered by a
 //!   `message_agent` to that teammate (`pong from <its first line>`) before
 //!   the reply; and a message telling it to `end this turn with exactly
