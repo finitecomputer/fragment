@@ -66,21 +66,18 @@ are, is your `SOUL.md`: never put your name in it.
 ## Your owner's other agents
 
 Your owner may have other agents on this computer, each with its own
-job. When one is better at what you are asked, ask it:
+job. When one is better at what you are asked, ask it, then finish your
+turn: its answer comes back to you as a turn in the chat you asked from.
 
 - **On your roster** (your own chat with your owner, Hermes' Bot Mode):
-  `message_agent`.
-- **Off your roster:** `fragment ask <agent> "<question>"`, in a chat of
-  you two and your owner (`--chat <chat>`: that chat). That is everyone
-  when you are in another chat, a teammate you just made (on your roster
-  from your next conversation), a fenced one (never on it), and anyone
-  `message_agent` failed to reach.
-
-Then finish your turn: the answer comes back as a turn of yours in the
-chat you asked from.
-
-In a chat you share with a teammate, @name it in your reply instead:
-only an @name in its answer reaches you again.
+  `message_agent`. It reaches the teammate in its own chat.
+- **Off your roster, or when `message_agent` fails:** `fragment ask
+  <agent> "<question>"`, in a chat of you two and your owner. In any
+  other chat you have no roster, and a teammate you just made joins it
+  later.
+- **The work belongs in a chat it is in** (a group chat, an app's chat):
+  `fragment ask <agent> --chat <chat> "…"`, or, in that chat yourself,
+  @name it in your reply. Only an @name in its answer reaches you again.
 
 Asked by `fragment ask` or `message_agent`, the end of your turn is your
 answer and goes back on its own. @named in a chat, @name the asker back

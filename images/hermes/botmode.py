@@ -41,6 +41,17 @@
 # (its newest turn's cause is that teammate's message) is posted as a
 # reply: with no `back`, so nothing more goes back and forth.
 #
+# A bot whose own chat has had no turn yet has no Bot Chat session, and a
+# fenced bot's is never one (the hook leaves it alone: its `message_agent`
+# would act for its owner, which it never does). Hermes lists both on every
+# roster all the same (every profile is), and would run a message to one as
+# a turn of its own, outside the bridge, which no one sees. So the keeper
+# holds a stand-in for each: a session of its own in the bot's state.db
+# (id STANDIN), titled "Bot Chat", which the hook takes the title from at
+# the first turn in the bot's own chat (a fenced bot's: never), and which
+# the keeper makes again when Hermes prunes it, empty. A fenced bot's own
+# chat's session titled before its fence gives the title up to it.
+#
 # A delivery the keeper claimed and never settled (it stopped between the
 # two: a sleep, a crash) is finished once the keeper holds that bot's Bot
 # Chat again: posted under the same id (`dm-<delivery>`, which the platform
@@ -69,6 +80,8 @@ HOLD = os.environ.get("FRAGMENT_HOLD", "/run/computer/hold")
 # signs it as that agent.
 API = os.environ.get("FRAGMENT_API", "http://api.fragment.internal").rstrip("/")
 TITLE = "Bot Chat"
+# The keeper's stand-in session, in each bot's own state.db (`bot_chat`).
+STANDIN = "fragment-bot-mode-standin"
 EVERY_S = 1.0
 # One request to the platform, at most this long.
 CALL_S = 30
@@ -132,21 +145,42 @@ def read_bots():
     except (OSError, ValueError, KeyError, TypeError):
         return []
     keys = ("agent", "identity", "owner", "profile", "home", "chat", "sessionKey")
-    return [b for b in bots if isinstance(b, dict) and all(isinstance(b.get(k), str) and b[k] for k in keys)]
+    return [b for b in bots if isinstance(b, dict) and all(isinstance(b.get(k), str) and b[k] for k in keys) and isinstance(b.get("fenced"), bool)]
 
 
 def bot_chat(bot):
-    """The bot's Bot Chat session as Hermes finds its owner (the compression tip of the session
-    titled "Bot Chat"), when that session is its own chat's; None before its chat's first turn."""
+    """The session the keeper holds for the bot, as Hermes finds a Bot Chat's owner (the compression
+    tip of the session titled "Bot Chat"): its own chat's, once that chat has had a turn and it is not
+    fenced; else the keeper's stand-in, made and titled here when none holds the title (or one that may
+    not: Hermes' own, or a fenced bot's own chat's). None while the platform holds the computer and the
+    stand-in is to be made."""
     path = Path(bot["home"]) / "state.db"
-    if not path.is_file():
+
+    def ours(titled):
+        return titled is not None and (titled["id"] == STANDIN or (titled.get("session_key") == bot["sessionKey"] and not bot["fenced"]))
+
+    if path.is_file():
+        db = SessionDB(db_path=path, read_only=True)
+        try:
+            titled = db.get_session_by_title(TITLE)
+            if ours(titled):
+                return db.get_compression_tip(titled["id"]) or titled["id"]
+        finally:
+            db.close()
+    if held():
         return None
-    db = SessionDB(db_path=path, read_only=True)
+    # written only to make the stand-in: looked at again as the writer
+    db = SessionDB(db_path=path)
     try:
         titled = db.get_session_by_title(TITLE)
-        if titled is None or titled.get("session_key") != bot["sessionKey"]:
-            return None
-        return db.get_compression_tip(titled["id"]) or titled["id"]
+        if ours(titled):
+            return db.get_compression_tip(titled["id"]) or titled["id"]
+        if titled is not None:
+            db.set_session_title(titled["id"], "")
+        db.create_session(STANDIN, "fragment-bot-mode")
+        db.set_session_title(STANDIN, TITLE)
+        ev("standin", agent=bot["agent"], freed=titled["id"] if titled is not None else None)
+        return STANDIN
     finally:
         db.close()
 

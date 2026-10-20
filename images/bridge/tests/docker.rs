@@ -2979,6 +2979,72 @@ async fn bots_message_each_other() {
     assert!(!first.body["messages"].to_string().contains("ping from juniper"), "a new session: none of the chat before");
 }
 
+/// Goal (Bot Mode, docs/computers.md): Hermes lists every agent on every
+/// roster, fenced or not, and whether its own chat has had a turn or not;
+/// a message to each is a hand-off in its own chat, which its owner sees,
+/// answered by a turn of the bridge's and given back, never a turn Hermes
+/// runs on its own outside the bridge. A fenced agent's own chat is never
+/// a Bot Chat: no roster or `message_agent` of its own.
+/// Method: juniper talks in her own chat; maple's own chat has had no
+/// turn; fern is fenced, with her own chat. The keeper holds a stand-in
+/// for maple and fern; juniper messages each.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_message_reaches_a_teammate_before_its_first_turn_and_a_fenced_one() {
+    let tag = hermes_tag();
+    build(&repo_dir(), "images/hermes/Dockerfile", &tag);
+    let fake = Fake::start("0.0.0.0:0", &["juniper", "maple", "fern"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let jchat = fake.chat_named("juniper-chat--h6j7", &["juniper"]);
+    let mchat = fake.chat_named("maple-chat--z8w6", &["maple"]);
+    let fchat = fake.chat_named("fern-chat--q2w3", &["fern"]);
+    fake.fence("fern", true);
+    let c = Container::run(&tag, fake.addr.port(), model.addr.port(), &[]);
+    let said = fake.say(&jchat, &person("paul"), json!({ "text": "hello" }));
+    let first = fragment_bridge::records::turn_id("juniper--k3x9", &jchat, "chat", said["seq"].as_u64().unwrap());
+    within(&fake, &jchat, &c, 240_000, "juniper's first reply", |w| w.bodies(&jchat, "work", "turn.end").iter().any(|e| e["turn"] == first)).await;
+    // a stand-in each for maple and fern, held as their Bot Chat's owner
+    let t = Instant::now();
+    // bounded: a minute
+    while !["maple--k3x9", "fern--k3x9"].iter().all(|a| c.logs().lines().any(|l| l.contains("\"botmode.owned\"") && l.contains(a))) {
+        assert!(t.elapsed() < Duration::from_secs(60), "the keeper to hold maple's and fern's stand-ins: {}", told(&fake, &jchat, &c));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let system = calls_of(&model, "juniper--k3x9", "hello").into_iter().next().expect("juniper's first turn").body["messages"][0]["content"].to_string();
+    assert!(system.contains("`@maple--k3x9`") && system.contains("`@fern--k3x9`"), "both on juniper's roster, as Hermes lists every profile: {system}");
+    let reply = |w: &support::fake::World, chat: &str, turn: &str| w.bodies(chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn).and_then(|r| r["text"].as_str().map(str::to_string));
+    for (who, chat) in [("maple", &mchat), ("fern", &fchat)] {
+        let identity = format!("npub1{who}");
+        let jturn = asked(&fake, &jchat, &c, &format!("dm: {who}--k3x9: ping {who}"), |w, turn| reply(w, &jchat, turn).is_some()).await;
+        // a hand-off in its own chat, asked from juniper's turn
+        let handed = |w: &support::fake::World| w.records(chat, "chat").into_iter().find(|r| r["principal"] == "npub1juniper" && r["body"]["to"] == json!([identity]));
+        within(&fake, chat, &c, 120_000, &format!("juniper's message in {who}'s chat"), |w| handed(w).is_some()).await;
+        let record = fake.with(|w| handed(w)).unwrap();
+        assert_eq!(record["body"]["back"], json!(jturn), "{who}: asked from juniper's turn: {}", record["body"]);
+        // answered by the bridge's turn there, and given back to juniper
+        let turn = fragment_bridge::records::turn_id(&format!("{who}--k3x9"), chat, "chat", record["seq"].as_u64().unwrap());
+        within(&fake, chat, &c, 180_000, &format!("{who}'s turn"), |w| w.bodies(chat, "work", "turn.end").iter().any(|e| e["turn"] == turn)).await;
+        let claim = fake.with(|w| w.records(chat, "work").into_iter().find(|r| r["body"]["kind"] == "turn.start" && r["body"]["turn"] == turn).and_then(|r| r["seq"].as_u64())).expect("its claim");
+        let back = fragment_bridge::records::turn_id("juniper--k3x9", chat, "work", claim);
+        within(&fake, &jchat, &c, 180_000, &format!("{who}'s answer back to juniper"), |w| reply(w, &jchat, &back).is_some_and(|t| t.contains(&format!("ping {who}")))).await;
+        // and no turn of Hermes' own: its every turn handed the ping (a call
+        // offering tools; fern's untitled session is also named, a call of
+        // none) is the bridge's
+        let handed_calls = calls_of(&model, &format!("{who}--k3x9"), &format!("ping {who}")).into_iter().filter(|m| m.body["tools"].as_array().is_some_and(|t| !t.is_empty()) && m.body["messages"].as_array().and_then(|ms| ms.iter().rev().find(|x| x["role"] == "user")).is_some_and(|u| u.to_string().contains(&format!("ping {who}")))).count();
+        assert_eq!(handed_calls, 1, "{who}: one turn answered it, the bridge's");
+    }
+    // maple's first turn made her own chat's session, which took the title:
+    // her Bot Chat now, with the roster
+    assert_eq!(bot_chat_of(&c, "maple--k3x9")["key"], "agent:maple--k3x9:relay:group:maple-chat--z8w6/maple--k3x9", "maple's own chat is her Bot Chat once it has had a turn");
+    let mcall = calls_of(&model, "maple--k3x9", "ping maple").into_iter().next().unwrap();
+    assert!(mcall.body["messages"][0]["content"].to_string().contains("## Messaging other agents"), "maple's turn had the roster");
+    // fern's never: the stand-in keeps the title, and her turn has neither
+    assert!(bot_chat_of(&c, "fern--k3x9")["key"].is_null(), "fern's Bot Chat is the keeper's stand-in: {}", bot_chat_of(&c, "fern--k3x9"));
+    let fcall = calls_of(&model, "fern--k3x9", "ping fern").into_iter().next().unwrap();
+    assert!(!fcall.body["messages"][0]["content"].to_string().contains("## Messaging other agents") && !fcall.body["tools"].to_string().contains("\"message_agent\""), "fern, fenced, has no roster and no message_agent");
+    assert!(c.logs().lines().filter(|l| l.contains("\"botmode.titled\"")).all(|l| !l.contains("fern--k3x9")), "fern's own chat is never titled");
+}
+
 /// Goal (docs/computers.md, "An agent's own model"; Paul, 2026-10-08): an
 /// agent whose owner connected a provider that serves models, and picked
 /// one of them for it in settings (its `agent.json`'s `model`), runs its

@@ -1747,9 +1747,12 @@ Hermes' teammate roster (each other agent of the computer, by name and
 role) and its `message_agent` tool, with which it messages another agent.
 A person's default agent makes and keeps the others (decision 62,
 proposed): `fragment agent --new` starts one and makes its Bot Chat as
-the shell does, and the new teammate is on the image's roster within
-seconds (on a bot's own roster from its next session: Hermes builds a
-session's prompt once).
+the shell does. Hermes lists every profile on the install on every
+roster, a fenced agent's too (`_roster`), and builds a profile's roster
+text once in its gateway's life (`get_bot_mode_protocol_section`, cached
+by profile: v0.21.7, read from its code), so a teammate made since may
+join a bot's roster only at the computer's next start; until then it is
+asked with `fragment ask`, as from any chat that is no Bot Chat.
 Hermes turns both on (v0.21.6: `tools/bot_mode_probe.py`,
 `tools/bot_mode_dm.py`, `agent/system_prompt.py`) only for a session
 titled exactly `Bot Chat`, on an install where a profile's `profile.yaml`
@@ -1813,7 +1816,8 @@ actually makes a chat a Bot Chat"), so the image does both
   started and restarted by the boot) is that owner. About once a second,
   for each agent in the bots file, it holds the agent's Bot Chat session
   (the compression tip of the session titled `Bot Chat`, when that is its
-  own chat's) with an active-session lease marked as a live-delivery
+  own chat's, else a stand-in of its own: below) with an active-session
+  lease marked as a live-delivery
   consumer, and takes each message waiting in its mailbox: it posts it
   into the agent's own chat as the agent that sent it, an agent's ask
   (docs/chat-records.md, "An agent's ask"): naming the agent in `to` and
@@ -1871,11 +1875,23 @@ actually makes a chat a Bot Chat"), so the image does both
   a chat or an agent come since has its sessions in that gateway's life,
   which hold their live adapter, and every start is a boot's, which
   writes the routes first.
-- An agent with no such chat (made by other means than the shell) has no
-  Bot Chat of ours, and no owner: Hermes runs a teammate's message in a
-  Bot Chat of its own, outside the bridge, which the person sees nowhere
-  until the agent has its own chat, whose session then takes the title.
-  So does every agent while the keeper is down.
+- A bot whose own chat has had no turn yet has no Bot Chat session, and
+  a fenced bot's own chat's session is never one (the hook leaves it
+  alone: its `message_agent` would act for its owner, which it never
+  does). Hermes would run a teammate's message to either as a turn of its
+  own, outside the bridge, which the person sees nowhere (a probe on the
+  scripted model, 2026-10-20: the bot's model called, nothing in its
+  chat). So the keeper holds a stand-in for each: a session of its own in
+  the bot's `state.db` (id `fragment-bot-mode-standin`), titled `Bot
+  Chat`, which the hook takes the title from as the bot's own chat's
+  first turn starts (a fenced bot's: never), made again when Hermes
+  prunes it, empty; a fenced bot's own chat's session titled before its
+  fence gives the title up to it. A fenced bot lists nothing for its
+  owner, so the boot finds its own chat in an unfenced agent's list for
+  the same owner. Event: `botmode.standin`. An agent with no own chat
+  found (made by other means than the shell or `fragment agent --new`)
+  is in no bots file, and Hermes runs a teammate's message to it on its
+  own, as it does every agent's while the keeper is down.
 - A bot answers a teammate once. Hermes' roster tells a bot that a
   teammate messaged to answer with `message_agent`, but its answer goes
   back on its own, so each said it twice (two redundant lines a run on the
@@ -1897,7 +1913,12 @@ woken turn silent; a message sent back while answering, posted as a
 reply, which asks nothing back; a restart while the other answers, whose
 cut answer still comes back; and so again after the container restarts,
 with a background job's completion in a chat that is no Bot Chat, and in
-the chat of an agent with none), and on a preview by the hosted `bot-mode` section, run by name
+the chat of an agent with none), its
+`a_message_reaches_a_teammate_before_its_first_turn_and_a_fenced_one`
+(both on the roster, each message a hand-off in the bot's own chat,
+answered by the bridge's turn and given back, never a turn Hermes runs on
+its own; the title moving to the bot's own chat at its first turn there,
+and never to a fenced bot's, which has no roster and no tool), and on a preview by the hosted `bot-mode` section, run by name
 (`--only bot-mode`): two real agents. Juniper, asked to have Maple make
 and publish a todo app and show it in her browser, runs `message_agent`.
 Maple's turn of it, in her own chat, makes the app, which goes live, and
@@ -2122,11 +2143,15 @@ internet; its computer only names no one for it.
 - **Its terminal names no one to act for.** Its profile's `.env` has
   no `FRAGMENT_FOR`, so the fragment CLI in its terminal acts as the
   agent alone; told its owner by hand, the platform refuses it (403).
-- **No Bot Mode.** It is in no Bot Mode roster (bots.rs), whose
-  `message_agent` acts for its owner, and the boot looks up no Bot Chat
-  for it: it is reached by its chats, as `fragment ask` reaches it, whose
-  answer comes back to the agent that asked (docs/bridge.md, "Agents
-  asking each other").
+- **No Bot Mode of its own.** Its own chat's session is never titled
+  `Bot Chat` (the hook leaves it alone, and the keeper takes the title
+  from one titled before its fence), so it has no roster and no
+  `message_agent`, which acts for its owner. Hermes lists it on its
+  teammates' rosters all the same (it lists every profile), and a
+  teammate's `message_agent` to it is posted into its own chat by the
+  keeper, which holds a stand-in for it, as `fragment ask` reaches it:
+  either way its answer comes back to the agent that asked
+  (docs/bridge.md, "Agents asking each other").
 - **Fenced or let go while awake.** The boot reads the change with its
   agents (every 3 s) and writes the profile again; nothing restarts.
   Hermes reads a profile's `.env` at each turn and passes it to each

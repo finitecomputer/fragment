@@ -1229,8 +1229,11 @@ these other providers."
         where Hermes' own wait gave up after 30 minutes and died with its
         process (docs/computers.md, "Bot Mode in our Hermes image").
         Agents are told one rule (computer.md): a teammate on your roster,
-        `message_agent`; anyone else (from another chat, one just made,
-        one fenced), `fragment ask`.
+        `message_agent`; anyone else (from another chat, one just made),
+        or work that belongs in a chat the teammate is in (`--chat`),
+        `fragment ask`. Hermes lists every agent on every roster, fenced
+        or not, so the keeper takes a message to each, even one whose own
+        chat has had no turn, which Hermes would otherwise run unseen.
       - **The hand-off chat:** a chat made for a question adds the
         teammate first, so the person's own words there reach it.
       - **What agents are told** (computer.md): every agent finishes its
@@ -1381,8 +1384,9 @@ native boundary that we can leverage here?"
       its own work directory, run as the `hermes` user beside the rest.
       Its terminal is given no owner to act for (no `FRAGMENT_FOR` in its
       `.env`, written again within seconds when the fence changes, read
-      at its next command), and it is in no Bot Mode roster, whose
-      `message_agent` acts for its owner: it is reached by its chats. The
+      at its next command), and it has no Bot Mode of its own (no roster
+      and no `message_agent`, which acts for its owner); a teammate
+      reaches it in its own chat, by `message_agent` or `fragment ask`. The
       computer does not enforce the fence: its commands can read the
       other agents' work and Hermes' home, and the computer's egress, which
       signs as whichever of its agents a request names, would sign as

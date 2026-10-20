@@ -1024,9 +1024,11 @@ fragment.club until cutover (decisions 34–35).
   same). A chat's name has a suffix of its own, so it is looked up at a
   boot, as agents come, and every few seconds while one is missing.
   Nothing on the platform says which chat is an agent's.
-- **Risk:** an agent made another way (the API by hand) has no Bot Chat
-  of ours, and Hermes makes one of its own that the person never sees; a
-  person with two chats of that label (one made by hand) may get either.
+- **Risk:** an agent made another way (the API by hand) is in no bots
+  file, and Hermes runs a teammate's message to it as a turn of its own
+  that the person never sees; a person with two chats of that label (one
+  made by hand) may get either. A fenced agent lists nothing for its
+  owner, so its chat is found in an unfenced agent's list.
   `fragment agent --new`, which a person's default agent uses to make
   their other agents (decision 62, proposed), makes it as the shell does.
 - **First proof:** a bot whose roster and `message_agent` never appear in
@@ -1035,6 +1037,30 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** the agent fragment names its own chat (its
   `agent.json`, written by whatever makes the two), and the image, the
   shell and the CLI read that.
+
+## The keeper holds a stand-in Bot Chat in Hermes' session store
+
+- **Observed:** 2026-10-20, Bot Mode in our Hermes image (the keeper,
+  `images/hermes/botmode.py`, `bot_chat`). Hermes lists every profile on
+  every roster, and queues a teammate's message for a live owner only
+  when the bot has a session titled `Bot Chat`; with none (its own chat
+  had no turn yet, or it is fenced, whose own chat's session the hook
+  never titles), it runs the message as a turn of its own, outside the
+  bridge (`tools/bot_mode_dm.py`, `_run_local_turn`). So the keeper
+  writes a session of its own into the bot's `state.db`
+  (`fragment-bot-mode-standin`, titled `Bot Chat`) and holds it, through
+  Hermes' session API, as the hook titles the bot's own chat's.
+- **Risk:** a Hermes upgrade that changes how a Bot Chat's owner is
+  found, prunes the stand-in while a message waits for it, or refuses a
+  session no gateway made: the bot's teammates' messages are run outside
+  the bridge again, unseen, or fail.
+- **First proof:** the Docker lane's
+  `a_message_reaches_a_teammate_before_its_first_turn_and_a_fenced_one`
+  fails on a candidate image; or a hosted run whose bot's model is called
+  with a teammate's message that is in no chat.
+- **Delete when:** Hermes lets an install name its live-delivery owner
+  per profile without a session (or runs no message on its own), and the
+  keeper uses that.
 
 ## Bot Mode's roster lists the gateway as a teammate
 
