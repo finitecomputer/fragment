@@ -313,9 +313,13 @@ config names two images (xtask/src/deploy.rs, `computers.images`):
 "default_image": "hermes",
 "images": {
   "hermes":        { "image": "registry.cloudflare.com/<account_id>/<repository>@sha256:<64 hex>" },
-  "hermes-canary": { "dockerfile": "images/hermes/Dockerfile", "build_context": "." }
+  "hermes-canary": { "image": "registry.cloudflare.com/<account_id>/<repository>@sha256:<64 hex>" }
 }
 ```
+
+(A deploy by hand, where Docker runs, may build the canary from the tree
+instead: `"hermes-canary": { "dockerfile": "images/hermes/Dockerfile",
+"build_context": "." }`.)
 
 - **Stable** is the default, kept at a digest: wrangler builds nothing
   for it, prepares the image the account's registry already holds, and
@@ -323,8 +327,11 @@ config names two images (xtask/src/deploy.rs, `computers.images`):
   it builds anything, a reference that is no digest in its own account's
   registry. It changes only when its line does, so a deploy tells the
   computers on it nothing. New computers start on it.
-- **The canary** is built from the tree by a deploy by hand, where Docker
-  runs and keeps its layer cache (on the preview, of master's tree). A
+- **The canary** is built from the tree by the Image workflow
+  (.github/workflows/image.yml, run by hand: `cargo xtask image push`,
+  xtask/src/image.rs), on a runner, from the branch that deploys the
+  environment (on the preview, master's tree), and pushed to that
+  environment's registry; its run's summary names the digest. A
   computer pinned to it is on the canary: every deploy that changes its
   image tells it an update is ready, as any deploy that changes an image
   tells (above).
@@ -332,9 +339,12 @@ config names two images (xtask/src/deploy.rs, `computers.images`):
   every image of the config it deploys from (its environment's secret
   `DEPLOY_CONFIG`, set from a file, as a secret is never read back) is
   kept at a digest, the canary's too, as a runner, with no layer cache,
-  would make a new digest at every deploy (below). So a canary built by
-  hand is pinned there next, at the digest that deploy names, or
-  master's next deploy puts the canary back where the secret has it.
+  would make a new digest at every deploy (below). So the canary the
+  Image workflow pushed is pinned there, at the digest its summary
+  names, and the next deploy takes it; until then, deploys keep the
+  canary where the secret has it. A run makes a new digest each time,
+  as its runner keeps no layer cache either: it is run for a change to
+  the image, once a round.
 - **What changes a version** (Paul, 2026-10-14: "changes to the cells, or
   frontend, that don't change the hermes image shouldn't require a hermes
   image rollout"). The image's inputs are what it runs, and no more:
@@ -365,9 +375,11 @@ config names two images (xtask/src/deploy.rs, `computers.images`):
   one record of what a computer runs, so there is no list beside it; the
   group (the finite team, by npub, an email found with `fragment operator
   people --q`) is the operators', outside the repo.
-- **Where a digest comes from.** A deploy names each image's reference as
+- **Where a digest comes from.** The Image workflow's summary names the
+  reference it pushed (`registry.cloudflare.com/<account>/<repository>@sha256:…`)
+  and the config line that pins it; a deploy names each image's reference as
   wrangler prepares it (`hermes-canary is ready to run`, then
-  `registry.cloudflare.com/…@sha256:…`), and an operator's view of a person
+  `registry.cloudflare.com/…@sha256:…`); and an operator's view of a person
   (`fragment operator person <npub>`) names the whole reference their
   computer runs and the one its next start runs (`references.running`,
   `references.next`); the version Settings shows is a digest's first 12
@@ -414,9 +426,10 @@ config names two images (xtask/src/deploy.rs, `computers.images`):
   canary group goes ahead of it as the preview's does. CI deploys it from
   the `production` branch (in minutes for a commit master's run proved
   green, ci.yml's `proven`; after the full tests otherwise), its images
-  pinned as the preview's are: one reaches its registry by a deploy by
-  hand (Paul's), and its digest then its line in production's
-  `DEPLOY_CONFIG`.
+  pinned as the preview's are: one reaches its registry by the Image
+  workflow run from `production` with `environment` production (into
+  `fragment-computer-hermes`), and its digest then its line in
+  production's `DEPLOY_CONFIG`.
 
 ### One round
 
@@ -424,15 +437,24 @@ On the preview (`preview.finite.build`, master's, which CI deploys at
 every green push), with the operators' key (`--key-file`, or
 `FRAGMENT_OPERATOR_KEY_FILE`) and `FRAGMENT_HOST` naming it. Once:
 stable's line is the digest its computers run (`references.running` of
-one awake on it), the canary's is the build in the config a deploy by
-hand takes and a digest in CI's (`DEPLOY_CONFIG`), and the canary group
-is pinned to `hermes-canary`.
+one awake on it), the canary's a digest too, both in the file the
+preview's `DEPLOY_CONFIG` is set from (a secret is never read back), and
+the canary group is pinned to `hermes-canary`.
 
-1. **The change lands** on master, and a deploy by hand of it, where
-   Docker runs, builds the canary; the digest that deploy names becomes
-   the canary's `image` in the preview's `DEPLOY_CONFIG`, so CI's next
-   deploy keeps it. Its version: `fragment operator person <npub> --json |
-   jq -r .computer.latest` for one of the group.
+1. **The change lands** on master, and the Image workflow is run from
+   master (Actions, image, Run workflow: `environment` preview; `tag`
+   empty for the commit's first 12 hex digits, or a name of the round's,
+   `r9-<sha>`). It builds the canary on a runner and pushes it to
+   `fragment-preview-computer-hermes-canary`; its summary names the
+   reference and the line
+   `"hermes-canary": { "image": "registry.cloudflare.com/<account>/…@sha256:…" }`,
+   which replaces the canary's in that file (the config's `account_id`
+   for `<account>`, masked in the run), and the secret is set again from
+   it (`base64 -w0 < <file> | gh secret set DEPLOY_CONFIG --env
+   preview`). The next deploy takes it: master's next green push, or a
+   re-run of the `deploy` job of master's latest ci run. Its version:
+   `fragment operator person <npub> --json | jq -r .computer.latest` for
+   one of the group.
 2. **The group takes it**: awake, each is told an update is ready and
    presses Restart (the path under test); asleep, its next wake takes it.
    Each checks, on their own computer: an old chat goes on where it was;
@@ -463,12 +485,13 @@ is pinned to `hermes-canary`.
 6. **Promote**: the reference a watched canary computer runs
    (`fragment operator person <npub> --json | jq -r .references.running`,
    its first 12 hex digits the version step 1 named) becomes `hermes`'s
-   `image` in the preview's configs (`DEPLOY_CONFIG`, and the one a
-   deploy by hand takes), the old line kept commented; deploy. One
-   computer on stable awake is told; one asleep wakes onto it.
+   `image` in the file the preview's `DEPLOY_CONFIG` is set from, the
+   old line kept commented, and the secret is set again; the next deploy
+   takes it, as in step 1. One computer on stable awake is told; one
+   asleep wakes onto it.
 7. **Or roll back**: `fragment operator pin <npub> hermes` for each of the
    group (a Hermes release is forward only, above); after a promotion,
-   the commented line back, and a deploy.
+   the commented line back, the secret set again, and a deploy.
 
 ## The guest's contract
 

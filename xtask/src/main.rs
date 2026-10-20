@@ -52,6 +52,11 @@
 //!                    <branch>.<zone> (xtask/src/deploy.rs); --pinned-only
 //!                    (CI's) refuses a config that builds a computer image
 //!                    rather than keeping it at its digest
+//!   image push <image> --repository <name> --tag <tag> [--summary <file>]
+//!                    build a computer image (hermes) as a deploy builds it and
+//!                    push it to the registry of the account CLOUDFLARE_ACCOUNT_ID
+//!                    names, then print the digest a config pins it at
+//!                    (xtask/src/image.rs; the Image workflow runs it)
 //!   teardown --config <file> --branch <name>
 //!                    remove a branch deployment (irreversible)
 //!   stripe check|setup --config <file> [--branch <name>] [--webhook-secret-file <path>]
@@ -59,7 +64,7 @@
 //!                    account its stripe.key_file names: check reads and says what
 //!                    is wrong; setup makes what is missing (xtask/src/stripe.rs)
 //!
-//! dev, e2e, secret, deploy and teardown run wrangler and npm on the pinned Node,
+//! dev, e2e, secret, deploy, image and teardown run wrangler and npm on the pinned Node,
 //! and check runs `node --check` on it, fetched into target/tools on first
 //! use, never a `node` from PATH (crates/devstack/src/node.rs).
 //!
@@ -79,6 +84,7 @@ mod deploy;
 mod dns;
 mod guards;
 mod html_sinks;
+mod image;
 mod js_syntax;
 #[cfg(test)]
 mod markdown_dom;
@@ -476,7 +482,8 @@ fn main() -> Result<()> {
         Some("deploy") => deploy::deploy(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
         Some("stripe") => deploy::stripe(&args[1..]),
-        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | teardown --config <file> --branch <name>"),
+        Some("image") => image::image(&args[1..]),
+        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
     }
 }
 

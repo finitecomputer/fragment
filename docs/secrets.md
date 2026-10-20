@@ -163,6 +163,15 @@ in the job's logs, so the account id in wrangler's and xtask's output
 (registry paths, URLs) is `***`. The job runs without it. Paul sets them
 in the repository's settings.
 
+**On the Image workflow** (.github/workflows/image.yml, run by hand:
+`cargo xtask image push`) the job runs in the same environment, for two
+of its secrets alone: `CLOUDFLARE_API_TOKEN`, which wrangler pushes with
+(its Containers · Edit), and `CLOUDFLARE_ACCOUNT_ID`, required there, as
+it names the registry the image goes to; masked as on the deploy, in the
+run's summary too, which names the pushed reference. It reads no
+`DEPLOY_CONFIG`, and writes no secret to a file: Docker's login, which
+wrangler makes, keeps registry credentials of 15 minutes, on the runner.
+
 ## Placeholders and the operator's keys (Paul, 2026-10-04)
 
 A computer's guest is given each credential its agent may use as a

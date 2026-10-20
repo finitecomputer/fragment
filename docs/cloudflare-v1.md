@@ -86,7 +86,8 @@ speaking Cloudflare's APIs) returns once this product works.
    `DEPLOY_CONFIG`: names and paths, as a stranger's file is, kept out
    of the public repo's logs) and its Cloudflare token; its images are
    pinned by digest (`xtask deploy --pinned-only`), and one is built by
-   a deploy by hand (docs/computers.md, "Stable and canary").
+   the Image workflow, run by hand (docs/computers.md, "Stable and
+   canary").
 4. **Self-deploy without forking.** Configuration lives in a file
    outside the repo: domains, the WorkOS environment, AI Gateway,
    pricing, the code.storage organization, and the default computer
@@ -371,7 +372,8 @@ speaking Cloudflare's APIs) returns once this product works.
 
     *Status (2026-10-13).* Stable and canary are two names of a
     deployment's images: the default kept at a digest, the canary built
-    at every deploy (since 2026-10-16, by a deploy by hand: CI's build
+    at every deploy until 2026-10-16, then by a deploy by hand, and since
+    2026-10-20 by the Image workflow, run by hand, and pinned (CI's build
     no image, decision 3's status); a promotion moves the default's
     digest, a rollback pins back (docs/computers.md, "Stable and
     canary"). The point-in-time
