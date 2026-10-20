@@ -2867,38 +2867,37 @@ on. So the page names the release that answered it (`<meta
 name="fragment-release">`, filled in as it is served), every answer of
 the platform's host names its own (`x-fragment-deploy`), and the page
 reads that on every answer it reads, and asks for it (`HEAD /healthz`)
-as it is shown again (`visibilitychange`), comes back from the
+as it is hidden or shown again (`visibilitychange`), comes back from the
 back-forward cache (`pageshow`) or comes online, at most once a minute.
 Once an answer names another release, the page reloads whole, its chats'
 and apps' frames with it, where it was (its path, its open chat, its
-apps' windows, each at the page it opened), at the next safe moment: at
-once while it is hidden, or as it is shown again, when nothing in it is
-unsent; else when the person next opens a chat or an app; else once
-nothing in it is unsent and no one has touched it for two minutes.
-Before it reloads it asks each chat's page whose hello (`agents?`) it
-had what it holds (`{fragment: "unsent?", ask}`, at the fragment's
-origin; answered at once, its socket up or not, `{fragment: "unsent",
-ask, text, held, idleMs}`): `text` the composer's words, which a reload
-keeps; `held` whether it holds what a reload could not keep (files, a
-voice memo, a quote, a card's answer, a message the platform has not
-taken or one that failed); `idleMs` since its person last touched it. A
-reload keeps each chat's words in the tab (`sessionStorage`, a day at
-most, 32 chats' at most) and gives them back to that chat's page once it
-says hello again (`{fragment: "restore-unsent", text}`, taken only from
-its parent at the platform's origin, by someone who may post there, and
-put in an empty composer or before what was typed since, never over it;
-answered `{fragment: "unsent-restored"}`, after which the tab keeps them
-no more). **Nothing unsent is lost**: no reload while a chat's page holds
-what it could not keep, while one that said hello does not answer within
-2 s, while one of the page's dialogs or its menu is open, words are typed
-in its own fields, a prompt is on its way to a chat or a write of its own
-is still going, nor without the tab's storage. **No loop**: a release is
+apps' windows, each at the page it opened): while it is hidden (as it
+is hidden, or as it goes: `pagehide`), or at the person's next move (a
+chat or an app opened); never under them on screen. **What is typed is
+the chat page's to keep**: its composer's draft is kept in its own
+origin's storage (`localStorage`) as its person's (`{who, text, at}`,
+`who` its principal), a moment after each change and as the page goes,
+and put back as it loads, so it survives any reload, the shell's for a
+new release, a crash or a quit app alike (a browser that keeps no
+storage for the frame keeps no draft). Only that person gets it back: a
+draft of anyone else's is let go as the page loads, and signing out or
+Use another account first asks each chat's page to let its draft go
+(`{fragment: "forget-draft"}`, answered `{fragment: "draft-forgotten"}`,
+waited for at most a second), then sends the form. **Nothing else is
+lost**: a chat's page tells the shell, as it changes, whether it is busy
+with what no storage keeps (`{fragment: "busy", busy}`: files chosen, a
+voice memo, a message on its way, a card's answer typed and not sent, or
+on its way), and the shell reloads only while none is, and while none of
+its own dialogs or its menu is open, no words are typed in its own
+fields, no prompt is on its way to a chat and no write of its own is
+still going. Nothing is asked of the pages as it reloads, so nothing can
+change between an answer and the reload. **No loop**: a release is
 reloaded for at most three times, a minute apart (a reload may still
 meet the old release while a deploy goes out), and the release a reload
 left is no reason to reload for ten minutes (a deploy's old side answers
 for a while); what the page waits to reload for is its root's
 `data-release-next`. A fragment's page open in a tab of its own is not
-the shell's, and does not reload so.
+the shell's, and does not reload so; a chat's keeps its draft there too.
 
 **On a phone it is an app** (Paul, 2026-10-13: "staying strictly in the
 viewport"). The page itself never scrolls, bounces or zooms: its html and

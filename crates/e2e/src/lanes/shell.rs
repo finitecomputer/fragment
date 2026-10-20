@@ -1182,15 +1182,21 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
-/// The page hidden, then shown again, as a phone's app switcher or another
-/// tab does (headless Chrome's page is always on screen, so its document
-/// says so in place of the browser).
-const HIDE_AND_SHOW: &str = "(() => { const as = (v) => { Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => v }); \
-    Object.defineProperty(document, 'hidden', { configurable: true, get: () => v === 'hidden' }); document.dispatchEvent(new Event('visibilitychange')); }; \
-    as('hidden'); as('visible'); return true; })()";
+/// The page's visibility as `v` (`hidden` or `visible`), as a phone's app
+/// switcher or another tab makes it (headless Chrome's page is always on
+/// screen, so its document says so in place of the browser).
+fn visibility(v: &str) -> String {
+    format!(
+        "(() => {{ Object.defineProperty(document, 'visibilityState', {{ configurable: true, get: () => {v:?} }}); \
+         Object.defineProperty(document, 'hidden', {{ configurable: true, get: () => {v:?} === 'hidden' }}); document.dispatchEvent(new Event('visibilitychange')); return true; }})()"
+    )
+}
 
 /// The chat's composer, ready for the person: its page has its hello.
 const COMPOSER_READY: &str = "(() => { const t = document.getElementById('text'); return !!t && !t.disabled && document.getElementById('say')?.dataset.ready === '1'; })()";
+
+/// The draft a chat's page keeps in its own origin's storage (chat.js `DRAFT_KEY`).
+const DRAFT: &str = "JSON.parse(localStorage.getItem('fragment.chat.draft.v1'))";
 
 /// The cookie a local fleet's answers to a request name its release by
 /// (docs/api.md, Test levers): this browser meets a deploy.
@@ -1199,21 +1205,29 @@ const RELEASE_COOKIE: &str = "fragment_e2e_release";
 /// A new release under an open shell (docs/api.md, The shell, "A new
 /// release"): the release cookie makes every answer of the node to this
 /// browser, and the shell's page, name another release, as a deploy does.
-/// Valid: shown again with nothing unsent, the page reloads at once onto
-/// it, where it was (its chat, its app's window). Typed words hold it as
-/// the page is shown again, and a file (which a reload could not keep)
-/// holds even the person's next move; once only words are left, their next
-/// move reloads it and the words are back in their chat's composer, kept
-/// no more. Replay: the release it runs said again, and the release it
-/// just left answering again (a deploy's old side), reload nothing: no
-/// loop. Invalid: a cookie naming no release, or none, is answered as the
-/// node's own. The browser goes back to the node's own whatever happened.
+/// Valid: hidden, the page reloads at once onto it, where it was (its chat,
+/// its app's window); on screen it waits, and reloads at the person's next
+/// move unless a chat's page is busy with what no storage keeps (a file
+/// chosen). Words typed in a chat are its page's to keep: typed a moment
+/// before the reload (nothing waited for), they are in its composer after
+/// it, and after a reload by hand too. Replay: the release it runs said
+/// again, and the release it just left answering again (a deploy's old
+/// side), reload nothing: no loop. The words are their person's: another
+/// account signed in to the tab opens the same chat to an empty composer
+/// (the first one's draft gone), and signing out or Use another account
+/// has each chat's page let its draft go before the form is sent.
+/// Invalid: a cookie naming no release, or none, is answered as the node's
+/// own. The browser goes back to the node's own, and to its person,
+/// whatever happened.
 #[allow(clippy::too_many_arguments)]
 fn release_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, chat: &str, other: &str, app: &str, shots: &std::path::Path) -> Result<()> {
     let checked = release_steps(s, api, b, page, session, chat, other, app, shots);
+    b.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
     b.set_cookie(&format!("{}/", api.base), RELEASE_COOKIE, "")?;
-    // the page as the node's own release answers it, its composer emptied
-    let _ = b.eval_in_frame(page, chat, "(() => { const t = document.getElementById('text'); if (t) { t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); } return true; })()");
+    // the page as the node's own release answers it, its composer emptied (its draft with it), at home
+    let _ = b.eval_in_frame(page, chat, &fill("#text", ""));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    b.eval(page, "(history.replaceState(null, '', '/'), true)")?;
     reload_shell(b, page)?;
     checked
 }
@@ -1241,7 +1255,7 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     let press = |b: &mut Browser, selector: &str| -> Result<bool> {
         Ok(b.eval(page, &format!("(() => {{ const e = document.querySelector({}); e?.click(); return !!e; }})()", js(selector)))? == true)
     };
-    // a negative check's look: past the shell's own ask of each chat's page (2 s)
+    // a negative check's look: past the shell's own wait after a press (0.4 s)
     let quiet = std::time::Duration::from_secs(3);
     let run = crate::api::now_s();
     let (next, after) = (format!("e2e-next-{run}"), format!("e2e-after-{run}"));
@@ -1250,6 +1264,8 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     let window = format!("!!document.querySelector({})", js(&format!("#stack .pane[data-key=\"app:{app}\"] iframe")));
     let row = |name: &str| format!("#chats [data-key={}]", js(&format!("chat:{name}")));
     let composer = |b: &mut Browser| b.eval_in_frame(page, chat, "({ text: document.getElementById('text')?.value ?? null, files: document.querySelectorAll('#attachments .attachment-chip').length })").unwrap_or(Value::Null);
+    let ready = |s: &Suite, b: &mut Browser| s.eventually(wait, || b.eval_in_frame(page, chat, COMPOSER_READY).ok() == Some(Value::Bool(true)));
+    let me_id = super::signin::who(api, session)?["id"].as_str().unwrap_or("").to_string();
 
     // the cookie: one naming no release, or none at all, is answered as the node's own
     let own = api.unsigned("HEAD", "/healthz", None)?.header("x-fragment-deploy");
@@ -1267,9 +1283,10 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     anyhow::ensure!(fresh && b.until(page, &format!("!!document.querySelector({})", js(&row(chat))), wait), "the shell reloaded, its first chat listed");
     press(b, &row(chat))?;
     b.eval(page, &format!("(document.querySelector({})?.click(), true)", js(&format!("#apps [data-key=\"app:{app}\"]"))))?;
-    let set = b.until(page, &format!("{} && {window}", shown(chat)), wait) && s.eventually(wait, || b.eval_in_frame(page, chat, COMPOSER_READY).ok() == Some(Value::Bool(true)));
+    let set = b.until(page, &format!("{} && {window}", shown(chat)), wait) && ready(s, b);
     let open = "({ title: document.getElementById('chat-title')?.textContent, shown: [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment, panes: [...document.querySelectorAll('#stack .pane')].map((p) => p.dataset.key), path: location.pathname })";
     anyhow::ensure!(set, "the shell's first chat ({chat}) and an app's window (app:{app}) open: {}", b.eval(page, open)?);
+    b.eval_in_frame(page, chat, &fill("#text", ""))?;
     b.eval(page, "(window.__release = 1, true)")?;
 
     // a deploy, to this browser: every answer names another release, the page's too
@@ -1288,64 +1305,67 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
             && others.header("x-fragment-deploy") == own,
         json!({ "health": health.header("x-fragment-deploy"), "api": [me.status, me.header("x-fragment-deploy")], "without": others.header("x-fragment-deploy") }),
     );
-    b.eval(page, HIDE_AND_SHOW)?;
+    // hidden, it asks which release runs now and reloads at once
+    b.eval(page, &visibility("hidden"))?;
     let reloaded = b.until(page, &format!("!window.__release && {} && {} && {window}", meta(&next), shown(chat)), wait);
     s.ok(
-        "a new release, and the page shown again with nothing unsent: it reloads at once onto it, its chat open again and its app's window too",
+        "a new release, and the page hidden (a phone's app switched away from): it reloads at once onto it, its chat open again and its app's window too",
         reloaded,
         b.eval(page, "({ mark: window.__release ?? null, release: document.querySelector('meta[name=fragment-release]')?.content, panes: [...document.querySelectorAll('#stack .pane')].map((p) => p.dataset.key) })")?,
     );
 
-    // words typed, and a file: shown again, the page stays as it was
-    let words = "a thought half typed before the deploy";
-    let ready = s.eventually(wait, || b.eval_in_frame(page, chat, COMPOSER_READY).ok() == Some(Value::Bool(true)));
-    b.eval_in_frame(page, chat, &fill("#text", words))?;
+    // on screen, another release is waited on: nothing reloads under the person
+    let ready_now = ready(s, b);
+    b.eval(page, "(window.__release = 2, true)")?;
+    b.set_cookie(&platform, RELEASE_COOKIE, &after)?;
+    b.eval(page, &visibility("visible"))?;
+    let seen = b.until(page, &format!("document.documentElement.dataset.releaseNext === {}", js(&after)), wait);
+    std::thread::sleep(quiet);
+    let stayed = b.eval(page, &format!("window.__release === 2 && {}", meta(&next)))? == true;
+    s.ok("another release, seen as the page is shown again: on screen, it waits, the page as it was", ready_now && seen && stayed, json!({ "seen": seen, "stayed": stayed }));
+    // a file chosen in a chat (which no storage keeps): its page says it is
+    // busy, and the person's next move, another chat, reloads nothing
     let attached = b.eval_in_frame(
         page,
         chat,
         "(() => { const p = document.getElementById('attachment-picker'); const d = new DataTransfer(); d.items.add(new File(['kept through the deploy'], 'note.txt', { type: 'text/plain' })); \
          p.files = d.files; p.dispatchEvent(new Event('change')); return document.querySelectorAll('#attachments .attachment-chip').length; })()",
     )?;
-    b.eval(page, "(window.__release = 2, true)")?;
-    b.set_cookie(&platform, RELEASE_COOKIE, &after)?;
-    b.eval(page, HIDE_AND_SHOW)?;
-    let seen = b.until(page, &format!("document.documentElement.dataset.releaseNext === {}", js(&after)), wait);
-    std::thread::sleep(quiet);
-    let held = composer(b);
-    let stayed = b.eval(page, &format!("window.__release === 2 && {}", meta(&next)))? == true;
-    s.ok(
-        "another release, seen as the page is shown again with words typed in its chat: it waits, the page and the words as they were",
-        ready && attached == 1 && seen && stayed && held["text"] == words && held["files"] == 1,
-        json!({ "composer": held, "attached": attached, "seen": seen, "stayed": stayed }),
-    );
-    // the file holds even the person's next move: a reload could not keep it
     press(b, &row(other))?;
     let moved = b.until(page, &shown(other), wait);
     std::thread::sleep(quiet);
     let held = composer(b);
     let stayed = b.eval(page, &format!("window.__release === 2 && {}", meta(&next)))? == true;
     s.ok(
-        "with a file in the composer (which a reload would lose) their next move, another chat, opens it and reloads nothing",
-        moved && stayed && held["text"] == words && held["files"] == 1,
+        "a chat's page busy with what no storage keeps (a file chosen) holds the reload: the person's next move, another chat, opens it and reloads nothing",
+        attached == 1 && moved && stayed && held["files"] == 1,
         json!({ "composer": held, "stayed": stayed }),
     );
-    // the file gone, their next move reloads it, and the words come back
+    // the file gone, words typed and the page hidden at once (nothing waited
+    // for): it reloads, and the words are in their chat's composer after it
+    let words = "a thought half typed before the deploy";
     let removed = b.eval_in_frame(page, chat, "(() => { document.querySelector('#attachments .attachment-remove')?.click(); return document.querySelectorAll('#attachments .attachment-chip').length === 0; })()")?;
+    // (its page tells the shell it is busy no more: a message, a moment)
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    b.eval_in_frame(page, chat, &fill("#text", words))?;
+    b.eval(page, &visibility("hidden"))?;
+    let reloaded = b.until(page, &format!("!window.__release && {} && {}", meta(&after), shown(other)), wait);
     press(b, &row(chat))?;
-    let reloaded = b.until(page, &format!("!window.__release && {} && {}", meta(&after), shown(chat)), wait);
-    let back = s.eventually(wait, || b.eval_in_frame(page, chat, &format!("document.getElementById('text')?.value === {}", js(words))).ok() == Some(Value::Bool(true)));
-    let kept = b.eval(page, "JSON.parse(sessionStorage.getItem('shell.unsent.v1') || '{}')")?;
+    let back = b.until(page, &shown(chat), wait) && s.eventually(wait, || b.eval_in_frame(page, chat, &format!("document.getElementById('text')?.value === {}", js(words))).ok() == Some(Value::Bool(true)));
+    let kept = b.eval_in_frame(page, chat, DRAFT)?;
     let _ = b.screenshot(page, &shots.join("release-words-back.png"));
     s.ok(
-        "the file gone, their next move (back to that chat) reloads the page onto the new release, and the words they typed are in its composer again, kept no more",
-        removed == true && reloaded && back && kept.get(chat).is_none(),
-        json!({ "composer": composer(b), "kept": kept, "release": b.eval(page, "document.querySelector('meta[name=fragment-release]')?.content")? }),
+        "the file gone, words typed and the page hidden the same moment: it reloads onto the new release, and the words are in their chat's composer again, kept by its own page as its person's",
+        removed == true && reloaded && back && kept["who"] == me_id.as_str() && kept["text"] == words,
+        json!({ "composer": composer(b), "kept": kept }),
     );
+    // any reload: by hand, the words are there again
+    let again = reload_shell(b, page)? && b.until(page, &shown(chat), wait) && s.eventually(wait, || b.eval_in_frame(page, chat, &format!("document.getElementById('text')?.value === {}", js(words))).ok() == Some(Value::Bool(true)));
+    s.ok("and after a reload by hand too: a draft is its chat page's, whatever reloads it", again, composer(b));
 
     // no loop: the release it runs, said again, and the one it just left
     // (a deploy's old side, answering again), reload nothing
     b.eval(page, "(window.__release = 3, true)")?;
-    b.eval(page, HIDE_AND_SHOW)?;
     b.set_cookie(&platform, RELEASE_COOKIE, &next)?;
     // the launcher's search: an answer the shell reads, naming the old release
     press(b, "#sidebar-new-chat")?;
@@ -1356,13 +1376,67 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     b.until(page, "!document.getElementById('search-dialog').open", wait);
     press(b, &row(other))?;
     let moved = b.until(page, &shown(other), wait);
+    b.eval(page, &visibility("hidden"))?;
     std::thread::sleep(quiet);
+    b.eval(page, &visibility("visible"))?;
     let still = b.eval(page, &format!("({{ mark: window.__release ?? null, waits: document.documentElement.dataset.releaseNext ?? null, release: {} }})", meta(&after)))?;
     s.ok(
-        "no loop: the release it runs, said again, and the one its reload left, answering again, reload nothing, at its next move either",
+        "no loop: the release it runs, said again, and the one its reload left, answering again, reload nothing, at its next move or hidden",
         read && moved && still == json!({ "mark": 3, "waits": null, "release": true }),
         &still,
     );
+
+    // another account in this tab, with the first one's draft kept in the
+    // chat (shared with them): it is none of theirs
+    let other_email = format!("shell-ui-release-{run}@e2e.test");
+    let other_session = api.sign_in(&other_email)?;
+    let other_id = super::signin::who(api, &other_session)?["id"].as_str().unwrap_or("").to_string();
+    let shared = shell(api, session, "PUT", &format!("/api/f/{chat}/members/{other_id}"), Some(&json!({ "role": "editor" })), &[])?;
+    anyhow::ensure!(shared.status == 200, "the first chat shared with another account: {shared}");
+    b.set_cookie(&platform, RELEASE_COOKIE, "")?;
+    b.set_cookie(&platform, "fragment_session", &other_session)?;
+    b.eval(page, "(history.replaceState(null, '', '/'), true)")?;
+    let theirs = reload_shell(b, page)? && b.until(page, &shown(chat), wait) && ready(s, b);
+    std::thread::sleep(quiet);
+    let given = composer(b);
+    let kept = b.eval_in_frame(page, chat, DRAFT)?;
+    s.ok(
+        "another account signed in to the tab opens the same chat (shared with them): its composer is empty, and the first account's draft is gone from the page's storage",
+        theirs && given["text"] == "" && kept.is_null(),
+        json!({ "composer": given, "kept": kept }),
+    );
+    // signing out, and Use another account, have each chat's page let its
+    // draft go before the form is sent (its sending stood in for here)
+    let mut forgot = vec![];
+    for form in ["form[action='/auth/logout']", "form[action^='/auth/switch']"] {
+        let typed = ready(s, b) && b.eval_in_frame(page, chat, &fill("#text", "their own words"))? == true;
+        let saved = s.eventually(wait, || b.eval_in_frame(page, chat, DRAFT).ok().is_some_and(|d| d["who"] == other_id.as_str() && d["text"] == "their own words"));
+        press(b, "#settings")?;
+        b.until(page, &format!("!!document.querySelector({})", js(&format!("#settings-page {form}"))), wait);
+        let sent = format!(
+            "(() => {{ window.__sent = null; HTMLFormElement.prototype.submit = function () {{ window.__sent = this.getAttribute('action'); }}; document.querySelector({}).requestSubmit(); return true; }})()",
+            js(&format!("#settings-page {form}"))
+        );
+        b.eval(page, &sent)?;
+        let went = b.until(page, "!!window.__sent", wait);
+        let gone = b.eval_in_frame(page, chat, DRAFT)?;
+        forgot.push(json!({ "typed": typed, "saved": saved, "went": went, "draft": gone }));
+        // a fresh page for the next form: the one asked keeps no draft more
+        press(b, &row(chat))?;
+        b.until(page, "location.pathname === '/'", wait);
+        reload_shell(b, page)?;
+        b.until(page, &shown(chat), wait);
+    }
+    s.ok(
+        "signing out and Use another account have the chat's page let its person's draft go, and only then is the form sent",
+        forgot.iter().all(|f| f["typed"] == true && f["saved"] == true && f["went"] == true && f["draft"].is_null()),
+        json!(forgot),
+    );
+    // back to the first account, at home, the chat theirs alone again
+    b.set_cookie(&platform, "fragment_session", session)?;
+    anyhow::ensure!(reload_shell(b, page)?, "the first account's shell again, at home: {}", b.eval(page, "location.pathname")?);
+    let unshared = shell(api, session, "DELETE", &format!("/api/f/{chat}/members/{other_id}"), None, &[])?;
+    anyhow::ensure!(unshared.status == 200, "the other account out of the first chat again: {unshared}");
     Ok(())
 }
 

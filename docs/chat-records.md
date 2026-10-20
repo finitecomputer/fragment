@@ -619,21 +619,20 @@ sends `{fragment: "open-launcher"}` to its parent. The shell accepts it
 only from its focused, listed fragment iframe with the expected origin.
 Standalone chats leave the shortcut to the browser.
 
-**A new release, around it.** The shell reloads itself, its chats' pages
-with it, once the platform under it runs another release (docs/api.md,
-The shell, "A new release"), and asks the page first what it holds
-(`{fragment: "unsent?", ask}`). The page answers its parent at once,
-whether or not its socket is up (a page that never had its hello holds
-nothing): `{fragment: "unsent", ask, text, held, idleMs}`, `text` the
-composer's words, `held` whether it holds what a reload could not keep
-(files, a voice memo, a quote, a card's typed answer, a message the
-platform has not taken, or one that failed), `idleMs` since its person
-last touched it. The shell reloads only when nothing is held, keeping the
-words, and gives them back after (`{fragment: "restore-unsent", text}`):
-taken only from its parent at the platform's origin (its hello's
-`platform`) by someone who may post here, they go in an empty composer,
-or before what was typed since, never over it, and the page says so
-(`{fragment: "unsent-restored"}`).
+**Its draft, kept.** What is typed in the composer is kept in the page's
+own origin's storage (`localStorage`, `fragment.chat.draft.v1`: `{who,
+text, at}`, `who` the principal it is signed in as), a moment after each
+change and as the page goes, and put back in an empty composer as the
+page loads, for that principal alone: a draft of anyone else's is let go
+then, never shown. So words typed survive any reload: the shell's for a
+new release (docs/api.md, The shell, "A new release"), a crash, a quit
+app. Sending empties it. Framed, the page lets its draft go when the
+shell asks as its person signs out or uses another account (`{fragment:
+"forget-draft"}`, answered `{fragment: "draft-forgotten"}`), and keeps
+none after. It also tells the shell, as it changes, whether it is busy
+with what no storage keeps (`{fragment: "busy", busy}`: files chosen, a
+voice memo, a message on its way, a card's answer typed and not sent,
+or on its way); the shell reloads only while it is not.
 
 **Your other agents.** Framed, the page asks the shell for its person's
 agents as it mounts (`{fragment: "agents?"}`). A shell answers only a
