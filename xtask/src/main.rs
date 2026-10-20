@@ -30,8 +30,9 @@
 //!                    and agent-restart upgrades into and back
 //!   check            every first-party JavaScript file parses (node --check;
 //!                    xtask/src/js_syntax.rs) and none turns a string into
-//!                    markup or code (xtask/src/html_sinks.rs), the schema
-//!                    lock is what the Durable Objects' steps make
+//!                    markup (xtask/src/html_sinks.rs), no runtime code runs
+//!                    a string as script (xtask/src/eval_sinks.rs), the
+//!                    schema lock is what the Durable Objects' steps make
 //!                    (xtask/src/schema_lock.rs), then host tests and
 //!                    clippy, warnings denied
 //!   schema-lock      appends the Durable Objects' new schema steps to
@@ -86,6 +87,7 @@ use fragment_devstack as devstack;
 mod build;
 mod deploy;
 mod dns;
+mod eval_sinks;
 mod guards;
 mod html_sinks;
 mod image;
@@ -410,7 +412,7 @@ fn javascript_parses(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// No first-party JavaScript turns a string into markup or code
+/// No first-party JavaScript turns a string into markup
 /// (xtask/src/html_sinks.rs): text becomes DOM only by the DOM's own
 /// constructors, so no file or message can script a fragment's origin.
 fn no_html_sinks(root: &Path) -> Result<()> {
@@ -420,10 +422,21 @@ fn no_html_sinks(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// No runtime code runs a string as script (xtask/src/eval_sinks.rs): no
+/// DevTools evaluate, no page driver's, no `eval`, `Function` or timer of a
+/// string, no `import()` of a URL made at run time.
+fn no_eval_sinks(root: &Path) -> Result<()> {
+    let files = eval_sinks::sources(root)?;
+    eval_sinks::check(&files, &eval_sinks::ALLOWED)?;
+    println!("eval sinks: none in {} runtime files ({} allowed, each with why)", files.len(), eval_sinks::ALLOWED.len());
+    Ok(())
+}
+
 fn check() -> Result<()> {
     let root = devstack::repo_root();
     no_conflict_markers(&root)?;
     no_html_sinks(&root)?;
+    no_eval_sinks(&root)?;
     schema_lock::holds(&root)?;
     let read = |path: &str| std::fs::read_to_string(root.join(path)).with_context(|| format!("read {path}"));
     let copies = ["cli/GUIDE.md", "README.md", "cell/shell/shell.js"].map(|path| read(path).map(|text| (path, text)));

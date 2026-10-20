@@ -94,15 +94,21 @@ pub fn files(root: &Path) -> Result<Vec<(String, InputType)>> {
 /// Every file git tracks or would add (untracked and not ignored) that is
 /// still on disk, sorted: the files the repo's own checks read.
 pub fn listed(root: &Path) -> Result<BTreeSet<String>> {
-    let out = Command::new("git")
-        .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
-        .current_dir(root)
-        .output()
-        .context("git ls-files")?;
-    ensure!(out.status.success(), "git ls-files: {}", String::from_utf8_lossy(&out.stderr));
-    let listed = out.stdout.split(|b| *b == 0).filter(|p| !p.is_empty()).map(|p| String::from_utf8_lossy(p).into_owned());
+    let listed = ls_files(root, &["--cached", "--others", "--exclude-standard"])?;
     // a path deleted but not yet committed is listed, and is not there
-    Ok(listed.filter(|p| root.join(p).is_file()).collect())
+    Ok(listed.into_iter().filter(|p| root.join(p).is_file()).collect())
+}
+
+/// Every file git tracks, sorted: the repo as committed, without a
+/// checkout's own untracked files.
+pub fn tracked(root: &Path) -> Result<BTreeSet<String>> {
+    ls_files(root, &["--cached"])
+}
+
+fn ls_files(root: &Path, which: &[&str]) -> Result<BTreeSet<String>> {
+    let out = Command::new("git").args(["ls-files", "-z"]).args(which).current_dir(root).output().context("git ls-files")?;
+    ensure!(out.status.success(), "git ls-files: {}", String::from_utf8_lossy(&out.stderr));
+    Ok(out.stdout.split(|b| *b == 0).filter(|p| !p.is_empty()).map(|p| String::from_utf8_lossy(p).into_owned()).collect())
 }
 
 /// The JavaScript among `paths`, less `VENDORED`, with how each parses.
