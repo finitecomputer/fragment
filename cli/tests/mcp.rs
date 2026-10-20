@@ -56,9 +56,10 @@ fn host() -> (Server, Seen) {
 fn home(tag: &str, key: Option<&str>) -> PathBuf {
     let home = std::env::temp_dir().join(format!("fragment-mcp-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(home.join(".config/fragment")).unwrap();
+    let config = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment");
+    std::fs::create_dir_all(&config).unwrap();
     if let Some(key) = key {
-        std::fs::write(home.join(".config/fragment/config.json"), json!({ "secret_key": key }).to_string()).unwrap();
+        std::fs::write(config.join("config.json"), json!({ "secret_key": key }).to_string()).unwrap();
     }
     home
 }

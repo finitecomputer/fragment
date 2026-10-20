@@ -1,3 +1,4 @@
+mod agent;
 mod api;
 mod ask;
 mod auth;
@@ -298,8 +299,13 @@ enum Cmd {
     Ask {
         /// The agent: its label or fragment (`fred`, `fred--k3x9`), or its identity
         agent: String,
-        /// What to ask it
-        text: String,
+        /// What to ask it (or --from)
+        #[arg(required_unless_present = "from", conflicts_with = "from")]
+        text: Option<String>,
+        /// What to ask it, from a file, or `-` for standard input: the shell
+        /// changes nothing in it (no `$`, backtick or quote to escape)
+        #[arg(long, value_name = "FILE")]
+        from: Option<PathBuf>,
         /// Ask in this chat instead (each of you two not in it is added, as its
         /// owner's agent may)
         #[arg(long)]
@@ -325,12 +331,20 @@ enum Cmd {
     },
     /// Show or set who can see a fragment: public | link | members
     Visibility { name: String, value: Option<String> },
-    /// Show or change an agent's name and picture, as every page shows it:
-    /// its agent fragment's title and its avatar.png, put live at once
+    /// Show or change an agent: its name and picture, as every page shows
+    /// it (its agent fragment's title and its avatar.png), its job and model;
+    /// start or stop it on your computer; or make a new one (--new). Each
+    /// change is put live at once
     Agent {
-        /// The agent fragment (`juniper--k3x9`); an agent on a computer
-        /// names itself by leaving it out
+        /// The agent fragment (`juniper--k3x9`, or its label); an agent on a
+        /// computer names itself by leaving it out
+        #[arg(conflicts_with = "new")]
         agent: Option<String>,
+        /// Make a new agent with this label (its @name, and its name unless
+        /// --name), running on your computer, with a chat of its own with
+        /// you: give it --job (or --job-from)
+        #[arg(long, value_name = "LABEL", conflicts_with_all = ["picture", "no_picture", "start", "stop", "no_model"])]
+        new: Option<String>,
         /// Its new name
         #[arg(long, value_name = "NAME")]
         name: Option<String>,
@@ -340,6 +354,29 @@ enum Cmd {
         /// Take its picture away
         #[arg(long)]
         no_picture: bool,
+        /// Its job: its SOUL.md, who it is and what it does (never its name)
+        #[arg(long, value_name = "TEXT", conflicts_with = "job_from")]
+        job: Option<String>,
+        /// Its job from a file, or `-` for standard input: the shell changes
+        /// nothing in it (no `$`, backtick or quote to escape)
+        #[arg(long, value_name = "FILE")]
+        job_from: Option<PathBuf>,
+        /// The platform's tier it runs on: cheap or medium
+        #[arg(long, value_name = "TIER")]
+        tier: Option<String>,
+        /// A model of a provider your owner connected, which it runs on instead
+        /// of its tier: <provider>:<id> (openrouter:anthropic/claude-sonnet-5.5)
+        #[arg(long, value_name = "PROVIDER:ID", conflicts_with = "no_model")]
+        model: Option<String>,
+        /// Take its model away: its tier again
+        #[arg(long)]
+        no_model: bool,
+        /// Start it on your computer
+        #[arg(long, conflicts_with = "stop")]
+        start: bool,
+        /// Stop it on your computer (its fragment, job and memories are kept)
+        #[arg(long)]
+        stop: bool,
     },
     /// A fragment's scheduled records: at each minute a cron names (UTC),
     /// it appends a record to one of its channels, as itself, which its
@@ -2042,7 +2079,12 @@ fn run(cli: Cli) -> Result<()> {
                 eprintln!("(replayed: post {id} had already appended this record)");
             }
         }
-        Cmd::Ask { agent, text, chat, wait, id } => {
+        Cmd::Ask { agent, text, from, chat, wait, id } => {
+            let text = match (text, from) {
+                (Some(t), None) => t,
+                (None, Some(f)) => text_from(&f, "the question", fragment_proto::limits::RECORD_BODY_MAX_BYTES)?,
+                _ => return Err(usage("say what to ask: its text, or --from FILE (- for stdin)")),
+            };
             let id = id.unwrap_or_else(|| format!("ask-{:016x}", rand::random::<u64>()));
             let v = ask::ask(&c, &agent, &text, chat.as_deref(), wait, id)?;
             json_exit(j, &v);
@@ -2096,10 +2138,26 @@ fn run(cli: Cli) -> Result<()> {
                 println!("{}", serde_json::to_string(r)?);
             }
         }
-        Cmd::Agent { agent, name, picture, no_picture } => {
+        Cmd::Agent { new: Some(label), name, job, job_from, tier, model, .. } => {
+            let settings = agent_settings(tier.as_deref(), model.as_deref(), false)?;
+            let job = job_given(job, job_from)?.ok_or_else(|| usage("give the new agent its job: --job TEXT, or --job-from FILE (- for stdin)"))?;
+            // its name its label's unless one is given
+            let name = name.unwrap_or_else(|| label.clone());
+            let asked = agent::New { label, name, job, settings };
+            let made = agent::make(&c, &asked)?;
+            json_exit(j, &made);
+            let label = fragment_proto::split_fragment_name(&made.agent).map_or(made.agent.as_str(), |(l, _)| l);
+            println!("{} ({}) runs on your computer, on {}", made.agent, made.name, made.runs_on.said());
+            println!("its own chat with you: {}{}", made.chat, if made.left_chat { " (made by this agent, which left it: the new agent leads it)" } else { "" });
+            println!("brief it: fragment ask {label} \"…\" --wait");
+        }
+        Cmd::Agent { agent, new: None, name, picture, no_picture, job, job_from, tier, model, no_model, start, stop } => {
+            let job = job_given(job, job_from)?;
             let Some(agent) = agent.or_else(|| c.agent().map(|m| m.agent.clone())) else {
                 return Err(usage("name the agent fragment: `fragment agent juniper--k3x9 --name Frank`"));
             };
+            let agent = c.fragment(&agent)?;
+            let settings = agent_settings(tier.as_deref(), model.as_deref(), no_model)?;
             let files = agent_face_writes(&c, &agent, name.as_deref(), picture.as_deref(), no_picture)?;
             if !files.is_empty() {
                 // one commit, keyed by what it writes: the same change sent again commits nothing twice
@@ -2108,12 +2166,24 @@ fn run(cli: Cli) -> Result<()> {
                 let Deployed::Live { live_tip, .. } = deploy(&c, &agent, None, None)? else { unreachable!("a deploy of no folder syncs nothing") };
                 refused_live(&c, &agent, &live_tip)?;
             }
+            // its job and model (decision 62, proposed), then whether it runs
+            let changed = match job.is_some() || !settings.is_empty() {
+                true => agent::change(&c, &agent, job.as_deref(), &settings)?.changed,
+                false => false,
+            };
+            let agents = match (start, stop) {
+                (true, _) => Some(agent::run(&c, &agent, true)?),
+                (_, true) => Some(agent::run(&c, &agent, false)?),
+                _ => agent::agents(&c)?,
+            };
+            let running = agents.as_ref().map(|agents| agents.iter().any(|a| a.fragment == agent));
+            let runs_on = agent::runs_on(agent::settings_of(&c, &agent)?.as_ref());
             // as its list says it: the platform's face of it, a moment after a change
             let list: FragmentList = c.call_as(c.get("/api/fragments")?)?;
             let row = list.fragments.into_iter().find(|f| f.name == agent);
             let shown_name = name.or_else(|| row.as_ref().and_then(|r| r.title.clone())).unwrap_or_else(|| agent.clone());
             let shown_picture = if files.is_empty() { row.and_then(|r| r.picture) } else { None };
-            json_exit(j, &json!({ "agent": agent, "name": shown_name, "picture": shown_picture, "changed": !files.is_empty() }));
+            json_exit(j, &json!({ "agent": agent, "name": shown_name, "picture": shown_picture, "changed": !files.is_empty() || changed, "runsOn": runs_on, "running": running }));
             println!("{agent}: {shown_name}");
             match (&picture, no_picture, shown_picture) {
                 (Some(p), _, _) => println!("picture: {} (it shows everywhere within seconds)", p.display()),
@@ -2121,6 +2191,12 @@ fn run(cli: Cli) -> Result<()> {
                 (None, false, Some(url)) => println!("picture: {url}"),
                 (None, false, None) if files.is_empty() => println!("no picture"),
                 _ => {}
+            }
+            println!("runs on {}", runs_on.said());
+            match running {
+                Some(true) => println!("running on your computer"),
+                Some(false) => println!("not running (`fragment agent {agent} --start` starts it)"),
+                None => {}
             }
         }
         Cmd::Schedule { sub } => match sub {
@@ -2232,6 +2308,11 @@ fn agent_face_writes(c: &api::Client, agent: &str, name: Option<&str>, picture: 
         if name.is_empty() || name.chars().count() > fragment_proto::limits::TITLE_MAX_CHARS {
             return Err(usage(format!("a name is 1 to {} characters", fragment_proto::limits::TITLE_MAX_CHARS)));
         }
+        // its own: another of its owner's agents' is refused
+        let list: fragment_proto::FragmentList = c.call_as(c.get("/api/fragments")?)?;
+        if let Some(other) = agent::named_already(c, &list.fragments, name, Some(agent)) {
+            return Err(anyhow::Error::new(CodedError { code: Code::Conflict, msg: format!("{other} is named {name:?} already: give this one a name of its own") }));
+        }
         let mut manifest: Value = c.call_as(c.get(&format!("/api/f/{agent}/manifest"))?)?;
         anyhow::ensure!(manifest.is_object(), "{agent}'s fragment.json is not an object: {manifest}");
         manifest["meta"]["title"] = json!(name);
@@ -2246,6 +2327,42 @@ fn agent_face_writes(c: &api::Client, agent: &str, name: Option<&str>, picture: 
         files.push(json!({ "path": at, "delete": true }));
     }
     Ok(files)
+}
+
+/// A job named on the command line (`--job`) or read whole from a file
+/// (`--job-from`, `-` for standard input), never more than a job holds.
+fn job_given(job: Option<String>, from: Option<PathBuf>) -> Result<Option<String>> {
+    match (job, from) {
+        (Some(j), _) => Ok(Some(j)),
+        (None, Some(f)) => Ok(Some(text_from(&f, "the job", agent::JOB_MAX_BYTES)?)),
+        (None, None) => Ok(None),
+    }
+}
+
+/// The text of `path`, or of standard input for `-`, as written (the shell
+/// expands nothing in it), at most `max` bytes: one longer is refused, not
+/// cut. `what` names it in a refusal.
+fn text_from(path: &Path, what: &str, max: usize) -> Result<String> {
+    let mut bytes = Vec::new();
+    let limit = u64::try_from(max).expect("a bound fits u64") + 1;
+    let read = if path.as_os_str() == "-" {
+        std::io::stdin().take(limit).read_to_end(&mut bytes).context("reading stdin")
+    } else {
+        std::fs::File::open(path).and_then(|f| f.take(limit).read_to_end(&mut bytes)).with_context(|| format!("reading {}", path.display()))
+    };
+    read?;
+    if bytes.len() > max {
+        return Err(usage(format!("{what} is at most {max} bytes; {} is longer", if path.as_os_str() == "-" { "standard input" } else { "the file" })));
+    }
+    String::from_utf8(bytes).map_err(|_| usage(format!("{what} is text: UTF-8")))
+}
+
+/// The settings `fragment agent` was asked for: a tier, a model, or the
+/// model taken away.
+fn agent_settings(tier: Option<&str>, model: Option<&str>, no_model: bool) -> Result<agent::Settings> {
+    let tier = tier.map(agent::parse_tier).transpose().map_err(usage)?;
+    let model = model.map(agent::parse_model).transpose().map_err(usage)?;
+    Ok(agent::Settings { tier, model, no_model })
 }
 
 fn writer_id(c: &api::Client) -> String {
@@ -2295,6 +2412,26 @@ fn scaffold(dir: &Path, tpl_name: &str) -> Result<(Vec<&'static str>, usize)> {
 
 #[cfg(test)]
 mod tests {
+    /// Goal: a job or a question read from a file is its text as written,
+    /// what a shell would expand included. Invalid: past its bound it is
+    /// refused, never cut; bytes that are no text are refused; a file that
+    /// is not there says so.
+    #[test]
+    fn text_from_a_file_is_as_written_and_bounded() {
+        let dir = std::env::temp_dir().join(format!("fragment-cli-text-from-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("job.md");
+        let job = "You track costs in $ and $1,000, and use `trading-agent-finite`; \"quotes\" stay.\n";
+        std::fs::write(&file, job).unwrap();
+        assert_eq!(super::text_from(&file, "the job", 4096).unwrap(), job);
+        assert_eq!(super::text_from(&file, "the job", job.len()).unwrap(), job, "exactly at the bound");
+        assert!(super::text_from(&file, "the job", job.len() - 1).unwrap_err().to_string().contains("at most"));
+        std::fs::write(&file, [0xff, 0xfe]).unwrap();
+        assert!(super::text_from(&file, "the job", 4096).unwrap_err().to_string().contains("UTF-8"));
+        assert!(super::text_from(&dir.join("none.md"), "the job", 4096).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     use super::*;
 
     /// Goal: login's opener is started, not waited for: one that never

@@ -1398,7 +1398,10 @@ offered (decision 60 says why, with the vendors' words).
   and put live (`POST …/deploy`, as its name and picture are: its computer
   reads main, its page live). Its tier's option, named by the tier and its
   model's id, removes `model`. Any model the provider serves may be named
-  by hand; settings offers the catalog's `offer`.
+  by hand; settings offers the catalog's `offer`. A person's agent picks
+  one for another of their agents the same way, `fragment agent <agent>
+  --model openrouter:<id>` (and `--no-model`), when its owner asked or
+  agreed (decision 62, proposed).
 - **Our Hermes image** reads each agent's `agent.json` again every 10 s
   while awake, and whenever its credentials change. When the agent's
   credentials hold the named provider with a `modelBase`, its profile's
@@ -1851,6 +1854,11 @@ same; its owner, or the agent, may take the name out of its job.
 Hermes' Bot Mode is on: each agent is a bot, and in its Bot Chat it has
 Hermes' teammate roster (each other agent of the computer, by name and
 role) and its `message_agent` tool, with which it messages another agent.
+A person's default agent makes and keeps the others (decision 62,
+proposed): `fragment agent --new` starts one and makes its Bot Chat as
+the shell does. Hermes caches each profile's roster prompt for the
+gateway's life, so a teammate made since may appear there only at the
+computer's next start. Until then, ask it with `fragment ask`.
 Hermes turns both on (v0.21.6: `tools/bot_mode_probe.py`,
 `tools/bot_mode_dm.py`, `agent/system_prompt.py`) only for a session
 titled exactly `Bot Chat`, on an install where a profile's `profile.yaml`

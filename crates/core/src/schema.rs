@@ -82,7 +82,7 @@ fn check_at(schema: &Value, at: &str, depth: usize) -> Result<(), String> {
                     return bad("a type name or a list of them");
                 }
             }
-            "enum" if !v.as_array().is_some_and(|a| !a.is_empty()) => return bad("a non-empty array"),
+            "enum" if v.as_array().is_none_or(|a| a.is_empty()) => return bad("a non-empty array"),
             "minLength" | "maxLength" | "minItems" | "maxItems" | "minProperties" | "maxProperties" if v.as_u64().is_none() => {
                 return bad("a non-negative integer")
             }

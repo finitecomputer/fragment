@@ -813,6 +813,10 @@ speaking Cloudflare's APIs) returns once this product works.
     - limits between one person's agents are specialization, never a
       security boundary. Walls stand between people (decision 36), and
       an agent is held below its owner only by its owner's choice.
+    - so a person's default agent may start and stop their other agents
+      for them (decision 62, proposed), and the care it takes for its
+      owner's private things around a teammate on another provider is no
+      wall either.
 
 ### People: npubs, emails, no usernames (Paul, 2026-10-08)
 
@@ -1221,6 +1225,42 @@ Private stays possible by config.
     the Worker's logs, `model.settled` names `glm-5-3-flash` for the
     tiers' calls, and `model.fallback` from it says why a call went to
     Workers AI (a 429 there is the window spent).
+
+### A person's default agent keeps the rest (proposed: Austin; Paul's to decide)
+
+62. **A person's default agent keeps their other agents.** Proposed and
+    implemented in the draft bot stack; this changes decision 44 only by
+    allowing an agent to start and stop its owner's other agents. The
+    person talks to their main agent, which makes lasting specialists,
+    briefs them, maintains their jobs and settings, and stops idle ones.
+    - **Authority.** An unheld agent acting `for` its owner may `PUT` or
+      `DELETE /api/computers/{id}/agents/{fragment}` on its owner's
+      computer and agent fragments. It never starts or stops itself.
+      Every other computer route stays the person's. Events name the
+      agent that started or stopped a teammate.
+    - **Creation.** `fragment agent --new <label> --job T` makes the agent
+      fragment, assigns it to the computer, writes its job and settings,
+      deploys them, and makes its own chat with its owner. The making
+      agent leaves that chat so the new agent leads it. Retrying finishes
+      an incomplete creation; an existing, different job is refused.
+    - **Names.** The lead checks its team before making another, briefing
+      and widening an existing specialist where it fits. New teammates
+      have one to three lowercase words joined by dashes, describing
+      their job (`garden-keeper`). The label is also the name unless
+      `--name` is supplied. The CLI refuses another agent's name or label
+      (case, spaces and dashes aside), for creation and renaming. Settings
+      renames do not yet enforce this check.
+    - **Maintenance.** `fragment agent <agent>` reads its state and changes
+      its job, name, picture, tier or model, or starts or stops it.
+      Stopping retains its fragment, memories and job. `--job-from` and
+      `fragment ask --from` read file or stdin text literally.
+    - **Guidance.** The main agent's initial job makes it the team's lead;
+      the managed `agents-finite` skill teaches when to make an agent,
+      how to write its job, and how to brief and maintain it. Most work
+      stays with the main agent. Existing agents retain their own jobs.
+    - **Approval outstanding.** Paul decides whether an agent may start
+      and stop its owner's agents and whether it must tell its owner
+      first. This remains a proposal, with no production rollout.
 
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 

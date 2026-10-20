@@ -65,8 +65,9 @@ does what that needs when the computer sets:
   own; the computer's egress signs it as that agent, which then holds
   exactly its grants.
 - `FRAGMENT_FOR=<npub>`, optional: the person the agent acts for (its
-  owner), named as `for` on a fragment's routes and the fragment list,
-  the routes that honor it. The agent then holds that person's role,
+  owner), named as `for` on a fragment's routes, the fragment list, and
+  starting or stopping an agent on its owner's computer, the routes that
+  honor it. The agent then holds that person's role,
   never above it (and never above an editor): `fragment list` lists their
   fragments, and what `fragment create` makes is theirs, the agent its
   editor.
@@ -111,6 +112,8 @@ with `fragment ask`:
 ```
 fragment ask fred "what's on the calendar Friday?" --wait   # prints fred's answer
 fragment ask fred "draft the reply" --chat team-chat         # asks in that chat; the answer comes there
+fragment ask fred --from - <<'ASK'                           # its text as written: $, backticks and quotes stay
+ASK
 ```
 
 The question goes to a chat of the two agents and their owner
@@ -815,19 +818,63 @@ by them (your shell, its chats, the share sheet, push notifications),
 and so does its runtime (Hermes' Bot Mode), within seconds of a change:
 
 ```
-fragment agent juniper--k3x9 --name Frank          # its name
-fragment agent juniper--k3x9 --picture frank.jpg   # its picture (--no-picture takes it away)
-fragment agent juniper--k3x9                       # what they are now
+fragment agent garden-keeper--k3x9 --name plant-doctor   # its name
+fragment agent garden-keeper--k3x9 --picture leaf.jpg    # its picture (--no-picture takes it away)
+fragment agent garden-keeper--k3x9                       # what they are now
 ```
 
 `fragment agent` checks the picture, writes both in one commit and puts
 it live; an agent on a computer leaves its own name out. A picture too
 large or that is no picture is refused before anything is written; one
 committed by hand is refused when it is deployed (`fragment deploy` and
-`fragment status` say why), and the last good name and picture stay.
-Its `@name`, the word that mentions it, stays its label. Its runtime's
+`fragment status` say why), and the last good name and picture stay. A
+name another of its owner's agents has (its name or label, case, spaces
+and dashes aside) is refused (409). Its `@name`, the word that mentions
+it, stays its label. Its runtime's
 own files (Hermes' `profile.yaml`) are written from its name: never edit
 them to rename it.
+
+### Making and keeping agents
+
+An agent acting for its owner makes, changes, starts and stops its
+owner's other agents as its owner would (docs: decision 62, proposed), so
+a person's default agent keeps the rest:
+
+```
+fragment agent --new garden-keeper --job "You keep the garden's notes: …"   # made, running, its own chat
+fragment agent garden-keeper --job "…"             # its job (its SOUL.md)
+fragment agent garden-keeper --tier medium         # the platform's tier it runs on
+fragment agent garden-keeper --model openrouter:anthropic/claude-sonnet-5.5   # a model of a provider its owner connected
+fragment agent garden-keeper --no-model            # its tier again
+fragment agent garden-keeper --stop                # stopped: its fragment, job and memories kept
+fragment agent garden-keeper --start               # running again
+fragment agent garden-keeper                       # its name, where its model calls go, whether it runs
+```
+
+`--new <label>` makes the agent fragment (named by its label, or by
+`--name`: a name another of its owner's agents has is refused, 409; an
+agent names one by its job, `melee-researcher`), starts it on
+its owner's computer, writes its job and settings, puts them live, and
+makes its own chat with its owner (`<label>-chat`, its Bot Chat), with
+it in it. An agent that runs it is in that chat as its maker and leaves
+it once the new agent is in, so the new one leads its own chat. Run it
+again after a failure and it finishes what the first try made; a label
+whose agent already has another job is refused (409), never rewritten.
+Brief the new agent with `fragment ask <label> "…" --wait`: it answers
+in a chat its owner sees. A job is who the agent is and what it does, at
+most 8 KiB, and never its name (that is its title); its first line is
+what its teammates see of it.
+
+A model (`--model <provider>:<id>`) runs only while its owner has that
+provider connected (Settings, Connections); otherwise the agent runs on
+its tier. `fragment agent <agent> --json` says where its model calls go:
+`runsOn` is `{on: "platform", tier}` or `{on: "own", provider, id}`,
+its owner's own provider, outside the platform. An agent never starts or
+stops itself, and the platform refuses (403) every other computer route
+to an agent, starting or stopping acting for anyone but its owner, and
+any of it while its owner holds it below them.
+
+### Routines
 
 An agent's routines are what it does on a schedule, each in a chat it is
 in, asked as you: scheduled records on its agent fragment's `tasks`
@@ -930,9 +977,11 @@ fragment write <name> <path> --text T | --from FILE|- [--message M]
 fragment blob put <name> <file>          # prints its sha256: its pages read it at __blob/<sha256>
 fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name>                       fragment guide|skill
-fragment ask <agent> <text> [--chat C] [--wait [S]] [--id ID]
+fragment ask <agent> <text> | --from FILE|- [--chat C] [--wait [S]] [--id ID]
 fragment mcp <name> [--write]            # its described operations as an MCP server's tools, over stdio
-fragment agent [<agent>] [--name N] [--picture FILE | --no-picture]
+fragment agent [<agent>] [--name N] [--picture FILE | --no-picture] [--job T | --job-from FILE|-]
+fragment agent [<agent>] [--tier cheap|medium] [--model PROVIDER:ID | --no-model] [--start | --stop]
+fragment agent --new <label> [--name N] --job T | --job-from FILE|- [--tier cheap|medium] [--model PROVIDER:ID]
 fragment schedule add [<name>] --cron "<m h dom mon dow>" --channel C --record JSON
 fragment schedule add [<name>] --cron "<m h dom mon dow>" --routine TEXT --chat C   # an agent's routine, on its tasks
 fragment schedule list [<name>]          fragment schedule pause|resume|rm [<name>] <id>

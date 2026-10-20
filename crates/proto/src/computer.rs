@@ -36,6 +36,16 @@ pub enum ComputerPhase {
     WontWake,
 }
 
+/// A model of a provider its owner connected, as its agent fragment's
+/// `agent.json` names it (`model: {provider, id}`): its calls go to that
+/// provider, outside the platform, while its owner has it connected
+/// (docs/computers.md, "An agent's own model").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentModel {
+    pub provider: String,
+    pub id: String,
+}
+
 /// An agent fragment a computer runs, as the guest and the owner see it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

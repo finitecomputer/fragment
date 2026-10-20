@@ -33,3 +33,7 @@ fragment-templates = { path = "../crates/templates" }
 lto = true
 codegen-units = 1
 opt-level = "s"
+
+# Keep the cell within its Wasm budget; worker-build retains function names.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Oz"]

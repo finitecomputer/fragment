@@ -1176,9 +1176,11 @@ fragment.club until cutover (decisions 34–35).
   same). A chat's name has a suffix of its own, so it is looked up at a
   boot, as agents come, and every few seconds while one is missing.
   Nothing on the platform says which chat is an agent's.
-- **Risk:** an agent made another way (the CLI, the API) has no Bot Chat
+- **Risk:** an agent made another way (the API by hand) has no Bot Chat
   of ours, and Hermes makes one of its own that the person never sees; a
   person with two chats of that label (one made by hand) may get either.
+  `fragment agent --new`, which a person's default agent uses to make
+  their other agents (decision 62, proposed), makes it as the shell does.
 - **First proof:** a bot whose roster and `message_agent` never appear in
   its own chat (no `botmode.titled` event for it, or no
   `botmode.chat_found`).

@@ -36,6 +36,7 @@ mod limits;
 mod members;
 mod migrations;
 mod notes;
+mod orchestrator;
 mod orgs;
 mod plane;
 mod posts;
@@ -78,6 +79,7 @@ const LANES: &[Lane] = &[
     templates::templates,
     share::share,
     faces::faces,
+    orchestrator::orchestrator,
     isolation::isolation,
     frames::frames,
     app::ops,
@@ -158,7 +160,7 @@ pub const SHARDS: [&[&str]; 4] = [
     &["finite-private", "chat", "shell-ui", "wipe", "sync", "migrations", "restart", "connections"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
-        "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "faces", "isolation", "frames",
+        "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "faces", "orchestrator", "isolation", "frames",
         "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "doc", "push", "ai", "ledger", "transcribe", "orgs", "billing", "billing-page", "trials", "admin", "admin-page",
     ],
 ];

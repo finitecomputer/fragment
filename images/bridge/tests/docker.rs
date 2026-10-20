@@ -266,6 +266,7 @@ async fn the_hermes_image() {
             ("skills/grill-me/SKILL.md", "---\nname: grill-me\ndescription: The managed grilling.\n---\n# Grill\n"),
             ("skills/software-development/apps-finite/SKILL.md", include_str!("../../../templates/skills/skills/software-development/apps-finite/SKILL.md")),
             ("skills/software-development/git-finite/SKILL.md", include_str!("../../../templates/skills/skills/software-development/git-finite/SKILL.md")),
+            ("skills/autonomous-ai-agents/agents-finite/SKILL.md", include_str!("../../../templates/skills/skills/autonomous-ai-agents/agents-finite/SKILL.md")),
             ("skills/research/brain-finite/SKILL.md", include_str!("../../../templates/skills/skills/research/brain-finite/SKILL.md")),
             ("skills/productivity/google-workspace-finite/SKILL.md", include_str!("../../../templates/skills/skills/productivity/google-workspace-finite/SKILL.md")),
             ("skills/image-editing/image-generation-finite/SKILL.md", include_str!("../../../templates/skills/skills/image-editing/image-generation-finite/SKILL.md")),
@@ -424,7 +425,7 @@ async fn the_hermes_image() {
     assert!(found["garden-notes"].as_str().is_some_and(|d| d.contains("Juniper's own")), "its own skill: {found}");
     assert!(found["grill-me"].as_str().is_some_and(|d| d.contains("which wins")), "its own wins on a name: {found}");
     assert!(found["fragment"].as_str().is_some_and(|d| d.starts_with("You are an agent on a Fragment computer")), "the platform skill: {found}");
-    for name in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite"] {
+    for name in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "agents-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite"] {
         assert!(found[name].is_string(), "the release's managed {name} is visible: {found}");
     }
     for name in ["pdf", "docx", "powerpoint", "xlsx", "systematic-debugging", "test-driven-development", "arxiv"] {
@@ -463,7 +464,7 @@ async fn the_hermes_image() {
     });
     let t_follow = Instant::now();
     let shown = || c.exec(&["test", "-e", &format!("{view}/platform/fragment/SKILL.md")]);
-    while !(c.exec_out(&["cat", &format!("{managed}/research/model-council-finite/SKILL.md")]).contains("again") && !installed("research/model-council-finite/scripts/model_council.py") && installed("fragment/SKILL.md") && !shown()) {
+    while !c.exec_out(&["cat", &format!("{managed}/research/model-council-finite/SKILL.md")]).contains("again") || installed("research/model-council-finite/scripts/model_council.py") || !installed("fragment/SKILL.md") || shown() {
         assert!(t_follow.elapsed() < Duration::from_secs(60), "the managed skills never followed the change; the container said:\n{}", c.logs());
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -2692,7 +2693,7 @@ fn bot_chat_of(c: &Container, profile: &str) -> serde_json::Value {
         c,
         &[],
         &format!(
-            "import json\nfrom pathlib import Path\nfrom hermes_state import SessionDB\ndb = SessionDB(db_path=Path('/data/hermes/profiles/{profile}/state.db'), read_only=True)\ns = db.get_session_by_title('Bot Chat') or {{}}\ntexts = [str(m.get('content'))[:300] for m in db.get_messages_as_conversation(s['id'])] if s else []\nprint(json.dumps({{'key': s.get('session_key'), 'texts': texts}}))"
+            "import json\nfrom pathlib import Path\nfrom hermes_state import SessionDB\ndb = SessionDB(db_path=Path('/data/hermes/profiles/{profile}/state.db'), read_only=True)\ns = db.get_session_by_title('Bot Chat') or {{}}\ntexts = [str(m.get('content'))[:300] for m in db.get_messages_as_conversation(s['id'])] if s else []\nprint(json.dumps({{'id': s.get('id'), 'key': s.get('session_key'), 'texts': texts}}))"
         ),
     )
 }
@@ -2752,6 +2753,15 @@ async fn bots_message_each_other() {
     assert_eq!(bot_chat_of(&c, "maple--k3x9")["key"], "agent:maple--k3x9:relay:group:maple-chat--z8w6/maple--k3x9", "maple's Bot Chat is her own chat's session");
     let hooked = c.exec_out(&["readlink", "/data/hermes/profiles/maple--k3x9/hooks/fragment-bot-chat"]);
     assert_eq!(hooked.trim(), "/opt/fragment/hooks/fragment-bot-chat");
+
+    // A first reply can finish before the keeper's next pass. Wait for
+    // each current session's lease, rather than racing message_agent
+    // against it (or accepting an earlier stand-in's lease).
+    let sessions = ["juniper--k3x9", "maple--k3x9"].map(|agent| bot_chat_of(&c, agent)["id"].as_str().expect("the bot's session").to_owned());
+    within(&fake, &mchat, &c, 15_000, "the keeper to hold both Bot Chats", |_| {
+        let logs = c.logs();
+        sessions.iter().all(|session| logs.lines().any(|line| line.contains("\"botmode.owned\"") && line.contains(session)))
+    }).await;
 
     // juniper, asked in her Bot Chat, messages maple
     let reply = |w: &support::fake::World, chat: &str, turn: &str| w.bodies(chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn).and_then(|r| r["text"].as_str().map(str::to_string));
@@ -2870,7 +2880,7 @@ async fn bots_message_each_other() {
     c.restart();
     let t = Instant::now();
     // bounded: three minutes
-    while !c.logs().split("\"botmode.started\"").nth(started + 1).is_some_and(|after| after.matches("\"botmode.owned\"").count() >= 2) {
+    while c.logs().split("\"botmode.started\"").nth(started + 1).is_none_or(|after| after.matches("\"botmode.owned\"").count() < 2) {
         assert!(t.elapsed() < Duration::from_secs(180), "the keeper to hold both Bot Chats again: {}", told(&fake, &jchat, &c));
         tokio::time::sleep(Duration::from_millis(250)).await;
     }

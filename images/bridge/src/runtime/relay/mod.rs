@@ -604,7 +604,7 @@ impl Loop {
                 }
             }
             Wire::Frame { conn, text } => {
-                if !self.conn.as_ref().is_some_and(|(c, _)| *c == conn) {
+                if self.conn.as_ref().is_none_or(|(c, _)| *c != conn) {
                     return;
                 }
                 if text.len() > limits::FRAME_MAX_BYTES {
