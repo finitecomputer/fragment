@@ -1236,6 +1236,11 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
         let extra = vec![("x-fragment-shell", "1".to_string()), ("sec-fetch-site", "same-origin".to_string())];
         api.call(Call { method, url: format!("{}{path}", api.base), cookie, extra, ..Call::default() })
     };
+    // a person's press on a row or a button, as a script's click (its
+    // handler, wherever a pointer would be): whether it was there
+    let press = |b: &mut Browser, selector: &str| -> Result<bool> {
+        Ok(b.eval(page, &format!("(() => {{ const e = document.querySelector({}); e?.click(); return !!e; }})()", js(selector)))? == true)
+    };
     // a negative check's look: past the shell's own ask of each chat's page (2 s)
     let quiet = std::time::Duration::from_secs(3);
     let run = crate::api::now_s();
@@ -1260,10 +1265,11 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     b.set_cookie(&platform, RELEASE_COOKIE, "")?;
     let fresh = reload_shell(b, page)?;
     anyhow::ensure!(fresh && b.until(page, &format!("!!document.querySelector({})", js(&row(chat))), wait), "the shell reloaded, its first chat listed");
-    b.click(page, &row(chat))?;
+    press(b, &row(chat))?;
     b.eval(page, &format!("(document.querySelector({})?.click(), true)", js(&format!("#apps [data-key=\"app:{app}\"]"))))?;
     let set = b.until(page, &format!("{} && {window}", shown(chat)), wait) && s.eventually(wait, || b.eval_in_frame(page, chat, COMPOSER_READY).ok() == Some(Value::Bool(true)));
-    anyhow::ensure!(set, "the shell's first chat and an app's window open: {}", b.eval(page, "document.body.innerText.slice(0, 300)")?);
+    let open = "({ title: document.getElementById('chat-title')?.textContent, shown: [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment, panes: [...document.querySelectorAll('#stack .pane')].map((p) => p.dataset.key), path: location.pathname })";
+    anyhow::ensure!(set, "the shell's first chat ({chat}) and an app's window (app:{app}) open: {}", b.eval(page, open)?);
     b.eval(page, "(window.__release = 1, true)")?;
 
     // a deploy, to this browser: every answer names another release, the page's too
@@ -1313,7 +1319,7 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
         json!({ "composer": held, "attached": attached, "seen": seen, "stayed": stayed }),
     );
     // the file holds even the person's next move: a reload could not keep it
-    b.click(page, &row(other))?;
+    press(b, &row(other))?;
     let moved = b.until(page, &shown(other), wait);
     std::thread::sleep(quiet);
     let held = composer(b);
@@ -1325,7 +1331,7 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     );
     // the file gone, their next move reloads it, and the words come back
     let removed = b.eval_in_frame(page, chat, "(() => { document.querySelector('#attachments .attachment-remove')?.click(); return document.querySelectorAll('#attachments .attachment-chip').length === 0; })()")?;
-    b.click(page, &row(chat))?;
+    press(b, &row(chat))?;
     let reloaded = b.until(page, &format!("!window.__release && {} && {}", meta(&after), shown(chat)), wait);
     let back = s.eventually(wait, || b.eval_in_frame(page, chat, &format!("document.getElementById('text')?.value === {}", js(words))).ok() == Some(Value::Bool(true)));
     let kept = b.eval(page, "JSON.parse(sessionStorage.getItem('shell.unsent.v1') || '{}')")?;
@@ -1342,13 +1348,13 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     b.eval(page, HIDE_AND_SHOW)?;
     b.set_cookie(&platform, RELEASE_COOKIE, &next)?;
     // the launcher's search: an answer the shell reads, naming the old release
-    b.click(page, "#sidebar-new-chat")?;
+    press(b, "#sidebar-new-chat")?;
     b.until(page, "document.getElementById('search-dialog').open", wait);
     b.eval(page, &fill("#workspace-search", "thought"))?;
     let read = b.until(page, "document.getElementById('search-results').children.length > 0 || document.getElementById('search-status').textContent !== ''", wait);
     b.press(page, "Escape", false)?;
     b.until(page, "!document.getElementById('search-dialog').open", wait);
-    b.click(page, &row(other))?;
+    press(b, &row(other))?;
     let moved = b.until(page, &shown(other), wait);
     std::thread::sleep(quiet);
     let still = b.eval(page, &format!("({{ mark: window.__release ?? null, waits: document.documentElement.dataset.releaseNext ?? null, release: {} }})", meta(&after)))?;
