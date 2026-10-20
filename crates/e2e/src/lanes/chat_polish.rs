@@ -363,3 +363,78 @@ pub(super) fn working_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut 
     anyhow::ensure!(r.status == 200, "the fixture's key revoked: {r}");
     Ok(())
 }
+
+/// The shapes of a production chat's records (2026-10-20: a chat that did
+/// not load in the shell): prompt answers from before answers named their
+/// card (`{kind: "prompt_response", option, prompt}`, no agent, no turn),
+/// messages whose files' blobs are not here, an owner's `steer`, a step
+/// with long commentary; and an agent's reply whose markdown made the
+/// renderer throw (a row of one cell over a separator with no pipe: `a |`,
+/// then `---`), which kept every redraw of its chat from drawing anything.
+/// Goal: the page draws every one of them, and an item it cannot draw (here
+/// the commentary's fold, in a browser without `Intl.Segmenter`, as Firefox
+/// before 125) is a quiet line in its place, said to the console, the rest
+/// of the chat drawn. Method: a quiet chat's owner and agent post them; the
+/// owner's page read, then read again with `Intl.Segmenter` taken away.
+pub(super) fn record_shapes(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrome: &mut Browser) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    let name = s.named(api, owner, "chat-shapes")?;
+    let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "making the shapes chat: {made}");
+    s.owned(&made.body, owner);
+    let (hand, agent) = quiet_agent(api, owner, &name)?;
+    let me = api.identity(owner)?;
+    let post = |by: &Keys, channel: &str, id: &str, body: Value| -> Result<i64> {
+        let r = api.signed(by, "POST", &format!("/api/f/{name}/channels/{channel}"), Some(&json!({ "id": id, "body": body })))?;
+        anyhow::ensure!(r.status == 200, "posting {id} on {channel}: {r}");
+        Ok(r.body["seq"].as_i64().unwrap_or(0))
+    };
+    // a file named by a hash no blob of the chat's has
+    let missing = |name: &str, kind: &str, size: u64| json!({ "name": name, "sha256": hex::encode(Sha256::digest(name.as_bytes())), "size": size, "type": kind });
+    let asked = post(owner, "chat", "ask", json!({ "text": "My couch broke. How do I get a replacement?" }))?;
+    post(&hand, "work", "start", json!({ "kind": "turn.start", "turn": "t1", "asker": me, "agent": agent, "cause": { "channel": "chat", "seq": asked } }))?;
+    let commentary = "The warranty covers a spring that broke from ordinary sitting, so this should be a free replacement rather than a repair you pay for. I will look up the claim form, then ask you two short questions before I fill it in for you.";
+    post(&hand, "work", "step", json!({ "kind": "turn.step", "turn": "t1", "step": 1, "category": "web", "tool": "web_search", "args": "sofa spring warranty", "ok": true, "excerpt": "", "text": commentary }))?;
+    for (i, prompt) in ["289a31.dcc130a7", "289a31.623765bc"].iter().enumerate() {
+        let options = json!([{ "id": "c0", "label": "Yes", "style": "primary" }, { "id": "c1", "label": "No" }, { "id": "other", "label": "Something else", "words": true }]);
+        post(&hand, "work", &format!("p{i}"), json!({ "kind": "turn.prompt", "turn": "t1", "prompt": prompt, "text": format!("Question {}?", i + 1), "options": options, "asks": me, "expiresAt": 4_102_444_800_000u64 }))?;
+        post(owner, "chat", &format!("answer-{i}"), json!({ "kind": "prompt_response", "option": "c0", "prompt": prompt }))?;
+        post(&hand, "work", &format!("pc{i}"), json!({ "kind": "turn.prompt.closed", "turn": "t1", "prompt": prompt, "outcome": "answered", "option": "c0", "by": me }))?;
+    }
+    post(&hand, "chat", "rp:t1:1", json!({ "text": "Your new address |\n---\nIt is on file now.", "turn": "t1" }))?;
+    post(&hand, "work", "end", json!({ "kind": "turn.end", "turn": "t1", "outcome": "idle" }))?;
+    post(owner, "chat", "photos", json!({ "text": "", "attachments": [missing("IMG_1.jpeg", "image/jpeg", 4_628_527), missing("IMG_2.jpeg", "image/jpeg", 3_153_194)] }))?;
+    post(owner, "chat", "screenshot", json!({ "text": "My address has changed", "attachments": [missing("IMG_3.png", "image/png", 793_981)] }))?;
+    post(owner, "chat", "steer", json!({ "kind": "command", "command": "steer", "args": "Or you could move them to your computer", "to": [agent] }))?;
+    post(&hand, "chat", "last", json!({ "text": "The last word." }))?;
+
+    // each page's uncaught errors, and what it says to the console
+    let probe = "window.__errors = []; addEventListener('error', (e) => window.__errors.push(String(e.message))); window.__said = []; const said = console.error; console.error = (...a) => { window.__said.push(a.map(String).join(' ')); said(...a); };";
+    let rest = "(() => { const md = [...document.querySelectorAll('.msg.agent .md')]; const reply = md.find((m) => m.querySelector('table th')?.textContent === 'Your new address'); return !!reply && reply.textContent.includes('It is on file now.') && md.some((m) => m.textContent === 'The last word.') && [...document.querySelectorAll('.prompt.closed .outcome.answered')].filter((o) => o.textContent.startsWith('Yes')).length === 2 && [...document.querySelectorAll('.message-attachments .attachment-name')].map((a) => a.textContent).join() === 'IMG_1.jpeg,IMG_2.jpeg,IMG_3.png' && [...document.querySelectorAll('.bubble')].some((b) => b.textContent === 'My address has changed') && document.querySelector('.bubble.command .command-name')?.textContent === '/steer'; })()";
+    chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
+    let page = chrome.open_with_script(&api.site_url(&name, "__signin?return=/"), probe)?;
+    chrome.viewport(&page, 1280, 860, false)?;
+    let drew = super::shows(chrome, &page, rest) && super::shows(chrome, &page, "!!document.querySelector('details.tools .step-text .note-preview')");
+    let seen = chrome.eval(&page, "({ errors: window.__errors, unshown: document.querySelectorAll('.unshown').length, items: [...document.querySelectorAll('#messages > *')].map((n) => n.className) })")?;
+    s.ok(
+        "a chat of production's record shapes draws whole: legacy prompt answers, files with no blobs, a steer, long commentary, and a one-cell table over a rule",
+        drew && seen["errors"] == json!([]) && seen["unshown"] == 0,
+        &seen,
+    );
+    chrome.screenshot(&page, &s.dir("chat-polish").join("record-shapes.png"))?;
+    chrome.close(page)?;
+    let page = chrome.open_with_script(&api.site_url(&name, ""), &format!("delete Intl.Segmenter; {probe}"))?;
+    chrome.viewport(&page, 1280, 860, false)?;
+    let quiet = "(() => { const n = document.querySelector('#messages > :nth-child(2)'); return !!n?.matches('.msg.notice.unshown') && n.textContent === 'This part of the chat could not be shown.' && !document.querySelector('details.tools'); })()";
+    let drew = super::shows(chrome, &page, rest) && super::shows(chrome, &page, quiet);
+    let seen = chrome.eval(&page, "({ errors: window.__errors, said: window.__said, items: [...document.querySelectorAll('#messages > *')].map((n) => n.className) })")?;
+    let said = seen["said"].as_array().is_some_and(|l| l.iter().any(|x| x.as_str().is_some_and(|x| x.contains("could not be shown"))));
+    s.ok(
+        "an item the page cannot draw (its commentary's fold, with no Intl.Segmenter) is a quiet line in its place, said to the console, and everything after it draws",
+        drew && said && seen["errors"] == json!([]),
+        &seen,
+    );
+    chrome.screenshot(&page, &s.dir("chat-polish").join("record-shapes-unshown.png"))?;
+    chrome.close(page)?;
+    Ok(())
+}

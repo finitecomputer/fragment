@@ -249,8 +249,36 @@ check("only the renderer's own elements are ever made", made.every((t) => m.ELEM
   check("an HTML comment block is left out", comment.textContent === "beforeafter", comment.textContent);
   const ends = render("| a | b |\n| - | - |\n| 1 | 2 |\n> a quote | with a pipe\n# a heading | too");
   check("a table ends at another block, even one with a pipe", elements(ends).filter((e) => e.tag === "tr").length === 2 && elements(ends).some((e) => e.tag === "blockquote") && elements(ends).some((e) => e.tag === "h1"), ends.textContent);
+  // a row of one cell over a separator with no pipe is a table of one
+  // column (2026-10-20: its separator was dropped, and the renderer threw,
+  // so a chat with such a reply drew nothing)
+  for (const [text, paragraphs] of [["a |\n---", ""], ["| a\n-", ""], ["`a | b`\n:-:", ""], ["> a |\n> ---", ""], ["words\n| a\n---\nafter", "words|after"]]) {
+    let root;
+    try { root = render(text); } catch (e) { check(`${JSON.stringify(text)} renders`, false, e.stack); continue; }
+    const th = elements(root).filter((e) => e.tag === "th");
+    const ps = elements(root).filter((e) => e.tag === "p").map((p) => p.textContent).join("|");
+    check(`${JSON.stringify(text)} is a table of one column, its header the row's words, between its paragraphs`, th.length === 1 && !elements(root).some((e) => e.tag === "td") && ps === paragraphs, root.textContent);
+  }
   check("scheme reads a URL as a browser does", m.scheme("java\tscript:x") === "javascript" && m.scheme(" HTTPS://a") === "https" && m.scheme("//a.b/c") === "https" && m.scheme("notes/a.md") === null && m.scheme("a b:c") === "ab");
   check("resolvePath follows .. and . from a folder", m.resolvePath("a/b", "../c/./d.md") === "a/c/d.md" && m.resolvePath("a/b", "/x.md") === "x.md");
+}
+// Whatever text it is given, the renderer answers: an agent's reply is
+// any text, and one throw draws no chat. Short runs of markdown's own
+// marks, chosen by a fixed seed (the same strings every run), rendered
+// whole and inline, with and without `breaks`.
+{
+  const marks = ["|", "| ", " |", "a", "b c", "-", "---", ":-:", "`", "```", "~~~", "*", "**", "_", "~~", "==", "[", "]", "(", ")", "[[", "]]", "!", "<", ">", "> ", "#", "#".repeat(2) + " ", "1. ", "- ", "* ", "  ", "    ", "\t", "\n", "\n\n", "\\", "&amp;", "&#0;", "<br>", "<!--", "-->", "http://x.y/z", "a@b.co", "[x]: http://e.f", "[x][x]", "- [ ] ", "[!note]", "=", "===", "\r\n"];
+  let seed = 7;
+  const next = (n) => { seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff; return seed % n; };
+  const threw = [];
+  for (let i = 0; i < 20000 && threw.length < 5; i++) {
+    let text = "";
+    for (let k = 1 + next(14); k > 0; k--) text += marks[next(marks.length)];
+    for (const breaks of [false, true]) {
+      try { render(text, { breaks }); m.inline(new FakeNode("p"), text, { breaks }); } catch (e) { threw.push(`${JSON.stringify(text)}: ${e.message}`); }
+    }
+  }
+  check("20 000 runs of markdown's marks each render, none throwing", threw.length === 0, threw.join("; "));
 }
 console.log(JSON.stringify(results));
 "##;

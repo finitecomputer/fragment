@@ -499,6 +499,12 @@ words (`turn.asked`), its composer saying what they type answers it
 ("Your answer for Juniper"), or whose answer it waits for, to anyone
 else.
 
+An item the page cannot draw (a record of a shape nothing here expects,
+a fault of a renderer's or of the browser's) is a quiet line in its place,
+"This part of the chat could not be shown.", said once to the console:
+one record never keeps the rest of the chat from drawing (the page draws
+its whole timeline each time, so one item that threw once drew nothing).
+
 Commentary uses the replies' safe markdown, smaller and muted; a long note
 folds at a whole block or sentence and expands on request. A step's line
 has a check for `ok: true`, an error mark for `ok: false`, or a spinner
