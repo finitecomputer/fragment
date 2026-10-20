@@ -69,7 +69,8 @@ impl Code {
             ErrorCode::StorageFull => Code::StorageFull,
             // the platform's own object refuses its schema: nothing an agent can fix
             ErrorCode::HostFailed | ErrorCode::SchemaRefused => Code::ServerError,
-            ErrorCode::UpstreamFailed | ErrorCode::RegistryUnavailable | ErrorCode::NodeFull | ErrorCode::WontWake => Code::Unavailable,
+            // a deploy going out: the same call again in a few seconds
+            ErrorCode::UpstreamFailed | ErrorCode::RegistryUnavailable | ErrorCode::NodeFull | ErrorCode::WontWake | ErrorCode::Deploying => Code::Unavailable,
         }
     }
 
@@ -716,6 +717,7 @@ mod tests {
             (ErrorCode::WontWake, "unavailable"),
             (ErrorCode::NotConnected, "forbidden"),
             (ErrorCode::SchemaRefused, "server_error"),
+            (ErrorCode::Deploying, "unavailable"),
         ];
         for (error, cli) in table {
             let body = serde_json::to_vec(&ErrorBody { error, message: "name taken, already exists".into() }).unwrap();

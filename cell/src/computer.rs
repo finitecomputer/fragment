@@ -372,6 +372,9 @@ impl DurableObject for ComputerCell {
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
+        if let Some(refused) = crate::routed::refused(&req, &self.cfg.deploy_id)? {
+            return Ok(refused);
+        }
         match self.route(req).await {
             Ok(r) => Ok(r),
             Err(e) => e.response(),
@@ -2717,7 +2720,7 @@ async fn host_answer(req: Request, env: &Env, url: &Url, id: &str, signer: Optio
         init.with_body(req.inner().body().map(JsValue::from));
     }
     let inner = Request::new_with_init(&format!("http://container/{tail}{query}"), &init)?;
-    Ok(env.durable_object("COMPUTER")?.get_by_name(id)?.fetch_with_request(inner).await?)
+    crate::routed::send(env, "COMPUTER", id, inner).await
 }
 
 /// Every request a computer's guest sends to `api.fragment.internal`,
@@ -2776,7 +2779,7 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
             let mut init = RequestInit::new();
             init.with_method(Method::Get).with_headers(headers);
             let inner = Request::new_with_init("https://computer.internal/keepalive", &init)?;
-            return Ok(env.durable_object("COMPUTER")?.get_by_name(computer)?.fetch_with_request(inner).await?);
+            return crate::routed::send(env, "COMPUTER", computer, inner).await;
         }
         _ => {}
     }

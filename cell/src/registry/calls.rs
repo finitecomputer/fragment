@@ -465,8 +465,16 @@ pub(crate) enum TestHook {
     /// `TEST_DOWN_FOR_MAX`; 0 answers them again), as `Down` does: a test
     /// fails one call a request makes, and the rest go on.
     DownFor(DownFor),
-    /// How many calls the Registry has had since it started (`{calls:
-    /// null}`): a test counts a request's round trips by the difference.
+    /// Answer the next `times` calls to one path (at most
+    /// `TEST_DOWN_FOR_MAX`; 0 answers them again) as an object of another
+    /// release (`SKEWED`) would: each refused, 503 `deploying`, before it is
+    /// read, by the check every call meets (`routed::refused`), so a test
+    /// sees what a deploy going out does to that call, and that its caller
+    /// asks again.
+    SkewFor(DownFor),
+    /// How many calls the Registry has had since it started, and how many
+    /// it refused for their release (`{calls: null}` → `{calls, skewed}`):
+    /// a test counts a request's round trips by the difference.
     Calls,
     /// The next call waits this many milliseconds (at most
     /// `TEST_HOLD_MAX_MS`) before it is answered: a test lets other
@@ -541,8 +549,12 @@ pub(crate) struct DownFor {
     pub times: u32,
 }
 
-/// The most calls one `TestHook::DownFor` fails.
+/// The most calls one `TestHook::DownFor` fails (or `SkewFor` refuses).
 pub(crate) const TEST_DOWN_FOR_MAX: u32 = 100;
+
+/// The release `TestHook::SkewFor` answers its calls as: no deploy's
+/// (`FRAGMENT_DEPLOY_ID` is a commit, or `dev`).
+pub(crate) const SKEWED: &str = "another-release-a-test-hook";
 
 /// The controls over sign-in's rows.
 #[derive(Serialize, Deserialize)]
@@ -571,7 +583,7 @@ pub(crate) struct SigninCounts {
 
 impl Call for TestHook {
     const PATH: &'static str = "/test";
-    /// The hook's setting, `{down}`, `{downFor}`, `{calls}`, or `{hold}`, or `SigninCounts`.
+    /// The hook's setting, `{down}`, `{downFor}`, `{skewFor}`, `{calls, skewed}`, or `{hold}`, or `SigninCounts`.
     type Answer = serde_json::Value;
 }
 

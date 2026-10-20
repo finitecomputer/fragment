@@ -255,6 +255,9 @@ impl DurableObject for PrincipalCell {
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
+        if let Some(refused) = crate::routed::refused(&req, &crate::config::Config::from_env(&self.env).deploy_id)? {
+            return Ok(refused);
+        }
         match self.route(req).await {
             Ok(r) => Ok(r),
             Err(e) => e.response(),
@@ -759,7 +762,7 @@ pub(crate) async fn tell_changed(env: &Env, identity: &str) -> CellResult<()> {
     let mut init = RequestInit::new();
     init.with_method(Method::Post);
     let req = Request::new_with_init("https://principal.internal/changed", &init)?;
-    let resp = env.durable_object("PRINCIPAL")?.get_by_name(identity)?.fetch_with_request(req).await?;
+    let resp = crate::routed::send(env, "PRINCIPAL", identity, req).await?;
     if resp.status_code() != 200 {
         return Err(CellError::host(format!("{identity}'s list answered {} to a change", resp.status_code())));
     }

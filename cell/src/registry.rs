@@ -77,9 +77,16 @@ pub struct RegistryCell {
     /// Dev fleets' test hook: the path whose next calls are 503, and how
     /// many more; for this cell's life, as `down` is.
     down_for: RefCell<Option<(String, u32)>>,
+    /// Dev fleets' test hook: the path whose next calls this cell answers as
+    /// one of another release (`calls::SKEWED`), refusing them as a deploy
+    /// going out does, and how many more; for this cell's life, as `down` is.
+    skew_for: RefCell<Option<(String, u32)>>,
     /// The calls answered (or refused) since this cell started, the hooks'
     /// aside: what a test counts a request's Registry round trips by.
     calls: Cell<u64>,
+    /// The calls refused since this cell started for their release
+    /// (`routed::refused`): another's, or the hook's stand-in. Not in `calls`.
+    skewed: Cell<u64>,
     /// Dev fleets' test hook: how long the next call waits before it is
     /// answered (0: it does not), set only by the hook.
     hold_ms: Cell<u32>,
@@ -106,10 +113,26 @@ impl DurableObject for RegistryCell {
         let cfg = Config::from_env(&env);
         assert!(cfg.signins_pending_max >= 1, "a fresh sign-in always fits under the cap");
         let cli_begins = RefCell::new(fragment_core::ratelimit::Rate::new(cfg.cli_begins_per_ip_minute, limits::CLI_BEGINS_PER_MINUTE_MAX));
-        RegistryCell { state, env, cfg, down: Cell::new(false), down_for: RefCell::new(None), calls: Cell::new(0), hold_ms: Cell::new(0), cli_begins, schema }
+        RegistryCell {
+            state,
+            env,
+            cfg,
+            down: Cell::new(false),
+            down_for: RefCell::new(None),
+            skew_for: RefCell::new(None),
+            calls: Cell::new(0),
+            skewed: Cell::new(0),
+            hold_ms: Cell::new(0),
+            cli_begins,
+            schema,
+        }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
+        if let Some(refused) = crate::routed::refused(&req, self.release_for(&req.path()))? {
+            self.skewed.set(self.skewed.get() + 1);
+            return Ok(refused);
+        }
         match self.route(req).await {
             Ok(resp) => Ok(resp),
             Err(e) => e.response(),
@@ -255,6 +278,22 @@ fn picture_path(identity: &str, p: &Picture) -> String {
 /// what its askers do not decode.
 fn reply<C: Call>(answer: CellResult<C::Answer>) -> CellResult<Response> {
     Ok(Response::from_json(&answer?)?)
+}
+
+/// Whether a call to `path` is one a test hook's `(path, times left)`
+/// takes (`DownFor`, `SkewFor`), counting it; the hook clears itself at 0.
+fn one_more(hook: &RefCell<Option<(String, u32)>>, path: &str) -> bool {
+    let mut hook = hook.borrow_mut();
+    let Some((named, left)) = hook.as_mut() else { return false };
+    if named != path {
+        return false;
+    }
+    assert!(*left > 0, "a hook that takes no more is cleared");
+    *left -= 1;
+    if *left == 0 {
+        *hook = None;
+    }
+    true
 }
 
 impl RegistryCell {
@@ -685,17 +724,19 @@ impl RegistryCell {
 
     /// Whether a call to `path` is one `TestHook::DownFor` fails, counting it.
     fn down_once(&self, path: &str) -> bool {
-        let mut down_for = self.down_for.borrow_mut();
-        let Some((down, left)) = down_for.as_mut() else { return false };
-        if down != path {
-            return false;
+        one_more(&self.down_for, path)
+    }
+
+    /// The release this cell answers a call to `path` as (`routed::refused`):
+    /// its own, but while `TestHook::SkewFor` names the path, the hook's
+    /// stand-in for another (counting the call), so the call is refused as
+    /// one from another release is, by the same check.
+    fn release_for(&self, path: &str) -> &str {
+        if one_more(&self.skew_for, path) {
+            calls::SKEWED
+        } else {
+            &self.cfg.deploy_id
         }
-        assert!(*left > 0, "a hook that fails no more is cleared");
-        *left -= 1;
-        if *left == 0 {
-            *down_for = None;
-        }
-        true
     }
 
     async fn test_hook(&self, hook: TestHook) -> CellResult<Value> {
@@ -704,7 +745,7 @@ impl RegistryCell {
                 self.down.set(down);
                 Ok(json!({ "down": down }))
             }
-            TestHook::Calls => Ok(json!({ "calls": self.calls.get() })),
+            TestHook::Calls => Ok(json!({ "calls": self.calls.get(), "skewed": self.skewed.get() })),
             TestHook::Hold(ms) => {
                 if ms > TEST_HOLD_MAX_MS {
                     return Err(CellError::invalid(format!("hold at most {TEST_HOLD_MAX_MS} ms")));
@@ -718,6 +759,13 @@ impl RegistryCell {
                 }
                 *self.down_for.borrow_mut() = (times > 0).then(|| (path.clone(), times));
                 Ok(json!({ "downFor": { "path": path, "times": times } }))
+            }
+            TestHook::SkewFor(DownFor { path, times }) => {
+                if times > TEST_DOWN_FOR_MAX || !path.starts_with('/') || path == TestHook::PATH {
+                    return Err(CellError::invalid(format!("skew for a call's path (not /test's), at most {TEST_DOWN_FOR_MAX} times")));
+                }
+                *self.skew_for.borrow_mut() = (times > 0).then(|| (path.clone(), times));
+                Ok(json!({ "skewFor": { "path": path, "times": times } }))
             }
             TestHook::Signins(hook) => Ok(json!(self.signins_hook(hook).await?)),
             TestHook::E2eSignIn(asked) => Ok(json!(self.e2e_sign_in(&asked.email, asked.paid_calls).await?)),

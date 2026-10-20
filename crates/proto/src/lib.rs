@@ -573,6 +573,11 @@ pub enum ErrorCode {
     /// else until newer code is deployed or an operator resets it; the
     /// message names it and why.
     SchemaRefused,
+    /// 503: a deploy is going out, and a call between the platform's own
+    /// Worker and one of its objects met another release on the other
+    /// side, which refused it before doing anything (docs/MODEL.md, "Calls
+    /// between releases"); try again in a few seconds.
+    Deploying,
 }
 
 impl ErrorCode {
@@ -591,7 +596,7 @@ impl ErrorCode {
             ErrorCode::RegistryUnavailable => 503,
             ErrorCode::BudgetUsedUp => 402,
             ErrorCode::StorageFull => 507,
-            ErrorCode::NodeFull | ErrorCode::WontWake => 503,
+            ErrorCode::NodeFull | ErrorCode::WontWake | ErrorCode::Deploying => 503,
             ErrorCode::NotConnected => 403,
         }
     }
@@ -2153,5 +2158,7 @@ mod tests {
         let body = ErrorBody { error: ErrorCode::ConflictingBody, message: "x".into() };
         assert_eq!(serde_json::to_string(&body).unwrap(), r#"{"error":"conflicting_body","message":"x"}"#);
         assert_eq!(ErrorCode::ConflictingBody.status(), 409);
+        assert_eq!(serde_json::to_value(ErrorCode::Deploying).unwrap(), "deploying");
+        assert_eq!(ErrorCode::Deploying.status(), 503, "a deploy going out is tried again, as a 503 is");
     }
 }

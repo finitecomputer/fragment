@@ -259,6 +259,7 @@ Every change is checked against this table.
 | Members, roles, invites | the fragment's supervisor | grants and revokes are transactional; `events` records each. The registry keeps each invite waiting on an email against that email, to meet it at a sign-in: a pointer the fragment overrules (one with none waiting is forgotten); a claim the fragment could not take is tried again by the registry's alarm, bounded, then waits on the next sign-in |
 | Cell state (supervisor tables, the operation ledger, channels, the app's SQL) | the Durable Objects' own storage | none |
 | A platform object's schema: its tables, and the steps that made them | its class's steps, `crates/core/migrations/<class>/` (Schemas, below) | each object's `_schema` holds the steps it took (number, name, SHA, ran or adopted) and refuses code whose steps differ (`schema_refused`); `crates/core/migrations/schema.lock` locks each step and what the steps make, and `cargo xtask check` holds the tree to it. An app facet's SQLite is its author's |
+| The release a call between the Worker and an object (or two objects) was made by | the caller's `FRAGMENT_DEPLOY_ID`, its deploy's commit (Calls between releases, below) | stamped on each call (`x-fragment-release`) and checked first by the object, which refuses another's (503 `deploying`) before it acts; never stored |
 | Large file bytes (1 MiB or more) | R2 (`BLOBS`), keyed by SHA-256 | git holds a pointer; a sync resolves it; a blob no branch tip references is deleted |
 | Identities (npubs) and their keys, each person's own key (sealed), sign-ins and their verified emails, agents' owners, sessions | the registry (fragment's BANKS: docs/cloudflare-v1.md, decisions 45 to 50) | an identity's npub never changes; an email names at most one person; sessions and caches name an identity and never outlive a revocation; cookies hold only tokens, the registry their hashes |
 | A person's wipe: how far it got, and that it locks them | the registry's `wipes` (docs/api.md, Operators) | a wiped person's ledger, list and computer each keep one row saying so, and take nothing more |
@@ -338,6 +339,71 @@ statements, ATTACH, TEMP objects), so no step that would fail there
 locks; and each class's schema as the deployments ran it before
 versions is checked in (`crates/core/migrations/deployed`) and must
 adopt.
+
+## Calls between releases
+
+A deploy does not move the Worker and its Durable Objects at one
+instant: for seconds (minutes, Cloudflare says, at worst) a Worker of
+the new release calls objects still running the old one, an old Worker
+calls objects already on the new one, and objects call each other
+across the two. Their calls (the router's to a supervisor, any call to
+the Registry, a fragment's to a list or a ledger, the queue consumers',
+a run's Workflow's) are the platform's own and change shape freely
+between releases, so each must meet its own release on the other side.
+On 2026-10-20, as master `bc8b87e7` replaced `33e323cd` on finite.chat,
+the new Worker asked the old Registry to exchange a sign-in's WorkOS
+code (#351 had changed its answer's shape); the old Registry exchanged
+it and answered the old shape, the new Worker could not read it (503
+`registry_unavailable`), and the person's refresh replayed a code
+already spent (WorkOS's 400).
+
+So every call into a platform object carries its caller's release, and
+the object admits only its own (`fragment_core::release`). The release
+is the deployment's `FRAGMENT_DEPLOY_ID`: a Worker variable, so a part of
+the Worker version, and the router, the queue consumers, the Workflow
+and all five object classes are one script (cell/entry.mjs), each
+running with the variables of the version it runs; one deploy is one
+value everywhere. It is the deploy's commit (`git rev-parse --short=12`,
+what `/healthz` answers in `x-fragment-deploy` and CD checks), so a
+commit deployed again (a secret or a variable changed) is one release,
+whose code agrees with itself; an uncommitted tree's is that deploy's
+alone (`<sha>-dirty-<second>`). Dev and the e2e run one build in one
+`workerd` (`dev` everywhere), and nothing changes for them.
+
+- **The caller** stamps it (`x-fragment-release`) on every call: the
+  cell calls an object only through `routed::send` and `send_again`, and
+  the JavaScript only with requests `InternalRoute.request` makes (both
+  held by xtask's guard).
+- **The object** checks it first in its `fetch`, before it reads the
+  call or does anything for it (its schema's steps ran as it started,
+  its own release's, whoever called): a call from another release,
+  newer or older, or one naming none (a caller from before this check),
+  is answered 503 `deploying`, marked as that refusal
+  (`x-fragment-release-refused`), and nothing was done. Its alarms and
+  its sockets' messages are its own release's, and the calls they make
+  are checked as any other.
+- **On a refusal** the caller asks again, since nothing was done,
+  however the call acts: after 250, 500 and 1000 ms, at most four asks
+  (`release::ASKS`), then it answers `deploying` itself (the person
+  tries again; the CLI reads it as `unavailable`). A request that cannot
+  be made again (a body streamed through, a socket's upgrade) is asked
+  once. An outbox, a queue message or a Workflow step that meets it is
+  retried as any failure of theirs is. A `deploying` an object answers
+  because a call of its own was refused is its answer, never asked
+  again: it may have acted before that call.
+
+Both directions refuse alike, as a release is a commit and commits are
+not ordered: an old caller at a new object will not be admitted from
+that isolate, and its asks run out; a new caller at an old object is
+admitted once the object restarts on the new release. A deploy is all at
+once (`wrangler deploy`): a gradual deployment, two versions serving for
+a while, would refuse between them for that while. What outlives a
+deploy is not a call and is not covered: a queue message or a stored row
+written by one release is read by the next, so its shape stays readable
+(a message no release can read is acked and logged; a table changes by
+its steps, above). The first deploy of the check met callers that named
+no release, refused like any other, and old objects that checked
+nothing, as before it.
 
 ## Limits (initial; each enforced and tested)
 

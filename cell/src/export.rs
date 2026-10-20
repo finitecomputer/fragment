@@ -124,7 +124,7 @@ async fn principal(env: &Env, person: &str, method: Method, path: &str, body: Op
         init.with_body(Some(b.into()));
     }
     let req = Request::new_with_init(&format!("https://principal.internal{path}"), &init)?;
-    Ok(env.durable_object("PRINCIPAL")?.get_by_name(person)?.fetch_with_request(req).await?)
+    crate::routed::send(env, "PRINCIPAL", person, req).await
 }
 
 // ---- the fragment's side: its app's database, for its owner ----
@@ -1161,7 +1161,7 @@ impl PrincipalCell {
             Source::Save { computer, record } => {
                 let body = json!({ "owner": run.job.person, "record": record, "offset": c.done, "length": length });
                 let req = crate::routed::internal_request("computer/export-read", &body.to_string())?;
-                let mut resp = self.env.durable_object("COMPUTER")?.get_by_name(computer)?.fetch_with_request(req).await?;
+                let mut resp = crate::routed::send(&self.env, "COMPUTER", computer, req).await?;
                 match resp.status_code() {
                     200 => resp.bytes().await?,
                     404 => return Err(fail(ExportFailure::SourceChanged, format!("its computer's save went away as it was copied ({}): export again", resp.text().await.unwrap_or_default()))),
@@ -1206,7 +1206,7 @@ impl PrincipalCell {
         let mut init = RequestInit::new();
         init.with_method(method).with_headers(headers);
         let req = Request::new_with_init(&format!("https://fragment.internal{inner}"), &init)?;
-        Ok(self.env.durable_object("FRAGMENT")?.get_by_name(name)?.fetch_with_request(req).await?)
+        crate::routed::send(&self.env, "FRAGMENT", name, req).await
     }
 
     /// A fragment's route as the person: its answer's bytes, or its refusal
@@ -1255,7 +1255,7 @@ impl PrincipalCell {
         let mut lists: Vec<(String, FragmentList)> = vec![(person.clone(), self.own_list()?)];
         for agent in &me.agents {
             let req = Request::new("https://principal.internal/list", Method::Get)?;
-            let list: FragmentList = self.env.durable_object("PRINCIPAL")?.get_by_name(agent)?.fetch_with_request(req).await?.json().await?;
+            let list: FragmentList = crate::routed::send(&self.env, "PRINCIPAL", agent, req).await?.json().await?;
             lists.push((agent.clone(), list));
         }
         for (whose, list) in &lists {

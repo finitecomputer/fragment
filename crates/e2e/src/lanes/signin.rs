@@ -153,6 +153,61 @@ pub(super) fn registry_calls(api: &Api) -> Result<u64> {
     r.body["calls"].as_u64().with_context(|| format!("the calls test hook: {r}"))
 }
 
+/// The registry's calls since it started, and those it refused for their
+/// release (`{calls, skewed}`).
+fn registry_counts(api: &Api) -> Result<(u64, u64)> {
+    let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "calls": null })))?;
+    Ok((r.body["calls"].as_u64().with_context(|| format!("the calls test hook: {r}"))?, r.body["skewed"].as_u64().with_context(|| format!("the calls test hook: {r}"))?))
+}
+
+/// A deploy going out (docs/MODEL.md, "Calls between releases"): the
+/// registry, answering as an object of another release would (the
+/// `skewFor` hook), refuses a sign-in's exchange before it reads it, by the
+/// check every call into an object meets; the router asks it again a
+/// bounded number of times, then answers 503 `deploying`, nothing done;
+/// and the same callback, once the deploy is out, signs in. On 2026-10-20 an
+/// old Registry exchanged the WorkOS code for a new Worker that could not
+/// read its answer, and the person's refresh replayed a spent code
+/// (WorkOS's 400, "already been exchanged": the fake's `invalid_grant`).
+fn deploying_cases(s: &mut Suite, api: &Api) -> Result<()> {
+    let asks = fragment_core::release::ASKS as u64;
+    let r = api.unsigned("GET", "/auth/login?return=/deploying", None)?;
+    let bound = r.cookies().into_iter().find(|c| c.starts_with("fragment_login=")).context("a login cookie")?;
+    let back = api.external(&format!("{}&login_hint=deploying@e2e.test", r.header("location")))?;
+    let callback = back.header("location");
+    let skew = |times: u64| -> Result<()> {
+        let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "skewFor": { "path": "/login/exchange", "times": times } })))?;
+        anyhow::ensure!(r.status == 200 && r.body["skewFor"]["times"] == times, "the skewFor test hook: {r}");
+        Ok(())
+    };
+    // one refusal more than the router asks: all its asks meet the other release
+    skew(asks + 1)?;
+    let (calls, skewed) = registry_counts(api)?;
+    let refused = api.call(Call { method: "GET", url: callback.clone(), cookie: Some(bound.clone()), ..Call::default() })?;
+    let (calls_after, skewed_after) = registry_counts(api)?;
+    s.ok(
+        "a sign-in's exchange that meets a registry of another release is refused unread (503 deploying, a deploy going out), its session never set, after the router asked it the bounded number of times",
+        refused.status == 503
+            && refused.code() == Some(ErrorCode::Deploying)
+            && refused.body["message"].as_str().is_some_and(|m| m.starts_with("a deploy is going out; try again in a few seconds"))
+            && cookie_line(&refused, "fragment_session").is_empty()
+            && skewed_after - skewed == asks
+            && calls_after == calls,
+        format!("asked {} times ({asks} at most), read {}: {refused}", skewed_after - skewed, calls_after - calls),
+    );
+    // the hook's last refusal meets the first ask: asked again, the
+    // exchange is read once, and WorkOS's code is exchanged then, its first time
+    let r = api.call(Call { method: "GET", url: callback, cookie: Some(bound), ..Call::default() })?;
+    let (calls_done, skewed_done) = registry_counts(api)?;
+    s.ok(
+        "once the deploy is out, the same callback signs in: nothing was done before (WorkOS's code never exchanged, the sign-in not spent), and a refusal within the router's asks is not seen",
+        r.status == 302 && r.header("location").ends_with("/deploying") && cookie_line(&r, "fragment_session").contains("HttpOnly") && skewed_done - skewed_after == 1 && calls_done - calls_after == 1,
+        format!("refused {} more, read {}: {r}", skewed_done - skewed_after, calls_done - calls_after),
+    );
+    skew(0)?;
+    Ok(())
+}
+
 /// What `f` answered, and the registry calls it made.
 pub(super) fn calls_of<T>(api: &Api, f: impl FnOnce() -> Result<T>) -> Result<(T, u64)> {
     let before = registry_calls(api)?;
@@ -350,6 +405,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 400 && r.code() == Some(ErrorCode::InvalidRequest) && cookie_line(&r, "fragment_session").is_empty(),
         &r,
     );
+    deploying_cases(s, api)?;
     let r = api.unsigned("GET", "/auth/login?invitation_token=Z1uX3Rbw_cIl-5fIG", None)?;
     s.ok("an invitation's token rides along to WorkOS (it lets its invitee sign up)", r.header("location").contains("&invitation_token=Z1uX3Rbw_cIl-5fIG"), &r);
     let r = api.unsigned("GET", "/auth/login?invitation_token=%22%3E%3Cscript%3E", None)?;

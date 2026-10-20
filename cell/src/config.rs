@@ -144,7 +144,10 @@ pub struct Config {
     /// are made within a day's caps. A local fleet's reach everything.
     pub levers_scoped: bool,
     /// `FRAGMENT_DEPLOY_ID`: which deployment this is (the deploy sets it;
-    /// `/healthz` answers it in `x-fragment-deploy`; default `dev`).
+    /// `/healthz` answers it in `x-fragment-deploy`; default `dev`). It is
+    /// the release every call into a platform object carries, and every
+    /// object admits only its own (fragment_core::release): a Worker
+    /// variable, so the Worker and every object of one deploy run one value.
     pub deploy_id: String,
     /// `FRAGMENT_PROVIDERS`: the provider catalog (`fragment_core::catalog`),
     /// every credential a computer's guest may use: the WorkOS Pipes
@@ -207,9 +210,12 @@ fn test_secret(env: &Env, fleet: fragment_core::levers::Fleet) -> Option<fragmen
     }
 }
 
-/// `FRAGMENT_DEPLOY_ID`, or `dev` where a fleet names none.
+/// `FRAGMENT_DEPLOY_ID`, or `dev` where a fleet names none: a release's
+/// id (fragment_core::release::valid), or the isolate does not start.
 fn deploy_id(env: &Env) -> String {
-    var(env, "FRAGMENT_DEPLOY_ID").unwrap_or_else(|| "dev".into())
+    let id = var(env, "FRAGMENT_DEPLOY_ID").unwrap_or_else(|| "dev".into());
+    assert!(fragment_core::release::valid(&id), "FRAGMENT_DEPLOY_ID is 1 to {} of letters, digits, `.`, `_` and `-`", fragment_core::release::ID_MAX_BYTES);
+    id
 }
 
 /// The isolate's settings, built from the first `env` it is handed and

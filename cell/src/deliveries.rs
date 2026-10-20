@@ -392,7 +392,8 @@ async fn report(env: &Env, d: &Delivery, outcome: Outcome, status: u16, error: &
     let body = serde_json::to_string(&body).map_err(|e| Error::RustError(e.to_string()))?;
     // marked as the supervisor's `deliver/report` route expects (routed.rs)
     let req = crate::routed::internal_request("deliver/report", &body).map_err(|e| Error::RustError(e.message))?;
-    env.durable_object("FRAGMENT")?.get_by_name(&d.fragment)?.fetch_with_request(req).await?;
+    // a supervisor of another release refuses it unread: tried again with the message
+    crate::routed::send(env, "FRAGMENT", &d.fragment, req).await.map_err(|e| Error::RustError(e.message))?;
     Ok(())
 }
 

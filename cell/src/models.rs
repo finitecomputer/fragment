@@ -610,7 +610,7 @@ async fn caller(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<
         return Err(CellError::invalid("`fragment` is a fragment's name, <label>--<suffix>"));
     }
     let ask = routed::internal_request("meter/whose", &json!({ "principal": agent.id }).to_string())?;
-    let mut answer = env.durable_object("FRAGMENT")?.get_by_name(&name)?.fetch_with_request(ask).await?;
+    let mut answer = crate::routed::send(env, "FRAGMENT", &name, ask).await?;
     if answer.status_code() != 200 {
         return Err(CellError::new(ErrorCode::NotFound, format!("no fragment {name}")));
     }
