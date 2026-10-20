@@ -842,6 +842,24 @@ export function mount(root) {
     }
   }
 
+  // An item the page cannot draw (a record shaped as nothing here expects,
+  // a renderer's fault) is a quiet line in its place, said once to the
+  // console: no one record keeps the rest of the chat from drawing.
+  function drawn(it) {
+    try {
+      return itemNode(it);
+    } catch (err) {
+      const key = `x:${it.type}:${it.m?.seq ?? it.key ?? it.t?.key ?? "pending"}:${it.steps?.[0].step ?? it.p?.prompt ?? it.x?.seq ?? ""}`;
+      if (!nodes.has(key)) console.error("chat: a part of the chat could not be shown", it, err);
+      return [key, cached(key, "", () => {
+        const line = el("div", "msg notice unshown");
+        line.replaceChildren(icon("alert"));
+        line.append(el("span", null, "This part of the chat could not be shown."));
+        return line;
+      })];
+    }
+  }
+
   function render() {
     const col = $("messages");
     const { node: anchor, top } = history.anchor ?? (!stuck ? visibleAnchor() : {});
@@ -852,7 +870,7 @@ export function mount(root) {
       shown.push(node);
     }
     for (const it of timeline()) {
-      const [key, node] = itemNode(it);
+      const [key, node] = drawn(it);
       used.add(key);
       shown.push(node);
     }

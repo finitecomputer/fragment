@@ -589,6 +589,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
 
     polish::check(s, api, &owner, &owner_session, &mut chrome, &label)?;
     polish::working_card(s, api, &owner, &mut chrome, &identity, &agent_name)?;
+    polish::record_shapes(s, api, &owner, &owner_session, &mut chrome)?;
 
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;

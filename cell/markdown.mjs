@@ -273,9 +273,11 @@ function blocks(lines, o, depth, tight) {
     } else if ((m = line.match(ITEM)) && m[1].length < 4) {
       i = list(lines, i, out, o, depth);
     } else if (tableAt(lines, i)) {
-      // its rows: to a blank line, a line with no pipe, or another block
-      const rows = [];
-      for (; i < lines.length && lines[i].trim() && lines[i].includes("|") && (rows.length < 2 || !interrupts(lines[i])); i++) rows.push(lines[i]);
+      // its header and separator rows, as tableAt read them (a separator
+      // may have no pipe: `a |` over `---`), then its rows: to a blank
+      // line, a line with no pipe, or another block
+      const rows = [lines[i], lines[i + 1]];
+      for (i += 2; i < lines.length && lines[i].trim() && lines[i].includes("|") && !interrupts(lines[i]); i++) rows.push(lines[i]);
       out.append(table(rows, o, depth));
     } else {
       const para = [line.trimStart()];
