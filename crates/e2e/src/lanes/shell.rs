@@ -1290,15 +1290,25 @@ fn guest_ui(s: &mut Suite, api: &Api, b: &mut Browser, seat_email: &str, shots: 
         b.close(page)?;
         return Ok(());
     }
-    // Sign in asks who is signing in now: the seat's email, to its seat
-    b.click(&page, "#first-run-card a.primary")?;
+    // Sign in asks who is signing in now: the seat's email, to its seat.
+    // Each press is a script's click on the element, and the fake's form
+    // is submitted: a mouse's press, at a point measured on a page just
+    // loaded, never reached Settings on CI's runners (2026-10-20: it never
+    // opened, and made none of its calls). What is checked is what the
+    // shell then shows.
+    b.eval(&page, "(document.querySelector('#first-run-card a.primary').click(), true)")?;
     let asked = b.until(&page, "!!document.querySelector('input[name=login_hint]')", wait);
-    b.eval(&page, &format!("(document.querySelector('input[name=login_hint]').value = {}, true)", js(seat_email)))?;
-    b.click(&page, "button")?;
+    b.eval(&page, &format!("(document.querySelector('input[name=login_hint]').value = {}, document.querySelector('input[name=login_hint]').form.submit(), true)", js(seat_email)))?;
     let home = b.until(&page, "location.pathname === '/' && !document.getElementById('layout').hidden && !!document.querySelector('#frames iframe')", wait);
     let told = b.eval(&page, "({ noSeat: document.querySelectorAll('.no-seat').length, notice: document.getElementById('notice').hidden ? null : document.getElementById('notice').innerText })")?;
-    b.click(&page, "#settings")?;
-    let settled = b.until(&page, "location.pathname === '/settings' && !!document.querySelector('#settings-page .settings-who')", wait);
+    b.eval(&page, "(document.getElementById('settings').click(), true)")?;
+    // settled once their email is rendered in Account (it waits on the
+    // page's calls), not at a moment after the press
+    let settled = b.until(
+        &page,
+        &format!("location.pathname === '/settings' && document.querySelector('#settings-page .settings-who .settings-value strong')?.textContent === {}", js(seat_email)),
+        wait,
+    );
     let account = b.eval(&page, ACCOUNT_SEEN)?;
     let text = b.eval(&page, "document.getElementById('settings-page').innerText")?;
     s.ok(
