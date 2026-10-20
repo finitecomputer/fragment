@@ -248,6 +248,7 @@ impl RegistryCell {
     /// and the key's holder may bring it to the new person they become.
     fn end_access(&self, identity: &str) -> CellResult<()> {
         self.exec(&format!("DELETE FROM redemptions WHERE session IN (SELECT hash FROM sessions WHERE {THEIRS})"), theirs(identity))?;
+        self.exec(&format!("DELETE FROM connection_signins WHERE session IN (SELECT hash FROM sessions WHERE {THEIRS})"), theirs(identity))?;
         self.exec(&format!("DELETE FROM sessions WHERE {THEIRS}"), theirs(identity))?;
         self.exec(&format!("DELETE FROM keys WHERE {THEIRS}"), theirs(identity))?;
         self.exec("DELETE FROM person_keys WHERE identity = ?", vec![identity.into()])?;

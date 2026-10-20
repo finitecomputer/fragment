@@ -338,6 +338,7 @@ pub struct Fleet {
     /// place of its host.
     pub providers: Option<String>,
     pub operator_key_values: Vec<(String, String)>,
+    pub connection_secret_values: Vec<(String, String)>,
     pub swap_upstream: Option<String>,
 }
 
@@ -366,7 +367,9 @@ impl Fleet {
     fn bound(&self) -> store::Bound {
         let providers: Vec<&str> = self.operator_key_values.iter().map(|(p, _)| p.as_str()).collect();
         let slots: Vec<&str> = self.model_key_slots.iter().map(String::as_str).collect();
-        store::Bound::conventional(self.workos.is_some(), self.stripe.is_some(), &providers, &slots)
+        let mut bound = store::Bound::conventional(self.workos.is_some(), self.stripe.is_some(), &providers, &slots);
+        bound.connection_secrets = self.connection_secret_values.iter().map(|(p, _)| (p.clone(), format!("fragment-{p}-oauth-secret"))).collect();
+        bound
     }
 
     /// Renders the deployment for a node on `project`: its settings into
@@ -392,6 +395,9 @@ impl Fleet {
             values.push((store::MODEL_KEY, value));
         }
         for ((_, name), (_, value)) in bound.operator_keys.iter().zip(&self.operator_key_values) {
+            values.push((name.as_str(), value.as_str()));
+        }
+        for ((_, name), (_, value)) in bound.connection_secrets.iter().zip(&self.connection_secret_values) {
             values.push((name.as_str(), value.as_str()));
         }
         assert_eq!(values.len(), bound.secrets().len(), "every secret bound has its value, once");

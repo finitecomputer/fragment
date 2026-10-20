@@ -17,6 +17,7 @@ mod checkout;
 mod computers;
 mod control;
 mod credentials;
+mod connections;
 mod delegation;
 mod export;
 mod faces;
@@ -68,6 +69,7 @@ const LANES: &[Lane] = &[
     members::members,
     identities::identities,
     signin::signin,
+    connections::connections,
     levers::levers,
     members::secrets,
     delegation::delegation,
@@ -153,7 +155,7 @@ const LANES: &[Lane] = &[
 /// passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [
     &["shell", "computers", "export", "hermes", "agent-smoke", "agent-ask", "agent-restart", "bot-mode", "checkout"],
-    &["finite-private", "chat", "shell-ui", "wipe", "sync", "migrations", "restart"],
+    &["finite-private", "chat", "shell-ui", "wipe", "sync", "migrations", "restart", "connections"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "faces", "isolation", "frames",

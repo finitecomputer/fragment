@@ -207,11 +207,11 @@ pub(crate) fn repository_ok(repository: &str) -> bool {
     repository.split('/').all(component)
 }
 
-/// The deployment's catalog, and the store secret each operator key's
-/// value is in: a row's `key` is the deploy's (it binds it), the rest the
-/// cell's (`FRAGMENT_PROVIDERS`). An operator key names one; no other row
-/// may.
-fn catalog_of(d: &Deployment) -> Result<(fragment_core::catalog::Catalog, Vec<(String, String)>)> {
+/// The deployment's catalog and provider secret names. An operator row's
+/// `key` is its API key; a connection with connection_oauth names its OAuth
+/// client secret. Values never enter FRAGMENT_PROVIDERS.
+type ProviderKeys = Vec<(String, String)>;
+fn catalog_of(d: &Deployment) -> Result<(fragment_core::catalog::Catalog, ProviderKeys)> {
     let mut rows = vec![];
     let mut keys = vec![];
     for row in &d.providers {
@@ -220,6 +220,8 @@ fn catalog_of(d: &Deployment) -> Result<(fragment_core::catalog::Catalog, Vec<(S
         let key = row.as_object_mut().and_then(|o| o.remove("key"));
         match (row["kind"].as_str(), key) {
             (Some("operator"), Some(Value::String(k))) => keys.push((name.clone(), k)),
+            (Some("connection"), Some(Value::String(k))) if row.get("connection_oauth").is_some_and(|o| !o.is_null()) => keys.push((name.clone(), k)),
+            (Some("connection"), None) if row.get("connection_oauth").is_some_and(|o| !o.is_null()) => bail!("providers: connection {name} names its OAuth client secret in key (its store name)"),
             (Some("operator"), _) => bail!("providers: the operator key {name} names its key (its secret's name in the store)"),
             (_, Some(_)) => bail!("providers: {name} is no operator key, so it names no key"),
             (_, None) => {}
@@ -335,7 +337,8 @@ fn bound(d: &Deployment) -> Result<devstack::store::Bound> {
 /// `bound`, for a deploy of `branch` (one that makes its endpoint binds no
 /// store secret for it).
 fn bound_for(d: &Deployment, branch: Option<&str>) -> Result<devstack::store::Bound> {
-    let (_, operator_keys) = catalog_of(d)?;
+    let (catalog, provider_keys) = catalog_of(d)?;
+    let (operator_keys, connection_secrets) = provider_keys.into_iter().partition(|(name, _)| catalog.get(name).is_some_and(|p| p.kind == fragment_core::catalog::Kind::Operator));
     let (_, model_keys) = models_of(d)?;
     Ok(devstack::store::Bound {
         host_secret: d.host_secret.clone(),
@@ -344,6 +347,7 @@ fn bound_for(d: &Deployment, branch: Option<&str>) -> Result<devstack::store::Bo
         workos: Some((d.workos.client_id.clone(), d.workos.api_key.clone())),
         stripe: d.stripe.as_ref().map(|s| (s.key.clone(), (!makes_endpoint(d, branch)).then(|| s.webhook_secret.clone()))),
         operator_keys,
+        connection_secrets,
         model_keys,
     })
 }
@@ -375,6 +379,9 @@ fn named_secrets(b: &devstack::store::Bound) -> Vec<(String, &str)> {
     }
     for (provider, name) in &b.operator_keys {
         named.push((format!("providers: {provider}'s key"), name.as_str()));
+    }
+    for (provider, name) in &b.connection_secrets {
+        named.push((format!("providers: {provider}'s OAuth client secret"), name.as_str()));
     }
     named
 }
@@ -1125,6 +1132,26 @@ mod tests {
         let path = dir.join("deploy.jsonc");
         fs::write(&path, body.to_string()).unwrap();
         path
+    }
+
+    #[test]
+    fn a_connection_binds_its_client_secret_without_exposing_it_in_the_catalog() {
+        let mut d = deployment(Some("fragment.club"), Some("fragment.boats"));
+        d.providers.push(serde_json::json!({
+            "name": "google", "kind": "connection", "hosts": ["www.googleapis.com"],
+            "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"],
+            "connection_oauth": { "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent", "exchange": "https://oauth2.googleapis.com/token", "client_id": "mock-client", "scopes": ["scope"] },
+            "key": "fragment-google-oauth-secret"
+        }));
+        let (catalog, _) = catalog_of(&d).unwrap();
+        assert!(!serde_json::to_string(catalog.providers()).unwrap().contains("fragment-google-oauth-secret"));
+        let bound = bound_for(&d, None).unwrap();
+        assert!(bound.operator_keys.is_empty());
+        assert!(bound.cell().contains(&("CONNECTION_SECRET_GOOGLE".into(), "fragment-google-oauth-secret")));
+        d.providers[0].as_object_mut().unwrap().remove("key");
+        assert!(catalog_of(&d).is_err(), "configured OAuth needs its secret binding");
+        d.providers[0].as_object_mut().unwrap().remove("connection_oauth");
+        assert!(catalog_of(&d).is_ok(), "a disabled connection can still read its existing state");
     }
 
     /// The test levers are a preview's: a deployment of its own (production)

@@ -59,6 +59,14 @@ struct State {
     consents: HashMap<String, (String, String)>,
     /// Connected accounts' states read (each with no token).
     states_read: u64,
+    /// Independent OAuth provider boundary for browser-bound Pipes tests.
+    oauth_codes: HashMap<String, (String, String, String, String)>,
+    oauth_grants: HashMap<String, (String, String)>,
+    oauth_exchanges: usize,
+    imports: Vec<(String, String, String)>,
+    legacy_authorizations: usize,
+    import_attempts: usize,
+    fail_import: bool,
 }
 
 impl State {
@@ -123,6 +131,22 @@ fn now_s() -> i64 {
 }
 
 impl WorkOs {
+    pub fn connection_oauth(&self) -> Value {
+        json!({ "authorize": format!("{}/test-oauth/authorize", self.url), "exchange": format!("{}/test-oauth/token", self.url), "client_id": "mock-connection-client", "scopes": ["mail.read", "files.read"] })
+    }
+
+    pub fn connection_counts(&self) -> (usize, usize, usize) {
+        let s = self.state.lock().expect("workos state");
+        (s.oauth_exchanges, s.imports.len(), s.legacy_authorizations)
+    }
+
+    /// Attribution only: no token bytes in test diagnostics.
+    pub fn imported_accounts(&self) -> Vec<(String, String, String)> {
+        self.state.lock().expect("workos state").imports.clone()
+    }
+
+    pub fn fail_next_import(&self) { self.state.lock().expect("workos state").fail_import = true; }
+    pub fn import_attempts(&self) -> usize { self.state.lock().expect("workos state").import_attempts }
     /// Serves on a free port for one environment: its client id and API key.
     pub fn start(client_id: &str, api_key: &str) -> std::io::Result<WorkOs> {
         Self::start_on(0, client_id, api_key)
@@ -138,6 +162,46 @@ impl WorkOs {
             let q = |k: &str| req.query.get(k).cloned().unwrap_or_default();
             let mut s = st.lock().expect("workos state");
             match (req.method.as_str(), req.path.as_str()) {
+                ("GET", "/test-oauth/authorize") => {
+                    if q("client_id") != "mock-connection-client" || q("response_type") != "code" || q("code_challenge_method") != "S256" { return problem(400, "invalid_request", "OAuth parameters"); }
+                    let Ok(mut back) = url::Url::parse(&q("redirect_uri")) else { return problem(400, "invalid_request", "callback"); };
+                    if q("decline") != "yes" {
+                        let code = s.next("oauth_code");
+                        s.oauth_codes.insert(code.clone(), (q("code_challenge"), q("redirect_uri"), q("scope"), q("account")));
+                        back.query_pairs_mut().append_pair("code", &code);
+                    }
+                    back.query_pairs_mut().append_pair("state", &q("state"));
+                    redirect(back.as_str())
+                }
+                ("POST", "/test-oauth/token") => {
+                    s.oauth_exchanges += 1;
+                    let form: HashMap<String, String> = url::form_urlencoded::parse(&req.body).into_owned().collect();
+                    let f = |k: &str| form.get(k).map(String::as_str).unwrap_or("");
+                    let Some((challenge, callback, scopes, account)) = s.oauth_codes.remove(f("code")) else { return problem(400, "invalid_grant", "code"); };
+                    use sha2::Digest;
+                    let actual = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(f("code_verifier").as_bytes()));
+                    if challenge != actual || callback != f("redirect_uri") || f("client_id") != "mock-connection-client" || f("client_secret") != "mock-connection-secret" || f("grant_type") != "authorization_code" {
+                        return problem(400, "invalid_grant", "binding");
+                    }
+                    let access = s.next("mock_access");
+                    let refresh = s.next("mock_refresh");
+                    s.oauth_grants.insert(access.clone(), (refresh.clone(), account));
+                    Response::json(200, &json!({ "access_token": access, "refresh_token": refresh, "token_type": "Bearer", "expires_in": 3600, "scope": scopes }))
+                }
+                ("POST" | "PUT", p) if p.starts_with("/user_management/users/") && p.contains("/connected_accounts/") => {
+                    s.import_attempts += 1;
+                    if std::mem::take(&mut s.fail_import) { return problem(503, "unavailable", "test import failure"); }
+                    if req.header("authorization") != Some(format!("Bearer {key}").as_str()) { return problem(401, "unauthorized", "API key"); }
+                    let Some((user, provider)) = p["/user_management/users/".len()..].split_once("/connected_accounts/") else { return problem(404, "not_found", "route"); };
+                    if !s.users.iter().any(|u| u.id == user) { return problem(404, "not_found", "user"); }
+                    if req.method == "POST" && s.pipes.contains_key(&(user.into(), provider.into())) { return problem(409, "conflict", "already exists"); }
+                    let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+                    let Some((refresh, account)) = s.oauth_grants.get(body["access_token"].as_str().unwrap_or("")).cloned() else { return problem(422, "invalid_tokens", "not issued here"); };
+                    if body["refresh_token"] != refresh || !body["expires_at"].is_string() || body["state"] != "connected" { return problem(422, "invalid_tokens", "token combination"); }
+                    s.pipes.insert((user.into(), provider.into()), true);
+                    s.imports.push((user.into(), provider.into(), account));
+                    Response::json(if req.method == "POST" { 201 } else { 200 }, &json!({ "id": format!("conn_{user}_{provider}"), "user_id": user, "state": "connected" }))
+                }
                 ("GET", "/user_management/authorize") | ("GET", "/user_management/authorize/as") => {
                     if q("client_id") != client {
                         return problem(400, "invalid_client", "unknown client_id");
@@ -216,6 +280,7 @@ impl WorkOs {
                     }
                 }
                 ("POST", p) if p.starts_with("/data-integrations/") && p.ends_with("/authorize") => {
+                    s.legacy_authorizations += 1;
                     if req.header("authorization") != Some(format!("Bearer {key}").as_str()) {
                         return problem(401, "unauthorized", "the API key is wrong");
                     }

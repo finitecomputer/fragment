@@ -68,7 +68,7 @@ mod tests {
         assert!((trip_bound..next_fn).contains(&made_at), "inside trip_bound");
         assert_eq!(uses(&files, "same_state("), only("auth.rs", 1), "states are compared in trip_bound alone");
         assert_eq!(uses(&files, ".cookie()"), only("auth.rs", 3), "a round trip's cookie is set, spent and read in auth.rs alone");
-        for cookie in ["\"fragment_login\"", "\"fragment_switch\"", "\"fragment_own_key\""] {
+        for cookie in ["\"fragment_login\"", "\"fragment_switch\"", "\"fragment_own_key\"", "\"fragment_connection\""] {
             assert!(uses(&files, cookie).is_empty(), "{cookie} is named by fragment_core::roundtrip alone");
         }
         // the finished round trips: made from a Bound, never decoded
@@ -76,6 +76,11 @@ mod tests {
         assert!(calls.contains("#[derive(Serialize)]\n#[serde(rename_all = \"camelCase\")]\npub(crate) struct Exchange {\n    state: String,"), "Exchange is Serialize only, its fields private");
         assert_eq!(uses(&files, "Exchange { state"), only("registry/calls.rs", 1), "an Exchange is made in Exchange::of alone");
         assert!(calls.contains("pub(crate) fn of(bound: crate::auth::Bound,"), "from a Bound");
+        assert!(calls.contains("#[derive(Serialize)]\npub(crate) struct FinishConnection {\n    state: String,"), "connection completion is Serialize only with private fields");
+        assert_eq!(uses(&files, "FinishConnection::of("), only("connections.rs", 1));
+        assert_eq!(uses(&files, "keys::connection_exchange("), only("registry/connection_signin.rs", 1));
+        assert_eq!(uses(&files, "keys::pipes_import("), only("registry/connection_signin.rs", 1));
+        assert!(uses(&files, "pipes_authorize(").is_empty(), "no legacy authorization bypass");
         let computer = &files["computer.rs"];
         assert!(computer.contains("#[derive(serde::Serialize)]\npub(crate) struct SignedIn {"), "SignedIn is Serialize only");
         assert_eq!(uses(&files, "SignedIn { computer"), only("computer.rs", 1), "a SignedIn is made in SignedIn::of alone");

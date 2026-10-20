@@ -37,10 +37,12 @@ pub enum Trip {
     /// An own key's sign-in at its provider (`own_signin`), begun by the
     /// signed-in person from settings.
     OwnKey,
+    /// A connection's authorization, before credentials reach Pipes.
+    Connection,
 }
 
 impl Trip {
-    pub const ALL: [Trip; 3] = [Trip::SignIn, Trip::Switch, Trip::OwnKey];
+    pub const ALL: [Trip; 4] = [Trip::SignIn, Trip::Switch, Trip::OwnKey, Trip::Connection];
 
     /// The cookie that binds its state (`__Host-` first over https).
     pub const fn cookie(self) -> &'static str {
@@ -48,6 +50,7 @@ impl Trip {
             Trip::SignIn => "fragment_login",
             Trip::Switch => "fragment_switch",
             Trip::OwnKey => "fragment_own_key",
+            Trip::Connection => "fragment_connection",
         }
     }
 }

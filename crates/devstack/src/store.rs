@@ -413,6 +413,7 @@ pub struct Bound {
     pub stripe: Option<(String, Option<String>)>,
     /// Each operator key's provider and its secret's name.
     pub operator_keys: Vec<(String, String)>,
+    pub connection_secrets: Vec<(String, String)>,
     /// Each slot of the model route that runs on an OpenAI-compatible API
     /// (`fragment_core::models::SLOTS`), and its key's secret's name (two
     /// slots may name one: Finite's tiers name the platform's OpenRouter key).
@@ -436,6 +437,7 @@ impl Bound {
             workos: workos.then(|| ("fragment-workos-client-id".into(), "fragment-workos-api-key".into())),
             stripe: stripe.then(|| ("fragment-stripe-key".into(), Some("fragment-stripe-webhook-secret".into()))),
             operator_keys: operator_keys.iter().map(|p| (p.to_string(), format!("fragment-{p}-api-key"))).collect(),
+            connection_secrets: vec![],
             model_keys: model_slots.iter().map(|s| (s.to_string(), MODEL_KEY.to_string())).collect(),
         }
     }
@@ -462,6 +464,9 @@ impl Bound {
         }
         for (provider, name) in &self.operator_keys {
             bound.push((bindings::operator_key(provider), name.as_str()));
+        }
+        for (provider, name) in &self.connection_secrets {
+            bound.push((bindings::connection_secret(provider), name.as_str()));
         }
         assert!(bound.len() <= bindings::CACHE_ENTRIES_MAX, "the cell's cache holds every binding");
         bound

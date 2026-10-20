@@ -569,6 +569,8 @@ pub(crate) enum SigninsHook {
     /// The session this token names expires now (its row stays for the
     /// sweep; a platform session's site sessions end with it).
     ExpireSession(String),
+    /// Expire just this local test's connection attempt (its nonce).
+    ExpireConnection(String),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -588,6 +590,55 @@ impl Call for TestHook {
 }
 
 // ------------------------------------------------------------- sign-in
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct BeginConnection {
+    pub session: String,
+    pub provider: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ConnectionBegun {
+    pub state: String,
+    pub challenge: String,
+}
+
+impl Call for BeginConnection {
+    const PATH: &'static str = "/connection/begin";
+    type Answer = ConnectionBegun;
+}
+
+/// Only a callback proved to belong to this browser can request an exchange.
+#[derive(Serialize)]
+pub(crate) struct FinishConnection {
+    state: String,
+    session: String,
+    provider: String,
+    code: Option<String>,
+}
+
+impl FinishConnection {
+    pub(crate) fn of(bound: crate::auth::Bound, session: String, provider: String, code: Option<String>) -> Self {
+        assert_eq!(bound.trip(), fragment_core::roundtrip::Trip::Connection);
+        Self { state: bound.state().into(), session, provider, code }
+    }
+}
+
+#[derive(Deserialize)]
+pub(in crate::registry) struct FinishConnectionIn {
+    pub state: String,
+    pub session: String,
+    pub provider: String,
+    pub code: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ConnectionFinished { Connected, NotUnderWay, Declined, CodeRefused, Failed }
+
+impl Call for FinishConnection {
+    const PATH: &'static str = "/connection/finish";
+    type Answer = ConnectionFinished;
+}
 
 /// `POST /login/begin`: a sign-in starts (`link_to`: a signed-in session
 /// adding a second sign-in to its person).

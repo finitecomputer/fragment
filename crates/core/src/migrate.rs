@@ -118,7 +118,7 @@ pub const FRAGMENT: Class = Class {
     kept: &["ended", "ended_index", "ended_repos", "ended_agents", "ended_errors"],
 };
 
-pub const REGISTRY: Class = Class { name: "Registry", steps: &[step!("baseline", "registry/0001_baseline.sql")], variants: &[], kept: &[] };
+pub const REGISTRY: Class = Class { name: "Registry", steps: &[step!("baseline", "registry/0001_baseline.sql"), step!("connection_signins", "registry/0002_connection_signins.sql")], variants: &[], kept: &[] };
 
 pub const PRINCIPAL: Class = Class {
     name: "Principal",
@@ -645,7 +645,8 @@ mod tests {
         const REGISTRY_FENCED: &[Step] = &[step!("baseline", "registry/0001_baseline.sql"), Step { name: "identities_fenced", sql: "ALTER TABLE identities ADD COLUMN fenced INTEGER NOT NULL DEFAULT 0;\n" }];
         const COMPUTER_FENCED: &[Step] = &[step!("baseline", "computer/0001_baseline.sql"), Step { name: "agents_fenced", sql: "ALTER TABLE agents ADD COLUMN fenced INTEGER NOT NULL DEFAULT 0;\n" }];
         let registry = Lite::new();
-        migrated(&registry, &REGISTRY, 1).expect("a registry");
+        let baseline = Class { steps: &REGISTRY.steps[..1], ..REGISTRY };
+        migrated(&registry, &baseline, 1).expect("a registry at its baseline");
         registry.exec("INSERT INTO identities (id, kind, created_at) VALUES ('npub1a', 'agent', 1)").expect("an identity");
         let fenced = Class { steps: REGISTRY_FENCED, ..REGISTRY };
         assert_eq!(migrated(&registry, &fenced, 2), Ok(Ran::Migrated { from: 1, version: 2 }));
@@ -753,7 +754,7 @@ mod tests {
         )
         .expect("the Registry before #367");
         db.exec("INSERT INTO org_members (id, org, person, email, admin, comped, sleeps, added_at, added_by) VALUES ('m', 'o', 'npub1a', 'a@b.c', 1, 0, 0, 1, 'npub1a')").expect("a member");
-        assert_eq!(migrated(&db, &REGISTRY, 7), Ok(Ran::Adopted { fixed: vec![], version: 1 }));
+        assert_eq!(migrated(&db, &REGISTRY, 7), Ok(Ran::Adopted { fixed: vec![], version: REGISTRY.steps.len() as u32 }));
         assert_eq!(db.count("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('org_members_org_email')"), 0, "the old index went");
         assert_eq!(db.count("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('org_payers', 'org_members_offer_email')"), 2);
         assert_eq!(db.count("SELECT COUNT(*) FROM org_members"), 1);
