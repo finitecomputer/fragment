@@ -2802,9 +2802,7 @@ function signIn() {
   heading.append(el("h1", null, PITCH), el("p", "muted", SUBTITLE));
   const actions = el("div", "splash-actions");
   actions.append(go, other);
-  const organization = el("a", "splash-organization", "Enter organization code");
-  organization.href = "https://finite.computer/code";
-  firstRun(heading, actions, organization);
+  firstRun(heading, actions);
   $("first-run").classList.add("splash");
 }
 // "Use another account" (`POST /auth/switch`, docs/api.md, Sign-in), back
