@@ -3462,8 +3462,8 @@ fn ask_cli(s: &mut Suite, api: &Api, me: &Person) -> Result<()> {
     let r = s.cli_json(api, &home, &args)?;
     let answer = |r: &Value| r["answer"]["replies"].as_array().into_iter().flatten().filter_map(|x| x["text"].as_str()).collect::<Vec<_>>().join("\n");
     s.ok(
-        "fragment ask, as a person: their direct chat with the agent, the question to it, its answer waited for",
-        r["chat"] == own_named(api, me.session, "reader-chat")?.as_str() && r["asked"]["identity"] == reader.as_str() && r["record"]["body"]["to"] == json!([reader]) && r["answer"]["outcome"] == "idle" && answer(&r).contains(said) && answer(&r).starts_with("echo:"),
+        "fragment ask, as a person: their direct chat with the agent, the question to it (wanting nothing back: a person is no turn to wake), its answer waited for",
+        r["chat"] == own_named(api, me.session, "reader-chat")?.as_str() && r["asked"]["identity"] == reader.as_str() && r["record"]["body"]["to"] == json!([reader]) && r["record"]["body"].get("back").is_none() && r["back"] == false && r["answer"]["outcome"] == "idle" && answer(&r).contains(said) && answer(&r).starts_with("echo:"),
         &r,
     );
     let again = s.cli_json(api, &home, &args)?;

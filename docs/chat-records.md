@@ -57,7 +57,9 @@ A **turn** is what one agent does about one record. Its id is 24 hex of
 SHA-256 of `<agent fragment>|<fragment>/<channel>/<seq>` (the record
 that started it), so a record read twice (a catch-up, a restart, a
 reconnect) is one turn, and two agents answering one message are two
-turns. A message an agent's runtime sends on its own (no turn running)
+turns. An answer that comes back to an asking agent (`back`, below) is
+started by the asked turn's `turn.start`, on the `work` of the chat it
+was asked in. A message an agent's runtime sends on its own (no turn running)
 gets a turn of its own, from the bridge's life and counter (`work`,
 below), so a counter that a restored `/data` sent back names a new turn.
 
@@ -128,6 +130,34 @@ it, and a new draft may follow (the next part).
   `to` names it, and only at most 3 hops deep (`HOPS_MAX`), so two agents
   stop handing off.
 
+**An agent's ask** (a message an agent posts itself, as `fragment ask`
+does):
+
+```json
+{ "text": "…", "to": ["npub1…"], "back": "<turn>" }
+```
+
+- `back`, optional: the asker's turn that it asks from, in any chat
+  (`fragment ask` reads it from its runtime: in our Hermes image, the
+  turn's message id Hermes gives each command; that image's Bot Mode
+  keeper, posting a `message_agent` message, names the sender's newest
+  turn in its own chat: docs/computers.md). The asker's bridge takes
+  it only for a turn of the asker's that it runs, or ended lately (within
+  5 minutes). Once the asked agent's turn of it ends (answered, stopped,
+  or cut by a restart), that bridge gives the asker a turn in that turn's
+  chat, told what the asked agent said (images/bridge, `engine.rs`
+  `answer_back`):
+  - its `turn.start`'s `asker` is the asker's owner;
+  - its `cause` is the asked turn's `turn.start`, on this chat's `work`;
+  - its hop is the ask's, and it is counted in that chat's budget.
+
+  So an asking agent finishes its turn rather than waiting, as Hermes'
+  `message_agent` does, and the answer goes only where it asked from.
+  Anything but a post id makes the body no message. Nothing comes back
+  for a person's message, or for an ask naming no turn of the asker's
+  the bridge knows
+  (docs/bridge.md, "Agents asking each other").
+
 **The hop is the answering bridge's to count**, never the poster's to
 say (images/bridge, `engine.rs` `hop_of`). `hop` in a body only ever
 raises it. For an agent of the answering bridge's own computer (a
@@ -135,9 +165,10 @@ person's agents all run on one: decision 13) the bridge knows the turns
 it runs, so a record that agent posts is one hop past the turn it is in:
 its turn running in that chat, or the turn there its `turn` names when that
 ended within 5 minutes (its reply, read just after the turn was let go);
-and its deepest turn running in another chat (a `fragment ask` from one
-chat into another), the deeper of the two; in no turn at all, the last hop
-allowed (answered once, its answer handing on nothing). A post
+the turn an ask's `back` names, running or ended within 5 minutes; and its
+deepest turn running in another chat (a `fragment ask` from one chat into
+another): the deepest of them; in no turn at all, the last hop allowed
+(answered once, its answer handing on nothing). A post
 made around the bridge, with the CLI or the API and no `hop`, so counts as
 a reply would; a `hop: 0` resets nothing. Another computer's agent is held
 to the hop it claims, at least 1. This is the image's rule, on ordinary

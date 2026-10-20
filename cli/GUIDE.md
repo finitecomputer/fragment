@@ -110,22 +110,27 @@ An agent asks another of its owner's agents (one its computer runs)
 with `fragment ask`:
 
 ```
-fragment ask fred "what's on the calendar Friday?" --wait   # prints fred's answer
-fragment ask fred "draft the reply" --chat team-chat         # asks in that chat; the answer comes there
-fragment ask fred --from - <<'ASK'                           # its text as written: $, backticks and quotes stay
+fragment ask fred "research the venues for Friday"   # returns at once; fred's answer comes back to you
+fragment ask fred "draft the reply" --chat team-chat  # asks in that chat; the answer comes there, and back
+fragment ask fred --from - <<'ASK'                    # its text as written: $, backticks and quotes stay
 ASK
 ```
 
 The question goes to a chat of the two agents and their owner
 (`<a>-<b>`, made the first time), or to `--chat`; whichever of the two
 is not in that chat is added as an editor (the owner's to do, so its
-agent may, on the owner's chats). It is a message whose `to` names the
-asked agent; its turn's replies come in that chat, where it can @name
-you back. `--wait [secs]` (150 by default, at most 1800) follows the
-chat for that turn and prints its replies once it ends, or says none
-came. `--json`: `{chat, asked: {fragment, identity, name}, record,
-replayed, created, added, answer?: {turn, outcome, error?, replies:
-[{seq, text, attachments}]}}`. A person asks one of their own agents the
+agent may, on the owner's chats), the asked agent first, so it leads a
+chat made for the question and its owner's own words there reach it. It
+is a message whose `to` names the asked agent; its turn's replies come
+in that chat, where it can @name you back. Asked from a turn, the
+question names that turn (`back`), and once the asked agent's turn ends
+you get a turn in that turn's chat, with what it said. So finish your
+turn after asking; don't wait, poll or check on it. `--wait [secs]` (150 by
+default, at most 1800) follows the chat for that turn and prints its
+replies once it ends, or says none came; the answer still comes back
+after. `--json`: `{chat, asked: {fragment, identity, name}, record,
+replayed, created, added, back, answer?: {turn, outcome, error?,
+replies: [{seq, text, attachments}]}}`. A person asks one of their own agents the
 same way, in their direct chat with it (`<agent>-chat`). The answering
 agent's computer counts the hand-offs: three in a row without a person
 stop, and a chat allows its agents 20 turns of each other in 5 minutes
@@ -861,8 +866,8 @@ it in it. An agent that runs it is in that chat as its maker and leaves
 it once the new agent is in, so the new one leads its own chat. Run it
 again after a failure and it finishes what the first try made; a label
 whose agent already has another job is refused (409), never rewritten.
-Brief the new agent with `fragment ask <label> "…" --wait`: it answers
-in a chat its owner sees. A job is who the agent is and what it does, at
+Brief the new agent with `fragment ask <label> "…"`: it answers in a
+chat its owner sees, and its answer comes back to you. A job is who the agent is and what it does, at
 most 8 KiB, and never its name (that is its title); its first line is
 what its teammates see of it.
 

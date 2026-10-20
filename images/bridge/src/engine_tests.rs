@@ -502,7 +502,7 @@ fn turns_another_life_ran_are_told_once_to_the_next_turn() {
     let theirs = |e: &mut Engine, s: Step| -> Vec<String> {
         let claims: Vec<String> = s.effects.iter().filter_map(|x| match x { Effect::Claim { turn, .. } => Some(turn.clone()), _ => None }).collect();
         for turn in &claims {
-            let r = e.step(Input::Claimed { turn: turn.clone(), answer: ClaimAnswer::Theirs }, T0 + 1);
+            let r = e.step(Input::Claimed { turn: turn.clone(), answer: ClaimAnswer::Theirs { seq: None } }, T0 + 1);
             assert!(started(&r).is_none(), "another life's turn never runs here");
             let owed: Vec<(String, String)> = r.effects.iter().filter_map(|x| match x { Effect::Owed { turn, id, .. } => Some((turn.clone(), id.clone())), _ => None }).collect();
             for (turn, id) in owed {
@@ -1619,7 +1619,7 @@ impl World {
         };
         let answer = match self.land(&e) {
             Answer::Appended | Answer::Replayed => ClaimAnswer::Ours { seq: seq.and_then(|(f, id)| self.journal.seq_of(&f, &id)) },
-            Answer::Conflict => ClaimAnswer::Theirs,
+            Answer::Conflict => ClaimAnswer::Theirs { seq: None },
         };
         self.tell(&e, answer);
         self.deliver();
@@ -2439,4 +2439,327 @@ fn a_crash_that_drops_a_turns_end_leaves_nothing_open() {
     }
     assert_eq!(w.ends(&running)[0]["error"], LOST, "the one the crash cut is lost");
     w.check().unwrap();
+}
+
+// ---- an answer comes back to the agent that asked ----
+
+/// `said`, in `chat`: a message from `npub1paul`.
+fn said_in(e: &mut Engine, a: &Agent, v: &ChatView, chat: &str, seq: u64, text: &str, now: u64) -> Step {
+    let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: chat.into(), record: rec(seq, "npub1paul", json!({ "text": text })), view: Some(v.clone()), since: 0 }, now);
+    answered(e, s, now)
+}
+
+const TALK: &str = "talk--k3x9";
+const PAIR: &str = "juniper-rowan--k3x9";
+
+/// `s`, with each claim it makes answered as this life's at the next place
+/// on its chat's `work` (`seq` counts them, as the platform's answer names
+/// it), each record it owes answered, and what those answers do added.
+fn answered_at(e: &mut Engine, mut s: Step, now: u64, seq: &mut u64) -> Step {
+    let claims: Vec<String> = s.effects.iter().filter_map(|x| match x { Effect::Claim { turn, .. } => Some(turn.clone()), _ => None }).collect();
+    for turn in claims {
+        *seq += 1;
+        let more = e.step(Input::Claimed { turn, answer: ClaimAnswer::Ours { seq: Some(*seq) } }, now);
+        s.dirty |= more.dirty;
+        s.effects.extend(more.effects);
+    }
+    let owed: Vec<(String, String)> = s.effects.iter().filter_map(|x| match x { Effect::Owed { turn, id, .. } => Some((turn.clone(), id.clone())), _ => None }).collect();
+    for (turn, id) in owed {
+        let more = e.step(Input::Posted { turn, id }, now);
+        s.dirty |= more.dirty;
+        s.effects.extend(more.effects);
+    }
+    s
+}
+
+/// A record of `chat`, read by `a`'s follower there.
+fn read_as(e: &mut Engine, a: &Agent, chat: &str, v: &ChatView, record: Record, now: u64, seq: &mut u64) -> Step {
+    let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: chat.into(), record, view: Some(v.clone()), since: 0 }, now);
+    answered_at(e, s, now, seq)
+}
+
+/// Juniper's ask of rowan in their chat, as `fragment ask` posts it, from
+/// the turn of juniper's it names (`back`).
+fn ask_rowan(seq: u64, at: i64, back: Option<&str>) -> Record {
+    let mut body = json!({ "text": "research this", "to": ["npub1rowan"] });
+    if let Some(turn) = back {
+        body["back"] = json!(turn);
+    }
+    rec_at(seq, at, "npub1juniper", body)
+}
+
+/// Rowan's turn says `text` and ends idle: what that does, its claims and
+/// owed records answered.
+fn rowan_answers(e: &mut Engine, turn: &str, text: &str, now: u64, seq: &mut u64) -> Step {
+    ev(e, Event::Reply { turn: turn.into(), part: 1, text: text.into() }, now);
+    let s = e.step(Input::Runtime(Event::End { turn: turn.into(), outcome: Outcome::Idle }), now);
+    answered_at(e, s, now, seq)
+}
+
+/// Goal: an agent's ask that names the turn it asks from in another chat
+/// (`fragment ask`) gives the asker a turn in that chat once the asked
+/// agent's turn ends, its own turn there long over: every reply the asked
+/// agent said and its files counted, by its name, asked as the asker's
+/// owner (who may stop it), at the ask's hop and in that chat's budget,
+/// caused by the asked turn's claim. The asked agent knows its asker by
+/// name, not as "someone". Asking again from the answer's turn goes one
+/// deeper, and the chain stops at the cap, answering nothing back.
+#[test]
+fn an_answer_comes_back_to_the_agent_that_asked() {
+    let (j, r) = (agent("juniper"), agent("rowan"));
+    let (v, pair) = (view(&[&j]), view(&[&r, &j]));
+    let mut e = engine(&[j.clone(), r.clone()]);
+    let mut seq = 0;
+    let s = read_as(&mut e, &j, TALK, &v, rec_at(1, 10, "npub1paul", json!({ "text": "get rowan on it" })), T0, &mut seq);
+    let jt = started(&s).expect("juniper's turn").turn;
+    let s = read_as(&mut e, &r, PAIR, &pair, ask_rowan(1, 11, Some(&jt)), T0 + 1, &mut seq);
+    let rt = started(&s).expect("rowan's turn").turn;
+    let claim = seq;
+    let asked = &e.state().turns[&rt];
+    assert_eq!((asked.asker.as_str(), asked.asker_name.as_str(), asked.hop), ("npub1juniper", "juniper", 1), "its asker by name");
+    assert_eq!(asked.back.as_ref().map(|b| (b.chat.as_str(), b.claim)), Some((TALK, Some(claim))));
+    // juniper ends its turn ("I asked rowan"); rowan says two things, a file with the second
+    ev(&mut e, Event::End { turn: jt, outcome: Outcome::Idle }, T0 + 2);
+    assert!(keepalive(&ev(&mut e, Event::Reply { turn: rt.clone(), part: 1, text: "found three sources".into() }, T0 + 3)).is_none());
+    ev(&mut e, Event::Reply { turn: rt.clone(), part: 2, text: "here is the summary".into() }, T0 + 4);
+    let file = LocalFile { path: "/tmp/x.md".into(), media_type: "text/markdown".into(), name: "x.md".into(), size: 4 };
+    ev(&mut e, Event::Attachment { turn: rt.clone(), part: 2, file }, T0 + 4);
+    let s = e.step(Input::Runtime(Event::End { turn: rt.clone(), outcome: Outcome::Idle }), T0 + 5);
+    let end = answered_at(&mut e, s, T0 + 5, &mut seq);
+    assert!(end.dirty, "the answer's turn is kept before it is claimed");
+    let back = started(&end).expect("juniper's turn, back in talk");
+    assert_eq!((back.agent.fragment.as_str(), back.fragment.as_str()), (j.fragment.as_str(), TALK));
+    assert_eq!(back.turn, records::turn_id(&j.fragment, PAIR, "work", claim), "caused by rowan's claim");
+    assert_eq!((back.asker.as_str(), back.asker_name.as_str(), back.routine, back.command), ("npub1paul", "rowan", false, false));
+    assert_eq!(back.text, "rowan answered what you asked it in juniper-rowan--k3x9:\n\nfound three sources\n\nhere is the summary\n\n(It sent a file, in juniper-rowan--k3x9.)");
+    let claimed = posts(&end).into_iter().find(|(id, _)| *id == records::work_id(&back.turn, "start")).expect("claimed").1;
+    assert_eq!(claimed["cause"], json!({ "fragment": PAIR, "channel": "work", "seq": claim }));
+    assert_eq!(claimed["asker"], "npub1paul", "its owner stops it");
+    assert_eq!(e.state().turns[&back.turn].hop, 1, "at the ask's hop");
+    assert_eq!(e.state().agent_turns[TALK].len(), 1, "counted in talk's budget");
+    assert!(!e.state().turns.contains_key(&rt), "rowan's turn let go");
+
+    // asking again from the answer's turn goes one deeper, its answer at that hop
+    let mut asker = back.turn;
+    for k in 2..=u64::from(limits::HOPS_MAX) {
+        let now = T0 + 10 * k;
+        let s = read_as(&mut e, &r, PAIR, &pair, ask_rowan(k, 10 * k as i64, Some(&asker)), now, &mut seq);
+        let rt = started(&s).expect("rowan, asked again").turn;
+        let hop = u32::try_from(k).expect("small");
+        assert_eq!(e.state().turns[&rt].hop, hop);
+        ev(&mut e, Event::End { turn: asker.clone(), outcome: Outcome::Idle }, now + 1);
+        let back = started(&rowan_answers(&mut e, &rt, &format!("pass {k}"), now + 3, &mut seq)).expect("back to juniper");
+        assert_eq!((e.state().turns[&back.turn].hop, back.text.ends_with(&format!("pass {k}"))), (hop, true));
+        asker = back.turn;
+    }
+    // past the cap: rowan is not asked, and nothing comes back
+    let past = read_as(&mut e, &r, PAIR, &pair, ask_rowan(9, 90, Some(&asker)), T0 + 90, &mut seq);
+    assert!(started(&past).is_none() && posts(&past).is_empty(), "too deep");
+}
+
+/// Goal: an answer goes back to the chat of the turn its ask names, not to
+/// another chat its asker is busy in at the time (where others may read
+/// it); the hop still counts from the deepest of them.
+#[test]
+fn an_answer_goes_back_to_the_chat_its_ask_names() {
+    let (j, r) = (agent("juniper"), agent("rowan"));
+    let (v, pair) = (view(&[&j]), view(&[&r, &j]));
+    let mut e = engine(&[j.clone(), r.clone()]);
+    let mut seq = 0;
+    let group = "group--k3x9";
+    let talk_turn = started(&read_as(&mut e, &j, TALK, &v, rec_at(1, 10, "npub1paul", json!({ "text": "ask rowan" })), T0, &mut seq)).expect("talk").turn;
+    let group_turn = started(&read_as(&mut e, &j, group, &v, rec_at(1, 11, "npub1skyler", json!({ "text": "hello there" })), T0 + 1, &mut seq)).expect("group").turn;
+    assert!(e.state().turns[&group_turn].order > e.state().turns[&talk_turn].order, "two turns of juniper's at once, the group's the newer");
+    let rt = started(&read_as(&mut e, &r, PAIR, &pair, ask_rowan(1, 12, Some(&talk_turn)), T0 + 2, &mut seq)).expect("rowan").turn;
+    assert_eq!(e.state().turns[&rt].back.as_ref().map(|b| b.chat.as_str()), Some(TALK), "where it was asked from, though the group's turn is newer");
+    ev(&mut e, Event::End { turn: talk_turn, outcome: Outcome::Idle }, T0 + 3);
+    let back = started(&rowan_answers(&mut e, &rt, "done", T0 + 4, &mut seq)).expect("back");
+    assert_eq!(back.fragment, TALK);
+    ev(&mut e, Event::End { turn: back.turn, outcome: Outcome::Idle }, T0 + 5);
+    // invalid: an ask naming another agent's turn, or a turn never run, comes back nowhere
+    let rowan_own = started(&read_as(&mut e, &r, TALK, &view(&[&r]), rec_at(2, 13, "npub1paul", json!({ "text": "hi rowan" })), T0 + 6, &mut seq)).expect("rowan in talk").turn;
+    for (k, named) in [(2u64, rowan_own.as_str()), (3, "000000000000000000000000")] {
+        let s = read_as(&mut e, &r, PAIR, &pair, ask_rowan(k, 20 + k as i64, Some(named)), T0 + 10 * k, &mut seq);
+        let asked = started(&s).map(|t| t.turn);
+        assert!(asked.as_ref().is_none_or(|t| e.state().turns[t].back.is_none()), "{named}: no turn of juniper's");
+        if let Some(t) = asked {
+            ev(&mut e, Event::End { turn: t, outcome: Outcome::Idle }, T0 + 10 * k + 1);
+        }
+    }
+}
+
+/// Goal: an ask made in the chat its asker's turn is in (`fragment ask
+/// --chat` there) comes back there too: every ask from a turn does.
+#[test]
+fn an_ask_within_one_chat_comes_back_there() {
+    let (j, r) = (agent("juniper"), agent("rowan"));
+    let pair = view(&[&r, &j]);
+    let mut e = engine(&[j.clone(), r.clone()]);
+    let mut seq = 0;
+    let jp = started(&read_as(&mut e, &j, PAIR, &pair, rec_at(1, 10, "npub1paul", json!({ "text": "ask rowan", "to": ["npub1juniper"] })), T0, &mut seq)).expect("juniper, in the pair chat").turn;
+    let rt = started(&read_as(&mut e, &r, PAIR, &pair, ask_rowan(2, 11, Some(&jp)), T0 + 1, &mut seq)).expect("rowan").turn;
+    assert_eq!((e.state().turns[&rt].hop, e.state().turns[&rt].back.as_ref().map(|b| b.chat.as_str())), (1, Some(PAIR)));
+    ev(&mut e, Event::End { turn: jp, outcome: Outcome::Idle }, T0 + 2);
+    let back = started(&rowan_answers(&mut e, &rt, "found it", T0 + 3, &mut seq)).expect("back to juniper, in the same chat");
+    assert_eq!((back.fragment.as_str(), back.agent.fragment.as_str()), (PAIR, j.fragment.as_str()));
+}
+
+/// The race: an ask read just after its asker's turn ended (the asker's
+/// closing words were quicker than the bridge) still comes back to that
+/// turn's chat, and counts from it, so the asker may ask again from the
+/// answer's turn; one naming a turn ended long before comes back nowhere,
+/// and is the last hop.
+#[test]
+fn an_ask_read_as_its_asker_finished_still_comes_back() {
+    let (j, r) = (agent("juniper"), agent("rowan"));
+    let (v, pair) = (view(&[&j]), view(&[&r, &j]));
+    let mut e = engine(&[j.clone(), r.clone()]);
+    let mut seq = 0;
+    let jt = started(&read_as(&mut e, &j, TALK, &v, rec_at(1, 10, "npub1paul", json!({ "text": "get rowan on it" })), T0, &mut seq)).expect("juniper").turn;
+    ev(&mut e, Event::End { turn: jt.clone(), outcome: Outcome::Idle }, T0 + 1);
+    let rt = started(&read_as(&mut e, &r, PAIR, &pair, ask_rowan(1, 11, Some(&jt)), T0 + 2, &mut seq)).expect("rowan").turn;
+    assert_eq!(e.state().turns[&rt].hop, 1, "one past the turn it names, though that ended");
+    assert_eq!(e.state().turns[&rt].back.as_ref().map(|b| b.chat.as_str()), Some(TALK));
+    let back = started(&rowan_answers(&mut e, &rt, "half done", T0 + 3, &mut seq)).expect("back in talk");
+    assert_eq!((back.fragment.as_str(), e.state().turns[&back.turn].hop), (TALK, 1));
+    let again = started(&read_as(&mut e, &r, PAIR, &pair, ask_rowan(2, 12, Some(&back.turn)), T0 + 4, &mut seq)).expect("asked again from the answer").turn;
+    assert_eq!(e.state().turns[&again].hop, 2);
+    ev(&mut e, Event::End { turn: back.turn, outcome: Outcome::Idle }, T0 + 5);
+    rowan_answers(&mut e, &again, "all done", T0 + 6, &mut seq);
+
+    let later = T0 + 6 + limits::ENDED_HOPS_MS + 1;
+    let rt = started(&read_as(&mut e, &r, PAIR, &pair, ask_rowan(3, 13, Some(&jt)), later, &mut seq)).expect("rowan, answering once").turn;
+    assert!(e.state().turns[&rt].back.is_none(), "asked from no turn it knows of");
+    assert_eq!(e.state().turns[&rt].hop, limits::HOPS_MAX);
+}
+
+/// Invalid: nothing comes back for an ask that names no turn, a person's
+/// message that names one (no hand-off), one whose claim's place the
+/// platform did not say, or one whose asker left the computer before the
+/// answer.
+#[test]
+fn what_answers_nothing_back() {
+    let (j, r) = (agent("juniper"), agent("rowan"));
+    let (v, pair) = (view(&[&j]), view(&[&r, &j]));
+    let ended_quietly = |e: &mut Engine, rt: &str, seq: &mut u64, now: u64| {
+        let s = e.step(Input::Runtime(Event::End { turn: rt.into(), outcome: Outcome::Idle }), now);
+        let s = answered_at(e, s, now, seq);
+        assert!(started(&s).is_none(), "nothing comes back");
+        assert!(e.state().turns.values().all(|t| t.agent != "juniper--k3x9" || t.fragment != TALK || t.phase != Phase::Queued), "no turn of juniper's waits in talk");
+    };
+    // no `back`
+    let mut e = engine(&[j.clone(), r.clone()]);
+    let mut seq = 0;
+    let jt = started(&read_as(&mut e, &j, TALK, &v, rec_at(1, 10, "npub1paul", json!({ "text": "go" })), T0, &mut seq)).expect("juniper").turn;
+    let rt = started(&read_as(&mut e, &r, PAIR, &pair, ask_rowan(1, 11, None), T0 + 1, &mut seq)).expect("rowan").turn;
+    assert!(e.state().turns[&rt].back.is_none());
+    ev(&mut e, Event::End { turn: jt.clone(), outcome: Outcome::Idle }, T0 + 2);
+    ended_quietly(&mut e, &rt, &mut seq, T0 + 3);
+
+    // a person's message naming juniper's turn: hop 0, no hand-off
+    let s = read_as(&mut e, &r, PAIR, &pair, rec_at(2, 12, "npub1paul", json!({ "text": "you too", "to": ["npub1rowan"], "back": jt })), T0 + 4, &mut seq);
+    let rt = started(&s).expect("rowan").turn;
+    assert!(e.state().turns[&rt].back.is_none());
+    ended_quietly(&mut e, &rt, &mut seq, T0 + 5);
+
+    // its claim's place unsaid: nothing to cause the answer by
+    let mut e = engine(&[j.clone(), r.clone()]);
+    let jt = started(&said_in(&mut e, &j, &v, TALK, 1, "go", T0)).expect("juniper").turn;
+    let s = e.step(Input::Record { agent: r.fragment.clone(), fragment: PAIR.into(), record: ask_rowan(1, 11, Some(&jt)), view: Some(pair.clone()), since: 0 }, T0 + 1);
+    let rt = started(&answered(&mut e, s, T0 + 1)).expect("rowan").turn;
+    assert_eq!(e.state().turns[&rt].back.as_ref().map(|b| b.claim), Some(None));
+    ended_quietly(&mut e, &rt, &mut 0, T0 + 2);
+
+    // juniper leaves the computer before rowan answers
+    let mut e = engine(&[j.clone(), r.clone()]);
+    let mut seq = 0;
+    let jt = started(&read_as(&mut e, &j, TALK, &v, rec_at(1, 10, "npub1paul", json!({ "text": "go" })), T0, &mut seq)).expect("juniper").turn;
+    let rt = started(&read_as(&mut e, &r, PAIR, &pair, ask_rowan(1, 11, Some(&jt)), T0 + 1, &mut seq)).expect("rowan").turn;
+    e.step(Input::Agents(vec![r.clone()]), T0 + 2);
+    ended_quietly(&mut e, &rt, &mut seq, T0 + 3);
+}
+
+/// Restart: an asked turn a restart cuts still answers back (that it was
+/// cut), from the next life, which claims the answer's turn once its
+/// runtime is up; what it keeps of it survives the state's round trip.
+/// Replay: a life that restored `/data` from before the asked turn ended
+/// makes the same answer turn, whose claim is the first life's (409): it
+/// is ended as lost, never run twice.
+#[test]
+fn an_answer_cut_by_a_restart_comes_back_once() {
+    let (j, r) = (agent("juniper"), agent("rowan"));
+    let (v, pair) = (view(&[&j]), view(&[&r, &j]));
+    let mut e = engine(&[j.clone(), r.clone()]);
+    let mut seq = 0;
+    let jt = started(&read_as(&mut e, &j, TALK, &v, rec_at(1, 10, "npub1paul", json!({ "text": "go" })), T0, &mut seq)).expect("juniper").turn;
+    let rt = started(&read_as(&mut e, &r, PAIR, &pair, ask_rowan(1, 11, Some(&jt)), T0 + 1, &mut seq)).expect("rowan").turn;
+    ev(&mut e, Event::Reply { turn: rt.clone(), part: 1, text: "halfway".into() }, T0 + 2);
+    ev(&mut e, Event::Step { turn: rt.clone(), step: ToolStep { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), text: String::new(), category: records::Category::Shell } }, T0 + 3);
+    let claim = seq;
+    let saved: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
+    assert_eq!(saved.turns[&rt].back.as_ref().map(|b| (b.said.as_str(), b.claim)), Some(("halfway", Some(claim))), "kept across the round trip");
+
+    let next_life = |life: &str| {
+        let mut e = Engine::new(saved.clone(), Settings::default(), life).expect("whole");
+        e.step(Input::Agents(vec![j.clone(), r.clone()]), T0 + 10);
+        let rec = e.recover(T0 + 10);
+        assert!(rec.effects.iter().all(|x| !matches!(x, Effect::Claim { .. })), "nothing claimed before the runtime is up");
+        let id = e.state().turns.values().find(|t| t.agent == j.fragment && t.fragment == TALK && t.phase == Phase::Queued).expect("the answer's turn waits").id.clone();
+        let up = e.step(Input::Runtime(Event::Connected(true)), T0 + 11);
+        assert!(up.effects.iter().any(|x| matches!(x, Effect::Claim { turn, .. } if *turn == id)), "claimed once the runtime is up");
+        (e, id)
+    };
+    let (mut b, id) = next_life("fedcba9876543210fedcba9876543210");
+    assert_eq!(id, records::turn_id(&j.fragment, PAIR, "work", claim));
+    let s = b.step(Input::Claimed { turn: id.clone(), answer: ClaimAnswer::Ours { seq: Some(50) } }, T0 + 12);
+    let back = started(&s).expect("run in the next life");
+    assert_eq!(back.text, format!("rowan could not finish what you asked it in juniper-rowan--k3x9 ({LOST}). It said:\n\nhalfway"));
+
+    // a life that restored the same /data makes the same turn, and the first life's claim holds it
+    let (mut c, again) = next_life("00112233445566778899aabbccddeeff");
+    assert_eq!(again, id, "one answer, one turn");
+    let s = c.step(Input::Claimed { turn: again.clone(), answer: ClaimAnswer::Theirs { seq: Some(50) } }, T0 + 12);
+    assert!(started(&s).is_none(), "never run twice");
+    assert_eq!(c.state().turns[&again].phase, Phase::Ended);
+}
+
+/// Rollback: a life that restored `/data` saved before the asked turn was
+/// claimed finds that another life ran it (its claim a 409, the journal
+/// saying where): that turn answers back as lost, by that life's claim, so
+/// it is the same answer turn that life made, if it made one. The journal
+/// not saying where, nothing comes back.
+#[test]
+fn an_asked_turn_another_life_ran_answers_back_once() {
+    let (j, r) = (agent("juniper"), agent("rowan"));
+    let (v, pair) = (view(&[&j]), view(&[&r, &j]));
+    let mut e = engine(&[j.clone(), r.clone()]);
+    let mut seq = 0;
+    let jt = started(&read_as(&mut e, &j, TALK, &v, rec_at(1, 10, "npub1paul", json!({ "text": "go" })), T0, &mut seq)).expect("juniper").turn;
+    // rowan's turn is admitted and its claim is in flight when /data is saved
+    let admitted = e.step(Input::Record { agent: r.fragment.clone(), fragment: PAIR.into(), record: ask_rowan(1, 11, Some(&jt)), view: Some(pair.clone()), since: 0 }, T0 + 1);
+    let rt = admitted.effects.iter().find_map(|x| match x { Effect::Claim { turn, .. } => Some(turn.clone()), _ => None }).expect("claimed");
+    let saved = e.state().clone();
+    assert_eq!(saved.turns[&rt].back.as_ref().map(|b| (b.chat.as_str(), b.claim)), Some((TALK, None)));
+    // that life runs it to its end, and makes its answer turn
+    let first = started(&answered_at(&mut e, admitted, T0 + 1, &mut seq)).expect("rowan runs").turn;
+    assert_eq!(first, rt);
+    let theirs = seq;
+    ev(&mut e, Event::End { turn: jt, outcome: Outcome::Idle }, T0 + 2);
+    let made = started(&rowan_answers(&mut e, &rt, "done", T0 + 2, &mut seq)).expect("juniper's answer turn").turn;
+
+    let next = |seq: Option<u64>| {
+        let mut b = Engine::new(saved.clone(), Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole");
+        b.step(Input::Agents(vec![j.clone(), r.clone()]), T0 + 10);
+        b.recover(T0 + 10);
+        b.step(Input::Runtime(Event::Connected(true)), T0 + 11);
+        let s = b.step(Input::Claimed { turn: rt.clone(), answer: ClaimAnswer::Theirs { seq } }, T0 + 12);
+        (b, s)
+    };
+    let (b, s) = next(Some(theirs));
+    let answer = s.effects.iter().find_map(|x| match x { Effect::Claim { turn, fragment, .. } if fragment == TALK => Some(turn.clone()), _ => None }).expect("its answer turn is claimed in talk");
+    assert_eq!(answer, made, "the turn the life that ran it made: one answer, one turn");
+    assert!(b.state().turns[&answer].text.starts_with(&format!("rowan could not finish what you asked it in juniper-rowan--k3x9 ({LOST})")));
+    let (b, s) = next(None);
+    assert!(s.effects.iter().all(|x| !matches!(x, Effect::Claim { fragment, .. } if fragment == TALK)), "where unsaid, nothing comes back");
+    assert!(b.state().turns.values().all(|t| t.cause.channel != "work"));
 }

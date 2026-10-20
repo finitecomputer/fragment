@@ -7,11 +7,19 @@
 //! asking finds their direct chat with the agent (`<agent>-chat`, as the
 //! shell names it). Each agent not in the chat is added as an editor, as
 //! the shell adds agents (decision 36: an agent shares its owner's
-//! fragments for them). The question is a message whose `to` names the
-//! asked agent (docs/chat-records.md), so its bridge takes it as a turn;
-//! the hop is that bridge's to count, never this post's (engine.rs,
-//! `hop_of`). `--wait` follows the chat's `work` for the asked agent's turn
-//! of that message, and prints its replies once the turn ends.
+//! fragments for them), the asked agent first: a chat's first agent leads
+//! it (decision 8), so in a chat made for a question (which the platform
+//! makes with its maker in it) the maker leaves and joins again after, and
+//! the owner's own words there reach the agent doing the work. The question
+//! is a message whose `to` names the asked agent (docs/chat-records.md), so
+//! its bridge takes it as a turn; the hop is that bridge's to count, never
+//! this post's (engine.rs, `hop_of`). An agent's question asked in a turn
+//! names that turn (`back`, its runtime's: `asking_turn`), so once the
+//! asked agent's turn of it ends, the asker's bridge gives the asker a turn
+//! in that turn's chat with the answer (engine.rs, `answer_back`), and it
+//! need not wait. `--wait` follows the chat's `work` for the asked
+//! agent's turn of that message, and prints its replies once the turn
+//! ends.
 //!
 //! Who may be asked is the computer's own list: an agent's `GET
 //! /api/computer` (its computer's agents, all its owner's), a person's
@@ -158,11 +166,29 @@ pub struct Asked {
     pub created: bool,
     /// The agents added to the chat for it.
     pub added: Vec<String>,
+    /// Its answer comes back to the asker on its own (an agent asking in a
+    /// turn: `back`), as a turn of its in that turn's chat.
+    pub back: bool,
     /// `--wait`: its answer, or none in the time given.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answer: Option<Answer>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub waited_s: Option<u64>,
+}
+
+/// What our image's runtime, Hermes, exports to each command its tools run
+/// in a turn (its gateway's session context, gateway/session_context.py):
+/// the turn's inbound message id, which the bridge's relay makes the
+/// turn's id (images/bridge, relay/mod.rs).
+const TURN_ENV: &str = "HERMES_SESSION_MESSAGE_ID";
+
+/// The turn an agent asks from, for its answer to come back to (`back`):
+/// the one its runtime says this command runs in. None outside a turn, or
+/// for an id no record could carry; the bridge takes it only for a turn of
+/// the asker's it ran lately.
+pub fn asking_turn(turn: Option<&str>) -> Option<String> {
+    let turn = turn.map(str::trim).filter(|t| !t.is_empty() && t.len() <= 128 && t.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-')))?;
+    Some(turn.to_string())
 }
 
 fn coded(code: Code, msg: impl Into<String>) -> anyhow::Error {
@@ -284,6 +310,17 @@ pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u
         }
         (None, None) => return Err(coded(Code::NotFound, format!("no chat named {}", found.unwrap_or_default()))),
     };
+    // the chat of the two, the asker in it and the asked agent not yet (the
+    // platform made it with its maker in it; or a try stopped there): the
+    // asker leaves, and joins again after the asked agent, so the one at
+    // work leads it. Once the asked agent is in, the order stands: nothing
+    // either said there is made history for the other.
+    let pair = chat.is_none() && asker.is_some();
+    let first_ask = |l: &MemberList| asker.as_ref().is_some_and(|a| l.members.iter().any(|m| m.principal == a.identity)) && !l.members.iter().any(|m| m.principal == asked.identity);
+    if pair && first_ask(&list) {
+        c.call(c.delete(&format!("/api/f/{full}/members/me"))?).with_context(|| format!("leaving {full}, to join again after {}", asked.name))?;
+        list = members(c, &full)?.unwrap_or(list);
+    }
     let channels = c.call(c.get(&format!("/api/f/{full}/channels"))?)?;
     let listed = channels["channels"].as_array().cloned().unwrap_or_default();
     let postable_chat = listed.iter().any(|ch| ch["name"] == "chat" && ch["post"].is_string());
@@ -292,9 +329,10 @@ pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u
     }
     let work_seq = listed.iter().find(|ch| ch["name"] == "work").and_then(|ch| ch["seq"].as_i64()).unwrap_or(0);
 
-    // each of the two in it, an editor (an agent's turns are recorded on `work`)
+    // each of the two in it, an editor (an agent's turns are recorded on
+    // `work`), the asked agent first: a new chat's lead is the one at work
     let mut added = Vec::new();
-    for (who, must) in asker.iter().map(|a| (a, false)).chain([(&asked, true)]) {
+    for (who, must) in [(&asked, true)].into_iter().chain(asker.iter().map(|a| (a, false))) {
         match list.members.iter().find(|m| m.principal == who.identity) {
             Some(m) if must && m.role < Role::Editor => {
                 return Err(coded(Code::Forbidden, format!("{} is a viewer in {full}, so it cannot answer there (its turns are an editor's): ask it in another chat", who.name)));
@@ -317,7 +355,13 @@ pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u
     }
     assert!(list.members.iter().any(|m| m.principal == asked.identity), "the asked agent is in the chat before it is asked");
 
-    let body = json!({ "text": text, "to": [asked.identity] });
+    // an agent's question, asked in a turn, names that turn: its answer
+    // comes back there
+    let back = asker.as_ref().and_then(|_| asking_turn(std::env::var(TURN_ENV).ok().as_deref()));
+    let body = match &back {
+        Some(turn) => json!({ "text": text, "to": [asked.identity], "back": turn }),
+        None => json!({ "text": text, "to": [asked.identity] }),
+    };
     let posted: Posted = c
         .post_json_by_id(&format!("/api/f/{full}/channels/chat"), &fragment_proto::PostRecord { id: id.clone(), body })
         .and_then(|r| c.call_as(r))
@@ -330,7 +374,7 @@ pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u
         Some(s) => answered(c, &full, &asked.identity, seq, from, Duration::from_secs(s))?,
         None => None,
     };
-    Ok(Asked { chat: full, asked, record, replayed: posted.replayed, created, added, answer, waited_s: wait })
+    Ok(Asked { chat: full, asked, record, replayed: posted.replayed, created, added, back: back.is_some(), answer, waited_s: wait })
 }
 
 /// Records of `channel` after `after`, at most `PAGES_MAX` pages, and the
@@ -432,6 +476,20 @@ mod tests {
         assert_eq!(direct_label("fred--k3x9"), "fred-chat");
         let d = direct_label(&format!("{}--k3x9", "z".repeat(57)));
         assert!(fits(&d, fragment_proto::limits::LABEL_MAX_BYTES) && d.ends_with("-chat"), "{d}");
+    }
+
+    /// Goal: an agent's ask names the turn its runtime runs it in, for the
+    /// answer to come back there. Invalid: no turn (a command outside one),
+    /// or an id no record carries, names none.
+    #[test]
+    fn an_ask_names_the_turn_it_is_asked_from() {
+        let turn = "0123456789abcdef01234567";
+        assert_eq!(asking_turn(Some(turn)).as_deref(), Some(turn));
+        assert_eq!(asking_turn(Some(&format!(" {turn}\n"))).as_deref(), Some(turn), "trimmed");
+        for bad in [None, Some(""), Some("  "), Some("has space"), Some("é")] {
+            assert_eq!(asking_turn(bad), None, "{bad:?}");
+        }
+        assert_eq!(asking_turn(Some(&"a".repeat(129))), None, "longer than a post id");
     }
 
     fn rec(seq: i64, principal: &str, body: Value) -> Value {

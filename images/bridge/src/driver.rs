@@ -1034,8 +1034,9 @@ async fn claim(api: &Api, fragment: &str, agent: &str, id: &str, body: &Value, c
                 return ClaimAnswer::Ours { seq: posted.seq };
             }
             Err(e) if e.status() == Some(409) => {
-                crate::ev!("claim.taken", { "fragment": fragment, "id": id, "why": "another life's claim holds the id" });
-                return ClaimAnswer::Theirs;
+                let seq = claim_of_theirs(api, agent, fragment, body, stop.clone()).await;
+                crate::ev!("claim.taken", { "fragment": fragment, "id": id, "why": "another life's claim holds the id", "seq": seq });
+                return ClaimAnswer::Theirs { seq };
             }
             Err(e) if e.gone() => {
                 // Not the agent's to post in (it left, or is held below
@@ -1059,6 +1060,43 @@ async fn claim(api: &Api, fragment: &str, agent: &str, id: &str, body: &Value, c
         }
     }
     unreachable!("the last try returns")
+}
+
+/// Where another life's claim of a turn is on the chat's `work` (read back
+/// from its tail, at most `NOTE_SCAN_RECORDS_MAX` records): an asked turn's
+/// answer back is caused by it (engine.rs, `answer_back`). A read that
+/// fails as a retry may mend (a transport error, 429, 5xx) is tried again,
+/// `POST_TRIES_MAX` times at most, a jittered backoff between. `None` when
+/// it is further back, the journal did not answer, or the bridge stopped.
+async fn claim_of_theirs(api: &Api, agent: &str, fragment: &str, body: &Value, stop: watch::Receiver<bool>) -> Option<u64> {
+    let (turn, by) = (body["turn"].as_str()?, body["agent"].as_str()?);
+    let mut backoff = Backoff::default();
+    for attempt in 1..=limits::POST_TRIES_MAX {
+        let read = async {
+            let tail = api.channels(agent, fragment).await?.into_iter().find(|c| c.name == records::WORK).map_or(0, |c| c.seq);
+            read_back(api, agent, fragment, records::WORK, tail + 1, |rs| claim_in(rs, turn, by).is_some()).await
+        };
+        match read.await {
+            Ok((work, _)) => return claim_in(&work, turn, by),
+            Err(e) if e.retryable() && attempt < limits::POST_TRIES_MAX => {
+                crate::ev!("claim.unread", { "fragment": fragment, "turn": turn, "attempt": attempt, "error": e.to_string() });
+                if !backoff.wait(stop.clone()).await {
+                    return None;
+                }
+            }
+            Err(e) => {
+                crate::ev!("claim.unread", { "fragment": fragment, "turn": turn, "attempt": attempt, "error": e.to_string(), "gave_up": true });
+                return None;
+            }
+        }
+    }
+    None
+}
+
+/// The seq of `turn`'s claim among records of `work`: its `turn.start`, by
+/// its agent `by` (no other writer's record claims it).
+pub fn claim_in(work: &[Record], turn: &str, by: &str) -> Option<u64> {
+    work.iter().find(|r| r.principal == by && r.body["kind"] == "turn.start" && r.body["turn"] == turn).map(|r| r.seq)
 }
 
 /// A post, tried until the platform answers it, or `POST_TRIES_MAX` times
@@ -1438,5 +1476,28 @@ async fn keepalive(api: Api, mut hold: watch::Receiver<bool>, stop: watch::Recei
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Goal: another life's claim of a turn is found by its turn and its
+    /// agent. Invalid: another turn's claim, the same turn claimed in a
+    /// record by another writer (an editor may post on `work`), and a step
+    /// of that turn are none of it.
+    #[test]
+    fn another_lifes_claim_is_found_by_its_turn_and_agent() {
+        let rec = |seq: u64, by: &str, body: Value| Record { channel: "work".into(), seq, at: 0, principal: by.into(), kind: "message".into(), body };
+        let work = vec![
+            rec(3, "npub1rowan", serde_json::json!({ "kind": "turn.start", "turn": "t-other" })),
+            rec(4, "npub1mallory", serde_json::json!({ "kind": "turn.start", "turn": "t-1" })),
+            rec(5, "npub1rowan", serde_json::json!({ "kind": "turn.step", "turn": "t-1" })),
+            rec(6, "npub1rowan", serde_json::json!({ "kind": "turn.start", "turn": "t-1" })),
+        ];
+        assert_eq!(claim_in(&work, "t-1", "npub1rowan"), Some(6));
+        assert_eq!(claim_in(&work, "t-2", "npub1rowan"), None);
+        assert_eq!(claim_in(&work[..3], "t-1", "npub1rowan"), None, "a forged claim and a step are none");
     }
 }

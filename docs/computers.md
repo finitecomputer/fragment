@@ -1856,9 +1856,12 @@ Hermes' teammate roster (each other agent of the computer, by name and
 role) and its `message_agent` tool, with which it messages another agent.
 A person's default agent makes and keeps the others (decision 62,
 proposed): `fragment agent --new` starts one and makes its Bot Chat as
-the shell does. Hermes caches each profile's roster prompt for the
-gateway's life, so a teammate made since may appear there only at the
-computer's next start. Until then, ask it with `fragment ask`.
+the shell does. Hermes lists every profile on the install on every
+roster, a fenced agent's too (`_roster`), and builds a profile's roster
+text once in its gateway's life (`get_bot_mode_protocol_section`, cached
+by profile: v0.21.7, read from its code), so a teammate made since may
+join a bot's roster only at the computer's next start; until then it is
+asked with `fragment ask`, as from any chat that is no Bot Chat.
 Hermes turns both on (v0.21.6: `tools/bot_mode_probe.py`,
 `tools/bot_mode_dm.py`, `agent/system_prompt.py`) only for a session
 titled exactly `Bot Chat`, on an install where a profile's `profile.yaml`
@@ -1922,30 +1925,50 @@ actually makes a chat a Bot Chat"), so the image does both
   started and restarted by the boot) is that owner. About once a second,
   for each agent in the bots file, it holds the agent's Bot Chat session
   (the compression tip of the session titled `Bot Chat`, when that is its
-  own chat's) with an active-session lease marked as a live-delivery
+  own chat's, else a stand-in of its own: below) with an active-session
+  lease marked as a live-delivery
   consumer, and takes each message waiting in its mailbox: it posts it
-  into the agent's own chat as the agent that sent it, naming the agent
-  in `to` (id `dm-<delivery>`, acting as the sender for their owner, as
-  `fragment ask --chat` posts a question, but adding the sender to no
-  chat: the bridge answers a record by `to`, and the chat's page names an
-  agent that is no member by its profile), and once the agent's turn of
-  it ends (read from the chat's `work`, as `fragment ask --wait` reads it,
-  for up to 30 minutes), settles the delivery with its
-  replies (up to 16,000 characters; a failure with why). That wakes the
-  sender, whose turn says the answer in the sender's own chat (a message
-  of its runtime's own: docs/chat-records.md). The message's text is
-  Hermes' own, its attribution first (`Message from 🤖 Juniper
-  (@juniper--k3x9): …`). At most four messages per agent are delivered at
-  once; the rest wait in its mailbox. While the platform holds the
-  computer the keeper writes nothing. Events: `botmode.owned`,
-  `botmode.taken`, `botmode.delivered` (its status, sender and `ms`).
-- The answer wakes the sender after a restart too. A session Hermes'
-  gateway reads back from disk (every session from before a deploy or a
-  sleep) holds no live adapter, and an agent's profile has none of its
-  own (the relay is the default profile's), so a background process's
-  completion in such a session (message_agent's answer among them) had
-  no adapter to go through: the gateway retried it every 5 s, silently,
-  for ever (p5, 2026-10-09). The
+  into the agent's own chat as the agent that sent it, an agent's ask
+  (docs/chat-records.md, "An agent's ask"): naming the agent in `to` and
+  the sender's turn it was sent from in `back` (id `dm-<delivery>`,
+  acting as the sender for their owner, as `fragment ask --chat` posts a
+  question, but adding the sender to no chat: the bridge answers a record
+  by `to`, and the chat's page names an agent that is no member by its
+  profile). So once the agent's turn of it ends (answered, stopped, or cut
+  by a restart), the bridge gives the sender a turn in its own chat with
+  what the agent said (up to `ANSWER_BACK_MAX_BYTES`, 8 KiB), as for any
+  ask: from its state and journal, which a sleep or a restart keeps, with
+  nothing waiting (docs/bridge.md, "Agents asking each other"). Hermes'
+  delivery names no turn of the sender's, so the keeper reads it from the
+  sender's own chat, where `message_agent` runs: its newest `turn.start`
+  there (the bridge runs one of an agent's turns in a chat at a time),
+  read back from `work`'s newest record. Then it settles the delivery at
+  once, which ends Hermes' wait for it (a background process of the
+  sender's, up to 30 minutes otherwise) and wakes the sender: a turn of
+  its own after the one that sent the message, told it will be given the
+  answer and to end with exactly `[SILENT]`, Hermes' silence marker (its
+  gateway says nothing for it: gateway/response_filters.py). A message
+  taken when the sender's newest turn ended over 4 minutes before (past
+  the bridge's 5 for an ask's turn, `ENDED_HOPS_MS`) is posted with no
+  `back`, and its sender told the answer stays in the agent's chat. A
+  delivery the keeper claimed and never settled (stopped between the two:
+  a sleep, a crash) is finished when it holds that Bot Chat again: posted
+  under the same id, which the platform answers as a replay, then
+  settled. The message's text is Hermes' own, its attribution first
+  (`Message from 🤖 Juniper (@juniper--k3x9): …`). At most 16 messages
+  per agent are taken a pass; the rest wait in its mailbox. While the
+  platform holds the computer the keeper writes nothing. Events:
+  `botmode.owned`, `botmode.taken`, `botmode.recovered`,
+  `botmode.delivered` (its status, sender, `how`: `back`, `reply` or
+  `none`, and `ms`).
+- A background job's completion reaches its chat after a restart too. A
+  session Hermes' gateway reads back from disk (every session from before
+  a deploy or a sleep) holds no live adapter, and an agent's profile has
+  none of its own (the relay is the default profile's), so a background
+  process's completion in such a session (message_agent's delivery,
+  whose end wakes its sender, among them) had no adapter to go through:
+  the gateway retried it every 5 s, silently, for ever (p5,
+  2026-10-09). The
   boot routes each agent to its profile in the gateway's config
   (`profile_routes`, in the managed overlay: `bots::profile_routes`), by
   one chat: its Bot Chat, else a chat it is in (an agent in no chat has
@@ -1961,33 +1984,68 @@ actually makes a chat a Bot Chat"), so the image does both
   a chat or an agent come since has its sessions in that gateway's life,
   which hold their live adapter, and every start is a boot's, which
   writes the routes first.
-- An agent with no such chat (made by other means than the shell) has no
-  Bot Chat of ours, and no owner: Hermes runs a teammate's message in a
-  Bot Chat of its own, outside the bridge, which the person sees nowhere
-  until the agent has its own chat, whose session then takes the title.
-  So does every agent while the keeper is down.
+- A bot whose own chat has had no turn yet has no Bot Chat session.
+  Hermes would run a teammate's message to it as a turn of its own,
+  outside the bridge, which the person sees nowhere (a probe on the
+  scripted model, 2026-10-20: the bot's model called, nothing in its
+  chat). So the keeper holds a stand-in for it: a session of its own in
+  the bot's `state.db` (id `fragment-bot-mode-standin`), titled `Bot
+  Chat`, which the hook takes the title from as the bot's own chat's
+  first turn starts, made again when Hermes prunes it, empty. A fenced
+  bot lists nothing for its owner, so the boot finds its own chat in an
+  unfenced agent's list for the same owner. Event: `botmode.standin`.
+- A fenced bot runs in Bot Mode too (decision 63, proposed), as itself
+  alone: its own chat is its Bot Chat, and its profile's prompt says it
+  is fenced and that its `message_agent` reaches its owner's main agent
+  only (`hermes::FENCED_NOTE`). The keeper holds to that: a fenced
+  sender's message reaches the lead (the bots file's `lead`, the
+  computer's first agent, as the shell's `primaryAgent` takes it), or
+  answers whoever asked it (its newest turn's cause is theirs); to anyone
+  else it is refused, saying whom it reaches (`how: "refused"`), and
+  nothing is posted. Its message is posted into its own chat, the one
+  chat it is in that holds nothing of another bot's, as itself (no
+  `for`: it acts for no one), naming the teammate, whom the keeper adds
+  there first (acting for the owner, as `fragment ask` adds an agent),
+  and ending with a line saying the sender is fenced and to give it
+  placeholders for its owner's private details (`FENCED`); the
+  teammate's answer, a turn of the bridge's there, comes back to it as
+  any other's. A message to a fenced bot is posted into its own chat as
+  to any bot. Two fenced bots do not message each other: either's own
+  chat would show the other's provider what it holds. Event:
+  `botmode.joined`. An agent with no own chat
+  found (made by other means than the shell or `fragment agent --new`)
+  is in no bots file, and Hermes runs a teammate's message to it on its
+  own, as it does every agent's while the keeper is down.
 - A bot answers a teammate once. Hermes' roster tells a bot that a
-  teammate messaged to answer with `message_agent`, and the delivery's
-  answer wakes the sender too, so each said it twice (the sender relaying
-  the answer again, the teammate acknowledging that: two redundant lines
-  a run on the preview). So the posted message ends with a line telling
-  the bot its reply there goes back to the sender on its own, and not to
-  message the sender about it (`ANSWER_HERE`). When a bot messages its
-  sender back anyway while answering (the keeper sees its message taken
-  while it answers the sender's, or within 3 s of that turn's end), both
-  deliveries settle with their answer under a line telling the woken bot it
-  has had it already, and to end its turn with exactly `[SILENT]` if it
-  adds nothing (`HAD_IT`), Hermes' silence marker, for which its gateway
-  says nothing (gateway/response_filters.py). Event: `botmode.delivered`'s
-  `had` (`answered`, `reply`).
+  teammate messaged to answer with `message_agent`, but its answer goes
+  back on its own, so each said it twice (two redundant lines a run on the
+  preview). So the posted message ends with a line telling the bot its
+  reply there goes back to the sender on its own, and not to message the
+  sender about it (`ANSWER_HERE`). A message a bot sends its sender
+  anyway while answering it (its newest turn's cause is the sender's
+  message) is a reply: posted with no `back`, so nothing more goes back
+  and forth, and ending with a line telling the sender its answer comes
+  back on its own too, to pass on only what is new (`REPLY`). Event:
+  `botmode.delivered`'s `how`.
 
 Proven by the Docker lane's `bots_message_each_other` (the scripted
 model: the roster and the tool from an agent's first turn in its own
-chat, a message posted into the other's chat as the sender, answered
-there by a turn of the bridge's, settled once, and said in the sender's
-chat, and so again after the container restarts, with a background
-job's completion in a chat that is no Bot Chat, and in the chat of an
-agent with none), and on a preview by the hosted `bot-mode` section, run by name
+chat, a message posted into the other's chat as the sender, asked from
+the sender's turn, answered there by a turn of the bridge's, and that
+answer given back to the sender, which says it in its own chat, its
+woken turn silent; a message sent back while answering, posted as a
+reply, which asks nothing back; a restart while the other answers, whose
+cut answer still comes back; and so again after the container restarts,
+with a background job's completion in a chat that is no Bot Chat, and in
+the chat of an agent with none), its
+`a_message_reaches_a_teammate_before_its_first_turn_and_a_fenced_one`
+(both on the roster, each message a hand-off in the bot's own chat,
+answered by the bridge's turn and given back, never a turn Hermes runs on
+its own; the title moving to the bot's own chat at its first turn there,
+a fenced bot's too, which is told it is fenced; its message to the lead
+posted into its own chat as itself, the lead added and answering there,
+the answer given back; its message to another teammate refused, nothing
+posted), and on a preview by the hosted `bot-mode` section, run by name
 (`--only bot-mode`): two real agents. Juniper, asked to have Maple make
 and publish a todo app and show it in her browser, runs `message_agent`.
 Maple's turn of it, in her own chat, makes the app, which goes live, and
@@ -2221,6 +2279,15 @@ internet; its computer only names no one for it.
 - **Its terminal names no one to act for.** Its profile's `.env` has
   no `FRAGMENT_FOR`, so the fragment CLI in its terminal acts as the
   agent alone; told its owner by hand, the platform refuses it (403).
+- **Bot Mode, as itself.** Its own chat is its Bot Chat, with the
+  roster and `message_agent`, and its prompt says it is fenced
+  (`hermes::FENCED_NOTE`). Its `message_agent` reaches its owner's main
+  agent alone, and answers whoever asked it; the keeper refuses any
+  other, and posts what it sends into its own chat, as itself, the
+  teammate added there ("Bot Mode in our Hermes image", above). A
+  teammate's `message_agent` or `fragment ask` reaches it as any bot;
+  either way the answer comes back to the agent that asked
+  (docs/bridge.md, "Agents asking each other").
 - **Fenced or let go while awake.** The boot reads the change with its
   agents (every 3 s) and writes the profile again; nothing restarts.
   Hermes reads a profile's `.env` at each turn and passes it to each

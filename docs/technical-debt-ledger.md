@@ -1176,9 +1176,11 @@ fragment.club until cutover (decisions 34–35).
   same). A chat's name has a suffix of its own, so it is looked up at a
   boot, as agents come, and every few seconds while one is missing.
   Nothing on the platform says which chat is an agent's.
-- **Risk:** an agent made another way (the API by hand) has no Bot Chat
-  of ours, and Hermes makes one of its own that the person never sees; a
-  person with two chats of that label (one made by hand) may get either.
+- **Risk:** an agent made another way (the API by hand) is in no bots
+  file, and Hermes runs a teammate's message to it as a turn of its own
+  that the person never sees; a person with two chats of that label (one
+  made by hand) may get either. A fenced agent lists nothing for its
+  owner, so its chat is found in an unfenced agent's list.
   `fragment agent --new`, which a person's default agent uses to make
   their other agents (decision 62, proposed), makes it as the shell does.
 - **First proof:** a bot whose roster and `message_agent` never appear in
@@ -1187,6 +1189,29 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** the agent fragment names its own chat (its
   `agent.json`, written by whatever makes the two), and the image, the
   shell and the CLI read that.
+
+## The keeper holds a stand-in Bot Chat in Hermes' session store
+
+- **Observed:** 2026-10-20, Bot Mode in our Hermes image (the keeper,
+  `images/hermes/botmode.py`, `bot_chat`). Hermes lists every profile on
+  every roster, and queues a teammate's message for a live owner only
+  when the bot has a session titled `Bot Chat`; with none (its own chat
+  had no turn yet), it runs the message as a turn of its own, outside the
+  bridge (`tools/bot_mode_dm.py`, `_run_local_turn`). So the keeper
+  writes a session of its own into the bot's `state.db`
+  (`fragment-bot-mode-standin`, titled `Bot Chat`) and holds it, through
+  Hermes' session API, as the hook titles the bot's own chat's.
+- **Risk:** a Hermes upgrade that changes how a Bot Chat's owner is
+  found, prunes the stand-in while a message waits for it, or refuses a
+  session no gateway made: the bot's teammates' messages are run outside
+  the bridge again, unseen, or fail.
+- **First proof:** the Docker lane's
+  `a_message_reaches_a_teammate_before_its_first_turn_and_a_fenced_one`
+  fails on a candidate image; or a hosted run whose bot's model is called
+  with a teammate's message that is in no chat.
+- **Delete when:** Hermes lets an install name its live-delivery owner
+  per profile without a session (or runs no message on its own), and the
+  keeper uses that.
 
 ## Bot Mode's roster lists the gateway as a teammate
 
@@ -1204,24 +1229,29 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** Hermes lets an install leave its default profile out
   of the roster, or our gateway's own profile is an agent's.
 
-## A bot's answer to a teammate outlives the teammate's wait only while awake
+## The keeper finds the turn a bot messaged from by reading its chat
 
-- **Observed:** 2026-10-08, Bot Mode in our Hermes image (the keeper,
-  `images/hermes/botmode.py`). A bot's `message_agent` waits for its
-  teammate's answer in a background process of Hermes' (up to 30
-  minutes), and the keeper delivers the message by a `fragment ask --wait`
-  of its own. Neither is saved: a sleep, a crash or a restart while the
-  teammate's turn runs ends both. Hermes keeps the delivery's claim for
-  good (its receipts never expire), and nothing settles it.
-- **Risk:** the sender never hears the answer, and never tells its owner;
-  the answer is in the teammate's chat, and the sender's owner sees it
-  there only if they look.
-- **First proof:** a hosted run where a computer sleeps while one bot's
-  teammate is still answering it, and the sender's chat says nothing more.
-- **Delete when:** a delivery's wait is the journal's: the keeper, at its
-  start, finds each claim of its own left unsettled and settles it from
-  the teammate's chat (the hand-off's record is `dm-<delivery>`), and the
-  sender's wake comes from that receipt rather than from a process.
+- **Observed:** 2026-10-20, Bot Mode in our Hermes image (the keeper,
+  `images/hermes/botmode.py`). Hermes' delivery of a `message_agent`
+  message names its sender (`bot:<profile>`), not the turn it was sent
+  from, which the keeper names as the ask's `back` so the answer comes
+  back to the sender (docs/chat-records.md, "An agent's ask"). So the
+  keeper reads it from the sender's own chat: its newest `turn.start`
+  there, read back from `work`'s newest record (`message_agent` runs only
+  in a Bot Chat, and the bridge runs one of an agent's turns in a chat at
+  a time), and whether it runs or ended within 4 minutes.
+- **Risk:** a message taken after the sender's turn ended and its next
+  began there (its owner spoke in that second) is asked from that next
+  turn: its answer still comes back to the sender's own chat, but at that
+  turn's hop. One taken long after it was sent (the keeper stopped a while)
+  asks nothing back, and its sender is told the answer stays in its
+  teammate's chat. A turn read wrong is a lost answer, not a wrong one.
+- **First proof:** a hosted run where a bot's `message_agent` message is
+  posted with no `back` (`botmode.delivered`'s `how: "none"`) though its
+  sender's turn was running.
+- **Delete when:** Hermes' delivery names the sender's session message
+  id (`HERMES_SESSION_MESSAGE_ID`, which `fragment ask` reads), and the
+  keeper names that.
 
 ## Own keys are kept by the person's computer
 

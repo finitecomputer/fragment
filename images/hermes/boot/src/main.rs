@@ -873,17 +873,21 @@ fn write_bots(agents: &[Agent], home: &Path, chats: &BotChats) {
 /// Each agent's Bot Chat as found (bots.rs, `bot_chat`), by its fragment.
 type BotChats = BTreeMap<String, String>;
 
-/// Looks for the Bot Chat of each agent that has none found yet, in its
+/// Looks for the Bot Chat of each agent that has none found yet, in a
 /// list for its owner: at a boot, as agents come, and on the agents'
 /// cadence while one is missing (the shell makes an agent's chat after it
-/// assigns the agent). Whether one was found. Bounded: one list a missing
-/// agent, and a computer runs at most `AGENTS_MAX` of them.
+/// assigns the agent). Its own list, or, for a fenced agent, which lists
+/// nothing for its owner, an unfenced agent's of the same owner (a
+/// person's agents all run on one computer: decision 13). Whether one was
+/// found. Bounded: one list a missing agent, and a computer runs at most
+/// `AGENTS_MAX` of them.
 async fn find_bot_chats(api: &Api, agents: &[Agent], chats: &mut BotChats) -> bool {
     let mut found = false;
-    // a fenced agent is in no Bot Mode roster, and lists nothing for its owner
-    let missing: Vec<&Agent> = agents.iter().filter(|a| !a.fenced && !chats.contains_key(&a.fragment)).collect();
+    let missing: Vec<&Agent> = agents.iter().filter(|a| !chats.contains_key(&a.fragment)).collect();
     for a in missing {
-        match api.fragments_for(&a.fragment, &a.owner).await {
+        let lister = if a.fenced { agents.iter().find(|o| !o.fenced && o.owner == a.owner) } else { Some(a) };
+        let Some(lister) = lister else { continue };
+        match api.fragments_for(&lister.fragment, &a.owner).await {
             Ok(list) => {
                 if let Some(chat) = bots::bot_chat(&a.fragment, &list) {
                     ev!("botmode.chat_found", { "agent": a.fragment, "chat": chat });
@@ -1016,7 +1020,7 @@ async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: 
         ev!("profile.credentials", { "agent": a.fragment, "providers": a.credentials.iter().map(|c| c.provider.clone()).collect::<Vec<_>>() });
     }
     // fenced or let go (decision 63, proposed): its `.env` again, naming its
-    // owner or no one, read at its next turn; its Bot Mode roster below
+    // owner or no one, read at its next turn; the bots file below says so
     for a in &change.fenced {
         write_profile(api, a, home, ids, route, credential_env).await;
         ev!("profile.fenced", { "agent": a.fragment, "fenced": a.fenced });
@@ -1030,7 +1034,9 @@ async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: 
             Err(e) => ev!("agents.serve_unasked", { "error": e, "ms": asked.elapsed().as_millis() as u64 }),
         }
     }
-    find_bot_chats(api, &change.added, chats).await;
+    // the added agents' chats (each looked for once: the found are skipped),
+    // a fenced one's through an unfenced agent of them all
+    find_bot_chats(api, now, chats).await;
     write_ready(now, home, chats);
     ev!("agents.ready", { "agents": now.len(), "ms": t.elapsed().as_millis() as u64 });
 }

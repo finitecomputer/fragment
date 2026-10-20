@@ -15,8 +15,12 @@
 # gateway identity first when the turn has not written it yet, and any other
 # session of the agent's that holds the title made to give it up (Hermes'
 # own `chat -c "Bot Chat" --create-if-missing` makes one when a teammate
-# messages an agent with no chat yet; its history stays). A turn in any
-# other chat, or of the gateway's own profile, is left alone.
+# messages an agent with no chat yet; its history stays; and the keeper's
+# stand-in, which holds the title until the agent's own chat has a turn).
+# A turn in any other chat, or of the gateway's own profile, is left
+# alone. A fenced agent's own chat is its Bot Chat too: its `message_agent`
+# reaches its owner's main agent alone, as itself (the keeper's rule:
+# decision 63, proposed).
 #
 # This file is the image's, not the repo's tooling: it runs inside Hermes'
 # gateway, whose session code only it can call.
@@ -26,6 +30,8 @@ from pathlib import Path
 
 BOTS = os.path.join(os.environ.get("FRAGMENT_RUN", "/var/lib/fragment-run"), "bots.json")
 TITLE = "Bot Chat"
+# Titling the turn's session, at most this many tries.
+TITLE_TRIES = 3
 
 
 def bot_of(home):
@@ -60,10 +66,20 @@ def handle(event_type, context):
                 session, source="relay", session_key=bot["sessionKey"], chat_id=context["chat_id"],
                 chat_type=context.get("chat_type") or "group", user_id=context.get("user_id") or None,
             )
-        holder = db.get_session_by_title(TITLE)
-        if holder is not None and holder["id"] != session:
-            db.set_session_title(holder["id"], "")
-        db.set_session_title(session, TITLE)
-        print(json.dumps({"event": "botmode.titled", "agent": bot["agent"], "session": session, "freed": holder["id"] if holder else None}), flush=True)
+        # bounded: TITLE_TRIES; the keeper may title its stand-in between
+        # the two writes (it saw no title), and gives it up to this one
+        freed = None
+        for tries in range(TITLE_TRIES):
+            holder = db.get_session_by_title(TITLE)
+            if holder is not None and holder["id"] != session:
+                db.set_session_title(holder["id"], "")
+                freed = holder["id"]
+            try:
+                db.set_session_title(session, TITLE)
+                break
+            except ValueError:
+                if tries == TITLE_TRIES - 1:
+                    raise
+        print(json.dumps({"event": "botmode.titled", "agent": bot["agent"], "session": session, "freed": freed}), flush=True)
     finally:
         db.close()

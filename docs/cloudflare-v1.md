@@ -1257,6 +1257,25 @@ Private stays possible by config.
       its job, name, picture, tier or model, or starts or stops it.
       Stopping retains its fragment, memories and job. `--job-from` and
       `fragment ask --from` read file or stdin text literally.
+    - **Answers return.** An agent's ask names the sender's current turn
+      (`back`). When the teammate answers, stops or is cut by restart,
+      the bridge journals a return turn in the sender's chat, at the
+      ask's hop. Its state and journal keep the return across sleep and
+      restart. The lead ends its sending turn, then acts on each answer.
+      A person asking has no turn to wake; `--wait` still reads the reply.
+    - **Bot Mode shares that path.** The image's keeper posts a
+      `message_agent` delivery as an ask from its sender's turn and
+      settles Hermes' process wait immediately. The bridge returns the
+      answer durably. The keeper recovers claimed deliveries under the
+      same record id and holds a stand-in Bot Chat until a new bot's own
+      chat has its first turn. Hermes caches each profile's roster for
+      the gateway's life, so an agent uses `fragment ask` for a teammate
+      absent from its roster or work belonging in another shared chat.
+    - **Fenced Bot Mode.** A fenced bot sends as itself in its own chat,
+      to the main agent or the agent it is answering. The keeper adds
+      that recipient there and refuses other destinations and two
+      fenced bots messaging each other. The recipient is reminded to
+      return placeholders for private details. The platform fence stands.
     - **Guidance.** The main agent's initial job makes it the team's lead;
       the managed `agents-finite` skill teaches when to make an agent,
       how to write its job, and how to brief and maintain it. Most work

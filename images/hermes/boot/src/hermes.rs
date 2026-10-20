@@ -329,6 +329,11 @@ pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64, screen_i
 /// what an earlier message or its memory calls it may be from before a
 /// rename. Hermes expands `${VAR}` in a config's strings from its
 /// environment, so a `${` in a name is broken apart (`$ {`).
+/// What a fenced agent is told at every turn, after its name (decision 63,
+/// proposed): it acts as itself, and its `message_agent` reaches its
+/// owner's main agent alone (the keeper refuses any other: botmode.py).
+pub const FENCED_NOTE: &str = "You are fenced: you act as yourself alone, never for your owner. Your message_agent reaches only your owner's main agent: ask it to involve anyone else.";
+
 pub fn told_name(name: &str) -> String {
     let name = name.replace("${", "$ {");
     format!("Your name is {name}: your agent fragment's title, as it is now. If an earlier message or your memory calls you something else, you have been renamed since, and {name} is your name.")
@@ -354,7 +359,8 @@ pub fn profile_config(agent: &Agent, name: &str, main: &MainModel, route: &Route
     y.push_str(&format!("# Written by hermes-boot for {} (model {}) at every boot, and when its model or its name changes.\n", agent.fragment, main.name()));
     // its name, at every turn; a tier's guidance and a text tier's one
     // retry (below) beside it, in its one `agent` mapping
-    y.push_str(&format!("agent:\n  system_prompt: {}\n", q(&told_name(name))));
+    let told = if agent.fenced { format!("{} {FENCED_NOTE}", told_name(name)) } else { told_name(name) };
+    y.push_str(&format!("agent:\n  system_prompt: {}\n", q(&told)));
     // A tier agent's prompt is the one its tiers were validated on, named
     // `cheap` and `medium` (canary rounds 1 to 4): Hermes adds guidance for
     // a model's family by a substring of its name, and named by its id a
@@ -1037,8 +1043,9 @@ mod tests {
 
     /// Decision 63 (proposed): a fenced agent's fence is the platform's. On
     /// its computer its profile is any agent's (its tools, its terminal, the
-    /// internet), but its terminal names no one to act for; let go, it names
-    /// its owner again.
+    /// internet), but its terminal names no one to act for, and it is told
+    /// so at every turn; let go, it names its owner again, and is told
+    /// nothing of a fence.
     #[test]
     fn a_fenced_agents_terminal_names_no_one_to_act_for() {
         let fenced = Agent { fenced: true, ..agent() };
@@ -1047,7 +1054,9 @@ mod tests {
         assert!(profile_env(&agent()).contains("\nFRAGMENT_FOR=npub1paul\n"), "let go, its owner");
         let creds = Path::new("/c.sh");
         for main in [Tier::Cheap.into(), Tier::Medium.into(), Tier::High.into()] {
-            assert_eq!(profile_config(&fenced, "Juniper", &main, &route("http://m"), &[], creds), profile_config(&agent(), "Juniper", &main, &route("http://m"), &[], creds), "its tools and terminal are any agent's");
+            let (told, let_go) = (profile_config(&fenced, "Juniper", &main, &route("http://m"), &[], creds), profile_config(&agent(), "Juniper", &main, &route("http://m"), &[], creds));
+            assert!(told.contains(FENCED_NOTE) && !let_go.contains("You are fenced"), "a fenced agent is told so at every turn: {told}");
+            assert_eq!(told.replace(&format!(" {FENCED_NOTE}"), ""), let_go, "its tools and terminal are any agent's");
         }
     }
 

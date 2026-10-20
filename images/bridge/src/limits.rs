@@ -167,6 +167,11 @@ pub const AGENT_TURN_CHATS_MAX: usize = 256;
 pub const ENDED_HOPS_MS: u64 = 5 * 60 * 1000;
 pub const ENDED_HOPS_MAX: usize = 256;
 
+/// What an asked agent said is kept for its asker's answer turn (engine.rs,
+/// `answer_back`) up to this many bytes, its replies joined; the rest is in
+/// the chat it said it in. Kept in `/data` while that turn runs, so small.
+pub const ANSWER_BACK_MAX_BYTES: usize = 8 * 1024;
+
 /// Reconnects wait a jittered backoff (lesson 5): from this, doubling, up to
 /// the max, each wait a uniform 0.5–1.5 of it.
 pub const RECONNECT_MS_MIN: u64 = 1_000;
@@ -259,4 +264,5 @@ const _: () = assert!(NOTE_PAGE_RECORDS as usize <= NOTE_SCAN_RECORDS_MAX && NOT
 const _: () = assert!(HOPS_MAX >= 1, "an agent's record is one hop at least");
 const _: () = assert!(AGENT_TURNS_PER_CHAT_MAX > HOPS_MAX as usize, "the budget is a backstop, past one chain of hand-offs");
 const _: () = assert!(AGENT_TURNS_WINDOW_MS > 0 && ENDED_HOPS_MS > 0);
+const _: () = assert!(ANSWER_BACK_MAX_BYTES + 1024 < MESSAGE_TEXT_MAX_BYTES, "an answer, and what says whose, fit the message its asker is handed");
 const _: () = assert!(MEDIA_FETCH_MS < 30_000, "Hermes waits 30 s for an op's answer, a fetched file's included");
