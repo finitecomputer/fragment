@@ -56,8 +56,19 @@ works. Never save a skill or a script and call it their bot.
 
 ## Make one
 
+First look at the team you lead (`fragment list --json`, kind `agent`,
+and your roster): when an agent already does this job, or nearly, brief
+it, and widen its job if it needs to (`fragment agent <agent>
+--job-from -`), rather than make another. Your owner's team grows one
+specialist per job.
+
+Name a new one by its job: one to three lowercase words joined by
+dashes (`melee-researcher`, `hardware-deal-finder`, `website-designer`,
+`ai-stock-consultant`). That is its label, its @name and the name your
+owner sees; an agent is never given a person's name.
+
 ```sh
-fragment agent --new garden --name Juniper --job-from - <<'JOB'
+fragment agent --new garden-keeper --job-from - <<'JOB'
 You keep the garden's notes for your owner: what was planted where and when, what to water, what to harvest.
 You answer the default agent's questions about the garden, plainly. You never message anyone outside this computer.
 JOB
@@ -65,9 +76,11 @@ JOB
 
 It makes the agent fragment, starts it on your owner's computer, writes
 its job, puts it live, and makes its own chat with your owner
-(`garden-chat`), which it leaves you out of, so the new agent leads it. Run it again after an
-error: it finishes what the first try made. A label already taken by an
-agent with another job is refused, never rewritten.
+(`garden-keeper-chat`), which it leaves you out of, so the new agent
+leads it. Run it again after an error: it finishes what the first try
+made. A name another agent has already is refused, never rewritten:
+that agent exists, so brief it, or name this one by what sets its job
+apart.
 
 Write the job as who it is and what it does, in the second person:
 
@@ -75,18 +88,18 @@ Write the job as who it is and what it does, in the second person:
   beside its name on their roster.
 - Then what it does, what it never does, and who it answers to (you,
   and its owner).
-- Never its name: that is its title (`--name`), which a rename changes.
+- Never its name, which a rename changes.
 - Pass it with `--job-from -` and a quoted marker (`<<'JOB'`), as above:
   the shell changes nothing between the markers, so `$`, backticks and
   quotes stay as you wrote them.
 
 Then brief it with `fragment ask` (it is not on your roster yet), and
 tell your owner in one plain line what you made and why ("I set up
-Juniper to keep your garden notes; ask me or Juniper anything about the
-garden").
+garden-keeper to keep your garden notes; ask me or garden-keeper anything
+about the garden").
 
 ```sh
-fragment ask garden --from - <<'ASK'
+fragment ask garden-keeper --from - <<'ASK'
 Here is what your owner planted this spring: …
 ASK
 ```
@@ -118,11 +131,11 @@ there go to it.
 
 ```sh
 fragment list --json                          # your owner's fragments: agents are kind "agent"
-fragment agent garden                          # its name, where its model calls go, whether it runs
-fragment agent garden --job "…"                # its job, rewritten
-fragment agent garden --tier medium            # the platform's stronger tier
-fragment agent garden --stop                   # stopped: its job and memories kept
-fragment agent garden --start                  # running again
+fragment agent garden-keeper                   # its name, where its model calls go, whether it runs
+fragment agent garden-keeper --job "…"         # its job, rewritten
+fragment agent garden-keeper --tier medium     # the platform's stronger tier
+fragment agent garden-keeper --stop            # stopped: its job and memories kept
+fragment agent garden-keeper --start           # running again
 ```
 
 When your owner's needs change, change the job rather than make a second
@@ -178,9 +191,10 @@ it work (below): the task's details, placeholders for your owner's.
 You are your owner's guard. Before you hand anything to a teammate on
 their own provider, send the task, never the private details.
 
-**Asking for its help is not consent.** "Have Polisher fix this note"
-asks for the work; it does not let Polisher see your owner's details.
-Only your owner's words about the details themselves do ("Polisher may
+**Asking for its help is not consent.** "Have note-polisher fix this
+note" asks for the work; it does not let note-polisher see your owner's
+details. Only your owner's words about the details themselves do
+("note-polisher may
 see my address"). So every time, before you send:
 
 1. **Find the private details** in what you are about to send: people's

@@ -341,10 +341,10 @@ enum Cmd {
         /// computer names itself by leaving it out
         #[arg(conflicts_with = "new")]
         agent: Option<String>,
-        /// Make a new agent with this label (its @name), running on your
-        /// computer, with a chat of its own with you: give it --name and --job
-        /// (or --job-from)
-        #[arg(long, value_name = "LABEL", requires = "name", conflicts_with_all = ["picture", "no_picture", "start", "stop", "no_model", "fence", "no_fence"])]
+        /// Make a new agent with this label (its @name, and its name unless
+        /// --name), running on your computer, with a chat of its own with
+        /// you: give it --job (or --job-from)
+        #[arg(long, value_name = "LABEL", conflicts_with_all = ["picture", "no_picture", "start", "stop", "no_model", "fence", "no_fence"])]
         new: Option<String>,
         /// Its new name
         #[arg(long, value_name = "NAME")]
@@ -2029,7 +2029,9 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Agent { new: Some(label), name, job, job_from, tier, model, .. } => {
             let settings = agent_settings(tier.as_deref(), model.as_deref(), false)?;
             let job = job_given(job, job_from)?.ok_or_else(|| usage("give the new agent its job: --job TEXT, or --job-from FILE (- for stdin)"))?;
-            let asked = agent::New { label, name: name.unwrap_or_default(), job, settings };
+            // its name its label's unless one is given
+            let name = name.unwrap_or_else(|| label.clone());
+            let asked = agent::New { label, name, job, settings };
             let made = agent::make(&c, &asked)?;
             json_exit(j, &made);
             let label = fragment_proto::split_fragment_name(&made.agent).map_or(made.agent.as_str(), |(l, _)| l);
@@ -2176,6 +2178,11 @@ fn agent_face_writes(c: &api::Client, agent: &str, name: Option<&str>, picture: 
     if let Some(name) = name.map(str::trim) {
         if name.is_empty() || name.chars().count() > fragment_proto::limits::TITLE_MAX_CHARS {
             return Err(usage(format!("a name is 1 to {} characters", fragment_proto::limits::TITLE_MAX_CHARS)));
+        }
+        // its own: another of its owner's agents' is refused
+        let list: fragment_proto::FragmentList = c.call_as(c.get("/api/fragments")?)?;
+        if let Some(other) = agent::named_already(c, &list.fragments, name, Some(agent)) {
+            return Err(anyhow::Error::new(CodedError { code: Code::Conflict, msg: format!("{other} is named {name:?} already: give this one a name of its own") }));
         }
         let mut manifest: Value = c.call_as(c.get(&format!("/api/f/{agent}/manifest"))?)?;
         anyhow::ensure!(manifest.is_object(), "{agent}'s fragment.json is not an object: {manifest}");

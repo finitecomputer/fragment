@@ -352,6 +352,23 @@ fn cli(s: &mut Suite, api: &Api) -> Result<()> {
         !out.status.success() && said.contains("job of its own") && api.signed(&me, "GET", &format!("/api/f/{agent}/file?path=SOUL.md"), None)?.text == format!("{job}\n"),
         &said,
     );
+    // its name its own: named by its label when no --name is given, and a
+    // name another of its owner's agents has (its title or label, case and
+    // dashes aside) refused, for a new agent and a rename alike
+    let (pine, birch) = (s.name("pine"), s.name("birch"));
+    let named = s.cli_json(api, &home, &["agent", "--new", &pine, "--job", "You keep the pine stand's notes.", "--json"])?;
+    let pine_agent = named["agent"].as_str().unwrap_or("").to_string();
+    let title = api.signed(&me, "GET", &format!("/api/f/{pine_agent}/manifest"), None)?.body["meta"]["title"].clone();
+    let twin = s.cli(api, &home, &["agent", "--new", &birch, "--name", "oak", "--job", "You keep the birches.", "--json"]);
+    let twin_said = format!("{}{}", String::from_utf8_lossy(&twin.stdout), String::from_utf8_lossy(&twin.stderr));
+    let renamed = s.cli(api, &home, &["agent", &pine_agent, "--name", "OAK"]);
+    let listed = api.signed(&me, "GET", "/api/fragments", None)?.body["fragments"].clone();
+    let birch_made = listed.as_array().into_iter().flatten().any(|f| f["name"].as_str().is_some_and(|n| n.starts_with(&format!("{birch}--"))));
+    s.ok(
+        "a new agent with no --name is named by its label; another of its owner's agents' name (Oak's, as `oak` or `OAK`) is refused (conflict), for a new agent (none made) and a rename",
+        named["name"] == pine.as_str() && title == json!(pine) && !twin.status.success() && twin_said.contains("is named") && !birch_made && !renamed.status.success(),
+        json!({ "named": named, "title": title, "twin": twin_said, "renamed": renamed.status.code(), "birchMade": birch_made }),
+    );
     let bad = s.cli(api, &home, &["agent", "--new", "Not A Label", "--name", "X", "--job", "y"]);
     let high = s.cli(api, &home, &["agent", &agent, "--tier", "high"]);
     let model = s.cli(api, &home, &["agent", &agent, "--model", "claude"]);

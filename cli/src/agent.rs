@@ -200,6 +200,27 @@ fn own_labelled<'a>(c: &Client, list: &'a [ListedFragment], kind: FragmentKind, 
     list.iter().find(|f| f.kind == kind && owns(f) && fragment_proto::split_fragment_name(&f.name).is_some_and(|(l, _)| l == label))
 }
 
+/// A name as two agents' are compared: case, spaces, dashes and underscores
+/// aside (`Melee Researcher` is `melee-researcher`).
+pub fn name_key(name: &str) -> String {
+    name.split(|c: char| c.is_whitespace() || c == '-' || c == '_').filter(|w| !w.is_empty()).map(str::to_lowercase).collect::<Vec<_>>().join(" ")
+}
+
+/// Another of its owner's agents (not `not`, the one being named) already
+/// called `name`, by its title or its label (`name_key`): its fragment's
+/// name. A person's agents each have a name of their own, which their
+/// roster, their @names and the shell show (two chats of the same lead once
+/// named two of them "Scout").
+pub fn named_already<'a>(c: &Client, list: &'a [ListedFragment], name: &str, not: Option<&str>) -> Option<&'a str> {
+    let key = name_key(name);
+    let owns = |f: &ListedFragment| match c.agent() {
+        Some(_) => f.owned,
+        None => f.role == Role::Owner,
+    };
+    let called = |f: &ListedFragment| f.title.as_deref().is_some_and(|t| name_key(t) == key) || fragment_proto::split_fragment_name(&f.name).is_some_and(|(l, _)| name_key(l) == key);
+    list.iter().find(|f| f.kind == FragmentKind::Agent && owns(f) && Some(f.name.as_str()) != not && called(f)).map(|f| f.name.as_str())
+}
+
 /// A file of `name` at main, or none.
 fn read_file(c: &Client, name: &str, path: &str) -> Result<Option<String>> {
     let r = c.get(&format!("/api/f/{name}/file?path={path}"))?;
@@ -308,6 +329,11 @@ pub fn make(c: &Client, new: &New) -> Result<Made> {
     let home = home(c, true)?;
     let list: FragmentList = c.call_as(c.get("/api/fragments")?)?;
 
+    // its name its own: another agent's is refused (an earlier try's is its)
+    let earlier = own_labelled(c, &list.fragments, FragmentKind::Agent, label).map(|f| f.name.as_str());
+    if let Some(other) = named_already(c, &list.fragments, name, earlier) {
+        return Err(coded(Code::Conflict, format!("{other} is named {name:?} already: if it does this job, brief it (`fragment ask`) or change its job; otherwise name this one by its own job")));
+    }
     // its fragment, an earlier try's or new
     let (agent, made_agent) = match own_labelled(c, &list.fragments, FragmentKind::Agent, label) {
         Some(f) => (f.name.clone(), false),
@@ -421,6 +447,18 @@ pub fn running(c: &Client, agent: &str) -> Result<Option<bool>> {
 
 #[cfg(test)]
 mod tests {
+    /// Two agents' names are the same name whatever their case, spaces,
+    /// dashes or underscores: `Melee Researcher` is `melee-researcher`, and
+    /// `Scout` is `scout`; `melee-research` is another.
+    #[test]
+    fn a_name_is_compared_by_its_words() {
+        assert_eq!(name_key("Melee Researcher"), name_key("melee-researcher"));
+        assert_eq!(name_key("  ai_stock--consultant "), "ai stock consultant");
+        assert_eq!(name_key("Scout"), name_key("scout"));
+        assert_ne!(name_key("melee-research"), name_key("melee-researcher"));
+        assert_eq!(name_key(" - "), "", "no words, no name");
+    }
+
     use super::*;
 
     #[test]

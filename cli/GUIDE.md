@@ -791,17 +791,19 @@ by them (your shell, its chats, the share sheet, push notifications),
 and so does its runtime (Hermes' Bot Mode), within seconds of a change:
 
 ```
-fragment agent juniper--k3x9 --name Frank          # its name
-fragment agent juniper--k3x9 --picture frank.jpg   # its picture (--no-picture takes it away)
-fragment agent juniper--k3x9                       # what they are now
+fragment agent garden-keeper--k3x9 --name plant-doctor   # its name
+fragment agent garden-keeper--k3x9 --picture leaf.jpg    # its picture (--no-picture takes it away)
+fragment agent garden-keeper--k3x9                       # what they are now
 ```
 
 `fragment agent` checks the picture, writes both in one commit and puts
 it live; an agent on a computer leaves its own name out. A picture too
 large or that is no picture is refused before anything is written; one
 committed by hand is refused when it is deployed (`fragment deploy` and
-`fragment status` say why), and the last good name and picture stay.
-Its `@name`, the word that mentions it, stays its label. Its runtime's
+`fragment status` say why), and the last good name and picture stay. A
+name another of its owner's agents has (its name or label, case, spaces
+and dashes aside) is refused (409). Its `@name`, the word that mentions
+it, stays its label. Its runtime's
 own files (Hermes' `profile.yaml`) are written from its name: never edit
 them to rename it.
 
@@ -812,18 +814,20 @@ owner's other agents as its owner would (docs: decision 62, proposed), so
 a person's default agent keeps the rest:
 
 ```
-fragment agent --new maple --name Maple --job "You keep the garden's notes: …"   # made, running, its own chat
-fragment agent maple --job "…"                     # its job (its SOUL.md)
-fragment agent maple --tier medium                 # the platform's tier it runs on
-fragment agent maple --model openrouter:anthropic/claude-sonnet-5.5   # a model of a provider its owner connected
-fragment agent maple --no-model                    # its tier again
-fragment agent maple --stop                        # stopped: its fragment, job and memories kept
-fragment agent maple --start                       # running again
-fragment agent maple --fence                       # fenced: it acts as itself alone (--no-fence, its owner's)
-fragment agent maple                               # its name, where its model calls go, whether it runs
+fragment agent --new garden-keeper --job "You keep the garden's notes: …"   # made, running, its own chat
+fragment agent garden-keeper --job "…"             # its job (its SOUL.md)
+fragment agent garden-keeper --tier medium         # the platform's tier it runs on
+fragment agent garden-keeper --model openrouter:anthropic/claude-sonnet-5.5   # a model of a provider its owner connected
+fragment agent garden-keeper --no-model            # its tier again
+fragment agent garden-keeper --stop                # stopped: its fragment, job and memories kept
+fragment agent garden-keeper --start               # running again
+fragment agent garden-keeper --fence               # fenced: it acts as itself alone (--no-fence, its owner's)
+fragment agent garden-keeper                       # its name, where its model calls go, whether it runs
 ```
 
-`--new <label>` makes the agent fragment (titled `--name`), starts it on
+`--new <label>` makes the agent fragment (named by its label, or by
+`--name`: a name another of its owner's agents has is refused, 409; an
+agent names one by its job, `melee-researcher`), starts it on
 its owner's computer, writes its job and settings, puts them live, and
 makes its own chat with its owner (`<label>-chat`, its Bot Chat), with
 it in it. An agent that runs it is in that chat as its maker and leaves
@@ -921,7 +925,7 @@ fragment mcp <name> [--write]            # its described operations as an MCP se
 fragment agent [<agent>] [--name N] [--picture FILE | --no-picture] [--job T | --job-from FILE|-]
 fragment agent [<agent>] [--tier cheap|medium] [--model PROVIDER:ID | --no-model] [--start | --stop]
 fragment agent [<agent>] [--fence | --no-fence]
-fragment agent --new <label> --name N --job T | --job-from FILE|- [--tier cheap|medium] [--model PROVIDER:ID]
+fragment agent --new <label> [--name N] --job T | --job-from FILE|- [--tier cheap|medium] [--model PROVIDER:ID]
 fragment operator key <file>
 fragment operator wipe <email|npub> [--dry-run | --yes] [--key-file F]
 fragment operator people [--q Q] [--after A] [--key-file F]

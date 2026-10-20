@@ -1200,12 +1200,23 @@ these other providers."
       settings, a deploy, its own chat) an agent did already for its
       owner. What it starts has every connection its owner has (decision
       44), as one its owner starts does.
-    - **One step makes one.** `fragment agent --new <label> --name N
+    - **One step makes one.** `fragment agent --new <label> [--name N]
       --job T [--tier …] [--model …]` (cli/src/agent.rs) is the shell's
       first run for any agent: made, started, its job live, and its own
       chat (`<label>-chat`, its Bot Chat), which the making agent then
       leaves so the new one leads it. `fragment agent <agent> --job …
       --tier … --model … --start --stop` keeps it.
+    - **A teammate is named by its job** (Austin, 2026-10-20: two chats of
+      one lead each named a teammate "Scout"; "simple non-human one to
+      three word names … the user / orchestrator will stack these
+      specialized agents over time"). The lead names one in one to three
+      lowercase words joined by dashes (`melee-researcher`), its label and
+      its name both (`--new` names it by its label unless `--name`), and
+      looks at its team first, briefing and widening the job of one that
+      does it already (agents-finite). The CLI refuses a name another of
+      the owner's agents has, its title or its label, case, spaces and
+      dashes aside (409), for `--new` and a rename alike; a rename in
+      Settings is not checked.
     - **An answer comes back to the agent that asked** (Austin,
       2026-10-18, on a local run: the default agent was "falling asleep
       on the job and leaving the other bots hanging").
