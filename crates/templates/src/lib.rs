@@ -80,6 +80,22 @@ pub fn shell(name: &str) -> Option<&'static File> {
     SHELL.binary_search_by(|f| f.path.cmp(name)).ok().map(|i| &SHELL[i])
 }
 
+/// The shell's page's one blank (cell/shell/index.html, its
+/// `<meta name="fragment-release">`): the release that answers it, which
+/// its script compares with the release every later answer names, to
+/// reload once the platform under it changed (docs/api.md, The shell).
+#[cfg(feature = "platform")]
+pub const RELEASE_BLANK: &str = "{{release}}";
+
+/// The shell's page (`index.html`'s text) as `release` answers it: its
+/// blank filled once. `release` is a release's id
+/// (`fragment_core::release::valid`), which an attribute holds as it is.
+#[cfg(feature = "platform")]
+pub fn shell_page(text: &str, release: &str) -> String {
+    assert!(fragment_core::release::valid(release) && text.matches(RELEASE_BLANK).count() == 1, "the shell's page has its release's blank once, for a release's id");
+    text.replacen(RELEASE_BLANK, release, 1)
+}
+
 /// The shell's files it publishes at `/__shell/<name>` (cell/src/shell.rs),
 /// each with its content type: of the rest of cell/shell/, its pages are
 /// served at their own paths, and its credits and licenses not at all.
@@ -273,6 +289,25 @@ pub(crate) mod tests {
             assert!(shell(name).is_some() && shell_published(name).is_none(), "{name}");
         }
         assert!(shell_published("nope.js").is_none() && shell_published("../templates/chat/app.mjs").is_none());
+    }
+
+    /// Goal: the shell's page names the release that answered it, in the
+    /// one place its script reads (shell.js `RELEASE`). Valid: index.html
+    /// has the blank once, in that meta; filled, the meta names the id and
+    /// no blank is left. Invalid: an id that is none (an attribute's quote,
+    /// a space), or a page without its blank or with two.
+    #[test]
+    fn the_shell_page_names_its_release() {
+        let page = std::fs::read_to_string(repo().join("cell/shell/index.html")).unwrap();
+        assert!(page.contains(&format!(r#"<meta name="fragment-release" content="{RELEASE_BLANK}">"#)), "its meta holds the blank");
+        let filled = shell_page(&page, "bc8b87e7a1b2-dirty-1760918400");
+        assert!(filled.contains(r#"<meta name="fragment-release" content="bc8b87e7a1b2-dirty-1760918400">"#) && !filled.contains(RELEASE_BLANK));
+        assert_eq!(filled.len(), page.len() - RELEASE_BLANK.len() + "bc8b87e7a1b2-dirty-1760918400".len(), "nothing else changes");
+        for bad in [r#"x" onload="y"#, "a b", ""] {
+            assert!(std::panic::catch_unwind(|| shell_page(&page, bad)).is_err(), "{bad:?}");
+        }
+        assert!(std::panic::catch_unwind(|| shell_page("<html>", "dev")).is_err(), "no blank");
+        assert!(std::panic::catch_unwind(|| shell_page(&format!("{RELEASE_BLANK}{RELEASE_BLANK}"), "dev")).is_err(), "two");
     }
 
     fn walkdir(dir: &std::path::Path) -> usize {

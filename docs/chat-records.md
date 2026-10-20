@@ -619,6 +619,22 @@ sends `{fragment: "open-launcher"}` to its parent. The shell accepts it
 only from its focused, listed fragment iframe with the expected origin.
 Standalone chats leave the shortcut to the browser.
 
+**A new release, around it.** The shell reloads itself, its chats' pages
+with it, once the platform under it runs another release (docs/api.md,
+The shell, "A new release"), and asks the page first what it holds
+(`{fragment: "unsent?", ask}`). The page answers its parent at once,
+whether or not its socket is up (a page that never had its hello holds
+nothing): `{fragment: "unsent", ask, text, held, idleMs}`, `text` the
+composer's words, `held` whether it holds what a reload could not keep
+(files, a voice memo, a quote, a card's typed answer, a message the
+platform has not taken, or one that failed), `idleMs` since its person
+last touched it. The shell reloads only when nothing is held, keeping the
+words, and gives them back after (`{fragment: "restore-unsent", text}`):
+taken only from its parent at the platform's origin (its hello's
+`platform`) by someone who may post here, they go in an empty composer,
+or before what was typed since, never over it, and the page says so
+(`{fragment: "unsent-restored"}`).
+
 **Your other agents.** Framed, the page asks the shell for its person's
 agents as it mounts (`{fragment: "agents?"}`). A shell answers only a
 frame of a fragment its person owns (docs/api.md, The shell), so in its

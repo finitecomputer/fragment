@@ -12,6 +12,10 @@
 //!   POST /api/test/registry {…}: a lever on the registry (the whole deployment's)
 //!   POST /api/test/mail     {to, subject, text}: one message, as the platform sends it
 //!
+//! And one hook no route takes: on a local fleet, a request's
+//! `fragment_e2e_release` cookie names the release it is answered as
+//! (`answered_release`), so a browser meets a deploy.
+//!
 //! An e2e person signs in by an `@e2e.test` email under the e2e issuer, so
 //! no real sign-in ever reaches them, and is made a seat whose paid calls
 //! (model calls and AI steps) are capped at what the request asks for, at
@@ -40,6 +44,24 @@ use crate::{ask_registry, check_name, json_answer, ledger, no_route, read_body, 
 /// The ledger command that makes an e2e person a seat: one id, so signing
 /// the same person in again sets nothing twice.
 const E2E_SEAT_ID: &str = "e2e-seat";
+
+/// The cookie a request on a local fleet with a test secret names the
+/// release it is answered as in (docs/api.md, Test levers): a browser's,
+/// so one browser meets a deploy and no one else's answers change.
+const RELEASE_COOKIE: &str = "fragment_e2e_release";
+
+/// The release the platform's own host names in its answer to `req`
+/// (`x-fragment-deploy`, the shell's page's meta: docs/api.md, The shell):
+/// its own, `FRAGMENT_DEPLOY_ID`, or on a local fleet with a test secret
+/// the one the request's `RELEASE_COOKIE` names, as a deploy would. Calls
+/// between the Worker and its objects keep its own (`routed`): only what
+/// a browser reads changes. A preview's and production's answers are
+/// their own, whatever a request carries.
+pub(crate) fn answered_release(cfg: &Config, req: &Request) -> String {
+    let cookies = (cfg.test_hooks && !cfg.levers_scoped).then(|| req.headers().get("cookie").ok().flatten()).flatten().unwrap_or_default();
+    let named = fragment_core::site::cookie(&cookies, RELEASE_COOKIE).filter(|id| fragment_core::release::valid(id));
+    named.unwrap_or(&cfg.deploy_id).to_string()
+}
 
 /// `POST /api/test/signin`.
 #[derive(Deserialize)]

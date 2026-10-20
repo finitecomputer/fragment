@@ -1055,22 +1055,31 @@ pub(crate) async fn route(req: Request, env: &Env, ctx: &Context) -> CellResult<
     }
     // everything else is the platform's own answer, an error's included,
     // with the platform's headers (`platform_origin`)
+    let release = levers::answered_release(cfg, &req);
     let answered = match platform_answer(req, env, ctx, cfg, url).await {
         Ok(resp) => resp,
         Err(e) => e.response()?,
     };
-    platform_origin(answered)
+    platform_origin(answered, &release)
 }
+
+/// The header the platform's own host names the release that answered in
+/// (`FRAGMENT_DEPLOY_ID`, or a local fleet's test cookie's: levers.rs
+/// `answered_release`), on every answer there, `/healthz`'s among them.
+const DEPLOY_HEADER: &str = "x-fragment-deploy";
 
 /// The headers every answer of the platform's own host carries (a page,
 /// sign-in's and `/cli`'s, a callback's, the API's JSON, a refusal): no
-/// type sniffing, and no referrer beyond the origin unless the answer chose
-/// its own (sign-in's hand-offs send none; the shell's pages say theirs). A
-/// computer's origin is left as its guest answers: its pages are the
-/// image's own.
-fn platform_origin(resp: Response) -> CellResult<Response> {
+/// type sniffing, no referrer beyond the origin unless the answer chose
+/// its own (sign-in's hand-offs send none; the shell's pages say theirs),
+/// and the release that answered (`DEPLOY_HEADER`: the shell compares it
+/// with its page's, to reload once the platform under it changed;
+/// docs/api.md, The shell). A computer's origin is left as its guest
+/// answers: its pages are the image's own.
+fn platform_origin(resp: Response, release: &str) -> CellResult<Response> {
     let h = resp.headers().clone();
     h.set("x-content-type-options", "nosniff")?;
+    h.set(DEPLOY_HEADER, release)?;
     if !h.has("referrer-policy")? {
         h.set("referrer-policy", "same-origin")?;
     }
@@ -1109,7 +1118,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         },
         // the shell, for everyone: signed out it asks them to sign in;
         // `/settings` opens its settings, `/welcome` a new person's welcome
-        (Method::Get, [""] | ["settings"] | ["welcome"]) => shell::page(env, cfg, &url).await,
+        (Method::Get, [""] | ["settings"] | ["welcome"]) => shell::page(&req, env, cfg, &url).await,
         // the operators' admin page: to anyone else, the 404 below
         (Method::Get, ["admin"]) => shell::admin_page(&req, env, cfg, &url).await,
         (_, ["auth", ..] | ["cli"] | ["cli", "begin" | "approve"]) => {
@@ -1122,11 +1131,8 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         }
         (Method::Get | Method::Head, ["llms.txt"]) => assets::agent_doc(&req, env, cfg, LLMS_TXT).await,
         (Method::Get | Method::Head, ["llms-full.txt"]) => assets::agent_doc(&req, env, cfg, LLMS_FULL_TXT).await,
-        (Method::Get | Method::Head, ["healthz"]) => {
-            let mut resp = Response::ok("ok")?;
-            resp.headers_mut().set("x-fragment-deploy", &cfg.deploy_id)?;
-            Ok(resp)
-        }
+        // its release in `DEPLOY_HEADER`, as every answer here names it (`platform_origin`)
+        (Method::Get | Method::Head, ["healthz"]) => Ok(Response::ok("ok")?),
         (Method::Post, ["api", "fragments"]) => {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let create: CreateFragment = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
