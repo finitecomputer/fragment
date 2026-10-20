@@ -1,11 +1,13 @@
 //! `cargo xtask check`'s HTML-sink pass: no first-party JavaScript turns a
-//! string into markup or code. A page's text (a file, a message, a model's
+//! string into markup. A page's text (a file, a message, a model's
 //! words) becomes DOM through the DOM's constructors and setters only
 //! (cell/markdown.mjs renders markdown so; an icon is built of its shapes),
 //! so no text can add an element, an attribute or a script to a fragment's
 //! origin. The notes viewer once put `marked`'s output in `innerHTML`, and
 //! every note's `<img onerror>` ran as its viewers (the 2026-10-16 audit's
 //! H2); this pass makes the sink itself the error, wherever it is written.
+//! A string run as code outright (`eval`, `Function`, a timer's string) is
+//! eval_sinks.rs's, in runtime code.
 //!
 //! Which source: every file `js_syntax` checks (first-party `.js`, `.mjs`
 //! and `.cjs`, less its `VENDORED`), and each inline `<script>` of a `.html`
@@ -13,14 +15,14 @@
 //! one fails the check, its file and line named: in code, in a string (so
 //! `el["innerHTML"]` is found too) and in a comment (so no exception hides
 //! in one, and the words never appear). A name is found where it starts a
-//! word, and ends one when it ends in a letter (`retrieval(` is no `eval(`).
+//! word, and ends one when it ends in a letter (`innerHTMLish` is no
+//! `innerHTML`).
 //!
 //! Besides the names, a few shapes are sinks only by what follows them
-//! (`SHAPED`): an `on…` attribute set by `setAttribute`, a timer handed a
-//! string, a `<script>` the page makes. `eval` and `Function` are found
-//! with space before their `(` too, and `srcdoc` in any case.
+//! (`SHAPED`): an `on…` attribute set by `setAttribute`, a `<script>` the
+//! page makes. `srcdoc` is found in any case.
 //!
-//! An exception is a place that must turn a string into code or markup:
+//! An exception is a place that must turn a string into markup:
 //! `ALLOWED`, each with why. Like `js_syntax`'s lists, an entry that no
 //! longer matches fails the check, so a stale one never waves a new use
 //! through.
@@ -29,18 +31,16 @@
 //! (`el["inner" + "HTML"]`, `Reflect.set`, `document[name]`), a sink taken
 //! into a variable first (`const write = document.write`), a URL of
 //! `javascript:` set on a link or `location` (the renderer's links are held
-//! to safe schemes, and a page's own must be), code loaded from a string's
-//! URL (`import()` or a `Worker` of a `data:` or `blob:` URL), and the text
-//! of a `<script>` the page did not make here.
+//! to safe schemes, and a page's own must be), and the text of a `<script>`
+//! the page did not make here.
 
 use std::path::Path;
 
 use anyhow::{ensure, Context, Result};
 
-/// The names that turn a string into markup or code, each with what it
-/// does. A name ending in `(` is found with space before its `(` too; one
+/// The names that turn a string into markup, each with what it does. One
 /// in lower case (an attribute's) is found in any case.
-pub const REFUSED: [(&str, &str); 12] = [
+pub const REFUSED: [(&str, &str); 10] = [
     ("innerHTML", "parses a string as markup"),
     ("outerHTML", "parses a string as markup"),
     ("insertAdjacentHTML", "parses a string as markup"),
@@ -51,18 +51,14 @@ pub const REFUSED: [(&str, &str); 12] = [
     ("createContextualFragment", "parses a string as markup"),
     ("setHTMLUnsafe", "parses a string as markup"),
     ("parseHTMLUnsafe", "parses a string as markup"),
-    ("eval(", "runs a string as code"),
-    ("Function(", "runs a string as code"),
 ];
 
 /// A test of the text after a name's `(` and any space.
 pub type Follows = fn(&str) -> bool;
 
 /// The shapes that are sinks by what follows a name: `(name, after, what)`.
-pub const SHAPED: [(&str, Follows, &str); 4] = [
+pub const SHAPED: [(&str, Follows, &str); 2] = [
     ("setAttribute", event_attribute, "sets an event handler (on…) from a string"),
-    ("setTimeout", string_first, "runs a string as code"),
-    ("setInterval", string_first, "runs a string as code"),
     ("createElement", script_element, "makes a <script>, whose text runs"),
 ];
 
@@ -72,11 +68,6 @@ fn event_attribute(after: &str) -> bool {
     matches!(chars.next(), Some('"' | '\'' | '`')) && chars.as_str().get(..2).is_some_and(|on| on.eq_ignore_ascii_case("on"))
 }
 
-// a string literal first: the timer runs it as code
-fn string_first(after: &str) -> bool {
-    after.starts_with(['"', '\'', '`'])
-}
-
 // `"script"`, in any case and quote
 fn script_element(after: &str) -> bool {
     let mut chars = after.chars();
@@ -84,10 +75,7 @@ fn script_element(after: &str) -> bool {
 }
 
 /// The places that must, each `(path, name, why)`.
-pub const ALLOWED: [(&str, &str, &str); 2] = [
-    ("crates/e2e/fixtures/probe.mjs", "eval(", "the e2e's probe that a fragment's Worker refuses code from strings (cell/platform.mjs)"),
-    ("crates/e2e/fixtures/probe.mjs", "Function(", "the same probe, by the Function constructor"),
-];
+pub const ALLOWED: [(&str, &str, &str); 0] = [];
 
 /// More inline scripts than this in one page means the scan is reading
 /// something that is not one.
@@ -163,15 +151,9 @@ pub fn sinks(source: &Source) -> Vec<Sink> {
     for (n, line) in source.text.lines().enumerate() {
         let lower = line.to_ascii_lowercase();
         for (name, _) in REFUSED {
-            let call = name.strip_suffix('(');
-            let word = call.unwrap_or(name);
             // a lower-case name is an attribute's, which HTML reads in any case
-            let (hay, needle) = if word.bytes().all(|b| !b.is_ascii_uppercase()) { (lower.as_str(), word) } else { (line, word) };
-            let hit = match call {
-                Some(_) => words(hay, needle).any(|i| after_space(&hay[i + needle.len()..]).starts_with('(')),
-                None => words(hay, needle).next().is_some(),
-            };
-            if hit {
+            let hay = if name.bytes().all(|b| !b.is_ascii_uppercase()) { lower.as_str() } else { line };
+            if words(hay, name).next().is_some() {
                 found.push(Sink { path: source.path.clone(), line: source.first_line + n, name });
             }
         }
@@ -219,7 +201,7 @@ pub fn check(sources: &[Source], allowed: &[(&str, &str, &str)]) -> Result<()> {
     let listed: Vec<String> = refused.iter().map(|s| format!("{}:{}: {} ({})", s.path, s.line, s.name, why(s.name))).collect();
     ensure!(
         listed.is_empty(),
-        "first-party JavaScript turns a string into markup or code (xtask/src/html_sinks.rs), {} place(s); build the DOM instead (cell/markdown.mjs for markdown, an icon's shapes for an icon):\n{}",
+        "first-party JavaScript turns a string into markup (xtask/src/html_sinks.rs), {} place(s); build the DOM instead (cell/markdown.mjs for markdown, an icon's shapes for an icon):\n{}",
         listed.len(),
         listed.join("\n")
     );
@@ -245,7 +227,7 @@ mod tests {
     fn a_planted_sink_fails_the_check_naming_its_line() {
         let clean = source(
             "site/clean.js",
-            "const p = document.createElement(\"p\");\np.textContent = text;\nretrieval(1);\nconst innerHTMLish = 1;\nisFunction(x);\nsetTimeout(() => tick(), 10);\np.setAttribute(\"aria-label\", text);\nconst f = function (x) { return x; };\ndocument.createElement(\"scripts-list\");\n",
+            "const p = document.createElement(\"p\");\np.textContent = text;\nconst innerHTMLish = 1;\np.setAttribute(\"aria-label\", text);\ndocument.createElement(\"scripts-list\");\n",
         );
         check(&[source("site/clean.js", &clean.text)], &[]).expect("clean code passes");
         assert!(sinks(&clean).is_empty(), "{:?}", sinks(&clean));
@@ -259,16 +241,11 @@ mod tests {
             ("g.js", "new DOMParser().parseFromString(text, \"text/html\");\n", 1, "DOMParser"),
             ("h.js", "range.createContextualFragment(text);\n", 1, "createContextualFragment"),
             ("i.js", "el.setHTMLUnsafe(text);\n", 1, "setHTMLUnsafe"),
-            ("j.js", "eval(text);\n", 1, "eval("),
-            ("k.js", "const run = new Function(\"return 1\");\n", 1, "Function("),
             ("l.js", "// one must never write el.innerHTML here\n", 1, "innerHTML"),
-            ("m.js", "eval (text);\n", 1, "eval("),
             ("n.js", "frame.setAttribute(\"srcDoc\", page);\n", 1, "srcdoc"),
             ("o.js", "Document.parseHTMLUnsafe(text);\n", 1, "parseHTMLUnsafe"),
             ("p.js", "el.setAttribute(\"onclick\", code);\n", 1, "setAttribute"),
             ("q.js", "el.setAttribute( 'OnLoad', code);\n", 1, "setAttribute"),
-            ("r.js", "setTimeout(\"tick()\", 10);\n", 1, "setTimeout"),
-            ("s.js", "setInterval (`tick()`, 10);\n", 1, "setInterval"),
             ("t.js", "const s = document.createElement(\"SCRIPT\");\n", 1, "createElement"),
         ];
         for (path, text, line, name) in planted {
@@ -300,11 +277,11 @@ mod tests {
     /// file, and an entry that matches nothing.
     #[test]
     fn an_exception_is_exact_and_never_stale() {
-        let probe = source("fixtures/probe.mjs", "eval(\"1\");\n");
-        check(&[source("fixtures/probe.mjs", "eval(\"1\");\n")], &[("fixtures/probe.mjs", "eval(", "a probe")]).expect("allowed");
-        assert!(check(&[probe], &[("fixtures/other.mjs", "eval(", "elsewhere")]).is_err(), "another file's entry exempts nothing");
-        let err = check(&[source("a.js", "ok();\n")], &[("fixtures/probe.mjs", "eval(", "a probe")]).expect_err("stale").to_string();
-        assert!(err.contains("ALLOWED names eval( in fixtures/probe.mjs"), "{err}");
+        let probe = source("fixtures/probe.mjs", "el.innerHTML = \"<b>1</b>\";\n");
+        check(&[source("fixtures/probe.mjs", &probe.text)], &[("fixtures/probe.mjs", "innerHTML", "a probe")]).expect("allowed");
+        assert!(check(&[probe], &[("fixtures/other.mjs", "innerHTML", "elsewhere")]).is_err(), "another file's entry exempts nothing");
+        let err = check(&[source("a.js", "ok();\n")], &[("fixtures/probe.mjs", "innerHTML", "a probe")]).expect_err("stale").to_string();
+        assert!(err.contains("ALLOWED names innerHTML in fixtures/probe.mjs"), "{err}");
     }
 
     /// Goal: the repo itself holds no sink but its listed exceptions, and
