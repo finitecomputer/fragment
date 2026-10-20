@@ -1239,7 +1239,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let who = signer(env, &req, &url, &body).await?;
             let rest = rest.to_vec();
-            connections::route(env, &url, &who, method, &rest, &body).await
+            connections::route(&req, env, &url, &who, method, &rest, &body).await
         }
         (method, ["api", "computers", rest @ ..]) => {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;

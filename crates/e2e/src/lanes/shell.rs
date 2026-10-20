@@ -157,19 +157,18 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
             && row(crate::SWAP_ROUTER)["state"] == "not_set"
             && row(crate::SWAP_ROUTER)["signIn"]["manage"].is_string()
             && row(crate::SWAP_ROUTER)["models"].as_array().is_some_and(|m| !m.is_empty())
-            && rows.len() == crate::SWAP_KEYS.len() + 3,
+            && rows.len() == crate::SWAP_KEYS.len() + 4,
         &r,
     );
     let r = shell(api, &session, "POST", "/api/connections/perplexity/authorize", Some(&json!({})), &[])?;
     s.ok("an operator key is no connection to authorize (400)", r.status == 400, &r);
     let r = shell(api, &session, "POST", &format!("/api/connections/{}/authorize", crate::SWAP_CONNECTION), Some(&json!({})), &[])?;
-    let consent = r.body["url"].as_str().unwrap_or("").to_string();
-    s.ok("and starts one: a consent URL for the person's browser", r.status == 200 && consent.starts_with(&s.workos.url), &r);
-    let done = api.external(&consent)?;
+    s.ok("a connection without browser-bound OAuth configured fails closed", r.status >= 400 && r.body["url"].is_null(), &r);
+    // The connections lane exercises the browser-bound import. This lane
+    // tests the shell's read of an existing account at its vendor boundary.
+    s.workos.connect(&email, crate::SWAP_CONNECTION, true);
     let r = shell(api, &session, "GET", "/api/connections", None, &[])?;
-    s.ok("followed, the account is connected", done.status == 200 && status(&r) == Some(json!("connected")), &r);
-    let again = api.external(&consent)?;
-    s.ok("(a consent is followed once)", again.status == 400, &again);
+    s.ok("the shell reads the connected account without issuing consent", status(&r) == Some(json!("connected")), &r);
     let r = shell(api, &session, "POST", "/api/connections/notion/authorize", Some(&json!({})), &[])?;
     s.ok("a provider the deployment does not offer is none to connect (404)", r.status == 404, &r);
 
@@ -1887,7 +1886,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     // each row: its provider, kind, state, agents allowed, and uses
     let rows = "[...document.querySelectorAll('#settings-connections [data-provider]')].map((r) => [r.dataset.provider, r.dataset.kind, r.dataset.state, \
                 r.querySelectorAll('[data-agent][aria-pressed=true]').length, [...r.querySelectorAll('[data-use]')].map((u) => [u.dataset.use, Number(u.dataset.calls), Number(u.dataset.micros)])])";
-    let shown = b.until(page, &format!("document.querySelectorAll('#settings-connections [data-provider]').length === {} && !!document.querySelector('{} [data-use]')", crate::SWAP_KEYS.len() + 3, row("perplexity")), wait);
+    let shown = b.until(page, &format!("document.querySelectorAll('#settings-connections [data-provider]').length === {} && !!document.querySelector('{} [data-use]')", crate::SWAP_KEYS.len() + 4, row("perplexity")), wait);
     let got = b.eval(page, rows)?;
     let of = |p: &str| got.as_array().and_then(|l| l.iter().find(|r| r[0] == p)).cloned().unwrap_or(Value::Null);
     let perplexity_charge = 7_500; // $0.005 a call at list, and the margin
@@ -1917,7 +1916,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let narrowed = b.until(page, &format!("document.querySelector('{} [data-agent={lead:?}]')?.getAttribute('aria-pressed') === 'false'", row("perplexity")), wait);
     let view = shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[])?;
     let list = view.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).map(|a| a["connections"].clone()).unwrap_or(Value::Null);
-    let others: Vec<&str> = std::iter::once(crate::SWAP_CONNECTION).chain(crate::SWAP_KEYS.iter().map(|(k, _, _)| *k).filter(|k| *k != "perplexity")).chain([crate::SWAP_OWN, crate::SWAP_ROUTER]).collect();
+    let others: Vec<&str> = std::iter::once(crate::SWAP_CONNECTION).chain(crate::SWAP_KEYS.iter().map(|(k, _, _)| *k).filter(|k| *k != "perplexity")).chain([crate::SWAP_OWN, crate::SWAP_ROUTER, "e2e-oauth"]).collect();
     s.ok(
         "pressing an agent takes that provider from it (a narrowing of the rest), and the page says so",
         narrowed && list.as_array().is_some_and(|l| l.len() == others.len() && others.iter().all(|p| l.iter().any(|x| x == p))),

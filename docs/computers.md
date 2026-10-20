@@ -1175,6 +1175,13 @@ expires within 30 days. The container application is the deployment's
 
 ### Connections and operator keys
 
+Connection consent is [browser-bound](pipes-browser-binding.md). A connection
+row's optional `connection_oauth` (`authorize`, `exchange`, `client_id`, `scopes`)
+enables the platform callback and requires `key` (the OAuth client secret's store
+name) in deployment configuration. Without it, starting consent fails closed.
+Only after a validated one-use callback are tokens imported into WorkOS Pipes;
+the existing computer swap still obtains short-lived tokens from Pipes.
+
 Paul, 2026-10-04 (decisions 22, 37 and 44): every credential a guest uses
 is a per-agent placeholder in the environment variable its provider's own
 SDK reads, so any SDK or CLI works unmodified, with no header of ours. The

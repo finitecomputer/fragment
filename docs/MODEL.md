@@ -38,6 +38,13 @@ the wire contract in full.
 
 ## Anatomy of a fragment, in Cloudflare terms
 
+Connection authorization's pending state lives in the Registry's
+`connection_signins`: a state hash, session hash, provider, issuer/subject,
+configuration hash, sealed verifier and expiry. A browser cookie proves the
+round trip; a one-use transaction is consumed before the provider exchange.
+Completed connection credentials live only in WorkOS Pipes. See
+[browser-bound Pipes connections](pipes-browser-binding.md).
+
 | Part | Cloudflare primitive | Holds |
 |---|---|---|
 | Supervisor | a Durable Object (`Fragment`), platform code in Rust | members, invites, the audit copy of the operation ledger, channels, schedules, wrapped secrets, the file-plane pins and tree index, the live code pin |

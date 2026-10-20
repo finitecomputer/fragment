@@ -381,7 +381,15 @@ fragment.club until cutover (decisions 34–35).
 
 ## A connection's consent is not bound to the browser that began it
 
-- **Observed:** the 2026-10-16 security audit's round-trip work (H3).
+- **Code fix (2026-10-20; rollout pending):** the legacy REST authorize
+  path is removed. Fragment now completes a provider authorization-code
+  flow under `auth::Bound`, the same live platform session, a one-use
+  Registry transaction and S256 PKCE, before importing credentials into
+  Pipes. Missing `connection_oauth` fails closed. See
+  [the contract, evidence and remaining operational work](pipes-browser-binding.md).
+  The local `connections` lane covers two users/browsers and replay/restart;
+  vendor configuration and refresh still require controlled staging validation.
+- **Observed before this fix:** the 2026-10-16 security audit's round-trip work (H3).
   Every round trip that comes back to the platform now finishes only in
   the browser that began it (`auth::trip_bound`). A connection's does not
   come back: `POST /api/connections/{provider}/authorize` asks WorkOS
@@ -402,13 +410,14 @@ fragment.club until cutover (decisions 34–35).
   (event_01M551YAQEBPM4EBX8AJJVGJYN, 13:48:39Z), attaching the other
   person's Google to user A, with `established_by_user_id` = user A. The
   REST consent is bound to no one.
-- **Shortcut:** none in our code: we cannot bind what never comes back to
-  us, and a `return_to` of our own would bind it only if WorkOS gave back
-  something the beginner cannot know, which it does not document. Nothing
-  is exposed today: the preview's WorkOS project has no Google Pipes
-  provider yet, and no deployment offers a connection whose consent is
-  unbound. The binding must exist before Google (or any connection) is
-  enabled in a deployment's WorkOS project.
+- **Remaining gate:** the user's staging Google OAuth client and WorkOS
+  provider are now configured, but the provider remains Disabled. The
+  new platform callback, matching client-secret binding and catalog
+  configuration must be reviewed before Paul deploys. The documented
+  WorkOS import/update contract supports this design; no real grant,
+  import or refresh has been tested here. Previously issued unbound
+  URLs/accounts must be resolved before enabling a previously used
+  environment: removing our old path cannot invalidate those URLs.
 - **Risk:** confirmed, not hypothetical. Whoever holds a consent link gets
   the account of whoever approves it: someone who can connect accounts
   sends another person their own link, that person approves at Google,
@@ -419,15 +428,10 @@ fragment.club until cutover (decisions 34–35).
   at Google.
 - **First proof:** done, Paul's test above (2026-10-17). Any deployment
   that enables a connection provider reproduces it with one link.
-- **Delete when:** either WorkOS offers a bound REST flow (`require_handoff`
-  on `authorize`, with its token delivered to the browser that began it;
-  or a verifiable one-time code appended to `return_to` that our `Bound`
-  helper checks against the beginner's cookie and session before the
-  connection may be used), or the platform runs the provider's OAuth
-  itself under the `Bound` helper as it does an own key's; in either case
-  with the H3-style e2e (the link opened in another browser, as another
-  person, connects nothing for anyone), and before any deployment enables
-  the provider.
+- **Delete when:** the new browser-bound flow and its regression tests
+  are reviewed, deployed by Paul and proven in controlled staging,
+  including imported-token refresh with the matching OAuth client.
+  Provider enablement and real grants need separate authorization.
 
 ## An own key's sign-in finishes at the person's one computer
 

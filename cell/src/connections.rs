@@ -11,8 +11,9 @@
 //!   `not_set`. Reading it tells the person's computer the connections'
 //!   states, so a guest learns of a new connection at its next read.
 //! - `POST /api/connections/{provider}/authorize` → `{url}`: where the
-//!   person's browser goes to connect a connection (Pipes' consent, then
-//!   the provider's).
+//!   person's browser goes to connect a connection. Its own provider's code
+//!   returns to Fragment; browser/session/provider binding is checked before
+//!   exchanging it and importing tokens into Pipes (docs/pipes-browser-binding.md).
 //! - `PUT /api/connections/{provider}/key {key}` and `DELETE …/key`: the
 //!   person's own key for an `own` provider, kept sealed by their computer
 //!   (one computer per person for now: decision 13), which swaps it in.
@@ -80,7 +81,7 @@ pub async fn connection_states(env: &Env, cfg: &Config, user: impl std::future::
     Ok(states)
 }
 
-pub(crate) async fn route(env: &Env, url: &Url, signed: &Signed, method: Method, rest: &[&str], body: &[u8]) -> CellResult<Response> {
+pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, method: Method, rest: &[&str], body: &[u8]) -> CellResult<Response> {
     if signed.identity.kind != IdentityKind::Person {
         return Err(CellError::new(ErrorCode::Forbidden, "connections are a person's: their agents use them through their computer"));
     }
@@ -135,13 +136,19 @@ pub(crate) async fn route(env: &Env, url: &Url, signed: &Signed, method: Method,
             if p.kind != Kind::Connection {
                 return Err(CellError::invalid(format!("{provider} is no connection: it is a key, which is not authorized through WorkOS")));
             }
-            let user = workos_user(env, cfg, who).await?.ok_or_else(|| CellError::new(ErrorCode::NotConnected, "connections are a signed-in person's: sign in through the platform first"))?;
-            let (status, answer) = crate::keys::pipes_authorize(env, &cfg.workos()?.api, provider, &user).await?;
-            // https only, but for the local fakes of a local fleet (a
-            // preview's levers do not make its real WorkOS's http good)
-            let url = answer["url"].as_str().filter(|u| status == 200 && (u.starts_with("https://") || (cfg.egress_local && u.starts_with("http://"))));
-            let url = url.ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS gave no consent URL for {provider} ({status})")))?;
-            json_response(&json!({ "provider": provider, "url": url }))
+            if signed.key.is_some() {
+                return Err(CellError::new(ErrorCode::Forbidden, "connect from settings in a browser signed in to the platform"));
+            }
+            let o = p.connection_oauth.as_ref().ok_or_else(|| CellError::new(ErrorCode::NotConnected, "browser-bound authorization is not configured for this connection"))?;
+            reachable(cfg, &o.authorize)?;
+            reachable(cfg, &o.exchange)?;
+            let session = crate::auth::platform_session_token(req, url)?.ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "sign in before connecting"))?;
+            let begun = crate::ask_registry(env, &crate::registry::calls::BeginConnection { session, provider: provider.to_string() }).await?;
+            if !roundtrip::valid_state(&begun.state) || !own_signin::valid_token(&begun.challenge) { return Err(CellError::host("invalid connection challenge")); }
+            let to = fragment_core::connection_signin::authorize_url(o, &callback_url(cfg, provider), &begun.challenge, &begun.state);
+            let mut resp = json_response(&json!({ "provider": provider, "url": to }))?;
+            resp.headers_mut().append("set-cookie", &crate::auth::trip_begun(Trip::Connection, &begun.state, url))?;
+            Ok(resp)
         }
         (Method::Put | Method::Delete, [provider, "key"]) => {
             if provider_of(provider)?.kind != Kind::Own {
@@ -272,19 +279,23 @@ pub(crate) async fn callback(req: &Request, env: &Env, url: &Url, provider: &str
         return Err(CellError::new(ErrorCode::NotFound, "a sign-in comes back to the platform's own host"));
     }
     let page = |status: u16, title: &str, says: &str| crate::auth::page(status, title, &format!("<p>{}</p><p><a href=\"/settings\">Back to settings</a></p>", crate::auth::esc(says)));
-    let Some(p) = cfg.providers.get(provider).filter(|p| p.kind == Kind::Own) else { return page(400, "Not connected", "This platform offers no such key.") };
-    let Some(o) = &p.oauth else { return page(400, "Not connected", "That key is given in settings, not signed in to.") };
+    let Some(p) = cfg.providers.get(provider) else { return page(400, "Not connected", "This platform offers no such provider.") };
+    let trip = match p.kind {
+        Kind::Own if p.oauth.is_some() => Trip::OwnKey,
+        Kind::Connection if p.connection_oauth.is_some() => Trip::Connection,
+        _ => return page(400, "Not connected", "Browser authorization is not configured for this provider."),
+    };
     // the clean page a refusal is sent to: its word, and nothing else
     if let Some(word) = crate::auth::query(url, "refused") {
         let why = Unfinished::parse(&word).map_or("This sign-in did not finish: connect again from settings.", Unfinished::message);
         return page(400, "Not connected", why);
     }
-    let finished = finish(req, env, cfg, url, provider, o).await?;
-    let spent = (finished != Err(Unfinished::NotBegunHere)).then(|| crate::auth::trip_spent(Trip::OwnKey, url));
+    let finished = if trip == Trip::Connection { finish_connection(req, env, url, provider).await? } else { finish(req, env, cfg, url, provider, p.oauth.as_ref().expect("checked above")).await? };
+    let spent = (finished != Err(Unfinished::NotBegunHere)).then(|| crate::auth::trip_spent(trip, url));
     let mut resp = match finished {
-        Ok(()) => page(200, "Connected", &format!("{provider} is connected: your agents can use its models now. You can close this window."))?,
+        Ok(()) => page(200, "Connected", &format!("{provider} is connected: your agents can use it now. You can close this window."))?,
         Err(why) => {
-            console_log!("{}", json!({ "own-key-sign-in": provider, "unfinished": why.word() }));
+            console_log!("{}", json!({ "connection-sign-in": provider, "unfinished": why.word() }));
             crate::auth::redirect(&format!("{}?refused={}", callback_url(cfg, provider), why.word()), &[])?.with_status(303)
         }
     };
@@ -292,6 +303,25 @@ pub(crate) async fn callback(req: &Request, env: &Env, url: &Url, provider: &str
         resp.headers_mut().append("set-cookie", &spent)?;
     }
     Ok(resp)
+}
+
+async fn finish_connection(req: &Request, env: &Env, url: &Url, provider: &str) -> CellResult<Result<(), Unfinished>> {
+    use crate::registry::calls::{ConnectionFinished, FinishConnection};
+    let Some(bound) = crate::auth::trip_bound(req, url, &[Trip::Connection])? else { return Ok(Err(Unfinished::NotBegunHere)) };
+    let Some(session) = crate::auth::platform_session_token(req, url)? else { return Ok(Err(Unfinished::SignedOut)) };
+    let code = crate::auth::query(url, "code").filter(|c| own_signin::valid_code(c) && crate::auth::query(url, "error").is_none());
+    let call = FinishConnection::of(bound, session, provider.to_string(), code);
+    Ok(match crate::ask_registry(env, &call).await {
+        Ok(ConnectionFinished::Connected) => Ok(()),
+        Ok(ConnectionFinished::NotUnderWay) => Err(Unfinished::NotUnderWay),
+        Ok(ConnectionFinished::Declined) => Err(Unfinished::Declined),
+        Ok(ConnectionFinished::CodeRefused) => Err(Unfinished::CodeRefused),
+        Ok(ConnectionFinished::Failed) => Err(Unfinished::NoKey),
+        Err(e) if e.code == ErrorCode::Unauthenticated => Err(Unfinished::SignedOut),
+        // Do not leave a code in the URL on network/import failures. The
+        // server has spent the transaction; connecting again is required.
+        Err(_) => Err(Unfinished::NoKey),
+    })
 }
 
 /// The own-key sign-in this request comes back with, finished: bound to

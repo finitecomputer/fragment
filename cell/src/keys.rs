@@ -288,13 +288,42 @@ pub async fn pipes_state(env: &Env, api: &str, provider: &str, user: &str) -> Ce
     }
 }
 
-/// A WorkOS Pipes consent URL for `user` to connect `provider`
-/// (`POST /data-integrations/{provider}/authorize`, spike S5): (status,
-/// WorkOS's answer, `{url, state}`).
-pub async fn pipes_authorize(env: &Env, api: &str, provider: &str, user: &str) -> CellResult<(u16, Value)> {
-    assert!(fragment_core::catalog::valid_name(provider), "a provider is checked before WorkOS is asked");
+/// Standard OAuth code exchange. Called only by the Registry after consuming
+/// the browser/session/provider-bound transaction. No redirects, retries or
+/// response-body diagnostics: these messages carry credentials.
+pub(super) async fn connection_exchange(env: &Env, provider: &str, o: &fragment_core::catalog::ConnectionOAuth, callback: &str, code: &str, verifier: &str) -> CellResult<(u16, Value)> {
+    let cfg = Config::from_env(env);
+    if !o.exchange.starts_with("https://") && !cfg.egress_local { return Err(CellError::host("a local OAuth endpoint is disabled on this fleet")); }
+    let secret = required(env, &store::connection_secret(provider)).await?;
+    let form = fragment_core::connection_signin::exchange_form(o, callback, code, verifier, &secret);
+    confidential_request(&o.exchange, Method::Post, "application/x-www-form-urlencoded", None, &form).await
+}
+
+async fn confidential_request(url: &str, method: Method, content_type: &str, bearer: Option<&str>, body: &str) -> CellResult<(u16, Value)> {
+    let headers = Headers::new();
+    headers.set("content-type", content_type)?;
+    if let Some(key) = bearer { headers.set("authorization", &format!("Bearer {key}"))?; }
+    let mut init = RequestInit::new();
+    init.with_method(method).with_headers(headers).with_redirect(worker::RequestRedirect::Manual).with_body(Some(body.into()));
+    let req = Request::new_with_init(url, &init)?;
+    let a = crate::cs::fetch_all(req, VENDOR_TIMEOUT, VENDOR_ANSWER_MAX_BYTES).await
+        .map_err(|_| CellError::new(ErrorCode::UpstreamFailed, "the connection provider did not answer; connect again"))?;
+    Ok((a.status, if a.cut { Value::Null } else { serde_json::from_slice(&a.body).unwrap_or(Value::Null) }))
+}
+
+/// The documented Pipes import API, after Fragment has validated and spent
+/// the transaction. A known 409 permits update; an uncertain outcome is
+/// never retried. Refresh stays at WorkOS, using the same OAuth client.
+pub(super) async fn pipes_import(env: &Env, api: &str, provider: &str, user: &str, tokens: fragment_core::connection_signin::Tokens) -> CellResult<bool> {
+    assert!(fragment_core::catalog::valid_name(provider));
+    if user.is_empty() || !user.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') { return Err(CellError::host("invalid WorkOS user id")); }
     let key = required(env, store::WORKOS_KEY).await?;
-    post_json(&format!("{api}/data-integrations/{provider}/authorize"), Method::Post, Some(&key), Some(&json!({ "user_id": user })), "WorkOS").await
+    let expires_at = fragment_core::export::rfc3339(js::now_ms() + i64::from(tokens.expires_in) * 1000);
+    let body = tokens.import_body(&expires_at).to_string();
+    let url = format!("{api}/user_management/users/{user}/connected_accounts/{provider}");
+    let (status, _) = confidential_request(&url, Method::Post, "application/json", Some(&key), &body).await?;
+    let status = if status == 409 { confidential_request(&url, Method::Put, "application/json", Some(&key), &body).await?.0 } else { status };
+    Ok(matches!(status, 200 | 201))
 }
 
 /// Whether the deployment binds the operator's key `name`

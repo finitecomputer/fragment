@@ -227,6 +227,7 @@ fn dev(args: &[String]) -> Result<()> {
         computer_unsaved_max_ms: None,
         providers: None,
         operator_key_values: vec![],
+        connection_secret_values: vec![],
         swap_upstream: None,
     };
     // its secrets go to wrangler's local store under cell/.wrangler/state

@@ -155,6 +155,19 @@ pub struct KeyOAuth {
     pub manage: String,
 }
 
+/// Standard authorization-code connection. Fragment completes the browser
+/// round trip before importing tokens into Pipes; Pipes owns refresh.
+/// The same confidential client must be configured at Pipes. Fixed vendor
+/// options (for example offline access) may be in `authorize`'s query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectionOAuth {
+    pub authorize: String,
+    pub exchange: String,
+    pub client_id: String,
+    pub scopes: Vec<String>,
+}
+
 /// A model a person may pick for an agent: its id as the provider names it,
 /// and its name for people.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,6 +205,10 @@ pub struct Provider {
     /// An own key's sign-in: connected from settings, never pasted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<KeyOAuth>,
+    /// Absent means connection authorization is disabled; never falls back
+    /// to an unbound Pipes authorization URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_oauth: Option<ConnectionOAuth>,
     /// An own key's models, which a person may pick for their agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Models>,
@@ -485,6 +502,12 @@ impl Catalog {
                     return Err(CatalogError::OAuth { provider, why: format!("a {} is not signed in to: only an own key is", p.kind.name()) });
                 }
                 check_oauth(o).map_err(|why| CatalogError::OAuth { provider: provider.clone(), why })?;
+            }
+            if let Some(o) = &p.connection_oauth {
+                if p.kind != Kind::Connection {
+                    return Err(CatalogError::OAuth { provider, why: "connection_oauth belongs only to a connection".into() });
+                }
+                crate::connection_signin::check(o).map_err(|why| CatalogError::OAuth { provider: provider.clone(), why })?;
             }
             if let Some(m) = &p.models {
                 if p.kind != Kind::Own {

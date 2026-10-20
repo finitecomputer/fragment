@@ -53,6 +53,7 @@ pub(crate) mod orgs;
 pub(crate) mod seats;
 pub(crate) mod trials;
 mod signin;
+mod connection_signin;
 pub(crate) mod wipe;
 use calls::{
     Active, AddKey, AgentForgotten, ApproveKey, Begin, By, Call, CheckKey, CliBegin, CliCodeOf, EndSession, Exchange, ForgetAgent, Hold, InviteEmail, Logout, Lookup, Mint, Picture, PictureOf, Profile, ProfileAgent, Profiles,
@@ -820,6 +821,8 @@ impl RegistryCell {
             return answer;
         }
         match path.as_str() {
+            calls::BeginConnection::PATH => reply::<calls::BeginConnection>(self.begin_connection(body(&bytes)?).await),
+            calls::FinishConnection::PATH => reply::<calls::FinishConnection>(self.finish_connection(body(&bytes)?).await),
             Resolve::PATH => reply::<Resolve>(self.key_holder(&body::<Resolve>(&bytes)?.key)),
             Lookup::PATH => reply::<Lookup>(self.lookup(body(&bytes)?)),
             InviteEmail::PATH => reply::<InviteEmail>(self.invite(body(&bytes)?).await),

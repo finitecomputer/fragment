@@ -583,8 +583,13 @@ impl Suite {
             computer_image: Some("stub".into()),
             computer_snapshots: false,
             computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
-            providers: Some(swap_providers(Some(self.openrouter.node().oauth()))?.to_string()),
+            providers: Some({
+                let mut rows = swap_providers(Some(self.openrouter.node().oauth()))?;
+                rows.as_array_mut().expect("catalog").push(json!({ "name": "e2e-oauth", "kind": "connection", "hosts": ["oauth.test"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["E2E_OAUTH_TOKEN"], "connection_oauth": self.workos.node().connection_oauth() }));
+                rows.to_string()
+            }),
             operator_key_values: SWAP_KEYS.iter().map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
+            connection_secret_values: vec![("e2e-oauth".into(), "mock-connection-secret".into())],
             swap_upstream: Some(self.upstream.node().url.clone()),
         };
         // its secrets go to wrangler's local store in the node's own state

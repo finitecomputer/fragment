@@ -8,6 +8,7 @@ step Fragment 1 baseline 6f010c0c276b4871
 step Fragment 2 listed 464da803484efc23
 step Fragment 3 record_schedules 90308e727fc4ce8b
 step Registry 1 baseline fd5a79e5c834a15d
+step Registry 2 connection_signins e9d1f862c2e3e4ed
 step Principal 1 baseline 28b4d4bf3f8cdb71
 step Principal 2 listed 09e5aab70c4f7f61
 step Ledger 1 baseline 6d5c6ebad64a53b2
@@ -80,6 +81,9 @@ Registry index cli_codes_created: CREATE INDEX cli_codes_created ON cli_codes (c
 Registry index cli_codes_key: CREATE INDEX cli_codes_key ON cli_codes (key)
 Registry table cli_misses: CREATE TABLE cli_misses ( identity TEXT PRIMARY KEY, misses INTEGER NOT NULL, since INTEGER NOT NULL)
 Registry index cli_misses_since: CREATE INDEX cli_misses_since ON cli_misses (since)
+Registry table connection_signins: CREATE TABLE connection_signins ( state TEXT PRIMARY KEY, session TEXT NOT NULL, provider TEXT NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL, config TEXT NOT NULL, sealed TEXT NOT NULL, expires_at INTEGER NOT NULL)
+Registry index connection_signins_expires: CREATE INDEX connection_signins_expires ON connection_signins (expires_at)
+Registry index connection_signins_session: CREATE INDEX connection_signins_session ON connection_signins (session)
 Registry table consents: CREATE TABLE consents ( identity TEXT NOT NULL, fragment TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (identity, fragment))
 Registry index consents_at: CREATE INDEX consents_at ON consents (identity, at)
 Registry table e2e_days: CREATE TABLE e2e_days ( day INTEGER PRIMARY KEY, people INTEGER NOT NULL, paid_calls INTEGER NOT NULL)
