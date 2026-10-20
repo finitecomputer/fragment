@@ -631,8 +631,10 @@ shell asks as its person signs out or uses another account (`{fragment:
 "forget-draft"}`, answered `{fragment: "draft-forgotten"}`), and keeps
 none after. It also tells the shell, as it changes, whether it is busy
 with what no storage keeps (`{fragment: "busy", busy}`: files chosen, a
-voice memo, a message on its way, a card's answer typed and not sent,
-or on its way); the shell reloads only while it is not.
+voice memo, a message on its way or one that failed (its Retry, a retry
+under way: newer words may be in the composer), a quote chosen, a card's
+answer typed and not sent, or on its way); the shell reloads only while
+it is not, and stops a reload under way if it becomes so.
 
 **Your other agents.** Framed, the page asks the shell for its person's
 agents as it mounts (`{fragment: "agents?"}`). A shell answers only a

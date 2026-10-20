@@ -1195,6 +1195,24 @@ fn visibility(v: &str) -> String {
 /// The chat's composer, ready for the person: its page has its hello.
 const COMPOSER_READY: &str = "(() => { const t = document.getElementById('text'); return !!t && !t.disabled && document.getElementById('say')?.dataset.ready === '1'; })()";
 
+/// A file chosen in a chat's composer, as its picker hands it over: how
+/// many its composer holds then.
+const PICK_FILE: &str = "(() => { const p = document.getElementById('attachment-picker'); const d = new DataTransfer(); d.items.add(new File(['kept through the deploy'], 'note.txt', { type: 'text/plain' })); \
+    p.files = d.files; p.dispatchEvent(new Event('change')); return document.querySelectorAll('#attachments .attachment-chip').length; })()";
+
+/// The chat's composer's files taken out again.
+const REMOVE_FILE: &str = "(() => { for (const b of [...document.querySelectorAll('#attachments .attachment-remove')]) b.click(); return document.querySelectorAll('#attachments .attachment-chip').length === 0; })()";
+
+/// A chat page's next post to its `chat` channel held (`window.__holdPosts`),
+/// until `window.__postHeld()`, then answered as it would be, or refused
+/// (`window.__failPosts`: a 400, which no retry of the library's takes back),
+/// as a slow or failing network's are.
+const HOLD_POSTS: &str = "(() => { if (!window.__realFetch) window.__realFetch = window.fetch; window.__postHeld = null; \
+    window.fetch = async (url, o) => { if (String(url).includes('__op/channels/chat') && window.__holdPosts) { window.__holdPosts = false; const fail = window.__failPosts; \
+      await new Promise((r) => { window.__postHeld = r; }); \
+      if (fail) return new Response(JSON.stringify({ error: 'invalid', message: 'refused for the test' }), { status: 400, headers: { 'content-type': 'application/json' } }); } \
+      return window.__realFetch(url, o); }; return true; })()";
+
 /// The draft a chat's page keeps in its own origin's storage (chat.js `DRAFT_KEY`).
 const DRAFT: &str = "JSON.parse(localStorage.getItem('fragment.chat.draft.v1'))";
 
@@ -1207,8 +1225,12 @@ const RELEASE_COOKIE: &str = "fragment_e2e_release";
 /// browser, and the shell's page, name another release, as a deploy does.
 /// Valid: hidden, the page reloads at once onto it, where it was (its chat,
 /// its app's window); on screen it waits, and reloads at the person's next
-/// move unless a chat's page is busy with what no storage keeps (a file
-/// chosen). Words typed in a chat are its page's to keep: typed a moment
+/// move unless a chat's page is busy with what no storage keeps: a file
+/// chosen, a message that failed while newer words were typed, a retry of
+/// it under way, a quote chosen, a file picked the moment the page hides
+/// (heard before the reload is decided), and a file picked while a reload
+/// is under way (its answer slow), which stops it. Words typed in a chat
+/// are its page's to keep: typed a moment
 /// before the reload (nothing waited for), they are in its composer after
 /// it, and after a reload by hand too. Replay: the release it runs said
 /// again, and the release it just left answering again (a deploy's old
@@ -1325,12 +1347,7 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     s.ok("another release, seen as the page is shown again: on screen, it waits, the page as it was", ready_now && seen && stayed, json!({ "seen": seen, "stayed": stayed }));
     // a file chosen in a chat (which no storage keeps): its page says it is
     // busy, and the person's next move, another chat, reloads nothing
-    let attached = b.eval_in_frame(
-        page,
-        chat,
-        "(() => { const p = document.getElementById('attachment-picker'); const d = new DataTransfer(); d.items.add(new File(['kept through the deploy'], 'note.txt', { type: 'text/plain' })); \
-         p.files = d.files; p.dispatchEvent(new Event('change')); return document.querySelectorAll('#attachments .attachment-chip').length; })()",
-    )?;
+    let attached = b.eval_in_frame(page, chat, PICK_FILE)?;
     press(b, &row(other))?;
     let moved = b.until(page, &shown(other), wait);
     std::thread::sleep(quiet);
@@ -1341,17 +1358,85 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
         attached == 1 && moved && stayed && held["files"] == 1,
         json!({ "composer": held, "stayed": stayed }),
     );
+    // back in the first chat, the file gone: what else no storage keeps
+    // holds the page hidden (Alex's review of #406)
+    press(b, &row(chat))?;
+    b.until(page, &shown(chat), wait);
+    b.eval_in_frame(page, chat, REMOVE_FILE)?;
+    let stays_hidden = |b: &mut Browser| -> Result<bool> {
+        b.eval(page, &visibility("hidden"))?;
+        std::thread::sleep(quiet);
+        let stayed = b.eval(page, &format!("window.__release === 2 && {}", meta(&next)))? == true;
+        b.eval(page, &visibility("visible"))?;
+        Ok(stayed)
+    };
+    let in_chat = |s: &Suite, b: &mut Browser, expr: &str| s.eventually(wait, || b.eval_in_frame(page, chat, &format!("!!({expr})")).ok() == Some(Value::Bool(true)));
+    // a message that fails while newer words are typed: its words are in its bubble alone
+    b.eval_in_frame(page, chat, HOLD_POSTS)?;
+    b.eval_in_frame(page, chat, "(window.__holdPosts = true, window.__failPosts = true, true)")?;
+    b.eval_in_frame(page, chat, &format!("(() => {{ {}; document.getElementById('say').requestSubmit(); return true; }})()", fill("#text", "the message that fails")))?;
+    let pending = in_chat(s, b, "typeof window.__postHeld === 'function'");
+    b.eval_in_frame(page, chat, &fill("#text", "newer words"))?;
+    b.eval_in_frame(page, chat, "(window.__postHeld(), true)")?;
+    let failed = in_chat(s, b, "!!document.querySelector('.message-error .message-retry')");
+    let stayed = stays_hidden(b)?;
+    let held = composer(b);
+    s.ok(
+        "a message that failed while newer words were typed (its words in its bubble alone, with Retry) holds the reload: hidden, the page stays",
+        pending && failed && stayed && held["text"] == "newer words",
+        json!({ "pending": pending, "failed": failed, "stayed": stayed, "composer": held }),
+    );
+    // its retry under way holds it too; sent, the page is busy no more
+    b.eval_in_frame(page, chat, "(window.__holdPosts = true, window.__failPosts = false, window.__postHeld = null, document.querySelector('.message-error .message-retry').click(), true)")?;
+    let retrying = in_chat(s, b, "typeof window.__postHeld === 'function'");
+    let stayed = stays_hidden(b)?;
+    b.eval_in_frame(page, chat, "(window.__postHeld(), true)")?;
+    let sent = in_chat(s, b, "!document.querySelector('.message-error') && !document.querySelector('.msg.user.mine.sending')");
+    s.ok("a retry of it under way holds the reload too, and it is sent once let go", retrying && stayed && sent, json!({ "retrying": retrying, "stayed": stayed, "sent": sent }));
+    // a quote chosen holds it, and unquoted, holds it no more
+    b.eval_in_frame(page, chat, "([...document.querySelectorAll('.msg .reply')].pop()?.click(), true)")?;
+    let quoting = in_chat(s, b, "!document.getElementById('quoting').hidden");
+    let stayed = stays_hidden(b)?;
+    let quoted = b.eval_in_frame(page, chat, "!document.getElementById('quoting').hidden")? == true;
+    b.eval_in_frame(page, chat, "(document.getElementById('unquote').click(), true)")?;
+    s.ok("a quote chosen holds the reload: hidden, the page stays, and the quote with it", quoting && stayed && quoted, json!({ "quoting": quoting, "stayed": stayed }));
+    // a file picked and the page hidden at once: the page's word of it, sent
+    // just before, is heard before the reload is decided
+    b.eval_in_frame(page, chat, PICK_FILE)?;
+    let stayed = stays_hidden(b)?;
+    let held = composer(b);
+    b.eval_in_frame(page, chat, REMOVE_FILE)?;
+    s.ok("a file picked the moment the page is hidden is heard before the reload is decided: the page stays, the file kept", stayed && held["files"] == 1, json!({ "stayed": stayed, "composer": held }));
+    // a reload under way (its answer slow, a phone's), a file picked before
+    // the new page comes: the reload is stopped, the page and the file kept
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    b.eval(page, "(window.__leaving = false, addEventListener('beforeunload', () => { window.__leaving = true; }), true)")?;
+    b.latency(page, 4_000)?;
+    b.eval(page, &visibility("hidden"))?;
+    let leaving = b.until(page, "window.__leaving === true", wait);
+    // (the frame's own session: the page's waits on its navigation)
+    let picked = b.eval_in_isolated_frame(chat, PICK_FILE)?;
+    std::thread::sleep(std::time::Duration::from_secs(6));
+    b.latency(page, 0)?;
+    let stayed = b.eval(page, &format!("window.__release === 2 && {}", meta(&next)))? == true;
+    b.eval(page, &visibility("visible"))?;
+    let held = composer(b);
+    s.ok(
+        "a file picked while a reload is under way (its answer slow) stops it: the page stays as it was, the file kept",
+        leaving && picked == 1 && stayed && held["files"] == 1,
+        json!({ "leaving": leaving, "stayed": stayed, "composer": held }),
+    );
+    b.eval_in_frame(page, chat, REMOVE_FILE)?;
     // the file gone, words typed and the page hidden at once (nothing waited
     // for): it reloads, and the words are in their chat's composer after it
     let words = "a thought half typed before the deploy";
-    let removed = b.eval_in_frame(page, chat, "(() => { document.querySelector('#attachments .attachment-remove')?.click(); return document.querySelectorAll('#attachments .attachment-chip').length === 0; })()")?;
+    let removed = b.eval_in_frame(page, chat, "document.querySelectorAll('#attachments .attachment-chip').length === 0")?;
     // (its page tells the shell it is busy no more: a message, a moment)
     std::thread::sleep(std::time::Duration::from_millis(300));
     b.eval_in_frame(page, chat, &fill("#text", words))?;
     b.eval(page, &visibility("hidden"))?;
-    let reloaded = b.until(page, &format!("!window.__release && {} && {}", meta(&after), shown(other)), wait);
-    press(b, &row(chat))?;
-    let back = b.until(page, &shown(chat), wait) && s.eventually(wait, || b.eval_in_frame(page, chat, &format!("document.getElementById('text')?.value === {}", js(words))).ok() == Some(Value::Bool(true)));
+    let reloaded = b.until(page, &format!("!window.__release && {} && {}", meta(&after), shown(chat)), wait);
+    let back = s.eventually(wait, || b.eval_in_frame(page, chat, &format!("document.getElementById('text')?.value === {}", js(words))).ok() == Some(Value::Bool(true)));
     let kept = b.eval_in_frame(page, chat, DRAFT)?;
     let _ = b.screenshot(page, &shots.join("release-words-back.png"));
     s.ok(

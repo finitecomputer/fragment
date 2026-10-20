@@ -1732,6 +1732,8 @@ export function mount(root) {
     $("quoting-who").textContent = q ? `Replying to ${who(q.principal).name}` : "";
     $("quoting-text").replaceChildren();
     if (q) quoteText($("quoting-text"), q.m);
+    // a quote chosen is kept by no storage: the shell is told
+    tellBusy();
   }
   $("unquote").onclick = () => {
     state.replyTo = null;
@@ -1817,12 +1819,15 @@ export function mount(root) {
     window.parent.postMessage({ fragment: "draft-forgotten" }, event.origin);
   }
   // ---- what this page holds that no storage keeps: files chosen, a voice
-  // memo, a message on its way, a card's answer typed and not sent. The
-  // shell that frames it is told as it changes (`{fragment: "busy",
-  // busy}`), and reloads it for a new release only while it is not. ----
+  // memo, a message on its way, one that failed (its Retry, and a retry
+  // under way: newer words may be in the composer), a quote chosen, a
+  // card's answer typed and not sent, or on its way. The shell that frames
+  // it is told as it changes (`{fragment: "busy", busy}`), and reloads it
+  // for a new release only while it is not, and stops a reload under way
+  // if it becomes so. ----
   function tellBusy() {
     const answerTyped = [...state.typed].some(([card, text]) => text.trim() && !state.answering.has(card));
-    const busy = attachments.length > 0 || !!recording || sending || state.sending.size > 0 || answersOnTheirWay > 0 || answerTyped;
+    const busy = attachments.length > 0 || !!recording || sending || state.sending.size > 0 || state.failed.size > 0 || !!state.replyTo || answersOnTheirWay > 0 || answerTyped;
     if (!framed || !state.me || busy === busyTold) return;
     busyTold = busy;
     window.parent.postMessage({ fragment: "busy", busy }, state.me.platform);

@@ -2886,12 +2886,20 @@ Use another account first asks each chat's page to let its draft go
 waited for at most a second), then sends the form. **Nothing else is
 lost**: a chat's page tells the shell, as it changes, whether it is busy
 with what no storage keeps (`{fragment: "busy", busy}`: files chosen, a
-voice memo, a message on its way, a card's answer typed and not sent, or
-on its way), and the shell reloads only while none is, and while none of
-its own dialogs or its menu is open, no words are typed in its own
-fields, no prompt is on its way to a chat and no write of its own is
-still going. Nothing is asked of the pages as it reloads, so nothing can
-change between an answer and the reload. **No loop**: a release is
+voice memo, a message on its way or one that failed (its Retry, a retry
+under way), a quote chosen, a card's answer typed and not sent, or on its
+way), and the shell reloads only while none is, and while none of its
+own dialogs or its menu is open, no words are typed in its own fields,
+no prompt is on its way to a chat and no write of its own is still
+going. Nothing is asked of the pages as it reloads, so nothing can change
+between an answer and the reload. It decides a moment after the page is
+hidden (100 ms) or the person moves (400 ms), in a task of its own, so a
+page's word posted just before is heard first; and a page that says it
+is busy while the reload is under way (its answer slow: a file picked, a
+memo begun, a message failed) stops it (`window.stop()`), the release
+still waited on. What is left: a page that becomes busy once the new
+page has begun to come in is gone with it; that window opens only while
+the page is hidden, or as the person themselves moves. **No loop**: a release is
 reloaded for at most three times, a minute apart (a reload may still
 meet the old release while a deploy goes out), and the release a reload
 left is no reason to reload for ten minutes (a deploy's old side answers
