@@ -68,7 +68,8 @@ pub fn notes(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and opens it", chrome.until(&page, "document.getElementById('content')?.textContent.includes('third')", wait), "");
     let vault = Vault { home: &home, name: &name, dir: &dir, view: &view };
     hostile(s, api, &vault, &mut chrome, &page)?;
-    links(s, api, &vault, &mut chrome, &page)
+    links(s, api, &vault, &mut chrome, &page)?;
+    late(s, api, &vault, &mut chrome, &page)
 }
 
 /// The notes fragment the lane made: its CLI's home, its name, the synced
@@ -113,6 +114,51 @@ fn links(s: &mut Suite, api: &Api, vault: &Vault, chrome: &mut crate::browser::B
     chrome.click(page, "#content .md a.md-wikilink")?;
     let opened = chrome.until(page, "location.hash === '#/notes%2Fwelcome.md' && document.getElementById('content')?.textContent.includes('welcome to your notes')", wait);
     s.ok("a click on a wikilink opens its note in the viewer", opened, chrome.eval(page, "location.hash + ' ' + (document.getElementById('content')?.innerText.slice(0, 120) ?? '')")?);
+    Ok(())
+}
+
+/// A note names a picture and a note the vault does not hold yet. Goal:
+/// when they come in a later sync, the open note, itself unchanged, shows
+/// the picture and links the note in place; a file it does not name, coming,
+/// leaves it as drawn. Method: the note opened once the page's tree has it
+/// (so its own sync's trigger has come and gone), then the files synced;
+/// then a note it does not name, with the page's reads of it counted.
+fn late(s: &mut Suite, api: &Api, vault: &Vault, chrome: &mut crate::browser::Browser, page: &crate::browser::Page) -> Result<()> {
+    let (home, name, dir) = (vault.home, vault.name, vault.dir);
+    let dir_s = dir.to_str().expect("utf-8 path");
+    let wait = Duration::from_secs(20);
+    let text = "JSON.stringify({ hash: location.hash, stayed: window.__stayed ?? null, text: document.getElementById('content')?.innerText.slice(0, 200) ?? null, img: document.querySelector('#content .md img')?.getAttribute('src') ?? null })";
+    std::fs::write(dir.join("notes/waiting.md"), "# Waiting\n\n![[late.png]]\n\nThen [[later]].\n")?;
+    s.cli(api, home, &["sync", name, "--dir", dir_s]);
+    chrome.eval(page, "location.hash = '#/notes/waiting.md'; true")?;
+    let missing = chrome.until(
+        page,
+        "document.querySelector('#content .md h1')?.textContent === 'Waiting' && !document.querySelector('#content .md img') && [...document.querySelectorAll('#content .md .md-missing')].map((x) => x.textContent).join() === 'late.png,later' && !!document.querySelector('#tree a.file[data-path=\"notes/waiting.md\"]')",
+        wait,
+    );
+    s.ok("a note that names a picture and a note the vault lacks shows both as missing", missing, chrome.eval(page, text)?);
+
+    // a navigation or a reload would drop the mark
+    chrome.eval(page, "window.__stayed = true; true")?;
+    std::fs::write(dir.join("notes/late.png"), DOT_PNG)?;
+    std::fs::write(dir.join("notes/later.md"), "# later\n")?;
+    s.cli(api, home, &["sync", name, "--dir", dir_s]);
+    let embed = "document.querySelector('#content .md img.md-image')";
+    let drawn = chrome.until(
+        page,
+        &format!("window.__stayed === true && location.hash === '#/notes/waiting.md' && ({embed}?.getAttribute('src') ?? '').startsWith('api/file?path=notes%2Flate.png') && {embed}.complete && {embed}.naturalWidth > 0 && document.querySelector('#content .md a.md-wikilink')?.dataset.path === 'notes/later.md'"),
+        wait,
+    );
+    s.ok("when they come in a later sync, the open note, unchanged, shows the picture and links the note, with no navigation", drawn, chrome.eval(page, text)?);
+
+    // the page's reads of the open note, from here
+    chrome.eval(page, "(() => { window.__reads = 0; const f = window.fetch; window.fetch = (u, o) => { if (String(u).includes('waiting.md')) window.__reads++; return f(u, o); }; return true; })()")?;
+    std::fs::write(dir.join("notes/aside.md"), "# aside\n")?;
+    s.cli(api, home, &["sync", name, "--dir", dir_s]);
+    // the refresh that lists it decides, in the same turn, whether to read the note again
+    let listed = chrome.until(page, "!!document.querySelector('#tree a.file[data-path=\"notes/aside.md\"]')", wait);
+    let reads = chrome.eval(page, "window.__reads")?;
+    s.ok("a note it does not name, coming, leaves it as drawn: the page does not read it again", listed && reads == 0, &reads);
     Ok(())
 }
 
@@ -161,4 +207,10 @@ fn hostile(s: &mut Suite, api: &Api, vault: &Vault, chrome: &mut crate::browser:
 }
 
 const HOSTILE_NOTE: &str = include_str!("../../fixtures/hostile-note.md");
+/// A 1×1 PNG: the picture a note names before the vault holds it.
+const DOT_PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15,
+    0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x89, 0x99, 0x3d, 0x1d, 0x00, 0x00, 0x00, 0x00,
+    0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+];
 const SCRIPTED_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" onload=\"document.documentElement.setAttribute('data-ran', '1')\"><circle cx=\"4\" cy=\"4\" r=\"4\"/></svg>\n";
