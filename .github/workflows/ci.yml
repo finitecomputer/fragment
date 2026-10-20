@@ -22,7 +22,8 @@
 # holds below, saved right after the step that fills it.
 #
 # A green push deploys (`deploy`, below): master's to the preview,
-# production's to production.
+# production's to production. A push to production of a commit master's
+# run already proved skips the tests and deploys at once (`proven`, below).
 name: ci
 
 on:
@@ -39,7 +40,54 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # A push to production only: whether master already proved this commit,
+  # by a run of this workflow (by its id, not its name) on a push to master
+  # whose head is this SHA, and which succeeded. A job can only need jobs
+  # of its own run, so without this a promotion tested again, for 20
+  # minutes, what master's run had (Paul, 2026-10-20). The same SHA is the
+  # same ci.yml, whose master runs always test and then deploy the
+  # preview: such a run's success is its check's, its e2e's and its
+  # deploy's. Proven, the tests skip and `deploy` runs at once; otherwise
+  # (a hotfix pushed straight to production, master's run red or still
+  # running) they run as on any push. Should this job fail, nothing after
+  # it runs and nothing deploys.
+  proven:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/production'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read # this workflow's runs, through the API
+      contents: read
+    outputs:
+      proven: ${{ steps.ask.outputs.proven }}
+    steps:
+      # the API's filters, held again to each run it answers; every one
+      # found is printed, with its state
+      - id: ask
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          workflow=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .workflow_id)
+          runs=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs" \
+              -f head_sha="$GITHUB_SHA" -f branch=master -f event=push -f per_page=100 |
+            jq -c --argjson w "$workflow" --arg sha "$GITHUB_SHA" --arg repo "$GITHUB_REPOSITORY" \
+              '[.workflow_runs[] | select(.workflow_id == $w and .head_sha == $sha and .head_branch == "master" and .event == "push" and .head_repository.full_name == $repo)]')
+          jq -r '.[] | "on master: \(.html_url), attempt \(.run_attempt): \(.status) \(.conclusion // "")"' <<< "$runs"
+          if jq -e 'any(.status == "completed" and .conclusion == "success")' <<< "$runs" > /dev/null; then
+            echo "master proved $GITHUB_SHA: deploying it without testing it again"
+            echo proven=true >> "$GITHUB_OUTPUT"
+          else
+            echo "master has not proved $GITHUB_SHA (no run of this workflow on a push to master of it succeeded): testing it first"
+            echo proven=false >> "$GITHUB_OUTPUT"
+          fi
+
   check:
+    # on every run but a production push of a commit master proved
+    # (`proven`, which skips on every other run: `!cancelled()` keeps its
+    # skip from skipping this), and never after `proven` fails
+    needs: proven
+    if: ${{ !cancelled() && (needs.proven.result == 'skipped' || (needs.proven.result == 'success' && needs.proven.outputs.proven == 'false')) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -75,6 +123,9 @@ jobs:
 
   e2e-shard:
     name: e2e shard ${{ matrix.shard }}/4
+    # as `check`
+    needs: proven
+    if: ${{ !cancelled() && (needs.proven.result == 'skipped' || (needs.proven.result == 'success' && needs.proven.outputs.proven == 'false')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -157,21 +208,24 @@ jobs:
           retention-days: 7
 
   # the check named `e2e`: green when every shard is (a re-run's, by each
-  # shard's latest attempt). It runs whatever the shards did (unless the run
-  # was cancelled), so a red shard makes it red, never skipped.
+  # shard's latest attempt). It runs whenever the shards were to run, as
+  # `check`, whatever they did (unless the run was cancelled), so a red or
+  # skipped shard makes it red; it skips with them alone.
   e2e:
-    needs: e2e-shard
-    if: ${{ !cancelled() }}
+    needs: [proven, e2e-shard]
+    if: ${{ !cancelled() && (needs.proven.result == 'skipped' || (needs.proven.result == 'success' && needs.proven.outputs.proven == 'false')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - run: test "${{ needs.e2e-shard.result }}" = success || { echo "a shard's job failed (${{ needs.e2e-shard.result }}); its log says where"; exit 1; }
 
   # Continuous deployment, on a green push: master's to the preview
-  # (`--branch preview`), production's to production. Only Paul updates
-  # `production` (a protected branch): his push, or the pull request he
-  # merges into it, is the approval. Each deploys from a GitHub environment
-  # of its name, `preview` or `production`, which the repo's settings let
+  # (`--branch preview`), production's to production, at once when master
+  # proved its commit (`proven`), and never after a red test or a failed
+  # `proven`. Only Paul updates `production` (a protected branch): his
+  # push, or the pull request he merges into it, is the approval. Each
+  # deploys from a GitHub environment of its name, `preview` or
+  # `production`, which the repo's settings let
   # only its branch use, and which holds the variable DEPLOY_HOST (its
   # platform's host) and the secrets DEPLOY_CONFIG (the whole deploy
   # config, JSONC: names and paths, a secret only so the public repo's
@@ -181,8 +235,12 @@ jobs:
   # pinned by digest (`--pinned-only`): a runner builds none
   # (xtask/src/deploy.rs, `pinned_only`, says why).
   deploy:
-    needs: [check, e2e]
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/production')
+    needs: [proven, check, e2e]
+    if: >-
+      ${{ !cancelled() && github.event_name == 'push'
+      && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/production')
+      && ((needs.proven.result == 'success' && needs.proven.outputs.proven == 'true')
+      || (needs.check.result == 'success' && needs.e2e.result == 'success')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -206,7 +264,10 @@ jobs:
       # the e2e's cache, restored and never saved here: a deploy builds what
       # its build does (xtask in target/debug, the cell's wasm32 builds,
       # worker-build and its tools). Every input but save-if is the e2e
-      # shards' own, as the paths are part of the cache's version.
+      # shards' own, as the paths are part of the cache's version. On
+      # production it is always master's (a branch reads the default
+      # branch's caches), as its shards save none, and a proven push runs
+      # none.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: e2e-build-worker-build-${{ env.WORKER_BUILD_VERSION }}
