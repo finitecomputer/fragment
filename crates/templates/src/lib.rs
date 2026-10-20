@@ -100,7 +100,7 @@ pub fn shell_page(text: &str, release: &str) -> String {
 /// each with its content type: of the rest of cell/shell/, its pages are
 /// served at their own paths, and its credits and licenses not at all.
 #[cfg(feature = "platform")]
-const SHELL_PUBLISHED: [(&str, &str); 17] = [
+const SHELL_PUBLISHED: [(&str, &str); 18] = [
     ("shell.js", "text/javascript; charset=utf-8"),
     ("shell.css", "text/css; charset=utf-8"),
     ("layout.js", "text/javascript; charset=utf-8"),
@@ -116,6 +116,8 @@ const SHELL_PUBLISHED: [(&str, &str); 17] = [
     ("vendor/split-grid.js", "text/javascript; charset=utf-8"),
     ("manifest.webmanifest", "application/manifest+json"),
     ("icon.svg", "image/svg+xml"),
+    // Finite's logo, above the splash's and the welcome's card (CREDITS.md)
+    ("finite-logo.svg", "image/svg+xml"),
     // the desktop's and the launcher's light and dark landscapes (cell/shell/CREDITS.md)
     ("wallpaper.jpg", "image/jpeg"),
     ("wallpaper-dark.jpg", "image/jpeg"),
