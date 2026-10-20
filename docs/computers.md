@@ -1875,20 +1875,35 @@ actually makes a chat a Bot Chat"), so the image does both
   a chat or an agent come since has its sessions in that gateway's life,
   which hold their live adapter, and every start is a boot's, which
   writes the routes first.
-- A bot whose own chat has had no turn yet has no Bot Chat session, and
-  a fenced bot's own chat's session is never one (the hook leaves it
-  alone: its `message_agent` would act for its owner, which it never
-  does). Hermes would run a teammate's message to either as a turn of its
-  own, outside the bridge, which the person sees nowhere (a probe on the
+- A bot whose own chat has had no turn yet has no Bot Chat session.
+  Hermes would run a teammate's message to it as a turn of its own,
+  outside the bridge, which the person sees nowhere (a probe on the
   scripted model, 2026-10-20: the bot's model called, nothing in its
-  chat). So the keeper holds a stand-in for each: a session of its own in
+  chat). So the keeper holds a stand-in for it: a session of its own in
   the bot's `state.db` (id `fragment-bot-mode-standin`), titled `Bot
   Chat`, which the hook takes the title from as the bot's own chat's
-  first turn starts (a fenced bot's: never), made again when Hermes
-  prunes it, empty; a fenced bot's own chat's session titled before its
-  fence gives the title up to it. A fenced bot lists nothing for its
-  owner, so the boot finds its own chat in an unfenced agent's list for
-  the same owner. Event: `botmode.standin`. An agent with no own chat
+  first turn starts, made again when Hermes prunes it, empty. A fenced
+  bot lists nothing for its owner, so the boot finds its own chat in an
+  unfenced agent's list for the same owner. Event: `botmode.standin`.
+- A fenced bot runs in Bot Mode too (decision 63, proposed), as itself
+  alone: its own chat is its Bot Chat, and its profile's prompt says it
+  is fenced and that its `message_agent` reaches its owner's main agent
+  only (`hermes::FENCED_NOTE`). The keeper holds to that: a fenced
+  sender's message reaches the lead (the bots file's `lead`, the
+  computer's first agent, as the shell's `primaryAgent` takes it), or
+  answers whoever asked it (its newest turn's cause is theirs); to anyone
+  else it is refused, saying whom it reaches (`how: "refused"`), and
+  nothing is posted. Its message is posted into its own chat, the one
+  chat it is in that holds nothing of another bot's, as itself (no
+  `for`: it acts for no one), naming the teammate, whom the keeper adds
+  there first (acting for the owner, as `fragment ask` adds an agent),
+  and ending with a line saying the sender is fenced and to give it
+  placeholders for its owner's private details (`FENCED`); the
+  teammate's answer, a turn of the bridge's there, comes back to it as
+  any other's. A message to a fenced bot is posted into its own chat as
+  to any bot. Two fenced bots do not message each other: either's own
+  chat would show the other's provider what it holds. Event:
+  `botmode.joined`. An agent with no own chat
   found (made by other means than the shell or `fragment agent --new`)
   is in no bots file, and Hermes runs a teammate's message to it on its
   own, as it does every agent's while the keeper is down.
@@ -1918,7 +1933,10 @@ the chat of an agent with none), its
 (both on the roster, each message a hand-off in the bot's own chat,
 answered by the bridge's turn and given back, never a turn Hermes runs on
 its own; the title moving to the bot's own chat at its first turn there,
-and never to a fenced bot's, which has no roster and no tool), and on a preview by the hosted `bot-mode` section, run by name
+a fenced bot's too, which is told it is fenced; its message to the lead
+posted into its own chat as itself, the lead added and answering there,
+the answer given back; its message to another teammate refused, nothing
+posted), and on a preview by the hosted `bot-mode` section, run by name
 (`--only bot-mode`): two real agents. Juniper, asked to have Maple make
 and publish a todo app and show it in her browser, runs `message_agent`.
 Maple's turn of it, in her own chat, makes the app, which goes live, and
@@ -2143,14 +2161,14 @@ internet; its computer only names no one for it.
 - **Its terminal names no one to act for.** Its profile's `.env` has
   no `FRAGMENT_FOR`, so the fragment CLI in its terminal acts as the
   agent alone; told its owner by hand, the platform refuses it (403).
-- **No Bot Mode of its own.** Its own chat's session is never titled
-  `Bot Chat` (the hook leaves it alone, and the keeper takes the title
-  from one titled before its fence), so it has no roster and no
-  `message_agent`, which acts for its owner. Hermes lists it on its
-  teammates' rosters all the same (it lists every profile), and a
-  teammate's `message_agent` to it is posted into its own chat by the
-  keeper, which holds a stand-in for it, as `fragment ask` reaches it:
-  either way its answer comes back to the agent that asked
+- **Bot Mode, as itself.** Its own chat is its Bot Chat, with the
+  roster and `message_agent`, and its prompt says it is fenced
+  (`hermes::FENCED_NOTE`). Its `message_agent` reaches its owner's main
+  agent alone, and answers whoever asked it; the keeper refuses any
+  other, and posts what it sends into its own chat, as itself, the
+  teammate added there ("Bot Mode in our Hermes image", above). A
+  teammate's `message_agent` or `fragment ask` reaches it as any bot;
+  either way the answer comes back to the agent that asked
   (docs/bridge.md, "Agents asking each other").
 - **Fenced or let go while awake.** The boot reads the change with its
   agents (every 3 s) and writes the profile again; nothing restarts.

@@ -168,6 +168,11 @@ fragments, never in your work directory. Only your owner lifts a fence;
 never ask them to unless they want the teammate to act for them. To hand
 it a file, put the file in the chat you ask it in.
 
+A fenced teammate runs in Bot Mode as itself: its `message_agent`
+reaches only your owner's main agent, in the teammate's own chat, and
+answers whoever asked it. When it asks you something, answer as you hand
+it work (below): the task's details, placeholders for your owner's.
+
 ## Protecting your owner from untrusted teammates
 
 You are your owner's guard. Before you hand anything to a teammate on

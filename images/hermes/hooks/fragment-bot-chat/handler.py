@@ -17,9 +17,10 @@
 # own `chat -c "Bot Chat" --create-if-missing` makes one when a teammate
 # messages an agent with no chat yet; its history stays; and the keeper's
 # stand-in, which holds the title until the agent's own chat has a turn).
-# A turn in any other chat, of the gateway's own profile, or of a fenced
-# agent (whose `message_agent` would act for its owner, which it never
-# does: decision 63, proposed) is left alone.
+# A turn in any other chat, or of the gateway's own profile, is left
+# alone. A fenced agent's own chat is its Bot Chat too: its `message_agent`
+# reaches its owner's main agent alone, as itself (the keeper's rule:
+# decision 63, proposed).
 #
 # This file is the image's, not the repo's tooling: it runs inside Hermes'
 # gateway, whose session code only it can call.
@@ -51,7 +52,7 @@ def handle(event_type, context):
 
     home = str(get_hermes_home().resolve())
     bot = bot_of(home)
-    if bot is None or bot.get("fenced") is not False or context.get("chat_id") != f"{bot['chat']}/{bot['agent']}":
+    if bot is None or context.get("chat_id") != f"{bot['chat']}/{bot['agent']}":
         return
     session = context["session_id"]
     db = SessionDB(db_path=Path(home) / "state.db")

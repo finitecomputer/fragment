@@ -1044,8 +1044,7 @@ fragment.club until cutover (decisions 34–35).
   `images/hermes/botmode.py`, `bot_chat`). Hermes lists every profile on
   every roster, and queues a teammate's message for a live owner only
   when the bot has a session titled `Bot Chat`; with none (its own chat
-  had no turn yet, or it is fenced, whose own chat's session the hook
-  never titles), it runs the message as a turn of its own, outside the
+  had no turn yet), it runs the message as a turn of its own, outside the
   bridge (`tools/bot_mode_dm.py`, `_run_local_turn`). So the keeper
   writes a session of its own into the bot's `state.db`
   (`fragment-bot-mode-standin`, titled `Bot Chat`) and holds it, through

@@ -2983,11 +2983,15 @@ async fn bots_message_each_other() {
 /// roster, fenced or not, and whether its own chat has had a turn or not;
 /// a message to each is a hand-off in its own chat, which its owner sees,
 /// answered by a turn of the bridge's and given back, never a turn Hermes
-/// runs on its own outside the bridge. A fenced agent's own chat is never
-/// a Bot Chat: no roster or `message_agent` of its own.
-/// Method: juniper talks in her own chat; maple's own chat has had no
-/// turn; fern is fenced, with her own chat. The keeper holds a stand-in
-/// for maple and fern; juniper messages each.
+/// runs on its own outside the bridge. A fenced agent runs in Bot Mode too
+/// (decision 63, proposed), as itself: its `message_agent` reaches the
+/// lead (the computer's first agent), posted into its own chat as itself,
+/// the lead added there, and its answer comes back; to any other teammate
+/// it is refused, and nothing is posted.
+/// Method: juniper, the lead, talks in her own chat; maple's own chat has
+/// had no turn; fern is fenced, with her own chat. The keeper holds a
+/// stand-in for maple and fern; juniper messages each; then fern messages
+/// juniper, and maple.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn a_message_reaches_a_teammate_before_its_first_turn_and_a_fenced_one() {
@@ -3038,11 +3042,44 @@ async fn a_message_reaches_a_teammate_before_its_first_turn_and_a_fenced_one() {
     assert_eq!(bot_chat_of(&c, "maple--k3x9")["key"], "agent:maple--k3x9:relay:group:maple-chat--z8w6/maple--k3x9", "maple's own chat is her Bot Chat once it has had a turn");
     let mcall = calls_of(&model, "maple--k3x9", "ping maple").into_iter().next().unwrap();
     assert!(mcall.body["messages"][0]["content"].to_string().contains("## Messaging other agents"), "maple's turn had the roster");
-    // fern's never: the stand-in keeps the title, and her turn has neither
-    assert!(bot_chat_of(&c, "fern--k3x9")["key"].is_null(), "fern's Bot Chat is the keeper's stand-in: {}", bot_chat_of(&c, "fern--k3x9"));
-    let fcall = calls_of(&model, "fern--k3x9", "ping fern").into_iter().next().unwrap();
-    assert!(!fcall.body["messages"][0]["content"].to_string().contains("## Messaging other agents") && !fcall.body["tools"].to_string().contains("\"message_agent\""), "fern, fenced, has no roster and no message_agent");
-    assert!(c.logs().lines().filter(|l| l.contains("\"botmode.titled\"")).all(|l| !l.contains("fern--k3x9")), "fern's own chat is never titled");
+    // and fern's, fenced: Bot Mode too, told she is fenced
+    assert_eq!(bot_chat_of(&c, "fern--k3x9")["key"], "agent:fern--k3x9:relay:group:fern-chat--q2w3/fern--k3x9", "fern's own chat is her Bot Chat too");
+    let fcall = calls_of(&model, "fern--k3x9", "ping fern").into_iter().find(|m| m.body["tools"].as_array().is_some_and(|t| !t.is_empty())).unwrap();
+    let fsystem = fcall.body["messages"][0]["content"].to_string();
+    assert!(fsystem.contains("## Messaging other agents") && fcall.body["tools"].to_string().contains("\"message_agent\""), "fern, fenced, has the roster and message_agent");
+    assert!(fsystem.contains("You are fenced: you act as yourself alone"), "and is told she is fenced: {fsystem}");
+
+    // fern messages juniper, the lead: in her own chat, as herself
+    let fsay = |text: &str| {
+        let said = fake.say(&fchat, &person("paul"), json!({ "text": text }));
+        fragment_bridge::records::turn_id("fern--k3x9", &fchat, "chat", said["seq"].as_u64().unwrap())
+    };
+    let fturn = fsay("dm: juniper--k3x9: ping from fern");
+    within(&fake, &fchat, &c, 180_000, "fern's turn", |w| w.bodies(&fchat, "work", "turn.end").iter().any(|e| e["turn"] == fturn)).await;
+    let asked_lead = |w: &support::fake::World| w.records(&fchat, "chat").into_iter().find(|r| r["principal"] == "npub1fern" && r["body"]["to"] == json!(["npub1juniper"]));
+    within(&fake, &fchat, &c, 120_000, "fern's message to juniper in her own chat", |w| asked_lead(w).is_some()).await;
+    let record = fake.with(|w| asked_lead(w)).unwrap();
+    let text = record["body"]["text"].as_str().unwrap_or_default();
+    assert_eq!(record["body"]["back"], json!(fturn), "asked from fern's turn: {}", record["body"]);
+    assert!(text.contains("ping from fern") && text.ends_with("(Fern is fenced, on a model outside the platform: what you send it leaves the platform, so give it placeholders for your owner's private details.)"), "said to be fenced: {text}");
+    assert!(fake.with(|w| w.fragments[&fchat].members.iter().any(|m| m.principal == "npub1juniper")), "juniper added to fern's chat, to answer her there");
+    let jturn = fragment_bridge::records::turn_id("juniper--k3x9", &fchat, "chat", record["seq"].as_u64().unwrap());
+    within(&fake, &fchat, &c, 180_000, "juniper's turn in fern's chat", |w| w.bodies(&fchat, "work", "turn.end").iter().any(|e| e["turn"] == jturn)).await;
+    let claim = fake.with(|w| w.records(&fchat, "work").into_iter().find(|r| r["body"]["kind"] == "turn.start" && r["body"]["turn"] == jturn).and_then(|r| r["seq"].as_u64())).expect("juniper's claim");
+    let back = fragment_bridge::records::turn_id("fern--k3x9", &fchat, "work", claim);
+    within(&fake, &fchat, &c, 180_000, "juniper's answer back to fern", |w| reply(w, &fchat, &back).is_some_and(|t| t.contains("ping from fern"))).await;
+
+    // and maple, no lead of hers: refused, saying whom she reaches, and
+    // nothing posted
+    let fturn2 = fsay("dm: maple--k3x9: ping maple from fern");
+    within(&fake, &fchat, &c, 180_000, "fern's second turn", |w| w.bodies(&fchat, "work", "turn.end").iter().any(|e| e["turn"] == fturn2)).await;
+    let t = Instant::now();
+    // bounded: a minute
+    while !c.logs().lines().any(|l| l.contains("\"botmode.delivered\"") && l.contains("\"sender\": \"fern--k3x9\"") && l.contains("\"how\": \"refused\"")) {
+        assert!(t.elapsed() < Duration::from_secs(60), "fern's message to maple refused: {}", told(&fake, &fchat, &c));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(fake.with(|w| !w.records(&mchat, "chat").iter().chain(w.records(&fchat, "chat").iter()).any(|r| r["principal"] == "npub1fern" && r["body"]["text"].as_str().is_some_and(|t| t.contains("ping maple from fern")))), "nothing posted for it");
 }
 
 /// Goal (docs/computers.md, "An agent's own model"; Paul, 2026-10-08): an

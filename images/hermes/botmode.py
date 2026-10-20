@@ -41,16 +41,22 @@
 # (its newest turn's cause is that teammate's message) is posted as a
 # reply: with no `back`, so nothing more goes back and forth.
 #
-# A bot whose own chat has had no turn yet has no Bot Chat session, and a
-# fenced bot's is never one (the hook leaves it alone: its `message_agent`
-# would act for its owner, which it never does). Hermes lists both on every
-# roster all the same (every profile is), and would run a message to one as
-# a turn of its own, outside the bridge, which no one sees. So the keeper
-# holds a stand-in for each: a session of its own in the bot's state.db
-# (id STANDIN), titled "Bot Chat", which the hook takes the title from at
-# the first turn in the bot's own chat (a fenced bot's: never), and which
-# the keeper makes again when Hermes prunes it, empty. A fenced bot's own
-# chat's session titled before its fence gives the title up to it.
+# A fenced bot runs in Bot Mode too (decision 63, proposed), as itself
+# alone: its `message_agent` reaches its owner's lead (their main agent, the
+# bots file's `lead`), and answers whoever asked it; the keeper refuses any
+# other, saying so. Its message is posted into its own chat (the one chat it
+# is in that holds nothing of another bot's), as itself, naming the
+# teammate, whom the keeper adds to that chat (an unfenced agent, which
+# reads its owner's chats already), with a line saying the sender is fenced.
+# A message to a fenced bot is posted into its own chat as to any bot.
+#
+# A bot whose own chat has had no turn yet has no Bot Chat session. Hermes
+# lists it on every roster all the same (every profile is), and would run a
+# message to it as a turn of its own, outside the bridge, which no one sees.
+# So the keeper holds a stand-in for it: a session of its own in the bot's
+# state.db (id STANDIN), titled "Bot Chat", which the hook takes the title
+# from at the first turn in the bot's own chat, and which the keeper makes
+# again when Hermes prunes it, empty.
 #
 # A delivery the keeper claimed and never settled (it stopped between the
 # two: a sleep, a crash) is finished once the keeper holds that bot's Bot
@@ -103,10 +109,15 @@ REPLY = "\n\n({name} sent you this while answering what you asked it. Its answer
 # What the sender is told when its delivery is settled, as a turn of its own
 # after the one that sent it (`{name}` is the teammate's).
 SETTLED = {
-    "back": "{name} has your message, in its own chat, and its answer comes back to you on its own, as a turn of yours: so end this turn with exactly [SILENT].",
-    "reply": "{name} has your message, in its own chat, and your answer goes back to {name} on its own: so end this turn with exactly [SILENT].",
-    "none": "{name} has your message, in its own chat ({chat}), and answers there: its answer comes back to you only if it messages you. If your owner is waiting on it, tell them where to look.",
+    "back": "{name} has your message, and its answer comes back to you on its own, as a turn of yours: so end this turn with exactly [SILENT].",
+    "reply": "{name} has your message, and your answer goes back to {name} on its own: so end this turn with exactly [SILENT].",
+    "none": "{name} has your message, in {chat}, and answers there: its answer comes back to you only if it messages you. If your owner is waiting on it, tell them where to look.",
 }
+# The line a fenced sender's message ends with (decision 63, proposed).
+FENCED = "\n\n({name} is fenced, on a model outside the platform: what you send it leaves the platform, so give it placeholders for your owner's private details.)"
+# Why a fenced sender's message to another teammate is refused.
+REFUSED = "You are fenced: your message_agent reaches only {lead}, and answers whoever asked you. Ask {lead} to involve {name}."
+
 # Hermes' attribution of a teammate's message (tools/bot_mode_dm.py): the
 # sender's friendly name.
 ATTRIBUTION = re.compile(r"Message from \S+ (.+?) \(@[^)]+\): ")
@@ -145,19 +156,18 @@ def read_bots():
     except (OSError, ValueError, KeyError, TypeError):
         return []
     keys = ("agent", "identity", "owner", "profile", "home", "chat", "sessionKey")
-    return [b for b in bots if isinstance(b, dict) and all(isinstance(b.get(k), str) and b[k] for k in keys) and isinstance(b.get("fenced"), bool)]
+    return [b for b in bots if isinstance(b, dict) and all(isinstance(b.get(k), str) and b[k] for k in keys) and all(isinstance(b.get(k), bool) for k in ("fenced", "lead"))]
 
 
 def bot_chat(bot):
     """The session the keeper holds for the bot, as Hermes finds a Bot Chat's owner (the compression
-    tip of the session titled "Bot Chat"): its own chat's, once that chat has had a turn and it is not
-    fenced; else the keeper's stand-in, made and titled here when none holds the title (or one that may
-    not: Hermes' own, or a fenced bot's own chat's). None while the platform holds the computer and the
-    stand-in is to be made."""
+    tip of the session titled "Bot Chat"): its own chat's, once that chat has had a turn; else the
+    keeper's stand-in, made and titled here when none holds the title (or Hermes' own does). None while
+    the platform holds the computer and the stand-in is to be made."""
     path = Path(bot["home"]) / "state.db"
 
     def ours(titled):
-        return titled is not None and (titled["id"] == STANDIN or (titled.get("session_key") == bot["sessionKey"] and not bot["fenced"]))
+        return titled is not None and (titled["id"] == STANDIN or titled.get("session_key") == bot["sessionKey"])
 
     if path.is_file():
         db = SessionDB(db_path=path, read_only=True)
@@ -234,8 +244,9 @@ class Refused(Exception):
 
 
 def call(method, path, sender, body=None):
-    """One request to the platform as `sender` (an agent of this computer), acting for its owner."""
-    url = f"{API}{path}{'&' if '?' in path else '?'}for={urllib.parse.quote(sender['owner'], safe='')}"
+    """One request to the platform as `sender` (an agent of this computer), acting for its owner; a
+    fenced one as itself alone, which it only ever is (decision 63, proposed)."""
+    url = f"{API}{path}" if sender["fenced"] else f"{API}{path}{'&' if '?' in path else '?'}for={urllib.parse.quote(sender['owner'], safe='')}"
     data = None if body is None else json.dumps(body).encode()
     headers = {"x-fragment-agent": sender["agent"]} | ({"content-type": "application/json"} if data is not None else {})
     try:
@@ -306,9 +317,20 @@ def bot_name(bot):
         return bot["agent"].split(".")[0]
 
 
-def deliver(bot, sender, owner, claimed):
-    """A teammate's message, posted into the bot's own chat as the teammate (asked from its newest
-    turn, a reply, or neither: `how`), and its delivery settled."""
+def join(chat, agent):
+    """`agent` (an unfenced one) an editor of `chat`, acting for its owner, as `fragment ask` adds an
+    agent to a chat it is asked in: so it answers a fenced sender there."""
+    members = call("GET", f"/api/f/{chat}/members", agent).get("members") or []
+    if not any(m.get("principal") == agent["identity"] for m in members):
+        call("PUT", f"/api/f/{chat}/members/{urllib.parse.quote(agent['identity'], safe='')}", agent, {"role": "editor"})
+        ev("joined", agent=agent["agent"], chat=chat)
+
+
+def deliver(bot, sender, owner, claimed, bots):
+    """A teammate's message, posted as an agent's ask (asked from its newest turn, a reply, or neither:
+    `how`), and its delivery settled: into the bot's own chat by the sender for their owner, or a
+    fenced sender's into its own chat as itself, when it reaches the lead or answers its asker
+    (`refused` otherwise)."""
     delivery = claimed["delivery_id"]
     t = time.time()
     status, reply, error, reason, how = "failed", "", "", "", None
@@ -318,23 +340,34 @@ def deliver(bot, sender, owner, claimed):
         else:
             them = name_of(claimed["message"], sender["agent"].split(".")[0])
             start, fresh = newest_turn(sender)
-            body = {"text": claimed["message"], "to": [bot["identity"]]}
-            if start is not None and asker_of(sender, start) == bot["identity"]:
-                how = "reply"
-                body["text"] += REPLY.format(name=them)
-            elif fresh:
-                how = "back"
-                body["text"] += ANSWER_HERE.format(name=them)
-                body["back"] = start["turn"]
+            replying = start is not None and asker_of(sender, start) == bot["identity"]
+            if sender["fenced"] and not bot["lead"] and not replying:
+                lead = next((b for b in bots if b["lead"]), None)
+                how, error = "refused", REFUSED.format(lead=bot_name(lead) if lead else "your owner's main agent", name=bot_name(bot))
             else:
-                how = "none"
-            try:
-                call("POST", f"/api/f/{bot['chat']}/channels/chat", sender, {"id": "dm-" + delivery[:32], "body": body})
-            except Refused as e:
-                # posted before under this id (a claim finished again), its body then another
-                if e.status != 409:
-                    raise
-            status, reply = "settled", SETTLED[how].format(name=bot_name(bot), chat=bot["chat"])
+                body = {"text": claimed["message"], "to": [bot["identity"]]}
+                if replying:
+                    how = "reply"
+                    body["text"] += REPLY.format(name=them)
+                elif fresh:
+                    how = "back"
+                    body["text"] += ANSWER_HERE.format(name=them)
+                    body["back"] = start["turn"]
+                else:
+                    how = "none"
+                # a fenced sender's own chat, the one it is in that holds nothing of another's
+                chat = bot["chat"]
+                if sender["fenced"]:
+                    chat = sender["chat"]
+                    body["text"] += FENCED.format(name=them)
+                    join(chat, bot)
+                try:
+                    call("POST", f"/api/f/{chat}/channels/chat", sender, {"id": "dm-" + delivery[:32], "body": body})
+                except Refused as e:
+                    # posted before under this id (a claim finished again), its body then another
+                    if e.status != 409:
+                        raise
+                status, reply = "settled", SETTLED[how].format(name=bot_name(bot), chat=chat)
     except Exception as e:  # the delivery is settled whatever went wrong
         error = f"{type(e).__name__}: {e}"[:600]
     if status == "failed":
@@ -378,7 +411,7 @@ def take(bot, bots, owner):
         owner.recovered = True
         for claimed in left_claimed(owner):
             ev("recovered", agent=bot["agent"], delivery=claimed["delivery_id"])
-            deliver(bot, sender_of(claimed, bots), owner, claimed)
+            deliver(bot, sender_of(claimed, bots), owner, claimed, bots)
     # bounded: TAKE_MAX a pass
     for _ in range(TAKE_MAX):
         if held():
@@ -388,7 +421,7 @@ def take(bot, bots, owner):
             return
         sender = sender_of(claimed, bots)
         ev("taken", agent=bot["agent"], sender=sender["agent"] if sender else None, delivery=claimed["delivery_id"])
-        deliver(bot, sender, owner, claimed)
+        deliver(bot, sender, owner, claimed, bots)
 
 
 def main():

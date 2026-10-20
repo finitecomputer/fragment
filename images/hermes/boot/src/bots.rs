@@ -136,14 +136,15 @@ pub fn link_hook(profile: &Path, hook: &Path) -> std::io::Result<()> {
 /// The bots file: for each agent whose own chat is found (`chats`, by
 /// `bot_chat`), its identity and owner, its profile's home, that chat, the
 /// session key Hermes keeps that chat's session under
-/// (`wire::session_key`), whose session the hook titles `Bot Chat`, and
-/// whether it is fenced. The keeper takes a teammate's message to each, so
-/// none is run by Hermes outside the bridge; a fenced agent's session is
-/// never titled (its `message_agent` would act for its owner, which it
-/// never does: decision 63, proposed), so the keeper holds a stand-in of
-/// its own for it. An agent with no chat found yet is left out: the hook
-/// and the keeper leave it alone.
+/// (`wire::session_key`), whose session the hook titles `Bot Chat`,
+/// whether it is fenced, and whether it is its owner's lead: their main
+/// agent, the computer's first (as the shell's `primaryAgent` takes it),
+/// the one teammate a fenced agent's `message_agent` reaches (decision 63,
+/// proposed). The keeper takes a teammate's message to each, so none is
+/// run by Hermes outside the bridge. An agent with no chat found yet is
+/// left out: the hook and the keeper leave it alone.
 pub fn bots_file(agents: &[Agent], home: &Path, chats: &BTreeMap<String, String>) -> String {
+    let lead = agents.first().map(|a| a.fragment.as_str());
     let bots: Vec<serde_json::Value> = agents
         .iter()
         .filter_map(|a| {
@@ -158,6 +159,7 @@ pub fn bots_file(agents: &[Agent], home: &Path, chats: &BTreeMap<String, String>
                 "chat": chat,
                 "sessionKey": wire::session_key(&profile, &wire::chat_id(chat, &a.fragment)),
                 "fenced": a.fenced,
+                "lead": lead == Some(a.fragment.as_str()),
             }))
         })
         .collect();
@@ -320,8 +322,8 @@ mod tests {
 
     /// The hook's and the keeper's file: each agent's home, own chat, the
     /// key Hermes' gateway keeps that chat's session under (the bridge's
-    /// own), and whether it is fenced (a fenced one listed too: the keeper
-    /// takes its teammates' messages to it); an agent whose chat is not
+    /// own), whether it is fenced (a fenced one listed too), and whether it
+    /// is the lead (the computer's first agent); an agent whose chat is not
     /// found yet is left out.
     #[test]
     fn the_bots_file_names_each_bot_chats_session() {
@@ -339,10 +341,11 @@ mod tests {
                 "chat": "juniper-chat--h6j7",
                 "sessionKey": "agent:juniper--k3x9:relay:group:juniper-chat--h6j7/juniper--k3x9",
                 "fenced": false,
+                "lead": true,
             })
         );
         assert_eq!(f["bots"].as_array().map(Vec::len), Some(2), "maple, with no chat found, is left out");
-        assert_eq!((&f["bots"][1]["chat"], &f["bots"][1]["fenced"]), (&json!("fred-chat--b3c4"), &json!(true)), "fred, fenced, listed: its teammates' messages reach it");
+        assert_eq!((&f["bots"][1]["chat"], &f["bots"][1]["fenced"], &f["bots"][1]["lead"]), (&json!("fred-chat--b3c4"), &json!(true), &json!(false)), "fred, fenced, listed; juniper, the first, the lead");
         assert_eq!(bots_file(&[], Path::new("/data/hermes"), &chats), r#"{"bots":[]}"#);
     }
 

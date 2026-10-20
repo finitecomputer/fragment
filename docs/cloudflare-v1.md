@@ -1384,9 +1384,16 @@ native boundary that we can leverage here?"
       its own work directory, run as the `hermes` user beside the rest.
       Its terminal is given no owner to act for (no `FRAGMENT_FOR` in its
       `.env`, written again within seconds when the fence changes, read
-      at its next command), and it has no Bot Mode of its own (no roster
-      and no `message_agent`, which acts for its owner); a teammate
-      reaches it in its own chat, by `message_agent` or `fragment ask`. The
+      at its next command), and its prompt says it is fenced. It runs in
+      Bot Mode as itself (Austin, 2026-10-20: "both fenced and unfenced
+      bots are running in bot mode"): its `message_agent` reaches its
+      owner's main agent alone, and answers whoever asked it, posted into
+      its own chat as itself, the teammate added there; the keeper
+      refuses any other message, so every path from an untrusted bot to
+      a trusted one goes through the guard. Two fenced bots do not message
+      each other yet: either's own chat would show the other's provider
+      what it holds. A teammate reaches it in its own chat, by
+      `message_agent` or `fragment ask`. The
       computer does not enforce the fence: its commands can read the
       other agents' work and Hermes' home, and the computer's egress, which
       signs as whichever of its agents a request names, would sign as
