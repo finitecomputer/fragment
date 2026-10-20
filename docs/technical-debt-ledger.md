@@ -144,7 +144,7 @@ fragment.club until cutover (decisions 34–35).
   until its next image change, and a pin back restores it: a rollback then
   loses only the canary's own work, and says so as any going back does.
 
-## CI deploys pinned images only; an image is built by hand
+## CI deploys pinned images only; a pushed image's digest is pinned by hand
 
 - **Observed:** 2026-10-16, continuous deployment (.github/workflows/
   ci.yml, `deploy`). A runner keeps no Docker layer cache: a build there
@@ -153,22 +153,26 @@ fragment.club until cutover (decisions 34–35).
   digest at every deploy, which tells every computer on that image an
   update is ready (docs/computers.md, "What changes a version").
 - **Shortcut:** CI deploys with `--pinned-only` (xtask/src/deploy.rs),
-  which refuses a config with an image built from the tree. The canary,
-  and production's next stable, are built by a deploy by hand where
-  Docker runs, and the digest that deploy names is copied into the CI
-  config's file and the environment's `DEPLOY_CONFIG` secret set again
+  which refuses a config with an image built from the tree. The canary
+  is built and pushed by the Image workflow (.github/workflows/image.yml,
+  run by hand: `cargo xtask image push`, since 2026-10-20), on a runner
+  with no layer cache, so each build makes a new digest and pushes the
+  whole base, tried up to four times; production's next stable is the
+  round's proven image, copied by it at its digest (`cargo xtask image
+  copy`). The digest its summary names is copied into the file the
+  environment's `DEPLOY_CONFIG` is set from, and the secret set again
   from it.
-- **Risk:** the secret (never read back) and the config a deploy by hand
-  takes drift: a canary built by hand and not pinned in the secret is
-  put back at the secret's digest by master's next deploy, telling the
-  canary group of an update no round made; and a round waits on a person
-  with Docker.
+- **Risk:** the secret (never read back) and its file drift: a canary
+  pushed and not pinned in the secret is put back at the secret's digest
+  by master's next deploy, telling the canary group of an update no round
+  made. A run for a commit whose image did not change still makes a new
+  digest, which, pinned, tells the canary group of an update that changes
+  nothing.
 - **First proof:** a canary computer told an update is ready after a
   master deploy that no round built.
-- **Delete when:** a workflow run by hand builds an image on a builder
-  whose cache keeps a digest while its inputs stay the same, and the
-  digest it names becomes the image's line in `DEPLOY_CONFIG` without a
-  copy by hand.
+- **Delete when:** the Image workflow builds on a builder whose cache
+  keeps a digest while its inputs stay the same, and the digest it names
+  becomes the image's line in `DEPLOY_CONFIG` without a copy by hand.
 
 ## A direct chat's label is its agent's, which a branch may lack room for
 

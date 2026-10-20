@@ -182,23 +182,29 @@ struct Pinned {
 }
 
 /// The registry wrangler pushes a deployment's images to.
-const REGISTRY: &str = "registry.cloudflare.com";
+pub(crate) const REGISTRY: &str = "registry.cloudflare.com";
 
 /// Whether `reference` is an image pinned by digest in `account`'s
 /// registry: `registry.cloudflare.com/<account>/<repository>@sha256:` and 64
-/// lowercase hex digits, its repository's components lowercase letters and
-/// digits joined by `.`, `_` or `-` (what wrangler takes). Another
+/// lowercase hex digits, its repository `repository_ok`. Another
 /// account's image (a preview's, at a production deploy) is refused here:
 /// the account deployed to could not run it.
-fn pinned_ok(reference: &str, account: &str) -> bool {
+pub(crate) fn pinned_ok(reference: &str, account: &str) -> bool {
     let Some((repository, hex)) = reference.strip_prefix(REGISTRY).and_then(|r| r.strip_prefix('/')).and_then(|r| r.strip_prefix(account)).and_then(|r| r.strip_prefix('/')).and_then(|r| r.split_once("@sha256:")) else {
         return false;
     };
+    !account.is_empty() && repository_ok(repository) && hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Whether `repository` is one in a registry's account: components of
+/// lowercase letters and digits joined by `.`, `_` or `-`, separated by
+/// `/` (what wrangler takes).
+pub(crate) fn repository_ok(repository: &str) -> bool {
     let component = |c: &str| {
         let alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
         !c.is_empty() && c.bytes().all(|b| alnum(b) || b"._-".contains(&b)) && c.bytes().next().is_some_and(alnum) && c.bytes().last().is_some_and(alnum)
     };
-    !account.is_empty() && repository.split('/').all(component) && hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    repository.split('/').all(component)
 }
 
 /// The deployment's catalog, and the store secret each operator key's
@@ -649,7 +655,7 @@ fn pinned_only(d: &Deployment) -> Result<()> {
 }
 
 /// wrangler on the pinned Node (`devstack::Tools::wrangler`), for `account`.
-fn wrangler(tools: &devstack::Tools, account: &str) -> Result<Command> {
+pub(crate) fn wrangler(tools: &devstack::Tools, account: &str) -> Result<Command> {
     let mut c = tools.wrangler()?;
     c.env("CLOUDFLARE_ACCOUNT_ID", account).current_dir(devstack::repo_root());
     Ok(c)

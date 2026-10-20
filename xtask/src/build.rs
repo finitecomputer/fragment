@@ -81,25 +81,33 @@ pub fn images() -> Result<()> {
     for container in &containers {
         for (name, image) in container["images"].as_object().into_iter().flatten() {
             let t0 = Instant::now();
-            image_build(image).with_context(|| format!("building the {name} image ahead of the node"))?;
+            image_build(image, None).with_context(|| format!("building the {name} image ahead of the node"))?;
             println!("image {name} built ahead of the node in {:.1?}", t0.elapsed());
         }
     }
     Ok(())
 }
 
-/// One image, as wrangler builds it; its output shown only when it fails.
-fn image_build(image: &serde_json::Value) -> Result<()> {
+/// One image, as wrangler builds it. Ahead of the node it is untagged and
+/// its output shown only when it fails; a push's (`tag`: image.rs) is
+/// tagged, and its output shown as it runs.
+pub fn image_build(image: &serde_json::Value, tag: Option<&str>) -> Result<()> {
     let dockerfile = image["dockerfile"].as_str().context("an image names its dockerfile")?;
     let context = image["build_context"].as_str().context("an image names its build context")?;
     let text = std::fs::read(dockerfile).with_context(|| format!("read {dockerfile}"))?;
     let mut cmd = Command::new("docker");
     cmd.args(["build", "--load", "--platform", "linux/amd64", "--provenance=false"]);
+    if let Some(tag) = tag {
+        cmd.args(["-t", tag]);
+    }
     for (k, v) in image["build_vars"].as_object().into_iter().flatten() {
         let v = v.as_str().with_context(|| format!("build var {k} is a string"))?;
         cmd.arg("--build-arg").arg(format!("{k}={v}"));
     }
-    cmd.args(["-f", "-", context]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.args(["-f", "-", context]).stdin(Stdio::piped());
+    if tag.is_none() {
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    }
     let shown = shown(&cmd);
     let mut child = cmd.spawn().with_context(|| format!("could not start {shown} (is Docker running?)"))?;
     child.stdin.take().context("docker's stdin")?.write_all(&text)?;

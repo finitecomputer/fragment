@@ -163,6 +163,26 @@ in the job's logs, so the account id in wrangler's and xtask's output
 (registry paths, URLs) is `***`. The job runs without it. Paul sets them
 in the repository's settings.
 
+**On the Image workflow** (.github/workflows/image.yml, run by hand:
+`cargo xtask image push|copy`) the job runs in the same environment, for
+its secrets alone: `CLOUDFLARE_API_TOKEN`, which wrangler pushes with
+(its Containers · Edit), and `CLOUDFLARE_ACCOUNT_ID`, required there, as
+it names the registry the image goes to; masked as on the deploy, in the
+run's summary too, which names the reference. A copy into production
+(its promotion, docs/computers.md, "Production") reads two more of
+production's: `PREVIEW_REGISTRY_TOKEN`, a token of the preview's account
+(Account · Containers · Read, as it only pulls; Edit if the API refuses
+Read the pull credentials), which the copy mints its credentials for
+the preview's registry with, and `PREVIEW_ACCOUNT_ID`, that account,
+named as a secret so it is masked as the other account is. Each copy
+mints registry credentials for each side as wrangler mints its own
+(`wrangler containers registries credentials`, 15 minutes, pull for the
+source, push and pull for production's), never printed, and hands them
+to skopeo on its standard input, which keeps each login in a file of its
+own (mode 600, under `target/image-copy`, mode 700), removed as the try
+ends. It reads no `DEPLOY_CONFIG`; a push's Docker login, which wrangler
+makes, keeps its registry credentials of 15 minutes on the runner.
+
 ## Placeholders and the operator's keys (Paul, 2026-10-04)
 
 A computer's guest is given each credential its agent may use as a

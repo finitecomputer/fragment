@@ -1,0 +1,154 @@
+# A computer image put in an environment's Cloudflare registry, by hand
+# (Actions, image, Run workflow): built from a commit and pushed, or, for
+# production, copied byte for byte from the preview's registry, its digest
+# the one a round proved (Paul, 2026-10-20). The run's summary then names
+# the digest and the line a deploy config pins it with (`cargo xtask
+# image push|copy`, xtask/src/image.rs; docs/computers.md, "One round").
+# CI's deploys build no image (ci.yml's `deploy`, `--pinned-only`), so a
+# canary is built here, a promotion copied here, and a round waits on no
+# one's machine.
+#
+# Its job runs in the environment the image is for, `preview` or
+# `production`, for its secrets: CLOUDFLARE_API_TOKEN, which wrangler
+# acts with, and CLOUDFLARE_ACCOUNT_ID, the account whose registry the
+# image goes to (the deployment's own: a deploy refuses another account's
+# image), required here, and masked wherever it appears, the summary
+# too; and, for a copy, production's PREVIEW_REGISTRY_TOKEN (a token of
+# the preview's account with Containers, which the copy mints its pull
+# credentials with) and PREVIEW_ACCOUNT_ID (that account, masked as the
+# other is). Each environment's image comes from the branch that deploys
+# it, as the environments' own rules also hold: the preview's from
+# master, production's from `production` (`ref`, below, refuses any other
+# pairing, and a copy into the preview, before an environment is
+# reached).
+#
+# The repositories are the ones the deploys by hand made, which the
+# configs pin today (wrangler names a Durable Object container's image
+# `<Worker>-<class>-<image>`): the preview's canary, which its stable is
+# in too, and production's `hermes`. A tag is a name for people; a config
+# pins the digest.
+#
+# A build is a deploy's wrangler's (xtask/src/build.rs, `image_build`), on
+# the runner's own Docker, with no layer cache: images.yml says why. So
+# every build makes a new digest, of a tree whose image did not change
+# too: build for a change to the image (docs/computers.md, "What changes
+# a version"), once a round, and promote by a copy, which keeps the
+# digest. The disk: images.yml's Docker lane builds this image and the
+# stub, and runs them, within about 11 GB of the runner's 85 GB free, so
+# none is freed first. A copy goes registry to registry through skopeo
+# (Ubuntu's; the runners have it), and needs no disk to speak of.
+name: image
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Whose registry: preview (run from master) or production (run from production)"
+        type: choice
+        options: [preview, production]
+        default: preview
+      image:
+        description: "The image"
+        type: choice
+        options: [hermes]
+        default: hermes
+      from:
+        description: "Production only: copy this proven preview image rather than build one (registry.cloudflare.com/<account>/fragment-preview-computer-hermes-canary@sha256:<64 hex>, <account> standing for the preview's)"
+        type: string
+        required: false
+        default: ""
+      tag:
+        description: "Its tag (empty: a build's commit's first 12 hex digits, a copy's digest's)"
+        type: string
+        required: false
+        default: ""
+
+permissions: {}
+
+# one push to each registry at a time, never cancelled mid-way
+concurrency:
+  group: image-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  # the branch each environment's image comes from, and a copy production's
+  # alone, checked with no secret
+  ref:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: the branch for ${{ inputs.environment }}
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          FROM: ${{ inputs.from }}
+        run: |
+          case "$ENVIRONMENT $GITHUB_REF" in
+            "preview refs/heads/master" | "production refs/heads/production") echo "$ENVIRONMENT's image from $GITHUB_REF at $GITHUB_SHA" ;;
+            *) echo "::error::the preview's image is pushed from master, production's from production: this run is $ENVIRONMENT's, from $GITHUB_REF"; exit 1 ;;
+          esac
+          if [ "$ENVIRONMENT" = preview ] && [ -n "$FROM" ]; then
+            echo "::error::from is production's (a copy of a preview image into production's registry): the preview's image is built"
+            exit 1
+          fi
+
+  push:
+    name: ${{ inputs.from != '' && 'copy' || 'push' }} ${{ inputs.image }} to ${{ inputs.environment }}
+    needs: ref
+    runs-on: ubuntu-latest
+    # xtask's build (cold, minutes), the image's (about 7 minutes), and
+    # up to four pushes of it; or up to four copies
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      # the pinned Node xtask runs wrangler on, unpacked: ci.yml's key, read
+      # only (on a miss xtask fetches it, checked by its SHA-256). No Rust
+      # cache: xtask alone builds in minutes, and the e2e's cache, which
+      # holds it, is gigabytes to restore.
+      - uses: actions/cache/restore@v4
+        with:
+          path: target/tools
+          key: node-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs') }}
+      - name: build and push
+        if: inputs.from == ''
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          IMAGE: ${{ inputs.image }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
+            test -n "${!v}" || { echo "::error::the environment $ENVIRONMENT has no $v"; exit 1; }
+          done
+          case "$ENVIRONMENT" in
+            preview) repository="fragment-preview-computer-$IMAGE-canary" ;;
+            production)
+              repository="fragment-computer-$IMAGE"
+              echo "::warning::a production build is a new image, not the one a round proved: with no layer cache, its digest is not the canary's. A promotion copies the proven digest (from)."
+              ;;
+          esac
+          cargo xtask image push "$IMAGE" --repository "$repository" --tag "${TAG:-${GITHUB_SHA::12}}" --summary "$GITHUB_STEP_SUMMARY"
+      - name: copy
+        if: inputs.from != ''
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          FROM_CLOUDFLARE_API_TOKEN: ${{ secrets.PREVIEW_REGISTRY_TOKEN }}
+          FROM_CLOUDFLARE_ACCOUNT_ID: ${{ secrets.PREVIEW_ACCOUNT_ID }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          FROM: ${{ inputs.from }}
+          IMAGE: ${{ inputs.image }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID FROM_CLOUDFLARE_API_TOKEN FROM_CLOUDFLARE_ACCOUNT_ID; do
+            test -n "${!v}" || { echo "::error::the environment $ENVIRONMENT has no $v (FROM_CLOUDFLARE_API_TOKEN is its PREVIEW_REGISTRY_TOKEN, FROM_CLOUDFLARE_ACCOUNT_ID its PREVIEW_ACCOUNT_ID)"; exit 1; }
+          done
+          command -v skopeo > /dev/null || { sudo apt-get update -q && sudo apt-get install -y -q skopeo; }
+          digest=${FROM##*@sha256:}
+          cargo xtask image copy "$IMAGE" --from "$FROM" --repository "fragment-computer-$IMAGE" --tag "${TAG:-${digest:0:12}}" --summary "$GITHUB_STEP_SUMMARY"
