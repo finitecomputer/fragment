@@ -417,8 +417,20 @@ fn cli(s: &mut Suite, api: &Api) -> Result<()> {
         own["fenced"] == true && computer_fenced(&agent)? == Some(true),
         json!({ "answer": own["fenced"], "computer": computer_fenced(&agent)? }),
     );
+    // the platform keeps the model its agent.json names, read as its main
+    // moves (decision 62, proposed): its computer's view says it, which the
+    // shell shows as where its model calls go
+    let view_model = |agent: &str| -> Value {
+        let view = api.signed(&me, "GET", "/api/computers", None).map(|r| r.body["computers"][0].clone()).unwrap_or(Value::Null);
+        view["agents"].as_array().into_iter().flatten().find(|a| a["fragment"] == agent).map(|a| a["model"].clone()).unwrap_or(Value::Null)
+    };
+    let sonnet = json!({ "provider": "openrouter", "id": "anthropic/claude-sonnet-5.5" });
+    let named = s.eventually(std::time::Duration::from_secs(10), || view_model(&agent) == sonnet);
+    s.ok("and its computer's view names that model, the platform's copy of its agent.json's", named, view_model(&agent));
     let back = s.cli_json(api, &home, &["agent", &agent, "--no-model", "--json"])?;
     s.ok("`--no-model` puts it on its tier again", back["runsOn"] == json!({ "on": "platform", "tier": "medium" }), &back);
+    let gone = s.eventually(std::time::Duration::from_secs(10), || view_model(&agent).is_null());
+    s.ok("and its computer's view names no model: the platform's tier", gone, view_model(&agent));
     s.ok("and lifts no fence: its owner does", back["fenced"] == true, &back);
     let lifted = s.cli_json(api, &home, &["agent", &agent, "--no-fence", "--json"])?;
     let again = s.cli_json(api, &home, &["agent", &agent, "--fence", "--json"])?;

@@ -111,6 +111,15 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     s.ok("a code block's copy button copies only its literal source", super::shows(chrome, &page, "window.__codeCopied === document.querySelector('pre code').textContent && document.querySelector('.md-code-copy').textContent === 'Copied'"), "");
     let streamed = chrome.eval(&page, "import('./markdown.js').then(m => { const n = document.createElement('div'); n.append(m.renderMarkdown('```js\\n<script>')); const deep = document.createElement('div'); deep.append(m.renderMarkdown('> '.repeat(100) + 'safe')); return n.querySelector('pre code').textContent === '<script>' && !n.querySelector('script') && deep.textContent === '> '.repeat(68) + 'safe'; })")?;
     s.ok("incomplete streamed fences and deeply nested quotes remain safe", streamed == true, "");
+    // a placeholder the default agent sends a teammate (`[SISTER_NAME]`) and
+    // a snake_case name read as written; an underscore at a word's edge
+    // still opens emphasis (CommonMark)
+    let underscores = chrome.eval(&page, "import('./markdown.js').then(m => { const n = document.createElement('div'); n.append(m.renderMarkdown('Hi [SISTER_NAME] and [MEMBER_ID], see snake_case_name, but _this_ and __that__ stay emphasis')); return { text: n.textContent, em: [...n.querySelectorAll('em')].map(e => e.textContent), strong: [...n.querySelectorAll('strong')].map(e => e.textContent) }; })")?;
+    s.ok(
+        "an underscore inside a word opens no emphasis ([SISTER_NAME], snake_case), and one at a word's edge still does",
+        underscores["text"] == "Hi [SISTER_NAME] and [MEMBER_ID], see snake_case_name, but this and that stay emphasis" && underscores["em"] == json!(["this"]) && underscores["strong"] == json!(["that"]),
+        &underscores,
+    );
     chrome.viewport(&page, 375, 812, true)?;
     chrome.eval(&page, "(() => { const t = document.querySelector('.md-table'); t.querySelector('th').textContent = 'wide '.repeat(80); t.querySelector('table').style.width = '900px'; return true; })()")?;
     s.ok("wide tables scroll within the reply on a phone", chrome.eval(&page, "(() => { const t = document.querySelector('.md-table'); t.scrollLeft = 100; return t.scrollLeft > 0 && t.scrollWidth > t.clientWidth && document.documentElement.scrollWidth <= innerWidth; })()")? == true, "");

@@ -667,6 +667,18 @@ under way: newer words may be in the composer), a quote chosen, a card's
 answer typed and not sent, or on its way); the shell reloads only while
 it is not, and stops a reload under way if it becomes so.
 
+**Emphasis.** An underscore opens or closes emphasis only at a word's
+edge, so `[SISTER_NAME]` and `snake_case` read as written.
+
+**A chat led outside the platform says so.** When the shell's roster
+says the chat's lead runs on its owner's own provider (`runsOn: {on:
+"own", model, provider}`), the composer's note reads "<model> ·
+<provider>", its title saying what goes there: what the person sends in
+this chat goes to that provider, outside the platform, with no agent of
+theirs taking their
+private things out first (decision 62, proposed). Only on a note no
+other line holds (signing in, read-only, setup).
+
 **Your other agents.** Framed, the page asks the shell for its person's
 agents as it mounts (`{fragment: "agents?"}`). A shell answers only a
 frame of a fragment its person owns (docs/api.md, The shell), so in its

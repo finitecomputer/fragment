@@ -123,7 +123,7 @@ pub const PRINCIPAL: Class = Class {
 
 pub const LEDGER: Class = Class { name: "Ledger", steps: &[step!("baseline", "ledger/0001_baseline.sql")], variants: &[], kept: &["wiped"] };
 
-pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql"), step!("agents_fenced", "computer/0002_agents_fenced.sql")], variants: &[], kept: &["wiped"] };
+pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql"), step!("agents_fenced", "computer/0002_agents_fenced.sql"), step!("agents_model", "computer/0003_agents_model.sql")], variants: &[], kept: &["wiped"] };
 
 /// Every platform class, as the lock lists them.
 pub const CLASSES: [&Class; 5] = [&FRAGMENT, &REGISTRY, &PRINCIPAL, &LEDGER, &COMPUTER];
@@ -656,6 +656,23 @@ mod tests {
         computer.exec("UPDATE agents SET fenced = 1 WHERE fragment = 'f'").expect("fence its view");
         assert_eq!(migrated(&computer, &COMPUTER, 3), Ok(Ran::Current { version: known }));
         assert_eq!(computer.count("SELECT COUNT(*) FROM agents WHERE fragment = 'f' AND fenced = 1"), 1);
+    }
+
+    /// Goal: model metadata can be added to a computer with fenced agents
+    /// without changing their authority or assignment. Method: upgrade
+    /// the real previous schema, then persist a model across restart.
+    #[test]
+    fn a_computers_model_metadata_preserves_existing_agents() {
+        let computer = Lite::new();
+        let before = Class { steps: &COMPUTER.steps[..2], ..COMPUTER };
+        migrated(&computer, &before, 1).expect("a computer before model metadata");
+        computer.exec("INSERT INTO agents (fragment, identity, owner, added_at, fenced) VALUES ('f', 'npub1a', 'npub1o', 1, 1)").expect("a fenced agent");
+        let known = COMPUTER.steps.len() as u32;
+        assert_eq!(migrated(&computer, &COMPUTER, 2), Ok(Ran::Migrated { from: 2, version: known }));
+        assert_eq!(computer.count("SELECT COUNT(*) FROM agents WHERE fragment = 'f' AND identity = 'npub1a' AND fenced = 1 AND model IS NULL"), 1);
+        computer.exec("UPDATE agents SET model = '{\"provider\":\"openrouter\",\"id\":\"test/model\"}' WHERE fragment = 'f'").expect("its own model");
+        assert_eq!(migrated(&computer, &COMPUTER, 3), Ok(Ran::Current { version: known }));
+        assert_eq!(computer.count("SELECT COUNT(*) FROM agents WHERE fragment = 'f' AND fenced = 1 AND model IS NOT NULL"), 1);
     }
 
     /// Goal: a step that fails rolls every step of that start back (the

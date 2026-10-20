@@ -2694,9 +2694,30 @@ said yet above them all), less the ones they archived (`PUT
 /api/fragments/{name}/archived`, above). Its apps (kind `app` or `brain`)
 are the desktop's: a dock of their icons and titles under the viewer's
 windows, then Add, open beside the chat on a
-desktop's width, a sheet from the bottom on a phone. Any other agents of
-theirs are in no list (a setting may offer more than one later); a chat
-with one of them is a chat, listed and found as any other. **Add teaches
+desktop's width, a sheet from the bottom on a phone. **Their other
+agents are the one agent's team** (decision 62, proposed): a row each,
+one level down under it (`#team`: indented, smaller and quieter than the
+person's chats), under "Your team". A row opens that agent's own chat with the
+person (`<label>-chat`, else its newest other chat with them, else a new
+one), chosen as pressed; it is marked while one of its chats is open,
+those listed under it. Its chats are the ones it leads (a chat's first
+agent, the one that answers there: the list names a chat's agents in the
+order they joined): its other chats with the person, then its hand-offs
+(a chat it leads that another of the person's agents is in, as `fragment
+ask` makes one: "Hand-offs from <agent>"). It says its unread with the
+person (its hand-offs count none: its agents' talk, which the one agent
+reports), and a globe when its model runs outside the platform (its
+computer's view's `model`: the platform's models, or "<model> ·
+<provider>, outside the platform"); its ⋯ says
+where, and offers its hand-offs, "Ask <agent> to change it" (put in the
+one agent's chat's composer, not sent), its screen, its fence ("Fence
+it", or, fenced, "Let it act for you…", which asks its person first,
+in the shell's own dialog, saying what it would reach: decision 63,
+proposed; a fenced row shows a lock), and its profile. The chats each
+leads never list in the person's list; search still finds them. A prompt the shell puts in a
+composer goes to the open chat when it is the person's own, never a
+teammate's. New chats, Enter and the launcher stay the one agent's.
+**Add teaches
 how to ask for an app** (Paul, 2026-10-14: "rather than spawning generic
 apps we teach the user how to prompt for new apps"): a window of ways to
 ask, each saying who the app is for and what it does, `…` the part to
@@ -2786,7 +2807,7 @@ a message in it, unless it was renamed first.
 shell made of a fragment its person owns (the open chat, an app's window)
 may `postMessage({fragment: "agents?"})` to it; the shell answers that
 frame, at that fragment's own origin only (its status's canonical URL),
-`{fragment: "agents", agents: [{identity, fragment, name, title, picture?, phase?, modelProviders?}], models?}`: the
+`{fragment: "agents", agents: [{identity, fragment, name, title, picture?, phase?, runsOn, modelProviders?}], models?}`: the
 agents its person's computer runs, `name` the label that `@mentions`
 each, `title` and `picture` (an absolute address) what each shows by
 (Identities, "An agent's name and picture"), and `phase` that computer's as the platform last said (`asleep`,
@@ -2795,7 +2816,7 @@ has read it); `modelProviders` and `models` are that computer's view's
 (`GET /api/computers/{id}`): the providers whose models each may run now
 (absent when none), and the model route's models' ids by its names, which
 with an agent's `agent.json` say the model it runs (the agent template's
-page shows it so: docs/computers.md, "An agent's own model"). It sends the list again when any of it changes, its
+page shows it so: docs/computers.md, "An agent's own model"). `runsOn` names the configured model for team presentation: `{on: "platform"}` or `{on: "own", model, provider}`, with model and provider names for people. It sends the list again when any of it changes, its
 computer's phase too (the list's socket tells the shell, which reads the
 computer again). The frame may then ask
 `{fragment: "add-agent", identity, nonce}` (a nonce of at most 64
@@ -3057,7 +3078,7 @@ is 403.
 | --- | --- | --- |
 | `POST /api/computers` | a person | → `{computer, owner, image, phase, why?, agents, origin}` (`ComputerView`): their computer, made asleep on the deployment's default image (`FRAGMENT_COMPUTER_IMAGE`); again, the same one (its id is derived from its owner). Made, it asks the registry to push its owner's seat to it (always-on: Seats and orgs); when the registry does not take that ask, the computer is made and the answer is the registry's failure (503 `registry_unavailable`), so its caller makes it again, which asks again |
 | `GET /api/computers` | a person | → `{computers: [ComputerView], support}`: `support` is where a person whose computer will not start gets help (`FRAGMENT_SUPPORT_URL`), or `null` |
-| `GET /api/computers/{id}` | its owner | → `ComputerView`: `phase` is `asleep`, `starting`, `awake`, `sleeping`, or `wont_wake` (its starts kept failing; `why` says why); `restored` is what its last start that came up restored (`{generation, from: snapshot \| backup \| nothing, save?, savedAt?, ageMs?, after?: sleep \| exit, rollback, at}`: the save's id, when it was taken and how old it was then, and how the life before that start ended; absent before its first start), `rollbacks` counts its starts that went back in time (the life before ended by a crash, or by a sleep that slept unsaved, or its start fell back to an older save: docs/computers.md, "Saves and what a wake restores"), and `saves` lists the saves of its `/data` it keeps, newest first (`[{number, id, at, generation, held, unusable?}]`, at most three); `why` also says when its sleep's save failed and it stays awake, or slept unsaved; `generation` is its newest start (what a restart names); `notices` is what its owner is told, the most pressing first (proto's `ComputerNotice`; docs/computers.md, "What its owner is told"): `{kind: "wont_wake", why}`, `{kind: "unsaved", since, save?, failingSince, failures, why, stopsAt?}` (its saves failing: its work in no save since `since`, a stop going back to save `save`, the bound stopping it at `stopsAt` unless a save works or something uses it), `{kind: "went_back", life, cause: crash \| unsaved \| restart \| unusable, endedAt?, pending, save?, savedAt?, at?}` (a start went back to save `save`, or will as it next starts, until its owner says they saw it), `{kind: "update", version}` (awake, with no turn running, on another image than its next start runs: an update is ready, which a restart takes, or its next sleep and wake, until its owner puts that version off); absent when none. `version` is the version of the image it runs (its digest's first 12 hex digits; none while it runs nothing), `latest` the one its next start runs (its pinned image as the deployment has it now). `models` is the model route's models' ids by its names (`{cheap, medium, fallback, vision}`, as the guest's view names them: Models, above; not secret, and nothing of where each runs), and each of its `agents` names in `modelProviders` the providers whose models it may run now (an own key its owner set, whose catalog row offers models, that the agent is not narrowed from; absent when none): an agent whose `agent.json` names a model of one of those runs it, any other its tier's model (docs/computers.md, "An agent's own model"), which Settings and the agent's page show by its id. Their open pages are told when it changes (`/api/fragments/watch`'s `changed`); anyone else 404 |
+| `GET /api/computers/{id}` | its owner | → `ComputerView`: `phase` is `asleep`, `starting`, `awake`, `sleeping`, or `wont_wake` (its starts kept failing; `why` says why); `restored` is what its last start that came up restored (`{generation, from: snapshot \| backup \| nothing, save?, savedAt?, ageMs?, after?: sleep \| exit, rollback, at}`: the save's id, when it was taken and how old it was then, and how the life before that start ended; absent before its first start), `rollbacks` counts its starts that went back in time (the life before ended by a crash, or by a sleep that slept unsaved, or its start fell back to an older save: docs/computers.md, "Saves and what a wake restores"), and `saves` lists the saves of its `/data` it keeps, newest first (`[{number, id, at, generation, held, unusable?}]`, at most three); `why` also says when its sleep's save failed and it stays awake, or slept unsaved; `generation` is its newest start (what a restart names); `notices` is what its owner is told, the most pressing first (proto's `ComputerNotice`; docs/computers.md, "What its owner is told"): `{kind: "wont_wake", why}`, `{kind: "unsaved", since, save?, failingSince, failures, why, stopsAt?}` (its saves failing: its work in no save since `since`, a stop going back to save `save`, the bound stopping it at `stopsAt` unless a save works or something uses it), `{kind: "went_back", life, cause: crash \| unsaved \| restart \| unusable, endedAt?, pending, save?, savedAt?, at?}` (a start went back to save `save`, or will as it next starts, until its owner says they saw it), `{kind: "update", version}` (awake, with no turn running, on another image than its next start runs: an update is ready, which a restart takes, or its next sleep and wake, until its owner puts that version off); absent when none. `version` is the version of the image it runs (its digest's first 12 hex digits; none while it runs nothing), `latest` the one its next start runs (its pinned image as the deployment has it now). Each agent's optional `model: {provider, id}` is its configured own-provider model, as last read from its agent fragment's main (decision 62, proposed); absent, its platform tier. `models` is the model route's models' ids by its names (`{cheap, medium, fallback, vision}`, as the guest's view names them: Models, above; not secret, and nothing of where each runs), and each of its `agents` names in `modelProviders` the providers whose models it may run now (an own key its owner set, whose catalog row offers models, that the agent is not narrowed from; absent when none): an agent whose `agent.json` names a model of one of those runs it, any other its tier's model (docs/computers.md, "An agent's own model"), which Settings and the agent's page show by its id. Their open pages are told when it changes (`/api/fragments/watch`'s `changed`); anyone else 404 |
 | `POST /api/computers/{id}/wake` | its owner | → the view once it is awake (a wake also lifts `wont_wake`); 503 `wont_wake` when it would not start |
 | `POST /api/computers/{id}/sleep` | its owner | → the view once it is asleep: the guest held, `/data` saved, the guest signalled, the container gone. When the save fails, the view is awake (its container kept, its `why` saying so), and its sleep is tried again on its own (docs/computers.md); asked again, it tries at once. It answers within the sum of its steps' bounds (docs/computers.md, "Bounds"), 10 minutes 50 s at most: the hold 55 s, the save 9 minutes (its backups 8, a save whose backups never answer failing at it), the stop 55 s; the calls it makes to the platform's own Durable Objects (its owner's ledger, their open pages) aside, and a start in the same call when a wake came as it slept, within that start's own bounds. A sleep under way already answers its view at once (`sleeping`) |
 | `POST /api/computers/{id}/restart` | its owner | `{generation?}` (no body: whatever runs) → the view once it has started again: its way back to working. Running, a sleep that saves if it can and stops whether or not it did (a failed save keeps no container), then a start at once; asleep or `wont_wake`, a start (lifting it). The start is fresh: the image and the newest good save, never a snapshot. `generation` names the start the owner saw: a restart of one already restarted (the same press again, another tab's) restarts nothing and answers the view. Its owner's ledger is asked first, as for a wake: at zero credit 402, a guest 403, and what runs runs on |

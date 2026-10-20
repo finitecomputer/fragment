@@ -134,7 +134,7 @@ speaking Cloudflare's APIs) returns once this product works.
    person's one agent above a flat list of their chats, newest first (no
    agent list, no New agent or New group; any other agents they have stay
    out of the sidebar, their chats listed and found as any other; more
-   than one agent may be a setting later); apps in a square-icon dock on
+   than one agent may be a setting later; decision 62, proposed, puts them one level down as the main agent's team); apps in a square-icon dock on
    the landscape desktop, open by default on wide screens, an empty one
    offering a few real requests of the agent. The sidebar plus (a
    bottom-right button on a phone), the phone's chat-header plus and
@@ -1276,6 +1276,12 @@ Private stays possible by config.
       that recipient there and refuses other destinations and two
       fenced bots messaging each other. The recipient is reminded to
       return placeholders for private details. The platform fence stands.
+    - **Team view.** The shell shows specialists under the main agent,
+      opening their own chats and grouping chats by the agent that leads
+      them. Model metadata follows `agent.json` at main into the computer
+      view, and chats led by an own-provider model say where messages go.
+      The team menu offers each agent's screen, profile and fence, and
+      prepares a request to the lead when its job needs changing.
     - **Guidance.** The main agent's initial job makes it the team's lead;
       the managed `agents-finite` skill teaches when to make an agent,
       how to write its job, and how to brief and maintain it. Most work

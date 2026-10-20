@@ -365,6 +365,9 @@ pub(crate) enum MetaKey {
     Computer,
     /// The agent identity its own key holds, once it ran on a computer.
     AgentIdentity,
+    /// An agent fragment's `agent.json` `model` at main, as JSON (none: its
+    /// tier), as its computer was last told it (plane.rs, `read_agent_model`).
+    AgentModel,
     /// The next time a page may pre-wake the computers its channels wake.
     PrewakeAt,
     /// Test fleets only: how many more paid AI steps fail just after their
@@ -429,6 +432,7 @@ impl MetaKey {
             MetaKey::TestAdvanceHeld => "test_advance_held",
             MetaKey::Computer => "computer",
             MetaKey::AgentIdentity => "agent_identity",
+            MetaKey::AgentModel => "agent_model",
             MetaKey::PrewakeAt => "prewake_at",
             MetaKey::TestFailAfterPaid => "test_fail_after_paid",
             MetaKey::TestFailMeterAcks => "test_fail_meter_acks",

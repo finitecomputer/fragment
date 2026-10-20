@@ -31,6 +31,10 @@ use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, missing, Caller, Facts, FragmentCell, MetaKey};
 use crate::js;
 
+/// An agent fragment's settings: its tier, and a model of its owner's own
+/// provider (docs/computers.md, "An agent's own model").
+const AGENT_JSON: &str = "agent.json";
+
 /// Platform code that runs in the facet around the author's App class.
 pub const PLATFORM_JS: &str = include_str!("../platform.mjs");
 /// Tree rows per insert statement.
@@ -332,8 +336,15 @@ impl FragmentCell {
             return Ok(());
         }
         match (which, pin.as_deref()) {
-            ("main", Some(sha)) => self.read_manifest(&self.must(MetaKey::Repo)?, sha).await?,
-            ("main", None) => self.del_meta(MetaKey::ManifestMain)?,
+            ("main", Some(sha)) => {
+                let repo = self.must(MetaKey::Repo)?;
+                self.read_manifest(&repo, sha).await?;
+                self.read_agent_model(Some((&repo, sha))).await?;
+            }
+            ("main", None) => {
+                self.del_meta(MetaKey::ManifestMain)?;
+                self.read_agent_model(None).await?;
+            }
             (_, live) => {
                 self.install_code(live).await?;
                 self.search_fence()?;
@@ -344,6 +355,35 @@ impl FragmentCell {
             Some(sha) => self.set_meta(done_key, &sha),
             None => self.del_meta(done_key),
         }
+    }
+
+    /// An agent fragment keeps the model its `agent.json` names at main
+    /// (`fragment_core::catalog::agent_model`), as it keeps `fragment.json`,
+    /// and tells the computer it runs on when that changes: its view says
+    /// where each agent's model calls go (decision 62, proposed). A computer
+    /// that does not answer fails the read, so the next refresh or poll
+    /// tries again; a computer it runs on later reads it as it takes it.
+    async fn read_agent_model(&self, pin: Option<(&str, &str)>) -> CellResult<()> {
+        if self.kind()? != FragmentKind::Agent {
+            return Ok(());
+        }
+        let model = match (pin, self.tree_row("main", AGENT_JSON)?) {
+            (Some((repo, sha)), Some(_)) => self.cs()?.read(repo, sha, AGENT_JSON, limits::MANIFEST_MAX_BYTES).await?.and_then(|b| fragment_core::catalog::agent_model(&b)),
+            _ => None,
+        };
+        let said = model.as_ref().map(serde_json::to_string).transpose().map_err(|e| CellError::host(format!("a model as JSON: {e}")))?;
+        if self.meta(MetaKey::AgentModel)? == said {
+            return Ok(());
+        }
+        if let Some(computer) = self.meta(MetaKey::Computer)? {
+            crate::computer::ask(&self.env, &computer, "computer/model", &json!({ "fragment": self.name()?, "model": model })).await?;
+        }
+        match &said {
+            Some(text) => self.set_meta(MetaKey::AgentModel, text)?,
+            None => self.del_meta(MetaKey::AgentModel)?,
+        }
+        self.event("agent.model", &format!("its model: {}", model.as_ref().map_or_else(|| "its tier".to_string(), |m| format!("{} on {}", m.id, m.provider))), json!({ "model": model }));
+        Ok(())
     }
 
     /// Keeps `fragment.json` at main for `GET manifest`, and says when it

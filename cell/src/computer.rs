@@ -58,7 +58,7 @@ use fragment_core::ledger::{Meter, MeterRow, Month, Release, Reserve, Settle, Sp
 use fragment_core::own_signin;
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
-use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
+use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentConnections, AgentModel, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
 use fragment_proto::{ErrorCode, IdentityKind};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -466,6 +466,17 @@ struct Assign {
     /// Whether the registry has the agent fenced (decision 63, proposed),
     /// read by the router as it assigns it.
     fenced: bool,
+    /// The model its agent.json names, as the agent fragment last read it.
+    #[serde(default)]
+    model: Option<AgentModel>,
+}
+
+/// `computer/model`'s body: the model an agent fragment's agent.json names
+/// now (none: its tier), as the fragment read it at its main's move.
+#[derive(Deserialize)]
+struct ModelBody {
+    fragment: String,
+    model: Option<AgentModel>,
 }
 
 /// `computer/fenced`'s body: an agent of this computer's fenced or let go,
@@ -1502,7 +1513,7 @@ impl ComputerCell {
     }
 
     fn agents(&self) -> CellResult<Vec<ComputerAgent>> {
-        let rows = self.rows("SELECT fragment, identity, owner, connections, fenced FROM agents ORDER BY added_at", vec![])?;
+        let rows = self.rows("SELECT fragment, identity, owner, connections, fenced, model FROM agents ORDER BY added_at", vec![])?;
         assert!(rows.len() as u64 <= AGENTS_MAX, "a computer runs at most AGENTS_MAX agents");
         let mut agents = Vec::with_capacity(rows.len());
         let own = self.own_key_names()?;
@@ -1519,6 +1530,7 @@ impl ComputerCell {
                 name,
                 connections,
                 fenced: r["fenced"].as_i64().unwrap_or(0) != 0,
+                model: r["model"].as_str().and_then(|m| serde_json::from_str(m).ok()),
                 credentials: vec![],
             });
         }
@@ -2096,8 +2108,8 @@ impl ComputerCell {
                 // a new agent may use every connection its owner has (decision
                 // 44); assigned again, it keeps what its owner narrowed it to
                 self.exec(
-                    "INSERT INTO agents (fragment, identity, owner, added_at, connections, fenced) VALUES (?, ?, ?, ?, 'null', ?) ON CONFLICT (fragment) DO UPDATE SET identity = excluded.identity, fenced = excluded.fenced",
-                    vec![b.fragment.as_str().into(), b.identity.as_str().into(), b.owner.as_str().into(), js::now_ms().into(), i64::from(b.fenced).into()],
+                    "INSERT INTO agents (fragment, identity, owner, added_at, connections, fenced, model) VALUES (?, ?, ?, ?, 'null', ?, ?) ON CONFLICT (fragment) DO UPDATE SET identity = excluded.identity, fenced = excluded.fenced, model = excluded.model",
+                    vec![b.fragment.as_str().into(), b.identity.as_str().into(), b.owner.as_str().into(), js::now_ms().into(), i64::from(b.fenced).into(), model_json(b.model.as_ref())?.map_or(SqlStorageValue::Null, Into::into)],
                 )?;
                 json_response(&self.view()?)
             }
@@ -2108,6 +2120,21 @@ impl ComputerCell {
                 self.must(MetaKey::Id)?;
                 self.exec("UPDATE agents SET fenced = ? WHERE identity = ?", vec![i64::from(b.fenced).into(), b.identity.as_str().into()])?;
                 self.tell_owner().await;
+                json_response(&self.view()?)
+            }
+            // where an agent's model calls go changed (its agent.json, read by
+            // its fragment as its main moved): its owner's open pages read
+            // the view again; one it does not run, nothing
+            "computer/model" => {
+                let b: ModelBody = body_json(&mut req).await?;
+                self.must(MetaKey::Id)?;
+                let had = self.rows("SELECT model FROM agents WHERE fragment = ?", vec![b.fragment.as_str().into()])?;
+                let said = model_json(b.model.as_ref())?;
+                let changed = had.first().is_some_and(|r| r["model"].as_str() != said.as_deref());
+                if changed {
+                    self.exec("UPDATE agents SET model = ? WHERE fragment = ?", vec![said.map_or(SqlStorageValue::Null, Into::into), b.fragment.as_str().into()])?;
+                    self.tell_owner().await;
+                }
                 json_response(&self.view()?)
             }
             "computer/pin" => {
@@ -2480,6 +2507,11 @@ pub(crate) async fn agent_fenced(env: &Env, owner: &str, identity: &str, fenced:
     }
 }
 
+/// An agent's model as its row keeps it: its JSON, or none (its tier).
+fn model_json(model: Option<&AgentModel>) -> CellResult<Option<String>> {
+    model.map(serde_json::to_string).transpose().map_err(|e| CellError::host(format!("a model as JSON: {e}")))
+}
+
 /// The internal call `path` with `body` on computer `id`.
 pub(crate) async fn ask(env: &Env, id: &str, path: &str, body: &Value) -> CellResult<Value> {
     crate::routed::ask_object(env, "COMPUTER", id, path, body).await
@@ -2620,7 +2652,7 @@ pub(crate) async fn route(env: &Env, signed: &Signed, method: Method, rest: &[&s
             // fenced or not, as the registry has it now (decision 63, proposed):
             // a fenced agent's computer runs it fenced from its first turn
             let seen = crate::ask_registry(env, &crate::registry::calls::View { identity: Some(identity.to_string()), by: crate::registry::calls::By::Identity(who.to_string()) }).await?;
-            let body = json!({ "fragment": fragment, "identity": identity, "owner": who, "fenced": seen.fenced });
+            let body = json!({ "fragment": fragment, "identity": identity, "owner": who, "fenced": seen.fenced, "model": took["model"] });
             json_response(&view_of(ask(env, id, "computer/assign", &body).await?)?)
         }
         (Method::Put, [id, "agents", fragment, "connections"]) => {
