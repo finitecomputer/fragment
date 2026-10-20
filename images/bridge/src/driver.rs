@@ -246,7 +246,7 @@ impl Shared {
 
 /// The agents the screen names, from those the bridge runs.
 fn named(agents: &[Agent]) -> Vec<Named> {
-    agents.iter().map(|a| Named { fragment: a.fragment.clone(), name: a.name.clone() }).collect()
+    agents.iter().map(|a| Named { fragment: a.fragment.clone() }).collect()
 }
 
 /// Runs the bridge until `stop` turns true.

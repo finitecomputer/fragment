@@ -57,6 +57,12 @@ pub struct ComputerAgent {
     /// role's specialization rather than a wall.
     #[serde(default)]
     pub connections: Option<Vec<String>>,
+    /// The providers whose models it may run now
+    /// (`fragment_core::catalog::Catalog::model_providers`): its
+    /// `agent.json`'s `model` runs only on one of these, else it runs on
+    /// its tier (docs/computers.md, "An agent's own model").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_providers: Vec<String>,
     /// The guest's view only (`GET /api/computer`): each credential the
     /// agent may use now, its placeholder in its environment variables.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -264,10 +270,10 @@ pub struct ComputerView {
     /// or not (so an image can pass them all through, once).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credential_env: Vec<String>,
-    /// The guest's view only: the model route's models' ids, by its names,
-    /// as the deployment names them now (docs/computers.md, "A model by its
-    /// id"), so a guest names its models by their ids and follows a change
-    /// of them while it runs.
+    /// The model route's models' ids, by its names, as the deployment
+    /// names them now (docs/computers.md, "A model by its id"): a guest
+    /// names its models by their ids and follows a change of them while it
+    /// runs, and its owner's pages show the model each agent runs by its id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<ModelIds>,
     /// What its last start that came up restored (docs/computers.md, "What
@@ -539,13 +545,16 @@ mod tests {
         assert_eq!(all.connections, None);
         let narrowed: AgentConnections = serde_json::from_str(r#"{"connections":["github"]}"#).unwrap();
         assert_eq!(narrowed.connections, Some(vec!["github".to_string()]));
-        let agent = ComputerAgent { fragment: "juniper.paul".into(), identity: "id:a".into(), name: "juniper".into(), owner: "id:p".into(), connections: None, credentials: vec![] };
+        let agent = ComputerAgent { fragment: "juniper.paul".into(), identity: "id:a".into(), name: "juniper".into(), owner: "id:p".into(), connections: None, model_providers: vec![], credentials: vec![] };
         let v = serde_json::to_value(&agent).unwrap();
         assert_eq!(v["connections"], serde_json::Value::Null, "the default is named, as null");
         assert!(v.get("credentials").is_none(), "the owner's view names no placeholder");
+        assert!(v.get("modelProviders").is_none(), "none whose models it may run, left out");
+        let own = ComputerAgent { model_providers: vec!["openrouter".into()], ..agent };
+        assert_eq!(serde_json::to_value(&own).unwrap()["modelProviders"], serde_json::json!(["openrouter"]));
         let older: ComputerAgent = serde_json::from_str(r#"{"fragment":"juniper.paul","identity":"id:a","name":"juniper","owner":"id:p"}"#).unwrap();
         assert_eq!(older.connections, None);
-        assert!(older.credentials.is_empty());
+        assert!(older.credentials.is_empty() && older.model_providers.is_empty());
     }
 
     /// What its owner is told, on the wire as the shell reads it: a kind,

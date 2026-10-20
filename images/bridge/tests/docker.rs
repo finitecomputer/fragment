@@ -1215,7 +1215,7 @@ async fn the_hermes_desktop() {
     // before any agent's call: the page, the control socket, the RFB stream
     assert!(c.exec_out(&["curl", "-sf", "http://127.0.0.1:6080/"]).contains("Take over"));
     let mut watching = Control::open(&base, "watcher", "juniper--k3x9").await.unwrap_or_else(|e| panic!("the control socket: {e}"));
-    assert_eq!(watching.next().await.unwrap(), json!({ "type": "control", "agent": "juniper--k3x9", "name": "juniper", "holder": null }), "a viewer hears whose screen it is, and who holds control");
+    assert_eq!(watching.next().await.unwrap(), json!({ "type": "control", "agent": "juniper--k3x9", "holder": null }), "a viewer hears whose screen it is, and who holds control");
     let t = Instant::now();
     let opened = Viewer::open(&base, "watcher", "juniper--k3x9", Duration::from_secs(60)).await;
     let mut watcher = opened.unwrap_or_else(|e| panic!("the screen's RFB stream: {e}\n{}\nlauncher: {}", c.logs(), c.exec_out(&["cat", "/data/hermes/profiles/juniper--k3x9/bot-desktop/launcher.log"])));
@@ -1394,9 +1394,9 @@ async fn two_agents_two_desktops() {
 
     // each agent's own screen, refusals included
     let mut jc = Control::open(&base, "watcher", "juniper--k3x9").await.unwrap();
-    assert_eq!(jc.next().await.unwrap(), json!({ "type": "control", "agent": "juniper--k3x9", "name": "juniper", "holder": null }));
+    assert_eq!(jc.next().await.unwrap(), json!({ "type": "control", "agent": "juniper--k3x9", "holder": null }));
     let mut fc = Control::open(&base, "watcher", "fred--k3x9").await.unwrap();
-    assert_eq!(fc.next().await.unwrap(), json!({ "type": "control", "agent": "fred--k3x9", "name": "fred", "holder": null }));
+    assert_eq!(fc.next().await.unwrap(), json!({ "type": "control", "agent": "fred--k3x9", "holder": null }));
     let nobody = fragment_bridge::net::connect_ws(&base, "/websockify?viewer=w&agent=nobody--k3x9", &[]).await.err().unwrap_or_default();
     assert!(nobody.contains("404"), "an agent not on this computer: {nobody}");
     let unnamed = fragment_bridge::net::connect_ws(&base, "/websockify?viewer=w&agent=../fred--k3x9", &[]).await.err().unwrap_or_default();

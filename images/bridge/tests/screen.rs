@@ -124,7 +124,7 @@ async fn each_agent_has_its_own_screen() {
     let (running, base) = bridge(&fake, &dir).await;
 
     let mut c = control(&base, "w", "juniper--k3x9").await;
-    assert_eq!(next(&mut c).await, json!({ "type": "control", "agent": "juniper--k3x9", "name": "juniper", "holder": null }), "a control socket names its agent");
+    assert_eq!(next(&mut c).await, json!({ "type": "control", "agent": "juniper--k3x9", "holder": null }), "a control socket names its agent");
 
     // refused: never another agent's screen
     let refused = |path: String| {

@@ -20,5 +20,16 @@
   platform's lanes run without any agent runtime. Its screen port serves
   only this page.</p>
 </main>
+<script>
+  // whose screen this would be, by the agent's name as the platform's page
+  // framing this one says it (docs/computers.md, Ports), as our Hermes
+  // image's screen page names it: what the platform's lanes read
+  const agent = new URLSearchParams(location.search).get("agent");
+  addEventListener("message", (e) => {
+    const d = e.data;
+    if (window.parent === window || e.source !== window.parent || d?.fragment !== "screen" || d.agent !== agent || typeof d.name !== "string" || !d.name) return;
+    document.title = `${d.name}'s screen`;
+  });
+</script>
 </body>
 </html>

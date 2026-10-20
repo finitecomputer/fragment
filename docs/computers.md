@@ -746,10 +746,12 @@ expires within 30 days. The container application is the deployment's
   them, never above them (decision 36).
 - Without the header only the computer's own routes answer:
   - `GET /api/computer` → `{computer, owner, image, agents: [{fragment,
-    identity, name, owner, connections, credentials: [{provider, kind,
-    env, placeholder, hosts, modelBase?}]}], credentialEnv, models: {cheap,
-    medium, fallback, vision}}`: the agents to run, each one's credentials
-    (below, Connections and operator keys), and the model route's models'
+    identity, name, owner, connections, modelProviders?, credentials:
+    [{provider, kind, env, placeholder, hosts, modelBase?}]}],
+    credentialEnv, models: {cheap, medium, fallback, vision}}`: the agents
+    to run, each one's credentials (below, Connections and operator keys;
+    `modelProviders` names those of them with a `modelBase`, as its owner's
+    view does: "An agent's own model"), and the model route's models'
     ids by its names (below, Models, "A model by its id"). **They
     may change while the computer runs** (its owner assigns or unassigns
     an agent, connects an account, narrows an agent): the guest reads them
@@ -886,6 +888,12 @@ expires within 30 days. The container application is the deployment's
     (always on) would keep naming the ids it started with. A guest that
     names the route's names (an image from before the ids, the stub's
     `think`) runs on as before.
+  - Its owner reads the same ids in their view of it (`GET
+    /api/computers/{id}`'s `models`; docs/api.md, Computers), so Settings'
+    Agents names a tier by its model's id beside it ("Cheap
+    (z-ai/glm-5.3-flash)"), and the agent's page the model it runs by its
+    id (Paul, 2026-10-20: it said "cheap model"; below, "An agent's own
+    model").
 
   **What an OpenAI-compatible API is sent.** The agent's chat completion
   fields the route, our jobs and Hermes use (`CLIENT_KEYS`: `messages`,
@@ -1330,10 +1338,12 @@ offered (decision 60 says why, with the vendors' words).
   as the agent's in the computer's `uses` and charged nothing (no platform
   fee: Paul).
 - **Picking a model.** Settings' Agents section offers each agent the
-  connected provider's models beside "Workers AI" (included in their credit). The pick
+  connected provider's models beside its tier's (included in their credit). The pick
   is written to the agent fragment's `agent.json`: `"model": {"provider":
-  "openrouter", "id": "anthropic/claude-sonnet-5.5"}`, beside its `tier`.
-  "Workers AI" removes `model`. Any model the provider serves may be named
+  "openrouter", "id": "anthropic/claude-sonnet-5.5"}`, beside its `tier`,
+  and put live (`POST …/deploy`, as its name and picture are: its computer
+  reads main, its page live). Its tier's option, named by the tier and its
+  model's id, removes `model`. Any model the provider serves may be named
   by hand; settings offers the catalog's `offer`.
 - **Our Hermes image** reads each agent's `agent.json` again every 10 s
   while awake, and whenever its credentials change. When the agent's
@@ -1351,6 +1361,20 @@ offered (decision 60 says why, with the vendors' words).
   turn and rebuilds the agent on the new model, with nothing restarted.
   Vision (`auxiliary.vision`) and voice notes (`stt`) stay on the route's
   `vision` and `whisper`, metered to the owner as before.
+- **What its owner is shown.** Their view of the computer names, for each
+  agent, the providers whose models it may run now (`modelProviders`:
+  `fragment_core::catalog::Catalog::model_providers`, an own key set whose
+  row offers models, that the agent is not narrowed from: in its guest's
+  view, a credential with a `modelBase`), and the route's models' ids
+  (`models`). The agent's page (the agent template's, framed by their
+  shell, which hands both over with its agents: docs/api.md, The shell)
+  shows the model it runs by that rule: the model `agent.json` names
+  while its provider is one of those, else its tier's model's id (`medium`,
+  else `cheap`). Never `agent.json`'s model alone: one its owner
+  disconnected or narrowed it from is not what runs. Opened outside its
+  owner's shell, the page names no model. What the image itself chose is
+  its own (`profile.model_*`); an image that does not follow this rule
+  is not shown truly, and its reporting what it runs is not built.
 - **Disconnecting** (`DELETE /api/connections/{provider}/key`, settings'
   Disconnect) takes the key from the computer. The agent's next turn is
   its tier's again. The key itself is revoked at OpenRouter
@@ -1397,7 +1421,17 @@ the refusal of an agent the computer does not run, are the image's. The
 page is served at the port's root and reaches its sockets by relative
 URLs, naming the agent again (our images': `websockify?viewer=&agent=`
 and `control?viewer=&agent=`), so it works under the port's prefix
-(`/p/6080/`).
+(`/p/6080/`). Whose screen it is, by name, is the shell's to say: as the
+page loads, and again whenever the agent is renamed while it is open, the
+shell posts it `{fragment: "screen", agent, name}` at the port's own
+origin, `agent` its `?agent=` and `name` the agent's name (its
+fragment's title, as the person's list says it now: docs/api.md, "An
+agent's name and picture"), and titles the screen's window so. A page
+takes it only from the page framing it (`event.source` its parent),
+and only for its own agent. The computer knows an agent by its label
+alone, which is no name (Paul, 2026-10-20: the screen said "Watching
+pulsar-360's screen" of his agent Waffle), so a screen opened in a tab of
+its own names none.
 
 ## Our images
 
@@ -1642,8 +1676,9 @@ settings and state):
   each agent's own tools keep each on its own desktop, and the platform
   skill tells every agent never to touch another's.
 
-  The screen's page names the agent it shows (its `?agent=`, then the
-  name the control socket says) and follows the desktop: a stream that
+  The screen's page shows the agent its `?agent=` names, by the name the
+  shell tells it (Ports, above; "the screen" until then, and in a tab of
+  its own), and follows the desktop: a stream that
   ends (the desktop stopped or restarted, its viewers' streams ending with
   it) is opened again on its own, from 1 s backing off to 10 s, while the
   page's control socket stays open, and the bridge starts the desktop for

@@ -13,10 +13,12 @@
 //!   never half-sent;
 //! - `GET /control?viewer=<id>&agent=<fragment>`: a WebSocket of `{type:
 //!   "take"}` and `{type: "give"}` from the page, answered to every viewer
-//!   of that agent's screen with `{type: "control", agent, name, holder:
+//!   of that agent's screen with `{type: "control", agent, holder:
 //!   <viewer>|null}`, the first at once. It answers on an image with no
 //!   display too (the stub's), so the platform's lanes open a socket through
-//!   a computer's port.
+//!   a computer's port. It names the agent by its fragment alone: the
+//!   computer knows it by its label, which is no name (the page is told its
+//!   name, its fragment's title, by the platform's page framing it).
 //!
 //! An `agent` or `viewer` that is no name is 400. An agent this bridge does
 //! not run, or one the image names no screen for when it names screens,
@@ -101,7 +103,6 @@ pub struct ScreenConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Named {
     pub fragment: String,
-    pub name: String,
 }
 
 /// The agents the bridge runs, from its driver: `None` until it has read
@@ -504,7 +505,7 @@ async fn file(dir: &Path, path: &str) -> Response<Body> {
 }
 
 fn said(named: &Named, holder: &Holder) -> Message {
-    Message::text(json!({ "type": "control", "agent": named.fragment, "name": named.name, "holder": holder.said() }).to_string())
+    Message::text(json!({ "type": "control", "agent": named.fragment, "holder": holder.said() }).to_string())
 }
 
 async fn viewer_control(ws: net::ServerWs, viewer: String, screen: Arc<Screen>, named: Named) {

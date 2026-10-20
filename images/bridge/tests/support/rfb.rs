@@ -202,7 +202,7 @@ impl Control {
         Ok(Control { ws: net::connect_ws(base, &format!("/control?viewer={id}&agent={agent}"), &[]).await? })
     }
 
-    /// The next `{type: "control", agent, name, holder}` it says.
+    /// The next `{type: "control", agent, holder}` it says.
     pub async fn next(&mut self) -> Result<Value, String> {
         let read = async {
             // bounded by the socket and the timeout around it

@@ -1492,6 +1492,7 @@ impl ComputerCell {
         let rows = self.rows("SELECT fragment, identity, owner, connections FROM agents ORDER BY added_at", vec![])?;
         assert!(rows.len() as u64 <= AGENTS_MAX, "a computer runs at most AGENTS_MAX agents");
         let mut agents = Vec::with_capacity(rows.len());
+        let own = self.own_key_names()?;
         for r in rows {
             let fragment = r["fragment"].as_str().unwrap_or_default().to_string();
             let name = fragment_proto::split_fragment_name(&fragment).map(|(label, _)| label.to_string()).unwrap_or_default();
@@ -1500,6 +1501,7 @@ impl ComputerCell {
             agents.push(ComputerAgent {
                 identity: r["identity"].as_str().unwrap_or_default().to_string(),
                 owner: r["owner"].as_str().unwrap_or_default().to_string(),
+                model_providers: self.cfg.providers.model_providers(&own, connections.as_deref()),
                 fragment,
                 name,
                 connections,
@@ -1512,13 +1514,11 @@ impl ComputerCell {
     /// The guest's own view (`GET /api/computer`): its agents, each with
     /// the credentials it may use now (a connection its owner connected, an
     /// operator key the deployment holds, an own key its owner gave; none
-    /// its owner narrowed it from), each a placeholder naming the agent; and
-    /// the model route's models' ids, as the deployment names them now.
+    /// its owner narrowed it from), each a placeholder naming the agent.
     async fn guest_view(&self) -> CellResult<ComputerView> {
         let mut view = self.view()?;
         // what its owner is told is theirs (its guest reads `restored`)
         view.notices = vec![];
-        view.models = Some(self.cfg.models.ids_by_name());
         let catalog = &self.cfg.providers;
         view.credential_env = catalog.env_names();
         if catalog.is_empty() || view.agents.is_empty() {
@@ -1742,7 +1742,8 @@ impl ComputerCell {
             agents: self.agents()?,
             origin,
             credential_env: vec![],
-            models: None,
+            // not secret: its owner's pages show each agent's model by its id
+            models: Some(self.cfg.models.ids_by_name()),
             restored: saves.restored().cloned(),
             rollbacks: saves.rollbacks(),
             saves: saves.views(),
@@ -2132,6 +2133,9 @@ impl ComputerCell {
                 let text = serde_json::to_string(&b.connections).map_err(|e| CellError::host(e.to_string()))?;
                 assert_eq!(stored_connections(&text, &b.fragment)?, b.connections, "connections read back as they are written");
                 self.exec("UPDATE agents SET connections = ? WHERE fragment = ?", vec![text.into(), b.fragment.as_str().into()])?;
+                // its owner's other pages read it again (the agent's page:
+                // which model it runs)
+                self.tell_owner().await;
                 json_response(&self.view()?)
             }
             "computer/credentials" => {
@@ -2171,6 +2175,8 @@ impl ComputerCell {
                     }
                     None => self.exec("DELETE FROM own_keys WHERE provider = ?", vec![b.provider.as_str().into()])?,
                 }
+                // its owner's pages read it again: whose models each agent may run
+                self.tell_owner().await;
                 json_response(&json!({ "providers": self.own_key_names()? }))
             }
             "computer/sign-in" => {
