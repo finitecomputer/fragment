@@ -90,13 +90,20 @@ fn links(s: &mut Suite, api: &Api, vault: &Vault, chrome: &mut crate::browser::B
     std::fs::write(dir.join("notes/linked.md"), "---\ntitle: Linked\nsecret: in the front matter\n---\n# Linked note\n\nGo [[welcome|home]], to [the second](second.md), or to [the third][3].\n\n![[pic.svg|40]]\n\n[3]: third.md\n")?;
     s.cli(api, home, &["sync", name, "--dir", dir.to_str().expect("utf-8 path")]);
     chrome.eval(page, "location.hash = '#/notes/linked.md'; true")?;
-    let shown = chrome.until(page, "document.querySelector('#content .md h1')?.textContent === 'Linked note'", wait);
-    let read = chrome.eval(page, "(() => { const c = document.querySelector('#content .md'); const img = c.querySelector('img.md-image'); const a = (t) => [...c.querySelectorAll('a')].find((x) => x.textContent === t); return { front: c.textContent.includes('front matter'), src: img?.getAttribute('src') ?? null, width: img?.getAttribute('width') ?? null, home: a('home')?.getAttribute('href') ?? null, second: a('the second')?.dataset.path ?? null, third: a('the third')?.dataset.path ?? null }; })()")?;
+    // The note is read at main as it opens, but its embed resolves against
+    // the viewer's tree, which follows main by the file trigger: until the
+    // trigger reaches the page (seconds, on a hosted run) the picture an
+    // earlier sync added is not in it, and the note is drawn again when its
+    // own sync's trigger arrives. So it is read once its picture is loaded.
+    let embed = "document.querySelector('#content .md img.md-image')";
+    let shown = chrome.until(page, &format!("document.querySelector('#content .md h1')?.textContent === 'Linked note' && !!{embed}?.getAttribute('src') && {embed}.complete && {embed}.naturalWidth > 0"), wait);
+    let read = chrome.eval(page, "(() => { const c = document.querySelector('#content .md'); const img = c.querySelector('img.md-image'); const a = (t) => [...c.querySelectorAll('a')].find((x) => x.textContent === t); return { front: c.textContent.includes('front matter'), src: img?.getAttribute('src') ?? null, width: img?.getAttribute('width') ?? null, loaded: !!img && img.complete && img.naturalWidth > 0, home: a('home')?.getAttribute('href') ?? null, second: a('the second')?.dataset.path ?? null, third: a('the third')?.dataset.path ?? null }; })()")?;
     s.ok(
         "the viewer leaves out front matter, shows an embed through the app (the share link rides its cookie), and resolves wikilinks, relative and reference links to notes",
         shown
             && read["front"] == false
             && read["src"].as_str().is_some_and(|u| u.starts_with("api/file?path=notes%2Fpic.svg"))
+            && read["loaded"] == true
             && read["width"] == "40"
             && read["home"] == "#/notes%2Fwelcome.md"
             && read["second"] == "notes/second.md"
