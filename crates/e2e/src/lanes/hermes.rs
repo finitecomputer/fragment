@@ -162,6 +162,23 @@ fn screen(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, id: &str, agen
     let watching = s.eventually(wait, || chrome.eval_in_frame(&shell, &computer, &ready).ok() == Some(json!(true)));
     let said = |chrome: &mut crate::browser::Browser| chrome.eval_in_frame(&shell, &computer, "[document.body.dataset.state, document.getElementById('status')?.textContent ?? '']").unwrap_or_default();
     s.ok("in a frame of the platform's page, the agent's screen's page names it and connects to it (noVNC through the port), Take over ready", watching, said(&mut chrome));
+    // whose it is, by name, as the page framing it says it (the shell, as it
+    // opens it and on a rename: docs/computers.md, Ports); until then no
+    // one, never its label (Paul, 2026-10-20: "Watching pulsar-360's screen")
+    let unnamed = said(&mut chrome);
+    let tell = |chrome: &mut crate::browser::Browser, name: &str| -> Result<Value> {
+        chrome.eval(&shell, &format!("(document.querySelector('iframe').contentWindow.postMessage({{ fragment: 'screen', agent: {}, name: {} }}, '*'), true)", serde_json::to_string(agent)?, serde_json::to_string(name)?))
+    };
+    let says = |name: &str| format!("document.getElementById('status')?.textContent === {} && document.title === {}", serde_json::to_string(&format!("Watching {name}'s screen")).unwrap_or_default(), serde_json::to_string(&format!("{name}'s screen")).unwrap_or_default());
+    tell(&mut chrome, "Juniper")?;
+    let named = s.eventually(Duration::from_secs(10), || chrome.eval_in_frame(&shell, &computer, &says("Juniper")).ok() == Some(json!(true)));
+    tell(&mut chrome, "Junie")?;
+    let renamed = s.eventually(Duration::from_secs(10), || chrome.eval_in_frame(&shell, &computer, &says("Junie")).ok() == Some(json!(true)));
+    s.ok(
+        "told its name by the page framing it, the screen's page says it (\"Watching Juniper's screen\"), and again on a rename; before that it names no one, never its label",
+        unnamed[1] == "Watching the screen" && named && renamed,
+        json!({ "before": unnamed, "after": said(&mut chrome) }),
+    );
     chrome.eval_in_frame(&shell, &computer, "document.getElementById('control').click(), true")?;
     let mine = "document.body.dataset.state === 'mine'";
     let taken = s.eventually(Duration::from_secs(20), || chrome.eval_in_frame(&shell, &computer, mine).ok() == Some(json!(true)));

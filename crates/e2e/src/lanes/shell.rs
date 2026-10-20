@@ -1386,6 +1386,21 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     let _ = b.screenshot(page, &shots.join("chat-agent-face.png"));
     let sheet = super::signin::with_session(api, "GET", &format!("/share/{chat}"), me.session)?;
     s.ok("its chat's share sheet names it so, with its picture", sheet.status == 200 && sheet.text.contains("Frank") && sheet.text.contains(&format!("src=\"{path}\"")), &sheet);
+    // its screen (its menu's Its screen), by its name and never its label
+    // (Paul, 2026-10-20: "Watching pulsar-360's screen" of his Waffle): the
+    // window's title, and the screen's page, which the shell tells (the
+    // stub's page titles itself by it, as our Hermes image's says it)
+    let screen_at = format!("/p/6080/?agent={agent}");
+    let screen_pane = js(&format!("#stack .pane[data-key={}] .pane-title", js(&format!("screen:{agent}"))));
+    let screen_named = |s: &Suite, b: &mut Browser, name: &str| {
+        let pane = format!("document.querySelector({screen_pane})?.textContent === {}", js(name));
+        b.until(page, &pane, wait) && s.eventually(wait, || b.eval_in_frame(page, &screen_at, "document.title").ok() == Some(json!(format!("{name}'s screen"))))
+    };
+    let screen_said = |b: &mut Browser| json!({ "window": b.eval(page, &format!("document.querySelector({screen_pane})?.textContent ?? null")).ok(), "page": b.eval_in_frame(page, &screen_at, "document.title").ok() });
+    b.click(page, "#sidebar-agent")?;
+    let opened = menu_item(b, page, "Its screen")?;
+    let named = opened && screen_named(s, b, "Frank");
+    s.ok("its screen's window and page name it by its name, never its label", named, json!({ "label": me.first, "shown": screen_said(b) }));
     // renamed elsewhere, as `fragment agent --name` does (its files, then a
     // deploy): the sidebar and the chat's page follow; the chat's own title
     // is the chat's, and stays
@@ -1403,24 +1418,32 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
         wrote.status == 200 && deployed.status == 200 && followed && in_frame && kept["row"] == FIRST_CHAT && kept["header"] == FIRST_CHAT && listed["title"] == FIRST_CHAT,
         json!({ "shown": kept, "chat": listed }),
     );
+    let renamed = screen_named(s, b, "Frankie");
+    let _ = b.screenshot(page, &shots.join("screen-renamed.png"));
+    s.ok("its screen, open, follows the rename: its window and its page name it anew, with no reload", renamed, screen_said(b));
+    // closed (its address names the agent too, as its page's frame does)
+    b.eval(page, &format!("(document.querySelector({screen_pane})?.closest('.pane')?.querySelector('button[aria-label=Close]')?.click(), true)"))?;
+    b.until(page, &format!("!document.querySelector({screen_pane})"), wait);
     // its page (its menu's Its profile): its new name, and no old one
-    // anywhere on it (its job names none)
+    // anywhere on it (its job names none); the model it runs, its tier's
+    // (agent.json's `cheap`), by its id as their computer's view names it
     b.click(page, "#sidebar-agent")?;
     let profile = menu_item(b, page, "Its profile")?;
     let mut seen = Value::Null;
     // its own origin's frame (a screen's names it in its address too)
     let its_page = api.site_origin(&agent);
+    let cheap = r.body["computers"][0]["models"]["cheap"].as_str().unwrap_or("").to_string();
     let named = profile
         && s.eventually(wait, || {
-            seen = b.eval_in_frame(page, &its_page, "({ name: document.getElementById('name')?.textContent ?? null, title: document.title, soul: document.getElementById('soul')?.textContent ?? '', text: document.body.innerText })").unwrap_or(Value::Null);
-            seen["name"] == "Frankie" && seen["soul"].as_str().is_some_and(|t| t.contains("default agent"))
+            seen = b.eval_in_frame(page, &its_page, "({ name: document.getElementById('name')?.textContent ?? null, title: document.title, model: document.getElementById('tier')?.textContent ?? null, soul: document.getElementById('soul')?.textContent ?? '', text: document.body.innerText })").unwrap_or(Value::Null);
+            seen["name"] == "Frankie" && seen["soul"].as_str().is_some_and(|t| t.contains("default agent")) && seen["model"] == cheap.as_str()
         });
     let text = seen["text"].as_str().unwrap_or("");
     let _ = b.screenshot(page, &shots.join("agent-page-renamed.png"));
     s.ok(
-        "its page shows its new name, and none of the names it had (its job says what it does, never who it is)",
-        named && seen["title"] == "Frankie" && !text.contains(me.first_title) && !seen["soul"].as_str().unwrap_or("").contains("Frank"),
-        json!({ "was": me.first_title, "seen": seen }),
+        "its page shows its new name, and none of the names it had (its job says what it does, never who it is), and the model it runs by its id (its tier's, as their computer's view names it), never a tier's name",
+        named && seen["title"] == "Frankie" && !text.contains(me.first_title) && !seen["soul"].as_str().unwrap_or("").contains("Frank") && !cheap.is_empty() && cheap != "cheap" && !text.contains("cheap model"),
+        json!({ "was": me.first_title, "seen": seen, "cheap": cheap }),
     );
     // Rename asks for what it renames: the chat's name in the chat's ⋯, the
     // agent's in its menu, each alone
@@ -1944,22 +1967,30 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         came_back && said.0 && set && s.openrouter.keys().len() == keys_before + 1 && manage == "https://openrouter.ai/settings/keys",
         json!({ "popup": said.1, "manage": manage }),
     );
-    // each agent offers the provider's models beside its tier's, by the tier's name
+    // each agent offers the provider's models beside its tier's, by the
+    // tier's name and its model's id, as their computer's view names it
     let lead = b.eval(page, "document.querySelector('[data-model-for]')?.dataset.modelFor ?? ''")?.as_str().unwrap_or("").to_string();
     let read = b.until(page, &format!("document.querySelector('[data-model-for={lead:?}]')?.dataset.read === '1'"), wait);
     let options = b.eval(page, &format!("[...(document.querySelector('[data-model-for={lead:?}]')?.options ?? [])].map((o) => [o.value, o.textContent])"))?;
     let options = options.as_array().cloned().unwrap_or_default();
     let agent_json = || shell(api, session, "GET", &format!("/api/f/{lead}/file?path=agent.json"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
     let before = agent_json();
+    let view = || shell(api, session, "GET", "/api/computers", None, &[]).map(|r| r.body["computers"][0].clone()).unwrap_or(Value::Null);
+    let runs_on = |v: &Value| v["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).map(|a| a["modelProviders"].clone()).unwrap_or(Value::Null);
+    let connected = view();
+    let cheap = connected["models"]["cheap"].as_str().unwrap_or("").to_string();
     let vendor = b.eval(page, "document.getElementById('settings-page').innerText.includes('Workers AI') || [...document.querySelectorAll('[data-model-for] option')].some((o) => o.textContent.includes('Workers AI'))")?;
     s.ok(
-        "then each agent offers the provider's models, after its tier's, which it runs on now, named by its tier (cheap: Cheap) and no vendor: no Workers AI anywhere in settings",
+        "then each agent offers the provider's models, after its tier's, which it runs on now, named by its tier and its model's id as their computer's view names it (Cheap (<id>), never \"cheap\") and no vendor: no Workers AI anywhere in settings; the view names it among the providers whose models the agent may run",
         read && !lead.is_empty()
             && before["tier"] == "cheap"
-            && options.first().is_some_and(|o| o[0] == "" && o[1] == "Cheap")
+            && !cheap.is_empty() && cheap != "cheap"
+            && ["medium", "fallback", "vision"].iter().all(|n| connected["models"][n].as_str().is_some_and(|id| !id.is_empty()))
+            && options.first().is_some_and(|o| o[0] == "" && o[1] == format!("Cheap ({cheap})").as_str())
             && options.iter().any(|o| o[0] == "openrouter anthropic/claude-sonnet-5.5" && o[1] == "Claude Sonnet 5.5")
-            && vendor == false,
-        json!({ "options": options, "agentJson": before, "workersAi": vendor }),
+            && vendor == false
+            && runs_on(&connected) == json!([crate::SWAP_ROUTER]),
+        json!({ "options": options, "agentJson": before, "workersAi": vendor, "view": connected }),
     );
     let pick = |b: &mut Browser, value: &str| -> Result<bool> {
         b.eval(page, &format!("(() => {{ const p = document.querySelector('[data-model-for={lead:?}]'); p.value = {value:?}; p.dispatchEvent(new Event('change')); return true; }})()"))?;
@@ -1976,6 +2007,28 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         saved && after["model"] == json!({ "provider": "openrouter", "id": "anthropic/claude-sonnet-5.5" }) && after["tier"] == before["tier"] && after.get("color").is_none(),
         json!({ "before": before, "after": after }),
     );
+    // its page (its row's Open) names the model it runs: that one, while its
+    // computer gives it the provider's models; narrowed from the provider,
+    // its tier's, by its id (Paul, 2026-10-20: it said "cheap model"), and
+    // back again, each with no reload (its owner's view tells the shell)
+    b.eval(page, &format!("(document.querySelector('.agent-setting[data-agent={lead:?}] button.row')?.click(), true)"))?;
+    let its_page = api.site_origin(&lead);
+    let shows = |b: &mut Browser, want: &str| s.eventually(wait, || b.eval_in_frame(page, &its_page, "document.getElementById('tier')?.textContent ?? null").ok() == Some(json!(want)));
+    let own_shown = shows(b, "anthropic/claude-sonnet-5.5 (openrouter)");
+    let narrow = |list: Value| shell(api, session, "PUT", &format!("/api/computers/{}/agents/{lead}/connections", connected["computer"].as_str().unwrap_or("")), Some(&json!({ "connections": list })), &[]);
+    let narrowed = narrow(json!([]))?;
+    let tier_shown = narrowed.status == 200 && shows(b, &cheap);
+    let unused = runs_on(&view());
+    let _ = b.screenshot(page, &shots.join("agent-page-model-unused.png"));
+    let widened = narrow(Value::Null)?;
+    let own_again = widened.status == 200 && shows(b, "anthropic/claude-sonnet-5.5 (openrouter)");
+    s.ok(
+        "its page names the model it runs by its id: its own while its computer gives it the provider's models; narrowed from the provider, its tier's (the view names none it may run), never the one agent.json names; widened, its own again",
+        own_shown && tier_shown && unused.is_null() && own_again,
+        json!({ "page": b.eval_in_frame(page, &its_page, "document.getElementById('tier')?.textContent ?? null").ok(), "tier": cheap, "narrowed": unused }),
+    );
+    b.click(page, "#settings")?;
+    b.until(page, &format!("location.pathname === '/settings' && !!document.querySelector('[data-model-for={lead:?}]')"), wait);
     b.reload(page)?;
     let shown = b.until(page, &format!("document.querySelector('[data-model-for={lead:?}]')?.dataset.read === '1' && document.querySelector('[data-model-for={lead:?}]').value === 'openrouter anthropic/claude-sonnet-5.5'"), wait);
     let back = pick(b, "")?;
@@ -1984,7 +2037,8 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     // disconnected: the key goes, and no agent offers its models
     b.click(page, &format!("{row} [data-action=disconnect]"))?;
     let off = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'not_set' && document.querySelectorAll('[data-model-for]').length === 0"), wait);
-    s.ok("Disconnect takes the key away, and no agent offers its models", off, b.eval(page, &format!("document.querySelector('{row}')?.innerText"))?);
+    let left = runs_on(&view());
+    s.ok("Disconnect takes the key away, and no agent offers its models, nor may run them", off && left.is_null(), json!({ "row": b.eval(page, &format!("document.querySelector('{row}')?.innerText"))?, "modelProviders": left }));
     Ok(())
 }
 

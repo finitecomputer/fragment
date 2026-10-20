@@ -37,6 +37,33 @@ fragment.club until cutover (decisions 34–35).
   with the same ownership and fresh-read guarantees; remove the plugin
   after that behavior passes the promotion test. Budget tuning is Paul's call.
 
+## The agent's page derives the model an agent runs; the image does not say it
+
+- **Observed:** Paul, 2026-10-20 (production, his agent Waffle): the
+  agent's page said "cheap model" while its chat's `/model` named the real
+  one. The page now names it by its id from their computer's view
+  (`models`, and each agent's `modelProviders`) and the agent's
+  `agent.json` (docs/computers.md, "An agent's own model").
+- **Shortcut:** the rule that picks the model (its own while its provider
+  is one it may run models of, else its tier's: `medium`, else `cheap`) is
+  written twice: in our Hermes image (`hermes-boot`'s `MainModel::of` and
+  `Tier::of`, which also refuse an `agent.json` model whose id is no id)
+  and in the agent template's page (`runs`). Nothing the image chose
+  reaches the platform.
+- **Risk:** the two drift, or an image runs by a rule of its own (a high
+  tier turned on, an id the image refuses), and the page names a model the
+  agent does not run. The page reads `agent.json` as live has it
+  (`__file`), the computer as main has it: Settings puts each pick live,
+  but a change committed and not deployed (the agent's own, the CLI's)
+  shows on the page only once it is.
+- **First proof:** an agent whose `agent.json` names a model its image
+  refuses while its provider is connected: the page names it, the chat's
+  `/model` does not.
+- **Delete when:** the image says what each agent runs (its view's agents
+  written back, `PUT /api/computer/agents/{a}/model` or the like, as
+  `profile.model` already logs it), its owner's view carries it, and the
+  page shows that; an image change, which ships through a canary.
+
 ## OpenRouter's calls are charged at their ceiling, not their cost
 
 - **Observed:** 2026-10-15, moving Finite's tiers to GLM-5.3 Flash

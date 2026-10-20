@@ -524,6 +524,21 @@ impl Catalog {
         names
     }
 
+    /// The providers whose models an agent may run now, in the catalog's
+    /// order (docs/computers.md, "An agent's own model"): each an own key
+    /// whose row offers models, which its owner set (`set`) and the agent
+    /// is not narrowed from (`narrowed`, its `connections`: `None` is every
+    /// one). Its guest's view gives it each as a credential with a
+    /// `modelBase`; its `agent.json`'s `model` runs only on one of these,
+    /// and otherwise it runs on its tier.
+    pub fn model_providers(&self, set: &[String], narrowed: Option<&[String]>) -> Vec<String> {
+        self.providers
+            .iter()
+            .filter(|p| p.kind == Kind::Own && p.models.is_some() && set.contains(&p.name) && narrowed.is_none_or(|list| list.contains(&p.name)))
+            .map(|p| p.name.clone())
+            .collect()
+    }
+
     /// The operator keys' prices, as the price book takes them.
     pub fn key_prices(&self) -> Vec<crate::price::KeyPrice> {
         self.providers
@@ -681,6 +696,22 @@ mod tests {
         }
         assert!(matches!(with(&|r| r["models"]["offer"] = json!([{ "id": "a", "name": "A" }, { "id": "a", "name": "B" }])), Err(CatalogError::Models { .. })), "named twice");
         assert!(valid_model_id("anthropic/claude-sonnet-5.5") && valid_model_id("deepseek/deepseek-v4.1-flash:floor") && !valid_model_id("a\"b"));
+    }
+
+    /// Valid: an own key with models, set, runs an agent's own model, unless
+    /// the agent is narrowed from it. Invalid: not set, an own key with no
+    /// models, a connection, or a provider the catalog lacks is none.
+    #[test]
+    fn the_providers_whose_models_an_agent_may_run() {
+        let voice = json!({ "name": "elevenlabs", "kind": "own", "hosts": ["api.elevenlabs.io"], "placements": [{ "header": "xi-api-key" }], "env": ["ELEVENLABS_API_KEY"] });
+        let c = parse(json!([google(), voice, router()])).unwrap();
+        let every: Vec<String> = ["google", "elevenlabs", "openrouter", "nonesuch"].map(String::from).into();
+        assert_eq!(c.model_providers(&every, None), vec!["openrouter"], "an own key with models, set, the agent narrowed from nothing");
+        assert_eq!(c.model_providers(&every, Some(&["openrouter".into()])), vec!["openrouter"], "narrowed to it");
+        assert!(c.model_providers(&every, Some(&["elevenlabs".into(), "google".into()])).is_empty(), "narrowed from it");
+        assert!(c.model_providers(&every, Some(&[])).is_empty(), "narrowed from every one");
+        assert!(c.model_providers(&["elevenlabs".into(), "google".into()], None).is_empty(), "its key not set");
+        assert!(Catalog::default().model_providers(&every, None).is_empty(), "a catalog with no providers");
     }
 
     #[test]

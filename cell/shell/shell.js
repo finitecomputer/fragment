@@ -281,11 +281,15 @@ fitViewport();
 // A frame of a fragment the person owns may ask for their agents
 // (`{fragment: "agents?"}`); the shell answers it, at that fragment's own
 // origin only (its status's canonical URL), `{fragment: "agents", agents:
-// [{identity, fragment, name, title, picture?, phase?}]}` (`picture` its
-// picture's address, whole, on this platform; `phase` their computer's,
-// as the platform last said: `asleep`, `starting`, `awake`, `sleeping` or
-// `wont_wake`), and again whenever any of it changes: a rename or a new
-// picture reaches the page as it reaches this one.
+// [{identity, fragment, name, title, picture?, phase?, modelProviders?}],
+// models?}` (`picture` its picture's address, whole, on this platform;
+// `phase` their computer's, as the platform last said: `asleep`,
+// `starting`, `awake`, `sleeping` or `wont_wake`; `modelProviders` and
+// `models` as their computer's view says them: the providers whose models
+// each may run now, and the model route's models' ids by its names, which
+// with an agent's `agent.json` say the model it runs), and again whenever
+// any of it changes: a rename or a new picture reaches the page as it
+// reaches this one.
 // It may then ask for one of them in its fragment (`{fragment: "add-agent",
 // identity, nonce}`): the shell asks its person, in its own dialog (never
 // in the frame: a page is code its author or an agent wrote, so it asks
@@ -316,13 +320,14 @@ const roster = () => {
   const phase = state.computer?.phase;
   return [...state.agents.values()].map((a) => {
     const picture = agentFace(a.fragment, a.identity).picture;
-    return { identity: a.identity, fragment: a.fragment, name: a.name || labelOf(a.fragment), title: titleOf(a.fragment), ...(picture ? { picture: new URL(picture, location.origin).href } : {}), ...(phase ? { phase } : {}) };
+    return { identity: a.identity, fragment: a.fragment, name: a.name || labelOf(a.fragment), title: titleOf(a.fragment), ...(picture ? { picture: new URL(picture, location.origin).href } : {}), ...(phase ? { phase } : {}), ...(a.modelProviders?.length ? { modelProviders: a.modelProviders } : {}) };
   });
 };
+// the answer to `name`'s frame
+const rosterFor = (name) => ({ fragment: "agents", agents: roster(), ...(state.computer?.models ? { models: state.computer.models } : {}), setup: setupFor(name) });
 let rosterSent = "";
 function rosterChanged() {
-  const agents = roster();
-  const now = JSON.stringify([agents, setup && setupFor(setup.chat)]);
+  const now = JSON.stringify([roster(), state.computer?.models, setup && setupFor(setup.chat)]);
   if (now === rosterSent) return;
   rosterSent = now;
   const live = new Set([...document.querySelectorAll("iframe[data-fragment]")].map((f) => f.contentWindow));
@@ -330,7 +335,7 @@ function rosterChanged() {
     if (!live.has(win)) rosterTo.delete(win);
     else {
       const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === win);
-      win.postMessage({ fragment: "agents", agents, setup: setupFor(frame?.dataset.fragment) }, origin);
+      win.postMessage(rosterFor(frame?.dataset.fragment), origin);
     }
   }
 }
@@ -355,7 +360,7 @@ addEventListener("message", async (event) => {
   }
   if (d.fragment === "agents?") {
     rosterTo.set(event.source, origin);
-    event.source.postMessage({ fragment: "agents", agents: roster(), setup: setupFor(name) }, origin);
+    event.source.postMessage(rosterFor(name), origin);
     // a prompt pressed before its chat's page was there (`composeApp`)
     const text = composing.get(name);
     composing.delete(name);
@@ -1098,10 +1103,26 @@ async function openScreen(agent) {
   try {
     const t = await api("POST", `/api/computers/${seg(state.computer.computer)}/ports/6080/ticket`, { path: `/?agent=${encodeURIComponent(agent)}` });
     const frame = frameOf(t.url, `${titleOf(agent)}'s screen`);
+    frame.dataset.screen = agent;
+    frame.addEventListener("load", () => nameScreen(frame));
     show({ key: `screen:${agent}`, title: titleOf(agent), subtitle: "screen", icon: paneIcon("screen"), body: frame, persist: false });
   } catch (e) {
     notice("Its screen did not open", e.message);
   }
+}
+// Whose screen it is, by the agent's name as the person's list says it now
+// (its fragment's title): its window's, and its page's, told at the port's
+// own origin as it loads and again on a rename (`{fragment: "screen",
+// agent, name}`; docs/computers.md, Ports). Its computer knows the agent by
+// its label alone, which is no name.
+function nameScreen(frame) {
+  const agent = frame.dataset.screen;
+  frame.setAttribute("aria-label", `${titleOf(agent)}'s screen`);
+  const title = frame.closest(".pane")?.querySelector(".pane-title");
+  if (title) title.textContent = titleOf(agent);
+  try {
+    frame.contentWindow?.postMessage({ fragment: "screen", agent, name: titleOf(agent) }, new URL(frame.dataset.src).origin);
+  } catch {}
 }
 
 // ---- making the agent: its fragment, its computer, its chat (decision 10, 16) ----
@@ -2098,9 +2119,10 @@ function faceControls(a) {
 }
 // Settings' agent rows as the list says now: each one's face and name, and
 // whether it has a picture to change or remove; and the names its other
-// controls carry (each agent's screen, its model).
+// controls carry (each agent's screen, its model), and its open screens.
 function renderAgentFaces() {
   for (const b of document.querySelectorAll("[data-screen-for]")) b.textContent = `Open ${titleOf(b.dataset.screenFor)}'s screen`;
+  for (const f of document.querySelectorAll("iframe[data-screen]")) nameScreen(f);
   for (const pick of document.querySelectorAll("[data-model-for]")) pick.setAttribute("aria-label", `${titleOf(pick.dataset.modelFor)}'s model`);
   for (const name of document.querySelectorAll("[data-agent-face]")) {
     const fragment = name.dataset.agentFace;
@@ -2339,13 +2361,17 @@ function dataSection() {
 }
 
 // ---- an agent's model: its agent.json's `model` ({provider, id}), a model
-// of a provider the person connected, or none: its `tier`'s, shown by the
-// tier's name (which model that is, the deployment's `models` say, and a
-// person's session reads none of it). Its computer reads agent.json again
-// within seconds and runs its next turn on it. Vision and voice notes stay
-// on the platform's own models.
+// of a provider the person connected, or none: its `tier`'s (`medium`, else
+// the default: `high` is off, decision 23), shown by the tier's name and its
+// model's id, as their computer's view names it (the deployment's `models`).
+// Its computer reads agent.json again within seconds and runs its next turn
+// on it. Vision and voice notes stay on the platform's own models.
 const TIER = { cheap: "Cheap", medium: "Medium" };
-const tierName = (tier) => TIER[tier ?? DEFAULT_AGENT_TIER] ?? tier;
+const tierName = (tier) => {
+  const t = tier === "medium" ? "medium" : DEFAULT_AGENT_TIER;
+  const id = state.computer?.models?.[t];
+  return id ? `${TIER[t]} (${id})` : TIER[t];
+};
 const modelValue = (provider, id) => `${provider} ${id}`;
 function modelOption(value, text) {
   const o = el("option", null, text);
@@ -2393,6 +2419,9 @@ function modelPicker(a, row, modeled) {
         message: `its model: ${provider ? id : next.tier}`,
         files: [{ path: "agent.json", text: JSON.stringify(next, null, 2) + "\n" }],
       });
+      // put live, as its name and picture are: its computer reads main, its
+      // page live (`__file`), and both then say the same
+      await api("POST", `/api/f/${seg(a.fragment)}/deploy`, {});
       said.textContent = "Saved: its next message uses it.";
       pick.dataset.saved = pick.value;
     } catch (e) {

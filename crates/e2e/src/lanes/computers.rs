@@ -1323,8 +1323,8 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         Ok((first, taken))
     });
     s.ok(
-        "a socket on its port opens from its own page, and carries the container's first word (the agent's screen, held by no one) and the page's answer",
-        heard.as_ref().is_ok_and(|(first, taken)| first["type"] == "control" && first["agent"] == agent_name.as_str() && first["name"].as_str().is_some_and(|n| !n.is_empty()) && first["holder"].is_null() && taken["holder"] == "e2e"),
+        "a socket on its port opens from its own page, and carries the container's first word (the agent's screen, by its fragment and never its label, held by no one) and the page's answer",
+        heard.as_ref().is_ok_and(|(first, taken)| first["type"] == "control" && first["agent"] == agent_name.as_str() && first.get("name").is_none() && first["holder"].is_null() && taken["holder"] == "e2e"),
         format!("{heard:?}"),
     );
     // an agent this computer does not run, or no agent's name, is refused
