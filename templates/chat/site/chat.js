@@ -53,6 +53,10 @@ import "./tooltips.js";
 
 // A message's text and files (docs/chat-records.md).
 const TEXT_MAX_BYTES = 32 * 1024;
+// The composer's draft in this origin's storage (`saveDraft`): {who, text, at},
+// kept this long after a change.
+const DRAFT_KEY = "fragment.chat.draft.v1";
+const DRAFT_SAVE_MS = 300;
 const ATTACHMENTS_MAX = 8;
 const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
 // The backlog a page reads: the chat's last messages, and enough of `work`
@@ -324,6 +328,12 @@ export function mount(root) {
   const input = $("text");
   input.maxLength = TEXT_MAX_BYTES;
   const composer = $("say");
+  // the composer's draft as kept (`saveDraft`), and what the shell was told
+  // of what no storage keeps (`tellBusy`)
+  let draftTimer = 0;
+  let draftsForgotten = false;
+  let busyTold = false;
+  let answersOnTheirWay = 0; // a card's answers posted, not yet answered
   $("head").hidden = framed;
 
   const state = {
@@ -383,6 +393,7 @@ export function mount(root) {
       }
     }
     schedule();
+    tellBusy();
   });
   // where the shell that handed the roster is (its answers come from there)
   let rosterOrigin = null;
@@ -710,6 +721,7 @@ export function mount(root) {
       t.closed.set(b.prompt, b);
       state.answering.delete(cardKey(t.key, b.prompt));
       state.typed.delete(cardKey(t.key, b.prompt));
+      tellBusy();
     } else if (b.kind === "turn.end") {
       t.end = { outcome: b.outcome, error: typeof b.error === "string" ? b.error : "", at: record.at, n };
       state.drafts.delete(t.key);
@@ -1379,6 +1391,7 @@ export function mount(root) {
     const ready = () => (go.disabled = disabled || !field.value.trim());
     field.oninput = () => {
       state.typed.set(card, field.value);
+      tellBusy();
       ready();
     };
     ready();
@@ -1704,6 +1717,7 @@ export function mount(root) {
     const steers = !!words && !words.startsWith("/") && !attachments.length && !recording && !!workingOn(target) && menuOf(target).some((c) => c.name === "steer");
     $("steer").hidden = !steers;
     $("steer").disabled = sending;
+    tellBusy();
   }
   // The message the composer quotes, above what is typed.
   function quote(m) {
@@ -1718,6 +1732,8 @@ export function mount(root) {
     $("quoting-who").textContent = q ? `Replying to ${who(q.principal).name}` : "";
     $("quoting-text").replaceChildren();
     if (q) quoteText($("quoting-text"), q.m);
+    // a quote chosen is kept by no storage: the shell is told
+    tellBusy();
   }
   $("unquote").onclick = () => {
     state.replyTo = null;
@@ -1753,6 +1769,68 @@ export function mount(root) {
     input.style.height = "auto";
     input.style.height = `${Math.min(Math.max(input.scrollHeight, 27), 220)}px`;
     refreshSend();
+    draftChanged();
+  }
+  // ---- the composer's draft: kept in this origin's storage as its
+  // person's, a moment after each change and as the page goes, and put
+  // back as it loads, so words typed survive any reload of the page (the
+  // shell's for a new release, a crash, a quit app). Only the person it is
+  // signed in as gets theirs back: a draft of anyone else's is let go, and
+  // the shell asks for it to go as its person signs out (`forget-draft`).
+  // A browser that keeps no storage for this frame keeps no draft. ----
+  function saveDraft() {
+    clearTimeout(draftTimer);
+    const who = state.me?.principal;
+    if (!who || draftsForgotten || !canPost()) return;
+    try {
+      if (input.value.trim()) localStorage.setItem(DRAFT_KEY, JSON.stringify({ who, text: input.value, at: Date.now() }));
+      else localStorage.removeItem(DRAFT_KEY);
+    } catch {}
+  }
+  function draftChanged() {
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(saveDraft, DRAFT_SAVE_MS);
+  }
+  addEventListener("pagehide", saveDraft);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) saveDraft(); });
+  // as the page knows its person: their draft back in an empty composer
+  function restoreDraft(who) {
+    let kept = null;
+    try {
+      kept = JSON.parse(localStorage.getItem(DRAFT_KEY));
+    } catch {}
+    if (!kept) return;
+    if (kept.who !== who || typeof kept.text !== "string" || kept.text.length > TEXT_MAX_BYTES) {
+      try {
+        localStorage.removeItem(DRAFT_KEY);
+      } catch {}
+      return;
+    }
+    if (canPost() && !input.value.trim()) input.value = kept.text;
+  }
+  // its person signing out, or in with another account (the shell asks):
+  // the draft goes, and nothing more is kept from this page
+  function forgetDraft(event) {
+    draftsForgotten = true;
+    clearTimeout(draftTimer);
+    try {
+      localStorage.removeItem(DRAFT_KEY);
+    } catch {}
+    window.parent.postMessage({ fragment: "draft-forgotten" }, event.origin);
+  }
+  // ---- what this page holds that no storage keeps: files chosen, a voice
+  // memo, a message on its way, one that failed (its Retry, and a retry
+  // under way: newer words may be in the composer), a quote chosen, a
+  // card's answer typed and not sent, or on its way. The shell that frames
+  // it is told as it changes (`{fragment: "busy", busy}`), and reloads it
+  // for a new release only while it is not, and stops a reload under way
+  // if it becomes so. ----
+  function tellBusy() {
+    const answerTyped = [...state.typed].some(([card, text]) => text.trim() && !state.answering.has(card));
+    const busy = attachments.length > 0 || !!recording || sending || state.sending.size > 0 || state.failed.size > 0 || !!state.replyTo || answersOnTheirWay > 0 || answerTyped;
+    if (!framed || !state.me || busy === busyTold) return;
+    busyTold = busy;
+    window.parent.postMessage({ fragment: "busy", busy }, state.me.platform);
   }
   function renderAttachments() {
     const list = $("attachments");
@@ -2262,6 +2340,8 @@ export function mount(root) {
     const card = cardKey(t.key, prompt);
     state.answering.set(card, option);
     schedule();
+    answersOnTheirWay++;
+    tellBusy();
     try {
       const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(card)));
       const id = `pr:${[...digest.slice(0, 16)].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
@@ -2273,6 +2353,9 @@ export function mount(root) {
         problem(`Your answer was not sent: ${err.message}`);
       }
       schedule();
+    } finally {
+      answersOnTheirWay--;
+      tellBusy();
     }
   }
 
@@ -2353,39 +2436,9 @@ export function mount(root) {
       if (typeof d.mobile === "boolean") document.documentElement.dataset.mobile = String(d.mobile);
     }
     else if (d && d.fragment === "compose" && typeof d.text === "string") compose(event, d.text);
-    else if (d && d.fragment === "unsent?" && Number.isInteger(d.ask)) window.parent.postMessage(holds(d.ask), event.origin);
-    else if (d && d.fragment === "restore-unsent" && typeof d.text === "string") restoreUnsent(event, d.text);
+    else if (d && d.fragment === "forget-draft") forgetDraft(event);
     else fromShell(event);
   });
-  // ---- the shell's reload for a new release (docs/api.md, The shell): it
-  // asks what this page holds unsent first, and gives back after the
-  // reload the words it kept. The ask is answered at once, to the parent
-  // that asked (only the platform's page frames this one), whatever the
-  // page's socket is doing: a page that never got its hello still says it
-  // holds nothing, so a shell stuck on an old release can reload. ----
-  let touchedAt = Date.now();
-  for (const type of ["pointerdown", "keydown", "wheel", "touchstart", "input", "scroll"]) addEventListener(type, () => { touchedAt = Date.now(); }, { capture: true, passive: true });
-  // `text`: the composer's words (a reload keeps them); `held`: what it
-  // could not keep (files, a voice memo, a quote, a card's answer, a
-  // message the platform has not taken, or one that failed); `idleMs`:
-  // since the person last touched the page
-  function holds(ask) {
-    const held = attachments.length > 0 || !!recording || sending || state.sending.size > 0 || state.failed.size > 0 || !!state.replyTo || state.answering.size > 0 || [...state.typed.values()].some((t) => t.trim());
-    return { fragment: "unsent", ask, text: input.value.trim() ? input.value : "", held, idleMs: Date.now() - touchedAt };
-  }
-  // The words this page held before the reload, back in its composer: in
-  // place of nothing, or before what was typed since (never over it). Taken
-  // only from its parent at the platform's origin, for someone who may
-  // post here; then the shell keeps them no more.
-  function restoreUnsent(event, text) {
-    fragment.me().then((hello) => {
-      if (event.origin !== hello.platform || !canPost() || input.disabled) return;
-      if (!text.trim() || text.length > TEXT_MAX_BYTES) return;
-      if (!input.value.includes(text)) input.value = input.value.trim() ? `${text}\n${input.value}` : text;
-      grow();
-      window.parent.postMessage({ fragment: "unsent-restored" }, hello.platform);
-    });
-  }
   // asks once: a shell that is its owner's answers (and again on a change)
   if (framed) window.parent.postMessage({ fragment: "agents?" }, "*");
   addEventListener("keydown", event => {
@@ -2411,6 +2464,8 @@ export function mount(root) {
       try { await earlierWork(); }
       catch (err) { $("history-error").textContent = `Could not load earlier progress: ${err.message}.`; $("earlier").hidden = false; }
     } });
+    // what they had typed here before the page last went (any reload), theirs alone; anyone else's goes
+    restoreDraft(hello.principal);
     const note = $("note");
     note.replaceChildren();
     if (!canPost()) {

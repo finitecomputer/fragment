@@ -375,6 +375,15 @@ impl Browser {
     }
 
     /// Changes reachability while keeping the page's origin and identity.
+    /// Every request of the page's own (its frames of other sites aside)
+    /// answered `ms` late, a navigation's too, as a slow phone's are; 0 as
+    /// they come.
+    pub fn latency(&mut self, page: &Page, ms: u64) -> Result<()> {
+        self.send("Network.enable", json!({}), Some(&page.session))?;
+        self.send("Network.emulateNetworkConditions", json!({ "offline": false, "latency": ms, "downloadThroughput": -1, "uploadThroughput": -1 }), Some(&page.session))?;
+        Ok(())
+    }
+
     pub fn offline(&mut self, page: &Page, offline: bool) -> Result<()> {
         self.send("Network.enable", json!({}), Some(&page.session))?;
         self.send("Network.emulateNetworkConditions", json!({ "offline": offline, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1 }), Some(&page.session))?;
@@ -509,8 +518,10 @@ impl Browser {
 
     /// `eval_in_frame` in a frame of another site than the page's: the
     /// first frame target of this lease's contexts whose URL contains
-    /// `url_part`, attached for the evaluation.
-    fn eval_in_isolated_frame(&mut self, url_part: &str, expr: &str) -> Result<Value> {
+    /// `url_part`, attached for the evaluation. Called alone, it reaches
+    /// the frame while its page is between documents (a navigation under
+    /// way, which holds the page's own session back until it commits).
+    pub fn eval_in_isolated_frame(&mut self, url_part: &str, expr: &str) -> Result<Value> {
         let v = self.send("Target.getTargets", json!({}), None)?;
         let context = self.context.clone();
         let ours = |id: &Value| context.as_deref().is_none_or(|c| id == c || self.others.iter().any(|o| id == o.as_str()));
