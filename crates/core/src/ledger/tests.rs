@@ -893,7 +893,43 @@ fn a_head_kept_with_holds_loads_without_them_and_charges_nothing() {
     assert_eq!(w.ok(Op::Sweep), Outcome::Swept(Swept { forgotten: 0 }));
     assert_eq!((w.balance(), w.ledger.totals().charged), (47 * USD, 3 * USD), "no sweep charges a hold that was");
     let written = serde_json::to_value(&w.ledger).unwrap();
-    assert!(written.get("holds").is_none(), "written back without them: {written}");
+    assert_eq!(written["holds"], serde_json::json!({}), "written back without them: {written}");
+}
+
+/// The head as the release before decision 62 read it: every field
+/// required, `holds` a map (its `Ledger`; what a hold holds is no matter
+/// here, as this release writes none).
+#[derive(Debug, serde::Deserialize)]
+struct HeadBefore {
+    money: Money,
+    book: PriceBook,
+    holds: BTreeMap<String, serde::de::IgnoredAny>,
+}
+
+/// Goal: a rollback to the release before decision 62 reads every head
+/// this one writes: old → new → old, a head with holds and one without, a
+/// new person's, and one restarted. Method: the previous release's head
+/// shape (`HeadBefore`) reads what this one wrote, with its money and book
+/// as they were, and no holds.
+#[test]
+fn a_head_written_here_reads_in_the_release_before() {
+    let mut w = World::seat();
+    w.spend_in("b1", 3 * USD, Some("todo.ann"));
+    let mut old = serde_json::to_value(&w.ledger).unwrap();
+    old["holds"] = serde_json::json!({ "aig:held": { "amount": TURN, "fragment": "todo.ann", "at_ms": T0 } });
+    let before: HeadBefore = serde_json::from_value(old.clone()).expect("the old shape, as the release before wrote it");
+    assert_eq!(before.holds.len(), 1);
+    let fresh = World::guest().ledger;
+    for (what, head) in [("with holds", serde_json::from_value::<Ledger>(old).unwrap()), ("without", w.ledger.clone()), ("a new person's", fresh)] {
+        let written = serde_json::to_string(&head).unwrap();
+        let back: HeadBefore = serde_json::from_str(&written).unwrap_or_else(|e| panic!("{what}: the release before reads it: {e}"));
+        assert_eq!((back.money, &back.book, back.holds.len()), (head.money, &head.book, 0), "{what}");
+        let again: Ledger = serde_json::from_str(&written).unwrap();
+        assert_eq!(again, head, "{what}: and this one reads it back the same");
+    }
+    let w = w.restarted();
+    let back: HeadBefore = serde_json::from_str(&serde_json::to_string(&w.ledger).unwrap()).expect("restarted, the same");
+    assert_eq!(back.money, w.ledger.money);
 }
 
 /// Goal: an entry those releases kept (a reservation, held, settled or

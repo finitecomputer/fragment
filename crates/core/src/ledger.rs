@@ -666,13 +666,36 @@ fn gate(money: &Money, spend: Spend) -> Result<(), Refused> {
     }
 }
 
-/// A person's ledger: the head of its state (see the module's docs). A
-/// head kept before decision 62 names its `holds` too: read past (the
-/// fields a head does not name are let go), so they go uncharged.
+/// A person's ledger: the head of its state (see the module's docs).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ledger {
     money: Money,
     book: PriceBook,
+    /// The reservations the releases before decision 62 held: read past
+    /// (forgiven: what they held was never drawn from the balance), and
+    /// written empty, so a release rolled back to one of those, which
+    /// requires the map, reads a head this one wrote.
+    #[serde(default)]
+    holds: NoHolds,
+}
+
+/// A head's `holds`, kept for a rollback (`Ledger::holds`): whatever a head
+/// read names is let go, and it is written as an empty map. Goes once no
+/// release that requires the map can be deployed again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct NoHolds;
+
+impl Serialize for NoHolds {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        s.serialize_map(Some(0))?.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for NoHolds {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<NoHolds, D::Error> {
+        serde::de::IgnoredAny::deserialize(d).map(|_| NoHolds)
+    }
 }
 
 impl Ledger {
@@ -692,7 +715,7 @@ impl Ledger {
             read_only: false,
             totals: Totals::default(),
         };
-        let ledger = Ledger { money, book };
+        let ledger = Ledger { money, book, holds: NoHolds };
         ledger.assert_valid();
         ledger
     }

@@ -14,8 +14,10 @@
 //!
 //! Nothing is held before a paid call (decision 62): a head or an entry
 //! the releases before kept (holds, reservations) loads, its holds dropped
-//! uncharged (`fragment_core::ledger`). The `entries.held` column stays
-//! (a schema changes only by a new step), written 0.
+//! uncharged, and a head is written with `holds` empty, which a release
+//! rolled back to one of those reads (`fragment_core::ledger`). The
+//! `entries.held` column stays (a schema changes only by a new step),
+//! written 0.
 //!
 //! Inner routes (platform code only, through `ask`): each is a POST of a
 //! `Route`'s request (the core's types, or proto's), answered with its

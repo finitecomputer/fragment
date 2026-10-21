@@ -166,7 +166,9 @@ Pure: no I/O, no clock (time is an argument). The state has two parts:
   read-only latch, the overdraft, and the price book. Small and bounded;
   kept whole. A head kept before decision 62 names the reservations it
   held too: it loads without them, uncharged (what they held was never
-  drawn), and is written back without them.
+  drawn), and is written back with `holds` empty, so a release rolled
+  back to one before decision 62 (which requires the map) reads every
+  head this one writes.
 - **The store** (`trait Store`): what grows with use, by id. References
   (`Entry`), batches, commands, each fragment's spend by month, and caps.
   The Durable Object keeps these in SQLite tables; `Memory` keeps them in
