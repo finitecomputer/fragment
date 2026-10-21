@@ -698,7 +698,9 @@ for a seat once someone holds one:
   and "Get a seat", which opens the welcome, beside "Use another
   account".
 - **A seat holder** sees their seat, its kind, who provides it, this
-  month's usage and credit, and "Buy $25 of credit" (its `offer`'s price). On `seat_always_on`
+  month's usage and credit (its balance, "left", or below zero "owed":
+  a paid call is charged after it, so the balance can pass zero), and
+  "Buy $25 of credit" (its `offer`'s price). On `seat_always_on`
   it adds "let it sleep". One who is no admin has "Leave" beside their
   org.
 - **Someone on the deployment's default plan, in no org,** can buy the

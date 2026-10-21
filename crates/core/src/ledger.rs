@@ -1,6 +1,6 @@
 //! A person's usage ledger (docs/ledger.md; docs/cloudflare-v1.md,
-//! decisions 24–27 and 36): credit, plans, reservations, meters, caps,
-//! and the standing that says what may still spend.
+//! decisions 24–27, 36 and 62): credit, plans, meters, caps, and the
+//! standing that says what may still spend.
 //!
 //! One ledger per payer. The caller decides who pays (an agent's model
 //! and compute bill the agent's owner; a fragment's hosting bills the
@@ -11,8 +11,7 @@
 //! simulate.
 //!
 //! The state has two parts. `Ledger` is the head: small and bounded (the
-//! plan, the balance's parts, the reservations held, the price book),
-//! kept whole. A `Store` holds what grows with use, by id: each reference
+//! plan, the balance's parts, the price book), kept whole. A `Store` holds what grows with use, by id: each reference
 //! charged, each batch and command applied, each fragment's spend by
 //! month, and caps. The Durable Object keeps those in SQLite tables, and
 //! runs each mutation in one transaction with the head; tests keep them
@@ -29,6 +28,12 @@
 //! and expires at its end; purchased credit stays until spent. A charge
 //! draws included credit first. Included credit that arrives while the
 //! person owes pays the debt first, so a debt is paid once.
+//!
+//! Nothing is held before a paid call (decision 62): a spend asks the
+//! cell's cached gate (`may_spend`, `fragment_open`; `gate`), and what it
+//! used is metered after it, once by its reference. A head kept before
+//! (2026-10-21) that names holds loads without them: what they held was
+//! never drawn, so they go uncharged.
 //!
 //! Zero (decision 27): at a balance of zero or less, agents stop (no
 //! turns, no wakes, no AI steps). Fragments keep taking writes down to the
@@ -72,13 +77,6 @@ pub const CAP_DEFAULT: i64 = 5 * USD;
 /// Rows in one batch: a batch is one request and one transaction, and
 /// 1,000 rows of about 300 bytes stay far under the request body limit.
 pub const BATCH_ROWS_MAX: usize = 1_000;
-/// One reservation: the dearest call the tiers allow is about $10 (Opus
-/// with a million tokens in and 128K out, with the fee and margin), so
-/// $25 leaves room for media steps and still refuses a typo.
-pub const RESERVATION_MAX: i64 = 25 * USD;
-/// Reservations held at once: a computer's agents and a person's jobs in
-/// flight together hold a few dozen; past this, something leaks them.
-pub const HOLDS_MAX: usize = 256;
 /// One grant: a purchase or an operator's gift; more is a typo.
 pub const GRANT_MAX: i64 = 10_000 * USD;
 /// A fragment's cap: more is no cap at all, and a typo.
@@ -93,11 +91,6 @@ pub const OVERDRAFT_MAX: i64 = 1_000 * USD;
 pub const ID_MAX_BYTES: usize = 256;
 /// A grant's note for people.
 pub const NOTE_MAX_BYTES: usize = 512;
-/// A reservation older than this is settled at its worst case by the next
-/// sweep. No call holds for hours (a long model answer takes minutes), so its
-/// caller died, and whether the call used anything is unknown: the money
-/// path fails closed, as it does for a call that reports no usage.
-pub const HOLD_MAX_MS: i64 = 6 * HOUR_MS;
 /// How long references and batches are remembered (the audit records'
 /// retention). A row from before this is refused as stale: its reference
 /// may have been forgotten, so it could be a replay. Sources retry within
@@ -111,11 +104,8 @@ pub const SWEEP_EVERY_MS: i64 = DAY_MS;
 /// Fragments a status lists, the largest spend first.
 pub const STATUS_FRAGMENTS: usize = 50;
 
-const _: () = assert!(HOLD_MAX_MS < REF_KEEP_MS, "a hold expires long before its reference could be forgotten");
-const _: () = assert!(RESERVATION_MAX <= price::CHARGE_MAX, "a reservation is a charge it could become");
 const _: () = assert!(SEAT_INCLUDED <= SEAT_ALWAYS_ON_INCLUDED, "the larger seat includes more");
 const _: () = assert!(OVERDRAFT_DEFAULT <= OVERDRAFT_MAX && CAP_DEFAULT <= CAP_MAX, "the defaults are within their limits");
-const _: () = assert!((HOLDS_MAX as i64) * RESERVATION_MAX < i64::MAX / 1024, "what is held sums in an i64");
 
 /// A UTC month, counted from January 1970 (month 0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -163,46 +153,6 @@ pub enum Spend {
     /// Making a fragment, whose hosting its maker will pay: a write to a
     /// fragment of their own, and a guest makes none.
     Create,
-}
-
-/// A paid call's worst case, held before the call is made.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Reserve {
-    /// The call's reference, stable across its retries (a job step's
-    /// `step:<fragment>@<incarnation>/run/<run>/step/<index>`, or the
-    /// intercept's id for a model call).
-    #[serde(rename = "ref")]
-    pub reference: String,
-    /// `AgentTurn` or `AiStep`: wakes, writes and creates reserve nothing.
-    pub spend: Spend,
-    /// The call's worst case, priced with the ledger's book.
-    pub worst: Usage,
-    /// The fragment the call is in: its month's spend counts it.
-    pub fragment: Option<String>,
-    /// The agent making the call, for the record.
-    pub agent: Option<String>,
-    /// The fragment's cap applies: this payer owns `fragment`, and the
-    /// spender is not its owner (nor its owner's agent acting for them).
-    pub capped: bool,
-}
-
-/// A held call's end: what it used (`None`: it reported nothing, and is
-/// charged its reservation, failing closed).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Settle {
-    #[serde(rename = "ref")]
-    pub reference: String,
-    pub usage: Option<Usage>,
-}
-
-/// A held call that failed for good before it used anything (bug 3).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Release {
-    #[serde(rename = "ref")]
-    pub reference: String,
 }
 
 /// Rows a source metered since its last flush, under an id of the batch's
@@ -253,50 +203,6 @@ pub enum Command {
     SetBook(SetPriceBook),
 }
 
-/// A reservation's answer, from where its reference stands: a replay
-/// changes nothing, and a retried step learns that its call was paid
-/// (bug 2), so it never makes the call again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "reserved", rename_all = "snake_case")]
-pub enum Reserved {
-    /// Held: make the call, then settle it, or release it if it fails for
-    /// good having used nothing.
-    Held { amount: i64 },
-    /// Settled before: the call was made and charged.
-    Settled { charge: i64 },
-    /// Released before: the call failed for good.
-    Released,
-}
-
-/// What a settled call was charged, and from what.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Settled {
-    pub charge: i64,
-    pub basis: Basis,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Basis {
-    /// The usage it reported, priced (even past its reservation: it
-    /// happened).
-    Usage,
-    /// Its reservation: it reported no usage, or one the book has no price
-    /// for.
-    Reservation,
-    /// Its reservation: it was held past `HOLD_MAX_MS`.
-    Expired,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "released", rename_all = "snake_case")]
-pub enum Released {
-    /// The reservation went back (now, or by this release's earlier try).
-    Back,
-    /// It had settled: its charge stands.
-    Settled { charge: i64 },
-}
-
 /// A batch's answer, kept with the batch so a replay answers the same.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Metered {
@@ -318,17 +224,8 @@ pub struct RowRefused {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Swept {
-    /// Holds past `HOLD_MAX_MS`, settled at their reservations.
-    pub expired: Vec<Expired>,
     /// References and batches forgotten (past `REF_KEEP_MS`).
     pub forgotten: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Expired {
-    #[serde(rename = "ref")]
-    pub reference: String,
-    pub charge: i64,
 }
 
 /// Why a mutation or a question was refused. A refusal changes nothing.
@@ -339,13 +236,6 @@ pub enum Refused {
     Invalid { what: Invalid },
     /// This id was used with another body.
     ConflictingBody,
-    /// No reservation by this reference (never made, or forgotten).
-    UnknownRef,
-    /// A settle for a reservation released before: a call that used
-    /// anything settles; only one that used nothing is released.
-    Ended,
-    /// `HOLDS_MAX` reservations are held.
-    TooManyHolds,
     /// A price book no newer than the ledger's: refused no more, since a
     /// ledger takes any book whose contents differ from its own (#451);
     /// kept so an answer of the releases before reads.
@@ -356,8 +246,7 @@ pub enum Refused {
     StaleSeat { current: u64 },
     /// The book prices no such model, instance type or key.
     NoPrice,
-    /// More than one reservation (`RESERVATION_MAX`) or one row
-    /// (`price::CHARGE_MAX`) may cost.
+    /// More than one row may cost (`price::CHARGE_MAX`).
     TooLarge,
     /// A row from before what the ledger remembers (`REF_KEEP_MS`).
     Stale,
@@ -368,11 +257,8 @@ pub enum Refused {
     GuestCreates,
     AgentsStopped { why: Why },
     ReadOnly { why: Why },
-    /// The worst case does not fit what is available (the balance less
-    /// what is held).
-    CreditShort { available: i64, needed: i64 },
-    /// The fragment spent its cap this month (counting what is held in
-    /// it): only its owner spends in it until the next month.
+    /// The fragment spent its cap this month: only its owner spends in it
+    /// until the next month.
     CapReached { cap: i64, spent: i64 },
     /// The person was wiped (docs/api.md, Operators): their ledger keeps
     /// nothing but that, and takes nothing more. Not the core's to decide:
@@ -395,10 +281,6 @@ pub enum Invalid {
     Note,
     /// A batch with no rows, or more than `BATCH_ROWS_MAX`.
     Rows,
-    /// A wake, a write or a create, which reserve nothing.
-    Spend,
-    /// A capped reservation that names no fragment.
-    Capped,
     /// A row from before 1970, or past `CLOCK_SKEW_MS` ahead.
     Time,
     /// A seat change at order 0 (orders start at 1).
@@ -429,15 +311,14 @@ impl Refused {
     /// `budget_used_up` (402), with the reason in the message.
     pub fn code(self) -> ErrorCode {
         match self {
-            Refused::Invalid { .. } | Refused::Ended | Refused::StaleBook { .. } | Refused::StaleSeat { .. } | Refused::NoPrice | Refused::Stale => ErrorCode::InvalidRequest,
+            Refused::Invalid { .. } | Refused::StaleBook { .. } | Refused::StaleSeat { .. } | Refused::NoPrice | Refused::Stale => ErrorCode::InvalidRequest,
             Refused::ConflictingBody => ErrorCode::ConflictingBody,
-            Refused::UnknownRef | Refused::Wiped => ErrorCode::NotFound,
-            Refused::TooManyHolds => ErrorCode::RateLimited,
+            Refused::Wiped => ErrorCode::NotFound,
             Refused::TooLarge => ErrorCode::TooLarge,
             // what a guest's plan does not allow, as a role does not: no
             // amount of credit is short
             Refused::GuestPayer | Refused::GuestCreates => ErrorCode::Forbidden,
-            Refused::AgentsStopped { .. } | Refused::ReadOnly { .. } | Refused::CreditShort { .. } | Refused::CapReached { .. } => ErrorCode::BudgetUsedUp,
+            Refused::AgentsStopped { .. } | Refused::ReadOnly { .. } | Refused::CapReached { .. } => ErrorCode::BudgetUsedUp,
         }
     }
 
@@ -446,13 +327,10 @@ impl Refused {
         match self {
             Refused::Invalid { what } => format!("the request breaks a rule ({what:?})"),
             Refused::ConflictingBody => "this id was used with a different body".into(),
-            Refused::UnknownRef => "no reservation by that reference".into(),
-            Refused::Ended => "that reservation was released; only a call that used nothing is released".into(),
-            Refused::TooManyHolds => format!("{HOLDS_MAX} reservations are held already; try again as they end"),
             Refused::StaleBook { current } => format!("the ledger charges with price book {current}; a new book has a higher version"),
             Refused::StaleSeat { current } => format!("the ledger's seat is at order {current}; a change to it has a higher one"),
             Refused::NoPrice => "the price book has no price for that".into(),
-            Refused::TooLarge => "that is more than one call or row may cost".into(),
+            Refused::TooLarge => "that is more than one row may cost".into(),
             Refused::Stale => "that row is older than the ledger remembers".into(),
             Refused::GuestPayer => "a guest pays for nothing: no agents, no AI, nothing billed".into(),
             Refused::GuestCreates => {
@@ -462,9 +340,6 @@ impl Refused {
             }
             Refused::AgentsStopped { why } => format!("agents are stopped: {}", why_text(why)),
             Refused::ReadOnly { why } => format!("fragments are read-only: {}", why_text(why)),
-            Refused::CreditShort { available, needed } => {
-                format!("not enough credit: this needs up to {}, and {} is available", dollars(needed), dollars(available.max(0)))
-            }
             Refused::CapReached { cap, spent } => {
                 format!("this fragment spent {} of its {} cap this month: only its owner spends in it until next month", dollars(spent), dollars(cap))
             }
@@ -489,42 +364,34 @@ fn valid_names(names: [&Option<String>; 3]) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "entry", rename_all = "snake_case")]
 pub enum Entry {
-    /// A reservation, and its end once it has one.
-    Reservation { reserve: Reserve, amount: i64, at_ms: i64, end: Option<End> },
     /// A meter row: its price under the book of the time, and its charge
     /// (the price's, or nothing for a waived meter).
     Row { row: MeterRow, priced: Priced, charge: i64, book: u32 },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "end", rename_all = "snake_case")]
-pub enum End {
-    /// `priced` is the usage's price when it had one: its list price is
-    /// what the gateway's log reports, for reconciliation.
-    Settled { usage: Option<Usage>, priced: Option<Priced>, charge: i64, basis: Basis },
-    Released,
+    /// A record of the releases before decision 62 (a reservation, held,
+    /// settled or released): read, never written, and forgotten by its
+    /// row's time as any. Its reference is no row's: a row under it is
+    /// another body.
+    #[serde(other)]
+    Before,
 }
 
 impl Entry {
-    /// When it happened: `Store::prune` forgets by this.
+    /// When it happened: `Store::prune` forgets by this. A record from
+    /// before is never written (its row's time is the store's), so this is
+    /// none of its business: 0.
     pub fn at_ms(&self) -> i64 {
         match self {
-            Entry::Reservation { at_ms, .. } => *at_ms,
             Entry::Row { row, .. } => row.at_ms,
+            Entry::Before => 0,
         }
     }
 
-    /// What it charged, once it has.
+    /// What it charged: a row's charge; a record from before, none here.
     pub fn charge(&self) -> Option<i64> {
         match self {
-            Entry::Reservation { end: Some(End::Settled { charge, .. }), .. } | Entry::Row { charge, .. } => Some(*charge),
-            Entry::Reservation { .. } => None,
+            Entry::Row { charge, .. } => Some(*charge),
+            Entry::Before => None,
         }
-    }
-
-    /// A reservation still held.
-    pub fn held(&self) -> bool {
-        matches!(self, Entry::Reservation { end: None, .. })
     }
 }
 
@@ -563,10 +430,9 @@ pub trait Store {
     fn spends(&self, month: Month, limit: usize) -> Vec<(String, i64)>;
     fn cap(&self, fragment: &str) -> Option<i64>;
     fn set_cap(&mut self, fragment: &str, micros: Option<i64>);
-    /// Forgets the entries and batches from before `before_ms` (never a
-    /// held reservation: the sweep expired those first) and the months of
-    /// spend before `before_month`; answers how many entries and batches
-    /// it forgot.
+    /// Forgets the entries and batches from before `before_ms` and the
+    /// months of spend before `before_month`; answers how many entries and
+    /// batches it forgot.
     fn prune(&mut self, before_ms: i64, before_month: Month) -> u64;
 }
 
@@ -633,11 +499,7 @@ impl Store for Memory {
 
     fn prune(&mut self, before_ms: i64, before_month: Month) -> u64 {
         let (entries, batches) = (self.entries.len(), self.batches.len());
-        self.entries.retain(|_, e| {
-            let keep = e.at_ms() >= before_ms;
-            assert!(keep || !e.held(), "a held reservation is expired before it could be forgotten");
-            keep
-        });
+        self.entries.retain(|_, e| e.at_ms() >= before_ms);
         self.batches.retain(|_, b| b.at_ms >= before_ms);
         self.spent.retain(|m, _| *m >= before_month);
         ((entries - self.entries.len()) + (batches - self.batches.len())) as u64
@@ -775,6 +637,17 @@ impl Money {
     }
 }
 
+/// What may still be charged before the person's fragments go read-only
+/// (`LedgerStatus::available_micros`): the balance plus the overdraft's
+/// room, none once read-only.
+fn available(money: &Money) -> i64 {
+    if money.read_only {
+        0
+    } else {
+        money.balance() + money.overdraft
+    }
+}
+
 /// Whether `spend` may start on these means. Making a fragment is a write
 /// to one of the payer's own: it goes as a write does, but a guest, whose
 /// fragments would be billed nothing, makes none.
@@ -793,21 +666,13 @@ fn gate(money: &Money, spend: Spend) -> Result<(), Refused> {
     }
 }
 
-/// A held reservation, by its reference in `Ledger::holds`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct Hold {
-    amount: i64,
-    fragment: Option<String>,
-    at_ms: i64,
-}
-
-/// A person's ledger: the head of its state (see the module's docs).
+/// A person's ledger: the head of its state (see the module's docs). A
+/// head kept before decision 62 names its `holds` too: read past (the
+/// fields a head does not name are let go), so they go uncharged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ledger {
     money: Money,
     book: PriceBook,
-    /// At most `HOLDS_MAX`, so the head stays small.
-    holds: BTreeMap<String, Hold>,
 }
 
 impl Ledger {
@@ -827,7 +692,7 @@ impl Ledger {
             read_only: false,
             totals: Totals::default(),
         };
-        let ledger = Ledger { money, book, holds: BTreeMap::new() };
+        let ledger = Ledger { money, book };
         ledger.assert_valid();
         ledger
     }
@@ -853,13 +718,13 @@ impl Ledger {
 
     /// Whether `fragment`, which this ledger's person owns, is still open
     /// this month to spenders other than its owner (decision 26): its
-    /// charges and what is held in it are under its cap.
+    /// charges are under its cap.
     pub fn fragment_open(&self, store: &impl Store, fragment: &str, now_ms: i64) -> Result<(), Refused> {
         if !valid_id(fragment) {
             return Err(invalid(Invalid::Id));
         }
         let month = self.money_at(now_ms).month;
-        let spent = store.spent(month, fragment) + self.held_in(fragment);
+        let spent = store.spent(month, fragment);
         let cap = store.cap(fragment).unwrap_or(CAP_DEFAULT);
         if spent < cap {
             Ok(())
@@ -886,7 +751,6 @@ impl Ledger {
 
     pub fn status(&self, store: &impl Store, now_ms: i64) -> LedgerStatus {
         let money = self.money_at(now_ms);
-        let reserved = self.reserved();
         let fragments = store
             .spends(money.month, STATUS_FRAGMENTS)
             .into_iter()
@@ -903,8 +767,8 @@ impl Ledger {
             included_micros: money.included_left,
             included_granted_micros: money.included_granted,
             purchased_micros: money.purchased_left,
-            reserved_micros: reserved,
-            available_micros: money.balance() - reserved,
+            reserved_micros: 0,
+            available_micros: available(&money),
             overdraft_micros: money.overdraft,
             standing: money.standing(),
             price_book: self.book.version,
@@ -920,20 +784,10 @@ impl Ledger {
         &self.book
     }
 
-    /// What every hold holds together.
-    pub fn reserved(&self) -> i64 {
-        self.holds.values().map(|h| h.amount).sum()
-    }
-
-    /// When the Durable Object's alarm should run `sweep` next: when the
-    /// oldest hold expires, and at least once a `SWEEP_EVERY_MS`.
+    /// When the Durable Object's alarm should run `sweep` next: once a
+    /// `SWEEP_EVERY_MS`, to forget what is past `REF_KEEP_MS`.
     pub fn next_sweep_ms(&self, now_ms: i64) -> i64 {
-        let oldest = self.holds.values().map(|h| h.at_ms + HOLD_MAX_MS).min();
-        oldest.map_or(now_ms + SWEEP_EVERY_MS, |at| at.min(now_ms + SWEEP_EVERY_MS))
-    }
-
-    fn held_in(&self, fragment: &str) -> i64 {
-        self.holds.values().filter(|h| h.fragment.as_deref() == Some(fragment)).map(|h| h.amount).sum()
+        now_ms + SWEEP_EVERY_MS
     }
 
     fn roll(&mut self, now_ms: i64) {
@@ -960,10 +814,6 @@ impl Ledger {
     /// Durable Object checks them again after reading the head back.
     pub fn assert_valid(&self) {
         self.money.assert_valid();
-        assert!(self.holds.len() <= HOLDS_MAX, "at most HOLDS_MAX holds");
-        for hold in self.holds.values() {
-            assert!((0..=RESERVATION_MAX).contains(&hold.amount), "a hold is never negative, nor over RESERVATION_MAX");
-        }
     }
 
     // Commands: each idempotent by its id.
@@ -1086,8 +936,7 @@ impl Ledger {
     /// again changes nothing (a replay), and one taken before is taken
     /// again (a configuration rolled back): the books are compared, never
     /// ordered. Each is kept once, under `book:<digest>`, as it was first
-    /// taken. What was charged stays charged; held reservations keep the
-    /// amounts they were priced at.
+    /// taken. What was charged stays charged.
     pub fn set_book(&mut self, store: &mut impl Store, book: &PriceBook, now_ms: i64) -> Result<(), Refused> {
         self.roll(now_ms);
         if self.book == *book {
@@ -1101,117 +950,6 @@ impl Ledger {
         }
         self.assert_valid();
         Ok(())
-    }
-
-    // Paid calls: reserve before, then settle or release, each once by
-    // the call's reference.
-
-    pub fn reserve(&mut self, store: &mut impl Store, r: &Reserve, now_ms: i64) -> Result<Reserved, Refused> {
-        self.roll(now_ms);
-        if !valid_id(&r.reference) || !valid_names([&r.fragment, &r.agent, &None]) {
-            return Err(invalid(Invalid::Id));
-        }
-        r.worst.validate().map_err(|fault| invalid(Invalid::Usage(fault)))?;
-        if !matches!(r.spend, Spend::AgentTurn | Spend::AiStep) {
-            return Err(invalid(Invalid::Spend));
-        }
-        if r.capped && r.fragment.is_none() {
-            return Err(invalid(Invalid::Capped));
-        }
-        if let Some(entry) = store.entry(&r.reference) {
-            return match entry {
-                Entry::Reservation { reserve, amount, end, .. } if reserve == *r => Ok(match end {
-                    None => Reserved::Held { amount },
-                    Some(End::Settled { charge, .. }) => Reserved::Settled { charge },
-                    Some(End::Released) => Reserved::Released,
-                }),
-                // another body under this reference, or a meter row's
-                _ => Err(Refused::ConflictingBody),
-            };
-        }
-        gate(&self.money, r.spend)?;
-        let (_, amount) = self.charge_for(&r.worst)?;
-        if amount > RESERVATION_MAX {
-            return Err(Refused::TooLarge);
-        }
-        if self.holds.len() >= HOLDS_MAX {
-            return Err(Refused::TooManyHolds);
-        }
-        let available = self.money.balance() - self.reserved();
-        if amount > available {
-            return Err(Refused::CreditShort { available, needed: amount });
-        }
-        if let (true, Some(fragment)) = (r.capped, r.fragment.as_deref()) {
-            self.fragment_open(&*store, fragment, now_ms)?;
-        }
-        self.holds.insert(r.reference.clone(), Hold { amount, fragment: r.fragment.clone(), at_ms: now_ms });
-        store.put_entry(&r.reference, Entry::Reservation { reserve: r.clone(), amount, at_ms: now_ms, end: None });
-        self.assert_valid();
-        assert!(self.money.balance() - self.reserved() >= available - amount, "a hold takes only its own amount");
-        Ok(Reserved::Held { amount })
-    }
-
-    /// A held call's end, charged once: its usage priced (even past its
-    /// reservation: it happened), or its reservation when it reported
-    /// none.
-    pub fn settle(&mut self, store: &mut impl Store, s: &Settle, now_ms: i64) -> Result<Settled, Refused> {
-        self.roll(now_ms);
-        if !valid_id(&s.reference) {
-            return Err(invalid(Invalid::Id));
-        }
-        if let Some(usage) = &s.usage {
-            usage.validate().map_err(|fault| invalid(Invalid::Usage(fault)))?;
-        }
-        let Some(entry) = store.entry(&s.reference) else { return Err(Refused::UnknownRef) };
-        let Entry::Reservation { reserve, amount, at_ms, end } = entry else { return Err(Refused::ConflictingBody) };
-        match end {
-            None => {}
-            // an expired hold's settlement stands, whatever this one says
-            Some(End::Settled { charge, basis: Basis::Expired, .. }) => return Ok(Settled { charge, basis: Basis::Expired }),
-            Some(End::Settled { usage, charge, basis, .. }) if usage == s.usage => return Ok(Settled { charge, basis }),
-            Some(End::Settled { .. }) => return Err(Refused::ConflictingBody),
-            Some(End::Released) => return Err(Refused::Ended),
-        }
-        let (priced, charge, basis) = match &s.usage {
-            None => (None, amount, Basis::Reservation),
-            Some(usage) => match self.charge_for(usage) {
-                Ok((priced, charge)) => (Some(priced), charge, Basis::Usage),
-                // the call was made, with a usage the book cannot price:
-                // its worst case, failing closed
-                Err(PriceError::NoPrice) => (None, amount, Basis::Reservation),
-                Err(e) => return Err(e.into()),
-            },
-        };
-        let hold = self.holds.remove(&s.reference).expect("a reservation that has not ended is held");
-        assert_eq!(hold.amount, amount, "a hold holds its entry's amount");
-        let month = self.money.month;
-        self.charge(store, charge, reserve.fragment.as_deref(), month);
-        let end = Some(End::Settled { usage: s.usage.clone(), priced, charge, basis });
-        store.put_entry(&s.reference, Entry::Reservation { reserve, amount, at_ms, end });
-        self.money.latch();
-        self.assert_valid();
-        Ok(Settled { charge, basis })
-    }
-
-    /// A held call that failed for good, having used nothing: its
-    /// reservation goes back (bug 3).
-    pub fn release(&mut self, store: &mut impl Store, r: &Release, now_ms: i64) -> Result<Released, Refused> {
-        self.roll(now_ms);
-        if !valid_id(&r.reference) {
-            return Err(invalid(Invalid::Id));
-        }
-        let Some(entry) = store.entry(&r.reference) else { return Err(Refused::UnknownRef) };
-        let Entry::Reservation { reserve, amount, at_ms, end } = entry else { return Err(Refused::ConflictingBody) };
-        match end {
-            None => {}
-            Some(End::Released) => return Ok(Released::Back),
-            Some(End::Settled { charge, .. }) => return Ok(Released::Settled { charge }),
-        }
-        let hold = self.holds.remove(&r.reference).expect("a reservation that has not ended is held");
-        assert_eq!(hold.amount, amount, "a hold holds its entry's amount");
-        store.put_entry(&r.reference, Entry::Reservation { reserve, amount, at_ms, end: Some(End::Released) });
-        self.assert_valid();
-        Ok(Released::Back)
     }
 
     // Meters: usage that already happened, charged once by reference.
@@ -1270,7 +1008,7 @@ impl Ledger {
         match store.entry(&row.reference) {
             None => {}
             Some(Entry::Row { row: first, .. }) if first == *row => return Ok(None),
-            // another body under this reference, or a reservation's
+            // another body under this reference, or a record from before
             Some(_) => return Err(Refused::ConflictingBody),
         }
         let (priced, charge) = self.charge_for(&row.usage)?;
@@ -1281,32 +1019,14 @@ impl Ledger {
         Ok(Some(charge))
     }
 
-    /// Expires holds past `HOLD_MAX_MS` (settled at their reservations)
-    /// and forgets what is past `REF_KEEP_MS`. The Durable Object's alarm
-    /// runs it at `next_sweep_ms`.
+    /// Forgets what is past `REF_KEEP_MS`. The Durable Object's alarm runs
+    /// it at `next_sweep_ms`.
     pub fn sweep(&mut self, store: &mut impl Store, now_ms: i64) -> Swept {
         self.roll(now_ms);
-        let deadline = now_ms - HOLD_MAX_MS;
-        let stale: Vec<String> = self.holds.iter().filter(|(_, h)| h.at_ms <= deadline).map(|(r, _)| r.clone()).collect();
-        let mut expired = Vec::with_capacity(stale.len());
-        // at most HOLDS_MAX
-        for reference in stale {
-            let entry = store.entry(&reference);
-            let Some(Entry::Reservation { reserve, amount, at_ms, end: None }) = entry else {
-                panic!("held reservation {reference} has no held entry: {entry:?}");
-            };
-            self.holds.remove(&reference);
-            let month = self.money.month;
-            self.charge(store, amount, reserve.fragment.as_deref(), month);
-            let end = Some(End::Settled { usage: None, priced: None, charge: amount, basis: Basis::Expired });
-            store.put_entry(&reference, Entry::Reservation { reserve, amount, at_ms, end });
-            expired.push(Expired { reference, charge: amount });
-        }
         let horizon = now_ms - REF_KEEP_MS;
         let forgotten = if horizon > 0 { store.prune(horizon, Month::of(horizon)) } else { 0 };
         self.money.latch();
         self.assert_valid();
-        assert!(self.holds.values().all(|h| h.at_ms > deadline), "no hold outlives HOLD_MAX_MS past a sweep");
-        Swept { expired, forgotten }
+        Swept { forgotten }
     }
 }

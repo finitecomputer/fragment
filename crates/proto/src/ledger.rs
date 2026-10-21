@@ -2,8 +2,8 @@
 //! and the CLI read (`LedgerStatus`) and what operators, Stripe's hooks
 //! and fragment owners send (credit, plans, seats, overdrafts, caps).
 //! Money is integer micro-dollars. The ledger's state machine is
-//! `fragment_core::ledger`; the platform's own inner routes (reserve,
-//! settle, release, meter) are its types, not these.
+//! `fragment_core::ledger`; the platform's own inner routes (meter, the
+//! gate's questions) are its types, not these.
 
 use serde::{Deserialize, Serialize};
 
@@ -73,7 +73,8 @@ pub struct FragmentSpend {
 
 /// A person's ledger now (`GET /api/ledger`). The balance is the included
 /// credit left this month plus the purchased credit left (negative while
-/// the person owes); `available` is what a new reservation may take.
+/// the person owes). Its fields are the wire a shipped CLI parses: none
+/// goes, and none changes its type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LedgerStatus {
@@ -86,7 +87,12 @@ pub struct LedgerStatus {
     /// This month's included credit, as granted (it expires at the month's end).
     pub included_granted_micros: i64,
     pub purchased_micros: i64,
+    /// What calls running now hold: always 0 since nothing is held before
+    /// a call (decision 62); kept for the CLIs and pages that read it.
     pub reserved_micros: i64,
+    /// What may still be charged before the person's fragments go
+    /// read-only: the balance plus the overdraft's room (0 once
+    /// read-only). Agents stop at zero, before it.
     pub available_micros: i64,
     pub overdraft_micros: i64,
     pub standing: Standing,

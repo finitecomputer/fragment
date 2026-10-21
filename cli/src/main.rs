@@ -1760,7 +1760,8 @@ fn run(cli: Cli) -> Result<()> {
                 let v: LedgerStatus = c.call_as(c.get("/api/ledger")?)?;
                 json_exit(j, &v);
                 let plan = serde_json::to_value(v.plan)?.as_str().unwrap_or("").to_string();
-                println!("{}: {} available ({} balance, {} held by calls running now), plan {plan}", v.month, dollars(v.available_micros.max(0)), dollars(v.balance_micros), dollars(v.reserved_micros));
+                let credit = if v.balance_micros < 0 { format!("{} owed", dollars(-v.balance_micros)) } else { format!("{} left", dollars(v.balance_micros)) };
+                println!("{}: {credit}, plan {plan}", v.month);
                 println!("{}", standing_text(&v.standing));
                 for f in &v.fragments {
                     println!("  {}\t{} of its {} cap", f.fragment, dollars(f.spent_micros), dollars(f.cap_micros));

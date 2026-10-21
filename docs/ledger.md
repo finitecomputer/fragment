@@ -19,8 +19,8 @@ is the wire contract. It replaced the OpenRouter-backed ledger and
     agent's owner;
   - a fragment's hosting (requests, storage, dynamic workers,
     screenshots) and its AI steps bill the fragment's owner.
-- **Guests pay for nothing.** A guest's ledger refuses reservations and
-  meter batches (`guest_payer`). A guest owns nothing billable, so a
+- **Guests pay for nothing.** A guest's ledger refuses their paid calls
+  at the gate and meter batches (`guest_payer`). A guest owns nothing billable, so a
   guest makes no fragment either (`guest_creates`, 403: "guests can't
   create fragments"; Paul, 2026-10-03): every create asks its maker's
   ledger first (`may_spend(create)`). A guest still edits the fragments
@@ -56,11 +56,11 @@ is the wire contract. It replaced the OpenRouter-backed ledger and
     means the included credit is gone.
 - **Caps** (decision 26). Each fragment has a monthly cap on its owner's
   ledger, $5 until the owner sets one. Its spend is every charge on that
-  ledger in that fragment this month, plus what is held in it. At the
-  cap the fragment is closed to AI steps and agent turns by anyone but
-  its owner (and the owner's agents acting for them). A reservation may
-  cross the cap; only a fragment already at it is closed. Caps never stop
-  writes or wakes. A late row counts in its own month.
+  ledger in that fragment this month. At the cap the fragment is closed
+  to AI steps and agent turns by anyone but its owner (and the owner's
+  agents acting for them), as the gate reads it. A call that started
+  under it is charged past it; only a fragment already at it is closed.
+  Caps never stop writes or wakes. A late row counts in its own month.
 - **Zero** (decision 27). At a balance of zero or less, agents stop: no
   turns, no wakes, no AI steps (`agents_stopped`, `no_credit`).
   Fragments keep serving and taking writes.
@@ -71,9 +71,8 @@ is the wire contract. It replaced the OpenRouter-backed ledger and
   makes no new fragment, and their fragments' cron and triggers start no
   runs: each is recorded `blocked`, saying why (Paul, 2026-10-03).
 - **Meters always record.** Usage that happened is charged, past zero
-  and past the overdraft. A reservation must fit the balance less what is
-  held (`credit_short`); a settle larger than its reservation is charged
-  in full.
+  and past the overdraft: nothing is held before a paid call (decision
+  62), so a call that started before zero is charged in full after it.
 - **Standing** is a pure function, `standing_of(plan, seat, balance,
   read_only)`: `ok`, `agents_stopped {why}` or `read_only {why}`, with
   `why` one of `guest`, `seat_canceled`, `no_credit`, `overdrawn`.
@@ -91,7 +90,7 @@ the gateway's log `cost`) and its cost basis (list plus fee).
 | Meter (`Usage`) | Unit | Default list price | Source |
 |---|---|---|---|
 | `tokens` | tokens per model: input (uncached), cached input, cache write, output | per million: Flash $0.15 / $0.03 / $0.15 / $0.50; GLM-5.3 Flash through OpenRouter (`z-ai/glm-5.3-flash`, Finite's tiers') at its routing's ceiling, $0.15 / $0.15 / $0.15 / $0.50, grossed up to $0.150715 / $0.150715 / $0.150715 / $0.502381 for OpenRouter's 5.5% fee; Finite Private's GLM-5.3 Flash (`glm-5-3-flash`) the same as Flash's; GLM-5.3 $1.40 / $0.26 / $1.40 / $4.40; DeepSeek V4 Flash (the route's default fallback) $0.44 / $0.014 / $0.44 / $1.32; Opus 5.5 $4 / $0.20 / $5 / $20; the Clef family (decisions; media counted as input tokens, nothing out, no cache: every input token at its input price) Clef-flash $0.038, Clef $0.24, Clef-omni $0.15 | Workers AI catalog (`/ai/models/search`; DeepSeek's checked against its neurons on 2026-10-09); the AI model catalog page for Opus (S4); OpenRouter's is the `max_price` its slots route under (deploy/example.jsonc; its endpoints, `/api/v1/models/z-ai/glm-5.3-flash/endpoints`, and its fee, openrouter.ai/docs/faq, read 2026-10-15), "OpenRouter's price" below, a decision for Paul; Finite Private publishes no price (finite-mono meters a key in weighted tokens, never dollars), so it is at Workers AI's Flash's, decision 61 (a decision for Paul); Workers AI's pricing page and its [Clef-flash](https://developers.cloudflare.com/workers-ai/models/clef-flash/), [Clef](https://developers.cloudflare.com/workers-ai/models/clef/) and [Clef-omni](https://developers.cloudflare.com/workers-ai/models/clef-omni/) pages (2026-10-14) |
-| `neurons` | thousandths of a neuron | $0.011 per thousand neurons; an image (FLUX.1 [schnell]) is 4.80 neurons a 512×512 tile and 9.60 a step (`fragment_core::media`); a transcription (Whisper large-v3-turbo) is 46.63 neurons a minute of audio, reserved at its bytes read as 16 kbps and settled at the length Whisper heard (`fragment_core::transcribe`) | Workers AI pricing (its image rows for FLUX.1 [schnell], its audio row for whisper-large-v3-turbo, read 2026-10-07); S4 matched it to tokens on every call |
+| `neurons` | thousandths of a neuron | $0.011 per thousand neurons; an image (FLUX.1 [schnell]) is 4.80 neurons a 512×512 tile and 9.60 a step (`fragment_core::media`); a transcription (Whisper large-v3-turbo) is 46.63 neurons a minute of audio, charged at the length Whisper heard (`fragment_core::transcribe`) | Workers AI pricing (its image rows for FLUX.1 [schnell], its audio row for whisper-large-v3-turbo, read 2026-10-07); S4 matched it to tokens on every call |
 | `awake` | ms, per instance type | `2vcpu-6gib`: $0.064224 an hour | Containers pricing: 6 GiB memory and a 12 GB disk provisioned, plus 5% of 2 vCPU (CPU is billed on active use, which the Computer DO cannot see) |
 | `storage` | byte-hours, by class | per GB-month (10^9 bytes × 720 h): R2 $0.015, SQLite $0.20, git $0.015 | R2 and Durable Objects pricing; code.storage publishes no price to us, so git is at R2's |
 | `requests` | requests | $0.45 per million | Workers Standard $0.30 plus the Durable Object request $0.15 |
@@ -110,8 +109,8 @@ charges with: the books are compared, never ordered, so a key's row
 added or its price changed, a change to the defaults, and a
 configuration rolled back each reach every ledger (#451: on 2026-10-20
 operator keys' rows were added without a higher version, which a ledger
-then needed, and every ledger refused their calls as unpriced). A hold
-keeps the price it was held at. The book's version is informational (a
+then needed, and every ledger refused their calls as unpriced). A row
+is charged at the book of its time. The book's version is informational (a
 ledger's status shows it, `priceBook`): the higher of the
 configuration's `price_book_version` and the code's
 (`DEFAULT_BOOK_VERSION`, 7 since OpenRouter's GLM-5.3 Flash was priced
@@ -164,8 +163,10 @@ Private's).
 Pure: no I/O, no clock (time is an argument). The state has two parts:
 
 - **The head** (`Ledger`): the plan, the seat, the balance's parts, the
-  read-only latch, the overdraft, the price book, and the reservations
-  held (at most 256). Small and bounded; kept whole.
+  read-only latch, the overdraft, and the price book. Small and bounded;
+  kept whole. A head kept before decision 62 names the reservations it
+  held too: it loads without them, uncharged (what they held was never
+  drawn), and is written back without them.
 - **The store** (`trait Store`): what grows with use, by id. References
   (`Entry`), batches, commands, each fragment's spend by month, and caps.
   The Durable Object keeps these in SQLite tables; `Memory` keeps them in
@@ -182,33 +183,27 @@ mutation first brings the ledger to its time's month.
 | `set_overdraft(SetOverdraft)` | its `id` | `()` |
 | `set_cap(SetFragmentCap)` | its `id` | `()` |
 | `set_book(PriceBook)` | its contents: the same book again changes nothing; any other is taken, whatever its version (no order); each kept once as a command, `book:<digest>` | `()` |
-| `reserve(Reserve)` | the call's `ref` | `held {amount}`, `settled {charge}` or `released` |
-| `settle(Settle)` | the call's `ref` | `{charge, basis}`: `usage`, `reservation` or `expired` |
-| `release(Release)` | the call's `ref` | `back`, or `settled {charge}` |
 | `meter(Meter)` | the batch's id; each row by its `ref` | `{charged, rows_new, rows_before, refused: [{index, why}]}` |
-| `sweep(now)` | (time) | `{expired: [{ref, charge}], forgotten}` |
+| `sweep(now)` | (time) | `{forgotten}` |
 
 - **Replays.** The same id again answers as the first did and changes
   nothing. The same id with another body is refused
   (`conflicting_body`). A refusal is not remembered, so the same id may
   be tried again (a step after a top-up).
-- **A replayed reservation answers where its reference stands.** While
-  held that is its first answer. Once settled it is `settled {charge}`,
-  so a retried step learns its call was paid and never makes it again
-  (bug 2).
-- **References are one namespace.** A meter row cannot reuse a
-  reservation's reference, and the reverse. Sources prefix theirs
-  (`aig:`, `step:`, `awake:`), so two sources never collide.
-- **Settles.** A settle without usage, or with a usage the book cannot
-  price, is charged its reservation: the money path fails closed. A
-  settle after a release is refused (`ended`): a call that used anything
-  settles; only one that used nothing is released (bug 3).
-- **Sweeps** run from the Durable Object's alarm at `next_sweep_ms`.
-  A hold older than 6 hours is settled at its reservation (its caller
-  died, and whether it used anything is unknown). References and batches
-  older than 90 days are forgotten, and a row from before that is
-  refused as `stale`, so a forgotten reference is never charged again.
-  Commands are never forgotten.
+- **A row is charged once by its reference**, whatever batch carries
+  it: a paid call's row under its call's reference (`aig:`, `key:`), an
+  AI step's under the step's key (`step:`), so a step tried again after
+  its call was paid is charged once (bug 2).
+- **References are one namespace.** Sources prefix theirs (`aig:`,
+  `step:`, `awake:`), so two sources never collide. An entry the
+  releases before decision 62 kept (a reservation, held, settled or
+  released) reads as one from before (`Entry::Before`): never charged
+  again, a row under its reference is another body, and it is forgotten
+  by its time as any is.
+- **Sweeps** run from the Durable Object's alarm at `next_sweep_ms`,
+  daily: references and batches older than 90 days are forgotten, and a
+  row from before that is refused as `stale`, so a forgotten reference
+  is never charged again. Commands are never forgotten.
 - **Reads** (`standing`, `gate`, `fragment_open`, `may_spend`, `status`)
   roll a copy of the head to their own month and change nothing. A
   spend is an agent's turn, an AI step, a wake, a write, or a create (a
@@ -269,7 +264,7 @@ interrupt every request"):
   answer late, which no call waits on past the gate's wait (the e2e's
   `ledger` section).
 - **Test fleets** cap an e2e person's paid calls (`paid-calls {max}`):
-  once their ledger has charged or holds `max` (each an entry under
+  once their ledger has charged `max` (each an entry under
   `aig:`, `key:` or `step:`), its gate refuses an agent's turn or an AI
   step as at zero credit, saying so; the cap is approximate by what
   starts within the gate's minute.
@@ -279,15 +274,12 @@ interrupt every request"):
 | Limit | Value | Why |
 |---|---|---|
 | `BATCH_ROWS_MAX` | 1,000 rows | one request and one transaction, far under the body limit |
-| `RESERVATION_MAX` | $25 | the dearest call the tiers allow is about $10 |
-| `HOLDS_MAX` | 256 | a computer's agents and a person's jobs hold a few dozen; past this, something leaks |
 | `GRANT_MAX` | $10,000 | more is a typo |
 | `CAP_MAX` | $10,000 | more is no cap |
 | `OVERDRAFT_MAX` | $1,000 | someone trusted with more is someone to invoice |
 | `price::CHARGE_MAX` | $100,000 a row | no call or sample costs that; a row that would is a bug upstream |
 | `price::QUANTITY_MAX` | 10^15 per quantity | keeps the 128-bit math from overflowing |
 | `ID_MAX_BYTES` | 256, printable ASCII | ids and names |
-| `HOLD_MAX_MS` | 6 hours | no call holds for hours |
 | `REF_KEEP_MS` | 90 days | the audit retention; sources retry within hours |
 | `CLOCK_SKEW_MS` | 5 minutes | a row's source runs on its own clock |
 
@@ -306,8 +298,9 @@ guest), then takes `FRAGMENT_DEFAULT_PLAN` under `plan:default`.
 Tables:
 
 - `head`: the head (`Ledger`), kept whole as one JSON row: small and
-  bounded (at most 256 holds), checked as it is read back;
-- `entries (ref PRIMARY KEY, kind, at_ms, …)`, `batches (id PRIMARY KEY,
+  bounded, checked as it is read back;
+- `entries (ref PRIMARY KEY, at_ms, held, entry)` (`held` written 0: a
+  column of the releases that held), `batches (id PRIMARY KEY,
   digest, answer, at_ms)`, `commands (id PRIMARY KEY, command, at_ms)`;
 - `spend (month, fragment, micros, PRIMARY KEY (month, fragment))`,
   `caps (fragment PRIMARY KEY, micros)`.
@@ -316,9 +309,6 @@ Inner routes (platform code only, through the DO's stub):
 
 | Route | Body | Answer |
 |---|---|---|
-| `POST /reserve` | `Reserve` | `Reserved` |
-| `POST /settle` | `Settle` | `Settled` |
-| `POST /release` | `Release` | `Released` |
 | `POST /meter` | `Meter` | `Metered` |
 | `POST /may-spend` | `{spend, fragment, byOwner}` | `{}` or the refusal |
 | `POST /fragment-open` | `{fragment}` | `{}` or `cap_reached` |
@@ -419,7 +409,7 @@ mark sends the same batch again, which answers as before.
   key's calls, an agent's model calls on their own OpenRouter account
   among them, are paid by their account at the provider. The computer
   counts them by agent and month (`uses`, charge 0), and nothing reaches
-  the ledger: no reservation, no charge, no platform fee (Paul,
+  the ledger: no charge, no platform fee (Paul,
   2026-10-08).
 - **Compute** (the Computer DO). It meters each awake interval at sleep,
   and every few minutes while awake, as `awake {instance, ms}` rows
@@ -496,7 +486,8 @@ the batch, so a guest's fragments are billed nothing.
   the owner's own agents' included. Only others are stopped by it.
 - An agent's own usage cap (decision 14) is not built: the same
   mechanism, keyed by the agent's fragment, would carry it.
-- An abandoned hold is charged its worst case after 6 hours.
+- A paid call that reports no usage is charged nothing, said aloud
+  (`ledger.unknown-usage`; decision 62, the debt ledger).
 - The default instance rate assumes a 12 GB disk and 5% CPU; git storage
   is priced at R2's until code.storage's price is known.
 - A card's shot is a Browser Session, which Cloudflare also bills by
