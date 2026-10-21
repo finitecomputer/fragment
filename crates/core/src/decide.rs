@@ -13,20 +13,21 @@
 //! WebM). Media is billed as input tokens, and output never: a call's cost
 //! is its reported `usage.input_tokens` at its model's input price.
 //!
-//! The bound a call reserves is its model's context window. Clef scores
+//! The bound on a call's input is its model's context window. Clef scores
 //! every question in one pass over one context: "Media tokens count toward
 //! the model's context window, together with the questions. If they exceed
 //! the context window, the request fails. Otherwise, the text `state` is
 //! truncated to fit the remaining space." So no call's input passes it. A
-//! usage reported past it is charged all the same (the ledger prices what
-//! happened), and one missing is charged the reservation.
+//! call is charged after its answer at the usage it reported (past the
+//! window too: the ledger prices what happened), and one missing is
+//! charged nothing, said aloud (decision 62).
 //!
 //! Media is a fragment's own blob by its SHA-256 (`{sha256, type}`, as
 //! `fragment.blob(file)` and a chat's attachments name one), which the
 //! cell reads, or bytes inline (`{data}`, a base64 `data:` URL). A job's
 //! inline media is small (its args travel with the run); an agent's media
 //! is all inline (it has no fragment's blob store), bounded by its route's
-//! body. Every limit is checked before anything is reserved.
+//! body. Every limit is checked before anything is sent.
 //!
 //! The request is read by hand from its JSON (`bound`), not derived: each
 //! way it is wrong is a refusal of its own, and the cell's Wasm carries no
@@ -77,7 +78,7 @@ impl Model {
     }
 
     /// Its context window, in tokens: the most one call's input counts
-    /// (the module's doc), so what a call reserves.
+    /// (the module's doc).
     pub const fn context_tokens(self) -> u64 {
         match self {
             Model::ClefFlash => 24_576,
@@ -217,7 +218,7 @@ pub enum Asker {
     Agent,
 }
 
-/// Why a decision is refused before anything is reserved.
+/// Why a decision is refused before anything is sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     /// Not an object of `REQUEST_KEYS`.
@@ -445,7 +446,7 @@ fn item(m: &Value, asker: Asker) -> Result<Item, Refusal> {
 }
 
 /// Reads and validates a request (`{model?, input, questions, media?}`)
-/// before anything is reserved, and translates it to the wire. A blob's
+/// before anything is sent, and translates it to the wire. A blob's
 /// size is the cell's to read: `DecisionCall::sized` checks it.
 pub fn bound(request: &Value, asker: Asker) -> Result<DecisionCall, Refusal> {
     let o = request.as_object().filter(|o| only(o, &REQUEST_KEYS)).ok_or(Refusal::Request)?;
@@ -601,14 +602,9 @@ impl DecisionCall {
         wire
     }
 
-    /// What it reserves: its model's whole context window (the module's doc).
-    pub fn worst(&self) -> Usage {
-        tokens(self.model, self.model.context_tokens())
-    }
-
     /// Its input tokens, media and questions included; output is never
-    /// billed. `None` when missing or malformed: the cell charges the
-    /// reservation.
+    /// billed. `None` when missing or malformed: the cell charges nothing,
+    /// said aloud (decision 62).
     pub fn usage(&self, response: &Value) -> Option<Usage> {
         response["usage"]["input_tokens"].as_u64().map(|n| tokens(self.model, n)).filter(|u| u.validate().is_ok())
     }
@@ -737,7 +733,7 @@ mod tests {
     }
 
     /// Goal: each model is selectable by name, runs on its catalog id, and
-    /// reserves its whole context. Method: each name, and names that are
+    /// counts its whole context. Method: each name, and names that are
     /// none of them (a catalog id, a tier, another type).
     #[test]
     fn the_family_is_selected_by_name() {
@@ -745,7 +741,6 @@ mod tests {
             let c = bound(&with(Some(name), vec![]), Asker::Job).unwrap();
             assert_eq!((c.model.name(), c.model.id(), c.model.context_tokens()), (name, id, context));
             assert_eq!(c.input(vec![])["model"], name, "System One's selector is the name");
-            assert_eq!(c.worst(), tokens(c.model, context));
             assert_eq!(Model::of_id(id), Some(c.model));
             let r = c.answer(&response()).unwrap();
             assert_eq!(r["model"], id, "the answer names the model that answered");
@@ -760,9 +755,9 @@ mod tests {
     }
 
     /// Goal: the price book prices each model's input at its list price,
-    /// output never, and a reservation is its context's. Method: the
-    /// default book on 300 tokens and on each context, at its fee and
-    /// margin (×1.05 ×1.5, rounded up).
+    /// output never, a whole context too. Method: the default book on 300
+    /// tokens and on each context, at its fee and margin (×1.05 ×1.5,
+    /// rounded up).
     #[test]
     fn each_model_is_priced_by_its_input_alone() {
         let book = PriceBook::defaults();
@@ -772,8 +767,8 @@ mod tests {
         assert_eq!(charge(Model::ClefOmni, 300), 71, "ceil($0.15/M × 300 × 1.575 = 70.875 µ$)");
         let with_output = Usage::Tokens { model: Model::Clef.id().into(), input: 300, cached_input: 0, cache_write: 0, output: 1_000_000 };
         assert_eq!(book.price(&with_output).unwrap().charge, 114, "output is free");
-        for (m, worst) in [(Model::ClefFlash, 1_471), (Model::Clef, 24_773), (Model::ClefOmni, 15_120)] {
-            assert_eq!(charge(m, m.context_tokens()), worst, "{} reserves its context", m.name());
+        for (m, whole) in [(Model::ClefFlash, 1_471), (Model::Clef, 24_773), (Model::ClefOmni, 15_120)] {
+            assert_eq!(charge(m, m.context_tokens()), whole, "{}'s whole context", m.name());
             let row = book.models.iter().find(|r| r.model == m.id()).expect("a row for each model");
             assert_eq!(row.price.input, m.input_price());
             assert_eq!(row.price.output, 0);
@@ -781,7 +776,7 @@ mod tests {
     }
 
     /// Goal: a request outside the contract is refused, typed, before
-    /// anything is reserved. Method: each bound at and past its edge, and
+    /// anything is sent. Method: each bound at and past its edge, and
     /// each shape that is not one.
     #[test]
     fn invalid_requests_are_refused_before_payment() {
@@ -852,7 +847,7 @@ mod tests {
     }
 
     /// Goal: media outside its bounds is refused, typed, before anything is
-    /// reserved or read whole. Method: each bound at and past its edge.
+    /// sent or read whole. Method: each bound at and past its edge.
     #[test]
     fn media_limits_hold() {
         let refused = |model: Option<&str>, media: Vec<Value>, asker| bound(&with(model, media), asker).err();

@@ -1271,7 +1271,11 @@ Paul:
       usage is charged nothing, said aloud. So are operator keys'
       calls through the swap (`claude/keys-charged-after`): gated, and
       charged once the provider answered; a ledger that does not answer
-      no longer refuses them. AI steps follow.
+      no longer refuses them. So are AI steps
+      (`claude/steps-charged-after`): gated in the fragment's isolate,
+      and charged from its meter outbox under `step:<step's key>`, once
+      whatever attempt or replay makes the call; one that fails for good
+      is charged nothing, as nothing was held.
 
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 
@@ -2002,7 +2006,8 @@ Each one needs a test in the phase that ports its feature.
    metered.
 3. **A failed step keeps its reservation.** A step that fails for good
    still holds its budget reservation. Phase 3: a final failure releases
-   it, with a test.
+   it, with a test. Since decision 62 nothing is held before a call, so
+   there is nothing to release: a failed step is charged nothing.
 4. **`fragment deploy` reports success when the code is refused.** It
    printed `live:` while the status said an operation name broke
    `^[a-z][a-z0-9_]{0,63}$`, and the guide never names that rule. Phase 2:
