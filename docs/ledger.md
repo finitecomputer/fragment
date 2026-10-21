@@ -199,6 +199,12 @@ mutation first brings the ledger to its time's month.
 - **References are one namespace.** A meter row cannot reuse a
   reservation's reference, and the reverse. Sources prefix theirs
   (`aig:`, `step:`, `awake:`), so two sources never collide.
+- **A call the book cannot price is never refused.** Its reservation
+  holds nothing (a key whose row the book lacks, as every ledger's did on
+  2026-10-20, #451), the call is made, and the Durable Object logs
+  `ledger.unpriced` naming the model, instance type or key, at the hold
+  and again at the settle. A lagging book must stop no agent; the money's
+  own refusals (a guest, agents stopped, credit short) still stand.
 - **Settles.** A settle without usage, or with a usage the book cannot
   price, is charged its reservation: the money path fails closed. A
   settle after a release is refused (`ended`): a call that used anything

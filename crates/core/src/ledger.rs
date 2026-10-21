@@ -350,7 +350,9 @@ pub enum Refused {
     /// (`current`): it changes nothing, and is kept by nothing. The seat's
     /// one writer, the registry, takes its next order past `current`.
     StaleSeat { current: u64 },
-    /// The book prices no such model, instance type or key.
+    /// The book prices no such model, instance type or key: a meter row's
+    /// refusal. A reservation the book cannot price is never refused: it
+    /// holds nothing (`Ledger::reserve`).
     NoPrice,
     /// More than one reservation (`RESERVATION_MAX`) or one row
     /// (`price::CHARGE_MAX`) may cost.
@@ -1096,6 +1098,12 @@ impl Ledger {
     // Paid calls: reserve before, then settle or release, each once by
     // the call's reference.
 
+    /// Holds a paid call's worst case. One the book has no price for (a
+    /// key whose row it lacks, as every ledger's did on 2026-10-20) holds
+    /// nothing and is never refused: the call is made, and settles at its
+    /// hold, nothing, when its usage has no price either. The Durable
+    /// Object says so loudly (`ledger.unpriced`); a book that lags its
+    /// deployment's catalog must stop no agent.
     pub fn reserve(&mut self, store: &mut impl Store, r: &Reserve, now_ms: i64) -> Result<Reserved, Refused> {
         self.roll(now_ms);
         if !valid_id(&r.reference) || !valid_names([&r.fragment, &r.agent, &None]) {
@@ -1120,7 +1128,11 @@ impl Ledger {
             };
         }
         gate(&self.money, r.spend)?;
-        let (_, amount) = self.charge_for(&r.worst)?;
+        let amount = match self.charge_for(&r.worst) {
+            Ok((_, amount)) => amount,
+            Err(PriceError::NoPrice) => 0,
+            Err(e) => return Err(e.into()),
+        };
         if amount > RESERVATION_MAX {
             return Err(Refused::TooLarge);
         }

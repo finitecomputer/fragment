@@ -614,8 +614,6 @@ fn every_refusal_of_a_reservation() {
         w.refused(Op::Reserve(Reserve { spend, ..reservation("r1", turn()) }), Refused::Invalid { what: Invalid::Spend });
     }
     w.refused(Op::Reserve(Reserve { capped: true, ..reservation("r1", turn()) }), Refused::Invalid { what: Invalid::Capped });
-    let unknown = Usage::Tokens { model: "@cf/other".into(), input: 1, cached_input: 0, cache_write: 0, output: 1 };
-    w.refused(Op::Reserve(reservation("r1", unknown)), Refused::NoPrice);
     // $4 a million in: ten million tokens of Opus is $63 with the fee and margin
     let dear = Usage::Tokens { model: "anthropic/claude-opus-5.5".into(), input: 10_000_000, cached_input: 0, cache_write: 0, output: 0 };
     w.refused(Op::Reserve(reservation("r1", dear)), Refused::TooLarge);
@@ -624,6 +622,36 @@ fn every_refusal_of_a_reservation() {
     }
     w.refused(reserve("r1"), Refused::TooManyHolds);
     // the money refusals (credit, standing, caps) have tests of their own above
+}
+
+/// An agent's call the book has no price for (a key whose row the book
+/// lacks, as every ledger's did on 2026-10-20) is never refused: it holds
+/// nothing and settles at nothing when its usage has no price either. A
+/// replay answers as the first did, and a restart changes nothing; the
+/// money's own refusals (a guest, an agent stopped) still stand, and a
+/// usage that has a price still settles at it.
+#[test]
+fn a_call_the_book_cannot_price_holds_nothing_and_is_never_refused() {
+    let key = |units| Usage::Key { key: "google-places".into(), units };
+    let call = |reference: &str| Op::Reserve(reservation(reference, key(1)));
+    World::guest().refused(call("k0"), Refused::GuestPayer);
+    let mut w = World::seat();
+    let before = w.balance();
+    assert_eq!(w.replays(call("k1")), held(0));
+    assert_eq!(w.status().reserved_micros, 0);
+    let mut w = w.restarted();
+    assert_eq!(w.ok(call("k1")), held(0), "a replay after a restart");
+    assert_eq!(w.replays(settle("k1", Some(key(1)))), settled(0, Basis::Reservation));
+    let mut w = w.restarted();
+    assert_eq!(w.ok(settle("k1", Some(key(1)))), settled(0, Basis::Reservation), "a replayed settle after a restart");
+    assert_eq!(w.replays(call("k1")), Outcome::Reserved(Reserved::Settled { charge: 0 }));
+    assert_eq!(w.balance(), before, "nothing charged");
+    // one that holds nothing and reports a usage the book does price is charged it
+    w.ok(call("k2"));
+    assert_eq!(w.ok(settle("k2", Some(flash(10_000, 1_000)))), settled(3_150, Basis::Usage));
+    // the money still stops agents: a seat canceled
+    w.ok(seat("s1", SeatState::Canceled, 1));
+    w.refused(call("k3"), Refused::AgentsStopped { why: Why::SeatCanceled });
 }
 
 /// A replayed reservation answers where its reference stands, so a retry

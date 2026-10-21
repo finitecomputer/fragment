@@ -26,7 +26,7 @@
 use std::cell::Cell;
 
 use fragment_core::ledger::{self as core, BatchRecord, CommandRecord, Entry, Ledger, Month, Refused, Spend, Store};
-use fragment_core::price::PriceBook;
+use fragment_core::price::{PriceBook, PriceError, Usage};
 use fragment_proto::ledger::{GrantCredit, LedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat};
 use fragment_proto::ErrorCode;
 use serde::de::DeserializeOwned;
@@ -502,6 +502,23 @@ fn take_book(ledger: &mut Ledger, store: &mut SqlStore, cfg: &Config, now_ms: i6
     }
 }
 
+/// Says loudly when the book has no price for a paid call's usage, which
+/// the ledger lets through rather than refuse: a worst case it cannot
+/// price holds nothing, and a usage it cannot price settles at its hold
+/// (`Ledger::reserve`). Names the model, instance type or key it lacks.
+fn unpriced(book: &PriceBook, usage: &Usage, reference: &str) {
+    if book.price(usage) != Err(PriceError::NoPrice) {
+        return;
+    }
+    let name = match usage {
+        Usage::Tokens { model, .. } => model.as_str(),
+        Usage::Awake { instance, .. } => instance.as_str(),
+        Usage::Key { key, .. } => key.as_str(),
+        _ => "",
+    };
+    console_error!("{}", json!({ "event": "ledger.unpriced", "ref": reference, "unpriced": name, "book": book.version }));
+}
+
 fn save(store: &SqlStore, ledger: &Ledger) {
     store.exec(
         "INSERT INTO head (id, ledger) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET ledger = excluded.ledger",
@@ -622,11 +639,19 @@ impl LedgerCell {
                 if self.cfg.test_hooks {
                     self.paid_call(&r.reference)?;
                 }
-                reply(self.mutate(move |l, s, now| l.reserve(s, &r, now)).await?)
+                reply(self.mutate(move |l, s, now| {
+                    unpriced(l.book(), &r.worst, &r.reference);
+                    l.reserve(s, &r, now)
+                }).await?)
             }
             <core::Settle as Route>::PATH => {
                 let r: core::Settle = decode(&body)?;
-                reply(self.mutate(move |l, s, now| l.settle(s, &r, now)).await?)
+                reply(self.mutate(move |l, s, now| {
+                    if let Some(usage) = &r.usage {
+                        unpriced(l.book(), usage, &r.reference);
+                    }
+                    l.settle(s, &r, now)
+                }).await?)
             }
             <core::Release as Route>::PATH => {
                 let r: core::Release = decode(&body)?;
