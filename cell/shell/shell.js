@@ -2655,7 +2655,9 @@ function connectionsSection(linked, uses) {
       try {
         await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}/key`);
       } catch {
-        unremoved.set(p.provider, visit);
+        // kept only while its visit is the one shown: an older visit's
+        // answer never replaces a newer one's
+        if (visit === visits && state.page === "Settings") unremoved.set(p.provider, visit);
       }
       await reopenSettings();
     };

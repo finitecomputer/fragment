@@ -3105,7 +3105,9 @@ const UNREMOVED: &str = "That didn't go through. Try again.";
 /// is sent while a chat opens and settings open again, then refused; and a
 /// Remove refused at once, its reload's read held while a chat opens and
 /// settings open again: the settings shown say nothing of it, the key
-/// still set and the chip as it was. The key taken away after.
+/// still set and the chip as it was. And the same key's Remove pressed in
+/// two visits, both refused, in either order: the newer visit's failure is
+/// what is said. The key taken away after.
 fn left_and_back_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, chat: &str) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let own = format!("#settings-connections [data-provider={:?}]", crate::SWAP_OWN);
@@ -3153,6 +3155,53 @@ fn left_and_back_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sess
         "a Remove refused in one visit of settings, its reload held until the person has left and come back, says nothing in the settings shown, then or once let go",
         held && back && settled && shown == "" && row == json!({ "state": "set", "said": "" }),
         json!({ "shown": shown, "after": row }),
+    );
+
+    // the same key's Remove pressed in two visits, both refused: the newer
+    // visit's first, then the older one's; then the other way round. The
+    // newer visit's failure is said either way.
+    let said = format!("(document.querySelector('{own} .provider-said')?.textContent ?? '')");
+    let remove = format!("(document.querySelector('{own} [data-action=remove-key]').click(), true)");
+    let failed_here = format!("{set} && {said} === {}", js(UNREMOVED));
+    b.eval(page, &hold("DELETE", &format!("{key}$"), Hold::Request))?;
+    b.eval(page, &remove)?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    open_row(b, page, chat, wait)?;
+    b.eval(page, open_settings)?;
+    let back = b.until(page, &set, wait);
+    b.eval(page, &refuse_once("DELETE", &format!("{key}$")))?;
+    b.eval(page, &remove)?;
+    let newer = b.until(page, &failed_here, wait);
+    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
+    let settled = b.until(page, HELD_SETTLED, wait);
+    let kept = b.eval(page, &failed_here)?;
+    let seen = b.eval(page, &said)?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "the same key's Remove refused in a newer visit of settings, then the older visit's refused: the newer visit's failure is still said",
+        held && back && newer && settled && kept == true,
+        &seen,
+    );
+    b.eval(page, &hold("DELETE", &format!("{key}$"), Hold::Request))?;
+    b.eval(page, &remove)?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    b.eval(page, "(window.__older = window.__held, true)")?;
+    open_row(b, page, chat, wait)?;
+    b.eval(page, open_settings)?;
+    let back = b.until(page, &format!("{set} && {said} === ''"), wait);
+    b.eval(page, &hold("DELETE", &format!("{key}$"), Hold::Request))?;
+    b.eval(page, &remove)?;
+    let held_newer = b.until(page, "!!window.__held.release", wait);
+    b.eval(page, "(window.__older.release?.('refuse'), true)")?;
+    let settled = b.until(page, "window.__older.inflight === 0 && performance.now() - window.__older.quiet > 500", wait);
+    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
+    let newer = b.until(page, &failed_here, wait);
+    let seen = b.eval(page, &said)?;
+    b.eval(page, "(window.__held.restore(), window.__older.restore(), true)")?;
+    s.ok(
+        "the same key's Remove refused in an older visit of settings, then the newer visit's refused: the newer visit's failure is said",
+        held && back && held_newer && settled && newer,
+        &seen,
     );
 
     // the chip: held, a chat, settings again, then refused
