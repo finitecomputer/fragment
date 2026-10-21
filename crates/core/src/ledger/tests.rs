@@ -581,6 +581,58 @@ fn a_newer_price_book_replaces_the_old_and_an_older_is_refused() {
     assert_eq!(w.ok(reserve("r2")), held(8_400), "the new book's margin");
 }
 
+/// A catalog addition at the stored version does not refresh an owner's
+/// book (#394); only a newer book makes the previously unpriced call possible.
+#[test]
+fn places_catalog_rollout_needs_a_newer_book_across_restarts() {
+    use crate::catalog::Catalog;
+
+    // Pin the historical versions, independent of future default-book bumps.
+    let old = PriceBook { version: 7, keys: Catalog::default().key_prices(), ..PriceBook::defaults() };
+    let mut w = World { ledger: Ledger::new(T0, old.clone()), store: Memory::default(), now: T0 };
+    w.ok(plan("plan:seat", Plan::Seat));
+    let call = Op::Reserve(reservation("places:1", Usage::Key { key: "google-places".into(), units: 1 }));
+    w.refused(call.clone(), Refused::NoPrice);
+
+    // No explicit price: the production catalog supplies the Places default.
+    let catalog = Catalog::parse(
+        r#"[{
+            "name": "google-places", "kind": "operator",
+            "hosts": ["places.googleapis.com"], "placements": [{ "query": "key" }],
+            "env": ["GOOGLE_PLACES_API_KEY"]
+        }]"#,
+    )
+    .unwrap();
+    let mut configured = PriceBook { keys: catalog.key_prices(), ..old };
+    assert_eq!(configured.keys, vec![KeyPrice { key: "google-places".into(), micros: 35_000_000, per: 1_000 }]);
+    let equal_version = Op::Book(SetPriceBook { id: "book:7".into(), book: configured.clone() });
+    for _ in 0..2 {
+        // Exercise the core's guard directly; the cell skips equal-version books.
+        w.refused(equal_version.clone(), Refused::StaleBook { current: 7 });
+        w.refused(call.clone(), Refused::NoPrice);
+        assert_eq!(w.status().price_book, 7);
+        w = w.restarted();
+    }
+
+    configured.version = 8;
+    let update = Op::Book(SetPriceBook { id: "book:8".into(), book: configured.clone() });
+    assert_eq!(w.replays(update.clone()), Outcome::Done);
+    assert_eq!(w.ledger.book(), &configured);
+    assert_eq!(w.replays(call.clone()), held(52_500));
+    assert_eq!(w.status().reserved_micros, 52_500, "one hold despite retries of the formerly refused reference");
+
+    w = w.restarted();
+    let (ledger, store) = (w.ledger.clone(), w.store.clone());
+    assert_eq!(w.ok(update), Outcome::Done);
+    assert_eq!(w.ok(call), held(52_500));
+    assert_eq!((&w.ledger, &w.store), (&ledger, &store), "book and reservation replays change nothing after restart");
+    assert_eq!(w.ledger.book(), &configured);
+    assert_eq!(w.status().price_book, 8);
+    assert_eq!(w.ok(Op::Reserve(reservation("places:2", Usage::Key { key: "google-places".into(), units: 1 }))), held(52_500));
+    assert_eq!(w.status().reserved_micros, 105_000, "a fresh reservation uses the persisted book too");
+    w.refused(equal_version, Refused::StaleBook { current: 8 });
+}
+
 // Reservations
 
 #[test]
