@@ -405,12 +405,17 @@ impl Fleet {
         write_local_config(project, &bound.cell())?;
         let poll = self.poll_interval_s.to_string();
         let retry = self.job_retry_delay_s.to_string();
+        // the node's one release (`dev`) deployed as it is configured, as a
+        // deploy names its second: what the levers' older and newer
+        // stand-ins are ordered against (fragment_core::release `restarts`)
+        let deployed_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs().to_string();
         let mut vars = vec![
             ("CODESTORAGE_ORG", self.codestorage_org.as_str()),
             ("CODESTORAGE_API_URL", self.codestorage_url.as_str()),
             ("FRAGMENT_PLATFORM_URL", self.platform_url.as_str()),
             ("FRAGMENT_POLL_INTERVAL_S", poll.as_str()),
             ("FRAGMENT_JOB_RETRY_DELAY_S", retry.as_str()),
+            ("FRAGMENT_DEPLOYED_AT", deployed_at.as_str()),
         ];
         if self.egress_local {
             vars.push(("FRAGMENT_EGRESS_LOCAL", "allow"));

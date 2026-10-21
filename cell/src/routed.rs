@@ -22,7 +22,12 @@
 //! another release is refused before anything is done, so a change to a
 //! call's shape ships safely across the seconds a deploy takes
 //! (fragment_core::release; docs/MODEL.md, "Calls between releases").
+//! An object that refuses a call from a release deployed after its own
+//! restarts onto it (`restart_soon`), so the caller's next ask meets the
+//! new code.
 
+use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::ops::Deref;
 
 use fragment_core::{npub, release};
@@ -30,7 +35,8 @@ use fragment_proto::{routed, valid_fragment_name, ErrorBody, ErrorCode, Identity
 use serde::{Deserialize, Serialize};
 // the macro's generated code names `wasm_bindgen`: worker's re-export
 use worker::wasm_bindgen::{self, prelude::*, JsCast};
-use worker::{console_log, Delay, Env, Headers, Method, Request, RequestInit, Response, Url};
+use worker::js_sys::{Function, Object, Reflect};
+use worker::{console_error, console_log, Delay, Env, Headers, Method, Request, RequestInit, Response, Url};
 
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
@@ -225,23 +231,111 @@ pub(crate) fn internal_request(path: &str, body: &str) -> CellResult<Request> {
     Ok(Request::new_with_init(&format!("https://fragment.internal/{path}"), &init)?)
 }
 
-/// Stamps a call into a platform object with this release (`release::HEADER`).
+/// Stamps a call into a platform object with this release
+/// (`release::HEADER`) and when it was deployed (`release::DEPLOYED`).
 fn stamp(req: &Request, env: &Env) -> CellResult<()> {
-    req.headers().set(release::HEADER, &Config::from_env(env).deploy_id)?;
+    let cfg = Config::from_env(env);
+    let headers = req.headers();
+    headers.set(release::HEADER, &cfg.deploy_id)?;
+    match cfg.deployed_at {
+        Some(at) => headers.set(release::DEPLOYED, &at.to_string())?,
+        None => headers.delete(release::DEPLOYED)?,
+    }
     Ok(())
 }
 
+/// An object's own release, as its `fetch` checks each call against it
+/// (`refused`): its deployment's (`Own::of`), or a test lever's stand-in
+/// (the Registry's `skewFor`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Own<'a> {
+    /// The release (`FRAGMENT_DEPLOY_ID`).
+    pub id: &'a str,
+    /// When it was deployed (`FRAGMENT_DEPLOYED_AT`), if it was named.
+    pub deployed: Option<u64>,
+}
+
+impl Own<'static> {
+    /// The release the isolate runs.
+    pub(crate) fn of(cfg: &'static Config) -> Own<'static> {
+        Own { id: &cfg.deploy_id, deployed: cfg.deployed_at }
+    }
+}
+
 /// The object's side, the first thing every platform object's `fetch`
-/// does: a call from a release other than `own` (its own, `deploy_id`), or
-/// naming none, is answered here, 503 `deploying` marked as this refusal
+/// does: a call from a release other than `own`, or naming none, is
+/// answered here, 503 `deploying` marked as this refusal
 /// (`release::REFUSED`), before anything is read or done; `None` admits it.
-pub(crate) fn refused(req: &Request, own: &str) -> worker::Result<Option<Response>> {
+/// When the caller's release was deployed after `own`, the object
+/// restarts onto it too (`release::restarts`; `restart_soon`): `ctx` is
+/// its state, as the runtime handed it.
+pub(crate) fn refused(req: &Request, own: Own<'_>, ctx: &JsValue) -> worker::Result<Option<Response>> {
     let caller = req.headers().get(release::HEADER)?;
-    let Err(skew) = release::admit(caller.as_deref(), own) else { return Ok(None) };
-    console_log!("{}", serde_json::json!({ "event": "release.refused", "caller": skew.caller, "callee": skew.callee, "path": req.path() }));
+    let Err(skew) = release::admit(caller.as_deref(), own.id) else { return Ok(None) };
+    let deployed = req.headers().get(release::DEPLOYED)?.as_deref().and_then(release::deployed);
+    let restarting = release::restarts(deployed, own.deployed)
+        && match restart_soon(ctx) {
+            Ok(asked) => asked,
+            Err(e) => {
+                console_error!("{}", serde_json::json!({ "event": "release.restart_failed", "why": format!("{e:?}") }));
+                false
+            }
+        };
+    console_log!(
+        "{}",
+        serde_json::json!({ "event": "release.refused", "caller": skew.caller, "callee": skew.callee, "path": req.path(), "callerDeployed": deployed, "calleeDeployed": own.deployed, "restarting": restarting })
+    );
     let mut resp = CellError::new(ErrorCode::Deploying, skew.message()).response()?;
-    resp.headers_mut().set(release::REFUSED, own)?;
+    resp.headers_mut().set(release::REFUSED, own.id)?;
     Ok(Some(resp))
+}
+
+thread_local! {
+    /// The objects this isolate has restarted onto a newer release, by id
+    /// (`restart_soon`): each at most once. An isolate runs one release, so
+    /// an object of it restarts once, and its next instance is the new
+    /// release's, in another isolate. Should Cloudflare start it again on
+    /// this one (its host still behind), it is not restarted again: it
+    /// refuses until Cloudflare's own restart, as before restarts were
+    /// asked for, never restarting at every call.
+    static RESTARTED: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
+}
+
+/// The most objects one isolate restarts (`RESTARTED`): far more than an
+/// isolate holds at once; past it, each is left to Cloudflare's restart.
+const RESTARTED_MAX: usize = 4096;
+
+/// How long after the refusal that asks for it an object restarts: past
+/// that refusal's answer, which must reach its caller (whose next ask is
+/// what meets the new code; the restart ends every request the instance
+/// is still answering), and well before that ask
+/// (`release::AGAIN_AFTER_MS`'s first wait).
+const RESTART_AFTER_MS: u32 = 50;
+
+/// Restarts the object whose state is `ctx` (`ctx.abort()`: its instance
+/// ends, and the next call or alarm starts another, on the code its
+/// deployment runs now) `RESTART_AFTER_MS` from now, once in this isolate
+/// (`RESTARTED`): whether this asked for it. A deploy restarts every object anyway, but
+/// Cloudflare holds one it keeps busy on the code before for minutes
+/// (fragment_core::release); this is that restart, brought forward, and
+/// it costs what that one does: the requests the instance is still
+/// answering end (each caller's failure, as at any restart), its sockets
+/// close (their pages reconnect), an alarm that runs is run again, a
+/// container runs on (computer.rs adopts it). The timer calls `abort`
+/// itself, so no Rust is running in the isolate as the instance ends.
+fn restart_soon(ctx: &JsValue) -> Result<bool, JsValue> {
+    let id = String::from(Object::from(Reflect::get(ctx, &JsValue::from_str("id"))?).to_string());
+    if !RESTARTED.with(|r| {
+        let mut r = r.borrow_mut();
+        r.len() < RESTARTED_MAX && r.insert(id)
+    }) {
+        return Ok(false);
+    }
+    let abort: Function = Reflect::get(ctx, &JsValue::from_str("abort"))?.dyn_into()?;
+    let set_timeout: Function = Reflect::get(&worker::js_sys::global(), &JsValue::from_str("setTimeout"))?.dyn_into()?;
+    let restart = abort.bind1(ctx, &JsValue::from_str("a call from a release deployed after this one's: restarting onto it"));
+    set_timeout.call2(&JsValue::UNDEFINED, &restart, &JsValue::from(RESTART_AFTER_MS))?;
+    Ok(true)
 }
 
 /// What one call into an object came to: its answer, or its refusal of

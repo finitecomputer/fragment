@@ -153,7 +153,7 @@ impl DurableObject for FragmentCell {
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
-        if let Some(refused) = crate::routed::refused(&req, &self.cfg.deploy_id)? {
+        if let Some(refused) = crate::routed::refused(&req, crate::routed::Own::of(self.cfg), &self.raw)? {
             return Ok(refused);
         }
         match self.route(req).await {

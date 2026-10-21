@@ -821,12 +821,23 @@ fn tee(mut from: impl Read, mut to: impl Write) -> std::io::Result<Vec<u8>> {
     }
 }
 
-/// The deploy's id (`FRAGMENT_DEPLOY_ID`): its commit, which is also its
-/// release, the one id every call between its Worker and its objects
-/// carries (fragment_core::release). A tree with changes not committed is
-/// marked with the deploy's second as well, so two such deploys of one
-/// commit are two releases, never one whose calls the other admits.
-fn git_head() -> Result<String> {
+/// The release a deploy makes: its id and when it was made.
+struct Release {
+    /// `FRAGMENT_DEPLOY_ID`: its commit, which is also its release, the one
+    /// id every call between its Worker and its objects carries
+    /// (fragment_core::release). A tree with changes not committed is
+    /// marked with the deploy's second as well, so two such deploys of one
+    /// commit are two releases, never one whose calls the other admits.
+    id: String,
+    /// `FRAGMENT_DEPLOYED_AT`: the deploy's second, which every such call
+    /// carries too, so an object of the release before, refusing it,
+    /// restarts onto this one (fragment_core::release `restarts`). A later
+    /// deploy is a later second, a rollback's included.
+    deployed_at: u64,
+}
+
+/// This deploy's release, from the tree's commit and the clock.
+fn this_release() -> Result<Release> {
     let out = Command::new("git").args(["rev-parse", "--short=12", "HEAD"]).current_dir(devstack::repo_root()).output()?;
     anyhow::ensure!(out.status.success(), "git rev-parse HEAD");
     let dirty = Command::new("git").args(["status", "--porcelain"]).current_dir(devstack::repo_root()).output()?;
@@ -834,7 +845,8 @@ fn git_head() -> Result<String> {
     let at_s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
     let id = deploy_id(&sha, !dirty.stdout.is_empty(), at_s);
     anyhow::ensure!(fragment_core::release::valid(&id), "the deploy's id {id:?} is a release's (fragment_core::release::valid)");
-    Ok(id)
+    anyhow::ensure!(fragment_core::release::deployed(&at_s.to_string()) == Some(at_s), "the deploy's second {at_s} is a deploy time (fragment_core::release::deployed)");
+    Ok(Release { id, deployed_at: at_s })
 }
 
 /// A deploy's id from its commit, whether its tree has changes not
@@ -943,10 +955,11 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     let store = preflight(&tools, &d, &config, &bound)?;
     println!("secrets: the {} the config names are in the account's Secrets Store {} ({})", named_secrets(&bound).len(), store.name, store.id);
     crate::build()?;
-    let deploy_id = git_head()?;
+    let release = this_release()?;
+    let deploy_id = &release.id;
     let dir = devstack::repo_root().join("target/deploy").join(&n.cell);
     fs::create_dir_all(&dir)?;
-    let cell = worker_config(&d, &n, &store.id, &deploy_id, &devstack::repo_root())?;
+    let cell = worker_config(&d, &n, &store.id, &release, &devstack::repo_root())?;
     let cell_config = dir.join("cell.json");
     fs::write(&cell_config, serde_json::to_string_pretty(&cell)?)?;
     let platform_url = format!("https://{}", n.platform_host);
@@ -1008,7 +1021,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
 /// The platform Worker's config, rendered from the deployment's and the
 /// checked-in one (`root`'s `cell/`), its store secrets bound by name in
 /// the store `store_id`. No value of a secret is in it.
-fn worker_config(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, root: &Path) -> Result<Value> {
+fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, root: &Path) -> Result<Value> {
     let bound = bound_for(d, n.label_suffix.as_deref())?;
     let (catalog, _) = catalog_of(d)?;
     let platform_url = format!("https://{}", n.platform_host);
@@ -1068,7 +1081,8 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, roo
         }
     }
     let mut vars = json!({
-        "FRAGMENT_DEPLOY_ID": deploy_id,
+        "FRAGMENT_DEPLOY_ID": release.id,
+        "FRAGMENT_DEPLOYED_AT": release.deployed_at.to_string(),
         "FRAGMENT_HOST_SUFFIX": n.suffix,
         "FRAGMENT_PLATFORM_URL": platform_url,
         "CODESTORAGE_ORG": d.codestorage.org,
@@ -1332,6 +1346,25 @@ mod tests {
         assert!(fragment_core::release::valid(&a) && fragment_core::release::valid(&deploy_id(&"f".repeat(12), true, u64::MAX)));
     }
 
+    /// The release the rendering tests deploy.
+    fn test_release() -> Release {
+        Release { id: "abc123".into(), deployed_at: 1_792_615_843 }
+    }
+
+    /// The Worker's variables name the release and when it was deployed,
+    /// as the cell reads them (config.rs): what an object of the release
+    /// before restarts onto (fragment_core::release `restarts`).
+    #[test]
+    fn a_deploy_names_its_release_and_its_second() {
+        let n = names(&deployment(None, None), Some("dev")).unwrap();
+        let vars = worker_config(&deployment(None, None), &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"].clone();
+        assert_eq!(vars["FRAGMENT_DEPLOY_ID"], "abc123");
+        assert_eq!(vars["FRAGMENT_DEPLOYED_AT"], "1792615843", "a Worker variable is a string");
+        assert_eq!(vars["FRAGMENT_DEPLOYED_AT"].as_str().and_then(fragment_core::release::deployed), Some(1_792_615_843));
+        let release = this_release().unwrap();
+        assert!(fragment_core::release::valid(&release.id) && release.deployed_at > 1_792_615_843, "this tree's, made now");
+    }
+
     /// A branch config (on the zone finite.place) with neither host, else a
     /// deployment of its own's (no zone).
     fn deployment(platform: Option<&str>, suffix: Option<&str>) -> Deployment {
@@ -1490,7 +1523,7 @@ mod tests {
 
         assert_eq!(n.platform_host, "dev.finite.place");
         // both routes in the one zone, as the Worker's config renders them
-        let cell = worker_config(&deployment(None, None), &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap();
+        let cell = worker_config(&deployment(None, None), &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
         assert_eq!(cell["routes"], json!([{ "pattern": "dev.finite.place/*", "zone_name": "finite.place" }, { "pattern": "*--dev.finite.place/*", "zone_name": "finite.place" }]));
         // one wildcard in the zone covers the platform and every fragment
         assert_eq!(n.dns, [crate::dns::Wanted { zone: "finite.place".into(), name: "*.finite.place".into() }]);
@@ -1513,7 +1546,7 @@ mod tests {
         let d = deployment(Some("finite.chat"), Some("finite.place"));
         let n = names(&d, None).unwrap();
         assert_eq!((n.platform_host.as_str(), n.suffix.as_str()), ("finite.chat", "finite.place"));
-        let cell = worker_config(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap();
+        let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
         assert_eq!(cell["routes"], json!([{ "pattern": "finite.chat/*", "zone_name": "finite.chat" }, { "pattern": "*.finite.place/*", "zone_name": "finite.place" }]));
         assert_eq!((cell["vars"]["FRAGMENT_PLATFORM_URL"].as_str(), cell["vars"]["FRAGMENT_HOST_SUFFIX"].as_str()), (Some("https://finite.chat"), Some("finite.place")));
         assert!(cell["vars"].get("FRAGMENT_HOST_LABEL_SUFFIX").is_none() && cell["vars"].get("CODESTORAGE_REPO_PREFIX").is_none());
@@ -1651,7 +1684,7 @@ mod tests {
         v["host_secret_previous"] = json!("fragment-host-secret-old");
         let d = load(&config_file("bindings", &v)).unwrap();
         let n = names(&d, Some("p5")).unwrap();
-        let cell = worker_config(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap();
+        let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
         let bound: Vec<(&str, &str)> = cell["secrets_store_secrets"].as_array().unwrap().iter().map(|b| (b["binding"].as_str().unwrap(), b["secret_name"].as_str().unwrap())).collect();
         assert_eq!(
             bound,
@@ -1690,7 +1723,7 @@ mod tests {
     fn the_deploy_uploads_the_release_files() {
         let own = deployment(Some("fragment.club"), Some("fragment.boats"));
         for (d, branch) in [(&own, None), (&deployment(None, None), Some("p5"))] {
-            let cell = worker_config(d, &names(d, branch).unwrap(), "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap();
+            let cell = worker_config(d, &names(d, branch).unwrap(), "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
             let assets = &cell["assets"];
             assert_eq!(assets["directory"], json!(devstack::repo_root().join("cell/build/assets")), "{branch:?}");
             assert_eq!((&assets["binding"], &assets["run_worker_first"]), (&json!("ASSETS"), &json!(true)), "{branch:?}");
@@ -1761,7 +1794,7 @@ mod tests {
         let built = json!({ "dockerfile": "images/hermes/Dockerfile", "build_context": "." });
         v["computers"]["images"] = json!({ "hermes": { "image": stable }, "hermes-canary": built });
         let d = load(&config_file("pinned-stable", &v)).unwrap();
-        let cell = worker_config(&d, &names(&d, Some("preview")).unwrap(), "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap();
+        let cell = worker_config(&d, &names(&d, Some("preview")).unwrap(), "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
         let images = &cell["containers"][0]["images"];
         assert_eq!(images["hermes"], json!({ "image": stable }), "kept as it is: nothing to build");
         assert_eq!(images["hermes-canary"]["dockerfile"], json!(devstack::repo_root().join("images/hermes/Dockerfile")));
@@ -1838,7 +1871,7 @@ mod tests {
         let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
         let rendered = |v: &Value, test: &str| {
             let d = load(&config_file(test, v)).unwrap();
-            worker_config(&d, &names(&d, Some("p5")).unwrap(), "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap()
+            worker_config(&d, &names(&d, Some("p5")).unwrap(), "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()
         };
         v.as_object_mut().unwrap().remove("mail_from");
         let none = rendered(&v, "mail-none");
@@ -1869,7 +1902,7 @@ mod tests {
         let rendered = |file: &str| {
             let d = load(&devstack::repo_root().join(file)).unwrap();
             let n = names(&d, Some("p5")).unwrap();
-            (worker_config(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap(), bound(&d).unwrap())
+            (worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap(), bound(&d).unwrap())
         };
         let (cell, b) = rendered("deploy/example.jsonc");
         let models: Value = serde_json::from_str(cell["vars"]["FRAGMENT_MODELS"].as_str().unwrap()).unwrap();
@@ -1954,7 +1987,7 @@ mod tests {
         v["models"] = json!({ "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } });
         let d = load(&config_file("models-fallback", &v)).unwrap();
         let n = names(&d, Some("p5")).unwrap();
-        let vars = worker_config(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap()["vars"].clone();
+        let vars = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"].clone();
         assert_eq!(vars["FRAGMENT_MODELS"], json!({ "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } }).to_string());
         // the fields it replaced
         for (field, now) in [("vision_model", "models.vision"), ("fallback_model", "models.fallback")] {
@@ -1983,6 +2016,6 @@ mod tests {
         v["support_url"] = json!("mailto:help@example.dev");
         let d = load(&config_file("support-named", &v)).unwrap();
         let n = names(&d, Some("p5")).unwrap();
-        assert_eq!(worker_config(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap()["vars"]["FRAGMENT_SUPPORT_URL"], "mailto:help@example.dev");
+        assert_eq!(worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"]["FRAGMENT_SUPPORT_URL"], "mailto:help@example.dev");
     }
 }
