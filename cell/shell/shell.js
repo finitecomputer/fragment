@@ -1732,6 +1732,26 @@ function noticeRow(n) {
 function renderComputer() {
   const box = $("computer-notices");
   const rows = (state.computer?.notices ?? []).map(noticeRow).filter(Boolean);
+  if (reads.computerFailed) {
+    const row = el("div", "computer-notice");
+    row.dataset.kind = "unavailable";
+    const copy = el("div", "notice-copy");
+    copy.append(el("strong", null, "Your computer could not be refreshed"), el("p", null,
+      state.computer ? "Showing its last confirmed state. Try again to check your computer and agents." : "Try again to check your computer and agents."));
+    const actions = el("div", "notice-actions");
+    const retry = el("button", null, "Try again");
+    retry.type = "button";
+    retry.dataset.action = "refresh-computer";
+    const who = state.me?.id;
+    retry.onclick = async () => {
+      if (retry.disabled || who !== state.me?.id) return;
+      retry.disabled = true;
+      try { await load(); } catch {} finally { retry.disabled = false; }
+    };
+    actions.append(retry);
+    row.append(copy, actions);
+    rows.push(row);
+  }
   box.replaceChildren(...rows);
   box.hidden = !rows.length;
 }
@@ -1946,7 +1966,7 @@ async function openSettings(push = true) {
       writing--;
     }
     if (r.ok) {
-      state.me = await api("GET", "/api/identities/me");
+      identityIs(await api("GET", "/api/identities/me"));
       openSettings(false);
     } else picture.querySelector("span").textContent = (await r.json().catch(() => ({}))).message || "That picture was not taken";
   };
@@ -2969,7 +2989,7 @@ const unjoined = (f) => own(f) && !f.agents?.length && /-chat$/.test(labelOf(f.n
 // not a member of its own chat (asked of the chat: a row may not name its
 // agents yet).
 async function owesFirstAgent() {
-  if (state.guest) return false;
+  if (state.guest || reads.computerFailed) return false;
   if (!chats().length) return true;
   if (chats().some((f) => own(f) && (f.agents ?? []).some((id) => state.agents.has(id)))) return false;
   const agent = primaryAgent();
@@ -3130,17 +3150,34 @@ function seatFirst(seat) {
 // (`watchList`: `changed`), only the apps whose rows it touched (new, or
 // not as they were) have their card read again. An older read's answer
 // that comes after a newer one's is not shown.
-const reads = { asked: 0, shown: 0 };
+const reads = { asked: 0, shown: 0, computerFailed: false };
+// A retained view belongs only to the current person, never the next sign-in.
+function identityIs(me) {
+  if (state.me?.id !== me?.id) {
+    reads.shown = ++reads.asked;
+    reads.computerFailed = false;
+    state.computer = null;
+    state.support = null;
+    state.agents = new Map();
+    renderComputer();
+  }
+  state.me = me;
+}
 async function load(changed = false) {
+  const who = state.me?.id;
+  if (!who) return;
   const mine = ++reads.asked;
-  const [list, computers] = await Promise.all([api("GET", "/api/fragments"), api("GET", "/api/computers").catch(() => ({ computers: [] }))]);
-  if (mine < reads.shown) return;
+  const [list, computers] = await Promise.all([api("GET", "/api/fragments"), api("GET", "/api/computers").catch(() => null)]);
+  if (mine < reads.shown || who !== state.me?.id) return;
   reads.shown = mine;
   const before = new Map(state.fragments.map((f) => [f.name, JSON.stringify(f)]));
   state.fragments = list.fragments ?? [];
-  state.computer = computers.computers?.[0] ?? null;
-  state.support = computers.support ?? null;
-  state.agents = new Map((state.computer?.agents ?? []).map((a) => [a.identity, a]));
+  reads.computerFailed = computers === null;
+  if (computers) {
+    state.computer = computers.computers?.[0] ?? null;
+    state.support = computers.support ?? null;
+    state.agents = new Map((state.computer?.agents ?? []).map((a) => [a.identity, a]));
+  }
   renderChats();
   renderApps();
   renderHeading();
@@ -3378,6 +3415,7 @@ function reopenWindows(settings) {
 document.addEventListener("submit", (e) => {
   const form = e.target;
   if (!(form instanceof HTMLFormElement) || !/^\/auth\/(logout|switch)(\?|$)/.test(form.getAttribute("action") ?? "")) return;
+  identityIs(null);
   tab.drop(WINDOWS_KEY);
   const frames = [...state.frames.values()].filter((f) => f.isConnected && greeted.has(f));
   if (!frames.length) return;
@@ -3430,10 +3468,10 @@ async function start(open) {
   try {
     me = await api("GET", "/api/identities/me");
   } catch (e) {
-    if (e.status === 401) return signIn();
+    if (e.status === 401) { identityIs(null); return signIn(); }
     throw e;
   }
-  state.me = me;
+  identityIs(me);
   const [, mine] = await Promise.all([load(), api("GET", "/api/seat").catch(() => null)]);
   setGuest(!!mine?.guest);
   watchList();
