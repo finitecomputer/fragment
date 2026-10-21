@@ -276,12 +276,14 @@ fragment.club until cutover (decisions 34–35).
   then refuses every mutation that names it, as the platform objects'
   did before their steps.
 - **Guard:** `facet::tests::app_ledger_schema_matches_the_deployed_shape`
-  executes the constructor's actual DDL in host SQLite and compares it
+  extracts the current CREATE template into host SQLite and compares it
   with the frozen deployed schema (`crates/core/tests/fixtures/facet-ledger.sql`).
-  A second test reruns that initializer over a populated deployed ledger
+  A second test reapplies that CREATE over a populated deployed ledger
   and checks its replay row survives. These run in `cargo xtask check`;
   changing the shape requires versioned facet migrations, not a refreshed
-  fixture. They do not run the JavaScript constructor or a live facet.
+  fixture. The textual extractor does not detect additional constructor
+  SQL or a commented-out CREATE template. These tests do not run the
+  JavaScript constructor or a live facet.
 - **First proof:** a mutation answering `no such column` from
   `_fragment_ops` after a deploy that changed it.
 - **Delete when:** the facet's ledger takes versioned steps of its own;

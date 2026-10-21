@@ -243,13 +243,14 @@ mod tests {
     // accept a changed CREATE: existing facets would keep the old table.
     const LEDGER_SCHEMA: &str = include_str!("../tests/fixtures/facet-ledger.sql");
 
-    /// Read the constructor's actual DDL, including its table name. Fail
-    /// closed if the initializer moves to a different JavaScript shape.
+    /// Extract the current CREATE template and table name by their textual
+    /// markers. This checks neither additional constructor SQL nor whether
+    /// the matched text is commented out; it does not execute JavaScript.
     fn ledger_ddl() -> String {
         let name = PLATFORM_JS.split_once("const LEDGER = \"").expect("platform declares its ledger name").1
             .split_once('"').expect("the ledger name ends").0;
         let start = "sql.exec(`CREATE TABLE IF NOT EXISTS ${LEDGER} (";
-        assert_eq!(PLATFORM_JS.matches(start).count(), 1, "one app ledger initializer; update this guard if it moves");
+        assert_eq!(PLATFORM_JS.matches(start).count(), 1, "one app ledger CREATE template marker; update this guard if it moves");
         let rest = PLATFORM_JS.split_once(start).unwrap().1.split_once('`').expect("the DDL template ends").0;
         format!("CREATE TABLE IF NOT EXISTS {name} ({rest}")
     }
@@ -272,8 +273,8 @@ mod tests {
             "the app ledger changed without a migration: add versioned facet migrations before changing its deployed shape; do not refresh the fixture");
     }
 
-    /// Restart/redeploy: rerunning the current constructor over a populated
-    /// deployed ledger preserves the result and effects needed for replay.
+    /// Reapplying the extracted CREATE template over a populated deployed
+    /// schema preserves the stored result and effects needed for replay.
     #[test]
     fn app_ledger_reinitialization_preserves_replay_rows() {
         let db = rusqlite::Connection::open_in_memory().unwrap();
