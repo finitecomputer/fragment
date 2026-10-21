@@ -2502,21 +2502,27 @@ const PROVIDER_NAMES = { xai: "xAI", elevenlabs: "ElevenLabs", openrouter: "Open
 const providerName = (p) => PROVIDER_NAMES[p] ?? p.replace(/(^|-)([a-z])/g, (_, d, l) => `${d ? " " : ""}${l.toUpperCase()}`);
 // micro-dollars, to a hundredth of a cent under a dollar (a call is often less than a cent)
 const money = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: micros < 1_000_000 ? 4 : 2 });
+const removingConnections = new Set();
+let connectionRefresh = Promise.resolve();
 function connectionsSection(linked, uses) {
   const s = section("Connections");
   s.id = "settings-connections";
   const owner = state.me.id;
-  const current = () => state.page === "Settings" && state.me.id === owner && s.isConnected;
+  const current = () => state.page === "Settings" && state.me?.id === owner;
   function removal(p, row, label) {
+    const key = JSON.stringify([owner, p.provider]);
     const button = el("button", "quiet", label);
     button.type = "button";
     button.dataset.action = label.toLowerCase();
+    button.disabled = removingConnections.has(key);
     const said = el("p", "muted provider-detail");
+    said.dataset.removalError = "";
     said.setAttribute("role", "status");
     said.hidden = true;
     row.append(said);
     button.onclick = async () => {
-      if (button.disabled) return;
+      if (button.disabled || removingConnections.has(key)) return;
+      removingConnections.add(key);
       button.disabled = true;
       said.hidden = true;
       said.textContent = "";
@@ -2525,15 +2531,32 @@ function connectionsSection(linked, uses) {
       } catch {
         // A lost response is not proof that the key stayed or was removed.
         // Keep the last confirmed state and never echo a server's error text.
+        // If another removal is rebuilding Settings, put this error in the
+        // row it finishes rendering, not in the detached row we started in.
+        await connectionRefresh.catch(() => {});
         if (current()) {
-          said.textContent = "Could not confirm removal. Try again.";
-          said.hidden = false;
+          const live = [...($("settings-connections")?.children ?? [])].find((r) => r.dataset.provider === p.provider);
+          const feedback = live?.querySelector("[data-removal-error]");
+          if (feedback) {
+            feedback.textContent = "Could not confirm removal. Try again.";
+            feedback.hidden = false;
+            live.querySelector(`[data-action=${button.dataset.action}]`).disabled = false;
+          }
         }
-        button.disabled = false;
         return;
+      } finally {
+        removingConnections.delete(key);
+        button.disabled = false;
       }
-      // A late result must not reopen Settings or replace a newer section.
-      if (current()) await openSettings(false);
+      // Another provider's removal may have replaced this section. Its new
+      // version still needs this success, but leaving Settings does not.
+      // DELETEs stay concurrent. Their reloads finish in order so an older
+      // snapshot cannot overwrite the refresh after a later deletion.
+      const refresh = connectionRefresh.catch(() => {}).then(() => {
+        if (current()) return openSettings(false);
+      });
+      connectionRefresh = refresh;
+      await refresh;
     };
     return button;
   }
