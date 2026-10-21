@@ -2932,9 +2932,14 @@ calls; the router asks again for under two seconds, then answers 503
 page's load is what the person's reload would be, so a load that answer
 stops says "A new release is going out" and loads again, after 1, 2, 4,
 8, 15, 30 and 60 seconds (`LOAD_AGAIN_AFTER_MS`), about two minutes in
-all; past them it did not load, as with any other failure. Only the load
-is asked again: a person's own move that meets it says so, and they try
-again.
+all; past them it did not load, as with any other failure. It waits on
+the first run's card alone: nothing of the page is there to use, so
+nothing done on it is undone as it loads (#483 review: an older load's
+ask again opened settings again, and what was typed there was lost).
+Each load begun (the page's first, a move back or forward) is a new one,
+and an older one, waiting or failing, asks, opens and says nothing more.
+Only the load is asked again: a person's own move that meets it says so,
+and they try again.
 
 **On a phone it is an app** (Paul, 2026-10-13: "staying strictly in the
 viewport"). The page itself never scrolls, bounces or zooms: its html and

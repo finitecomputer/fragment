@@ -1825,7 +1825,7 @@ addEventListener("popstate", () => {
   const shown = !$("layout").hidden;
   if (shown && location.pathname === SETTINGS) openSettings(false).catch((e) => notice("Settings did not open", e.message));
   else if (shown && location.pathname === "/" && byName(state.current)) openChat(state.current, false);
-  else loadPage().catch((e) => notice("This page did not load", e.message));
+  else loadPage();
 });
 
 // ---- settings: the person's account, credit, computer and agents ----
@@ -3541,26 +3541,36 @@ addEventListener("pagehide", () => reloadWhenSafe("hidden"));
 addEventListener("pageshow", (e) => { if (e.persisted) lookForRelease(); });
 addEventListener("online", () => lookForRelease());
 
-// ---- a deploy going out, under the page's load (docs/api.md, The shell,
-// "A deploy going out"): for seconds after a deploy, minutes at worst, an
-// object may still run the release before and refuse this one's calls,
-// which the router asks again for under two seconds, then answers 503
-// `deploying`, nothing done. The load asks again, as the person's reload
-// would, saying why, for about two minutes; past them it did not load. ----
+// ---- the page's load, and a deploy going out under it (docs/api.md, The
+// shell, "A deploy going out"): for seconds after a deploy, minutes at
+// worst, an object may still run the release before and refuse this one's
+// calls, which the router asks again for under two seconds, then answers
+// 503 `deploying`, nothing done. The load asks again, as the person's
+// reload would, for about two minutes, on the first run's card alone:
+// nothing of the page is there to use, so nothing done on it is undone as
+// it loads. Past them it did not load. Each load begun (the page's first,
+// a move back or forward) is a new one, and an older one asks, opens and
+// says nothing more (#483 review). ----
 const LOAD_AGAIN_AFTER_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000];
+let loads = 0;
 async function loadPage(open) {
-  let waiting = null;
+  const mine = ++loads;
   for (const wait of [...LOAD_AGAIN_AFTER_MS, null]) {
     try {
-      await start(open);
-      // the wait's notice, unless the load said or took away one since
-      if (waiting === noticeGen) hideNotice();
-      return;
+      return await start(open);
     } catch (e) {
-      if (e.code !== "deploying" || wait === null) throw e;
-      $("layout").hidden = false;
-      waiting = notice("A new release is going out", "This page loads as soon as it is out.");
+      if (mine !== loads) return;
+      if (e.code !== "deploying" || wait === null) {
+        $("first-run").hidden = true;
+        $("layout").hidden = false;
+        notice("This page did not load", e.message);
+        return;
+      }
+      const heading = el("div", "splash-heading");
+      heading.append(el("h1", null, "A new release is going out"), el("p", "muted", "This page loads as soon as it is out."));
+      firstRun(heading);
       await new Promise((r) => setTimeout(r, wait));
+      if (mine !== loads) return;
     }
   }
 }
@@ -3625,7 +3635,4 @@ function guestHome(offer) {
   notice("You're a guest", [`You see and edit what people share with you: it shows in the sidebar as they share it. ${seatGives(offer)}`, noSeatSaid()], [...(offer ? [seat] : []), switchForm("/", "allow")]);
 }
 
-loadPage().catch((e) => {
-  $("layout").hidden = false;
-  notice("This page did not load", e.message);
-});
+loadPage();

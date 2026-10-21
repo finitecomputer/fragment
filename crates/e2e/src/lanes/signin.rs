@@ -265,15 +265,64 @@ fn restart_cases(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
+/// What the shell's page shows, recorded from before its script runs:
+/// each change of what is on screen (`card: <its heading>` for the first
+/// run's card, `page: <its notice>` for the page, both joined when both
+/// show), its asks of who is signed in (`__me`), and its reads of its list
+/// refused (`__refused`) and when the last was (`__refusedAt`, the page's
+/// clock).
+/// The registry's own count of refusals is its isolate's, which a page that
+/// stops leaves idle long enough to be evicted.
+const PAGE_RECORDER: &str = r#"
+window.__said = []; window.__me = 0; window.__refused = 0;
+const fetched = window.fetch;
+window.fetch = function (input, init) {
+  const me = String(input).endsWith('/api/identities/me');
+  const list = String(input).endsWith('/api/fragments');
+  if (me) window.__me++;
+  return fetched.call(this, input, init).then((r) => {
+    if (list && r.status === 503) { window.__refused++; window.__refusedAt = performance.now(); }
+    return r;
+  });
+};
+const shown = (id) => { const e = document.getElementById(id); return !!e && !e.hidden; };
+new MutationObserver(() => {
+  const now = [];
+  if (shown('first-run')) now.push('card: ' + (document.querySelector('#first-run-card h1')?.textContent ?? ''));
+  if (shown('layout')) now.push('page: ' + (shown('notice') ? document.querySelector('#notice strong')?.textContent ?? '' : ''));
+  const t = now.join(' + ');
+  if (t && window.__said.at(-1) !== t) window.__said.push(t);
+}).observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+"#;
+
+/// What a page waiting out a deploy shows: the first run's card alone,
+/// nothing of the page to use (#483 review).
+const WAITING: &str = "card: A new release is going out";
+
+/// Whether a page's recorded screens (`PAGE_RECORDER`) ever said it did not load.
+fn did_not_load(said: &Value) -> bool {
+    said.as_array().is_some_and(|n| n.iter().any(|t| t.as_str().is_some_and(|t| t.contains("This page did not load"))))
+}
+
+/// The registry refuses its next `times` asks for a session (`/session`)
+/// as a registry of another release would. The page's asks of who is
+/// signed in and of its seat ask it by the session in one call of their
+/// own (`/view`, and the seat's), so they are answered; its reads of its
+/// list and its computers (two calls at once, each asked by the router
+/// `ASKS` times) each ask for the session first, so `PAGE_READS` refusals
+/// refuse both, however their asks interleave.
+fn skew_sessions(api: &Api, times: u64) -> Result<()> {
+    let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "skewFor": { "path": "/session", "times": times } })))?;
+    anyhow::ensure!(r.status == 200 && (times == 0 || r.body["skewFor"]["times"] == times), "the skewFor test hook: {r}");
+    Ok(())
+}
+
 /// The shell's page as a deploy goes out (docs/api.md, The shell, "A
 /// deploy going out"): its load meets an object of the release before for
 /// longer than the router asks it (seconds to minutes, Cloudflare says),
 /// and its call answers 503 `deploying`. On the preview on 2026-10-21 the
 /// page stopped there, "This page did not load" ("a call from release
-/// 5083ebcaeb1b reached release 069479198b79"). Every call of the page
-/// asks the registry for its session (`/session`), which the `skewFor`
-/// hook refuses as a registry of another release would: two of the page's
-/// calls in a row each meet all the router's asks.
+/// 5083ebcaeb1b reached release 069479198b79").
 fn deploying_page(s: &mut Suite, api: &Api) -> Result<()> {
     let Some(mut browser) = s.browser()? else {
         s.ok("Chrome is installed for the shell's page as a deploy goes out (set CHROME_BIN)", false, "no Chrome found");
@@ -287,25 +336,61 @@ fn deploying_page(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&s.operator, "POST", &format!("/api/ledger/{id}/plan"), Some(&json!({ "id": email, "plan": "guest" })))?;
     anyhow::ensure!(r.status == 200, "making a guest: {r}");
     browser.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
-    let refusals = 2 * fragment_core::release::ASKS as u64;
-    let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "skewFor": { "path": "/session", "times": refusals } })))?;
-    anyhow::ensure!(r.status == 200 && r.body["skewFor"]["times"] == refusals, "the skewFor test hook: {r}");
-    // each notice the page shows, in order, from before its script runs
-    // (the registry's own count of refusals is its isolate's, which a page
-    // that stopped leaves idle long enough to be evicted)
-    let notices = "window.__notices = []; new MutationObserver(() => { const n = document.getElementById('notice'); const t = n && !n.hidden && n.querySelector('strong')?.textContent; if (t && window.__notices.at(-1) !== t) window.__notices.push(t); }).observe(document, { subtree: true, childList: true, attributes: true, characterData: true });";
-    let page = browser.open_with_script(&format!("{}/", api.base), notices)?;
-    let loaded = browser.until(&page, &format!("location.pathname === '/welcome' && document.body.innerText.includes({})", json!(email)), Duration::from_secs(30));
-    let shown = browser.eval(&page, "window.__notices")?;
-    let said = |title: &str| shown.as_array().is_some_and(|n| n.iter().any(|t| t == title));
-    s.ok(
-        "the shell's page, its load refused as a deploy goes out (503 deploying, past the router's asks), says a new release is going out and loads once it is out, never stopping at \"This page did not load\"",
-        loaded && said("A new release is going out") && !said("This page did not load"),
-        format!("loaded: {loaded}, its notices {shown}"),
-    );
+    let out = deploying_load(s, api, &mut browser, email).and_then(|()| deploying_move(s, api, &mut browser));
     // a page that stopped early leaves refusals the checks after it must not meet
-    let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "skewFor": { "path": "/session", "times": 0 } })))?;
-    anyhow::ensure!(r.status == 200, "the skewFor test hook: {r}");
+    skew_sessions(api, 0)?;
+    out
+}
+
+/// The refusals of one load's reads (`skew_sessions`).
+const PAGE_READS: u64 = 2 * fragment_core::release::ASKS as u64;
+
+/// Who is signed in is answered, and the page's next reads all meet the
+/// release before: the page waits on the first run's card, asks again,
+/// and loads.
+fn deploying_load(s: &mut Suite, api: &Api, browser: &mut crate::browser::Browser, email: &str) -> Result<()> {
+    skew_sessions(api, PAGE_READS)?;
+    let page = browser.open_with_script(&format!("{}/", api.base), PAGE_RECORDER)?;
+    let loaded =browser.until(&page, &format!("location.pathname === '/welcome' && document.body.innerText.includes({})", json!(email)), Duration::from_secs(30));
+    let said = browser.eval(&page, "window.__said")?;
+    s.ok(
+        "the shell's page, its load refused as a deploy goes out (503 deploying, past the router's asks), says a new release is going out on the first run's card alone, nothing of the page to use, and loads once it is out, never stopping at \"This page did not load\"",
+        loaded && said.as_array().is_some_and(|n| n.iter().any(|t| t == WAITING)) && !did_not_load(&said),
+        format!("loaded: {loaded}, it showed {said}"),
+    );
+    browser.close(page)?;
+    Ok(())
+}
+
+/// A move back or forward while the load waits (here to settings) begins
+/// a newer load, and the older one does nothing more: it asks no more,
+/// opens nothing again, says nothing (#483 review: an older load's ask
+/// again opened settings again, and what was typed there was lost). A
+/// guest's settings hold no field of their own, so a mark on what the
+/// newer load rendered stands for what the person did there: settings
+/// opened again replace it.
+fn deploying_move(s: &mut Suite, api: &Api, browser: &mut crate::browser::Browser) -> Result<()> {
+    // who is signed in answered, its reads refused, twice in a row: the
+    // page has its person, as one whose settings would open
+    skew_sessions(api, 2 * PAGE_READS)?;
+    let page = browser.open_with_script(&format!("{}/", api.base), PAGE_RECORDER)?;
+    // refused twice: the load waits its second wait (2 s), the refusals spent
+    let waiting = browser.until(&page, "window.__refused === 2", Duration::from_secs(30));
+    browser.eval(&page, "history.pushState(null, '', '/settings'); dispatchEvent(new PopStateEvent('popstate')); true")?;
+    let opened = browser.until(
+        &page,
+        "location.pathname === '/settings' && !document.getElementById('layout').hidden && !!document.querySelector('#settings-page .settings-layout') && !document.querySelector('#settings-page .settings-loading')",
+        Duration::from_secs(15),
+    );
+    let marked = browser.eval(&page, "(() => { const l = document.querySelector('#settings-page .settings-layout'); if (!l) return false; l.dataset.e2e = 'kept'; return true; })()")? == json!(true);
+    // past the older load's wait, and its load had it gone on
+    let past = browser.until(&page, "performance.now() - window.__refusedAt > 4000", Duration::from_secs(10));
+    let now = browser.eval(&page, "({ path: location.pathname, kept: document.querySelector('#settings-page .settings-layout')?.dataset.e2e === 'kept', me: window.__me, said: window.__said })")?;
+    s.ok(
+        "a move back or forward while the page's load waits out a deploy begins a newer load, and the older one does nothing more: it asks no more, and the settings the newer one opened stay as they are, never opened again under the person",
+        waiting && opened && marked && past && now["path"] == "/settings" && now["kept"] == true && now["me"] == 3 && !did_not_load(&now["said"]),
+        format!("waited: {waiting}, opened: {opened}, marked: {marked}, past its wait: {past}, now {now}"),
+    );
     browser.close(page)?;
     Ok(())
 }
