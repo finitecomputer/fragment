@@ -1105,6 +1105,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     add_skills_ui(s, api, &mut b, &page, &session)?;
     skills_ui(s, api, &mut b, &page, &session)?;
     connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
+    settings_race_ui(s, api, &mut b, &page, &session)?;
     notice_ui(s, &mut b, &page, &chat, &shots)?;
     models_ui(s, api, &mut b, &page, &session, &shots)?;
     computer_ui(s, api, &mut b, &page, &session, &shots)?;
@@ -2370,6 +2371,39 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let view = shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[])?;
     let back = view.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).is_some_and(|a| a["connections"].is_null());
     s.ok("pressed again, it may use every provider again (null)", again && back, &view);
+    Ok(())
+}
+
+/// Two loads of settings at once (#441): the first one's read of the
+/// connections answered (no key yet) and held, the person's own key saved,
+/// and settings opened again, which show it set; the first then let go and
+/// finished (`HELD_SETTLED`), the row still says set, and the page is still
+/// the second load's: an older load never draws over a newer one. The key
+/// is taken away again for the checks after.
+fn settings_race_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let row = format!("#settings-connections [data-provider={:?}]", crate::SWAP_OWN);
+    let state = format!("document.querySelector('{row}')?.dataset.state");
+    anyhow::ensure!(b.until(page, &format!("location.pathname === '/settings' && {state} === 'not_set'"), wait), "settings show {} not set", crate::SWAP_OWN);
+    b.eval(page, &hold("GET", "^/api/connections$", Hold::Answer))?;
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    let key = format!("/api/connections/{}/key", crate::SWAP_OWN);
+    let saved = shell(api, session, "PUT", &key, Some(&json!({ "key": "mail-race-e2e-55aa" })), &[])?;
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    let newer = b.until(page, &format!("{state} === 'set'"), wait);
+    b.eval(page, "(window.__held.newer = document.querySelector('#settings-page .settings-layout'), window.__held.release?.(), true)")?;
+    let settled = b.until(page, HELD_SETTLED, wait);
+    let after = b.eval(page, &format!("({{ state: {state} ?? null, same: document.querySelector('#settings-page .settings-layout') === window.__held.newer }})"))?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "two loads of settings at once: the older one, whose read of the connections said no key and answered last, draws nothing over the newer one; the row stays set",
+        held && saved.status == 200 && newer && settled && after == json!({ "state": "set", "same": true }),
+        json!({ "held": held, "saved": saved.status, "newer": newer, "settled": settled, "after": after }),
+    );
+    shell(api, session, "DELETE", &key, None, &[])?;
+    b.reload(page)?;
+    anyhow::ensure!(b.until(page, &format!("{state} === 'not_set'"), wait), "settings show {} not set again", crate::SWAP_OWN);
     Ok(())
 }
 
