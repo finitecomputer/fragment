@@ -2714,8 +2714,10 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
         s.ok("the Connections page has agents to show", false, &computers);
         return Ok(());
     };
-    // the person connects Google, and reading their connections tells their computer
+    // the person connects Google (as another account than their sign-in here),
+    // and reading their connections tells their computer
     s.workos.connect(email, crate::SWAP_CONNECTION, true);
+    s.workos.label(email, crate::SWAP_CONNECTION, "their-google@gmail.test");
     shell(api, session, "GET", "/api/connections", None, &[])?;
     let replies = || {
         shell(api, session, "GET", &format!("/api/f/{chat}/channels/chat"), None, &[])
@@ -2757,6 +2759,8 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
         &got,
     );
     s.ok("each row names which agents may use it: all of them, by default", got.as_array().is_some_and(|l| l.iter().all(|r| r[3] == agents.len())), &got);
+    let accounts = b.eval(page, "[...document.querySelectorAll('#settings-connections [data-account]')].map((a) => [a.closest('[data-provider]').dataset.provider, a.textContent])")?;
+    s.ok("a connection's row names the account it is connected to, and no other row names one", accounts == json!([[crate::SWAP_CONNECTION, "their-google@gmail.test"]]), &accounts);
     s.ok(
         "and this month's use by agent: a connection's calls counted, an operator key's with its cost",
         counted && of(crate::SWAP_CONNECTION)[4] == json!([[lead, 1, 0]]) && of("perplexity")[4] == json!([[lead, 1, perplexity_charge]]),

@@ -49,6 +49,7 @@ use worker::*;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::fragment::json_response;
+use crate::keys::PipesAccount;
 use crate::registry::calls::SubjectOf;
 use crate::routed::Signed;
 
@@ -70,22 +71,28 @@ pub async fn workos_user(env: &Env, cfg: &Config, who: &str) -> CellResult<Optio
 /// whose WorkOS user `user` finds (`workos_user`, or the one their computer
 /// keeps), asked only when the catalog has a connection.
 pub async fn connection_states(env: &Env, cfg: &Config, user: impl std::future::Future<Output = CellResult<Option<String>>>) -> CellResult<BTreeMap<String, ProviderState>> {
+    Ok(connection_accounts(env, cfg, user).await?.into_iter().map(|(p, a)| (p, a.state)).collect())
+}
+
+/// Each connection's account for a person, as Pipes says (`connection_states`
+/// with the account each is, as its person knows it).
+pub async fn connection_accounts(env: &Env, cfg: &Config, user: impl std::future::Future<Output = CellResult<Option<String>>>) -> CellResult<BTreeMap<String, PipesAccount>> {
     let connections: Vec<&str> = cfg.providers.providers().iter().filter(|p| p.kind == Kind::Connection).map(|p| p.name.as_str()).collect();
-    let mut states = BTreeMap::new();
+    let mut accounts = BTreeMap::new();
     if connections.is_empty() {
-        return Ok(states);
+        return Ok(accounts);
     }
     let user = user.await?;
     let api = &cfg.workos()?.api;
     // at most `catalog::PROVIDERS_MAX` providers, one question each
     for provider in connections {
-        let state = match &user {
+        let account = match &user {
             Some(u) => crate::keys::pipes_state(env, api, provider, u).await?,
-            None => ProviderState::NotConnected,
+            None => PipesAccount { state: ProviderState::NotConnected, label: None },
         };
-        states.insert(provider.to_string(), state);
+        accounts.insert(provider.to_string(), account);
     }
-    Ok(states)
+    Ok(accounts)
 }
 
 pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, method: Method, rest: &[&str], body: &[u8]) -> CellResult<Response> {
@@ -99,7 +106,8 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
     let computer = fragment_core::computer::default_computer_of(who);
     match (method.clone(), rest) {
         (Method::Get, []) => {
-            let states = connection_states(env, cfg, workos_user(env, cfg, who)).await?;
+            let accounts = connection_accounts(env, cfg, workos_user(env, cfg, who)).await?;
+            let states: BTreeMap<&String, ProviderState> = accounts.iter().map(|(p, a)| (p, a.state)).collect();
             // the person's computer keeps them, for its guest's next read; one
             // not made yet has nothing to tell, and so no own key either
             let own: Vec<String> = match crate::computer::ask(env, &computer, "computer/own-keys", &json!({ "connections": states })).await {
@@ -125,6 +133,7 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                     price: p.price.map(|pr| ProviderPrice { micros: pr.micros, per: pr.per }),
                     sign_in: p.oauth.as_ref().map(|o| ProviderSignIn { manage: o.manage.clone() }),
                     models: p.models.as_ref().map(|m| m.offer.iter().map(|o| ProviderModel { id: o.id.clone(), name: o.name.clone() }).collect()),
+                    account: accounts.get(&p.name).and_then(|a| a.label.clone()),
                 })
                 .collect();
             json_response(&Providers { providers })

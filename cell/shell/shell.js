@@ -2695,6 +2695,12 @@ function connectionsSection(linked, uses) {
     const stateName = p.signIn ? (p.state === "set" ? "Connected" : "Not connected") : PROVIDER_STATE[p.state] ?? p.state;
     const st = el("span", `provider-state ${p.state}`, stateName);
     identity.append(st);
+    // which account a connection is: the person's sign-in here may be another
+    if (p.account) {
+      const account = el("span", "provider-account", p.account);
+      account.dataset.account = p.account;
+      identity.append(account);
+    }
     head.append(identity);
     row.append(head);
     const actions = el("div", "settings-actions");

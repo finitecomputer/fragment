@@ -75,6 +75,9 @@ struct State {
     fail_revoke: bool,
     /// Connected accounts deleted (user id, provider), each asked once.
     deleted: Vec<(String, String)>,
+    /// Connected accounts' labels (`account_display_name`), as imported.
+    labels: HashMap<(String, String), String>,
+    omit_id_token: bool,
 }
 
 impl State {
@@ -175,8 +178,11 @@ fn now_s() -> i64 {
 
 impl WorkOs {
     pub fn connection_oauth(&self) -> Value {
-        json!({ "authorize": format!("{}/test-oauth/authorize", self.url), "exchange": format!("{}/test-oauth/token", self.url), "client_id": "mock-connection-client", "scopes": ["mail.read", "files.read"], "revoke": format!("{}/test-oauth/revoke", self.url) })
+        json!({ "authorize": format!("{}/test-oauth/authorize", self.url), "exchange": format!("{}/test-oauth/token", self.url), "client_id": "mock-connection-client", "scopes": ["mail.read", "files.read", "openid"], "revoke": format!("{}/test-oauth/revoke", self.url) })
     }
+
+    /// The next code exchange answers no ID token, as a provider asked for no `openid`.
+    pub fn omit_next_id_token(&self) { self.state.lock().expect("workos state").omit_id_token = true; }
 
     /// `gate`'s requests wait from now until `resume`.
     pub fn pause(&self, gate: Gate) {
@@ -265,8 +271,17 @@ impl WorkOs {
                     }
                     let access = s.next("mock_access");
                     let refresh = s.next("mock_refresh");
+                    let mut grant = json!({ "access_token": access, "refresh_token": refresh, "token_type": "Bearer", "expires_in": 3600, "scope": scopes });
+                    // OpenID Connect's ID token beside the grant when `openid` was asked
+                    // for, unsigned as the fake's AuthKit tokens are: its account's
+                    // email, for this client
+                    if scopes.split(' ').any(|s| s == "openid") && !std::mem::take(&mut s.omit_id_token) {
+                        let b64 = |v: Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
+                        let claims = json!({ "iss": "https://oauth.test", "aud": "mock-connection-client", "sub": account, "email": format!("{account}@oauth.test"), "email_verified": true });
+                        grant["id_token"] = format!("{}.{}.fake", b64(json!({ "alg": "none", "typ": "JWT" })), b64(claims)).into();
+                    }
                     s.oauth_grants.insert(access.clone(), (refresh.clone(), account));
-                    Response::json(200, &json!({ "access_token": access, "refresh_token": refresh, "token_type": "Bearer", "expires_in": 3600, "scope": scopes }))
+                    Response::json(200, &grant)
                 }
                 // RFC 7009 as Google answers it: a token Pipes or the provider handed out, or 400
                 ("POST", "/test-oauth/revoke") => {
@@ -289,6 +304,13 @@ impl WorkOs {
                     let Some((refresh, account)) = s.oauth_grants.get(body["access_token"].as_str().unwrap_or("")).cloned() else { return problem(422, "invalid_tokens", "not issued here"); };
                     if body["refresh_token"] != refresh || !body["expires_at"].is_string() || body["state"] != "connected" { return problem(422, "invalid_tokens", "token combination"); }
                     s.pipes.insert((user.into(), provider.into()), true);
+                    // a string sets the label and null clears it; omitted, an update keeps it
+                    match body.get("account_display_name") {
+                        Some(Value::String(label)) => { s.labels.insert((user.into(), provider.into()), label.clone()); }
+                        Some(Value::Null) => { s.labels.remove(&(user.to_string(), provider.to_string())); }
+                        _ if req.method == "POST" => { s.labels.remove(&(user.to_string(), provider.to_string())); }
+                        _ => {}
+                    }
                     s.imports.push((user.into(), provider.into(), account));
                     Response::json(if req.method == "POST" { 201 } else { 200 }, &json!({ "id": format!("conn_{user}_{provider}"), "user_id": user, "state": "connected" }))
                 }
@@ -400,12 +422,14 @@ impl WorkOs {
                     let rest = &p["/user_management/users/".len()..];
                     let Some((user, provider)) = rest.split_once("/connected_accounts/") else { return problem(404, "not_found", "no such route") };
                     s.states_read += 1;
+                    let label = s.labels.get(&(user.to_string(), provider.to_string())).cloned();
                     match s.pipes.get(&(user.to_string(), provider.to_string())).copied() {
                         None => problem(404, "not_found", "no connected account"),
                         Some(authorized) => Response::json(
                             200,
                             &json!({
                                 "object": "connected_account", "id": format!("conn_{user}_{provider}"), "user_id": user, "organization_id": null,
+                                "account_display_name": label,
                                 "scopes": [], "state": if authorized { "connected" } else { "needs_reauthorization" },
                                 "created_at": "2026-10-01T00:00:00.000Z", "updated_at": "2026-10-01T00:00:00.000Z",
                             }),
@@ -421,6 +445,7 @@ impl WorkOs {
                     match s.pipes.remove(&(user.to_string(), provider.to_string())) {
                         None => problem(404, "not_found", "no connected account"),
                         Some(_) => {
+                            s.labels.remove(&(user.to_string(), provider.to_string()));
                             s.deleted.push((user.into(), provider.into()));
                             Response::bytes(204, "text/plain", vec![])
                         }
@@ -489,6 +514,14 @@ impl WorkOs {
         let mut s = self.state.lock().expect("workos state");
         let user = s.user_for(email);
         s.pipes.insert((user.id, provider.to_string()), authorized);
+    }
+
+    /// `email`'s account at `provider` is labeled `label` (its
+    /// `account_display_name`), as a connect through the platform sets it.
+    pub fn label(&self, email: &str, provider: &str, label: &str) {
+        let mut s = self.state.lock().expect("workos state");
+        let user = s.user_for(email);
+        s.labels.insert((user.id, provider.to_string()), label.to_string());
     }
 
     /// How many connected accounts' states were read.

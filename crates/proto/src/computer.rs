@@ -166,6 +166,11 @@ pub struct ProviderView {
     /// The models an own key's provider offers for the person's agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<ProviderModel>>,
+    /// The account a connection is connected to, as its provider named it
+    /// when the person connected it (its email): shown to them, never
+    /// trusted for access. None when the provider gave none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 /// An own key's sign-in, as its person sees it.

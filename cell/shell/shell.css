@@ -562,6 +562,7 @@ iframe[data-blocked] { display: none; }
 .provider-name { font-weight: 600; }
 .provider-kind { font-size: 12px; color: var(--text-tertiary); }
 .provider-state { font-size: 13px; color: var(--text-secondary); }
+.provider-account { font-size: 12.5px; color: var(--text-secondary); overflow-wrap: anywhere; }
 .provider-state.connected, .provider-state.set, .provider-state.offered { color: var(--success); }
 .provider-state.needs_reauthorization { color: var(--danger-text); }
 .provider-agents, .provider-uses { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; font-size: 13px; }
