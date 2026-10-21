@@ -65,6 +65,9 @@ enum Shape {
     /// one key a test value), the fallback and vision on Workers AI's
     /// GLM-5.3 Flash.
     FinitePrivate,
+    /// As `Plain`, with no Stripe (no `stripe` in its config): billing
+    /// off, as finite.chat launched, every seat an operator's comp.
+    SellsNothing,
 }
 
 /// Finite Private's key on a node shaped as Finite's (`Shape::FinitePrivate`):
@@ -511,6 +514,14 @@ impl Suite {
         started
     }
 
+    /// Starts the node with no Stripe (`Shape::SellsNothing`): billing off.
+    pub fn start_selling_nothing(&mut self) -> Result<Api> {
+        self.shape = Shape::SellsNothing;
+        let started = self.start(false);
+        self.shape = Shape::Plain;
+        started
+    }
+
     fn start_shaped(&mut self, shape: Shape) -> Result<Api> {
         self.shape = shape;
         let started = self.start(false);
@@ -562,7 +573,7 @@ impl Suite {
                 api_key: WORKOS_KEY.into(),
                 api_url: Some(self.workos.node().url.clone()),
             }),
-            stripe: Some(devstack::StripeVars {
+            stripe: (self.shape != Shape::SellsNothing).then(|| devstack::StripeVars {
                 key: STRIPE_KEY.into(),
                 webhook_secret: STRIPE_WEBHOOK.into(),
                 api_url: Some(self.stripe.node().url.clone()),
@@ -571,7 +582,7 @@ impl Suite {
             }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
-                Shape::Plain | Shape::FinitePrivate => format!("http://127.0.0.1:{}", self.port),
+                Shape::Plain | Shape::FinitePrivate | Shape::SellsNothing => format!("http://127.0.0.1:{}", self.port),
             },
             operators: Some(
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
@@ -616,7 +627,7 @@ impl Suite {
     fn suffix(&self) -> &'static str {
         match self.shape {
             Shape::TwoSites => BOATS,
-            Shape::Plain | Shape::FinitePrivate => SUFFIX,
+            Shape::Plain | Shape::FinitePrivate | Shape::SellsNothing => SUFFIX,
         }
     }
 
