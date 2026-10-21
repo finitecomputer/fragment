@@ -1301,9 +1301,11 @@ the provider's own hosts.
   - is a connection its owner has not connected, or must authorize again:
     403 `not_connected`; an own key its owner has not given: 403
     `not_connected`;
-  - is an operator key's, and its owner's ledger refuses to hold the
-    call's price: 402 or 403, with the ledger's reason. A ledger that does
-    not answer refuses it too (5xx), since a key is the operator's money.
+  - is an operator key's, and its owner's ledger's gate refuses them (out
+    of credit, or a guest): 402 or 403, with the ledger's reason. The gate
+    is what the router's isolate heard within the minute (docs/ledger.md,
+    "The gate"), and a ledger that does not answer refuses nothing
+    (decision 62).
 
   Otherwise each placeholder's place gets its credential: a header is its
   format around it (`Bearer sk-…`, whatever scheme word the guest wrote), a
@@ -1319,12 +1321,13 @@ the provider's own hosts.
   host with no placeholder goes on as it
   came; a body is sent as it came, read whole (at most 32 MiB); a redirect
   is never followed (the guest follows it, without the credential).
-- **An operator key's call is held first**, as a model call is
-  (docs/ledger.md): its price (the price book's and the margin) is reserved
-  on the agent's owner's ledger (`key:<computer>:…`) before the request
-  goes on. Once the provider answers (anything under 500), the call
-  settles at that price; one it did not answer is released. Then every
-  call is counted as the agent's
+- **An operator key's call is charged after it**, as a model call is
+  (docs/ledger.md): once the provider answers (anything under 500), its
+  price (the price book's and the margin) is charged to the agent's
+  owner's ledger (`key:<computer>:…`, as the agent), on the ledger's queue,
+  never in the answer's way; one it did not answer is charged nothing.
+  Before it goes on, the owner's standing is read through the gate (the
+  refusals above). Then every call is counted as the agent's
   in the computer's `uses`: by month, provider and agent, its calls and
   what they were charged (a connection's and an own key's are counted,
   never charged). Its owner reads them (`GET /api/computers/{id}/uses`,
@@ -2252,9 +2255,9 @@ for a host) and finds the same `HOME`, `~` and modes.
   under way then, to its own failure), or to the
   save that works first (Paul, 2026-10-08; "What its owner is told").
 - Model calls bill the agent's owner, through the platform's model
-  route. Each operator key's call is held on the agent's owner's ledger
-  before it is made, and settled once the provider answered, at the key's
-  price and the margin (`key:<computer>:…`; decision 37); a catalog's
+  route. Each operator key's call is charged to the agent's owner's
+  ledger once the provider answered, at the key's price and the margin
+  (`key:<computer>:…`; decisions 37 and 62); a catalog's
   operator key always has a price (its own or
   the price book's list price). A connection's call and an own key's are
   counted, never charged; every call is in the computer's `uses`.

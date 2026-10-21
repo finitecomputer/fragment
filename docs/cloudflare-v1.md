@@ -719,6 +719,9 @@ speaking Cloudflare's APIs) returns once this product works.
     auth as its row says; a person's own keys are a third kind (`own`),
     sealed by their computer and never metered. The managed skills read
     the variables.
+    Status (2026-10-21, decision 62): an operator key's call is no longer
+    held first, nor refused when the ledger does not answer: it asks the
+    cached gate, and is charged after the provider answered.
 38. **Routines are fragment cron.** An agent's routines are its
     fragment's cron triggers, not Hermes' own scheduler, which is turned
     off. A trigger posts to a channel the agent's bridge subscribes to,
@@ -1265,8 +1268,10 @@ Paul:
       calls are read through it. Model calls (the route's chat calls,
       decisions and transcriptions) are gated by it and charged after
       their answers (`claude/models-charged-after`); one that reports no
-      usage is charged nothing, said aloud. Operator keys and AI steps
-      follow, one kind a pull request.
+      usage is charged nothing, said aloud. So are operator keys'
+      calls through the swap (`claude/keys-charged-after`): gated, and
+      charged once the provider answered; a ledger that does not answer
+      no longer refuses them. AI steps follow.
 
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 

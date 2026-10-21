@@ -258,7 +258,8 @@ interrupt every request"):
   route, and a computer's model intercept through it) asks
   `may_spend(agent_turn)` of the agent's owner, and `fragment_open` of a
   fragment someone else owns that it spends in for someone else
-  (cell/src/models.rs `gate`). A fragment's writes ask
+  (cell/src/models.rs `gate`); so does an operator key's call through the
+  swap (the router's isolate too: cell/src/computer.rs `egress_swap`). A fragment's writes ask
   `may_spend(write)` of its owner (cell/src/meter.rs `read_only`): 402
   past the overdraft. A test fleet's `forget-standing` lever (docs/api.md)
   makes an isolate's gate forget every answer, as its ledger's
@@ -401,15 +402,16 @@ mark sends the same batch again, which answers as before.
   a reservation holds 1,471 (Clef-flash's 24,576 tokens), 24,773
   (Clef's 65,536) or 15,120 (Clef-omni's 64,000), releasing what was
   unused on settlement.
-- **Operator keys** (decision 37): reserved and settled the same way as
-  model calls. Before the call, the intercept reserves one `key` call at
-  its price (`key:<computer>:<12 hex>`, as the agent, on its owner's
-  ledger). A refusal, or a ledger that does not answer, refuses the call:
-  a key is the operator's money. Once the provider answered (under 500),
-  the call settles at that one call, and the computer counts it with its
-  charge (docs/computers.md). A call the provider did not answer is
-  released. A settle or release that does not land is charged by the
-  sweep.
+- **Operator keys** (decisions 37 and 62): gated and charged the same
+  way as model calls. Before the call, the swap asks the gate of the
+  agent's owner (`may_spend(agent_turn)`): only a refusal stops it, and a
+  ledger that does not answer refuses nothing. Once the provider answered
+  (under 500), each operator key's call is one `key` row at its price
+  (`key:<computer>:<12 hex>`, as the agent, naming the computer) on its
+  owner's ledger, sent on the ledger's queue after the answer, and the
+  computer counts it with its charge, priced with the configured book
+  (docs/computers.md). A call the provider did not answer is charged
+  nothing.
 - **Not metered: a person's own keys** (decisions 37 and 60). Their own
   key's calls, an agent's model calls on their own OpenRouter account
   among them, are paid by their account at the provider. The computer
