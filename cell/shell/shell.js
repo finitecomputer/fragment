@@ -2505,6 +2505,38 @@ const money = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style
 function connectionsSection(linked, uses) {
   const s = section("Connections");
   s.id = "settings-connections";
+  const owner = state.me.id;
+  const current = () => state.page === "Settings" && state.me.id === owner && s.isConnected;
+  function removal(p, row, label) {
+    const button = el("button", "quiet", label);
+    button.type = "button";
+    button.dataset.action = label.toLowerCase();
+    const said = el("p", "muted provider-detail");
+    said.setAttribute("role", "status");
+    said.hidden = true;
+    row.append(said);
+    button.onclick = async () => {
+      if (button.disabled) return;
+      button.disabled = true;
+      said.hidden = true;
+      said.textContent = "";
+      try {
+        await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}/key`);
+      } catch {
+        // A lost response is not proof that the key stayed or was removed.
+        // Keep the last confirmed state and never echo a server's error text.
+        if (current()) {
+          said.textContent = "Could not confirm removal. Try again.";
+          said.hidden = false;
+        }
+        button.disabled = false;
+        return;
+      }
+      // A late result must not reopen Settings or replace a newer section.
+      if (current()) await openSettings(false);
+    };
+    return button;
+  }
   const offered = linked?.providers ?? [];
   if (!offered.length) {
     s.append(el("p", "muted", linked ? "This platform offers none yet." : "Your connections could not be read."));
@@ -2569,14 +2601,7 @@ function connectionsSection(linked, uses) {
         actions.append(go);
         if (p.models?.length) details.push(el("span", "muted provider-detail", `Your ${providerName(p.provider)} account pays for its models; then pick one for an agent under Agents.`));
       } else {
-        const off = el("button", "quiet", "Disconnect");
-        off.type = "button";
-        off.dataset.action = "disconnect";
-        off.onclick = async () => {
-          off.disabled = true;
-          await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}/key`).catch(() => {});
-          await openSettings(false);
-        };
+        const off = removal(p, row, "Disconnect");
         const manage = el("a", "quiet", `Revoke the key at ${providerName(p.provider)}`);
         manage.href = p.signIn.manage;
         manage.target = "_blank";
@@ -2605,13 +2630,7 @@ function connectionsSection(linked, uses) {
       };
       actions.append(form);
       if (p.state === "set") {
-        const remove = el("button", "quiet", "Remove");
-        remove.type = "button";
-        remove.onclick = async () => {
-          remove.disabled = true;
-          await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}/key`).catch(() => {});
-          await openSettings(false);
-        };
+        const remove = removal(p, row, "Remove");
         actions.append(remove);
       }
     }
