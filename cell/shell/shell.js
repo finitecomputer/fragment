@@ -2961,7 +2961,16 @@ async function welcome() {
 const SEAT_WAIT_MS = 30_000;
 async function seated(session) {
   if (session) {
-    const mine = await api("POST", `/api/billing/sessions/${encodeURIComponent(session)}`, {});
+    // a refusal said plainly, with what to do (Try again retries it; the
+    // platform's words go to the console, for us)
+    const mine = await api("POST", `/api/billing/sessions/${encodeURIComponent(session)}`, {}).catch((e) => {
+      console.warn("A seat's Checkout return was not applied:", e);
+      throw new Error(
+        e.status === 404
+          ? "This payment wasn't found. Choose a seat to start again."
+          : "We couldn't confirm your payment yet. If you were charged, try again in a moment.",
+      );
+    });
     if (!mine.seat?.good) throw new Error("Your payment has not reached us yet: try again in a moment.");
     history.replaceState(null, "", "/");
   }

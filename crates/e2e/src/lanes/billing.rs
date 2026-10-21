@@ -1019,6 +1019,16 @@ fn press(text: &str) -> String {
 }
 
 /// Clicks the first element `selector` matches; answers whether there was one.
+/// The page's billing writes (every call to `/api/billing/…`, `/api/seat…`
+/// or `/api/org/…` but a read) refused, each with `window.__next`'s status
+/// (then 503 again) and the platform's words for the test; what it warns
+/// of in the console kept (`window.__warned`), and every confirm said yes.
+const REFUSE_BILLING: &str = "(() => { const real = window.fetch; window.__next = 503; window.__warned = []; const warn = console.warn; \
+    console.warn = (...a) => { window.__warned.push(a.map(String).join(' ')); warn(...a); }; window.confirm = () => true; \
+    window.fetch = async (url, o) => { if ((o?.method ?? 'GET') === 'GET' || !/^\\/api\\/(billing\\/|seat|org\\/)/.test(String(url))) return real(url, o); \
+    const status = window.__next; window.__next = 503; \
+    return new Response(JSON.stringify({ error: 'refused', message: 'the platform said this for the test' }), { status, headers: { 'content-type': 'application/json' } }); }; return true; })()";
+
 fn click(selector: &str) -> String {
     format!("(() => {{ const e = document.querySelector({selector:?}); e?.click(); return !!e; }})()")
 }
@@ -1320,13 +1330,34 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     if !act(s, &mut b, &page, "the welcome's trial code", typed)? {
         return Ok(());
     }
-    let refused = b.until(&page, "[...document.querySelectorAll('#first-run-card .form-error')].some((e) => !e.hidden && /no such trial code/.test(e.textContent))", wait);
+    let refused = b.until(
+        &page,
+        "[...document.querySelectorAll('#first-run-card .form-error')].some((e) => !e.hidden && e.textContent === \"That trial code isn't one we know. Check it and try again.\") && !document.getElementById('first-run-card').innerText.includes('no such trial code')",
+        wait,
+    );
     let seen = b.eval(&page, SEEN)?;
     let _ = b.screenshot(&page, &shots.join("3-no-such-code.png"));
     s.ok(
-        "a trial code that is none is said on the welcome, which stays, its choices open again; nothing is bought",
+        "a trial code that is none is said on the welcome in plain words (never the platform's), which stays, its choices open again; nothing is bought",
         refused && seen["path"] == "/welcome" && seen["enabled"] == true && seat(api, &gus)["seat"].is_null(),
         &seen,
+    );
+    // a seat's Checkout return that names no payment: said plainly, with
+    // Try again and Choose a seat, which goes back to the welcome
+    b.eval(&page, "(location.assign('/welcome?checkout=cs_e2e_nonesuch'), true)")?;
+    let unfound = view(
+        &mut b,
+        &page,
+        "(() => { const c = document.getElementById('first-run-card'); const e = c?.querySelector('.form-error'); return !!e && !e.hidden && e.textContent === \"This payment wasn't found. Choose a seat to start again.\" && !c.innerText.includes('Stripe') && [...c.querySelectorAll('button')].some((b) => !b.hidden && b.textContent === 'Try again'); })()",
+        wait,
+    );
+    let card = b.eval(&page, "document.getElementById('first-run-card')?.innerText ?? ''")?;
+    b.eval(&page, &click_text("#first-run-card button", "Choose a seat"))?;
+    let chosen = view(&mut b, &page, WELCOMED, wait);
+    s.ok(
+        "a seat's Checkout return that names no payment says so in plain words (never the platform's), with Try again, and Choose a seat goes back to the welcome",
+        unfound && chosen && seat(api, &gus)["seat"].is_null(),
+        &card,
     );
 
     // ---- valid: the $200 seat paid; its return is the welcome's, then the first run
@@ -1456,6 +1487,41 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     );
     b.close(page)?;
 
+    // ---- every Billing and Org control whose call fails says so in plain
+    // words, never the platform's (which go to the console): each refused
+    // once by the page's fetch, by the status that picks its words
+    let page = b.open(&format!("{}/settings", api.base))?;
+    let ready = view(&mut b, &page, "!!document.querySelector('.billing-seats') && [...document.querySelectorAll('#settings-page label')].some((l) => l.textContent.includes('Let my computer sleep'))", wait);
+    b.eval(&page, REFUSE_BILLING)?;
+    let typed = |form: &str, email: &str| format!("(() => {{ const f = [...document.querySelectorAll('#settings-page form')].find((f) => f.textContent.includes({form:?})); f.querySelector('input[type=email]').value = {email:?}; f.requestSubmit(); return true; }})()");
+    let steps = [
+        ("the sleep switch", 503, "([...document.querySelectorAll('#settings-page label')].find((l) => l.textContent.includes('Let my computer sleep')).querySelector('input').click(), true)".to_string(), "That wasn't changed. Try again in a moment.".to_string()),
+        ("Buy credit", 503, click_text("#settings-page button", &format!("Buy {pack} of credit")), "Checkout didn't open. Try again in a moment.".to_string()),
+        ("Payment and invoices", 503, click_text("#settings-page button", "Payment and invoices"), "Payment and invoices didn't open. Try again in a moment.".to_string()),
+        (
+            "Remove seat, the org's last paid one",
+            400,
+            format!("([...document.querySelectorAll('.billing-seats tr')].find((r) => r.textContent.includes({teammate:?})).querySelector('button').click(), true)"),
+            "This is your org's last paid seat: to end it, cancel the subscription in Payment and invoices.".to_string(),
+        ),
+        ("Add a seat, offers used up today", 429, typed("Add a seat", "billing-page-more@e2e.test"), "Your org has sent as many offers as it can today. Try again tomorrow.".to_string()),
+        ("Add an admin", 503, typed("Add an admin", "billing-page-admin@e2e.test"), "No admin's place was offered to billing-page-admin@e2e.test. Try again in a moment.".to_string()),
+    ];
+    let mut said = vec![];
+    for (what, status, act, want) in steps {
+        b.eval(&page, &format!("(window.__next = {status}, true)"))?;
+        b.eval(&page, &act)?;
+        let shown = b.until(&page, &format!("[...document.querySelectorAll('#settings-page .billing-note')].some((n) => n.textContent === {want:?})"), wait);
+        said.push(json!({ "what": what, "said": shown }));
+    }
+    let seen = b.eval(&page, "({ notes: [...document.querySelectorAll('#settings-page .billing-note')].map((n) => n.textContent), server: document.body.innerText.includes('the platform said this for the test'), warned: window.__warned.filter((w) => w.includes('the platform said this for the test')).length })")?;
+    s.ok(
+        "every Billing and Org control whose call fails says what happened and what to do, in plain words by its refusal; the platform's words go to the console, never the page",
+        ready && said.iter().all(|x| x["said"] == true) && seen["server"] == false && seen["warned"] == 6,
+        json!({ "steps": said, "seen": seen }),
+    );
+    b.close(page)?;
+
     // ---- a guest offered a seat: the welcome shows the offer first (its
     // org, who made it, Accept and Decline); accepted, on to their first run
     let kai = guest(api, "billing-page-offered")?;
@@ -1556,10 +1622,10 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = b.screenshot(&page, &shots.join("7-not-theirs.png"));
     let chose = b.eval(&page, &press("Choose a seat"))? == json!(true) && b.until(&page, &format!("{WELCOMED} && location.search === ''"), wait);
     s.ok(
-        "another's Checkout returned is refused and said, and applies nothing, its address kept until then; Choose a seat goes back to the welcome's seats",
+        "another's Checkout returned is refused and said in plain words (never the platform's), and applies nothing, its address kept until then; Choose a seat goes back to the welcome's seats",
         failed
             && seen["search"].as_str().is_some_and(|q| q.contains("checkout="))
-            && seen["errors"].as_array().is_some_and(|e| e.iter().any(|t| t.as_str().is_some_and(|t| t.contains("no Checkout"))))
+            && seen["errors"].as_array().is_some_and(|e| e.iter().any(|t| t == "This payment wasn't found. Choose a seat to start again.") && !e.iter().any(|t| t.as_str().is_some_and(|t| t.contains("no Checkout"))))
             && chose
             && seat(api, &ida)["seat"].is_null(),
         &seen,

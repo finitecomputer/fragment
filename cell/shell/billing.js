@@ -40,7 +40,24 @@ export function seatGives(offer) {
  */
 let h = null;
 
-function button(text, onclick) {
+/**
+ * A billing failure, said plainly: what happened and what the person can
+ * do, never the platform's words, which go to the console for us. `known`:
+ * what to say for a refusal of a given status (the platform's refusals are
+ * typed by status here; several share one, so each says what covers them);
+ * `otherwise`: what to say for anything else (a fault, a dropped
+ * connection), with Try again only where its control stays to retry.
+ */
+function plainly(e, known, otherwise) {
+  console.warn("A billing call failed:", e);
+  if (e?.status === 401) return "You're signed out. Reload the page to sign in again.";
+  if (known?.[e?.status]) return known[e.status];
+  if (e?.status === 429) return "Too many tries just now. Try again in a few minutes.";
+  return otherwise;
+}
+
+// `failed(e)`: what its failure says (`plainly`)
+function button(text, onclick, failed) {
   const b = h.el("button", "quiet", text);
   b.type = "button";
   b.onclick = async () => {
@@ -49,13 +66,15 @@ function button(text, onclick) {
       await onclick();
     } catch (e) {
       // said beside it: under its offer, or at the end of its section
-      note(b.closest(".billing-offer, section"), e.message);
+      note(b.closest(".billing-offer, section"), failed(e));
     } finally {
       b.disabled = false;
     }
   };
   return b;
 }
+// a Checkout or Stripe's portal that did not open
+const NOT_OPENED = (what) => (e) => plainly(e, null, `${what} didn't open. Try again in a moment.`);
 
 /** A line of warning at the end of `box`, replacing the last one. */
 function note(box, text) {
@@ -99,8 +118,22 @@ function offers(mine, done) {
       const seat = await h.api("POST", `/api/seat/offers/${encodeURIComponent(o.id)}/${verb}`, {});
       await done(seat);
     };
+    const gone = "This offer isn't open any more: it was withdrawn or already answered.";
+    const accepted = (e) =>
+      plainly(
+        e,
+        {
+          404: gone,
+          400: `${o.org.name} isn't paying for seats right now, so its offer can't be taken yet. Ask its admins.`,
+          409: away
+            ? `You can't move yet: if you pay for ${mine.org.name}, cancel its subscription in Payment and invoices first; if you're its last admin, make someone else its admin first.`
+            : `You already have a seat in ${o.org.name}: decline this offer.`,
+        },
+        "The offer wasn't accepted. Try again in a moment.",
+      );
+    const declined = (e) => plainly(e, { 404: gone }, "The offer wasn't declined. Try again in a moment.");
     const actions = el("div", "settings-actions");
-    actions.append(button("Accept", answer("accept")), button("Decline", answer("decline")));
+    actions.append(button("Accept", answer("accept"), accepted), button("Decline", answer("decline"), declined));
     box.append(actions);
     return box;
   });
@@ -182,7 +215,24 @@ export function seatOffer(helpers, mine, trial) {
     try {
       await goCheckout(body);
     } catch (e) {
-      said.textContent = e.message;
+      said.textContent = body.trialCode
+        ? plainly(
+            e,
+            {
+              404: "That trial code isn't one we know. Check it and try again.",
+              400: "That trial code has ended.",
+              409: "That trial code can't be used: its places are taken, or you've had a trial already.",
+            },
+            "Checkout didn't open. Try again in a moment.",
+          )
+        : plainly(
+            e,
+            {
+              400: "Seats aren't on sale right now.",
+              409: "You may have a seat already. If your org pays for its seats, add yours in Settings, under your org.",
+            },
+            "Checkout didn't open. Try again in a moment.",
+          );
       said.hidden = false;
     } finally {
       for (const b of choices) b.disabled = false;
@@ -234,7 +284,9 @@ export async function billingSections(helpers, ledger, mine, back) {
     billing.append(said);
   }
   // an admin's org, and whether they are alone in it
-  const org = mine.admin ? await h.api("GET", "/api/org").catch((e) => ({ error: e.message })) : null;
+  const org = mine.admin
+    ? await h.api("GET", "/api/org").catch((e) => ({ error: plainly(e, { 403: "Only your org's admins see its seats." }, "Your org's seats couldn't be read. Open Settings again to try again.") }))
+    : null;
   const alone = org?.members?.length === 1;
   const seat = mine.seat;
   if (seat) {
@@ -243,17 +295,29 @@ export async function billingSections(helpers, ledger, mine, back) {
     // a seat's holder who is no admin leaves by their own yes, as they joined
     const leave = seat.admin
       ? null
-      : button(`Leave ${seat.org.name}`, async () => {
-          if (!confirm(`Leave ${seat.org.name}? Your seat there ends, and your agents stop. Nothing of yours is deleted.`)) return;
-          await h.api("POST", "/api/seat/leave", {});
-          await h.reopen();
-        });
+      : button(
+          `Leave ${seat.org.name}`,
+          async () => {
+            if (!confirm(`Leave ${seat.org.name}? Your seat there ends, and your agents stop. Nothing of yours is deleted.`)) return;
+            await h.api("POST", "/api/seat/leave", {});
+            await h.reopen();
+          },
+          (e) =>
+            plainly(
+              e,
+              {
+                409: `You pay for ${seat.org.name}: cancel its subscription in Payment and invoices first.`,
+                400: `You admin ${seat.org.name}: step down as its admin first, then leave.`,
+              },
+              `You're still in ${seat.org.name}. Try again in a moment.`,
+            ),
+        );
     if (!alone) billing.append(line("Org", seat.org.name + (seat.admin ? " (you admin it)" : ""), leave));
     if (seat.trialEnds) billing.append(line("Trial ends", new Date(seat.trialEnds * 1000).toLocaleDateString()));
     if (!seat.good) {
       billing.append(el("p", "settings-warning", "Your seat lapsed: your agents are stopped. Nothing of yours is gone."));
       // paid again at Checkout, where something is sold
-      if (offer) billing.append(seat.admin ? actionLine("Renewal", button("Pay again", () => goCheckout({}))) : el("p", "muted", "Ask your org's admin to pay for it again."));
+      if (offer) billing.append(seat.admin ? actionLine("Renewal", button("Pay again", () => goCheckout({}), NOT_OPENED("Checkout"))) : el("p", "muted", "Ask your org's admin to pay for it again."));
     }
     if (seat.good && seat.kind === "seat_always_on") {
       const sleeps = el("input");
@@ -264,7 +328,7 @@ export async function billingSections(helpers, ledger, mine, back) {
           await h.api("PUT", "/api/seat", { sleeps: sleeps.checked });
         } catch (e) {
           sleeps.checked = !sleeps.checked;
-          note(billing, e.message);
+          note(billing, plainly(e, { 400: "You don't hold a seat any more. Open Settings again to see where it went." }, "That wasn't changed. Try again in a moment."));
         }
       };
       const label = el("label", "settings-line");
@@ -289,7 +353,10 @@ export async function billingSections(helpers, ledger, mine, back) {
   // credit is a seat's (or a plan the deployment gives): a guest pays for
   // nothing, so has none to show
   if (ledger && !mine.guest) {
-    const topUp = offer && seat?.good ? button(`Buy ${price(offer.packMicros)} of credit`, async () => location.assign((await h.api("POST", "/api/billing/packs", {})).url)) : null;
+    const topUp =
+      offer && seat?.good
+        ? button(`Buy ${price(offer.packMicros)} of credit`, async () => location.assign((await h.api("POST", "/api/billing/packs", {})).url), NOT_OPENED("Checkout"))
+        : null;
     billing.append(line("Credit this month", `${usd(ledger.availableMicros)} left`, topUp));
   }
   if (!alone) return org ? [billing, orgSection(org, offer, mine.pays)] : [billing];
@@ -310,7 +377,11 @@ export async function billingSections(helpers, ledger, mine, back) {
 
 /** Stripe's portal: the org's card, invoices, and cancelling. */
 function portal() {
-  return button("Payment and invoices", async () => location.assign((await h.api("POST", "/api/billing/portal", {})).url));
+  return button(
+    "Payment and invoices",
+    async () => location.assign((await h.api("POST", "/api/billing/portal", {})).url),
+    (e) => plainly(e, { 403: "Only the person who pays for your org opens its payments." }, "Payment and invoices didn't open. Try again in a moment."),
+  );
 }
 
 /**
@@ -335,18 +406,51 @@ function orgSection(org, offer, pays) {
     const payer = !!m.person && m.person === org.payer;
     const role = el("td", null, [m.admin ? "admin" : "", m.seat ? KIND[m.seat] + (m.comped ? " (given)" : "") : "", payer ? "pays" : ""].filter(Boolean).join(", "));
     const actions = el("td");
+    const now = "Open Settings again to see your org as it is now.";
     if (m.seat && !m.comped && (!payer || pays)) {
-      actions.append(button("Remove seat", async () => {
-        if (!confirm(`Remove ${m.email}'s seat? Their agents stop.`)) return;
-        await h.api("DELETE", `/api/org/seats/${encodeURIComponent(m.id)}`);
-        await h.reopen();
-      }));
+      const removed = (e) =>
+        plainly(
+          e,
+          {
+            400: "This is your org's last paid seat: to end it, cancel the subscription in Payment and invoices.",
+            403: "That seat isn't one you can remove here: whoever pays ends theirs by canceling in Payment and invoices.",
+            404: `That seat is gone already. ${now}`,
+          },
+          `${m.email}'s seat wasn't removed. Try again in a moment.`,
+        );
+      actions.append(
+        button(
+          "Remove seat",
+          async () => {
+            if (!confirm(`Remove ${m.email}'s seat? Their agents stop.`)) return;
+            await h.api("DELETE", `/api/org/seats/${encodeURIComponent(m.id)}`);
+            await h.reopen();
+          },
+          removed,
+        ),
+      );
     }
     if (m.admin && org.members.filter((x) => x.admin && x.person).length > 1 && (!payer || pays)) {
-      actions.append(button("Not admin", async () => {
-        await h.api("DELETE", `/api/org/admins/${encodeURIComponent(m.id)}`);
-        await h.reopen();
-      }));
+      const stepped = (e) =>
+        plainly(
+          e,
+          {
+            409: "You can't step down yet: whoever pays stays an admin until the subscription is canceled in Payment and invoices.",
+            403: "Whoever pays steps down as admin only themselves.",
+            404: `${m.email} isn't an admin any more. ${now}`,
+          },
+          `${m.email} is still an admin. Try again in a moment.`,
+        );
+      actions.append(
+        button(
+          "Not admin",
+          async () => {
+            await h.api("DELETE", `/api/org/admins/${encodeURIComponent(m.id)}`);
+            await h.reopen();
+          },
+          stepped,
+        ),
+      );
     }
     tr.append(who, role, actions);
     table.append(tr);
@@ -362,13 +466,25 @@ function orgSection(org, offer, pays) {
   const go = el("button", "quiet", "Add a seat");
   go.type = "submit";
   add.append(email, go);
+  // what an offer of a seat or an admin's place that failed says
+  const offerFailed = (err, who, what, full) =>
+    plainly(
+      err,
+      {
+        400: `No ${what} was offered. Check the email; if it's right, your org may not be paying for seats right now (pay for yours first), or it has ${full} already.`,
+        403: `Only your org's admins offer ${what}s.`,
+        409: `${who} already has a seat here, or an offer waiting.`,
+        429: "Your org has sent as many offers as it can today. Try again tomorrow.",
+      },
+      `No ${what} was offered to ${who}. Try again in a moment.`,
+    );
   add.onsubmit = async (e) => {
     e.preventDefault();
     try {
       await h.api("POST", "/api/org/seats", { email: email.value.trim() });
       await h.reopen();
     } catch (err) {
-      note(box, err.message);
+      note(box, offerFailed(err, email.value.trim(), "seat", "as many seats as it can hold"));
     }
   };
   const admin = el("form", "settings-actions");
@@ -385,7 +501,7 @@ function orgSection(org, offer, pays) {
       await h.api("POST", "/api/org/admins", { email: adminEmail.value.trim() });
       await h.reopen();
     } catch (err) {
-      note(box, err.message);
+      note(box, offerFailed(err, adminEmail.value.trim(), "admin's place", "10 admins"));
     }
   };
   box.append(
