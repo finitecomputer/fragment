@@ -1925,7 +1925,7 @@ async function openSettings(push = true, failed = null) {
   leaveSidebar();
   // a credit pack's Checkout returning, before the ledger is read (its
   // settlement every load awaits, said by the one that renders)
-  const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => openSettings(false), noSeatSaid, switchForm };
+  const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => openSettings(false), noSeatSaid, switchForm, support: state.support };
   const back = await returning(billingHelpers);
   if (lost()) return;
   const [ledger, mySeat, linked, uses, access] = await Promise.all([

@@ -56,6 +56,18 @@ fn held_return(b: &mut Lease, api: &Api, session: &str, wait: Duration) -> Resul
     Ok((held && waiting && settled, seen))
 }
 
+/// What settings say of a pack's return that was not applied (billing.js
+/// `NOT_HERE`).
+const NOT_HERE: &str = "Your purchase isn't here yet. If you were charged, the credit arrives within a few minutes: open Settings again to see it.";
+
+/// A page's script, before the shell runs: its read of the computers
+/// names a help link (`support`, as a deployment's `support_url` does),
+/// and what it warns of in the console is kept (`window.__warned`).
+const HELP_AND_CONSOLE: &str = "if (window === window.top) { const real = window.fetch; window.fetch = async (url, o) => { const r = await real(url, o); \
+    if (String(url) !== '/api/computers' || o?.method !== 'GET' || !r.ok) return r; const body = await r.json(); \
+    return new Response(JSON.stringify({ ...body, support: 'mailto:help@e2e.test' }), { status: r.status, headers: { 'content-type': 'application/json' } }); }; \
+    const warn = console.warn; window.__warned = []; console.warn = (...a) => { window.__warned.push(a.map(String).join(' ')); warn(...a); }; }";
+
 fn seat(api: &Api, keys: &Keys) -> Value {
     api.signed(keys, "GET", "/api/seat", None).map(|r| r.body).unwrap_or(Value::Null)
 }
@@ -1420,9 +1432,29 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let (settled, seen) = held_return(&mut b, api, "cs_e2e_nonesuch", wait)?;
     s.ok(
         "a return that is refused, answering after settings were opened again: the settings shown say the purchase is not here yet",
-        settled && seen["text"].as_str().is_some_and(|t| t.contains("Your purchase is not here yet")),
+        settled && seen["text"].as_str().is_some_and(|t| t.contains(NOT_HERE)),
         &seen,
     );
+
+    // ---- a pack's return that is not applied (one Stripe never made) is
+    // said in plain words, what to do, and where to get help (the
+    // deployment's link: put in the page's read of the computers, as the
+    // local node names none); the platform's words go to the console
+    let refused = api.signed(&gus, "POST", "/api/billing/sessions/cs_e2e_nonesuch", Some(&json!({})))?;
+    let page = b.open_with_script(&format!("{}/settings?pack=cs_e2e_nonesuch", api.base), HELP_AND_CONSOLE)?;
+    let told = view(&mut b, &page, &format!("(document.getElementById('settings-page')?.innerText ?? '').includes({NOT_HERE:?})"), wait);
+    let seen = b.eval(
+        &page,
+        "({ text: document.getElementById('settings-page').innerText, help: [...document.querySelectorAll('#settings-page a')].find((a) => a.textContent === 'get help')?.getAttribute('href') ?? null, warned: window.__warned })",
+    )?;
+    let said = seen["text"].as_str().unwrap_or("");
+    let warned = seen["warned"].as_array().is_some_and(|l| l.iter().any(|w| w.as_str().is_some_and(|w| w.contains(refused.message()))));
+    s.ok(
+        "a pack's return that is not applied says so plainly: not here yet, the credit arrives within minutes if they were charged, and where to get help; the platform's words go to the console, never the page",
+        refused.status == 404 && told && said.contains(&format!("{NOT_HERE} If it doesn't, get help.")) && !said.contains(refused.message()) && seen["help"] == "mailto:help@e2e.test" && warned,
+        json!({ "seen": seen, "platform": refused.message() }),
+    );
+    b.close(page)?;
 
     // ---- a guest offered a seat: the welcome shows the offer first (its
     // org, who made it, Accept and Decline); accepted, on to their first run
