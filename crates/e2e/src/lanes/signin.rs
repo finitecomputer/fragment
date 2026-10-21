@@ -1074,6 +1074,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         );
     }
     browser_logout(s, api)?;
+    entry_page_widths(s, api)?;
 
     // sign-in's rows: bounded, and swept on the registry's alarm, never on a request
     // (paul is not in f: he says yes to it once, and its redemptions follow)
@@ -1262,6 +1263,59 @@ pub(super) fn switched_out(s: &mut Suite, browser: &mut crate::browser::Browser,
     let out = back && s.workos.held().is_none() && s.workos.ended().contains(&held) && !browser.cookies()?.iter().any(|c| c["name"] == "fragment_session");
     s.ok(what, out, format!("returned: {back}"));
     Ok(out)
+}
+
+/// The server-rendered entry/error pages use two shared styles. Exercise
+/// their actual routes in Chromium, including the mobile layout viewport;
+/// scrollWidth <= innerWidth alone can pass a page scaled down from 980px.
+fn entry_page_widths(s: &mut Suite, api: &Api) -> Result<()> {
+    let Some(mut browser) = s.browser()? else {
+        s.ok("Chrome is installed for entry-page layout (set CHROME_BIN)", false, "no Chrome found");
+        return Ok(());
+    };
+    let session = api.sign_in("entry-layout@e2e.test")?;
+    browser.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
+    let wait = Duration::from_secs(10);
+    // Neither callback has an authorization code or bound round trip. Both
+    // return local error pages; no provider authorization is initiated.
+    for (label, path, title, control) in [
+        ("cli", "/cli", "Add a fragment CLI", "input[name=code]"),
+        ("signout", "/auth/logout", "Sign out", "form[action='/auth/logout'] button"),
+        ("declined", "/auth/callback?error=access_denied&error_description=Sign-in%20was%20cancelled.", "Sign-in did not finish", "a[href='/auth/login']"),
+        ("unbound", "/auth/callback", "Sign-in did not start here", "a[href='/auth/login']"),
+    ] {
+        let page = browser.open(&format!("{}{path}", api.base))?;
+        let loaded = browser.until(&page, &format!("document.readyState === 'complete' && document.querySelector('h1')?.textContent === {title:?} && !!document.querySelector({control:?})"), wait);
+        anyhow::ensure!(loaded, "the {label} entry page loads: {}", browser.eval(&page, "document.body.innerText")?);
+        for (width, mobile) in [(320, true), (390, true), (768, false)] {
+            browser.viewport(&page, width, 900, mobile)?;
+            for scheme in ["light", "dark"] {
+                browser.color_scheme(&page, scheme)?;
+                let measured = browser.eval(&page, r#"(() => {
+                  const root = document.documentElement;
+                  const controls = [...document.querySelectorAll('a[href], button, input:not([type=hidden])')]
+                    .filter(el => el.getClientRects().length).map(el => {
+                      const r = el.getBoundingClientRect();
+                      return {tag: el.tagName, left: r.left, right: r.right, width: r.width};
+                    });
+                  return {viewport: innerWidth, client: root.clientWidth, scroll: root.scrollWidth,
+                    controls, contained: controls.length > 0 && controls.every(r => r.width > 0 && r.left >= 0 && r.right <= root.clientWidth + 1)};
+                })()"#)?;
+                s.ok(
+                    &format!("the {label} entry page fits {width}px in {scheme}, with its controls inside the viewport"),
+                    measured["viewport"] == width && measured["client"] == width
+                        && measured["scroll"].as_u64().is_some_and(|scroll| scroll <= u64::from(width) + 1)
+                        && measured["contained"] == true,
+                    &measured,
+                );
+                if width == 320 && scheme == "light" {
+                    browser.screenshot(&page, &s.scratch.join(format!("entry-{label}-phone.png")))?;
+                }
+            }
+        }
+        browser.close(page)?;
+    }
+    Ok(())
 }
 
 /// Chromium applies a form's CSP to HTTP redirects too. Drive the shell's
