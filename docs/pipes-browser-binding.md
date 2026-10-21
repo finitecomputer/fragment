@@ -81,7 +81,7 @@ is needed for this fix.
 | Google authorized redirect URI | `https://<staging-platform>/api/connections/google/callback` | `https://<production-platform>/api/connections/google/callback` | Path is shared; origins are separate |
 | OAuth endpoints and compatibility scopes | Reviewed endpoints/scopes below | Same protocol and reviewed scope set | Yes, subject to production consent-screen review |
 | Cloudflare binding | `CONNECTION_SECRET_GOOGLE`, existing staging client's secret in its store | Same binding name, production client's secret in its store | Binding name only; not secret values |
-| Deployment catalog | `connection_oauth` + store-name `key` in preview `DEPLOY_CONFIG` | Equivalent row in production `DEPLOY_CONFIG` | Shape only; client ID/store names/origin must be checked per environment |
+| Deployment catalog | `connection_oauth` + store-name `key` in fragment-deploy's `preview.jsonc` | Equivalent row in fragment-deploy's `production.jsonc` | Shape only; client ID/store names/origin must be checked per environment |
 | WorkOS provider | Existing staging Google integration, currently Disabled | Existing production integration, status to verify | Keep enablement separate and gated |
 | Canonical privacy-policy / terms URLs | **Pending placeholders**; not a blocker for the controlled External/Testing staging work | **Pending placeholders**; do not submit unfinished policies for production verification | Reuse the eventual approved canonical URLs; none are invented or published here |
 

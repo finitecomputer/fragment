@@ -148,16 +148,22 @@ environment (`preview` or `production`) holds the secrets
 also writes to `~/.config/fragment/secrets/cloudflare-api-token` as the
 DNS token, and the preview's `PREVIEW_TEST_SECRET`, which it writes to
 `~/.config/fragment/secrets/preview-test-secret`, each 0600, for that
-job alone. The config it deploys from is the secret `DEPLOY_CONFIG`, though
-it holds names and paths alone: the repo is public, and a variable is
-shown in its job's log. It names those two paths, and no
-`stripe.key_file`, which a runner lacks; a secret is never read back, so
-it is set from a file kept beside the config a deploy by hand takes, as
-one line of base64 (`base64 -w0 < <file> | gh secret set DEPLOY_CONFIG
---env <environment>`), which the job decodes, refusing one that is no
-base64 of a file with something in it. One line, as the runner masks
-each line of a secret as well as the whole: a config's lines of `{` or
-`}` alone would mask every brace in the job's logs.
+job alone. The config it deploys from is no secret: it holds names and
+paths alone, each secret named by its store name, never a value; it
+names those two paths, and no `stripe.key_file`, which a runner lacks.
+It is the environment's file in the private repo
+finitecomputer/fragment-deploy (`preview.jsonc` or `production.jsonc`,
+at the root of its `main`), kept out of this public repo and its logs,
+and readable and editable by the team, as a GitHub secret, never read
+back, was not. The job checks it out at `main` as it stands then, with
+the environment's secret `DEPLOY_REPO_TOKEN` (a fine-grained token with
+Contents · Read on that repo alone, which the checkout does not keep),
+refuses to go on without the token or the file, and prints the commit
+it deploys from, never the contents. So a change to a config is a
+commit there, which the environment's next deploy takes: the preview's
+at master's next green push, or a re-run of its `deploy` job;
+production's only at a deploy of Paul's, his next move of `production`
+or his re-run of its `deploy` job.
 `CLOUDFLARE_ACCOUNT_ID`, optional but recommended, is a secret only to be
 masked: the runner masks each secret its job names wherever it appears
 in the job's logs, so the account id in wrangler's and xtask's output
@@ -181,7 +187,7 @@ mints registry credentials for each side as wrangler mints its own
 source, push and pull for production's), never printed, and hands them
 to skopeo on its standard input, which keeps each login in a file of its
 own (mode 600, under `target/image-copy`, mode 700), removed as the try
-ends. It reads no `DEPLOY_CONFIG`; a push's Docker login, which wrangler
+ends. It reads no deploy config; a push's Docker login, which wrangler
 makes, keeps its registry credentials of 15 minutes on the runner.
 
 ## Placeholders and the operator's keys (Paul, 2026-10-04)

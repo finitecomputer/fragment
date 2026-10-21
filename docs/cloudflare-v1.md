@@ -82,13 +82,17 @@ speaking Cloudflare's APIs) returns once this product works.
    straight there or a commit whose master run is red or still running,
    runs the full tests first (Paul, 2026-10-20). Each
    deploys from a GitHub environment (`preview`, `production`) that only
-   its branch may use, holding its config whole (the secret
-   `DEPLOY_CONFIG`: names and paths, as a stranger's file is, kept out
-   of the public repo's logs) and its Cloudflare token; its images are
-   pinned by digest (`xtask deploy --pinned-only`), and one is built by
-   the Image workflow, run by hand, and copied by it, at its digest,
-   into production's registry once a round proves it (docs/computers.md,
-   "Stable and canary").
+   its branch may use, holding its Cloudflare token and a token that
+   reads its config: a file in the private repo
+   finitecomputer/fragment-deploy (`preview.jsonc`, `production.jsonc`;
+   names and paths, as a stranger's file is, no secret's value, kept out
+   of the public repo's logs), which the team can read and change by a
+   commit, the environment's next deploy taking it (Paul, 2026-10-21: it
+   was a GitHub secret, which no one could read back to edit); its
+   images are pinned by digest (`xtask deploy --pinned-only`), and one
+   is built by the Image workflow, run by hand, and copied by it, at its
+   digest, into production's registry once a round proves it
+   (docs/computers.md, "Stable and canary").
 4. **Self-deploy without forking.** Configuration lives in a file
    outside the repo: domains, the WorkOS environment, AI Gateway,
    pricing, the code.storage organization, and the default computer
