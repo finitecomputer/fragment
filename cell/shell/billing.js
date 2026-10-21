@@ -108,13 +108,23 @@ function offers(mine, done) {
 
 /**
  * A credit pack's Checkout returning (`/settings?pack=`): the credit
- * applied at once, whatever Stripe's webhook's timing. Answers what to say.
+ * applied at once, whatever Stripe's webhook's timing. It is the page's,
+ * settled once for every load of settings (a second press while it
+ * settles finds the query gone): each awaits it, so the one that renders
+ * reads the ledger after it and says how it went, and then no load says
+ * it again (`returnSaid`). Answers what to say.
  */
-export async function returning(helpers) {
+let settling = null;
+export function returning(helpers) {
   h = helpers;
   const pack = new URLSearchParams(location.search).get("pack");
-  if (!pack) return { said: null };
-  history.replaceState(null, "", location.pathname);
+  if (pack) {
+    history.replaceState(null, "", location.pathname);
+    settling = settle(pack);
+  }
+  return settling ?? Promise.resolve({ said: null });
+}
+async function settle(pack) {
   if (pack === "canceled") return { said: "Checkout was canceled: nothing was bought." };
   try {
     await h.api("POST", `/api/billing/sessions/${encodeURIComponent(pack)}`, {});
@@ -122,6 +132,10 @@ export async function returning(helpers) {
   } catch (e) {
     return { said: `Your purchase is not here yet: ${e.message}` };
   }
+}
+/** A return (`returning`'s) a load of settings has rendered: said once. */
+export function returnSaid(back) {
+  if (back.said) settling = null;
 }
 
 /**

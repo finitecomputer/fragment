@@ -15,7 +15,7 @@ import { colorOf } from "./agent-color.js";
 import { appIcon, icon } from "./icons.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
 import { createViewer } from "./viewer.js";
-import { billingSections, returning, seatGives, seatOffer } from "./billing.js";
+import { billingSections, returnSaid, returning, seatGives, seatOffer } from "./billing.js";
 
 const $ = (id) => document.getElementById(id);
 // New agents run on the cheap tier: GLM-5.3 Flash, DeepSeek V4 Flash its fallback (Paul, 2026-10-09).
@@ -1895,9 +1895,15 @@ function renderSettingsPage(page, sections) {
   };
   page.onscroll();
 }
+// Each load of settings is numbered, and only the latest renders, while
+// settings are shown: an older one that answers last (an action's reload, a
+// second press, Back) read older state, and is dropped (#441).
+let settingsLoads = 0;
 // `failed`: what the action that asked for this load says once it renders
 // (a failure's notice, [title, text]).
 async function openSettings(push = true, failed = null) {
+  const ticket = ++settingsLoads;
+  const lost = () => ticket !== settingsLoads || state.page !== "Settings";
   if (push) at(SETTINGS);
   // settings render with no notice: one of the page they came from stays
   // there, an action that worked takes its earlier failure's away, and
@@ -1917,9 +1923,11 @@ async function openSettings(push = true, failed = null) {
   renderHeading();
   renderChats();
   leaveSidebar();
-  // a credit pack's Checkout returning, before the ledger is read
+  // a credit pack's Checkout returning, before the ledger is read (its
+  // settlement every load awaits, said by the one that renders)
   const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => openSettings(false), noSeatSaid, switchForm };
   const back = await returning(billingHelpers);
+  if (lost()) return;
   const [ledger, mySeat, linked, uses, access] = await Promise.all([
     api("GET", "/api/ledger").catch(() => null),
     api("GET", "/api/seat").catch(() => null),
@@ -1927,6 +1935,7 @@ async function openSettings(push = true, failed = null) {
     state.computer ? api("GET", `/api/computers/${seg(state.computer.computer)}/uses`).catch(() => null) : null,
     api("GET", "/api/access").catch((e) => ({ error: e.message })),
   ]);
+  if (lost()) return;
   if (mySeat) setGuest(mySeat.guest);
   const emails = (state.me.subjects ?? []).map((x) => x.email).filter(Boolean);
   // who is signed in (their latest sign-in's email), signing out, and
@@ -1978,13 +1987,15 @@ async function openSettings(push = true, failed = null) {
   if (emails.length > 1) account.append(line("Sign-ins", emails.join(", ")));
   // the person's seat, credit and org (billing.js), and why agents stop
   const billing = await billingSections(billingHelpers, ledger, mySeat, back);
-  // everything that is theirs, to download (a guest's too: what is shared
-  // with them, named)
-  const data = dataSection();
+  if (lost()) return;
   // a guest has no agents to stop, nor a computer, skills or connections
-  // for them, nor apps to publish: a seat to get comes first, then who they are
+  // for them, nor apps to publish: a seat to get comes first, then who they
+  // are, then everything that is theirs, to download (what is shared with
+  // them, named); Your data is built only by a load that renders, as it
+  // reads its export again while one builds
   if (state.guest) {
-    renderSettingsPage(page, [...billing, account, data]);
+    returnSaid(back);
+    renderSettingsPage(page, [...billing, account, dataSection()]);
     return tell();
   }
   const standing = ledger?.standing?.standing;
@@ -2056,7 +2067,9 @@ async function openSettings(push = true, failed = null) {
   }) : [el("p", "muted", "None yet.")]));
   const connections = connectionsSection(linked, uses);
   const skills = await skillsSection();
-  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, buildSection(), data]);
+  if (lost()) return;
+  returnSaid(back);
+  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, buildSection(), dataSection()]);
   renderAgentFaces();
   tell();
 }
