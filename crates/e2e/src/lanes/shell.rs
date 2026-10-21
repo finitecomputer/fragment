@@ -2287,6 +2287,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     b.eval(page, "(document.getElementById('settings-connections').scrollIntoView(), true)")?;
     // the lane's pictures so far are there: `dir` would start it afresh
     let _ = b.screenshot(page, &s.scratch.join("shell-ui/desktop-connections.png"));
+    connection_usage_read_ui(s, b, page, &id)?;
     // a press narrows that agent from that provider, and the page says so
     b.eval(page, &format!("document.querySelector('{} [data-agent={lead:?}]').click(), true", row("perplexity")))?;
     let narrowed = b.until(page, &format!("document.querySelector('{} [data-agent={lead:?}]')?.getAttribute('aria-pressed') === 'false'", row("perplexity")), wait);
@@ -2304,6 +2305,44 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let back = view.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).is_some_and(|a| a["connections"].is_null());
     s.ok("pressed again, it may use every provider again (null)", again && back, &view);
     Ok(())
+}
+
+/// Hold/fail only the browser's usage GET. Other Settings reads and provider
+/// actions remain real, and Retry returns to the local node's confirmed counts.
+fn connection_usage_read_ui(s: &mut Suite, b: &mut Browser, page: &Page, computer: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let path = format!("/api/computers/{computer}/uses");
+    b.eval(page, &format!(r#"(() => {{
+      window.__usageFetch = window.fetch;
+      window.__usageMethods = [];
+      window.__holdUsage = true;
+      window.fetch = (input, options) => {{
+        const path = new URL(input.url ?? String(input), location.href).pathname;
+        if (path === {path:?}) {{
+          window.__usageMethods.push(options?.method ?? 'GET');
+          if (window.__holdUsage) {{
+            window.__holdUsage = false;
+            return new Promise(resolve => {{ window.__releaseUsage = () => resolve(new Response(JSON.stringify({{ message: 'secret-must-not-appear' }}), {{ status: 500, headers: {{ 'content-type': 'application/json' }} }})); }});
+          }}
+        }}
+        return window.__usageFetch(input, options);
+      }};
+      document.getElementById('settings').click();
+      return true;
+    }})()"#))?;
+    let checked = (|| -> Result<()> {
+        let loading = b.until(page, "typeof window.__releaseUsage === 'function' && document.querySelectorAll('#settings-connections .provider-uses[data-state=loading]').length > 0", wait);
+        s.ok("Connections renders while its usage GET waits, without claiming zero calls", loading && b.eval(page, "!document.getElementById('settings-page').hidden && !document.getElementById('settings-connections').innerText.includes('No calls yet') && window.__usageMethods.length === 1")? == true, "");
+        b.eval(page, "(window.__releaseUsage?.(), true)")?;
+        let failed = b.until(page, "document.querySelector('#settings-connections [data-action=connection-usage-retry]')?.disabled === false", wait);
+        s.ok("a failed usage GET shows a visible safe error and Retry, not No calls yet", failed && b.eval(page, "(() => { const s = document.getElementById('settings-connections'), b = s.querySelector('[data-action=connection-usage-retry]'); return b.getClientRects().length > 0 && s.innerText.includes('could not be read') && !s.innerText.includes('No calls yet') && !s.innerText.includes('secret-must-not-appear'); })()")? == true, "");
+        b.eval(page, "(() => { window.__usageSection = document.getElementById('settings-connections'); const b = document.querySelector('[data-action=connection-usage-retry]'); b?.click(); b?.click(); return true; })()")?;
+        let recovered = b.until(page, "document.querySelector('#settings-connections [data-provider=perplexity] [data-use]')?.dataset.calls === '1'", wait);
+        s.ok("Retry reads confirmed usage once, with no write and no Settings reload", recovered && b.eval(page, "document.getElementById('settings-connections') === window.__usageSection && window.__usageMethods.length === 2 && window.__usageMethods.every(m => m === 'GET') && !document.getElementById('settings-connections').innerText.includes('could not be read')")? == true, b.eval(page, "window.__usageMethods")?);
+        Ok(())
+    })();
+    b.eval(page, "(window.fetch = window.__usageFetch, delete window.__usageFetch, delete window.__releaseUsage, delete window.__usageSection, delete window.__usageMethods, delete window.__holdUsage, true)")?;
+    checked
 }
 
 /// Settings' own models (Paul, 2026-10-08: "they should be able to connect

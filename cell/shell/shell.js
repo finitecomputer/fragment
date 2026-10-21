@@ -1898,11 +1898,10 @@ async function openSettings(push = true) {
   // a credit pack's Checkout returning, before the ledger is read
   const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => openSettings(false), noSeatSaid, switchForm };
   const back = await returning(billingHelpers);
-  const [ledger, mySeat, linked, uses, access] = await Promise.all([
+  const [ledger, mySeat, linked, access] = await Promise.all([
     api("GET", "/api/ledger").catch(() => null),
     api("GET", "/api/seat").catch(() => null),
     api("GET", "/api/connections").catch(() => null),
-    state.computer ? api("GET", `/api/computers/${seg(state.computer.computer)}/uses`).catch(() => null) : null,
     api("GET", "/api/access").catch((e) => ({ error: e.message })),
   ]);
   if (mySeat) setGuest(mySeat.guest);
@@ -2031,8 +2030,8 @@ async function openSettings(push = true) {
     const agentRow = actionLine(name, actions, row);
     return [modeled.length ? modelPicker(a, agentRow, modeled) : agentRow, said];
   }) : [el("p", "muted", "None yet.")]));
-  const connections = connectionsSection(linked, uses);
   const skills = await skillsSection();
+  const connections = connectionsSection(linked);
   renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, buildSection(), data]);
   renderAgentFaces();
 }
@@ -2502,7 +2501,79 @@ const PROVIDER_NAMES = { xai: "xAI", elevenlabs: "ElevenLabs", openrouter: "Open
 const providerName = (p) => PROVIDER_NAMES[p] ?? p.replace(/(^|-)([a-z])/g, (_, d, l) => `${d ? " " : ""}${l.toUpperCase()}`);
 // micro-dollars, to a hundredth of a cent under a dollar (a call is often less than a cent)
 const money = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: micros < 1_000_000 ? 4 : 2 });
-function connectionsSection(linked, uses) {
+// Usage is a read of its own: neither a slow read nor a failed one means
+// zero calls. Mount the provider rows first, then read once, or on Retry.
+function loadConnectionUsage(s, rows) {
+  const owner = state.me, computer = state.computer?.computer;
+  const render = (uses, message) => {
+    for (const [p, row] of rows) {
+      row.dataset.state = uses ? "ready" : message === "Loading usage…" ? "loading" : "error";
+      row.replaceChildren(el("span", "settings-key", uses?.month ? `In ${uses.month}` : "This month"));
+      if (!uses) { row.append(el("span", "muted", message)); continue; }
+      const mine = uses.uses.filter((u) => u.provider === p.provider);
+      if (!mine.length) row.append(el("span", "muted", "No calls yet"));
+      for (const u of mine) {
+        const calls = `${u.calls} ${u.calls === 1 ? "call" : "calls"}`;
+        const item = el("span", "use", `${titleOf(u.agent)}: ${p.kind === "operator" ? `${calls}, ${money(u.micros)}` : calls}`);
+        item.dataset.use = u.agent;
+        item.dataset.calls = String(u.calls);
+        item.dataset.micros = String(u.micros);
+        row.append(item);
+      }
+    }
+  };
+  if (!computer) { render({ uses: [] }); return; }
+  render(null, "Loading usage…");
+  const feedback = el("div", "settings-actions");
+  feedback.hidden = true;
+  s.append(feedback);
+  const retry = el("button", "quiet", "Retry usage");
+  retry.type = "button";
+  retry.dataset.action = "connection-usage-retry";
+  let mounted = false, stopped = false, busy = false;
+  const current = () => owner && state.me === owner && state.computer?.computer === computer && state.page === "Settings" && s.isConnected && !$("settings-page").hidden && !$("layout").hidden;
+  const stop = () => {
+    stopped = true;
+    observer.disconnect();
+    removeEventListener("pagehide", stop);
+  };
+  const live = () => { if (!stopped && current()) return true; stop(); return false; };
+  const refresh = async () => {
+    if (busy || !live()) return;
+    busy = true;
+    retry.disabled = true;
+    feedback.hidden = true;
+    feedback.replaceChildren();
+    render(null, "Loading usage…");
+    try {
+      const uses = await api("GET", `/api/computers/${seg(computer)}/uses`);
+      if (!live()) return;
+      if (uses?.computer !== computer || typeof uses.month !== "string" || !Array.isArray(uses.uses)) throw new Error("Invalid usage response");
+      render(uses);
+      stop();
+    } catch {
+      if (live()) {
+        render(null, "Usage unavailable");
+        const error = el("p", "settings-warning", "Your connection usage could not be read. Try again.");
+        error.setAttribute("role", "status");
+        feedback.replaceChildren(error, retry);
+        feedback.hidden = false;
+      }
+    } finally {
+      busy = false;
+      if (!stopped) retry.disabled = false;
+    }
+  };
+  retry.onclick = refresh;
+  const observer = new MutationObserver(() => {
+    if (mounted) { if (!current()) stop(); }
+    else if (s.isConnected) { mounted = true; refresh(); }
+    else if (state.me !== owner || state.computer?.computer !== computer || state.page !== "Settings" || $("settings-page").hidden || $("layout").hidden) stop();
+  });
+  observer.observe($("layout"), { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden"] });
+  addEventListener("pagehide", stop, { once: true });
+}
+function connectionsSection(linked) {
   const s = section("Connections");
   s.id = "settings-connections";
   const offered = linked?.providers ?? [];
@@ -2511,6 +2582,7 @@ function connectionsSection(linked, uses) {
     return s;
   }
   s.append(el("p", "muted", "Your agents use these through their computer, which adds each credential on the way out. None is ever on the computer."));
+  const usageRows = [];
   const agents = state.computer?.agents ?? [];
   for (const p of offered) {
     const row = el("div", "provider");
@@ -2650,21 +2722,12 @@ function connectionsSection(linked, uses) {
       row.append(who);
     }
     // this month's calls through the swap, by agent, and an operator key's cost
-    const mine = (uses?.uses ?? []).filter((u) => u.provider === p.provider);
     const used = el("div", "provider-uses");
-    used.append(el("span", "settings-key", uses?.month ? `In ${uses.month}` : "This month"));
-    if (!mine.length) used.append(el("span", "muted", "No calls yet"));
-    for (const u of mine) {
-      const calls = `${u.calls} ${u.calls === 1 ? "call" : "calls"}`;
-      const item = el("span", "use", `${titleOf(u.agent)}: ${p.kind === "operator" ? `${calls}, ${money(u.micros)}` : calls}`);
-      item.dataset.use = u.agent;
-      item.dataset.calls = String(u.calls);
-      item.dataset.micros = String(u.micros);
-      used.append(item);
-    }
+    usageRows.push([p, used]);
     row.append(used);
     s.append(row);
   }
+  loadConnectionUsage(s, usageRows);
   return s;
 }
 
