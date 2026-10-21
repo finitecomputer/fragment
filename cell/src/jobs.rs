@@ -578,20 +578,12 @@ impl FragmentCell {
             return Ok(json!({ "stop": true }));
         }
         match route {
-            "advance" => {
-                let answer = self.advance(decode(body)?).await?;
-                if answer.get("failed").is_some() || answer.get("done").is_some() {
-                    // the run ended: nothing settles its holds now
-                    self.release_ended_holds().await;
-                }
-                Ok(answer)
-            }
+            "advance" => self.advance(decode(body)?).await,
             "effect" => self.job_effect(decode(body)?).await,
             "finish" => {
                 let call: FinishCall = decode(body)?;
                 if let Some(run) = self.current_run(call.run, call.attempt)? {
                     self.finish_run(&run, Err(call.error))?;
-                    self.release_ended_holds().await;
                 }
                 Ok(json!({ "ok": true }))
             }
@@ -613,10 +605,6 @@ impl FragmentCell {
         if let Some(f) = call.failed {
             if f.index.checked_add(1) != Some(count) {
                 return Err(CellError::invalid(format!("step {} ran out of retries, but the advance is after {count} steps", f.index)));
-            }
-            // a paid step that failed for good gives its reservation back (bug 3)
-            if f.kind.starts_with("ai.") {
-                self.release_step(&run, f.index).await;
             }
             self.keep_step(run_id, attempt, f.index, &StepResult { kind: f.kind, outcome: StepOutcome::Error(clip(&f.error)) })?;
         }
@@ -1249,7 +1237,7 @@ impl FragmentCell {
             vec![SqlStorageValue::Integer(js::now_ms() - limits::RUN_RETENTION_MS), SqlStorageValue::Integer(limits::RUNS_KEPT)],
         )?;
         // a run's charges and what its steps bought go with it (the ledger keeps the month's usage)
-        self.exec("DELETE FROM charges WHERE run NOT IN (SELECT id FROM runs) AND held = 0", vec![])?;
+        self.exec("DELETE FROM charges WHERE run NOT IN (SELECT id FROM runs)", vec![])?;
         self.exec("DELETE FROM paid WHERE run NOT IN (SELECT id FROM runs)", vec![])
 
     }

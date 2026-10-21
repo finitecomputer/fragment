@@ -719,6 +719,9 @@ speaking Cloudflare's APIs) returns once this product works.
     auth as its row says; a person's own keys are a third kind (`own`),
     sealed by their computer and never metered. The managed skills read
     the variables.
+    Status (2026-10-21, decision 62): an operator key's call is no longer
+    held first, nor refused when the ledger does not answer: it asks the
+    cached gate, and is charged after the provider answered.
 38. **Routines are fragment cron.** An agent's routines are its
     fragment's cron triggers, not Hermes' own scheduler, which is turned
     off. A trigger posts to a channel the agent's bridge subscribes to,
@@ -1265,8 +1268,14 @@ Paul:
       calls are read through it. Model calls (the route's chat calls,
       decisions and transcriptions) are gated by it and charged after
       their answers (`claude/models-charged-after`); one that reports no
-      usage is charged nothing, said aloud. Operator keys and AI steps
-      follow, one kind a pull request.
+      usage is charged nothing, said aloud. So are operator keys'
+      calls through the swap (`claude/keys-charged-after`): gated, and
+      charged once the provider answered; a ledger that does not answer
+      no longer refuses them. So are AI steps
+      (`claude/steps-charged-after`): gated in the fragment's isolate,
+      and charged from its meter outbox under `step:<step's key>`, once
+      whatever attempt or replay makes the call; one that fails for good
+      is charged nothing, as nothing was held.
 
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 
@@ -1997,7 +2006,8 @@ Each one needs a test in the phase that ports its feature.
    metered.
 3. **A failed step keeps its reservation.** A step that fails for good
    still holds its budget reservation. Phase 3: a final failure releases
-   it, with a test.
+   it, with a test. Since decision 62 nothing is held before a call, so
+   there is nothing to release: a failed step is charged nothing.
 4. **`fragment deploy` reports success when the code is refused.** It
    printed `live:` while the status said an operation name broke
    `^[a-z][a-z0-9_]{0,63}$`, and the guide never names that rule. Phase 2:

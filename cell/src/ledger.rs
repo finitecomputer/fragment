@@ -918,25 +918,6 @@ async fn asked(env: &Env, payer: &str, path: &str, body: String) -> Result<Vec<u
     }
 }
 
-/// A ledger call is asked this many times while the ledger does not
-/// answer, before a paid call is given up (a reservation) or left held,
-/// for the sweep to charge at its worst case (a settle, a release).
-const TRIES: usize = 3;
-
-/// `ask`, asked again while the ledger does not answer (a host failure);
-/// a refusal answers at once.
-pub async fn retried<R: Route>(env: &Env, payer: &str, request: &R) -> Result<R::Answer, LedgerError> {
-    let mut tries = 0;
-    // bounded: TRIES asks, then the last answer stands
-    loop {
-        tries += 1;
-        match ask(env, payer, request).await {
-            Err(e) if e.refused.is_none() && e.code == ErrorCode::HostFailed && tries < TRIES => continue,
-            answered => return answered,
-        }
-    }
-}
-
 /// The gate (docs/ledger.md, "The gate"): whether `person`'s ledger lets a
 /// spend start, a `MaySpend` of theirs or a `FragmentOpen` of a fragment
 /// they own. Its answer as this isolate heard it within the minute
@@ -979,18 +960,4 @@ async fn gated(env: &Env, person: &str, path: &'static str, body: String) -> Res
 /// `forget-standing` lever).
 pub fn forget_gate() {
     GATE.with(|g| g.borrow_mut().forget());
-}
-
-/// Holds a paid call's worst case on `payer`'s ledger before the call is
-/// made (docs/ledger.md): its amount. A refusal, or a ledger that does not
-/// answer, holds nothing, and the call is not made. The call then settles
-/// what it used, or is released having used nothing; a settle or release
-/// that does not land leaves it held, and the ledger's sweep charges its
-/// worst case: the money path fails closed.
-pub async fn hold(env: &Env, payer: &str, reserve: &core::Reserve) -> Result<i64, LedgerError> {
-    match retried(env, payer, reserve).await? {
-        core::Reserved::Held { amount } => Ok(amount),
-        // a reference of the call's own was never reserved before
-        other => Err(CellError::host(format!("a fresh call's reservation {} answered {other:?}", reserve.reference)).into()),
-    }
 }

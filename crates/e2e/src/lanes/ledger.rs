@@ -1,7 +1,7 @@
 //! The usage ledger (phase 3 of docs/cloudflare-v1.md; docs/ledger.md),
 //! end to end on workerd: plans and guests (who make no fragments, and
 //! still edit a seat's), a seat's included credit, operators' commands, AI
-//! steps' reserve, settle and release (bugs 2 and 3), zero credit and the
+//! steps' charges, once whatever retries (bug 2), zero credit and the
 //! overdraft (past it, no new fragments, and cron and triggers start no
 //! runs until a top-up), a fragment's cap, the meters that reach the
 //! ledger through the queue, and the model route, streamed and not,
@@ -122,15 +122,15 @@ pub(super) fn entries(api: &Api, identity: &str, prefix: &str) -> Vec<Value> {
     }
 }
 
-/// The reservations of one run's steps, every attempt's.
+/// The charges of one run's steps (one a step, whatever attempt made it).
 fn run_steps(api: &Api, identity: &str, name: &str, run: &Value) -> Vec<Value> {
-    let marker = format!("/run/{}/attempt/", run["id"]);
+    let marker = format!("/run/{}/step/", run["id"]);
     entries(api, identity, &format!("step:{name}@")).into_iter().filter(|e| e["ref"].as_str().is_some_and(|r| r.contains(&marker))).collect()
 }
 
 /// What a run's steps were charged on the ledger, together.
 fn run_charged(api: &Api, identity: &str, name: &str, run: &Value) -> i64 {
-    run_steps(api, identity, name, run).iter().filter_map(|e| e["entry"]["end"]["charge"].as_i64()).sum()
+    run_steps(api, identity, name, run).iter().filter_map(charged).sum()
 }
 
 
@@ -150,11 +150,6 @@ fn lever(api: &Api, fragment: &str, op: &str, extra: Value) -> Result<Reply> {
 /// Waits for a deploy to land: a query answers once it has.
 fn landed(s: &Suite, api: &Api, keys: &Keys, name: &str, wait: Duration) {
     s.eventually(wait, || api.op(keys, name, "notes", "q", json!({})).is_ok_and(|r| r.status == 200));
-}
-
-/// A reservation's end, as the ledger kept it: `settled` or `released` (none while held).
-pub(super) fn end_of(entry: &Value) -> String {
-    entry["entry"]["end"]["end"].as_str().unwrap_or("held").to_string()
 }
 
 /// What a row the ledger charged was charged (a paid call's, charged after
@@ -326,7 +321,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "cards": super::site::cards(api, &guest_app), "events": super::site::event_kinds(api, &guest, &guest_app), "skipsBefore": skips_before }),
     );
 
-    // ---- an AI step: reserved, then settled from the usage it reported
+    // ---- an AI step: gated, then charged after it from the usage it reported
     let name = s.named(api, &owner, "ledger")?;
     let c = s.create(api, &owner, &name)?;
     ship(s, &c, LEDGER_APP, LEDGER_JSON);
@@ -345,19 +340,21 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.op(&owner, &name, "summarize", "t-1", json!({ "text": "the notes", "tier": "cheap" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
     let paid = charge(&tokens(CHEAP, 800, 200, 500));
-    let after = ledger(api, &owner);
     s.ok(
         "an AI step runs on its tier's model through the model route",
         run["status"] == "succeeded" && run["output"]["text"] == "echo: the notes" && run["output"]["model"] == CHEAP && run["output"]["tier"] == "cheap",
         &run,
     );
+    // its row goes with the fragment's meters, from its outbox, just after the step
+    let billed = s.eventually(wait, || entries(api, &owner_id, &format!("step:{name}@")).iter().any(|e| charged(e) == Some(paid)));
     let step = entries(api, &owner_id, &format!("step:{name}@"));
     s.ok(
-        "it reserved, then settled from its usage (input less what was cached), once",
-        step.len() == 1 && end_of(&step[0]) == "settled" && step[0]["entry"]["end"]["basis"] == "usage" && step[0]["entry"]["end"]["charge"] == paid,
+        "it is charged after its call, from its usage (input less what was cached), once",
+        billed && step.len() == 1 && charged(&step[0]) == Some(paid) && step[0]["entry"]["row"]["fragment"] == name.as_str(),
         json!(step),
     );
     // (the fragment's own meters bill the owner too, a few micro-dollars at a time)
+    let after = ledger(api, &owner);
     s.ok(
         "the owner's balance moved by the charge, nothing is held, and the run shows its cost",
         m(&before, "balanceMicros") - m(&after, "balanceMicros") >= paid && m(&after, "reservedMicros") == 0 && run["costMicros"] == paid && run_charged(api, &owner_id, &name, &run) == paid,
@@ -370,15 +367,14 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{:?}", call.map(|c| c.metadata)),
     );
 
-    // ---- bug 3: a call that fails for good gives its reservation back
+    // ---- a call that fails for good is charged nothing (nothing was held)
     s.ai.fail_next(&[400]);
     let r = api.op(&owner, &name, "summarize", "t-400", json!({ "text": "refused", "tier": "cheap" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
-    let released = entries(api, &owner_id, &format!("step:{name}@")).into_iter().filter(|e| end_of(e) == "released").count();
     let v = ledger(api, &owner);
     s.ok(
-        "a step the model refuses for good is held, and its reservation goes back (bug 3)",
-        run["status"] == "held" && released == 1 && m(&v, "reservedMicros") == 0 && run_charged(api, &owner_id, &name, &run) == 0,
+        "a step the model refuses for good is held, and charged nothing",
+        run["status"] == "held" && m(&v, "reservedMicros") == 0 && run["costMicros"].as_i64().unwrap_or(0) == 0 && run_steps(api, &owner_id, &name, &run).is_empty(),
         json!({ "run": run, "ledger": v }),
     );
     // its model and the fallback both down: every try fails
@@ -386,11 +382,10 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.op(&owner, &name, "summarize", "t-503", json!({ "text": "flaky", "tier": "cheap" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], Duration::from_secs(90));
     s.ai.down(&[]);
-    let released = entries(api, &owner_id, &format!("step:{name}@")).into_iter().filter(|e| end_of(e) == "released").count();
     let v = ledger(api, &owner);
     s.ok(
-        "a step whose retries run out gives its reservation back too (bug 3)",
-        run["status"] == "held" && released == 2 && m(&v, "reservedMicros") == 0 && run_charged(api, &owner_id, &name, &run) == 0,
+        "a step whose retries run out is charged nothing too",
+        run["status"] == "held" && m(&v, "reservedMicros") == 0 && run["costMicros"].as_i64().unwrap_or(0) == 0 && run_steps(api, &owner_id, &name, &run).is_empty(),
         json!({ "run": run, "ledger": v }),
     );
 
@@ -401,9 +396,10 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.op(&owner, &name, "summarize", "t-retried", json!({ "text": "paid once", "tier": "cheap" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
     let once = charge(&tokens(CHEAP, 100, 0, 10));
+    let billed = s.eventually(wait, || run_charged(api, &owner_id, &name, &run) == once);
     s.ok(
         "a text step that failed after its paid call is tried again from what it kept: one call, one charge (bug 2)",
-        run["status"] == "succeeded" && run["output"]["text"] == "echo: paid once" && s.ai.calls().len() == calls + 1 && run_charged(api, &owner_id, &name, &run) == once && run_steps(api, &owner_id, &name, &run).len() == 1,
+        run["status"] == "succeeded" && run["output"]["text"] == "echo: paid once" && s.ai.calls().len() == calls + 1 && billed && run_steps(api, &owner_id, &name, &run).len() == 1 && run["costMicros"] == once,
         json!({ "run": run, "calls": s.ai.calls().len() - calls }),
     );
     lever(api, &name, "fail-after-paid", json!({ "times": 1 }))?;
@@ -413,24 +409,22 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
     // Workers AI's price: 4.80 neurons a 512×512 tile, 9.60 a step (fragment_core::media)
     let image = |tiles: u64, steps: u64| charge(&Usage::Neurons { milli: tiles * 4_800 + steps * 9_600 });
+    let billed = s.eventually(wait, || run_charged(api, &owner_id, &name, &run) == image(4, 4));
     s.ok(
         "an image step whose commit failed after it was paid commits from its kept bytes: one image bought (bug 2), charged its 4 tiles and 4 steps in neurons",
         run["status"] == "succeeded"
             && s.fake.file_at(c["repo"].as_str().unwrap_or(""), "main", "art/lighthouse.jpg") == Some(image_bytes("a lighthouse"))
             && images() == drawn + 1
-            && run_charged(api, &owner_id, &name, &run) == image(4, 4),
+            && billed,
         json!({ "run": run, "images": images() - drawn }),
     );
     let r = api.op(&owner, &name, "draw", "d-wide", json!({ "prompt": "a wide shore", "path": "art/shore.jpg", "steps": 8 }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    let billed = s.eventually(wait, || run_charged(api, &owner_id, &name, &run) == image(6, 8));
     let step = run_steps(api, &owner_id, &name, &run);
     s.ok(
-        "an image is charged the tiles it covers (1536×1024: 6) and the steps it took, past its 1024×1024 reservation, from its usage",
-        run["status"] == "succeeded"
-            && step.len() == 1
-            && step[0]["entry"]["end"]["basis"] == "usage"
-            && run_charged(api, &owner_id, &name, &run) == image(6, 8)
-            && m(&ledger(api, &owner), "reservedMicros") == 0,
+        "an image is charged the tiles it covers (1536×1024: 6) and the steps it took, from its usage",
+        run["status"] == "succeeded" && step.len() == 1 && billed && run["costMicros"] == image(6, 8) && m(&ledger(api, &owner), "reservedMicros") == 0,
         json!({ "run": run, "step": step }),
     );
     // a replay pays only for the step it had not paid for: the first call
@@ -440,12 +434,23 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ai.fail_next(&[400]);
     let r = api.op(&owner, &name, "twice", "w-1", json!({ "a": "first", "b": "second" }))?;
     let held = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    // its paid step's receipt as the release before decision 62 left it:
+    // kept, not marked charged, charged under an attempt's reference
+    let before = lever(api, &name, "receipt-before", json!({ "run": held["id"] }))?;
     api.signed(&owner, "POST", &format!("/api/f/{name}/replay"), Some(&json!({ "run": held["id"] })))?;
     let done = settle(api, &owner, &name, held["id"].as_i64().unwrap_or(0), &["succeeded"], wait);
     s.ok(
         "a replayed run reuses the step it paid for: the model is asked for the other alone",
         held["status"] == "held" && done["status"] == "succeeded" && done["output"] == json!({ "one": "echo: first", "two": "echo: second" }) && s.ai.calls().len() - calls == 3,
         json!({ "held": held, "done": done, "calls": s.ai.calls().len() - calls }),
+    );
+    let second = s.eventually(wait, || run_steps(api, &owner_id, &name, &done).len() == 2);
+    let rows = run_steps(api, &owner_id, &name, &done);
+    let step = |i: u32| rows.iter().find(|e| e["ref"].as_str().is_some_and(|r| r.ends_with(&format!("/step/{i}")))).and_then(charged);
+    s.ok(
+        "a receipt the release before kept is never charged again: the replay charges the other step alone, and the run's cost counts the first once",
+        before.status == 200 && before.body["receipts"] == 1 && second && step(1).is_some_and(|two| done["costMicros"].as_i64() == held["costMicros"].as_i64().map(|one| one + two)),
+        json!({ "held": held["costMicros"], "done": done["costMicros"], "rows": rows }),
     );
 
     // ---- zero credit: agents and AI steps stop; fragments keep taking writes
@@ -454,6 +459,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ai.set_usage(&[Used { prompt: 10, cached: 0, completion: n }]);
     let r = api.op(&owner, &name, "summarize", "t-big", json!({ "text": "a long answer", "tier": "medium" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    s.eventually(wait, || m(&ledger(api, &owner), "balanceMicros") < 0);
     let v = ledger(api, &owner);
     s.ok(
         "usage that happened is charged in full, past zero: the balance is below it",
@@ -461,6 +467,8 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         &v,
     );
     let calls = s.ai.calls().len();
+    // the gate heard the owner within the minute, when they had credit: it asks afresh
+    forget_gate(api, &owner_id)?;
     let r = api.op(&owner, &name, "summarize", "t-zero", json!({ "text": "at zero", "tier": "cheap" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
     s.ok(
@@ -513,8 +521,11 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let v = ledger(api, &owner);
     let n = tokens_costing(GLM, 10, m(&v, "balanceMicros") + 3 * USD);
     s.ai.set_usage(&[Used { prompt: 10, cached: 0, completion: n }]);
+    // the gate heard the owner at zero: it asks afresh, now they have credit again
+    forget_gate(api, &owner_id)?;
     let r = api.op(&owner, &name, "summarize", "t-over", json!({ "text": "past the overdraft", "tier": "medium" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    s.eventually(wait, || ledger(api, &owner)["standing"]["standing"] == "read_only");
     let v = ledger(api, &owner);
     s.ok(
         "a charge past the $2 overdraft makes the person's fragments read-only",
