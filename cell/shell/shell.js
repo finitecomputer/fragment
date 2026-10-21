@@ -2512,6 +2512,83 @@ function connectionsSection(linked, uses) {
   }
   s.append(el("p", "muted", "Your agents use these through their computer, which adds each credential on the way out. None is ever on the computer."));
   const agents = state.computer?.agents ?? [];
+  function connectProvider(go, provider, row) {
+    const owner = state.me;
+    const said = el("p", "muted provider-detail");
+    said.setAttribute("role", "status");
+    said.hidden = true;
+    row.append(said);
+    const tell = (text) => { said.textContent = text; said.hidden = !text; };
+    const current = () => state.me === owner && state.page === "Settings" && row.isConnected && !$("settings-page").hidden && !$("layout").hidden;
+    go.onclick = async () => {
+      if (!current()) return;
+      if (connectionsSection.authorization) {
+        tell(connectionsSection.authorization.stopped ? "The previous sign-in request is still finishing. Try again in a moment." : "A sign-in is already underway. Finish it or close its window first.");
+        return;
+      }
+      // Open within the click's user gesture, before an authorization is made.
+      let popup;
+      try { popup = window.open("", "_blank", "popup,width=520,height=720"); } catch {}
+      if (!popup) {
+        tell("Your browser blocked the sign-in window. Allow pop-ups, then try again.");
+        return;
+      }
+      // Browser-bound sign-ins must not supersede one another, including a
+      // request still settling after Settings has replaced its original row.
+      const attempt = connectionsSection.authorization = { settled: false, stopped: false, initialized: false };
+      go.disabled = true;
+      tell("Finish connecting in the other window, then close it.");
+      let timer;
+      const stop = (close = false) => {
+        if (attempt.stopped) return;
+        attempt.stopped = true;
+        clearTimeout(timer);
+        observer.disconnect();
+        removeEventListener("focus", check);
+        removeEventListener("pagehide", leave);
+        if (close) { try { popup.close(); } catch {} }
+        if (attempt.settled && connectionsSection.authorization === attempt) { connectionsSection.authorization = null; go.disabled = false; }
+      };
+      const check = () => {
+        clearTimeout(timer);
+        if (attempt.stopped) return;
+        if (!current()) return stop(true);
+        if (popup.closed) {
+          stop();
+          if (attempt.initialized) {
+            // The callback says to close its window; read the confirmed state.
+            openSettings(false).catch(() => { if (current()) tell("Your connections could not be read. Open Settings to try again."); });
+          } else tell("The sign-in window was closed. Try again.");
+          return;
+        }
+        timer = setTimeout(check, 500);
+      };
+      const leave = () => stop(true);
+      const observer = new MutationObserver(() => { if (!current()) stop(true); });
+      observer.observe($("layout"), { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden"] });
+      addEventListener("focus", check);
+      addEventListener("pagehide", leave);
+      check();
+      try {
+        if (attempt.stopped) return;
+        const { url } = await api("POST", `/api/connections/${encodeURIComponent(provider)}/authorize`, {});
+        if (attempt.stopped || !current() || popup.closed) {
+          stop(true);
+          if (current()) tell("The sign-in window was closed. Try again.");
+          return;
+        }
+        if (typeof url !== "string" || !/^https?:$/.test(new URL(url).protocol)) throw new Error("Invalid authorization URL");
+        popup.location.replace(url);
+        attempt.initialized = true;
+      } catch {
+        if (current()) tell("Sign-in could not start. Try again.");
+        stop(true);
+      } finally {
+        attempt.settled = true;
+        if (attempt.stopped && connectionsSection.authorization === attempt) { connectionsSection.authorization = null; go.disabled = false; }
+      }
+    };
+  }
   for (const p of offered) {
     const row = el("div", "provider");
     row.dataset.provider = p.provider;
@@ -2532,19 +2609,7 @@ function connectionsSection(linked, uses) {
     if (p.kind === "connection" && p.state !== "connected") {
       const go = el("button", "quiet", p.state === "needs_reauthorization" ? "Connect again" : "Connect");
       go.type = "button";
-      go.onclick = async () => {
-        go.disabled = true;
-        try {
-          const { url } = await api("POST", `/api/connections/${encodeURIComponent(p.provider)}/authorize`, {});
-          window.open(url, "_blank", "popup,width=520,height=720");
-          // back from the provider: the section says so
-          addEventListener("focus", () => openSettings(false).catch(() => {}), { once: true });
-        } catch (e) {
-          go.textContent = e.message;
-        } finally {
-          go.disabled = false;
-        }
-      };
+      connectProvider(go, p.provider, row);
       actions.append(go);
     }
     if (p.kind === "own" && p.signIn) {
@@ -2554,18 +2619,7 @@ function connectionsSection(linked, uses) {
         const go = el("button", "quiet", "Connect");
         go.type = "button";
         go.dataset.action = "sign-in";
-        go.onclick = async () => {
-          go.disabled = true;
-          try {
-            const { url } = await api("POST", `/api/connections/${encodeURIComponent(p.provider)}/authorize`, {});
-            window.open(url, "_blank", "popup,width=520,height=720");
-            addEventListener("focus", () => openSettings(false).catch(() => {}), { once: true });
-          } catch (e) {
-            go.textContent = e.message;
-          } finally {
-            go.disabled = false;
-          }
-        };
+        connectProvider(go, p.provider, row);
         actions.append(go);
         if (p.models?.length) details.push(el("span", "muted provider-detail", `Your ${providerName(p.provider)} account pays for its models; then pick one for an agent under Agents.`));
       } else {
