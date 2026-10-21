@@ -737,10 +737,10 @@ fn fill(selector: &str, value: &str) -> String {
 /// signed in on its own origin with the agent's answer in it, a second
 /// agent, an app's window, settings (at `/settings`, which the address
 /// keeps), the phone's layout, a read of the computer that fails from the
-/// page's start (`refresh_failed_start_ui`), and last a guest told who is
-/// signed in, who uses another account to sign in to this seat
-/// (`guest_ui`). The agents
-/// run on the stub image (Docker), as the computers section's do.
+/// page's start (`refresh_failed_start_ui`, `first_run_put_off_ui`), and
+/// last a guest told who is signed in, who uses another account to sign
+/// in to this seat (`guest_ui`). The agents run on the stub image
+/// (Docker), as the computers section's do.
 pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // (the fakes and the deployment: a guest the operator's key makes,
     // signed out of the WorkOS fake's held session: `guest_ui`)
@@ -1203,6 +1203,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.close(page)?;
     // their computer unread from the page's start: theirs, then a new person's
     refresh_failed_start_ui(s, api, &mut b, &shots)?;
+    first_run_put_off_ui(s, api, &mut b, &shots)?;
     // a guest, in this browser, who then signs in to this seat
     guest_ui(s, api, &mut b, &email, &shots)?;
     println!("      (screenshots: {})", shots.display());
@@ -2287,18 +2288,27 @@ fn update_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
 }
 
 /// The shell's page with its reads of its person's computer (`GET
-/// /api/computers`) failing as a blip's do while `window.__failComputers`
-/// holds (counted: `__computerReads`); with `__holdMakes` set before it, a
-/// first run's makes (`POST /api/fragments`, `POST /api/computers`) held
-/// for good (counted: `__makes`), so nothing is made; and whether it ever
-/// said "Making your agent…" (`__makingSaid`). Its top window's alone.
+/// /api/computers`) failing as a blip's do (counted: `__computerReads`):
+/// every one while `window.__failComputers` is `true` (its default), or
+/// as many as it counts. With `__holdMakes` set before it, a first run's
+/// makes (`POST /api/fragments`, `POST /api/computers`) are held for good
+/// (counted: `__makes`), so nothing is made, and so is a wake; with
+/// `__holdMembers`, its read of a chat's members waits for
+/// `__membersHeld()`, then answers none. Whether it ever said "Making your
+/// agent…" (`__makingSaid`), and at which read (`__makingAt`). Its top
+/// window's alone.
 const FAIL_COMPUTERS: &str = "(() => { if (window !== window.top || window.__computerReads !== undefined) return true; \
-    const real = window.fetch.bind(window); Object.assign(window, { __failComputers: true, __computerReads: 0, __makes: 0, __makingSaid: false }); \
+    const real = window.fetch.bind(window); Object.assign(window, { __failComputers: window.__failComputers ?? true, __computerReads: 0, __makes: 0, __makingSaid: false }); \
     window.fetch = async (url, o) => { \
-      if (url === '/api/computers' && o?.method === 'GET') { window.__computerReads++; if (window.__failComputers) throw new TypeError('Failed to fetch'); } \
-      if (window.__holdMakes && o?.method === 'POST' && ['/api/fragments', '/api/computers'].includes(url)) { window.__makes++; await new Promise(() => {}); } \
+      if (url === '/api/computers' && o?.method === 'GET') { window.__computerReads++; const fail = window.__failComputers; \
+        if (typeof fail === 'number') window.__failComputers = Math.max(0, fail - 1); \
+        if (fail) throw new TypeError('Failed to fetch'); } \
+      if (window.__holdMembers && o?.method === 'GET' && /^\\/api\\/f\\/[^/]+\\/members$/.test(url)) { await new Promise((r) => { window.__membersHeld = r; }); window.__membersHeld = null; \
+        return new Response('{\"members\":[]}', { status: 200, headers: { 'content-type': 'application/json' } }); } \
+      if (window.__holdMakes && o?.method === 'POST' && (url === '/api/fragments' || url.startsWith('/api/computers'))) { if (!url.endsWith('/wake')) window.__makes++; await new Promise(() => {}); } \
       return real(url, o); }; \
-    new MutationObserver(() => { if (document.getElementById('notice')?.textContent.includes('Making your agent')) window.__makingSaid = true; }).observe(document, { subtree: true, childList: true, characterData: true }); \
+    new MutationObserver(() => { if (!window.__makingSaid && document.getElementById('notice')?.textContent.includes('Making your agent')) Object.assign(window, { __makingSaid: true, __makingAt: window.__computerReads }); }) \
+      .observe(document, { subtree: true, childList: true, characterData: true }); \
     return true; })()";
 /// The band's line for a read of the computer that failed, its Try again ready.
 const REFRESH_LINE: &str = "(() => { const r = document.querySelector('#computer-notices:not([hidden]) .computer-notice[data-kind=refresh]'); \
@@ -2308,8 +2318,18 @@ const NO_REFRESH_LINE: &str = "!document.querySelector('#computer-notices .compu
 /// Try again pressed, the computer's reads let through.
 const READ_AGAIN: &str = "(window.__failComputers = false, document.querySelector('#computer-notices [data-action=refresh]')?.click(), true)";
 /// What the page made and said, under `FAIL_COMPUTERS`.
-const MADE: &str = "({ notice: document.getElementById('notice').hidden ? null : document.getElementById('notice').innerText, band: document.getElementById('computer-notices').innerText, \
-    makingSaid: window.__makingSaid, makes: window.__makes, reads: window.__computerReads })";
+const MADE: &str = "({ path: location.pathname, notice: document.getElementById('notice').hidden ? null : document.getElementById('notice').innerText, band: document.getElementById('computer-notices').innerText, \
+    makingSaid: window.__makingSaid, makingAt: window.__makingAt ?? null, makes: window.__makes, reads: window.__computerReads })";
+/// Settings' Computer section, as shown (null before it is).
+const COMPUTER_SECTION: &str = "[...document.querySelectorAll('#settings-page h2')].find((h) => h.textContent === 'Computer')?.parentElement.innerText ?? null";
+
+/// The shell at `path` under `FAIL_COMPUTERS` from its first document,
+/// its first run's makes held, after `before` (a script setting it).
+fn open_failing(b: &mut Browser, api: &Api, path: &str, before: &str) -> Result<Page> {
+    let page = b.open_with_script(&format!("{}{path}", api.base), &format!("window.__holdMakes = true; {before} {FAIL_COMPUTERS}"))?;
+    b.viewport(&page, 1280, 800, false)?;
+    Ok(page)
+}
 
 /// What their agent's menu offers, opened from its pill and closed again.
 fn agent_menu(b: &mut Browser, page: &Page) -> Result<Vec<String>> {
@@ -2353,28 +2373,23 @@ fn refresh_failed_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, ses
     Ok(())
 }
 
+/// The shell's chat column with a chat open, and the band's line.
+const CHAT_AND_LINE: &str = "!document.getElementById('layout').hidden && !!document.querySelector('#frames iframe:not([hidden])') && ";
+
 /// A read of the computer that fails from the page's start (#437: someone
 /// with an agent was sent to "Making your agent…", their agents unknown
 /// taken for none), every read of it failing and a first run's makes held
-/// (`FAIL_COMPUTERS`). Someone with an agent sees their chat and the line,
-/// and no first run; Try again knows their agent and makes nothing. A new
-/// person, with no chats, has their first run all the same, and Try again
-/// during it starts no other. Someone with only the chat an earlier try
-/// made (no agent yet) sees that chat and the line, and no first run,
-/// until Try again reads their computer: then the first run goes on there.
+/// (`open_failing`), for someone with an agent (the browser's person). At
+/// home: their chat and the line, and no first run; Try again knows their
+/// agent and makes nothing. At Settings: its Computer section says it
+/// couldn't be loaded, never that their computer starts with their first
+/// agent; Try again shows it there.
 fn refresh_failed_start_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let settle = std::time::Duration::from_secs(2);
-    let script = format!("window.__holdMakes = true; {FAIL_COMPUTERS}");
-    let open = |b: &mut Browser| -> Result<Page> {
-        let page = b.open_with_script(&format!("{}/", api.base), &script)?;
-        b.viewport(&page, 1280, 800, false)?;
-        Ok(page)
-    };
-    let chat_open = format!("!document.getElementById('layout').hidden && !!document.querySelector('#frames iframe:not([hidden])') && {REFRESH_LINE}");
+    let chat_open = format!("{CHAT_AND_LINE}{REFRESH_LINE}");
 
-    // someone with an agent (the browser's person)
-    let page = open(b)?;
+    let page = open_failing(b, api, "/", "")?;
     let shown = b.until(&page, &chat_open, wait);
     std::thread::sleep(settle);
     let made = b.eval(&page, MADE)?;
@@ -2396,10 +2411,46 @@ fn refresh_failed_start_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &st
     );
     b.close(page)?;
 
-    // a new person: no chats, so their first run, the line beside it
+    // at Settings: what is true of their computer, then the computer itself
+    let page = open_failing(b, api, "/settings", "")?;
+    let loaded = b.until(&page, &format!("location.pathname === '/settings' && ({COMPUTER_SECTION}) !== null && {REFRESH_LINE}"), wait);
+    let said = b.eval(&page, COMPUTER_SECTION)?;
+    let _ = b.screenshot(&page, &shots.join("settings-refresh-failed.png"));
+    s.ok(
+        "their computer unread, Settings' Computer section says it couldn't be loaded, never that it starts with their first agent, under the line",
+        loaded && said.as_str().is_some_and(|t| t.contains("Couldn't load your computer") && !t.contains("starts with your first agent")),
+        &said,
+    );
+    b.eval(&page, READ_AGAIN)?;
+    let shown = b.until(&page, &format!("{NO_REFRESH_LINE} && location.pathname === '/settings' && !!document.querySelector('#settings-page [data-action=restart-ask]')"), wait);
+    let said = b.eval(&page, COMPUTER_SECTION)?;
+    let made = b.eval(&page, MADE)?;
+    s.ok(
+        "Try again there shows their computer in it (its state and Restart), at Settings still, and makes nothing",
+        shown && said.as_str().is_some_and(|t| t.contains("State") && !t.contains("Couldn't load")) && made["makingSaid"] == false && made["makes"] == 0,
+        json!({ "said": said, "made": made }),
+    );
+    b.close(page)?;
+    Ok(())
+}
+
+/// A first run that a failed read of the computer put off, or did not,
+/// for a new person (#437; Alex's review of #459), every first-run make
+/// held (`open_failing`). With no chats, their first run starts all the
+/// same, and Try again during it starts no other. With only the chat an
+/// earlier try made (no agent yet), that chat and the line and no first
+/// run, until a read answers: the list socket's own, with nothing pressed,
+/// or Try again's; then it goes on there. With their agent on their
+/// computer but not in its chat, a move to Settings while Try again asks
+/// that chat's members starts nothing there (the address and Settings
+/// stay); back home, the next read goes on with it.
+fn first_run_put_off_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let settle = std::time::Duration::from_secs(2);
+    let chat_open = format!("{CHAT_AND_LINE}{REFRESH_LINE}");
     let session = api.sign_in(&format!("shell-ui-unread-{}@e2e.test", crate::api::now_s()))?;
     b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
-    let page = open(b)?;
+    let page = open_failing(b, api, "/", "")?;
     let first = b.until(&page, &format!("window.__makingSaid === true && window.__makes === 1 && {REFRESH_LINE}"), wait);
     let made = b.eval(&page, MADE)?;
     let _ = b.screenshot(&page, &shots.join("start-refresh-failed-new.png"));
@@ -2411,11 +2462,25 @@ fn refresh_failed_start_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &st
     s.ok("Try again during it reads the computer, and starts no other run", read && made["makes"] == 1, &made);
     b.close(page)?;
 
-    // the chat an earlier try made, and no agent yet
+    // the chat an earlier try made, and no agent yet; the page's first read
+    // fails, and the list socket's (its opening reads the list) answers
     let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "label": "basil-chat", "template": "chat", "title": FIRST_CHAT })), &[])?;
     anyhow::ensure!(r.status == 200, "making an earlier try's chat: {r}");
     let chat = r.body["name"].as_str().unwrap_or("").to_string();
-    let page = open(b)?;
+    let card = |s: &Suite, b: &mut Browser, page: &Page| s.eventually(wait, || b.eval_in_frame(page, &chat, "!!document.querySelector('.setup-card')").ok() == Some(Value::Bool(true)));
+    let page = open_failing(b, api, "/", "window.__failComputers = 1;")?;
+    let on = b.until(&page, &format!("window.__computerReads >= 2 && window.__makingAt >= 2 && window.__makes > 0 && {NO_REFRESH_LINE}"), wait);
+    let carded = card(s, b, &page);
+    let made = b.eval(&page, MADE)?;
+    s.ok(
+        "with only the chat an earlier try made, its first read failed: once the list socket's read answers, with nothing pressed, the first run goes on in that chat (its card)",
+        on && carded,
+        &made,
+    );
+    b.close(page)?;
+
+    // every read failing until Try again
+    let page = open_failing(b, api, "/", "")?;
     let shown = b.until(&page, &chat_open, wait);
     std::thread::sleep(settle);
     let made = b.eval(&page, MADE)?;
@@ -2426,10 +2491,39 @@ fn refresh_failed_start_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &st
     );
     b.eval(&page, READ_AGAIN)?;
     let on = b.until(&page, &format!("{NO_REFRESH_LINE} && window.__makingSaid === true && window.__makes > 0"), wait);
-    let card = s.eventually(wait, || b.eval_in_frame(&page, &chat, "!!document.querySelector('.setup-card')").ok() == Some(Value::Bool(true)));
+    let carded = card(s, b, &page);
     let _ = b.screenshot(&page, &shots.join("start-refresh-failed-earlier-try.png"));
     let framed = b.eval_in_frame(&page, &chat, "({ text: document.body.innerText.slice(0, 300), hidden: document.hidden })").unwrap_or_else(|e| json!(e.to_string()));
-    s.ok("Try again reads it, finds no agent, and the first run goes on in that chat (its card)", on && card, json!({ "made": b.eval(&page, MADE)?, "chat": framed }));
+    s.ok("Try again reads it, finds no agent, and the first run goes on in that chat (its card)", on && carded, json!({ "made": b.eval(&page, MADE)?, "chat": framed }));
+    b.close(page)?;
+
+    // their agent on their computer (asleep), not yet in its chat: Try
+    // again asks that chat's members, held, while the person goes to Settings
+    let agent = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "label": "basil", "template": "agent", "title": "Basil" })), &[])?;
+    let computer = shell(api, &session, "POST", "/api/computers", Some(&json!({})), &[])?;
+    let (agent, computer) = (agent.body["name"].as_str().unwrap_or("").to_string(), computer.body["computer"].as_str().unwrap_or("").to_string());
+    let r = shell(api, &session, "PUT", &format!("/api/computers/{computer}/agents/{agent}"), None, &[])?;
+    anyhow::ensure!(r.status == 200 && !agent.is_empty(), "assigning the agent: {r}");
+    let page = open_failing(b, api, "/", "")?;
+    let shown = b.until(&page, &chat_open, wait);
+    b.eval(&page, &format!("(window.__holdMembers = true, {READ_AGAIN})"))?;
+    let asked = b.until(&page, "typeof window.__membersHeld === 'function'", wait);
+    b.click(&page, "#settings")?;
+    let settings = b.until(&page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden", wait);
+    b.eval(&page, "(window.__holdMembers = false, window.__membersHeld?.(), true)")?;
+    std::thread::sleep(settle);
+    let made = b.eval(&page, MADE)?;
+    let stayed = b.eval(&page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden && document.getElementById('layout').classList.contains('settings-view')")?;
+    s.ok(
+        "with their agent not yet in its chat, a move to Settings while Try again asks its members starts nothing there: the address and Settings stay, nothing is made",
+        shown && asked && settings && stayed == true && made["makingSaid"] == false && made["makes"] == 0,
+        json!({ "made": made, "stayed": stayed }),
+    );
+    b.click(&page, "#chats .chat-row")?;
+    let home = b.until(&page, "location.pathname === '/' && document.getElementById('settings-page').hidden", wait);
+    let r = shell(api, &session, "PUT", &format!("/api/fragments/{chat}/archived"), Some(&json!({ "archived": false })), &[])?;
+    let on = b.until(&page, "window.__makingSaid === true && window.__makes > 0 && location.pathname === '/'", wait);
+    s.ok("back home, the next read (the list socket's) goes on with its first run", home && r.status == 200 && on, b.eval(&page, MADE)?);
     b.close(page)?;
     Ok(())
 }

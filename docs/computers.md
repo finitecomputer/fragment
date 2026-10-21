@@ -183,8 +183,10 @@ everything said (their records are the chat's own), so a notice says the
 work on the computer after the save is what went. A read of the computer
 that fails (a blip, a 5xx) is not "no computer" (#437): the band keeps
 what the last read said, its agents too, and adds "Couldn't refresh your
-computer" with Try again; failing at the page's start, the first agent is
-made only for someone with no chats, and otherwise once Try again reads it.
+computer" with Try again (Settings, which never read it, says it couldn't
+be loaded); failing at the page's start, the first agent is made at once
+only for someone with no chats, and otherwise once a read answers (Try
+again's, or the list socket's), if the person is still at home.
 
 **Not in the chat.** The chat's records are its agents' and people's: the
 platform posts none there (the rule; docs/chat-records.md), and a notice
