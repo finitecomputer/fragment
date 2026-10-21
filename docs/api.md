@@ -1829,11 +1829,11 @@ A tier's call whose model fails before answering anything (not reached,
 platform's, also 401, 402, 403 or 404: its key refused, its credit spent,
 or no endpoint left by its routing, none of them the caller's to fail
 for) is made once more, the same, on the deployment's fallback model,
-and its answer is the call's: settled from its usage at its prices,
-under the call's one hold; a 401 or 402 is also logged aloud
-(`model.platform-key`). An answer that began is final; a refusal of the
-request (400, another 4xx) is the call's; when the fallback
-fails too, its failure is the call's, released, after two tries in all.
+and its answer is the call's: charged from its usage at its prices,
+once; a 401 or 402 is also logged aloud (`model.platform-key`). An
+answer that began is final; a refusal of the request (400, another 4xx)
+is the call's; when the fallback fails too, its failure is the call's,
+charged nothing, after two tries in all.
 `vision` and transcriptions have no fallback. A job's text step falls
 back the same, and its output's `model` names the model that answered.
 
@@ -1851,7 +1851,7 @@ model by its id"): the slot of the caller's tier when that slot runs it
 refused, 400), else the first slot that does, in the order `cheap`,
 `medium`, `fallback`, `vision`. The call is that slot's, as if it named
 the slot: its model, its key, its `body`, its fallback and its price.
-An id no slot runs is refused, 400, nothing reserved or sent, the message
+An id no slot runs is refused, 400, nothing charged or sent, the message
 listing the ids a call may name, which `GET /api/models/v1/models` lists
 too: OpenAI's list (`{object: "list", data: [{id, object: "model",
 created: 0, owned_by: "fragment"}]}`), each id once, nothing of where each
@@ -1877,17 +1877,16 @@ memo is one the agent transcribes itself, through this route):
 - **What it is sent.** The audio as base64. A `language` or `prompt` it
   was given passes on; with no language, Whisper detects it. OpenAI's
   other fields are let go.
-- **Refusals before anything is reserved.** A form that is not one, a
+- **Refusals before anything is sent.** A form that is not one, a
   model other than `whisper`, and a format other than `json` or `text`
   are refused 400. Audio past 10 MiB is refused 413.
 - **Metering** (`fragment_core::transcribe`). Workers AI's 46.63 neurons
-  a minute of audio. The call reserves its audio's bytes read as 16
-  kbps, and settles at the length Whisper reports. Above the
-  reservation it is charged in full; with no length reported, at the
-  reservation.
+  a minute of audio, charged after the answer at the length Whisper
+  reports; with no length reported, nothing, said aloud
+  (`ledger.unknown-usage`).
 - **Who pays.** The payer is the agent's owner, under no fragment's cap.
 - **What is kept.** Only the usage, on the ledger. Whisper's refusal is
-  released and passed through, as a chat call's is.
+  charged nothing and passed through, as a chat call's is.
 - **Its answer's shape.** An answer carries `x-fragment-answer-shape`:
   the model's own answer's top-level keys, and its `usage` when that is
   a small object of numbers and short strings (`{"keys": […], "usage":
@@ -1897,8 +1896,8 @@ memo is one the agent transcribes itself, through this route):
   catalog's schema unwrapped (`text`, `transcription_info`, `segments`,
   `vtt`, `word_count`), plus a `usage` the schema does not name. The
   route reads `text` and `transcription_info.duration` (the catalog's own
-  field). An answer in any other shape is answered 502 and settled at its
-  reservation.
+  field). An answer in any other shape is answered 502 and charged
+  nothing.
 
 What the model is sent is the body bounded: no `model` (the tier's),
 its images as they came, `max_tokens` at most 16384, `reasoning_effort`
@@ -1907,30 +1906,36 @@ client's headers. The payer is the agent's owner (decision 36); `fragment`, one 
 member of (403 otherwise), is where the turn is: when its owner pays,
 the call counts in its month and is under its cap for anyone but the
 owner (or the owner's agent acting for them); when another person owns
-it, that owner's ledger is asked first whether it is still open
-(decision 26). A request is at most 6 MiB (413 past it, nothing
-reserved): a screenshot Hermes shrinks to 5 MiB of base64 after a 413
-fits. Each call reserves its worst case (the body's bytes as
-tokens in, `max_tokens` out) under a reference of its own (`aig:<hex>`),
-then settles from its last, cumulative usage, input less what was cached
-(Workers AI puts a per-chunk delta on every chunk and the whole call's
-on a line of its own at the end: only that is metered). A call the model
-refuses is released and its answer passed through as it came; one whose
-stream broke before its usage is charged its worst case; a streamed
-call settles at its `[DONE]`, whether or not the client read to its end,
-and not at the stream's end: the gateway has held a stream open ~150 s
-past its `[DONE]`, which left the settle late, or cut with the Worker's
-`waitUntil` (the ledger's sweep then charged its worst case). The client
-reads the stream as it came (OpenAI's clients stop at `[DONE]`). Nothing
-of the request or its answer is kept: only the usage, on the ledger. A
-refusal of the payer's ledger is its own (402 `budget_used_up`, 403 for
-a guest), with its message.
+it, that owner's ledger is asked too whether it is still open
+(decision 26). Both are asked through the gate (docs/ledger.md, "The
+gate"; decision 62): what the router's isolate heard within the minute,
+so a call waits on no ledger in the common case, and a ledger that does
+not answer refuses nothing. A request is at most 6 MiB (413 past it,
+nothing sent): a screenshot Hermes shrinks to 5 MiB of base64 after a
+413 fits. Each call is charged after its answer, never in its way: its
+last, cumulative usage, input less what was cached (Workers AI puts a
+per-chunk delta on every chunk and the whole call's on a line of its
+own at the end: only that is metered), as one meter row under a
+reference of its own (`aig:<hex>`), sent to the payer's ledger on the
+ledger's queue, which asks again until the ledger has it (once by its
+reference). A call the model refuses, or never reached, is charged
+nothing and its answer passed through as it came; one whose stream
+broke before its usage is charged nothing, said aloud
+(`ledger.unknown-usage`); a streamed call is charged at its `[DONE]`,
+whether or not the client read to its end, and not at the stream's end:
+the gateway has held a stream open ~150 s past its `[DONE]`, which left
+a charge at its end late, or cut with the Worker's `waitUntil`. The
+client reads the stream as it came (OpenAI's clients stop at `[DONE]`).
+Nothing of the request or its answer is kept: only the usage, on the
+ledger. A refusal of the payer's ledger is its own (402
+`budget_used_up`, 403 for a guest), with its message.
 
-Each call's settle logs one line, `{"event": "model.settled", ref,
-logId, tier, model, charge, basis, first_ms, ms, calls}` (`wrangler
-tail`): `first_ms` is ms from its first try to the answer's first data
-line (streamed) or its status (read whole), `ms` to its settle, `calls`
-its tries (2 when it fell back), `model` the one that answered. A later
+Each call's charge logs one line, `{"event": "model.settled", ref,
+logId, tier, model, usage, first_ms, ms, calls}` (`wrangler tail`):
+`first_ms` is ms from its first try to the answer's first data line
+(streamed) or its status (read whole), `ms` to its charge, `calls` its
+tries (2 when it fell back), `model` the one that answered, `usage` what
+it reported (null: none, and charged nothing). A later
 latency lane reads these, as it reads a job's text step's `timing`
 (AI, above).
 
@@ -1940,11 +1945,12 @@ since the route reads no fragment's blob store (an agent reads one with
 `GET /api/f/{name}/blobs/{sha256}` and sends its bytes). Its caller,
 payer, `fragment`, 6 MiB body and ledger refusals are the chat route's.
 A body that is no decision (not one, a key unknown, a bound past) is
-400 saying why, nothing reserved or sent. It reserves its model's
-context window under an `aig:<hex>` reference, as an agent's turn, and
-settles at the input tokens the model counted. The model's refusal is
-released and passed through as it came; an answer that does not answer
-what was asked is settled (it was paid for) and answered 502
+400 saying why, nothing charged or sent. It asks the gate as an
+agent's turn and is charged after its answer, under an `aig:<hex>`
+reference, at the input tokens the model counted (none reported:
+nothing, said aloud). The model's refusal is charged nothing and passed
+through as it came; an answer that does not answer what was asked is
+charged (it was paid for) and answered 502
 `upstream_failed`. A computer's guest asks it as `POST /v1/decide` on
 its model intercept (docs/computers.md, Models).
 

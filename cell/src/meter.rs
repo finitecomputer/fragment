@@ -20,6 +20,11 @@
 //! same order, and the ledger answers it as before: a crash between its
 //! apply and the acknowledgement charges nothing twice.
 //!
+//! A paid call the router makes (a model call) is charged on the same
+//! queue after its answer (`charge`): one row, as a batch of its own under
+//! the row's reference, from no fragment (`source` empty), which the
+//! consumer applies and acknowledges, telling no one.
+//!
 //! The owner's standing gates the fragment's writes (decision 27): past
 //! the overdraft, the owner's fragments refuse mutations, posts, file
 //! writes, deploys, blob uploads and replays with a 402 that says why, and
@@ -69,7 +74,8 @@ const DAY_MS: i64 = 24 * HOUR_MS;
 const _: () = assert!(BATCH_ROWS as usize <= fragment_core::ledger::BATCH_ROWS_MAX, "a fragment's batch is one the ledger takes");
 
 /// A batch on its way to its payer's ledger: from fragment `source`, its
-/// outbox's batch `seq`.
+/// outbox's batch `seq`; or, `source` empty, a paid call's charge
+/// (`charge`), which no fragment is told of.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MeterBatch {
     pub payer: String,
@@ -375,8 +381,29 @@ pub(crate) fn read_only_refusal(why: Why) -> CellError {
     CellError::new(ErrorCode::BudgetUsedUp, format!("this fragment's owner's {}", Refused::ReadOnly { why }.message()))
 }
 
+/// Charges `rows`, each a paid call's usage that happened, to `payer`'s
+/// ledger after the call answered, never in its way (decision 62): each a
+/// batch of its own, under its row's reference, on the ledger's queue,
+/// whose consumer applies it (once by its reference: a batch sent again
+/// charges nothing twice) and asks again while the ledger does not
+/// answer. A send that fails is said aloud with its references: the
+/// charge is lost, and the call stands.
+pub async fn charge(env: &Env, payer: &str, rows: Vec<MeterRow>) {
+    let refs: Vec<String> = rows.iter().map(|r| r.reference.clone()).collect();
+    let bodies: Vec<Value> = rows
+        .into_iter()
+        .map(|row| {
+            let meter = Meter { batch: row.reference.clone(), rows: vec![row] };
+            serde_json::to_value(MeterBatch { payer: payer.to_string(), source: String::new(), seq: 0, meter }).expect("a batch serializes")
+        })
+        .collect();
+    if let Err(e) = js::queue_send(env.as_ref(), QUEUE_BINDING, &bodies).await {
+        console_error!("{}", json!({ "event": "ledger.charge-lost", "refs": refs, "message": e.message }));
+    }
+}
+
 /// The ledger queue's consumer: each batch applied on its payer's ledger,
-/// then its fragment told. A ledger that does not answer, or a fragment
+/// then its fragment told (a paid call's charge tells no one). A ledger that does not answer, or a fragment
 /// that does not hear, gets the message again; a refusal is final (a
 /// guest's fragments are billed nothing; a batch the ledger refuses as
 /// another body is a source's bug, kept in its event log).
@@ -405,6 +432,15 @@ async fn consume_one(raw: RawMessage, env: &Env) {
             return;
         }
     };
+    if b.source.is_empty() {
+        // a paid call's charge (`charge`): no outbox to tell, and nothing to send again
+        let rows_refused = metered.as_ref().map_or(0, |m| m.refused.len());
+        if refused.is_some() || rows_refused > 0 {
+            console_error!("{}", json!({ "event": "ledger.charge-refused", "batch": b.meter.batch, "refused": refused, "rows": metered.map(|m| m.refused) }));
+        }
+        message.ack();
+        return;
+    }
     let acked = Acked { seq: b.seq, batch: b.meter.batch.clone(), metered, refused };
     let body = serde_json::to_string(&acked).expect("an acknowledgement serializes");
     let heard = async {

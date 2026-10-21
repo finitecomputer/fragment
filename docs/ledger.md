@@ -152,17 +152,12 @@ tier costs a person what it did. Two differences remain:
 - **What it costs Finite** is Tinfoil's GPU time, not tokens: the margin
   is a guess at that, not a measure.
 
-A model call that fell back (docs/api.md, Models) keeps its one hold,
-reserved at its tier's model's worst case, and is settled from the
-fallback's usage at the fallback's prices. The hold (the request's
-bytes as tokens, the capped `max_tokens` out, at the tier's model's
-prices) covers a fallback call of an agent's usual size; DeepSeek V4
-Flash, the default fallback, is dearer than the cheap tier's GLM-5.3
-Flash, so a fallback call near its worst case is charged in full past
-its hold, as any usage that happened is. On Finite's own deployment the
-fallback, Workers AI's GLM-5.3 Flash, is cheaper than the tiers'
-OpenRouter row (and at one price with Finite Private's): the hold always
-covers it.
+A model call that fell back (docs/api.md, Models) is charged once,
+from the fallback's usage at the fallback's prices: DeepSeek V4 Flash,
+the default fallback, is dearer than the cheap tier's GLM-5.3 Flash; on
+Finite's own deployment the fallback, Workers AI's GLM-5.3 Flash, is
+cheaper than the tiers' OpenRouter row (and at one price with Finite
+Private's).
 
 ## The state machine
 
@@ -259,10 +254,17 @@ interrupt every request"):
   whatever is in flight during the cache window' is a small price to pay
   for 1. simplifying the code, 2. not breaking agents, 3. lowering
   latency."
-- **Who asks.** A fragment's writes ask `may_spend(write)` of its owner
-  (cell/src/meter.rs `read_only`): 402 past the overdraft. A test fleet's
-  `forget-standing` lever (docs/api.md) makes an isolate's gate forget
-  every answer.
+- **Who asks.** An agent's model call (the router's isolate: the model
+  route, and a computer's model intercept through it) asks
+  `may_spend(agent_turn)` of the agent's owner, and `fragment_open` of a
+  fragment someone else owns that it spends in for someone else
+  (cell/src/models.rs `gate`). A fragment's writes ask
+  `may_spend(write)` of its owner (cell/src/meter.rs `read_only`): 402
+  past the overdraft. A test fleet's `forget-standing` lever (docs/api.md)
+  makes an isolate's gate forget every answer, as its ledger's
+  `forget-gate` does the router's; its ledger's `slow {ms}` makes it
+  answer late, which no call waits on past the gate's wait (the e2e's
+  `ledger` section).
 - **Test fleets** cap an e2e person's paid calls (`paid-calls {max}`):
   once their ledger has charged or holds `max` (each an entry under
   `aig:`, `key:` or `step:`), its gate refuses an agent's turn or an AI
@@ -347,13 +349,16 @@ payer through the ledger Queue, under a batch id of its own
 mark sends the same batch again, which answers as before.
 
 - **Model calls** (the computer's model intercept, lesson 7). Before the
-  call it reserves a worst case (tokens in from the body's size, out at
-  the tier's capped `max_tokens`) under the intercept's own call id. It
-  streams, takes only the last, cumulative usage (S4), and settles with
-  it at the stream's `[DONE]` (not when the connection ends: the gateway
-  has held one open ~150 s past it). A call that failed before any token
-  is released. A call whose
-  stream broke settles without usage, at its worst case. A Workers AI
+  call it asks the gate (above); nothing is held. It streams, takes only
+  the last, cumulative usage (S4), and is charged with it after its
+  answer, at the stream's `[DONE]` (not when the connection ends: the
+  gateway has held one open ~150 s past it), as one row under a
+  reference of its own (`aig:<hex>`), a batch of its own under that
+  reference on the ledger's queue (cell/src/meter.rs `charge`), which
+  asks again until the ledger has it. A call that failed before any token
+  is charged nothing. A call that reported no usage (its stream broke) is
+  charged nothing, said aloud (`ledger.unknown-usage`): billing never
+  stops an agent (decision 62). A Workers AI
   call's gateway log id rides along for reconciliation; the gateway's
   per-user spend rule is only a backstop. An OpenRouter or Finite
   Private call has neither: OpenRouter bills the platform's one key from
@@ -363,8 +368,8 @@ mark sends the same batch again, which answers as before.
   choice: an OpenAI-compatible API's usage is read wherever it comes
   (`fragment_core::models::Stream::on`). The payer is the
   agent's owner; the fragment is the agent's. An agent's decision
-  (`/v1/decide`) is reserved and settled as a decision step is (below),
-  under its own call id.
+  (`/v1/decide`) and transcription are charged the same way, after their
+  answers, at the input tokens or the audio's length they reported.
 - **AI steps** (a job's `ai.*`, voice input). The step's reference
   (`step:<fragment>@<incarnation>/run/<run>/attempt/<attempt>/step/<index>`:
   a replay is a new attempt, so a step released before reserves again) is

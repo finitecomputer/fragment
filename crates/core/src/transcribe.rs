@@ -8,10 +8,9 @@
 //! (`price::Usage::Neurons`). Pure: the cell reads the body, makes the call
 //! and meters it.
 //!
-//! A call reserves its worst case first, the audio's bytes read as
-//! `WORST_BYTES_PER_SECOND` (`worst`), and settles at the length Whisper
-//! reports (`usage_of`), above the reservation too (docs/ledger.md). What
-//! reaches the model is the audio and, when the client sent them, its
+//! A call is charged after its answer at the length Whisper reports
+//! (`usage_of`; docs/ledger.md), nothing held before it. What reaches the
+//! model is the audio and, when the client sent them, its
 //! language and prompt (`bound`); the client's answer is OpenAI's shape,
 //! `{"text": …}` or the text alone (`answer`).
 
@@ -40,18 +39,14 @@ pub const MILLI_NEURONS_PER_MINUTE: u64 = 46_630;
 pub const AUDIO_MAX_BYTES: usize = 10 * 1024 * 1024;
 /// The whole form: the audio and its other fields.
 pub const BODY_MAX_BYTES: usize = AUDIO_MAX_BYTES + 64 * 1024;
-/// The reservation reads the audio as this many bytes a second (16 kbps,
-/// below any voice note's), so 10 MiB holds about 87 minutes. Audio
-/// encoded tighter settles above it, charged in full.
-pub const WORST_BYTES_PER_SECOND: u64 = 2_000;
 /// A prompt (Whisper's `initial_prompt`), at most this many characters:
 /// OpenAI reads 224 tokens of one.
 pub const PROMPT_MAX_CHARS: usize = 1_024;
 /// An answer's audio is at most a day long: a duration past it is not
-/// Whisper's, and settles at the reservation.
+/// Whisper's, and no usage.
 pub const DURATION_MAX_SECONDS: f64 = 86_400.0;
 
-/// Why a transcription is refused before anything is reserved or sent.
+/// Why a transcription is refused before anything is sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
     /// `model` is not `whisper`.
@@ -93,12 +88,11 @@ pub enum Format {
     Text,
 }
 
-/// A transcription bounded: the model's input, the audio's size (what
-/// the reservation reads), and how the client reads the answer.
+/// A transcription bounded: the model's input, and how the client reads
+/// the answer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Bounded {
     pub input: Value,
-    pub audio_bytes: usize,
     pub format: Format,
 }
 
@@ -137,7 +131,7 @@ pub fn bound(parts: &[Part<'_>]) -> Result<Bounded, Refusal> {
         }
         input["initial_prompt"] = json!(p);
     }
-    Ok(Bounded { input, audio_bytes: audio.len(), format })
+    Ok(Bounded { input, format })
 }
 
 /// `seconds` of audio in the ledger's unit, a part of a thousandth of a
@@ -147,29 +141,20 @@ fn neurons(millis: u64) -> Usage {
     Usage::Neurons { milli: (millis * MILLI_NEURONS_PER_MINUTE).div_ceil(60_000) }
 }
 
-impl Bounded {
-    /// What the call reserves: its audio's bytes as seconds at
-    /// `WORST_BYTES_PER_SECOND`, at least one.
-    pub fn worst(&self) -> Usage {
-        let seconds = (self.audio_bytes as u64).div_ceil(WORST_BYTES_PER_SECOND).max(1);
-        neurons(seconds * 1_000)
-    }
-}
-
 // Whisper's answer, as the AI binding gives it (the hosted lane, on
 // e2e.finite.place, 2026-10-08): its catalog's output schema, unwrapped
 // (`text`, `transcription_info`, `segments`, `vtt`, `word_count`), and a
 // `usage` the schema does not name. Read as it is: an answer in any other
 // shape (inside `result`, as Workers AI's REST API wraps one) has no text
-// and no length, so it is answered 502 and settled at its reservation.
+// and no length, so it is answered 502 and charged nothing (the cell says so aloud).
 
 /// What a call cost, from Whisper's answer: its audio's length
 /// (`transcription_info.duration`, seconds, the catalog's own field;
 /// measured hosted, 2 s of audio settled at 1,555 thousandths of a neuron).
 /// Its undocumented `usage` is not read: what it holds is shown by
 /// `shape` until it is known. An answer that does not say, or says what no
-/// audio is, is `None`, which the ledger settles at the reservation: the
-/// money path fails closed.
+/// audio is, is `None`: charged nothing, said aloud (cell/src/models.rs;
+/// decision 62).
 pub fn usage_of(answer: &Value) -> Option<Usage> {
     let seconds = answer["transcription_info"]["duration"].as_f64()?;
     if !seconds.is_finite() || !(0.0..=DURATION_MAX_SECONDS).contains(&seconds) {
@@ -219,7 +204,7 @@ mod tests {
         let audio = b"OggS\x00voice".to_vec();
         let b = bound(&[part("model", b"whisper"), part("file", &audio), part("response_format", b"json")]).unwrap();
         assert_eq!(b.input, json!({ "audio": base64::engine::general_purpose::STANDARD.encode(&audio), "task": "transcribe" }), "no language: Whisper detects it");
-        assert_eq!((b.audio_bytes, b.format), (audio.len(), Format::Json));
+        assert_eq!(b.format, Format::Json);
         let b = bound(&[part("model", b" whisper "), part("file", &audio), part("language", b"de"), part("prompt", b"Paul, fragment"), part("response_format", b"text"), part("temperature", b"0")]).unwrap();
         assert_eq!((b.input["language"].clone(), b.input["initial_prompt"].clone(), b.format), (json!("de"), json!("Paul, fragment"), Format::Text));
         assert!(b.input.get("temperature").is_none(), "what Whisper has no input for is let go");
@@ -228,7 +213,7 @@ mod tests {
     }
 
     /// Invalid: what is no transcription the route takes is refused before
-    /// anything is reserved, saying why.
+    /// anything is sent, saying why.
     #[test]
     fn a_form_out_of_shape_is_refused() {
         let a = b"audio".as_slice();
@@ -252,11 +237,10 @@ mod tests {
         assert!(Refusal::TooLarge(11).message().contains("at most 10485760"));
     }
 
-    /// Goal: a call reserves its audio's bytes at 16 kbps and settles at
-    /// the length Whisper heard, at Workers AI's 46.63 neurons a minute, so
-    /// a minute is its listed $0.0005 (before the fee and margin). Method:
-    /// the book's price of a minute, a reservation, and answers that do and
-    /// do not say how long.
+    /// Goal: a call is charged at the length Whisper heard, at Workers
+    /// AI's 46.63 neurons a minute, so a minute is its listed $0.0005
+    /// (before the fee and margin). Method: the book's price of a minute,
+    /// and answers that do and do not say how long.
     #[test]
     fn a_minute_is_workers_ais_price() {
         let book = PriceBook::defaults();
@@ -269,12 +253,6 @@ mod tests {
         for bad in [json!({}), json!({ "transcription_info": { "duration": "60" } }), json!({ "transcription_info": { "duration": -1.0 } }), json!({ "transcription_info": { "duration": 90_000.0 } })] {
             assert_eq!(usage_of(&bad), None, "{bad}");
         }
-        let b = Bounded { input: json!({}), audio_bytes: AUDIO_MAX_BYTES, format: Format::Json };
-        // 10 MiB at 2,000 bytes a second: 5,243 s, about 87 minutes
-        assert_eq!(b.worst(), Usage::Neurons { milli: (5_243u64 * 1_000 * 46_630).div_ceil(60_000) });
-        let worst = book.price(&b.worst()).unwrap().charge;
-        assert!((65_000..75_000).contains(&worst), "about $0.07 held for the largest, the fee and margin in: {worst}");
-        assert_eq!(Bounded { audio_bytes: 1, ..b }.worst(), Usage::Neurons { milli: 778 }, "at least a second");
     }
 
     /// The client's answer: OpenAI's json, or the text alone; an answer of
@@ -286,7 +264,7 @@ mod tests {
         assert_eq!(answer(Format::Text, &w), Some(("text/plain; charset=utf-8", b"hello there".to_vec())));
         assert_eq!(answer(Format::Json, &json!({ "transcription_info": {} })), None);
         // an answer in another shape (the REST API's wrapping) has no text
-        // and no length: answered 502, settled at its reservation
+        // and no length: answered 502, charged nothing
         let wrapped = json!({ "result": w, "success": true });
         assert_eq!((answer(Format::Text, &wrapped), usage_of(&wrapped)), (None, None));
     }

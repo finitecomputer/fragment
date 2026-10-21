@@ -599,6 +599,9 @@ speaking Cloudflare's APIs) returns once this product works.
     and triggers start no runs either: each run they would have started
     is recorded `blocked`, with the reason, and they start again once the
     owner has credit (Paul, 2026-10-03).
+    Status (2026-10-21, decision 62): the stop is read from a cached
+    standing, so it reaches an agent within a minute of zero, and a
+    ledger that does not answer stops nothing.
 28. **Sign-up is open; creating needs a seat** (decision 49, which
     replaced invite-only sign-up on 2026-10-08).
 
@@ -1259,8 +1262,11 @@ Paul:
       starts within the gate's minute.
     - Status (2026-10-21; the stack from `claude/ledger-cached-gate`):
       the gate is built, and a fragment's writes and an e2e person's paid
-      calls are read through it; the paid calls move onto it and onto
-      rows charged after, one kind a pull request.
+      calls are read through it. Model calls (the route's chat calls,
+      decisions and transcriptions) are gated by it and charged after
+      their answers (`claude/models-charged-after`); one that reports no
+      usage is charged nothing, said aloud. Operator keys and AI steps
+      follow, one kind a pull request.
 
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 
