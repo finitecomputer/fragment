@@ -35,8 +35,8 @@ export function seatGives(offer) {
 /**
  * The shell's helpers this module uses: `{api, el}` for the welcome, and
  * `{section, line, actionLine, usd, reopen}` besides for settings, with
- * `noSeatSaid` (who is signed in, said to a guest) and `switchForm` (Use
- * another account).
+ * `noSeatSaid` (who is signed in, said to a guest), `switchForm` (Use
+ * another account) and `support` (the deployment's help link, or null).
  */
 let h = null;
 
@@ -130,9 +130,15 @@ async function settle(pack) {
     await h.api("POST", `/api/billing/sessions/${encodeURIComponent(pack)}`, {});
     return { said: "Paid: the credit is yours." };
   } catch (e) {
-    return { said: `Your purchase is not here yet: ${e.message}` };
+    // said plainly: what happened, and what to do (the platform's words
+    // are for us, in the console)
+    console.warn("A credit pack's return was not applied:", e);
+    return { said: NOT_HERE, help: true };
   }
 }
+// A pack's return that was not applied: Stripe's webhook applies a paid
+// pack within minutes whatever the return did, so Settings show it later.
+const NOT_HERE = "Your purchase isn't here yet. If you were charged, the credit arrives within a few minutes: open Settings again to see it.";
 /** A return (`returning`'s) a load of settings has rendered: said once. */
 export function returnSaid(back) {
   if (back.said) settling = null;
@@ -212,7 +218,21 @@ export async function billingSections(helpers, ledger, mine, back) {
   if (!mine) return [section("Billing", el("p", "muted", "Your seat could not be read."))];
   const { offer } = mine;
   const billing = section("Billing");
-  if (back?.said) billing.append(el("p", "settings-line", back.said));
+  if (back?.said) {
+    // one sentence (the line lays its children out apart), and, where the
+    // deployment names one, where to get help
+    const words = el("span", null, back.said);
+    if (back.help && h.support) {
+      const help = el("a", null, "get help");
+      help.href = h.support;
+      help.target = "_blank";
+      help.rel = "noopener";
+      words.append(" If it doesn't, ", help, ".");
+    }
+    const said = el("p", "settings-line");
+    said.append(words);
+    billing.append(said);
+  }
   // an admin's org, and whether they are alone in it
   const org = mine.admin ? await h.api("GET", "/api/org").catch((e) => ({ error: e.message })) : null;
   const alone = org?.members?.length === 1;
