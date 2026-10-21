@@ -227,6 +227,48 @@ Every refusal is a typed `Refused`, with `code()` (the platform's
 `ErrorCode`: every money refusal is 402 `budget_used_up`) and `message()`
 for people.
 
+## The gate
+
+Before a spend starts, its payer's ledger is asked whether it may
+(`may_spend`, and a fragment's owner `fragment_open` when someone else
+pays in it), through one cached question, `ledger::may` (cell/src/ledger.rs;
+its cache is `fragment_core::ledger::gate`), never on every call
+(decision 62; Paul, 2026-10-21: "billing should be settled best effort not
+interrupt every request"):
+
+- **Cached per isolate.** Each isolate (the router's, which makes model
+  calls and the swap's operator-key calls, and each Fragment object's,
+  which takes writes) keeps each answer for `STANDING_CACHE_MS` (a
+  minute), keyed by the person and the question (the spend, the
+  fragment, whether its owner spends). A refusal is kept as an
+  allowance is. At most `GATE_ENTRIES_MAX` (1,024) answers: past it the
+  stale go first, then the oldest.
+- **Asked once, briefly.** With no fresh answer, the ledger is asked once,
+  for at most `GATE_WAIT_MS` (1.5 s: a few times a Durable Object call's
+  round trip, a cold start's included).
+- **Fail open.** A ledger that does not answer in time, or answers with
+  anything but its own refusal (an outage, a deploy going out), lets the
+  spend start, logs `ledger.gate-unknown`, and is not kept, so the next
+  spend asks again. The one deliberate refusal is the ledger's: a person
+  out of credit, read-only, a guest, or a capped caller past a fragment's
+  cap.
+- **What it costs.** A person's standing reaches an isolate within a
+  minute: one out of credit spends on for up to a minute more (each call
+  charged after it, as every meter is: usage that happened is charged),
+  and one who topped up waits up to a minute for their agents. Paul: "'overspend by
+  whatever is in flight during the cache window' is a small price to pay
+  for 1. simplifying the code, 2. not breaking agents, 3. lowering
+  latency."
+- **Who asks.** A fragment's writes ask `may_spend(write)` of its owner
+  (cell/src/meter.rs `read_only`): 402 past the overdraft. A test fleet's
+  `forget-standing` lever (docs/api.md) makes an isolate's gate forget
+  every answer.
+- **Test fleets** cap an e2e person's paid calls (`paid-calls {max}`):
+  once their ledger has charged or holds `max` (each an entry under
+  `aig:`, `key:` or `step:`), its gate refuses an agent's turn or an AI
+  step as at zero credit, saying so; the cap is approximate by what
+  starts within the gate's minute.
+
 ## Limits
 
 | Limit | Value | Why |
@@ -277,7 +319,7 @@ Inner routes (platform code only, through the DO's stub):
 | `POST /fragment-open` | `{fragment}` | `{}` or `cap_reached` |
 | `POST /grant`, `/plan`, `/seat`, `/overdraft`, `/cap` | proto's `GrantCredit`, `SetPlan`, `SetSeat`, `SetOverdraft`, `SetFragmentCap` | `{}` |
 | `POST /status` | `{}` | proto's `LedgerStatus` |
-| `POST /test` | `{op: clock {offsetMs} \| sweep \| entries {prefix} \| totals \| book}` | test fleets only |
+| `POST /test` | `{op: clock {offsetMs} \| sweep \| entries {prefix} \| totals \| book \| paid-calls {max?} \| legacy-seat {seat, seq} \| schema}` | test fleets only |
 
 Before each route the DO offers the ledger the configured book
 (`configured_book`: the core's defaults and the configuration's operator

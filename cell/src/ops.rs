@@ -554,7 +554,8 @@ impl FragmentCell {
             }
             Some("meter") => self.meter_state()?,
             Some("forget-standing") => {
-                *self.standing.borrow_mut() = None;
+                // the isolate's whole gate: every person's answers, not only this owner's
+                crate::ledger::forget_gate();
                 json!({ "ok": true })
             }
             Some("cron-now") => {

@@ -17,17 +17,24 @@
 //! `Route::Answer`; a refusal is `ErrorBody` with the typed `Refused`
 //! beside it, so a caller can tell a read-only owner from a guest.
 //!
+//! **The gate** (`may`; docs/ledger.md, "The gate"): before a spend starts
+//! (a paid call, a write), its payer's ledger is asked whether it may, at
+//! most once a minute in each isolate (`fragment_core::ledger::gate`), and
+//! for at most `GATE_WAIT_MS`. Only a refusal stops it: a ledger that does
+//! not answer lets it start (decision 62).
+//!
 //! **Wiped** (docs/api.md, Operators): a wipe of its person empties it in
 //! one step and leaves one row that says so (`wiped`). From then every
 //! route is refused as `Refused::Wiped` (404), which a caller reads as a
 //! refusal, not an outage: a meter batch still in the queue is acknowledged
 //! and kept nowhere, so nothing makes the ledger again.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
+use fragment_core::ledger::gate::Gate;
 use fragment_core::ledger::{self as core, BatchRecord, CommandRecord, Entry, Ledger, Month, Refused, Spend, Store};
 use fragment_core::price::PriceBook;
-use fragment_proto::ledger::{GrantCredit, LedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat};
+use fragment_proto::ledger::{GrantCredit, LedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Why};
 use fragment_proto::ErrorCode;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -47,9 +54,19 @@ pub const PAYER_HEADER: &str = "x-fragment-payer";
 const DEFAULT_PLAN_ID: &str = "plan:default";
 /// Test fleets: references a test hook lists at most.
 const TEST_ENTRIES_MAX: i64 = 500;
-/// The meta keys of a capped ledger's paid calls (`TestHook::PaidCalls`).
+/// The meta key of a capped ledger's paid calls (`TestHook::PaidCalls`).
 const PAID_CALLS_MAX: &str = "test_paid_calls_max";
-const PAID_CALLS_USED: &str = "test_paid_calls_used";
+/// How long a gate waits on a ledger it has no fresh answer from: a few
+/// times a Durable Object call's usual round trip (tens of ms within a
+/// location, a few hundred across the world, and a cold start), so a slow
+/// or far ledger costs a call at most this, once a minute, and one that
+/// does not answer lets the call through (decision 62).
+const GATE_WAIT_MS: u64 = 1_500;
+
+thread_local! {
+    /// What each person's ledger last answered this isolate's gate (`may`).
+    static GATE: RefCell<Gate> = const { RefCell::new(Gate::new()) };
+}
 
 /// The price book the deployment charges with: the core's defaults, and
 /// the operator keys' prices and the book's version from the deployment's
@@ -94,7 +111,8 @@ impl DurableObject for LedgerCell {
         }
         match self.route(req).await {
             Ok(answer) => Response::from_json(&answer),
-            Err(Failed::Refused(why)) => refusal(why),
+            Err(Failed::Refused(why)) => refusal(why, why.message()),
+            Err(Failed::Saying(why, message)) => refusal(why, message),
             Err(Failed::Cell(e)) => e.response(),
         }
     }
@@ -116,14 +134,17 @@ impl DurableObject for LedgerCell {
 
 /// A refusal as its caller reads it: the platform's error body, and the
 /// core's typed reason beside it.
-fn refusal(why: Refused) -> Result<Response> {
-    let body = json!({ "error": why.code(), "message": why.message(), "refused": why });
+fn refusal(why: Refused, message: String) -> Result<Response> {
+    let body = json!({ "error": why.code(), "message": message, "refused": why });
     Ok(Response::from_json(&body)?.with_status(why.code().status()))
 }
 
 /// How a route failed: the ledger refused (typed), or the cell did.
 enum Failed {
     Refused(Refused),
+    /// A refusal that says more than its reason's message (a test fleet's
+    /// paid-calls cap).
+    Saying(Refused, String),
     Cell(CellError),
 }
 
@@ -180,11 +201,11 @@ pub struct Status {}
 /// (`sweep`), list the references under a prefix (`entries {prefix}`),
 /// read what moved its balance (`totals`), read the price book its head
 /// holds as of its last call (`book`, answering `{book}`), or cap its paid
-/// calls from now
-/// (`paid-calls {max?}`, answering `{max, used}`; with no `max` the cap
-/// stays as it is, 0 where there was none: each new reservation, a model
-/// call or an AI step, counts one, and one past `max` is refused as a
-/// ledger at zero refuses it; the hosted e2e's people are capped so), or
+/// calls/// (`paid-calls {max?}`, answering `{max, used}`; with no `max` the cap
+/// stays as it is, 0 where there was none: `used` is every model call,
+/// operator key's call and AI step it has charged or holds, by their
+/// references, and once it reaches `max` its gate refuses them as a ledger
+/// at zero does; the hosted e2e's people are capped so), or
 /// set its seat at an order of the lever's (`legacy-seat {seat, seq}`,
 /// answering its status), as an operator's `seat` command did before it
 /// went (2026-10-16): a ledger such a command left ahead of the
@@ -618,7 +639,7 @@ impl LedgerCell {
             <core::Reserve as Route>::PATH => {
                 let r: core::Reserve = decode(&body)?;
                 if self.cfg.test_hooks {
-                    self.paid_call(&r.reference)?;
+                    self.paid_calls(Some(&r.reference))?;
                 }
                 reply(self.mutate(move |l, s, now| l.reserve(s, &r, now)).await?)
             }
@@ -636,6 +657,9 @@ impl LedgerCell {
             }
             MaySpend::PATH => {
                 let q: MaySpend = decode(&body)?;
+                if self.cfg.test_hooks && matches!(q.spend, Spend::AgentTurn | Spend::AiStep) {
+                    self.paid_calls(None)?;
+                }
                 reply(done(self.mutate(move |l, s, now| l.may_spend(s, q.spend, q.fragment.as_deref(), q.by_owner, now)).await?))
             }
             FragmentOpen::PATH => {
@@ -708,22 +732,37 @@ impl LedgerCell {
         }
     }
 
+    /// Fleets with levers: a capped ledger's paid calls used, every model
+    /// call, operator key's call and AI step it has charged or holds (an
+    /// entry under `aig:`, `key:` or `step:`).
+    fn paid_calls_used(&self) -> CellResult<u64> {
+        let rows: Vec<Value> = self
+            .sql()
+            .exec("SELECT COUNT(*) AS n FROM entries WHERE substr(ref, 1, 4) IN ('aig:', 'key:') OR substr(ref, 1, 5) = 'step:'", None)?
+            .to_array()?;
+        Ok(rows.first().and_then(|r| r["n"].as_u64()).unwrap_or(0))
+    }
+
     /// Fleets with levers: a ledger whose paid calls are capped
-    /// (`TestHook::PaidCalls`) counts each new reservation, and refuses one
-    /// past the cap before anything is held. A retry of one it holds (the
-    /// same reference) is no new call.
-    fn paid_call(&self, reference: &str) -> Result<(), Failed> {
+    /// (`TestHook::PaidCalls`) refuses one more once it has charged or holds
+    /// `max`, as a ledger at zero refuses it: at its gate (which an isolate
+    /// trusts for up to a minute, so the cap is approximate by what starts
+    /// in that window), and at a new reservation (`reference`: a retry of
+    /// one it holds is no new call).
+    fn paid_calls(&self, reference: Option<&str>) -> Result<(), Failed> {
         assert!(self.cfg.test_hooks, "only a fleet with levers caps paid calls");
         let Some(max) = self.meta(PAID_CALLS_MAX)?.and_then(|v| v.parse::<u64>().ok()) else { return Ok(()) };
-        let held: Vec<Value> = self.sql().exec("SELECT 1 AS n FROM entries WHERE ref = ? LIMIT 1", vec![reference.into()])?.to_array()?;
-        if !held.is_empty() {
-            return Ok(());
+        if let Some(reference) = reference {
+            let held: Vec<Value> = self.sql().exec("SELECT 1 AS n FROM entries WHERE ref = ? LIMIT 1", vec![reference.into()])?.to_array()?;
+            if !held.is_empty() {
+                return Ok(());
+            }
         }
-        let used = self.meta(PAID_CALLS_USED)?.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        let used = self.paid_calls_used()?;
         if used >= max {
-            return Err(CellError::new(ErrorCode::BudgetUsedUp, format!("this test person's {max} paid calls are used up (the hosted e2e's cap)")).into());
+            let message = format!("this test person's {max} paid calls are used up (the hosted e2e's cap)");
+            return Err(Failed::Saying(Refused::AgentsStopped { why: Why::NoCredit }, message));
         }
-        self.set_meta(PAID_CALLS_USED, &(used + 1).to_string())?;
         Ok(())
     }
 
@@ -737,8 +776,7 @@ impl LedgerCell {
                     None => self.meta(PAID_CALLS_MAX)?.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0),
                 };
                 self.set_meta(PAID_CALLS_MAX, &max.to_string())?;
-                let used = self.meta(PAID_CALLS_USED)?.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-                Ok(json!({ "max": max, "used": used }))
+                Ok(json!({ "max": max, "used": self.paid_calls_used()? }))
             }
             TestHook::Clock { offset_ms } => {
                 self.set_meta("clock_offset", &offset_ms.to_string())?;
@@ -797,6 +835,12 @@ impl From<LedgerError> for CellError {
     }
 }
 
+impl From<Refused> for LedgerError {
+    fn from(why: Refused) -> LedgerError {
+        LedgerError { code: why.code(), message: why.message(), refused: Some(why) }
+    }
+}
+
 impl From<CellError> for LedgerError {
     fn from(e: CellError) -> LedgerError {
         LedgerError { code: e.code, message: e.message, refused: None }
@@ -814,19 +858,26 @@ impl From<worker::Error> for LedgerError {
 /// stand-in, a host failure (5xx), which a gate may treat as passing (a
 /// write, a wake); a paid call never does (`retried`, then refused).
 pub async fn ask<R: Route>(env: &Env, payer: &str, request: &R) -> Result<R::Answer, LedgerError> {
+    let bytes = asked(env, payer, R::PATH, serde_json::to_string(request).expect("a ledger request serializes")).await?;
+    serde_json::from_slice(&bytes).map_err(|e| CellError::host(format!("the ledger's answer to {}: {e}", R::PATH)).into())
+}
+
+/// `ask`'s round trip, one copy for every route (the cell's Wasm is held
+/// to a budget, and a copy per route type costs it): route `path`'s
+/// answer, as bytes, or its refusal.
+async fn asked(env: &Env, payer: &str, path: &str, body: String) -> Result<Vec<u8>, LedgerError> {
     assert!(fragment_core::npub::is_identity(payer), "a ledger is a person's, named by their identity");
     let headers = Headers::new();
     headers.set(PAYER_HEADER, payer)?;
     headers.set("content-type", "application/json")?;
-    let body = serde_json::to_string(request).expect("a ledger request serializes");
     let mut init = RequestInit::new();
     init.with_method(Method::Post).with_headers(headers).with_body(Some(body.into()));
-    let req = Request::new_with_init(&format!("https://ledger.internal{}", R::PATH), &init)?;
+    let req = Request::new_with_init(&format!("https://ledger.internal{path}"), &init)?;
     let mut resp = crate::routed::send(env, "LEDGER", payer, req).await?;
     let status = resp.status_code();
     let bytes = resp.bytes().await?;
     if status == 200 {
-        return serde_json::from_slice(&bytes).map_err(|e| CellError::host(format!("the ledger's answer to {}: {e}", R::PATH)).into());
+        return Ok(bytes);
     }
     /// A refusal's body: `ErrorBody` and, from the ledger, its reason.
     #[derive(Deserialize)]
@@ -858,6 +909,50 @@ pub async fn retried<R: Route>(env: &Env, payer: &str, request: &R) -> Result<R:
             answered => return answered,
         }
     }
+}
+
+/// The gate (docs/ledger.md, "The gate"): whether `person`'s ledger lets a
+/// spend start, a `MaySpend` of theirs or a `FragmentOpen` of a fragment
+/// they own. Its answer as this isolate heard it within the minute
+/// (`fragment_core::ledger::gate`), or asked now, once, for at most
+/// `GATE_WAIT_MS`. Only the ledger's refusal stops the spend: one that does
+/// not answer in time, or answers otherwise (an outage, a deploy going
+/// out), lets it start, says so in the log, and is asked again next time
+/// (decision 62: billing never stops an agent).
+pub async fn may<R: Route<Answer = Done>>(env: &Env, person: &str, question: &R) -> Result<(), LedgerError> {
+    gated(env, person, R::PATH, serde_json::to_string(question).expect("a gate's question serializes")).await
+}
+
+/// `may`, one copy for both questions: route `path` with `body`.
+async fn gated(env: &Env, person: &str, path: &'static str, body: String) -> Result<(), LedgerError> {
+    let key = format!("{person} {path} {body}");
+    let now = js::now_ms();
+    if let Some(answer) = GATE.with(|g| g.borrow().fresh(&key, now)) {
+        return answer.map_err(LedgerError::from);
+    }
+    let asked = std::pin::pin!(asked(env, person, path, body));
+    let waited = std::pin::pin!(Delay::from(std::time::Duration::from_millis(GATE_WAIT_MS)));
+    // what the ledger said, and its refusal as it said it (its message)
+    let (heard, said) = match futures_util::future::select(asked, waited).await {
+        // the routes answer `{}` when they allow it
+        futures_util::future::Either::Left((Ok(_), _)) => (Some(Ok(())), None),
+        futures_util::future::Either::Left((Err(e), _)) if e.refused.is_some() => (e.refused.map(Err), Some(e)),
+        futures_util::future::Either::Left((Err(e), _)) => {
+            console_error!("{}", json!({ "event": "ledger.gate-unknown", "path": path, "message": e.message }));
+            (None, None)
+        }
+        futures_util::future::Either::Right(_) => {
+            console_error!("{}", json!({ "event": "ledger.gate-unknown", "path": path, "message": format!("no answer in {GATE_WAIT_MS} ms") }));
+            (None, None)
+        }
+    };
+    GATE.with(|g| g.borrow_mut().heard(&key, heard, now)).map_err(|why| said.unwrap_or_else(|| why.into()))
+}
+
+/// Forgets every answer this isolate's gate heard (a test fleet's
+/// `forget-standing` lever).
+pub fn forget_gate() {
+    GATE.with(|g| g.borrow_mut().forget());
 }
 
 /// Holds a paid call's worst case on `payer`'s ledger before the call is

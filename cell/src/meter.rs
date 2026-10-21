@@ -25,8 +25,8 @@
 //! writes, deploys, blob uploads and replays with a 402 that says why, and
 //! keep serving reads; their cron and triggers start no runs, each one
 //! recorded `blocked` with the reason instead (jobs.rs `start_run`). The
-//! fragment asks the owner's ledger at most once a `STANDING_CACHE_MS`,
-//! rather than on every write.
+//! fragment asks through the gate (ledger.rs `may`): its isolate asks the
+//! owner's ledger at most once a minute, rather than on every write.
 
 use fragment_core::ledger::{Meter, MeterRow, Metered, Refused, Spend};
 use fragment_core::price::{StorageClass, Usage};
@@ -48,12 +48,6 @@ pub const QUEUE_BINDING: &str = "METERS";
 /// Set on the internal routes below by platform code; the router never
 /// sets or passes it.
 pub const METER_HEADER: &str = "x-fragment-meter";
-/// How long a fragment trusts what it last heard of its owner's standing.
-/// A cache, so its contract: its source is the owner's ledger
-/// (`may_spend(write)`), nothing invalidates it but its age, and a stale
-/// read lets a write through for at most this long past the overdraft, or
-/// refuses one for at most this long after a top-up.
-pub const STANDING_CACHE_MS: i64 = 60_000;
 /// A batch not acknowledged this long after it was sent is sent again.
 const RESEND_AFTER_MS: i64 = 5 * 60_000;
 /// Storage is sampled at most this often (from the alarm's daily pass).
@@ -73,7 +67,6 @@ const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 24 * HOUR_MS;
 
 const _: () = assert!(BATCH_ROWS as usize <= fragment_core::ledger::BATCH_ROWS_MAX, "a fragment's batch is one the ledger takes");
-const _: () = assert!(STANDING_CACHE_MS <= 60_000, "a fragment learns its owner's standing within a minute");
 
 /// A batch on its way to its payer's ledger: from fragment `source`, its
 /// outbox's batch `seq`.
@@ -96,10 +89,6 @@ pub struct Acked {
     pub metered: Option<Metered>,
     pub refused: Option<String>,
 }
-
-/// What the fragment last heard of its owner's standing: when (ms), and
-/// why its writes are refused, if they are.
-pub type StandingSeen = Option<(i64, Option<Why>)>;
 
 #[derive(Deserialize)]
 struct Minute {
@@ -363,35 +352,21 @@ impl FragmentCell {
         }
     }
 
-    /// Why the owner's fragments are read-only, when they are: what the
-    /// fragment last heard (`STANDING_CACHE_MS`), or the owner's ledger
-    /// now. A fresh answer waits on nothing, so a caller that asked a
-    /// moment before (a write's check) reads it within its own turn. A
-    /// ledger that does not answer says none: writes are the product, and
-    /// an outage costs cents at most; that answer is not kept, so the next
-    /// question asks again.
+    /// Why the owner's fragments are read-only, when they are: the gate's
+    /// answer to `may_spend(write)` (ledger.rs `may`: what this isolate
+    /// heard within the minute, or the owner's ledger now). A ledger that
+    /// does not answer says none: writes are the product, and an outage
+    /// costs cents at most. Any other refusal is none too: a guest's
+    /// fragments are billed nothing and take writes.
     pub(crate) async fn read_only(&self) -> CellResult<Option<Why>> {
-        let now = js::now_ms();
-        let seen = *self.standing.borrow();
-        if let Some((at, why)) = seen.filter(|(at, _)| now - at < STANDING_CACHE_MS) {
-            assert!(at <= now, "a standing is heard before it is read");
-            return Ok(why);
-        }
         let owner = self.must(MetaKey::Owner)?;
-        let asked = ledger::ask(&self.env, &owner, &MaySpend { spend: Spend::Write, fragment: None, by_owner: true }).await;
-        let why = match asked {
-            Ok(_) => None,
+        match ledger::may(&self.env, &owner, &MaySpend { spend: Spend::Write, fragment: None, by_owner: true }).await {
             Err(e) => match e.refused {
-                Some(Refused::ReadOnly { why }) => Some(why),
-                Some(_) => None,
-                None => {
-                    console_error!("{}", json!({ "event": "meter.standing-unknown", "message": e.message }));
-                    return Ok(None);
-                }
+                Some(Refused::ReadOnly { why }) => Ok(Some(why)),
+                _ => Ok(None),
             },
-        };
-        *self.standing.borrow_mut() = Some((now, why));
-        Ok(why)
+            Ok(()) => Ok(None),
+        }
     }
 }
 

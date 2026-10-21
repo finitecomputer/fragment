@@ -50,6 +50,7 @@ use sha2::{Digest, Sha256};
 
 use crate::price::{self, dollars, BookFault, PriceBook, PriceError, Priced, Usage, UsageFault, USD};
 
+pub mod gate;
 #[cfg(test)]
 mod sim;
 #[cfg(test)]

@@ -1229,6 +1229,39 @@ Private stays possible by config.
     tiers' calls, and `model.fallback` from it says why a call went to
     Workers AI (a 429 there is the window spent).
 
+### Billing never stops an agent (Paul, 2026-10-21)
+
+Paul:
+- "I don't want us to break people's agents. that should always be goal
+  #1, over time we can get tighter and better about how we price
+  everything but just do the simple thing that will work for now."
+- "we aren't adding some rest roundtrip per inference call yeah? billing
+  should be settled best effort not interrupt every request"
+- "'overspend by whatever is in flight during the cache window' is a
+  small price to pay for 1. simplifying the code, 2. not breaking
+  agents, 3. lowering latency. we want that to be the case even when
+  billing is on"
+
+62. **A spend is gated by a cached standing and charged after.**
+    - **The gate.** Before a paid call (a model call, an operator key's
+      call, an AI step) or a write, its payer's standing is read through
+      one cached question (`ledger::may`; docs/ledger.md, "The gate"):
+      each isolate asks the payer's ledger at most once a minute, for at
+      most 1.5 s, and keeps the answer, a refusal too. The one deliberate
+      refusal is a person out of credit, read-only or a guest, or a
+      capped caller past a fragment's cap (decisions 26 and 27). A ledger
+      that does not answer lets the spend start: a billing or pricing
+      problem never refuses an agent's call.
+    - **The charge.** A paid call is charged after its answer, as a meter
+      row idempotent by its reference, sent to the payer's ledger without
+      the call waiting on it (the ledger's queue, which retries). Nothing
+      is held before a call. A person out of credit may overspend by what
+      starts within the gate's minute.
+    - Status (2026-10-21; the stack from `claude/ledger-cached-gate`):
+      the gate is built, and a fragment's writes and an e2e person's paid
+      calls are read through it; the paid calls move onto it and onto
+      rows charged after, one kind a pull request.
+
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 
 `docs/ROADMAP.md` (2026-09-23, before this plan) is gone; it is in git
