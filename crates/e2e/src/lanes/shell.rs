@@ -1110,7 +1110,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
     settings_race_ui(s, api, &mut b, &page, &session)?;
     notice_ui(s, &mut b, &page, &chat, &shots)?;
-    models_ui(s, api, &mut b, &page, &session, &shots)?;
+    models_ui(s, api, &mut b, &page, &session, &chat, &shots)?;
     computer_ui(s, api, &mut b, &page, &session, &shots)?;
     update_ui(s, api, &mut b, &page, &session, &shots)?;
     b.color_scheme(&page, "dark")?;
@@ -2908,8 +2908,10 @@ fn notice_late_ui(s: &mut Suite, b: &mut Browser, page: &Page, chat: &str) -> Re
 /// beside its tier's (named by the tier, never a vendor), and the one
 /// picked is its agent.json's `model`, its tier kept, which its computer
 /// runs its next turn on. Its tier again takes the model away;
-/// disconnecting takes the offer.
-fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
+/// disconnecting takes the offer, and a Disconnect that fails says so in
+/// its row (#439); a Remove that answers once the person has gone to a
+/// chat leaves them there.
+fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, chat: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let row = format!("#settings-connections [data-provider={:?}]", crate::SWAP_ROUTER);
     b.reload(page)?;
@@ -3042,13 +3044,60 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let back = pick(b, "")?;
     let gone = agent_json();
     s.ok("settings shows it again as picked; its tier again takes the model away, its tier kept", shown && back && gone.get("model").is_none() && gone["tier"] == before["tier"], &gone);
+    // a Disconnect that does not go through (#439): settings reload, its row
+    // still connected, saying so, with Disconnect to try again
+    let said = format!("document.querySelector('{row} .provider-said')");
+    b.eval(page, &refuse_once("DELETE", &format!("/api/connections/{}/key$", crate::SWAP_ROUTER)))?;
+    b.click(page, &format!("{row} [data-action=disconnect]"))?;
+    let told = b.until(
+        page,
+        &format!("document.querySelector('{row}')?.dataset.state === 'set' && {said}?.textContent === {} && {said}.checkVisibility() && document.querySelector('{row} [data-action=disconnect]')?.disabled === false", js(UNREMOVED)),
+        wait,
+    );
+    s.ok(
+        "a Disconnect that does not go through: its row, reloaded, still connected, says That didn't go through. Try again., with Disconnect to try again",
+        told,
+        b.eval(page, &format!("document.querySelector('{row}')?.innerText"))?,
+    );
     // disconnected: the key goes, and no agent offers its models
     b.click(page, &format!("{row} [data-action=disconnect]"))?;
-    let off = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'not_set' && document.querySelectorAll('[data-model-for]').length === 0"), wait);
+    let off = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'not_set' && !{said}?.textContent && document.querySelectorAll('[data-model-for]').length === 0"), wait);
     let left = runs_on(&view());
-    s.ok("Disconnect takes the key away, and no agent offers its models, nor may run them", off && left.is_null(), json!({ "row": b.eval(page, &format!("document.querySelector('{row}')?.innerText"))?, "modelProviders": left }));
+    s.ok(
+        "pressed again, Disconnect takes the key away, the failure no longer said, and no agent offers its models, nor may run them",
+        off && left.is_null(),
+        json!({ "row": b.eval(page, &format!("document.querySelector('{row}')?.innerText"))?, "modelProviders": left }),
+    );
+    // an action's answer once the person has gone to a chat leaves them in
+    // it (#439): an own key's Remove, its answer held while a chat opens
+    let own = format!("#settings-connections [data-provider={:?}]", crate::SWAP_OWN);
+    let key = format!("/api/connections/{}/key", crate::SWAP_OWN);
+    let saved = shell(api, session, "PUT", &key, Some(&json!({ "key": "mail-left-e2e-55aa" })), &[])?;
+    b.reload(page)?;
+    let set = b.until(page, &format!("document.querySelector('{own}')?.dataset.state === 'set'"), wait);
+    b.eval(page, &hold("DELETE", &format!("{key}$"), Hold::Answer))?;
+    b.click(page, &format!("{own} [data-action=remove-key]"))?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    open_row(b, page, chat, wait)?;
+    b.eval(page, "(window.__held.release?.(), true)")?;
+    let settled = b.until(page, HELD_SETTLED, wait);
+    let seen = b.eval(page, "({ path: location.pathname, settings: !document.getElementById('settings-page').hidden, chat: [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment ?? null })")?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    let listed = shell(api, session, "GET", "/api/connections", None, &[])?;
+    let gone = listed.body["providers"].as_array().and_then(|l| l.iter().find(|p| p["provider"] == crate::SWAP_OWN)).map(|p| p["state"].clone()).unwrap_or(Value::Null);
+    s.ok(
+        "a Remove that answers once the person has gone to a chat takes the key away and leaves them in the chat: settings stay hidden",
+        saved.status == 200 && set && held && settled && seen == json!({ "path": "/", "settings": false, "chat": chat }) && gone == "not_set",
+        json!({ "seen": seen, "state": gone }),
+    );
+    b.click(page, "#settings")?;
+    anyhow::ensure!(b.until(page, &format!("location.pathname === '/settings' && document.querySelector('{own}')?.dataset.state === 'not_set'"), wait), "settings again");
     Ok(())
 }
+
+/// What a connection's row says when its Disconnect or Remove did not go
+/// through (shell.js `unremoved`).
+const UNREMOVED: &str = "That didn't go through. Try again.";
 
 /// How soon an open shell shows a change to its person's list, made
 /// anywhere: "within a few seconds", with no reload.
