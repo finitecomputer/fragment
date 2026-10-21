@@ -504,6 +504,13 @@ Checked against finite-mono's code (2026-10-08):
 
 ### Tests
 
+- **The `billing-off` e2e section** starts the real cell without Stripe
+  bindings, with the existing local vendor fakes. It checks
+  `billingEnabled: false`, guest creation refused, checkout/trial/pack
+  requests refused without contacting Stripe, and an operator comp
+  created, replayed and ended through the real registry and ledger. It
+  then restores the ordinary node and checks `billingEnabled: true`.
+  Run it with `cargo xtask e2e --only billing-off`; CI runs it in shard 4.
 - **Host:**
   - signatures (valid; wrong secret; stale; two `v1`s; tampered
     body);

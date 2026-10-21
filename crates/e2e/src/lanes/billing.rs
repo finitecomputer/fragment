@@ -43,6 +43,77 @@ fn subscription_of(s: &Suite, org: &str) -> Option<String> {
     })
 }
 
+/// Real cell/registry/ledger, no Stripe binding; the other vendor
+/// boundaries remain the existing local fakes. Restore the ordinary node
+/// even when a check errors, so later billing lanes still run normally.
+pub fn billing_off(s: &mut Suite, _: &Api) -> Result<()> {
+    if !s.section("billing-off", &[Need::Node, Need::Fakes, Need::Deployment]) {
+        return Ok(());
+    }
+    s.stop()?;
+    let api = s.start_without_billing()?;
+    let checked = billing_off_checks(s, &api);
+    s.stop()?;
+    let api = s.start(false)?;
+    checked?;
+    let restored = api.signed(&s.operator, "GET", "/api/seat", None)?;
+    s.ok("restoring the Stripe binding enables purchases again", restored.status == 200 && restored.body["billingEnabled"] == true, restored.status);
+    Ok(())
+}
+
+fn billing_off_checks(s: &mut Suite, api: &Api) -> Result<()> {
+    let session = api.sign_in("operator@e2e.test")?;
+    let _ = api.approve(&session, &s.operator);
+    let person = api.person()?;
+    let who = api.identity(&person)?;
+    let plan = api.signed(&s.operator, "POST", &format!("/api/ledger/{who}/plan"), Some(&json!({ "id": "billing-off-guest", "plan": "guest" })))?;
+    anyhow::ensure!(plan.status == 200, "making the billing-off guest: status {}", plan.status);
+    let mine = api.signed(&person, "GET", "/api/seat", None)?;
+    s.ok(
+        "without a Stripe binding the real cell reports billing disabled for a guest with no seat",
+        mine.status == 200 && mine.body["billingEnabled"] == false && mine.body["guest"] == true && mine.body["seat"].is_null(),
+        &mine,
+    );
+    let create = api.create(&person, &s.name("billing-off-guest"))?;
+    s.ok("billing off does not let a guest create", create.status == 403 && create.message().contains("guests can't create"), create.status);
+    let requests = s.stripe.requests().len();
+    for (path, body) in [
+        ("/api/billing/checkout", json!({ "kind": "seat_always_on" })),
+        ("/api/billing/checkout", json!({ "trialCode": "TEST-TRIAL" })),
+        ("/api/billing/packs", json!({})),
+    ] {
+        let r = api.signed(&person, "POST", path, Some(&body))?;
+        s.ok(&format!("billing off refuses {path} before contacting Stripe"), r.status == 400 && r.message().contains("sells no seats"), r.status);
+    }
+    let portal = api.signed(&person, "POST", "/api/billing/portal", Some(&json!({})))?;
+    s.ok("a billing-off guest cannot open a payer's portal", portal.status == 403 && portal.message().contains("only who pays"), portal.status);
+    let comp = json!({ "email": Api::email_of(&person), "kind": "seat_always_on" });
+    let given = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&comp))?;
+    let id = given.body["seat"]["id"].as_str().context("the comp's seat id")?;
+    let pushed = s.eventually(PUSHED, || {
+        let l = ledger(api, &person);
+        l["plan"] == "seat_always_on" && l["seat"] == "active"
+    });
+    let held = seat(api, &person);
+    let made = api.create(&person, &s.name("billing-off-comp"))?;
+    s.ok(
+        "an operator comp works with billing disabled: its real ledger is active, its holder is no guest and can create",
+        given.status == 200 && pushed && held["billingEnabled"] == false && held["guest"] == false && held["seat"]["comped"] == true && held["seat"]["good"] == true && made.status == 200,
+        json!({ "seat": held, "created": made.status, "pushed": pushed }),
+    );
+    let again = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&comp))?;
+    s.ok("replaying the billing-off comp keeps the same seat", again.status == 200 && again.body["created"] == false && again.body["seat"]["id"] == id, again.status);
+    let ended = api.signed(&s.operator, "DELETE", &format!("/api/admin/seats/{id}"), None)?;
+    let expired = s.eventually(PUSHED, || {
+        let mine = seat(api, &person);
+        let l = ledger(api, &person);
+        mine["billingEnabled"] == false && mine["guest"] == true && mine["seat"].is_null() && l["seat"] == "canceled"
+    });
+    s.ok("ending the comp returns its holder to guest status without enabling checkout", ended.status == 200 && expired, ended.status);
+    s.ok("billing-off refusals and comp lifecycle made no Stripe requests", s.stripe.requests().len() == requests, s.stripe.requests().len() - requests);
+    Ok(())
+}
+
 pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("billing", &[Need::Fakes]) {
         return Ok(());

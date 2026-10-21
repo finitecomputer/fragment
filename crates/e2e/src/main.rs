@@ -522,6 +522,15 @@ impl Suite {
 
     /// Starts the node, fragments on their own hosts.
     pub fn start(&mut self, clean: bool) -> Result<Api> {
+        self.start_with_billing(clean, true)
+    }
+
+    /// The same local node and vendor fakes, with no Stripe bindings.
+    pub fn start_without_billing(&mut self) -> Result<Api> {
+        self.start_with_billing(false, false)
+    }
+
+    fn start_with_billing(&mut self, clean: bool, billing: bool) -> Result<Api> {
         anyhow::ensure!(self.preview.is_none(), "a hosted run starts no node: a section that does declares Need::Node");
         assert!(self.node.is_none(), "one node at a time");
         let tools = self.tools.as_ref().context("a local run locates its tools")?;
@@ -562,7 +571,7 @@ impl Suite {
                 api_key: WORKOS_KEY.into(),
                 api_url: Some(self.workos.node().url.clone()),
             }),
-            stripe: Some(devstack::StripeVars {
+            stripe: billing.then(|| devstack::StripeVars {
                 key: STRIPE_KEY.into(),
                 webhook_secret: STRIPE_WEBHOOK.into(),
                 api_url: Some(self.stripe.node().url.clone()),

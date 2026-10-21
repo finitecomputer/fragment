@@ -116,6 +116,7 @@ const LANES: &[Lane] = &[
     ledger::transcribe_lane,
     finite_private::finite_private,
     orgs::orgs,
+    billing::billing_off,
     billing::billing,
     billing::billing_page,
     trials::trials,
@@ -159,7 +160,7 @@ pub const SHARDS: [&[&str]; 4] = [
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "faces", "isolation", "frames",
-        "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "doc", "push", "ai", "ledger", "transcribe", "orgs", "billing", "billing-page", "trials", "admin", "admin-page",
+        "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "doc", "push", "ai", "ledger", "transcribe", "orgs", "billing-off", "billing", "billing-page", "trials", "admin", "admin-page",
     ],
 ];
 
