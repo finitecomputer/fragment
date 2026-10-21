@@ -756,10 +756,10 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let page = b.open(&format!("{}/settings", api.base))?;
     let asked = b.until(&page, "document.querySelector('#first-run-card a.primary')?.getAttribute('href') === '/auth/login?screen_hint=sign-up&return=%2Fsettings'", wait);
     s.ok("signed out, /settings is the shell asking them to sign in, and to come back to settings", asked, b.eval(&page, "document.body.innerText.slice(0, 200)")?);
-    let other = b.eval(&page, "(() => { const f = document.querySelector('#first-run-card form[action]'); return { method: f?.getAttribute('method'), action: f?.getAttribute('action'), says: f?.textContent }; })()")?;
+    let other = b.eval(&page, "(() => { const a = document.querySelector('#first-run-card a.splash-secondary'); return { href: a?.getAttribute('href'), says: a?.textContent }; })()")?;
     s.ok(
-        "and offers Sign In: a form posting to /auth/switch, back to settings too",
-        other["method"] == "post" && other["action"] == "/auth/switch?screen_hint=sign-in&return=%2Fsettings" && other["says"] == "Sign In",
+        "and offers Sign In: a sign-in on AuthKit's sign-in screen, back to settings too",
+        other == json!({ "href": "/auth/login?screen_hint=sign-in&return=%2Fsettings", "says": "Sign In" }),
         &other,
     );
     let logo = b.eval(
@@ -771,7 +771,9 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         logo == json!({ "src": "/__shell/finite-logo.svg", "drawn": true, "status": 200, "type": "image/svg+xml" }),
         &logo,
     );
-    // evidence for a person: the signed-out page, on a desktop and a phone
+    // evidence for a person: the signed-out page, on a desktop and a phone,
+    // in its own fonts
+    let _ = b.eval(&page, "document.fonts.ready.then(() => true)");
     let _ = b.screenshot(&page, &shots.join("signed-out.png"));
     b.viewport(&page, 375, 812, true)?;
     let _ = b.screenshot(&page, &shots.join("phone-375-signed-out.png"));
@@ -1510,7 +1512,7 @@ fn guest_ui(s: &mut Suite, api: &Api, b: &mut Browser, seat_email: &str, shots: 
     // loaded, never reached Settings on CI's runners (2026-10-20: it never
     // opened, and made none of its calls). What is checked is what the
     // shell then shows.
-    b.eval(&page, "(document.querySelector('#first-run-card a.primary').click(), true)")?;
+    b.eval(&page, "(document.querySelector('#first-run-card a.splash-secondary').click(), true)")?;
     let asked = b.until(&page, "!!document.querySelector('input[name=login_hint]')", wait);
     b.eval(&page, &format!("(document.querySelector('input[name=login_hint]').value = {}, document.querySelector('input[name=login_hint]').form.submit(), true)", js(seat_email)))?;
     let home = b.until(&page, "location.pathname === '/' && !document.getElementById('layout').hidden && !!document.querySelector('#frames iframe')", wait);

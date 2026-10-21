@@ -278,7 +278,7 @@ fn form_destination(r: &Reply) -> Result<String> {
 /// `POST /auth/switch?return=<back>` from the platform's own page, with
 /// the browser's cookies.
 fn switch(api: &Api, back: &str, cookie: Option<String>) -> Result<Reply> {
-    api.call(Call { method: "POST", url: format!("{}/auth/switch?screen_hint=sign-in&return={}", api.base, url_enc(back)), cookie, extra: vec![("origin", api.base.clone())], ..Call::default() })
+    api.call(Call { method: "POST", url: format!("{}/auth/switch?return={}", api.base, url_enc(back)), cookie, extra: vec![("origin", api.base.clone())], ..Call::default() })
 }
 
 /// AuthKit keeps its own session in the browser (a cookie on its own
@@ -325,7 +325,7 @@ fn switch_cases(s: &mut Suite, api: &Api) -> Result<()> {
     let line = cookie_line(&r, "fragment_switch");
     s.ok(
         "Use another account starts a sign-in at WorkOS, its state bound to the browser by a cookie of its own (HttpOnly, SameSite=Lax)",
-        r.status == 200 && to.contains("/user_management/authorize?") && to.contains("screen_hint=sign-in") && !to.contains("login_hint") && line.contains("HttpOnly") && line.contains("SameSite=Lax") && cookie_line(&r, "fragment_login").is_empty(),
+        r.status == 200 && to.contains("/user_management/authorize?") && !to.contains("login_hint") && line.contains("HttpOnly") && line.contains("SameSite=Lax") && cookie_line(&r, "fragment_login").is_empty(),
         &r,
     );
     let back = api.external(&to)?;
@@ -410,6 +410,8 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an invitation's token rides along to WorkOS (it lets its invitee sign up)", r.header("location").contains("&invitation_token=Z1uX3Rbw_cIl-5fIG"), &r);
     let r = api.unsigned("GET", "/auth/login?invitation_token=%22%3E%3Cscript%3E", None)?;
     s.ok("and a malformed one does not", r.status == 302 && !r.header("location").contains("invitation_token"), &r);
+    let r = api.unsigned("GET", "/auth/login?screen_hint=sign-in&return=/x", None)?;
+    s.ok("Sign In's screen rides along to WorkOS too", r.status == 302 && r.header("location").contains("&screen_hint=sign-in"), &r);
     let r = api.unsigned("GET", "/auth/login?screen_hint=other", None)?;
     s.ok("an unknown AuthKit screen is not forwarded", r.status == 302 && !r.header("location").contains("screen_hint"), &r);
     s.workos.fail_next("access_denied");
@@ -1305,7 +1307,21 @@ fn browser_logout(s: &mut Suite, api: &Api) -> Result<()> {
     if !signed_out {
         return Ok(());
     }
-    if !switched_out(s, &mut browser, &page, "form[action^='/auth/switch'] button", emails[0], "Sign In reaches WorkOS under the shell's CSP and ends its held session")? {
+    // Sign In with WorkOS holding a session in the browser: that account
+    // again, asking no one, its session there kept (a sign-in, not a
+    // switch), and back where it began (a guest's home, the welcome)
+    let held = s.workos.hold(emails[0], 3600);
+    browser.eval(&page, "(document.querySelector('#first-run-card a.splash-secondary').click(), true)")?;
+    let again = browser.until(&page, &format!("location.pathname === '/welcome' && document.body.innerText.includes({})", json!(emails[0])), wait);
+    s.ok(
+        "the shell's Sign In, with WorkOS holding a session in the browser, is that account again, asking no one, and keeps that session",
+        again && s.workos.held() == Some(held),
+        format!("returned: {again}"),
+    );
+    if !again {
+        return Ok(());
+    }
+    if !switched_out(s, &mut browser, &page, "#first-run-card form[action^='/auth/switch'] button", emails[0], "Use another account reaches WorkOS under the shell's CSP and ends its held session")? {
         return Ok(());
     }
     browser.click(&page, "#first-run-card a.primary")?;

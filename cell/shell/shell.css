@@ -415,8 +415,7 @@ iframe[data-blocked] { display: none; }
 .splash-actions { display: grid; gap: 10px; width: 100%; }
 .splash .primary, .splash-secondary { display: flex; align-items: center; justify-content: center; width: 100%; min-height: 48px; height: auto; padding: 12px 24px; font-size: 16px; transition: background .15s, opacity .15s; }
 .splash .primary:hover { opacity: .85; }
-.splash form { margin: 0; }
-.splash-secondary { border: 1px solid var(--border-strong); border-radius: 999px; background: transparent; color: var(--text-primary); font-weight: 600; transition: border-color .15s; }
+.splash-secondary { border: 1px solid var(--border-strong); border-radius: 999px; background: transparent; color: var(--text-primary); font-weight: 600; text-decoration: none; transition: border-color .15s; }
 .splash-secondary:hover { border-color: var(--text-secondary); }
 .splash :is(.primary, .splash-secondary):focus-visible { outline: 2px solid var(--text-primary); outline-offset: 4px; }
 .first-run-form { display: flex; flex-direction: column; gap: 10px; }

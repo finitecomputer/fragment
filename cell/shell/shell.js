@@ -2792,12 +2792,15 @@ function firstRun(...children) {
 const PITCH = "Welcome to Finite";
 const SUBTITLE = "Superintelligent agents for you and your organization";
 function signIn() {
-  // back to this view, with what its address carries (a mailed trial's code)
+  // back to this view, with what its address carries (a mailed trial's
+  // code), whichever screen of AuthKit's each opens on. Sign In is a
+  // sign-in, not a switch: one WorkOS answers from a session it holds in
+  // the browser comes back here too, as that account.
   const back = location.pathname + location.search;
   const go = el("a", "primary", "Sign Up");
   go.href = `/auth/login?screen_hint=sign-up&return=${encodeURIComponent(back)}`;
-  const other = switchForm(back, "splash-secondary", "Sign In");
-  other.action = `/auth/switch?screen_hint=sign-in&return=${encodeURIComponent(back)}`;
+  const other = el("a", "splash-secondary", "Sign In");
+  other.href = `/auth/login?screen_hint=sign-in&return=${encodeURIComponent(back)}`;
   const heading = el("div", "splash-heading");
   heading.append(el("h1", null, PITCH), el("p", "muted", SUBTITLE));
   const actions = el("div", "splash-actions");
@@ -2809,14 +2812,15 @@ function signIn() {
 // to `back`: WorkOS keeps its own sign-in in the browser (clearing this
 // site's data leaves it), and Sign in comes back as that account without
 // asking. A switch ends this session here, if there is one, and that one
-// there, so the next sign-in asks who is signing in. A form: the shell's
+// there (whose logout comes back to the platform's root, not `back`), so
+// the next sign-in asks who is signing in. A form: the shell's
 // `form-action 'self'` lets the browser leave for WorkOS only from the
 // page its answer is.
-function switchForm(back, cls = "quiet", label = "Use another account") {
+function switchForm(back, cls = "quiet") {
   const other = el("form");
   other.method = "post";
   other.action = `/auth/switch?return=${encodeURIComponent(back)}`;
-  const use = el("button", cls, label);
+  const use = el("button", cls, "Use another account");
   use.type = "submit";
   other.append(use);
   return other;
