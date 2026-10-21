@@ -177,15 +177,36 @@ pub fn locate(tools: &Path) -> Result<Node, NodeError> {
     installed(&home)
 }
 
+/// How many times a node just written is run before a "text file busy"
+/// stands, and the pause before each try again (it grows: 20, 40, 60 ms).
+const BUSY_TRIES: u32 = 4;
+const BUSY_PAUSE: Duration = Duration::from_millis(20);
+
 /// Whether `node --version` (run with none of `VARS_CLEARED`) answers as
-/// the pin, and what it answered.
+/// the pin, and what it answered. A node just written (unpacked; tar
+/// closes each file as it writes it) can still be refused its run with
+/// ETXTBSY, "text file busy": another thread of this process that forked
+/// while the file was open for writing left a copy of that descriptor in
+/// its child until the child's own exec closes it (O_CLOEXEC). That window
+/// is a fork's, well under these pauses, so the run is tried again a few
+/// times, briefly, on ETXTBSY alone (run 39655637106: the unit tests,
+/// forking in parallel, met it).
 fn answers_as_pin(node: &Path) -> Result<(bool, String), io::Error> {
     let mut cmd = Command::new(node);
     cmd.arg("--version").stdin(Stdio::null());
     for var in VARS_CLEARED {
         cmd.env_remove(var);
     }
-    let out = cmd.output()?;
+    let mut tried = 1;
+    let out = loop {
+        match cmd.output() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tried < BUSY_TRIES => {
+                std::thread::sleep(BUSY_PAUSE * tried);
+                tried += 1;
+            }
+            done => break done?,
+        }
+    };
     let answer = String::from_utf8_lossy(&out.stdout).trim().to_string();
     Ok((out.status.success() && answer == format!("v{NODE_VERSION}"), answer))
 }
@@ -467,6 +488,52 @@ mod tests {
         fs::write(home.join("bin/node"), "#!/bin/sh\necho v26.8.0-alpha.0.0.0\n").unwrap();
         assert!(matches!(installed(&home), Err(NodeError::Corrupt { .. })));
         fs::remove_dir_all(&tools).unwrap();
+    }
+
+    /// A node, executable, and a descriptor open for writing on it (as a
+    /// fork's child holds one until its exec): Linux refuses its run with
+    /// ETXTBSY while it is open.
+    fn busy_node(name: &str) -> (PathBuf, PathBuf, fs::File) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch(name);
+        let node = dir.join("node");
+        fs::write(&node, format!("#!/bin/sh\necho v{NODE_VERSION}\n")).unwrap();
+        fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).unwrap();
+        let held = fs::OpenOptions::new().write(true).open(&node).unwrap();
+        (dir, node, held)
+    }
+
+    /// A node just written, its file still held open for writing a moment
+    /// (run 39655637106: another test's fork, in parallel), runs once it is
+    /// let go. Method: the descriptor dropped 30 ms in, within the tries'
+    /// pauses (20, then 40 ms).
+    #[test]
+    fn a_node_busy_a_moment_runs_once_let_go() {
+        let (dir, node, held) = busy_node("busy-moment");
+        let letting_go = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            drop(held);
+        });
+        let ran = answers_as_pin(&node);
+        letting_go.join().unwrap();
+        assert!(matches!(ran, Ok((true, _))), "it runs, as the pin: {ran:?}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Held busy throughout, its run is tried BUSY_TRIES times and then
+    /// refused as busy: the tries are bounded.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_node_busy_throughout_is_refused_after_its_tries() {
+        let (dir, node, held) = busy_node("busy-throughout");
+        let t0 = std::time::Instant::now();
+        let ran = answers_as_pin(&node);
+        let took = t0.elapsed();
+        drop(held);
+        assert_eq!(ran.as_ref().err().and_then(|e| e.raw_os_error()), Some(libc::ETXTBSY), "refused as busy: {ran:?}");
+        let paused = (1..BUSY_TRIES).map(|tried| BUSY_PAUSE * tried).sum::<Duration>();
+        assert!(took >= paused && took < paused + Duration::from_secs(2), "tried {BUSY_TRIES} times: {took:?}");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// An entry outside the tarball's one directory is refused.
