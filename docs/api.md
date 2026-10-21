@@ -2761,6 +2761,23 @@ titled "New chat" is titled from its first message with words (its first
 line, at most 48 characters) by the person's shell once their list shows
 a message in it, unless it was renamed first.
 
+**A chat knows whether its shell frame is shown.** After its identity hello,
+a chat sends `{fragment: "chat-visibility?", nonce}` to the hello's platform
+origin. The shell accepts a nonempty nonce of at most 64 characters from a
+connected frame in its chat map, for a fragment still in its person's list,
+after checking the source window and the fragment's canonical origin.
+It answers `{fragment: "chat-visibility", nonce, visible}` at that origin,
+and again on navigation, document visibility changes and page lifecycle
+events. Only the selected chat in a visible shell outside Settings or
+first-run is shown. An identity refresh for the same person keeps the
+registration; another person does not inherit it. A late origin lookup
+cannot register a replaced frame or a changed identity snapshot.
+The chat accepts only its parent at its hello's platform origin and its
+current nonce. Page departure retires the nonce; restoration asks again.
+Until confirmed, a framed chat reports `looking: false`; standalone chats
+use document visibility. This controls notification suppression only, not
+permission prompts or subscriptions, and carries no chat or identity data.
+
 **A page of the person's own may ask for their agents.** A frame the
 shell made of a fragment its person owns (the open chat, an app's window)
 may `postMessage({fragment: "agents?"})` to it; the shell answers that

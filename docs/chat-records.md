@@ -687,10 +687,15 @@ a job acting as the chat itself:
 
 A member who calls `notify_reply` itself pushes nothing (`job.via` is not
 `channel`). A turn that replies more than once pushes each reply under
-the chat's tag, so a browser shows the latest. `looking` is the page's
-own visibility, so a chat open in a tab of the shell that is not shown
-counts as looked at, and a chat whose agents reply more than 120 times
-in an hour pauses its push (the debt ledger has both).
+the chat's tag, so a browser shows the latest. Standalone, `looking` is
+the page's document visibility. Framed, it also requires the platform
+shell's confirmation that this chat is shown: an inactive frame, Settings,
+or a hidden shell does not suppress a push. The page waits for this
+confirmation after its identity hello and after page restoration. The
+visibility exchange carries a per-request nonce and a boolean, no chat
+content; each side checks the other's origin and window (docs/api.md,
+The shell). A chat whose agents reply more than 120 times in an hour
+pauses its push (the debt ledger).
 
 ## `tasks` (an agent fragment's)
 

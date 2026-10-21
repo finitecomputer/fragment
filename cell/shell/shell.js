@@ -223,6 +223,43 @@ function frameOf(src, title, name = null) {
   return frame;
 }
 
+// CSS-hidden frames still have visible documents. Tell only a registered
+// chat's own page whether it is shown; the nonce belongs to that document.
+const chatVisibility = new WeakMap();
+let chatPageAway = false;
+function tellChatVisibility(frame) {
+  const view = chatVisibility.get(frame);
+  if (!view?.origin || !frame.isConnected || state.frames.get(frame.dataset.fragment) !== frame) return;
+  const visible = !chatPageAway && !document.hidden && view.owner.id === state.me?.id && !!byName(frame.dataset.fragment)
+    && !state.page && state.current === frame.dataset.fragment && !frame.hidden && !$("frames").hidden && !$("layout").hidden;
+  frame.contentWindow?.postMessage({ fragment: "chat-visibility", nonce: view.nonce, visible }, view.origin);
+}
+function tellChatsVisibility() {
+  for (const frame of state.frames.values()) tellChatVisibility(frame);
+}
+async function chatVisibilityAsked(event) {
+  const d = event.data;
+  if (d?.fragment !== "chat-visibility?" || typeof d.nonce !== "string" || !d.nonce || d.nonce.length > 64) return;
+  const frame = [...state.frames.values()].find((f) => f.contentWindow === event.source);
+  const name = frame?.dataset.fragment;
+  if (!frame?.isConnected || !state.me || !byName(name)) return;
+  const view = { nonce: d.nonce, owner: state.me, origin: null };
+  chatVisibility.set(frame, view);
+  let origin;
+  try { origin = await originOf(name); } catch { return; }
+  if (chatVisibility.get(frame) !== view) return;
+  if (event.origin !== origin || view.owner !== state.me || !frame.isConnected || state.frames.get(name) !== frame || frame.contentWindow !== event.source || !byName(name)) {
+    chatVisibility.delete(frame);
+    return;
+  }
+  view.origin = origin;
+  tellChatVisibility(frame);
+}
+addEventListener("message", chatVisibilityAsked);
+document.addEventListener("visibilitychange", tellChatsVisibility);
+addEventListener("pagehide", () => { chatPageAway = true; tellChatsVisibility(); });
+addEventListener("pageshow", () => { chatPageAway = false; tellChatsVisibility(); });
+
 // A frame that could not sign in says so, and how on (the mint's note,
 // auth.rs `frame_note`, or a fragment's page whose browser keeps its frame
 // cookie from it): in this page's look, in the frame's place (a note
@@ -908,6 +945,7 @@ function openChat(name, push = true) {
     state.frames.set(name, frame);
   }
   for (const [n, frame] of state.frames) frame.hidden = n !== name;
+  tellChatsVisibility();
   renderHeading();
   renderChats();
   markSeen();
@@ -1889,6 +1927,7 @@ async function openSettings(push = true) {
   state.page = "Settings";
   $("layout").classList.add("settings-view");
   $("frames").hidden = true;
+  tellChatsVisibility();
   const page = $("settings-page");
   page.hidden = false;
   page.replaceChildren(el("p", "muted", "Loading…"));
@@ -2787,6 +2826,7 @@ addEventListener("resize", clearSplashEdge);
 function firstRun(...children) {
   clearSplashEdge();
   $("layout").hidden = true;
+  tellChatsVisibility();
   $("first-run").hidden = false;
   $("first-run").classList.remove("splash");
   $("first-run-card").replaceChildren(...children);

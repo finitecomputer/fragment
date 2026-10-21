@@ -2143,8 +2143,11 @@ export function mount(root) {
   // this page's typing, to everyone here: on while there is text and a key
   // came lately, off after a send or TYPING_MS of quiet
   // with whether the chat is on screen (`looking`), which keeps the
-  // chat's code from pushing its replies to this page's person (app.mjs)
-  const onScreen = () => document.visibilityState === "visible";
+  // chat's code from pushing its replies to this page's person (app.mjs).
+  // A framed page waits for its platform parent to confirm it is shown:
+  // CSS hiding alone does not change the document's visibility state.
+  let shellVisible = !framed, visibilityNonce = null, pageAway = false;
+  const onScreen = () => !pageAway && document.visibilityState === "visible" && shellVisible;
   const shared = { typing: false, looking: onScreen() };
   let typingTimer = 0;
   function setTyping(on) {
@@ -2154,10 +2157,35 @@ export function mount(root) {
     shared.typing = on;
     fragment.presence.set({ ...shared });
   }
-  document.addEventListener("visibilitychange", () => {
+  function updateLooking() {
     if (onScreen() === shared.looking) return;
     shared.looking = onScreen();
     fragment.presence.set({ ...shared });
+  }
+  function askVisibility() {
+    if (!framed || !state.me?.platform || pageAway) return;
+    visibilityNonce = crypto.randomUUID();
+    shellVisible = false;
+    updateLooking();
+    window.parent.postMessage({ fragment: "chat-visibility?", nonce: visibilityNonce }, state.me.platform);
+  }
+  addEventListener("message", (event) => {
+    const d = event.data;
+    if (!framed || pageAway || event.source !== window.parent || event.origin !== state.me?.platform
+      || d?.fragment !== "chat-visibility" || !visibilityNonce || d.nonce !== visibilityNonce || typeof d.visible !== "boolean") return;
+    shellVisible = d.visible;
+    updateLooking();
+  });
+  document.addEventListener("visibilitychange", () => {
+    askVisibility();
+    updateLooking();
+  });
+  addEventListener("pagehide", () => { pageAway = true; visibilityNonce = null; updateLooking(); });
+  addEventListener("pageshow", () => {
+    pageAway = false;
+    shellVisible = !framed;
+    updateLooking();
+    askVisibility();
   });
   input.addEventListener("input", () => {
     grow();
@@ -2457,6 +2485,7 @@ export function mount(root) {
   });
   fragment.me().then((hello) => {
     state.me = hello;
+    askVisibility();
     // mine and theirs, and who may answer a card, are known now
     nodes.clear();
     if (atLeast(hello.role, "viewer")) fragment.subscribe("work", onWork, { last: WORK_LAST, onReady: async () => {

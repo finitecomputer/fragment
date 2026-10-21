@@ -296,22 +296,20 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** a manual check on a hosted fleet (phase 3) is recorded,
   or a browser test can run with a local push service.
 
-## A chat the shell frames is "looked at" while the shell is, and asks for notifications in a tab
+## A chat the shell frames asks for notifications in a separate tab
 
 - **Observed:** 2026-10-03, the chat's push (docs/chat-records.md, Push).
-  A chat's page says it is `looking` while its document is visible, so a
-  chat open in a tab of the shell that is not shown (its frame is still
-  in a visible page) keeps its person from being pushed. And a browser
-  does not let a cross-origin frame ask for notifications, so the bell of
+  A browser does not let a cross-origin frame ask for notifications, so the bell of
   a chat the shell frames opens the chat in a tab of its own, where it may
   ask.
-- **Risk:** a person with the shell open on another chat misses a
-  reply's push; turning notifications on from the shell takes a detour.
-- **First proof:** a person who keeps the shell open says a reply came
-  without a notification.
-- **Delete when:** the shell tells each frame whether it is shown (a
-  message the chat's page reads, beside its theme), and asks for
-  notifications on the platform's origin for the fragments it frames, or
+- **Risk:** turning notifications on from the shell takes a detour.
+- **First proof:** the bell opens a separate chat tab to ask permission.
+- **Fixed portion:** the shell now tells each chat frame whether it is
+  shown, with origin/source checks and a per-document nonce. Synthetic
+  production-callback tests cover hidden frames and navigation; real
+  browser push delivery remains unverified (the entry above).
+- **Delete when:** the shell asks for notifications on the platform's
+  origin for the fragments it frames, or
   browsers let a frame ask.
 
 ## A chat's unread count counts its person's own messages
