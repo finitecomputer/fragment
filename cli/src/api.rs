@@ -613,6 +613,19 @@ mod tests {
         (server, seen, client)
     }
 
+    /// A port no host is at, held while the socket lives: bound and never
+    /// listening, so a connection to it is refused (it never opens), and
+    /// no other process can take the port meanwhile. A port freed by
+    /// dropping a listener could be taken, and answer ("expected a failure,
+    /// got http 404", on a machine running other servers).
+    fn refusing_port() -> (socket2::Socket, u16) {
+        let held = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).expect("a socket");
+        held.bind(&std::net::SocketAddr::from(([127, 0, 0, 1], 0)).into()).expect("bound to a free port");
+        let port = held.local_addr().expect("its address").as_socket().expect("an IP address").port();
+        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_err(), "no one else may listen on a held port");
+        (held, port)
+    }
+
     /// The failure's stable code (a request that got an answer fails the test).
     fn code_of(r: Result<Resp>) -> &'static str {
         match r {
@@ -658,7 +671,7 @@ mod tests {
         let call = serde_json::json!({ "id": "cli-1", "input": {} });
         assert_eq!(code_of(c.post_json_by_id("/api/f/x--k3x9/ops/add", &call)), "outcome_unknown");
         assert_eq!(seen.load(Ordering::SeqCst), REQUEST_ATTEMPTS, "each try arrived");
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let (_held, port) = refusing_port();
         let nowhere = Client::new(&format!("http://127.0.0.1:{port}"), crate::auth::fixed(7));
         assert_eq!(code_of(nowhere.post_json_by_id("/api/f/x--k3x9/ops/add", &call)), "unavailable", "no try reached a host");
     }
@@ -667,7 +680,7 @@ mod tests {
     /// retried, and the failure is plain unavailability.
     #[test]
     fn a_write_that_never_connected_is_unavailable() {
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let (_held, port) = refusing_port();
         let c = Client::new(&format!("http://127.0.0.1:{port}"), crate::auth::fixed(7));
         assert_eq!(code_of(c.post_json("/api/fragments", &serde_json::json!({ "name": "x" }))), "unavailable");
     }
