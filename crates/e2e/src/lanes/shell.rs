@@ -1620,13 +1620,22 @@ fn guest_ui(s: &mut Suite, api: &Api, b: &mut Browser, seat_email: &str, shots: 
     let said = no_seat_said(&guest);
     let welcome = "location.pathname === '/welcome' && !!document.querySelector('#first-run-card .no-seat')";
     let settings = "location.pathname === '/settings' && /You are a guest/.test(document.getElementById('settings-page').innerText) && !!document.querySelector('#settings-page .settings-who')";
+    // A look at a page between documents finds no context to run in (a
+    // page just opened, or one navigating), and a look at the old document
+    // can pass for the new one (the welcome, loaded again): the page opened
+    // is waited for, and each load marks the document it leaves and waits
+    // for a new one, ready
+    anyhow::ensure!(b.until(&page, welcome, wait), "a guest's / opens on the welcome");
+    let go = |b: &mut Browser, path: &str, ready: &str| -> Result<bool> {
+        b.eval(&page, &format!("(window.__left = true, location.assign({}), true)", js(path)))?;
+        Ok(b.until(&page, &format!("!window.__left && {ready}"), wait))
+    };
     // on a phone, from 320 px to 430 px
     let mut bad: Vec<Value> = Vec::new();
     for w in [320u32, 375, 430] {
         b.viewport(&page, w, 812, true)?;
         for (place, path, ready) in [("welcome", "/welcome", welcome), ("settings", "/settings", settings)] {
-            b.eval(&page, &format!("(location.assign({path:?}), true)"))?;
-            let shown = b.until(&page, ready, wait);
+            let shown = go(b, path, ready)?;
             if place == "settings" {
                 b.eval(&page, "(document.querySelector('#settings-page .settings-who')?.scrollIntoView({ block: 'center' }), true)")?;
             }
@@ -1646,8 +1655,7 @@ fn guest_ui(s: &mut Suite, api: &Api, b: &mut Browser, seat_email: &str, shots: 
     );
     // at a desktop's width: the welcome
     b.viewport(&page, 1280, 800, false)?;
-    b.eval(&page, "(location.assign('/'), true)")?;
-    let welcomed = b.until(&page, welcome, wait);
+    let welcomed = go(b, "/", welcome)?;
     let seen = b.eval(&page, NO_SEAT_SEEN)?;
     s.ok(
         "a guest's welcome says which email is signed in, in bold, that it has no seat, and offers Use another account: a form posting to /auth/switch, back to the welcome",
@@ -1656,9 +1664,8 @@ fn guest_ui(s: &mut Suite, api: &Api, b: &mut Browser, seat_email: &str, shots: 
     );
     let _ = b.screenshot(&page, &shots.join("guest-welcome.png"));
     // settings: Billing's guest state, then Account
-    b.eval(&page, "(location.assign('/settings'), true)")?;
     let still = "document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getComputedTiming().iterations === Infinity)";
-    let settled = b.until(&page, &format!("{settings} && {still}"), wait);
+    let settled = go(b, "/settings", &format!("{settings} && {still}"))?;
     let seen = b.eval(&page, NO_SEAT_SEEN)?;
     let account = b.eval(&page, ACCOUNT_SEEN)?;
     let get = b.eval(&page, "[...document.querySelectorAll('#settings-page a')].filter((a) => a.textContent === 'Get a seat').map((a) => a.getAttribute('href'))")?;
