@@ -94,6 +94,28 @@ fragment.club until cutover (decisions 34–35).
   on it): the first change after launch (the coordinator for Paul,
   2026-10-15).
 
+## A ledger's head carries `holds` and a `book` for a rollback
+
+- **Observed:** 2026-10-21 (decision 62; review of #474 and #475). A
+  ledger keeps no holds and no price book now, but the releases before
+  require both in a head, and every route writes its head back.
+- **Shortcut:** a head is written with `holds` empty and the book of the
+  release writing it (`fragment_core::ledger` `OldHolds`,
+  `Ledger::written`), which no release since reads, and a head read with
+  holds has them retired, their entries ended as released
+  (`retire_holds`), so a rollback to a release before decision 62 reads
+  every head this one wrote and finds no held entry.
+- **Risk:** none in use: a few hundred bytes a head, written and never
+  read. Kept past its need, it is dead weight that reads as if it meant
+  something.
+- **First proof:** n/a (a compatibility field, not a bug).
+- **Delete when:** no release before decision 62 can be deployed again
+  (production and the preview past it, and Paul agrees a rollback that
+  far is not wanted), and no head holds any (every ledger read since):
+  drop `OldHolds`, `retire_holds` and `written`'s book, and the
+  `a_head_written_here_reads_in_the_release_before` and
+  `a_rollback_finds_no_hold_and_no_held_entry` tests.
+
 ## A paid call's charge is best effort
 
 - **Observed:** 2026-10-21 (decision 62; Paul: "billing should be
