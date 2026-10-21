@@ -2611,11 +2611,11 @@ function connectButton(p, label, said) {
   };
   return go;
 }
-// The own keys whose last Disconnect or Remove did not go through, in the
-// visit of settings it was pressed in: said in their row, while it still
-// has the key, until the next press. Whichever load of settings renders
-// after the press shows it (#439).
-const unremoved = new Set();
+// The own keys whose last Disconnect or Remove did not go through, each
+// with the visit of settings it was pressed in: said in their row by
+// whichever load of settings renders in that visit, while the row still
+// has the key, until the next press; in another visit, never (#439).
+const unremoved = new Map();
 function connectionsSection(linked, uses) {
   const s = section("Connections");
   s.id = "settings-connections";
@@ -2655,7 +2655,7 @@ function connectionsSection(linked, uses) {
       try {
         await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}/key`);
       } catch {
-        if (visit === visits && state.page === "Settings") unremoved.add(p.provider);
+        unremoved.set(p.provider, visit);
       }
       await reopenSettings();
     };
@@ -2712,11 +2712,10 @@ function connectionsSection(linked, uses) {
         actions.append(remove);
       }
     }
-    if (p.state !== "set") unremoved.delete(p.provider);
-    else if (unremoved.has(p.provider)) {
+    if (p.state === "set" && unremoved.get(p.provider) === visits) {
       said.textContent = "That didn't go through. Try again.";
       details.push(said);
-    }
+    } else unremoved.delete(p.provider);
     if (p.kind === "operator" && p.price) {
       details.push(el("span", "muted provider-detail", `${money(p.price.micros / p.price.per)} a call at list, metered to your credit`));
     }

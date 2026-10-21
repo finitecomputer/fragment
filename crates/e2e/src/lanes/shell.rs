@@ -3102,9 +3102,10 @@ const UNREMOVED: &str = "That didn't go through. Try again.";
 
 /// A failure belongs to the visit of settings it was pressed in (#462
 /// review): an own key's Remove, then an agent's chip, each held before it
-/// is sent while a chat opens and settings open again, then refused: the
-/// settings shown say nothing of it, the key still set and the chip as it
-/// was. The key taken away after.
+/// is sent while a chat opens and settings open again, then refused; and a
+/// Remove refused at once, its reload's read held while a chat opens and
+/// settings open again: the settings shown say nothing of it, the key
+/// still set and the chip as it was. The key taken away after.
 fn left_and_back_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, chat: &str) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let own = format!("#settings-connections [data-provider={:?}]", crate::SWAP_OWN);
@@ -3132,6 +3133,26 @@ fn left_and_back_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sess
         "a Remove refused once the person has left settings and come back says nothing in the settings shown: the key still set",
         ready && held && back && settled && row == json!({ "state": "set", "said": "" }),
         &row,
+    );
+
+    // the Remove refused here, its reload's read held while a chat opens
+    // and settings open again; then let go
+    b.eval(page, &hold("GET", "^/api/connections$", Hold::Answer))?;
+    b.eval(page, &refuse_once("DELETE", &format!("{key}$")))?;
+    b.click(page, &format!("{own} [data-action=remove-key]"))?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    open_row(b, page, chat, wait)?;
+    b.eval(page, open_settings)?;
+    let back = b.until(page, &set, wait);
+    let shown = b.eval(page, &format!("document.querySelector('{own} .provider-said')?.textContent ?? ''"))?;
+    b.eval(page, "(window.__held.release?.(), true)")?;
+    let settled = b.until(page, HELD_SETTLED, wait);
+    let row = b.eval(page, &format!("({{ state: document.querySelector('{own}')?.dataset.state ?? null, said: document.querySelector('{own} .provider-said')?.textContent ?? '' }})"))?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "a Remove refused in one visit of settings, its reload held until the person has left and come back, says nothing in the settings shown, then or once let go",
+        held && back && settled && shown == "" && row == json!({ "state": "set", "said": "" }),
+        json!({ "shown": shown, "after": row }),
     );
 
     // the chip: held, a chat, settings again, then refused
