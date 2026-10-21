@@ -1124,6 +1124,23 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         missing && works,
         json!({ "none": none, "again": b.eval(&page, COPY_SEEN)? }),
     );
+    // a press held, then another refused; the first then copies: the later
+    // press's word stands (#464 review)
+    b.until(&page, &format!("{copy}.textContent === 'Copy'"), wait);
+    b.eval(&page, unselect)?;
+    b.eval(&page, &format!("(window.__copy = null, navigator.clipboard.writeText = () => new Promise((done) => {{ window.__copy = done; }}), {copy}.click(), true)"))?;
+    let held = b.until(&page, "typeof window.__copy === 'function'", wait);
+    b.eval(&page, &format!("(window.__first = window.__copy, navigator.clipboard.writeText = () => Promise.reject(new DOMException('Write permission denied.', 'NotAllowedError')), {copy}.click(), true)"))?;
+    let later = b.until(&page, &refused, wait);
+    // (the first's answer lands within a task of its copy)
+    b.eval(&page, "(async () => { window.__first(); await new Promise((r) => setTimeout(r, 0)); return true; })()")?;
+    let stands = b.eval(&page, &refused)?;
+    b.eval(&page, "(navigator.clipboard.writeText = async (text) => { window.__copied = text; }, true)")?;
+    s.ok(
+        "a Copy that answers after a newer one was refused changes nothing: the line stays, and the button still says Copy",
+        held && later && stands == true,
+        b.eval(&page, COPY_SEEN)?,
+    );
     // Sharing: what they own, each with who can open it (GET /api/access)
     let theirs = format!("#settings-access .access-row[data-fragment={groceries:?}]");
     let listed = b.until(&page, &format!("!!document.querySelector({theirs:?}) && document.querySelector({theirs:?}).textContent.includes('Anyone with the link')"), wait);

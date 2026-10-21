@@ -2128,11 +2128,16 @@ function buildSection() {
   said.id = "build-prompt-said";
   said.setAttribute("role", "status");
   said.hidden = true;
+  // each press, numbered: one that answers after a newer press changes
+  // nothing (that one says how it went)
+  let presses = 0;
   copy.onclick = async () => {
+    const mine = ++presses;
     said.hidden = true;
     try {
       await navigator.clipboard.writeText(prompt.value);
     } catch {
+      if (mine !== presses) return;
       copy.textContent = "Copy";
       said.textContent = "Couldn't copy it. The prompt is selected: copy it yourself (Ctrl+C, or ⌘C on a Mac).";
       said.hidden = false;
@@ -2140,8 +2145,11 @@ function buildSection() {
       prompt.select();
       return;
     }
+    if (mine !== presses) return;
     copy.textContent = "Copied";
-    setTimeout(() => (copy.textContent = "Copy"), 1500);
+    setTimeout(() => {
+      if (mine === presses) copy.textContent = "Copy";
+    }, 1500);
   };
   const actions = el("div", "settings-actions");
   actions.append(copy);
