@@ -1425,14 +1425,29 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     // a reload under way (its answer slow, a phone's), a file picked before
     // the new page comes: the reload is stopped, the page and the file kept
     std::thread::sleep(std::time::Duration::from_millis(300));
-    b.eval(page, "(window.__leaving = false, addEventListener('beforeunload', () => { window.__leaving = true; }), true)")?;
-    b.latency(page, 4_000)?;
-    b.eval(page, &visibility("hidden"))?;
-    let leaving = b.until(page, "window.__leaving === true", wait);
-    // (the frame's own session: the page's waits on its navigation)
-    let picked = b.eval_in_isolated_frame(chat, PICK_FILE)?;
-    std::thread::sleep(std::time::Duration::from_secs(6));
+    // Polling the navigating page can wait until its new document commits,
+    // losing a window flag before the poll sees it. This wait times out on base too.
+    // A same-origin, script-free page observes the actual beforeunload via
+    // storage while the shell's own DevTools session is between documents.
+    let witness = b.open(&format!("{platform}healthz"))?;
+    let leaving_key = format!("e2e-unloading-{run}");
+    let clear_leaving = format!("(localStorage.removeItem({}), true)", js(&leaving_key));
+    b.eval(&witness, &clear_leaving)?;
+    b.eval(page, &format!("(addEventListener('beforeunload', () => localStorage.setItem({}, '1'), {{ once: true }}), true)", js(&leaving_key)))?;
+    let observed: Result<(bool, Value)> = (|| {
+        b.latency(page, 4_000)?;
+        b.eval(page, &visibility("hidden"))?;
+        let leaving = b.until(&witness, &format!("localStorage.getItem({}) === '1'", js(&leaving_key)), wait);
+        anyhow::ensure!(leaving, "the delayed reload announced beforeunload to its independent witness");
+        // The frame's own session remains usable before navigation commits.
+        let picked = b.eval_in_isolated_frame(chat, PICK_FILE)?;
+        std::thread::sleep(std::time::Duration::from_secs(6));
+        Ok((leaving, picked))
+    })();
     b.latency(page, 0)?;
+    b.eval(&witness, &clear_leaving)?;
+    b.close(witness)?;
+    let (leaving, picked) = observed?;
     let stayed = b.eval(page, &format!("window.__release === 2 && {}", meta(&next)))? == true;
     b.eval(page, &visibility("visible"))?;
     let held = composer(b);

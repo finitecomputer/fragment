@@ -27,9 +27,11 @@ function hub() {
   };
 }
 
-function setup({ standalone = false, holdOrigins = false } = {}) {
+function setup({ standalone = false, holdOrigins = false, releaseProbe = false, visibilityProtocol = true } = {}) {
   const errors = [], outbound = [], queue = [], originReads = [], clients = new Map();
-  const shellEvents = hub(), shellDocument = { ...hub(), hidden: false };
+  const shellEvents = hub(), shellDocument = { ...hub(), hidden: false, querySelector: () => null };
+  const release = { mine: "old", next: null, reloading: false }, releaseTimers = [];
+  const navigation = { reloads: 0, stops: 0 };
   const nodes = Object.fromEntries(["layout", "settings-page", "frames", "notice", "first-run", "first-run-card"].map((id) => [id, {
     hidden: id === "settings-page", classList: { add() {}, remove() {} }, replaceChildren() {}, append() {},
   }]));
@@ -49,14 +51,25 @@ function setup({ standalone = false, holdOrigins = false } = {}) {
     el() { return {}; }, section() {}, line() {}, actionLine() {}, usd() {}, noSeatSaid() {}, switchForm() {},
     // Pause after the real Settings navigation code; billing/rendering is unrelated.
     returning: () => new Promise(() => {}), clearSplashEdge() {},
+    release, typedIn: new Set(), menu: { hidden: true }, writing: 0, composing: new Set(), pendingLaunch: null, starting: false,
+    setTimeout(callback) { releaseTimers.push(callback); }, lastReload: () => null,
+    tab: { set: () => true, drop() {} }, WINDOWS_KEY: "windows", RELOADED_KEY: "release", openWindows: () => [],
+    RELOAD_SETTLE_MS: 100, NAVIGATED_SETTLE_MS: 400,
+    location: { reload() { navigation.reloads++; } }, window: { stop() { navigation.stops++; } },
   });
-  runInContext(`const origins = new Map();\n${fn(shell, "originOf")}\n${shellVisibility}\n${["openChat", "openSettings", "firstRun"].map((name) => fn(shell, name)).join("\n")}`, shellContext);
+  runInContext(`const origins = new Map();\n${fn(shell, "originOf")}\n${visibilityProtocol ? shellVisibility : "function tellChatsVisibility() {}"}\n${["openChat", "openSettings", "firstRun"].map((name) => fn(shell, name)).join("\n")}`, shellContext);
+  if (releaseProbe) {
+    const busy = shell.slice(shell.indexOf("const greeted ="), shell.indexOf("// Reloads for `release.next`"));
+    assert.ok(busy.startsWith("const greeted =") && busy.includes("const chatsBusy"));
+    runInContext(busy + ["shellHolds", "reloadWhenSafe", "stopReload", "navigated"].map((name) => fn(shell, name)).join("\n"), shellContext);
+    shellDocument.addEventListener("visibilitychange", () => shellContext.reloadWhenSafe("hidden"));
+  }
 
   for (const name of ["chat-a", "chat-b"]) {
     const events = hub(), document = { ...hub(), visibilityState: "visible" }, publications = [], timers = new Map();
     let id = 0;
     const source = {}, window = {};
-    const chatState = { me: null };
+    const chatState = { me: null, typed: new Map(), answering: new Set(), sending: new Set(), failed: new Set(), replyTo: null };
     const vm = createContext({
       state: chatState, document, window, framed: !standalone, TYPING_MS: 5000,
       crypto: { randomUUID: () => `${name}-document-${++id}` }, addEventListener: events.addEventListener,
@@ -76,6 +89,7 @@ function setup({ standalone = false, holdOrigins = false } = {}) {
     const frame = { hidden: true, isConnected: true, dataset: { fragment: name }, contentWindow: source };
     state.frames.set(name, frame);
     runInContext(pagePresence + initialPresence + hello + "\n  });", vm);
+    runInContext("const attachments = []; let recording = false, sending = false, answersOnTheirWay = 0, busyTold;\n" + fn(page.replace(/^  /gm, ""), "tellBusy"), vm);
     clients.set(name, {
       frame, events, document, publications, state: chatState, parent: parentProxy,
       looking: () => publications.at(-1).looking,
@@ -84,10 +98,12 @@ function setup({ standalone = false, holdOrigins = false } = {}) {
       lifecycle: (event) => call(events.emit(event)),
       visibility(value) { document.visibilityState = value; call(document.emit("visibilitychange")); },
       type(value) { vm.setTyping(value); },
+      file(value) { runInContext(`attachments.length = ${value ? 1 : 0}; tellBusy();`, vm); },
     });
   }
   return {
-    clients, state, nodes, outbound, originReads,
+    clients, state, nodes, outbound, originReads, release, navigation,
+    settleRelease() { while (releaseTimers.length) releaseTimers.shift()(); },
     open: (name) => shellContext.openChat(name), settings: () => shellContext.openSettings(), firstRun: () => shellContext.firstRun(),
     message: (event) => call(shellEvents.emit("message", event)),
     lifecycle: (event) => call(shellEvents.emit(event)),
@@ -238,3 +254,27 @@ test("visibility messages carry no identity, roster or notification content", as
     assert.deepEqual(Object.keys(message.data).sort(), (message.from ? ["fragment", "nonce"] : ["fragment", "nonce", "visible"]).sort());
   }
 });
+
+for (const visibilityProtocol of [false, true]) {
+  test(`release interaction (visibility protocol ${visibilityProtocol ? "on" : "off"}): a file blocks reload; picked during reload, it stops it`, async () => {
+    const h = setup({ releaseProbe: true, visibilityProtocol });
+    h.open("chat-a"); await h.flush();
+    const frame = h.state.frames.get("chat-a"), child = h.clients.get("chat-a");
+    h.release.next = "new";
+    child.file(true); await h.flush();
+    h.visibility(true); await h.flush(); h.settleRelease();
+    assert.equal(h.navigation.reloads, 0, "presence does not erase a real busy notification");
+    h.visibility(false); child.file(false); await h.flush(); h.settleRelease();
+    h.visibility(true); await h.flush(); h.settleRelease();
+    assert.equal(h.navigation.reloads, 1, "visibility alone does not hold a safe reload");
+    assert.ok(h.release.reloading);
+    child.file(true); await h.flush();
+    assert.equal(h.navigation.stops, 1, "the production busy callback stops an in-flight reload");
+    assert.equal(h.release.reloading, false);
+    assert.equal(h.state.frames.get("chat-a"), frame, "presence neither removes nor replaces the frame");
+    assert.equal(frame.hidden, false);
+    h.visibility(false); child.file(false); await h.flush(); h.settleRelease();
+    h.visibility(true); await h.flush(); h.settleRelease();
+    assert.equal(h.navigation.reloads, 2, "reload remains available after the file is removed");
+  });
+}
