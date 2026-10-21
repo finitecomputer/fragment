@@ -180,7 +180,11 @@ and Settings, in plain words, the times in the person's own clock:
 its agents did after that isn't kept yet. It keeps trying. If it still
 can't by 14:35, it stops and starts again from that save." Its chats keep
 everything said (their records are the chat's own), so a notice says the
-work on the computer after the save is what went.
+work on the computer after the save is what went. A read of the computer
+that fails (a blip, a 5xx) is not "no computer" (#437): the band keeps
+what the last read said, its agents too, and adds "Couldn't refresh your
+computer" with Try again; failing at the page's start, the first agent is
+made only for someone with no chats, and otherwise once Try again reads it.
 
 **Not in the chat.** The chat's records are its agents' and people's: the
 platform posts none there (the rule; docs/chat-records.md), and a notice
