@@ -640,13 +640,11 @@ impl Call for FinishConnection {
     type Answer = ConnectionFinished;
 }
 
-/// `POST /login/begin`: a sign-in starts (`link_to`: a signed-in session
-/// adding a second sign-in to its person).
+/// `POST /login/begin`: a sign-in starts.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Begin {
     pub return_to: String,
-    pub link_to: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]

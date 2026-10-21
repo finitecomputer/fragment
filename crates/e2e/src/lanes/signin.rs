@@ -514,23 +514,22 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.workos_callback("paul-twin@e2e.test")?;
     s.ok("verified, it signs in: a new person", r.status == 302, &r);
 
-    // linking a second sign-in: explicit, from a signed-in session
-    let r = with_session(api, "GET", "/auth/link", &renamed)?;
-    let bound = r.cookies().into_iter().find(|c| c.starts_with("fragment_login="));
-    let back = api.external(&format!("{}&login_hint=paul-work@e2e.test", r.header("location")))?;
-    let r = api.call(Call { method: "GET", url: back.header("location"), cookie: bound, ..Call::default() })?;
-    s.ok("linking a second sign-in finishes with a session", r.status == 302, &r);
+    // no linking a second sign-in (2026-10-21: AuthKit answered it from the
+    // session it held, as the same email): its route went, a 404 as any
+    // path no route answers, signed in or not, and it begins no sign-in
+    let (link, none, out) = (
+        with_session(api, "GET", "/auth/link?return=%2Fsettings", &renamed)?,
+        with_session(api, "GET", "/auth/no-such-route", &renamed)?,
+        api.unsigned("GET", "/auth/link", None)?,
+    );
+    let begun = [&link, &out].iter().any(|r| r.cookies().iter().any(|c| c.starts_with("fragment_login=")));
+    s.ok(
+        "/auth/link is gone: 404, as a path no route answers, signed in or out, and no sign-in begun",
+        link.status == 404 && none.status == 404 && out.status == 404 && link.body["error"] == none.body["error"] && !begun,
+        format!("{link} / {none} / {out}"),
+    );
     let me = api.signed(&k3, "GET", "/api/identities/me", None)?;
-    s.ok("the person now has two sign-ins", me.body["subjects"].as_array().map_or(0, |a| a.len()) == 2, &me);
-    let work = api.sign_in("paul-work@e2e.test")?;
-    let k5 = Keys::generate();
-    let r = api.approve(&work, &k5)?;
-    s.ok("and either one signs in as them", r.body["id"] == paul_id.as_str(), &r);
-    let r = with_session(api, "GET", "/auth/link", &renamed)?;
-    let bound = r.cookies().into_iter().find(|c| c.starts_with("fragment_login="));
-    let back = api.external(&format!("{}&login_hint=paul@renamed.test.example", r.header("location")))?;
-    let r = api.call(Call { method: "GET", url: back.header("location"), cookie: bound, ..Call::default() })?;
-    s.ok("a sign-in that is someone else's cannot be linked", r.status == 409, &r);
+    s.ok("and the person keeps the one sign-in they have", me.body["subjects"].as_array().map_or(0, |a| a.len()) == 1, &me);
 
     switch_cases(s, api)?;
 

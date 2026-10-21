@@ -1,7 +1,7 @@
 //! A browser's round trip (docs/api.md, Sign-in): a platform page sends
-//! the browser away, to WorkOS for a sign-in (`/auth/login`, `/auth/link`,
-//! `/auth/switch`) or to an own key's provider (`own_signin`), and the other
-//! side sends it back to a callback with the state it was given. Anyone who
+//! the browser away, to WorkOS for a sign-in (`/auth/login`, `/auth/switch`)
+//! or to an own key's provider (`own_signin`), and the other side sends it
+//! back to a callback with the state it was given. Anyone who
 //! holds a callback's URL, or who began a round trip of their own and sent
 //! its page to someone else, could open it in another browser; so a round
 //! trip finishes only in the browser that began it. Its state is kept server
@@ -27,9 +27,7 @@ pub const TTL_S: i64 = 600;
 /// first's callback is refused (connect, or sign in, again).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trip {
-    /// A sign-in at WorkOS (`/auth/login`), or one adding a second sign-in
-    /// to the signed-in person (`/auth/link`, whose person the registry
-    /// keeps with the state).
+    /// A sign-in at WorkOS (`/auth/login`).
     SignIn,
     /// "Use another account" (`/auth/switch`): a sign-in, its state bound
     /// apart from one's, as WorkOS may answer it from the session it held.

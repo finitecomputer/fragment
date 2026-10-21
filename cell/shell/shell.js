@@ -1891,7 +1891,8 @@ async function openSettings(push = true) {
   $("frames").hidden = true;
   const page = $("settings-page");
   page.hidden = false;
-  page.replaceChildren(el("p", "muted", "Loading…"));
+  // in the loaded page's own layout, so nothing moves as it loads
+  renderSettingsPage(page, [el("p", "muted settings-loading", "Loading…")]);
   renderHeading();
   renderChats();
   leaveSidebar();
@@ -1951,11 +1952,9 @@ async function openSettings(push = true) {
     } else picture.querySelector("span").textContent = (await r.json().catch(() => ({}))).message || "That picture was not taken";
   };
   account.append(actionLine("Picture", picture));
-  // their sign-ins, when there are several, and another (an email, a
-  // provider) that is this person too
-  const link = el("a", "quiet", "Add another sign-in");
-  link.href = `/auth/link?return=${encodeURIComponent(SETTINGS)}`;
-  account.append(emails.length > 1 ? line("Sign-ins", emails.join(", "), link) : actionLine("Sign-ins", link));
+  // their sign-ins, when they linked several before linking went (off
+  // until WorkOS offers an account picker: docs/api.md, Sign-in)
+  if (emails.length > 1) account.append(line("Sign-ins", emails.join(", ")));
   // the person's seat, credit and org (billing.js), and why agents stop
   const billing = await billingSections(billingHelpers, ledger, mySeat, back);
   // everything that is theirs, to download (a guest's too: what is shared

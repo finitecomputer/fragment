@@ -1047,19 +1047,27 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     open_beside_ui(s, api, &mut b, &page, &me, &groceries, &shots)?;
     sidebar_live(s, api, &mut b, &page, &session, &shots)?;
 
-    // settings, at /settings: what a person needs of their account
+    // settings, at /settings: what a person needs of their account, its
+    // Loading… where the loaded page's content goes
     let id = super::signin::who(api, &session)?["id"].as_str().unwrap_or("").to_string();
-    b.click(&page, "#settings")?;
+    let loading = settings_loading(&mut b, &page, "document.getElementById('settings').click()", wait)?;
+    s.ok(
+        "settings load in the loaded page's own box: its layout, padding, content and heading where they stay once loaded (no jump), on a desktop",
+        loading["ok"] == true,
+        &loading,
+    );
     let settings = b.until(&page, "location.pathname === '/settings' && ['Account', 'Credit', 'Computer', 'Sharing', 'Connections', 'Build with Claude Code or Codex'].every(h => document.getElementById('settings-page').innerText.toUpperCase().includes(h.toUpperCase()))", wait);
     let text = b.eval(&page, "document.getElementById('settings-page').innerText")?;
     let text = text.as_str().unwrap_or("");
     let mut has = |q: &str| b.eval(&page, &format!("!!document.querySelector({q:?})")).ok() == Some(serde_json::json!(true));
     s.ok(
-        "settings, at /settings: the account (who they are, their identity, another sign-in, signing out), credit, computer, connections, and building with a coding agent",
+        "settings, at /settings: the account (who they are, their identity, signing out; no Add another sign-in, which WorkOS answered as the same email), credit, computer, connections, and building with a coding agent",
         settings
             && text.contains(&email)
             && text.contains(&id)
-            && has("#settings-page a[href='/auth/link?return=%2Fsettings']")
+            && !text.contains("Add another sign-in")
+            && !text.contains("Sign-ins")
+            && !has("#settings-page a[href^='/auth/link']")
             && has("#settings-page form[method=post][action='/auth/logout'] button"),
         &text[..text.len().min(600)],
     );
@@ -1903,6 +1911,34 @@ const PAGE_FITS: &str = "(() => { const d = document.documentElement; const wide
     const moved = scrollY + d.scrollTop + document.body.scrollTop; scrollTo(0, 0); document.body.scrollTop = 0; \
     return { ok: wide <= innerWidth && moved === 0 && getComputedStyle(d).overscrollBehaviorY === 'none', wide, width: innerWidth, moved }; })()";
 
+/// Settings' boxes that must not move as they load (left, top, width,
+/// rounded): its layout's, its content's and its heading's, with the
+/// layout's padding, and whether it is still loading.
+const SETTINGS_BOX: &str = "(() => { const p = document.getElementById('settings-page'); const r = (e) => { const b = e?.getBoundingClientRect(); return b ? [b.left, b.top, b.width].map(Math.round) : null; }; \
+    const l = p.querySelector('.settings-layout'); const c = p.querySelector('.settings-content'); \
+    return { layout: r(l), padding: l ? getComputedStyle(l).padding : null, content: r(c), heading: r(c?.querySelector('h1')), loading: !!p.querySelector('.settings-loading'), sections: p.querySelectorAll('.settings-section').length }; })()";
+
+/// The shell's next read of the ledger held until `window.__ledgerHeld()`:
+/// settings, which read it first, stay loading.
+const HOLD_LEDGER: &str = "(() => { const real = window.fetch; window.__ledgerHeld = null; window.fetch = async (url, o) => { \
+    if (String(url) === '/api/ledger') { window.fetch = real; await new Promise((r) => { window.__ledgerHeld = r; }); } return real(url, o); }; return true; })()";
+
+/// Opens settings by `open` (a script's expression) with their read of
+/// the ledger held (`HOLD_LEDGER`), so they stay loading: their boxes then
+/// (`SETTINGS_BOX`), and once the read is let go and they load. `ok` when
+/// they were seen loading and then loaded, and nothing moved.
+fn settings_loading(b: &mut Browser, page: &Page, open: &str, wait: std::time::Duration) -> Result<Value> {
+    b.eval(page, HOLD_LEDGER)?;
+    b.eval(page, &format!("({open}, true)"))?;
+    let held = b.until(page, "location.pathname === '/settings' && !!window.__ledgerHeld && !!document.querySelector('#settings-page .settings-loading')", wait);
+    let loading = b.eval(page, SETTINGS_BOX)?;
+    b.eval(page, "(window.__ledgerHeld?.(), true)")?;
+    let loaded = b.until(page, "!document.querySelector('#settings-page .settings-loading') && document.querySelectorAll('#settings-page .settings-section').length > 0", wait);
+    let after = b.eval(page, SETTINGS_BOX)?;
+    let same = ["layout", "padding", "content", "heading"].iter().all(|k| !loading[k].is_null() && loading[k] == after[k]);
+    Ok(json!({ "ok": held && loaded && loading["loading"] == true && after["loading"] == false && same, "loading": loading, "loaded": after }))
+}
+
 /// Opens `chat` from its row in the sidebar, as a person picks it (a
 /// reload, or /, opens the newest chat: maybe another).
 fn open_row(b: &mut Browser, page: &Page, chat: &str, wait: std::time::Duration) -> Result<()> {
@@ -1973,6 +2009,7 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
     anyhow::ensure!(r.status == 200, "the export: {r}");
     let mut small: Vec<Value> = Vec::new();
     let mut phone_prompt: Option<(bool, Value)> = None;
+    let mut phone_loading: Option<Value> = None;
     for w in [320u32, 375, 390, 430] {
         b.viewport(page, w, 812, true)?;
         b.reload(page)?;
@@ -2007,8 +2044,13 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
         if let Value::Array(l) = b.eval(page, SMALL_FIELDS)? { small.extend(l.into_iter().map(|f| json!({ "width": w, "in": "launcher", "field": f }))); }
         b.eval(page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
         b.until(page, "!document.getElementById('search-dialog').open", wait);
-        // settings
-        b.eval(page, "(document.getElementById('scrim').click(), document.getElementById('settings').click(), true)")?;
+        // settings (at 375 px, held loading a moment: where the loaded page's content goes)
+        let open = "document.getElementById('scrim').click(), document.getElementById('settings').click()";
+        if w == 375 {
+            phone_loading = Some(settings_loading(b, page, open, wait)?);
+        } else {
+            b.eval(page, &format!("({open}, true)"))?;
+        }
         b.until(page, "location.pathname === '/settings' && !!document.querySelector('#settings-access')", wait);
         places.push(("settings", b.eval(page, PAGE_FITS)?));
         if let Value::Array(l) = b.eval(page, SMALL_FIELDS)? { small.extend(l.into_iter().map(|f| json!({ "width": w, "in": "settings", "field": f }))); }
@@ -2090,6 +2132,12 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
     s.ok("on a phone no field is under 16px (Safari zooms in on one as it takes focus): the chat's composer, the launcher, settings and the share sheet", small.is_empty(), json!(small));
     let (composed, seen) = phone_prompt.unwrap_or((false, Value::Null));
     s.ok("on a phone, a way to ask from the dock's Add goes into the chat's composer: the desktop's sheet closes, the composer shows, focused, and nothing is sent", composed, seen);
+    let loading = phone_loading.unwrap_or(Value::Null);
+    s.ok(
+        "settings load in the loaded page's own box: its layout, padding, content and heading where they stay once loaded (no jump), on a phone (375 px)",
+        loading["ok"] == true,
+        &loading,
+    );
     Ok(())
 }
 

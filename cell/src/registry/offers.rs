@@ -157,13 +157,13 @@ impl RegistryCell {
         Ok(m)
     }
 
-    /// The emails `person` signs in with (at most `SUBJECTS_MAX`).
+    /// The emails `person` signs in with (`signin::subjects_of`'s: at most 8).
     fn emails_of(&self, person: &str) -> CellResult<Vec<String>> {
         Ok(self.rows::<EmailRow>("SELECT DISTINCT email FROM subjects WHERE identity = ?", vec![person.into()])?.into_iter().map(|r| r.email).collect())
     }
 
     /// The offers to the emails `person` signs in with, oldest first, each
-    /// with its org and who made it. Bounded: at most `SUBJECTS_MAX` emails,
+    /// with its org and who made it. Bounded: at most 8 emails (`emails_of`),
     /// each offered by at most `OFFERS_PER_EMAIL_MAX` orgs.
     pub(super) fn offers_to(&self, person: &str) -> CellResult<Vec<OfferedSeat>> {
         #[derive(Deserialize)]

@@ -762,11 +762,18 @@ live in the registry on every request whose answer depends on who is
 asking (Principals and access, above; a 30-day lifetime; tokens are 32
 random bytes, the registry keeps their SHA-256).
 
+Linking a second sign-in to a person (another email) is off until WorkOS
+offers an account picker: AuthKit answers a sign-in begun from a
+signed-in browser from the session it already holds there, so the link
+came back as the same email and linked nothing (Paul, 2026-10-21, in
+production), and ending that session first loses the way back. The
+route that did it, `/auth/link`, went (404, as any path no route
+answers); a person who linked one before keeps it.
+
 | method & path (platform origin) | what |
 | --- | --- |
 | `GET /`, `GET /settings`, `GET /welcome` | the shell's page, for anyone (The shell, below): signed out it offers Sign Up (`/auth/login?screen_hint=sign-up`) and Sign In (`/auth/login?screen_hint=sign-in`), each back to the same address, its query included; for a new guest it is the welcome, and for a seat with no chat it makes their first agent; at `/settings` it opens its settings, at `/welcome` the welcome |
 | `GET /auth/login?return=&login_hint=&screen_hint=` | → WorkOS's authorize URL (`provider=authkit`, `redirect_uri` `<platform>/auth/callback`, a state); optional `screen_hint` selects `sign-up` or `sign-in` (other values are ignored), without changing WorkOS’s registration policy; the state is bound to the browser by `fragment_login` (HttpOnly, SameSite=Lax, `Path=/`, ten minutes) |
-| `GET /auth/link?return=` | the same from a signed-in browser: the sign-in that comes back joins this person (409 when it is someone else's) |
 | `GET /auth/callback?code=&state=` | the state must match the browser's cookie (400 otherwise); the code is exchanged server-side; → `fragment_session` (HttpOnly, SameSite=Lax, `Path=/`) and back to `return`; a WorkOS `error` is shown (400); a sign-in already finished or past its ten minutes, or a code WorkOS refuses (a callback sent again), is 400 `invalid_request`; a registry of another release (a deploy going out) refuses the exchange before it reads it, 503 `deploying`, the code not exchanged and the sign-in not spent, so the same callback again signs in |
 | `POST /auth/logout` | ends the session and every fragment session made from it, clears the cookie, and returns a non-cacheable page (200) that navigates to WorkOS's logout (`session_id` from the access token's `sid`, `return_to` `<platform>/`, which must be a Sign-out URI of the environment's application), which ends WorkOS's session too. With no live session or WorkOS session id, redirects home; from another origin, 403 (`GET` shows the button) |
 | `POST /auth/switch?return=` | “Use another account”, wherever the shell says who is signed in: AuthKit keeps its own session in the browser (a cookie on its own domain, which clearing the platform's site data leaves, and which another application of the environment may have made), and answers a sign-in from it without asking anyone. A switch ends this browser's session here (if any), then signs in as `/auth/login` does, its state bound by `fragment_switch` in `fragment_login`'s stead; where WorkOS answers from a session it already held (the access token's `auth_time`, the last time its person actively authenticated, is before the switch began, or absent), no one is signed in, and the browser goes to WorkOS's logout with that session's `sid` (as `POST /auth/logout`, back at the platform's root, not `return`: WorkOS's logout returns only to a Sign-out URI of the application), so the next sign-in asks who is signing in; where someone signed in meanwhile, they are signed in, back at `return`. From another origin, 403 |
@@ -779,8 +786,8 @@ random bytes, the registry keeps their SHA-256).
 | `POST /cli/approve` | that button (`form`, `code`): the code spent (every code its key had waiting with it), and the key joins the signed-in person at once; the person is mailed (Mail, below: the key's ending, the whole key, and `fragment keys revoke`). The same code again is a miss (400); a key someone else holds, or a revoked one, is 409; another origin, or another session's token, 403. The CLI waits for `GET /api/identities/me` to answer, then prints the email of whom it acts as. People themselves come only from sign-in (`POST /api/identities {kind: "person"}` is 400) |
 
 Every round trip that leaves the platform and comes back to it (a
-sign-in, a link and a switch at WorkOS; an own key's sign-in at its
-provider: Connections) finishes only in the browser that began it. Its
+sign-in and a switch at WorkOS; an own key's sign-in at its provider:
+Connections) finishes only in the browser that began it. Its
 state (32 random bytes, as hex) is kept server side (the registry's
 `logins`, the person's computer's `own_signins`) and bound to the browser
 by a cookie of its kind (`fragment_login`, `fragment_switch`,
@@ -1045,8 +1052,8 @@ their agent for them) names an email and a role, viewer or editor
 - When no one does yet, the invite waits on the email for 30 days
   (`INVITE_TTL_S`) in the fragment, and the registry keeps it against the
   email and mails it a link to the fragment's address: `{invited}`. Their
-  first sign-in that verifies the email (a WorkOS sign-in, an
-  `/auth/link` adding it, or an e2e person's) makes them a member at the
+  first sign-in that verifies the email (a WorkOS sign-in, or an e2e
+  person's) makes them a member at the
   role it said, added by the invite's maker, and a stronger role they hold
   is kept (the invite is spent either way). A claim the fragment cannot
   take then (it is unreachable, or at `MEMBERS_MAX`) keeps the invite
@@ -2617,7 +2624,7 @@ account, then Your data. Its
 settings hold the person's account (who is signed in, their latest
 sign-in's email, beside a POST to `/auth/logout` and one to
 `/auth/switch`, Use another account; their sign-ins when they have
-several; identity id; picture; `/auth/link` to add another sign-in),
+several, linked before linking went (Sign-in); identity id; picture),
 their Billing (cell/shell/billing.js: for a guest, who is signed in,
 Get a seat, to the welcome, and Use another account; a seat's kind,
 org, trial's end and lapse, "let it sleep" for an always-on seat, this month's
