@@ -1339,7 +1339,7 @@ fn entry_page_widths(s: &mut Suite, api: &Api) -> Result<()> {
             browser.type_text(&page, "BAD")?;
             let typed = browser.eval(&page, "document.querySelector('input[name=code]').value === 'BAD'")?;
             browser.press(&page, "Enter", false)?;
-            let refused = browser.until(&page, "location.pathname === '/cli' && !!document.querySelector('.flash.error') && document.querySelector('input[name=code]')?.value === ''", wait);
+            let refused = browser.until(&page, "location.pathname === '/cli' && document.querySelector('.flash.error')?.textContent === 'No `fragment login` is waiting on that code. Check it against your terminal: a code is good for ten minutes, once.' && document.querySelector('input[name=code]')?.value === ''", wait);
             s.ok("typing a malformed CLI code and pressing Enter submits it and shows the local validation error", typed == true && refused, browser.eval(&page, "document.body.innerText")?);
         }
         browser.close(page)?;
