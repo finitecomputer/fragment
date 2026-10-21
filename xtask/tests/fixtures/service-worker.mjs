@@ -11,7 +11,7 @@ const origin = "https://chat.fragment.test";
 const matchOptions = { type: "window", includeUncontrolled: true };
 const defaults = { body: "", tag: undefined, data: undefined, icon: undefined };
 
-function worker({ windows = [], show = async () => {}, match, open = async () => ({}) } = {}) {
+function worker({ windows = [], show = async () => {}, match, open = async () => ({}) } = {}, source = script) {
   const listeners = new Map(), calls = [];
   const clients = windows.map((w, i) => ({
     url: w.url,
@@ -31,7 +31,7 @@ function worker({ windows = [], show = async () => {}, match, open = async () =>
       openWindow(url) { calls.push(["open", url]); return open(); },
     },
   };
-  runInNewContext(script, { self, URL }, { filename: "cell/sw.js", timeout: 1000 });
+  runInNewContext(source, { self, URL }, { filename: "cell/sw.js", timeout: 1000 });
   function fire(type, event) {
     const waits = [];
     listeners.get(type)({ ...event, waitUntil: (promise) => waits.push(promise) });
@@ -49,18 +49,28 @@ test("the worker registers only push and notificationclick, never fetch", () => 
   assert.deepEqual([...worker().listeners.keys()], ["push", "notificationclick"]);
 });
 
-test("valid payload fields reach the notification and waitUntil tracks display completion", async () => {
+async function displayLifetime(source = script) {
   let resolve;
-  const h = worker({ show: () => new Promise((r) => { resolve = r; }) });
+  const h = worker({ show: () => new Promise((r) => { resolve = r; }) }, source);
   const payload = { title: "Agent replied", body: "Ready ✓", tag: "chat-7", url: "./", icon: "https://images.example/agent.png" };
   let settled = false;
   const pending = h.push({ json: () => payload }).then(() => { settled = true; });
-  await Promise.resolve();
-  assert.equal(settled, false, "the event waits for display, not just the handler's return");
-  assert.deepEqual(h.calls, [["show", payload.title, { body: payload.body, tag: payload.tag, data: payload.url, icon: payload.icon }]]);
-  resolve();
-  await pending;
+  try {
+    assert.equal(typeof resolve, "function", "display started");
+    // Drain promise reactions before checking: a single microtask can miss a
+    // detached waitUntil promise settling through Promise.all and .then.
+    await new Promise(setImmediate);
+    assert.equal(settled, false, "the event waits for display, not just the handler's return");
+    assert.deepEqual(h.calls, [["show", payload.title, { body: payload.body, tag: payload.tag, data: payload.url, icon: payload.icon }]]);
+  } finally {
+    resolve?.();
+    await pending;
+  }
   assert.equal(settled, true);
+}
+
+test("valid payload fields reach the notification and waitUntil tracks display completion", { timeout: 1000 }, async () => {
+  await displayLifetime();
 });
 
 test("missing, invalid JSON and non-object payloads display safe defaults", async () => {
@@ -92,22 +102,59 @@ test("a rejected notification display is contained by the event lifetime", async
   assert.deepEqual(h.calls, [["show", "Reply", defaults]]);
 });
 
-test("a click closes immediately and waits for the matching existing window's focus", { timeout: 1000 }, async () => {
+async function focusLifetime(source = script) {
   let resolve, started;
   const focusing = new Promise((r) => { started = r; });
   const h = worker({ windows: [
     { url: `${origin}/other` },
     { url: `${origin}/`, focus: () => new Promise((r) => { resolve = r; started(); }) },
-  ] });
+  ] }, source);
   let settled = false;
   const pending = h.click("./").then(() => { settled = true; });
-  assert.deepEqual(h.calls[0], ["close"]);
-  await focusing;
-  assert.equal(settled, false);
-  assert.deepEqual(h.calls, [["close"], ["match", matchOptions], ["focus", 1]]);
-  resolve();
-  await pending;
+  try {
+    assert.deepEqual(h.calls[0], ["close"]);
+    await focusing;
+    await new Promise(setImmediate);
+    assert.equal(settled, false, "the event waits for focus completion");
+    assert.deepEqual(h.calls, [["close"], ["match", matchOptions], ["focus", 1]]);
+  } finally {
+    resolve?.();
+    await pending;
+  }
   assert.equal(settled, true);
+}
+
+test("a click closes immediately and waits for the matching existing window's focus", { timeout: 1000 }, async () => {
+  await focusLifetime();
+});
+
+// Negative controls keep the lifetime assertions honest. Mutate only the copy
+// evaluated by this harness; the served worker remains unchanged.
+function replaceOnce(before, after) {
+  assert.equal(script.split(before).length, 2, "negative control matches exactly one source statement");
+  return script.replace(before, after);
+}
+
+test("the display lifetime assertion rejects a detached notification promise", { timeout: 1000 }, async () => {
+  const detached = replaceOnce(
+    "event.waitUntil(self.registration.showNotification(title, opts).catch(() => {}));",
+    "self.registration.showNotification(title, opts).catch(() => {}); event.waitUntil(Promise.resolve());",
+  );
+  await assert.rejects(displayLifetime(detached), {
+    code: "ERR_ASSERTION", actual: true, expected: false,
+    message: /^the event waits for display, not just the handler's return/,
+  });
+});
+
+test("the focus lifetime assertion rejects a detached matching-window promise", { timeout: 1000 }, async () => {
+  const detached = replaceOnce(
+    "if (url && c.url === url) return await c.focus();",
+    "if (url && c.url === url) { c.focus().catch(() => {}); return; }",
+  );
+  await assert.rejects(focusLifetime(detached), {
+    code: "ERR_ASSERTION", actual: true, expected: false,
+    message: /^the event waits for focus completion/,
+  });
 });
 
 test("relative and same-origin absolute targets open their resolved URL when no window matches", async () => {
