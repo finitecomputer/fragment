@@ -63,13 +63,29 @@ fn shows(chrome: &mut Browser, page: &Page, cond: &str) -> bool {
 /// library dialled again only on a close, so the page waited for its hello
 /// for good). Valid: the page closes it once it has waited past any healthy
 /// open (`OPEN_WAIT_MS`, cell/client.mjs), dials again, has its hello, and
-/// its composer is ready, every message of the owner's shown once.
-fn held_socket(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str) -> Result<()> {
+/// its composer is ready, its chat comes (the owner's newest message
+/// shown), and every message of the owner's is shown once.
+fn held_socket(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, chat: &str) -> Result<()> {
     // the open wait and its first backoff, jittered, and the new open
     let wait = Duration::from_secs(30);
+    // The chat comes after the hello: the new socket's subscribe, from the
+    // channel's cursor, then its page of records, drawn. Its newest message
+    // of the owner's shown, that page is (a look as the hello came found
+    // none drawn yet: runs 39667027692, 39679966640 and 39682770211).
+    let me = api.identity(owner)?;
+    let newest = records(api, owner, chat, "chat")
+        .into_iter()
+        .filter(|r| r["principal"] == me.as_str() && r["body"]["text"].is_string() && r["body"]["kind"].is_null())
+        .filter_map(|r| r["seq"].as_i64())
+        .max()
+        .context("the owner has said something in the chat")?;
     let page = chrome.open_with_script(&api.site_url(chat, "__signin?return=/"), &crate::browser::hold_first_socket("/__live"))?;
     fit(chrome, &page, 1280, 860, false)?;
-    let ready = chrome.until(&page, "window.__heldSockets === 1 && window.__heldClosed === 1 && document.getElementById('say')?.dataset.ready === '1'", wait);
+    let ready = chrome.until(
+        &page,
+        &format!("window.__heldSockets === 1 && window.__heldClosed === 1 && document.getElementById('say')?.dataset.ready === '1' && !!document.querySelector('.msg.user.mine[data-seq=\"{newest}\"]')"),
+        wait,
+    );
     let seen = chrome.eval(&page, "({ held: window.__heldSockets, closed: window.__heldClosed, ready: document.getElementById('say')?.dataset.ready ?? null, mine: [...document.querySelectorAll('.msg.user.mine[data-seq]')].map((m) => m.dataset.seq) })")?;
     let mine = strings_of(&seen["mine"]);
     let once = !mine.is_empty() && mine.iter().collect::<std::collections::BTreeSet<_>>().len() == mine.len();
@@ -643,7 +659,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     );
     // (a tab of its own, in front: after the push checks, which ask whether
     // the owner's page is on screen)
-    held_socket(s, api, &mut chrome, &chat_name)?;
+    held_socket(s, api, &mut chrome, &owner, &chat_name)?;
 
     polish::check(s, api, &owner, &owner_session, &mut chrome, &label)?;
     polish::working_card(s, api, &owner, &mut chrome, &identity, &agent_name)?;
