@@ -172,5 +172,38 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
         list.status == 200 && list.body["codes"][0]["id"] == typed_id.as_str() && list.body["codes"].as_array().is_some_and(|c| c.iter().any(|c| c["id"] == id.as_str())),
         &list,
     );
+
+    // ---- a Checkout Stripe refuses gives back the place it held at once
+    // (a code of one place): refused for one person, another's Checkout
+    // takes the place; then that one's open Checkout keeps it, through a
+    // retry of theirs Stripe refuses too, and a third finds none
+    let r = admin("POST", "/trials", Some(&json!({ "name": "One place", "kind": "seat_always_on", "days": 7, "capacity": 1 })))?;
+    let one = r.body["code"].as_str().unwrap_or("").to_string();
+    let ora = api.person()?;
+    let pip = api.person()?;
+    let quo = api.person()?;
+    let try_code = |who: &fragment_nip98::Keys| api.signed(who, "POST", "/api/billing/checkout", Some(&json!({ "trialCode": one })));
+    s.stripe.fail("POST", "/v1/checkout/sessions", true);
+    let refused = try_code(&ora)?;
+    s.stripe.fail("POST", "/v1/checkout/sessions", false);
+    let taken = try_code(&pip)?;
+    s.stripe.fail("POST", "/v1/checkout/sessions", true);
+    let pip_again = try_code(&pip)?;
+    s.stripe.fail("POST", "/v1/checkout/sessions", false);
+    let full = try_code(&quo)?;
+    let mine = try_code(&ora)?;
+    let view = admin("GET", &format!("/trials/{}", r.body["id"].as_str().unwrap_or("")), None)?;
+    s.ok(
+        "a trial's Checkout Stripe refuses gives its place back at once: another person's Checkout with that code takes it; theirs, made, keeps it through a retry Stripe refuses, so others find none (409), the first person too",
+        r.status == 200
+            && refused.status >= 500
+            && taken.status == 200
+            && pip_again.status >= 500
+            && full.status == 409
+            && full.message().contains("places")
+            && mine.status == 409
+            && view.body["open"] == 1,
+        json!({ "refused": refused.status, "taken": taken.status, "again": pip_again.status, "full": [full.status, full.message()], "mine": mine.status, "view": view.body }),
+    );
     Ok(())
 }

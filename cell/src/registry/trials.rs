@@ -77,6 +77,24 @@ pub(crate) struct TrialOffer {
     pub days: u32,
 }
 
+/// `POST /trials/release`: a Checkout that never was (Stripe refused it,
+/// or it failed before a session existed) gives back the place it took at
+/// once, rather than when it would have expired. Only a place it took
+/// fresh (`at`, `CheckoutPlan::hold_at`): one the person already held for
+/// an earlier Checkout, maybe still open on Stripe's page, stays theirs.
+/// Asked again, or after a newer hold, it changes nothing.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct TrialRelease {
+    pub person: String,
+    pub code: String,
+    pub at: i64,
+}
+
+impl Call for TrialRelease {
+    const PATH: &'static str = "/trials/release";
+    type Answer = ();
+}
+
 #[derive(Deserialize)]
 struct CodeRow {
     id: String,
@@ -302,13 +320,26 @@ impl RegistryCell {
         Ok(TrialOffer { id: r.id.clone(), kind: r.kind()?, days: u32::try_from(r.days).map_err(|_| CellError::host("trial_codes.days"))? })
     }
 
-    /// Holds a code's place for `person`'s Checkout until it expires.
-    pub(super) fn hold_trial_place(&self, code: &str, person: &str, until_ms: i64) -> CellResult<()> {
+    /// Holds a code's place for `person`'s Checkout until it expires. When
+    /// it took the place fresh (the person held none open), when it did:
+    /// what `TrialRelease` gives back if the Checkout never is.
+    pub(super) fn hold_trial_place(&self, code: &str, person: &str, until_ms: i64) -> CellResult<Option<i64>> {
+        let now = js::now_ms();
+        let held = self.count("SELECT COUNT(*) AS n FROM trial_uses WHERE person = ? AND subscription IS NULL AND expires_at > ?", vec![person.into(), SqlStorageValue::Integer(now)])? > 0;
         self.exec(
             "INSERT INTO trial_uses (person, code, at, expires_at, subscription) VALUES (?, ?, ?, ?, NULL)
              ON CONFLICT (person) DO UPDATE SET code = excluded.code, at = excluded.at, expires_at = excluded.expires_at
              WHERE trial_uses.subscription IS NULL",
-            vec![person.into(), code.into(), SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(until_ms)],
+            vec![person.into(), code.into(), SqlStorageValue::Integer(now), SqlStorageValue::Integer(until_ms)],
+        )?;
+        Ok((!held).then_some(now))
+    }
+
+    /// A Checkout that never was gives back the place it took (`TrialRelease`).
+    fn trial_release(&self, b: TrialRelease) -> CellResult<()> {
+        self.exec(
+            "DELETE FROM trial_uses WHERE person = ? AND code = ? AND at = ? AND subscription IS NULL",
+            vec![b.person.into(), b.code.into(), SqlStorageValue::Integer(b.at)],
         )
     }
 
@@ -323,6 +354,7 @@ impl RegistryCell {
             TrialList::PATH => reply::<TrialList>(self.trial_list()),
             TrialGet::PATH => reply::<TrialGet>(body::<TrialGet>(bytes).and_then(|b| self.trial_view(&self.code_row(&b.id)?, true))),
             TrialChange::PATH => reply::<TrialChange>(body(bytes).and_then(|b| self.trial_change(b))),
+            TrialRelease::PATH => reply::<TrialRelease>(body(bytes).and_then(|b| self.trial_release(b))),
             _ => return None,
         })
     }
