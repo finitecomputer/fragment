@@ -70,17 +70,20 @@ pub async fn workos_user(env: &Env, cfg: &Config, who: &str) -> CellResult<Optio
 /// Each connection's state for a person (as Pipes says, with no token),
 /// whose WorkOS user `user` finds (`workos_user`, or the one their computer
 /// keeps), asked only when the catalog has a connection.
-pub async fn connection_states(env: &Env, cfg: &Config, user: impl std::future::Future<Output = CellResult<Option<String>>>) -> CellResult<BTreeMap<String, ProviderState>> {
-    Ok(connection_accounts(env, cfg, user).await?.into_iter().map(|(p, a)| (p, a.state)).collect())
-}
-
-/// Each connection's account for a person, as Pipes says (`connection_states`
-/// with the account each is, as its person knows it).
-pub async fn connection_accounts(env: &Env, cfg: &Config, user: impl std::future::Future<Output = CellResult<Option<String>>>) -> CellResult<BTreeMap<String, PipesAccount>> {
+/// `labels`, when asked for, gets each connected one's account as its
+/// person knows it (`keys::PipesAccount`'s label), from the same answers.
+/// (One function, not a second beside it: each is instantiated once per
+/// caller's future, and the cell's Wasm has a budget.)
+pub async fn connection_states(
+    env: &Env,
+    cfg: &Config,
+    user: impl std::future::Future<Output = CellResult<Option<String>>>,
+    mut labels: Option<&mut BTreeMap<String, String>>,
+) -> CellResult<BTreeMap<String, ProviderState>> {
     let connections: Vec<&str> = cfg.providers.providers().iter().filter(|p| p.kind == Kind::Connection).map(|p| p.name.as_str()).collect();
-    let mut accounts = BTreeMap::new();
+    let mut states = BTreeMap::new();
     if connections.is_empty() {
-        return Ok(accounts);
+        return Ok(states);
     }
     let user = user.await?;
     let api = &cfg.workos()?.api;
@@ -90,9 +93,12 @@ pub async fn connection_accounts(env: &Env, cfg: &Config, user: impl std::future
             Some(u) => crate::keys::pipes_state(env, api, provider, u).await?,
             None => PipesAccount { state: ProviderState::NotConnected, label: None },
         };
-        accounts.insert(provider.to_string(), account);
+        if let (Some(labels), Some(label)) = (labels.as_deref_mut(), account.label) {
+            labels.insert(provider.to_string(), label);
+        }
+        states.insert(provider.to_string(), account.state);
     }
-    Ok(accounts)
+    Ok(states)
 }
 
 pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, method: Method, rest: &[&str], body: &[u8]) -> CellResult<Response> {
@@ -106,8 +112,8 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
     let computer = fragment_core::computer::default_computer_of(who);
     match (method.clone(), rest) {
         (Method::Get, []) => {
-            let accounts = connection_accounts(env, cfg, workos_user(env, cfg, who)).await?;
-            let states: BTreeMap<&String, ProviderState> = accounts.iter().map(|(p, a)| (p, a.state)).collect();
+            let mut labels = BTreeMap::new();
+            let states = connection_states(env, cfg, workos_user(env, cfg, who), Some(&mut labels)).await?;
             // the person's computer keeps them, for its guest's next read; one
             // not made yet has nothing to tell, and so no own key either
             let own: Vec<String> = match crate::computer::ask(env, &computer, "computer/own-keys", &json!({ "connections": states })).await {
@@ -133,7 +139,7 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                     price: p.price.map(|pr| ProviderPrice { micros: pr.micros, per: pr.per }),
                     sign_in: p.oauth.as_ref().map(|o| ProviderSignIn { manage: o.manage.clone() }),
                     models: p.models.as_ref().map(|m| m.offer.iter().map(|o| ProviderModel { id: o.id.clone(), name: o.name.clone() }).collect()),
-                    account: accounts.get(&p.name).and_then(|a| a.label.clone()),
+                    account: labels.get(&p.name).cloned(),
                 })
                 .collect();
             json_response(&Providers { providers })
@@ -263,7 +269,7 @@ async fn revoke_grant(env: &Env, cfg: &Config, api: &str, provider: &str, user: 
 /// rather than once its states age out. A computer not made yet has no
 /// guest; a failure is logged (each swap asks Pipes, which refuses now).
 async fn disconnected_told(env: &Env, cfg: &Config, computer: &str, provider: &str, user: Option<String>) {
-    let told = match connection_states(env, cfg, std::future::ready(Ok(user))).await {
+    let told = match connection_states(env, cfg, std::future::ready(Ok(user)), None).await {
         Ok(states) => crate::computer::ask(env, computer, "computer/own-keys", &json!({ "connections": states })).await.map(drop),
         Err(e) => Err(e),
     };
