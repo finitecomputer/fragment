@@ -654,7 +654,13 @@ fn commands_queued_and_quotes(s: &mut Suite, api: &Api, chrome: &mut Browser, pa
     chrome.press(page, "Enter", false)?;
     let bubble = "[...document.querySelectorAll('.msg.user.mine .bubble.command')].some((b) => b.textContent === '/usage')";
     s.ok("Enter sends it, shown as the command it is", shows(chrome, bubble), chrome.eval(page, "document.getElementById('messages').innerText.slice(-300)")?);
-    let sent = chat_records().into_iter().find(|r| r["body"]["kind"] == "command" && r["body"]["command"] == "usage").unwrap_or_default();
+    // its bubble shows as it is posted (`.sending`), before its record is
+    // written: the record is waited for, not read once (Alex's, from #430)
+    let mut sent = Value::Null;
+    s.eventually(TURN, || {
+        sent = chat_records().into_iter().find(|r| r["body"]["kind"] == "command" && r["body"]["command"] == "usage").unwrap_or_default();
+        !sent.is_null()
+    });
     s.ok("its record is `{kind: \"command\", command, to}`, the agent named", sent["body"] == json!({ "kind": "command", "command": "usage", "to": [o.identity] }), &sent);
     s.ok("and the agent answers it as a turn of its own", shows(chrome, &replied("ran /usage")), "");
 
