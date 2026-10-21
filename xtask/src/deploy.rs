@@ -12,7 +12,9 @@
 //! checked-in config (`cell/wrangler.jsonc`) it renders the Worker's own
 //! wrangler config under `target/deploy/<name>/`, the store secrets bound
 //! by name (`secrets_store_secrets`), makes the bucket and queues it
-//! names, and runs `wrangler deploy`. Only a branch's
+//! names, and runs `wrangler deploy` (up to three times, again only when it
+//! fails in a way it is safe to answer by running it again: `retryable`).
+//! Only a branch's
 //! test secret is still a Worker secret, uploaded from a file of mode 600
 //! that is removed after.
 //!
@@ -30,10 +32,11 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use fragment_devstack as devstack;
@@ -679,6 +682,144 @@ fn ensure(cmd: &mut Command, what: &str) -> Result<()> {
     bail!("{what}: {}", text.trim())
 }
 
+/// How many times a deploy runs `wrangler deploy` at most: again only after
+/// a failure `retryable` names (the hand deploys' loop was three tries too).
+const DEPLOY_TRIES: u32 = 3;
+/// The pause before each try after the first.
+const DEPLOY_PAUSE: Duration = Duration::from_secs(10);
+/// How much of each of a try's streams is kept to classify its failure:
+/// the end, where wrangler says what failed (an image's build before it
+/// prints a lot).
+const DEPLOY_KEPT_BYTES: usize = 1 << 20;
+
+/// wrangler's message (4.145.0, `wrangler-dist/cli.js`) when the Worker's
+/// version is deployed but its Durable Object-managed Container application
+/// settings are not, and the rest of the deploy (its routes, its crons) is
+/// not done: it says to re-run the same `wrangler deploy` to finish.
+const CONTAINER_APPLY: &str = "Wrangler could not finish applying its Durable Object-managed Container application settings";
+/// Docker's, when an image's push waits too long for the registry's answer
+/// (the hand deploys' 4 GB layer did): pushed again, the layers the
+/// registry has are skipped. Only a deploy that builds an image pushes one.
+const PUSH_TIMEOUT: &str = "timeout awaiting response headers";
+
+/// A failed `wrangler deploy` that is safe to answer by running it again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Retryable {
+    ContainerApply,
+    PushTimeout,
+}
+
+impl Retryable {
+    fn what(self) -> &'static str {
+        match self {
+            Retryable::ContainerApply => "its Container application settings were not applied, which wrangler says to answer by running it again",
+            Retryable::PushTimeout => "an image's push to the registry timed out awaiting its answer",
+        }
+    }
+}
+
+/// Whether a failed `wrangler deploy` that printed `output` is `Retryable`:
+/// wrangler's container-settings message (its words, however its colours
+/// and line breaks fall), or Docker's push timeout on a line that names the
+/// registry. Nothing else is: not a config wrangler refuses, not auth, not
+/// a deploy Cloudflare refuses, not an image that does not build.
+fn retryable(output: &str) -> Option<Retryable> {
+    let plain = without_ansi(output);
+    if plain.split_whitespace().collect::<Vec<_>>().join(" ").contains(CONTAINER_APPLY) {
+        return Some(Retryable::ContainerApply);
+    }
+    if plain.lines().any(|l| l.contains(PUSH_TIMEOUT) && l.contains(&format!("https://{REGISTRY}/"))) {
+        return Some(Retryable::PushTimeout);
+    }
+    None
+}
+
+/// `text` without its terminal escapes (wrangler colours its errors where
+/// it thinks a terminal, or CI, shows them).
+fn without_ansi(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            plain.push(c);
+            continue;
+        }
+        // a CSI sequence (`ESC [`, parameters, one final byte in @..~),
+        // else a two-character one
+        if chars.next() == Some('[') {
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        }
+    }
+    plain
+}
+
+/// Runs `wrangler deploy` (`cmd`) until it succeeds, a failure is not
+/// `retryable`, or it has failed DEPLOY_TRIES times, each try's output
+/// passed through as it comes and each failure said.
+fn deploy_with_retries(cmd: &mut Command) -> Result<()> {
+    let shown = crate::shown(cmd);
+    with_retries(&shown, DEPLOY_PAUSE, || run_teed(cmd).with_context(|| format!("could not start {shown}")))
+}
+
+/// `deploy_with_retries`' loop, `attempt` one try (its status and what it
+/// printed).
+fn with_retries(shown: &str, pause: Duration, mut attempt: impl FnMut() -> Result<(ExitStatus, String)>) -> Result<()> {
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        let (status, output) = attempt()?;
+        if status.success() {
+            return Ok(());
+        }
+        match retryable(&output) {
+            None => bail!("{shown} failed: {status}"),
+            Some(r) if tries >= DEPLOY_TRIES => bail!("{shown} failed {tries} times, the last {status}: {}", r.what()),
+            Some(r) => {
+                eprintln!("deploy: wrangler deploy failed ({status}, try {tries} of {DEPLOY_TRIES}): {}; running it again in {}s", r.what(), pause.as_secs());
+                std::thread::sleep(pause);
+            }
+        }
+    }
+}
+
+/// Runs `cmd` (no stdin) to its end, its output passed through to this
+/// process's as it comes, and returns its status and the last
+/// DEPLOY_KEPT_BYTES of each of its streams.
+fn run_teed(cmd: &mut Command) -> std::io::Result<(ExitStatus, String)> {
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let (out, err) = (child.stdout.take().expect("stdout is piped"), child.stderr.take().expect("stderr is piped"));
+    let out = std::thread::spawn(move || tee(out, std::io::stdout()));
+    let err = std::thread::spawn(move || tee(err, std::io::stderr()));
+    let status = child.wait()?;
+    let mut kept = out.join().expect("the stdout tee does not panic")?;
+    kept.extend(err.join().expect("the stderr tee does not panic")?);
+    Ok((status, String::from_utf8_lossy(&kept).into_owned()))
+}
+
+/// Copies `from` to `to` to its end, keeping the last DEPLOY_KEPT_BYTES
+/// (to twice that, between trims). A write that fails is dropped, never
+/// the read: the child must never block on a pipe no one drains.
+fn tee(mut from: impl Read, mut to: impl Write) -> std::io::Result<Vec<u8>> {
+    let (mut kept, mut buf) = (Vec::new(), [0u8; 8192]);
+    loop {
+        let n = match from.read(&mut buf) {
+            Ok(0) => return Ok(kept),
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        let _ = to.write_all(&buf[..n]).and_then(|()| to.flush());
+        kept.extend_from_slice(&buf[..n]);
+        if kept.len() > 2 * DEPLOY_KEPT_BYTES {
+            kept.drain(..kept.len() - DEPLOY_KEPT_BYTES);
+        }
+    }
+}
+
 /// The deploy's id (`FRAGMENT_DEPLOY_ID`): its commit, which is also its
 /// release, the one id every call between its Worker and its objects
 /// carries (fragment_core::release). A tree with changes not committed is
@@ -851,7 +992,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         }
         true => None,
     };
-    crate::run(&mut deploy_cell)?;
+    deploy_with_retries(&mut deploy_cell)?;
     drop(test_secrets);
     println!("deployed {deploy_id}:");
     println!("  the platform  {platform_url}/  (sign-in redirect: {platform_url}/auth/callback)");
@@ -1084,6 +1225,98 @@ pub fn teardown(rest: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    /// CD's preview deploy's failure (master run 39495348843), as wrangler
+    /// printed it there, colours and all.
+    const CONTAINER_APPLY_CI: &str = "Uploaded fragment-preview (6.41 sec)\n\n\x1b[31m✘ \x1b[41;31m[\x1b[41;97mERROR\x1b[41;31m]\x1b[0m \x1b[1mThe Worker version was deployed, but Wrangler could not finish applying its Durable Object-managed Container application settings. Re-run the same `wrangler deploy` command to retry and finish deployment.\x1b[0m\n\n\n🪵  Logs were written to \"/home/runner/.config/.wrangler/logs/wrangler-2026-10-20_21-14-56_155.log\"\n";
+    /// A hand deploy's image push that timed out (2026-10-07).
+    const PUSH_TIMEOUT_HAND: &str = "edd7ace4: Pushing [=====>    ] 1.2GB/4.1GB\nfailed to do request: Put \"https://registry.cloudflare.com/v2/acct/fragment-claude-smoke-computer-hermes/blobs/uploads/edd7ace4-5361-459f-9b4d-c51822ce7ada?digest=sha256%3A964fade076b4f7bfb29f8230df8d4fe482bf097ede709a00fff82a55c78391f8\": net/http: timeout awaiting response headers\n\n✘ [ERROR] Docker command exited with code: 1\n";
+
+    /// Only what wrangler or the registry says a re-run answers is run
+    /// again: the container settings not applied (in CI's colours, or
+    /// plain and wrapped as a terminal wraps it) and the registry's push
+    /// timeout. A config wrangler refuses, auth, a deploy Cloudflare
+    /// refuses, an image that does not build or a push the registry
+    /// refuses, and a timeout from any host but the registry are not.
+    #[test]
+    fn a_deploy_is_run_again_only_for_a_failure_a_rerun_answers() {
+        assert_eq!(retryable(CONTAINER_APPLY_CI), Some(Retryable::ContainerApply));
+        let wrapped = "✘ [ERROR] The Worker version was deployed, but Wrangler could not finish\n  applying its Durable Object-managed Container application settings.\n  Re-run the same `wrangler deploy` command to retry and finish deployment.\n";
+        assert_eq!(retryable(wrapped), Some(Retryable::ContainerApply));
+        assert_eq!(retryable(PUSH_TIMEOUT_HAND), Some(Retryable::PushTimeout));
+        assert_eq!(retryable(&format!("\x1b[2m{PUSH_TIMEOUT_HAND}\x1b[0m")), Some(Retryable::PushTimeout));
+        for (what, output) in [
+            ("a config wrangler refuses", "✘ [ERROR] Processing target/deploy/fragment-preview/cell.json configuration:\n\n    - \"containers[0]\" should have a string \"image\" field.\n"),
+            ("auth", "✘ [ERROR] A request to the Cloudflare API (/accounts/acct/workers/scripts/fragment-preview) failed.\n\n  Authentication error [code: 10000]\n"),
+            ("a deploy Cloudflare refuses", "✘ [ERROR] A request to the Cloudflare API (/accounts/acct/workers/scripts/fragment-preview/versions) failed.\n\n  Your Worker exceeded the size limit of 10 MiB. [code: 10027]\n"),
+            ("a container application Cloudflare refuses", "✘ [ERROR] Error creating application due to a misconfiguration:\n  the Container application settings are invalid: instance_type standard-9 does not exist\n"),
+            ("an image that does not build", "ERROR: failed to solve: process \"/bin/sh -c cargo build --release\" did not complete successfully: exit code: 101\n✘ [ERROR] Docker command exited with code: 1\n"),
+            ("a push the registry refuses", "unauthorized: authentication required: https://registry.cloudflare.com/v2/acct/fragment-computer-hermes/blobs/uploads/\n✘ [ERROR] Docker command exited with code: 1\n"),
+            ("a base image's pull timing out", "failed to do request: Head \"https://registry-1.docker.io/v2/library/debian/manifests/bookworm\": net/http: timeout awaiting response headers\n✘ [ERROR] Docker command exited with code: 1\n"),
+            ("nothing said", ""),
+        ] {
+            assert_eq!(retryable(output), None, "{what} is not run again");
+        }
+        assert_eq!(without_ansi("\x1b[41;97mERROR\x1b[0m \x1b7ok\x1b[1m"), "ERROR ok");
+    }
+
+    fn exited(code: i32) -> ExitStatus {
+        ExitStatus::from_raw(code << 8)
+    }
+
+    /// A deploy is run again after each failure a re-run answers, up to
+    /// three tries, and never after another: the first such failure ends
+    /// it, as does one that cannot start.
+    #[test]
+    fn a_deploy_tries_three_times_at_most_and_only_again_for_a_rerun() {
+        let tries = |script: Vec<(i32, &'static str)>| {
+            let mut script = script.into_iter();
+            let mut n = 0;
+            let r = with_retries("wrangler deploy", Duration::ZERO, || {
+                n += 1;
+                let (code, output) = script.next().expect("the script has a try for each");
+                Ok((exited(code), output.to_string()))
+            });
+            (n, r.map_err(|e| e.to_string()))
+        };
+        assert_eq!(tries(vec![(0, "")]), (1, Ok(())));
+        assert_eq!(tries(vec![(1, CONTAINER_APPLY_CI), (0, "")]), (2, Ok(())));
+        assert_eq!(tries(vec![(1, PUSH_TIMEOUT_HAND), (1, CONTAINER_APPLY_CI), (0, "")]), (3, Ok(())));
+        let (n, r) = tries(vec![(1, CONTAINER_APPLY_CI); 3]);
+        assert_eq!(n, 3, "three tries at most");
+        assert!(r.as_ref().is_err_and(|e| e.contains("failed 3 times") && e.contains("Container application settings")), "{r:?}");
+        let (n, r) = tries(vec![(1, "✘ [ERROR] Authentication error [code: 10000]")]);
+        assert_eq!((n, r), (1, Err("wrangler deploy failed: exit status: 1".into())), "another failure is not run again");
+        let (n, r) = tries(vec![(1, CONTAINER_APPLY_CI), (1, "✘ [ERROR] Authentication error [code: 10000]")]);
+        assert_eq!((n, r.is_err()), (2, true), "a retry's other failure ends it");
+        let mut n = 0;
+        let r = with_retries("wrangler deploy", Duration::ZERO, || {
+            n += 1;
+            bail!("could not start wrangler deploy")
+        });
+        assert!(r.is_err() && n == 1, "a try that cannot start is not run again");
+    }
+
+    /// A try's output is passed through whole, and only its end is kept
+    /// to classify it, at most twice DEPLOY_KEPT_BYTES.
+    #[test]
+    fn a_tries_output_passes_through_and_its_end_is_kept() {
+        let input: Vec<u8> = (0..3 * DEPLOY_KEPT_BYTES + 12_345).map(|i| (i % 251) as u8).collect();
+        let mut shown = Vec::new();
+        let kept = tee(std::io::Cursor::new(&input), &mut shown).expect("a tee of memory");
+        assert_eq!(shown, input, "everything is passed through");
+        assert!(kept.len() >= DEPLOY_KEPT_BYTES && kept.len() <= 2 * DEPLOY_KEPT_BYTES, "{} kept", kept.len());
+        assert!(input.ends_with(&kept), "the end is kept");
+        let mut shown = Vec::new();
+        assert_eq!(tee(CONTAINER_APPLY_CI.as_bytes(), &mut shown).expect("a tee of memory"), CONTAINER_APPLY_CI.as_bytes());
+        // a child's two streams are both kept, as wrangler's error is on
+        // stderr and Docker's push on either
+        let (status, output) = run_teed(Command::new("/bin/sh").args(["-c", "echo pushed; echo \"$0\" >&2; exit 1", CONTAINER_APPLY])).expect("run /bin/sh");
+        assert_eq!(status.code(), Some(1));
+        assert_eq!(output, format!("pushed\n{CONTAINER_APPLY}\n"));
+        assert_eq!(retryable(&output), Some(Retryable::ContainerApply));
+    }
 
     /// A deploy's id is its commit, which `/healthz` answers and CD checks;
     /// an uncommitted tree's is that deploy's alone, so two of one commit

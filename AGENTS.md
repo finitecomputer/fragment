@@ -272,8 +272,11 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   lists the store first and refuses, before anything is built, when a
   secret the config names is missing (naming the `secret set` for each);
   it binds them by name and uploads no secret but a branch's test
-  secret. A branch is a complete copy at `<branch>.<zone>`, its
-  fragments at `<name>--<branch>.<zone>`. `--pinned-only` (CI's)
+  secret, and runs `wrangler deploy` again (three tries at most, 10 s
+  apart) only for a failure a re-run answers: its Container settings not
+  applied, or an image's push to the registry timing out. A branch is a
+  complete copy at `<branch>.<zone>`, its fragments at
+  `<name>--<branch>.<zone>`. `--pinned-only` (CI's)
   refuses, before anything is read or built, a config with a computer
   image built from the tree (a `dockerfile`), naming it: every image is
   kept at its digest, and the deploy needs no Docker. `cargo xtask
