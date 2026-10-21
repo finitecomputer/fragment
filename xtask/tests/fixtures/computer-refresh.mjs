@@ -2,11 +2,12 @@
 // synthetic HTTP/DOM and downstream renderers, without a browser or server.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "node:test";
+import { test as nodeTest } from "node:test";
 import { createContext, runInContext } from "node:vm";
+const test = (name, run) => nodeTest(name, { timeout: 1000 }, run);
 
 const shell = readFileSync(new URL("../../../cell/shell/shell.js", import.meta.url), "utf8");
-const functions = ["api", "load", "identityIs", "renderComputer", "owesFirstAgent", "start"].map((name) => {
+const functions = ["api", "load", "identityIs", "renderComputer", "owesFirstAgent", "start", "prewake", "computerCurrent", "computerIs", "computerOf", "restartComputer", "sawNotice", "updateLater", "agentReady"].map((name) => {
   const source = shell.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}`, "m"))?.[0];
   assert.ok(source, `the shell declares ${name}; update the test if it moves`);
   return source;
@@ -14,12 +15,15 @@ const functions = ["api", "load", "identityIs", "renderComputer", "owesFirstAgen
 const reads = shell.match(/^const reads = .*;$/m)?.[0];
 const apiError = shell.match(/^class ApiError[^]*?^\}/m)?.[0];
 const submit = shell.match(/^document.addEventListener\("submit",[^]*?^\}, true\);/m)?.[0];
-assert.ok(reads && apiError && submit);
+const computerVars = ["woke", "making", "restarted"].map((name) => shell.match(new RegExp(`^let ${name} = .*;$`, "m"))?.[0]).join("\n");
+const profile = shell.match(/^  file.onchange = async[^]*?^  \};/m)?.[0];
+const permission = shell.slice(shell.indexOf("function connectionsSection(")).match(/^        chip.onclick = async[^]*?^        \};/m)?.[0];
+assert.ok(reads && apiError && submit && profile && permission);
 const html = readFileSync(new URL("../../../cell/shell/index.html", import.meta.url), "utf8");
 assert.match(html, /<div class="computer-notices" id="computer-notices" role="status" aria-live="polite" hidden><\/div>\s*<div class="frames" id="frames">/,
   "the notice band is outside frames, which Settings hides");
 const turn = () => new Promise(setImmediate);
-const computer = (id = "computer-a", agent = "agent-a") => ({ computer: id, agents: [{ identity: agent, fragment: agent }], notices: [{ kind: "update" }] });
+const computer = (id = "computer-a", agent = "agent-a", owner = "owner-a") => ({ computer: id, owner, phase: "asleep", agents: [{ identity: agent, fragment: agent }], notices: [{ kind: "update" }] });
 const listing = (value = computer()) => ({ computers: value ? [value] : [], support: "https://support.example" });
 
 function setup() {
@@ -35,8 +39,11 @@ function setup() {
     constructor(action) { this.action = action; }
     getAttribute(name) { assert.equal(name, "action"); return this.action; }
   }
+  const button = { textContent: "Restart", disabled: false, parentElement: { querySelector: () => null, append() {} } };
+  const file = { files: [{ type: "image/png" }] };
   const context = createContext({
-    state, el, $: (id) => ids[id],
+    state, el, $: (id) => ids[id], button, file, picture: { querySelector: () => el("span") },
+    chip: button, offered: [{ provider: "tools" }], p: { provider: "tools" }, allowed: true,
     fetch: (path, options) => new Promise((resolve, reject) => requests.push({ path, options, resolve, reject })),
     heard() {},
     noticeRow: (n) => { const row = el("div"); row.dataset.kind = n.kind; return row; },
@@ -45,14 +52,15 @@ function setup() {
     chats: () => state.fragments.filter((f) => f.kind === "chat"),
     own: (f) => f.role === "owner", UNTITLED: "Untitled", cardsLoad: {}, loadCards: async () => {},
     primaryAgent: () => state.computer?.agents[0],
-    document: { addEventListener: (type, fn) => listeners.set(type, fn) }, HTMLFormElement: Form,
+    document: { hidden: false, addEventListener: (type, fn) => listeners.set(type, fn), querySelectorAll: () => [button] }, HTMLFormElement: Form,
     tab: { drop() {} }, WINDOWS_KEY: "windows", greeted: new Set(),
     location: { pathname: "/settings" }, SETTINGS: "/settings", WELCOME: "/welcome",
     setGuest: (guest) => { state.guest = guest; }, watchList() {}, byName: () => null, shown: () => [],
-    openSettings: async () => {}, reopenWindows() {}, prewake() {}, signIn: () => rendered.push("sign-in"),
+    openSettings: async () => {}, reopenWindows() {}, signIn: () => rendered.push("sign-in"),
+    setup: null, seg: encodeURIComponent,
     notice: () => rendered.push("notice"), creatingAgent: () => { throw new Error("unexpected agent creation"); },
   });
-  runInContext(`${apiError}\nlet writing = 0;\n${reads}\n${functions}\n${submit}`, context);
+  runInContext(`${apiError}\nlet writing = 0;\n${computerVars}\n${reads}\n${functions}\n${submit}\n${profile}\n${permission}`, context);
   const call = (expression) => runInContext(expression, context);
   call('identityIs({id: "owner-a"})');
   const box = ids["computer-notices"];
@@ -60,6 +68,9 @@ function setup() {
   return { state, requests, rendered, box, failure, layout: ids.layout,
     path: (value) => { context.location.pathname = value; },
     load: () => call("load()"), start: () => call("start()"),
+    call, wake: () => call("prewake()"), profile: () => file.onchange(),
+    permission: () => { context.a = state.computer.agents[0]; return button.onclick(); },
+    api: (method, path) => { context.requestArgs = [method, path]; return call("api(...requestArgs)"); },
     owes: () => call("owesFirstAgent()"),
     identity: (id) => { context.nextIdentity = id === null ? null : { id }; call("identityIs(nextIdentity)"); },
     signout: (action) => listeners.get("submit")({ target: new Form(action) }),
@@ -110,7 +121,6 @@ for (const status of [403, 500, "transport"]) {
     assert.equal(h.state.computer.computer, "computer-new");
     assert.deepEqual([...h.state.agents.keys()], ["agent-new"]);
     assert.equal(h.failure(), undefined);
-    assert.equal(retry.disabled, false);
     assert.ok(h.requests.every((r) => r.options.method === "GET"));
   });
 }
@@ -277,7 +287,181 @@ test("a retry whose fragment request fails stays available without discarding th
   respond(h.requests[4], {}, 500);
   respond(h.requests[5], listing());
   await again;
-  assert.equal(retry.disabled, false);
+  assert.equal(h.retry().disabled, false);
   assert.equal(h.state.computer.computer, "computer-a");
   assert.ok(h.failure());
+});
+
+async function startAs(h, id) {
+  const at = h.requests.length;
+  const pending = h.start();
+  respond(h.requests[at], { id });
+  await turn();
+  complete(h, at + 1, {}, 500);
+  respond(h.requests[at + 3], { guest: false });
+  await pending;
+}
+
+for (const wakeFirst of [true, false]) {
+  test(`real prewake answer ${wakeFirst ? "before" : "after"} the new identity's failed list cannot be retained`, async () => {
+    const h = setup();
+    await seed(h);
+    h.wake();
+    assert.match(h.requests[2].path, /\/wake$/);
+    const pending = h.start();
+    respond(h.requests[3], { id: "owner-b" });
+    await turn();
+    if (wakeFirst) { respond(h.requests[2], computer()); await turn(); }
+    complete(h, 4, {}, 500);
+    respond(h.requests[6], { guest: false });
+    await pending;
+    if (!wakeFirst) { respond(h.requests[2], computer()); await turn(); }
+    assert.equal(h.state.me.id, "owner-b");
+    assert.equal(h.state.computer, null);
+    assert.equal(h.state.agents.size, 0);
+    assert.ok(h.failure());
+  });
+}
+
+test("wake from a previous session cannot return after actual startup switches away and back", async () => {
+  const h = setup();
+  await seed(h);
+  h.wake();
+  await startAs(h, "owner-b");
+  await startAs(h, "owner-a");
+  respond(h.requests[2], computer());
+  await turn();
+  assert.equal(h.state.me.id, "owner-a");
+  assert.equal(h.state.computer, null);
+});
+
+for (const action of ["/auth/logout", "/auth/switch"]) {
+  test(`a pending actual startup identity lookup cannot undo ${action}`, async () => {
+    const h = setup();
+    await seed(h);
+    const pending = h.start();
+    h.signout(action);
+    respond(h.requests[2], { id: "owner-a" });
+    await turn();
+    assert.equal(h.requests.length, 3, "the old lookup cannot start more account reads");
+    await pending;
+    assert.equal(h.state.me, null);
+    assert.equal(h.state.computer, null);
+  });
+}
+
+test("an older identity lookup cannot overwrite a newer lookup of the same current person", async () => {
+  const h = setup();
+  await seed(h);
+  const old = h.start(), recent = h.start();
+  respond(h.requests[3], { id: "owner-a" });
+  await turn();
+  complete(h, 4, listing(null));
+  respond(h.requests[6], { guest: false });
+  await recent;
+  respond(h.requests[2], { id: "owner-b" });
+  await turn();
+  assert.equal(h.requests.length, 7);
+  await old;
+  assert.equal(h.state.me.id, "owner-a");
+});
+
+test("the actual profile handler drops an old upload completion before reading identity", async () => {
+  const h = setup();
+  await seed(h);
+  const pending = h.profile();
+  assert.equal(h.requests[2].path, "/api/identities/me/picture");
+  h.signout("/auth/logout");
+  respond(h.requests[2], {});
+  await turn();
+  assert.equal(h.requests.length, 3);
+  await pending;
+  assert.equal(h.state.me, null);
+});
+
+test("the actual profile identity read cannot restore the person after sign-out", async () => {
+  const h = setup();
+  await seed(h);
+  const pending = h.profile();
+  respond(h.requests[2], {});
+  await turn();
+  assert.equal(h.requests[3].path, "/api/identities/me");
+  const rejected = assert.rejects(pending, { code: "identity_changed" });
+  h.signout("/auth/logout");
+  respond(h.requests[3], { id: "owner-a" });
+  await rejected;
+  assert.equal(h.state.me, null);
+});
+
+for (const [name, expression] of [
+  ["restart", "restartComputer(button)"],
+  ["notice seen", 'sawNotice("life", button)'],
+  ["notice later", 'updateLater("version", button)'],
+  ["agent connections", null],
+]) {
+  test(`actual ${name} handler cannot reinstall a computer after sign-out and same-identity return`, async () => {
+    const h = setup();
+    await seed(h);
+    const pending = expression ? h.call(expression) : h.permission();
+    h.signout("/auth/switch");
+    h.identity("owner-a");
+    respond(h.requests[2], computer());
+    await pending;
+    assert.equal(h.state.computer, null);
+    assert.equal(h.state.agents.size, 0);
+    assert.equal(h.requests.length, 3, "no fallback GET from the old handler");
+  });
+}
+
+test("computer creation is scoped to the identity and an old rejection cannot clear a newer creation", async () => {
+  const h = setup();
+  const old = h.call("computerOf()");
+  const rejected = assert.rejects(old, { code: "identity_changed" });
+  h.identity("owner-b");
+  const recent = h.call("computerOf()");
+  respond(h.requests[0], computer());
+  await rejected;
+  assert.equal(h.call("computerOf()"), recent);
+  assert.equal(h.requests.length, 2);
+  respond(h.requests[1], computer("computer-b", "agent-b", "owner-b"));
+  await recent;
+  assert.equal(h.state.computer.owner, "owner-b");
+});
+
+test("the actual ready/assignment poll cannot install a list response after identity changes", async () => {
+  const h = setup();
+  const pending = h.call('agentReady({chat: "chat-a", id: "agent-a", computer: "computer-a"})');
+  const rejected = assert.rejects(pending, { code: "identity_changed" });
+  h.identity("owner-b");
+  respond(h.requests[0], listing());
+  respond(h.requests[1], { subscriptions: [] });
+  await rejected;
+  assert.equal(h.state.computer, null);
+});
+
+test("a computer already returned by the API still cannot cross the next continuation's identity boundary", async () => {
+  const h = setup();
+  const pending = h.api("GET", "/api/computers/computer-a");
+  respond(h.requests[0], computer());
+  const value = await pending;
+  h.identity("owner-b");
+  h.identity("owner-a");
+  // Pass the exact returned object, retaining its API provenance.
+  h.state.returned = value;
+  assert.equal(h.call("computerIs(state.returned)"), false);
+  assert.equal(h.state.computer, null);
+});
+
+test("a background failure cannot re-enable a pending manual retry in a replacement notice", async () => {
+  const h = setup();
+  await seed(h);
+  const failed = h.load(); complete(h, 2, {}, 500); await failed;
+  const retry = h.retry().onclick();
+  const background = h.load(); complete(h, 6, {}, 500); await background;
+  assert.equal(h.retry().disabled, true);
+  await h.retry().onclick();
+  assert.equal(h.requests.length, 8);
+  complete(h, 4, listing());
+  await retry;
+  assert.equal(h.retry().disabled, false);
 });

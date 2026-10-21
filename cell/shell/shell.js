@@ -83,6 +83,10 @@ class ApiError extends Error {
 // this page's writes still going: a reload for a new release waits for them
 let writing = 0;
 async function api(method, path, body) {
+  api.identity ??= { generation: 0, request: 0, replies: new WeakMap() };
+  const generation = api.identity.generation;
+  const lookup = path === "/api/identities/me" && method === "GET" ? ++api.identity.request : 0;
+  const bound = lookup || /^\/api\/computers(?:\/|$)/.test(path);
   const headers = { "x-fragment-shell": "1" };
   if (body !== undefined) headers["content-type"] = "application/json";
   const writes = method !== "GET";
@@ -91,6 +95,15 @@ async function api(method, path, body) {
     const r = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: "same-origin" });
     heard(r);
     const out = await r.json().catch(() => ({}));
+    // An answer from the previous session cannot become the retained view.
+    // Keep its binding through the caller's next await/Promise continuation.
+    if (bound) {
+      if (generation !== api.identity.generation || (lookup && lookup !== api.identity.request)) throw new ApiError(409, "identity_changed", "The signed-in account changed.");
+      if (out && typeof out === "object") {
+        api.identity.replies.set(out, { generation, lookup });
+        for (const c of Array.isArray(out.computers) ? out.computers : []) api.identity.replies.set(c, { generation });
+      }
+    }
     if (!r.ok) throw new ApiError(r.status, out.error, out.message || r.statusText);
     return out;
   } finally {
@@ -1605,8 +1618,15 @@ let woke = 0;
 // docs/api.md).
 let making = null;
 function computerOf() {
-  making ??= api("POST", "/api/computers", {}).then((c) => { state.computer = c; return c; });
-  making.catch(() => { making = null; });
+  if (!making) {
+    const request = api("POST", "/api/computers", {}).then((c) => {
+      if (!computerCurrent(c)) throw new ApiError(409, "identity_changed", "The signed-in account changed.");
+      state.computer = c;
+      return c;
+    });
+    making = request;
+    request.catch(() => { if (making === request) making = null; });
+  }
   return making;
 }
 // A computer that won't start is not woken by the person's presence: its
@@ -1623,12 +1643,16 @@ function prewake() {
 }
 document.addEventListener("visibilitychange", prewake);
 // The computer as the platform last answered: shown at once.
+function computerCurrent(v) {
+  return !!state.me && v?.owner === state.me.id && api.identity.replies.get(v)?.generation === api.identity.generation;
+}
 function computerIs(v) {
-  if (!v?.computer) return;
+  if (!v?.computer || !computerCurrent(v)) return false;
   state.computer = v;
   renderComputer();
   renderChats();
   rosterChanged();
+  return true;
 }
 
 // ---- what the person should know of their computer (docs/computers.md,
@@ -1742,11 +1766,16 @@ function renderComputer() {
     const retry = el("button", null, "Try again");
     retry.type = "button";
     retry.dataset.action = "refresh-computer";
+    retry.disabled = !!reads.retry;
     const who = state.me?.id;
     retry.onclick = async () => {
-      if (retry.disabled || who !== state.me?.id) return;
+      if (reads.retry || who !== state.me?.id) return;
+      const pending = {};
+      reads.retry = pending;
       retry.disabled = true;
-      try { await load(); } catch {} finally { retry.disabled = false; }
+      try { await load(); } catch {} finally {
+        if (reads.retry === pending) { reads.retry = null; renderComputer(); }
+      }
     };
     actions.append(retry);
     row.append(copy, actions);
@@ -1759,6 +1788,7 @@ function renderComputer() {
 // good save. It names the start the person saw, so pressed twice (or in two
 // tabs) it restarts once. What went wrong is said beside the button.
 async function restartComputer(button) {
+  const generation = api.identity.generation;
   const c = state.computer;
   if (!c) return;
   const buttons = [...document.querySelectorAll("[data-action=restart]")];
@@ -1767,9 +1797,10 @@ async function restartComputer(button) {
   button.textContent = "Restarting…";
   try {
     restarted = c.generation || 0;
-    computerIs(await api("POST", `/api/computers/${seg(c.computer)}/restart`, { generation: c.generation || 0 }));
+    if (!computerIs(await api("POST", `/api/computers/${seg(c.computer)}/restart`, { generation: c.generation || 0 }))) return;
     if (state.page === "Settings") await openSettings(false);
   } catch (e) {
+    if (generation !== api.identity.generation) return;
     button.textContent = label;
     const said = button.parentElement.querySelector(".form-error") ?? el("p", "form-error");
     said.textContent = `It did not restart: ${e.message}`;
@@ -1780,23 +1811,27 @@ async function restartComputer(button) {
 }
 // The person read what a start went back to: told no more, anywhere.
 async function sawNotice(life, button) {
+  const generation = api.identity.generation;
   const c = state.computer;
   if (!c) return;
   button.disabled = true;
   try {
     computerIs(await api("POST", `/api/computers/${seg(c.computer)}/notices/seen`, { life }));
   } catch {
+    if (generation !== api.identity.generation) return;
     computerIs(await api("GET", `/api/computers/${seg(c.computer)}`).catch(() => null));
   }
 }
 // Later: this update is told no more, anywhere, until another is ready.
 async function updateLater(version, button) {
+  const generation = api.identity.generation;
   const c = state.computer;
   if (!c) return;
   button.disabled = true;
   try {
     computerIs(await api("POST", `/api/computers/${seg(c.computer)}/notices/later`, { version }));
   } catch {
+    if (generation !== api.identity.generation) return;
     computerIs(await api("GET", `/api/computers/${seg(c.computer)}`).catch(() => null));
   }
 }
@@ -1955,6 +1990,7 @@ async function openSettings(push = true) {
   file.hidden = true;
   picture.append(shown, el("span", null, state.me.picture ? "Change your picture" : "Add a picture"), file);
   file.onchange = async () => {
+    const generation = api.identity.generation;
     const f = file.files?.[0];
     if (!f) return;
     writing++;
@@ -1965,8 +2001,9 @@ async function openSettings(push = true) {
     } finally {
       writing--;
     }
+    if (generation !== api.identity.generation) return;
     if (r.ok) {
-      identityIs(await api("GET", "/api/identities/me"));
+      if (!identityIs(await api("GET", "/api/identities/me"))) return;
       openSettings(false);
     } else picture.querySelector("span").textContent = (await r.json().catch(() => ({}))).message || "That picture was not taken";
   };
@@ -2652,15 +2689,17 @@ function connectionsSection(linked, uses) {
         chip.setAttribute("aria-pressed", String(allowed));
         chip.title = allowed ? `${titleOf(a.fragment)} may use it: press to take it away` : `${titleOf(a.fragment)} may not use it: press to let it`;
         chip.onclick = async () => {
+          const generation = api.identity.generation;
           chip.disabled = true;
           const all = offered.map((x) => x.provider);
           const now = a.connections ?? all;
           const next = allowed ? now.filter((x) => x !== p.provider) : [...new Set([...now, p.provider])];
           const list = all.every((x) => next.includes(x)) ? null : next;
           try {
-            computerIs(await api("PUT", `/api/computers/${seg(state.computer.computer)}/agents/${seg(a.fragment)}/connections`, { connections: list }));
+            if (!computerIs(await api("PUT", `/api/computers/${seg(state.computer.computer)}/agents/${seg(a.fragment)}/connections`, { connections: list }))) return;
             state.agents = new Map((state.computer?.agents ?? []).map((x) => [x.identity, x]));
           } catch (e) {
+            if (generation !== api.identity.generation) return;
             notice("That was not changed", e.message);
           }
           await openSettings(false);
@@ -3031,6 +3070,7 @@ async function defaultAgent() {
   let agent = state.fragments.find((f) => f.kind === "agent" && own(f) && labelOf(f.name) === label);
   if (!agent) agent = await api("POST", "/api/fragments", { label, template: "agent", title });
   const assigned = await api("PUT", `/api/computers/${seg(computer.computer)}/agents/${seg(agent.name)}`, {});
+  if (!computerCurrent(assigned)) throw new ApiError(409, "identity_changed", "The signed-in account changed.");
   const id = assigned.agents.find((a) => a.fragment === agent.name)?.identity;
   if (!id) throw new Error("its computer did not take it");
   // its job and tier, written once: an agent already set up keeps its own
@@ -3060,6 +3100,7 @@ async function agentReady({ chat, id, computer }) {
     api("GET", "/api/computers").then((v) => v.computers?.find((x) => x.computer === computer)),
     api("GET", `/api/f/${chat}/subscriptions`),
   ]);
+  if (c && !computerCurrent(c)) throw new ApiError(409, "identity_changed", "The signed-in account changed.");
   computerIs(c);
   // a wake refused (its owner's credit) is said, not waited out
   if (c?.why && c.phase !== "awake") throw Object.assign(new Error(c.why), { refused: true });
@@ -3150,18 +3191,27 @@ function seatFirst(seat) {
 // (`watchList`: `changed`), only the apps whose rows it touched (new, or
 // not as they were) have their card read again. An older read's answer
 // that comes after a newer one's is not shown.
-const reads = { asked: 0, shown: 0, computerFailed: false };
+const reads = { asked: 0, shown: 0, computerFailed: false, retry: null };
 // A retained view belongs only to the current person, never the next sign-in.
 function identityIs(me) {
-  if (state.me?.id !== me?.id) {
+  api.identity ??= { generation: 0, request: 0, replies: new WeakMap() };
+  const reply = me && api.identity.replies.get(me);
+  if (reply && (reply.generation !== api.identity.generation || reply.lookup !== api.identity.request)) return false;
+  if (!me || state.me?.id !== me.id) {
+    api.identity.generation++;
+    making = null;
+    woke = 0;
+    restarted = 0;
     reads.shown = ++reads.asked;
     reads.computerFailed = false;
+    reads.retry = null;
     state.computer = null;
     state.support = null;
     state.agents = new Map();
     renderComputer();
   }
   state.me = me;
+  return true;
 }
 async function load(changed = false) {
   const who = state.me?.id;
@@ -3172,11 +3222,20 @@ async function load(changed = false) {
   reads.shown = mine;
   const before = new Map(state.fragments.map((f) => [f.name, JSON.stringify(f)]));
   state.fragments = list.fragments ?? [];
+  if (state.computer && !computerCurrent(state.computer)) {
+    state.computer = null;
+    state.agents = new Map();
+    state.support = null;
+  }
   reads.computerFailed = computers === null;
   if (computers) {
-    state.computer = computers.computers?.[0] ?? null;
-    state.support = computers.support ?? null;
-    state.agents = new Map((state.computer?.agents ?? []).map((a) => [a.identity, a]));
+    const computer = computers.computers?.[0] ?? null;
+    if (computer && !computerCurrent(computer)) reads.computerFailed = true;
+    else {
+      state.computer = computer;
+      state.support = computers.support ?? null;
+      state.agents = new Map((state.computer?.agents ?? []).map((a) => [a.identity, a]));
+    }
   }
   renderChats();
   renderApps();
@@ -3468,11 +3527,14 @@ async function start(open) {
   try {
     me = await api("GET", "/api/identities/me");
   } catch (e) {
+    if (e.code === "identity_changed") return;
     if (e.status === 401) { identityIs(null); return signIn(); }
     throw e;
   }
-  identityIs(me);
+  if (!identityIs(me)) return;
+  const generation = api.identity.generation;
   const [, mine] = await Promise.all([load(), api("GET", "/api/seat").catch(() => null)]);
+  if (generation !== api.identity.generation) return;
   setGuest(!!mine?.guest);
   watchList();
   if (!open && location.pathname === WELCOME) return welcome();
