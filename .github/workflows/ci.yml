@@ -227,11 +227,14 @@ jobs:
   # deploys from a GitHub environment of its name, `preview` or
   # `production`, which the repo's settings let
   # only its branch use, and which holds the variable DEPLOY_HOST (its
-  # platform's host) and the secrets DEPLOY_CONFIG (the whole deploy
-  # config, JSONC: names and paths, a secret only so the public repo's
-  # logs never show it; in base64, below), CLOUDFLARE_API_TOKEN
-  # (wrangler's, and the DNS token), the preview's PREVIEW_TEST_SECRET,
-  # and, optional, CLOUDFLARE_ACCOUNT_ID (below). Every computer image is
+  # platform's host) and the secrets DEPLOY_REPO_TOKEN (below),
+  # CLOUDFLARE_API_TOKEN (wrangler's, and the DNS token), the preview's
+  # PREVIEW_TEST_SECRET, and, optional, CLOUDFLARE_ACCOUNT_ID (below).
+  # Its config is its environment's file in the private repo
+  # finitecomputer/fragment-deploy, `preview.jsonc` or `production.jsonc`
+  # at the root of its main as it stands when the job runs: names and
+  # paths, no secret's value, kept out of this public repo and its logs,
+  # and readable by the team, as a secret is not. Every computer image is
   # pinned by digest (`--pinned-only`): a runner builds none
   # (xtask/src/deploy.rs, `pinned_only`, says why).
   deploy:
@@ -253,11 +256,36 @@ jobs:
     env:
       # xtask/src/build.rs, WORKER_BUILD_VERSION
       WORKER_BUILD_VERSION: 0.8.5
+      # the environment's config, in fragment-deploy's checkout (below)
+      CONFIG_FILE: ${{ github.ref_name == 'production' && 'production' || 'preview' }}.jsonc
     steps:
       # the deploy reads its commit, and needs no git credentials
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      # the config, from fragment-deploy's main as it stands now (a change
+      # there deploys at the environment's next deploy), read with
+      # DEPLOY_REPO_TOKEN, a fine-grained token with Contents · Read on that
+      # repo alone, which its checkout does not keep. It is checked out
+      # after this repo, whose checkout cleans the tree, into
+      # deploy-config/, which .gitignore names: the tree stays clean, so the
+      # deploy's id is its commit (xtask/src/deploy.rs, `git_head`). The job
+      # prints the config's commit, so a deploy's config is traceable, and
+      # never its contents.
+      - env:
+          DEPLOY_REPO_TOKEN: ${{ secrets.DEPLOY_REPO_TOKEN }}
+        run: test -n "$DEPLOY_REPO_TOKEN" || { echo "::error::the environment of $GITHUB_REF_NAME's deploy has no DEPLOY_REPO_TOKEN (a fine-grained token with Contents · Read on finitecomputer/fragment-deploy), so it has no config"; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          repository: finitecomputer/fragment-deploy
+          ref: main
+          token: ${{ secrets.DEPLOY_REPO_TOKEN }}
+          path: deploy-config
+          persist-credentials: false
+      - run: |
+          at=$(git -C deploy-config rev-parse --short HEAD)
+          test -s "deploy-config/$CONFIG_FILE" || { echo "::error::finitecomputer/fragment-deploy has no $CONFIG_FILE at its root on main ($at)"; exit 1; }
+          echo "$GITHUB_REF_NAME deploys with finitecomputer/fragment-deploy's $CONFIG_FILE at $at"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -286,37 +314,28 @@ jobs:
           path: target/tools
           key: node-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs') }}
       - run: worker-build --version | grep -qF "$WORKER_BUILD_VERSION" || cargo install worker-build --version "$WORKER_BUILD_VERSION" --locked
-      # the config, and the two files it reads by path, at the paths a CI
-      # config names (deploy/example.jsonc): the token, its DNS token too,
-      # and the preview's test secret, each 0600. printf is the shell's
-      # own, so no value is ever a process's argument, and nothing here
-      # echoes one. The config is set as one line of base64 (`base64 -w0 <
-      # <file> | gh secret set DEPLOY_CONFIG --env <environment>`): the
-      # runner masks each line of a secret too, and a config's lines of `{`
-      # or `}` alone would mask every brace in the job's logs.
+      # the two files the config reads by path, at the paths a CI config
+      # names (deploy/example.jsonc): the token, its DNS token too, and the
+      # preview's test secret, each 0600. printf is the shell's own, so no
+      # value is ever a process's argument, and nothing here echoes one.
       # CLOUDFLARE_ACCOUNT_ID is named only to be masked: the runner masks
       # every secret a job names, wherever it appears in the job's logs
       # (wrangler's and xtask's registry paths and URLs); unset, it is empty
       # and masks nothing.
       - env:
-          DEPLOY_CONFIG: ${{ secrets.DEPLOY_CONFIG }}
           DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           PREVIEW_TEST_SECRET: ${{ secrets.PREVIEW_TEST_SECRET }}
           CLOUDFLARE_ACCOUNT_ID_MASKED: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           umask 077
-          for v in DEPLOY_CONFIG DEPLOY_HOST CLOUDFLARE_API_TOKEN; do
+          for v in DEPLOY_HOST CLOUDFLARE_API_TOKEN; do
             test -n "${!v}" || { echo "the environment of $GITHUB_REF_NAME's deploy has no $v"; exit 1; }
           done
-          if ! printf '%s' "$DEPLOY_CONFIG" | base64 -d > "$RUNNER_TEMP/deploy.jsonc" || ! test -s "$RUNNER_TEMP/deploy.jsonc"; then
-            echo "the environment of $GITHUB_REF_NAME's deploy has a DEPLOY_CONFIG that is no config in base64: set it with base64 -w0 < <file> | gh secret set DEPLOY_CONFIG --env <environment>"
-            exit 1
-          fi
           mkdir -p ~/.config/fragment/secrets
           printf '%s\n' "$CLOUDFLARE_API_TOKEN" > ~/.config/fragment/secrets/cloudflare-api-token
           if [ -n "$PREVIEW_TEST_SECRET" ]; then printf '%s\n' "$PREVIEW_TEST_SECRET" > ~/.config/fragment/secrets/preview-test-secret; fi
-      - run: cargo xtask deploy --config "$RUNNER_TEMP/deploy.jsonc" --pinned-only ${{ github.ref_name == 'master' && '--branch preview' || '' }}
+      - run: cargo xtask deploy --config "deploy-config/$CONFIG_FILE" --pinned-only ${{ github.ref_name == 'master' && '--branch preview' || '' }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       # the deployment answers with this commit: /healthz's x-fragment-deploy

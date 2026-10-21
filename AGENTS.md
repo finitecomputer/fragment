@@ -366,23 +366,31 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   from a GitHub environment, `preview` or `production`, that only its
   branch may use,
   holding the variable `DEPLOY_HOST` (its platform's host, whose
-  `/healthz` must then answer the commit) and the secrets `DEPLOY_CONFIG`
-  (the whole deploy config, names and paths: a secret so the public
-  repo's logs never show it, set in base64 from a file kept beside the
-  config a deploy by hand takes, as a secret is never read back: `base64
-  -w0 < <file> | gh secret set DEPLOY_CONFIG --env <environment>`),
+  `/healthz` must then answer the commit) and the secrets
+  `DEPLOY_REPO_TOKEN` (a fine-grained token with Contents · Read on
+  finitecomputer/fragment-deploy alone),
   `CLOUDFLARE_API_TOKEN` (wrangler's, and the DNS token), the preview's
   `PREVIEW_TEST_SECRET`, and, optional but recommended,
   `CLOUDFLARE_ACCOUNT_ID`, named only so the job's logs mask the account
-  wherever wrangler or xtask print it. The job writes the token and the
-  test secret where a CI config names them,
-  `~/.config/fragment/secrets/cloudflare-api-token` and
+  wherever wrangler or xtask print it. The configs live in the private
+  repo finitecomputer/fragment-deploy, `preview.jsonc` and
+  `production.jsonc` at the root of its `main`: names and paths, no
+  secret's value, kept out of this public repo's logs and readable by
+  the team. The job checks out its environment's at `main` as it stands
+  then, prints that commit (never the contents), and deploys from it,
+  so a change there deploys at the environment's next deploy: the
+  preview's at master's next green push or a re-run of the `deploy` job
+  of master's latest ci run, production's only at a deploy of Paul's
+  (his next move of `production`, or his re-run of its `deploy` job).
+  The job writes the token and the test secret where a CI config names
+  them, `~/.config/fragment/secrets/cloudflare-api-token` and
   `…/preview-test-secret` (deploy/example.jsonc). Every image a CI
   config names is pinned by digest: a canary is built and pushed by the
   Image workflow (above), production's stable copied by it from the
-  preview's registry, and the digest its summary names then pinned in
-  the environment's `DEPLOY_CONFIG` (docs/computers.md, "One round").
-  Other branches' copies deploy by hand.
+  preview's registry, and the digest its summary names then pinned by a
+  commit to the environment's file in fragment-deploy
+  (docs/computers.md, "One round"). Other branches' copies deploy by
+  hand.
   fragment.club (the celld fleet on Fly) deploys only from the `celld`
   branch (tag `celld-final`) until cutover: its fleet file, node image
   and docs/operate.md's commands are that branch's. Deploys to the
@@ -397,6 +405,12 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   Only the DNS token and a preview's test secret are files read by path.
   Never print them, pass them on a command line (no `--value`), or commit
   them; deleting one is Paul's.
+- The configs CI deploys from live in the private repo
+  finitecomputer/fragment-deploy (`preview.jsonc`, `production.jsonc`):
+  names and paths, never a secret's value (a secret is named there by
+  its store name). A change to one is a commit there, which its
+  environment's next deploy takes (the CI bullets above); none is kept
+  in a GitHub secret.
 - `cargo xtask dev` runs `wrangler dev` on `cell/`, which rebuilds when it
   changes; the e2e runs a staged copy (`target/e2e/<run>/cell`) with its own
   variables, state and dev registry, so the two can run at once.

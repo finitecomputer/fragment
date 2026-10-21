@@ -336,15 +336,16 @@ instead: `"hermes-canary": { "dockerfile": "images/hermes/Dockerfile",
   image tells it an update is ready, as any deploy that changes an image
   tells (above).
 - **CI's deploys build no image** (`--pinned-only`; ci.yml's `deploy`):
-  every image of the config it deploys from (its environment's secret
-  `DEPLOY_CONFIG`, set from a file, as a secret is never read back) is
-  kept at a digest, the canary's too, as a runner, with no layer cache,
-  would make a new digest at every deploy (below). So the canary the
-  Image workflow pushed is pinned there, at the digest its summary
-  names, and the next deploy takes it; until then, deploys keep the
-  canary where the secret has it. A run makes a new digest each time,
-  as its runner keeps no layer cache either: it is run for a change to
-  the image, once a round.
+  every image of the config it deploys from (its environment's file in
+  the private repo finitecomputer/fragment-deploy, `preview.jsonc` or
+  `production.jsonc`, read from its `main` at each deploy) is kept at a
+  digest, the canary's too, as a runner, with no layer cache, would make
+  a new digest at every deploy (below). So the canary the Image workflow
+  pushed is pinned there by a commit, at the digest its summary names,
+  and the next deploy takes it; until then, deploys keep the canary
+  where that file has it. A run makes a new digest each time, as its
+  runner keeps no layer cache either: it is run for a change to the
+  image, once a round.
 - **What changes a version** (Paul, 2026-10-14: "changes to the cells, or
   frontend, that don't change the hermes image shouldn't require a hermes
   image rollout"). The image's inputs are what it runs, and no more:
@@ -431,11 +432,11 @@ instead: `"hermes-canary": { "dockerfile": "images/hermes/Dockerfile",
   Image workflow run from `production` with `environment` production and
   `from` that reference (`cargo xtask image copy`: skopeo, with
   `--preserve-digests`, then the copy's manifest held to the source's
-  digest), and that digest then `hermes`'s line in production's
-  `DEPLOY_CONFIG` (One round, step 8). A run without `from` builds
-  production's tree instead, warning that its digest is not the
-  canary's: with no layer cache, a build is a new image of the same
-  inputs, which no round proved.
+  digest), and that digest then `hermes`'s line in production's config,
+  fragment-deploy's `production.jsonc` (One round, step 8). A run
+  without `from` builds production's tree instead, warning that its
+  digest is not the canary's: with no layer cache, a build is a new
+  image of the same inputs, which no round proved.
 
 ### One round
 
@@ -443,9 +444,11 @@ On the preview (`preview.finite.build`, master's, which CI deploys at
 every green push), with the operators' key (`--key-file`, or
 `FRAGMENT_OPERATOR_KEY_FILE`) and `FRAGMENT_HOST` naming it. Once:
 stable's line is the digest its computers run (`references.running` of
-one awake on it), the canary's a digest too, both in the file the
-preview's `DEPLOY_CONFIG` is set from (a secret is never read back), and
-the canary group is pinned to `hermes-canary`.
+one awake on it), the canary's a digest too, both in the preview's
+config (`preview.jsonc` in the private repo
+finitecomputer/fragment-deploy, which CI's deploy reads from its
+`main`: a commit there, never a secret, pins a digest), and the canary
+group is pinned to `hermes-canary`.
 
 1. **The change lands** on master, and the Image workflow is run from
    master (Actions, image, Run workflow: `environment` preview; `tag`
@@ -454,13 +457,13 @@ the canary group is pinned to `hermes-canary`.
    `fragment-preview-computer-hermes-canary`; its summary names the
    reference and the line
    `"hermes-canary": { "image": "registry.cloudflare.com/<account>/…@sha256:…" }`,
-   which replaces the canary's in that file (the config's `account_id`
-   for `<account>`, masked in the run), and the secret is set again from
-   it (`base64 -w0 < <file> | gh secret set DEPLOY_CONFIG --env
-   preview`). The next deploy takes it: master's next green push, or a
-   re-run of the `deploy` job of master's latest ci run. Its version:
-   `fragment operator person <npub> --json | jq -r .computer.latest` for
-   one of the group.
+   which replaces the canary's in `preview.jsonc` (the config's
+   `account_id` for `<account>`, masked in the run), committed to
+   fragment-deploy's `main`. The next deploy takes it: master's next
+   green push, or a re-run of the `deploy` job of master's latest ci run
+   (its log names the fragment-deploy commit it deployed from). Its
+   version: `fragment operator person <npub> --json | jq -r
+   .computer.latest` for one of the group.
 2. **The group takes it**: awake, each is told an update is ready and
    presses Restart (the path under test); asleep, its next wake takes it.
    Each checks, on their own computer: an old chat goes on where it was;
@@ -491,13 +494,12 @@ the canary group is pinned to `hermes-canary`.
 6. **Promote**: the reference a watched canary computer runs
    (`fragment operator person <npub> --json | jq -r .references.running`,
    its first 12 hex digits the version step 1 named) becomes `hermes`'s
-   `image` in the file the preview's `DEPLOY_CONFIG` is set from, the
-   old line kept commented, and the secret is set again; the next deploy
-   takes it, as in step 1. One computer on stable awake is told; one
-   asleep wakes onto it.
+   `image` in `preview.jsonc`, the old line kept commented, by a commit
+   to fragment-deploy's `main`; the next deploy takes it, as in step 1.
+   One computer on stable awake is told; one asleep wakes onto it.
 7. **Or roll back**: `fragment operator pin <npub> hermes` for each of the
    group (a Hermes release is forward only, above); after a promotion,
-   the commented line back, the secret set again, and a deploy.
+   the commented line back by a commit, and a deploy.
 8. **Production takes the proven image**, copied, never rebuilt: the
    Image workflow run from `production` (Actions, image, Run workflow:
    branch `production`, `environment` production, `from` the reference
@@ -510,10 +512,10 @@ the canary group is pinned to `hermes-canary`.
    digest; its summary names
    `registry.cloudflare.com/<account>/fragment-computer-hermes@sha256:…`,
    the same digest, and the line
-   `"hermes": { "image": "…" }`, which becomes stable's in the file
-   production's `DEPLOY_CONFIG` is set from (the old line kept
-   commented), and the secret is set again (`--env production`). Paul's
-   next push to `production` deploys it.
+   `"hermes": { "image": "…" }`, which becomes stable's in
+   fragment-deploy's `production.jsonc` (the old line kept commented),
+   by a commit to its `main`. Production's next deploy, Paul's next push
+   to `production`, takes it.
 
 ## The guest's contract
 
