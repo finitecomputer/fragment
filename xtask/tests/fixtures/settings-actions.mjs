@@ -21,7 +21,7 @@ const apiError = shell.match(/^class ApiError[^]*?^\}/m)?.[0];
 const skillsOf = shell.match(/^const skillsFragmentOf = .*;$/m)?.[0];
 const walk = (node) => [node, ...node.children.filter((n) => typeof n === "object").flatMap(walk)];
 const turn = () => new Promise(setImmediate);
-function setup() {
+function setup(action = null) {
   const requests = [], mutations = [], identities = [];
   let holdIdentity = false;
   function el(tag, classes, text) {
@@ -44,7 +44,7 @@ function setup() {
   const nodes = Object.fromEntries(["layout", "frames", "settings-page", "notice", "first-run", "first-run-card"].map((id) => [id, el("div")]));
   const state = { me: { id: "owner-a", email: "a@example.test" }, page: null, guest: false, computer: null, agents: new Map(), frames: new Map([["chat", el("iframe")]]), fragments: [] };
   const seat = { guest: false, admin: true, pays: false, offer: {}, offered: [{ id: "offer-a", org: { id: "org-a", name: "Example" } }] };
-  const linked = { providers: [{ provider: "test/provider", kind: "own", state: "not_set" }] };
+  const linked = { providers: [{ provider: "test/provider", kind: "own", state: ["disconnect", "remove"].includes(action) ? "set" : "not_set", ...(action === "disconnect" ? { signIn: { manage: "https://provider.example.test/keys" } } : {}) }] };
   const context = createContext({
     state, el, URLSearchParams, location: { pathname: "/settings", search: "" }, confirm: () => true,
     $: (id) => nodes[id], heard() {},
@@ -74,6 +74,7 @@ function setup() {
       if (name === "profile") { const file = find((n) => n.tag === "input" && n.type === "file"); file.files = [{ type: "image/png" }]; return file.onchange(); }
       if (name === "key") { const form = find((n) => n.classes === "provider-key"); form.children[0].value = "fake-test-key"; return form.onsubmit({ preventDefault() {} }); }
       if (name === "skills") return find((n) => n.textContent === "Add the managed skills").onclick();
+      if (name === "disconnect" || name === "remove") return find((n) => n.tag === "button" && n.textContent === (name === "disconnect" ? "Disconnect" : "Remove")).onclick();
       if (name === "decline") return find((n) => n.textContent === "Decline").onclick();
       if (name === "add-admin") { const button = find((n) => n.textContent === "Add an admin"); button.parent.children[0].value = "fake@example.test"; return button.parent.onsubmit({ preventDefault() {} }); }
       throw new Error(`unknown action ${name}`);
@@ -81,10 +82,10 @@ function setup() {
   };
 }
 const answer = (request, body = {}) => request.resolve({ ok: true, json: async () => body });
-for (const action of ["profile", "key", "skills", "decline", "add-admin"]) {
-  for (const change of ["stay", "refresh", "chat", "chat-return", "identity", "identity-return", "sign-in-return"]) {
+for (const action of ["profile", "key", "skills", "decline", "add-admin", "disconnect", "remove"]) {
+  for (const change of ["stay", "refresh", "chat", "chat-return", "identity", "identity-return", "same-id", "signout", "sign-in-return"]) {
     test(`${action}: completion after ${change} only refreshes the initiating visit`, async () => {
-      const h = setup(); await h.open();
+      const h = setup(action); await h.open();
       const pending = h.action(action);
       assert.equal(h.mutations.length, 1);
       if (change === "refresh") await h.open();
@@ -94,6 +95,8 @@ for (const action of ["profile", "key", "skills", "decline", "add-admin"]) {
         h.state.me = { id: "owner-b" }; await h.open();
       }
       if (change === "identity-return") { h.state.me = { id: "owner-a" }; await h.open(); }
+      if (change === "signout") { h.state.me = null; h.signIn(); }
+      if (change === "same-id") { h.state.me = { ...h.state.me }; await h.open(); }
       if (change === "sign-in-return") { h.signIn(); h.nodes.layout.hidden = false; await h.open(); }
       const before = h.loads(), me = h.state.me;
       answer(h.mutations[0], { name: "fake-skills" }); await pending; await turn();
@@ -105,15 +108,42 @@ for (const action of ["profile", "key", "skills", "decline", "add-admin"]) {
     });
   }
 }
-for (const change of ["chat", "chat-return", "identity"]) {
+for (const change of ["chat", "chat-return", "identity", "signout"]) {
   test(`profile identity GET finishing after ${change} does not reopen Settings`, async () => {
     const h = setup(); await h.open(); h.holdIdentity();
     const pending = h.action("profile"); answer(h.mutations[0]); await turn();
     assert.equal(h.identities.length, 1);
     if (change === "identity") { h.state.me = { id: "owner-b" }; await h.open(); }
+    else if (change === "signout") { h.state.me = null; h.signIn(); }
     else { h.chat(); if (change === "chat-return") await h.open(); }
     const before = h.loads(), me = h.state.me;
     answer(h.identities[0], { id: "owner-a", picture: "/late-picture" }); await pending; await turn();
     assert.equal(h.loads(), before); assert.equal(h.state.me, me);
   });
 }
+
+for (const action of ["key", "skills", "decline", "add-admin", "disconnect", "remove"]) {
+  test(`${action}: a concurrent profile update preserves the same-account visit`, async () => {
+    const h = setup(action); await h.open();
+    const pending = h.action(action), before = h.state.me;
+    const profile = h.action("profile");
+    assert.equal(h.mutations.length, 2);
+    assert.equal(h.mutations[1].path, "/api/identities/me/picture");
+    answer(h.mutations[1]); await profile; await turn();
+    assert.notEqual(h.state.me, before, "the actual profile handler accepted a new identity object");
+    assert.equal(h.state.me.id, before.id);
+    const loads = h.loads();
+    answer(h.mutations[0], { name: "fake-skills" }); await pending; await turn();
+    assert.equal(h.loads(), loads + 1, "the concurrent completion still refreshes its same visit");
+    assert.equal(h.mutations.length, 2);
+  });
+}
+
+test("a profile identity response for another account cannot adopt the current visit", async () => {
+  const h = setup(); await h.open(); h.holdIdentity();
+  const pending = h.action("profile"); answer(h.mutations[0]); await turn();
+  const me = h.state.me, before = h.loads();
+  answer(h.identities[0], { id: "owner-b", picture: "/other-picture" });
+  await pending; await turn();
+  assert.equal(h.state.me, me); assert.equal(h.loads(), before);
+});

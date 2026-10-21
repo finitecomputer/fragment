@@ -1888,8 +1888,8 @@ function renderSettingsPage(page, sections) {
 // An action may refresh the visit that began it, including after another
 // action refreshed that same view, but never reopen it after navigation.
 function settingsActionCurrent() {
-  const owner = state.me, visit = openSettings.visit;
-  return () => state.me === owner && openSettings.visit === visit && state.page === "Settings" && !$("settings-page").hidden && !$("layout").hidden;
+  const visit = openSettings.visit;
+  return () => !!visit && state.me === visit.owner && openSettings.visit === visit && state.page === "Settings" && !$("settings-page").hidden && !$("layout").hidden;
 }
 async function openSettings(push = true) {
   if (push) at(SETTINGS);
@@ -1898,7 +1898,7 @@ async function openSettings(push = true) {
   $("frames").hidden = true;
   const page = $("settings-page");
   page.hidden = false;
-  openSettings.visit ??= {};
+  if (!openSettings.visit || openSettings.visit.owner !== state.me) openSettings.visit = { owner: state.me };
   page.replaceChildren(el("p", "muted", "Loading…"));
   renderHeading();
   renderChats();
@@ -1958,8 +1958,11 @@ async function openSettings(push = true) {
     if (!current()) return;
     if (r.ok) {
       const me = await api("GET", "/api/identities/me");
-      if (!current()) return;
+      if (!current() || me.id !== state.me.id) return;
       state.me = me;
+      // A profile update keeps this person's visit and its pending actions.
+      // Other identity replacements still retire it at the next refresh.
+      openSettings.visit.owner = me;
       openSettings(false);
     } else picture.querySelector("span").textContent = (await r.json().catch(() => ({}))).message || "That picture was not taken";
   };
@@ -2518,6 +2521,7 @@ const money = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style
 function connectionsSection(linked, uses) {
   const s = section("Connections");
   s.id = "settings-connections";
+  const current = settingsActionCurrent();
   const offered = linked?.providers ?? [];
   if (!offered.length) {
     s.append(el("p", "muted", linked ? "This platform offers none yet." : "Your connections could not be read."));
@@ -2588,7 +2592,7 @@ function connectionsSection(linked, uses) {
         off.onclick = async () => {
           off.disabled = true;
           await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}/key`).catch(() => {});
-          await openSettings(false);
+          if (current()) await openSettings(false);
         };
         const manage = el("a", "quiet", `Revoke the key at ${providerName(p.provider)}`);
         manage.href = p.signIn.manage;
@@ -2624,7 +2628,7 @@ function connectionsSection(linked, uses) {
         remove.onclick = async () => {
           remove.disabled = true;
           await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}/key`).catch(() => {});
-          await openSettings(false);
+          if (current()) await openSettings(false);
         };
         actions.append(remove);
       }
