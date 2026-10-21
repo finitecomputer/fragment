@@ -24,9 +24,10 @@
 //! within the minute; a ledger that does not answer refuses nothing:
 //! decision 62), makes its call, and keeps what it bought beside the step
 //! (`paid`, by the step's key `<f>@<life>/run/<run>/step/<i>`, which a
-//! retry and a replay's attempt find too) together with its charge: one
-//! row in the fragment's meter outbox, `step:<key>`, which the ledger
-//! charges once by that reference (meter.rs). A step tried again after its
+//! retry and a replay's attempt find too) together with its charge, in one
+//! transaction: one row in the fragment's meter outbox, `step:<key>`, which
+//! the ledger charges once by that reference (meter.rs). A receipt the
+//! release before kept is never charged again (`reused`). A step tried again after its
 //! call answered reuses what was kept and never calls the vendor again
 //! (bug 2): a commit that did not finish runs from the kept bytes. Nothing
 //! is held before a call, so a step that fails for good gives nothing back
@@ -97,17 +98,16 @@ struct Paying {
     capped: bool,
 }
 
-/// What a paid step bought, kept beside it.
+/// What a paid step bought, kept beside it, and whether it was charged
+/// as it was kept (every receipt of this release's).
 struct Kept {
     result: Value,
-    usage: Option<Usage>,
     settled: bool,
 }
 
 #[derive(Deserialize)]
 struct KeptRow {
     result: String,
-    usage: Option<String>,
     settled: i64,
 }
 
@@ -144,69 +144,71 @@ impl FragmentCell {
     }
 
     fn kept(&self, key: &str) -> Result<Option<Kept>, StepFail> {
-        let rows: Vec<KeptRow> = self.typed("SELECT result, usage, settled FROM paid WHERE key = ?", vec![key.into()]).map_err(retry)?;
+        let rows: Vec<KeptRow> = self.typed("SELECT result, settled FROM paid WHERE key = ?", vec![key.into()]).map_err(retry)?;
         let Some(row) = rows.into_iter().next() else { return Ok(None) };
         let corrupt = |e: serde_json::Error| retry(CellError::host(format!("a kept step result: {e}")));
         let result = serde_json::from_str(&row.result).map_err(corrupt)?;
-        let usage = row.usage.map(|u| serde_json::from_str(&u)).transpose().map_err(corrupt)?;
-        Ok(Some(Kept { result, usage, settled: row.settled != 0 }))
+        Ok(Some(Kept { result, settled: row.settled != 0 }))
     }
 
-    /// Keeps what a paid call bought, and its charge (`charge`), together: a
-    /// step tried again finds it and never calls again, and its call is
-    /// charged once.
+    /// Keeps what a paid call bought and its charge in one transaction: the
+    /// receipt (`paid`, by the step's key, `settled` 1: charged here), its
+    /// usage as a row in the fragment's meter outbox (`step:<key>`, which
+    /// the ledger charges once whatever attempt makes the call), and its
+    /// price on the run (`charges`, priced with the configured book, as
+    /// the ledger prices it). So a receipt of this release's is its
+    /// charge: a step tried again finds it, never calls again, and charges
+    /// nothing more. One that reported no usage is kept and charged
+    /// nothing, said aloud.
     async fn keep(&self, p: &Paying, result: &Value, usage: Option<Usage>, log_id: Option<&str>) -> Result<(), StepFail> {
-        let text = usage.as_ref().map(|u| serde_json::to_string(u).expect("a usage serializes"));
-        // one step, no await: kept and charged, or neither
-        self.exec(
-            "INSERT INTO paid (key, run, result, usage, settled, at) VALUES (?, ?, ?, ?, 0, ?) ON CONFLICT (key) DO NOTHING",
-            vec![
-                p.key.as_str().into(),
-                SqlStorageValue::Integer(p.run),
-                result.to_string().into(),
-                text.map_or(SqlStorageValue::Null, SqlStorageValue::from),
-                SqlStorageValue::Integer(crate::js::now_ms()),
-            ],
-        )
-        .map_err(retry)?;
-        self.charge(p, usage, log_id).await
-    }
-
-    /// Charges a kept call, once (`paid.settled` says it is charged): its
-    /// usage as a row in the fragment's meter outbox, `step:<key>`, which
-    /// the alarm sends to the owner's ledger (meter.rs), and its price on
-    /// the run (`charges`, priced with the configured book, as the ledger
-    /// prices it). One that reported no usage is charged nothing, said
-    /// aloud.
-    async fn charge(&self, p: &Paying, usage: Option<Usage>, log_id: Option<&str>) -> Result<(), StepFail> {
         let now = crate::js::now_ms();
-        let Some(usage) = usage else {
-            console_error!("{}", json!({ "event": "ledger.unknown-usage", "ref": p.reference, "logId": log_id, "why": "the step's call reported no usage: charged nothing" }));
-            return self.exec("UPDATE paid SET settled = 1 WHERE key = ?", vec![p.key.as_str().into()]).map_err(retry);
+        let text = usage.as_ref().map(|u| serde_json::to_string(u).expect("a usage serializes"));
+        let charge = match usage {
+            Some(usage) => {
+                let micros = ledger::configured_book(self.cfg).price(&usage).map_or(0, |priced| priced.charge);
+                Some((self.outbox_row(&p.reference, usage, now, p.agent.clone()).map_err(retry)?, micros))
+            }
+            None => {
+                console_error!("{}", json!({ "event": "ledger.unknown-usage", "ref": p.reference, "logId": log_id, "why": "the step's call reported no usage: charged nothing" }));
+                None
+            }
         };
-        let micros = ledger::configured_book(self.cfg).price(&usage).map_or(0, |priced| priced.charge);
-        // one step, no await: the row, its price on the run, and the mark
-        self.outbox(&p.reference, usage, now, p.agent.clone()).map_err(retry)?;
-        self.exec(
-            "INSERT INTO charges (ref, run, micros, held, at) VALUES (?, ?, ?, 0, ?) ON CONFLICT (ref) DO NOTHING",
-            vec![p.reference.as_str().into(), SqlStorageValue::Integer(p.run), SqlStorageValue::Integer(micros), SqlStorageValue::Integer(now)],
-        )
+        let (sql, key, reference, run, result) = (self.sql(), p.key.clone(), p.reference.clone(), p.run, result.to_string());
+        let charged = charge.is_some();
+        crate::js::transaction_sync(&self.raw, move || {
+            sql.exec(
+                "INSERT INTO paid (key, run, result, usage, settled, at) VALUES (?, ?, ?, ?, 1, ?) ON CONFLICT (key) DO NOTHING",
+                vec![key.as_str().into(), SqlStorageValue::Integer(run), result.into(), text.map_or(SqlStorageValue::Null, SqlStorageValue::from), SqlStorageValue::Integer(now)],
+            )?;
+            if let Some((row, micros)) = charge {
+                sql.exec(crate::meter::OUTBOX_INSERT, vec![reference.as_str().into(), row.into()])?;
+                sql.exec(
+                    "INSERT INTO charges (ref, run, micros, held, at) VALUES (?, ?, ?, 0, ?) ON CONFLICT (ref) DO NOTHING",
+                    vec![reference.as_str().into(), SqlStorageValue::Integer(run), SqlStorageValue::Integer(micros), SqlStorageValue::Integer(now)],
+                )?;
+            }
+            Ok(())
+        })
         .map_err(retry)?;
-        self.exec("UPDATE paid SET settled = 1 WHERE key = ?", vec![p.key.as_str().into()]).map_err(retry)?;
         // the outbox goes at the alarm's next pass
-        if let Err(e) = self.schedule().await {
-            console_error!("{}", json!({ "event": "meter.arm-failed", "message": e.message }));
+        if charged {
+            if let Err(e) = self.schedule().await {
+                console_error!("{}", json!({ "event": "meter.arm-failed", "message": e.message }));
+            }
         }
         Ok(())
     }
 
-    /// A kept call's charge, when it has not been made (a call kept by a
-    /// release before charges went in the outbox).
-    async fn charge_kept(&self, p: &Paying, kept: &Kept) -> Result<(), StepFail> {
-        if kept.settled {
-            return Ok(());
+    /// A receipt reused. One of this release's was charged as it was kept
+    /// (`keep`). One the release before kept (`settled` 0) is never charged
+    /// here: that release reserved its call under an attempt's reference,
+    /// which it settled (perhaps with its answer lost before it marked the
+    /// receipt), its sweep charges, or the next release forgives; a charge
+    /// under the step's key now could charge the call twice.
+    fn reused(&self, p: &Paying, kept: &Kept) {
+        if !kept.settled {
+            console_log!("{}", json!({ "event": "ledger.receipt-before", "ref": p.reference, "why": "kept by the release before, which reserved its call: not charged again" }));
         }
-        self.charge(p, kept.usage.clone(), None).await
     }
 
     /// Asks the gate whether the owner may pay for this step (ledger.rs
@@ -256,7 +258,7 @@ impl FragmentCell {
                 let call = media::image_call(image).map_err(|why| permanent(why.message()))?;
                 let p = self.paying(run, index)?;
                 if let Some(kept) = self.kept(&p.key)? {
-                    self.charge_kept(&p, &kept).await?;
+                    self.reused(&p, &kept);
                     let sha = kept.result["sha256"].as_str().ok_or_else(|| retry(CellError::host("a kept image names its bytes")))?.to_string();
                     let mut out = self.store_media(run, index, &image.path, self.kept_bytes(&sha).await?).await?;
                     out["mediaType"] = kept.result["mediaType"].clone();
@@ -301,7 +303,7 @@ impl FragmentCell {
     async fn step_decide(&self, run: &RunRow, index: u32, d: &Value) -> Result<Value, StepFail> {
         let p = self.paying(run, index)?;
         if let Some(kept) = self.kept(&p.key)? {
-            self.charge_kept(&p, &kept).await?;
+            self.reused(&p, &kept);
             return decision_result(kept.result);
         }
         let call = decide::bound(d, decide::Asker::Job).map_err(|e| permanent(e.message()))?;
@@ -363,7 +365,7 @@ impl FragmentCell {
     async fn step_text(&self, run: &RunRow, index: u32, t: &AiText, tried: Option<u32>) -> Result<Value, StepFail> {
         let p = self.paying(run, index)?;
         if let Some(kept) = self.kept(&p.key)? {
-            self.charge_kept(&p, &kept).await?;
+            self.reused(&p, &kept);
             return Ok(kept.result);
         }
         let tier = bounds::tier_named(t.model.as_deref()).map_err(|why| permanent(why.message()))?;

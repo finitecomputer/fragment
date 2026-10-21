@@ -53,6 +53,8 @@ pub const QUEUE_BINDING: &str = "METERS";
 /// Set on the internal routes below by platform code; the router never
 /// sets or passes it.
 pub const METER_HEADER: &str = "x-fragment-meter";
+/// A row into the outbox, once by its reference: `(ref, row)`.
+pub(crate) const OUTBOX_INSERT: &str = "INSERT OR IGNORE INTO meter_rows (ref, row, batch) VALUES (?, ?, NULL)";
 /// A batch not acknowledged this long after it was sent is sent again.
 const RESEND_AFTER_MS: i64 = 5 * 60_000;
 /// Storage is sampled at most this often (from the alarm's daily pass).
@@ -117,10 +119,16 @@ impl FragmentCell {
     /// Keeps a row in the outbox, once by its reference: the fragment's
     /// own usage, or an AI step's, made for `agent` when an agent's run.
     pub(crate) fn outbox(&self, reference: &str, usage: Usage, at_ms: i64, agent: Option<String>) -> CellResult<()> {
+        let text = self.outbox_row(reference, usage, at_ms, agent)?;
+        self.exec(OUTBOX_INSERT, vec![reference.into(), text.into()])
+    }
+
+    /// An outbox row's JSON, for `OUTBOX_INSERT` (`outbox`, or a statement
+    /// of a transaction of its caller's: an AI step's charge, ai.rs).
+    pub(crate) fn outbox_row(&self, reference: &str, usage: Usage, at_ms: i64, agent: Option<String>) -> CellResult<String> {
         let row = MeterRow { reference: reference.to_string(), usage, fragment: Some(self.name()?), agent, computer: None, at_ms };
         assert!(fragment_core::price::printable(reference, fragment_core::ledger::ID_MAX_BYTES), "a meter's reference is one the ledger takes: {reference}");
-        let text = serde_json::to_string(&row).expect("a meter row serializes");
-        self.exec("INSERT OR IGNORE INTO meter_rows (ref, row, batch) VALUES (?, ?, NULL)", vec![reference.into(), text.into()])
+        Ok(serde_json::to_string(&row).expect("a meter row serializes"))
     }
 
     /// Counts one request the router handed this created fragment: in this

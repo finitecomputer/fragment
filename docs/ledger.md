@@ -382,8 +382,11 @@ mark sends the same batch again, which answers as before.
   attempt), together with its charge: one row in the fragment's outbox,
   `step:<key>`, which the ledger charges once whatever attempt or replay
   carries it, and its price on the run (`charges`, priced with the
-  configured book). A retried step that finds what it kept reuses it and
-  never calls the model again (bug 2). A step that fails for good is
+  configured book), in one transaction. A retried step that finds what it
+  kept reuses it and never calls the model again (bug 2). A receipt the
+  release before kept is never charged again: that release reserved its
+  call under an attempt's reference, which it settled, its sweep charges,
+  or the next release forgives. A step that fails for good is
   charged nothing: nothing was held (bug 3 went with the holds).
   A text step is charged its tokens (streamed, from its last usage; its
   tools, tool calls and their results are tokens like any other, so the

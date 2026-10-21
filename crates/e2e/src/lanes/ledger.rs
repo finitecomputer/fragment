@@ -434,12 +434,23 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ai.fail_next(&[400]);
     let r = api.op(&owner, &name, "twice", "w-1", json!({ "a": "first", "b": "second" }))?;
     let held = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    // its paid step's receipt as the release before decision 62 left it:
+    // kept, not marked charged, charged under an attempt's reference
+    let before = lever(api, &name, "receipt-before", json!({ "run": held["id"] }))?;
     api.signed(&owner, "POST", &format!("/api/f/{name}/replay"), Some(&json!({ "run": held["id"] })))?;
     let done = settle(api, &owner, &name, held["id"].as_i64().unwrap_or(0), &["succeeded"], wait);
     s.ok(
         "a replayed run reuses the step it paid for: the model is asked for the other alone",
         held["status"] == "held" && done["status"] == "succeeded" && done["output"] == json!({ "one": "echo: first", "two": "echo: second" }) && s.ai.calls().len() - calls == 3,
         json!({ "held": held, "done": done, "calls": s.ai.calls().len() - calls }),
+    );
+    let second = s.eventually(wait, || run_steps(api, &owner_id, &name, &done).len() == 2);
+    let rows = run_steps(api, &owner_id, &name, &done);
+    let step = |i: u32| rows.iter().find(|e| e["ref"].as_str().is_some_and(|r| r.ends_with(&format!("/step/{i}")))).and_then(charged);
+    s.ok(
+        "a receipt the release before kept is never charged again: the replay charges the other step alone, and the run's cost counts the first once",
+        before.status == 200 && before.body["receipts"] == 1 && second && step(1).is_some_and(|two| done["costMicros"].as_i64() == held["costMicros"].as_i64().map(|one| one + two)),
+        json!({ "held": held["costMicros"], "done": done["costMicros"], "rows": rows }),
     );
 
     // ---- zero credit: agents and AI steps stop; fragments keep taking writes
