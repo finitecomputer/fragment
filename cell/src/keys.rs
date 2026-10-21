@@ -342,13 +342,13 @@ pub async fn pipes_delete(env: &Env, api: &str, provider: &str, user: &str) -> C
     }
 }
 
-/// A connection's grant revoked at its provider (RFC 7009) with `token`, an
-/// access token Pipes just minted for it: whether the provider says so (200).
-/// No redirects or retries, and nothing of its answer is kept: the request
-/// carries a credential.
-pub async fn connection_revoke(revoke: &str, token: &str) -> CellResult<bool> {
-    let form = fragment_core::connection_signin::revoke_form(token);
-    Ok(confidential_request(revoke, Method::Post, "application/x-www-form-urlencoded", None, &form).await?.0 == 200)
+/// A connection's grant revoked at its provider (RFC 7009) with `form`
+/// (`connection_signin::revoke_form`: an access token Pipes just minted
+/// for it, or one a fenced callback was given): whether the provider says
+/// so (200). No redirects or retries, and nothing of its answer is kept:
+/// the request carries a credential.
+pub async fn connection_revoke(revoke: &str, form: &str) -> CellResult<bool> {
+    Ok(confidential_request(revoke, Method::Post, "application/x-www-form-urlencoded", None, form).await?.0 == 200)
 }
 
 /// Whether the deployment binds the operator's key `name`

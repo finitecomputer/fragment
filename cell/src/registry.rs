@@ -107,6 +107,10 @@ pub struct RegistryCell {
     /// in its config, which each branch copy, the dev stack and the e2e's
     /// node would need rendered apart.
     cli_begins: RefCell<fragment_core::ratelimit::Rate>,
+    /// The connection callbacks under way past their pending row, which a
+    /// disconnect fences (connection_signin.rs). In memory: each runs
+    /// inside this cell and ends with it, so a restart has none.
+    finishing: RefCell<fragment_core::connection_signin::Finishing>,
     /// Its schema as it started (schema.rs): ready, or refused, which
     /// refuses every sign-in and key until newer code or a reset.
     schema: crate::schema::Schema,
@@ -133,6 +137,7 @@ impl DurableObject for RegistryCell {
             skewed: Cell::new(0),
             hold_ms: Cell::new(0),
             cli_begins,
+            finishing: RefCell::default(),
             schema,
         }
     }
@@ -833,6 +838,7 @@ impl RegistryCell {
         match path.as_str() {
             calls::BeginConnection::PATH => reply::<calls::BeginConnection>(self.begin_connection(body(&bytes)?).await),
             calls::FinishConnection::PATH => reply::<calls::FinishConnection>(self.finish_connection(body(&bytes)?).await),
+            calls::FenceConnection::PATH => reply::<calls::FenceConnection>(self.fence_connection(body(&bytes)?)),
             Resolve::PATH => reply::<Resolve>(self.key_holder(&body::<Resolve>(&bytes)?.key)),
             Lookup::PATH => reply::<Lookup>(self.lookup(body(&bytes)?)),
             InviteEmail::PATH => reply::<InviteEmail>(self.invite(body(&bytes)?).await),

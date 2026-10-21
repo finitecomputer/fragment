@@ -52,6 +52,26 @@ whole grant to the OAuth client, so when two people here connected the same
 Google account, one's Disconnect ends the other's connection at its next
 refresh too (Pipes can no longer refresh it).
 
+Before it revokes or deletes anything, a disconnect fences the account in the
+Registry (`POST /connection/fence`, one turn, no await between check and act),
+so no connect begun before it connects the account after it:
+
+- every attempt at that WorkOS user's account at that provider still pending is
+  ended, in each of their sessions (its callback then finds no transaction:
+  `not-under-way`);
+- each callback past its pending row and still exchanging its code is
+  cancelled: it re-checks just before importing, imports nothing, and the grant
+  its exchange made is revoked at `revoke` where the row names one;
+- a callback already importing refuses the fence (429, nothing ended), since
+  what it sent Pipes cannot be called back; the disconnect asked again, once
+  that answered, deletes it.
+
+Callbacks under way are kept in the Registry's memory, not a table: each one
+runs inside the Registry and ends with it, so a Registry that restarts has none
+under way. Another person's attempts, and the person's attempts at another
+provider, are untouched. A connect begun after the fence is a new one and may
+connect.
+
 ## Evidence and scope
 
 - [Google's web-server OAuth flow](https://developers.google.com/identity/protocols/oauth2/web-server)

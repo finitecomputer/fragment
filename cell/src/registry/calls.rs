@@ -657,6 +657,25 @@ impl Call for FinishConnection {
     type Answer = ConnectionFinished;
 }
 
+/// `POST /connection/fence`: a person's connection to `provider` about to
+/// be disconnected, fenced in one turn (`fragment_core::connection_signin::
+/// Finishing`): every attempt at it still pending ended, and each callback
+/// still exchanging cancelled, so none begun before the disconnect imports
+/// after it. 429 while a callback imports into it (nothing ended: the
+/// disconnect is asked again). Answers their WorkOS user, whose account the
+/// disconnect then deletes (none: no account, and nothing was under way).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct FenceConnection {
+    pub identity: String,
+    pub issuer: String,
+    pub provider: String,
+}
+
+impl Call for FenceConnection {
+    const PATH: &'static str = "/connection/fence";
+    type Answer = SubjectAnswer;
+}
+
 /// `POST /login/begin`: a sign-in starts.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

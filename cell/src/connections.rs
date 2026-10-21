@@ -19,6 +19,8 @@
 //!   row names a `revoke` endpoint (with a token Pipes mints for it), then its
 //!   account is deleted at Pipes, which ends every swap of it; `revoked` says
 //!   whether the provider confirmed. The person's computer is told at once.
+//!   Before anything goes, the registry fences the account: no connect begun
+//!   before the disconnect connects it after (a 429 while one is importing).
 //! - `PUT /api/connections/{provider}/key {key}` and `DELETE …/key`: the
 //!   person's own key for an `own` provider, kept sealed by their computer
 //!   (one computer per person for now: decision 13), which swaps it in.
@@ -162,7 +164,12 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                 Kind::Own => return Err(CellError::invalid(format!("{provider} is no connection to disconnect: your own key is removed with DELETE /api/connections/{provider}/key"))),
                 Kind::Operator => return Err(CellError::invalid(format!("{provider} is no connection to disconnect: it is the platform's key, not yours"))),
             }
-            let user = workos_user(env, cfg, who).await?;
+            // first, no connect begun before this one connects it after:
+            // the registry ends those pending and cancels those exchanging
+            // (429 while one imports), and names the person's WorkOS user
+            let issuer = crate::keys::workos(env, cfg).await?.issuer();
+            let fence = crate::registry::calls::FenceConnection { identity: who.into(), issuer, provider: provider.to_string() };
+            let user = crate::ask_registry(env, &fence).await?.subject;
             let revoked = match &user {
                 Some(u) => disconnect(env, cfg, provider, p.connection_oauth.as_ref(), u).await?,
                 None => false,
@@ -239,7 +246,7 @@ async fn revoke_grant(env: &Env, cfg: &Config, api: &str, provider: &str, user: 
     let Some(token) = (status == 200 && answer["active"] == true).then(|| answer["access_token"]["access_token"].as_str()).flatten().filter(|t| !t.is_empty()) else {
         return Ok(false);
     };
-    crate::keys::connection_revoke(revoke, token).await
+    crate::keys::connection_revoke(revoke, &fragment_core::connection_signin::revoke_form(token)).await
 }
 
 /// The person's computer told their connections' states after a

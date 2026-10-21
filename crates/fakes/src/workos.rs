@@ -97,7 +97,42 @@ pub struct WorkOs {
     pub url: String,
     pub client_id: String,
     state: Arc<Mutex<State>>,
+    gates: Arc<Gates>,
     _server: Server,
+}
+
+/// The stand-in provider's exchange and Pipes' import, each held by a test
+/// (`pause`) until it lets them go (`resume`): a request waits outside the
+/// state's lock (each has its thread), so the rest of the fake answers
+/// meanwhile.
+#[derive(Default)]
+struct Gates {
+    held: Mutex<HashMap<Gate, usize>>,
+    changed: std::sync::Condvar,
+}
+
+/// What a test may hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Gate {
+    /// `POST /test-oauth/token`, a callback's code exchange.
+    Exchange,
+    /// `POST|PUT …/connected_accounts/…`, a callback's import.
+    Import,
+}
+
+impl Gates {
+    /// Waits while `gate` is held, counted as waiting.
+    fn pass(&self, gate: Gate) {
+        let mut held = self.held.lock().expect("gates");
+        if !held.contains_key(&gate) {
+            return;
+        }
+        *held.get_mut(&gate).expect("held") += 1;
+        self.changed.notify_all();
+        while held.contains_key(&gate) {
+            held = self.changed.wait(held).expect("gates");
+        }
+    }
 }
 
 fn problem(status: u16, error: &str, description: &str) -> Response {
@@ -143,7 +178,24 @@ impl WorkOs {
         json!({ "authorize": format!("{}/test-oauth/authorize", self.url), "exchange": format!("{}/test-oauth/token", self.url), "client_id": "mock-connection-client", "scopes": ["mail.read", "files.read"], "revoke": format!("{}/test-oauth/revoke", self.url) })
     }
 
-    /// The Pipes tokens revoked at the OAuth provider, oldest first.
+    /// `gate`'s requests wait from now until `resume`.
+    pub fn pause(&self, gate: Gate) {
+        self.gates.held.lock().expect("gates").entry(gate).or_insert(0);
+    }
+
+    /// How many requests wait at `gate` (since it was held).
+    pub fn paused(&self, gate: Gate) -> usize {
+        self.gates.held.lock().expect("gates").get(&gate).copied().unwrap_or(0)
+    }
+
+    /// `gate`'s requests go on, and later ones pass.
+    pub fn resume(&self, gate: Gate) {
+        self.gates.held.lock().expect("gates").remove(&gate);
+        self.gates.changed.notify_all();
+    }
+
+    /// The tokens revoked at the OAuth provider, oldest first: Pipes' for
+    /// an account, or one the provider gave a callback.
     pub fn revoked(&self) -> Vec<String> { self.state.lock().expect("workos state").revoked.clone() }
     /// The next revocation fails (503), as a provider that does not answer.
     pub fn fail_next_revoke(&self) { self.state.lock().expect("workos state").fail_revoke = true; }
@@ -176,11 +228,18 @@ impl WorkOs {
     pub fn start_on(port: u16, client_id: &str, api_key: &str) -> std::io::Result<WorkOs> {
         let state: Arc<Mutex<State>> = Arc::default();
         let (st, client, key) = (Arc::clone(&state), client_id.to_string(), api_key.to_string());
+        let gates: Arc<Gates> = Arc::default();
+        let gated = Arc::clone(&gates);
         // where the fake answers, for the consent URLs it gives (known once it listens)
         let base: Arc<Mutex<String>> = Arc::default();
         let at = Arc::clone(&base);
         let handler: Handler = Arc::new(move |req: &Request| {
             let q = |k: &str| req.query.get(k).cloned().unwrap_or_default();
+            match (req.method.as_str(), req.path.as_str()) {
+                ("POST", "/test-oauth/token") => gated.pass(Gate::Exchange),
+                ("POST" | "PUT", p) if p.starts_with("/user_management/users/") && p.contains("/connected_accounts/") => gated.pass(Gate::Import),
+                _ => {}
+            }
             let mut s = st.lock().expect("workos state");
             match (req.method.as_str(), req.path.as_str()) {
                 ("GET", "/test-oauth/authorize") => {
@@ -209,12 +268,13 @@ impl WorkOs {
                     s.oauth_grants.insert(access.clone(), (refresh.clone(), account));
                     Response::json(200, &json!({ "access_token": access, "refresh_token": refresh, "token_type": "Bearer", "expires_in": 3600, "scope": scopes }))
                 }
-                // RFC 7009 as Google answers it: a token Pipes handed out, or 400
+                // RFC 7009 as Google answers it: a token Pipes or the provider handed out, or 400
                 ("POST", "/test-oauth/revoke") => {
                     if std::mem::take(&mut s.fail_revoke) { return problem(503, "unavailable", "test revocation failure"); }
                     let form: HashMap<String, String> = url::form_urlencoded::parse(&req.body).into_owned().collect();
                     let token = form.get("token").cloned().unwrap_or_default();
-                    if form.len() != 1 || !s.tokens.values().flatten().any(|t| *t == token) { return problem(400, "invalid_token", "not a token handed out here"); }
+                    let ours = s.tokens.values().flatten().any(|t| *t == token) || s.oauth_grants.contains_key(&token);
+                    if form.len() != 1 || !ours { return problem(400, "invalid_token", "not a token handed out here"); }
                     s.revoked.push(token);
                     Response::json(200, &json!({}))
                 }
@@ -394,7 +454,7 @@ impl WorkOs {
         });
         let server = Server::start(port, handler)?;
         *base.lock().expect("workos base") = server.url.clone();
-        Ok(WorkOs { url: server.url.clone(), client_id: client_id.to_string(), state, _server: server })
+        Ok(WorkOs { url: server.url.clone(), client_id: client_id.to_string(), state, gates, _server: server })
     }
 
     /// The user an email signs in as (made the first time).
