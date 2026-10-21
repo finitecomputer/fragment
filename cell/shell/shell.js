@@ -916,6 +916,8 @@ function openChat(name, push = true) {
   markSeen();
   prewake();
   navigated();
+  // home: a first run a failed read put off goes on from here too
+  if (firstRunPutOff) resumeFirstRun();
 }
 
 // ---- apps: every other fragment, each a window in the viewer ----
@@ -3008,9 +3010,10 @@ async function owesFirstAgent() {
 }
 // The first run's question, put off while their computer could not be read
 // (`owesFirstAgent`), is asked again by each read that answers (`load`:
-// Try again's, or the list's socket's) while the person is at home, and
-// after it too (they may have gone to Settings meanwhile: then the next
-// read at home asks it). Owed, it is made once (`creatingAgent`).
+// Try again's, or the list's socket's) and each arrival home (`openChat`,
+// the one way there), while the person is at home, and after it too (they
+// may have gone to Settings meanwhile: then their way back asks it). Owed,
+// it is made once (`creatingAgent`).
 let firstRunPutOff = false;
 const atHome = () => location.pathname === "/" && !state.page;
 async function resumeFirstRun() {

@@ -2440,10 +2440,12 @@ fn refresh_failed_start_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &st
 /// same, and Try again during it starts no other. With only the chat an
 /// earlier try made (no agent yet), that chat and the line and no first
 /// run, until a read answers: the list socket's own, with nothing pressed,
-/// or Try again's; then it goes on there. With their agent on their
-/// computer but not in its chat, a move to Settings while Try again asks
-/// that chat's members starts nothing there (the address and Settings
-/// stay); back home, the next read goes on with it.
+/// or Try again's; then it goes on there. Answered at Settings, nothing
+/// starts there, and coming home goes on with it, with no other read or
+/// change to set it off. With their agent on their computer but not in
+/// its chat, a move to Settings while Try again asks that chat's members
+/// starts nothing there (the address and Settings stay); coming home goes
+/// on with it, the same way.
 fn first_run_put_off_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let settle = std::time::Duration::from_secs(2);
@@ -2497,6 +2499,30 @@ fn first_run_put_off_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &std::
     s.ok("Try again reads it, finds no agent, and the first run goes on in that chat (its card)", on && carded, json!({ "made": b.eval(&page, MADE)?, "chat": framed }));
     b.close(page)?;
 
+    // every read failing, the person goes to Settings and Try again answers
+    // there: nothing starts there, and their way back home goes on with it,
+    // with no read of its own: said with no read before it but the first
+    // run's own, which starts in the same task as its "Making your agent…",
+    // before the page's observer hears it (a read that set it off would be
+    // a second)
+    let page = open_failing(b, api, "/", "")?;
+    let shown = b.until(&page, &chat_open, wait);
+    b.click(&page, "#settings")?;
+    let settings = b.until(&page, &format!("location.pathname === '/settings' && ({COMPUTER_SECTION}) !== null && {REFRESH_LINE}"), wait);
+    b.eval(&page, READ_AGAIN)?;
+    let read = b.until(&page, &format!("{NO_REFRESH_LINE} && location.pathname === '/settings'"), wait);
+    std::thread::sleep(settle);
+    let there = b.eval(&page, MADE)?;
+    b.click(&page, "#chats .chat-row")?;
+    let own_read = there["reads"].as_i64().unwrap_or(-2) + 1;
+    let on = b.until(&page, &format!("location.pathname === '/' && window.__makingSaid === true && window.__makingAt <= {own_read} && window.__makes > 0"), wait);
+    s.ok(
+        "with only that chat, Try again answering at Settings starts nothing there; back home, the first run goes on, with no other read",
+        shown && settings && read && there["makingSaid"] == false && there["makes"] == 0 && on,
+        json!({ "there": there, "home": b.eval(&page, MADE)? }),
+    );
+    b.close(page)?;
+
     // their agent on their computer (asleep), not yet in its chat: Try
     // again asks that chat's members, held, while the person goes to Settings
     let agent = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "label": "basil", "template": "agent", "title": "Basil" })), &[])?;
@@ -2519,11 +2545,14 @@ fn first_run_put_off_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &std::
         shown && asked && settings && stayed == true && made["makingSaid"] == false && made["makes"] == 0,
         json!({ "made": made, "stayed": stayed }),
     );
+    let own_read = made["reads"].as_i64().unwrap_or(-2) + 1;
     b.click(&page, "#chats .chat-row")?;
-    let home = b.until(&page, "location.pathname === '/' && document.getElementById('settings-page').hidden", wait);
-    let r = shell(api, &session, "PUT", &format!("/api/fragments/{chat}/archived"), Some(&json!({ "archived": false })), &[])?;
-    let on = b.until(&page, "window.__makingSaid === true && window.__makes > 0 && location.pathname === '/'", wait);
-    s.ok("back home, the next read (the list socket's) goes on with its first run", home && r.status == 200 && on, b.eval(&page, MADE)?);
+    let on = b.until(
+        &page,
+        &format!("location.pathname === '/' && document.getElementById('settings-page').hidden && window.__makingSaid === true && window.__makingAt <= {own_read} && window.__makes > 0"),
+        wait,
+    );
+    s.ok("back home, it goes on with its first run, with no other read", on, b.eval(&page, MADE)?);
     b.close(page)?;
     Ok(())
 }
