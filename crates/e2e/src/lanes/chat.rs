@@ -58,6 +58,23 @@ fn shows(chrome: &mut Browser, page: &Page, cond: &str) -> bool {
     chrome.until(page, cond, TURN)
 }
 
+/// The page's viewport made `width`×`height` (a phone's when `mobile`),
+/// and waited for until the chat fits it. The chat is as tall as the
+/// visual viewport, from that viewport's `resize` (chat.js `fitViewport`,
+/// `--viewport-height`), which comes a frame or more after the change;
+/// until it does, the composer is where the old size put it, and a press
+/// read from its box lands beside it (what was typed then went nowhere:
+/// run 39542336296's "on a desktop Enter sends", a local run's "on a phone
+/// too, Reply quotes").
+fn fit(chrome: &mut Browser, page: &Page, width: u32, height: u32, mobile: bool) -> Result<()> {
+    chrome.viewport(page, width, height, mobile)?;
+    let fitted = format!(
+        "innerWidth === {width} && Math.round(visualViewport.height) === {height} && document.documentElement.style.getPropertyValue('--viewport-height') === '{height}px'"
+    );
+    anyhow::ensure!(chrome.until(page, &fitted, TURN), "the chat fits {width}×{height}: {}", chrome.eval(page, "[innerWidth, visualViewport.height, document.documentElement.style.getPropertyValue('--viewport-height')]")?);
+    Ok(())
+}
+
 /// A JS string literal.
 fn js(s: &str) -> String {
     serde_json::to_string(s).expect("a string encodes")
@@ -196,7 +213,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let shots = s.dir("chat");
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &owner_session)?;
     let page = chrome.open(&api.site_url(&chat_name, "__signin?return=/"))?;
-    chrome.viewport(&page, 1280, 860, false)?;
+    fit(&mut chrome, &page, 1280, 860, false)?;
     let ready = chrome.until(&page, "document.getElementById('say')?.dataset.ready === '1'", TURN);
     let role = chrome.eval(&page, "import('./__fragment.js').then((f) => f.me()).then((m) => m.role)").unwrap_or_default();
     s.ok("the owner, signed in on the chat's page, may write", ready && role == "owner" && chrome.eval(&page, "!document.getElementById('text').disabled")? == true, &role);
@@ -314,7 +331,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let elsewhere = chrome.another_context()?;
     chrome.set_cookie_in(&elsewhere, &format!("{}/", api.base), "fragment_session", &member_session)?;
     let theirs = chrome.open_in(&elsewhere, &api.site_url(&chat_name, "__signin?return=/"))?;
-    chrome.viewport(&theirs, 1280, 860, false)?;
+    fit(&mut chrome, &theirs, 1280, 860, false)?;
     let seen = chrome.until(&theirs, "document.querySelectorAll('.prompt:not(.closed) .options button').length === 2", TURN);
     let pressable = chrome.eval(&theirs, "[...document.querySelectorAll('.prompt:not(.closed) .options button')].filter((b) => !b.disabled).length")?;
     let note = chrome.eval(&theirs, "document.querySelector('.prompt .prompt-note')?.textContent ?? ''")?;
@@ -463,7 +480,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.color_scheme(&page, "light")?;
     chrome.screenshot(&page, &shots.join("desktop-light-cards.png"))?;
     chrome.color_scheme(&page, "dark")?;
-    chrome.viewport(&page, 375, 812, true)?;
+    fit(&mut chrome, &page, 375, 812, true)?;
     chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); s.scrollTop = s.scrollHeight; return true; })()")?;
     std::thread::sleep(Duration::from_millis(300));
     let widths = chrome.eval(
@@ -628,7 +645,7 @@ struct Owned<'a> {
 /// sends, a desktop's Enter sends. Screenshots in the run's scratch
 /// (`chat/`).
 fn commands_queued_and_quotes(s: &mut Suite, api: &Api, chrome: &mut Browser, page: &Page, o: Owned, shots: &Path) -> Result<()> {
-    chrome.viewport(page, 1280, 860, false)?;
+    fit(chrome, page, 1280, 860, false)?;
     chrome.color_scheme(page, "light")?;
     let shows = |chrome: &mut Browser, cond: &str| chrome.until(page, cond, TURN);
     let replied = |text: &str| format!("[...document.querySelectorAll('.msg.agent:not(.streaming) .md')].some((m) => m.textContent.includes({}))", js(text));
@@ -736,7 +753,7 @@ fn commands_queued_and_quotes(s: &mut Suite, api: &Api, chrome: &mut Browser, pa
     chrome.press(page, "Enter", false)?;
     s.ok("/btw is answered as a message of the agent's own", shows(chrome, &replied("aside: /btw which file?")), "");
     // and on a phone, the page fitted to its visual viewport, its fields 16px
-    chrome.viewport(page, 375, 812, true)?;
+    fit(chrome, page, 375, 812, true)?;
     chrome.eval(page, &format!("(() => {{ document.querySelector('.msg.agent[data-seq=\"{reply_seq}\"] .actions .reply')?.click(); return true; }})()"))?;
     let phone_shown = shows(chrome, &quoting);
     typed(chrome, "and on a phone")?;
@@ -751,14 +768,13 @@ fn commands_queued_and_quotes(s: &mut Suite, api: &Api, chrome: &mut Browser, pa
         phone_shown && phone_sent && on_phone["body"]["reply_to"] == reply_seq && phone_handed,
         &on_phone,
     );
-    chrome.viewport(page, 1280, 860, false)?;
-    chrome.until(page, "innerWidth === 1280", TURN);
+    fit(chrome, page, 1280, 860, false)?;
 
     // a phone's return is a newline, and the send button sends (Paul,
     // 2026-10-14): a touch screen with no finer pointer, at a phone's width
     let composer = "(() => { const t = document.getElementById('text'); return { value: t.value, hint: t.enterKeyHint }; })()";
     let said = |text: &str| chat_records().into_iter().filter(|r| r["body"]["text"] == text).count();
-    chrome.viewport(page, 375, 812, true)?;
+    fit(chrome, page, 375, 812, true)?;
     chrome.touch(page, true)?;
     let labelled = shows(chrome, "document.getElementById('text').enterKeyHint === 'enter'");
     let before = chat_records().len();
@@ -780,7 +796,7 @@ fn commands_queued_and_quotes(s: &mut Suite, api: &Api, chrome: &mut Browser, pa
     let _ = shows(chrome, &replied("a line on a phone"));
     // a desktop's: Enter sends, Shift+Enter adds a line
     chrome.touch(page, false)?;
-    chrome.viewport(page, 1280, 860, false)?;
+    fit(chrome, page, 1280, 860, false)?;
     let labelled = shows(chrome, "innerWidth === 1280 && document.getElementById('text').enterKeyHint === 'send'");
     typed(chrome, "first of two")?;
     chrome.press(page, "Enter", true)?;

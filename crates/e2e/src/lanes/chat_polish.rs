@@ -34,12 +34,12 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     anyhow::ensure!(posted.status == 200, "posting media: {posted}");
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
     let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
-    chrome.viewport(&page, 1280, 860, false)?;
+    super::fit(chrome, &page, 1280, 860, false)?;
     s.ok("a video attachment is a labelled inline player with loaded metadata", super::shows(chrome, &page, "!!document.querySelector('.attachment-video video[controls][aria-label=\"clip.mp4\"]') && document.querySelector('video').readyState >= 1"), "");
     s.ok("a PDF attachment has an inline view and open/download/share actions", super::shows(chrome, &page, "!!document.querySelector('.attachment-pdf[title=\"preview.pdf\"]') && document.querySelectorAll('.attachment-download[download]').length === 2 && document.querySelectorAll('.attachment-share').length === 2"), "");
     let shots = s.dir("chat-polish");
     chrome.screenshot(&page, &shots.join("media-desktop.png"))?;
-    chrome.viewport(&page, 375, 812, true)?;
+    super::fit(chrome, &page, 375, 812, true)?;
     s.ok("video and PDF attachments fit a phone without sideways page scrolling", chrome.eval(&page, "document.documentElement.scrollWidth <= innerWidth && document.getElementById('scroll').scrollWidth === document.getElementById('scroll').clientWidth")? == true, "");
     chrome.screenshot(&page, &shots.join("media-phone.png"))?;
     // More than the initial 400 records, then a fresh page: the browser's
@@ -69,7 +69,7 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     let malformed = api.signed(owner, "GET", &format!("/api/f/{name}/channels/chat?before=no"), None)?;
     s.ok("ambiguous and malformed history cursors are refused", bad.status == 400 && malformed.status == 400, format!("{bad} | {malformed}"));
     let page = chrome.open(&api.site_url(&name, ""))?;
-    chrome.viewport(&page, 1280, 860, false)?;
+    super::fit(chrome, &page, 1280, 860, false)?;
     s.ok("the initial backlog is bounded to 400 and offers earlier messages", super::shows(chrome, &page, "document.querySelectorAll('.msg.user').length === 400 && !document.getElementById('earlier').hidden"), "");
     s.ok("a quote outside the initial history has an earlier-message placeholder", chrome.eval(&page, "document.querySelector('.msg[data-seq=\"416\"] .quote')?.disabled === true")? == true, "");
     // The reader's place is the anchor's offset from the top of the scroll
@@ -111,13 +111,13 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     s.ok("a code block's copy button copies only its literal source", super::shows(chrome, &page, "window.__codeCopied === document.querySelector('pre code').textContent && document.querySelector('.md-code-copy').textContent === 'Copied'"), "");
     let streamed = chrome.eval(&page, "import('./markdown.js').then(m => { const n = document.createElement('div'); n.append(m.renderMarkdown('```js\\n<script>')); const deep = document.createElement('div'); deep.append(m.renderMarkdown('> '.repeat(100) + 'safe')); return n.querySelector('pre code').textContent === '<script>' && !n.querySelector('script') && deep.textContent === '> '.repeat(68) + 'safe'; })")?;
     s.ok("incomplete streamed fences and deeply nested quotes remain safe", streamed == true, "");
-    chrome.viewport(&page, 375, 812, true)?;
+    super::fit(chrome, &page, 375, 812, true)?;
     chrome.eval(&page, "(() => { const t = document.querySelector('.md-table'); t.querySelector('th').textContent = 'wide '.repeat(80); t.querySelector('table').style.width = '900px'; return true; })()")?;
     s.ok("wide tables scroll within the reply on a phone", chrome.eval(&page, "(() => { const t = document.querySelector('.md-table'); t.scrollLeft = 100; return t.scrollLeft > 0 && t.scrollWidth > t.clientWidth && document.documentElement.scrollWidth <= innerWidth; })()")? == true, "");
     chrome.screenshot(&page, &shots.join("markdown-wide-table-phone.png"))?;
     chrome.eval(&page, "(() => { const t = document.querySelector('.md-table'); t.querySelector('th').textContent = 'Language'; t.querySelector('table').style.removeProperty('width'); t.scrollLeft = 0; document.getElementById('scroll').scrollTop = 0; return true; })()")?;
     chrome.screenshot(&page, &shots.join("markdown-phone.png"))?;
-    chrome.viewport(&page, 1280, 860, false)?;
+    super::fit(chrome, &page, 1280, 860, false)?;
     chrome.eval(&page, "(() => { document.getElementById('scroll').scrollTop = 0; return true; })()")?;
     chrome.screenshot(&page, &shots.join("markdown-desktop.png"))?;
     // Reopen to discard only the markdown fixture. A real network outage
@@ -331,7 +331,7 @@ pub(super) fn working_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut 
         anyhow::ensure!(r.status == 200, "posting working-card fixture {i}: {r}");
     }
     let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
-    chrome.viewport(&page, 1000, 1100, false)?;
+    super::fit(chrome, &page, 1000, 1100, false)?;
     anyhow::ensure!(super::shows(chrome, &page, "document.querySelectorAll('details.tools[open] .step').length === 8"), "eight-step working card rendered");
     s.ok("commentary renders bold, code, quotes, lists and safe links with the reply renderer", chrome.eval(&page, "(() => { const n = document.querySelector('.step-text'); return n.querySelector('strong').textContent === 'partially.' && n.querySelector('code').textContent === 'apps-finite' && !!n.querySelector('blockquote strong') && n.querySelectorAll('li').length === 2 && n.querySelector('a').getAttribute('href') === 'https://example.com/docs' && n.querySelector('a').rel === 'noopener noreferrer'; })()")? == true, "");
     s.ok("HTML in commentary is escaped, including after expanding it", chrome.eval(&page, "(() => { const n = document.querySelector('.step-text'); n.querySelector('.note-expand').click(); return !n.querySelector('img,script') && !window.__noteInjected && n.innerText.includes('<img src=x onerror=') && n.querySelector('.note-expand').getAttribute('aria-expanded') === 'true'; })()")? == true, "");
@@ -346,13 +346,13 @@ pub(super) fn working_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut 
     chrome.eval(&page, "(() => { document.querySelector('details.tools').scrollIntoView({block:'start'}); return true; })()")?;
     let shots = s.dir("working-card");
     chrome.screenshot(&page, &shots.join("desktop.png"))?;
-    chrome.viewport(&page, 375, 1000, true)?;
+    super::fit(chrome, &page, 375, 1000, true)?;
     s.ok("a narrow step wraps to two lines, shortening directories in the middle while keeping the filename", super::shows(chrome, &page, "(() => { const a = document.querySelectorAll('.step-args')[1]; const h = Number.parseFloat(getComputedStyle(a).lineHeight); return a.textContent.startsWith('~/') && a.textContent.includes('…/') && a.textContent.endsWith('/WorkingCard.tsx') && a.clientHeight > h && a.scrollHeight <= 2*h + 1 && a.title.endsWith('/layout/WorkingCard.tsx'); })()"), chrome.eval(&page, "document.querySelectorAll('.step-args')[1].textContent")?);
     s.ok("the older bridge's path also keeps its filename visible when shortened on a phone", super::shows(chrome, &page, "(() => { const a = document.querySelectorAll('.step-args')[2]; const r = document.createRange(); r.setStart(a.firstChild, a.textContent.length - 20); r.setEnd(a.firstChild, a.textContent.length); return a.textContent.startsWith('ls -R skills/') && a.textContent.includes('…/') && a.textContent.endsWith('/engineering-style.md') && a.title.startsWith('ls -R /data/hermes/managed-skills/') && a.scrollHeight <= 2*Number.parseFloat(getComputedStyle(a).lineHeight)+1 && r.getBoundingClientRect().bottom <= a.getBoundingClientRect().bottom + 1; })()"), "");
     s.ok("the working card fits the phone without horizontal page scrolling", chrome.eval(&page, "document.documentElement.scrollWidth <= innerWidth && document.getElementById('scroll').scrollWidth === document.getElementById('scroll').clientWidth")? == true, "");
     chrome.eval(&page, "(() => { document.querySelector('details.tools').scrollIntoView({block:'start'}); return true; })()")?;
     chrome.screenshot(&page, &shots.join("phone.png"))?;
-    chrome.viewport(&page, 1000, 1100, false)?;
+    super::fit(chrome, &page, 1000, 1100, false)?;
     s.ok("resizing back restores the full shortened path when two lines fit", super::shows(chrome, &page, "document.querySelectorAll('.step-args')[1].textContent === '~/apps-finite/src/components/chat/working-card/variants/desktop/theme/layout/WorkingCard.tsx'"), "");
     let ended = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": "fixture-end", "body": { "kind": "turn.end", "turn": "working-card", "outcome": "idle" } })))?;
     anyhow::ensure!(ended.status == 200, "ending working-card fixture: {ended}");
@@ -413,7 +413,7 @@ pub(super) fn record_shapes(s: &mut Suite, api: &Api, owner: &Keys, session: &st
     let rest = "(() => { const md = [...document.querySelectorAll('.msg.agent .md')]; const reply = md.find((m) => m.querySelector('table th')?.textContent === 'Your new address'); return !!reply && reply.textContent.includes('It is on file now.') && md.some((m) => m.textContent === 'The last word.') && [...document.querySelectorAll('.prompt.closed .outcome.answered')].filter((o) => o.textContent.startsWith('Yes')).length === 2 && [...document.querySelectorAll('.message-attachments .attachment-name')].map((a) => a.textContent).join() === 'IMG_1.jpeg,IMG_2.jpeg,IMG_3.png' && [...document.querySelectorAll('.bubble')].some((b) => b.textContent === 'My address has changed') && document.querySelector('.bubble.command .command-name')?.textContent === '/steer'; })()";
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
     let page = chrome.open_with_script(&api.site_url(&name, "__signin?return=/"), probe)?;
-    chrome.viewport(&page, 1280, 860, false)?;
+    super::fit(chrome, &page, 1280, 860, false)?;
     let drew = super::shows(chrome, &page, rest) && super::shows(chrome, &page, "!!document.querySelector('details.tools .step-text .note-preview')");
     let seen = chrome.eval(&page, "({ errors: window.__errors, unshown: document.querySelectorAll('.unshown').length, items: [...document.querySelectorAll('#messages > *')].map((n) => n.className) })")?;
     s.ok(
@@ -424,7 +424,7 @@ pub(super) fn record_shapes(s: &mut Suite, api: &Api, owner: &Keys, session: &st
     chrome.screenshot(&page, &s.dir("chat-polish").join("record-shapes.png"))?;
     chrome.close(page)?;
     let page = chrome.open_with_script(&api.site_url(&name, ""), &format!("delete Intl.Segmenter; {probe}"))?;
-    chrome.viewport(&page, 1280, 860, false)?;
+    super::fit(chrome, &page, 1280, 860, false)?;
     let quiet = "(() => { const n = document.querySelector('#messages > :nth-child(2)'); return !!n?.matches('.msg.notice.unshown') && n.textContent === 'This part of the chat could not be shown.' && !document.querySelector('details.tools'); })()";
     let drew = super::shows(chrome, &page, rest) && super::shows(chrome, &page, quiet);
     let seen = chrome.eval(&page, "({ errors: window.__errors, said: window.__said, items: [...document.querySelectorAll('#messages > *')].map((n) => n.className) })")?;
