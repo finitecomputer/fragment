@@ -29,6 +29,8 @@ This repo holds:
 Read [docs/MODEL.md](docs/MODEL.md) for the model,
 [docs/api.md](docs/api.md) for the wire contract, and
 [docs/cloudflare-v1.md](docs/cloudflare-v1.md) for where it is going.
+For operational triage, use the [incident evidence recipe](docs/incident-response.md)
+and its sanitized support handoff.
 This repo is [finitecomputer/fragment](https://github.com/finitecomputer/fragment);
 fragment.club runs its `celld` branch (tag `celld-final`) on celld until
 it moves to Cloudflare. MIT licensed; see [LICENSE](LICENSE).
