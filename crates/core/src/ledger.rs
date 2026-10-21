@@ -230,7 +230,8 @@ pub struct MeterRow {
     pub at_ms: i64,
 }
 
-/// A new price book from the deploy's configuration.
+/// A price book from the deploy's configuration, as a ledger keeps it once
+/// it takes it: under `book:<digest>` (`PriceBook::digest`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetPriceBook {
@@ -344,7 +345,9 @@ pub enum Refused {
     Ended,
     /// `HOLDS_MAX` reservations are held.
     TooManyHolds,
-    /// A price book no newer than the ledger's.
+    /// A price book no newer than the ledger's: refused no more, since a
+    /// ledger takes any book whose contents differ from its own (#451);
+    /// kept so an answer of the releases before reads.
     StaleBook { current: u32 },
     /// A seat change no newer (by `seq`) than the last one applied
     /// (`current`): it changes nothing, and is kept by nothing. The seat's
@@ -1076,20 +1079,26 @@ impl Ledger {
         Ok(())
     }
 
-    /// A newer price book. What was charged stays charged; held
-    /// reservations keep the amounts they were priced at.
-    pub fn set_book(&mut self, store: &mut impl Store, c: &SetPriceBook, now_ms: i64) -> Result<(), Refused> {
+    /// The deployment's configured book, which the Durable Object offers
+    /// before every route: taken whenever it differs from the one the
+    /// ledger charges with, whatever its version (#451). The same book
+    /// again changes nothing (a replay), and one taken before is taken
+    /// again (a configuration rolled back): the books are compared, never
+    /// ordered. Each is kept once, under `book:<digest>`, as it was first
+    /// taken. What was charged stays charged; held reservations keep the
+    /// amounts they were priced at.
+    pub fn set_book(&mut self, store: &mut impl Store, book: &PriceBook, now_ms: i64) -> Result<(), Refused> {
         self.roll(now_ms);
-        let command = Command::SetBook(c.clone());
-        if !Self::admit(store, &c.id, &command)? {
+        if self.book == *book {
             return Ok(());
         }
-        c.book.validate().map_err(|fault| invalid(Invalid::Book(fault)))?;
-        if c.book.version <= self.book.version {
-            return Err(Refused::StaleBook { current: self.book.version });
+        book.validate().map_err(|fault| invalid(Invalid::Book(fault)))?;
+        let id = format!("book:{}", book.digest());
+        self.book = book.clone();
+        if store.command(&id).is_none() {
+            store.put_command(&id, CommandRecord { command: Command::SetBook(SetPriceBook { id: id.clone(), book: book.clone() }), at_ms: now_ms });
         }
-        self.book = c.book.clone();
-        self.done(store, &c.id, command, now_ms);
+        self.assert_valid();
         Ok(())
     }
 

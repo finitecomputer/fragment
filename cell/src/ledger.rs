@@ -54,7 +54,7 @@ const PAID_CALLS_USED: &str = "test_paid_calls_used";
 /// The price book the deployment charges with: the core's defaults, and
 /// the operator keys' prices and the book's version from the deployment's
 /// configuration (decision 4: pricing lives there). Each ledger takes it
-/// at its next call when its version is newer (`take_book`).
+/// at its next call when it differs from its own (`take_book`).
 pub fn configured_book(cfg: &Config) -> PriceBook {
     let mut book = PriceBook::defaults();
     book.keys = cfg.providers.key_prices();
@@ -178,7 +178,9 @@ pub struct Status {}
 /// Fleets with levers only (`FRAGMENT_TEST_SECRET`; cell/src/levers.rs):
 /// move this ledger's clock (`clock {offsetMs}`), run its sweep now
 /// (`sweep`), list the references under a prefix (`entries {prefix}`),
-/// read what moved its balance (`totals`), or cap its paid calls from now
+/// read what moved its balance (`totals`), read the price book its head
+/// holds as of its last call (`book`, answering `{book}`), or cap its paid
+/// calls from now
 /// (`paid-calls {max?}`, answering `{max, used}`; with no `max` the cap
 /// stays as it is, 0 where there was none: each new reservation, a model
 /// call or an AI step, counts one, and one past `max` is refused as a
@@ -194,6 +196,7 @@ pub enum TestHook {
     Clock { offset_ms: i64 },
     Sweep,
     Entries { prefix: String },
+    Book,
     Totals,
     PaidCalls { max: Option<u64> },
     LegacySeat { seat: SeatState, seq: u64 },
@@ -487,18 +490,13 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
     Ok(ledger)
 }
 
-/// The configured book, taken when it is newer than the ledger's (under
-/// its version's id, once). A configuration that changed a book's prices
-/// without a new version is refused as another body, and the ledger keeps
-/// charging with the one it has, saying so.
+/// The configured book, taken when it differs from the ledger's, whatever
+/// its version (`Ledger::set_book`; #451). A book the core refuses leaves
+/// the ledger on the one it has, saying so.
 fn take_book(ledger: &mut Ledger, store: &mut SqlStore, cfg: &Config, now_ms: i64) {
     let book = configured_book(cfg);
-    if book.version <= ledger.book().version {
-        return;
-    }
-    let set = core::SetPriceBook { id: format!("book:{}", book.version), book };
-    if let Err(why) = ledger.set_book(store, &set, now_ms) {
-        console_error!("{}", json!({ "event": "ledger.book-refused", "id": set.id, "message": why.message() }));
+    if let Err(why) = ledger.set_book(store, &book, now_ms) {
+        console_error!("{}", json!({ "event": "ledger.book-refused", "version": book.version, "message": why.message() }));
     }
 }
 
@@ -769,6 +767,11 @@ impl LedgerCell {
                 Ok(json!({ "entries": entries }))
             }
             TestHook::Totals => Ok(serde_json::to_value(self.mutate(|l, _, _| Ok(l.totals())).await?).expect("totals serialize")),
+            TestHook::Book => {
+                let rows: Vec<Json> = self.sql().exec("SELECT ledger AS value FROM head WHERE id = 1", None)?.to_array()?;
+                let head: Value = rows.first().map_or(Value::Null, |r| serde_json::from_str(&r.value).expect("a head is JSON the ledger wrote"));
+                Ok(json!({ "book": head["book"] }))
+            }
             TestHook::LegacySeat { seat, seq } => {
                 let c = SetSeat { id: format!("legacy-seat:{seq}"), seat, seq };
                 let status = self.mutate(move |l, s, now| l.set_seat(s, &c, now).map(|()| l.status(s, now))).await?;

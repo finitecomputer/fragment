@@ -120,8 +120,9 @@ struct Deployment {
     /// the store.
     #[serde(default)]
     providers: Vec<Value>,
-    /// The price book's version: raise it with every change to a key's
-    /// price, or ledgers made before keep the book they have.
+    /// The price book's version, informational (a ledger's status shows
+    /// it): a ledger takes a key's price added or changed at its next call,
+    /// whatever the version (#451).
     price_book_version: Option<u32>,
     /// A branch deployment's test levers (`FRAGMENT_TEST_SECRET`, docs/secrets.md):
     /// the file of a secret of 32 bytes or more, with which the hosted e2e

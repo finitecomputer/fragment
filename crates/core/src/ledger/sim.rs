@@ -38,7 +38,7 @@ pub(super) enum Op {
     Seat(SetSeat),
     Overdraft(SetOverdraft),
     Cap(SetFragmentCap),
-    Book(SetPriceBook),
+    Book(PriceBook),
     Reserve(Reserve),
     Settle(Settle),
     Release(Release),
@@ -63,7 +63,7 @@ pub(super) fn apply(ledger: &mut Ledger, store: &mut impl Store, op: &Op, now_ms
         Op::Seat(c) => ledger.set_seat(store, c, now_ms).map(|()| Outcome::Done),
         Op::Overdraft(c) => ledger.set_overdraft(store, c, now_ms).map(|()| Outcome::Done),
         Op::Cap(c) => ledger.set_cap(store, c, now_ms).map(|()| Outcome::Done),
-        Op::Book(c) => ledger.set_book(store, c, now_ms).map(|()| Outcome::Done),
+        Op::Book(b) => ledger.set_book(store, b, now_ms).map(|()| Outcome::Done),
         Op::Reserve(r) => ledger.reserve(store, r, now_ms).map(Outcome::Reserved),
         Op::Settle(s) => ledger.settle(store, s, now_ms).map(Outcome::Settled),
         Op::Release(r) => ledger.release(store, r, now_ms).map(Outcome::Released),
@@ -525,7 +525,6 @@ impl Sim {
             Op::Seat(c) => &c.id,
             Op::Overdraft(c) => &c.id,
             Op::Cap(c) => &c.id,
-            Op::Book(c) => &c.id,
             _ => return false,
         };
         if answer.is_err() || !self.applied.insert(id.clone()) {
@@ -790,9 +789,9 @@ impl Sim {
         if self.rng.chance(50) {
             book.keys.push(crate::price::KeyPrice { key: "search".into(), micros: 5_000_000, per: 1_000 });
         }
-        let id = self.id("book");
-        // a late book (reordered behind a newer one) is refused as stale
-        self.send(Op::Book(SetPriceBook { id, book }));
+        // books are compared, never ordered: a late one (reordered behind
+        // another) is taken, as a configuration rolled back is
+        self.send(Op::Book(book));
     }
 
     fn restart(&mut self) {
