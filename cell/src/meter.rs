@@ -20,6 +20,11 @@
 //! same order, and the ledger answers it as before: a crash between its
 //! apply and the acknowledgement charges nothing twice.
 //!
+//! A paid call the router makes (a model call) is charged on the same
+//! queue after its answer (`charge`): one row, as a batch of its own under
+//! the row's reference, from no fragment (`source` empty), which the
+//! consumer applies and acknowledges, telling no one.
+//!
 //! The owner's standing gates the fragment's writes (decision 27): past
 //! the overdraft, the owner's fragments refuse mutations, posts, file
 //! writes, deploys, blob uploads and replays with a 402 that says why, and
@@ -48,6 +53,8 @@ pub const QUEUE_BINDING: &str = "METERS";
 /// Set on the internal routes below by platform code; the router never
 /// sets or passes it.
 pub const METER_HEADER: &str = "x-fragment-meter";
+/// A row into the outbox, once by its reference: `(ref, row)`.
+pub(crate) const OUTBOX_INSERT: &str = "INSERT OR IGNORE INTO meter_rows (ref, row, batch) VALUES (?, ?, NULL)";
 /// A batch not acknowledged this long after it was sent is sent again.
 const RESEND_AFTER_MS: i64 = 5 * 60_000;
 /// Storage is sampled at most this often (from the alarm's daily pass).
@@ -69,7 +76,8 @@ const DAY_MS: i64 = 24 * HOUR_MS;
 const _: () = assert!(BATCH_ROWS as usize <= fragment_core::ledger::BATCH_ROWS_MAX, "a fragment's batch is one the ledger takes");
 
 /// A batch on its way to its payer's ledger: from fragment `source`, its
-/// outbox's batch `seq`.
+/// outbox's batch `seq`; or, `source` empty, a paid call's charge
+/// (`charge`), which no fragment is told of.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MeterBatch {
     pub payer: String,
@@ -108,12 +116,19 @@ impl FragmentCell {
         Ok(format!("{}@{}", self.name()?, self.must(MetaKey::CreatedAt)?))
     }
 
-    /// Keeps a row in the outbox, once by its reference.
-    pub(crate) fn outbox(&self, reference: &str, usage: Usage, at_ms: i64) -> CellResult<()> {
-        let row = MeterRow { reference: reference.to_string(), usage, fragment: Some(self.name()?), agent: None, computer: None, at_ms };
+    /// Keeps a row in the outbox, once by its reference: the fragment's
+    /// own usage, or an AI step's, made for `agent` when an agent's run.
+    pub(crate) fn outbox(&self, reference: &str, usage: Usage, at_ms: i64, agent: Option<String>) -> CellResult<()> {
+        let text = self.outbox_row(reference, usage, at_ms, agent)?;
+        self.exec(OUTBOX_INSERT, vec![reference.into(), text.into()])
+    }
+
+    /// An outbox row's JSON, for `OUTBOX_INSERT` (`outbox`, or a statement
+    /// of a transaction of its caller's: an AI step's charge, ai.rs).
+    pub(crate) fn outbox_row(&self, reference: &str, usage: Usage, at_ms: i64, agent: Option<String>) -> CellResult<String> {
+        let row = MeterRow { reference: reference.to_string(), usage, fragment: Some(self.name()?), agent, computer: None, at_ms };
         assert!(fragment_core::price::printable(reference, fragment_core::ledger::ID_MAX_BYTES), "a meter's reference is one the ledger takes: {reference}");
-        let text = serde_json::to_string(&row).expect("a meter row serializes");
-        self.exec("INSERT OR IGNORE INTO meter_rows (ref, row, batch) VALUES (?, ?, NULL)", vec![reference.into(), text.into()])
+        Ok(serde_json::to_string(&row).expect("a meter row serializes"))
     }
 
     /// Counts one request the router handed this created fragment: in this
@@ -157,7 +172,7 @@ impl FragmentCell {
             return;
         }
         let id = &hex::encode(<sha2::Sha256 as sha2::Digest>::digest(version.as_bytes()))[..16];
-        let noted = self.meter_key().and_then(|key| self.outbox(&format!("dw:{key}:{id}:{day}"), Usage::DynamicWorkers { count: 1 }, now));
+        let noted = self.meter_key().and_then(|key| self.outbox(&format!("dw:{key}:{id}:{day}"), Usage::DynamicWorkers { count: 1 }, now, None));
         match noted {
             Ok(()) => *self.dw_noted.borrow_mut() = Some((version.to_string(), day)),
             Err(e) => console_error!("{}", json!({ "event": "meter.dw-failed", "message": e.message })),
@@ -185,7 +200,7 @@ impl FragmentCell {
         for (class, name, bytes) in [(StorageClass::Sqlite, "sqlite", sqlite), (StorageClass::R2, "r2", blobs)] {
             let byte_hours = u64::try_from(u128::from(bytes) * elapsed / HOUR_MS as u128).unwrap_or(u64::MAX);
             if byte_hours > 0 {
-                self.outbox(&format!("store:{key}:{name}:{now}"), Usage::Storage { class, byte_hours }, now)?;
+                self.outbox(&format!("store:{key}:{name}:{now}"), Usage::Storage { class, byte_hours }, now, None)?;
             }
         }
         self.set_meta(MetaKey::StorageSampledAt, &now.to_string())
@@ -207,7 +222,7 @@ impl FragmentCell {
             let count = u64::try_from(m.count).map_err(|_| CellError::host("a negative request count"))?;
             // a minute's row is at its end, or now for one that is not over (a test's)
             let at = ((m.minute + 1) * MINUTE_MS - 1).min(now);
-            self.outbox(&format!("req:{key}:{}", m.minute), Usage::Requests { count }, at)?;
+            self.outbox(&format!("req:{key}:{}", m.minute), Usage::Requests { count }, at, None)?;
         }
         if let Some(last) = minutes.last() {
             self.exec("DELETE FROM meter_requests WHERE minute <= ?", vec![SqlStorageValue::Integer(last.minute)])?;
@@ -375,8 +390,29 @@ pub(crate) fn read_only_refusal(why: Why) -> CellError {
     CellError::new(ErrorCode::BudgetUsedUp, format!("this fragment's owner's {}", Refused::ReadOnly { why }.message()))
 }
 
+/// Charges `rows`, each a paid call's usage that happened, to `payer`'s
+/// ledger after the call answered, never in its way (decision 62): each a
+/// batch of its own, under its row's reference, on the ledger's queue,
+/// whose consumer applies it (once by its reference: a batch sent again
+/// charges nothing twice) and asks again while the ledger does not
+/// answer. A send that fails is said aloud with its references: the
+/// charge is lost, and the call stands.
+pub async fn charge(env: &Env, payer: &str, rows: Vec<MeterRow>) {
+    let refs: Vec<String> = rows.iter().map(|r| r.reference.clone()).collect();
+    let bodies: Vec<Value> = rows
+        .into_iter()
+        .map(|row| {
+            let meter = Meter { batch: row.reference.clone(), rows: vec![row] };
+            serde_json::to_value(MeterBatch { payer: payer.to_string(), source: String::new(), seq: 0, meter }).expect("a batch serializes")
+        })
+        .collect();
+    if let Err(e) = js::queue_send(env.as_ref(), QUEUE_BINDING, &bodies).await {
+        console_error!("{}", json!({ "event": "ledger.charge-lost", "refs": refs, "message": e.message }));
+    }
+}
+
 /// The ledger queue's consumer: each batch applied on its payer's ledger,
-/// then its fragment told. A ledger that does not answer, or a fragment
+/// then its fragment told (a paid call's charge tells no one). A ledger that does not answer, or a fragment
 /// that does not hear, gets the message again; a refusal is final (a
 /// guest's fragments are billed nothing; a batch the ledger refuses as
 /// another body is a source's bug, kept in its event log).
@@ -405,6 +441,15 @@ async fn consume_one(raw: RawMessage, env: &Env) {
             return;
         }
     };
+    if b.source.is_empty() {
+        // a paid call's charge (`charge`): no outbox to tell, and nothing to send again
+        let rows_refused = metered.as_ref().map_or(0, |m| m.refused.len());
+        if refused.is_some() || rows_refused > 0 {
+            console_error!("{}", json!({ "event": "ledger.charge-refused", "batch": b.meter.batch, "refused": refused, "rows": metered.map(|m| m.refused) }));
+        }
+        message.ack();
+        return;
+    }
     let acked = Acked { seq: b.seq, batch: b.meter.batch.clone(), metered, refused };
     let body = serde_json::to_string(&acked).expect("an acknowledgement serializes");
     let heard = async {

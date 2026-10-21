@@ -54,6 +54,9 @@ pub const PAYER_HEADER: &str = "x-fragment-payer";
 const DEFAULT_PLAN_ID: &str = "plan:default";
 /// Test fleets: references a test hook lists at most.
 const TEST_ENTRIES_MAX: i64 = 500;
+/// Test fleets: the longest a slowed ledger waits before each answer
+/// (`TestHook::Slow`).
+const TEST_SLOW_MAX_MS: u64 = 30_000;
 /// The meta key of a capped ledger's paid calls (`TestHook::PaidCalls`).
 const PAID_CALLS_MAX: &str = "test_paid_calls_max";
 /// How long a gate waits on a ledger it has no fresh answer from: a few
@@ -90,6 +93,9 @@ pub struct LedgerCell {
     armed: Cell<Option<i64>>,
     /// Its person was wiped (`wiped`'s row, read as it starts).
     wiped: Cell<bool>,
+    /// Test fleets: how long it waits before each answer but a lever's
+    /// (`TestHook::Slow`; this activation's alone).
+    slow_ms: Cell<u64>,
     /// Its schema as it started (schema.rs): ready, or refused.
     schema: crate::schema::Schema,
 }
@@ -102,7 +108,7 @@ impl DurableObject for LedgerCell {
         let schema = crate::schema::Schema::start(&raw, sql.clone(), &fragment_core::migrate::LEDGER, &state.id().to_string());
         let wiped = schema.wiped(&sql);
         let cfg = Config::from_env(&env);
-        LedgerCell { state, raw, cfg, armed: Cell::new(None), wiped: Cell::new(wiped), schema }
+        LedgerCell { state, raw, cfg, armed: Cell::new(None), wiped: Cell::new(wiped), slow_ms: Cell::new(0), schema }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -209,7 +215,11 @@ pub struct Status {}
 /// set its seat at an order of the lever's (`legacy-seat {seat, seq}`,
 /// answering its status), as an operator's `seat` command did before it
 /// went (2026-10-16): a ledger such a command left ahead of the
-/// registry's order.
+/// registry's order; or make it answer every other route `ms` late
+/// (`slow {ms}`, at most `TEST_SLOW_MAX_MS`, 0 to end it: a slow or far
+/// ledger, which no paid call waits on past the gate's wait), or make the
+/// gate of its isolate (and, through the router's lever, the router's)
+/// forget what it heard (`forget-gate`).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum TestHook {
@@ -223,6 +233,10 @@ pub enum TestHook {
     LegacySeat { seat: SeatState, seq: u64 },
     /// The steps its schema holds (schema.rs `view`).
     Schema,
+    Slow {
+        ms: u64,
+    },
+    ForgetGate,
 }
 
 impl Route for core::Reserve {
@@ -627,6 +641,10 @@ impl LedgerCell {
             return Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", req.method().as_ref(), req.path())).into());
         }
         let path = req.path();
+        let slow = self.slow_ms.get();
+        if slow > 0 && path != TestHook::PATH {
+            Delay::from(std::time::Duration::from_millis(slow)).await;
+        }
         let body = req.bytes().await?;
         fn reply<T: Serialize>(answer: T) -> Result<Value, Failed> {
             Ok(serde_json::to_value(answer).expect("the ledger's answers serialize"))
@@ -770,6 +788,14 @@ impl LedgerCell {
         assert!(self.cfg.test_hooks, "test hooks answer on test fleets only");
         match hook {
             TestHook::Schema => Ok(crate::schema::view(self.sql(), &fragment_core::migrate::LEDGER)?),
+            TestHook::Slow { ms } => {
+                self.slow_ms.set(ms.min(TEST_SLOW_MAX_MS));
+                Ok(json!({ "slowMs": self.slow_ms.get() }))
+            }
+            TestHook::ForgetGate => {
+                forget_gate();
+                Ok(json!({ "forgot": true }))
+            }
             TestHook::PaidCalls { max } => {
                 let max = match max {
                     Some(max) => max,
@@ -892,25 +918,6 @@ async fn asked(env: &Env, payer: &str, path: &str, body: String) -> Result<Vec<u
     }
 }
 
-/// A ledger call is asked this many times while the ledger does not
-/// answer, before a paid call is given up (a reservation) or left held,
-/// for the sweep to charge at its worst case (a settle, a release).
-const TRIES: usize = 3;
-
-/// `ask`, asked again while the ledger does not answer (a host failure);
-/// a refusal answers at once.
-pub async fn retried<R: Route>(env: &Env, payer: &str, request: &R) -> Result<R::Answer, LedgerError> {
-    let mut tries = 0;
-    // bounded: TRIES asks, then the last answer stands
-    loop {
-        tries += 1;
-        match ask(env, payer, request).await {
-            Err(e) if e.refused.is_none() && e.code == ErrorCode::HostFailed && tries < TRIES => continue,
-            answered => return answered,
-        }
-    }
-}
-
 /// The gate (docs/ledger.md, "The gate"): whether `person`'s ledger lets a
 /// spend start, a `MaySpend` of theirs or a `FragmentOpen` of a fragment
 /// they own. Its answer as this isolate heard it within the minute
@@ -953,18 +960,4 @@ async fn gated(env: &Env, person: &str, path: &'static str, body: String) -> Res
 /// `forget-standing` lever).
 pub fn forget_gate() {
     GATE.with(|g| g.borrow_mut().forget());
-}
-
-/// Holds a paid call's worst case on `payer`'s ledger before the call is
-/// made (docs/ledger.md): its amount. A refusal, or a ledger that does not
-/// answer, holds nothing, and the call is not made. The call then settles
-/// what it used, or is released having used nothing; a settle or release
-/// that does not land leaves it held, and the ledger's sweep charges its
-/// worst case: the money path fails closed.
-pub async fn hold(env: &Env, payer: &str, reserve: &core::Reserve) -> Result<i64, LedgerError> {
-    match retried(env, payer, reserve).await? {
-        core::Reserved::Held { amount } => Ok(amount),
-        // a reference of the call's own was never reserved before
-        other => Err(CellError::host(format!("a fresh call's reservation {} answered {other:?}", reserve.reference)).into()),
-    }
 }

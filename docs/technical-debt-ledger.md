@@ -89,10 +89,32 @@ fragment.club until cutover (decisions 34–35).
 - **First proof:** a person's month on the ledger against the platform's
   OpenRouter activity for the same calls (its generation ids), or a
   person asking why a turn costs more than it did on Workers AI.
-- **Delete when:** a call is settled from OpenRouter's reported cost
+- **Delete when:** a call is charged from OpenRouter's reported cost
   (a `Usage` of the vendor's cost in micro-dollars, the fee and margin
-  on it, the ceiling still its reservation): the first change after
-  launch (the coordinator for Paul, 2026-10-15).
+  on it): the first change after launch (the coordinator for Paul,
+  2026-10-15).
+
+## A paid call's charge is best effort
+
+- **Observed:** 2026-10-21 (decision 62; Paul: "billing should be
+  settled best effort not interrupt every request"). A model call is
+  gated by a cached standing and charged after its answer, as a row on
+  the ledger's queue (cell/src/models.rs, meter.rs `charge`).
+- **Shortcut:** a call that reports no usage (an upstream stream that
+  broke before its last chunk, an answer with no `usage`) is charged
+  nothing, said aloud (`ledger.unknown-usage`), where a hold charged its
+  worst case; a charge whose queue send fails is lost, said aloud
+  (`ledger.charge-lost`); and a person out of credit spends on for up to
+  the gate's minute in each isolate.
+- **Risk:** calls given away: a provider whose streams break before
+  their usage, or a queue outage, costs the platform what those calls
+  cost; an agent at zero runs on for up to a minute. Cents, against an
+  agent never stopped by billing.
+- **First proof:** `ledger.unknown-usage` or `ledger.charge-lost` lines
+  in the Worker's logs, more than a few a day.
+- **Delete when:** a call with no usage is charged from what it streamed
+  (its output's tokens counted, its input's bytes), and a failed send is
+  kept and sent again.
 
 ## The cell's Wasm budget was raised for launch
 

@@ -303,7 +303,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         json!(calls.iter().map(|c| json!({ "model": c.model, "metadata": c.metadata })).collect::<Vec<_>>()),
     );
     let aig = super::ledger::entries(api, &owner_id, "aig:");
-    s.ok("and each is settled on its owner's ledger", !aig.is_empty() && aig.iter().all(|e| super::ledger::end_of(e) == "settled"), json!(aig));
+    s.ok("and each is charged on its owner's ledger", !aig.is_empty() && aig.iter().all(|e| super::ledger::charged(e).is_some()), json!(aig));
 
     // a tool step, then the answer that names it
     let r = say(2, "run: echo tool-ran")?;
@@ -768,11 +768,11 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let vision_entries: Vec<Value> = super::ledger::entries(api, &owner_id, "aig:")
         .into_iter()
-        .filter(|e| e["entry"]["reserve"]["agent"] == maple_id.as_str() && e["entry"]["reserve"]["worst"]["model"] == fragment_core::models::VISION_MODEL_DEFAULT)
+        .filter(|e| e["entry"]["row"]["agent"] == maple_id.as_str() && super::ledger::usage(e)["model"] == fragment_core::models::VISION_MODEL_DEFAULT)
         .collect();
     s.ok(
-        "each vision call is metered to the agent's owner, as the agent, settled at the vision model's price",
-        vision_entries.len() >= looks.len() && !looks.is_empty() && vision_entries.iter().all(|e| super::ledger::end_of(e) == "settled" && e["entry"]["end"]["usage"]["model"] == fragment_core::models::VISION_MODEL_DEFAULT),
+        "each vision call is metered to the agent's owner, as the agent, charged at the vision model's price",
+        vision_entries.len() >= looks.len() && !looks.is_empty() && vision_entries.iter().all(|e| super::ledger::charged(e).is_some()),
         json!(vision_entries),
     );
 

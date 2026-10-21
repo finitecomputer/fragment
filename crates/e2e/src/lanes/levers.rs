@@ -206,8 +206,10 @@ fn not_a_workos_person(s: &mut Suite, api: &Api, email: &str) -> Result<()> {
 }
 
 /// Locally, on the Workers AI fake: an e2e person lent one paid call makes
-/// one model call (their agent's, through the model route), and the ledger
-/// refuses the next before it is made.
+/// one model call (their agent's, through the model route), charged after
+/// it, and their ledger's gate refuses the next before it is made, once it
+/// asks (it trusts what it heard for a minute: the cap is approximate by
+/// that).
 fn paid_calls(s: &mut Suite, api: &Api) -> Result<()> {
     let keys = Keys::generate();
     let email = Api::email_of(&keys);
@@ -226,11 +228,14 @@ fn paid_calls(s: &mut Suite, api: &Api) -> Result<()> {
         r.map(|r| r.body["entries"].as_array().map_or(0, Vec::len)).unwrap_or(0)
     };
     let one = call("one")?;
-    s.ok("their first model call is made", one.status == 200 && one.body["choices"][0]["message"]["content"] == "echo: one" && calls(api) == 1, &one);
+    let charged = s.eventually(std::time::Duration::from_secs(20), || calls(api) == 1);
+    s.ok("their first model call is made, and charged after it", one.status == 200 && one.body["choices"][0]["message"]["content"] == "echo: one" && charged, &one);
+    // the gate heard their ledger before that call: it asks afresh, as it would a minute on
+    super::ledger::forget_gate(api, &identity)?;
     let asked = s.ai.chats().len();
     let two = call("two")?;
     s.ok(
-        "the next is refused by their ledger before it is made (402), and the model is not asked",
+        "the next is refused by their ledger's gate before it is made (402), and the model is not asked",
         two.status == 402 && two.message().contains("paid calls") && calls(api) == 1 && s.ai.chats().len() == asked,
         &two,
     );

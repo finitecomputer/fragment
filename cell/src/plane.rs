@@ -710,9 +710,8 @@ impl FragmentCell {
     /// Whether the fragment's next pass (its housekeeping, and the poll
     /// backstop) comes within the poll interval rather than a day after the
     /// last: the pins may lag the repo (`pins_may_lag`), a run is in flight
-    /// (each pass checks it against its Workflow) or ended with a
-    /// reservation to give back, or a template is still to land (each pass
-    /// tries again). The rest of the alarm's work has due times of its own.
+    /// (each pass checks it against its Workflow), or a template is still to
+    /// land (each pass tries again). The rest of the alarm's work has due times of its own.
     /// A fragment nothing touches (a chat, from its second day) is woken
     /// once a day, and asks code.storage nothing.
     pub(crate) fn busy(&self) -> CellResult<bool> {
@@ -720,16 +719,14 @@ impl FragmentCell {
         struct Busy {
             pending: i64,
             running: i64,
-            holds: i64,
         }
         let rows: Vec<Busy> = self.typed(
             "SELECT EXISTS (SELECT 1 FROM meta WHERE key = ?) AS pending,
-               EXISTS (SELECT 1 FROM runs WHERE status = 'running') AS running,
-               EXISTS (SELECT 1 FROM charges WHERE held = 1 AND run NOT IN (SELECT id FROM runs WHERE status IN ('queued', 'running'))) AS holds",
+               EXISTS (SELECT 1 FROM runs WHERE status = 'running') AS running",
             vec![MetaKey::TemplatePending.key().into()],
         )?;
         let b = rows.into_iter().next().expect("a SELECT without FROM answers one row");
-        Ok(self.pins_may_lag()? || b.pending != 0 || b.running != 0 || b.holds != 0)
+        Ok(self.pins_may_lag()? || b.pending != 0 || b.running != 0)
     }
 
     /// Whether the pins may lag the repo: in the last day a storage token

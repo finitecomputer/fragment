@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::jobs::records;
-use super::ledger::{end_of, entries};
+use super::ledger::{charged, entries, quiet};
 use crate::api::{Api, Call, Socket};
 use super::credentials::{model_checks, placeholder, swap_checks, Swapping, MODEL_CHECKS, SWAP_CHECKS};
 use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_HOST};
@@ -699,13 +699,14 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
 /// (401), each before anything is reserved or sent. The replies it adds.
 fn intercept_names_by_key(s: &mut Suite, api: &Api, owner_id: &str, agent: &str, chat: &str, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
     use fragment_fakes::workers_ai::TRANSCRIBE_MODEL;
-    let (calls, before) = (s.ai.calls().len(), entries(api, owner_id, "aig:").len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let said = fetched(s, 70, "transcribe hello from a voice memo")?;
     let sent = s.ai.calls().get(calls).cloned();
+    let metered = s.eventually(Duration::from_secs(20), || entries(api, owner_id, "aig:").len() == before + 1);
     let aig = entries(api, owner_id, "aig:");
     s.ok(
-        "a voice memo through the intercept, its agent named by its key (agent:<name>), is transcribed by Whisper and metered to the agent's owner",
-        said == "heard: hello from a voice memo" && aig.len() == before + 1 && aig.iter().filter(|e| end_of(e) == "settled").count() == aig.len(),
+        "a voice memo through the intercept, its agent named by its key (agent:<name>), is transcribed by Whisper and charged to the agent's owner",
+        said == "heard: hello from a voice memo" && metered && aig.iter().all(|e| charged(e).is_some()),
         json!({ "said": said, "aig": aig }),
     );
     s.ok(
@@ -715,13 +716,13 @@ fn intercept_names_by_key(s: &mut Suite, api: &Api, owner_id: &str, agent: &str,
     );
     let said = fetched(s, 71, &format!("think as agent:{agent} hello by key"))?;
     s.ok("a chat call names its agent the same way, by its key alone", said == "thought: echo: hello by key", &said);
-    let (calls, before) = (s.ai.calls().len(), entries(api, owner_id, "aig:").len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let elsewhere = fetched(s, 72, &format!("transcribe hi as agent:{chat}"))?;
     let malformed = fetched(s, 73, "transcribe hi as agent:not-a-name")?;
     let disagree = fetched(s, 74, &format!("transcribe hi as agent:{chat} header {agent}"))?;
     let missing = fetched(s, 75, "transcribe hi as fragment-model")?;
     s.ok(
-        "a key naming a fragment that does not run on this computer is refused (403); a malformed one, one that disagrees with x-fragment-agent, and a key that names no agent (401); nothing reserved or sent",
+        "a key naming a fragment that does not run on this computer is refused (403); a malformed one, one that disagrees with x-fragment-agent, and a key that names no agent (401); nothing charged or sent",
         elsewhere.starts_with("transcribe refused: 403") && malformed.starts_with("transcribe refused: 401") && disagree.starts_with("transcribe refused: 401") && missing.starts_with("transcribe refused: 401")
             && s.ai.calls().len() == calls && entries(api, owner_id, "aig:").len() == before,
         json!({ "elsewhere": elsewhere, "malformed": malformed, "disagree": disagree, "missing": missing }),
@@ -729,18 +730,19 @@ fn intercept_names_by_key(s: &mut Suite, api: &Api, owner_id: &str, agent: &str,
     // a tool the agent built on its computer decides as it calls a model:
     // `POST /v1/decide` on the intercept, its agent named by its key
     use fragment_core::decide::Model;
-    let (calls, before) = (s.ai.calls().len(), entries(api, owner_id, "aig:").len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let decided = fetched(s, 76, "decide kale chips")?;
     let heard = fetched(s, 77, "decide heard is this a snack")?;
     let sent = s.ai.calls()[calls..].to_vec();
+    s.eventually(Duration::from_secs(20), || entries(api, owner_id, "aig:").len() == before + 2);
     let aig = entries(api, owner_id, "aig:");
     s.ok(
-        "a decision through the intercept (POST /v1/decide), its agent named by its key, runs clef-flash, and with a voice memo inline clef-omni, each metered to the agent's owner; the vendor sees no key",
+        "a decision through the intercept (POST /v1/decide), its agent named by its key, runs clef-flash, and with a voice memo inline clef-omni, each charged to the agent's owner; the vendor sees no key",
         decided == format!("decided: {} snack 0.5", Model::ClefFlash.id()) && heard == format!("decided: {} snack 0.5", Model::ClefOmni.id())
             && sent.len() == 2 && sent[0].model == Model::ClefFlash.id() && sent[0].body["state"] == "kale chips"
             && sent[1].model == Model::ClefOmni.id() && sent[1].body["audio"].as_array().is_some_and(|a| a.len() == 1)
             && sent.iter().all(|c| c.authorization.is_none() && !c.body.to_string().contains("agent:"))
-            && aig.len() == before + 2 && aig.iter().all(|e| end_of(e) == "settled"),
+            && aig.len() == before + 2 && aig.iter().all(|e| charged(e).is_some()),
         json!({ "decided": decided, "heard": heard, "models": sent.iter().map(|c| c.model.clone()).collect::<Vec<_>>(), "aig": aig.len() - before }),
     );
     Ok(8)
@@ -763,19 +765,20 @@ fn intercept_takes_model_ids(s: &mut Suite, api: &Api, owner_id: &str, fetched: 
         listed == format!("{GLM_FLASH}, {MEDIUM_MODEL}, {DEEPSEEK_FLASH}") && given == json!({ "cheap": GLM_FLASH, "medium": MEDIUM_MODEL, "fallback": DEEPSEEK_FLASH, "vision": GLM_FLASH }),
         &said,
     );
-    let (calls, before) = (s.ai.calls().len(), entries(api, owner_id, "aig:").len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let said = fetched(s, 81, &format!("think on {MEDIUM_MODEL} hello by id"))?;
     let tried: Vec<String> = s.ai.calls()[calls..].iter().map(|c| c.model.clone()).collect();
+    let metered = s.eventually(Duration::from_secs(20), || entries(api, owner_id, "aig:").len() == before + 1);
     let aig = entries(api, owner_id, "aig:");
     s.ok(
-        "a call through the intercept naming a model by its id (GLM-5.3, the medium tier's) runs on it, metered to the agent's owner",
-        said == "thought: echo: hello by id" && tried == [MEDIUM_MODEL] && aig.len() == before + 1 && aig.iter().all(|e| end_of(e) == "settled"),
+        "a call through the intercept naming a model by its id (GLM-5.3, the medium tier's) runs on it, charged to the agent's owner",
+        said == "thought: echo: hello by id" && tried == [MEDIUM_MODEL] && metered && aig.iter().all(|e| charged(e).is_some()),
         json!({ "said": said, "tried": tried, "aig": aig.len() - before }),
     );
-    let (calls, before) = (s.ai.calls().len(), entries(api, owner_id, "aig:").len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let said = fetched(s, 82, "think on gpt-4o hello")?;
     s.ok(
-        "one naming a model no slot runs is refused (400), naming the ids it may, nothing reserved or sent",
+        "one naming a model no slot runs is refused (400), naming the ids it may, nothing charged or sent",
         said.starts_with("think failed: 400") && said.contains(MEDIUM_MODEL) && s.ai.calls().len() == calls && entries(api, owner_id, "aig:").len() == before,
         &said,
     );
@@ -1301,31 +1304,28 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         if fakes {
             s.ai.clear_script();
         }
-        let aig_before = entries(api, &owner_id, "aig:").len();
+        let aig_before = quiet(api, &owner_id, "aig:");
         let said = fetched(s, 23, "think hello model")?;
         replies_so_far += 1;
         s.ok("a model call through the computer's intercept answers as the model did", said == "thought: echo: hello model", &said);
+        let metered = s.eventually(Duration::from_secs(20), || entries(api, &owner_id, "aig:").len() == aig_before + 1);
         let aig = entries(api, &owner_id, "aig:");
-        s.ok(
-            "and is metered to the agent's owner, settled from its usage",
-            aig.len() == aig_before + 1 && aig.iter().filter(|e| end_of(e) == "settled").count() == aig_before + 1,
-            json!(aig),
-        );
+        s.ok("and is charged to the agent's owner after it, from its usage", metered && aig.iter().all(|e| charged(e).is_some()), json!(aig));
         if fakes {
             replies_so_far += intercept_names_by_key(s, api, &owner_id, &agent_name, &chat_name, &fetched)?;
             replies_so_far += intercept_takes_model_ids(s, api, &owner_id, &fetched)?;
         }
     } else {
         // a real runtime called its model to answer at all: each call went
-        // through the intercept, reserved and settled on its owner's ledger.
+        // through the intercept, charged on its owner's ledger after it.
         // Hermes may make one more after its reply (on the e2e preview,
-        // 2026-10-06, one 55 s after the answer's), which settles only when
-        // that call ends: the wait covers a model call, not just the ledger.
-        let settled = |aig: &[Value]| !aig.is_empty() && aig.iter().all(|e| end_of(e) == "settled");
+        // 2026-10-06, one 55 s after the answer's), charged only when that
+        // call ends: the wait covers a model call, not just the ledger.
+        let settled = |aig: &[Value]| !aig.is_empty() && aig.iter().all(|e| charged(e).is_some());
         s.eventually(Duration::from_secs(150), || settled(&entries(api, &owner_id, "aig:")));
         let aig = entries(api, &owner_id, "aig:");
         s.ok(
-            "its answer's model calls went through the computer's intercept, each metered to the agent's owner and settled from its usage",
+            "its answer's model calls went through the computer's intercept, each charged to the agent's owner from its usage",
             settled(&aig),
             json!(aig),
         );

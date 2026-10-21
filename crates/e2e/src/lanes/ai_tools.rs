@@ -229,7 +229,7 @@ pub(super) fn text_tools(s: &mut Suite, api: &Api, wait: Duration) -> Result<()>
 }
 
 /// The model route (models.rs `complete`) on a stream held open past its
-/// `[DONE]`: the call is settled from its usage at its `[DONE]`, while the
+/// `[DONE]`: the call is charged from its usage at its `[DONE]`, while the
 /// stream is still open, not when (or if) it ends (the optchat survey's
 /// late settle); the client reads it as it came.
 fn route_held_open(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
@@ -248,13 +248,13 @@ fn route_held_open(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let t0 = Instant::now();
     let (answer, settled, open_at_settle) = std::thread::scope(|scope| {
         let call = scope.spawn(|| api.signed(&hand, "POST", "/api/models/v1/chat/completions", Some(&body)).map(|r| (r, t0.elapsed())));
-        let settled = s.eventually(hold / 2, || aig().iter().any(|e| e["entry"]["end"]["charge"] == charge(CHEAP_MODEL, used) && e["entry"]["end"]["basis"] == "usage"));
+        let settled = s.eventually(hold / 2, || aig().iter().any(|e| super::ledger::charged(e) == Some(charge(CHEAP_MODEL, used))));
         let open = !call.is_finished();
         (call.join(), settled, open)
     });
     let (r, answered) = answer.map_err(|_| anyhow::anyhow!("the route call's thread panicked"))??;
     s.ok(
-        "the model route settles a call from its usage at its [DONE], while the gateway still holds the stream open",
+        "the model route charges a call from its usage at its [DONE], while the gateway still holds the stream open",
         settled && open_at_settle && r.status == 200 && aig().len() == before + 1,
         format!("settled: {settled}, the stream still open then: {open_at_settle}; the client's answer after {answered:?}: {}", json!(aig())),
     );

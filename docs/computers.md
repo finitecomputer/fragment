@@ -873,11 +873,13 @@ expires within 30 days. The container application is the deployment's
   model route as that agent (`POST /api/models/v1/chat/completions`,
   signed as the agent: docs/api.md, docs/ledger.md), which allows only
   the tier's model and a capped `max_tokens`, drops the guest's auth
-  headers, reserves the call's worst case on the agent's owner's ledger,
-  calls the model where the deployment runs it, streams its answer back,
-  and settles the final usage at its `[DONE]` (lesson 7; not at the
-  stream's end, which the gateway has held open ~150 s past it), its
-  timing on its `model.settled` line (docs/api.md, Models). A call whose
+  headers, asks the gate whether the agent's owner may spend (their
+  standing as the router heard it within the minute: docs/ledger.md,
+  "The gate"), calls the model where the deployment runs it, streams its
+  answer back, and charges the final usage after it, at its `[DONE]`
+  (lesson 7; not at the stream's end, which the gateway has held open
+  ~150 s past it), its timing on its `model.settled` line (docs/api.md,
+  Models). A call whose
   model fails before
   answering (not reached, 429, or a 5xx; on an OpenAI-compatible API,
   where the key is the platform's, also 401, 402, 403 or 404) is made once
@@ -919,7 +921,7 @@ expires within 30 days. The container application is the deployment's
     as if it named the slot: its key, its `body`, its fallback (a tier's
     falls back; `fallback`'s and `vision`'s do not), its price. An id no
     slot runs is refused, 400, the message listing those it may name;
-    nothing is reserved or sent. The route's names keep naming their slots,
+    nothing is charged or sent. The route's names keep naming their slots,
     whatever tier the caller says.
   - An id is one model: a deployment whose two slots name one id at two
     places (Workers AI and an API, or two APIs) is refused by its deploy
@@ -1072,7 +1074,7 @@ expires within 30 days. The container application is the deployment's
   model must be one the price book prices, or the deploy is refused (and
   the cell, at its first request); GLM-5.3 Flash is the cheap tier's own
   row. `vision` is
-  bounded, reserved and settled as a tier's call is, at its model's
+  bounded, gated and charged as a tier's call is, at its model's
   price, to the agent's owner. It is no tier: an agent's `agent.json`,
   a job's step and a manifest name only tiers.
 - Our Hermes image's profiles send their image calls to `vision`
@@ -1111,10 +1113,8 @@ expires within 30 days. The container application is the deployment's
   Hermes shrinks a screenshot (a 1456-pixel long side for a capture) and
   sends it whole; one refused as too large (413) it shrinks to 5 MiB of
   base64 and sends once more (its `_RESIZE_TARGET_BYTES`, which its config
-  does not set), which fits. A call reserves its bytes as input tokens,
-  so a 5 MiB screenshot holds about $1.25 of its payer's credit (at
-  GLM-5.3 Flash's price, the fee and the margin) until it settles at what
-  the model counted; a payer with less is refused it (402).
+  does not set), which fits. A call holds none of its payer's credit: it
+  is charged after its answer at what the model counted (decision 62).
 - `POST http://model.fragment.internal/v1/audio/transcriptions`,
   OpenAI's multipart shape with `model` `whisper`: a voice memo
   transcribed (decision 9, its status). It is the platform's
@@ -1126,8 +1126,8 @@ expires within 30 days. The container application is the deployment's
   inline (docs/api.md, Decisions). It is the platform's decision route
   as the agent (`POST /api/models/v1/decide`): `clef-flash` unless it
   names `clef` or `clef-omni` (which hears audio and watches video),
-  reserved at its model's context window and settled at the input tokens
-  it counted, metered to the agent's owner. A tool the agent builds on
+  charged after its answer at the input tokens it counted, to the
+  agent's owner. A tool the agent builds on
   its computer calls it as it calls a model, with the same base URL and
   credentials (`$FRAGMENT_MODEL/v1/decide`, `x-fragment-agent` or the
   key `agent:<name>`).
@@ -1301,9 +1301,11 @@ the provider's own hosts.
   - is a connection its owner has not connected, or must authorize again:
     403 `not_connected`; an own key its owner has not given: 403
     `not_connected`;
-  - is an operator key's, and its owner's ledger refuses to hold the
-    call's price: 402 or 403, with the ledger's reason. A ledger that does
-    not answer refuses it too (5xx), since a key is the operator's money.
+  - is an operator key's, and its owner's ledger's gate refuses them (out
+    of credit, or a guest): 402 or 403, with the ledger's reason. The gate
+    is what the router's isolate heard within the minute (docs/ledger.md,
+    "The gate"), and a ledger that does not answer refuses nothing
+    (decision 62).
 
   Otherwise each placeholder's place gets its credential: a header is its
   format around it (`Bearer sk-…`, whatever scheme word the guest wrote), a
@@ -1319,12 +1321,13 @@ the provider's own hosts.
   host with no placeholder goes on as it
   came; a body is sent as it came, read whole (at most 32 MiB); a redirect
   is never followed (the guest follows it, without the credential).
-- **An operator key's call is held first**, as a model call is
-  (docs/ledger.md): its price (the price book's and the margin) is reserved
-  on the agent's owner's ledger (`key:<computer>:…`) before the request
-  goes on. Once the provider answers (anything under 500), the call
-  settles at that price; one it did not answer is released. Then every
-  call is counted as the agent's
+- **An operator key's call is charged after it**, as a model call is
+  (docs/ledger.md): once the provider answers (anything under 500), its
+  price (the price book's and the margin) is charged to the agent's
+  owner's ledger (`key:<computer>:…`, as the agent), on the ledger's queue,
+  never in the answer's way; one it did not answer is charged nothing.
+  Before it goes on, the owner's standing is read through the gate (the
+  refusals above). Then every call is counted as the agent's
   in the computer's `uses`: by month, provider and agent, its calls and
   what they were charged (a connection's and an own key's are counted,
   never charged). Its owner reads them (`GET /api/computers/{id}/uses`,
@@ -2252,9 +2255,9 @@ for a host) and finds the same `HOME`, `~` and modes.
   under way then, to its own failure), or to the
   save that works first (Paul, 2026-10-08; "What its owner is told").
 - Model calls bill the agent's owner, through the platform's model
-  route. Each operator key's call is held on the agent's owner's ledger
-  before it is made, and settled once the provider answered, at the key's
-  price and the margin (`key:<computer>:…`; decision 37); a catalog's
+  route. Each operator key's call is charged to the agent's owner's
+  ledger once the provider answered, at the key's price and the margin
+  (`key:<computer>:…`; decisions 37 and 62); a catalog's
   operator key always has a price (its own or
   the price book's list price). A connection's call and an own key's are
   counted, never charged; every call is in the computer's `uses`.
@@ -2376,7 +2379,7 @@ for a host) and finds the same `HOME`, `~` and modes.
   apt and a program into `/usr/local/bin`, offline), its home intact
   after a sleep and a wake; and that agent (on the medium tier) looking
   at its screen: its `computer_use` screenshot goes to the route's
-  `vision` as that agent, settled on its owner's ledger at GLM-5.3
+  `vision` as that agent, charged on its owner's ledger at GLM-5.3
   Flash's price, and its answer is what the vision model saw. The
   Workers AI fake reads images only on a model the catalog marks
   "Vision: Yes" (GLM-5.3 Flash) and answers 400 for one sent to another,
