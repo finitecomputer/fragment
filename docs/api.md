@@ -2455,7 +2455,9 @@ fragment's blobs, its SHA-256 computed in the page, as an editor; answers
 a page may render an error on its message and retry the same id and body),
 `me()` (`{id, principal, role, platform}`, the hello's), `closed(fn)`. The page's
 socket reconnects by itself after a jittered wait (half to one and a
-half times a backoff that doubles from 1 to 30 seconds), except after a
+half times a backoff that doubles from 1 to 30 seconds), and one not open
+within 10 seconds and its backoff is closed and so dialled again (an
+upgrade never answered), except after a
 close the fragment means for good: 4003 (the page's access was revoked)
 or 4004 (the fragment was deleted) ends it, and `closed` handlers get
 `{code, reason}`.
@@ -2713,7 +2715,8 @@ with no reload, the open chat and the rows already shown untouched (a
 row the same as before keeps its element). Only the apps whose rows the
 change touched have their card read again. A socket that closes is opened again after a
 jittered wait (1 s, doubling to 30 s), and each opening reads the list
-again, for what changed while it was shut.
+again, for what changed while it was shut; one not open within 10 s and
+that wait is closed, and so opened again.
 **What their agent is doing** is its chats' rows' `listed` (Listed
 records, below: each agent's newest record of a turn's kind on a chat's
 `work`), so it is live on the same socket and reads no chat. The shell

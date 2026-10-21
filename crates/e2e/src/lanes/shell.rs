@@ -1046,6 +1046,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     compose_elsewhere_ui(s, api, &mut b, &page, &session, &asked_in, &groceries)?;
     open_beside_ui(s, api, &mut b, &page, &me, &groceries, &shots)?;
     sidebar_live(s, api, &mut b, &page, &session, &shots)?;
+    held_list_socket(s, api, &mut b, &page, &session)?;
 
     // settings, at /settings: what a person needs of their account, its
     // Loading… where the loaded page's content goes
@@ -2864,6 +2865,42 @@ fn sidebar_live(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let back = b.until(page, &row(&theirs), SIDEBAR_LIVE_WAIT);
     s.ok("one archived in the other tab leaves the first's, and comes back unarchived", lent && archived && back, "");
     b.close(second)?;
+    Ok(())
+}
+
+/// A shell whose first list socket is never answered (its upgrade held, as
+/// a dropped connection or a phone's changing network leaves one: only a
+/// close opened it again, and a page back on screen opened one only when it
+/// had none, so its sidebar stayed as it was until a reload). Valid: the
+/// page closes it once it has waited past any healthy open
+/// (`LIST_OPEN_WAIT_MS`), opens another, and is live again: an app
+/// archived elsewhere leaves its dock, and comes back unarchived, with no
+/// reload.
+fn held_list_socket(s: &mut Suite, api: &Api, b: &mut Browser, main: &Page, session: &str) -> Result<()> {
+    // the open wait and its first wait, jittered
+    let wait = std::time::Duration::from_secs(30);
+    // the new socket's open, after the close
+    let live = std::time::Duration::from_secs(10);
+    let page = b.open_with_script(&format!("{}/", api.base), &crate::browser::hold_first_socket("/api/fragments/watch"))?;
+    b.viewport(&page, 1280, 800, false)?;
+    let app = "document.querySelector('#apps [data-key^=\"app:\"]')?.dataset.key.slice(4) ?? ''";
+    let shown = b.until(&page, &format!("!document.getElementById('layout').hidden && ({app}) !== ''"), wait);
+    let name = b.eval(&page, app)?.as_str().unwrap_or("").to_string();
+    let closed = b.until(&page, "window.__heldSockets === 1 && window.__heldClosed === 1", wait);
+    let row = format!("document.querySelector({})", js(&format!("#apps [data-key={}]", js(&format!("app:{name}")))));
+    let archive = |on: bool| shell(api, session, "PUT", &format!("/api/fragments/{name}/archived"), Some(&json!({ "archived": on })), &[]);
+    let r = archive(true)?;
+    let left = b.until(&page, &format!("!{row}"), live);
+    let r2 = archive(false)?;
+    let back = b.until(&page, &format!("!!{row}"), live);
+    s.ok(
+        "a shell whose first list socket is never answered closes it once it has waited past any healthy open, opens another, and its dock follows an app archived elsewhere, and unarchived, with no reload",
+        shown && closed && r.status == 200 && r2.status == 200 && left && back,
+        json!({ "app": name, "held": b.eval(&page, "[window.__heldSockets, window.__heldClosed]")?, "left": left, "back": back }),
+    );
+    b.close(page)?;
+    // the person's own tab, on screen again
+    b.front(main)?;
     Ok(())
 }
 

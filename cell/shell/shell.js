@@ -3219,8 +3219,12 @@ async function load(changed = false) {
 // so a burst is one read, the page reads the list again and patches the
 // sidebar in place. A socket that closes is opened again after a jittered
 // wait (1 s, doubling to 30 s); each opening reads the list again, for
-// what changed while it was shut.
+// what changed while it was shut. One not open within LIST_OPEN_WAIT_MS
+// (and its wait) is closed, and so opened again: an upgrade never answered
+// would otherwise hold the page's one socket for good (the fragment
+// library's OPEN_WAIT_MS, cell/client.mjs, says why ten seconds).
 const LIST_SETTLE_MS = 200;
+const LIST_OPEN_WAIT_MS = 10_000;
 function listChanged() {
   clearTimeout(watching.settle);
   watching.settle = setTimeout(() => load(true).catch(() => {}), LIST_SETTLE_MS);
@@ -3231,7 +3235,9 @@ function watchList() {
   if (watching.socket) return;
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/api/fragments/watch`);
   watching.socket = ws;
+  const opening = setTimeout(() => ws.close(), LIST_OPEN_WAIT_MS + watching.wait);
   ws.onopen = () => {
+    clearTimeout(opening);
     watching.wait = 1000;
     listChanged();
   };
@@ -3241,6 +3247,7 @@ function watchList() {
     } catch {}
   };
   ws.onclose = () => {
+    clearTimeout(opening);
     watching.socket = null;
     // what the agent is doing goes until the socket is back to hear it
     renderChats();
