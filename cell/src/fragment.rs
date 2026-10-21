@@ -538,16 +538,7 @@ pub(crate) async fn ask(env: &Env, name: &str, path: &str, body: &Value) -> Cell
     crate::routed::ask_object(env, "FRAGMENT", name, path, body).await
 }
 
-pub(crate) fn json_response<T: serde::Serialize>(v: &T) -> CellResult<Response> {
-    Ok(Response::from_json(v)?.with_headers(no_store()))
-}
-
-pub(crate) fn no_store() -> Headers {
-    let h = Headers::new();
-    h.set("content-type", "application/json").expect("static header");
-    h.set("cache-control", "no-store").expect("static header");
-    h
-}
+pub(crate) use crate::json_response::json_response;
 
 pub(crate) fn decode_segment(s: &str) -> String {
     url::form_urlencoded::parse(format!("x={}", s.replace('+', "%2B")).as_bytes()).next().map(|(_, v)| v.into_owned()).unwrap_or_default()

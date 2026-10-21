@@ -45,6 +45,7 @@ mod export;
 mod files;
 mod fragment;
 mod jobs;
+mod json_response;
 mod js;
 mod keys;
 mod ledger;
@@ -599,9 +600,7 @@ fn proven_key(proof: &str, req: &Request, url: &Url, signer_key: &str) -> CellRe
     Ok(key)
 }
 
-pub(crate) fn json_answer<T: serde::Serialize>(v: &T) -> CellResult<Response> {
-    Ok(Response::from_json(v)?)
-}
+pub(crate) use json_response::json_answer;
 
 /// An identity's fragments, as its `Principal` cell lists them.
 pub(crate) async fn listed(env: &Env, identity: &str) -> CellResult<FragmentList> {
