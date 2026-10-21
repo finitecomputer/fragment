@@ -3452,7 +3452,7 @@ async function start(open) {
   const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);
   if (settings) await openSettings(false);
   else if (pick) openChat(pick);
-  else if (state.guest) guestHome(mine.offer);
+  else if (state.guest) guestHome(mine);
   else notice("No chats yet", "Make an agent to start.");
   // after a reload for a new release, its windows where they were
   reopenWindows(settings);
@@ -3471,7 +3471,7 @@ function setGuest(guest) {
 // With no chat to show: the first app shared with them in its window, and
 // beside it what a guest may do, what a seat gives (the welcome's), and
 // who is signed in, with another account.
-function guestHome(offer) {
+function guestHome(mine) {
   const app = shown(apps())[0];
   if (app) openApp(app.name);
   const seat = el("a", "allow", "Get a seat");
@@ -3481,7 +3481,7 @@ function guestHome(offer) {
     at(WELCOME);
     welcome().catch((err) => notice("This page did not load", err.message));
   };
-  notice("You're a guest", [`You see and edit what people share with you: it shows in the sidebar as they share it. ${seatGives(offer)}`, noSeatSaid()], [seat, switchForm("/", "allow")]);
+  notice("You're a guest", [`You see and edit what people share with you: it shows in the sidebar as they share it. ${seatGives(mine.offer, mine.billingEnabled)}`, noSeatSaid()], [seat, switchForm("/", "allow")]);
 }
 
 start().catch((e) => {

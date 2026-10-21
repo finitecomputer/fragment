@@ -126,6 +126,10 @@ pub struct SeatStatus {
     #[serde(flatten)]
     pub mine: MySeat,
     pub guest: bool,
+    /// This deployment has Stripe configured. When false, seats are
+    /// operator comps only; pages offer no checkout, packs or portal.
+    #[serde(default)]
+    pub billing_enabled: bool,
     pub offer: Offer,
 }
 

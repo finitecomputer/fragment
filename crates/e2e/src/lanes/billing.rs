@@ -87,6 +87,7 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{:?}", asked.form),
     );
     let before = seat(api, &ann);
+    s.ok("GET /api/seat enables purchases when Stripe is configured", before["billingEnabled"] == true, &before);
     let none = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{org}"), None)?;
     s.ok(
         "before they pay, nothing is made: they hold no seat and are in no org, the org their Checkout names is none (404), and Stripe made no customer",

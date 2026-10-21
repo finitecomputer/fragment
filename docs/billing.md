@@ -483,6 +483,10 @@ Checked against finite-mono's code (2026-10-08):
   portal}` (store names and the portal configuration's id). Without
   it, billing is off: seats are comped only. That covers dev, the
   e2e's other sections, and a self-hosted deployment.
+  `GET /api/seat` reports this as `billingEnabled`. When false, the
+  welcome and Billing keep comp offers and account switching, name an
+  operator as the next step for a seat, and offer no Checkout, trial,
+  credit purchase, renewal, paid-seat addition or billing portal.
 - **`cargo xtask stripe check --config <file>`** is finite-mono's
   readiness audit in Rust, read-only. It checks:
   - the seat's and the pack's Prices by lookup key (amount, USD,

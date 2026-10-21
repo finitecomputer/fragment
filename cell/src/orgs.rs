@@ -82,7 +82,10 @@ async fn seat_itself(env: &Env, bytes: &[u8], by: By, method: Method) -> CellRes
                     fragment_core::org::guest(false, ledger.plan, ledger.seat)
                 }
             };
-            json_answer(&SeatStatus { mine, guest, offer: fragment_core::stripe::offer() })
+            // The same binding Config uses to enable Stripe; reading its
+            // presence needs no secret value or vendor call.
+            let billing_enabled = crate::keys::bound(env, fragment_core::secrets_store::STRIPE_KEY);
+            json_answer(&SeatStatus { mine, guest, billing_enabled, offer: fragment_core::stripe::offer() })
         }
         Method::Put => {
             let set: SetSleeps = body(bytes)?;

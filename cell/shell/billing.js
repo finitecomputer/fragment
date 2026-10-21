@@ -19,11 +19,13 @@
 // `returning`). Every value is text, never markup.
 
 const KIND = { seat: "Seat whose computer sleeps when idle", seat_always_on: "Always-on seat" };
+const BILLING_OFF = "Billing is not enabled here. Ask an operator for a seat.";
 // an offer's amount, in whole dollars where it is whole ($200, not $200.00)
 const price = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 0 });
 
 /** What a seat gives a guest, at its price (`offer`: `GET /api/seat`'s). */
-export function seatGives(offer) {
+export function seatGives(offer, billingEnabled) {
+  if (!billingEnabled) return BILLING_OFF;
   return `A seat, ${price(offer.seatMicros)} a month, gives you agents of your own, the always-on computer they run on, apps of your own, and ${price(offer.includedMicros)} of credit a month.`;
 }
 
@@ -132,6 +134,7 @@ export function seatOffer(helpers, mine, trial) {
   const { el } = h;
   if (!mine) return [el("p", "form-error", "The seat could not be read: reload to try again.")];
   const offering = mine.offered.length ? [el("h2", null, "Offered to you"), ...offers(mine, async () => location.assign("/"))] : [];
+  if (!mine.billingEnabled) return [...offering, el("p", "muted", BILLING_OFF)];
   if (mine.org && !mine.admin) return [...offering, el("p", "muted", `You are in ${mine.org.name}: its admins give you a seat.`)];
   const { offer } = mine;
   const said = el("p", "form-error");
@@ -212,7 +215,8 @@ export async function billingSections(helpers, ledger, mine, back) {
     if (seat.trialEnds) billing.append(line("Trial ends", new Date(seat.trialEnds * 1000).toLocaleDateString()));
     if (!seat.good) {
       billing.append(el("p", "settings-warning", "Your seat lapsed: your agents are stopped. Nothing of yours is gone."));
-      if (seat.admin) billing.append(actionLine("Renewal", button("Pay again", () => goCheckout({}))));
+      if (!mine.billingEnabled) billing.append(el("p", "muted", BILLING_OFF));
+      else if (seat.admin) billing.append(actionLine("Renewal", button("Pay again", () => goCheckout({}))));
       else billing.append(el("p", "muted", "Ask your org's admin to pay for it again."));
     }
     if (seat.good && seat.kind === "seat_always_on") {
@@ -232,7 +236,7 @@ export async function billingSections(helpers, ledger, mine, back) {
       billing.append(label);
     }
   } else if (mine.guest) {
-    billing.append(el("p", "muted", `You are a guest: you see and edit what is shared with you. ${seatGives(offer)}`));
+    billing.append(el("p", "muted", `You are a guest: you see and edit what is shared with you. ${seatGives(offer, mine.billingEnabled)}`));
     // the seats and a trial code are the welcome's, as a new person's are;
     // or the account a seat of theirs waits under (who is signed in, said)
     const get = el("a", "quiet", "Get a seat");
@@ -249,19 +253,19 @@ export async function billingSections(helpers, ledger, mine, back) {
   // credit is a seat's (or a plan the deployment gives): a guest pays for
   // nothing, so has none to show
   if (ledger && !mine.guest) {
-    const topUp = seat?.good ? button(`Buy ${price(offer.packMicros)} of credit`, async () => location.assign((await h.api("POST", "/api/billing/packs", {})).url)) : null;
+    const topUp = mine.billingEnabled && seat?.good ? button(`Buy ${price(offer.packMicros)} of credit`, async () => location.assign((await h.api("POST", "/api/billing/packs", {})).url)) : null;
     billing.append(line("Credit this month", `${usd(ledger.availableMicros)} left`, topUp));
   }
-  if (!alone) return org ? [billing, orgSection(org, offer, mine.pays)] : [billing];
+  if (!alone) return org ? [billing, orgSection(org, offer, mine.pays, mine.billingEnabled)] : [billing];
   const more = el("div", "settings-actions");
-  const others = el("button", "quiet", "Add seats for others");
+  const others = el("button", "quiet", mine.billingEnabled ? "Add seats for others" : "Manage organization");
   others.type = "button";
   others.onclick = () => {
     more.closest(".settings-action-line")?.remove();
-    billing.after(orgSection(org, offer, mine.pays));
+    billing.after(orgSection(org, offer, mine.pays, mine.billingEnabled));
   };
   // only who pays opens its billing (Stripe's portal renews it, and changes its card)
-  more.append(...(mine.pays ? [portal()] : []), others);
+  more.append(...(mine.billingEnabled && mine.pays ? [portal()] : []), others);
   billing.append(actionLine("Organization", more));
   return [billing];
 }
@@ -277,7 +281,7 @@ function portal() {
  * own seat and place are theirs alone to give up, and while its
  * subscription lives they stay (the platform says to cancel it first).
  */
-function orgSection(org, offer, pays) {
+function orgSection(org, offer, pays, billingEnabled) {
   const { el, section, actionLine } = h;
   const box = section(org.name ? `Org: ${org.name}` : "Org");
   if (org.error) {
@@ -344,11 +348,11 @@ function orgSection(org, offer, pays) {
     }
   };
   box.append(
-    actionLine("Add a seat", add),
+    ...(billingEnabled ? [actionLine("Add a seat", add)] : []),
     actionLine("Add an admin", admin),
-    el("p", "muted", `A seat or an admin's place is offered by mail, and is theirs once they accept it (someone in the org is given a seat at once). A seat, ${price(offer.seatMicros)} a month and always on, bills from its offer, prorated; one removed is credited on the next invoice. ${pays ? "Cancel in Payment and invoices." : "Its billing is who pays's."}`),
+    el("p", "muted", billingEnabled ? `A seat or an admin's place is offered by mail, and is theirs once they accept it (someone in the org is given a seat at once). A seat, ${price(offer.seatMicros)} a month and always on, bills from its offer, prorated; one removed is credited on the next invoice. ${pays ? "Cancel in Payment and invoices." : "Its billing is who pays's."}` : BILLING_OFF),
   );
-  if (pays) {
+  if (billingEnabled && pays) {
     const pay = el("div", "settings-actions");
     pay.append(portal());
     box.append(actionLine("Payment", pay));
