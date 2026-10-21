@@ -164,7 +164,17 @@ function patch(box, rows) {
   while (box.children.length > next.length) box.lastElementChild.remove();
 }
 
-// `text`: a line, or lines and elements; `action`: one, or several in a row
+// The notice's generation: each notice shown, and each one taken away (a
+// chat or settings opened, settings loaded again), is a new one. What
+// finishes later says or takes away a notice only under the generation it
+// began under, never over a newer notice or another page (#457 review).
+let noticeGen = 0;
+function hideNotice() {
+  $("notice").hidden = true;
+  return ++noticeGen;
+}
+// `text`: a line, or lines and elements; `action`: one, or several in a row;
+// its generation
 function notice(title, text, action = null) {
   const n = $("notice");
   n.replaceChildren(el("strong", null, title));
@@ -175,6 +185,7 @@ function notice(title, text, action = null) {
     n.append(row);
   }
   n.hidden = false;
+  return ++noticeGen;
 }
 
 // ---- layout: sidebar | chat | viewer ----
@@ -901,7 +912,7 @@ function openChat(name, push = true) {
   $("frames").hidden = false;
   state.current = name;
   store.set(CURRENT, name);
-  $("notice").hidden = true;
+  hideNotice();
   if (!state.frames.has(name)) {
     const frame = frameOf(framed(name, setupFor(name) ? "/?setup=1" : "/"), titleOf(name), name);
     $("frames").append(frame);
@@ -1884,12 +1895,18 @@ function renderSettingsPage(page, sections) {
   };
   page.onscroll();
 }
-async function openSettings(push = true) {
+// `failed`: what the action that asked for this load says once it renders
+// (a failure's notice, [title, text]).
+async function openSettings(push = true, failed = null) {
   if (push) at(SETTINGS);
   // settings render with no notice: one of the page they came from stays
   // there, an action that worked takes its earlier failure's away, and
-  // one that failed says so once they have reloaded (the agent chip's)
-  $("notice").hidden = true;
+  // one that failed says so once this load renders, if nothing newer (a
+  // load, a page, a notice) has come since it began
+  const gen = hideNotice();
+  const tell = () => {
+    if (failed && gen === noticeGen) notice(...failed);
+  };
   state.page = "Settings";
   $("layout").classList.add("settings-view");
   $("frames").hidden = true;
@@ -1966,7 +1983,10 @@ async function openSettings(push = true) {
   const data = dataSection();
   // a guest has no agents to stop, nor a computer, skills or connections
   // for them, nor apps to publish: a seat to get comes first, then who they are
-  if (state.guest) return renderSettingsPage(page, [...billing, account, data]);
+  if (state.guest) {
+    renderSettingsPage(page, [...billing, account, data]);
+    return tell();
+  }
   const standing = ledger?.standing?.standing;
   if (standing && standing !== "ok") {
     billing[0].append(el("p", "settings-warning", [STOPPED[standing] ?? "Your agents are stopped", WHY[ledger.standing.why]].filter(Boolean).join(": ") + "."));
@@ -2038,6 +2058,7 @@ async function openSettings(push = true) {
   const skills = await skillsSection();
   renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, buildSection(), data]);
   renderAgentFaces();
+  tell();
 }
 
 // Building with a coding agent: one prompt that names this platform's
@@ -2054,16 +2075,22 @@ function buildSection() {
   const copy = el("button", "quiet", "Copy");
   copy.type = "button";
   copy.dataset.action = "copy-prompt";
-  copy.onclick = () =>
+  // the notice of its last copy that failed: one that works takes that
+  // away, and no newer notice
+  let failed = null;
+  copy.onclick = () => {
+    const gen = noticeGen;
     navigator.clipboard.writeText(prompt.value).then(
       () => {
-        // copied: an earlier copy's "not copied" is no longer so
-        $("notice").hidden = true;
+        if (gen === noticeGen && gen === failed) hideNotice();
         copy.textContent = "Copied";
         setTimeout(() => (copy.textContent = "Copy"), 1500);
       },
-      (err) => notice("The prompt was not copied", err.message),
+      (err) => {
+        if (gen === noticeGen) failed = notice("The prompt was not copied", err.message);
+      },
     );
+  };
   const actions = el("div", "settings-actions");
   actions.append(copy);
   const yourself = el("details", "settings-install");
@@ -2656,8 +2683,11 @@ function connectionsSection(linked, uses) {
           } catch (e) {
             refused = e;
           }
-          await openSettings(false);
-          if (refused) notice("That was not changed", refused.message);
+          // a failure is said by the reload, while the agent may use it or
+          // not as before (a newer press may have changed it since)
+          const was = state.agents.get(a.identity) ?? a;
+          const unchanged = (was.connections == null || was.connections.includes(p.provider)) === allowed;
+          await openSettings(false, refused && unchanged ? ["That was not changed", refused.message] : null);
         };
         who.append(chip);
       }

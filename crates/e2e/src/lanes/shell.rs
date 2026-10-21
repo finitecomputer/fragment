@@ -2452,6 +2452,140 @@ fn notice_ui(s: &mut Suite, b: &mut Browser, page: &Page, chat: &str, shots: &st
         json!({ "loaded": loaded, "seen": seen }),
     );
     b.viewport(page, 1280, 800, false)?;
+    notice_late_ui(s, b, page, chat)
+}
+
+/// Where a held call waits: before it is sent (the platform has not had
+/// it), or with the platform's answer in (it has done it).
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Hold {
+    Request,
+    Answer,
+}
+
+/// The shell's next `method` call whose path matches `re` (a regular
+/// expression's source) held at `at` until `window.__held.release()`;
+/// let go with `release('refuse')`, it is answered as a failing network's
+/// is (a 503 with a message), never sent if it was held before it was.
+/// Every call counted while it is under way (`inflight`), and when the
+/// last one ended (`quiet`), so a check can wait for what the held call let
+/// go to finish (`HELD_SETTLED`); `restore()` puts the page's fetch back.
+pub(super) fn hold(method: &str, re: &str, at: Hold) -> String {
+    format!(
+        "(() => {{ const real = window.fetch; const re = new RegExp({}); const before = {}; let holding = true; \
+         const held = window.__held = {{ release: null, inflight: 0, quiet: performance.now(), restore: () => {{ window.fetch = real; }} }}; \
+         const wait = () => new Promise((go) => {{ held.release = go; }}); \
+         const refused = () => new Response(JSON.stringify({{ error: 'unavailable', message: 'refused for the test' }}), {{ status: 503, headers: {{ 'content-type': 'application/json' }} }}); \
+         window.fetch = async (url, o) => {{ const hold = holding && o?.method === {} && re.test(String(url)); if (hold) holding = false; held.inflight++; \
+         try {{ if (hold && before && (await wait()) === 'refuse') return refused(); const r = await real(url, o); if (hold && !before && (await wait()) === 'refuse') return refused(); return r; }} \
+         finally {{ held.inflight--; held.quiet = performance.now(); }} }}; return true; }})()",
+        js(re),
+        at == Hold::Request,
+        js(method)
+    )
+}
+
+/// Once a held call (`hold`) is let go: none of the page's calls under
+/// way, and none for half a second.
+pub(super) const HELD_SETTLED: &str = "window.__held.inflight === 0 && performance.now() - window.__held.quiet > 500";
+
+/// What answers late is said only where it still belongs (#457 review):
+/// an agent's chip whose save is refused, its reload's read held while a
+/// chat opens, says nothing over the chat; held again while settings open
+/// anew and the chip, pressed again, saves, the older reload let go brings
+/// back no failure; a Copy that answers after a chip's failure is said
+/// leaves that failure; and a save held, the chip pressed again from
+/// settings opened anew (it saves), then the first refused, says nothing:
+/// the change it asked for is there. The chip as it was, after.
+fn notice_late_ui(s: &mut Suite, b: &mut Browser, page: &Page, chat: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let chip = "#settings-connections [data-provider=\"perplexity\"] [data-agent]";
+    let pressed = |v: &str| format!("document.querySelector({})?.getAttribute('aria-pressed') === {}", js(chip), js(v));
+    let press = format!("(document.querySelector({}).click(), true)", js(chip));
+    let fresh = format!("location.pathname === '/settings' && document.querySelector({})?.disabled === false", js(chip));
+    let refuse = refuse_once("PUT", "/agents/[^/]+/connections$");
+    let hidden = "document.getElementById('notice').hidden";
+    let open_settings = "(document.getElementById('settings').click(), true)";
+    anyhow::ensure!(b.until(page, &format!("{fresh} && {}", pressed("true")), wait), "settings, the chip pressed");
+
+    // refused, its reload held, a chat opened, then let go
+    b.eval(page, &hold("GET", "^/api/connections$", Hold::Answer))?;
+    b.eval(page, &refuse)?;
+    b.eval(page, &press)?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    open_row(b, page, chat, wait)?;
+    b.eval(page, "(window.__held.release?.(), true)")?;
+    let settled = b.until(page, HELD_SETTLED, wait);
+    let seen = b.eval(page, &format!("({{ hidden: {hidden}, path: location.pathname, settings: !document.getElementById('settings-page').hidden }})"))?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "a chip's refused save whose reload answers once a chat is open says nothing over the chat",
+        held && settled && seen == json!({ "hidden": true, "path": "/", "settings": false }),
+        &seen,
+    );
+
+    // refused, its reload held; settings opened anew, the chip saved; then let go
+    b.eval(page, open_settings)?;
+    anyhow::ensure!(b.until(page, &format!("{fresh} && {}", pressed("true")), wait), "settings again, the chip pressed");
+    b.eval(page, &hold("GET", "^/api/connections$", Hold::Answer))?;
+    b.eval(page, &refuse)?;
+    b.eval(page, &press)?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    b.eval(page, open_settings)?;
+    let newer = b.until(page, &format!("{fresh} && {}", pressed("true")), wait);
+    b.eval(page, &press)?;
+    let saved = b.until(page, &format!("{fresh} && {} && {hidden}", pressed("false")), wait);
+    b.eval(page, "(window.__held.release?.(), true)")?;
+    let settled = b.until(page, HELD_SETTLED, wait);
+    let after = b.eval(page, NOTICE_SEEN)?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "a chip's refused save whose reload answers after settings opened anew and the chip saved there brings back no failure",
+        held && newer && saved && settled && b.eval(page, hidden)? == true,
+        &after,
+    );
+    // (an older load may have drawn the chip as it was: settings read again)
+    b.reload(page)?;
+    anyhow::ensure!(b.until(page, &format!("{fresh} && {}", pressed("false")), wait), "settings reloaded, the chip not pressed");
+    b.eval(page, &press)?;
+    anyhow::ensure!(b.until(page, &format!("{fresh} && {}", pressed("true")), wait), "the chip pressed again");
+
+    // a Copy held; a chip's failure said; then copied
+    b.eval(page, "(window.__copy = null, navigator.clipboard.writeText = (text) => new Promise((done) => { window.__copy = () => { window.__copied = text; done(); }; }), document.querySelector('#settings-page [data-action=copy-prompt]').click(), true)")?;
+    let copying = b.until(page, "typeof window.__copy === 'function'", wait);
+    b.eval(page, &refuse)?;
+    b.eval(page, &press)?;
+    let told = format!("(() => {{ const v = {NOTICE_SEEN}; return v.ok && v.text.startsWith('That was not changed') && v.settings; }})()");
+    let failed = b.until(page, &format!("{told} && {fresh}"), wait);
+    b.eval(page, "(window.__copied = null, window.__copy(), true)")?;
+    let copied = b.until(page, "window.__copied !== null", wait);
+    let kept = b.eval(page, &told)?;
+    b.eval(page, "(navigator.clipboard.writeText = async (text) => { window.__copied = text; }, true)")?;
+    s.ok(
+        "a Copy that answers after a chip's failure is said leaves that failure said",
+        copying && failed && copied && kept == true,
+        b.eval(page, NOTICE_SEEN)?,
+    );
+
+    // a save held; settings opened anew, the chip saved there; the first refused
+    b.eval(page, &hold("PUT", "/agents/[^/]+/connections$", Hold::Request))?;
+    b.eval(page, &press)?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    b.eval(page, open_settings)?;
+    let newer = b.until(page, &format!("{fresh} && {}", pressed("true")), wait);
+    b.eval(page, &press)?;
+    let saved = b.until(page, &format!("{fresh} && {} && {hidden}", pressed("false")), wait);
+    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
+    let settled = b.until(page, HELD_SETTLED, wait);
+    let quiet = b.eval(page, &format!("{hidden} && {}", pressed("false")))?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "a chip's save refused after the chip, pressed again from settings opened anew, saved the same change says nothing: the change is there",
+        held && newer && saved && settled && quiet == true,
+        b.eval(page, NOTICE_SEEN)?,
+    );
+    b.eval(page, &press)?;
+    anyhow::ensure!(b.until(page, &format!("{fresh} && {}", pressed("true")), wait), "the chip as it was");
     Ok(())
 }
 
