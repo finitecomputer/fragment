@@ -34,7 +34,7 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_HOST_SUFFIX` | fragments are served from `<name>.<suffix>` (any other name under it is 404, never the platform; the suffix's own name is the platform's, or redirects to it: Hosts, below). Every deployment names one: an isolate without it does not start |
 | `FRAGMENT_HOST_LABEL_SUFFIX` | a branch deployment's mark, `--<branch>` (a branch is 1 to 16 of lowercase letters, digits, and single dashes inside, as `cargo xtask deploy` makes them; an isolate with another does not start): its fragments are `<name>--<branch>.<suffix>`, one DNS label beside the other branches' in one zone, and the mark takes from the room its labels have (Names, below) |
 | `CODESTORAGE_REPO_PREFIX` | what this deployment's repos are named with first (a branch's `<branch>--`), so deployments sharing an org never share a repo |
-| `FRAGMENT_POLL_INTERVAL_S` | how often a busy fragment's pass runs (default 300): one whose pins may lag its repo (a storage token was minted for it, or a move failed to follow, in the last day), which polls code.storage for its branches (the backstop for a push no one refreshed), or with a run in flight (checked against its Workflow), an ended run's reservation to give back, or a template or the agent it declares still to land. Any other fragment's pass is daily, and polls nothing: every move the platform makes or is told of (`refresh`) is followed at once |
+| `FRAGMENT_POLL_INTERVAL_S` | how often a busy fragment's pass runs (default 300): one whose pins may lag its repo (a storage token was minted for it, or a move failed to follow, in the last day), which polls code.storage for its branches (the backstop for a push no one refreshed), or with a run in flight (checked against its Workflow), or a template or the agent it declares still to land. Any other fragment's pass is daily, and polls nothing: every move the platform makes or is told of (`refresh`) is followed at once |
 | `FRAGMENT_JOB_RETRY_DELAY_S` | a failed job step's first retry delay, doubling over 4 retries (default 10) |
 | `FRAGMENT_EGRESS_LOCAL` | `allow` lets jobs fetch loopback and private addresses, and takes a connection's http:// consent URL (dev and e2e fakes); never on a shared fleet. It also makes a fleet local for its test levers (Test levers, below) |
 | `FRAGMENT_BLOB_GRACE_S` | how long a blob no branch names is kept before it is deleted (default 7 days) |
@@ -1513,26 +1513,25 @@ pre-authenticated, and a text step on an OpenAI-compatible API
 (OpenRouter, or Finite Private) carries the deployment's key, which the
 platform adds.
 
-Each paid step reserves its worst case on the owner's ledger before its
-call (text: its request's bytes as tokens in and its tier's capped
-`max_tokens` out; an image: a 1024×1024 image's 4 tiles at its steps; a
-decision: its model's context window),
-under the step's reference,
-`step:<fragment>@<incarnation>/run/<run>/attempt/<attempt>/step/<index>`.
-It keeps what the call bought beside the step (by
+Each paid step asks the gate before its call (docs/ledger.md, "The
+gate"; decision 62): the owner's standing, and the fragment's cap when
+someone else's run spends there, as the fragment's isolate heard them
+within the minute; a ledger that does not answer refuses nothing.
+Nothing is held. The step keeps what the call bought beside it (by
 `<fragment>@<incarnation>/run/<run>/step/<index>`, the same in every
-attempt), then settles from the usage the call reported (an image's
-tiles from its JPEG's size, and its steps; a text call that reported no
-usage is charged its reservation, `ai.cost-missing`, never nothing). So:
+attempt) together with its charge: the usage the call reported (an
+image's tiles from its JPEG's size, and its steps) as one row in the
+fragment's meter outbox, `step:<fragment>@<incarnation>/run/<run>/step/<index>`,
+which the ledger charges once by that reference, and its price on the run
+(`costMicros`). A call that reported no usage is charged nothing, said
+aloud (`ai.cost-missing`, `ledger.unknown-usage`). So:
 
 - a step tried again after its call answered reuses what it kept and
-  never calls again: a settle that did not land lands, and an image whose
-  commit failed commits from its kept bytes (bug 2). A replayed run
-  reuses what its earlier attempts paid for, and pays only for the rest;
-- a step that fails for good before its call used anything (a refusal
-  from the model, the high tier) releases its reservation, and so does a
-  step whose retries ran out, and any hold of a run that ended (bug 3,
-  `ai.released`);
+  never calls again: an image whose commit failed commits from its kept
+  bytes (bug 2), and the call is charged once. A replayed run reuses
+  what its earlier attempts paid for, and pays only for the rest;
+- a step that fails for good (a refusal from the model, the high tier,
+  its retries run out) is charged nothing: nothing was held;
 - a step the owner's ledger refuses (no credit, a guest, the fragment's
   cap) fails with the ledger's reason, 402 `budget_used_up` in its words
   (uncaught, the run is held; replay it after a top-up or next month).
@@ -1558,10 +1557,10 @@ The steps:
   in git under 1 MiB (past an app's 256 KiB write limit: bug 1), a blob
   from 1 MiB. `prompt` is 1 to 2048 characters and `steps` 1 to 8 (4
   unless named); any other key (a model, an aspect ratio) is refused. An
-  answer that is no JPEG is refused and charged its reservation
+  answer that is no JPEG is refused and charged nothing, said aloud
   (`ai.image-refused`).
 - `job.ai.video(…)` is refused, saying "video steps are off until they
-  run on Cloudflare" (the debt ledger); nothing is reserved or called.
+  run on Cloudflare" (the debt ledger); nothing is called or charged.
 
 A text model's 429 or 5xx is answered by the fallback model (Models, below),
 sent the same request (its tools too); when the fallback fails too, the
@@ -1764,15 +1763,15 @@ distribution (within 0.01). Confidence is the model's estimate, not a
 guarantee: an app owns its review thresholds, and keeps the corrections
 people make.
 
-**The money.** A decision reserves its model's whole context window
-(1,471 micro-dollars on `clef-flash`, 24,773 on `clef`, 15,120 on
-`clef-omni`, at the default book's fee and margin): Clef scores every
-question in one pass over one context, media and questions included,
-and a request past it fails, so no call's input exceeds it. It settles
-at `usage.input_tokens` (media is counted as input tokens) at its
-model's input price; output is never charged. A call that reports no
-usage is charged its reservation (`ai.cost-missing`); one that reports
-more is charged what it reports (docs/ledger.md).
+**The money.** A decision is charged after its answer at
+`usage.input_tokens` (media is counted as input tokens) at its model's
+input price; output is never charged. Clef scores every question in one
+pass over one context, media and questions included, and a request past
+it fails, so no call's input exceeds its model's context window (at most
+1,471 micro-dollars on `clef-flash`, 24,773 on `clef`, 15,120 on
+`clef-omni`, at the default book's fee and margin). A call that reports
+no usage is charged nothing, said aloud (`ai.cost-missing`); one that
+reports more is charged what it reports (docs/ledger.md).
 
 A job sorting a photo or a voice note someone uploaded (the page
 uploads it with `fragment.blob(file)` and calls `sort({sha256, type})`):

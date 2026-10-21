@@ -201,7 +201,7 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
         let r = api.op(&owner, &name, op, id, input)?;
         Ok(settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait))
     };
-    // a run with no charge (none reserved, or one released) names no cost
+    // a run with no charge (no call made, or none charged) names no cost
     let cost = |r: &Value| r["costMicros"].as_i64().unwrap_or(0);
     // tools, drafts, and streams held open (ai_tools.rs)
     super::ai_tools::text_tools(s, api, wait)?;
@@ -292,10 +292,12 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
     s.ai.fail_next(&[400]);
     let r = run("i4", "draw", json!({ "prompt": "refused", "path": "art/none.jpg" }))?;
     s.ok("its refusal holds the run, saying so, and charges nothing", r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("the model answered 400")) && cost(&r) == 0, &r);
+    let said = super::ledger::logged(s, "ledger.unknown-usage");
     let r = run("i5", "draw", json!({ "prompt": "a png", "path": "art/junk.jpg" }))?;
+    let loud = s.eventually(wait, || super::ledger::logged(s, "ledger.unknown-usage") > said);
     s.ok(
-        "an answer that is no JPEG is refused, saying why, and nothing is written; the call is charged",
-        r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("not a JPEG")) && s.fake.file_at(&repo, "main", "art/junk.jpg").is_none() && cost(&r) > 0,
+        "an answer that is no JPEG is refused, saying why, and nothing is written; what it drew is unknown, so it is charged nothing, said aloud",
+        r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("not a JPEG")) && s.fake.file_at(&repo, "main", "art/junk.jpg").is_none() && cost(&r) == 0 && loud,
         &r,
     );
     decisions(s, api, &owner, &name, wait)?;
@@ -305,12 +307,12 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
 /// Typed decisions (docs/api.md, AI): the Clef family by name, its media
 /// the fragment's own blobs (as a page's `fragment.blob(file)` and a chat's
 /// attachments name them) or small and inline, each refused before any
-/// reservation or vendor call when it is outside the contract, and billed
-/// for input tokens alone, once, whatever retries. Vendor-boundary
+/// vendor call when it is outside the contract, and billed for input
+/// tokens alone, once, whatever retries. Vendor-boundary
 /// fixtures prove the transport, the media and the money, not a real
 /// model's accuracy: that is the hosted lane's.
 fn decisions(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, name: &str, wait: Duration) -> Result<()> {
-    use super::ledger::entries;
+    use super::ledger::{charged, entries, logged};
     use base64::Engine;
     use fragment_core::decide::{Kind, Model};
     use fragment_core::price::{PriceBook, Usage};
@@ -323,9 +325,9 @@ fn decisions(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, name: &str,
     };
     let price = |m: Model, input: u64| PriceBook::defaults().price(&Usage::Tokens { model: m.id().into(), input, cached_input: 0, cache_write: 0, output: 0 }).map_or(-1, |p| p.charge);
     let cost = |r: &Value| r["costMicros"].as_i64().unwrap_or(0);
-    // the ledger's reservations of one run's steps, every attempt's
+    // the ledger's charges of one run's steps (one a step, whatever attempt made it)
     let paid = |r: &Value| -> Vec<Value> {
-        let marker = format!("/run/{}/attempt/", r["id"]);
+        let marker = format!("/run/{}/step/", r["id"]);
         entries(api, &owner_id, &format!("step:{name}@")).into_iter().filter(|e| e["ref"].as_str().is_some_and(|r| r.contains(&marker))).collect()
     };
     let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
@@ -425,7 +427,7 @@ fn decisions(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, name: &str,
         json!({ "run": r }),
     );
 
-    // refused before any reservation or vendor call, saying why
+    // refused before any vendor call, saying why
     let calls = s.ai.calls().len();
     let refusals = [
         ("audio on clef-flash", with(json!({ "media": [{ "sha256": memo_sha, "type": "audio/wav" }] })), "clef-omni alone"),
@@ -444,7 +446,7 @@ fn decisions(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, name: &str,
     for (i, (what, input, why)) in refusals.into_iter().enumerate() {
         let r = run(&format!("decision-invalid-{i}"), input)?;
         s.ok(
-            &format!("{what} is refused, saying why, before any reservation or vendor call"),
+            &format!("{what} is refused, saying why, before any vendor call"),
             r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains(why)) && cost(&r) == 0 && paid(&r).is_empty() && s.ai.calls().len() == calls,
             json!({ "run": r, "calls": s.ai.calls().len() - calls }),
         );
@@ -453,7 +455,7 @@ fn decisions(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, name: &str,
     let r = api.op(owner, name, "decide_inline", "decision-inline-big", json!({ "bytes": 200 * 1024 }))?;
     let r = settle(api, owner, name, started(&r), &["succeeded", "held"], wait);
     s.ok(
-        "inline media past a job's 256 KiB (a larger file is a blob) is refused, saying why, before any reservation or vendor call",
+        "inline media past a job's 256 KiB (a larger file is a blob) is refused, saying why, before any vendor call",
         r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("inline media is at most 256 KiB")) && cost(&r) == 0 && paid(&r).is_empty() && s.ai.calls().len() == calls,
         &r,
     );
@@ -462,10 +464,11 @@ fn decisions(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, name: &str,
     api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "fail-after-paid", "times": 1 })))?;
     let calls = s.ai.calls().len();
     let r = run("decision-retry-paid", with(json!({ "media": [{ "sha256": photo_sha, "type": "image/png" }] })))?;
+    s.eventually(wait, || !paid(&r).is_empty());
     let receipts = paid(&r);
     s.ok(
         "a decision about a photo that failed after its paid call retries from its kept answer: one vendor call, one charge",
-        r["status"] == "succeeded" && s.ai.calls().len() == calls + 1 && receipts.len() == 1 && receipts[0]["entry"]["end"]["end"] == "settled" && receipts[0]["entry"]["end"]["charge"] == r["costMicros"],
+        r["status"] == "succeeded" && s.ai.calls().len() == calls + 1 && receipts.len() == 1 && charged(&receipts[0]).is_some_and(|c| r["costMicros"] == c),
         json!({ "run": r, "paid": receipts }),
     );
     s.ai.fail_next(&[503]);
@@ -478,17 +481,18 @@ fn decisions(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, name: &str,
     );
     s.ai.fail_next(&[400]);
     let r = run("decision-400", opts.clone())?;
-    s.ok("a decision model's permanent refusal releases its reservation", r["status"] == "held" && cost(&r) == 0, &r);
+    s.ok("a decision model's permanent refusal is charged nothing", r["status"] == "held" && cost(&r) == 0 && paid(&r).is_empty(), &r);
 
-    // missing usage pays the reservation, the model's context; a malformed
-    // answer is paid too, and kept as a rejection: a replay never buys it again
+    // missing usage is charged nothing, said aloud; a malformed answer is
+    // kept as a rejection: a replay never buys it again
     s.ai.decide_next(&[json!({ "answers": {} })]);
-    let calls = s.ai.calls().len();
+    let (calls, said) = (s.ai.calls().len(), logged(s, "ledger.unknown-usage"));
     let held = run("decision-malformed", opts.clone())?;
+    let loud = s.eventually(wait, || logged(s, "ledger.unknown-usage") > said);
     let receipts = paid(&held);
     s.ok(
-        "a malformed paid decision is held, and missing usage is charged at the reservation: clef-flash's context window",
-        held["status"] == "held" && cost(&held) == price(Model::ClefFlash, Model::ClefFlash.context_tokens()) && receipts.len() == 1 && receipts[0]["entry"]["end"]["basis"] == "reservation",
+        "a malformed paid decision is held, and its missing usage is charged nothing, said aloud (ledger.unknown-usage)",
+        held["status"] == "held" && cost(&held) == 0 && receipts.is_empty() && loud,
         json!({ "run": held, "entries": receipts }),
     );
     api.signed(owner, "POST", &format!("/api/f/{name}/replay"), Some(&json!({ "run": held["id"] })))?;

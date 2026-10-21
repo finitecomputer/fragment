@@ -110,6 +110,9 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let cap = json!({ "id": "restart-c", "micros": 7_000_000 });
     let r2 = api.signed(&owner, "PUT", &format!("/api/f/{paid}/cap"), Some(&cap))?;
     anyhow::ensure!(r.status == 200 && r2.status == 200, "ledger setup: {r} {r2}");
+    // the step's charge goes with the fragment's meters, just after it
+    let step_rows = || api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": owner_id, "op": "entries", "prefix": format!("step:{paid}@") }))).map(|r| r.body["entries"].as_array().map_or(0, Vec::len)).unwrap_or(0);
+    s.eventually(Duration::from_secs(40), || step_rows() == 1);
     let balance = api.signed(&owner, "GET", "/api/ledger", None)?.body["balanceMicros"].clone();
     let (book_before, version) = book_of(&api, &owner)?;
     anyhow::ensure!(book_before["models"].is_array() && added_key_price(&book_before).is_none(), "the ledger's book before the restart: {book_before}");
@@ -285,11 +288,11 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.ok("and a revoked key stays revoked", r.status == 401, &r);
     let r = api.signed(&owner, "GET", "/api/ledger", None)?;
     let steps = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": owner_id, "op": "entries", "prefix": format!("step:{paid}@") })))?;
-    let settled = steps.body["entries"].as_array().is_some_and(|e| e.len() == 1 && e[0]["entry"]["end"]["end"] == "settled");
+    let settled = steps.body["entries"].as_array().is_some_and(|e| e.len() == 1 && super::ledger::charged(&e[0]).is_some());
     // the fragments' meters land when their batches do: requests and a few
     // dynamic workers' days (3000 µ$ each) may have charged the owner since
     let kept = r.body["balanceMicros"].as_i64().zip(balance.as_i64()).is_some_and(|(now, then)| now <= then && then - now < 50_000 && then < 51_000_000 && then > 50_000_000);
-    s.ok("after a restart the ledger is what it was: the step's charge settled, the balance less it", r.status == 200 && settled && kept, json!({ "ledger": r.body, "then": balance, "steps": steps.body }));
+    s.ok("after a restart the ledger is what it was: the step's charge, the balance less it", r.status == 200 && settled && kept, json!({ "ledger": r.body, "then": balance, "steps": steps.body }));
     let capped = r.body["fragments"].as_array().is_some_and(|f| f.iter().any(|f| f["fragment"] == paid.as_str() && f["capMicros"] == 7_000_000));
     let again = api.signed(&s.operator, "POST", &format!("/api/ledger/{owner_id}/grant"), Some(&grant))?;
     let other = api.signed(&s.operator, "POST", &format!("/api/ledger/{owner_id}/grant"), Some(&json!({ "id": "restart-g", "micros": 2_000_000, "by": op_id, "why": "" })))?;

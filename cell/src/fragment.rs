@@ -1274,7 +1274,6 @@ impl FragmentCell {
                 self.event("blobs.collect-failed", &e.message, json!({ "code": e.code }));
             }
             self.reconcile_runs().await;
-            self.release_ended_holds().await;
             if let Err(e) = self.sample_storage(false) {
                 self.event("meter.sample-failed", &e.message, json!({ "code": e.code }));
             }

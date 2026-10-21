@@ -114,9 +114,10 @@ impl FragmentCell {
         Ok(format!("{}@{}", self.name()?, self.must(MetaKey::CreatedAt)?))
     }
 
-    /// Keeps a row in the outbox, once by its reference.
-    pub(crate) fn outbox(&self, reference: &str, usage: Usage, at_ms: i64) -> CellResult<()> {
-        let row = MeterRow { reference: reference.to_string(), usage, fragment: Some(self.name()?), agent: None, computer: None, at_ms };
+    /// Keeps a row in the outbox, once by its reference: the fragment's
+    /// own usage, or an AI step's, made for `agent` when an agent's run.
+    pub(crate) fn outbox(&self, reference: &str, usage: Usage, at_ms: i64, agent: Option<String>) -> CellResult<()> {
+        let row = MeterRow { reference: reference.to_string(), usage, fragment: Some(self.name()?), agent, computer: None, at_ms };
         assert!(fragment_core::price::printable(reference, fragment_core::ledger::ID_MAX_BYTES), "a meter's reference is one the ledger takes: {reference}");
         let text = serde_json::to_string(&row).expect("a meter row serializes");
         self.exec("INSERT OR IGNORE INTO meter_rows (ref, row, batch) VALUES (?, ?, NULL)", vec![reference.into(), text.into()])
@@ -163,7 +164,7 @@ impl FragmentCell {
             return;
         }
         let id = &hex::encode(<sha2::Sha256 as sha2::Digest>::digest(version.as_bytes()))[..16];
-        let noted = self.meter_key().and_then(|key| self.outbox(&format!("dw:{key}:{id}:{day}"), Usage::DynamicWorkers { count: 1 }, now));
+        let noted = self.meter_key().and_then(|key| self.outbox(&format!("dw:{key}:{id}:{day}"), Usage::DynamicWorkers { count: 1 }, now, None));
         match noted {
             Ok(()) => *self.dw_noted.borrow_mut() = Some((version.to_string(), day)),
             Err(e) => console_error!("{}", json!({ "event": "meter.dw-failed", "message": e.message })),
@@ -191,7 +192,7 @@ impl FragmentCell {
         for (class, name, bytes) in [(StorageClass::Sqlite, "sqlite", sqlite), (StorageClass::R2, "r2", blobs)] {
             let byte_hours = u64::try_from(u128::from(bytes) * elapsed / HOUR_MS as u128).unwrap_or(u64::MAX);
             if byte_hours > 0 {
-                self.outbox(&format!("store:{key}:{name}:{now}"), Usage::Storage { class, byte_hours }, now)?;
+                self.outbox(&format!("store:{key}:{name}:{now}"), Usage::Storage { class, byte_hours }, now, None)?;
             }
         }
         self.set_meta(MetaKey::StorageSampledAt, &now.to_string())
@@ -213,7 +214,7 @@ impl FragmentCell {
             let count = u64::try_from(m.count).map_err(|_| CellError::host("a negative request count"))?;
             // a minute's row is at its end, or now for one that is not over (a test's)
             let at = ((m.minute + 1) * MINUTE_MS - 1).min(now);
-            self.outbox(&format!("req:{key}:{}", m.minute), Usage::Requests { count }, at)?;
+            self.outbox(&format!("req:{key}:{}", m.minute), Usage::Requests { count }, at, None)?;
         }
         if let Some(last) = minutes.last() {
             self.exec("DELETE FROM meter_requests WHERE minute <= ?", vec![SqlStorageValue::Integer(last.minute)])?;

@@ -19,19 +19,21 @@
 //! not that owner nor an agent of theirs (a run does not record whom an
 //! agent asked for, so an agent of the owner's counts as the owner).
 //!
-//! A paid step reserves its worst case under its reference
-//! (`step:<f>@<life>/run/<run>/attempt/<a>/step/<i>`: a replay is a new
-//! attempt, so a step released before may reserve again), makes its call,
-//! keeps what it bought beside the step (`paid`, by the step's key
-//! `<f>@<life>/run/<run>/step/<i>`, which a replay's attempt finds too),
-//! and then settles. A step tried again after its call answered reuses what
-//! was kept and never calls the vendor again (bug 2): a settle that did not
-//! land lands from the kept usage, and a commit that did not finish runs
-//! from the kept bytes. A step that fails for good before its call used
-//! anything releases its reservation (bug 3), as does any hold of a step
-//! whose retries ran out, or of a run that ended.
+//! A paid step asks the gate first (ledger.rs `may`: the owner's standing,
+//! and the fragment's cap when it is capped, as this isolate heard them
+//! within the minute; a ledger that does not answer refuses nothing:
+//! decision 62), makes its call, and keeps what it bought beside the step
+//! (`paid`, by the step's key `<f>@<life>/run/<run>/step/<i>`, which a
+//! retry and a replay's attempt find too) together with its charge: one
+//! row in the fragment's meter outbox, `step:<key>`, which the ledger
+//! charges once by that reference (meter.rs). A step tried again after its
+//! call answered reuses what was kept and never calls the vendor again
+//! (bug 2): a commit that did not finish runs from the kept bytes. Nothing
+//! is held before a call, so a step that fails for good gives nothing back
+//! (bug 3 is gone with the holds). A call that reported no usage is
+//! charged nothing, said aloud (`ledger.unknown-usage`).
 
-use fragment_core::ledger::{Release, Released, Reserve, Reserved, Settle, Spend};
+use fragment_core::ledger::Spend;
 use fragment_core::decide;
 use fragment_core::media;
 use fragment_core::models::{self as bounds, Answer, Bounded, Stream};
@@ -48,11 +50,9 @@ use crate::error::CellError;
 use crate::files::FileWrite;
 use crate::fragment::{FragmentCell, MetaKey};
 use crate::jobs::{permanent, RunRow, StepFail};
-use crate::ledger::{self, LedgerError};
+use crate::ledger::{self, LedgerError, MaySpend};
 use crate::ops::JOB_ID_PREFIX;
 
-/// Holds released per pass, of runs that ended.
-const RELEASE_BATCH: i64 = 25;
 /// A text step's drafts go at most this often: 4 a second.
 const DRAFT_EVERY_MS: i64 = 250;
 /// While its model has no words yet, its draft says it is thinking at
@@ -68,14 +68,12 @@ fn model_failure(status: u16, body: &[u8]) -> StepFail {
     }
 }
 
-/// A ledger's answer as a step's failure: a refusal is for good (no
-/// credit, a cap, a guest: the run is held, and replays after a top-up or
-/// next month), a ledger that did not answer is for now.
+/// The gate's refusal as a step's failure: for good (no credit, a cap, a
+/// guest: the run is held, and replays after a top-up or next month). The
+/// gate answers nothing else: a ledger that does not answer refuses
+/// nothing.
 fn ledger_fail(e: LedgerError) -> StepFail {
-    match e.refused {
-        Some(_) => permanent(e.message),
-        None => StepFail::Retry(format!("the owner's ledger: {}", e.message)),
-    }
+    permanent(e.message)
 }
 
 fn retry(e: CellError) -> StepFail {
@@ -87,7 +85,8 @@ struct Paying {
     /// The fragment's owner, who pays.
     owner: String,
     fragment: String,
-    /// The reservation's reference: this attempt's.
+    /// Its charge's reference, `step:<key>`: one charge whatever attempt
+    /// makes the call.
     reference: String,
     /// What the step bought is kept by this, the same in every attempt.
     key: String,
@@ -131,9 +130,11 @@ impl FragmentCell {
         let agents: Vec<Agent> =
             self.typed("SELECT owner FROM members WHERE principal = ? AND kind = 'agent'", vec![run.principal.as_str().into()]).map_err(retry)?;
         let by_owner = run.principal == owner || agents.first().is_some_and(|a| a.owner.as_deref() == Some(owner.as_str()));
+        let key = self.step_ref(run, index)?;
+        debug_assert!(key.starts_with(&format!("{fragment}@{created}/")), "a step's key is its fragment's life's");
         Ok(Paying {
-            reference: format!("step:{fragment}@{created}/run/{}/attempt/{}/step/{index}", run.id, run.attempt),
-            key: self.step_ref(run, index)?,
+            reference: format!("step:{key}"),
+            key,
             owner,
             fragment,
             run: run.id,
@@ -151,99 +152,68 @@ impl FragmentCell {
         Ok(Some(Kept { result, usage, settled: row.settled != 0 }))
     }
 
-    /// Keeps what a paid call bought, before it is settled: a step tried
-    /// again finds it and never calls again.
-    fn keep(&self, p: &Paying, result: &Value, usage: Option<&Usage>) -> Result<(), StepFail> {
-        let usage = usage.map(|u| serde_json::to_string(u).expect("a usage serializes"));
+    /// Keeps what a paid call bought, and its charge (`charge`), together: a
+    /// step tried again finds it and never calls again, and its call is
+    /// charged once.
+    async fn keep(&self, p: &Paying, result: &Value, usage: Option<Usage>, log_id: Option<&str>) -> Result<(), StepFail> {
+        let text = usage.as_ref().map(|u| serde_json::to_string(u).expect("a usage serializes"));
+        // one step, no await: kept and charged, or neither
         self.exec(
             "INSERT INTO paid (key, run, result, usage, settled, at) VALUES (?, ?, ?, ?, 0, ?) ON CONFLICT (key) DO NOTHING",
             vec![
                 p.key.as_str().into(),
                 SqlStorageValue::Integer(p.run),
                 result.to_string().into(),
-                usage.map_or(SqlStorageValue::Null, SqlStorageValue::from),
+                text.map_or(SqlStorageValue::Null, SqlStorageValue::from),
                 SqlStorageValue::Integer(crate::js::now_ms()),
             ],
         )
-        .map_err(retry)
+        .map_err(retry)?;
+        self.charge(p, usage, log_id).await
     }
 
-    /// Holds the step's worst case on the owner's ledger. A reference that
-    /// answers it was settled already is a call paid whose result was not
-    /// kept (the node died between the two): it is never made again.
-    async fn reserve(&self, p: &Paying, worst: Usage) -> Result<(), StepFail> {
-        let reserve = Reserve { reference: p.reference.clone(), spend: Spend::AiStep, worst, fragment: Some(p.fragment.clone()), agent: p.agent.clone(), capped: p.capped };
-        match ledger::ask(&self.env, &p.owner, &reserve).await.map_err(ledger_fail)? {
-            Reserved::Held { .. } => {}
-            Reserved::Settled { .. } => return Err(permanent("this step's call was made and paid, and what it bought was lost: replay the run to make it again")),
-            Reserved::Released => return Err(permanent("this step's reservation was released: replay the run to try it again")),
-        }
+    /// Charges a kept call, once (`paid.settled` says it is charged): its
+    /// usage as a row in the fragment's meter outbox, `step:<key>`, which
+    /// the alarm sends to the owner's ledger (meter.rs), and its price on
+    /// the run (`charges`, priced with the configured book, as the ledger
+    /// prices it). One that reported no usage is charged nothing, said
+    /// aloud.
+    async fn charge(&self, p: &Paying, usage: Option<Usage>, log_id: Option<&str>) -> Result<(), StepFail> {
+        let now = crate::js::now_ms();
+        let Some(usage) = usage else {
+            console_error!("{}", json!({ "event": "ledger.unknown-usage", "ref": p.reference, "logId": log_id, "why": "the step's call reported no usage: charged nothing" }));
+            return self.exec("UPDATE paid SET settled = 1 WHERE key = ?", vec![p.key.as_str().into()]).map_err(retry);
+        };
+        let micros = ledger::configured_book(self.cfg).price(&usage).map_or(0, |priced| priced.charge);
+        // one step, no await: the row, its price on the run, and the mark
+        self.outbox(&p.reference, usage, now, p.agent.clone()).map_err(retry)?;
         self.exec(
-            "INSERT INTO charges (ref, run, micros, held, at) VALUES (?, ?, 0, 1, ?) ON CONFLICT (ref) DO NOTHING",
-            vec![p.reference.as_str().into(), SqlStorageValue::Integer(p.run), SqlStorageValue::Integer(crate::js::now_ms())],
+            "INSERT INTO charges (ref, run, micros, held, at) VALUES (?, ?, ?, 0, ?) ON CONFLICT (ref) DO NOTHING",
+            vec![p.reference.as_str().into(), SqlStorageValue::Integer(p.run), SqlStorageValue::Integer(micros), SqlStorageValue::Integer(now)],
         )
-        .map_err(retry)
+        .map_err(retry)?;
+        self.exec("UPDATE paid SET settled = 1 WHERE key = ?", vec![p.key.as_str().into()]).map_err(retry)?;
+        // the outbox goes at the alarm's next pass
+        if let Err(e) = self.schedule().await {
+            console_error!("{}", json!({ "event": "meter.arm-failed", "message": e.message }));
+        }
+        Ok(())
     }
 
-    /// Settles a held call from what it reported (`None`: its worst case),
-    /// and records the charge on the run. Once: a settle again answers the
-    /// same.
-    async fn settle(&self, owner: &str, reference: &str, usage: Option<Usage>) -> Result<i64, StepFail> {
-        let settled = ledger::ask(&self.env, owner, &Settle { reference: reference.to_string(), usage }).await.map_err(ledger_fail)?;
-        self.exec("UPDATE charges SET micros = ?, held = 0 WHERE ref = ?", vec![SqlStorageValue::Integer(settled.charge), reference.into()]).map_err(retry)?;
-        Ok(settled.charge)
-    }
-
-    /// A kept call's settle, when it has not landed.
-    async fn settle_kept(&self, p: &Paying, kept: &Kept) -> Result<(), StepFail> {
+    /// A kept call's charge, when it has not been made (a call kept by a
+    /// release before charges went in the outbox).
+    async fn charge_kept(&self, p: &Paying, kept: &Kept) -> Result<(), StepFail> {
         if kept.settled {
             return Ok(());
         }
-        self.settle(&p.owner, &p.reference, kept.usage.clone()).await?;
-        self.exec("UPDATE paid SET settled = 1 WHERE key = ?", vec![p.key.as_str().into()]).map_err(retry)
+        self.charge(p, kept.usage.clone(), None).await
     }
 
-    /// A held call that failed for good, having used nothing: its
-    /// reservation goes back (bug 3). One the ledger answers settled keeps
-    /// its charge.
-    async fn release(&self, owner: &str, reference: &str) {
-        let released = ledger::ask(&self.env, owner, &Release { reference: reference.to_string() }).await;
-        let _ = match released {
-            Ok(Released::Back) | Err(LedgerError { refused: Some(_), .. }) => self.exec("DELETE FROM charges WHERE ref = ?", vec![reference.into()]),
-            Ok(Released::Settled { charge }) => self.exec("UPDATE charges SET micros = ?, held = 0 WHERE ref = ?", vec![SqlStorageValue::Integer(charge), reference.into()]),
-            // the ledger did not answer: the alarm releases it later (`release_ended_holds`)
-            Err(_) => Ok(()),
-        };
-    }
-
-    /// The hold of step `index` of a run's attempt whose retries ran out
-    /// (the job sees its error, and may go on): its reservation goes back.
-    pub(crate) async fn release_step(&self, run: &RunRow, index: u32) {
-        let Ok(p) = self.paying(run, index) else { return };
-        let held = self.count_of("SELECT COUNT(*) AS n FROM charges WHERE ref = ? AND held = 1", vec![p.reference.as_str().into()]).unwrap_or(0);
-        if held > 0 {
-            self.release(&p.owner, &p.reference).await;
-            self.event("ai.released", &format!("{}: its step failed for good; the reservation goes back", p.reference), json!({ "ref": p.reference }));
-        }
-    }
-
-    /// Holds of runs that ended before their calls settled (a release the
-    /// ledger did not answer, a run held mid-step): nothing will settle
-    /// them, so their reservations go back. A replay reserves again. From a
-    /// job that ended, and from the alarm for runs ended any other way.
-    pub(crate) async fn release_ended_holds(&self) {
-        let Ok(rows) = self.rows(
-            "SELECT ref FROM charges WHERE held = 1 AND run NOT IN (SELECT id FROM runs WHERE status IN ('queued', 'running')) LIMIT ?",
-            vec![SqlStorageValue::Integer(RELEASE_BATCH)],
-        ) else {
-            return;
-        };
-        let Some(owner) = rows.first().and_then(|_| self.must(MetaKey::Owner).ok()) else { return };
-        for row in rows {
-            let reference = row["ref"].as_str().expect("charges.ref is TEXT").to_string();
-            self.release(&owner, &reference).await;
-            self.event("ai.released", &format!("{reference}: its run ended before the call settled; the reservation goes back"), json!({ "ref": reference }));
-        }
+    /// Asks the gate whether the owner may pay for this step (ledger.rs
+    /// `may`): their standing, and the fragment's cap when it is capped.
+    async fn gate(&self, p: &Paying) -> Result<(), StepFail> {
+        let may = MaySpend { spend: Spend::AiStep, fragment: p.capped.then(|| p.fragment.clone()), by_owner: !p.capped };
+        ledger::may(&self.env, &p.owner, &may).await.map_err(ledger_fail)
     }
 
     /// Writes generated bytes to `path` on `main` once per step: in git, or
@@ -286,24 +256,24 @@ impl FragmentCell {
                 let call = media::image_call(image).map_err(|why| permanent(why.message()))?;
                 let p = self.paying(run, index)?;
                 if let Some(kept) = self.kept(&p.key)? {
-                    self.settle_kept(&p, &kept).await?;
+                    self.charge_kept(&p, &kept).await?;
                     let sha = kept.result["sha256"].as_str().ok_or_else(|| retry(CellError::host("a kept image names its bytes")))?.to_string();
                     let mut out = self.store_media(run, index, &image.path, self.kept_bytes(&sha).await?).await?;
                     out["mediaType"] = kept.result["mediaType"].clone();
                     return Ok(out);
                 }
-                self.reserve(&p, call.worst()).await?;
+                self.gate(&p).await?;
                 let (status, bytes, log_id) = crate::models::run(&self.env, media::IMAGE_MODEL, &call.input, &p.owner, p.agent.as_deref()).await.map_err(retry)?;
                 if status != 200 {
-                    return Err(self.unpaid(&p, model_failure(status, &bytes)).await);
+                    return Err(model_failure(status, &bytes));
                 }
                 let drawn = match media::image_of(&bytes) {
                     Ok(drawn) => drawn,
                     Err(fault) => {
-                        // it answered, so it was paid for: charged its reservation, then refused
-                        self.settle(&p.owner, &p.reference, None).await?;
-                        self.event("ai.image-refused", &format!("{}: {}; charged its reservation", p.reference, fault.message()), json!({ "ref": p.reference, "logId": log_id }));
-                        return Err(permanent(format!("{}: its call is charged at its worst case", fault.message())));
+                        // it answered, and what it drew is unknown: charged nothing, said aloud
+                        self.event("ai.image-refused", &format!("{}: {}; charged nothing", p.reference, fault.message()), json!({ "ref": p.reference, "logId": log_id }));
+                        console_error!("{}", json!({ "event": "ledger.unknown-usage", "ref": p.reference, "logId": log_id, "why": "the image's answer was no image: charged nothing" }));
+                        return Err(permanent(fault.message()));
                     }
                 };
                 let usage = call.usage(drawn.width, drawn.height);
@@ -311,54 +281,43 @@ impl FragmentCell {
                 // the bytes first, then the note of them: a step tried again finds both
                 self.put_blob_bytes(&sha, drawn.bytes.clone()).await.map_err(retry)?;
                 let kept = json!({ "sha256": sha, "size": drawn.bytes.len(), "mediaType": media::IMAGE_MEDIA_TYPE, "width": drawn.width, "height": drawn.height });
-                self.keep(&p, &kept, Some(&usage))?;
-                self.settle_kept(&p, &Kept { result: kept.clone(), usage: Some(usage), settled: false }).await?;
+                self.keep(&p, &kept, Some(usage), log_id.as_deref()).await?;
                 // test fleets: a failure after the paid call (bug 2's), which the retry survives
                 self.test_countdown(MetaKey::TestFailAfterPaid, "the step failed after its paid call").map_err(retry)?;
                 let mut out = self.store_media(run, index, &image.path, drawn.bytes).await?;
                 out["mediaType"] = kept["mediaType"].clone();
                 Ok(out)
             }
-            // nothing is reserved: no call is made
+            // nothing is charged: no call is made
             Step::AiVideo {} => Err(permanent(media::Refusal::VideoOff.message())),
             other => unreachable!("only AI steps are performed here, not {}", other.kind()),
         }
     }
 
-    /// A call refused for good, having used nothing: the reservation goes
-    /// back (bug 3), and the step fails with why. One that may pass keeps
-    /// its hold, and is made again.
-    async fn unpaid(&self, p: &Paying, failed: StepFail) -> StepFail {
-        if let StepFail::Permanent(_) = &failed {
-            self.release(&p.owner, &p.reference).await;
-        }
-        failed
-    }
-
-    /// `job.ai.decide`: checked, its blobs sized then read, reserved at
-    /// its model's context, called, and its paid answer (a malformed one
-    /// too, as a rejection) kept before it settles: a retry or a replay
-    /// never buys it again, nor reads its media again.
+    /// `job.ai.decide`: checked, its blobs sized then read, gated, called,
+    /// and its paid answer (a malformed one too, as a rejection) kept with
+    /// its charge: a retry or a replay never buys it again, nor reads its
+    /// media again.
     async fn step_decide(&self, run: &RunRow, index: u32, d: &Value) -> Result<Value, StepFail> {
         let p = self.paying(run, index)?;
         if let Some(kept) = self.kept(&p.key)? {
-            self.settle_kept(&p, &kept).await?;
+            self.charge_kept(&p, &kept).await?;
             return decision_result(kept.result);
         }
         let call = decide::bound(d, decide::Asker::Job).map_err(|e| permanent(e.message()))?;
         let blobs = self.decision_blobs(&call).await?;
-        self.reserve(&p, call.worst()).await?;
+        self.gate(&p).await?;
         let input = call.input(blobs);
         let answered = crate::models::run(&self.env, call.model.id(), &input, &p.owner, p.agent.as_deref()).await;
         drop(input);
         let (status, bytes, log_id) = answered.map_err(retry)?;
         if status != 200 {
-            return Err(self.unpaid(&p, model_failure(status, &bytes)).await);
+            return Err(model_failure(status, &bytes));
         }
         let response: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         let usage = call.usage(&response);
         if usage.is_none() {
-            self.event("ai.cost-missing", &format!("{}: the decision model reported no valid input usage; charged its reservation", p.reference), json!({ "ref": p.reference, "logId": log_id }));
+            self.event("ai.cost-missing", &format!("{}: the decision model reported no valid input usage; charged nothing", p.reference), json!({ "ref": p.reference, "logId": log_id }));
         }
         let result = match call.answer(&response) {
             Ok(answer) => answer,
@@ -368,8 +327,7 @@ impl FragmentCell {
                 json!({ "error": message })
             }
         };
-        self.keep(&p, &result, usage.as_ref())?;
-        self.settle_kept(&p, &Kept { result: result.clone(), usage, settled: false }).await?;
+        self.keep(&p, &result, usage, log_id.as_deref()).await?;
         self.test_countdown(MetaKey::TestFailAfterPaid, "the step failed after its paid call").map_err(retry)?;
         decision_result(result)
     }
@@ -398,25 +356,24 @@ impl FragmentCell {
         crate::js::blob_get(&self.env, &key, None).await.map_err(retry)
     }
 
-    /// `job.ai.text`: the model route's call, streamed (`read_text`), kept,
-    /// then settled. Its answer is the model's text, its message (`{role,
+    /// `job.ai.text`: the model route's call, streamed (`read_text`), kept
+    /// with its charge. Its answer is the model's text, its message (`{role,
     /// content, tool_calls?}`, never its reasoning), why it stopped, and its
     /// timing; a step tried again after it was kept answers what was kept.
     async fn step_text(&self, run: &RunRow, index: u32, t: &AiText, tried: Option<u32>) -> Result<Value, StepFail> {
         let p = self.paying(run, index)?;
         if let Some(kept) = self.kept(&p.key)? {
-            self.settle_kept(&p, &kept).await?;
+            self.charge_kept(&p, &kept).await?;
             return Ok(kept.result);
         }
         let tier = bounds::tier_named(t.model.as_deref()).map_err(|why| permanent(why.message()))?;
         let body = bounds::text_body(t).map_err(|why| permanent(why.message()))?;
         let drafting = bounds::draft_of(t).map(|d| self.drafting(run, d)).transpose()?;
-        let body_bytes = body.to_string().len();
         // where the deployment runs the tier (Workers AI, or an
         // OpenAI-compatible API: Finite Private on Finite's own), streamed
         let models = &crate::config::Config::from_env(&self.env).models;
         let bounded = models.capped(bounds::Named::Tier(tier)).and_then(|m| bounds::bound(m, body, true)).map_err(|why| permanent(why.message()))?;
-        self.reserve(&p, bounded.worst(body_bytes)).await?;
+        self.gate(&p).await?;
         let read = match self.read_text(&p, &bounded, drafting.as_ref()).await {
             Ok(read) => read,
             Err(failed) => {
@@ -429,14 +386,13 @@ impl FragmentCell {
         };
         let usage = bounds::usage_of(read.model, &read.used);
         if usage.is_none() {
-            self.event("ai.cost-missing", &format!("{}: the model reported no usage; the step is charged its reservation", p.reference), json!({ "ref": p.reference, "logId": read.log_id }));
+            self.event("ai.cost-missing", &format!("{}: the model reported no usage; the step is charged nothing", p.reference), json!({ "ref": p.reference, "logId": read.log_id }));
         }
         // how long it took (docs/api.md, AI): kept with what it bought
         let timing = json!({ "first_ms": read.first_ms, "ms": read.ms, "model": read.model, "calls": read.calls, "tries": tried });
         let a = &read.answer;
         let result = json!({ "text": a.content, "message": a.message(), "finish_reason": a.finish_reason, "model": read.model, "tier": tier, "usage": read.used, "timing": timing });
-        self.keep(&p, &result, usage.as_ref())?;
-        self.settle_kept(&p, &Kept { result: result.clone(), usage, settled: false }).await?;
+        self.keep(&p, &result, usage, read.log_id.as_deref()).await?;
         self.test_countdown(MetaKey::TestFailAfterPaid, "the step failed after its paid call").map_err(retry)?;
         Ok(result)
     }
@@ -457,9 +413,9 @@ impl FragmentCell {
     /// dropped (the gateway can hold it open for minutes after). With a
     /// draft: thinking from the call's start, its text so far at most every
     /// `DRAFT_EVERY_MS` (none past a record's size), and its whole text once
-    /// more at its end. A refusal for good releases the hold; a stream that
+    /// more at its end. A refusal is the step's failure; a stream that
     /// breaks, or ends before its answer says it is whole, is the step's to
-    /// try again under the same hold.
+    /// try again.
     async fn read_text(&self, p: &Paying, bounded: &Bounded<'static>, d: Option<&Drafting>) -> Result<Read, StepFail> {
         let t0 = crate::js::now_ms();
         if let Some(d) = d {
@@ -469,7 +425,7 @@ impl FragmentCell {
         let status = answer.status_code();
         if status != 200 {
             let body = crate::models::read_whole(&mut answer).await.unwrap_or_default();
-            return Err(self.unpaid(p, model_failure(status, &body)).await);
+            return Err(model_failure(status, &body));
         }
         let mut bytes = answer.stream().map_err(|e| retry(e.into()))?;
         let mut stream = Stream::answering().on(upstream);
