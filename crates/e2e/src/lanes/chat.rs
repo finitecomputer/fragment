@@ -651,11 +651,41 @@ fn commands_queued_and_quotes(s: &mut Suite, api: &Api, chrome: &mut Browser, pa
     chrome.press(page, "Tab", false)?;
     let completed = chrome.eval(page, "document.getElementById('text').value")?;
     s.ok("Tab writes the one picked", completed == "/usage", &completed);
-    chrome.press(page, "Enter", false)?;
+    // A command bubble appears optimistically, before its POST is persisted.
+    // Hold this one request to prove that distinction without a timing sleep.
+    chrome.eval(page, r#"(() => {
+      const original = window.fetch;
+      window.__commandFetch = original;
+      window.fetch = (input, init) => {
+        const url = new URL(input.url ?? String(input), location.href);
+        if (init?.method === 'POST' && url.pathname.endsWith('/__op/channels/chat')
+          && JSON.parse(init.body).input?.command === 'usage') {
+          return new Promise(resolve => { window.__releaseCommand = () => resolve(original(input, init)); });
+        }
+        return original(input, init);
+      };
+      return true;
+    })()"#)?;
     let bubble = "[...document.querySelectorAll('.msg.user.mine .bubble.command')].some((b) => b.textContent === '/usage')";
-    s.ok("Enter sends it, shown as the command it is", shows(chrome, bubble), chrome.eval(page, "document.getElementById('messages').innerText.slice(-300)")?);
-    let sent = chat_records().into_iter().find(|r| r["body"]["kind"] == "command" && r["body"]["command"] == "usage").unwrap_or_default();
-    s.ok("its record is `{kind: \"command\", command, to}`, the agent named", sent["body"] == json!({ "kind": "command", "command": "usage", "to": [o.identity] }), &sent);
+    let confirmed = "[...document.querySelectorAll('.msg.user.mine:not(.sending) .bubble.command')].some((b) => b.textContent === '/usage')";
+    let held = (|| -> Result<()> {
+        chrome.press(page, "Enter", false)?;
+        let posting = shows(chrome, "typeof window.__releaseCommand === 'function'") && shows(chrome, bubble);
+        let before = api.signed(o.owner, "GET", &format!("/api/f/{}/channels/chat", o.chat), None)?;
+        s.ok("a pending command has its optimistic bubble but no confirmed bubble or persisted record", posting && chrome.eval(page, confirmed)? == false && before.status == 200 && before.body["records"].as_array().is_some_and(|records| !records.iter().any(|r| r["body"]["kind"] == "command" && r["body"]["command"] == "usage")), &before);
+        Ok(())
+    })();
+    chrome.eval(page, "(window.fetch = window.__commandFetch, window.__releaseCommand?.(), delete window.__commandFetch, delete window.__releaseCommand, true)")?;
+    held?;
+    // The optimistic bubble is not a persistence barrier. Wait for the server
+    // record, then keep the exact payload assertion (including its target).
+    let mut sent = Value::Null;
+    let persisted = s.eventually(TURN, || {
+        sent = chat_records().into_iter().find(|r| r["body"]["kind"] == "command" && r["body"]["command"] == "usage").unwrap_or_default();
+        !sent.is_null()
+    });
+    s.ok("its record is `{kind: \"command\", command, to}`, the agent named", persisted && sent["body"] == json!({ "kind": "command", "command": "usage", "to": [o.identity] }), &sent);
+    s.ok("Enter sends it, shown as the confirmed command it is", shows(chrome, confirmed), chrome.eval(page, "document.getElementById('messages').innerText.slice(-300)")?);
     s.ok("and the agent answers it as a turn of its own", shows(chrome, &replied("ran /usage")), "");
 
     // a viewer is offered none: their `/` is words
