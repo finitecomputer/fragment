@@ -100,8 +100,6 @@ pub struct FragmentCell {
     pub(crate) app: js::AppLoader,
     /// What this activation knows of its live sockets (live.rs).
     pub(crate) live: RefCell<crate::live::LiveMemory>,
-    /// What it last heard of its owner's standing (meter.rs `writable`).
-    pub(crate) standing: RefCell<crate::meter::StandingSeen>,
     /// The minute it last set the alarm to close a request count for.
     pub(crate) meter_armed: Cell<i64>,
     /// A record woke an idle search cursor, and the alarm is not armed for
@@ -144,7 +142,6 @@ impl DurableObject for FragmentCell {
             settling: RefCell::default(),
             app,
             live: RefCell::default(),
-            standing: RefCell::new(None),
             meter_armed: Cell::new(-1),
             search_woke: Cell::new(false),
             listed_moved: Cell::new(false),
@@ -1277,7 +1274,6 @@ impl FragmentCell {
                 self.event("blobs.collect-failed", &e.message, json!({ "code": e.code }));
             }
             self.reconcile_runs().await;
-            self.release_ended_holds().await;
             if let Err(e) = self.sample_storage(false) {
                 self.event("meter.sample-failed", &e.message, json!({ "code": e.code }));
             }

@@ -484,6 +484,20 @@ impl FragmentCell {
                 self.live_forget();
                 json!({ "ok": true })
             }
+            // a run's receipts as the release before decision 62 left them:
+            // kept, not marked charged, the run's charge under an attempt's
+            // reference (ai.rs `reused`)
+            Some("receipt-before") => {
+                let run = body["run"].as_i64().ok_or_else(|| CellError::invalid("name the run"))?;
+                let keys: Vec<Value> = self.rows("SELECT key FROM paid WHERE run = ?", vec![SqlStorageValue::Integer(run)])?;
+                for key in keys.iter().filter_map(|k| k["key"].as_str()) {
+                    let (prefix, index) = key.rsplit_once("/step/").ok_or_else(|| CellError::host("a receipt's key names its step"))?;
+                    let before = format!("step:{prefix}/attempt/1/step/{index}");
+                    self.exec("UPDATE charges SET ref = ? WHERE ref = ?", vec![before.as_str().into(), format!("step:{key}").into()])?;
+                }
+                self.exec("UPDATE paid SET settled = 0 WHERE run = ?", vec![SqlStorageValue::Integer(run)])?;
+                json!({ "receipts": keys.len() })
+            }
             Some("forget-steps") => {
                 // the kept answers of every run in flight go
                 self.exec("DELETE FROM steps WHERE run IN (SELECT id FROM runs WHERE status IN ('queued', 'running'))", vec![])?;
@@ -554,7 +568,8 @@ impl FragmentCell {
             }
             Some("meter") => self.meter_state()?,
             Some("forget-standing") => {
-                *self.standing.borrow_mut() = None;
+                // the isolate's whole gate: every person's answers, not only this owner's
+                crate::ledger::forget_gate();
                 json!({ "ok": true })
             }
             Some("cron-now") => {
@@ -574,7 +589,7 @@ impl FragmentCell {
                 json!({ "pollAt": now })
             }
             _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, fail-meter-acks, fail-after-paid, forget-steps,
- hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, age-invites, meter-now, meter, forget-standing, cron-now, poll-now, or ended")),
+ hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, age-invites, meter-now, meter, forget-standing, receipt-before, cron-now, poll-now, or ended")),
         })
     }
 }

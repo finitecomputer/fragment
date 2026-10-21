@@ -43,9 +43,8 @@
 //! is made only after the first has failed. An answer that began is final,
 //! and the fallback's failure is the call's.
 //!
-//! What a call may cost is reserved before it is made (`worst`); what it
-//! cost is read from its answer's usage (`usage_of`), priced as the model
-//! that answered it. A streamed answer
+//! What a call cost is read from its answer's usage (`usage_of`), priced
+//! as the model that answered it, and charged after it (decision 62). A streamed answer
 //! carries usage on every chunk, each a per-chunk delta, then a line of its
 //! own with the whole call's (spike S4): only that last, cumulative one is
 //! metered, and the client reads OpenAI's shape, usage once on a last chunk
@@ -140,16 +139,16 @@ pub const MODEL_BODY_MAX_BYTES: usize = IMAGE_DATA_URL_MAX_BYTES + 1024 * 1024;
 const _: () = assert!(MODEL_BODY_MAX_BYTES > IMAGE_DATA_URL_MAX_BYTES && MODEL_BODY_MAX_BYTES < 8 * 1024 * 1024, "the cap fits Hermes' shrunk image, and stays near it");
 /// The most one call may write, reasoning included: a job's text step may
 /// ask for up to this.
-/// It bounds the worst case each call reserves: GLM-5.3's is $0.11 of
-/// output at list price, before its input.
+/// It bounds what one call can cost: GLM-5.3's is $0.11 of output at
+/// list price, before its input.
 pub const MAX_TOKENS: u32 = 16_384;
 /// The reasoning efforts GLM takes that are not its dearest: anything else
 /// asked for is `low` (GLM maps `none`, `minimal`, `medium` and `xhigh` to
 /// `max`, its default, so passing them on would buy the most expensive).
 pub const EFFORTS: [&str; 2] = ["low", "high"];
 /// One line of a streamed answer: Workers AI's chunks are a few hundred
-/// bytes. A longer line is passed through unread, and the call is metered
-/// at its reservation (its usage cannot be trusted).
+/// bytes. A longer line is passed through unread, and the call reports no
+/// usage (its usage cannot be trusted): charged nothing, said aloud.
 pub const SSE_LINE_MAX: usize = 1024 * 1024;
 /// A text step's tools: at most this many, in at most this many bytes of
 /// JSON (what the model reads on every call).
@@ -285,8 +284,7 @@ impl Models {
     /// slots it names, each an `Upstream`) over the defaults, checked.
     /// Refused, saying why: a slot that is none of `SLOTS` (`high` among
     /// them: decision 23), a provider that is neither, a model the price
-    /// book does not price (a ledger would refuse every call's
-    /// reservation), an OpenAI-compatible API's `base_url` that is not
+    /// book does not price (a ledger would charge none of its calls), an OpenAI-compatible API's `base_url` that is not
     /// https on a host name (`loopback`: or a local fleet's fake at
     /// `http://127.0.0.1:<port>`), or names a query or a trailing `/`, and
     /// its `body` when it is no object, is past `UPSTREAM_BODY_MAX_BYTES`,
@@ -491,7 +489,7 @@ impl Named {
     }
 }
 
-/// Why a model call is refused before anything is reserved or sent.
+/// Why a model call is refused before anything is sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     /// `high` stays off until Cloudflare raises Unified Billing's Opus
@@ -584,7 +582,7 @@ fn tool_names(tools: &[Value]) -> Result<Vec<&str>, Refusal> {
 /// A job's text step as the chat completion it asks for (`bound` bounds it
 /// for its tier): its messages (or its prompt, as one user message), and
 /// what it named of `max_tokens`, `reasoning_effort`, `tools` and
-/// `tool_choice`. Refused, typed, before anything is reserved: tools past
+/// `tool_choice`. Refused, typed, before anything is sent: tools past
 /// their bounds or not a function's, a choice of none of them, a draft out
 /// of shape (the cell checks the app declares its channel), a request past
 /// `AI_TEXT_MAX_BYTES`.
@@ -892,15 +890,6 @@ pub struct Bounded<'a> {
     pub stream: bool,
 }
 
-impl Bounded<'_> {
-    /// The call's worst case, reserved before it is made: every byte of the
-    /// request a token in (a token is at least a byte, so this is an upper
-    /// bound, the JSON's own bytes included), and every token it may write.
-    pub fn worst(&self, body_bytes: usize) -> Usage {
-        Usage::Tokens { model: self.model.id().to_string(), input: body_bytes as u64, cached_input: 0, cache_write: 0, output: u64::from(self.max_tokens) }
-    }
-}
-
 /// A positive token count from a body's field, if it names one.
 fn tokens(v: Option<&Value>) -> Result<Option<u64>, Refusal> {
     match v {
@@ -952,8 +941,8 @@ fn count(v: &Value, k: &str) -> Option<u64> {
 /// A call's usage, OpenAI-shaped (Workers AI's and the gateway's), as the
 /// ledger meters it: `prompt_tokens` counts cached input and cache writes,
 /// so the input is what is left of it. A usage that does not read so (a
-/// field missing or negative, more cached than prompted) is `None`, which
-/// the ledger settles at the reservation: the money path fails closed.
+/// field missing or negative, more cached than prompted) is `None`: the
+/// call is charged nothing, said aloud (decision 62).
 pub fn usage_of(model: &str, usage: &Value) -> Option<Usage> {
     let prompt = usage.get("prompt_tokens")?.as_u64()?;
     let output = usage.get("completion_tokens")?.as_u64()?;
@@ -1262,7 +1251,7 @@ mod tests {
         assert_eq!(routed.named(None, Some(Tier::Medium)), Ok(cheap), "none named is the default tier, as before");
     }
 
-    /// Goal: an id no slot runs is refused before anything is reserved, the
+    /// Goal: an id no slot runs is refused before anything is sent, the
     /// refusal listing the ids the route takes (`GET /v1/models`'s), never
     /// the route's names; the list is OpenAI's, the ids alone, nothing of
     /// where each runs; and a guest reads each slot's id by its name.
@@ -1424,7 +1413,7 @@ mod tests {
 
     /// Goal: the deployment's vision model is GLM-5.3 Flash unless it names
     /// another, and one the price book does not price is refused (a ledger
-    /// would refuse every call's reservation). Method: the default, a priced
+    /// would charge none of its calls). Method: the default, a priced
     /// model named, and unpriced ones.
     #[test]
     fn the_vision_model_is_one_the_book_prices() {
@@ -1522,18 +1511,6 @@ mod tests {
         assert_eq!(bound(tier(Tier::Cheap), json!({ "messages": msgs(), "max_tokens": "9" }), false), Err(Refusal::MaxTokens));
         assert_eq!(bound(tier(Tier::Cheap), json!({ "messages": msgs(), "max_completion_tokens": -1 }), false), Err(Refusal::MaxTokens));
         assert_eq!(bound(tier(Tier::Cheap), json!({ "messages": msgs(), "stream": "yes" }), false), Err(Refusal::Stream));
-    }
-
-    /// Goal: the worst case is an upper bound: a byte a token in, the cap
-    /// out. Method: priced at the defaults, it is above what the call costs.
-    #[test]
-    fn the_worst_case_bounds_the_call() {
-        let b = bound(tier(Tier::Cheap), json!({ "messages": [{ "role": "user", "content": "hello there" }], "max_tokens": 1000 }), false).unwrap();
-        let worst = b.worst(80);
-        assert_eq!(worst, Usage::Tokens { model: CHEAP_MODEL.into(), input: 80, cached_input: 0, cache_write: 0, output: 1000 });
-        let book = crate::price::PriceBook::defaults();
-        let used = usage_of(CHEAP_MODEL, &json!({ "prompt_tokens": 20, "completion_tokens": 1000 })).unwrap();
-        assert!(book.price(&worst).unwrap().charge >= book.price(&used).unwrap().charge);
     }
 
     /// Goal: usage reads as the ledger meters it (S4's shapes). Method: an
@@ -1678,7 +1655,7 @@ mod tests {
     }
 
     /// Goal: a text step's tools, tool choice, draft and size are bounded,
-    /// and refused typed past them, before anything is reserved. Method:
+    /// and refused typed past them, before anything is sent. Method:
     /// each bound at and past its edge.
     #[test]
     fn a_text_steps_tools_and_draft_are_bounded() {
@@ -1797,14 +1774,14 @@ mod tests {
         let mut broken = Stream::default();
         broken.push(b"data: {\"choices\":[{\"delta\":{\"content\":\"h", None);
         broken.finish(None);
-        assert_eq!(broken.usage(), None, "it broke before its usage: metered at the reservation");
+        assert_eq!(broken.usage(), None, "it broke before its usage: none reported");
         let mut long = Stream::default();
         long.push(b"data: {\"response\":\"\",\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n", None);
         let mut out = Vec::new();
         long.push(&vec![b'x'; SSE_LINE_MAX + 1], Some(&mut out));
         long.finish(None);
         assert_eq!(out.len(), SSE_LINE_MAX + 1, "an overlong line passes through unread");
-        assert_eq!(long.usage(), None, "and the call is metered at its reservation");
+        assert_eq!(long.usage(), None, "and the call reports none");
     }
 
     const FALLBACK: &str = FALLBACK_MODEL_DEFAULT;
@@ -1926,40 +1903,28 @@ mod tests {
         assert_eq!(t.after(Tried::Answered(503)).map(|m| m.upstream), Some(&other));
     }
 
-    /// Goal: a call that fell back is held at its own model's worst case
-    /// (its reservation, made before any try) and settled from the usage
-    /// the fallback reported, priced as the fallback's; the hold covers a
-    /// fallback's call of an agent's usual size. Method: a cheap call's
-    /// worst case and the fallback's usage for a 30,000-token turn, priced
-    /// with the default book, then Finite's.
+    /// Goal: a call that fell back is charged from the usage the fallback
+    /// reported, priced as the fallback's. Method: the fallback's usage for
+    /// a 30,000-token turn, priced with the default book, then Finite's.
     #[test]
-    fn a_fallen_back_call_is_settled_as_the_fallbacks() {
+    fn a_fallen_back_call_is_charged_as_the_fallbacks() {
         let book = PriceBook::defaults();
         let b = bound(tier(Tier::Cheap), json!({ "messages": [{ "role": "user", "content": "hi" }] }), true).unwrap();
         let mut t = Tries::new(b.model, Some(DEFAULTS.fallback()));
         assert_eq!(t.after(Tried::Answered(502)).map(|m| m.id()), Some(FALLBACK));
-        let held = b.worst(120_000);
-        assert_eq!(held, Usage::Tokens { model: CHEAP_MODEL.into(), input: 120_000, cached_input: 0, cache_write: 0, output: u64::from(MAX_TOKENS) });
         let used = usage_of(t.model().id(), &json!({ "prompt_tokens": 30_000, "completion_tokens": 400, "prompt_tokens_details": { "cached_tokens": 0 } })).unwrap();
         assert_eq!(used, Usage::Tokens { model: FALLBACK.into(), input: 30_000, cached_input: 0, cache_write: 0, output: 400 });
-        let (held, used) = (book.price(&held).unwrap(), book.price(&used).unwrap());
         // 30,000 in and 400 out at $0.44 and $1.32 a million: $0.013728
-        assert_eq!(used.list, 13_728);
-        assert!(used.charge < held.charge, "{used:?} within {held:?}");
-        // the dearer fallback's worst case is past the cheap tier's hold: a call that large is charged in full, past it
-        let fallback_worst = Usage::Tokens { model: FALLBACK.into(), input: 120_000, cached_input: 0, cache_write: 0, output: u64::from(MAX_TOKENS) };
-        assert!(book.price(&fallback_worst).unwrap().charge > held.charge);
+        assert_eq!(book.price(&used).unwrap().list, 13_728);
 
-        // Finite's: held as Finite Private's, settled as Workers AI's GLM-5.3 Flash, at one price
+        // Finite's: Finite Private's call, fallen back to Workers AI's GLM-5.3 Flash, at one price
         let finite = finite();
         let b = bound(finite.capped(Named::Tier(Tier::Cheap)).unwrap(), json!({ "messages": [{ "role": "user", "content": "hi" }] }), true).unwrap();
-        assert_eq!(b.worst(1_000), Usage::Tokens { model: "glm-5-3-flash".into(), input: 1_000, cached_input: 0, cache_write: 0, output: u64::from(MAX_TOKENS) });
         let mut t = Tries::new(b.model, Some(finite.fallback()));
         assert_eq!(t.after(Tried::Answered(429)).map(|m| m.id()), Some(GLM_FLASH));
         let usage = json!({ "prompt_tokens": 30_000, "completion_tokens": 400 });
         let (on_private, fell) = (usage_of(b.model.id(), &usage).unwrap(), usage_of(t.model().id(), &usage).unwrap());
         assert_eq!(book.price(&on_private).unwrap(), book.price(&fell).unwrap(), "a person pays the same whichever answered (decision 61)");
-        assert!(book.price(&fell).unwrap().charge < book.price(&b.worst(1_000)).unwrap().charge);
     }
 
     /// Goal: Finite Private's answers meter as Workers AI's do: SGLang's
@@ -2084,6 +2049,6 @@ mod tests {
         // on Workers AI, a chunk with choices carries a delta: never the call's
         let mut s = Stream::default().on(&workers_ai(GLM_FLASH));
         s.push(text.as_bytes(), None);
-        assert_eq!(s.usage(), None, "metered at its reservation");
+        assert_eq!(s.usage(), None, "none reported");
     }
 }

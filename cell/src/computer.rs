@@ -53,7 +53,7 @@ use fragment_core::computer::{
     alive, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Socket, Step, Wake, ALIVE_MS, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS,
 };
-use fragment_core::ledger::{Meter, MeterRow, Month, Release, Reserve, Settle, Spend};
+use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
 use fragment_core::own_signin;
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
@@ -2266,8 +2266,9 @@ impl ComputerCell {
     /// The secrets to swap in for a request's placeholders (`b`, a request
     /// to `b.host`), when their tags name one agent that runs here now and
     /// that agent may use each provider: `{agent, identity, owner, secrets:
-    /// [{provider, tag, secret}]}`, so the egress holds a key's call on the
-    /// agent's owner's ledger and counts each call as the agent's. A tag that names
+    /// [{provider, tag, secret}]}`, so the egress gates a key's call on the
+    /// agent's owner's standing, charges it to them and counts each call as
+    /// the agent's. A tag that names
     /// no agent of this computer (forged, another computer's, or an agent
     /// removed since) is refused. An agent may use every provider its owner
     /// has unless its owner narrowed it to a list (decision 44: a person's
@@ -2319,7 +2320,7 @@ impl ComputerCell {
             }
             let secret = match provider.kind {
                 Kind::Connection => self.connection_token(&owner, &provider.name).await?,
-                // its call is held on its owner's ledger before it is made (`hold_keys`)
+                // its call is gated on its owner's standing, and charged after (`egress_swap`)
                 Kind::Operator => crate::keys::operator_key(&self.env, &provider.name).await?,
                 Kind::Own => self.own_key(&provider.name).await?.ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("give your own {} key first (PUT /api/connections/{}/key)", provider.name, provider.name)))?,
             };
@@ -2917,13 +2918,13 @@ const HOP_HEADERS: [&str; 9] = ["connection", "keep-alive", "proxy-authorization
 /// row names, for the agent its tag names, and the request goes on over
 /// HTTPS. A request with no placeholder goes on as it is (decision 43).
 /// A body is sent as it came. The platform's own headers (`x-fragment-…`)
-/// go to no provider. An operator key's call is held on the agent's
-/// owner's ledger before it is made (`hold_keys`, awaited: no hold, no
-/// call). After the answer is handed back, the hold is settled if the
-/// provider answered, or released (`end_holds`), and each call it answered
-/// is counted as the agent's (`computer/used`). Both run in `wait_until`:
-/// a hold that never ends is charged by the ledger's sweep, so deferring
-/// the settle loses nothing.
+/// go to no provider. An operator key's call asks the gate first
+/// (ledger.rs `may`: the agent's owner's standing as this isolate heard
+/// it within the minute; a person out of credit is refused, and a ledger
+/// that does not answer refuses nothing: decision 62). After the answer is
+/// handed back, each operator key's call the provider answered (under
+/// 500) is charged to the owner (`charge_keys`) and counted as the agent's
+/// (`computer/used`), in `wait_until`, never in the answer's way.
 async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     let url = req.url()?;
@@ -2977,26 +2978,39 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         init.with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
     }
     let out = Request::new_with_init(&target, &init)?;
-    // held last, so every hold reaches `end_holds`
-    let holds = match &payer {
-        Some((_, owner, identity)) => hold_keys(env, cfg, computer, owner, identity, &plan).await?,
-        None => vec![],
-    };
+    // the operator's keys among them, and the gate asked for them last
+    let keys: Vec<&Placeholder> = plan.wanted.iter().filter(|p| cfg.providers.get(&p.provider).is_some_and(|row| row.kind == Kind::Operator)).collect();
+    if let (Some((_, owner, _)), Some(first)) = (&payer, keys.first()) {
+        let may = crate::ledger::MaySpend { spend: Spend::AgentTurn, fragment: None, by_owner: true };
+        crate::ledger::may(env, owner, &may).await.map_err(|e| CellError::new(e.code, format!("{}'s call is not made: {}", first.provider, e.message)))?;
+    }
     let sent = Fetch::Request(out).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {e}")));
     let status = sent.as_ref().ok().map(Response::status_code);
     let answered = status.is_some_and(|s| s < 500);
-    // after the answer, never in its way: a hold that does not end is the
-    // ledger's to charge (its sweep), so nothing here goes unaccounted
-    if let Some((agent, owner, _)) = payer {
+    // after the answer, never in its way
+    if let (Some((agent, owner, identity)), true) = (payer, answered) {
+        let book = crate::ledger::configured_book(cfg);
+        let key = |p: &Placeholder| Usage::Key { key: p.provider.clone(), units: 1 };
         // each call the provider answered is the agent's (decision 37), a key's at its price
-        let uses: Vec<Value> = plan.wanted.iter().map(|p| json!({ "provider": p.provider, "micros": holds.iter().find(|h| h.provider == p.provider).map_or(0, |h| h.amount) })).collect();
+        let uses: Vec<Value> = plan
+            .wanted
+            .iter()
+            .map(|p| {
+                let micros = if keys.contains(&p) { book.price(&key(p)).map_or(0, |priced| priced.charge) } else { 0 };
+                json!({ "provider": p.provider, "micros": micros })
+            })
+            .collect();
+        let at = js::now_ms();
+        let rows: Vec<MeterRow> = keys
+            .iter()
+            .map(|p| MeterRow { reference: format!("key:{computer}:{}", js::random_hex::<12>()), usage: key(p), fragment: None, agent: Some(identity.clone()), computer: Some(computer.to_string()), at_ms: at })
+            .collect();
         let (env, computer) = (env.clone(), computer.to_string());
         ctx.wait_until(async move {
-            end_holds(&env, &owner, &holds, answered).await;
-            if !answered {
-                return;
+            if !rows.is_empty() {
+                crate::meter::charge(&env, &owner, rows).await;
             }
-            if let Err(e) = ask(&env, &computer, "computer/used", &json!({ "agent": agent, "at": js::now_ms(), "uses": uses })).await {
+            if let Err(e) = ask(&env, &computer, "computer/used", &json!({ "agent": agent, "at": at, "uses": uses })).await {
                 console_error!("{}", json!({ "egress": "swap", "used": e.message }));
             }
         });
@@ -3007,58 +3021,6 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         console_log!("{}", json!({ "egress": "swap", "computer": computer, "host": host, "method": method.as_ref(), "credentials": names, "status": status }));
     }
     sent
-}
-
-/// An operator key's call held on its owner's ledger (`hold_keys`).
-struct KeyHold {
-    provider: String,
-    reference: String,
-    amount: i64,
-}
-
-/// Holds each operator key's call in `plan` on `owner`'s ledger before it
-/// is made, as the agent `identity`: one call at its price, under
-/// `key:<computer>:<12 hex>`, as a model call holds its worst case
-/// (docs/ledger.md). A key is the operator's money: a ledger that refuses,
-/// or does not answer, refuses the call, and what it held already goes
-/// back.
-async fn hold_keys(env: &Env, cfg: &Config, computer: &str, owner: &str, identity: &str, plan: &Plan) -> CellResult<Vec<KeyHold>> {
-    let mut holds: Vec<KeyHold> = vec![];
-    // bounded: at most swap::PLACEHOLDERS_MAX
-    for p in plan.wanted.iter().filter(|p| cfg.providers.get(&p.provider).is_some_and(|row| row.kind == Kind::Operator)) {
-        let reserve = Reserve {
-            reference: format!("key:{computer}:{}", js::random_hex::<12>()),
-            spend: Spend::AgentTurn,
-            worst: Usage::Key { key: p.provider.clone(), units: 1 },
-            fragment: None,
-            agent: Some(identity.to_string()),
-            capped: false,
-        };
-        match crate::ledger::hold(env, owner, &reserve).await {
-            Ok(amount) => holds.push(KeyHold { provider: p.provider.clone(), reference: reserve.reference, amount }),
-            Err(e) => {
-                end_holds(env, owner, &holds, false).await;
-                return Err(CellError::new(e.code, format!("{}'s call is not made: {}", p.provider, e.message)));
-            }
-        }
-    }
-    Ok(holds)
-}
-
-/// Ends each hold: settled at its one call when its provider answered
-/// (under 500), else released (the call was not made, or not answered).
-/// One that does not land stays held, which the ledger's sweep charges at
-/// its amount.
-async fn end_holds(env: &Env, owner: &str, holds: &[KeyHold], answered: bool) {
-    for h in holds {
-        let ended = match answered {
-            true => crate::ledger::retried(env, owner, &Settle { reference: h.reference.clone(), usage: Some(Usage::Key { key: h.provider.clone(), units: 1 }) }).await.map(|_| ()),
-            false => crate::ledger::retried(env, owner, &Release { reference: h.reference.clone() }).await.map(|_| ()),
-        };
-        if let Err(e) = ended {
-            console_error!("{}", json!({ "egress": "swap", "hold": h.reference, "answered": answered, "error": e.message }));
-        }
-    }
 }
 
 /// The fragment a guest's `/f/<fragment>/…` or `/api/f/<fragment>/…` path names.

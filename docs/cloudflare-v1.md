@@ -599,6 +599,9 @@ speaking Cloudflare's APIs) returns once this product works.
     and triggers start no runs either: each run they would have started
     is recorded `blocked`, with the reason, and they start again once the
     owner has credit (Paul, 2026-10-03).
+    Status (2026-10-21, decision 62): the stop is read from a cached
+    standing, so it reaches an agent within a minute of zero, and a
+    ledger that does not answer stops nothing.
 28. **Sign-up is open; creating needs a seat** (decision 49, which
     replaced invite-only sign-up on 2026-10-08).
 
@@ -716,6 +719,9 @@ speaking Cloudflare's APIs) returns once this product works.
     auth as its row says; a person's own keys are a third kind (`own`),
     sealed by their computer and never metered. The managed skills read
     the variables.
+    Status (2026-10-21, decision 62): an operator key's call is no longer
+    held first, nor refused when the ledger does not answer: it asks the
+    cached gate, and is charged after the provider answered.
 38. **Routines are fragment cron.** An agent's routines are its
     fragment's cron triggers, not Hermes' own scheduler, which is turned
     off. A trigger posts to a channel the agent's bridge subscribes to,
@@ -1228,6 +1234,48 @@ Private stays possible by config.
     the Worker's logs, `model.settled` names `glm-5-3-flash` for the
     tiers' calls, and `model.fallback` from it says why a call went to
     Workers AI (a 429 there is the window spent).
+
+### Billing never stops an agent (Paul, 2026-10-21)
+
+Paul:
+- "I don't want us to break people's agents. that should always be goal
+  #1, over time we can get tighter and better about how we price
+  everything but just do the simple thing that will work for now."
+- "we aren't adding some rest roundtrip per inference call yeah? billing
+  should be settled best effort not interrupt every request"
+- "'overspend by whatever is in flight during the cache window' is a
+  small price to pay for 1. simplifying the code, 2. not breaking
+  agents, 3. lowering latency. we want that to be the case even when
+  billing is on"
+
+62. **A spend is gated by a cached standing and charged after.**
+    - **The gate.** Before a paid call (a model call, an operator key's
+      call, an AI step) or a write, its payer's standing is read through
+      one cached question (`ledger::may`; docs/ledger.md, "The gate"):
+      each isolate asks the payer's ledger at most once a minute, for at
+      most 1.5 s, and keeps the answer, a refusal too. The one deliberate
+      refusal is a person out of credit, read-only or a guest, or a
+      capped caller past a fragment's cap (decisions 26 and 27). A ledger
+      that does not answer lets the spend start: a billing or pricing
+      problem never refuses an agent's call.
+    - **The charge.** A paid call is charged after its answer, as a meter
+      row idempotent by its reference, sent to the payer's ledger without
+      the call waiting on it (the ledger's queue, which retries). Nothing
+      is held before a call. A person out of credit may overspend by what
+      starts within the gate's minute.
+    - Status (2026-10-21; the stack from `claude/ledger-cached-gate`):
+      the gate is built, and a fragment's writes and an e2e person's paid
+      calls are read through it. Model calls (the route's chat calls,
+      decisions and transcriptions) are gated by it and charged after
+      their answers (`claude/models-charged-after`); one that reports no
+      usage is charged nothing, said aloud. So are operator keys'
+      calls through the swap (`claude/keys-charged-after`): gated, and
+      charged once the provider answered; a ledger that does not answer
+      no longer refuses them. So are AI steps
+      (`claude/steps-charged-after`): gated in the fragment's isolate,
+      and charged from its meter outbox under `step:<step's key>`, once
+      whatever attempt or replay makes the call; one that fails for good
+      is charged nothing, as nothing was held.
 
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 
@@ -1958,7 +2006,8 @@ Each one needs a test in the phase that ports its feature.
    metered.
 3. **A failed step keeps its reservation.** A step that fails for good
    still holds its budget reservation. Phase 3: a final failure releases
-   it, with a test.
+   it, with a test. Since decision 62 nothing is held before a call, so
+   there is nothing to release: a failed step is charged nothing.
 4. **`fragment deploy` reports success when the code is refused.** It
    printed `live:` while the status said an operation name broke
    `^[a-z][a-z0-9_]{0,63}$`, and the guide never names that rule. Phase 2:

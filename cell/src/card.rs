@@ -137,7 +137,7 @@ impl FragmentCell {
             return Ok(());
         }
         if ms > 0 {
-            self.outbox(&meter, Usage::Browser { ms }, js::now_ms())?;
+            self.outbox(&meter, Usage::Browser { ms }, js::now_ms(), None)?;
         }
         let image = image.and_then(|bytes| card::check_image(&bytes).map(|()| bytes).map_err(|f| Failure { why: f.message(), retry: false }));
         let (outcome, why) = match image {
