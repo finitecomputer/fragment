@@ -2363,8 +2363,31 @@ function dataSection() {
   // its rows, drawn again as the export changes
   const shown = el("div", "settings-export");
   shown.dataset.state = "loading";
-  s.append(shown);
+  const feedback = el("div", "settings-actions");
+  feedback.hidden = true;
+  const error = el("p", "settings-warning", "Your export status could not be read. Try again.");
+  error.setAttribute("role", "status");
+  const retry = el("button", "quiet", "Retry");
+  retry.type = "button";
+  retry.dataset.action = "export-status-retry";
+  feedback.append(error, retry);
+  s.append(shown, feedback);
+  const owner = state.me.id;
   let timer = null;
+  let mounted = false, stopped = false, busy = false;
+  const current = () => state.page === "Settings" && state.me?.id === owner && s.isConnected && !$("settings-page").hidden && !$("layout").hidden;
+  const stop = () => {
+    stopped = true;
+    clearTimeout(timer);
+    observer.disconnect();
+    removeEventListener("pagehide", stop);
+  };
+  const live = () => {
+    if (stopped) return false;
+    if (current()) return true;
+    stop();
+    return false;
+  };
   const render = (v, refused) => {
     shown.dataset.state = v?.state ?? "none";
     const go = el("button", "quiet", v?.state === "building" ? "Exporting…" : v?.state === "ready" ? "Export again" : "Export everything");
@@ -2372,11 +2395,18 @@ function dataSection() {
     go.dataset.action = "export";
     go.disabled = v?.state === "building";
     go.onclick = async () => {
+      if (go.disabled || busy || !live()) return;
+      busy = true;
       go.disabled = true;
+      clearTimeout(timer);
+      feedback.hidden = true;
       try {
-        render(await api("POST", "/api/export"));
+        const result = await api("POST", "/api/export");
+        if (live()) render(result);
       } catch (e) {
-        render(v, e.message);
+        if (live()) render(v, e.message);
+      } finally {
+        busy = false;
       }
     };
     const rows = [];
@@ -2397,13 +2427,33 @@ function dataSection() {
     clearTimeout(timer);
     if (v?.state === "building") timer = setTimeout(refresh, 2000);
   };
-  const refresh = () => {
-    if (!s.isConnected && shown.dataset.state !== "loading") return;
-    api("GET", "/api/export")
-      .then((r) => render(r.export))
-      .catch((e) => shown.replaceChildren(el("p", "settings-warning", `Your export did not load: ${e.message}`)));
+  const refresh = async () => {
+    if (busy || !live()) return;
+    busy = true;
+    clearTimeout(timer);
+    retry.disabled = true;
+    feedback.hidden = true;
+    try {
+      const result = await api("GET", "/api/export");
+      if (live()) render(result.export);
+    } catch {
+      // Keep the last confirmed rows; retry only reads this export's status.
+      if (live()) feedback.hidden = false;
+    } finally {
+      busy = false;
+      if (!stopped) retry.disabled = false;
+    }
   };
-  refresh();
+  retry.onclick = refresh;
+  // Settings constructs this section before awaiting other panels. Start only
+  // once mounted, and cancel its timer when navigation hides or replaces it.
+  const observer = new MutationObserver(() => {
+    if (mounted) { if (!current()) stop(); }
+    else if (s.isConnected) { mounted = true; refresh(); }
+    else if (state.page !== "Settings" || state.me?.id !== owner || $("settings-page").hidden || $("layout").hidden) stop();
+  });
+  observer.observe($("layout"), { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden"] });
+  addEventListener("pagehide", stop, { once: true });
   return s;
 }
 
