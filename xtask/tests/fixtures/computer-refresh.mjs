@@ -302,6 +302,25 @@ async function startAs(h, id) {
   await pending;
 }
 
+test("the real wake still applies a current identity's confirmed response", async () => {
+  const h = setup();
+  await seed(h);
+  h.wake();
+  respond(h.requests[2], { ...computer(), phase: "awake" });
+  await turn();
+  assert.equal(h.state.computer.phase, "awake");
+  assert.equal(h.state.computer.owner, "owner-a");
+});
+
+test("the real ready poll accepts the current computer and its matching subscription", async () => {
+  const h = setup();
+  const pending = h.call('agentReady({chat: "chat-a", id: "agent-a", computer: "computer-a"})');
+  respond(h.requests[0], listing({ ...computer(), phase: "awake" }));
+  respond(h.requests[1], { subscriptions: [{ wake: true, principal: "agent-a", channel: "chat" }] });
+  assert.equal(await pending, true);
+  assert.equal(h.state.computer.phase, "awake");
+});
+
 for (const wakeFirst of [true, false]) {
   test(`real prewake answer ${wakeFirst ? "before" : "after"} the new identity's failed list cannot be retained`, async () => {
     const h = setup();
