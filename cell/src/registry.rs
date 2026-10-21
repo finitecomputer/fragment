@@ -30,7 +30,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
 use fragment_core::{blob, npub, registry};
-use fragment_proto::{limits, ErrorCode, Identity, IdentityKind, IdentityView, KeyView, Role};
+use fragment_proto::{limits, ErrorCode, Identity, IdentityKind, IdentityView, KeyView, Reason, Role};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};

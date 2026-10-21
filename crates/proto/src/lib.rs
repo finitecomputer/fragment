@@ -630,6 +630,154 @@ impl ErrorCode {
 pub struct ErrorBody {
     pub error: ErrorCode,
     pub message: String,
+    /// Why, where one status means several causes a person acts on
+    /// differently (billing's, seats' and orgs' refusals): the shell picks
+    /// its plain words by it. Add-only: absent from every other refusal, and
+    /// a client that knows none ignores it, and one that does not know this
+    /// one reads none (`reason_or_none`).
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "reason_or_none")]
+    pub reason: Option<Reason>,
+}
+
+/// A reason this reader does not know is none: reasons are add-only, so a
+/// refusal of a newer platform still reads as its code and message.
+fn reason_or_none<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Reason>, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.and_then(|s| Reason::parse(&s)))
+}
+
+/// A refusal's cause, for the people who read it (`ErrorBody::reason`):
+/// billing's, seats' and orgs' (docs/api.md, "Seats and orgs"). On the wire
+/// as its snake_case name (`as_str`), written by hand rather than derived:
+/// the cell's Wasm carries one name table, not serde's visitors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reason {
+    /// No such trial code.
+    TrialUnknown,
+    /// The trial code was turned off, is past its expiry, or is of a seat
+    /// no longer sold.
+    TrialEnded,
+    /// A trial is once a person, and they had theirs.
+    TrialUsed,
+    /// The trial code's places are taken.
+    TrialTaken,
+    /// A trial is for someone starting a seat of their own: not an org
+    /// that paid before, nor a seat beside others.
+    TrialNotHere,
+    /// This deployment sells no seats, or not that one.
+    NotSold,
+    /// Stripe refused, or did not answer, the call the platform made for
+    /// it (a Checkout, the portal): nothing the person asked is wrong.
+    StripeRefused,
+    /// They hold a seat already (here, or in this org).
+    HoldsSeat,
+    /// Their org pays for its seats: an admin adds theirs.
+    OrgPays,
+    /// They hold no seat.
+    NoSeat,
+    /// Only whoever pays for the org opens its billing.
+    NotPayer,
+    /// They pay for their org, and its subscription has not ended: they
+    /// stay (an admin, a member) until it has.
+    Pays,
+    /// They are the last admin of an org other people are in.
+    LastAdmin,
+    /// An admin leaves only by stepping down first.
+    StepDownFirst,
+    /// That is whoever pays's seat or admin's place: theirs alone to give up.
+    PayerOnly,
+    /// The seat, offer or admin's place named is gone (withdrawn, answered,
+    /// removed).
+    Gone,
+    /// The org pays for no seats now: it buys again first.
+    OrgNotPaying,
+    /// Only an org's admins do that.
+    NotAdmin,
+    /// That is not an email.
+    NotAnEmail,
+    /// That email holds a seat in the org, or is offered one, already.
+    AlreadyOffered,
+    /// The org holds as many seats as it may.
+    OrgFull,
+    /// The org has as many admins as it may, offered ones included.
+    AdminsFull,
+    /// That email is offered something by as many orgs as it may be.
+    TooManyOffers,
+    /// The org has mailed as many offers as it may today.
+    OffersPerDay,
+    /// The org's last paid seat: its subscription is canceled instead.
+    LastPaidSeat,
+}
+
+impl Reason {
+    pub const ALL: [Reason; 25] = [
+        Reason::TrialUnknown,
+        Reason::TrialEnded,
+        Reason::TrialUsed,
+        Reason::TrialTaken,
+        Reason::TrialNotHere,
+        Reason::NotSold,
+        Reason::StripeRefused,
+        Reason::HoldsSeat,
+        Reason::OrgPays,
+        Reason::NoSeat,
+        Reason::NotPayer,
+        Reason::Pays,
+        Reason::LastAdmin,
+        Reason::StepDownFirst,
+        Reason::PayerOnly,
+        Reason::Gone,
+        Reason::OrgNotPaying,
+        Reason::NotAdmin,
+        Reason::NotAnEmail,
+        Reason::AlreadyOffered,
+        Reason::OrgFull,
+        Reason::AdminsFull,
+        Reason::TooManyOffers,
+        Reason::OffersPerDay,
+        Reason::LastPaidSeat,
+    ];
+
+    /// Its name on the wire.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Reason::TrialUnknown => "trial_unknown",
+            Reason::TrialEnded => "trial_ended",
+            Reason::TrialUsed => "trial_used",
+            Reason::TrialTaken => "trial_taken",
+            Reason::TrialNotHere => "trial_not_here",
+            Reason::NotSold => "not_sold",
+            Reason::StripeRefused => "stripe_refused",
+            Reason::HoldsSeat => "holds_seat",
+            Reason::OrgPays => "org_pays",
+            Reason::NoSeat => "no_seat",
+            Reason::NotPayer => "not_payer",
+            Reason::Pays => "pays",
+            Reason::LastAdmin => "last_admin",
+            Reason::StepDownFirst => "step_down_first",
+            Reason::PayerOnly => "payer_only",
+            Reason::Gone => "gone",
+            Reason::OrgNotPaying => "org_not_paying",
+            Reason::NotAdmin => "not_admin",
+            Reason::NotAnEmail => "not_an_email",
+            Reason::AlreadyOffered => "already_offered",
+            Reason::OrgFull => "org_full",
+            Reason::AdminsFull => "admins_full",
+            Reason::TooManyOffers => "too_many_offers",
+            Reason::OffersPerDay => "offers_per_day",
+            Reason::LastPaidSeat => "last_paid_seat",
+        }
+    }
+
+    /// The reason a wire name names; none for one this reader does not know.
+    pub fn parse(name: &str) -> Option<Reason> {
+        Reason::ALL.into_iter().find(|r| r.as_str() == name)
+    }
+}
+
+impl Serialize for Reason {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
 }
 
 /// A member's role in a fragment. `Public` is the floor anyone who can see
@@ -2233,9 +2381,58 @@ mod tests {
         assert_eq!(DEFAULT_TIER.as_str(), "cheap");
     }
 
+    /// Every refusal reason is on the wire as its snake_case name and reads
+    /// back; a body names one only when it has one, and one a reader does
+    /// not know (a newer platform's) reads as none, the body still read.
+    #[test]
+    fn refusal_reasons_serialize_and_are_add_only() {
+        use Reason::*;
+        let all = [
+            (TrialUnknown, "trial_unknown"),
+            (TrialEnded, "trial_ended"),
+            (TrialUsed, "trial_used"),
+            (TrialTaken, "trial_taken"),
+            (TrialNotHere, "trial_not_here"),
+            (NotSold, "not_sold"),
+            (StripeRefused, "stripe_refused"),
+            (HoldsSeat, "holds_seat"),
+            (OrgPays, "org_pays"),
+            (NoSeat, "no_seat"),
+            (NotPayer, "not_payer"),
+            (Pays, "pays"),
+            (LastAdmin, "last_admin"),
+            (StepDownFirst, "step_down_first"),
+            (PayerOnly, "payer_only"),
+            (Gone, "gone"),
+            (OrgNotPaying, "org_not_paying"),
+            (NotAdmin, "not_admin"),
+            (NotAnEmail, "not_an_email"),
+            (AlreadyOffered, "already_offered"),
+            (OrgFull, "org_full"),
+            (AdminsFull, "admins_full"),
+            (TooManyOffers, "too_many_offers"),
+            (OffersPerDay, "offers_per_day"),
+            (LastPaidSeat, "last_paid_seat"),
+        ];
+        assert_eq!(all.len(), Reason::ALL.len(), "every reason is named here");
+        for (reason, wire) in all {
+            assert!(Reason::ALL.contains(&reason));
+            assert_eq!(serde_json::to_value(reason).unwrap(), wire);
+            assert_eq!(Reason::parse(wire), Some(reason));
+            let body = ErrorBody { error: ErrorCode::AlreadyExists, message: "m".into(), reason: Some(reason) };
+            let text = serde_json::to_string(&body).unwrap();
+            assert_eq!(text, format!(r#"{{"error":"already_exists","message":"m","reason":"{wire}"}}"#));
+            assert_eq!(serde_json::from_str::<ErrorBody>(&text).unwrap(), body);
+        }
+        let none = ErrorBody { error: ErrorCode::AlreadyExists, message: "m".into(), reason: None };
+        assert_eq!(serde_json::to_string(&none).unwrap(), r#"{"error":"already_exists","message":"m"}"#, "no reason, no field");
+        let newer: ErrorBody = serde_json::from_str(r#"{"error":"already_exists","message":"m","reason":"one_from_later"}"#).unwrap();
+        assert_eq!(newer, none, "a reason this reader does not know reads as none");
+    }
+
     #[test]
     fn error_codes_serialize_snake_case() {
-        let body = ErrorBody { error: ErrorCode::ConflictingBody, message: "x".into() };
+        let body = ErrorBody { error: ErrorCode::ConflictingBody, message: "x".into(), reason: None };
         assert_eq!(serde_json::to_string(&body).unwrap(), r#"{"error":"conflicting_body","message":"x"}"#);
         assert_eq!(ErrorCode::ConflictingBody.status(), 409);
         assert_eq!(serde_json::to_value(ErrorCode::Deploying).unwrap(), "deploying");

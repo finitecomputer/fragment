@@ -353,7 +353,7 @@ impl Config {
     pub fn stripe(&self) -> CellResult<&StripeConfig> {
         self.stripe
             .as_ref()
-            .ok_or_else(|| CellError::invalid(format!("this deployment sells no seats (no {} binding): an operator comps them", fragment_core::secrets_store::STRIPE_KEY)))
+            .ok_or_else(|| CellError::invalid(format!("this deployment sells no seats (no {} binding): an operator comps them", fragment_core::secrets_store::STRIPE_KEY)).because(fragment_proto::Reason::NotSold))
     }
 
     /// The deployment as Stripe's metadata names it: its platform's origin.

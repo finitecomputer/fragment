@@ -1018,17 +1018,18 @@ fn press(text: &str) -> String {
     format!("(() => {{ const b = [...document.querySelectorAll('#first-run-card button, #first-run-card a')].find((b) => !b.hidden && b.textContent === {text:?}); b?.click(); return !!b; }})()")
 }
 
-/// Clicks the first element `selector` matches; answers whether there was one.
 /// The page's billing writes (every call to `/api/billing/…`, `/api/seat…`
-/// or `/api/org/…` but a read) refused, each with `window.__next`'s status
-/// (then 503 again) and the platform's words for the test; what it warns
-/// of in the console kept (`window.__warned`), and every confirm said yes.
-const REFUSE_BILLING: &str = "(() => { const real = window.fetch; window.__next = 503; window.__warned = []; const warn = console.warn; \
+/// or `/api/org/…` but a read) refused, each as `window.__next` names (a
+/// status, and a refusal's `reason` or none; then a 503 with none again),
+/// with the platform's words for the test; what it warns of in the console
+/// kept (`window.__warned`), and every confirm said yes.
+const REFUSE_BILLING: &str = "(() => { const real = window.fetch; window.__next = { status: 503 }; window.__warned = []; const warn = console.warn; \
     console.warn = (...a) => { window.__warned.push(a.map(String).join(' ')); warn(...a); }; window.confirm = () => true; \
     window.fetch = async (url, o) => { if ((o?.method ?? 'GET') === 'GET' || !/^\\/api\\/(billing\\/|seat|org\\/)/.test(String(url))) return real(url, o); \
-    const status = window.__next; window.__next = 503; \
-    return new Response(JSON.stringify({ error: 'refused', message: 'the platform said this for the test' }), { status, headers: { 'content-type': 'application/json' } }); }; return true; })()";
+    const { status, reason } = window.__next; window.__next = { status: 503 }; \
+    return new Response(JSON.stringify({ error: 'refused', message: 'the platform said this for the test', ...(reason ? { reason } : {}) }), { status, headers: { 'content-type': 'application/json' } }); }; return true; })()";
 
+/// Clicks the first element `selector` matches; answers whether there was one.
 fn click(selector: &str) -> String {
     format!("(() => {{ const e = document.querySelector({selector:?}); e?.click(); return !!e; }})()")
 }
@@ -1342,6 +1343,31 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
         refused && seen["path"] == "/welcome" && seen["enabled"] == true && seat(api, &gus)["seat"].is_null(),
         &seen,
     );
+    // its words come by the platform's reason, not its status (#481
+    // review): a code that has ended, and then, Stripe refusing Checkout
+    // (a 400, as a 4xx of Stripe's is to the person), a valid code and the
+    // seat each say Checkout did not open, neither "ended" nor "not on sale"
+    let made = |name: &str| api.signed(&s.operator, "POST", "/api/admin/trials", Some(&json!({ "name": name, "kind": "seat_always_on", "days": 30, "capacity": 5 })));
+    let valid = made("billing-page valid")?;
+    let ended = made("billing-page ended")?;
+    let ended_off = api.signed(&s.operator, "PATCH", &format!("/api/admin/trials/{}", ended.body["id"].as_str().unwrap_or("")), Some(&json!({ "revision": 1, "active": false })))?;
+    let trial = |code: &str| format!("(() => {{ const f = document.querySelector('#first-run-card form.trial-code'); if (!f) return false; f.querySelector('input').value = {code:?}; f.requestSubmit(); return true; }})()");
+    let error_is = |text: &str| format!("[...document.querySelectorAll('#first-run-card .form-error')].some((e) => !e.hidden && e.textContent === {text:?})");
+    let mut said = vec![];
+    b.eval(&page, &trial(ended.body["code"].as_str().unwrap_or("")))?;
+    said.push(("an ended code", b.until(&page, &error_is("That trial code has ended."), wait)));
+    s.stripe.refuse("POST", "/v1/checkout/sessions", Some(400));
+    b.eval(&page, &trial(valid.body["code"].as_str().unwrap_or("")))?;
+    said.push(("a valid code, Stripe refusing", b.until(&page, &format!("{} && document.querySelector('#first-run-card [data-plan]')?.disabled === false", error_is("Checkout didn't open. Try again in a moment.")), wait)));
+    b.eval(&page, "(document.querySelector('#first-run-card .form-error').textContent = '', true)")?;
+    b.eval(&page, &click("#first-run-card [data-plan=seat_always_on]"))?;
+    said.push(("the seat, Stripe refusing", b.until(&page, &error_is("Checkout didn't open. Try again in a moment."), wait)));
+    s.stripe.refuse("POST", "/v1/checkout/sessions", None);
+    s.ok(
+        "a trial code that has ended says so; with Stripe refusing Checkout, a valid code and the seat each say Checkout didn't open, to try again: the words come by the platform's reason, never its status",
+        valid.status == 200 && ended_off.status == 200 && said.iter().all(|(_, ok)| *ok),
+        json!({ "said": said.iter().map(|(what, ok)| json!({ "what": what, "said": ok })).collect::<Vec<_>>(), "seen": b.eval(&page, SEEN)? }),
+    );
     // a seat's Checkout return that names no payment: said plainly, with
     // Try again and Choose a seat, which goes back to the welcome
     b.eval(&page, "(location.assign('/welcome?checkout=cs_e2e_nonesuch'), true)")?;
@@ -1495,21 +1521,21 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     b.eval(&page, REFUSE_BILLING)?;
     let typed = |form: &str, email: &str| format!("(() => {{ const f = [...document.querySelectorAll('#settings-page form')].find((f) => f.textContent.includes({form:?})); f.querySelector('input[type=email]').value = {email:?}; f.requestSubmit(); return true; }})()");
     let steps = [
-        ("the sleep switch", 503, "([...document.querySelectorAll('#settings-page label')].find((l) => l.textContent.includes('Let my computer sleep')).querySelector('input').click(), true)".to_string(), "That wasn't changed. Try again in a moment.".to_string()),
-        ("Buy credit", 503, click_text("#settings-page button", &format!("Buy {pack} of credit")), "Checkout didn't open. Try again in a moment.".to_string()),
-        ("Payment and invoices", 503, click_text("#settings-page button", "Payment and invoices"), "Payment and invoices didn't open. Try again in a moment.".to_string()),
+        ("the sleep switch", "{ status: 503 }", "([...document.querySelectorAll('#settings-page label')].find((l) => l.textContent.includes('Let my computer sleep')).querySelector('input').click(), true)".to_string(), "That wasn't changed. Try again in a moment.".to_string()),
+        ("Buy credit, Stripe refusing", "{ status: 400, reason: 'stripe_refused' }", click_text("#settings-page button", &format!("Buy {pack} of credit")), "Checkout didn't open. Try again in a moment.".to_string()),
+        ("Payment and invoices", "{ status: 503 }", click_text("#settings-page button", "Payment and invoices"), "Payment and invoices didn't open. Try again in a moment.".to_string()),
         (
             "Remove seat, the org's last paid one",
-            400,
+            "{ status: 400, reason: 'last_paid_seat' }",
             format!("([...document.querySelectorAll('.billing-seats tr')].find((r) => r.textContent.includes({teammate:?})).querySelector('button').click(), true)"),
             "This is your org's last paid seat: to end it, cancel the subscription in Payment and invoices.".to_string(),
         ),
-        ("Add a seat, offers used up today", 429, typed("Add a seat", "billing-page-more@e2e.test"), "Your org has sent as many offers as it can today. Try again tomorrow.".to_string()),
-        ("Add an admin", 503, typed("Add an admin", "billing-page-admin@e2e.test"), "No admin's place was offered to billing-page-admin@e2e.test. Try again in a moment.".to_string()),
+        ("Add a seat, offers used up today", "{ status: 429, reason: 'offers_per_day' }", typed("Add a seat", "billing-page-more@e2e.test"), "Your org has sent as many offers as it can today. Try again tomorrow.".to_string()),
+        ("Add an admin", "{ status: 503 }", typed("Add an admin", "billing-page-admin@e2e.test"), "No admin's place was offered to billing-page-admin@e2e.test. Try again in a moment.".to_string()),
     ];
     let mut said = vec![];
-    for (what, status, act, want) in steps {
-        b.eval(&page, &format!("(window.__next = {status}, true)"))?;
+    for (what, next, act, want) in steps {
+        b.eval(&page, &format!("(window.__next = {next}, true)"))?;
         b.eval(&page, &act)?;
         let shown = b.until(&page, &format!("[...document.querySelectorAll('#settings-page .billing-note')].some((n) => n.textContent === {want:?})"), wait);
         said.push(json!({ "what": what, "said": shown }));
@@ -1519,6 +1545,41 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
         "every Billing and Org control whose call fails says what happened and what to do, in plain words by its refusal; the platform's words go to the console, never the page",
         ready && said.iter().all(|x| x["said"] == true) && seen["server"] == false && seen["warned"] == 6,
         json!({ "steps": said, "seen": seen }),
+    );
+    b.close(page)?;
+
+    // ---- a stale two-admin view (#481 review): an org whose subscription
+    // has ended, its payer and another admin, and a member; the other admin
+    // steps down while the payer's settings still show them both; the
+    // payer's own Not admin is then refused as the last admin, and says to
+    // make someone else an admin first (never to cancel a subscription)
+    let pat = api.person()?;
+    let pat_org = buys(s, api, &pat)?;
+    let pat_sub = subscription_of(s, &pat_org).context("the payer's subscription")?;
+    let ben = api.person()?;
+    let r = api.signed(&pat, "POST", "/api/org/admins", Some(&json!({ "email": Api::email_of(&ben) })))?;
+    answer(api, &ben, r.body["admin"]["id"].as_str().unwrap_or(""), "accept")?;
+    let cal = api.person()?;
+    let r = api.signed(&pat, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(&cal) })))?;
+    answer(api, &cal, r.body["seat"]["id"].as_str().unwrap_or(""), "accept")?;
+    s.stripe.set_status(&pat_sub, "canceled").map_err(anyhow::Error::msg)?;
+    let ended = s.eventually(PUSHED, || seat(api, &pat)["seat"]["good"] == false);
+    let pat_session = api.sign_in(&Api::email_of(&pat))?;
+    let page = page_of(&mut b, api, &pat_session, "/settings")?;
+    let own_row = format!("[...document.querySelectorAll('.billing-seats tr')].find((r) => r.textContent.includes({:?}))", Api::email_of(&pat));
+    let step_down = format!("[...({own_row})?.querySelectorAll('button') ?? []].find((b) => b.textContent === 'Not admin')");
+    let both = view(&mut b, &page, &format!("!!{step_down}"), wait);
+    let org_view = api.signed(&ben, "GET", "/api/org", None)?;
+    let ben_id = api.identity(&ben)?;
+    let ben_row = org_view.body["members"].as_array().into_iter().flatten().find(|m| m["person"] == ben_id.as_str()).and_then(|m| m["id"].as_str()).unwrap_or("").to_string();
+    let stepped = api.signed(&ben, "DELETE", &format!("/api/org/admins/{ben_row}"), None)?;
+    b.eval(&page, &format!("(window.confirm = () => true, {step_down}.click(), true)"))?;
+    let told = b.until(&page, "[...document.querySelectorAll('#settings-page .billing-note')].some((n) => n.textContent === 'That would leave the org with no admin: make someone else an admin first.')", wait);
+    let notes = b.eval(&page, "[...document.querySelectorAll('#settings-page .billing-note')].map((n) => n.textContent)")?;
+    s.ok(
+        "a stale two-admin view: the payer of an org whose subscription ended steps down after the other admin did, and is told it would leave the org with no admin (its last-admin refusal's reason), not to cancel a subscription",
+        ended && both && stepped.status == 200 && told,
+        json!({ "notes": notes, "stepped": stepped.status }),
     );
     b.close(page)?;
 

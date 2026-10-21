@@ -5,7 +5,7 @@
 //! call needs it. No SDK: the API is a few form posts.
 
 use fragment_core::stripe::{Form, API_VERSION};
-use fragment_proto::ErrorCode;
+use fragment_proto::{ErrorCode, Reason};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use worker::*;
@@ -64,7 +64,7 @@ impl Stripe {
     /// An answer's body, read as `T`: the one generic step, so each type
     /// read costs the cell's Wasm a parse, not a copy of `send`.
     fn parse<T: DeserializeOwned>(path: &str, body: Vec<u8>) -> CellResult<T> {
-        serde_json::from_slice(&body).map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("Stripe's answer to {path}: {e}")))
+        serde_json::from_slice(&body).map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("Stripe's answer to {path}: {e}")).because(Reason::StripeRefused))
     }
 
     /// One call to Stripe: its 200's body, or why not.
@@ -85,9 +85,9 @@ impl Stripe {
             init.with_body(Some(b.into()));
         }
         let req = Request::new_with_init(&format!("{}{path}", self.api), &init)?;
-        let a = crate::cs::fetch_all(req, TIMEOUT, ANSWER_MAX_BYTES).await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("Stripe did not answer {path}: {}", e.message)))?;
+        let a = crate::cs::fetch_all(req, TIMEOUT, ANSWER_MAX_BYTES).await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("Stripe did not answer {path}: {}", e.message)).because(Reason::StripeRefused))?;
         if a.cut {
-            return Err(CellError::new(ErrorCode::UpstreamFailed, format!("Stripe's answer to {path} is over {ANSWER_MAX_BYTES} bytes")));
+            return Err(CellError::new(ErrorCode::UpstreamFailed, format!("Stripe's answer to {path} is over {ANSWER_MAX_BYTES} bytes")).because(Reason::StripeRefused));
         }
         if a.status == 200 {
             return Ok(a.body);
@@ -102,6 +102,6 @@ impl Stripe {
             400..=499 => ErrorCode::InvalidRequest,
             _ => ErrorCode::UpstreamFailed,
         };
-        Err(CellError::new(code, format!("Stripe refused {path} ({}): {why}", a.status)))
+        Err(CellError::new(code, format!("Stripe refused {path} ({}): {why}", a.status)).because(Reason::StripeRefused))
     }
 }

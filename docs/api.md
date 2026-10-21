@@ -2,7 +2,14 @@
 
 The cell (`cell/`, Rust on Cloudflare Workers) answers everything below;
 the CLI and the browser library are its clients. Errors are `{"error":
-"<code>", "message": "..."}` (codes in `crates/proto`). A platform object
+"<code>", "message": "..."}` (codes in `crates/proto`). Billing's, seats'
+and orgs' refusals add `"reason"`, where one status means several causes
+a person acts on differently (`proto::Reason`: a trial code unknown,
+ended, used or taken, a seat not sold, Stripe refusing, who pays staying
+until their subscription ends, the last admin, an offer gone, the day's
+offers used up, the last paid seat, …); the shell picks its plain words
+by it. It is add-only: absent elsewhere, and a reason a client does not
+know reads as none. A platform object
 that refuses its code's schema (docs/MODEL.md, Schemas) answers every
 call 500 `schema_refused`, its message naming it (its class and id) and
 why: a newer version than its code knows (a rollback), another code's

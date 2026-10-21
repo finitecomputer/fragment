@@ -215,9 +215,9 @@ impl RegistryCell {
 
     pub(super) fn member(&self, id: &str) -> CellResult<MemberRow> {
         if !org::valid_member_id(id) {
-            return Err(not_found(format!("no seat {id}")));
+            return Err(not_found(format!("no seat {id}")).because(Reason::Gone));
         }
-        self.row(&format!("SELECT {MEMBER_COLUMNS} FROM org_members m WHERE m.id = ?"), vec![id.into()])?.ok_or_else(|| not_found(format!("no seat {id}")))
+        self.row(&format!("SELECT {MEMBER_COLUMNS} FROM org_members m WHERE m.id = ?"), vec![id.into()])?.ok_or_else(|| not_found(format!("no seat {id}")).because(Reason::Gone))
     }
 
     /// When an org's trial ends (seconds), as its subscription says.
@@ -270,7 +270,7 @@ impl RegistryCell {
 
     pub(super) fn check_seats_room(&self, org: &str) -> CellResult<()> {
         if self.count("SELECT COUNT(*) AS n FROM org_members WHERE org = ? AND seat IS NOT NULL", vec![org.into()])? >= SEATS_PER_ORG_MAX {
-            return Err(CellError::invalid(format!("an org holds at most {SEATS_PER_ORG_MAX} seats")));
+            return Err(CellError::invalid(format!("an org holds at most {SEATS_PER_ORG_MAX} seats")).because(Reason::OrgFull));
         }
         Ok(())
     }
@@ -460,7 +460,7 @@ impl RegistryCell {
 
     fn sleeps(&self, b: Sleeps) -> CellResult<MySeat> {
         let who = self.person_by(&b.by)?;
-        let m = self.member_of(&who.id)?.filter(|m| m.seat.is_some()).ok_or_else(|| CellError::invalid("you hold no seat"))?;
+        let m = self.member_of(&who.id)?.filter(|m| m.seat.is_some()).ok_or_else(|| CellError::invalid("you hold no seat").because(Reason::NoSeat))?;
         if (m.sleeps != 0) != b.sleeps {
             self.exec("UPDATE org_members SET sleeps = ? WHERE id = ?", vec![SqlStorageValue::Integer(i64::from(b.sleeps)), m.id.as_str().into()])?;
             self.queue_sync(&who.id)?;
@@ -476,7 +476,7 @@ impl RegistryCell {
             (None, None) => return Err(CellError::invalid("an operator names the org")),
             (Some(by), named) => {
                 let who = self.person_by(by)?;
-                let m = self.member_of(&who.id)?.filter(|m| m.admin != 0).ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only an org's admins see it"))?;
+                let m = self.member_of(&who.id)?.filter(|m| m.admin != 0).ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only an org's admins see it").because(Reason::NotAdmin))?;
                 if named.is_some_and(|id| id != m.org) {
                     return Err(CellError::new(ErrorCode::Forbidden, "only an org's admins see it"));
                 }

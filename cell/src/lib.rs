@@ -262,7 +262,7 @@ async fn registry_round_trip(env: &Env, path: &str, body: String) -> CellResult<
         return Ok(bytes);
     }
     match serde_json::from_slice::<ErrorBody>(&bytes) {
-        Ok(e) if status < 500 => Err(CellError::new(e.error, e.message)),
+        Ok(e) if status < 500 => Err(CellError { reason: e.reason, ..CellError::new(e.error, e.message) }),
         Ok(e) => Err(registry_unavailable(e.message)),
         Err(_) => Err(registry_unavailable(format!("status {status}"))),
     }

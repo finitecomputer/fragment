@@ -74,10 +74,12 @@ function el(tag, cls, text) {
 
 // ---- the API, as this page calls it: the person's platform session ----
 class ApiError extends Error {
-  constructor(status, code, message) {
+  constructor(status, code, message, reason) {
     super(message);
     this.status = status;
     this.code = code;
+    // why, where the platform names it (billing's refusals: docs/api.md)
+    this.reason = reason ?? null;
   }
 }
 // this page's writes still going: a reload for a new release waits for them
@@ -91,7 +93,7 @@ async function api(method, path, body) {
     const r = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: "same-origin" });
     heard(r);
     const out = await r.json().catch(() => ({}));
-    if (!r.ok) throw new ApiError(r.status, out.error, out.message || r.statusText);
+    if (!r.ok) throw new ApiError(r.status, out.error, out.message || r.statusText, out.reason);
     return out;
   } finally {
     if (writes) writing--;
