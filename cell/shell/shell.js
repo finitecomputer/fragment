@@ -3432,6 +3432,8 @@ addEventListener("pageshow", (e) => { if (e.persisted) lookForRelease(); });
 addEventListener("online", () => lookForRelease());
 
 async function start(open) {
+  // its scripts came: "Still loading…" (index.html) is never said
+  $("still-loading")?.remove();
   let me;
   try {
     me = await api("GET", "/api/identities/me");

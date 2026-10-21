@@ -24,6 +24,12 @@
   <link rel="stylesheet" href="/__shell/shell.css">
 </head>
 <body>
+  <!-- said only if the shell's scripts have not started after a while (one
+       of them never came: the page would be blank, with nothing to press),
+       with a reload of this same page: shell.css shows it after a delay,
+       and shell.js takes it away as it starts. No script of its own: it
+       could fail to come as well. -->
+  <p class="still-loading" id="still-loading">Still loading… <a href="">Reload</a></p>
   <!-- the shell: the platform's one page (docs/cloudflare-v1.md, decisions 6–12).
        sidebar | gutter | chat | gutter | viewer, one grid (layout.js). Design:
        Skyler's handoff, 2026-10-02. -->
