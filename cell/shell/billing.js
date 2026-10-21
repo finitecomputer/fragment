@@ -188,7 +188,7 @@ export function seatOffer(helpers, mine, trial) {
 /** The Billing section, and an admin's Org section (`mine`: `GET /api/seat`'s). */
 export async function billingSections(helpers, ledger, mine, back) {
   h = helpers;
-  const { el, section, line, actionLine, usd } = h;
+  const { el, section, line, actionLine, usd, reopen } = h;
   if (!mine) return [section("Billing", el("p", "muted", "Your seat could not be read."))];
   const { offer } = mine;
   const billing = section("Billing");
@@ -206,7 +206,7 @@ export async function billingSections(helpers, ledger, mine, back) {
       : button(`Leave ${seat.org.name}`, async () => {
           if (!confirm(`Leave ${seat.org.name}? Your seat there ends, and your agents stop. Nothing of yours is deleted.`)) return;
           await h.api("POST", "/api/seat/leave", {});
-          await h.reopen();
+          await reopen();
         });
     if (!alone) billing.append(line("Org", seat.org.name + (seat.admin ? " (you admin it)" : ""), leave));
     if (seat.trialEnds) billing.append(line("Trial ends", new Date(seat.trialEnds * 1000).toLocaleDateString()));
@@ -245,7 +245,7 @@ export async function billingSections(helpers, ledger, mine, back) {
     billing.append(line("Seat", `${KIND[ledger?.plan] ?? "A seat"}, given to everyone here`));
   }
   // what orgs offer them: theirs to accept (a move, from an org they are in) or decline
-  for (const box of offers(mine, () => h.reopen())) billing.append(box);
+  for (const box of offers(mine, () => reopen())) billing.append(box);
   // credit is a seat's (or a plan the deployment gives): a guest pays for
   // nothing, so has none to show
   if (ledger && !mine.guest) {
@@ -278,7 +278,7 @@ function portal() {
  * subscription lives they stay (the platform says to cancel it first).
  */
 function orgSection(org, offer, pays) {
-  const { el, section, actionLine } = h;
+  const { el, section, actionLine, reopen } = h;
   const box = section(org.name ? `Org: ${org.name}` : "Org");
   if (org.error) {
     box.append(el("p", "muted", org.error));
@@ -296,13 +296,13 @@ function orgSection(org, offer, pays) {
       actions.append(button("Remove seat", async () => {
         if (!confirm(`Remove ${m.email}'s seat? Their agents stop.`)) return;
         await h.api("DELETE", `/api/org/seats/${encodeURIComponent(m.id)}`);
-        await h.reopen();
+        await reopen();
       }));
     }
     if (m.admin && org.members.filter((x) => x.admin && x.person).length > 1 && (!payer || pays)) {
       actions.append(button("Not admin", async () => {
         await h.api("DELETE", `/api/org/admins/${encodeURIComponent(m.id)}`);
-        await h.reopen();
+        await reopen();
       }));
     }
     tr.append(who, role, actions);
@@ -321,7 +321,7 @@ function orgSection(org, offer, pays) {
     e.preventDefault();
     try {
       await h.api("POST", "/api/org/seats", { email: email.value.trim() });
-      await h.reopen();
+      await reopen();
     } catch (err) {
       note(box, err.message);
     }
@@ -338,7 +338,7 @@ function orgSection(org, offer, pays) {
     e.preventDefault();
     try {
       await h.api("POST", "/api/org/admins", { email: adminEmail.value.trim() });
-      await h.reopen();
+      await reopen();
     } catch (err) {
       note(box, err.message);
     }

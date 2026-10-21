@@ -894,6 +894,7 @@ const agentsOwnChat = (agent) => chats().find((f) => own(f) && labelOf(f.name) =
 
 function openChat(name, push = true) {
   if (!byName(name)) return;
+  openSettings.visit = null;
   if (push) at("/");
   state.page = null;
   $("layout").classList.remove("settings-view");
@@ -1884,6 +1885,12 @@ function renderSettingsPage(page, sections) {
   };
   page.onscroll();
 }
+// An action may refresh the visit that began it, including after another
+// action refreshed that same view, but never reopen it after navigation.
+function settingsActionCurrent() {
+  const owner = state.me, visit = openSettings.visit;
+  return () => state.me === owner && openSettings.visit === visit && state.page === "Settings" && !$("settings-page").hidden && !$("layout").hidden;
+}
 async function openSettings(push = true) {
   if (push) at(SETTINGS);
   state.page = "Settings";
@@ -1891,12 +1898,14 @@ async function openSettings(push = true) {
   $("frames").hidden = true;
   const page = $("settings-page");
   page.hidden = false;
+  openSettings.visit ??= {};
   page.replaceChildren(el("p", "muted", "Loading…"));
   renderHeading();
   renderChats();
   leaveSidebar();
   // a credit pack's Checkout returning, before the ledger is read
-  const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => openSettings(false), noSeatSaid, switchForm };
+  const actionCurrent = settingsActionCurrent();
+  const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => actionCurrent() ? openSettings(false) : Promise.resolve(), noSeatSaid, switchForm };
   const back = await returning(billingHelpers);
   const [ledger, mySeat, linked, uses, access] = await Promise.all([
     api("GET", "/api/ledger").catch(() => null),
@@ -1937,6 +1946,7 @@ async function openSettings(push = true) {
   file.onchange = async () => {
     const f = file.files?.[0];
     if (!f) return;
+    const current = settingsActionCurrent();
     writing++;
     let r;
     try {
@@ -1945,8 +1955,11 @@ async function openSettings(push = true) {
     } finally {
       writing--;
     }
+    if (!current()) return;
     if (r.ok) {
-      state.me = await api("GET", "/api/identities/me");
+      const me = await api("GET", "/api/identities/me");
+      if (!current()) return;
+      state.me = me;
       openSettings(false);
     } else picture.querySelector("span").textContent = (await r.json().catch(() => ({}))).message || "That picture was not taken";
   };
@@ -2594,10 +2607,11 @@ function connectionsSection(linked, uses) {
       form.append(input, save);
       form.onsubmit = async (e) => {
         e.preventDefault();
+        const current = settingsActionCurrent();
         save.disabled = true;
         try {
           await api("PUT", `/api/connections/${encodeURIComponent(p.provider)}/key`, { key: input.value });
-          await openSettings(false);
+          if (current()) await openSettings(false);
         } catch (err) {
           save.textContent = err.message;
           save.disabled = false;
@@ -2712,7 +2726,10 @@ async function skillsSection() {
   if (!mine) {
     const add = el("button", "quiet", "Add the managed skills");
     add.type = "button";
-    add.onclick = () => skillsFragment().then(() => openSettings(false)).catch((e) => { add.textContent = e.message; });
+    add.onclick = () => {
+      const current = settingsActionCurrent();
+      return skillsFragment().then(() => { if (current()) return openSettings(false); }).catch((e) => { if (current()) add.textContent = e.message; });
+    };
     s.append(el("p", "muted", "Your agents have no managed skills yet."), actionLine("Managed skills", add));
   } else {
     const paths = await filesOf(mine.name);
@@ -2785,6 +2802,7 @@ $("first-run").addEventListener("scroll", clearSplashEdge, { passive: true });
 addEventListener("blur", clearSplashEdge);
 addEventListener("resize", clearSplashEdge);
 function firstRun(...children) {
+  openSettings.visit = null;
   clearSplashEdge();
   $("layout").hidden = true;
   $("first-run").hidden = false;
