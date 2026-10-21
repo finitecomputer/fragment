@@ -591,13 +591,14 @@ pub fn transaction_sync<T: 'static>(state: &JsValue, f: impl FnOnce() -> CellRes
 /// model's answer as the vendor sent it, through the named AI Gateway
 /// (spike S4: the binding is pre-authenticated, so the Worker holds no
 /// token). `options` is `{gateway: {id, metadata, collectLog}, extraHeaders}`.
-pub async fn ai_run(env: &JsValue, model: &str, input: &serde_json::Value, options: &serde_json::Value) -> CellResult<worker::Response> {
-    let ai = binding(env, "AI", "ai")?;
-    let opts = to_js(options);
-    set(opts.unchecked_ref::<Object>(), "returnRawResponse", true);
-    let out = await_js(call(&ai, "run", &[model.into(), to_js(input), opts]), "AI.run").await?;
-    let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host("AI.run answered no Response"))?;
-    Ok(worker::Response::from(resp))
+pub async fn ai_run(env: &JsValue, model: &str, input: &serde_json::Value, options: &serde_json::Value) -> Result<worker::Response, fragment_core::models::diagnostics::AiRunError<CellError>> {
+    fragment_core::models::diagnostics::with_ai_binding(binding(env, "AI", "ai"), |ai| async move {
+        let opts = to_js(options);
+        set(opts.unchecked_ref::<Object>(), "returnRawResponse", true);
+        let out = await_js(call(&ai, "run", &[model.into(), to_js(input), opts]), "AI.run").await?;
+        let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host("AI.run answered no Response"))?;
+        Ok(worker::Response::from(resp))
+    }).await
 }
 
 /// Sends one message through Cloudflare Email Sending (`EMAIL`, the

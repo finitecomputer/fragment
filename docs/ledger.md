@@ -301,20 +301,25 @@ request configuration (`model_configuration_failed`) say
 `outcome: blocked_before_provider`. A provider's HTTP refusal says
 `model_upstream_rejected` / `upstream_rejection` with its numeric status;
 a failed send says `model_transport_failed` / `transport_failure`.
-The model route also records response-read and ledger-finalization
-failures. The stable `code` is diagnostic, not a new API error code.
+The model route also sanitizes its existing ledger-finalization failure
+logs. The stable `code` is diagnostic, not a new API error code.
 
 Each failure carries `release`, `ms` (elapsed since reservation/attempt
-start, or model call start for response and finalization failures),
+start, or model call start for finalization failures),
 `attempt` (1 or 2 for provider attempts), and `request_id`: the first
 16 hex digits of SHA-256 of the reservation reference. The same reference
 joins a call's fallback and finalization; a job's reference already names
 its run, attempt and step. Hashing it keeps fragment names out of these
-logs. `error_code` is the existing typed API code when available.
+logs. `error_code` is the typed code at the failed boundary when available;
+it can differ from the client-facing adapter error. In particular, a missing
+Workers AI binding is logged as configuration blocked before the provider,
+while retaining the adapter's existing `upstream_failed` response.
 No exception message, provider body, URL, input or header is copied into
-these failure logs. The existing `model.fallback` and `model.platform-key`
-events keep their model/status fields and gain the same correlation and
-release; their former free-text `why` is removed. Client responses and
+these failure logs. `model.attempt-failed` replaces `model.fallback`;
+`model.platform-key` remains the event for a platform key's refusal, with
+the same sanitized fields. Their former free-text `why` is removed.
+401/402/403/404 remain numeric statuses; a failed fallback is attempt 2
+under the same `request_id`. Client responses and
 metering rules stay the same. This adds no alert or sampling settings.
 
 Each source keeps an outbox in its own SQLite and flushes one batch per

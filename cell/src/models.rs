@@ -23,7 +23,8 @@
 //! model (its `models.fallback`: DeepSeek V4 Flash unless named, behind the
 //! cheap tier's GLM-5.3 Flash; Workers AI's GLM-5.3 Flash behind
 //! OpenRouter on Finite's own; `fragment_core::models::Tries`), logged as
-//! `model.fallback`, under the same hold, and settled as the fallback's.
+//! `model.attempt-failed` (or `model.platform-key`), under the same hold,
+//! and settled as the fallback's.
 //! Not a race: the fallback is called only after the model failed. An
 //! answer that began is final, and the fallback's failure is passed
 //! through as any. `vision` has none (the default fallback, DeepSeek, reads
@@ -85,7 +86,7 @@ use std::pin::Pin;
 
 use fragment_core::ledger::{Release, Reserve, Settle, Spend};
 use fragment_core::models::{self as bounds, Bounded, Model, Named, Stream, Tried, Tries, Upstream};
-use fragment_core::models::diagnostics::{correlation, Failure};
+use fragment_core::models::diagnostics::Failure;
 use fragment_core::price::Usage;
 use fragment_core::{decide, multipart, transcribe};
 use fragment_proto::{valid_fragment_name, ErrorCode, IdentityKind, Tier};
@@ -168,8 +169,33 @@ pub(crate) fn diagnose(env: &Env, reference: &str, failure: Failure, attempt: Op
     console_error!("{}", failure.record(reference, &Config::from_env(env).deploy_id, attempt, js::now_ms() - t0));
 }
 
-fn diagnose_attempt(env: &Env, reference: &str, answer: &CellResult<Response>, attempt: u32, t0: i64) {
-    if let Some(failure) = Failure::attempt(answer.as_ref().map(Response::status_code).map_err(|e| e.code)) {
+/// Keep diagnostic stage separate from the existing client error contract.
+struct AttemptError {
+    diagnostic_code: ErrorCode,
+    error: CellError,
+}
+
+impl From<CellError> for AttemptError {
+    fn from(error: CellError) -> Self {
+        Self { diagnostic_code: error.code, error }
+    }
+}
+
+impl From<worker::Error> for AttemptError {
+    fn from(error: worker::Error) -> Self {
+        CellError::from(error).into()
+    }
+}
+
+type AttemptResult = std::result::Result<Response, AttemptError>;
+
+fn diagnose_attempt(env: &Env, reference: &str, answer: &AttemptResult, attempt: u32, t0: i64, platform_key: bool) {
+    let failure = Failure::attempt(answer.as_ref().map(Response::status_code).map_err(|e| e.diagnostic_code));
+    if let Some(failure) = failure {
+        let failure = match failure {
+            Failure::Upstream(status) if platform_key => Failure::PlatformKey(status),
+            other => other,
+        };
         diagnose(env, reference, failure, Some(attempt), t0);
     }
 }
@@ -298,7 +324,6 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
             Ok(b) => b,
             Err(e) => {
                 // what it used is unknown: its worst case
-                diagnose(env, &held.reference, Failure::ResponseBody, Some(held.calls), held.t0);
                 held.settle(None, log_id).await;
                 return Err(e);
             }
@@ -310,7 +335,6 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
         return Ok(resp);
     }
     let ResponseBody::Stream(source) = upstream.body() else {
-        diagnose(env, &held.reference, Failure::ResponseBody, Some(held.calls), held.t0);
         held.settle(None, log_id).await;
         return Err(CellError::new(ErrorCode::UpstreamFailed, "the model's stream had no body"));
     };
@@ -334,7 +358,6 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
             match chunk {
                 Ok(c) => stream.push(&c, None),
                 Err(_) => {
-                    diagnose(&held.env, &held.reference, Failure::ResponseBody, Some(held.calls), held.t0);
                     broke = true;
                     break;
                 }
@@ -402,15 +425,12 @@ async fn tried(env: &Env, cfg: &Config, bounded: &Bounded<'static>, fallback: Op
         calls += 1;
         let answer = transport(env, cfg, model, &bounded.input, meta).await;
         let status = answer.as_ref().ok().map(Response::status_code);
-        diagnose_attempt(env, reference, &answer, calls, t0);
-        let Some(next) = tries.after(status.map_or(Tried::Unreached, Tried::Answered)) else { return (answer, model, calls) };
+        diagnose_attempt(env, reference, &answer, calls, t0, status.and_then(|s| bounds::key_alarm(model.upstream, s)).is_some());
+        let Some(_) = tries.after(status.map_or(Tried::Unreached, Tried::Answered)) else { return (answer.map_err(|e| e.error), model, calls) };
         // A vendor's refusal may echo input or credentials. Drop it unread
         // on fallback; only the final refusal is read for the client.
-        // the platform's own key refused or its credit spent: every call falls back until someone fixes it
-        if let Some(alarm) = status.and_then(|s| bounds::key_alarm(model.upstream, s)) {
-            console_error!("{}", json!({ "event": "model.platform-key", "request_id": correlation(reference), "release": cfg.deploy_id, "model": model.id(), "status": status, "alarm": alarm }));
-        }
-        console_log!("{}", json!({ "event": "model.fallback", "request_id": correlation(reference), "release": cfg.deploy_id, "from": model.id(), "to": next.id(), "status": status, "ms": js::now_ms() - t0 }));
+        // The failed attempt above replaces the former fallback line.
+        // A fallback's attempt is 2 under the same request_id.
     }
 }
 
@@ -421,13 +441,11 @@ pub(crate) async fn run(env: &Env, model: &str, input: &Value, payer: &str, agen
     let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
     let t0 = js::now_ms();
     let answer = workers_ai(env, Config::from_env(env), model, input, &meta).await;
-    diagnose_attempt(env, reference, &answer, 1, t0);
-    let mut resp = answer?;
+    diagnose_attempt(env, reference, &answer, 1, t0, false);
+    let mut resp = answer.map_err(|e| e.error)?;
     let status = resp.status_code();
     let log_id = resp.headers().get("cf-aig-log-id")?;
-    let bytes = read_whole(&mut resp).await.inspect_err(|_| {
-        diagnose(env, reference, Failure::ResponseBody, Some(1), t0);
-    })?;
+    let bytes = read_whole(&mut resp).await?;
     Ok((status, bytes, log_id))
 }
 
@@ -481,7 +499,7 @@ struct Metadata {
 }
 
 /// Makes a bounded call on `model`, where the deployment runs it.
-async fn transport(env: &Env, cfg: &Config, model: Model<'_>, input: &Value, meta: &Metadata) -> CellResult<Response> {
+async fn transport(env: &Env, cfg: &Config, model: Model<'_>, input: &Value, meta: &Metadata) -> AttemptResult {
     match model.upstream {
         Upstream::WorkersAi { model } => workers_ai(env, cfg, model, input, meta).await,
         Upstream::Openai { base_url, model: id, body } => openai(env, model.named, base_url, &bounds::openai_request(input, id, body.as_ref())).await,
@@ -494,7 +512,7 @@ async fn transport(env: &Env, cfg: &Config, model: Model<'_>, input: &Value, met
 /// (`keys::model_key`) as its bearer token, and nothing of the client's
 /// or of the payer's. A key the deployment does not bind is a model not
 /// reached (its call falls back), said in the log without it.
-async fn openai(env: &Env, named: Named, base_url: &str, body: &Value) -> CellResult<Response> {
+async fn openai(env: &Env, named: Named, base_url: &str, body: &Value) -> AttemptResult {
     let key = crate::keys::model_key(env, named.as_str()).await?;
     let h = Headers::new();
     h.set("content-type", "application/json")?;
@@ -502,13 +520,13 @@ async fn openai(env: &Env, named: Named, base_url: &str, body: &Value) -> CellRe
     let mut init = RequestInit::new();
     init.with_method(Method::Post).with_headers(h).with_body(Some(body.to_string().into()));
     let req = Request::new_with_init(&format!("{base_url}/chat/completions"), &init)?;
-    Fetch::Request(req).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {e}")))
+    Fetch::Request(req).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {e}")).into())
 }
 
 /// Makes a bounded call: `input` to Workers AI's `model`, through the AI
 /// binding and the deployment's gateway, or, in dev and the e2e, to the
 /// fake at `FRAGMENT_AI_URL`.
-async fn workers_ai(env: &Env, cfg: &Config, model: &str, input: &Value, meta: &Metadata) -> CellResult<Response> {
+async fn workers_ai(env: &Env, cfg: &Config, model: &str, input: &Value, meta: &Metadata) -> AttemptResult {
     let mut metadata = json!({ "user_id": meta.user_id });
     if let Some(agent) = &meta.agent_id {
         metadata["agent_id"] = json!(agent);
@@ -529,13 +547,16 @@ async fn workers_ai(env: &Env, cfg: &Config, model: &str, input: &Value, meta: &
         let mut init = RequestInit::new();
         init.with_method(Method::Post).with_headers(h).with_body(Some(input.to_string().into()));
         let req = Request::new_with_init(&format!("{url}/run/{model}"), &init)?;
-        return Fetch::Request(req).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {e}")));
+        return Fetch::Request(req).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {e}")).into());
     }
     let Some(gateway) = &cfg.ai_gateway_id else {
-        return Err(CellError::host("this deployment has no model route: set AI_GATEWAY_ID (its AI Gateway)"));
+        return Err(CellError::host("this deployment has no model route: set AI_GATEWAY_ID (its AI Gateway)").into());
     };
     let options = json!({ "gateway": { "id": gateway, "metadata": metadata, "collectLog": false }, "extraHeaders": headers });
-    js::ai_run(env.as_ref(), model, input, &options).await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {}", e.message)))
+    js::ai_run(env.as_ref(), model, input, &options).await.map_err(|e| {
+        let (diagnostic_code, original) = e.into_parts();
+        AttemptError { diagnostic_code, error: CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {}", original.message)) }
+    })
 }
 
 /// An answer's body, at most `ANSWER_MAX_BYTES` (read no further).
@@ -716,12 +737,12 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url) 
     let mut held = hold(env, &owner, Some(&agent.id), None, bounded.worst(), transcribe::TRANSCRIBE_MODEL, transcribe::WHISPER).await?;
     let meta = Metadata { user_id: opaque(&owner), agent_id: Some(opaque(&agent.id)) };
     let answered = workers_ai(env, Config::from_env(env), transcribe::TRANSCRIBE_MODEL, &bounded.input, &meta).await;
-    diagnose_attempt(env, &held.reference, &answered, 1, held.t0);
+    diagnose_attempt(env, &held.reference, &answered, 1, held.t0, false);
     let mut upstream = match answered {
         Ok(r) => r,
         Err(e) => {
             held.release("the model was not reached").await;
-            return Err(e);
+            return Err(e.error);
         }
     };
     held.first_ms = Some(js::now_ms() - held.t0);
@@ -735,7 +756,6 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url) 
         Ok(b) => b,
         Err(e) => {
             // what it used is unknown: its worst case
-            diagnose(env, &held.reference, Failure::ResponseBody, Some(1), held.t0);
             held.settle(None, log_id).await;
             return Err(e);
         }

@@ -1219,7 +1219,7 @@ Private stays possible by config.
     (and take out `vision_model` or `fallback_model` if it names one);
     deploy. The deploy refuses to go on while the store lacks the key. On
     the Worker's logs, `model.settled` names `glm-5-3-flash` for the
-    tiers' calls, and `model.fallback` from it says why a call went to
+    tiers' calls, and `model.attempt-failed` from it says why a call went to
     Workers AI (a 429 there is the window spent).
 
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)

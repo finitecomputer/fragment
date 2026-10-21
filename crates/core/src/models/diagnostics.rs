@@ -6,13 +6,37 @@ use fragment_proto::ErrorCode;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+/// The Workers AI adapter distinguishes binding lookup from invoking it.
+/// Keep the original error for the client, but only its stage reaches logs.
+pub enum AiRunError<E> {
+    Binding(E),
+    Call(E),
+}
+
+impl<E> AiRunError<E> {
+    pub fn into_parts(self) -> (ErrorCode, E) {
+        match self {
+            Self::Binding(e) => (ErrorCode::HostFailed, e),
+            Self::Call(e) => (ErrorCode::UpstreamFailed, e),
+        }
+    }
+}
+
+/// The AI binding is resolved before its run callback can be invoked.
+/// Kept pure so a missing binding is testable without a Workers runtime.
+pub async fn with_ai_binding<B, T, E, F: std::future::Future<Output = Result<T, E>>>(binding: Result<B, E>, run: impl FnOnce(B) -> F) -> Result<T, AiRunError<E>> {
+    let binding = binding.map_err(AiRunError::Binding)?;
+    run(binding).await.map_err(AiRunError::Call)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Failure {
     Reservation(ErrorCode),
     Configuration(ErrorCode),
     Transport,
     Upstream(u16),
-    ResponseBody,
+    /// Preserve the existing operator signal for a platform key's refusal.
+    PlatformKey(u16),
     Settle(ErrorCode),
     Release(ErrorCode),
 }
@@ -40,7 +64,7 @@ impl Failure {
             Self::Configuration(e) => ("model.attempt-failed", "model_configuration_failed", "blocked_before_provider", Some(e), None),
             Self::Transport => ("model.attempt-failed", "model_transport_failed", "transport_failure", Some(ErrorCode::UpstreamFailed), None),
             Self::Upstream(s) => ("model.attempt-failed", "model_upstream_rejected", "upstream_rejection", None, Some(s)),
-            Self::ResponseBody => ("model.response-failed", "model_response_failed", "response_failure", Some(ErrorCode::UpstreamFailed), None),
+            Self::PlatformKey(s) => ("model.platform-key", "model_upstream_rejected", "upstream_rejection", None, Some(s)),
             Self::Settle(e) => ("model.settle-failed", "model_settle_failed", "ledger_finalization_failure", Some(e), None),
             Self::Release(e) => ("model.release-failed", "model_release_failed", "ledger_finalization_failure", Some(e), None),
         };
@@ -83,12 +107,42 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_workers_ai_binding_failure_is_not_a_transport_failure() {
+        // Poll ready mocks only, through the same boundary as js::ai_run.
+        fn ready<T>(future: impl std::future::Future<Output = T>) -> T {
+            let mut future = std::pin::pin!(future);
+            match future.as_mut().poll(&mut std::task::Context::from_waker(std::task::Waker::noop())) {
+                std::task::Poll::Ready(value) => value,
+                std::task::Poll::Pending => panic!("the mocked call is ready"),
+            }
+        }
+        let canary = "SYNTHETIC_EXCEPTION_CANARY";
+        for (binding, expected_calls, outcome) in [
+            (Err(canary), 0, "blocked_before_provider"),
+            (Ok(()), 1, "transport_failure"),
+        ] {
+            let calls = std::cell::Cell::new(0);
+            let answer = ready(with_ai_binding(binding, |()| {
+                calls.set(calls.get() + 1);
+                std::future::ready(Err::<(), _>(canary))
+            }));
+            assert_eq!(calls.get(), expected_calls);
+            let (diagnostic_code, original) = answer.err().unwrap().into_parts();
+            assert_eq!(original, canary, "the client error is retained separately");
+            let row = Failure::attempt(Err(diagnostic_code)).unwrap().record("aig:synthetic", "dev", Some(1), 1);
+            assert_eq!(row["outcome"], outcome);
+            assert!(!row.to_string().contains(canary));
+        }
+        assert!(ready(with_ai_binding(Ok::<_, &str>(()), |()| std::future::ready(Ok(200)))).is_ok());
+    }
+
+    #[test]
     fn diagnostics_only_serialize_the_allowlist() {
         // Synthetic canaries, never real credentials or customer content.
         let untrusted = "REDACTION_CANARY\nhttps://example.invalid/?token=CANARY";
         for failure in [
             Failure::Reservation(ErrorCode::BudgetUsedUp), Failure::Configuration(ErrorCode::HostFailed),
-            Failure::Transport, Failure::Upstream(403), Failure::ResponseBody,
+            Failure::Transport, Failure::Upstream(403), Failure::PlatformKey(401),
             Failure::Settle(ErrorCode::HostFailed), Failure::Release(ErrorCode::HostFailed),
         ] {
             let row = failure.record(untrusted, untrusted, None, -5);
@@ -117,5 +171,8 @@ mod tests {
         assert_eq!(fallback["attempt"], 2);
         assert_eq!(release["release"], "0123456789abcdef");
         assert!(!first.to_string().contains("synthetic-fragment"));
+        let key = Failure::PlatformKey(401).record(reference, "dev", Some(1), 1);
+        assert_eq!(key["event"], "model.platform-key", "the existing e2e and operator signal survives");
+        assert_eq!(key["status"], 401);
     }
 }
