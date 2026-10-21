@@ -1111,6 +1111,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     settings_race_ui(s, api, &mut b, &page, &session)?;
     notice_ui(s, &mut b, &page, &chat, &shots)?;
     models_ui(s, api, &mut b, &page, &session, &chat, &shots)?;
+    left_and_back_ui(s, api, &mut b, &page, &session, &chat)?;
     computer_ui(s, api, &mut b, &page, &session, &shots)?;
     update_ui(s, api, &mut b, &page, &session, &shots)?;
     b.color_scheme(&page, "dark")?;
@@ -3098,6 +3099,62 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
 /// What a connection's row says when its Disconnect or Remove did not go
 /// through (shell.js `unremoved`).
 const UNREMOVED: &str = "That didn't go through. Try again.";
+
+/// A failure belongs to the visit of settings it was pressed in (#462
+/// review): an own key's Remove, then an agent's chip, each held before it
+/// is sent while a chat opens and settings open again, then refused: the
+/// settings shown say nothing of it, the key still set and the chip as it
+/// was. The key taken away after.
+fn left_and_back_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, chat: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let own = format!("#settings-connections [data-provider={:?}]", crate::SWAP_OWN);
+    let key = format!("/api/connections/{}/key", crate::SWAP_OWN);
+    let chip = "#settings-connections [data-provider=\"perplexity\"] [data-agent]";
+    let pressed = format!("document.querySelector({})?.getAttribute('aria-pressed') === 'true' && document.querySelector({}).disabled === false", js(chip), js(chip));
+    let open_settings = "(document.getElementById('settings').click(), true)";
+    let saved = shell(api, session, "PUT", &key, Some(&json!({ "key": "mail-back-e2e-55aa" })), &[])?;
+    b.reload(page)?;
+    let set = format!("location.pathname === '/settings' && document.querySelector('{own}')?.dataset.state === 'set' && !!document.querySelector('{own} [data-action=remove-key]')");
+    let ready = saved.status == 200 && b.until(page, &format!("{set} && {pressed}"), wait);
+
+    // the Remove: held, a chat, settings again, then refused
+    b.eval(page, &hold("DELETE", &format!("{key}$"), Hold::Request))?;
+    b.click(page, &format!("{own} [data-action=remove-key]"))?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    open_row(b, page, chat, wait)?;
+    b.eval(page, open_settings)?;
+    let back = b.until(page, &set, wait);
+    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
+    let settled = b.until(page, HELD_SETTLED, wait);
+    let row = b.eval(page, &format!("({{ state: document.querySelector('{own}')?.dataset.state ?? null, said: document.querySelector('{own} .provider-said')?.textContent ?? '' }})"))?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "a Remove refused once the person has left settings and come back says nothing in the settings shown: the key still set",
+        ready && held && back && settled && row == json!({ "state": "set", "said": "" }),
+        &row,
+    );
+
+    // the chip: held, a chat, settings again, then refused
+    b.eval(page, &hold("PUT", "/agents/[^/]+/connections$", Hold::Request))?;
+    b.eval(page, &format!("(document.querySelector({}).click(), true)", js(chip)))?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    open_row(b, page, chat, wait)?;
+    b.eval(page, open_settings)?;
+    let back = b.until(page, &pressed, wait);
+    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
+    let settled = b.until(page, HELD_SETTLED, wait);
+    let quiet = b.eval(page, &format!("document.getElementById('notice').hidden && {pressed}"))?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "an agent's chip refused once the person has left settings and come back says nothing in the settings shown: the chip as it was",
+        held && back && settled && quiet == true,
+        b.eval(page, "document.getElementById('notice').innerText")?,
+    );
+    shell(api, session, "DELETE", &key, None, &[])?;
+    b.reload(page)?;
+    anyhow::ensure!(b.until(page, &format!("document.querySelector('{own}')?.dataset.state === 'not_set' && {pressed}"), wait), "settings, the key gone");
+    Ok(())
+}
 
 /// How soon an open shell shows a change to its person's list, made
 /// anywhere: "within a few seconds", with no reload.

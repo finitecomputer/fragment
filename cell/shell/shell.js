@@ -1921,6 +1921,9 @@ function renderSettingsPage(page, sections) {
 // settings are shown: an older one that answers last (an action's reload, a
 // second press, Back) read older state, and is dropped (#441).
 let settingsLoads = 0;
+// Each visit to settings, from another page (never a reload of them): an
+// action's failure is said only in the visit it was pressed in (#439).
+let visits = 0;
 // `failed`: what the action that asked for this load says once it renders
 // (a failure's notice, [title, text]).
 async function openSettings(push = true, failed = null) {
@@ -1935,6 +1938,7 @@ async function openSettings(push = true, failed = null) {
   const tell = () => {
     if (failed && gen === noticeGen) notice(...failed);
   };
+  if (state.page !== "Settings") visits++;
   state.page = "Settings";
   $("layout").classList.add("settings-view");
   $("frames").hidden = true;
@@ -2607,9 +2611,10 @@ function connectButton(p, label, said) {
   };
   return go;
 }
-// The own keys whose last Disconnect or Remove did not go through: said in
-// their row, while it still has the key, until the next press. Whichever
-// load of settings renders after the press shows it (#439).
+// The own keys whose last Disconnect or Remove did not go through, in the
+// visit of settings it was pressed in: said in their row, while it still
+// has the key, until the next press. Whichever load of settings renders
+// after the press shows it (#439).
 const unremoved = new Set();
 function connectionsSection(linked, uses) {
   const s = section("Connections");
@@ -2644,12 +2649,13 @@ function connectionsSection(linked, uses) {
     // Disconnect or Remove: settings then reload, and the row they show says
     // whether the key is still there; one that failed says so in it
     const removeKey = (button) => async () => {
+      const visit = visits;
       button.disabled = true;
       unremoved.delete(p.provider);
       try {
         await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}/key`);
       } catch {
-        unremoved.add(p.provider);
+        if (visit === visits && state.page === "Settings") unremoved.add(p.provider);
       }
       await reopenSettings();
     };
@@ -2728,6 +2734,7 @@ function connectionsSection(linked, uses) {
         chip.setAttribute("aria-pressed", String(allowed));
         chip.title = allowed ? `${titleOf(a.fragment)} may use it: press to take it away` : `${titleOf(a.fragment)} may not use it: press to let it`;
         chip.onclick = async () => {
+          const visit = visits;
           chip.disabled = true;
           const all = offered.map((x) => x.provider);
           const now = a.connections ?? all;
@@ -2740,11 +2747,12 @@ function connectionsSection(linked, uses) {
           } catch (e) {
             refused = e;
           }
-          // a failure is said by the reload, while the agent may use it or
-          // not as before (a newer press may have changed it since)
+          // a failure is said by the reload, in the visit it was pressed in,
+          // while the agent may use it or not as before (a newer press may
+          // have changed it since)
           const was = state.agents.get(a.identity) ?? a;
           const unchanged = (was.connections == null || was.connections.includes(p.provider)) === allowed;
-          await reopenSettings(refused && unchanged ? ["That was not changed", refused.message] : null);
+          await reopenSettings(refused && unchanged && visit === visits ? ["That was not changed", refused.message] : null);
         };
         who.append(chip);
       }
