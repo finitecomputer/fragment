@@ -295,6 +295,28 @@ Public routes (a hard cut of `/api/budget`; docs/api.md, Ledger):
 
 ## How each meter reaches it
 
+Model failures use the cell's one-line console JSON logs. Reservations
+refused by the ledger (`model_reservation_failed`) and missing keys or
+request configuration (`model_configuration_failed`) say
+`outcome: blocked_before_provider`. A provider's HTTP refusal says
+`model_upstream_rejected` / `upstream_rejection` with its numeric status;
+a failed send says `model_transport_failed` / `transport_failure`.
+The model route also records response-read and ledger-finalization
+failures. The stable `code` is diagnostic, not a new API error code.
+
+Each failure carries `release`, `ms` (elapsed since reservation/attempt
+start, or model call start for response and finalization failures),
+`attempt` (1 or 2 for provider attempts), and `request_id`: the first
+16 hex digits of SHA-256 of the reservation reference. The same reference
+joins a call's fallback and finalization; a job's reference already names
+its run, attempt and step. Hashing it keeps fragment names out of these
+logs. `error_code` is the existing typed API code when available.
+No exception message, provider body, URL, input or header is copied into
+these failure logs. The existing `model.fallback` and `model.platform-key`
+events keep their model/status fields and gain the same correlation and
+release; their former free-text `why` is removed. Client responses and
+metering rules stay the same. This adds no alert or sampling settings.
+
 Each source keeps an outbox in its own SQLite and flushes one batch per
 payer through the ledger Queue, under a batch id of its own
 (`<source>:<seq>`). A crash between the ledger's apply and the outbox's

@@ -85,6 +85,7 @@ use std::pin::Pin;
 
 use fragment_core::ledger::{Release, Reserve, Settle, Spend};
 use fragment_core::models::{self as bounds, Bounded, Model, Named, Stream, Tried, Tries, Upstream};
+use fragment_core::models::diagnostics::{correlation, Failure};
 use fragment_core::price::Usage;
 use fragment_core::{decide, multipart, transcribe};
 use fragment_proto::{valid_fragment_name, ErrorCode, IdentityKind, Tier};
@@ -162,6 +163,17 @@ fn refused(why: bounds::Refusal) -> CellError {
     CellError::invalid(why.message())
 }
 
+/// Failure metadata only: never an exception's message or a provider's body.
+pub(crate) fn diagnose(env: &Env, reference: &str, failure: Failure, attempt: Option<u32>, t0: i64) {
+    console_error!("{}", failure.record(reference, &Config::from_env(env).deploy_id, attempt, js::now_ms() - t0));
+}
+
+fn diagnose_attempt(env: &Env, reference: &str, answer: &CellResult<Response>, attempt: u32, t0: i64) {
+    if let Some(failure) = Failure::attempt(answer.as_ref().map(Response::status_code).map_err(|e| e.code)) {
+        diagnose(env, reference, failure, Some(attempt), t0);
+    }
+}
+
 /// A call's hold on its payer's ledger, until it settles or is released.
 struct Held {
     env: Env,
@@ -195,7 +207,7 @@ impl Held {
                 "{}",
                 json!({ "event": "model.settled", "ref": self.reference, "logId": log_id, "tier": self.name, "model": self.model, "charge": settled.charge, "basis": settled.basis, "first_ms": self.first_ms, "ms": ms, "calls": self.calls })
             ),
-            Err(e) => console_error!("{}", json!({ "event": "model.settle-failed", "ref": self.reference, "logId": log_id, "message": e.message })),
+            Err(e) => diagnose(&self.env, &self.reference, Failure::Settle(e.code), None, self.t0),
         }
     }
 
@@ -212,7 +224,7 @@ impl Held {
     async fn release(&self, why: &str) {
         match ledger::retried(&self.env, &self.payer, &Release { reference: self.reference.clone() }).await {
             Ok(_) => console_log!("{}", json!({ "event": "model.released", "ref": self.reference, "why": why })),
-            Err(e) => console_error!("{}", json!({ "event": "model.release-failed", "ref": self.reference, "why": why, "message": e.message })),
+            Err(e) => diagnose(&self.env, &self.reference, Failure::Release(e.code), None, self.t0),
         }
     }
 }
@@ -222,18 +234,23 @@ impl Held {
 /// payer's own fragment's, on its ledger; another owner's, asked of
 /// theirs first, unless the spender is that owner's (decision 26).
 async fn hold(env: &Env, payer: &str, agent: Option<&str>, fragment: Option<&InFragment<'_>>, worst: Usage, model: &'static str, name: &'static str) -> CellResult<Held> {
+    let reference = format!("aig:{}", js::random_hex::<16>());
+    let t0 = js::now_ms();
+    let failed = |e: &ledger::LedgerError| {
+        diagnose(env, &reference, Failure::Reservation(e.code), None, t0);
+    };
     let (fragment, capped) = match fragment {
         Some(f) if f.owner == payer => (Some(f.name.to_string()), !f.by_owner),
         Some(f) => {
             if !f.by_owner {
-                ledger::retried(env, f.owner, &FragmentOpen { fragment: f.name.to_string() }).await?;
+                ledger::retried(env, f.owner, &FragmentOpen { fragment: f.name.to_string() }).await.inspect_err(failed)?;
             }
             (None, false)
         }
         None => (None, false),
     };
-    let reserve = Reserve { reference: format!("aig:{}", js::random_hex::<16>()), spend: Spend::AgentTurn, worst, fragment, agent: agent.map(str::to_string), capped };
-    ledger::hold(env, payer, &reserve).await?;
+    let reserve = Reserve { reference: reference.clone(), spend: Spend::AgentTurn, worst, fragment, agent: agent.map(str::to_string), capped };
+    ledger::hold(env, payer, &reserve).await.inspect_err(failed)?;
     Ok(Held { env: env.clone(), payer: payer.to_string(), reference: reserve.reference, model, name, t0: js::now_ms(), calls: 1, first_ms: None })
 }
 
@@ -256,7 +273,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
         Named::Tier(_) => Some(cfg.models.fallback()),
         Named::Vision | Named::Fallback => None,
     };
-    let (answer, model, calls) = tried(env, cfg, &bounded, fallback, &meta).await;
+    let (answer, model, calls) = tried(env, cfg, &bounded, fallback, &meta, &held.reference).await;
     held.model = model.id();
     held.calls = calls;
     // its stream is read as the API that answered streams
@@ -281,6 +298,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
             Ok(b) => b,
             Err(e) => {
                 // what it used is unknown: its worst case
+                diagnose(env, &held.reference, Failure::ResponseBody, Some(held.calls), held.t0);
                 held.settle(None, log_id).await;
                 return Err(e);
             }
@@ -292,6 +310,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
         return Ok(resp);
     }
     let ResponseBody::Stream(source) = upstream.body() else {
+        diagnose(env, &held.reference, Failure::ResponseBody, Some(held.calls), held.t0);
         held.settle(None, log_id).await;
         return Err(CellError::new(ErrorCode::UpstreamFailed, "the model's stream had no body"));
     };
@@ -315,6 +334,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
             match chunk {
                 Ok(c) => stream.push(&c, None),
                 Err(_) => {
+                    diagnose(&held.env, &held.reference, Failure::ResponseBody, Some(held.calls), held.t0);
                     broke = true;
                     break;
                 }
@@ -358,11 +378,11 @@ pub(crate) struct Streamed {
 }
 
 /// `Streamed`'s call; the caller keeps what it bought before it settles.
-pub(crate) async fn streamed(env: &Env, bounded: &Bounded<'static>, payer: &str, agent: Option<&str>) -> CellResult<Streamed> {
+pub(crate) async fn streamed(env: &Env, bounded: &Bounded<'static>, payer: &str, agent: Option<&str>, reference: &str) -> CellResult<Streamed> {
     assert!(bounded.stream, "a step's call streams: its answer is read as it comes");
     let cfg = Config::from_env(env);
     let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
-    let (answer, model, calls) = tried(env, cfg, bounded, Some(cfg.models.fallback()), &meta).await;
+    let (answer, model, calls) = tried(env, cfg, bounded, Some(cfg.models.fallback()), &meta, reference).await;
     let answer = answer?;
     let log_id = answer.headers().get("cf-aig-log-id")?;
     Ok(Streamed { answer, log_id, model: model.id(), upstream: model.upstream, calls })
@@ -372,7 +392,7 @@ pub(crate) async fn streamed(env: &Env, bounded: &Bounded<'static>, payer: &str,
 /// answering anything, once more on `fallback` (`Tries`: at most two
 /// tries, the second only after the first failed): the answer that is the
 /// call's, its body unread, the model whose answer it is, and the tries.
-async fn tried(env: &Env, cfg: &Config, bounded: &Bounded<'static>, fallback: Option<Model<'static>>, meta: &Metadata) -> (CellResult<Response>, Model<'static>, u32) {
+async fn tried(env: &Env, cfg: &Config, bounded: &Bounded<'static>, fallback: Option<Model<'static>>, meta: &Metadata, reference: &str) -> (CellResult<Response>, Model<'static>, u32) {
     let mut tries = Tries::new(bounded.model, fallback);
     let mut calls = 0;
     // bounded by `Tries`: a second try at most
@@ -382,29 +402,32 @@ async fn tried(env: &Env, cfg: &Config, bounded: &Bounded<'static>, fallback: Op
         calls += 1;
         let answer = transport(env, cfg, model, &bounded.input, meta).await;
         let status = answer.as_ref().ok().map(Response::status_code);
+        diagnose_attempt(env, reference, &answer, calls, t0);
         let Some(next) = tries.after(status.map_or(Tried::Unreached, Tried::Answered)) else { return (answer, model, calls) };
-        // what the vendor said (its error, never the request's words)
-        let why = match answer {
-            Ok(mut failed) => bounded_text(&mut failed).await.chars().take(300).collect::<String>(),
-            Err(e) => e.message,
-        };
+        // A vendor's refusal may echo input or credentials. Drop it unread
+        // on fallback; only the final refusal is read for the client.
         // the platform's own key refused or its credit spent: every call falls back until someone fixes it
         if let Some(alarm) = status.and_then(|s| bounds::key_alarm(model.upstream, s)) {
-            console_error!("{}", json!({ "event": "model.platform-key", "model": model.id(), "status": status, "alarm": alarm, "why": why }));
+            console_error!("{}", json!({ "event": "model.platform-key", "request_id": correlation(reference), "release": cfg.deploy_id, "model": model.id(), "status": status, "alarm": alarm }));
         }
-        console_log!("{}", json!({ "event": "model.fallback", "from": model.id(), "to": next.id(), "status": status, "ms": js::now_ms() - t0, "why": why }));
+        console_log!("{}", json!({ "event": "model.fallback", "request_id": correlation(reference), "release": cfg.deploy_id, "from": model.id(), "to": next.id(), "status": status, "ms": js::now_ms() - t0 }));
     }
 }
 
 /// One call of a Workers AI model with its input, unmetered and read whole
 /// (a job's image or decision step: ai.rs, whose caller bounds the input and meters
 /// it).
-pub(crate) async fn run(env: &Env, model: &str, input: &Value, payer: &str, agent: Option<&str>) -> CellResult<(u16, Vec<u8>, Option<String>)> {
+pub(crate) async fn run(env: &Env, model: &str, input: &Value, payer: &str, agent: Option<&str>, reference: &str) -> CellResult<(u16, Vec<u8>, Option<String>)> {
     let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
-    let mut resp = workers_ai(env, Config::from_env(env), model, input, &meta).await?;
+    let t0 = js::now_ms();
+    let answer = workers_ai(env, Config::from_env(env), model, input, &meta).await;
+    diagnose_attempt(env, reference, &answer, 1, t0);
+    let mut resp = answer?;
     let status = resp.status_code();
     let log_id = resp.headers().get("cf-aig-log-id")?;
-    let bytes = read_whole(&mut resp).await?;
+    let bytes = read_whole(&mut resp).await.inspect_err(|_| {
+        diagnose(env, reference, Failure::ResponseBody, Some(1), t0);
+    })?;
     Ok((status, bytes, log_id))
 }
 
@@ -643,7 +666,7 @@ pub(crate) async fn decide_route(mut req: Request, env: &Env, url: &Url) -> Cell
     let model = call.model;
     let mut held = hold(env, &caller.owner, Some(&caller.agent), caller.in_fragment().as_ref(), call.worst(), model.id(), DECIDE).await?;
     let input = call.input(vec![]);
-    let answered = run(env, model.id(), &input, &caller.owner, Some(&caller.agent)).await;
+    let answered = run(env, model.id(), &input, &caller.owner, Some(&caller.agent), &held.reference).await;
     drop(input);
     let (status, bytes, log_id) = match answered {
         Ok(a) => a,
@@ -692,7 +715,9 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url) 
     drop(body);
     let mut held = hold(env, &owner, Some(&agent.id), None, bounded.worst(), transcribe::TRANSCRIBE_MODEL, transcribe::WHISPER).await?;
     let meta = Metadata { user_id: opaque(&owner), agent_id: Some(opaque(&agent.id)) };
-    let mut upstream = match workers_ai(env, Config::from_env(env), transcribe::TRANSCRIBE_MODEL, &bounded.input, &meta).await {
+    let answered = workers_ai(env, Config::from_env(env), transcribe::TRANSCRIBE_MODEL, &bounded.input, &meta).await;
+    diagnose_attempt(env, &held.reference, &answered, 1, held.t0);
+    let mut upstream = match answered {
         Ok(r) => r,
         Err(e) => {
             held.release("the model was not reached").await;
@@ -710,6 +735,7 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url) 
         Ok(b) => b,
         Err(e) => {
             // what it used is unknown: its worst case
+            diagnose(env, &held.reference, Failure::ResponseBody, Some(1), held.t0);
             held.settle(None, log_id).await;
             return Err(e);
         }

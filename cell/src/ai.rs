@@ -173,7 +173,11 @@ impl FragmentCell {
     /// kept (the node died between the two): it is never made again.
     async fn reserve(&self, p: &Paying, worst: Usage) -> Result<(), StepFail> {
         let reserve = Reserve { reference: p.reference.clone(), spend: Spend::AiStep, worst, fragment: Some(p.fragment.clone()), agent: p.agent.clone(), capped: p.capped };
-        match ledger::ask(&self.env, &p.owner, &reserve).await.map_err(ledger_fail)? {
+        let t0 = crate::js::now_ms();
+        match ledger::ask(&self.env, &p.owner, &reserve).await.map_err(|e| {
+            crate::models::diagnose(&self.env, &p.reference, bounds::diagnostics::Failure::Reservation(e.code), None, t0);
+            ledger_fail(e)
+        })? {
             Reserved::Held { .. } => {}
             Reserved::Settled { .. } => return Err(permanent("this step's call was made and paid, and what it bought was lost: replay the run to make it again")),
             Reserved::Released => return Err(permanent("this step's reservation was released: replay the run to try it again")),
@@ -293,7 +297,7 @@ impl FragmentCell {
                     return Ok(out);
                 }
                 self.reserve(&p, call.worst()).await?;
-                let (status, bytes, log_id) = crate::models::run(&self.env, media::IMAGE_MODEL, &call.input, &p.owner, p.agent.as_deref()).await.map_err(retry)?;
+                let (status, bytes, log_id) = crate::models::run(&self.env, media::IMAGE_MODEL, &call.input, &p.owner, p.agent.as_deref(), &p.reference).await.map_err(retry)?;
                 if status != 200 {
                     return Err(self.unpaid(&p, model_failure(status, &bytes)).await);
                 }
@@ -349,7 +353,7 @@ impl FragmentCell {
         let blobs = self.decision_blobs(&call).await?;
         self.reserve(&p, call.worst()).await?;
         let input = call.input(blobs);
-        let answered = crate::models::run(&self.env, call.model.id(), &input, &p.owner, p.agent.as_deref()).await;
+        let answered = crate::models::run(&self.env, call.model.id(), &input, &p.owner, p.agent.as_deref(), &p.reference).await;
         drop(input);
         let (status, bytes, log_id) = answered.map_err(retry)?;
         if status != 200 {
@@ -465,7 +469,7 @@ impl FragmentCell {
         if let Some(d) = d {
             self.put_draft(d, Some(""), Some(0));
         }
-        let crate::models::Streamed { mut answer, log_id, model, upstream, calls } = crate::models::streamed(&self.env, bounded, &p.owner, p.agent.as_deref()).await.map_err(retry)?;
+        let crate::models::Streamed { mut answer, log_id, model, upstream, calls } = crate::models::streamed(&self.env, bounded, &p.owner, p.agent.as_deref(), &p.reference).await.map_err(retry)?;
         let status = answer.status_code();
         if status != 200 {
             let body = crate::models::read_whole(&mut answer).await.unwrap_or_default();

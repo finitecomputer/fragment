@@ -68,6 +68,8 @@ use serde_json::{json, Map, Value};
 use crate::price::{PriceBook, Usage};
 use crate::steps::AiText;
 
+pub mod diagnostics;
+
 /// GLM-5.3 Flash and DeepSeek V4 Flash, as Workers AI's catalog names
 /// them: each id once, each role below naming its model.
 pub const GLM_FLASH: &str = "@cf/zai-org/glm-5.3-flash";
