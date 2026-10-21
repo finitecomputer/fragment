@@ -31,26 +31,27 @@ pub fn cell() -> Result<()> {
     run(Command::new("worker-build").arg("--release").current_dir(&dir))?;
     let wasm = dir.join("build/index_bg.wasm");
     let size = std::fs::metadata(&wasm).with_context(|| format!("{} after worker-build", wasm.display()))?.len();
-    within_budget(size)?;
+    let wasm_budget = within_budget(size)?;
     let (files, bytes) = fragment_templates::write_assets(&dir.join("build/assets")).context("writing the release's files into cell/build/assets")?;
     println!(
-        "built the cell for wasm32 in {:.1?}: {:.2} MB of Wasm (at most {:.2} MB), and {files} files of the release, {:.2} MB, in its Static Assets",
+        "built the cell for wasm32 in {:.1?}: {wasm_budget}, and {files} files of the release, {:.2} MB, in its Static Assets",
         t0.elapsed(),
-        size as f64 / 1e6,
-        CELL_WASM_MAX_BYTES as f64 / 1e6,
         bytes as f64 / 1e6
     );
     Ok(())
 }
 
-/// The cell's Wasm within `CELL_WASM_MAX_BYTES`, or why not.
-fn within_budget(size: u64) -> Result<()> {
+/// The checked size and exact headroom within `CELL_WASM_MAX_BYTES`, or
+/// the exact overage and why the build is refused.
+fn within_budget(size: u64) -> Result<String> {
     if size > CELL_WASM_MAX_BYTES {
+        let over = size - CELL_WASM_MAX_BYTES;
         bail!(
-            "cell/build/index_bg.wasm is {size} bytes, over its budget of {CELL_WASM_MAX_BYTES} (xtask/src/build.rs, CELL_WASM_MAX_BYTES): every isolate copies the Wasm's data into its memory. A file the cell serves belongs in its Static Assets (crates/templates, cell/src/assets.rs), not in an include_bytes!; anything else that grows it this far is a choice to make, and this number with it"
+            "cell/build/index_bg.wasm is {size} bytes, over its budget of {CELL_WASM_MAX_BYTES} bytes (excess bytes: {over}; xtask/src/build.rs, CELL_WASM_MAX_BYTES): every isolate copies the Wasm's data into its memory. A file the cell serves belongs in its Static Assets (crates/templates, cell/src/assets.rs), not in an include_bytes!; anything else that grows it this far is a choice to make, and this number with it"
         );
     }
-    Ok(())
+    let remaining = CELL_WASM_MAX_BYTES - size;
+    Ok(format!("{size} bytes of Wasm ({:.2} MB; budget {CELL_WASM_MAX_BYTES} bytes; remaining bytes: {remaining})", size as f64 / 1e6))
 }
 
 fn worker_build_installed() -> Result<()> {
@@ -120,13 +121,23 @@ pub fn image_build(image: &serde_json::Value, tag: Option<&str>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    /// The budget holds the cell to its number, and its refusal says what
-    /// to do and where the number is.
+    /// The budget is inclusive, and a one-byte difference stays visible
+    /// even when the rounded MB is identical. Extreme sizes never wrap.
     #[test]
     fn the_cell_is_held_to_its_budget() {
-        assert!(super::within_budget(super::CELL_WASM_MAX_BYTES).is_ok());
+        assert_eq!(super::CELL_WASM_MAX_BYTES, 6_500_000);
+        for (size, expected) in [
+            (0, "0 bytes of Wasm (0.00 MB; budget 6500000 bytes; remaining bytes: 6500000)"),
+            (6_499_999, "6499999 bytes of Wasm (6.50 MB; budget 6500000 bytes; remaining bytes: 1)"),
+            (6_500_000, "6500000 bytes of Wasm (6.50 MB; budget 6500000 bytes; remaining bytes: 0)"),
+        ] {
+            assert_eq!(super::within_budget(size).unwrap(), expected);
+        }
         let refused = super::within_budget(super::CELL_WASM_MAX_BYTES + 1).unwrap_err().to_string();
+        assert!(refused.starts_with("cell/build/index_bg.wasm is 6500001 bytes, over its budget of 6500000 bytes (excess bytes: 1;"), "{refused}");
         assert!(refused.contains("CELL_WASM_MAX_BYTES") && refused.contains("Static Assets"), "{refused}");
+        let refused = super::within_budget(u64::MAX).unwrap_err().to_string();
+        assert!(refused.starts_with("cell/build/index_bg.wasm is 18446744073709551615 bytes, over its budget of 6500000 bytes (excess bytes: 18446744073703051615;"), "{refused}");
     }
 
     /// Goal: the Hermes image's inputs are what it runs (docs/computers.md,
