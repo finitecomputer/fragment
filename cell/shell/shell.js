@@ -1885,11 +1885,17 @@ function renderSettingsPage(page, sections) {
   page.onscroll();
 }
 async function openSettings(push = true) {
+  if (!state.me) return;
+  const owner = state.me;
+  const request = openSettings.request = {};
   if (push) at(SETTINGS);
   state.page = "Settings";
   $("layout").classList.add("settings-view");
   $("frames").hidden = true;
   const page = $("settings-page");
+  // A later refresh, a new identity read, or leaving this view retires
+  // every continuation of this load, including its seat and section reads.
+  const current = () => openSettings.request === request && state.me === owner && state.page === "Settings" && !page.hidden && !$("layout").hidden;
   page.hidden = false;
   page.replaceChildren(el("p", "muted", "Loading…"));
   renderHeading();
@@ -1898,6 +1904,7 @@ async function openSettings(push = true) {
   // a credit pack's Checkout returning, before the ledger is read
   const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => openSettings(false), noSeatSaid, switchForm };
   const back = await returning(billingHelpers);
+  if (!current()) return;
   const [ledger, mySeat, linked, uses, access] = await Promise.all([
     api("GET", "/api/ledger").catch(() => null),
     api("GET", "/api/seat").catch(() => null),
@@ -1905,6 +1912,7 @@ async function openSettings(push = true) {
     state.computer ? api("GET", `/api/computers/${seg(state.computer.computer)}/uses`).catch(() => null) : null,
     api("GET", "/api/access").catch((e) => ({ error: e.message })),
   ]);
+  if (!current()) return;
   if (mySeat) setGuest(mySeat.guest);
   const emails = (state.me.subjects ?? []).map((x) => x.email).filter(Boolean);
   // who is signed in (their latest sign-in's email), signing out, and
@@ -1958,12 +1966,12 @@ async function openSettings(push = true) {
   account.append(emails.length > 1 ? line("Sign-ins", emails.join(", "), link) : actionLine("Sign-ins", link));
   // the person's seat, credit and org (billing.js), and why agents stop
   const billing = await billingSections(billingHelpers, ledger, mySeat, back);
+  if (!current()) return;
   // everything that is theirs, to download (a guest's too: what is shared
   // with them, named)
-  const data = dataSection();
   // a guest has no agents to stop, nor a computer, skills or connections
   // for them, nor apps to publish: a seat to get comes first, then who they are
-  if (state.guest) return renderSettingsPage(page, [...billing, account, data]);
+  if (state.guest) return renderSettingsPage(page, [...billing, account, dataSection()]);
   const standing = ledger?.standing?.standing;
   if (standing && standing !== "ok") {
     billing[0].append(el("p", "settings-warning", [STOPPED[standing] ?? "Your agents are stopped", WHY[ledger.standing.why]].filter(Boolean).join(": ") + "."));
@@ -2033,7 +2041,8 @@ async function openSettings(push = true) {
   }) : [el("p", "muted", "None yet.")]));
   const connections = connectionsSection(linked, uses);
   const skills = await skillsSection();
-  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, buildSection(), data]);
+  if (!current()) return;
+  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, buildSection(), dataSection()]);
   renderAgentFaces();
 }
 
