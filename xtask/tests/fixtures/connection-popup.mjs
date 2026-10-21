@@ -12,11 +12,20 @@ const source = ["connectionsSection", "section", "api"].map((name) => {
 }).join("\n");
 const constants = shell.slice(shell.indexOf("const PROVIDER_KIND ="), shell.indexOf("function connectionsSection("));
 const apiError = shell.match(/^class ApiError[^]*?^\}/m)?.[0];
+const releaseFunctions = ["heard", "lastReload", "reloadsFor", "shellHolds", "reloadWhenSafe", "openWindows"].map((name) => {
+  const fn = shell.match(new RegExp(`^function ${name}\\([^]*?^\\}`, "m"))?.[0];
+  assert.ok(fn, `production ${name} exists`); return fn;
+}).join("\n");
+const releaseConstants = ["RELEASE_ID", "RELEASE_HEADER", "RELEASE_LEFT_MS", "RELEASE_TRIES", "RELEASE_AGAIN_MS", "WINDOWS_KEPT_MAX", "NAVIGATED_SETTLE_MS", "RELOAD_SETTLE_MS", "RELOADED_KEY", "WINDOWS_KEY", "release", "chatsBusy"].map((name) => {
+  const value = shell.match(new RegExp(`^const ${name} = .*;`, "m"))?.[0];
+  assert.ok(value, `production ${name} exists`); return value;
+}).join("\n");
 const walk = (node) => [node, ...node.children.filter((n) => typeof n === "object").flatMap(walk)];
 const url = "https://provider.example.test/authorize?state=fake-state";
 
-function setup(kind, blocked = false) {
+function setup(kind, blocked = false, releaseFlow = false) {
   const requests = [], opens = [], observers = [], timers = new Map(), events = new Map(), refreshes = [];
+  const delays = new Map(), reloads = [];
   let serial = 0, failNavigation = false, root;
   function el(tag, classes, text) {
     return {
@@ -30,7 +39,7 @@ function setup(kind, blocked = false) {
   }
   root = el("main");
   const page = el("section"), frames = el("div"); frames.hidden = true; root.append(frames, page);
-  const state = { me: { id: "owner-a" }, page: "Settings", computer: null };
+  const state = { me: { id: "owner-a" }, page: "Settings", computer: null, frames: new Map() };
   const popup = { closed: false, closes: 0, navigations: [], close() { this.closed = true; this.closes++; }, location: { replace(value) { if (failNavigation) throw new Error("secret-navigation-detail"); popup.navigations.push(value); } } };
   class Observer {
     constructor(callback) { this.callback = callback; this.active = true; observers.push(this); }
@@ -42,17 +51,25 @@ function setup(kind, blocked = false) {
     state, el, URL, $: (id) => ({ layout: root, "settings-page": page })[id], provider,
     window: { open(...args) { opens.push(args); if (blocked === "throw") throw new Error("secret-popup-detail"); return blocked ? null : popup; } },
     fetch: (path, options) => new Promise((resolve, reject) => requests.push({ path, options, resolve, reject })), heard() {},
+    document: { hidden: true, documentElement: { dataset: {} }, querySelector: () => null },
+    menu: { hidden: true }, viewer: { keys: [] },
+    tab: { get: () => null, set: () => true },
+    location: { reload() { reloads.push(true); for (const cb of [...events.get("pagehide") ?? []]) cb(); } },
     MutationObserver: Observer,
     addEventListener: (name, cb) => { if (!events.has(name)) events.set(name, new Set()); events.get(name).add(cb); },
     removeEventListener: (name, cb) => { events.get(name)?.delete(cb); if (!events.get(name)?.size) events.delete(name); },
-    setTimeout: (cb, delay) => { assert.equal(delay, 500); const id = ++serial; timers.set(id, cb); return id; }, clearTimeout: (id) => timers.delete(id),
+    setTimeout: (cb, delay) => { assert.ok((releaseFlow ? [100, 400, 500] : [500]).includes(delay)); const id = ++serial; timers.set(id, cb); delays.set(id, delay); return id; }, clearTimeout: (id) => { timers.delete(id); delays.delete(id); },
     openSettings: async (push) => { refreshes.push(push); page.replaceChildren(el("p", "muted", "Loading…")); },
   });
-  runInContext(`${apiError}\nlet writing = 0;\n${constants}\n${source}`, context);
+  const releaseSource = releaseFlow ? `const RELEASE = "release-a"; const typedIn = new Set(), composing = new Map(), busyFrames = new WeakSet(); let pendingLaunch = null, starting = false;\n${releaseConstants}\n${releaseFunctions}` : "";
+  runInContext(`${apiError}\nlet writing = 0;\n${constants}\n${source}\n${releaseSource}`, context);
   function mount() { const section = runInContext("connectionsSection({ providers: [provider] }, null)", context); page.replaceChildren(section); return walk(section).find((n) => n.tag === "button"); }
   const go = mount();
   return {
-    state, root, page, popup, requests, opens, observers, timers, events, refreshes, go, mount,
+    state, root, page, popup, requests, opens, observers, timers, events, refreshes, go, mount, reloads,
+    holds: () => runInContext("shellHolds()", context),
+    checkRelease: () => runInContext('reloadWhenSafe("hidden")', context),
+    runTimers(delay) { for (const [id, cb] of [...timers]) if (delays.get(id) === delay) { timers.delete(id); delays.delete(id); cb(); } },
     another() { const section = runInContext('connectionsSection({ providers: [{ ...provider, provider: "second/provider" }] }, null)', context); page.append(section); return walk(section).find((n) => n.tag === "button"); },
     tell: () => walk(page).find((n) => n.role === "status"),
     text: () => walk(page).map((n) => n.textContent).join(" "),
@@ -63,8 +80,8 @@ function setup(kind, blocked = false) {
     tick() { assert.equal(timers.size, 1); const [id, cb] = timers.entries().next().value; timers.delete(id); cb(); },
   };
 }
-function answer(request, body = { url }, status = 200) {
-  request.resolve({ ok: status < 400, status, statusText: "secret-status", json: async () => status < 400 ? body : { message: "secret-server-detail" } });
+function answer(request, body = { url }, status = 200, release = null) {
+  request.resolve({ ok: status < 400, status, headers: { get: () => release }, statusText: "secret-status", json: async () => status < 400 ? body : { message: "secret-server-detail" } });
 }
 function clean(h) {
   assert.equal(h.timers.size, 0); assert.equal(h.events.size, 0);
@@ -213,5 +230,39 @@ for (const kind of ["connection", "own"]) {
     assert.equal(h.requests.length, 2);
     answer(h.requests[1]); await retry;
     assert.deepEqual(h.popup.navigations, [url]);
+  });
+}
+
+for (const kind of ["connection", "own"]) {
+  test(`${kind}: a release announced by authorization cannot reload and close its unfinished window`, async () => {
+    const h = setup(kind, false, true);
+    const pending = h.go.onclick();
+    answer(h.requests[0], { url }, 200, "release-b");
+    await pending;
+    // Real api -> heard -> reloadWhenSafe; writing has returned to zero.
+    h.runTimers(100);
+    assert.equal(h.reloads.length, 0, "the release must wait for the authorization, not merely its POST");
+    assert.equal(h.popup.closed, false);
+    assert.equal(h.holds(), true);
+    h.popup.closed = true;
+    h.runTimers(500);
+    clean(h);
+    assert.equal(h.holds(), false);
+    assert.deepEqual(h.refreshes, [false]);
+    // The next existing safe-moment check may now adopt the waiting release.
+    h.checkRelease(); h.runTimers(100);
+    assert.equal(h.reloads.length, 1);
+  });
+  test(`${kind}: release hold does not weaken actual pagehide cleanup`, async () => {
+    const h = setup(kind, false, true);
+    const pending = h.go.onclick();
+    answer(h.requests[0], { url }, 200, "release-b"); await pending;
+    h.runTimers(100);
+    assert.equal(h.reloads.length, 0);
+    h.event("pagehide");
+    assert.equal(h.popup.closed, true);
+    assert.equal(h.holds(), false);
+    assert.equal(h.refreshes.length, 0);
+    clean(h);
   });
 }

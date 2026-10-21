@@ -3345,7 +3345,8 @@ document.addEventListener("input", (e) => {
 function shellHolds() {
   for (const f of typedIn) if (!f.isConnected) typedIn.delete(f);
   const typed = [...typedIn].some((f) => f.value.trim() && f.getClientRects().length > 0);
-  return typed || !!document.querySelector("dialog[open]") || !menu.hidden || writing > 0 || composing.size > 0 || !!pendingLaunch || starting;
+  // A provider window still needs this opener after its authorize POST ends.
+  return typed || !!document.querySelector("dialog[open]") || !menu.hidden || writing > 0 || !!connectionsSection.authorization || composing.size > 0 || !!pendingLaunch || starting;
 }
 
 // The chats' frames whose page said hello (`agents?`, which the chat's
