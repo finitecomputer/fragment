@@ -2384,15 +2384,43 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         offered && pasted == false && b.eval(page, "document.querySelectorAll('[data-model-for]').length")? == 0,
         b.eval(page, &format!("document.querySelector('{row}')?.innerText"))?,
     );
-    // the press opens the provider's page, which sends the browser back to the platform
+    // its window opens in the press itself, before the authorize call (one
+    // opened once that answers is a popup Safari blocks, as Chrome does once
+    // the press is 5 s old; #442): one the browser blocks is said in the
+    // row, and starts nothing. The page's fetch counts the authorize calls
+    // and holds them `slow` ms.
+    let connect = format!("{row} [data-action=sign-in]");
+    b.eval(page, "(() => { const f = window.fetch.bind(window); window.authorizes = 0; window.slow = 0; window.fetch = (u, o) => { if (!String(u).endsWith('/authorize')) return f(u, o); window.authorizes++; return new Promise((r) => setTimeout(r, window.slow)).then(() => f(u, o)); }; window.realOpen = window.open; window.open = () => null; return true; })()")?;
+    b.click(page, &connect)?;
+    let blocked = b.until(page, &format!("document.querySelector('{row} .provider-said')?.textContent.includes('Allow pop-ups for this site')"), wait);
+    let started = b.eval(page, "window.authorizes")?;
+    s.ok(
+        "a window the browser blocks is said in its row, with how to allow it and to try again, and starts nothing",
+        blocked && started == 0,
+        json!({ "said": b.eval(page, &format!("document.querySelector('{row} .provider-said')?.textContent ?? null"))?, "authorizes": started }),
+    );
+    // the press opens the provider's page, which sends the browser back to
+    // the platform, the authorize call held past the press's 5 s; pressed
+    // twice, as a person whose window is slow to come does
+    b.eval(page, "(window.open = window.realOpen, window.slow = 6000, true)")?;
+    let windows = b.pages()?.len();
     let keys_before = s.openrouter.keys().len();
-    b.click(page, &format!("{row} [data-action=sign-in]"))?;
+    b.click(page, &connect)?;
+    b.click(page, &connect)?;
+    let opened = s.eventually(std::time::Duration::from_secs(3), || b.pages().is_ok_and(|l| l.len() > windows));
+    let waiting = b.eval(page, &format!("document.querySelector('{connect}')?.disabled === true && document.querySelector('{row} .provider-said')?.textContent === ''"))?;
     let callback = format!("/api/connections/{}/callback", crate::SWAP_ROUTER);
     let mut popup = None;
     let came_back = s.eventually(wait, || {
         popup = b.pages().ok().and_then(|l| l.into_iter().find(|(_, url)| url.contains(&callback)).map(|(id, _)| id));
         popup.is_some()
     });
+    let authorizes = b.eval(page, "window.authorizes")?;
+    s.ok(
+        "its window opens in the press, before the authorize call answers, and Connect waits for it: a second press starts no second attempt (each replaces the browser's binding)",
+        opened && waiting == true && authorizes == 1,
+        json!({ "opened": opened, "waiting": waiting, "authorizes": authorizes }),
+    );
     let said = match &popup {
         Some(id) => {
             let p = b.attach(id)?;

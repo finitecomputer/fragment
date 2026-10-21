@@ -2501,6 +2501,37 @@ const PROVIDER_NAMES = { xai: "xAI", elevenlabs: "ElevenLabs", openrouter: "Open
 const providerName = (p) => PROVIDER_NAMES[p] ?? p.replace(/(^|-)([a-z])/g, (_, d, l) => `${d ? " " : ""}${l.toUpperCase()}`);
 // micro-dollars, to a hundredth of a cent under a dollar (a call is often less than a cent)
 const money = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: micros < 1_000_000 ? 4 : 2 });
+// Connect: a window opened by the press itself, before any await, and only
+// then sent to the provider's page (#442): one opened once the authorize
+// call answers is a popup Safari blocks, as Chrome does once the press is
+// 5 s old. One attempt at a time: each start replaces the browser's one
+// binding cookie. The section reads again when the person comes back to it
+// (`focus`), never by watching `w.closed`: the shell's COOP has that read
+// true once the window is at the provider, still open.
+function connectButton(p, label, said) {
+  const go = el("button", "quiet", label);
+  go.type = "button";
+  go.onclick = async () => {
+    const w = window.open("", "_blank", "popup,width=520,height=720");
+    if (!w) {
+      said.textContent = "Your browser blocked the window. Allow pop-ups for this site, then try again.";
+      return;
+    }
+    go.disabled = true;
+    said.textContent = "";
+    try {
+      const { url } = await api("POST", `/api/connections/${encodeURIComponent(p.provider)}/authorize`, {});
+      w.location = url;
+      addEventListener("focus", () => openSettings(false).catch(() => {}), { once: true });
+    } catch (e) {
+      w.close();
+      said.textContent = e.message;
+    } finally {
+      go.disabled = false;
+    }
+  };
+  return go;
+}
 function connectionsSection(linked, uses) {
   const s = section("Connections");
   s.id = "settings-connections";
@@ -2528,44 +2559,20 @@ function connectionsSection(linked, uses) {
     row.append(head);
     const actions = el("div", "settings-actions");
     const details = [];
+    // what a Connect press says: a blocked window, or a start refused
+    const said = el("span", "muted provider-detail provider-said");
     if (p.kind === "connection" && p.state !== "connected") {
-      const go = el("button", "quiet", p.state === "needs_reauthorization" ? "Connect again" : "Connect");
-      go.type = "button";
-      go.onclick = async () => {
-        go.disabled = true;
-        try {
-          const { url } = await api("POST", `/api/connections/${encodeURIComponent(p.provider)}/authorize`, {});
-          window.open(url, "_blank", "popup,width=520,height=720");
-          // back from the provider: the section says so
-          addEventListener("focus", () => openSettings(false).catch(() => {}), { once: true });
-        } catch (e) {
-          go.textContent = e.message;
-        } finally {
-          go.disabled = false;
-        }
-      };
-      actions.append(go);
+      actions.append(connectButton(p, p.state === "needs_reauthorization" ? "Connect again" : "Connect", said));
+      details.push(said);
     }
     if (p.kind === "own" && p.signIn) {
       // connected through the provider's own page (never a key pasted here):
       // it makes a key of the person's, which their computer keeps sealed
       if (p.state !== "set") {
-        const go = el("button", "quiet", "Connect");
-        go.type = "button";
+        const go = connectButton(p, "Connect", said);
         go.dataset.action = "sign-in";
-        go.onclick = async () => {
-          go.disabled = true;
-          try {
-            const { url } = await api("POST", `/api/connections/${encodeURIComponent(p.provider)}/authorize`, {});
-            window.open(url, "_blank", "popup,width=520,height=720");
-            addEventListener("focus", () => openSettings(false).catch(() => {}), { once: true });
-          } catch (e) {
-            go.textContent = e.message;
-          } finally {
-            go.disabled = false;
-          }
-        };
         actions.append(go);
+        details.push(said);
         if (p.models?.length) details.push(el("span", "muted provider-detail", `Your ${providerName(p.provider)} account pays for its models; then pick one for an agent under Agents.`));
       } else {
         const off = el("button", "quiet", "Disconnect");
