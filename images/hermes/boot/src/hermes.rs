@@ -972,6 +972,38 @@ mod tests {
         Route::new(base, Some(&ids()))
     }
 
+    /// The page and Settings consume this same fixture in xtask's Node test.
+    /// Valid model IDs and platform-approved model-capable providers only:
+    /// malformed own-model IDs remain the explicit model-display debt.
+    #[test]
+    fn model_display_parity_fixtures_match_runtime_selection() {
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!("../tests/fixtures/model-display-parity.json")).unwrap();
+        for case in fixtures["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let settings = serde_json::to_vec(&case["settings"]).unwrap();
+            let tier = Tier::of(Some(&settings), false);
+            assert_eq!(tier.name(), case["tier"].as_str().unwrap(), "{name}");
+            let mut agent = agent();
+            for provider in case["modelProviders"].as_array().unwrap() {
+                agent.credentials.push(fragment_bridge::runtime::Credential {
+                    model_base: Some("https://provider.example.test/v1".into()),
+                    ..credential(provider.as_str().unwrap(), &[], "fixture-placeholder")
+                });
+            }
+            let ids: ModelIds = serde_json::from_value(case.get("models").unwrap_or(&fixtures["models"]).clone()).unwrap();
+            let route = Route::new("http://model.fragment.internal", Some(&ids));
+            let (main, _) = MainModel::of(&agent, tier, OwnModel::of(&settings).as_ref());
+            let (model_id, display) = match &main {
+                MainModel::Tier(t) => (route.tier(*t), route.tier(*t).to_string()),
+                MainModel::Own { id, provider, .. } => (id.as_str(), format!("{id} ({provider})")),
+            };
+            assert_eq!(model_id, case["modelId"].as_str().unwrap(), "{name}");
+            assert_eq!(display, case["display"].as_str().unwrap(), "{name}");
+            let profile = profile_config(&agent, "Fixture", &main, &route, &[], Path::new("/fixture-credentials.sh"));
+            assert!(profile.lines().any(|line| line == format!("  default: {}", q(model_id))), "{name}: the generated profile names the selected model");
+        }
+    }
+
     /// Valid, renamed, replay and invalid: an agent's profile config tells
     /// it its name (its agent fragment's title) in `agent.system_prompt`,
     /// one `agent` mapping whatever its model; a new name is another

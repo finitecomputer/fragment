@@ -1,0 +1,211 @@
+{
+  "models": {
+    "cheap": "fixture/cheap-v1",
+    "medium": "fixture/medium-v2",
+    "fallback": "fixture/fallback-v3",
+    "vision": "fixture/vision-v4"
+  },
+  "cases": [
+    {
+      "name": "missing tier",
+      "settings": {},
+      "modelProviders": [],
+      "tier": "cheap",
+      "modelId": "fixture/cheap-v1",
+      "display": "fixture/cheap-v1"
+    },
+    {
+      "name": "cheap tier",
+      "settings": {
+        "tier": "cheap"
+      },
+      "modelProviders": [],
+      "tier": "cheap",
+      "modelId": "fixture/cheap-v1",
+      "display": "fixture/cheap-v1"
+    },
+    {
+      "name": "medium tier",
+      "settings": {
+        "tier": "medium"
+      },
+      "modelProviders": [],
+      "tier": "medium",
+      "modelId": "fixture/medium-v2",
+      "display": "fixture/medium-v2"
+    },
+    {
+      "name": "high disabled",
+      "settings": {
+        "tier": "high"
+      },
+      "modelProviders": [],
+      "tier": "cheap",
+      "modelId": "fixture/cheap-v1",
+      "display": "fixture/cheap-v1"
+    },
+    {
+      "name": "unknown tier",
+      "settings": {
+        "tier": "future"
+      },
+      "modelProviders": [],
+      "tier": "cheap",
+      "modelId": "fixture/cheap-v1",
+      "display": "fixture/cheap-v1"
+    },
+    {
+      "name": "null tier",
+      "settings": {
+        "tier": null
+      },
+      "modelProviders": [],
+      "tier": "cheap",
+      "modelId": "fixture/cheap-v1",
+      "display": "fixture/cheap-v1"
+    },
+    {
+      "name": "numeric tier",
+      "settings": {
+        "tier": 7
+      },
+      "modelProviders": [],
+      "tier": "cheap",
+      "modelId": "fixture/cheap-v1",
+      "display": "fixture/cheap-v1"
+    },
+    {
+      "name": "own model on cheap",
+      "settings": {
+        "tier": "cheap",
+        "model": {
+          "provider": "openrouter",
+          "id": "fixture/own:1"
+        }
+      },
+      "modelProviders": [
+        "openrouter"
+      ],
+      "tier": "cheap",
+      "modelId": "fixture/own:1",
+      "display": "fixture/own:1 (openrouter)"
+    },
+    {
+      "name": "own model on medium",
+      "settings": {
+        "tier": "medium",
+        "model": {
+          "provider": "openrouter",
+          "id": "fixture/own:2"
+        }
+      },
+      "modelProviders": [
+        "openrouter"
+      ],
+      "tier": "medium",
+      "modelId": "fixture/own:2",
+      "display": "fixture/own:2 (openrouter)"
+    },
+    {
+      "name": "own model disconnected",
+      "settings": {
+        "model": {
+          "provider": "openrouter",
+          "id": "fixture/own:1"
+        }
+      },
+      "modelProviders": [],
+      "tier": "cheap",
+      "modelId": "fixture/cheap-v1",
+      "display": "fixture/cheap-v1"
+    },
+    {
+      "name": "own model narrowed on medium",
+      "settings": {
+        "tier": "medium",
+        "model": {
+          "provider": "openrouter",
+          "id": "fixture/own:1"
+        }
+      },
+      "modelProviders": [],
+      "tier": "medium",
+      "modelId": "fixture/medium-v2",
+      "display": "fixture/medium-v2"
+    },
+    {
+      "name": "another provider cannot enable the model",
+      "settings": {
+        "model": {
+          "provider": "openrouter",
+          "id": "fixture/own:1"
+        }
+      },
+      "modelProviders": [
+        "other-provider"
+      ],
+      "tier": "cheap",
+      "modelId": "fixture/cheap-v1",
+      "display": "fixture/cheap-v1"
+    },
+    {
+      "name": "own model missing id",
+      "settings": {
+        "model": {
+          "provider": "openrouter"
+        }
+      },
+      "modelProviders": [
+        "openrouter"
+      ],
+      "tier": "cheap",
+      "modelId": "fixture/cheap-v1",
+      "display": "fixture/cheap-v1"
+    },
+    {
+      "name": "own model missing provider",
+      "settings": {
+        "model": {
+          "id": "fixture/own:1"
+        }
+      },
+      "modelProviders": [
+        "openrouter"
+      ],
+      "tier": "cheap",
+      "modelId": "fixture/cheap-v1",
+      "display": "fixture/cheap-v1"
+    },
+    {
+      "name": "empty own model id",
+      "settings": {
+        "model": {
+          "provider": "openrouter",
+          "id": ""
+        }
+      },
+      "modelProviders": [
+        "openrouter"
+      ],
+      "tier": "cheap",
+      "modelId": "fixture/cheap-v1",
+      "display": "fixture/cheap-v1"
+    },
+    {
+      "name": "deployment model ids change",
+      "settings": {
+        "tier": "medium"
+      },
+      "modelProviders": [],
+      "tier": "medium",
+      "modelId": "changed/medium",
+      "display": "changed/medium",
+      "models": {
+        "cheap": "changed/cheap",
+        "medium": "changed/medium",
+        "fallback": "fixture/fallback-v3",
+        "vision": "fixture/vision-v4"
+      }
+    }
+  ]
+}
