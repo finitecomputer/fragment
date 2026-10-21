@@ -2325,6 +2325,12 @@ const REFRESH_LINE: &str = "(() => { const r = document.querySelector('#computer
     return !!r && r.innerText.includes(\"Couldn't refresh your computer\") && !!r.querySelector('button[data-action=refresh]:enabled'); })()";
 /// The band says nothing of a failed read.
 const NO_REFRESH_LINE: &str = "!document.querySelector('#computer-notices .computer-notice[data-kind=refresh]')";
+/// The sidebar's Settings pressed, as its own click: a page just opened
+/// and resized from the browser's own window may still be moving its
+/// sidebar, and a press read from where the button was can miss it (run
+/// 39689501852: Settings never opened). What these checks press it for is
+/// the move to Settings, not where the button sits.
+const TO_SETTINGS: &str = "(document.getElementById('settings').click(), true)";
 /// Try again pressed, the computer's reads let through.
 const READ_AGAIN: &str = "(window.__failComputers = false, document.querySelector('#computer-notices [data-action=refresh]')?.click(), true)";
 /// What the page made and said, under `FAIL_COMPUTERS`.
@@ -2517,7 +2523,7 @@ fn first_run_put_off_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &std::
     // a second)
     let page = open_failing(b, api, "/", "")?;
     let shown = b.until(&page, &chat_open, wait);
-    b.click(&page, "#settings")?;
+    b.eval(&page, TO_SETTINGS)?;
     let settings = b.until(&page, &format!("location.pathname === '/settings' && ({COMPUTER_SECTION}) !== null && {REFRESH_LINE}"), wait);
     b.eval(&page, READ_AGAIN)?;
     let read = b.until(&page, &format!("{NO_REFRESH_LINE} && location.pathname === '/settings'"), wait);
@@ -2544,7 +2550,7 @@ fn first_run_put_off_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &std::
     let shown = b.until(&page, &chat_open, wait);
     b.eval(&page, &format!("(window.__holdMembers = true, {READ_AGAIN})"))?;
     let asked = b.until(&page, "typeof window.__membersHeld === 'function'", wait);
-    b.click(&page, "#settings")?;
+    b.eval(&page, TO_SETTINGS)?;
     let settings = b.until(&page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden", wait);
     b.eval(&page, "(window.__holdMembers = false, window.__membersHeld?.(), true)")?;
     std::thread::sleep(settle);
