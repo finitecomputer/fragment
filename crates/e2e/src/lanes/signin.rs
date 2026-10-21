@@ -1276,42 +1276,71 @@ fn entry_page_widths(s: &mut Suite, api: &Api) -> Result<()> {
     let session = api.sign_in("entry-layout@e2e.test")?;
     browser.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
     let wait = Duration::from_secs(10);
+    let long_error = format!("<layout-{}>", "x".repeat(160));
+    let declined = format!("/auth/callback?error=access_denied&error_description={}", url_enc(&long_error));
     // Neither callback has an authorization code or bound round trip. Both
     // return local error pages; no provider authorization is initiated.
     for (label, path, title, control) in [
-        ("cli", "/cli", "Add a fragment CLI", "input[name=code]"),
+        ("cli", "/cli", "Add a fragment CLI", "input[name=code], button[data-arm]"),
         ("signout", "/auth/logout", "Sign out", "form[action='/auth/logout'] button"),
-        ("declined", "/auth/callback?error=access_denied&error_description=Sign-in%20was%20cancelled.", "Sign-in did not finish", "a[href='/auth/login']"),
+        ("declined", declined.as_str(), "Sign-in did not finish", "a[href='/auth/login']"),
         ("unbound", "/auth/callback", "Sign-in did not start here", "a[href='/auth/login']"),
     ] {
         let page = browser.open(&format!("{}{path}", api.base))?;
         let loaded = browser.until(&page, &format!("document.readyState === 'complete' && document.querySelector('h1')?.textContent === {title:?} && !!document.querySelector({control:?})"), wait);
         anyhow::ensure!(loaded, "the {label} entry page loads: {}", browser.eval(&page, "document.body.innerText")?);
-        for (width, mobile) in [(320, true), (390, true), (768, false)] {
-            browser.viewport(&page, width, 900, mobile)?;
+        browser.front(&page)?;
+        anyhow::ensure!(browser.until(&page, "![...document.querySelectorAll('[data-arm]')].some(b => b.disabled)", wait), "the {label} page arms its controls");
+        if label == "declined" {
+            s.ok("the long error description renders as literal escaped text", browser.eval(&page, &format!("document.body.innerText.includes({long_error:?})"))? == true, "");
+        }
+        for width in [320, 390, 420, 421, 760, 761, 768] {
+            browser.viewport(&page, width, 900, width <= 760)?;
             for scheme in ["light", "dark"] {
                 browser.color_scheme(&page, scheme)?;
-                let measured = browser.eval(&page, r#"(() => {
+                let measure = r#"(() => {
                   const root = document.documentElement;
+                  const required = [...document.querySelectorAll(REQUIRED_CONTROL)];
+                  const visible = el => {
+                    if (!el || !el.getClientRects().length) return false;
+                    const style = getComputedStyle(el), r = el.getBoundingClientRect();
+                    return style.visibility === 'visible' && Number(style.opacity) > 0 && r.width > 0 && r.height > 0;
+                  };
                   const controls = [...document.querySelectorAll('a[href], button, input:not([type=hidden])')]
-                    .filter(el => el.getClientRects().length).map(el => {
+                    .filter(visible).map(el => {
                       const r = el.getBoundingClientRect();
                       return {tag: el.tagName, left: r.left, right: r.right, width: r.width};
                     });
                   return {viewport: innerWidth, client: root.clientWidth, scroll: root.scrollWidth,
+                    requiredVisible: required.length === REQUIRED_COUNT && required.every(visible), armed: ![...document.querySelectorAll('[data-arm]')].some(b => b.disabled),
                     controls, contained: controls.length > 0 && controls.every(r => r.width > 0 && r.left >= 0 && r.right <= root.clientWidth + 1)};
-                })()"#)?;
+                })()"#.replace("REQUIRED_CONTROL", &json!(control).to_string()).replace("REQUIRED_COUNT", if label == "cli" { "2" } else { "1" });
+                let measured = browser.eval(&page, &measure)?;
                 s.ok(
                     &format!("the {label} entry page fits {width}px in {scheme}, with its controls inside the viewport"),
                     measured["viewport"] == width && measured["client"] == width
                         && measured["scroll"].as_u64().is_some_and(|scroll| scroll <= u64::from(width) + 1)
-                        && measured["contained"] == true,
+                        && measured["contained"] == true && measured["requiredVisible"] == true && measured["armed"] == true,
                     &measured,
                 );
                 if width == 320 && scheme == "light" {
                     browser.screenshot(&page, &s.scratch.join(format!("entry-{label}-phone.png")))?;
                 }
             }
+        }
+        if label == "cli" {
+            browser.viewport(&page, 320, 900, true)?;
+            s.ok("the CLI entry initially focuses its labelled code input", browser.eval(&page, "document.activeElement === document.querySelector('input[name=code]') && !!document.activeElement.getAttribute('aria-label')")? == true, "");
+            browser.press(&page, "Tab", false)?;
+            let button = browser.eval(&page, "document.activeElement === document.querySelector('button[data-arm]') && !document.activeElement.disabled && document.activeElement.matches(':focus-visible') && getComputedStyle(document.activeElement).outlineStyle !== 'none'")?;
+            browser.press(&page, "Tab", true)?;
+            let input = browser.eval(&page, "document.activeElement === document.querySelector('input[name=code]') && document.activeElement.matches(':focus-visible') && getComputedStyle(document.activeElement).outlineStyle !== 'none'")?;
+            s.ok("Tab reaches the armed Continue button and Shift+Tab returns to the input, both with visible focus", button == true && input == true, json!({ "button": button, "input": input }));
+            browser.type_text(&page, "BAD")?;
+            let typed = browser.eval(&page, "document.querySelector('input[name=code]').value === 'BAD'")?;
+            browser.press(&page, "Enter", false)?;
+            let refused = browser.until(&page, "location.pathname === '/cli' && !!document.querySelector('.flash.error') && document.querySelector('input[name=code]')?.value === ''", wait);
+            s.ok("typing a malformed CLI code and pressing Enter submits it and shows the local validation error", typed == true && refused, browser.eval(&page, "document.body.innerText")?);
         }
         browser.close(page)?;
     }
