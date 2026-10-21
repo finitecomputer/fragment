@@ -99,7 +99,10 @@ none of these secret values were read or printed here.
 2. Bind that client's secret through Cloudflare Secrets Store as
    `CONNECTION_SECRET_GOOGLE`. In the deployment provider row, `key` is its
    **store name**, never the value. Add `connection_oauth` with `client_id`,
-   `authorize: https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent`,
+   `authorize: https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=select_account%20consent`
+   (`select_account`: Google's account chooser, even in a browser signed in to
+   one Google account, so a person picks which account to connect; `consent`:
+   the refresh token Pipes needs, every time),
    `exchange: https://oauth2.googleapis.com/token`, and the reviewed compatibility
    scopes. Endpoint/client/scope settings are public configuration; secrets are
    read only by `cell/src/keys.rs`.
