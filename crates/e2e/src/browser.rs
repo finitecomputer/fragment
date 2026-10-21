@@ -20,6 +20,10 @@ use tungstenite::{Message, WebSocket};
 /// take to answer on its DevTools port.
 const CHROME_STARTS_MAX: u32 = 2;
 const CHROME_START_WAIT: Duration = Duration::from_secs(30);
+/// How long a reloaded page has to load its new document, resources and
+/// all (`reload`), and how many reloads it is given.
+const RELOAD_LOAD: Duration = Duration::from_secs(30);
+const RELOADS_MAX: u32 = 2;
 
 pub struct Browser {
     child: Child,
@@ -360,8 +364,25 @@ impl Browser {
         Ok(())
     }
 
+    /// Reloads the page and waits until its new document has loaded
+    /// (`readyState` complete; the old one, marked, is not taken for it).
+    /// One still loading after RELOAD_LOAD is reloaded once more, said in
+    /// the run's output: the local node can leave a request of a page's
+    /// unanswered, and a module script that never arrives leaves a page
+    /// whose script never runs (run 39632307934: two of the shell's
+    /// modules never reached the node, and its page stayed blank). A page
+    /// still loading after that is the caller's checks' to find.
     pub fn reload(&mut self, page: &Page) -> Result<()> {
-        self.send("Page.reload", json!({}), Some(&page.session))?;
+        for tried in 1..=RELOADS_MAX {
+            // (a page between documents answers once it has its new one)
+            let _ = self.eval(page, "(window.__e2eBeforeReload = true, true)");
+            self.send("Page.reload", json!({}), Some(&page.session))?;
+            if self.until(page, "!window.__e2eBeforeReload && document.readyState === 'complete'", RELOAD_LOAD) {
+                return Ok(());
+            }
+            let left = self.eval(page, "document.readyState").unwrap_or(Value::Null);
+            println!("      (reload {tried} of {RELOADS_MAX}: the page did not load in {RELOAD_LOAD:.0?}, its document {left})");
+        }
         Ok(())
     }
 
