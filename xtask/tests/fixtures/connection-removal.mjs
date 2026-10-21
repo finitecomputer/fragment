@@ -110,6 +110,10 @@ function setup(signIn, realRefresh = false) {
   const feedback = () => made.find((node) => node.role === "status");
   return { state, page, frames, visible, requests, refreshes, row, button, status, feedback,
     connectionReads, holdRefreshes: () => { holdConnections = true; },
+    reopen: (provider, value) => {
+      if (provider) backend.find((p) => p.provider === provider).state = value;
+      return runInContext("openSettings(false)", context);
+    },
     rowFor: (provider) => made.find((node) => node.dataset.provider === provider && node.isConnected),
     finish: (index, status) => {
       const request = requests[index];
@@ -120,6 +124,42 @@ function setup(signIn, realRefresh = false) {
 }
 
 for (const signIn of [true, false]) {
+  test(`${signIn ? "Disconnect" : "Remove"}: an earlier failure survives another removal's successful reload until explicit retry`, async () => {
+    const h = setup(signIn, true);
+    const action = signIn ? "disconnect" : "remove";
+    const second = h.rowFor("second/provider").querySelector(`[data-action=${action}]`);
+    const firstDone = h.button.onclick(), secondDone = second.onclick();
+    h.finish(0, 500);
+    await firstDone;
+    assert.equal(h.visible(h.rowFor("test/provider").querySelector("[data-removal-error]")), true);
+    h.finish(1, 200);
+    await secondDone;
+    const current = h.rowFor("test/provider");
+    const feedback = current.querySelector("[data-removal-error]");
+    assert.equal(current.dataset.state, "set");
+    assert.equal(h.visible(feedback), true, "the later successful reload preserves the earlier failure");
+    assert.equal(feedback.textContent, "Could not confirm removal. Try again.");
+    const retry = current.querySelector(`[data-action=${action}]`);
+    assert.equal(retry.disabled, false);
+    const retried = retry.onclick();
+    assert.equal(feedback.hidden, true);
+    assert.equal(feedback.textContent, "");
+    assert.equal(h.requests.length, 3, "retry is explicit");
+    h.finish(2, 200);
+    await retried;
+    assert.equal(h.rowFor("test/provider").dataset.state, "not_set");
+  });
+  test(`${signIn ? "Disconnect" : "Remove"}: a confirmed resolution clears retained removal failure`, async () => {
+    const h = setup(signIn, true);
+    const pending = h.button.onclick();
+    h.finish(0, 500);
+    await pending;
+    await h.reopen("test/provider", "not_set");
+    await h.reopen("test/provider", "set");
+    const feedback = h.rowFor("test/provider").querySelector("[data-removal-error]");
+    assert.equal(feedback.hidden, true, "a later reconnection does not inherit a resolved removal error");
+    assert.equal(feedback.textContent, "");
+  });
   for (const outcome of [200, 500]) {
     test(`${signIn ? "Disconnect" : "Remove"}: second concurrent ${outcome} reconciles after the first real Settings reload`, { timeout: 1000 }, async () => {
       const h = setup(signIn, true);
@@ -184,6 +224,19 @@ for (const signIn of [true, false]) {
     });
   }
 }
+
+test("retained removal errors do not cross an account switch", async () => {
+  const h = setup(true, true);
+  const pending = h.button.onclick();
+  h.finish(0, 500);
+  await pending;
+  h.state.me = { id: "owner-b" };
+  await h.reopen();
+  assert.equal(h.rowFor("test/provider").querySelector("[data-removal-error]").hidden, true);
+  h.state.me = { id: "owner-a" };
+  await h.reopen();
+  assert.equal(h.rowFor("test/provider").querySelector("[data-removal-error]").hidden, true);
+});
 
 function respond(request, status) {
   request.resolve({ ok: status === 200, status, statusText: "untrusted status text",

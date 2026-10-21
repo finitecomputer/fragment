@@ -2504,10 +2504,13 @@ const providerName = (p) => PROVIDER_NAMES[p] ?? p.replace(/(^|-)([a-z])/g, (_, 
 const money = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: micros < 1_000_000 ? 4 : 2 });
 const removingConnections = new Set();
 let connectionRefresh = Promise.resolve();
+let connectionFailures = { owner: null, providers: new Set() };
 function connectionsSection(linked, uses) {
   const s = section("Connections");
   s.id = "settings-connections";
   const owner = state.me.id;
+  if (connectionFailures.owner !== owner) connectionFailures = { owner, providers: new Set() };
+  const failures = connectionFailures.providers;
   const current = () => state.page === "Settings" && state.me?.id === owner;
   function removal(p, row, label) {
     const key = JSON.stringify([owner, p.provider]);
@@ -2515,14 +2518,16 @@ function connectionsSection(linked, uses) {
     button.type = "button";
     button.dataset.action = label.toLowerCase();
     button.disabled = removingConnections.has(key);
-    const said = el("p", "muted provider-detail");
+    const message = "Could not confirm removal. Try again.";
+    const said = el("p", "muted provider-detail", failures.has(p.provider) ? message : "");
     said.dataset.removalError = "";
     said.setAttribute("role", "status");
-    said.hidden = true;
+    said.hidden = !failures.has(p.provider);
     row.append(said);
     button.onclick = async () => {
       if (button.disabled || removingConnections.has(key)) return;
       removingConnections.add(key);
+      failures.delete(p.provider);
       button.disabled = true;
       said.hidden = true;
       said.textContent = "";
@@ -2533,12 +2538,14 @@ function connectionsSection(linked, uses) {
         // Keep the last confirmed state and never echo a server's error text.
         // If another removal is rebuilding Settings, put this error in the
         // row it finishes rendering, not in the detached row we started in.
+        // Keep it for later removal reloads too, regardless of completion order.
+        if (current()) failures.add(p.provider);
         await connectionRefresh.catch(() => {});
         if (current()) {
           const live = [...($("settings-connections")?.children ?? [])].find((r) => r.dataset.provider === p.provider);
           const feedback = live?.querySelector("[data-removal-error]");
           if (feedback) {
-            feedback.textContent = "Could not confirm removal. Try again.";
+            feedback.textContent = message;
             feedback.hidden = false;
             live.querySelector(`[data-action=${button.dataset.action}]`).disabled = false;
           }
@@ -2568,6 +2575,7 @@ function connectionsSection(linked, uses) {
   s.append(el("p", "muted", "Your agents use these through their computer, which adds each credential on the way out. None is ever on the computer."));
   const agents = state.computer?.agents ?? [];
   for (const p of offered) {
+    if (p.state !== "set") failures.delete(p.provider);
     const row = el("div", "provider");
     row.dataset.provider = p.provider;
     row.dataset.kind = p.kind;
