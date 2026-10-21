@@ -2051,9 +2051,13 @@ function buildSection() {
   const copy = el("button", "quiet", "Copy");
   copy.type = "button";
   copy.dataset.action = "copy-prompt";
+  const feedback = el("p", "muted");
+  feedback.setAttribute("role", "status");
+  feedback.hidden = true;
   copy.onclick = async () => {
     copy.textContent = "Copy";
     copy.disabled = true;
+    feedback.hidden = true;
     try {
       await navigator.clipboard.writeText(prompt.value);
       copy.textContent = "Copied";
@@ -2061,7 +2065,8 @@ function buildSection() {
     } catch {
       prompt.focus();
       prompt.select();
-      notice("The prompt was not copied", "Copy the selected prompt manually, then paste it into your coding agent.");
+      feedback.textContent = "The prompt was not copied. Copy the selected prompt manually, then paste it into your coding agent.";
+      feedback.hidden = false;
     } finally {
       copy.disabled = false;
     }
@@ -2081,6 +2086,7 @@ function buildSection() {
     say("Paste this into your coding agent and finish the sentence: it sets up the `fragment` command line itself, and you approve it here once."),
     prompt,
     actions,
+    feedback,
     yourself,
   );
 }
