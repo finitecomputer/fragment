@@ -2602,9 +2602,10 @@ files): its script reads the path, opening its
 settings at `/settings`, the welcome at `/welcome`, and the person's
 chats at `/`, and puts the view it shows in the address, so a reload
 stays put. Its page says "Still loading… Reload" (a link to itself) only
-if its script has not started 9 s after the page came, one of its files
-never having come (shell.css shows it then; the script takes it away as
-it starts). A new person's first run never goes through settings
+if it has drawn nothing 9 s after the page came, one of its files or its
+first answers never having come (shell.css shows it then; the script
+takes it away as it first draws the shell). A new person's first run
+never goes through settings
 (docs/billing.md, "The shell"): a guest with nothing shared with them
 lands on the welcome, the seat and a trial code
 (cell/shell/billing.js `seatOffer`), which a mailed trial's

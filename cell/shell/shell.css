@@ -74,8 +74,9 @@ html { -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%;
 body { top: var(--viewport-top, 0px); bottom: auto; height: var(--viewport-height, 100%); transform: translateZ(0); font: 15px/1.5 var(--font-sans); font-feature-settings: "ss01", "cv11", "kern"; -webkit-font-smoothing: antialiased; }
 :root { --vh: var(--viewport-height, 100dvh); }
 /* "Still loading… Reload" (index.html): hidden, then shown 9 s after the
-   page, past a slow phone's whole load of the shell (its page and its
-   nine scripts), if shell.js has not taken it away by starting by then */
+   page, past a slow phone's whole load of the shell (its page, its nine
+   scripts and their first answers), if shell.js has not drawn the shell,
+   and so taken it away, by then */
 .still-loading { position: fixed; inset: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0 8px; margin: 0; padding: 24px; color: var(--text-secondary); visibility: hidden; animation: still-loading 0s 9s forwards; }
 .still-loading a { color: var(--accent-blue); }
 @keyframes still-loading { to { visibility: visible; } }

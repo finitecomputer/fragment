@@ -2790,12 +2790,22 @@ $("first-run").addEventListener("pointerleave", clearSplashEdge);
 $("first-run").addEventListener("scroll", clearSplashEdge, { passive: true });
 addEventListener("blur", clearSplashEdge);
 addEventListener("resize", clearSplashEdge);
+// The two ways the shell is first drawn (its first run's card, here, and
+// its layout, `showLayout`) take away "Still loading…" (index.html), so it
+// is never said beside the shell, and is said while nothing is drawn: its
+// scripts not come, or their first answers.
 function firstRun(...children) {
+  $("still-loading")?.remove();
   clearSplashEdge();
   $("layout").hidden = true;
   $("first-run").hidden = false;
   $("first-run").classList.remove("splash");
   $("first-run-card").replaceChildren(...children);
+}
+function showLayout() {
+  $("still-loading")?.remove();
+  $("first-run").hidden = true;
+  $("layout").hidden = false;
 }
 const PITCH = "Welcome to Finite";
 const SUBTITLE = "Superintelligent agents for you and your organization";
@@ -3056,8 +3066,7 @@ function creatingAgent(seat = null) {
   if (seat) return seatFirst(seat);
   if (setupRun) return setupRun;
   history.replaceState(null, "", "/");
-  $("first-run").hidden = true;
-  $("layout").hidden = false;
+  showLayout();
   // until its chat is made, the middle column says what is being made
   if (!setup?.chat || !state.frames.has(setup.chat)) notice("Making your agent…");
   setupRun = (async () => {
@@ -3432,8 +3441,6 @@ addEventListener("pageshow", (e) => { if (e.persisted) lookForRelease(); });
 addEventListener("online", () => lookForRelease());
 
 async function start(open) {
-  // its scripts came: "Still loading…" (index.html) is never said
-  $("still-loading")?.remove();
   let me;
   try {
     me = await api("GET", "/api/identities/me");
@@ -3455,8 +3462,7 @@ async function start(open) {
   const settings = !open && location.pathname === SETTINGS;
   if (!open && !settings && await owesFirstAgent()) return creatingAgent(mine?.seat ? {} : null);
   if (!state.fragments.length && !open && !settings && state.guest) return welcome();
-  $("first-run").hidden = true;
-  $("layout").hidden = false;
+  showLayout();
   const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);
   if (settings) await openSettings(false);
   else if (pick) openChat(pick);
@@ -3494,6 +3500,6 @@ function guestHome(offer) {
 }
 
 start().catch((e) => {
-  $("layout").hidden = false;
+  showLayout();
   notice("This page did not load", e.message);
 });
