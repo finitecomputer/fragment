@@ -29,6 +29,33 @@ fn ledger(api: &Api, keys: &Keys) -> Value {
     api.signed(keys, "GET", "/api/ledger", None).map(|r| r.body).unwrap_or(Value::Null)
 }
 
+/// The credit settings say is left (`Credit this month`, then `$1,234.50
+/// left`, shell.js `usd`), in micro-dollars.
+fn credit_shown(text: &str) -> Option<i64> {
+    let line = &text[text.find("Credit this month")?..];
+    let amount = line[line.find('$')? + 1..].split(" left").next()?;
+    amount.contains('.').then_some(())?;
+    amount.chars().filter(char::is_ascii_digit).collect::<String>().parse::<i64>().ok().map(|cents| cents * 10_000)
+}
+
+/// Checkout's return to settings (`/settings?pack=<session>`) in a page of
+/// its own, its POST held before it is sent; settings opened again once
+/// the query is gone, and left until nothing but that POST is under way;
+/// then the POST let go, and the page left until all is done. Whether each
+/// step came, and what settings show then.
+fn held_return(b: &mut Lease, api: &Api, session: &str, wait: Duration) -> Result<(bool, Value)> {
+    let script = format!("if (window === window.top) {}", super::shell::hold("POST", "^/api/billing/sessions/", super::shell::Hold::Request));
+    let page = b.open_with_script(&format!("{}/settings?pack={session}", api.base), &script)?;
+    let held = b.until(&page, "location.search === '' && typeof window.__held?.release === 'function'", wait);
+    b.eval(&page, "(document.getElementById('settings').click(), true)")?;
+    let waiting = b.until(&page, "window.__held.inflight === 1 && performance.now() - window.__held.quiet > 500", wait);
+    b.eval(&page, "(window.__held.release(), true)")?;
+    let settled = b.until(&page, super::shell::HELD_SETTLED, wait);
+    let seen = b.eval(&page, "({ text: document.getElementById('settings-page')?.innerText ?? '', at: location.pathname + location.search })")?;
+    b.close(page)?;
+    Ok((held && waiting && settled, seen))
+}
+
 fn seat(api: &Api, keys: &Keys) -> Value {
     api.signed(keys, "GET", "/api/seat", None).map(|r| r.body).unwrap_or(Value::Null)
 }
@@ -1368,6 +1395,34 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
         ledger(api, &gus),
     );
     b.close(page)?;
+    // ---- Checkout's return settles once for every load of settings (#461
+    // review): its POST held before it is sent, and settings opened again
+    // meanwhile (the query gone); let go, the settings shown read the
+    // ledger after it and say how it went. Its webhook held, so the return
+    // alone applies it.
+    s.stripe.hold_events(true);
+    let r = api.signed(&gus, "POST", "/api/billing/packs", Some(&json!({})))?;
+    let session = r.body["session"].as_str().unwrap_or("").to_string();
+    s.stripe.complete(&session).map_err(anyhow::Error::msg)?;
+    let purchased = |api: &Api| ledger(api, &gus)["purchasedMicros"].as_i64().unwrap_or(0);
+    let (before, bought) = (ledger(api, &gus)["availableMicros"].as_i64().unwrap_or(0), purchased(api));
+    let (paid, seen) = held_return(&mut b, api, &session, wait)?;
+    let shown = seen["text"].as_str().unwrap_or("");
+    let credit = credit_shown(shown);
+    // (their computer's use may meter a few micro-dollars meanwhile: the
+    // pack's $25 is what must be there)
+    s.ok(
+        &format!("a pack's return whose settling answers after settings were opened again: the settings shown say it was paid, and their credit has its {pack}"),
+        paid && purchased(api) == bought + offer.pack_micros && shown.contains("Paid: the credit is yours.") && credit.is_some_and(|c| c > before + offer.pack_micros - 1_000_000),
+        json!({ "seen": seen, "before": before, "credit": credit }),
+    );
+    s.stripe.release_events(false);
+    let (settled, seen) = held_return(&mut b, api, "cs_e2e_nonesuch", wait)?;
+    s.ok(
+        "a return that is refused, answering after settings were opened again: the settings shown say the purchase is not here yet",
+        settled && seen["text"].as_str().is_some_and(|t| t.contains("Your purchase is not here yet")),
+        &seen,
+    );
 
     // ---- a guest offered a seat: the welcome shows the offer first (its
     // org, who made it, Accept and Decline); accepted, on to their first run

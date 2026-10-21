@@ -15,7 +15,7 @@ import { colorOf } from "./agent-color.js";
 import { appIcon, icon } from "./icons.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
 import { createViewer } from "./viewer.js";
-import { billingSections, returning, seatGives, seatOffer } from "./billing.js";
+import { billingSections, returnSaid, returning, seatGives, seatOffer } from "./billing.js";
 
 const $ = (id) => document.getElementById(id);
 // New agents run on the cheap tier: GLM-5.3 Flash, DeepSeek V4 Flash its fallback (Paul, 2026-10-09).
@@ -1923,7 +1923,8 @@ async function openSettings(push = true, failed = null) {
   renderHeading();
   renderChats();
   leaveSidebar();
-  // a credit pack's Checkout returning, before the ledger is read
+  // a credit pack's Checkout returning, before the ledger is read (its
+  // settlement every load awaits, said by the one that renders)
   const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => openSettings(false), noSeatSaid, switchForm };
   const back = await returning(billingHelpers);
   if (lost()) return;
@@ -1993,6 +1994,7 @@ async function openSettings(push = true, failed = null) {
   // them, named); Your data is built only by a load that renders, as it
   // reads its export again while one builds
   if (state.guest) {
+    returnSaid(back);
     renderSettingsPage(page, [...billing, account, dataSection()]);
     return tell();
   }
@@ -2066,6 +2068,7 @@ async function openSettings(push = true, failed = null) {
   const connections = connectionsSection(linked, uses);
   const skills = await skillsSection();
   if (lost()) return;
+  returnSaid(back);
   renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, buildSection(), dataSection()]);
   renderAgentFaces();
   tell();
