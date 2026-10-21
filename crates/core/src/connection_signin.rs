@@ -27,6 +27,12 @@ pub fn check(o: &ConnectionOAuth) -> Result<(), String> {
     if a.query_pairs().any(|(k, _)| RESERVED.contains(&k.as_ref())) || e.query().is_some() {
         return Err("OAuth endpoints must not supply protocol parameters; exchange has no query".into());
     }
+    if let Some(r) = &o.revoke {
+        catalog::row_url(r, true)?;
+        if url::Url::parse(r).expect("checked").query().is_some() {
+            return Err("the revocation endpoint has no query: the token is its form's".into());
+        }
+    }
     if !token(&o.client_id, 256) || !(1..=SCOPES_MAX).contains(&o.scopes.len()) || o.scopes.iter().any(|s| !token(s, SCOPE_MAX_BYTES) || s.contains(['"', '\\'])) {
         return Err("a connection needs a client id and 1–32 bounded OAuth scopes".into());
     }
@@ -45,6 +51,11 @@ pub fn exchange_form(o: &ConnectionOAuth, callback: &str, code: &str, verifier: 
     url::form_urlencoded::Serializer::new(String::new()).append_pair("grant_type", "authorization_code")
         .append_pair("client_id", &o.client_id).append_pair("client_secret", secret).append_pair("redirect_uri", callback)
         .append_pair("code", code).append_pair("code_verifier", verifier).finish()
+}
+
+/// A revocation's form (RFC 7009 §2.1; Google documents `token` alone).
+pub fn revoke_form(token: &str) -> String {
+    url::form_urlencoded::Serializer::new(String::new()).append_pair("token", token).finish()
 }
 
 /// Tokens are deliberately not Debug. Errors contain no vendor response.
@@ -87,7 +98,22 @@ mod tests {
     use super::*;
 
     fn config() -> ConnectionOAuth {
-        ConnectionOAuth { authorize: "https://accounts.example/authorize?access_type=offline&prompt=consent".into(), exchange: "https://accounts.example/token".into(), client_id: "client".into(), scopes: vec!["mail.read".into(), "files.read".into()] }
+        ConnectionOAuth { authorize: "https://accounts.example/authorize?access_type=offline&prompt=consent".into(), exchange: "https://accounts.example/token".into(), client_id: "client".into(), scopes: vec!["mail.read".into(), "files.read".into()], revoke: None }
+    }
+
+    #[test]
+    fn a_revocation_endpoint_is_checked_as_the_others_and_absent_from_the_config_hash() {
+        let mut o = config();
+        let without = serde_json::to_string(&o).unwrap();
+        assert!(!without.contains("revoke"), "a row without one hashes as it did before revocation was offered");
+        o.revoke = Some("https://accounts.example/revoke".into());
+        assert!(check(&o).is_ok());
+        for bad in ["http://attacker.example/revoke", "https://accounts.example/revoke?token=fixed", "not a url"] {
+            o.revoke = Some(bad.into());
+            assert!(check(&o).is_err(), "{bad}");
+        }
+        let form: std::collections::BTreeMap<_, _> = url::form_urlencoded::parse(revoke_form("a+b/c=").as_bytes()).into_owned().collect();
+        assert_eq!(form, std::collections::BTreeMap::from([("token".to_string(), "a+b/c=".to_string())]));
     }
 
     #[test]

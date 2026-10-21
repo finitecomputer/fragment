@@ -2649,6 +2649,29 @@ function connectButton(p, label, said) {
 // whichever load of settings renders in that visit, while the row still
 // has the key, until the next press; in another visit, never (#439).
 const unremoved = new Map();
+// Disconnect: the account goes from Pipes, so no agent's call gets its token
+// again, and its grant is revoked at the provider where the platform can;
+// when it could not, settings says where the person removes it themselves.
+function disconnectButton(p, said) {
+  const off = el("button", "quiet", "Disconnect");
+  off.type = "button";
+  off.dataset.action = "disconnect";
+  off.onclick = async () => {
+    off.disabled = true;
+    said.textContent = "";
+    let revoked;
+    try {
+      ({ revoked } = await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}`));
+    } catch (e) {
+      said.textContent = e.message;
+      off.disabled = false;
+      return;
+    }
+    const name = providerName(p.provider);
+    await reopenSettings(revoked ? null : [`${name} is disconnected`, `Your agents can no longer use it. ${name} may still list this platform's access to your account: remove it in your ${name} account's security settings.`]).catch(() => {});
+  };
+  return off;
+}
 function connectionsSection(linked, uses) {
   const s = section("Connections");
   s.id = "settings-connections";
@@ -2697,6 +2720,10 @@ function connectionsSection(linked, uses) {
     if (p.kind === "connection" && p.state !== "connected") {
       actions.append(connectButton(p, p.state === "needs_reauthorization" ? "Connect again" : "Connect", said));
       details.push(said);
+    }
+    if (p.kind === "connection" && p.state !== "not_connected") {
+      actions.append(disconnectButton(p, said));
+      if (!details.includes(said)) details.push(said);
     }
     if (p.kind === "own" && p.signIn) {
       // connected through the provider's own page (never a key pasted here):

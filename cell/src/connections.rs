@@ -14,6 +14,11 @@
 //!   person's browser goes to connect a connection. Its own provider's code
 //!   returns to Fragment; browser/session/provider binding is checked before
 //!   exchanging it and importing tokens into Pipes (docs/pipes-browser-binding.md).
+//! - `DELETE /api/connections/{provider}` → `{provider, state, revoked}`: a
+//!   connection disconnected. Its grant is revoked at the provider where its
+//!   row names a `revoke` endpoint (with a token Pipes mints for it), then its
+//!   account is deleted at Pipes, which ends every swap of it; `revoked` says
+//!   whether the provider confirmed. The person's computer is told at once.
 //! - `PUT /api/connections/{provider}/key {key}` and `DELETE …/key`: the
 //!   person's own key for an `own` provider, kept sealed by their computer
 //!   (one computer per person for now: decision 13), which swaps it in.
@@ -31,7 +36,7 @@
 
 use std::collections::BTreeMap;
 
-use fragment_core::catalog::{Kind, KeyOAuth};
+use fragment_core::catalog::{ConnectionOAuth, Kind, KeyOAuth};
 use fragment_core::own_signin;
 use fragment_core::roundtrip::{self, Trip};
 use fragment_proto::computer::{ProviderModel, ProviderPrice, ProviderSignIn, ProviderState, ProviderView, Providers};
@@ -150,6 +155,21 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
             resp.headers_mut().append("set-cookie", &crate::auth::trip_begun(Trip::Connection, &begun.state, url))?;
             Ok(resp)
         }
+        (Method::Delete, [provider]) => {
+            let p = provider_of(provider)?;
+            match p.kind {
+                Kind::Connection => {}
+                Kind::Own => return Err(CellError::invalid(format!("{provider} is no connection to disconnect: your own key is removed with DELETE /api/connections/{provider}/key"))),
+                Kind::Operator => return Err(CellError::invalid(format!("{provider} is no connection to disconnect: it is the platform's key, not yours"))),
+            }
+            let user = workos_user(env, cfg, who).await?;
+            let revoked = match &user {
+                Some(u) => disconnect(env, cfg, provider, p.connection_oauth.as_ref(), u).await?,
+                None => false,
+            };
+            disconnected_told(env, cfg, &computer, provider, user).await;
+            json_response(&json!({ "provider": provider, "state": ProviderState::NotConnected, "revoked": revoked }))
+        }
         (Method::Put | Method::Delete, [provider, "key"]) => {
             if provider_of(provider)?.kind != Kind::Own {
                 return Err(CellError::invalid(format!("{provider} takes no key of yours: only an own key's provider does")));
@@ -187,6 +207,55 @@ fn reachable(cfg: &Config, url: &str) -> CellResult<()> {
 /// Where the provider sends the person's browser back.
 fn callback_url(cfg: &Config, provider: &str) -> String {
     format!("{}/api/connections/{provider}/callback", cfg.platform())
+}
+
+/// `user`'s connection to `provider` taken away: its grant revoked at the
+/// provider first, while Pipes still holds a token for it (`o.revoke`; a
+/// failure there is logged and the account goes anyway: the person asked
+/// for their agents to lose it), then its account deleted at Pipes, which
+/// ends every swap of it. Answers whether the provider confirmed the revoke.
+async fn disconnect(env: &Env, cfg: &Config, provider: &str, o: Option<&ConnectionOAuth>, user: &str) -> CellResult<bool> {
+    let api = &cfg.workos()?.api;
+    let revoked = match o.and_then(|o| o.revoke.as_deref()) {
+        Some(revoke) => match revoke_grant(env, cfg, api, provider, user, revoke).await {
+            Ok(r) => r,
+            Err(e) => {
+                console_error!("{}", json!({ "connection-disconnect": provider, "not-revoked": e.message }));
+                false
+            }
+        },
+        None => false,
+    };
+    crate::keys::pipes_delete(env, api, provider, user).await?;
+    Ok(revoked)
+}
+
+/// The grant behind `user`'s account at `provider`, revoked with an access
+/// token Pipes mints for it (one Pipes refuses, the account inactive or
+/// gone, has no grant left to revoke here).
+async fn revoke_grant(env: &Env, cfg: &Config, api: &str, provider: &str, user: &str, revoke: &str) -> CellResult<bool> {
+    reachable(cfg, revoke)?;
+    let (status, answer) = crate::keys::pipes_token(env, api, provider, user).await?;
+    let Some(token) = (status == 200 && answer["active"] == true).then(|| answer["access_token"]["access_token"].as_str()).flatten().filter(|t| !t.is_empty()) else {
+        return Ok(false);
+    };
+    crate::keys::connection_revoke(revoke, token).await
+}
+
+/// The person's computer told their connections' states after a
+/// disconnect, so its guest is given that one no more at its next read
+/// rather than once its states age out. A computer not made yet has no
+/// guest; a failure is logged (each swap asks Pipes, which refuses now).
+async fn disconnected_told(env: &Env, cfg: &Config, computer: &str, provider: &str, user: Option<String>) {
+    let told = match connection_states(env, cfg, std::future::ready(Ok(user))).await {
+        Ok(states) => crate::computer::ask(env, computer, "computer/own-keys", &json!({ "connections": states })).await.map(drop),
+        Err(e) => Err(e),
+    };
+    match told {
+        Ok(()) => {}
+        Err(e) if e.code == ErrorCode::NotFound => {}
+        Err(e) => console_error!("{}", json!({ "connection-disconnect": provider, "computer-not-told": e.message })),
+    }
 }
 
 /// A sign-in to `provider`'s own key, begun: the person's computer keeps

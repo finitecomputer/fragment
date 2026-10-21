@@ -8,8 +8,20 @@ use crate::{Suite, Need, api::{Api, Call, Reply}};
 const PROVIDER: &str = "e2e-oauth";
 
 fn begin(api: &Api, session: &str, provider: &str) -> Result<Reply> {
-    api.call(Call { method: "POST", url: format!("{}/api/connections/{provider}/authorize", api.base), cookie: Some(format!("fragment_session={session}")),
+    shell(api, session, "POST", &format!("/api/connections/{provider}/authorize"))
+}
+
+/// A call from the shell, signed in by its session.
+fn shell(api: &Api, session: &str, method: &'static str, path: &str) -> Result<Reply> {
+    api.call(Call { method, url: format!("{}{path}", api.base), cookie: Some(format!("fragment_session={session}")),
         extra: vec![("x-fragment-shell", "1".into()), ("sec-fetch-site", "same-origin".into()), ("origin", api.base.clone())], ..Call::default() })
+}
+
+/// `provider`'s state in the person's `GET /api/connections`.
+fn listed(api: &Api, session: &str, provider: &str) -> Result<serde_json::Value> {
+    let r = shell(api, session, "GET", "/api/connections")?;
+    anyhow::ensure!(r.status == 200, "list connections: {r}");
+    Ok(r.body["providers"].as_array().and_then(|l| l.iter().find(|p| p["provider"] == provider)).map(|p| p["state"].clone()).unwrap_or_default())
 }
 
 fn pending(api: &Api, session: &str, account: &str) -> Result<(String, String, String)> {
@@ -137,6 +149,32 @@ pub fn connections(s: &mut Suite, api: &Api) -> Result<()> {
     let replay = back(&api, &failing, Some(&b), Some(&cookie))?;
     s.ok("failed import is not retried and callback replay cannot import", refused(&r, "no-key") && refused(&replay, "not-under-way")
         && s.workos.import_attempts() == attempts + 1 && s.workos.connection_counts() == (counts.0 + 1, counts.1, counts.2), format!("{} / {}", r.status, replay.status));
+
+    // disconnecting: the grant revoked with a token Pipes mints, then the account deleted
+    let path = format!("/api/connections/{PROVIDER}");
+    let user_a = s.workos.user("connection-a@e2e.test").id;
+    let (revoked, deleted) = (s.workos.revoked().len(), s.workos.deleted().len());
+    let was = listed(&api, &a, PROVIDER)?;
+    let r = shell(&api, &a, "DELETE", &path)?;
+    let minted = s.workos.tokens(PROVIDER).last().cloned().unwrap_or_default();
+    s.ok("disconnecting revokes the grant at the provider with a token Pipes mints for it, then deletes the account at Pipes: not connected, the token in no answer",
+        was == "connected" && r.status == 200 && r.body["revoked"] == true && r.body["state"] == "not_connected"
+            && !minted.is_empty() && !r.body.to_string().contains(&minted)
+            && s.workos.revoked().len() == revoked + 1 && s.workos.revoked().last() == Some(&minted)
+            && s.workos.deleted().last() == Some(&(user_a, PROVIDER.into())) && s.workos.deleted().len() == deleted + 1
+            && listed(&api, &a, PROVIDER)? == "not_connected", format!("was {was}, {r}"));
+    let r = api.signed(&key, "DELETE", &path, None)?;
+    s.ok("disconnecting again, with the person's key, asks the provider nothing: no account is left to revoke or delete", r.status == 200 && r.body["revoked"] == false
+        && s.workos.revoked().len() == revoked + 1 && s.workos.deleted().len() == deleted + 1, &r);
+    let was = listed(&api, &b, PROVIDER)?;
+    s.workos.fail_next_revoke();
+    let r = shell(&api, &b, "DELETE", &path)?;
+    s.ok("a provider that does not revoke still disconnects, and the answer says it did not", was == "connected" && r.status == 200 && r.body["revoked"] == false
+        && !s.workos.holds("connection-b@e2e.test", PROVIDER) && s.workos.revoked().len() == revoked + 1 && listed(&api, &b, PROVIDER)? == "not_connected", format!("was {was}, {r}"));
+    let operator = shell(&api, &a, "DELETE", "/api/connections/perplexity")?;
+    let unknown = shell(&api, &a, "DELETE", "/api/connections/no-such-provider")?;
+    s.ok("only a connection is disconnected so: an operator's key is 400, a provider not offered 404", operator.status == 400 && unknown.status == 404
+        && s.workos.deleted().len() == deleted + 2, format!("{} / {}", operator.status, unknown.status));
 
     let capped = api.sign_in("connection-cap@e2e.test")?;
     let counts = s.workos.connection_counts();

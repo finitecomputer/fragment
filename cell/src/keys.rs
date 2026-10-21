@@ -260,7 +260,8 @@ pub async fn workos_authenticate(env: &Env, api: &str, client_id: &str, code: &s
 /// A WorkOS Pipes access token for `user`'s account at `provider`
 /// (`POST /data-integrations/{provider}/token`): (status, WorkOS's answer,
 /// `{active, access_token: {access_token, expires_at, …}}` or `{active:
-/// false, error}`). Asked only to swap a token in: it may refresh one.
+/// false, error}`). Asked only to swap a token in, or to revoke the grant
+/// behind one at a disconnect: it may refresh one.
 pub async fn pipes_token(env: &Env, api: &str, provider: &str, user: &str) -> CellResult<(u16, Value)> {
     assert!(fragment_core::catalog::valid_name(provider), "a provider is checked before WorkOS is asked");
     let key = required(env, store::WORKOS_KEY).await?;
@@ -324,6 +325,30 @@ pub(super) async fn pipes_import(env: &Env, api: &str, provider: &str, user: &st
     let (status, _) = confidential_request(&url, Method::Post, "application/json", Some(&key), &body).await?;
     let status = if status == 409 { confidential_request(&url, Method::Put, "application/json", Some(&key), &body).await?.0 } else { status };
     Ok(matches!(status, 200 | 201))
+}
+
+/// `user`'s account at `provider` deleted at Pipes (`DELETE
+/// /user_management/users/{user}/connected_accounts/{provider}`, 204):
+/// its tokens go, and no swap gets one again. 404 is no account, which is
+/// what was asked for. The grant at the provider stays (`connection_revoke`).
+pub async fn pipes_delete(env: &Env, api: &str, provider: &str, user: &str) -> CellResult<()> {
+    assert!(fragment_core::catalog::valid_name(provider), "a provider is checked before WorkOS is asked");
+    if user.is_empty() || !user.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') { return Err(CellError::host("invalid WorkOS user id")); }
+    let key = required(env, store::WORKOS_KEY).await?;
+    let (status, answer) = post_json(&format!("{api}/user_management/users/{user}/connected_accounts/{provider}"), Method::Delete, Some(&key), None, "WorkOS").await?;
+    match status {
+        200 | 204 | 404 => Ok(()),
+        s => Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS did not disconnect {provider} ({s}): {}", answer["message"].as_str().unwrap_or("no reason given")))),
+    }
+}
+
+/// A connection's grant revoked at its provider (RFC 7009) with `token`, an
+/// access token Pipes just minted for it: whether the provider says so (200).
+/// No redirects or retries, and nothing of its answer is kept: the request
+/// carries a credential.
+pub async fn connection_revoke(revoke: &str, token: &str) -> CellResult<bool> {
+    let form = fragment_core::connection_signin::revoke_form(token);
+    Ok(confidential_request(revoke, Method::Post, "application/x-www-form-urlencoded", None, &form).await?.0 == 200)
 }
 
 /// Whether the deployment binds the operator's key `name`
