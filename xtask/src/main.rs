@@ -38,6 +38,9 @@
 //!   schema-lock      appends the Durable Objects' new schema steps to
 //!                    crates/core/migrations/schema.lock, refusing to change
 //!                    or drop a locked one (crates/core/src/migrate.rs)
+//!   smoke --url <platform-origin> [--expected-release <id>] [--json]
+//!                    read-only health and deployment identity, bounded by
+//!                    --timeout-ms (default 10000); docs/smoke-check.md
 //!   secret set <name> --config <file> [--from-file <path>]
 //!   secret gen <name> --config <file>
 //!   secret list --config <file>
@@ -96,6 +99,7 @@ mod js_syntax;
 mod markdown_dom;
 mod schema_lock;
 mod secret;
+mod smoke;
 mod stripe;
 
 const DEV_PORT: u16 = 8790;
@@ -495,13 +499,14 @@ fn main() -> Result<()> {
         Some("try") => try_template(&args[1..]),
         Some("e2e") => e2e(&args[1..]),
         Some("check") => check(),
+        Some("smoke") => smoke::run(&args[1..]),
         Some("schema-lock") => schema_lock::write(&devstack::repo_root()),
         Some("secret") => secret::secret(&args[1..]),
         Some("deploy") => deploy::deploy(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
         Some("stripe") => deploy::stripe(&args[1..]),
         Some("image") => image::image(&args[1..]),
-        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | smoke --url <platform-origin> [--expected-release <id>] [--json] | schema-lock | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
     }
 }
 
