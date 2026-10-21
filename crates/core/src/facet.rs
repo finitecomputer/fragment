@@ -239,6 +239,56 @@ mod tests {
     use super::*;
 
     const PLATFORM_JS: &str = include_str!("../../../cell/platform.mjs");
+    // The deployed shape, not a migration. Never refresh this fixture to
+    // accept a changed CREATE: existing facets would keep the old table.
+    const LEDGER_SCHEMA: &str = include_str!("../tests/fixtures/facet-ledger.sql");
+
+    /// Read the constructor's actual DDL, including its table name. Fail
+    /// closed if the initializer moves to a different JavaScript shape.
+    fn ledger_ddl() -> String {
+        let name = PLATFORM_JS.split_once("const LEDGER = \"").expect("platform declares its ledger name").1
+            .split_once('"').expect("the ledger name ends").0;
+        let start = "sql.exec(`CREATE TABLE IF NOT EXISTS ${LEDGER} (";
+        assert_eq!(PLATFORM_JS.matches(start).count(), 1, "one app ledger initializer; update this guard if it moves");
+        let rest = PLATFORM_JS.split_once(start).unwrap().1.split_once('`').expect("the DDL template ends").0;
+        format!("CREATE TABLE IF NOT EXISTS {name} ({rest}")
+    }
+
+    fn ledger_schema(db: &rusqlite::Connection) -> Vec<(String, String)> {
+        db.prepare("SELECT name, sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name").unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get::<_, String>(1)?.split_whitespace().collect::<Vec<_>>().join(" ")))).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap()
+    }
+
+    /// A fresh facet and an already-deployed facet must have the same
+    /// ledger shape. IF NOT EXISTS cannot migrate an existing table.
+    #[test]
+    fn app_ledger_schema_matches_the_deployed_shape() {
+        let deployed = rusqlite::Connection::open_in_memory().unwrap();
+        deployed.execute_batch(LEDGER_SCHEMA).unwrap();
+        let fresh = rusqlite::Connection::open_in_memory().unwrap();
+        fresh.execute_batch(&ledger_ddl()).unwrap();
+        assert_eq!(ledger_schema(&fresh), ledger_schema(&deployed),
+            "the app ledger changed without a migration: add versioned facet migrations before changing its deployed shape; do not refresh the fixture");
+    }
+
+    /// Restart/redeploy: rerunning the current constructor over a populated
+    /// deployed ledger preserves the result and effects needed for replay.
+    #[test]
+    fn app_ledger_reinitialization_preserves_replay_rows() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(LEDGER_SCHEMA).unwrap();
+        db.execute("INSERT INTO _fragment_ops (id, name, input_sha, result, at, effects, run) VALUES ('op-1', 'add', 'input-sha', '{\"id\":1}', 1234, '[{\"channel\":\"updates\"}]', 7)", []).unwrap();
+        for _ in 0..2 {
+            db.execute_batch(&ledger_ddl()).unwrap();
+            let row: (String, String, String, String, i64, String, i64) = db.query_row(
+                "SELECT id, name, input_sha, result, at, effects, run FROM _fragment_ops", [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+            ).unwrap();
+            assert_eq!(row, ("op-1".into(), "add".into(), "input-sha".into(), "{\"id\":1}".into(), 1234, "[{\"channel\":\"updates\"}]".into(), 7));
+            assert_eq!(db.query_row("SELECT COUNT(*) FROM _fragment_ops", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        }
+    }
 
     /// The names `export const|function <name>` declares.
     fn exports(module: &str) -> Vec<&str> {
