@@ -2393,29 +2393,43 @@ const NOTICE_SEEN: &str = "(() => { const n = document.getElementById('notice');
     return { ok: n.checkVisibility() && inside && !!at && n.contains(at), text: n.innerText, box: [r.left, r.top, r.width, r.height].map(Math.round), width: innerWidth, height: innerHeight, \
       path: location.pathname, settings: !document.getElementById('settings-page').hidden }; })()";
 
-/// On settings, an agent's chip under a connection whose save fails: the
-/// shell's notice says "That was not changed", seen over settings once
-/// they reload, the chip as it was. What was seen, and whether it held.
-fn chip_refused(b: &mut Browser, page: &Page, chip: &str, wait: std::time::Duration) -> Result<(bool, Value)> {
+/// On settings, an agent's chip under a connection whose save fails, then
+/// pressed again: the failure is said over settings once they reload
+/// ("That was not changed", in the viewport, the chip as it was; `shot`
+/// taken then); the retry that works takes the provider from the agent and
+/// the failure's notice away; a press more gives it back, for the checks
+/// after. Whether the failure was said, and whether the retry cleared it,
+/// with what was seen.
+fn chip_retried(b: &mut Browser, page: &Page, chip: &str, shot: &std::path::Path, wait: std::time::Duration) -> Result<(bool, bool, Value)> {
+    let pressed = |state: &str| format!("document.querySelector({})?.getAttribute('aria-pressed') === {}", js(chip), js(state));
+    let press = format!("(document.querySelector({}).click(), true)", js(chip));
     b.eval(page, &refuse_once("PUT", "/agents/[^/]+/connections$"))?;
-    b.eval(page, &format!("(document.querySelector({}).click(), true)", js(chip)))?;
-    let told = format!("(() => {{ const v = {NOTICE_SEEN}; return v.ok && v.text.startsWith('That was not changed') && v.path === '/settings' && v.settings && document.querySelector({})?.getAttribute('aria-pressed') === 'true'; }})()", js(chip));
-    let seen = b.until(page, &told, wait);
-    Ok((seen, b.eval(page, NOTICE_SEEN)?))
+    b.eval(page, &press)?;
+    let told = format!("(() => {{ const v = {NOTICE_SEEN}; return v.ok && v.text.startsWith('That was not changed') && v.path === '/settings' && v.settings && {}; }})()", pressed("true"));
+    let refused = b.until(page, &told, wait);
+    let failed = b.eval(page, NOTICE_SEEN)?;
+    let _ = b.screenshot(page, shot);
+    b.eval(page, &press)?;
+    let retried = b.until(page, &format!("{} && document.getElementById('notice').hidden", pressed("false")), wait);
+    let after = b.eval(page, NOTICE_SEEN)?;
+    b.eval(page, &press)?;
+    let back = b.until(page, &format!("{} && document.getElementById('notice').hidden", pressed("true")), wait);
+    Ok((refused, retried && back, json!({ "failed": failed, "retried": after, "back": back })))
 }
 
 /// The shell's own notice where the person is (#436), never in a place
 /// settings hide: on settings, the agent chip's failed save is said over
-/// them, in the viewport, on a desktop and a phone (375 px); over a chat,
-/// an archive that failed is said too; each place's notice is its own (the
-/// chat's clears for settings, settings' for the chat), and a reload on
-/// settings shows no Loading… left over the page.
+/// them, in the viewport, and a retry that works takes it away, on a
+/// desktop and a phone (375 px); over a chat, an archive that failed is
+/// said too; each place's notice is its own (the chat's clears for
+/// settings, settings' for the chat), and a reload on settings shows no
+/// Loading… left over the page.
 fn notice_ui(s: &mut Suite, b: &mut Browser, page: &Page, chat: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let chip = "#settings-connections [data-provider=\"perplexity\"] [data-agent]";
-    let (desk, seen) = chip_refused(b, page, chip, wait)?;
-    let _ = b.screenshot(page, &shots.join("desktop-settings-notice.png"));
-    s.ok("on settings, an agent's chip whose save fails says That was not changed over settings, in the viewport, on a desktop; the chip as it was", desk, &seen);
+    let (desk, retried, seen) = chip_retried(b, page, chip, &shots.join("desktop-settings-notice.png"), wait)?;
+    s.ok("on settings, an agent's chip whose save fails says That was not changed over settings, in the viewport, on a desktop; the chip as it was", desk, &seen["failed"]);
+    s.ok("pressed again, its save works: the chip says so, and the failure's notice is gone", retried, &seen);
     open_row(b, page, chat, wait)?;
     let left = b.eval(page, "document.getElementById('notice').hidden")?;
     b.eval(page, &refuse_once("PUT", "/archived$"))?;
@@ -2431,11 +2445,10 @@ fn notice_ui(s: &mut Suite, b: &mut Browser, page: &Page, chat: &str, shots: &st
     b.viewport(page, 375, 812, true)?;
     b.reload(page)?;
     let loaded = b.until(page, &format!("location.pathname === '/settings' && !!document.querySelector({}) && document.getElementById('notice').hidden", js(chip)), wait);
-    let (phone, seen) = chip_refused(b, page, chip, wait)?;
-    let _ = b.screenshot(page, &shots.join("phone-375-settings-notice.png"));
+    let (phone, retried, seen) = chip_retried(b, page, chip, &shots.join("phone-375-settings-notice.png"), wait)?;
     s.ok(
-        "on a phone (375 px), settings reloaded show no Loading… over them, and the chip's failed save is said over settings, in the viewport",
-        loaded && phone,
+        "on a phone (375 px), settings reloaded show no Loading… over them, the chip's failed save is said over settings, in the viewport, and a retry that works takes it away",
+        loaded && phone && retried,
         json!({ "loaded": loaded, "seen": seen }),
     );
     b.viewport(page, 1280, 800, false)?;

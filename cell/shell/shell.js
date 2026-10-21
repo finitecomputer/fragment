@@ -1886,9 +1886,10 @@ function renderSettingsPage(page, sections) {
 }
 async function openSettings(push = true) {
   if (push) at(SETTINGS);
-  // a notice of the page they came from stays there; one raised on
-  // settings stays as they reload (the agent chip's "That was not changed")
-  if (state.page !== "Settings") $("notice").hidden = true;
+  // settings render with no notice: one of the page they came from stays
+  // there, an action that worked takes its earlier failure's away, and
+  // one that failed says so once they have reloaded (the agent chip's)
+  $("notice").hidden = true;
   state.page = "Settings";
   $("layout").classList.add("settings-view");
   $("frames").hidden = true;
@@ -2056,6 +2057,8 @@ function buildSection() {
   copy.onclick = () =>
     navigator.clipboard.writeText(prompt.value).then(
       () => {
+        // copied: an earlier copy's "not copied" is no longer so
+        $("notice").hidden = true;
         copy.textContent = "Copied";
         setTimeout(() => (copy.textContent = "Copy"), 1500);
       },
@@ -2646,13 +2649,15 @@ function connectionsSection(linked, uses) {
           const now = a.connections ?? all;
           const next = allowed ? now.filter((x) => x !== p.provider) : [...new Set([...now, p.provider])];
           const list = all.every((x) => next.includes(x)) ? null : next;
+          let refused = null;
           try {
             computerIs(await api("PUT", `/api/computers/${seg(state.computer.computer)}/agents/${seg(a.fragment)}/connections`, { connections: list }));
             state.agents = new Map((state.computer?.agents ?? []).map((x) => [x.identity, x]));
           } catch (e) {
-            notice("That was not changed", e.message);
+            refused = e;
           }
           await openSettings(false);
+          if (refused) notice("That was not changed", refused.message);
         };
         who.append(chip);
       }
