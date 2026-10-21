@@ -111,6 +111,28 @@ pub struct Page {
     target: String,
 }
 
+/// For `open_with_script`: the page's first WebSocket whose URL holds
+/// `part`, held as an upgrade never answered is (a dropped connection, a
+/// phone's network changing under it): it stays connecting, never opening
+/// or closing by itself, until the page closes it, which closes it as a
+/// browser's does (code 1006, not clean). `window.__heldSockets` counts
+/// those held, `__heldClosed` those the page closed. Its top window's alone.
+pub fn hold_first_socket(part: &str) -> String {
+    let part = serde_json::to_string(part).expect("a string encodes");
+    format!(
+        "(() => {{ if (window !== window.top) return; const part = {part}; const Real = window.WebSocket; let held = false; \
+         Object.assign(window, {{ __heldSockets: 0, __heldClosed: 0 }}); \
+         class Held extends EventTarget {{ \
+           constructor(url) {{ super(); Object.assign(this, {{ url: String(url), readyState: 0, protocol: '', extensions: '', binaryType: 'blob', bufferedAmount: 0 }}); window.__heldSockets++; }} \
+           send() {{ throw new DOMException('the socket is not open', 'InvalidStateError'); }} \
+           close() {{ if (this.readyState >= 2) return; this.readyState = 3; window.__heldClosed++; \
+             setTimeout(() => {{ const e = new CloseEvent('close', {{ code: 1006, reason: '', wasClean: false }}); this.onclose?.(e); this.dispatchEvent(e); }}, 0); }} \
+         }} \
+         window.WebSocket = new Proxy(Real, {{ construct(target, args) {{ if (!held && String(args[0]).includes(part)) {{ held = true; return new Held(args[0]); }} return new target(...args); }} }}); \
+         }})();"
+    )
+}
+
 /// A second person's browser beside the lease's own: a browser context of
 /// its own in the same Chrome (its own cookies, storage, and cache), which
 /// ends with the lease. Its pages open with `Browser::open_in`.

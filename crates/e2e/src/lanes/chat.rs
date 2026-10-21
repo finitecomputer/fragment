@@ -58,6 +58,35 @@ fn shows(chrome: &mut Browser, page: &Page, cond: &str) -> bool {
     chrome.until(page, cond, TURN)
 }
 
+/// A chat page whose first live socket is never answered (its upgrade held,
+/// as a dropped connection or a phone's changing network leaves one: the
+/// library dialled again only on a close, so the page waited for its hello
+/// for good). Valid: the page closes it once it has waited past any healthy
+/// open (`OPEN_WAIT_MS`, cell/client.mjs), dials again, has its hello, and
+/// its composer is ready, every message of the owner's shown once.
+fn held_socket(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str) -> Result<()> {
+    // the open wait and its first backoff, jittered, and the new open
+    let wait = Duration::from_secs(30);
+    let page = chrome.open_with_script(&api.site_url(chat, "__signin?return=/"), &crate::browser::hold_first_socket("/__live"))?;
+    fit(chrome, &page, 1280, 860, false)?;
+    let ready = chrome.until(&page, "window.__heldSockets === 1 && window.__heldClosed === 1 && document.getElementById('say')?.dataset.ready === '1'", wait);
+    let seen = chrome.eval(&page, "({ held: window.__heldSockets, closed: window.__heldClosed, ready: document.getElementById('say')?.dataset.ready ?? null, mine: [...document.querySelectorAll('.msg.user.mine[data-seq]')].map((m) => m.dataset.seq) })")?;
+    let mine = strings_of(&seen["mine"]);
+    let once = !mine.is_empty() && mine.iter().collect::<std::collections::BTreeSet<_>>().len() == mine.len();
+    s.ok(
+        "a page whose first live socket is never answered closes it once it has waited past any healthy open, dials again, and is ready, each of the owner's messages shown once",
+        ready && once,
+        &seen,
+    );
+    chrome.close(page)?;
+    Ok(())
+}
+
+/// A JSON array's strings.
+fn strings_of(v: &Value) -> Vec<String> {
+    v.as_array().into_iter().flatten().filter_map(|x| x.as_str().map(str::to_string)).collect()
+}
+
 /// The page's viewport made `width`×`height` (a phone's when `mobile`),
 /// and waited for until the chat fits it. The chat is as tall as the
 /// visual viewport, from that viewport's `resize` (chat.js `fitViewport`,
@@ -612,6 +641,9 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         by_hand["status"] == "succeeded" && by_hand["output"]["pushed"] == 0 && s.push.received(&owner_push).len() == 1,
         &by_hand,
     );
+    // (a tab of its own, in front: after the push checks, which ask whether
+    // the owner's page is on screen)
+    held_socket(s, api, &mut chrome, &chat_name)?;
 
     polish::check(s, api, &owner, &owner_session, &mut chrome, &label)?;
     polish::working_card(s, api, &owner, &mut chrome, &identity, &agent_name)?;
