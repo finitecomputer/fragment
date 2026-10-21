@@ -255,7 +255,7 @@ impl DurableObject for PrincipalCell {
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
-        if let Some(refused) = crate::routed::refused(&req, &crate::config::Config::from_env(&self.env).deploy_id)? {
+        if let Some(refused) = crate::routed::refused(&req, crate::routed::Own::of(crate::config::Config::from_env(&self.env)), &self.raw)? {
             return Ok(refused);
         }
         match self.route(req).await {

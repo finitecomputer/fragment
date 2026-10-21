@@ -149,6 +149,13 @@ pub struct Config {
     /// object admits only its own (fragment_core::release): a Worker
     /// variable, so the Worker and every object of one deploy run one value.
     pub deploy_id: String,
+    /// `FRAGMENT_DEPLOYED_AT`: when this release was deployed, whole
+    /// seconds since 1970 (the deploy sets it; none where a fleet sets none,
+    /// dev's default). Every call into a platform object carries it beside
+    /// the release, and an object that refuses a call from a release
+    /// deployed after its own restarts onto it (fragment_core::release
+    /// `restarts`). A Worker variable, as the release is.
+    pub deployed_at: Option<u64>,
     /// `FRAGMENT_PROVIDERS`: the provider catalog (`fragment_core::catalog`),
     /// every credential a computer's guest may use: the WorkOS Pipes
     /// connections, the operator's keys (each bound as
@@ -216,6 +223,15 @@ fn deploy_id(env: &Env) -> String {
     let id = var(env, "FRAGMENT_DEPLOY_ID").unwrap_or_else(|| "dev".into());
     assert!(fragment_core::release::valid(&id), "FRAGMENT_DEPLOY_ID is 1 to {} of letters, digits, `.`, `_` and `-`", fragment_core::release::ID_MAX_BYTES);
     id
+}
+
+/// `FRAGMENT_DEPLOYED_AT`, or `None` where a fleet sets none: seconds as
+/// digits (fragment_core::release::deployed), or the isolate does not start.
+fn deployed_at(env: &Env) -> Option<u64> {
+    let v = var(env, "FRAGMENT_DEPLOYED_AT")?;
+    let at = fragment_core::release::deployed(&v);
+    assert!(at.is_some(), "FRAGMENT_DEPLOYED_AT is whole seconds since 1970, 1 to {} digits", fragment_core::release::DEPLOYED_MAX_DIGITS);
+    at
 }
 
 /// The isolate's settings, built from the first `env` it is handed and
@@ -323,6 +339,7 @@ impl Config {
             levers_scoped: test_secret.is_some() && levers_fleet == fragment_core::levers::Fleet::Branch,
             test_secret,
             deploy_id: deploy_id(env),
+            deployed_at: deployed_at(env),
             providers: providers(env),
             price_book_version: var(env, "FRAGMENT_PRICE_BOOK_VERSION")
                 .map(|v| v.parse().unwrap_or_else(|_| panic!("FRAGMENT_PRICE_BOOK_VERSION is a whole number")))

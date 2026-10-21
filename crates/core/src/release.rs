@@ -21,6 +21,18 @@
 //! what two releases say to each other: `HEADER` on the call, and a 503
 //! carrying `REFUSED` back. Neither is ever renamed; the body (`deploying`
 //! and its message) a caller reads only for its message.
+//!
+//! An object Cloudflare keeps busy keeps the code a deploy replaced: on the
+//! preview on 2026-10-21, after 7 of its 17 deploys, a busy object (the
+//! Registry, a computer, its agent fragment) ran the release before for
+//! 283 to 297 seconds, refusing every call of the new one, and those
+//! refusals themselves kept it busy. So a call carries when its
+//! release was deployed too (`DEPLOYED`), and an object that refuses a call
+//! from a release deployed after its own restarts (`restarts`): its next
+//! instance runs the newer code, and the caller's next ask meets it. That
+//! is the reset Cloudflare gives it minutes later, brought forward; a call
+//! from a release deployed before the object's is refused and nothing
+//! more, as its caller is the one a deploy replaced.
 
 /// The header a call into a platform object carries its caller's release
 /// in (cell/src/routed.rs stamps every one).
@@ -31,6 +43,16 @@ pub const HEADER: &str = "x-fragment-release";
 /// nothing, from an answer of `deploying` the object passed on from a call
 /// of its own (which may have done something before it).
 pub const REFUSED: &str = "x-fragment-release-refused";
+
+/// The header a call into a platform object carries when its caller's
+/// release was deployed in (`FRAGMENT_DEPLOYED_AT`, whole seconds since
+/// 1970, set by `cargo xtask deploy`), beside `HEADER`. It orders two
+/// releases for `restarts` alone: whether a call is admitted is `admit`'s,
+/// by the release, whatever the time. Never renamed, as `HEADER` is not.
+pub const DEPLOYED: &str = "x-fragment-release-deployed";
+
+/// A deploy time's most digits: seconds since 1970 until the year 33658.
+pub const DEPLOYED_MAX_DIGITS: usize = 12;
 
 /// A release's longest id: a commit's (`git rev-parse --short=12`), and a
 /// deploy of an uncommitted tree's mark after it.
@@ -60,11 +82,32 @@ impl Skew {
     }
 }
 
+/// A deploy time as a call or a deployment names it (`DEPLOYED`,
+/// `FRAGMENT_DEPLOYED_AT`): 1 to `DEPLOYED_MAX_DIGITS` ASCII digits, or
+/// `None`, as a call from before deploy times were named carries none.
+pub fn deployed(v: &str) -> Option<u64> {
+    if v.is_empty() || v.len() > DEPLOYED_MAX_DIGITS || !v.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    v.parse().ok()
+}
+
+/// Whether an object that refused a call (`admit`) restarts, so its next
+/// instance runs the caller's code: only when the caller's release was
+/// deployed after its own, both times known. One deployed before it, or at
+/// the same second, or one that names no time (from before they were
+/// named, or a fleet that sets none), leaves it as it is: restarting would
+/// only start the same code again, at every such call.
+pub fn restarts(caller_deployed: Option<u64>, own_deployed: Option<u64>) -> bool {
+    matches!((caller_deployed, own_deployed), (Some(caller), Some(own)) if caller > own)
+}
+
 /// The object's check of a call, the first thing it does: admitted only
-/// from its own release (`callee`). Another release, newer or older (the
-/// two are not ordered: a release is a commit), is refused, and so is a
-/// call that names none or one malformed. `callee` is the object's own,
-/// checked as the isolate starts (cell/src/config.rs).
+/// from its own release (`callee`). Another release, newer or older, is
+/// refused, and so is a call that names none or one malformed (when each
+/// was deployed decides only whether the object restarts: `restarts`).
+/// `callee` is the object's own, checked as the isolate starts
+/// (cell/src/config.rs).
 pub fn admit(caller: Option<&str>, callee: &str) -> Result<(), Skew> {
     assert!(valid(callee), "an object's own release is a valid id, not {callee:?}");
     match caller {
@@ -147,6 +190,7 @@ mod tests {
     fn the_refusal_between_releases_keeps_its_names() {
         assert_eq!(HEADER, "x-fragment-release");
         assert_eq!(REFUSED, "x-fragment-release-refused");
+        assert_eq!(DEPLOYED, "x-fragment-release-deployed");
         assert_eq!(fragment_proto::ErrorCode::Deploying.status(), 503);
         assert_eq!(serde_json::to_value(fragment_proto::ErrorCode::Deploying).unwrap(), "deploying");
     }
@@ -178,5 +222,45 @@ mod tests {
         let (old, new) = ("33e323cd0a1b", "bc8b87e7a1b2");
         assert!(admit(Some(new), old).is_err(), "the object still runs the old release");
         assert_eq!(admit(Some(new), new), Ok(()), "and once restarted on the new one, the same call is admitted");
+    }
+
+    /// Valid and invalid: a deploy time is seconds as digits, and anything
+    /// else names none (never a time read from part of it).
+    #[test]
+    fn a_deploy_time_is_whole_seconds() {
+        assert_eq!(deployed("1792616138"), Some(1_792_616_138));
+        assert_eq!(deployed("0"), Some(0));
+        assert_eq!(deployed(&"9".repeat(DEPLOYED_MAX_DIGITS)), Some(999_999_999_999));
+        for bad in ["", " 1792616138", "1792616138 ", "-1", "+1", "1.5", "17926e3", "0x10", &"9".repeat(DEPLOYED_MAX_DIGITS + 1), "١٢"] {
+            assert_eq!(deployed(bad), None, "{bad:?}");
+        }
+    }
+
+    /// Valid: the object refusing a call from a release deployed after its
+    /// own restarts onto it. Invalid: one deployed before it (an old caller
+    /// at a new object, whose restart would start the same code again at
+    /// every such call), at the same second, or naming no time, leaves the
+    /// object as it is.
+    #[test]
+    fn only_a_newer_release_restarts_the_object() {
+        let (old, new) = (1_792_612_609, 1_792_615_843);
+        assert!(restarts(Some(new), Some(old)), "a new Worker at an old object");
+        assert!(!restarts(Some(old), Some(new)), "an old Worker at a new object");
+        assert!(!restarts(Some(new), Some(new)), "one second, two releases: neither is newer");
+        assert!(!restarts(None, Some(old)), "a caller from before deploy times were named");
+        assert!(!restarts(Some(new), None), "an object of a fleet that sets none (dev)");
+        assert!(!restarts(None, None));
+    }
+
+    /// Replay: a newer caller's refusal restarts the old object once; the
+    /// restarted object, of the caller's release, admits it, and its
+    /// restart asks nothing more of it.
+    #[test]
+    fn a_restart_ends_the_refusals_it_was_for() {
+        let ((old, old_at), (new, new_at)) = (("069479198b79", 1_792_612_609), ("5083ebcaeb1b", 1_792_615_843));
+        assert!(admit(Some(new), old).is_err() && restarts(Some(new_at), Some(old_at)), "refused, and the object restarts");
+        assert_eq!(admit(Some(new), new), Ok(()), "its next instance, the deploy's, admits the same call");
+        // an old Worker still calling it is refused, and restarts nothing
+        assert!(admit(Some(old), new).is_err() && !restarts(Some(old_at), Some(new_at)));
     }
 }
