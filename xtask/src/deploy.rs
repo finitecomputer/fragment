@@ -43,6 +43,8 @@ use fragment_devstack as devstack;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+pub(crate) mod preflight;
+
 /// A deployment's settings (its config file). Unknown keys are refused, so
 /// a misspelt one never silently does nothing.
 #[derive(Deserialize)]

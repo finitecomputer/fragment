@@ -53,6 +53,9 @@
 //!                    <branch>.<zone> (xtask/src/deploy.rs); --pinned-only
 //!                    (CI's) refuses a config that builds a computer image
 //!                    rather than keeping it at its digest
+//!   preflight --config <file>
+//!                    offline configuration checks; reads only that JSONC file,
+//!                    never credentials or vendors (exit 0 valid, 1 invalid)
 //!   image push <image> --repository <name> --tag <tag> [--summary <file>]
 //!                    build a computer image (hermes) as a deploy builds it and
 //!                    push it to the registry of the account CLOUDFLARE_ACCOUNT_ID
@@ -498,10 +501,11 @@ fn main() -> Result<()> {
         Some("schema-lock") => schema_lock::write(&devstack::repo_root()),
         Some("secret") => secret::secret(&args[1..]),
         Some("deploy") => deploy::deploy(&args[1..]),
+        Some("preflight") => deploy::preflight::run(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
         Some("stripe") => deploy::stripe(&args[1..]),
         Some("image") => image::image(&args[1..]),
-        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | preflight --config <file> | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
     }
 }
 
