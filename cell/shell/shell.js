@@ -2051,14 +2051,21 @@ function buildSection() {
   const copy = el("button", "quiet", "Copy");
   copy.type = "button";
   copy.dataset.action = "copy-prompt";
-  copy.onclick = () =>
-    navigator.clipboard.writeText(prompt.value).then(
-      () => {
-        copy.textContent = "Copied";
-        setTimeout(() => (copy.textContent = "Copy"), 1500);
-      },
-      (err) => notice("The prompt was not copied", err.message),
-    );
+  copy.onclick = async () => {
+    copy.textContent = "Copy";
+    copy.disabled = true;
+    try {
+      await navigator.clipboard.writeText(prompt.value);
+      copy.textContent = "Copied";
+      setTimeout(() => (copy.textContent = "Copy"), 1500);
+    } catch {
+      prompt.focus();
+      prompt.select();
+      notice("The prompt was not copied", "Copy the selected prompt manually, then paste it into your coding agent.");
+    } finally {
+      copy.disabled = false;
+    }
+  };
   const actions = el("div", "settings-actions");
   actions.append(copy);
   const yourself = el("details", "settings-install");
