@@ -216,6 +216,18 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     };
     let mine = |text: &str| format!("[...document.querySelectorAll('.msg.user.mine .bubble')].some((b) => b.textContent === {})", js(text));
     let replied = |text: &str| format!("[...document.querySelectorAll('.msg.agent:not(.streaming) .md')].some((m) => m.textContent.includes({}))", js(text));
+    // The record of the owner's message `text`, waited for within TURN: the
+    // page shows its own message as it posts it (`.sending`), before the
+    // platform has answered the post and written its record, so a read
+    // right after it shows may find none (as #456 found for a command's).
+    let posted = |s: &Suite, text: &str| -> Value {
+        let mut found = Value::Null;
+        s.eventually(TURN, || {
+            found = records(api, &owner, &chat_name, "chat").into_iter().find(|x| x["body"]["text"] == text).unwrap_or_default();
+            !found.is_null()
+        });
+        found
+    };
 
     // typed, Enter: the message, the agent's draft live, then its reply
     let first = "hello there, slowly";
@@ -228,9 +240,8 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     say(&mut chrome, first)?;
     s.ok("typed and sent with Enter, the message shows as the owner's", shows(&mut chrome, &page, &mine(first)), "");
     s.ok("and the composer is empty again", chrome.eval(&page, "document.getElementById('text').value")? == "", "");
-    let r = records(api, &owner, &chat_name, "chat");
-    let sent = r.iter().find(|x| x["body"]["text"] == first);
-    s.ok("the page posted it to chat as the owner, `{text}`", sent.is_some_and(|x| x["principal"] == api.identity(&owner).unwrap_or_default().as_str()), json!(r));
+    let sent = posted(s, first);
+    s.ok("the page posted it to chat as the owner, `{text}`", sent["principal"] == api.identity(&owner).unwrap_or_default().as_str(), &sent);
     let answered = shows(&mut chrome, &page, &format!("{} && !document.querySelector('.msg.agent.streaming')", replied(first)));
     let reply = chrome.eval(&page, &format!("[...document.querySelectorAll('.msg.agent .md')].map((m) => m.textContent).find((t) => t.includes({})) ?? ''", js(first)))?;
     let reply = reply.as_str().unwrap_or("").to_string();
@@ -388,8 +399,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the page reads it back as the chat's blob, as uploaded", fetched == json!([200, "image/png", picture.len()]), &fetched);
     let blob = api.signed(&owner, "GET", &format!("/api/f/{chat_name}/blobs/{picture_sha}"), None)?;
     s.ok("the same bytes the API serves", blob.status == 200 && blob.bytes == picture, blob.status);
-    let r = records(api, &owner, &chat_name, "chat");
-    let carried = r.iter().find(|x| x["body"]["text"] == "here is a picture").map(|x| x["body"]["attachments"].clone()).unwrap_or_default();
+    let carried = posted(s, "here is a picture")["body"]["attachments"].clone();
     s.ok(
         "its record names the file as docs/chat-records.md does",
         carried == json!([{ "sha256": picture_sha, "size": picture.len(), "type": "image/png", "name": "picture.png" }]),
@@ -431,8 +441,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.click(&page, "#record")?;
     let memo_shown = "[...document.querySelectorAll('.msg.user.mine')].some((m) => m.querySelector('.attachment-audio audio[src^=\"./__blob/\"]') && m.textContent.includes('a voice memo'))";
     s.ok("pressed again, it sends the clip with what was typed, shown as a player", ticking && shows(&mut chrome, &page, memo_shown), chrome.eval(&page, "document.getElementById('messages').innerHTML.slice(-600)")?);
-    let r = records(api, &owner, &chat_name, "chat");
-    let memo = r.iter().find(|x| x["body"]["text"] == "a voice memo").map(|x| x["body"]["attachments"].clone()).unwrap_or_default();
+    let memo = posted(s, "a voice memo")["body"]["attachments"].clone();
     let memo_sha = memo[0]["sha256"].as_str().unwrap_or("").to_string();
     s.ok(
         "its record names the clip as an audio attachment, as the recorder made it",
@@ -474,7 +483,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let turns: Vec<String> = records(api, &owner, &chat_name, "work").iter().filter(|r| r["body"]["kind"] == "turn.start").filter_map(|r| r["body"]["turn"].as_str().map(str::to_string)).collect();
     let once: std::collections::BTreeSet<&String> = turns.iter().collect();
     s.ok("every message the page sent was one turn", turns.len() == 11 && once.len() == turns.len(), json!(turns));
-    let first_turn = turn_of(&agent_name, &chat_name, "chat", sent.and_then(|x| x["seq"].as_i64()).unwrap_or(0));
+    let first_turn = turn_of(&agent_name, &chat_name, "chat", sent["seq"].as_i64().unwrap_or(0));
     s.ok("the first of them the turn of the page's first message", turns.first() == Some(&first_turn), json!({ "first": first_turn, "turns": turns }));
 
     commands_queued_and_quotes(s, api, &mut chrome, &page, Owned { owner: &owner, member_session: &member_session, chat: &chat_name, identity: &identity, label: &label }, &shots)?;
