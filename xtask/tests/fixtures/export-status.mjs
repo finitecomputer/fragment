@@ -64,6 +64,7 @@ function setup() {
     mount: () => { page.append(section); notify(); },
     tick: () => { assert.equal(timers.size, 1); const [id, callback] = timers.entries().next().value; timers.delete(id); return callback(); },
     text: () => walk(section).map((node) => node.textContent).join(" "),
+    warnings: () => walk(section).filter((node) => node.classes === "settings-warning").map((node) => node.textContent),
   };
 }
 function answer(request, value, status = 200) {
@@ -75,11 +76,19 @@ async function first(h, value) {
   await turn();
 }
 
+test("successful status reads leave no error warning in the Settings DOM", async () => {
+  const h = setup();
+  assert.deepEqual(h.warnings(), [], "an unmounted panel has not failed");
+  await first(h, null);
+  assert.deepEqual(h.warnings(), [], "matches the existing Billing warning check, including hidden nodes");
+});
+
 for (const failure of [500, "transport"]) {
   test(`building → ${failure} → explicit GET retry → ready preserves the same export`, async () => {
     const h = setup();
     assert.equal(h.requests.length, 0, "constructing an unmounted panel does not start polling");
     await first(h, building);
+    assert.deepEqual(h.warnings(), []);
     const rows = h.shown.children;
     assert.equal(h.timers.size, 1);
     const poll = h.tick();
@@ -91,10 +100,12 @@ for (const failure of [500, "transport"]) {
     assert.match(h.text(), /2 of 7 parts/);
     assert.equal(h.find("export").disabled, true);
     assert.equal(h.visible(h.feedback), true, "feedback is in Settings, outside hidden frames");
+    assert.deepEqual(h.warnings(), ["Your export status could not be read. Try again."]);
     assert.doesNotMatch(h.text(), /secret-must-not-appear/);
     assert.equal(h.timers.size, 0, "a failed status read waits for explicit retry");
     const retry = h.find("export-status-retry");
     const pending = retry.onclick();
+    assert.deepEqual(h.warnings(), [], "retry removes the resolved warning node, not just its visibility");
     assert.equal(retry.disabled, true);
     await retry.onclick();
     assert.equal(h.requests.length, 3, "duplicate retry cannot create another poll loop");
@@ -103,6 +114,7 @@ for (const failure of [500, "transport"]) {
     assert.equal(h.shown.dataset.state, "ready");
     assert.equal(h.find("export-download").href, ready.download);
     assert.equal(h.feedback.hidden, true);
+    assert.deepEqual(h.warnings(), []);
     assert.equal(h.timers.size, 0);
     assert.ok(h.requests.every((r) => r.path === "/api/export" && r.options.method === "GET"));
   });

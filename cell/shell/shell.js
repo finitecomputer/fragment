@@ -2370,7 +2370,7 @@ function dataSection() {
   const retry = el("button", "quiet", "Retry");
   retry.type = "button";
   retry.dataset.action = "export-status-retry";
-  feedback.append(error, retry);
+  feedback.append(retry);
   s.append(shown, feedback);
   const owner = state.me.id;
   let timer = null;
@@ -2400,6 +2400,7 @@ function dataSection() {
       go.disabled = true;
       clearTimeout(timer);
       feedback.hidden = true;
+      feedback.replaceChildren(retry);
       try {
         const result = await api("POST", "/api/export");
         if (live()) render(result);
@@ -2433,12 +2434,16 @@ function dataSection() {
     clearTimeout(timer);
     retry.disabled = true;
     feedback.hidden = true;
+    feedback.replaceChildren(retry);
     try {
       const result = await api("GET", "/api/export");
       if (live()) render(result.export);
     } catch {
       // Keep the last confirmed rows; retry only reads this export's status.
-      if (live()) feedback.hidden = false;
+      if (live()) {
+        feedback.replaceChildren(error, retry);
+        feedback.hidden = false;
+      }
     } finally {
       busy = false;
       if (!stopped) retry.disabled = false;
