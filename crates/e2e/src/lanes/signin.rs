@@ -265,6 +265,51 @@ fn restart_cases(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
+/// The shell's page as a deploy goes out (docs/api.md, The shell, "A
+/// deploy going out"): its load meets an object of the release before for
+/// longer than the router asks it (seconds to minutes, Cloudflare says),
+/// and its call answers 503 `deploying`. On the preview on 2026-10-21 the
+/// page stopped there, "This page did not load" ("a call from release
+/// 5083ebcaeb1b reached release 069479198b79"). Every call of the page
+/// asks the registry for its session (`/session`), which the `skewFor`
+/// hook refuses as a registry of another release would: two of the page's
+/// calls in a row each meet all the router's asks.
+fn deploying_page(s: &mut Suite, api: &Api) -> Result<()> {
+    let Some(mut browser) = s.browser()? else {
+        s.ok("Chrome is installed for the shell's page as a deploy goes out (set CHROME_BIN)", false, "no Chrome found");
+        return Ok(());
+    };
+    // a guest, whose home is the welcome: nothing is made for them
+    let email = "deploying-page@e2e.test";
+    let session = api.sign_in(email)?;
+    let person = who(api, &session)?;
+    let id = person["id"].as_str().context("a signed-in person")?;
+    let r = api.signed(&s.operator, "POST", &format!("/api/ledger/{id}/plan"), Some(&json!({ "id": email, "plan": "guest" })))?;
+    anyhow::ensure!(r.status == 200, "making a guest: {r}");
+    browser.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
+    let refusals = 2 * fragment_core::release::ASKS as u64;
+    let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "skewFor": { "path": "/session", "times": refusals } })))?;
+    anyhow::ensure!(r.status == 200 && r.body["skewFor"]["times"] == refusals, "the skewFor test hook: {r}");
+    // each notice the page shows, in order, from before its script runs
+    // (the registry's own count of refusals is its isolate's, which a page
+    // that stopped leaves idle long enough to be evicted)
+    let notices = "window.__notices = []; new MutationObserver(() => { const n = document.getElementById('notice'); const t = n && !n.hidden && n.querySelector('strong')?.textContent; if (t && window.__notices.at(-1) !== t) window.__notices.push(t); }).observe(document, { subtree: true, childList: true, attributes: true, characterData: true });";
+    let page = browser.open_with_script(&format!("{}/", api.base), notices)?;
+    let loaded = browser.until(&page, &format!("location.pathname === '/welcome' && document.body.innerText.includes({})", json!(email)), Duration::from_secs(30));
+    let shown = browser.eval(&page, "window.__notices")?;
+    let said = |title: &str| shown.as_array().is_some_and(|n| n.iter().any(|t| t == title));
+    s.ok(
+        "the shell's page, its load refused as a deploy goes out (503 deploying, past the router's asks), says a new release is going out and loads once it is out, never stopping at \"This page did not load\"",
+        loaded && said("A new release is going out") && !said("This page did not load"),
+        format!("loaded: {loaded}, its notices {shown}"),
+    );
+    // a page that stopped early leaves refusals the checks after it must not meet
+    let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "skewFor": { "path": "/session", "times": 0 } })))?;
+    anyhow::ensure!(r.status == 200, "the skewFor test hook: {r}");
+    browser.close(page)?;
+    Ok(())
+}
+
 /// What `f` answered, and the registry calls it made.
 pub(super) fn calls_of<T>(api: &Api, f: impl FnOnce() -> Result<T>) -> Result<(T, u64)> {
     let before = registry_calls(api)?;
@@ -1131,6 +1176,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         );
     }
     browser_logout(s, api)?;
+    deploying_page(s, api)?;
 
     // sign-in's rows: bounded, and swept on the registry's alarm, never on a request
     // (paul is not in f: he says yes to it once, and its redemptions follow)

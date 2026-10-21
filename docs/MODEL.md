@@ -397,7 +397,9 @@ alone (`<sha>-dirty-<second>`). Dev and the e2e run one build in one
 - **On a refusal** the caller asks again, since nothing was done,
   however the call acts: after 250, 500 and 1000 ms, at most four asks
   (`release::ASKS`), then it answers `deploying` itself (the person
-  tries again; the CLI reads it as `unavailable`). A request that cannot
+  tries again, and the shell's page, as it loads, tries again for them
+  for about two minutes: docs/api.md, The shell, "A deploy going out";
+  the CLI reads it as `unavailable`). A request that cannot
   be made again (a body streamed through, a socket's upgrade) is asked
   once. An outbox, a queue message or a Workflow step that meets it is
   retried as any failure of theirs is. A `deploying` an object answers
