@@ -278,7 +278,7 @@ fn picture_path(identity: &str, p: &Picture) -> String {
 /// A call's answer: the type its `Call` names, so a route cannot answer
 /// what its askers do not decode.
 fn reply<C: Call>(answer: CellResult<C::Answer>) -> CellResult<Response> {
-    Ok(Response::from_json(&answer?)?)
+    crate::json_answer(&answer?)
 }
 
 /// Whether a call to `path` is one a test hook's `(path, times left)`
