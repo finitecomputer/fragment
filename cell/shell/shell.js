@@ -62,8 +62,9 @@ const promptDeck = { hand: APP_PROMPTS.map((_, i) => i).slice(0, PROMPT_HAND), d
 // makes nothing (decision 49); fragments: their list (name, role, kind,
 // title, agents, preview, sharing, archived: a chat's agents the lead
 // first, and its newest message); computer: theirs, with its agents;
-// agents: by identity
-const state = { me: null, guest: false, fragments: [], computer: null, agents: new Map(), current: store.get(CURRENT, null), frames: new Map(), page: null };
+// agents: by identity; computerFailed: whether the last read of their computer
+// failed (what an earlier one said stays: a failure is not "none")
+const state = { me: null, guest: false, fragments: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null };
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -375,7 +376,9 @@ const roster = () => {
 const rosterFor = (name) => ({ fragment: "agents", agents: roster(), ...(state.computer?.models ? { models: state.computer.models } : {}), setup: setupFor(name) });
 let rosterSent = "";
 function rosterChanged() {
-  const now = JSON.stringify([roster(), state.computer?.models, setup && setupFor(setup.chat)]);
+  // the first run's chat named too: its steps are the same before it is
+  // named, and a chat already open (`readAgain`) hears them only then
+  const now = JSON.stringify([roster(), state.computer?.models, setup && [setup.chat, setupFor(setup.chat)]]);
   if (now === rosterSent) return;
   rosterSent = now;
   const live = new Set([...document.querySelectorAll("iframe[data-fragment]")].map((f) => f.contentWindow));
@@ -924,6 +927,8 @@ function openChat(name, push = true) {
   markSeen();
   prewake();
   navigated();
+  // home: a first run a failed read put off goes on from here too
+  if (firstRunPutOff) resumeFirstRun();
 }
 
 // ---- apps: every other fragment, each a window in the viewer ----
@@ -1736,15 +1741,32 @@ function noticeRow(n) {
     later.dataset.action = "later";
     later.onclick = () => updateLater(n.version, later);
     actions.append(later);
+  } else if (n.kind === "refresh") {
+    copy.append(el("strong", null, "Couldn't refresh your computer"));
+    const again = el("button", "primary", "Try again");
+    again.type = "button";
+    again.dataset.action = "refresh";
+    again.onclick = () => readAgain(again);
+    actions.append(again);
   } else return null;
   row.append(copy, actions);
   return row;
 }
+// a read of it that failed (a blip, a 5xx) says so first, over what the
+// last read said, with Try again
 function renderComputer() {
   const box = $("computer-notices");
-  const rows = (state.computer?.notices ?? []).map(noticeRow).filter(Boolean);
+  const rows = [...(state.computerFailed ? [{ kind: "refresh" }] : []), ...(state.computer?.notices ?? [])].map(noticeRow).filter(Boolean);
   box.replaceChildren(...rows);
   box.hidden = !rows.length;
+}
+// Try again: the list and the computer read again (`load`, which goes on
+// with what the failure put off). The list's read failing too, the line
+// stays, to try again.
+async function readAgain(button) {
+  button.disabled = true;
+  await load().catch(() => {});
+  button.disabled = false;
 }
 // Restart: the computer saves if it can, then starts fresh from its newest
 // good save. It names the start the person saw, so pressed twice (or in two
@@ -2017,7 +2039,8 @@ async function openSettings(push = true, failed = null) {
             : []),
           ...(c.why ? [el("p", "settings-warning", c.why)] : []),
         ]
-      : [el("p", "muted", "Your computer starts with your first agent.")]),
+      : // never read: a failed read is not "none" (shown again once one answers: `load`)
+        [el("p", "muted", state.computerFailed ? "Couldn't load your computer." : "Your computer starts with your first agent.")]),
   );
   // each agent's own desktop
   const screens = [];
@@ -3024,10 +3047,16 @@ const unjoined = (f) => own(f) && !f.agents?.length && /-chat$/.test(labelOf(f.n
 // with no agent of theirs in a chat of their own. No chats at all; or only
 // the chat an earlier try made; or their agent not on their computer, or
 // not a member of its own chat (asked of the chat: a row may not name its
-// agents yet).
+// agents yet). With chats, and their computer's read failed, their agents
+// are unknown, not none: the question is put off until a read answers
+// (`resumeFirstRun`).
 async function owesFirstAgent() {
   if (state.guest) return false;
   if (!chats().length) return true;
+  if (state.computerFailed) {
+    firstRunPutOff = true;
+    return false;
+  }
   if (chats().some((f) => own(f) && (f.agents ?? []).some((id) => state.agents.has(id)))) return false;
   const agent = primaryAgent();
   if (!agent) return chats().every(unjoined);
@@ -3036,6 +3065,21 @@ async function owesFirstAgent() {
   if (!id || !itsChat) return true;
   const members = await api("GET", `/api/f/${seg(itsChat.name)}/members`).catch(() => null);
   return !!members && !(members.members ?? []).some((m) => m.principal === id);
+}
+// The first run's question, put off while their computer could not be read
+// (`owesFirstAgent`), is asked again by each read that answers (`load`:
+// Try again's, or the list's socket's) and each arrival home (`openChat`,
+// the one way there), while the person is at home, and after it too (they
+// may have gone to Settings meanwhile: then their way back asks it). Owed,
+// it is made once (`creatingAgent`).
+let firstRunPutOff = false;
+const atHome = () => location.pathname === "/" && !state.page;
+async function resumeFirstRun() {
+  if (!atHome()) return;
+  firstRunPutOff = false;
+  const owed = await owesFirstAgent();
+  if (!atHome()) firstRunPutOff = true;
+  else if (owed) creatingAgent();
 }
 // Each step reuses what an earlier try made, including a create whose
 // response was lost. The chat's frame opens once: a draft in it stays put.
@@ -3190,14 +3234,19 @@ function seatFirst(seat) {
 const reads = { asked: 0, shown: 0 };
 async function load(changed = false) {
   const mine = ++reads.asked;
-  const [list, computers] = await Promise.all([api("GET", "/api/fragments"), api("GET", "/api/computers").catch(() => ({ computers: [] }))]);
+  const [list, computers] = await Promise.all([api("GET", "/api/fragments"), api("GET", "/api/computers").catch(() => null)]);
   if (mine < reads.shown) return;
   reads.shown = mine;
   const before = new Map(state.fragments.map((f) => [f.name, JSON.stringify(f)]));
   state.fragments = list.fragments ?? [];
-  state.computer = computers.computers?.[0] ?? null;
-  state.support = computers.support ?? null;
-  state.agents = new Map((state.computer?.agents ?? []).map((a) => [a.identity, a]));
+  // failed, it is not "no computer": what was read before stays, and is said to be old
+  const unknown = state.computerFailed && !state.computer;
+  state.computerFailed = !computers;
+  if (computers) {
+    state.computer = computers.computers?.[0] ?? null;
+    state.support = computers.support ?? null;
+    state.agents = new Map((state.computer?.agents ?? []).map((a) => [a.identity, a]));
+  }
   renderChats();
   renderApps();
   renderHeading();
@@ -3206,6 +3255,9 @@ async function load(changed = false) {
   markSeen();
   renderAgentFaces();
   for (const f of chats()) if (own(f) && f.title === UNTITLED && f.preview) titleFromFirst(f.name);
+  // answered, it goes on with what a failure put off, whoever asked
+  if (computers && unknown && state.page === "Settings") openSettings(false).catch(() => {});
+  if (computers && firstRunPutOff) resumeFirstRun();
   const touched = changed ? new Set(state.fragments.filter((f) => before.get(f.name) !== JSON.stringify(f)).map((f) => f.name)) : null;
   cardsLoad.wait = 0;
   loadCards(touched).catch(() => {});
