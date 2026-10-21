@@ -12,7 +12,8 @@
       "modelProviders": [],
       "tier": "cheap",
       "modelId": "fixture/cheap-v1",
-      "display": "fixture/cheap-v1"
+      "display": "fixture/cheap-v1",
+      "credentials": []
     },
     {
       "name": "cheap tier",
@@ -22,7 +23,8 @@
       "modelProviders": [],
       "tier": "cheap",
       "modelId": "fixture/cheap-v1",
-      "display": "fixture/cheap-v1"
+      "display": "fixture/cheap-v1",
+      "credentials": []
     },
     {
       "name": "medium tier",
@@ -32,7 +34,8 @@
       "modelProviders": [],
       "tier": "medium",
       "modelId": "fixture/medium-v2",
-      "display": "fixture/medium-v2"
+      "display": "fixture/medium-v2",
+      "credentials": []
     },
     {
       "name": "high disabled",
@@ -42,7 +45,8 @@
       "modelProviders": [],
       "tier": "cheap",
       "modelId": "fixture/cheap-v1",
-      "display": "fixture/cheap-v1"
+      "display": "fixture/cheap-v1",
+      "credentials": []
     },
     {
       "name": "unknown tier",
@@ -52,7 +56,8 @@
       "modelProviders": [],
       "tier": "cheap",
       "modelId": "fixture/cheap-v1",
-      "display": "fixture/cheap-v1"
+      "display": "fixture/cheap-v1",
+      "credentials": []
     },
     {
       "name": "null tier",
@@ -62,7 +67,8 @@
       "modelProviders": [],
       "tier": "cheap",
       "modelId": "fixture/cheap-v1",
-      "display": "fixture/cheap-v1"
+      "display": "fixture/cheap-v1",
+      "credentials": []
     },
     {
       "name": "numeric tier",
@@ -72,7 +78,8 @@
       "modelProviders": [],
       "tier": "cheap",
       "modelId": "fixture/cheap-v1",
-      "display": "fixture/cheap-v1"
+      "display": "fixture/cheap-v1",
+      "credentials": []
     },
     {
       "name": "own model on cheap",
@@ -88,7 +95,10 @@
       ],
       "tier": "cheap",
       "modelId": "fixture/own:1",
-      "display": "fixture/own:1 (openrouter)"
+      "display": "fixture/own:1 (openrouter)",
+      "credentials": [
+        "openrouter"
+      ]
     },
     {
       "name": "own model on medium",
@@ -104,7 +114,10 @@
       ],
       "tier": "medium",
       "modelId": "fixture/own:2",
-      "display": "fixture/own:2 (openrouter)"
+      "display": "fixture/own:2 (openrouter)",
+      "credentials": [
+        "openrouter"
+      ]
     },
     {
       "name": "own model disconnected",
@@ -117,7 +130,8 @@
       "modelProviders": [],
       "tier": "cheap",
       "modelId": "fixture/cheap-v1",
-      "display": "fixture/cheap-v1"
+      "display": "fixture/cheap-v1",
+      "credentials": []
     },
     {
       "name": "own model narrowed on medium",
@@ -131,7 +145,8 @@
       "modelProviders": [],
       "tier": "medium",
       "modelId": "fixture/medium-v2",
-      "display": "fixture/medium-v2"
+      "display": "fixture/medium-v2",
+      "credentials": []
     },
     {
       "name": "another provider cannot enable the model",
@@ -142,11 +157,14 @@
         }
       },
       "modelProviders": [
-        "other-provider"
+        "alternate"
       ],
       "tier": "cheap",
       "modelId": "fixture/cheap-v1",
-      "display": "fixture/cheap-v1"
+      "display": "fixture/cheap-v1",
+      "credentials": [
+        "alternate"
+      ]
     },
     {
       "name": "own model missing id",
@@ -160,7 +178,10 @@
       ],
       "tier": "cheap",
       "modelId": "fixture/cheap-v1",
-      "display": "fixture/cheap-v1"
+      "display": "fixture/cheap-v1",
+      "credentials": [
+        "openrouter"
+      ]
     },
     {
       "name": "own model missing provider",
@@ -174,7 +195,10 @@
       ],
       "tier": "cheap",
       "modelId": "fixture/cheap-v1",
-      "display": "fixture/cheap-v1"
+      "display": "fixture/cheap-v1",
+      "credentials": [
+        "openrouter"
+      ]
     },
     {
       "name": "empty own model id",
@@ -189,7 +213,10 @@
       ],
       "tier": "cheap",
       "modelId": "fixture/cheap-v1",
-      "display": "fixture/cheap-v1"
+      "display": "fixture/cheap-v1",
+      "credentials": [
+        "openrouter"
+      ]
     },
     {
       "name": "deployment model ids change",
@@ -205,7 +232,81 @@
         "medium": "changed/medium",
         "fallback": "fixture/fallback-v3",
         "vision": "fixture/vision-v4"
-      }
+      },
+      "credentials": []
+    },
+    {
+      "name": "alternate own model provider",
+      "settings": {
+        "tier": "medium",
+        "model": {
+          "provider": "alternate",
+          "id": "fixture/alternate:1"
+        }
+      },
+      "modelProviders": [
+        "alternate"
+      ],
+      "credentials": [
+        "alternate"
+      ],
+      "tier": "medium",
+      "modelId": "fixture/alternate:1",
+      "display": "fixture/alternate:1 (alternate)"
+    },
+    {
+      "name": "credential without model capability",
+      "settings": {
+        "tier": "medium",
+        "model": {
+          "provider": "openrouter",
+          "id": "fixture/own:1"
+        }
+      },
+      "modelProviders": [],
+      "credentials": [
+        "openrouter-tools"
+      ],
+      "tier": "medium",
+      "modelId": "fixture/medium-v2",
+      "display": "fixture/medium-v2"
     }
-  ]
+  ],
+  "credentials": {
+    "openrouter": {
+      "provider": "openrouter",
+      "kind": "own",
+      "env": [
+        "OPENROUTER_API_KEY"
+      ],
+      "placeholder": "fck_openrouter_fixture",
+      "hosts": [
+        "openrouter.ai"
+      ],
+      "modelBase": "https://openrouter.ai/api/v1"
+    },
+    "alternate": {
+      "provider": "alternate",
+      "kind": "own",
+      "env": [
+        "ALTERNATE_API_KEY"
+      ],
+      "placeholder": "fck_alternate_fixture",
+      "hosts": [
+        "models.example.test"
+      ],
+      "modelBase": "https://models.example.test/v1"
+    },
+    "openrouter-tools": {
+      "provider": "openrouter",
+      "kind": "own",
+      "env": [
+        "OPENROUTER_API_KEY"
+      ],
+      "placeholder": "fck_openrouter_fixture",
+      "hosts": [
+        "openrouter.ai"
+      ]
+    }
+  }
 }

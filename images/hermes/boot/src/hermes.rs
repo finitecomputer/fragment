@@ -984,11 +984,11 @@ mod tests {
             let tier = Tier::of(Some(&settings), false);
             assert_eq!(tier.name(), case["tier"].as_str().unwrap(), "{name}");
             let mut agent = agent();
-            for provider in case["modelProviders"].as_array().unwrap() {
-                agent.credentials.push(fragment_bridge::runtime::Credential {
-                    model_base: Some("https://provider.example.test/v1".into()),
-                    ..credential(provider.as_str().unwrap(), &[], "fixture-placeholder")
-                });
+            // Guest credentials are fixture inputs independent of the browser's
+            // modelProviders view; no owner-view construction is exercised here.
+            for key in case["credentials"].as_array().unwrap() {
+                let credential = serde_json::from_value(fixtures["credentials"][key.as_str().unwrap()].clone()).unwrap();
+                agent.credentials.push(credential);
             }
             let ids: ModelIds = serde_json::from_value(case.get("models").unwrap_or(&fixtures["models"]).clone()).unwrap();
             let route = Route::new("http://model.fragment.internal", Some(&ids));
@@ -1001,6 +1001,14 @@ mod tests {
             assert_eq!(display, case["display"].as_str().unwrap(), "{name}");
             let profile = profile_config(&agent, "Fixture", &main, &route, &[], Path::new("/fixture-credentials.sh"));
             assert!(profile.lines().any(|line| line == format!("  default: {}", q(model_id))), "{name}: the generated profile names the selected model");
+            if let MainModel::Own { provider, base, placeholder, .. } = &main {
+                let credential = agent.credentials.iter().find(|c| &c.provider == provider).unwrap();
+                assert_eq!(credential.kind, "own", "{name}: realistic own-key credential");
+                assert_eq!(Some(base.as_str()), credential.model_base.as_deref(), "{name}: the selected credential's endpoint");
+                assert_eq!(placeholder, &credential.placeholder, "{name}: the selected credential's placeholder");
+                assert!(profile.contains(&format!("  base_url: {}\n", q(base))), "{name}: the own provider's model endpoint");
+                assert!(profile.contains(&format!("  api_key: {}\n", q(placeholder))), "{name}: the guest's placeholder, never a real key");
+            }
         }
     }
 
