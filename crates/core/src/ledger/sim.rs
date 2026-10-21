@@ -35,6 +35,8 @@ pub(super) enum Op {
     Seat(SetSeat),
     Overdraft(SetOverdraft),
     Cap(SetFragmentCap),
+    /// The configured book becomes this one: a deploy's (the ledger keeps
+    /// none; a batch is priced with the configured book of its time).
     Book(PriceBook),
     Meter(Meter),
     Sweep,
@@ -47,15 +49,18 @@ pub(super) enum Outcome {
     Swept(Swept),
 }
 
-pub(super) fn apply(ledger: &mut Ledger, store: &mut impl Store, op: &Op, now_ms: i64) -> Result<Outcome, Refused> {
+pub(super) fn apply(ledger: &mut Ledger, store: &mut impl Store, op: &Op, now_ms: i64, book: &mut PriceBook) -> Result<Outcome, Refused> {
     match op {
         Op::Grant(c) => ledger.grant(store, c, now_ms).map(|()| Outcome::Done),
         Op::Plan(c) => ledger.set_plan(store, c, now_ms).map(|()| Outcome::Done),
         Op::Seat(c) => ledger.set_seat(store, c, now_ms).map(|()| Outcome::Done),
         Op::Overdraft(c) => ledger.set_overdraft(store, c, now_ms).map(|()| Outcome::Done),
         Op::Cap(c) => ledger.set_cap(store, c, now_ms).map(|()| Outcome::Done),
-        Op::Book(b) => ledger.set_book(store, b, now_ms).map(|()| Outcome::Done),
-        Op::Meter(m) => ledger.meter(store, m, now_ms).map(Outcome::Metered),
+        Op::Book(b) => {
+            *book = b.clone();
+            Ok(Outcome::Done)
+        }
+        Op::Meter(m) => ledger.meter(store, m, now_ms, book).map(Outcome::Metered),
         Op::Sweep => Ok(Outcome::Swept(ledger.sweep(store, now_ms))),
     }
 }
@@ -237,6 +242,8 @@ struct Sim {
     serial: u64,
     seat_seq: u64,
     book_version: u32,
+    /// The configured book, as the release of the moment has it.
+    book: PriceBook,
     stats: Stats,
 }
 
@@ -246,7 +253,7 @@ fn flash(input: u64, output: u64) -> Usage {
 
 impl Sim {
     fn new(seed: u64) -> Sim {
-        let ledger = Ledger::new(T0, PriceBook::defaults());
+        let ledger = Ledger::new(T0);
         let model = Model {
             plan: Plan::Guest,
             seat: SeatState::Active,
@@ -272,6 +279,7 @@ impl Sim {
             serial: 0,
             seat_seq: 0,
             book_version: crate::price::DEFAULT_BOOK_VERSION,
+            book: PriceBook::defaults(),
             stats: Stats::default(),
         };
         // most runs start as a seat; the rest find their plan as they go
@@ -401,8 +409,8 @@ impl Sim {
         }
         // a replayed batch answers from its record, as of its first time
         let replayed = matches!(op, Op::Meter(m) if self.store.batch(&m.batch).is_some());
-        let answer = apply(&mut self.ledger, &mut self.store, op, self.now);
-        let twin = apply(&mut self.twin, &mut self.twin_store, op, self.now);
+        let answer = apply(&mut self.ledger, &mut self.store, op, self.now, &mut self.book);
+        let twin = apply(&mut self.twin, &mut self.twin_store, op, self.now, &mut self.book);
         assert_eq!(answer, twin, "the twin answers {op:?} the same");
         let overdraft_set = self.learn(op, &answer);
         if !replayed {
@@ -481,7 +489,7 @@ impl Sim {
                             self.stats.rows_stale += 1;
                             assert!(row.at_ms < self.now - REF_KEEP_MS, "only a row older than the ledger remembers is stale");
                         }
-                        Refused::NoPrice => assert_eq!(self.ledger.book.price(&row.usage), Err(PriceError::NoPrice)),
+                        Refused::NoPrice => assert_eq!(self.book.price(&row.usage), Err(PriceError::NoPrice)),
                         Refused::ConflictingBody => self.stats.conflicts += 1,
                         other => panic!("row {row:?} refused {other:?}"),
                     }
@@ -680,7 +688,8 @@ impl Sim {
             };
             assert_eq!(gate, expected, "{spend:?} at {standing:?}");
         }
-        let status = self.ledger.status(&self.store, self.now);
+        let status = self.ledger.status(&self.store, self.now, &self.book);
+        assert_eq!(status.price_book, self.book.version, "the status names the configured book");
         assert_eq!(status.standing, standing);
         assert_eq!(status.reserved_micros, 0, "nothing is held");
         let room = if let Standing::ReadOnly { .. } = status.standing { 0 } else { status.balance_micros + status.overdraft_micros };

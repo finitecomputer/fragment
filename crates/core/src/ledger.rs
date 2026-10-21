@@ -11,7 +11,7 @@
 //! simulate.
 //!
 //! The state has two parts. `Ledger` is the head: small and bounded (the
-//! plan, the balance's parts, the price book), kept whole. A `Store` holds what grows with use, by id: each reference
+//! plan, the balance's parts), kept whole. A `Store` holds what grows with use, by id: each reference
 //! charged, each batch and command applied, each fragment's spend by
 //! month, and caps. The Durable Object keeps those in SQLite tables, and
 //! runs each mutation in one transaction with the head; tests keep them
@@ -38,6 +38,13 @@
 //! release rolled back to one before reads a ledger with no hold and no
 //! held entry.
 //!
+//! The ledger keeps no price book (decision 62): every call into a
+//! person's ledger comes from its own release (the deploy-skew guard), so
+//! a batch is priced with the book that release configured, passed in
+//! (`meter`), and each book a ledger priced with is kept once as a
+//! command, `book:<digest>`, for the audit, beside each row's version. A
+//! head kept before names its book too: read past.
+//!
 //! Zero (decision 27): at a balance of zero or less, agents stop (no
 //! turns, no wakes, no AI steps). Fragments keep taking writes down to the
 //! overdraft; at it they go read-only, and stay read-only until the
@@ -56,7 +63,7 @@ use fragment_proto::ErrorCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::price::{self, dollars, BookFault, PriceBook, PriceError, Priced, Usage, UsageFault, USD};
+use crate::price::{self, dollars, PriceBook, PriceError, Priced, Usage, UsageFault, USD};
 
 pub mod gate;
 #[cfg(test)]
@@ -184,8 +191,9 @@ pub struct MeterRow {
     pub at_ms: i64,
 }
 
-/// A price book from the deploy's configuration, as a ledger keeps it once
-/// it takes it: under `book:<digest>` (`PriceBook::digest`).
+/// A price book from the deploy's configuration, as a ledger keeps it the
+/// first time it prices with it: under `book:<digest>` (`PriceBook::digest`),
+/// for the audit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetPriceBook {
@@ -240,8 +248,8 @@ pub enum Refused {
     /// This id was used with another body.
     ConflictingBody,
     /// A price book no newer than the ledger's: refused no more, since a
-    /// ledger takes any book whose contents differ from its own (#451);
-    /// kept so an answer of the releases before reads.
+    /// ledger keeps no book (decision 62); kept so an answer of the
+    /// releases before reads.
     StaleBook { current: u32 },
     /// A seat change no newer (by `seq`) than the last one applied
     /// (`current`): it changes nothing, and is kept by nothing. The seat's
@@ -277,7 +285,6 @@ pub enum Invalid {
     /// An id or a name that is empty, too long, or not printable ASCII.
     Id,
     Usage(UsageFault),
-    Book(BookFault),
     /// An amount outside its limit (a grant, a cap, an overdraft).
     Amount,
     /// A note longer than `NOTE_MAX_BYTES`.
@@ -367,8 +374,9 @@ fn valid_names(names: [&Option<String>; 3]) -> bool {
 /// before, `{"entry": "reservation", …}`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
-    /// A meter row: its price under the book of the time, and its charge
-    /// (the price's, or nothing for a waived meter).
+    /// A meter row: its price under the book of the time (`book`, its
+    /// version; the book itself is kept by its digest, `book:<digest>`), and
+    /// its charge (the price's, or nothing for a waived meter).
     Row { row: MeterRow, priced: Priced, charge: i64, book: u32 },
     /// A reservation of the releases before decision 62 (held, settled or
     /// released), kept as it was written: never charged here, a row under
@@ -712,11 +720,13 @@ fn gate(money: &Money, spend: Spend) -> Result<(), Refused> {
     }
 }
 
-/// A person's ledger: the head of its state (see the module's docs).
+/// A person's ledger: the head of its state (see the module's docs). A
+/// head kept before decision 62 names its `book` too: read past (the
+/// fields a head does not name are let go), and written with the book of
+/// the release writing it (`written`), for a rollback.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ledger {
     money: Money,
-    book: PriceBook,
     /// The reservations the releases before decision 62 held, by their
     /// references as a head of theirs names them, until `retire_holds`
     /// forgives them (the first thing done with a head read); written as
@@ -748,10 +758,8 @@ impl<'de> Deserialize<'de> for OldHolds {
 }
 
 impl Ledger {
-    /// A new person's ledger: a guest with no credit, charging with `book`
-    /// (the deploy's configured book; passed, never assumed).
-    pub fn new(now_ms: i64, book: PriceBook) -> Ledger {
-        assert_eq!(book.validate(), Ok(()), "a ledger starts on a valid book");
+    /// A new person's ledger: a guest with no credit.
+    pub fn new(now_ms: i64) -> Ledger {
         let money = Money {
             plan: Plan::Guest,
             seat: SeatState::Active,
@@ -764,7 +772,7 @@ impl Ledger {
             read_only: false,
             totals: Totals::default(),
         };
-        let ledger = Ledger { money, book, holds: OldHolds::default() };
+        let ledger = Ledger { money, holds: OldHolds::default() };
         ledger.assert_valid();
         ledger
     }
@@ -821,7 +829,9 @@ impl Ledger {
         }
     }
 
-    pub fn status(&self, store: &impl Store, now_ms: i64) -> LedgerStatus {
+    /// The ledger now, with the version of `book`, the configured book its
+    /// release charges with.
+    pub fn status(&self, store: &impl Store, now_ms: i64, book: &PriceBook) -> LedgerStatus {
         let money = self.money_at(now_ms);
         let fragments = store
             .spends(money.month, STATUS_FRAGMENTS)
@@ -843,7 +853,7 @@ impl Ledger {
             available_micros: available(&money),
             overdraft_micros: money.overdraft,
             standing: money.standing(),
-            price_book: self.book.version,
+            price_book: book.version,
             fragments,
         }
     }
@@ -852,8 +862,18 @@ impl Ledger {
         self.money.totals
     }
 
-    pub fn book(&self) -> &PriceBook {
-        &self.book
+    /// The head as a release writes it: with `book`, the book it charges
+    /// with, which no release since decision 62 reads, but one rolled back
+    /// to before it requires (its `book`), so a head written here reads
+    /// there. Goes once no such release can be deployed again.
+    pub fn written(&self, book: &PriceBook) -> String {
+        #[derive(Serialize)]
+        struct Head<'a> {
+            #[serde(flatten)]
+            ledger: &'a Ledger,
+            book: &'a PriceBook,
+        }
+        serde_json::to_string(&Head { ledger: self, book }).expect("a head serializes")
     }
 
     /// When the Durable Object's alarm should run `sweep` next: once a
@@ -868,8 +888,8 @@ impl Ledger {
 
     /// A usage's price, and its charge here: a $200 seat's awake time is
     /// not metered (decision 25; one computer per person, decision 13).
-    fn charge_for(&self, usage: &Usage) -> Result<(Priced, i64), PriceError> {
-        let priced = self.book.price(usage)?;
+    fn charge_for(&self, usage: &Usage, book: &PriceBook) -> Result<(Priced, i64), PriceError> {
+        let priced = book.price(usage)?;
         let waived = matches!(usage, Usage::Awake { .. }) && self.money.plan == Plan::SeatAlwaysOn;
         Ok((priced, if waived { 0 } else { priced.charge }))
     }
@@ -1023,31 +1043,14 @@ impl Ledger {
         Ok(())
     }
 
-    /// The deployment's configured book, which the Durable Object offers
-    /// before every route: taken whenever it differs from the one the
-    /// ledger charges with, whatever its version (#451). The same book
-    /// again changes nothing (a replay), and one taken before is taken
-    /// again (a configuration rolled back): the books are compared, never
-    /// ordered. Each is kept once, under `book:<digest>`, as it was first
-    /// taken. What was charged stays charged.
-    pub fn set_book(&mut self, store: &mut impl Store, book: &PriceBook, now_ms: i64) -> Result<(), Refused> {
-        self.roll(now_ms);
-        if self.book == *book {
-            return Ok(());
-        }
-        book.validate().map_err(|fault| invalid(Invalid::Book(fault)))?;
-        let id = format!("book:{}", book.digest());
-        self.book = book.clone();
-        if store.command(&id).is_none() {
-            store.put_command(&id, CommandRecord { command: Command::SetBook(SetPriceBook { id: id.clone(), book: book.clone() }), at_ms: now_ms });
-        }
-        self.assert_valid();
-        Ok(())
-    }
-
     // Meters: usage that already happened, charged once by reference.
 
-    pub fn meter(&mut self, store: &mut impl Store, m: &Meter, now_ms: i64) -> Result<Metered, Refused> {
+    /// A batch, its rows priced with `book`: the configured book of the
+    /// release applying it (every call into a ledger is its own release's),
+    /// kept once as a command (`book:<digest>`) the first time it prices a
+    /// batch, for the audit.
+    pub fn meter(&mut self, store: &mut impl Store, m: &Meter, now_ms: i64, book: &PriceBook) -> Result<Metered, Refused> {
+        assert_eq!(book.validate(), Ok(()), "a ledger charges with a valid book");
         self.roll(now_ms);
         if !valid_id(&m.batch) {
             return Err(invalid(Invalid::Id));
@@ -1062,12 +1065,16 @@ impl Ledger {
         if self.money.plan == Plan::Guest {
             return Err(Refused::GuestPayer);
         }
+        let id = format!("book:{}", book.digest());
+        if store.command(&id).is_none() {
+            store.put_command(&id, CommandRecord { command: Command::SetBook(SetPriceBook { id: id.clone(), book: book.clone() }), at_ms: now_ms });
+        }
         let charged_before = self.money.totals.charged;
         let mut answer = Metered::default();
         let mut at_ms = now_ms;
         // bounded by BATCH_ROWS_MAX, checked above
         for (index, row) in m.rows.iter().enumerate() {
-            match self.meter_row(store, row, now_ms) {
+            match self.meter_row(store, row, now_ms, book) {
                 Ok(Some(charge)) => {
                     answer.charged += charge;
                     answer.rows_new += 1;
@@ -1087,7 +1094,7 @@ impl Ledger {
 
     /// One row: `Some(charge)` when charged now, `None` when an earlier
     /// batch charged it with the same body.
-    fn meter_row(&mut self, store: &mut impl Store, row: &MeterRow, now_ms: i64) -> Result<Option<i64>, Refused> {
+    fn meter_row(&mut self, store: &mut impl Store, row: &MeterRow, now_ms: i64, book: &PriceBook) -> Result<Option<i64>, Refused> {
         if !valid_id(&row.reference) || !valid_names([&row.fragment, &row.agent, &row.computer]) {
             return Err(invalid(Invalid::Id));
         }
@@ -1104,11 +1111,11 @@ impl Ledger {
             // another body under this reference, or a record from before
             Some(_) => return Err(Refused::ConflictingBody),
         }
-        let (priced, charge) = self.charge_for(&row.usage)?;
+        let (priced, charge) = self.charge_for(&row.usage, book)?;
         // a row counts in its own month: a late one from last month does
         // not spend this month's cap
         self.charge(store, charge, row.fragment.as_deref(), Month::of(row.at_ms));
-        store.put_entry(&row.reference, Entry::Row { row: row.clone(), priced, charge, book: self.book.version });
+        store.put_entry(&row.reference, Entry::Row { row: row.clone(), priced, charge, book: book.version });
         Ok(Some(charge))
     }
 

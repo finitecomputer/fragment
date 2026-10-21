@@ -103,14 +103,22 @@ Checked against S4's real numbers: a $0.004 Flash turn is charged
 $0.0063; the gateway's own `cost` equals our list price on every call;
 neurons and tokens agree within half a micro-dollar on the spike's 17
 calls. The defaults are consts in `price.rs`, each with its source. The
-operator's book comes from the deploy's configuration, and a ledger
-takes it at its next call whenever its contents differ from the book it
-charges with: the books are compared, never ordered, so a key's row
-added or its price changed, a change to the defaults, and a
-configuration rolled back each reach every ledger (#451: on 2026-10-20
-operator keys' rows were added without a higher version, which a ledger
-then needed, and every ledger refused their calls as unpriced). A row
-is charged at the book of its time. The book's version is informational (a
+operator's book comes from the deploy's configuration, built and
+checked once per isolate (`Config::book`), and a ledger keeps none of
+its own (decision 62): every call into a ledger comes from its own
+release (the deploy-skew guard: docs/MODEL.md, Calls between releases),
+so each batch is priced with the book of the release applying it. A
+key's row added or its price changed, a change to the defaults, and a
+configuration rolled back each reach every ledger with the deploy (#451:
+on 2026-10-20 operator keys' rows were added without a higher version,
+which a ledger then needed, and every ledger refused their calls as
+unpriced). A row is charged at the book of its time, its version kept
+beside it, and each book a ledger priced with is kept once as a command,
+`book:<digest>`, for the audit. A head kept before names the book it
+charged with: read past. A head is written with the book of the release
+writing it (`Ledger::written`), which none since reads, so a release
+rolled back to one that kept its own (and requires it) reads every head
+this one writes. The book's version is informational (a
 ledger's status shows it, `priceBook`): the higher of the
 configuration's `price_book_version` and the code's
 (`DEFAULT_BOOK_VERSION`, 7 since OpenRouter's GLM-5.3 Flash was priced
@@ -163,15 +171,16 @@ Private's).
 Pure: no I/O, no clock (time is an argument). The state has two parts:
 
 - **The head** (`Ledger`): the plan, the seat, the balance's parts, the
-  read-only latch, the overdraft, and the price book. Small and bounded;
-  kept whole. A head kept before decision 62 names the reservations it
-  held too: as it loads, its holds are retired (`retire_holds`), never
-  charged (what they held was never drawn), and each one's reservation
-  entry, still held, is ended as released (its time kept, so a replay of
-  it stays refused), in the transaction that writes the head back with
-  `holds` empty. So a release rolled back to one before decision 62
-  (which requires the map) reads every head this one writes, and finds
-  no hold and no held entry for its sweep.
+  read-only latch and the overdraft. Small and bounded; kept whole. The
+  price book is the caller's release's (above), passed to `meter`. A
+  head kept before decision 62 names the reservations it held too: as it
+  loads, its holds are retired (`retire_holds`), never charged (what
+  they held was never drawn), and each one's reservation entry, still
+  held, is ended as released (its time kept, so a replay of it stays
+  refused), in the transaction that writes the head back with `holds`
+  empty. So a release rolled back to one before decision 62 (which
+  requires the map) reads every head this one writes, and finds no hold
+  and no held entry for its sweep.
 - **The store** (`trait Store`): what grows with use, by id. References
   (`Entry`), batches, commands, each fragment's spend by month, and caps.
   The Durable Object keeps these in SQLite tables; `Memory` keeps them in
@@ -187,8 +196,7 @@ mutation first brings the ledger to its time's month.
 | `set_seat(SetSeat)` | its `id`; ordered by `seq` (one no newer than the last applied is refused, `StaleSeat`) | `()` |
 | `set_overdraft(SetOverdraft)` | its `id` | `()` |
 | `set_cap(SetFragmentCap)` | its `id` | `()` |
-| `set_book(PriceBook)` | its contents: the same book again changes nothing; any other is taken, whatever its version (no order); each kept once as a command, `book:<digest>` | `()` |
-| `meter(Meter)` | the batch's id; each row by its `ref` | `{charged, rows_new, rows_before, refused: [{index, why}]}` |
+| `meter(Meter, book)` | the batch's id; each row by its `ref`; the book kept once as a command, `book:<digest>` | `{charged, rows_new, rows_before, refused: [{index, why}]}` |
 | `sweep(now)` | (time) | `{forgotten}` |
 
 - **Replays.** The same id again answers as the first did and changes
@@ -321,10 +329,11 @@ Inner routes (platform code only, through the DO's stub):
 | `POST /status` | `{}` | proto's `LedgerStatus` |
 | `POST /test` | `{op: clock {offsetMs} \| sweep \| entries {prefix} \| totals \| book \| paid-calls {max?} \| legacy-seat {seat, seq} \| schema}` | test fleets only |
 
-Before each route the DO offers the ledger the configured book
-(`configured_book`: the core's defaults and the configuration's operator
-keys' prices; the debt ledger), which `set_book` takes when it differs
-from the ledger's own. Its alarm runs `sweep` at `next_sweep_ms`.
+A batch is priced with the configured book of the DO's release
+(`Config::book`: the core's defaults and the configuration's operator
+keys' prices; the debt ledger), and a status names its version
+(`priceBook`); the `book` lever answers that book. Its alarm runs
+`sweep` at `next_sweep_ms`.
 
 Public routes (a hard cut of `/api/budget`; docs/api.md, Ledger):
 

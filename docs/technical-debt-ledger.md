@@ -646,17 +646,18 @@ fragment.club until cutover (decisions 34–35).
 ## The price book is the core's defaults
 
 - **Observed:** phase 3. Every ledger charges with
-  `PriceBook::defaults()` (cell/src/ledger.rs `configured_book`): the
-  list prices of 2026-10-02 and a 50% margin, version 1. Decision 4 puts
-  pricing in the deployment's configuration.
+  `PriceBook::defaults()` and the configuration's operator keys' prices
+  (cell/src/config.rs `configured_book`): the list prices of 2026-10-02
+  and a 50% margin. Decision 4 puts pricing in the deployment's
+  configuration.
 - **Risk:** a self-deployer cannot set their own margin or prices without
   a fork; a Cloudflare price change needs a code change and a deploy.
 - **First proof:** a deployment that wants another margin.
 - **Delete when:** `xtask deploy` renders a price book from the
   deployment's config (a versioned file) into a Worker variable that
-  `configured_book` reads, and each ledger takes a changed book at its
-  next call (`take_book` already does, since #451), with a test of a
-  book's change.
+  `configured_book` reads (each ledger prices with its release's book
+  since decision 62, so a changed one reaches them all with its deploy),
+  with a test of a book's change.
 
 ## A plan has two writers: the registry, and an operator's `plan` command
 

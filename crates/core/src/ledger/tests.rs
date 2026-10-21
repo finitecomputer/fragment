@@ -75,11 +75,13 @@ struct World {
     ledger: Ledger,
     store: Memory,
     now: i64,
+    /// The configured book of the release applying each op.
+    book: PriceBook,
 }
 
 impl World {
     fn guest() -> World {
-        World { ledger: Ledger::new(T0, book()), store: Memory::default(), now: T0 }
+        World { ledger: Ledger::new(T0), store: Memory::default(), now: T0, book: book() }
     }
 
     /// A $100 seat, active, with its $50 for October.
@@ -90,7 +92,7 @@ impl World {
     }
 
     fn apply(&mut self, op: &Op) -> Result<Outcome, Refused> {
-        apply(&mut self.ledger, &mut self.store, op, self.now)
+        apply(&mut self.ledger, &mut self.store, op, self.now, &mut self.book)
     }
 
     fn ok(&mut self, op: Op) -> Outcome {
@@ -98,7 +100,7 @@ impl World {
     }
 
     fn status(&self) -> LedgerStatus {
-        self.ledger.status(&self.store, self.now)
+        self.ledger.status(&self.store, self.now, &self.book)
     }
 
     fn balance(&self) -> i64 {
@@ -148,7 +150,7 @@ impl World {
         let ledger: Ledger = serde_json::from_str(&serde_json::to_string(&self.ledger).unwrap()).unwrap();
         let store: Memory = serde_json::from_str(&serde_json::to_string(&self.store).unwrap()).unwrap();
         assert_eq!((&ledger, &store), (&self.ledger, &self.store), "the state reads back as it was written");
-        World { ledger, store, now: self.now }
+        World { ledger, store, now: self.now, book: self.book.clone() }
     }
 }
 
@@ -530,21 +532,19 @@ fn a_late_row_from_last_month_does_not_spend_this_months_cap() {
 
 // Price books
 
-/// A ledger takes the configured book whenever its contents differ from
-/// its own, whatever the versions (#451): the books are compared, never
-/// ordered. The same one again is a replay (it changes nothing), and one
-/// taken before is taken again, as a configuration rolled back is. Each is
-/// kept once, under `book:<digest>`, as it was first taken; one the core
-/// refuses changes nothing; a row is charged at the book of its time.
+/// A ledger keeps no book (decision 62): a batch is priced with the
+/// configured book of the release applying it, whatever its version (#451):
+/// the books are compared, never ordered, and one used before is used
+/// again, as a configuration rolled back is. Each is kept once, under
+/// `book:<digest>`, as it first priced a batch, for the audit; a row is
+/// charged at the book of its time.
 #[test]
-fn a_price_book_is_taken_when_it_differs_in_any_order() {
+fn a_batch_is_priced_with_the_configured_book_of_its_release() {
     let mut w = World::seat();
     let (cost_basis, dearer) = (PriceBook { margin_bp: 0, ..book() }, PriceBook { margin_bp: 10_000, ..book() });
     w.replays(Op::Book(cost_basis.clone()));
-    assert_eq!((w.ledger.book(), w.status().price_book), (&cost_basis, 1), "taken at the same version: it is informational");
+    assert_eq!(w.status().price_book, 1, "the status names the configured book's version: it is informational");
     assert_eq!(w.charged("aig:1", turn()), 4_200, "no margin: the cost basis");
-    let bad = PriceBook { margin_bp: price::MARGIN_BP_MAX + 1, ..book() };
-    w.refused(Op::Book(bad), Refused::Invalid { what: Invalid::Book(BookFault::Rate) });
     w.now += 1_000;
     w.replays(Op::Book(PriceBook { version: 0, ..dearer.clone() }));
     assert_eq!(w.status().price_book, 0, "and at a lower one");
@@ -567,11 +567,10 @@ fn a_price_book_is_taken_when_it_differs_in_any_order() {
 /// #451: operator keys' rows were added to the deployments' configurations
 /// with no version raised, and every ledger kept the book it had and
 /// refused their calls as unpriced. Goal: a configuration that adds one
-/// key's price, and changes nothing else (its version included), is taken
-/// at the next call, and a call on that key is priced, across a restart
-/// and a replay; the same configuration again takes nothing. Method: the
-/// Durable Object's order (the configured book offered, then the route),
-/// restarted between.
+/// key's price, and changes nothing else (its version included), prices
+/// the next call on that key, across a restart and a replay; the ledger
+/// keeps no book of its own. Method: the release's book changed, then its
+/// batches, restarted between.
 #[test]
 fn a_key_the_configuration_adds_is_priced_at_the_next_call() {
     let mut configured = book();
@@ -579,20 +578,20 @@ fn a_key_the_configuration_adds_is_priced_at_the_next_call() {
     let mut w = World::seat();
     let call = Usage::Key { key: "google-places".into(), units: 1 };
     let charge_call = meter("key:1", vec![row("key:1", call.clone(), None, T0)]);
-    assert_eq!(w.ledger.book().price(&call), Err(PriceError::NoPrice), "the book it holds has no price for the key");
+    assert_eq!(w.book.price(&call), Err(PriceError::NoPrice), "the book configured before has no price for the key");
     w.ok(Op::Book(configured.clone()));
     // $35 per thousand calls, and the margin
     let charge = 52_500;
     let charged = Outcome::Metered(Metered { charged: charge, rows_new: 1, rows_before: 0, refused: vec![] });
     assert_eq!(w.replays(charge_call.clone()), charged);
     let mut w = w.restarted();
-    assert_eq!(w.ledger.book(), &configured, "the book read back");
+    assert!(serde_json::to_value(&w.ledger).unwrap().get("book").is_none(), "the head keeps no book");
     w.replays(Op::Book(configured.clone()));
     assert_eq!(w.ok(charge_call.clone()), charged, "a batch sent again answers as it did");
     let mut w = w.restarted();
     let (ledger, store) = (w.ledger.clone(), w.store.clone());
     w.ok(Op::Book(configured.clone()));
-    assert_eq!((&w.ledger, &w.store), (&ledger, &store), "the same configuration again takes nothing");
+    assert_eq!((&w.ledger, &w.store), (&ledger, &store), "the same configuration again changes nothing");
     let again = w.ok(meter("key:1-again", vec![row("key:1", call, None, T0)]));
     assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 1, refused: vec![] }), "and the row in another batch is charged once");
 }
@@ -759,7 +758,7 @@ fn a_read_sees_its_own_month_and_changes_nothing() {
     let mut w = World::seat();
     w.spend("b1", 10 * USD);
     let ledger = w.ledger.clone();
-    let s = w.ledger.status(&w.store, NOVEMBER);
+    let s = w.ledger.status(&w.store, NOVEMBER, &w.book);
     assert_eq!((s.month.as_str(), s.included_micros, s.balance_micros), ("2026-11", 50 * USD, 50 * USD));
     assert_eq!(w.ledger.standing(NOVEMBER), Standing::Ok);
     assert_eq!(w.ledger, ledger, "a read rolls a copy, never the ledger");
@@ -888,7 +887,7 @@ fn a_head_kept_with_holds_loads_without_them_and_charges_nothing() {
     again.retire_holds(&mut w.store);
     assert_eq!(again, loaded, "read and retired again, the same");
     assert_eq!(loaded.clone().retire_holds(&mut w.store), 0, "a head with none retires nothing");
-    let s = loaded.status(&w.store, T0);
+    let s = loaded.status(&w.store, T0, &w.book);
     assert_eq!((s.balance_micros, s.reserved_micros, s.available_micros), (47 * USD, 0, 47 * USD + OVERDRAFT_DEFAULT), "nothing held, nothing charged");
     assert_eq!(loaded.fragment_open(&w.store, "todo.ann", T0), Ok(()), "a hold no more counts toward a cap: $3 of $5");
     w.ledger = loaded;
@@ -910,32 +909,52 @@ struct HeadBefore {
     holds: BTreeMap<String, serde::de::IgnoredAny>,
 }
 
-/// Goal: a rollback to the release before decision 62 reads every head
-/// this one writes: old → new → old, a head with holds and one without, a
-/// new person's, and one restarted. Method: the previous release's head
-/// shape (`HeadBefore`) reads what this one wrote, with its money and book
-/// as they were, and no holds.
+/// Goal: a rollback to a release before decision 62 reads every head this
+/// one writes: old → new → old, a head with holds and a book, one without,
+/// a new person's, and one restarted. Method: the head shape of the
+/// release before the holds went (`HeadBefore`: a book and holds, both
+/// required; the release before the book went requires the book alone)
+/// reads what this one wrote (`written`), its money as it was, the book
+/// the release's own, and no holds.
 #[test]
 fn a_head_written_here_reads_in_the_release_before() {
     let mut w = World::seat();
     w.spend_in("b1", 3 * USD, Some("todo.ann"));
     let mut old = serde_json::to_value(&w.ledger).unwrap();
     old["holds"] = serde_json::json!({ "aig:held": { "amount": TURN, "fragment": "todo.ann", "at_ms": T0 } });
+    old["book"] = serde_json::to_value(PriceBook { margin_bp: 10_000, ..book() }).unwrap();
     let before: HeadBefore = serde_json::from_value(old.clone()).expect("the old shape, as the release before wrote it");
     assert_eq!(before.holds.len(), 1);
     let fresh = World::guest().ledger;
     let mut retired = serde_json::from_value::<Ledger>(old).unwrap();
     retired.retire_holds(&mut w.store);
-    for (what, head) in [("with holds", retired), ("without", w.ledger.clone()), ("a new person's", fresh)] {
-        let written = serde_json::to_string(&head).unwrap();
+    for (what, head) in [("with holds and a book", retired), ("without", w.ledger.clone()), ("a new person's", fresh)] {
+        let written = head.written(&w.book);
         let back: HeadBefore = serde_json::from_str(&written).unwrap_or_else(|e| panic!("{what}: the release before reads it: {e}"));
-        assert_eq!((back.money, &back.book, back.holds.len()), (head.money, &head.book, 0), "{what}");
+        assert_eq!((back.money, &back.book, back.holds.len()), (head.money, &w.book, 0), "{what}");
         let again: Ledger = serde_json::from_str(&written).unwrap();
         assert_eq!(again, head, "{what}: and this one reads it back the same");
     }
     let w = w.restarted();
-    let back: HeadBefore = serde_json::from_str(&serde_json::to_string(&w.ledger).unwrap()).expect("restarted, the same");
+    let back: HeadBefore = serde_json::from_str(&w.ledger.written(&w.book)).expect("restarted, the same");
     assert_eq!(back.money, w.ledger.money);
+}
+
+/// Goal: a head those releases kept names the book it charged with: it
+/// loads, the book let go, and its next batch is priced with the
+/// configured book of the release applying it, not that one. Method: a
+/// head written now, a dearer book of the old shape put back into it.
+#[test]
+fn a_head_kept_with_its_book_loads_and_charges_with_the_configured_one() {
+    let mut w = World::seat();
+    let mut old = serde_json::to_value(&w.ledger).unwrap();
+    old["book"] = serde_json::to_value(PriceBook { margin_bp: 10_000, version: 7, ..book() }).unwrap();
+    let loaded: Ledger = serde_json::from_value(old).expect("a head with its book loads");
+    assert_eq!(loaded, w.ledger, "the book is let go; nothing else moves");
+    w.ledger = loaded;
+    let mut w = w.restarted();
+    assert_eq!(w.charged("aig:1", turn()), TURN, "priced with the configured book (a 50% margin), not the head's (100%)");
+    assert_eq!(w.status().price_book, 1, "and the status names the configured one");
 }
 
 /// Goal: an entry those releases kept (a reservation, held, settled or
@@ -1053,7 +1072,7 @@ fn a_rollback_finds_no_hold_and_no_held_entry() {
     assert_eq!(m.refused, [RowRefused { index: 0, why: Refused::ConflictingBody }], "a replay of it stays refused");
 
     // rolled back: the release before reads the head and every entry
-    let back: HeadBefore = serde_json::from_str(&serde_json::to_string(&w.ledger).unwrap()).unwrap();
+    let back: HeadBefore = serde_json::from_str(&w.ledger.written(&w.book)).unwrap();
     assert_eq!((back.holds.len(), back.money), (0, w.ledger.money));
     assert_eq!(held_before(&w.store), 0, "no held entry for its sweep to find");
     let ended_before = entries_before(&w.store);

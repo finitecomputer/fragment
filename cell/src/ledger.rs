@@ -4,7 +4,7 @@
 //! decides who pays a row and asks that person's ledger, which keys on
 //! nothing else (docs/cloudflare-v1.md, decision 36).
 //!
-//! The head (plan, seat, balance, price book) is kept whole as one
+//! The head (plan, seat, balance) is kept whole as one
 //! JSON row, small and bounded; what grows with use (references, batches,
 //! commands, each fragment's spend by month, caps) is in tables, read and
 //! written through `SqlStore`. Each route is one `transactionSync` over
@@ -19,7 +19,10 @@
 //! rolled back to one of those reads a ledger with no hold and no held
 //! entry (`fragment_core::ledger`, `retire_holds`). The
 //! `entries.held` column stays (a schema changes only by a new step),
-//! written 0.
+//! written 0. A batch is priced with this release's configured book
+//! (`Config::book`): every call into a ledger is its own release's, so it
+//! keeps none (decision 62); a head is written with that book too, which
+//! a release rolled back to one that kept its own reads.
 //!
 //! Inner routes (platform code only, through `ask`): each is a POST of a
 //! `Route`'s request (the core's types, or proto's), answered with its
@@ -41,8 +44,8 @@
 use std::cell::{Cell, RefCell};
 
 use fragment_core::ledger::gate::Gate;
-use fragment_core::ledger::{self as core, BatchRecord, CommandRecord, Entry, Ledger, Month, Refused, Spend, Store};
 use fragment_core::price::PriceBook;
+use fragment_core::ledger::{self as core, BatchRecord, CommandRecord, Entry, Ledger, Month, Refused, Spend, Store};
 use fragment_proto::ledger::{GrantCredit, LedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Why};
 use fragment_proto::ErrorCode;
 use serde::de::DeserializeOwned;
@@ -78,17 +81,6 @@ const GATE_WAIT_MS: u64 = 1_500;
 thread_local! {
     /// What each person's ledger last answered this isolate's gate (`may`).
     static GATE: RefCell<Gate> = const { RefCell::new(Gate::new()) };
-}
-
-/// The price book the deployment charges with: the core's defaults, and
-/// the operator keys' prices and the book's version from the deployment's
-/// configuration (decision 4: pricing lives there). Each ledger takes it
-/// at its next call when it differs from its own (`take_book`).
-pub fn configured_book(cfg: &Config) -> PriceBook {
-    let mut book = PriceBook::defaults();
-    book.keys = cfg.providers.key_prices();
-    book.version = book.version.max(cfg.price_book_version);
-    book
 }
 
 #[durable_object]
@@ -511,7 +503,7 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
         ledger.assert_valid();
         return Ok(ledger);
     }
-    let mut ledger = Ledger::new(now_ms, configured_book(cfg));
+    let mut ledger = Ledger::new(now_ms);
     if cfg.default_plan != Plan::Guest {
         let set = SetPlan { id: DEFAULT_PLAN_ID.into(), plan: cfg.default_plan };
         ledger.set_plan(store, &set, now_ms).map_err(|why| CellError::host(format!("a new ledger refused its default plan: {}", why.message())))?;
@@ -519,20 +511,12 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
     Ok(ledger)
 }
 
-/// The configured book, taken when it differs from the ledger's, whatever
-/// its version (`Ledger::set_book`; #451). A book the core refuses leaves
-/// the ledger on the one it has, saying so.
-fn take_book(ledger: &mut Ledger, store: &mut SqlStore, cfg: &Config, now_ms: i64) {
-    let book = configured_book(cfg);
-    if let Err(why) = ledger.set_book(store, &book, now_ms) {
-        console_error!("{}", json!({ "event": "ledger.book-refused", "version": book.version, "message": why.message() }));
-    }
-}
-
-fn save(store: &SqlStore, ledger: &Ledger) {
+/// Writes the head back, with the book this release charges with
+/// (`Ledger::written`: for a rollback to a release that kept its own).
+fn save(store: &SqlStore, ledger: &Ledger, book: &PriceBook) {
     store.exec(
         "INSERT INTO head (id, ledger) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET ledger = excluded.ledger",
-        vec![SqlStore::text(ledger).into()],
+        vec![ledger.written(book).into()],
     );
 }
 
@@ -570,9 +554,8 @@ impl LedgerCell {
         js::transaction_sync(&self.raw, move || {
             let mut store = SqlStore::new(sql);
             let mut ledger = head(&mut store, cfg, now)?;
-            take_book(&mut ledger, &mut store, cfg, now);
             let answer = op(&mut ledger, &mut store, now);
-            save(&store, &ledger);
+            save(&store, &ledger, &cfg.book);
             store.checked()?;
             Ok((answer, ledger.next_sweep_ms(now)))
         })
@@ -647,7 +630,8 @@ impl LedgerCell {
         match path.as_str() {
             <core::Meter as Route>::PATH => {
                 let m: core::Meter = decode(&body)?;
-                reply(self.mutate(move |l, s, now| l.meter(s, &m, now)).await?)
+                let book = &self.cfg.book;
+                reply(self.mutate(move |l, s, now| l.meter(s, &m, now, book)).await?)
             }
             MaySpend::PATH => {
                 let q: MaySpend = decode(&body)?;
@@ -682,7 +666,8 @@ impl LedgerCell {
             }
             Status::PATH => {
                 let Status {} = decode(&body)?;
-                reply(self.mutate(|l, s, now| Ok(l.status(s, now))).await?)
+                let book = &self.cfg.book;
+                reply(self.mutate(move |l, s, now| Ok(l.status(s, now, book))).await?)
             }
             TestHook::PATH if self.cfg.test_hooks => self.test_hook(decode(&body)?).await,
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}")).into()),
@@ -776,7 +761,8 @@ impl LedgerCell {
             }
             TestHook::Clock { offset_ms } => {
                 self.set_meta("clock_offset", &offset_ms.to_string())?;
-                let status = self.mutate(|l, s, now| Ok(l.status(s, now))).await?;
+                let book = &self.cfg.book;
+                let status = self.mutate(move |l, s, now| Ok(l.status(s, now, book))).await?;
                 // the alarm follows the clock
                 self.armed.set(None);
                 Ok(json!({ "offsetMs": offset_ms, "month": status.month }))
@@ -801,14 +787,12 @@ impl LedgerCell {
                 Ok(json!({ "entries": entries }))
             }
             TestHook::Totals => Ok(serde_json::to_value(self.mutate(|l, _, _| Ok(l.totals())).await?).expect("totals serialize")),
-            TestHook::Book => {
-                let rows: Vec<Json> = self.sql().exec("SELECT ledger AS value FROM head WHERE id = 1", None)?.to_array()?;
-                let head: Value = rows.first().map_or(Value::Null, |r| serde_json::from_str(&r.value).expect("a head is JSON the ledger wrote"));
-                Ok(json!({ "book": head["book"] }))
-            }
+            // the book it charges with: its release's (it keeps none)
+            TestHook::Book => Ok(json!({ "book": self.cfg.book })),
             TestHook::LegacySeat { seat, seq } => {
                 let c = SetSeat { id: format!("legacy-seat:{seq}"), seat, seq };
-                let status = self.mutate(move |l, s, now| l.set_seat(s, &c, now).map(|()| l.status(s, now))).await?;
+                let book = &self.cfg.book;
+                let status = self.mutate(move |l, s, now| l.set_seat(s, &c, now).map(|()| l.status(s, now, book))).await?;
                 Ok(serde_json::to_value(status).expect("a status serializes"))
             }
         }

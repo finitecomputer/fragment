@@ -2989,7 +2989,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     let answered = status.is_some_and(|s| s < 500);
     // after the answer, never in its way
     if let (Some((agent, owner, identity)), true) = (payer, answered) {
-        let book = crate::ledger::configured_book(cfg);
+        let book = &cfg.book;
         let key = |p: &Placeholder| Usage::Key { key: p.provider.clone(), units: 1 };
         // each call the provider answered is the agent's (decision 37), a key's at its price
         let uses: Vec<Value> = plan
