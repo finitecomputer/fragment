@@ -7,7 +7,6 @@
 //!   GET  /auth/login?return=&login_hint=&invitation_token=   → WorkOS (a state cookie binds the
 //!                                 round trip; an invitation's token lets its invitee sign up, since
 //!                                 sign-up is off: WorkOS's "User invitation URL" points here)
-//!   GET  /auth/link?return=       the same, adding a second sign-in to the signed-in person
 //!   GET  /auth/callback           WorkOS → the code exchanged here → a session cookie
 //!   GET  /auth/logout             a button; POST ends the session (and its site sessions), and
 //!                                 WorkOS's, which it was signed in with
@@ -33,10 +32,10 @@
 //!                                 once; mailed to them (`mail_key_added`)
 //!
 //! Every round trip that leaves the platform and comes back (a sign-in, a
-//! link, a switch, an own key's sign-in: connections.rs) finishes only in
-//! the browser that began it: its state is bound by a cookie
-//! (`trip_begun`), and its callback finishes it only through
-//! `trip_bound`'s `Bound` (`fragment_core::roundtrip`).
+//! switch, an own key's sign-in: connections.rs) finishes only in the
+//! browser that began it: its state is bound by a cookie (`trip_begun`),
+//! and its callback finishes it only through `trip_bound`'s `Bound`
+//! (`fragment_core::roundtrip`).
 //!
 //! The rest of a person's account (their picture, email, fragments,
 //! credit) is the API's, which the shell calls with this session
@@ -55,9 +54,8 @@
 //!
 //! Each platform page asks the registry once: a call that needs the
 //! signed-in person carries the session's token, and the registry checks
-//! it in the same turn (`calls::By::Session`, `Mint`, `ApproveKey`,
-//! `Begin`'s `link_to`); a page that shows them gets their email with the
-//! session.
+//! it in the same turn (`calls::By::Session`, `Mint`, `ApproveKey`); a
+//! page that shows them gets their email with the session.
 //!
 //! A fragment's origin: `__signin?token=&return=` redeems the platform's
 //! redemption for this fragment only and sets its own session cookie (a
@@ -331,13 +329,13 @@ fn leave_form(to: &str, title: &str, cookies: &[String]) -> CellResult<Response>
 }
 
 /// A sign-in starts at WorkOS, its state bound to this browser as
-/// `trip`'s: a sign-in's (or a link's), or a switch's.
-async fn begin(env: &Env, cfg: &Config, url: &Url, link: Option<String>, trip: Trip) -> CellResult<Response> {
+/// `trip`'s: a sign-in's, or a switch's.
+async fn begin(env: &Env, cfg: &Config, url: &Url, trip: Trip) -> CellResult<Response> {
     assert!(matches!(trip, Trip::SignIn | Trip::Switch), "a sign-in is begun as one, or as a switch");
     let workos = crate::keys::workos(env, cfg).await?;
     let platform = cfg.platform();
     let return_to = site::return_path(query(url, "return").as_deref());
-    let began = ask_registry(env, &calls::Begin { return_to, link_to: link }).await?;
+    let began = ask_registry(env, &calls::Begin { return_to }).await?;
     let state = began.state;
     let mut to = format!(
         "{}/user_management/authorize?client_id={}&redirect_uri={}&response_type=code&provider=authkit&state={state}",
@@ -404,15 +402,7 @@ pub async fn platform(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, 
     let platform = cfg.platform();
     {
         match (method, segments) {
-            (Method::Get, ["auth", "login"]) => begin(env, cfg, url, None, Trip::SignIn).await,
-            // the registry checks the session is live as the sign-in begins
-            (Method::Get, ["auth", "link"]) => match cookie_of(&req, SESSION_COOKIE, secure(url), "/")? {
-                Some(token) => match begin(env, cfg, url, Some(token), Trip::SignIn).await {
-                    Err(e) if e.code == ErrorCode::Unauthenticated => to_login(&platform, "/auth/link"),
-                    begun => begun,
-                },
-                None => to_login(&platform, "/auth/link"),
-            },
+            (Method::Get, ["auth", "login"]) => begin(env, cfg, url, Trip::SignIn).await,
             (Method::Get, ["auth", "callback"]) => callback(&req, env, cfg, url).await,
             (Method::Get, ["auth", "logout"]) => page(200, "Sign out", "<form method=\"post\" action=\"/auth/logout\"><button>Sign out</button></form>"),
             (Method::Post, ["auth", "logout"]) => {
@@ -439,7 +429,7 @@ pub async fn platform(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, 
                         _ => {}
                     }
                 }
-                let mut begun = begin(env, cfg, url, None, Trip::Switch).await?;
+                let mut begun = begin(env, cfg, url, Trip::Switch).await?;
                 begun.headers_mut().append("set-cookie", &set_cookie(SESSION_COOKIE, "", "/", 0, secure(url)))?;
                 Ok(begun)
             }

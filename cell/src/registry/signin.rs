@@ -61,8 +61,7 @@ const _: () = assert!(LOGIN_TTL_MS == roundtrip::TTL_S * 1000, "a sign-in lives 
 const CLI_CODE_DRAWS_MAX: usize = 4;
 pub const SESSION_TTL_MS: i64 = 30 * 24 * 3600 * 1000;
 const REDEEM_TTL_MS: i64 = 60 * 1000;
-/// Subjects one person may link, and an email's length.
-const SUBJECTS_MAX: u64 = 8;
+/// An email's length.
 const EMAIL_MAX: usize = 320;
 /// The fragments a person's yes is remembered for (the oldest forgotten).
 const CONSENTS_MAX: i64 = 1000;
@@ -172,11 +171,11 @@ struct SessionRow {
     email: Option<String>,
 }
 
-/// `logins` (a pending sign-in, spent).
+/// `logins` (a pending sign-in, spent). Its `link_to` column, linking's,
+/// is NULL in every row since linking went; dropping it is a schema step.
 #[derive(Deserialize)]
 struct LoginRow {
     return_to: String,
-    link_to: Option<String>,
 }
 
 /// `redemptions` (one spent).
@@ -375,7 +374,7 @@ impl RegistryCell {
     /// so and a top-level one otherwise, its parent live too. Answers the
     /// session's hash, its identity, and their latest sign-in's email.
     pub(super) fn live_session(&self, token: &str, fragment: Option<&str>, frame: bool) -> CellResult<Live> {
-        // the email's subquery reads `subjects_identity` (at most SUBJECTS_MAX)
+        // the email's subquery reads `subjects_identity` (a person's sign-ins: `subjects_of`)
         const Q: &str = concat!(
             "SELECT s.identity, s.fragment, s.parent, s.embedder, p.hash AS parent_live, i.kind, i.owner, i.held, ",
             "(SELECT email FROM subjects WHERE identity = s.identity ORDER BY signed_in_at DESC LIMIT 1) AS email FROM sessions s ",
@@ -420,22 +419,13 @@ impl RegistryCell {
     }
 
     pub(super) async fn begin(&self, b: Begin) -> CellResult<Began> {
-        let link_to = b.link_to.as_deref().map(|token| self.live_session(token, None, false)).transpose()?.map(|live| live.session.identity);
-        if link_to.as_ref().is_some_and(|p| p.kind != IdentityKind::Person) {
-            return Err(CellError::new(ErrorCode::Forbidden, "only a person links a sign-in"));
-        }
         let now = js::now_ms();
         self.sweep_by(now + LOGIN_TTL_MS).await?;
         let state = fresh_token();
         let n = self
             .row::<RowidRow>(
-                "INSERT INTO logins (state, return_to, link_to, created_at) VALUES (?, ?, ?, ?) RETURNING rowid AS n",
-                vec![
-                    sha(&state).into(),
-                    b.return_to.as_str().into(),
-                    link_to.map_or(SqlStorageValue::Null, |p| p.id.into()),
-                    SqlStorageValue::Integer(now),
-                ],
+                "INSERT INTO logins (state, return_to, created_at) VALUES (?, ?, ?) RETURNING rowid AS n",
+                vec![sha(&state).into(), b.return_to.as_str().into(), SqlStorageValue::Integer(now)],
             )?
             .ok_or_else(|| CellError::host("a sign-in's insert answered no rowid"))?
             .n;
@@ -516,20 +506,20 @@ impl RegistryCell {
         }
         let login = self
             .row::<LoginRow>(
-                "DELETE FROM logins WHERE state = ? AND created_at > ? RETURNING return_to, link_to",
+                "DELETE FROM logins WHERE state = ? AND created_at > ? RETURNING return_to",
                 vec![sha(state).into(), SqlStorageValue::Integer(js::now_ms() - LOGIN_TTL_MS)],
             )?
             .ok_or_else(stale_login)?;
-        let (id, _) = self.person_for(issuer, subject, email, login.link_to.as_deref(), key)?;
+        let (id, _) = self.person_for(issuer, subject, email, key)?;
         let token = self.new_session(&id, None, None, sid, None, js::now_ms() + SESSION_TTL_MS)?;
         Ok(Exchanged::SignedIn { token, return_to: login.return_to })
     }
 
-    /// The person a verified `(issuer, subject)` signs in as: the one it is
-    /// already linked to, the signed-in person it is being linked to
-    /// (`link_to`), or a new person, named by `key`. Answers whether they
-    /// are new.
-    fn person_for(&self, issuer: &str, subject: &str, email: &str, link_to: Option<&str>, key: PersonKey) -> CellResult<(String, bool)> {
+    /// The person a verified `(issuer, subject)` signs in as: the one it
+    /// already names, or a new person, named by `key`. Answers whether they
+    /// are new. Nothing links a second sign-in to a person (docs/api.md,
+    /// Sign-in: off until WorkOS offers an account picker).
+    fn person_for(&self, issuer: &str, subject: &str, email: &str, key: PersonKey) -> CellResult<(String, bool)> {
         assert!(!issuer.is_empty() && !subject.is_empty(), "a sign-in names its issuer and subject");
         assert_eq!(email_of(email).as_deref(), Some(email), "a sign-in's email is checked and kept lower case");
         let now = SqlStorageValue::Integer(js::now_ms());
@@ -538,34 +528,25 @@ impl RegistryCell {
             .map(|r| r.identity);
         // a person being wiped signs in as no one, until their wipe is done
         // and their next sign-in makes a new person (wipe.rs)
-        for id in [known.as_deref(), link_to].into_iter().flatten() {
+        if let Some(id) = known.as_deref() {
             if self.wiping(id)? {
                 return Err(CellError::new(ErrorCode::Forbidden, "this account is being wiped: sign in again once that is done, as a new person"));
             }
         }
         // an email names at most one person: another person's is refused,
-        // never merged into them (a sign-in links to its person explicitly)
+        // never merged into them
         let others = self.rows::<HolderRow>(
             "SELECT identity FROM subjects WHERE email = ? AND NOT (issuer = ? AND subject = ?) LIMIT 1",
             vec![email.into(), issuer.into(), subject.into()],
         )?;
-        if others.first().is_some_and(|o| Some(o.identity.as_str()) != link_to.or(known.as_deref())) {
+        if others.first().is_some_and(|o| Some(o.identity.as_str()) != known.as_deref()) {
             return Err(conflict(format!("{email} is another account's here: sign in as that account")));
         }
-        let made = link_to.is_none() && known.is_none();
-        let id = match (link_to, known) {
-            // linking: explicit, from a signed-in session, never by email
-            (Some(to), Some(owner)) if owner == to => owner,
-            (Some(_), Some(_)) => return Err(conflict("that sign-in already belongs to someone else")),
-            (Some(to), None) => {
-                if self.count("SELECT COUNT(*) AS n FROM subjects WHERE identity = ?", vec![to.into()])? >= SUBJECTS_MAX {
-                    return Err(CellError::invalid(format!("a person links at most {SUBJECTS_MAX} sign-ins")));
-                }
-                to.to_string()
-            }
-            (None, Some(owner)) => owner,
+        let made = known.is_none();
+        let id = match known {
+            Some(owner) => owner,
             // a new person, named by their own key, which the registry keeps
-            (None, None) => {
+            None => {
                 let id = npub::identity_of(&key.pubkey);
                 self.exec(
                     "INSERT INTO identities (id, kind, owner, created_at) VALUES (?, 'person', NULL, ?)",
@@ -607,7 +588,7 @@ impl RegistryCell {
             let known = self.row::<HolderRow>("SELECT identity FROM subjects WHERE issuer = ? AND subject = ?", vec![levers::E2E_ISSUER.into(), email.into()])?.is_some();
             self.count_e2e_day(!known, paid_calls)?;
         }
-        let (identity, created) = self.person_for(levers::E2E_ISSUER, email, email, None, key)?;
+        let (identity, created) = self.person_for(levers::E2E_ISSUER, email, email, key)?;
         let token = self.new_session(&identity, None, None, None, None, js::now_ms() + SESSION_TTL_MS)?;
         self.meet_invites(email, &identity).await?;
         self.arm_syncs().await?;
@@ -921,8 +902,9 @@ impl RegistryCell {
         Ok(SubjectAnswer { subject: row.map(|r| r.subject) })
     }
 
-    /// A person's sign-ins (at most `SUBJECTS_MAX`), read straight into
-    /// the wire type.
+    /// A person's sign-ins, read straight into the wire type: the one that
+    /// made them, and those linked before linking went (at most 8, its
+    /// bound then; nothing links one now).
     pub(super) fn subjects_of(&self, id: &str) -> CellResult<Vec<Subject>> {
         self.rows::<Subject>("SELECT issuer, email, linked_at AS linkedAt FROM subjects WHERE identity = ? ORDER BY linked_at", vec![id.into()])
     }

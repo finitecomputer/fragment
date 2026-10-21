@@ -832,8 +832,11 @@ runaround".
     agent's identity is its fragment's npub.
     - A person's email is the verified email of their sign-in (WorkOS's
       `email_verified`; a sign-in without one is refused). An email
-      belongs to at most one person; `/auth/link` adds a second sign-in
-      and its email.
+      belongs to at most one person. Linking a second sign-in and its
+      email (`/auth/link`) is off until WorkOS offers an account picker:
+      AuthKit answered it from the session it held in the browser, as
+      the same email, and linked nothing (Paul, 2026-10-21, in
+      production); the route went.
     - The share sheet, member lists and the shell show people by email.
       A changed email follows at the next sign-in, and no grant moves,
       because grants name the npub.
