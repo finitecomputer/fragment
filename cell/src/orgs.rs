@@ -37,11 +37,12 @@ fn by(env: &Env, req: &Request, url: &Url, bytes: &[u8]) -> CellResult<By> {
 }
 
 /// `/api/seat…`: `GET` the asker's seat, org and what is offered them,
-/// whether they are a guest, and what is sold; `PUT {sleeps}` lets their
-/// always-on computer sleep, or not. Their own answers: accept or decline
-/// an offer (`offers/{id}/accept|decline`), and leave their org (`leave`, a
-/// seat's holder who is no admin). Nobody joins an org but by these.
-pub(crate) async fn seat(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> CellResult<Response> {
+/// whether they are a guest, and what is sold (nothing without Stripe);
+/// `PUT {sleeps}` lets their always-on computer sleep, or not. Their own
+/// answers: accept or decline an offer (`offers/{id}/accept|decline`), and
+/// leave their org (`leave`, a seat's holder who is no admin). Nobody joins
+/// an org but by these.
+pub(crate) async fn seat(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest: &[&str]) -> CellResult<Response> {
     let bytes = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     let by = by(env, &req, url, &bytes)?;
     let empty = || -> CellResult<()> {
@@ -65,12 +66,12 @@ pub(crate) async fn seat(mut req: Request, env: &Env, url: &Url, rest: &[&str]) 
             json_answer(&ask_registry(env, &LeaveOrg { by }).await?)
         }
         (_, [_, ..]) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/seat/{}", req.method().as_ref(), rest.join("/")))),
-        (m, []) => seat_itself(env, &bytes, by, m).await,
+        (m, []) => seat_itself(env, cfg, &bytes, by, m).await,
     }
 }
 
 /// `GET` or `PUT /api/seat`.
-async fn seat_itself(env: &Env, bytes: &[u8], by: By, method: Method) -> CellResult<Response> {
+async fn seat_itself(env: &Env, cfg: &Config, bytes: &[u8], by: By, method: Method) -> CellResult<Response> {
     match method {
         Method::Get => {
             let Mined { person, mine } = ask_registry(env, &Mine { by }).await?;
@@ -82,7 +83,7 @@ async fn seat_itself(env: &Env, bytes: &[u8], by: By, method: Method) -> CellRes
                     fragment_core::org::guest(false, ledger.plan, ledger.seat)
                 }
             };
-            json_answer(&SeatStatus { mine, guest, offer: fragment_core::stripe::offer() })
+            json_answer(&SeatStatus { mine, guest, offer: cfg.stripe().is_ok().then(fragment_core::stripe::offer) })
         }
         Method::Put => {
             let set: SetSleeps = body(bytes)?;

@@ -1089,6 +1089,68 @@ fn page_of(b: &mut Lease, api: &Api, session: &str, path: &str) -> Result<Page> 
     Ok(page)
 }
 
+/// What a page shows of buying, anywhere the shell offers it: a seat's
+/// button, a trial code, Get a seat, Pay again, Stripe's portal, seats for
+/// others, a pack; and any price in its text.
+const BUYS: &str = "(() => { const shown = [...document.querySelectorAll('[data-plan], form.trial-code, a, button')].filter((e) => e.getClientRects().length); \
+    return { buys: shown.filter((e) => e.matches('[data-plan], form.trial-code') || /^(Get a seat|Start a trial|Pay again|Payment and invoices|Add seats for others|Buy )/.test(e.textContent)).map((e) => e.textContent), \
+    prices: document.body.innerText.match(/\\$\\d/g) ?? [] }; })()";
+
+/// A deployment that sells nothing (no Stripe: billing off, as finite.chat
+/// launched; `Shape::SellsNothing`): `GET /api/seat` offers nothing, and a
+/// guest's welcome, Billing, and home beside what was shared with them
+/// show no price and nothing to buy: that seats are not open, who is
+/// signed in, and Use another account.
+fn sells_nothing(s: &mut Suite, b: &mut Lease, api: &Api, guest: &dyn Fn(&Api, &str) -> Result<Keys>, shots: &std::path::Path) -> Result<()> {
+    const CLOSED: &str = "Finite isn't open for new seats yet.";
+    let wait = Duration::from_secs(30);
+    let gus = guest(api, "billing-page-closed")?;
+    let email = Api::email_of(&gus);
+    let said = json!([super::shell::no_seat_said(&email)]);
+    let mine = seat(api, &gus);
+    s.ok("with no Stripe, GET /api/seat sells nothing: its offer is null", mine["guest"] == true && mine.get("offer") == Some(&Value::Null), &mine);
+    let session = api.sign_in(&email)?;
+    let page = page_of(b, api, &session, "/")?;
+    let welcomed = view(b, &page, &format!("location.pathname === '/welcome' && !document.getElementById('first-run').hidden && document.getElementById('first-run-card').innerText.includes({CLOSED:?})"), wait);
+    let _ = b.screenshot(&page, &shots.join("0-welcome-sells-nothing.png"));
+    let welcome = json!({ "buying": b.eval(&page, BUYS)?, "who": b.eval(&page, super::shell::NO_SEAT_SEEN)? });
+    b.eval(&page, "(location.assign('/settings'), true)")?;
+    let billed = view(b, &page, &format!("location.pathname === '/settings' && /You are a guest/.test(document.getElementById('settings-page').innerText) && document.getElementById('settings-page').innerText.includes({CLOSED:?})"), wait);
+    let billing = json!({ "buying": b.eval(&page, BUYS)?, "who": b.eval(&page, super::shell::NO_SEAT_SEEN)? });
+    b.close(page)?;
+    let none = json!({ "buys": [], "prices": [] });
+    let switch = |back: &str| json!([format!("/auth/switch?return={}", url_enc(back)), "post", "Use another account"]);
+    s.ok(
+        "with no Stripe, a new guest's welcome and Billing show no price and nothing to buy (no seat, trial code or Get a seat): that Finite isn't open for new seats yet, who is signed in, and Use another account",
+        welcomed
+            && billed
+            && welcome["buying"] == none
+            && billing["buying"] == none
+            && welcome["who"]["said"] == said
+            && billing["who"]["said"] == said
+            && welcome["who"]["switches"] == json!([switch("/welcome")])
+            && billing["who"]["switches"] == json!([switch("/settings"), switch("/settings")]),
+        json!({ "welcome": welcome, "billing": billing }),
+    );
+    // shared something, a guest is home beside it, told the same
+    let owner = api.person()?;
+    let made = api.signed(&owner, "POST", "/api/fragments", Some(&json!({ "label": format!("closed-{}", &Keys::generate().pubkey_hex()[..6]), "template": "todo" })))?;
+    anyhow::ensure!(made.status == 200, "making the app to share: {made}");
+    let app = made.body["name"].as_str().unwrap_or("").to_string();
+    let r = api.signed(&owner, "POST", &format!("/api/f/{app}/invites"), Some(&json!({ "email": email, "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "sharing it with the guest: {r}");
+    let page = page_of(b, api, &session, "/")?;
+    let home = view(b, &page, &format!("location.pathname === '/' && !!document.querySelector('.viewer iframe[data-fragment={app:?}]') && (document.getElementById('notice')?.innerText ?? '').includes({CLOSED:?})"), wait);
+    let seen = json!({ "buying": b.eval(&page, BUYS)?, "row": b.eval(&page, "[...document.querySelectorAll('#notice .notice-row > *')].map((e) => e.textContent)")? });
+    b.close(page)?;
+    s.ok(
+        "with no Stripe, a guest home beside what was shared with them is told seats are not open, beside Use another account alone: no price, no Get a seat",
+        home && seen["buying"] == none && seen["row"] == json!(["Use another account"]),
+        &seen,
+    );
+    Ok(())
+}
+
 /// A new person's first run, and Billing, in Chrome (cell/shell/shell.js
 /// `welcome`, billing.js): a new guest lands on the welcome, never
 /// settings: what this is, the one seat and a trial code. A guest's
@@ -1132,6 +1194,13 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
         Ok(keys)
     };
     let text = |b: &mut crate::browser::Lease, p: &crate::browser::Page| b.eval(p, "document.getElementById('settings-page')?.innerText ?? ''").map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_default();
+    // ---- a deployment that sells nothing, on a node of its own; then this one again
+    s.stop()?;
+    let off = s.start_selling_nothing()?;
+    let checked = sells_nothing(s, &mut b, &off, &guest, &shots);
+    s.stop()?;
+    s.start(false)?;
+    checked?;
     // what is sold, as core has it: every price a page shows is these
     let offer = fragment_core::stripe::offer();
     let (seat_price, included, pack) = (dollars(offer.seat_micros), dollars(offer.included_micros), dollars(offer.pack_micros));

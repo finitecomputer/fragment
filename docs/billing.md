@@ -481,8 +481,11 @@ Checked against finite-mono's code (2026-10-08):
     and Prices read.
 - **The deployment's config** gains `stripe: {key, webhook_secret,
   portal}` (store names and the portal configuration's id). Without
-  it, billing is off: seats are comped only. That covers dev, the
-  e2e's other sections, and a self-hosted deployment.
+  it, billing is off: seats are comped only. That covers a self-hosted
+  deployment, and finite.chat as it launched (dev and the e2e sell
+  seats on the Stripe fake). `GET /api/seat`'s `offer` is then null
+  (`Config::stripe`, the one place that says), and the shell shows no
+  price and nothing to buy ("The shell", below).
 - **`cargo xtask stripe check --config <file>`** is finite-mono's
   readiness audit in Rust, read-only. It checks:
   - the seat's and the pack's Prices by lookup key (amount, USD,
@@ -679,6 +682,12 @@ settings page)").
   of their own on their ledger: `fragment_core::org::guest`), and its
   `offer`, the prices every line above shows (core's constants), so the
   shell, Billing and the welcome never disagree.
+- **Where nothing is sold** (`offer` null: no Stripe), none of it shows:
+  no price, seat, trial code, Get a seat, credit pack, Pay again, seats
+  for others or portal. A guest's welcome, home and Billing say "Finite
+  isn't open for new seats yet.", beside who is signed in and Use
+  another account (an operator's comp may wait under another email).
+  The e2e's billing-page section checks it on a node with no Stripe.
 - **Later:** a place is kept, hidden, beside the seats for "Import your
   finite.computer agent" (fbfc's import, not built).
 

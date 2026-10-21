@@ -1210,7 +1210,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         }
         (_, ["api", "seat", rest @ ..]) => {
             let rest = rest.to_vec();
-            orgs::seat(req, env, &url, &rest).await
+            orgs::seat(req, env, cfg, &url, &rest).await
         }
         (_, ["api", "org", rest @ ..]) => {
             let rest = rest.to_vec();

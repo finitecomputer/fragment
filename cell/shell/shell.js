@@ -3469,8 +3469,9 @@ function setGuest(guest) {
   renderHeading();
 }
 // With no chat to show: the first app shared with them in its window, and
-// beside it what a guest may do, what a seat gives (the welcome's), and
-// who is signed in, with another account.
+// beside it what a guest may do, what a seat gives (the welcome's; where
+// nothing is sold, that seats are not open, and no Get a seat), and who is
+// signed in, with another account.
 function guestHome(offer) {
   const app = shown(apps())[0];
   if (app) openApp(app.name);
@@ -3481,7 +3482,7 @@ function guestHome(offer) {
     at(WELCOME);
     welcome().catch((err) => notice("This page did not load", err.message));
   };
-  notice("You're a guest", [`You see and edit what people share with you: it shows in the sidebar as they share it. ${seatGives(offer)}`, noSeatSaid()], [seat, switchForm("/", "allow")]);
+  notice("You're a guest", [`You see and edit what people share with you: it shows in the sidebar as they share it. ${seatGives(offer)}`, noSeatSaid()], [...(offer ? [seat] : []), switchForm("/", "allow")]);
 }
 
 start().catch((e) => {
