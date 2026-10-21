@@ -57,11 +57,9 @@ fn cap(id: &str, fragment: &str, micros: Option<i64>) -> Op {
     Op::Cap(SetFragmentCap { id: id.into(), fragment: fragment.into(), micros })
 }
 
-fn set_book(id: &str, version: u32, margin_bp: u32) -> Op {
-    let mut b = book();
-    b.version = version;
-    b.margin_bp = margin_bp;
-    Op::Book(SetPriceBook { id: id.into(), book: b })
+/// `book()` at another margin.
+fn set_book(margin_bp: u32) -> Op {
+    Op::Book(PriceBook { margin_bp, ..book() })
 }
 
 fn reservation(reference: &str, worst: Usage) -> Reserve {
@@ -311,7 +309,6 @@ fn every_command_refuses_a_bad_id() {
         w.refused(seat(id, SeatState::Canceled, 1), bad);
         w.refused(overdraft(id, USD), bad);
         w.refused(cap(id, "todo.ann", Some(USD)), bad);
-        w.refused(set_book(id, 2, 0), bad);
     }
 }
 
@@ -562,23 +559,71 @@ fn a_late_row_from_last_month_does_not_spend_this_months_cap() {
 
 // Price books
 
+/// A ledger takes the configured book whenever its contents differ from
+/// its own, whatever the versions (#451): the books are compared, never
+/// ordered. The same one again is a replay (it changes nothing), and one
+/// taken before is taken again, as a configuration rolled back is. Each is
+/// kept once, under `book:<digest>`, as it was first taken; one the core
+/// refuses changes nothing; a hold keeps the price it was held at.
 #[test]
-fn a_newer_price_book_replaces_the_old_and_an_older_is_refused() {
+fn a_price_book_is_taken_when_it_differs_in_any_order() {
     let mut w = World::seat();
-    w.replays(set_book("book:2", 2, 0));
-    assert_eq!(w.status().price_book, 2);
+    let (cost_basis, dearer) = (PriceBook { margin_bp: 0, ..book() }, PriceBook { margin_bp: 10_000, ..book() });
+    w.replays(Op::Book(cost_basis.clone()));
+    assert_eq!((w.ledger.book(), w.status().price_book), (&cost_basis, 1), "taken at the same version: it is informational");
     assert_eq!(w.ok(reserve("r1")), held(4_200), "no margin: the cost basis");
-    w.refused(set_book("book:2b", 2, 0), Refused::StaleBook { current: 2 });
-    w.refused(set_book("book:1", 1, 5_000), Refused::StaleBook { current: 2 });
-    w.refused(set_book("book:2", 3, 0), Refused::ConflictingBody);
-    let mut bad = book();
-    bad.version = 9;
-    bad.margin_bp = price::MARGIN_BP_MAX + 1;
-    w.refused(Op::Book(SetPriceBook { id: "book:9".into(), book: bad }), Refused::Invalid { what: Invalid::Book(BookFault::Rate) });
-    // a hold keeps the price it was held at
-    w.ok(set_book("book:3", 3, 10_000));
-    assert_eq!(w.ok(settle("r1", None)), settled(4_200, Basis::Reservation));
+    let bad = PriceBook { margin_bp: price::MARGIN_BP_MAX + 1, ..book() };
+    w.refused(Op::Book(bad), Refused::Invalid { what: Invalid::Book(BookFault::Rate) });
+    w.now += 1_000;
+    w.replays(Op::Book(PriceBook { version: 0, ..dearer.clone() }));
+    assert_eq!(w.status().price_book, 0, "and at a lower one");
+    w.replays(Op::Book(dearer.clone()));
+    assert_eq!(w.ok(settle("r1", None)), settled(4_200, Basis::Reservation), "held at the book of its time");
     assert_eq!(w.ok(reserve("r2")), held(8_400), "the new book's margin");
+    // rolled back, then forward again: each taken again
+    w.now += 1_000;
+    w.replays(Op::Book(cost_basis.clone()));
+    assert_eq!(w.ok(reserve("r3")), held(4_200), "the book rolled back to");
+    w.replays(Op::Book(dearer.clone()));
+    assert_eq!(w.ok(reserve("r4")), held(8_400), "and forward");
+    for (b, at_ms) in [(&cost_basis, T0), (&dearer, T0 + 1_000)] {
+        let id = format!("book:{}", b.digest());
+        let kept = CommandRecord { command: Command::SetBook(SetPriceBook { id: id.clone(), book: b.clone() }), at_ms };
+        assert_eq!(w.store.command(&id), Some(kept), "kept once, as first taken");
+    }
+}
+
+/// #451: operator keys' rows were added to the deployments' configurations
+/// with no version raised, and every ledger kept the book it had and
+/// refused their calls as unpriced. Goal: a configuration that adds one
+/// key's price, and changes nothing else (its version included), is taken
+/// at the next call, and a call on that key is priced, across a restart
+/// and a replay; the same configuration again takes nothing. Method: the
+/// Durable Object's order (the configured book offered, then the route),
+/// restarted between.
+#[test]
+fn a_key_the_configuration_adds_is_priced_at_the_next_call() {
+    let mut configured = book();
+    configured.keys.push(KeyPrice { key: "google-places".into(), micros: 35_000_000, per: 1_000 });
+    let mut w = World::seat();
+    let call = Usage::Key { key: "google-places".into(), units: 1 };
+    let reserve_call = Op::Reserve(reservation("key:1", call.clone()));
+    assert_eq!(w.ledger.book().price(&call), Err(PriceError::NoPrice), "the book it holds has no price for the key");
+    w.ok(Op::Book(configured.clone()));
+    // $35 per thousand calls, and the margin
+    let charge = 52_500;
+    assert_eq!(w.replays(reserve_call.clone()), held(charge));
+    let mut w = w.restarted();
+    assert_eq!(w.ledger.book(), &configured, "the book read back");
+    w.replays(Op::Book(configured.clone()));
+    assert_eq!(w.ok(reserve_call.clone()), held(charge), "a replayed call answers as it stands");
+    assert_eq!(w.replays(settle("key:1", Some(call.clone()))), settled(charge, Basis::Usage));
+    let mut w = w.restarted();
+    let (ledger, store) = (w.ledger.clone(), w.store.clone());
+    w.ok(Op::Book(configured.clone()));
+    assert_eq!((&w.ledger, &w.store), (&ledger, &store), "the same configuration again takes nothing");
+    assert_eq!(w.ok(settle("key:1", Some(call))), settled(charge, Basis::Usage), "and a replayed settle answers as the first did");
+    assert_eq!(w.ok(reserve_call), Outcome::Reserved(Reserved::Settled { charge }));
 }
 
 // Reservations
@@ -826,9 +871,8 @@ fn every_refusal_of_a_row() {
     assert_eq!((m.rows_new, m.rows_before, m.charged), (2, 1, 2), "row:8 once, its twin as before, and row:9");
     // once the book prices it, the refused row comes again
     let mut priced = book();
-    priced.version = 2;
     priced.instances.push(price::InstancePrice { instance: "8vcpu".into(), hour: 3_600_000 });
-    w.ok(Op::Book(SetPriceBook { id: "book:2".into(), book: priced }));
+    w.ok(Op::Book(priced));
     let again = w.ok(meter("b2", vec![row("row:6", Usage::Awake { instance: "8vcpu".into(), ms: 1 }, None, now)]));
     assert_eq!(again, Outcome::Metered(Metered { charged: 2, rows_new: 1, rows_before: 0, refused: vec![] }));
 }
@@ -918,7 +962,7 @@ fn every_mutation_answers_the_same_after_a_restart() {
         (0, seat("s1", SeatState::PastDue, 1)),
         (0, overdraft("o1", USD)),
         (0, cap("c1", "todo.ann", Some(USD))),
-        (0, set_book("book:2", 2, 4_000)),
+        (0, set_book(4_000)),
         (60_000, reserve_in("r1", "todo.ann", true)),
         (60_000, reserve("r2")),
         (120_000, settle("r1", Some(flash(50_000, 2_000)))),

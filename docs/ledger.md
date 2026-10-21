@@ -104,14 +104,19 @@ Checked against S4's real numbers: a $0.004 Flash turn is charged
 $0.0063; the gateway's own `cost` equals our list price on every call;
 neurons and tokens agree within half a micro-dollar on the spike's 17
 calls. The defaults are consts in `price.rs`, each with its source. The
-operator's book comes from the deploy's configuration and is versioned:
-a ledger takes only a newer version, and a hold keeps the price it was
-held at. The book's version is the higher of the configuration's
-`price_book_version` and the code's (`DEFAULT_BOOK_VERSION`, 7 since
-OpenRouter's GLM-5.3 Flash was priced on 2026-10-15, after 6 for the
-Clef family, 5 for Finite Private's GLM-5.3 Flash, 4 for Hermes' tool
-keys and 3 for DeepSeek V4 Flash), so a change
-to the defaults reaches every ledger at its next call.
+operator's book comes from the deploy's configuration, and a ledger
+takes it at its next call whenever its contents differ from the book it
+charges with: the books are compared, never ordered, so a key's row
+added or its price changed, a change to the defaults, and a
+configuration rolled back each reach every ledger (#451: on 2026-10-20
+operator keys' rows were added without a higher version, which a ledger
+then needed, and every ledger refused their calls as unpriced). A hold
+keeps the price it was held at. The book's version is informational (a
+ledger's status shows it, `priceBook`): the higher of the
+configuration's `price_book_version` and the code's
+(`DEFAULT_BOOK_VERSION`, 7 since OpenRouter's GLM-5.3 Flash was priced
+on 2026-10-15, after 6 for the Clef family, 5 for Finite Private's
+GLM-5.3 Flash, 4 for Hermes' tool keys and 3 for DeepSeek V4 Flash).
 
 **OpenRouter's price** (decision 61; a decision for Paul): Finite's
 tiers run on GLM-5.3 Flash through OpenRouter, which routes each call to
@@ -181,7 +186,7 @@ mutation first brings the ledger to its time's month.
 | `set_seat(SetSeat)` | its `id`; ordered by `seq` (one no newer than the last applied is refused, `StaleSeat`) | `()` |
 | `set_overdraft(SetOverdraft)` | its `id` | `()` |
 | `set_cap(SetFragmentCap)` | its `id` | `()` |
-| `set_book(SetPriceBook)` | its `id`; ordered by `version` | `()` |
+| `set_book(PriceBook)` | its contents: the same book again changes nothing; any other is taken, whatever its version (no order); each kept once as a command, `book:<digest>` | `()` |
 | `reserve(Reserve)` | the call's `ref` | `held {amount}`, `settled {charge}` or `released` |
 | `settle(Settle)` | the call's `ref` | `{charge, basis}`: `usage`, `reservation` or `expired` |
 | `release(Release)` | the call's `ref` | `back`, or `settled {charge}` |
@@ -272,13 +277,12 @@ Inner routes (platform code only, through the DO's stub):
 | `POST /fragment-open` | `{fragment}` | `{}` or `cap_reached` |
 | `POST /grant`, `/plan`, `/seat`, `/overdraft`, `/cap` | proto's `GrantCredit`, `SetPlan`, `SetSeat`, `SetOverdraft`, `SetFragmentCap` | `{}` |
 | `POST /status` | `{}` | proto's `LedgerStatus` |
-| `POST /test` | `{op: clock {offsetMs} \| sweep \| entries {prefix} \| totals}` | test fleets only |
+| `POST /test` | `{op: clock {offsetMs} \| sweep \| entries {prefix} \| totals \| book}` | test fleets only |
 
-Before each route the DO compares its book's version with the
-configured one and applies `SetPriceBook {id: "book:<version>"}` when the
-configuration is newer (`configured_book`: the core's defaults until the
-deployment's configuration carries one; the debt ledger). Its alarm runs
-`sweep` at `next_sweep_ms`.
+Before each route the DO offers the ledger the configured book
+(`configured_book`: the core's defaults and the configuration's operator
+keys' prices; the debt ledger), which `set_book` takes when it differs
+from the ledger's own. Its alarm runs `sweep` at `next_sweep_ms`.
 
 Public routes (a hard cut of `/api/budget`; docs/api.md, Ledger):
 

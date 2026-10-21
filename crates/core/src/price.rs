@@ -10,10 +10,11 @@
 //! credits that pay for AI through Unified Billing (spike S4), so it
 //! applies to tokens and neurons only; the margin is the operator's, 50%
 //! unless the book sets another. The book is data the operator sets (the
-//! deploy's configuration) and versions; a ledger keeps the version it
-//! charges with (crate::ledger).
+//! deploy's configuration); a ledger takes it whenever its contents differ
+//! from the book it charges with (crate::ledger, `set_book`).
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::decide::Model;
 
@@ -220,12 +221,13 @@ pub struct KeyPrice {
     pub per: u64,
 }
 
-/// Every price, the fee and the margin, at one version.
+/// Every price, the fee and the margin, and a version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PriceBook {
-    /// Grows with each change the operator makes: a ledger takes only a
-    /// book newer than the one it has (crate::ledger, `set_book`).
+    /// Informational (a ledger's status shows it, `priceBook`): a ledger
+    /// takes the configured book whenever its contents differ from its
+    /// own, whatever the versions (#451).
     pub version: u32,
     pub margin_bp: u32,
     /// Applied to AI (tokens and neurons), which credits pay for.
@@ -326,9 +328,10 @@ const fn clef(m: Model) -> (&'static str, TokenPrices) {
     let input = m.input_price();
     (m.id(), TokenPrices { input, cached_input: input, cache_write: input, output: 0 })
 }
-/// The default book's version. A ledger takes a book only when its version
-/// is newer than the one it charges with (docs/ledger.md), so every change
-/// to the defaults raises it: 7 for OpenRouter's GLM-5.3 Flash
+/// The default book's version, informational since a ledger takes any book
+/// whose contents differ from its own (docs/ledger.md; #451). Before, a
+/// ledger took only a newer version, so each change to the defaults
+/// raised it: 7 for OpenRouter's GLM-5.3 Flash
 /// (2026-10-15), after 6 for the Clef family (2026-10-14), 5
 /// for Finite Private's GLM-5.3 Flash (2026-10-14), 4 for Hermes' tool
 /// keys (2026-10-09) and 3 for
@@ -530,6 +533,12 @@ impl PriceBook {
             images: DEFAULT_IMAGES,
             keys: Vec::new(),
         }
+    }
+
+    /// SHA-256 of the book, as hex: the id a ledger keeps it under once it
+    /// takes it (`book:<digest>`).
+    pub fn digest(&self) -> String {
+        hex::encode(Sha256::digest(serde_json::to_vec(self).expect("a book serializes")))
     }
 
     /// Whether the book is one a ledger may charge with.

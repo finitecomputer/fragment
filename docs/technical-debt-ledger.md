@@ -632,8 +632,9 @@ fragment.club until cutover (decisions 34–35).
 - **First proof:** a deployment that wants another margin.
 - **Delete when:** `xtask deploy` renders a price book from the
   deployment's config (a versioned file) into a Worker variable that
-  `configured_book` reads, and each ledger takes the newer version at its
-  next call (`take_book` already does), with a test of a book's change.
+  `configured_book` reads, and each ledger takes a changed book at its
+  next call (`take_book` already does, since #451), with a test of a
+  book's change.
 
 ## A plan has two writers: the registry, and an operator's `plan` command
 

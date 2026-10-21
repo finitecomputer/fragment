@@ -245,7 +245,7 @@
   // "test_secret_file": "~/.config/fragment/secrets/preview-test-secret",
   // The book's version is the higher of this and the code's own
   // (fragment_core::price::DEFAULT_BOOK_VERSION, 7 since OpenRouter's
-  // GLM-5.3 Flash was priced): raise it past both with every change to a
-  // key's price, or ledgers keep their book.
+  // GLM-5.3 Flash was priced), and informational: a ledger takes a key's
+  // price added or changed at its next call, whatever the version.
   "price_book_version": 7
 }

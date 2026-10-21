@@ -68,6 +68,10 @@ enum Shape {
     /// As `Plain`, with no Stripe (no `stripe` in its config): billing
     /// off, as finite.chat launched, every seat an operator's comp.
     SellsNothing,
+    /// As `Plain`, its catalog one operator key longer (`ADDED_KEY`, at a
+    /// price of its own) and nothing else changed: a row an operator adds,
+    /// with no version to raise (#451).
+    OneKeyMore,
 }
 
 /// Finite Private's key on a node shaped as Finite's (`Shape::FinitePrivate`):
@@ -147,6 +151,14 @@ pub const SWAP_KEYS: [(&str, &str, &str); 8] = [
     ("xai", "xai-e2e-0c4d22", "XAI_API_KEY"),
     ("elevenlabs", "sk_e2e_eleven_9e1f", "ELEVENLABS_API_KEY"),
 ];
+/// The operator key a node shaped `Shape::OneKeyMore` adds (its name, its
+/// test value, its environment variable), and its catalog row: $0.02 a
+/// call at list.
+pub const ADDED_KEY: (&str, &str, &str) = ("e2e-added", "e2e-added-key-3f9b", "E2E_ADDED_KEY");
+pub fn added_key_row() -> Value {
+    let (name, _, env) = ADDED_KEY;
+    json!({ "name": name, "kind": "operator", "hosts": ["api.added.test"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [env], "price": { "micros": 20_000, "per": 1 } })
+}
 pub const SWAP_OWN: &str = "e2e-mail";
 pub const SWAP_OWN_HOST: &str = "api.mail.test";
 pub const SWAP_OWN_ENV: &str = "E2E_MAIL_KEY";
@@ -522,6 +534,15 @@ impl Suite {
         started
     }
 
+    /// Starts the node with one operator key more in its catalog
+    /// (`Shape::OneKeyMore`).
+    pub fn start_with_a_key_more(&mut self) -> Result<Api> {
+        self.shape = Shape::OneKeyMore;
+        let started = self.start(false);
+        self.shape = Shape::Plain;
+        started
+    }
+
     fn start_shaped(&mut self, shape: Shape) -> Result<Api> {
         self.shape = shape;
         let started = self.start(false);
@@ -582,7 +603,7 @@ impl Suite {
             }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
-                Shape::Plain | Shape::FinitePrivate | Shape::SellsNothing => format!("http://127.0.0.1:{}", self.port),
+                Shape::Plain | Shape::FinitePrivate | Shape::SellsNothing | Shape::OneKeyMore => format!("http://127.0.0.1:{}", self.port),
             },
             operators: Some(
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
@@ -597,9 +618,12 @@ impl Suite {
             providers: Some({
                 let mut rows = swap_providers(Some(self.openrouter.node().oauth()))?;
                 rows.as_array_mut().expect("catalog").push(json!({ "name": "e2e-oauth", "kind": "connection", "hosts": ["oauth.test"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["E2E_OAUTH_TOKEN"], "connection_oauth": self.workos.node().connection_oauth() }));
+                if self.shape == Shape::OneKeyMore {
+                    rows.as_array_mut().expect("catalog").push(added_key_row());
+                }
                 rows.to_string()
             }),
-            operator_key_values: SWAP_KEYS.iter().map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
+            operator_key_values: SWAP_KEYS.iter().chain((self.shape == Shape::OneKeyMore).then_some(&ADDED_KEY)).map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
             connection_secret_values: vec![("e2e-oauth".into(), "mock-connection-secret".into())],
             swap_upstream: Some(self.upstream.node().url.clone()),
         };
@@ -627,7 +651,7 @@ impl Suite {
     fn suffix(&self) -> &'static str {
         match self.shape {
             Shape::TwoSites => BOATS,
-            Shape::Plain | Shape::FinitePrivate | Shape::SellsNothing => SUFFIX,
+            Shape::Plain | Shape::FinitePrivate | Shape::SellsNothing | Shape::OneKeyMore => SUFFIX,
         }
     }
 

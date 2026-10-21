@@ -157,8 +157,8 @@ pub struct Config {
     /// placements and its environment variables. None by default.
     /// `FRAGMENT_PRICE_BOOK_VERSION` (default the defaults',
     /// `fragment_core::price::DEFAULT_BOOK_VERSION`; the book's is the higher
-    /// of the two) grows with every change to a key's price, or ledgers made
-    /// before keep their book.
+    /// of the two) is informational: a ledger takes the configured book
+    /// whenever its contents differ from its own (#451).
     pub providers: fragment_core::catalog::Catalog,
     pub price_book_version: u32,
     /// `FRAGMENT_MODELS` (the deploy config's `models`, less its keys): where
