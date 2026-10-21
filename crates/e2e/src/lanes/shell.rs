@@ -1105,6 +1105,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     add_skills_ui(s, api, &mut b, &page, &session)?;
     skills_ui(s, api, &mut b, &page, &session)?;
     connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
+    notice_ui(s, &mut b, &page, &chat, &shots)?;
     models_ui(s, api, &mut b, &page, &session, &shots)?;
     computer_ui(s, api, &mut b, &page, &session, &shots)?;
     update_ui(s, api, &mut b, &page, &session, &shots)?;
@@ -2369,6 +2370,222 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let view = shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[])?;
     let back = view.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).is_some_and(|a| a["connections"].is_null());
     s.ok("pressed again, it may use every provider again (null)", again && back, &view);
+    Ok(())
+}
+
+/// The shell's next `method` call whose path matches `re` (a regular
+/// expression's source) refused at once, as a failing network's is: a 503
+/// with a message. Every other call, and every one after it, as it is.
+fn refuse_once(method: &str, re: &str) -> String {
+    format!(
+        "(() => {{ const real = window.fetch; const re = new RegExp({}); window.fetch = async (url, o) => {{ if (o?.method === {} && re.test(String(url))) {{ window.fetch = real; \
+         return new Response(JSON.stringify({{ error: 'unavailable', message: 'refused for the test' }}), {{ status: 503, headers: {{ 'content-type': 'application/json' }} }}); }} return real(url, o); }}; return true; }})()",
+        js(re),
+        js(method)
+    )
+}
+
+/// The shell's notice (`#notice`) as the person sees it: shown, inside the
+/// viewport, and nothing over it (the point at its middle is its own); its
+/// words, and where the person is.
+const NOTICE_SEEN: &str = "(() => { const n = document.getElementById('notice'); const r = n.getBoundingClientRect(); const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); \
+    const inside = r.width > 0 && r.height > 0 && r.top >= 0 && r.left >= 0 && r.bottom <= innerHeight && r.right <= innerWidth; \
+    return { ok: n.checkVisibility() && inside && !!at && n.contains(at), text: n.innerText, box: [r.left, r.top, r.width, r.height].map(Math.round), width: innerWidth, height: innerHeight, \
+      path: location.pathname, settings: !document.getElementById('settings-page').hidden }; })()";
+
+/// On settings, an agent's chip under a connection whose save fails, then
+/// pressed again: the failure is said over settings once they reload
+/// ("That was not changed", in the viewport, the chip as it was; `shot`
+/// taken then); the retry that works takes the provider from the agent and
+/// the failure's notice away; a press more gives it back, for the checks
+/// after. Whether the failure was said, and whether the retry cleared it,
+/// with what was seen.
+fn chip_retried(b: &mut Browser, page: &Page, chip: &str, shot: &std::path::Path, wait: std::time::Duration) -> Result<(bool, bool, Value)> {
+    let pressed = |state: &str| format!("document.querySelector({})?.getAttribute('aria-pressed') === {}", js(chip), js(state));
+    let press = format!("(document.querySelector({}).click(), true)", js(chip));
+    b.eval(page, &refuse_once("PUT", "/agents/[^/]+/connections$"))?;
+    b.eval(page, &press)?;
+    let told = format!("(() => {{ const v = {NOTICE_SEEN}; return v.ok && v.text.startsWith('That was not changed') && v.path === '/settings' && v.settings && {}; }})()", pressed("true"));
+    let refused = b.until(page, &told, wait);
+    let failed = b.eval(page, NOTICE_SEEN)?;
+    let _ = b.screenshot(page, shot);
+    b.eval(page, &press)?;
+    let retried = b.until(page, &format!("{} && document.getElementById('notice').hidden", pressed("false")), wait);
+    let after = b.eval(page, NOTICE_SEEN)?;
+    b.eval(page, &press)?;
+    let back = b.until(page, &format!("{} && document.getElementById('notice').hidden", pressed("true")), wait);
+    Ok((refused, retried && back, json!({ "failed": failed, "retried": after, "back": back })))
+}
+
+/// The shell's own notice where the person is (#436), never in a place
+/// settings hide: on settings, the agent chip's failed save is said over
+/// them, in the viewport, and a retry that works takes it away, on a
+/// desktop and a phone (375 px); over a chat, an archive that failed is
+/// said too; each place's notice is its own (the chat's clears for
+/// settings, settings' for the chat), and a reload on settings shows no
+/// Loading… left over the page.
+fn notice_ui(s: &mut Suite, b: &mut Browser, page: &Page, chat: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let chip = "#settings-connections [data-provider=\"perplexity\"] [data-agent]";
+    let (desk, retried, seen) = chip_retried(b, page, chip, &shots.join("desktop-settings-notice.png"), wait)?;
+    s.ok("on settings, an agent's chip whose save fails says That was not changed over settings, in the viewport, on a desktop; the chip as it was", desk, &seen["failed"]);
+    s.ok("pressed again, its save works: the chip says so, and the failure's notice is gone", retried, &seen);
+    open_row(b, page, chat, wait)?;
+    let left = b.eval(page, "document.getElementById('notice').hidden")?;
+    b.eval(page, &refuse_once("PUT", "/archived$"))?;
+    b.eval(page, "(document.getElementById('chat-options').click(), true)")?;
+    let archive = b.until(page, "[...document.querySelectorAll('#menu button')].some((b) => b.textContent === 'Archive')", wait) && menu_item(b, page, "Archive")?;
+    let told = format!("(() => {{ const v = {NOTICE_SEEN}; return v.ok && v.text.startsWith('It was not archived') && v.path === '/' && !v.settings; }})()");
+    let in_chat = archive && b.until(page, &told, wait);
+    let seen = b.eval(page, NOTICE_SEEN)?;
+    s.ok("then a chat opened takes settings' notice away, and an archive that fails there says so over the chat, in the viewport", left == true && in_chat, json!({ "cleared": left, "seen": seen }));
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    let gone = b.until(page, &format!("location.pathname === '/settings' && !!document.querySelector({}) && document.getElementById('notice').hidden", js(chip)), wait);
+    s.ok("and settings opened from there leave the chat's notice with the chat", gone, b.eval(page, NOTICE_SEEN)?);
+    b.viewport(page, 375, 812, true)?;
+    b.reload(page)?;
+    let loaded = b.until(page, &format!("location.pathname === '/settings' && !!document.querySelector({}) && document.getElementById('notice').hidden", js(chip)), wait);
+    let (phone, retried, seen) = chip_retried(b, page, chip, &shots.join("phone-375-settings-notice.png"), wait)?;
+    s.ok(
+        "on a phone (375 px), settings reloaded show no Loading… over them, the chip's failed save is said over settings, in the viewport, and a retry that works takes it away",
+        loaded && phone && retried,
+        json!({ "loaded": loaded, "seen": seen }),
+    );
+    b.viewport(page, 1280, 800, false)?;
+    notice_late_ui(s, b, page, chat)
+}
+
+/// Where a held call waits: before it is sent (the platform has not had
+/// it), or with the platform's answer in (it has done it).
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Hold {
+    Request,
+    Answer,
+}
+
+/// The shell's next `method` call whose path matches `re` (a regular
+/// expression's source) held at `at` until `window.__held.release()`;
+/// let go with `release('refuse')`, it is answered as a failing network's
+/// is (a 503 with a message), never sent if it was held before it was.
+/// Every call counted while it is under way (`inflight`), and when the
+/// last one ended (`quiet`), so a check can wait for what the held call let
+/// go to finish (`HELD_SETTLED`); `restore()` puts the page's fetch back.
+pub(super) fn hold(method: &str, re: &str, at: Hold) -> String {
+    format!(
+        "(() => {{ const real = window.fetch; const re = new RegExp({}); const before = {}; let holding = true; \
+         const held = window.__held = {{ release: null, inflight: 0, quiet: performance.now(), restore: () => {{ window.fetch = real; }} }}; \
+         const wait = () => new Promise((go) => {{ held.release = go; }}); \
+         const refused = () => new Response(JSON.stringify({{ error: 'unavailable', message: 'refused for the test' }}), {{ status: 503, headers: {{ 'content-type': 'application/json' }} }}); \
+         window.fetch = async (url, o) => {{ const hold = holding && o?.method === {} && re.test(String(url)); if (hold) holding = false; held.inflight++; \
+         try {{ if (hold && before && (await wait()) === 'refuse') return refused(); const r = await real(url, o); if (hold && !before && (await wait()) === 'refuse') return refused(); return r; }} \
+         finally {{ held.inflight--; held.quiet = performance.now(); }} }}; return true; }})()",
+        js(re),
+        at == Hold::Request,
+        js(method)
+    )
+}
+
+/// Once a held call (`hold`) is let go: none of the page's calls under
+/// way, and none for half a second.
+pub(super) const HELD_SETTLED: &str = "window.__held.inflight === 0 && performance.now() - window.__held.quiet > 500";
+
+/// What answers late is said only where it still belongs (#457 review):
+/// an agent's chip whose save is refused, its reload's read held while a
+/// chat opens, says nothing over the chat; held again while settings open
+/// anew and the chip, pressed again, saves, the older reload let go brings
+/// back no failure; a Copy that answers after a chip's failure is said
+/// leaves that failure; and a save held, the chip pressed again from
+/// settings opened anew (it saves), then the first refused, says nothing:
+/// the change it asked for is there. The chip as it was, after.
+fn notice_late_ui(s: &mut Suite, b: &mut Browser, page: &Page, chat: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let chip = "#settings-connections [data-provider=\"perplexity\"] [data-agent]";
+    let pressed = |v: &str| format!("document.querySelector({})?.getAttribute('aria-pressed') === {}", js(chip), js(v));
+    let press = format!("(document.querySelector({}).click(), true)", js(chip));
+    let fresh = format!("location.pathname === '/settings' && document.querySelector({})?.disabled === false", js(chip));
+    let refuse = refuse_once("PUT", "/agents/[^/]+/connections$");
+    let hidden = "document.getElementById('notice').hidden";
+    let open_settings = "(document.getElementById('settings').click(), true)";
+    anyhow::ensure!(b.until(page, &format!("{fresh} && {}", pressed("true")), wait), "settings, the chip pressed");
+
+    // refused, its reload held, a chat opened, then let go
+    b.eval(page, &hold("GET", "^/api/connections$", Hold::Answer))?;
+    b.eval(page, &refuse)?;
+    b.eval(page, &press)?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    open_row(b, page, chat, wait)?;
+    b.eval(page, "(window.__held.release?.(), true)")?;
+    let settled = b.until(page, HELD_SETTLED, wait);
+    let seen = b.eval(page, &format!("({{ hidden: {hidden}, path: location.pathname, settings: !document.getElementById('settings-page').hidden }})"))?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "a chip's refused save whose reload answers once a chat is open says nothing over the chat",
+        held && settled && seen == json!({ "hidden": true, "path": "/", "settings": false }),
+        &seen,
+    );
+
+    // refused, its reload held; settings opened anew, the chip saved; then let go
+    b.eval(page, open_settings)?;
+    anyhow::ensure!(b.until(page, &format!("{fresh} && {}", pressed("true")), wait), "settings again, the chip pressed");
+    b.eval(page, &hold("GET", "^/api/connections$", Hold::Answer))?;
+    b.eval(page, &refuse)?;
+    b.eval(page, &press)?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    b.eval(page, open_settings)?;
+    let newer = b.until(page, &format!("{fresh} && {}", pressed("true")), wait);
+    b.eval(page, &press)?;
+    let saved = b.until(page, &format!("{fresh} && {} && {hidden}", pressed("false")), wait);
+    b.eval(page, "(window.__held.release?.(), true)")?;
+    let settled = b.until(page, HELD_SETTLED, wait);
+    let after = b.eval(page, NOTICE_SEEN)?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "a chip's refused save whose reload answers after settings opened anew and the chip saved there brings back no failure",
+        held && newer && saved && settled && b.eval(page, hidden)? == true,
+        &after,
+    );
+    // (an older load may have drawn the chip as it was: settings read again)
+    b.reload(page)?;
+    anyhow::ensure!(b.until(page, &format!("{fresh} && {}", pressed("false")), wait), "settings reloaded, the chip not pressed");
+    b.eval(page, &press)?;
+    anyhow::ensure!(b.until(page, &format!("{fresh} && {}", pressed("true")), wait), "the chip pressed again");
+
+    // a Copy held; a chip's failure said; then copied
+    b.eval(page, "(window.__copy = null, navigator.clipboard.writeText = (text) => new Promise((done) => { window.__copy = () => { window.__copied = text; done(); }; }), document.querySelector('#settings-page [data-action=copy-prompt]').click(), true)")?;
+    let copying = b.until(page, "typeof window.__copy === 'function'", wait);
+    b.eval(page, &refuse)?;
+    b.eval(page, &press)?;
+    let told = format!("(() => {{ const v = {NOTICE_SEEN}; return v.ok && v.text.startsWith('That was not changed') && v.settings; }})()");
+    let failed = b.until(page, &format!("{told} && {fresh}"), wait);
+    b.eval(page, "(window.__copied = null, window.__copy(), true)")?;
+    let copied = b.until(page, "window.__copied !== null", wait);
+    let kept = b.eval(page, &told)?;
+    b.eval(page, "(navigator.clipboard.writeText = async (text) => { window.__copied = text; }, true)")?;
+    s.ok(
+        "a Copy that answers after a chip's failure is said leaves that failure said",
+        copying && failed && copied && kept == true,
+        b.eval(page, NOTICE_SEEN)?,
+    );
+
+    // a save held; settings opened anew, the chip saved there; the first refused
+    b.eval(page, &hold("PUT", "/agents/[^/]+/connections$", Hold::Request))?;
+    b.eval(page, &press)?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    b.eval(page, open_settings)?;
+    let newer = b.until(page, &format!("{fresh} && {}", pressed("true")), wait);
+    b.eval(page, &press)?;
+    let saved = b.until(page, &format!("{fresh} && {} && {hidden}", pressed("false")), wait);
+    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
+    let settled = b.until(page, HELD_SETTLED, wait);
+    let quiet = b.eval(page, &format!("{hidden} && {}", pressed("false")))?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "a chip's save refused after the chip, pressed again from settings opened anew, saved the same change says nothing: the change is there",
+        held && newer && saved && settled && quiet == true,
+        b.eval(page, NOTICE_SEEN)?,
+    );
+    b.eval(page, &press)?;
+    anyhow::ensure!(b.until(page, &format!("{fresh} && {}", pressed("true")), wait), "the chip as it was");
     Ok(())
 }
 
