@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
-use crate::api::Api;
+use crate::api::{url_enc, Api};
 use crate::browser::{Lease, Page};
 use crate::{Need, Suite};
 
@@ -1046,6 +1046,41 @@ fn view(b: &mut Lease, page: &Page, expr: &str, wait: Duration) -> bool {
     b.reload(page).is_ok() && b.until(page, expr, wait)
 }
 
+/// The shell's Sign In from its signed-out page at `path`, the whole
+/// round trip, in a browser context of its own. With WorkOS holding a
+/// session as `email` in the browser (`held`: the fake's hold, as
+/// AuthKit's cookie on its own domain), WorkOS answers at once and that
+/// session is kept (a sign-in, not a switch), then let go; holding none,
+/// it asks, and `email` is typed. Either way the browser must come back
+/// to `path` (`landed`, a script's condition; `place` says it), signed in
+/// as `email`.
+#[allow(clippy::too_many_arguments)]
+fn signed_in_back(s: &mut Suite, b: &mut Lease, api: &Api, path: &str, email: &str, held: bool, landed: &str, place: &str) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let sid = held.then(|| s.workos.hold(email, 3600));
+    let context = b.another_context()?;
+    let page = b.open_in(&context, &format!("{}{path}", api.base))?;
+    let href = format!("/auth/login?screen_hint=sign-in&return={}", url_enc(path));
+    let offered = view(b, &page, &format!("document.querySelector('#first-run-card a.splash-secondary')?.getAttribute('href') === {href:?}"), wait);
+    let mut pressed = offered && b.eval(&page, &click("#first-run-card a.splash-secondary"))? == json!(true);
+    if pressed && !held {
+        // WorkOS's form (the fake's): who is signing in
+        pressed = b.until(&page, "!!document.querySelector('input[name=login_hint]')", wait)
+            && b.eval(&page, &format!("(document.querySelector('input[name=login_hint]').value = {email:?}, document.querySelector('input[name=login_hint]').form.submit(), true)"))? == json!(true);
+    }
+    let back = pressed && view(b, &page, &format!("({landed}) && document.body.innerText.includes({email:?})"), wait);
+    let kept = sid.as_ref().is_none_or(|sid| s.workos.held().as_ref() == Some(sid));
+    let seen = json!({ "offered": offered, "pressed": pressed, "at": b.eval(&page, "location.pathname + location.search")?, "held": s.workos.held() });
+    if let Some(sid) = &sid {
+        let ended = api.external(&format!("{}/user_management/sessions/logout?session_id={sid}", s.workos.url))?;
+        anyhow::ensure!(ended.status == 200 && s.workos.held().is_none(), "letting WorkOS's held session go: {ended}");
+    }
+    b.close(page)?;
+    let how = if held { "with WorkOS holding a session in the browser, is that account at once, keeps that session," } else { "with none held, asks who is signing in," };
+    s.ok(&format!("signed out at {path}, Sign In, {how} and lands back at {place}"), back && kept, seen);
+    Ok(())
+}
+
 /// A page of the person signed in with `session`, open at `path`.
 fn page_of(b: &mut Lease, api: &Api, session: &str, path: &str) -> Result<Page> {
     b.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
@@ -1125,7 +1160,8 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
             && seen["importing"] == "hidden"
             && seen["errors"] == json!([])
             && seen["card"].as_str().is_some_and(|t| {
-                t.contains("Agents that work for you")
+                t.contains("Welcome to Finite")
+                    && t.contains("Superintelligent agents for you and your organization")
                     && t.contains(&format!("{seat_price} a month, always on"))
                     && t.contains(&format!("{included} of credit included each month"))
                     && t.contains(&format!("{pack} a pack"))
@@ -1424,10 +1460,25 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let code = code.body["code"].as_str().unwrap_or("").to_string();
     let nobody = b.another_context()?;
     let out = b.open_in(&nobody, &format!("{}/welcome?trial={code}", api.base))?;
-    let href = format!("/auth/login?return=%2Fwelcome%3Ftrial%3D{code}");
-    let asked = view(&mut b, &out, &format!("document.querySelector('#first-run-card a.primary')?.getAttribute('href') === {href:?}"), wait);
-    s.ok("signed out, a trial's link asks them to sign in, and to come back to the welcome with its code", asked, b.eval(&out, "document.querySelector('#first-run-card a.primary')?.getAttribute('href') ?? null")?);
+    let to_welcome = format!("%2Fwelcome%3Ftrial%3D{code}");
+    let (up, back_in) = (format!("/auth/login?screen_hint=sign-up&return={to_welcome}"), format!("/auth/login?screen_hint=sign-in&return={to_welcome}"));
+    let asked = view(&mut b, &out, &format!("document.querySelector('#first-run-card a.primary')?.getAttribute('href') === {up:?}"), wait);
+    let offered = b.eval(&out, "({ up: document.querySelector('#first-run-card a.primary')?.getAttribute('href') ?? null, in: document.querySelector('#first-run-card a.splash-secondary')?.getAttribute('href') ?? null })")?;
+    s.ok(
+        "signed out, a trial's link offers Sign Up and Sign In, each coming back to the welcome with its code",
+        asked && offered == json!({ "up": up, "in": back_in }),
+        &offered,
+    );
     b.close(out)?;
+    // Sign In, the whole round trip, from the trial's link and from
+    // settings: with AuthKit holding a session in the browser and without
+    let (held, asked) = (guest(api, "billing-page-sign-in-held")?, guest(api, "billing-page-sign-in-asked")?);
+    let welcome_with_code = format!("{WELCOMED} && location.search === '' && document.querySelector('#first-run-card input[placeholder=\"Trial code\"]')?.value === {code:?}");
+    let guest_settings = "location.pathname === '/settings' && /You are a guest/.test(document.getElementById('settings-page')?.innerText ?? '')";
+    for (path, landed, place) in [(format!("/welcome?trial={code}"), welcome_with_code.as_str(), "the welcome, its trial code filled in"), ("/settings".to_string(), guest_settings, "settings")] {
+        signed_in_back(s, &mut b, api, &path, &Api::email_of(&held), true, landed, place)?;
+        signed_in_back(s, &mut b, api, &path, &Api::email_of(&asked), false, landed, place)?;
+    }
     let jo = guest(api, "billing-page-trial")?;
     let session = api.sign_in(&Api::email_of(&jo))?;
     let page = page_of(&mut b, api, &session, &format!("/welcome?trial={code}"))?;

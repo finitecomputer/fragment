@@ -348,6 +348,10 @@ async fn begin(env: &Env, cfg: &Config, url: &Url, link: Option<String>, trip: T
     if let Some(hint) = query(url, "login_hint").filter(|h| !h.is_empty() && h.len() <= LOGIN_HINT_MAX) {
         to += &format!("&login_hint={}", enc(&hint));
     }
+    // Choose AuthKit's entry screen; WorkOS still owns registration policy.
+    if let Some(screen) = query(url, "screen_hint").filter(|s| matches!(s.as_str(), "sign-up" | "sign-in")) {
+        to += &format!("&screen_hint={screen}");
+    }
     let token = query(url, "invitation_token")
         .filter(|t| !t.is_empty() && t.len() <= INVITATION_TOKEN_MAX && t.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
     if let Some(token) = token {

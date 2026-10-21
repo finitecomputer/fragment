@@ -266,12 +266,35 @@ addEventListener("focus", () => {
 // The frames follow this page's light or dark (they may not see its media).
 const dark = matchMedia("(prefers-color-scheme: dark)");
 const mobileChat = matchMedia("(max-width: 760px)");
+// Load and decode both landscapes once. Hold the current one until its
+// replacement is ready; a failed load keeps it, and a rapid theme reversal
+// never applies an image that is no longer wanted.
+function loadWallpaper(file) {
+  const image = new Image();
+  image.src = `/__shell/${file}`;
+  return image.decode().then(() => image, () => null);
+}
+const wallpapers = {
+  light: loadWallpaper("wallpaper.jpg"),
+  dark: loadWallpaper("wallpaper-dark.jpg"),
+};
+document.documentElement.style.setProperty("--wallpaper-dark-opacity", dark.matches ? "1" : "0");
+async function updateWallpaper() {
+  const mode = dark.matches ? "dark" : "light";
+  const image = await wallpapers[mode];
+  if (image && mode === (dark.matches ? "dark" : "light")) {
+    document.documentElement.style.setProperty("--wallpaper-dark-opacity", mode === "dark" ? "1" : "0");
+  }
+}
 function theme(frame) {
   try {
     frame.contentWindow?.postMessage({ fragment: "theme", mode: dark.matches ? "dark" : "light", mobile: mobileChat.matches }, "*");
   } catch {}
 }
-dark.addEventListener("change", () => { for (const f of document.querySelectorAll("iframe")) theme(f); });
+dark.addEventListener("change", () => {
+  void updateWallpaper();
+  for (const f of document.querySelectorAll("iframe")) theme(f);
+});
 mobileChat.addEventListener("change", () => { for (const f of document.querySelectorAll("iframe")) theme(f); });
 
 // ---- what is visible: the page is as tall as the visual viewport, from
@@ -2726,24 +2749,73 @@ $("settings").onclick = () => openSettings().catch((e) => notice("Settings did n
 
 // ---- first run: sign in, a seat, then the default agent is made
 // (decision 10); it never goes through settings ----
+// Match the chat composer's rim reflection, including its 64px approach
+// and rounded corners. Listen once: firstRun replaces only the card's children.
+const splashPointer = matchMedia("(hover: hover) and (pointer: fine)");
+let splashEdgeFrame = 0;
+let splashEdgePointer = null;
+function clearSplashEdge() {
+  cancelAnimationFrame(splashEdgeFrame);
+  splashEdgeFrame = 0;
+  $("first-run-card").style.setProperty("--edge-light", "0");
+}
+$("first-run").addEventListener("pointermove", (event) => {
+  if (!$("first-run").classList.contains("splash") || !splashPointer.matches || event.pointerType === "touch") return;
+  splashEdgePointer = { x: event.clientX, y: event.clientY };
+  if (splashEdgeFrame) return;
+  splashEdgeFrame = requestAnimationFrame(() => {
+    splashEdgeFrame = 0;
+    const card = $("first-run-card");
+    const rect = card.getBoundingClientRect();
+    const x = splashEdgePointer.x - rect.left;
+    const y = splashEdgePointer.y - rect.top;
+    const radius = parseFloat(getComputedStyle(card).borderRadius);
+    const qx = Math.abs(x - rect.width / 2) - rect.width / 2 + radius;
+    const qy = Math.abs(y - rect.height / 2) - rect.height / 2 + radius;
+    const distance = Math.max(0, Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - radius);
+    const proximity = Math.max(0, 1 - distance / 64);
+    card.style.setProperty("--edge-radius", `${Math.max(180, rect.height)}px`);
+    card.style.setProperty("--edge-x", `${x}px`);
+    card.style.setProperty("--edge-y", `${y}px`);
+    card.style.setProperty("--edge-light", String(proximity * proximity));
+  });
+});
+$("first-run").addEventListener("pointerleave", clearSplashEdge);
+$("first-run").addEventListener("scroll", clearSplashEdge, { passive: true });
+addEventListener("blur", clearSplashEdge);
+addEventListener("resize", clearSplashEdge);
 function firstRun(...children) {
+  clearSplashEdge();
   $("layout").hidden = true;
   $("first-run").hidden = false;
-  $("first-run-card").replaceChildren(el("div", "brand", $("brand").textContent), ...children);
+  $("first-run").classList.remove("splash");
+  $("first-run-card").replaceChildren(...children);
 }
-const PITCH = "Agents that work for you, and the apps they make.";
+const PITCH = "Welcome to Finite";
+const SUBTITLE = "Superintelligent agents for you and your organization";
 function signIn() {
-  // back to this view, with what its address carries (a mailed trial's code)
+  // back to this view, with what its address carries (a mailed trial's
+  // code), whichever screen of AuthKit's each opens on. Sign In is a
+  // sign-in, not a switch: one WorkOS answers from a session it holds in
+  // the browser comes back here too, as that account.
   const back = location.pathname + location.search;
-  const go = el("a", "primary", "Sign in");
-  go.href = `/auth/login?return=${encodeURIComponent(back)}`;
-  firstRun(el("h1", null, PITCH), el("p", "muted", "Sign in to start."), go, switchForm(back));
+  const go = el("a", "primary", "Sign Up");
+  go.href = `/auth/login?screen_hint=sign-up&return=${encodeURIComponent(back)}`;
+  const other = el("a", "splash-secondary", "Sign In");
+  other.href = `/auth/login?screen_hint=sign-in&return=${encodeURIComponent(back)}`;
+  const heading = el("div", "splash-heading");
+  heading.append(el("h1", null, PITCH), el("p", "muted", SUBTITLE));
+  const actions = el("div", "splash-actions");
+  actions.append(go, other);
+  firstRun(heading, actions);
+  $("first-run").classList.add("splash");
 }
 // "Use another account" (`POST /auth/switch`, docs/api.md, Sign-in), back
 // to `back`: WorkOS keeps its own sign-in in the browser (clearing this
 // site's data leaves it), and Sign in comes back as that account without
 // asking. A switch ends this session here, if there is one, and that one
-// there, so the next sign-in asks who is signing in. A form: the shell's
+// there (whose logout comes back to the platform's root, not `back`), so
+// the next sign-in asks who is signing in. A form: the shell's
 // `form-action 'self'` lets the browser leave for WorkOS only from the
 // page its answer is.
 function switchForm(back, cls = "quiet") {
@@ -2816,7 +2888,7 @@ async function welcome() {
   foot.append(out);
   firstRun(
     el("h1", null, PITCH),
-    el("p", "muted", "Your own agent, on a computer of its own: it does what you ask, and makes apps you can share. Take a seat, or start a trial, to begin."),
+    el("p", "muted", SUBTITLE),
     ...(back === "canceled" ? [el("p", null, "Checkout was canceled: nothing was bought.")] : []),
     ...seatOffer({ api, el }, mine, trial),
     imports,

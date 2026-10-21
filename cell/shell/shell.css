@@ -39,7 +39,7 @@
   --primary:var(--text-primary); --primary-foreground:var(--bg-window);
   --font-sans:"Funnel Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono:"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  --wallpaper: #071f3d url("/__shell/wallpaper-dark.jpg") center / cover no-repeat fixed;
+  --wallpaper-dark-opacity: 1;
   color-scheme: dark;
 }
 @media (prefers-color-scheme: light) {
@@ -52,7 +52,7 @@
     --accent-blue:#315fbd; --success:#167a52;
     --border:rgba(20,20,20,.105); --border-strong:rgba(20,20,20,.18);
     --danger-text:#81112f;
-    --wallpaper: #80b2df url("/__shell/wallpaper.jpg") center / cover no-repeat fixed;
+    --wallpaper-dark-opacity: 0;
     color-scheme: light;
   }
 }
@@ -176,8 +176,14 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; }
 /* ---- viewer: panes stacked vertically (viewer.js writes the rows) ---- */
 /* Fixed attachment shares the viewport's crop with search, regardless of panel size. */
 .viewer { display: flex; flex-direction: column; border-radius: 16px 16px 0 16px; overflow: hidden; clip-path: inset(0 round 16px 16px 0 16px); }
-/* Mirror only the viewport-sized artwork, leaving apps and controls unchanged. */
-.viewer::after, .search-dialog::before { content: ""; position: fixed; inset: 0; z-index: -2; background: var(--wallpaper); transform: scaleX(-1); pointer-events: none; }
+/* Keep both images mounted. The light layer stays opaque while the dark
+   layer fades over it, so no empty background shows through mid-transition.
+   shell.js waits for the target image to decode before changing opacity. */
+.wallpaper { position: fixed; inset: 0; z-index: -2; transform: scaleX(-1); pointer-events: none; }
+.wallpaper::before, .wallpaper::after { content: ""; position: absolute; inset: 0; }
+.wallpaper::before { background: #80b2df url("/__shell/wallpaper.jpg") center / cover no-repeat; }
+.wallpaper::after { background: #071f3d url("/__shell/wallpaper-dark.jpg") center / cover no-repeat; opacity: var(--wallpaper-dark-opacity); transition: opacity 450ms ease-in-out; }
+@media (prefers-reduced-motion: reduce) { .wallpaper::after { transition: none; } }
 .stack { flex: 1; display: grid; grid-template-columns: 100%; min-height: 0; padding: 8px; }
 .stack > * { min-height: 0; overflow: hidden; }
 .viewer.is-empty .stack { display: none; }
@@ -373,13 +379,45 @@ iframe[data-blocked] { display: none; }
    than the screen (its min-width: at 320 px the grid sized it to the
    trial code's row, past the screen's edge) */
 .first-run { position: relative; isolation: isolate; height: 100%; overflow-y: auto; display: grid; place-items: safe center; padding: max(24px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(24px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); background: transparent; }
-.first-run::before { content: ""; position: fixed; inset: 0; z-index: -1; background: var(--wallpaper); transform: scaleX(-1); pointer-events: none; }
+.first-run-content { width: min(100%, 480px); min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); justify-items: center; gap: 28px; }
+.first-run-logo { display: block; width: 88px; height: 88px; filter: drop-shadow(0 2px 8px rgba(0,0,0,.18)); }
+@media (prefers-color-scheme: light) { .first-run-logo { filter: brightness(0) drop-shadow(0 2px 8px rgba(0,0,0,.1)); } }
 .first-run-card { width: min(100%, 480px); min-width: 0; display: flex; flex-direction: column; gap: 14px; padding: 30px 30px 24px; border: 1px solid var(--border-strong); border-radius: 28px; background: var(--bg-sidebar); box-shadow: 0 24px 60px rgba(0,0,0,.22); }
-.first-run-card .brand { font-weight: 700; font-size: 15px; margin-bottom: 10px; padding: 0; }
 @media (max-width: 520px) { .first-run { padding: max(16px, env(safe-area-inset-top, 0px)) 12px max(16px, env(safe-area-inset-bottom, 0px)); align-items: safe end; } .first-run-card { padding: 24px 20px 20px; border-radius: 24px; } }
 .first-run-card > .primary, .first-run-card > .quiet { align-self: flex-start; }
-.first-run-card h1 { margin: 0; font-size: 28px; line-height: 1.2; font-weight: 600; letter-spacing: -.01em; }
+.first-run-card h1 { margin: 0; font-size: 28px; line-height: 1.2; font-weight: 600; letter-spacing: -.01em; text-align: center; text-wrap: balance; }
 .first-run-card p { margin: 0; }
+.first-run.splash { grid-template-rows: minmax(0, 1fr); align-items: safe center; }
+/* Equal space above and below centers the card itself; the logo lives
+   separately at the top. Short screens can scroll without overlap. */
+.splash .first-run-content { max-width: 420px; align-self: stretch; grid-template-rows: minmax(96px, 1fr) auto minmax(96px, 1fr); gap: 0; }
+.splash .first-run-logo { grid-row: 1; align-self: start; width: 64px; height: 64px; margin-top: clamp(8px, 2vh, 20px); }
+.splash .first-run-card {
+  grid-row: 2; position: relative; --edge-light: 0; align-items: center; gap: 28px; padding: 40px 28px;
+  background: linear-gradient(150deg, rgba(255,255,255,.065), rgba(255,255,255,.01)), color-mix(in srgb, var(--bg-card) 64%, transparent);
+  -webkit-backdrop-filter: blur(24px) saturate(1.25); backdrop-filter: blur(24px) saturate(1.25);
+  box-shadow: 0 24px 60px rgba(0,0,0,.22), inset 0 1px 0 rgba(255,255,255,.06); text-align: center;
+}
+/* The chat composer's cursor-following reflection, clipped to the rim. */
+.splash .first-run-card::before, .splash .first-run-card::after {
+  content: ""; position: absolute; inset: -1px; border-radius: inherit; padding: 1px; pointer-events: none;
+  background: radial-gradient(var(--edge-radius, 180px) circle at var(--edge-x, 50%) var(--edge-y, 50%), rgba(255,255,255,.65), rgba(255,255,255,.16) 45%, transparent 100%);
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude;
+  opacity: var(--edge-light); transition: opacity 160ms ease-out;
+}
+.splash .first-run-card::after { filter: blur(2px); opacity: calc(var(--edge-light) * .35); }
+@media (prefers-reduced-motion: reduce) { .splash .first-run-card::before, .splash .first-run-card::after { transition: none; } }
+.splash-heading { display: grid; gap: 12px; }
+.splash h1 { font-size: clamp(28px, 6vw, 36px); line-height: 1.15; letter-spacing: -.035em; }
+.splash-heading p { max-width: 32ch; margin-inline: auto; color: color-mix(in srgb, var(--text-primary) 82%, transparent); font-size: 16px; line-height: 1.5; text-wrap: balance; }
+.splash-actions { display: grid; gap: 10px; width: 100%; }
+.splash .primary, .splash-secondary { display: flex; align-items: center; justify-content: center; width: 100%; min-height: 48px; height: auto; padding: 12px 24px; font-size: 16px; transition: background .15s, opacity .15s; }
+.splash .primary:hover { opacity: .85; }
+.splash-secondary { border: 1px solid var(--border-strong); border-radius: 999px; background: transparent; color: var(--text-primary); font-weight: 600; text-decoration: none; transition: border-color .15s; }
+.splash-secondary:hover { border-color: var(--text-secondary); }
+.splash :is(.primary, .splash-secondary):focus-visible { outline: 2px solid var(--text-primary); outline-offset: 4px; }
 .first-run-form { display: flex; flex-direction: column; gap: 10px; }
 .first-run-form label { font-size: 13px; color: var(--text-secondary); }
 .first-run-form input, .first-run-form textarea, .rename-agent textarea {

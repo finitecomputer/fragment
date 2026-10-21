@@ -368,11 +368,11 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     }
 
     // the round trip
-    let r = api.unsigned("GET", "/auth/login?return=/x", None)?;
+    let r = api.unsigned("GET", "/auth/login?screen_hint=sign-up&return=/x", None)?;
     let to = r.header("location");
     s.ok(
-        "sign-in starts at WorkOS: this environment, a callback here, and a state",
-        r.status == 302 && to.contains("/user_management/authorize?") && to.contains("client_id=client_fragment_e2e") && to.contains(&url_enc(&format!("{}/auth/callback", api.base))) && to.contains("state="),
+        "Sign Up starts at WorkOS: this environment, the sign-up screen, a callback here, and a state",
+        r.status == 302 && to.contains("/user_management/authorize?") && to.contains("client_id=client_fragment_e2e") && to.contains(&url_enc(&format!("{}/auth/callback", api.base))) && to.contains("state=") && to.contains("&screen_hint=sign-up"),
         &r,
     );
     let login = cookie_line(&r, "fragment_login");
@@ -410,6 +410,10 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an invitation's token rides along to WorkOS (it lets its invitee sign up)", r.header("location").contains("&invitation_token=Z1uX3Rbw_cIl-5fIG"), &r);
     let r = api.unsigned("GET", "/auth/login?invitation_token=%22%3E%3Cscript%3E", None)?;
     s.ok("and a malformed one does not", r.status == 302 && !r.header("location").contains("invitation_token"), &r);
+    let r = api.unsigned("GET", "/auth/login?screen_hint=sign-in&return=/x", None)?;
+    s.ok("Sign In's screen rides along to WorkOS too", r.status == 302 && r.header("location").contains("&screen_hint=sign-in"), &r);
+    let r = api.unsigned("GET", "/auth/login?screen_hint=other", None)?;
+    s.ok("an unknown AuthKit screen is not forwarded", r.status == 302 && !r.header("location").contains("screen_hint"), &r);
     s.workos.fail_next("access_denied");
     let r = api.unsigned("GET", "/auth/login", None)?;
     let back = api.external(&format!("{}&login_hint=denied@e2e.test", r.header("location")))?;
@@ -1254,7 +1258,7 @@ pub(super) fn switched_out(s: &mut Suite, browser: &mut crate::browser::Browser,
     let held = s.workos.hold(email, 3600);
     browser.eval(page, "window.__beforeSwitch = true")?;
     browser.click(page, button)?;
-    let back = browser.until(page, "!window.__beforeSwitch && document.querySelector('#first-run-card a.primary')?.textContent === 'Sign in'", Duration::from_secs(15));
+    let back = browser.until(page, "!window.__beforeSwitch && document.querySelector('#first-run-card a.primary')?.textContent === 'Sign Up'", Duration::from_secs(15));
     let out = back && s.workos.held().is_none() && s.workos.ended().contains(&held) && !browser.cookies()?.iter().any(|c| c["name"] == "fragment_session");
     s.ok(what, out, format!("returned: {back}"));
     Ok(out)
@@ -1289,7 +1293,7 @@ fn browser_logout(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let ended = s.workos.ended().len();
     browser.click(&page, form)?;
-    let signed_out = browser.until(&page, "document.querySelector('#first-run-card a.primary')?.textContent === 'Sign in'", wait);
+    let signed_out = browser.until(&page, "document.querySelector('#first-run-card a.primary')?.textContent === 'Sign Up'", wait);
     s.ok(
         "the shell's Sign out button reaches WorkOS and returns signed out under its CSP",
         signed_out && s.workos.ended().len() == ended + 1,
@@ -1303,7 +1307,21 @@ fn browser_logout(s: &mut Suite, api: &Api) -> Result<()> {
     if !signed_out {
         return Ok(());
     }
-    if !switched_out(s, &mut browser, &page, "form[action^='/auth/switch'] button", emails[0], "Use another account reaches WorkOS under the shell's CSP and ends its held session")? {
+    // Sign In with WorkOS holding a session in the browser: that account
+    // again, asking no one, its session there kept (a sign-in, not a
+    // switch), and back where it began (a guest's home, the welcome)
+    let held = s.workos.hold(emails[0], 3600);
+    browser.eval(&page, "(document.querySelector('#first-run-card a.splash-secondary').click(), true)")?;
+    let again = browser.until(&page, &format!("location.pathname === '/welcome' && document.body.innerText.includes({})", json!(emails[0])), wait);
+    s.ok(
+        "the shell's Sign In, with WorkOS holding a session in the browser, is that account again, asking no one, and keeps that session",
+        again && s.workos.held() == Some(held),
+        format!("returned: {again}"),
+    );
+    if !again {
+        return Ok(());
+    }
+    if !switched_out(s, &mut browser, &page, "#first-run-card form[action^='/auth/switch'] button", emails[0], "Use another account reaches WorkOS under the shell's CSP and ends its held session")? {
         return Ok(());
     }
     browser.click(&page, "#first-run-card a.primary")?;
