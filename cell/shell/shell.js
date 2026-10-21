@@ -2121,21 +2121,27 @@ function buildSection() {
   const copy = el("button", "quiet", "Copy");
   copy.type = "button";
   copy.dataset.action = "copy-prompt";
-  // the notice of its last copy that failed: one that works takes that
-  // away, and no newer notice
-  let failed = null;
-  copy.onclick = () => {
-    const gen = noticeGen;
-    navigator.clipboard.writeText(prompt.value).then(
-      () => {
-        if (gen === noticeGen && gen === failed) hideNotice();
-        copy.textContent = "Copied";
-        setTimeout(() => (copy.textContent = "Copy"), 1500);
-      },
-      (err) => {
-        if (gen === noticeGen) failed = notice("The prompt was not copied", err.message);
-      },
-    );
+  // a clipboard that refuses (no permission, a webview's, none at all) is
+  // said under the prompt, which is selected to copy by hand; Copy stays
+  // Copy, to try again (#438)
+  const said = el("p", "form-error");
+  said.id = "build-prompt-said";
+  said.setAttribute("role", "status");
+  said.hidden = true;
+  copy.onclick = async () => {
+    said.hidden = true;
+    try {
+      await navigator.clipboard.writeText(prompt.value);
+    } catch {
+      copy.textContent = "Copy";
+      said.textContent = "Couldn't copy it. The prompt is selected: copy it yourself (Ctrl+C, or ⌘C on a Mac).";
+      said.hidden = false;
+      prompt.focus();
+      prompt.select();
+      return;
+    }
+    copy.textContent = "Copied";
+    setTimeout(() => (copy.textContent = "Copy"), 1500);
   };
   const actions = el("div", "settings-actions");
   actions.append(copy);
@@ -2152,6 +2158,7 @@ function buildSection() {
     say("Paste this into your coding agent and finish the sentence: it sets up the `fragment` command line itself, and you approve it here once."),
     prompt,
     actions,
+    said,
     yourself,
   );
 }

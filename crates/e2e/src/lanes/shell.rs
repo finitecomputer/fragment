@@ -1097,6 +1097,33 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.eval(&page, "(() => { window.__copied = null; navigator.clipboard.writeText = async (text) => { window.__copied = text; }; const p = document.getElementById('build-prompt'); p.value += 'a chore wheel'; document.querySelector('#settings-page [data-action=copy-prompt]').click(); return true; })()")?;
     let copied = b.until(&page, &format!("window.__copied === {:?} && document.querySelector('#settings-page [data-action=copy-prompt]').textContent === 'Copied'", format!("{prompt}a chore wheel")), wait);
     s.ok("its Copy copies the prompt as the person finished it, and says so", copied, b.eval(&page, "window.__copied")?);
+    // a clipboard that refuses (#438): a write rejected, then none at all
+    let copy = "document.querySelector('#settings-page [data-action=copy-prompt]')";
+    let unselect = "(() => { const p = document.getElementById('build-prompt'); p.setSelectionRange(0, 0); p.blur(); return true; })()";
+    let refused = format!(
+        "(() => {{ const v = {COPY_SEEN}; return v.said?.startsWith(\"Couldn't copy it.\") && !/permission/i.test(v.said) && v.button === 'Copy' && v.focused && v.selected; }})()"
+    );
+    b.until(&page, &format!("{copy}.textContent === 'Copy'"), wait);
+    b.eval(&page, unselect)?;
+    b.eval(&page, &format!("(navigator.clipboard.writeText = () => Promise.reject(new DOMException('Write permission denied.', 'NotAllowedError')), {copy}.click(), true)"))?;
+    let rejected = b.until(&page, &refused, wait);
+    let seen = b.eval(&page, COPY_SEEN)?;
+    s.ok(
+        "a Copy the clipboard refuses says so under the prompt, plainly, and selects the prompt to copy by hand; its button still says Copy",
+        rejected,
+        &seen,
+    );
+    b.eval(&page, unselect)?;
+    b.eval(&page, &format!("(Object.defineProperty(navigator, 'clipboard', {{ configurable: true, get: () => undefined }}), {copy}.click(), true)"))?;
+    let missing = b.until(&page, &refused, wait);
+    let none = b.eval(&page, COPY_SEEN)?;
+    b.eval(&page, &format!("(delete navigator.clipboard, navigator.clipboard.writeText = async (text) => {{ window.__copied = text; }}, window.__copied = null, {copy}.click(), true)"))?;
+    let works = b.until(&page, &format!("window.__copied === {} && {copy}.textContent === 'Copied' && document.getElementById('build-prompt-said').hidden", js(&format!("{prompt}a chore wheel"))), wait);
+    s.ok(
+        "with no clipboard at all, the same; one that works again copies it, says Copied, and the line goes",
+        missing && works,
+        json!({ "none": none, "again": b.eval(&page, COPY_SEEN)? }),
+    );
     // Sharing: what they own, each with who can open it (GET /api/access)
     let theirs = format!("#settings-access .access-row[data-fragment={groceries:?}]");
     let listed = b.until(&page, &format!("!!document.querySelector({theirs:?}) && document.querySelector({theirs:?}).textContent.includes('Anyone with the link')"), wait);
@@ -1223,6 +1250,13 @@ fn visibility(v: &str) -> String {
          Object.defineProperty(document, 'hidden', {{ configurable: true, get: () => {v:?} === 'hidden' }}); document.dispatchEvent(new Event('visibilitychange')); return true; }})()"
     )
 }
+
+/// Settings' build prompt after a Copy: the line under it, when it shows
+/// (`said`), its button's label, and whether the prompt has the focus and
+/// is selected whole.
+const COPY_SEEN: &str = "(() => { const p = document.getElementById('build-prompt'); const said = document.getElementById('build-prompt-said'); \
+    return { said: said && !said.hidden && said.checkVisibility() ? said.textContent : null, button: document.querySelector('#settings-page [data-action=copy-prompt]')?.textContent ?? null, \
+      focused: !!p && document.activeElement === p, selected: !!p && p.value.length > 0 && p.selectionStart === 0 && p.selectionEnd === p.value.length }; })()";
 
 /// The chat's composer, ready for the person: its page has its hello.
 const COMPOSER_READY: &str = "(() => { const t = document.getElementById('text'); return !!t && !t.disabled && document.getElementById('say')?.dataset.ready === '1'; })()";
