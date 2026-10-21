@@ -65,9 +65,10 @@
            and settings (shell.js renderComputer; docs/computers.md, "What
            its owner is told") -->
       <div class="computer-notices" id="computer-notices" role="status" aria-live="polite" hidden></div>
-      <div class="frames" id="frames">
-        <div class="notice" id="notice"><strong>Loading…</strong></div>
-      </div>
+      <!-- the shell's own notice (shell.js notice), above a chat or
+           settings alike: never in #frames, which settings hide -->
+      <div class="notice" id="notice"><strong>Loading…</strong></div>
+      <div class="frames" id="frames"></div>
       <section class="page" id="settings-page" hidden></section>
     </main>
 

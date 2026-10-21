@@ -1105,6 +1105,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     add_skills_ui(s, api, &mut b, &page, &session)?;
     skills_ui(s, api, &mut b, &page, &session)?;
     connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
+    notice_ui(s, &mut b, &page, &chat, &shots)?;
     models_ui(s, api, &mut b, &page, &session, &shots)?;
     computer_ui(s, api, &mut b, &page, &session, &shots)?;
     update_ui(s, api, &mut b, &page, &session, &shots)?;
@@ -2369,6 +2370,75 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let view = shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[])?;
     let back = view.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).is_some_and(|a| a["connections"].is_null());
     s.ok("pressed again, it may use every provider again (null)", again && back, &view);
+    Ok(())
+}
+
+/// The shell's next `method` call whose path matches `re` (a regular
+/// expression's source) refused at once, as a failing network's is: a 503
+/// with a message. Every other call, and every one after it, as it is.
+fn refuse_once(method: &str, re: &str) -> String {
+    format!(
+        "(() => {{ const real = window.fetch; const re = new RegExp({}); window.fetch = async (url, o) => {{ if (o?.method === {} && re.test(String(url))) {{ window.fetch = real; \
+         return new Response(JSON.stringify({{ error: 'unavailable', message: 'refused for the test' }}), {{ status: 503, headers: {{ 'content-type': 'application/json' }} }}); }} return real(url, o); }}; return true; }})()",
+        js(re),
+        js(method)
+    )
+}
+
+/// The shell's notice (`#notice`) as the person sees it: shown, inside the
+/// viewport, and nothing over it (the point at its middle is its own); its
+/// words, and where the person is.
+const NOTICE_SEEN: &str = "(() => { const n = document.getElementById('notice'); const r = n.getBoundingClientRect(); const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); \
+    const inside = r.width > 0 && r.height > 0 && r.top >= 0 && r.left >= 0 && r.bottom <= innerHeight && r.right <= innerWidth; \
+    return { ok: n.checkVisibility() && inside && !!at && n.contains(at), text: n.innerText, box: [r.left, r.top, r.width, r.height].map(Math.round), width: innerWidth, height: innerHeight, \
+      path: location.pathname, settings: !document.getElementById('settings-page').hidden }; })()";
+
+/// On settings, an agent's chip under a connection whose save fails: the
+/// shell's notice says "That was not changed", seen over settings once
+/// they reload, the chip as it was. What was seen, and whether it held.
+fn chip_refused(b: &mut Browser, page: &Page, chip: &str, wait: std::time::Duration) -> Result<(bool, Value)> {
+    b.eval(page, &refuse_once("PUT", "/agents/[^/]+/connections$"))?;
+    b.eval(page, &format!("(document.querySelector({}).click(), true)", js(chip)))?;
+    let told = format!("(() => {{ const v = {NOTICE_SEEN}; return v.ok && v.text.startsWith('That was not changed') && v.path === '/settings' && v.settings && document.querySelector({})?.getAttribute('aria-pressed') === 'true'; }})()", js(chip));
+    let seen = b.until(page, &told, wait);
+    Ok((seen, b.eval(page, NOTICE_SEEN)?))
+}
+
+/// The shell's own notice where the person is (#436), never in a place
+/// settings hide: on settings, the agent chip's failed save is said over
+/// them, in the viewport, on a desktop and a phone (375 px); over a chat,
+/// an archive that failed is said too; each place's notice is its own (the
+/// chat's clears for settings, settings' for the chat), and a reload on
+/// settings shows no Loading… left over the page.
+fn notice_ui(s: &mut Suite, b: &mut Browser, page: &Page, chat: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let chip = "#settings-connections [data-provider=\"perplexity\"] [data-agent]";
+    let (desk, seen) = chip_refused(b, page, chip, wait)?;
+    let _ = b.screenshot(page, &shots.join("desktop-settings-notice.png"));
+    s.ok("on settings, an agent's chip whose save fails says That was not changed over settings, in the viewport, on a desktop; the chip as it was", desk, &seen);
+    open_row(b, page, chat, wait)?;
+    let left = b.eval(page, "document.getElementById('notice').hidden")?;
+    b.eval(page, &refuse_once("PUT", "/archived$"))?;
+    b.eval(page, "(document.getElementById('chat-options').click(), true)")?;
+    let archive = b.until(page, "[...document.querySelectorAll('#menu button')].some((b) => b.textContent === 'Archive')", wait) && menu_item(b, page, "Archive")?;
+    let told = format!("(() => {{ const v = {NOTICE_SEEN}; return v.ok && v.text.startsWith('It was not archived') && v.path === '/' && !v.settings; }})()");
+    let in_chat = archive && b.until(page, &told, wait);
+    let seen = b.eval(page, NOTICE_SEEN)?;
+    s.ok("then a chat opened takes settings' notice away, and an archive that fails there says so over the chat, in the viewport", left == true && in_chat, json!({ "cleared": left, "seen": seen }));
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    let gone = b.until(page, &format!("location.pathname === '/settings' && !!document.querySelector({}) && document.getElementById('notice').hidden", js(chip)), wait);
+    s.ok("and settings opened from there leave the chat's notice with the chat", gone, b.eval(page, NOTICE_SEEN)?);
+    b.viewport(page, 375, 812, true)?;
+    b.reload(page)?;
+    let loaded = b.until(page, &format!("location.pathname === '/settings' && !!document.querySelector({}) && document.getElementById('notice').hidden", js(chip)), wait);
+    let (phone, seen) = chip_refused(b, page, chip, wait)?;
+    let _ = b.screenshot(page, &shots.join("phone-375-settings-notice.png"));
+    s.ok(
+        "on a phone (375 px), settings reloaded show no Loading… over them, and the chip's failed save is said over settings, in the viewport",
+        loaded && phone,
+        json!({ "loaded": loaded, "seen": seen }),
+    );
+    b.viewport(page, 1280, 800, false)?;
     Ok(())
 }
 

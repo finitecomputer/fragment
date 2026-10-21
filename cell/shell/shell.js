@@ -1886,6 +1886,9 @@ function renderSettingsPage(page, sections) {
 }
 async function openSettings(push = true) {
   if (push) at(SETTINGS);
+  // a notice of the page they came from stays there; one raised on
+  // settings stays as they reload (the agent chip's "That was not changed")
+  if (state.page !== "Settings") $("notice").hidden = true;
   state.page = "Settings";
   $("layout").classList.add("settings-view");
   $("frames").hidden = true;
