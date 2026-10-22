@@ -2471,15 +2471,31 @@ function dataSection() {
     }
     if (refused) rows.push(el("p", "settings-warning", refused));
     shown.replaceChildren(...rows);
-    // while it builds, read it again, as long as this page shows it
+    // while it builds, read it again, as long as settings show this section
     clearTimeout(timer);
     if (v?.state === "building") timer = setTimeout(refresh, 2000);
   };
+  // A read that fails keeps the rows shown, adds one line that says so,
+  // and stops reading: its Try again reads again (never a new export), and
+  // what it reads goes on as any read does (#440).
+  const unread = () => {
+    const again = el("button", "quiet", "Try again");
+    again.type = "button";
+    again.dataset.action = "export-read";
+    again.onclick = () => {
+      again.disabled = true;
+      refresh();
+    };
+    const said = actionLine(el("span", "settings-warning", "Couldn't check your export."), again);
+    said.dataset.unread = "";
+    shown.querySelector("[data-unread]")?.remove();
+    shown.append(said);
+  };
   const refresh = () => {
-    if (!s.isConnected && shown.dataset.state !== "loading") return;
-    api("GET", "/api/export")
-      .then((r) => render(r.export))
-      .catch((e) => shown.replaceChildren(el("p", "settings-warning", `Your export did not load: ${e.message}`)));
+    // only while settings show it (its first read is before it is placed);
+    // settings shown again build it again, which reads again
+    if (shown.dataset.state !== "loading" && (!s.isConnected || state.page !== "Settings")) return;
+    api("GET", "/api/export").then((r) => render(r.export), unread);
   };
   refresh();
   return s;

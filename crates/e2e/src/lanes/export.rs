@@ -63,6 +63,16 @@ fn pace(api: &Api, identity: &str, steps: Option<u32>) -> Result<Reply> {
     api.unsigned("POST", "/api/test/export", Some(&json!({ "identity": identity, "op": "pace", "steps": steps })))
 }
 
+/// The shell's calls to its export counted in `window.__export`: its reads
+/// (`reads`, `GET /api/export`) and its presses (`presses`, POST); while
+/// `refuse` is above 0, a read is refused as a failing network's is (a 503
+/// with a message), one less each time.
+const COUNT_EXPORT_CALLS: &str = "(() => { const real = window.fetch; const c = window.__export = { reads: 0, presses: 0, refuse: 0 }; window.fetch = async (url, o) => { \
+    if (String(url) === '/api/export' && o?.method === 'POST') c.presses++; \
+    if (String(url) === '/api/export' && o?.method === 'GET') { c.reads++; if (c.refuse > 0) { c.refuse--; \
+      return new Response(JSON.stringify({ error: 'unavailable', message: 'refused for the test' }), { status: 503, headers: { 'content-type': 'application/json' } }); } } \
+    return real(url, o); }; return true; })()";
+
 /// Waits for `keys`' export to be ready (or to fail): its view.
 fn built(s: &Suite, api: &Api, keys: &Keys) -> Value {
     s.eventually(BUILT, || view(api, keys)["state"] != "building");
@@ -448,11 +458,59 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
             let got = s.eventually(Duration::from_secs(30), || saved().and_then(|p| std::fs::metadata(p).ok()).is_some_and(|m| m.len() == archive.len() as u64));
             let same = saved().and_then(|p| std::fs::read(p).ok()).is_some_and(|b| b == archive);
             s.ok("a click on its download saves the archive, byte for byte", got && same, format!("{:?}", saved()));
+            // a new one, held building (#440): behind a chat, the page reads
+            // it no more; settings shown again read it again; a read of it
+            // that fails keeps its rows and says so once, with Try again,
+            // which only reads; then it is followed until it is ready
+            pace(api, &paul_id, Some(0))?;
+            chrome.eval(&page, COUNT_EXPORT_CALLS)?;
             chrome.click(&page, "#settings-data [data-action=export]")?;
-            let again = s.eventually(BUILT, || view(api, &paul)["id"] != id.as_str() && view(api, &paul)["state"] == "ready");
+            let building = "(() => { const e = document.querySelector('#settings-data .settings-export'); return e?.dataset.state === 'building' && e.innerText.includes('Building') && e.innerText.includes('Progress'); })()";
+            let held = chrome.until(&page, building, Duration::from_secs(30));
             let new_id = view(api, &paul)["id"].as_str().unwrap_or("").to_string();
+            let polled = chrome.until(&page, "window.__export.reads >= 1", Duration::from_secs(30));
+            chrome.eval(&page, &format!("(document.querySelector({:?}).click(), true)", format!("#chats [data-key=\"chat:{chat_name}\"]")))?;
+            let left = chrome.until(&page, "location.pathname === '/' && document.getElementById('settings-page').hidden", Duration::from_secs(30));
+            let before = chrome.eval(&page, "window.__export.reads")?;
+            std::thread::sleep(Duration::from_secs(5));
+            let after = chrome.eval(&page, "window.__export.reads")?;
+            s.ok(
+                "while an export builds, settings read it every 2 s; behind a chat, they read it no more (5 s: two of their reads)",
+                held && polled && left && before == after,
+                json!({ "before": before, "after": after }),
+            );
+            chrome.eval(&page, "(document.getElementById('settings').click(), true)")?;
+            let back = chrome.until(&page, &format!("{building} && window.__export.reads > {before}"), Duration::from_secs(30));
+            chrome.eval(&page, "(window.__export.refuse = 1, true)")?;
+            let warned = chrome.until(
+                &page,
+                &format!("{building} && document.querySelectorAll('#settings-data [data-unread]').length === 1 && !!document.querySelector('#settings-data [data-unread] [data-action=export-read]')"),
+                Duration::from_secs(30),
+            );
+            let text = chrome.eval(&page, "document.getElementById('settings-data')?.innerText ?? ''")?;
+            let text = text.as_str().unwrap_or("").to_string();
+            s.ok(
+                "settings shown again read it again; a read of it that fails keeps its rows (Building, its progress), and one line says it could not be checked, with Try again: never the platform's words",
+                back && warned && text.contains("Couldn't check your export.") && !text.contains("refused for the test"),
+                &text,
+            );
+            let reads = chrome.eval(&page, "window.__export.reads")?.as_u64().unwrap_or(0);
+            chrome.eval(&page, "(document.querySelector('#settings-data [data-action=export-read]')?.click(), true)")?;
+            let resumed = chrome.until(&page, &format!("{building} && !document.querySelector('#settings-data [data-unread]') && window.__export.reads >= {}", reads + 2), Duration::from_secs(30));
+            let counted = chrome.eval(&page, "window.__export")?;
+            s.ok(
+                "its Try again reads it again, and starts nothing: the line goes, the rows stay, and settings read it again every 2 s as it builds",
+                resumed && counted["presses"] == 1 && view(api, &paul)["id"] == new_id.as_str(),
+                &counted,
+            );
+            pace(api, &paul_id, None)?;
+            let again = s.eventually(BUILT, || view(api, &paul)["state"] == "ready");
             let followed = again && chrome.until(&page, &link(&new_id), Duration::from_secs(30));
-            s.ok("its Export again starts a new one, which the page follows until it is ready", followed && fragment_proto::export::valid_export_id(&new_id), view(api, &paul));
+            s.ok(
+                "its Export again started a new one, which the page follows until it is ready",
+                followed && new_id != id && fragment_proto::export::valid_export_id(&new_id),
+                view(api, &paul),
+            );
         }
     }
 
