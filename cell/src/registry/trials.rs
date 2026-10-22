@@ -383,9 +383,17 @@ impl RegistryCell {
         }
     }
 
-    /// A trial's Checkout completed: its use holds its place for good.
+    /// A trial's Checkout completed: its use holds its place for good,
+    /// however its hold went meanwhile (expired, moved to another code, or
+    /// given back after an answer of Stripe's that was lost while the
+    /// session was made): the person's row is this trial's, bought.
     pub(super) fn trial_bought(&self, code: &str, person: &str, subscription: &str) -> CellResult<()> {
-        self.exec("UPDATE trial_uses SET subscription = ? WHERE person = ? AND code = ?", vec![subscription.into(), person.into(), code.into()])
+        let now = SqlStorageValue::Integer(js::now_ms());
+        self.exec(
+            "INSERT INTO trial_uses (person, code, at, expires_at, subscription) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (person) DO UPDATE SET code = excluded.code, subscription = excluded.subscription",
+            vec![person.into(), code.into(), now.clone(), now, subscription.into()],
+        )
     }
 
     pub(super) fn trials_route(&self, path: &str, bytes: &[u8]) -> Option<CellResult<Response>> {
