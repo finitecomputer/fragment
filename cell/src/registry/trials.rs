@@ -78,16 +78,16 @@ pub(crate) struct TrialOffer {
 }
 
 /// `POST /trials/release`: a Checkout that never was (Stripe refused it,
-/// or it failed before a session existed) gives back the place it took at
-/// once, rather than when it would have expired. Only a place it took
-/// fresh (`at`, `CheckoutPlan::hold_at`): one the person already held for
-/// an earlier Checkout, maybe still open on Stripe's page, stays theirs.
-/// Asked again, or after a newer hold, it changes nothing.
+/// or it failed before a session existed) takes its own part out of the
+/// person's held trial place (`attempt`, `CheckoutPlan::hold`), and the
+/// place goes at once if no other Checkout of theirs holds it: one made,
+/// maybe open on Stripe's page, or one still under way, keeps it
+/// (fragment_core::org::hold_released). Asked again, or of another hold,
+/// it changes nothing.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct TrialRelease {
     pub person: String,
-    pub code: String,
-    pub at: i64,
+    pub attempt: String,
 }
 
 impl Call for TrialRelease {
@@ -121,6 +121,16 @@ impl CodeRow {
 #[derive(Deserialize)]
 struct UseRow {
     subscription: Option<String>,
+}
+
+/// `trial_uses.attempts`, read: the attempt ids holding a place.
+fn attempts_of(text: &str) -> CellResult<Vec<String>> {
+    serde_json::from_str(text).map_err(|e| CellError::host(format!("trial_uses.attempts: {e}")))
+}
+
+/// `trial_uses.attempts`, as stored.
+fn attempts_text(ids: &[String]) -> CellResult<String> {
+    serde_json::to_string(ids).map_err(|e| CellError::host(format!("trial_uses.attempts: {e}")))
 }
 
 fn not_a_code() -> CellError {
@@ -320,27 +330,57 @@ impl RegistryCell {
         Ok(TrialOffer { id: r.id.clone(), kind: r.kind()?, days: u32::try_from(r.days).map_err(|_| CellError::host("trial_codes.days"))? })
     }
 
-    /// Holds a code's place for `person`'s Checkout until it expires. When
-    /// it took the place fresh (the person held none open), when it did:
-    /// what `TrialRelease` gives back if the Checkout never is.
-    pub(super) fn hold_trial_place(&self, code: &str, person: &str, until_ms: i64) -> CellResult<Option<i64>> {
+    /// Holds a code's place for `person`'s Checkout until it expires: this
+    /// Checkout's own attempt id, among those of their open hold of the
+    /// code (fragment_core::org::hold_taken), which `TrialRelease` takes
+    /// out if it never is.
+    pub(super) fn hold_trial_place(&self, code: &str, person: &str, until_ms: i64) -> CellResult<String> {
+        #[derive(Deserialize)]
+        struct Open {
+            code: String,
+            attempts: Option<String>,
+        }
         let now = js::now_ms();
-        let held = self.count("SELECT COUNT(*) AS n FROM trial_uses WHERE person = ? AND subscription IS NULL AND expires_at > ?", vec![person.into(), SqlStorageValue::Integer(now)])? > 0;
-        self.exec(
-            "INSERT INTO trial_uses (person, code, at, expires_at, subscription) VALUES (?, ?, ?, ?, NULL)
-             ON CONFLICT (person) DO UPDATE SET code = excluded.code, at = excluded.at, expires_at = excluded.expires_at
-             WHERE trial_uses.subscription IS NULL",
-            vec![person.into(), code.into(), SqlStorageValue::Integer(now), SqlStorageValue::Integer(until_ms)],
+        let open = self.row::<Open>(
+            "SELECT code, attempts FROM trial_uses WHERE person = ? AND subscription IS NULL AND expires_at > ?",
+            vec![person.into(), SqlStorageValue::Integer(now)],
         )?;
-        Ok((!held).then_some(now))
+        let held = match open {
+            Some(o) if o.code == code => Some(match o.attempts {
+                Some(a) => attempts_of(&a)?,
+                // held before attempts were named: kept to its expiry
+                None => vec![org::HOLD_KEPT.to_string()],
+            }),
+            // none open, or another code's (this Checkout moves the hold)
+            _ => None,
+        };
+        let attempt = hex::encode(js::random_bytes::<8>());
+        let ids = org::hold_taken(held, &attempt);
+        self.exec(
+            "INSERT INTO trial_uses (person, code, at, expires_at, subscription, attempts) VALUES (?, ?, ?, ?, NULL, ?)
+             ON CONFLICT (person) DO UPDATE SET code = excluded.code, at = excluded.at, expires_at = excluded.expires_at, attempts = excluded.attempts
+             WHERE trial_uses.subscription IS NULL",
+            vec![person.into(), code.into(), SqlStorageValue::Integer(now), SqlStorageValue::Integer(until_ms), attempts_text(&ids)?.into()],
+        )?;
+        Ok(attempt)
     }
 
-    /// A Checkout that never was gives back the place it took (`TrialRelease`).
+    /// A Checkout that never was takes its part out of the held place, which
+    /// goes once no Checkout holds it (`TrialRelease`).
     fn trial_release(&self, b: TrialRelease) -> CellResult<()> {
-        self.exec(
-            "DELETE FROM trial_uses WHERE person = ? AND code = ? AND at = ? AND subscription IS NULL",
-            vec![b.person.into(), b.code.into(), SqlStorageValue::Integer(b.at)],
-        )
+        #[derive(Deserialize)]
+        struct Held {
+            attempts: Option<String>,
+        }
+        let Some(h) = self.row::<Held>("SELECT attempts FROM trial_uses WHERE person = ? AND subscription IS NULL", vec![b.person.as_str().into()])? else {
+            return Ok(());
+        };
+        let ids = h.attempts.as_deref().map(attempts_of).transpose()?.unwrap_or_default();
+        match org::hold_released(&ids, &b.attempt) {
+            None => Ok(()),
+            Some(left) if left.is_empty() => self.exec("DELETE FROM trial_uses WHERE person = ? AND subscription IS NULL", vec![b.person.into()]),
+            Some(left) => self.exec("UPDATE trial_uses SET attempts = ? WHERE person = ? AND subscription IS NULL", vec![attempts_text(&left)?.into(), b.person.into()]),
+        }
     }
 
     /// A trial's Checkout completed: its use holds its place for good.

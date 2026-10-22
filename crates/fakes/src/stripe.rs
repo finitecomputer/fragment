@@ -103,6 +103,9 @@ struct State {
     pending: Vec<Value>,
     /// Requests refused while set (`fail`, `refuse`): (method, path prefix, status).
     failing: Vec<(String, String, u16)>,
+    /// Requests answered only after a wait while set (`delay`): (method,
+    /// path prefix, the wait).
+    delaying: Vec<(String, String, std::time::Duration)>,
     /// Pending invoice items: id → (customer, subscription, amount), the
     /// prorations a quantity change made, waiting for an invoice.
     items: BTreeMap<String, (String, String, i64)>,
@@ -285,9 +288,18 @@ impl Stripe {
             let f = form(&req.body);
             let mut s = st.lock().expect("stripe state");
             s.asked.push(Asked { method: req.method.clone(), path: req.path.clone(), form: f.clone() });
-            if let Some((_, _, status)) = s.failing.iter().find(|(m, p, _)| *m == req.method && req.path.starts_with(p.as_str())) {
-                let kind = if *status >= 500 { "api_error" } else { "invalid_request_error" };
-                return error(*status, kind, "the fake refuses this request (a lever)");
+            // refused or not as it arrives, then answered after its delay
+            // (`delay`), the state let go meanwhile
+            let matches = |m: &String, p: &String| *m == req.method && req.path.starts_with(p.as_str());
+            let refused = s.failing.iter().find(|(m, p, _)| matches(m, p)).map(|(_, _, status)| *status);
+            if let Some(by) = s.delaying.iter().find(|(m, p, _)| matches(m, p)).map(|(_, _, by)| *by) {
+                drop(s);
+                std::thread::sleep(by);
+                s = st.lock().expect("stripe state");
+            }
+            if let Some(status) = refused {
+                let kind = if status >= 500 { "api_error" } else { "invalid_request_error" };
+                return error(status, kind, "the fake refuses this request (a lever)");
             }
             let idem = (req.method == "POST").then(|| req.header("idempotency-key").map(|k| format!("{}:{k}", req.path))).flatten();
             if let Some((status, v)) = idem.as_ref().and_then(|k| s.idempotent.get(k)).cloned() {
@@ -457,6 +469,17 @@ impl Stripe {
         s.failing.retain(|(m, p, _)| !(m == method && p == prefix));
         if let Some(status) = status {
             s.failing.push((method.to_string(), prefix.to_string(), status));
+        }
+    }
+
+    /// Requests of `method` under `prefix` are answered only after `by` (a
+    /// slow Stripe: overlapping calls), whether they are refused decided
+    /// as they arrive; with none, at once again.
+    pub fn delay(&self, method: &str, prefix: &str, by: Option<std::time::Duration>) {
+        let mut s = self.state.lock().expect("stripe state");
+        s.delaying.retain(|(m, p, _)| !(m == method && p == prefix));
+        if let Some(by) = by {
+            s.delaying.push((method.to_string(), prefix.to_string(), by));
         }
     }
 

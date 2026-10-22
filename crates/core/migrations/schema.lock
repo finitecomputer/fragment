@@ -9,6 +9,7 @@ step Fragment 2 listed 464da803484efc23
 step Fragment 3 record_schedules 90308e727fc4ce8b
 step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
+step Registry 3 trial_hold_attempts 07e123e05a049abe
 step Principal 1 baseline 28b4d4bf3f8cdb71
 step Principal 2 listed 09e5aab70c4f7f61
 step Ledger 1 baseline 6d5c6ebad64a53b2
@@ -127,7 +128,7 @@ Registry table subjects: CREATE TABLE subjects ( issuer TEXT NOT NULL, subject T
 Registry index subjects_email: CREATE INDEX subjects_email ON subjects (email)
 Registry index subjects_identity: CREATE INDEX subjects_identity ON subjects (identity)
 Registry table trial_codes: CREATE TABLE trial_codes ( id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, name TEXT NOT NULL, kind TEXT NOT NULL, days INTEGER NOT NULL, capacity INTEGER NOT NULL, expires_at INTEGER, active INTEGER NOT NULL, revision INTEGER NOT NULL, created_at INTEGER NOT NULL, created_by TEXT NOT NULL)
-Registry table trial_uses: CREATE TABLE trial_uses ( person TEXT PRIMARY KEY, code TEXT NOT NULL, at INTEGER NOT NULL, expires_at INTEGER NOT NULL, subscription TEXT)
+Registry table trial_uses: CREATE TABLE trial_uses ( person TEXT PRIMARY KEY, code TEXT NOT NULL, at INTEGER NOT NULL, expires_at INTEGER NOT NULL, subscription TEXT, attempts TEXT)
 Registry index trial_uses_code: CREATE INDEX trial_uses_code ON trial_uses (code, expires_at)
 Registry table wiped_agents: CREATE TABLE wiped_agents ( identity TEXT NOT NULL, agent TEXT NOT NULL, PRIMARY KEY (identity, agent))
 Registry table wiped_orgs: CREATE TABLE wiped_orgs ( identity TEXT NOT NULL, org TEXT NOT NULL, ended INTEGER NOT NULL, canceled INTEGER NOT NULL, lapsed INTEGER NOT NULL, PRIMARY KEY (identity, org))

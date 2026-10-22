@@ -103,13 +103,14 @@ async fn checkout(env: &Env, cfg: &Config, by: By, buy: Buy) -> CellResult<Check
     let plan = ask_registry(env, &CheckoutBegin { by, kind: buy.kind, trial: buy.trial_code, until_ms: expires_at_s * 1000 }).await?;
     let made = session_of(env, cfg, stripe_cfg, &plan, expires_at_s).await;
     // a Checkout that never was (Stripe refused it, or it failed before a
-    // session the person could open) gives back the trial's place it took
-    // at once, rather than in CHECKOUT_TTL_S; one made keeps it, as its
-    // page may be open
-    if let (Err(e), Some(t), Some(at)) = (&made, &plan.trial, plan.hold_at) {
-        if let Err(again) = ask_registry(env, &TrialRelease { person: plan.person.clone(), code: t.id.clone(), at }).await {
+    // session the person could open) takes its part out of the trial's held
+    // place at once, rather than in CHECKOUT_TTL_S; the place goes if no
+    // other Checkout of theirs holds it (one made, maybe open on Stripe's
+    // page, or one still under way keeps it)
+    if let (Err(e), Some(attempt)) = (&made, &plan.hold) {
+        if let Err(again) = ask_registry(env, &TrialRelease { person: plan.person.clone(), attempt: attempt.clone() }).await {
             // its place is held until the Checkout's own expiry, as before
-            console_error!("{}", json!({ "trial_release": t.id, "after": e.message, "failed": again.message }));
+            console_error!("{}", json!({ "trial_release": attempt, "after": e.message, "failed": again.message }));
         }
     }
     made

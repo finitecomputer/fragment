@@ -205,5 +205,48 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
             && view.body["open"] == 1,
         json!({ "refused": refused.status, "taken": taken.status, "again": pip_again.status, "full": [full.status, full.message()], "mine": mine.status, "view": view.body }),
     );
+
+    // ---- overlapping Checkouts of one person's place (#484's review),
+    // Stripe slow (a 3 s wait on its Checkouts): A under way, then B; both
+    // refused, the place goes once both have (another's Checkout takes
+    // it); A refused while B was made meanwhile, it stays B's (another
+    // finds none)
+    let codes = [admin("POST", "/trials", Some(&json!({ "name": "Both fail", "kind": "seat_always_on", "days": 7, "capacity": 1 })))?, admin("POST", "/trials", Some(&json!({ "name": "One made", "kind": "seat_always_on", "days": 7, "capacity": 1 })))?];
+    let code_of = |i: usize| codes[i].body["code"].as_str().unwrap_or("").to_string();
+    let checkout = |who: &fragment_nip98::Keys, code: &str| api.signed(who, "POST", "/api/billing/checkout", Some(&json!({ "trialCode": code })));
+    let sessions = || s.stripe.requests().iter().filter(|r| r.path == "/v1/checkout/sessions").count();
+    // A under way (its Checkout at Stripe), then `b` asked while it waits; A's answer
+    let overlapping = |who: &fragment_nip98::Keys, code: &str, b: &dyn Fn() -> Result<crate::api::Reply>| -> Result<(u16, u16)> {
+        let before = sessions();
+        std::thread::scope(|scope| {
+            let a = scope.spawn(|| checkout(who, code));
+            let arrived = s.eventually(Duration::from_secs(10), || sessions() > before);
+            anyhow::ensure!(arrived, "A's Checkout reached Stripe");
+            let b = b()?;
+            let a = a.join().map_err(|_| anyhow::anyhow!("A's call panicked"))??;
+            Ok((a.status, b.status))
+        })
+    };
+    let (rae, sal, tom, uli) = (api.person()?, api.person()?, api.person()?, api.person()?);
+    s.stripe.delay("POST", "/v1/checkout/sessions", Some(Duration::from_secs(3)));
+    s.stripe.fail("POST", "/v1/checkout/sessions", true);
+    let (a_both, b_both) = overlapping(&rae, &code_of(0), &|| checkout(&rae, &code_of(0)))?;
+    s.stripe.fail("POST", "/v1/checkout/sessions", false);
+    s.stripe.delay("POST", "/v1/checkout/sessions", None);
+    let freed = checkout(&sal, &code_of(0))?;
+    s.stripe.delay("POST", "/v1/checkout/sessions", Some(Duration::from_secs(3)));
+    s.stripe.fail("POST", "/v1/checkout/sessions", true);
+    let (a_one, b_one) = overlapping(&tom, &code_of(1), &|| {
+        // A refused as it arrived; B, after it, made at once
+        s.stripe.fail("POST", "/v1/checkout/sessions", false);
+        s.stripe.delay("POST", "/v1/checkout/sessions", None);
+        checkout(&tom, &code_of(1))
+    })?;
+    let kept = checkout(&uli, &code_of(1))?;
+    s.ok(
+        "overlapping Checkouts of one person's trial place: both refused, it goes once both have (another person's Checkout takes it); one refused while the other was made, it stays (another finds none, 409)",
+        a_both >= 500 && b_both >= 500 && freed.status == 200 && a_one >= 500 && b_one == 200 && kept.status == 409 && kept.message().contains("places"),
+        json!({ "both": [a_both, b_both, freed.status], "one_made": [a_one, b_one, kept.status, kept.message()] }),
+    );
     Ok(())
 }
