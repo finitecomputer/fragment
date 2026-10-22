@@ -1,7 +1,7 @@
 //! `cargo xtask <command>`: the repo's tooling, in Rust.
 //!
 //!   build            build cell/ for wasm32 (worker-build 0.8.5: build.rs)
-//!   dev [--clean] [--runtime wrangler|celld]
+//!   dev [--clean] [--runtime wrangler|celld] [--lan]
 //!                    build, then run the stack in the foreground under
 //!                    `wrangler dev`: the cell on :8790 (fragments at
 //!                    <name>.fragment.localhost:8790), the
@@ -27,12 +27,20 @@
 //!                    (FRAGMENT_OIDC_ISSUER: `dev_oidc`; docs/self-host.md,
 //!                    seam 4). FRAGMENT_DEV_PORT moves the stack and its
 //!                    fakes together (`dev_shift`), so a second one runs
-//!                    beside one on :8790
+//!                    beside one on :8790. --lan serves it to the home
+//!                    network as an intranet (on celld; lan.rs,
+//!                    docs/self-host-lan.md): https://<zone> through a TLS
+//!                    front door under a CA of its own, DNS for the zone,
+//!                    Dex signing people in, OpenBao holding the secrets,
+//!                    and computers on this machine's sandcastle engine
+//!                    behind a node the stack runs; no WorkOS, Stripe or
+//!                    mail fake
 //!   node-images [--tag <tag>] [--engine <dir>]
 //!                    the stub and our Hermes image built here and loaded
 //!                    into this machine's sandcastle engine (default
 //!                    /var/lib/sandcastle), printing the `images` a node list
-//!                    names them by, each pinned by its digest
+//!                    names them by, each pinned by its digest (and
+//!                    recording them for dev --lan's node list)
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -117,6 +125,7 @@ mod guards;
 mod html_sinks;
 mod image;
 mod js_syntax;
+mod lan;
 #[cfg(test)]
 mod markdown_dom;
 mod schema_lock;
@@ -144,6 +153,10 @@ const DEV_OIDC_SECRET: &str = "oidc-secret-fragment-dev";
 /// OpenBao, on loopback, when the cell's secrets are its (on celld,
 /// `FRAGMENT_SECRETS_BACKEND=openbao`: `dev_openbao`).
 const DEV_OPENBAO_PORT: u16 = 8804;
+/// The LAN mode's Dex, on loopback behind its front door, and the box's
+/// node in front of the machine's sandcastle engine (lan.rs).
+const DEV_DEX_PORT: u16 = 8806;
+const DEV_NODE_PORT: u16 = 8808;
 const DEV_STRIPE_WEBHOOK: &str = "whsec_fragment_dev";
 /// Where dev's mail says it comes from.
 const DEV_MAIL_FROM: &str = "fragment <mail@fragment.localhost>";
@@ -156,8 +169,8 @@ const DEV_ORG: &str = "fragment-dev";
 /// (each fake keeps its place above the cell), so a second stack runs
 /// beside one on :8790; none when it is unset.
 fn dev_shift() -> Result<u16> {
-    // OpenBao's, the highest a stack takes
-    let top = DEV_OPENBAO_PORT - DEV_PORT;
+    // the LAN's node's, the highest a stack takes
+    let top = DEV_NODE_PORT - DEV_PORT;
     match std::env::var("FRAGMENT_DEV_PORT") {
         Err(_) => Ok(0),
         Ok(p) => match p.parse::<u16>() {
@@ -189,9 +202,17 @@ fn build() -> Result<()> {
 }
 
 fn dev(args: &[String]) -> Result<()> {
+    // the home network as an intranet (lan.rs): its settings first, so a
+    // bad one stops the run before a build; it runs on celld
+    let lan_settings = match args.iter().any(|a| a == "--lan") {
+        true => Some(lan::Settings::from_env()?),
+        false => None,
+    };
     // the runtime: wrangler's local workerd, or celld (docs/self-host.md,
     // seam 1), located first: a missing CELLD_BIN stops the run at once
     let celld = match args.iter().position(|a| a == "--runtime").map(|i| args.get(i + 1).map(String::as_str)) {
+        None if lan_settings.is_some() => Some(devstack::celld::CelldTools::locate()?),
+        Some(Some("wrangler")) if lan_settings.is_some() => bail!("--lan runs on celld: drop --runtime wrangler"),
         None | Some(Some("wrangler")) => None,
         Some(Some("celld")) => Some(devstack::celld::CelldTools::locate()?),
         Some(other) => bail!("--runtime is wrangler or celld, not {}", other.unwrap_or("nothing")),
@@ -209,61 +230,98 @@ fn dev(args: &[String]) -> Result<()> {
         devstack::clear_state(&devstack::cell_dir())?;
     }
     let store = dev_codestore(clean, at(DEV_CODESTORAGE_PORT))?;
-    // sign-in: a real WorkOS environment when its files are named (its
-    // redirect URI must include http://127.0.0.1:8790/auth/callback), else the fake
     let read = |var: &str| -> Result<Option<String>> {
         match std::env::var_os(var) {
             Some(path) => Ok(Some(std::fs::read_to_string(&path).with_context(|| format!("reading {}", Path::new(&path).display()))?.trim().to_string())),
             None => Ok(None),
         }
     };
-    let (workos, _workos_fake) = match (read("WORKOS_CLIENT_ID_FILE")?, read("WORKOS_API_KEY_FILE")?) {
-        (Some(client_id), Some(api_key)) => (devstack::WorkOsVars { client_id, api_key, api_url: None }, None),
-        _ => {
+    // the LAN: its CA, Dex and the front door, then the box's node before
+    // the cell (it reaches the platform only for a computer's requests)
+    let lan = match lan_settings {
+        Some(s) => Some(lan::start(s, dev_port, at(DEV_DEX_PORT))?),
+        None => None,
+    };
+    let box_node = match (&lan, std::env::var_os(devstack::sandcastle::NODES_FILE_VAR)) {
+        (Some(l), None) => lan::box_node(l, at(DEV_NODE_PORT))?,
+        _ => None,
+    };
+    // sign-in: on the LAN, Dex alone; else a real WorkOS environment when
+    // its files are named (its redirect URI must include
+    // http://127.0.0.1:8790/auth/callback), else the fake
+    let (workos, _workos_fake) = match (&lan, read("WORKOS_CLIENT_ID_FILE")?, read("WORKOS_API_KEY_FILE")?) {
+        (Some(_), _, _) => (None, None),
+        (None, Some(client_id), Some(api_key)) => (Some(devstack::WorkOsVars { client_id, api_key, api_url: None }), None),
+        (None, _, _) => {
             let fake = fragment_fakes::workos::WorkOs::start_on(at(DEV_WORKOS_PORT), DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
-            (devstack::WorkOsVars { client_id: DEV_WORKOS_CLIENT.into(), api_key: DEV_WORKOS_KEY.into(), api_url: Some(fake.url.clone()) }, Some(fake))
+            (Some(devstack::WorkOsVars { client_id: DEV_WORKOS_CLIENT.into(), api_key: DEV_WORKOS_KEY.into(), api_url: Some(fake.url.clone()) }), Some(fake))
         }
     };
     let ai = fragment_fakes::workers_ai::WorkersAi::start(at(DEV_AI_PORT))?;
-    let models = dev_models(&read)?;
+    // a LAN's models are its state's when FRAGMENT_MODELS_FILE names none
+    let models = dev_models(&read, lan.as_ref().and_then(|l| l.settings.models_file()))?;
     // the cell's own secrets: wrangler's local store, or on celld the
     // stand-ins' variables or OpenBao behind them (docs/self-host.md, seam 12)
-    let openbao = dev_openbao(celld.is_some(), clean, at(DEV_OPENBAO_PORT))?;
-    let mailer = fragment_fakes::mail::Mailer::start(at(DEV_MAIL_PORT), true)?;
-    let stripe = fragment_fakes::stripe::Stripe::start(at(DEV_STRIPE_PORT), DEV_STRIPE_KEY)?;
-    stripe.set_endpoint(&format!("http://127.0.0.1:{dev_port}/api/stripe/webhook"), DEV_STRIPE_WEBHOOK);
-    let (oidc, oidc_fake) = dev_oidc(&read, at(DEV_OIDC_PORT))?;
-    let signin_label = match (&oidc, &workos.api_url) {
+    let openbao = dev_openbao(celld.is_some(), lan.as_ref(), clean, at(DEV_OPENBAO_PORT))?;
+    // an intranet has no mailer and sells nothing: the LAN runs with neither
+    // fake, as a self-hosted deployment runs (no mail: docs/technical-debt-ledger.md)
+    let mailer = match &lan {
+        Some(_) => None,
+        None => Some(fragment_fakes::mail::Mailer::start(at(DEV_MAIL_PORT), true)?),
+    };
+    let stripe = match &lan {
+        Some(_) => None,
+        None => {
+            let stripe = fragment_fakes::stripe::Stripe::start(at(DEV_STRIPE_PORT), DEV_STRIPE_KEY)?;
+            stripe.set_endpoint(&format!("http://127.0.0.1:{dev_port}/api/stripe/webhook"), DEV_STRIPE_WEBHOOK);
+            Some(stripe)
+        }
+    };
+    let (oidc, oidc_fake) = match &lan {
+        Some(l) => (Some(l.oidc()), None),
+        None => dev_oidc(&read, at(DEV_OIDC_PORT))?,
+    };
+    let signin_label = match (&oidc, workos.as_ref().and_then(|w| w.api_url.as_ref())) {
+        (Some(o), _) if lan.is_some() => format!("Dex at {}", o.issuer),
         (Some(o), _) if oidc_fake.is_some() => format!("{} (the OpenID Connect fake: any email)", o.issuer),
         (Some(o), _) => format!("the OpenID Connect provider {}", o.issuer),
         (None, Some(u)) => format!("{u} (the WorkOS fake)"),
-        (None, None) => format!("WorkOS {}", workos.client_id),
+        (None, None) => format!("WorkOS {}", workos.as_ref().map_or("", |w| w.client_id.as_str())),
+    };
+    // fragments' hosts and the platform's origin: on the LAN, the zone
+    // behind the front door; else loopback
+    let (suffix, platform_url) = match &lan {
+        Some(l) => (l.settings.zone.clone(), l.settings.platform_url()),
+        None => ("fragment.localhost".to_string(), format!("http://127.0.0.1:{dev_port}")),
     };
     // preview cards: wrangler's workerd has Browser Rendering's local mode;
     // on celld, which has no `browser` binding, the renderer shoots them
-    let (suffix, platform_url) = ("fragment.localhost", format!("http://127.0.0.1:{dev_port}"));
+    // (on the LAN, through the front door, under its root)
     let renderer = match celld {
-        Some(_) => Some(dev_renderer(suffix, &platform_url)?),
+        Some(_) => Some(dev_renderer(&suffix, &platform_url, lan.as_ref().map(lan::Lan::renderer_defaults))?),
         None => None,
     };
     // computers on sandcastle nodes (docs/self-host.md, seam 2): a node
-    // list, each node's secret in a file of its own beside it, and whether
-    // people may pair their own
-    let nodes = match std::env::var_os(devstack::sandcastle::NODES_FILE_VAR) {
-        Some(file) => Some(devstack::sandcastle::NodesFile::read(Path::new(&file))?),
-        None => None,
+    // list, each node's secret in a file of its own beside it (on the LAN,
+    // the box's node's, unless FRAGMENT_NODES_FILE names another), and
+    // whether people may pair their own
+    let nodes = match (std::env::var_os(devstack::sandcastle::NODES_FILE_VAR), &box_node) {
+        (Some(file), _) => Some(devstack::sandcastle::NodesFile::read(Path::new(&file))?),
+        (None, Some(b)) => Some(devstack::sandcastle::NodesFile::read(&b.list)?),
+        (None, None) => None,
     };
     let byoc = match std::env::var("FRAGMENT_BYOC").as_deref() {
         Err(_) | Ok("off") => false,
         Ok("on") => true,
         Ok(other) => bail!("FRAGMENT_BYOC is on or off, not {other}"),
     };
+    let computer_image = dev_computer_image(nodes.as_ref(), lan.is_some(), celld.is_some())?;
     let fleet = devstack::Fleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
         codestorage_org: store.org.clone(),
         codestorage_key_pem: store.key_pem.clone(),
         codestorage_url: store.url.clone(),
-        host_suffix: suffix.into(),
+        host_suffix: suffix.clone(),
         host_label_suffix: None,
         // A dev fragment's pins move by its own moves, the CLI's refresh, and this poll.
         poll_interval_s: 10,
@@ -278,33 +336,28 @@ fn dev(args: &[String]) -> Result<()> {
         model_key_slots: models.as_ref().map(|m| m.slots.clone()).unwrap_or_default(),
         model_key_value: models.as_ref().and_then(|m| m.key.clone()),
         // the mail fake, which prints each message (dev never sends real mail)
-        mail_url: Some(mailer.url.clone()),
-        mail_from: Some(DEV_MAIL_FROM.into()),
+        mail_url: mailer.as_ref().map(|m| m.url.clone()),
+        mail_from: mailer.as_ref().map(|_| DEV_MAIL_FROM.into()),
         // a dev person is a seat, with the month's included credit
         default_plan: Some("seat".into()),
         delivery_retry_s: None,
-        workos: Some(workos),
+        workos,
         oidc,
-        stripe: Some(devstack::StripeVars {
+        stripe: stripe.as_ref().map(|s| devstack::StripeVars {
             key: DEV_STRIPE_KEY.into(),
             webhook_secret: DEV_STRIPE_WEBHOOK.into(),
-            api_url: Some(stripe.url.clone()),
+            api_url: Some(s.url.clone()),
             portal: None,
             tax: false,
         }),
-        // the CLI's host: sign-in and approvals happen where it points
-        platform_url,
+        // the CLI's host: sign-in and approvals happen where it points (on
+        // the LAN, the front door's https origin)
+        platform_url: platform_url.clone(),
         operators: None,
         signins_pending_max: None,
         cli_begins_per_ip_minute: None,
         test_secret: None,
-        // celld runs no containers of its own here: a self-hosted
-        // deployment's computers are a sandcastle node's (seam 2), the
-        // node list's image (the stub) where it names one
-        computer_image: match &nodes {
-            Some(n) => n.default_image(),
-            None => celld.is_none().then(|| "stub".into()),
-        },
+        computer_image: computer_image.clone(),
         computer_snapshots: false,
         computer_unsaved_max_ms: None,
         providers: None,
@@ -336,30 +389,45 @@ fn dev(args: &[String]) -> Result<()> {
     };
     let (node, took) = match &celld {
         None => devstack::Node::start(&tools, &opts)?,
-        Some(celld) => devstack::celld::start(celld, &opts)?,
+        // the cell's own fetches (Dex's discovery, keys, token) trust the LAN's root
+        Some(celld) => devstack::celld::start(celld, &opts, lan.as_ref().map(|l| l.ca_file.as_path()))?,
     };
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
     match &celld {
         None => println!("  runtime:      wrangler dev (workerd)"),
+        Some(c) if lan.is_some() => println!("  runtime:      celld dev ({}): no mail (an invite's link is shared by hand)", c.celld.display()),
         Some(c) => println!("  runtime:      celld dev ({}): no mail but the fake's", c.celld.display()),
+    }
+    match &lan {
+        Some(l) => lan::banner(l).iter().for_each(|line| println!("{line}")),
+        None => println!("  fragments:    http://<name>.fragment.localhost:{dev_port}/"),
     }
     match &renderer {
         Some((r, said)) => println!("  cards:        {said} (the renderer at {})", r.url),
         None => println!("  cards:        Browser Rendering's local mode (wrangler's Chrome for Testing)"),
     }
-    match &fleet.nodes {
-        Some(n) => println!("  computers:    on the nodes {} lists{}", std::env::var(devstack::sandcastle::NODES_FILE_VAR).unwrap_or_default(), if n.ids().is_empty() { String::new() } else { format!(" ({})", n.ids().join(", ")) }),
-        None if celld.is_some() => println!("  computers:    none (no {}: docs/self-host.md, seam 2)", devstack::sandcastle::NODES_FILE_VAR),
-        None => println!("  computers:    the stub, in local Docker"),
+    match (&fleet.nodes, &box_node) {
+        (Some(_), Some(b)) => println!(
+            "  computers:    on this box's sandcastle engine, through its node at {} (log {}; the list {}), new ones on {}{}",
+            b.url,
+            b.log.display(),
+            b.list.display(),
+            computer_image.as_deref().unwrap_or("?"),
+            if byoc { ", and people's own (FRAGMENT_BYOC=on: sandcastle-node pair <platform>)" } else { "" }
+        ),
+        (Some(n), None) => println!("  computers:    on the nodes {} lists{}", std::env::var(devstack::sandcastle::NODES_FILE_VAR).unwrap_or_default(), if n.ids().is_empty() { String::new() } else { format!(" ({})", n.ids().join(", ")) }),
+        (None, _) if celld.is_some() => println!("  computers:    none (no {}: docs/self-host.md, seam 2)", devstack::sandcastle::NODES_FILE_VAR),
+        (None, _) => println!("  computers:    the stub, in local Docker"),
     }
     println!("  node log:     {}", node.log.display());
-    println!("  fragments:    http://<name>.fragment.localhost:{dev_port}/");
     println!("  code.storage: {} ({})", store.url, store.said);
     match &models {
         Some(m) => println!("  models:       {}; the rest, and image steps, on the Workers AI fake at {}", m.said, ai.url),
         None => println!("  models:       {} (the Workers AI fake: echoes, never a real model)", ai.url),
     }
-    println!("  seats:        {} (the Stripe fake: its Checkout is a Pay button)", stripe.url);
+    if let Some(s) = &stripe {
+        println!("  seats:        {} (the Stripe fake: its Checkout is a Pay button)", s.url);
+    }
     match &openbao {
         Some((bao, took)) => println!(
             "  secrets:      OpenBao {} at {} on loopback (ready in {took:.1?}; its state {}, its log {})",
@@ -371,9 +439,16 @@ fn dev(args: &[String]) -> Result<()> {
         None if celld.is_some() => println!("  secrets:      the cell's variables (.dev.vars; FRAGMENT_SECRETS_BACKEND=openbao for OpenBao)"),
         None => println!("  secrets:      wrangler's local Secrets Store"),
     }
-
-    println!("  sign-in:      http://127.0.0.1:{dev_port}/ via {signin_label}");
-    println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");
+    match &lan {
+        Some(l) => {
+            println!("  sign-in:      {}/ via {signin_label}", l.settings.platform_url());
+            println!("  the CLI:      FRAGMENT_HOST={} fragment login   (once this machine trusts the root)", l.settings.platform_url());
+        }
+        None => {
+            println!("  sign-in:      http://127.0.0.1:{dev_port}/ via {signin_label}");
+            println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");
+        }
+    }
     // Ctrl-C stops the node, and xtask outlives it to remove the containers
     // it left (wrangler's teardown removes its computers, not their sidecars)
     devstack::signals::outlive_interrupt()?;
@@ -388,6 +463,11 @@ fn dev(args: &[String]) -> Result<()> {
     if let Some(m) = store.macrofiche {
         m.stop()?;
     }
+    // the box's node, Dex and the front door stop with it (each this
+    // process's child; a computer awake on the engine keeps running, and
+    // the next start finds it)
+    drop(box_node);
+    drop(lan);
     Ok(())
 }
 
@@ -424,15 +504,34 @@ fn dev_oidc(read: &dyn Fn(&str) -> Result<Option<String>>, fake_port: u16) -> Re
     }
 }
 
+/// The image new computers are pinned to: `FRAGMENT_COMPUTER_IMAGE` (one of
+/// the node list's images; the cell checks it), else on the LAN Hermes when
+/// the list names it (the box's node's, loaded by `cargo xtask node-images`),
+/// else the list's default (the stub), else, with no nodes, the stub in
+/// wrangler's local Docker and none on celld.
+fn dev_computer_image(nodes: Option<&devstack::sandcastle::NodesVars>, lan: bool, celld: bool) -> Result<Option<String>> {
+    if let Some(image) = std::env::var("FRAGMENT_COMPUTER_IMAGE").ok().filter(|v| !v.trim().is_empty()) {
+        anyhow::ensure!(nodes.is_some() || !celld, "FRAGMENT_COMPUTER_IMAGE names a node list's image: on celld, computers are a sandcastle node's ({})", devstack::sandcastle::NODES_FILE_VAR);
+        return Ok(Some(image));
+    }
+    Ok(match nodes {
+        Some(n) if lan && n.image_names().iter().any(|i| i == "hermes") => Some("hermes".into()),
+        Some(n) => n.default_image(),
+        None => (!celld).then(|| "stub".into()),
+    })
+}
+
 /// The dev stack's OpenBao (docs/self-host.md, seam 12), when the cell's
 /// secrets are its: on celld, `FRAGMENT_SECRETS_BACKEND` is `vars` (the
-/// stand-ins' variables, the default) or `openbao`; on wrangler, which has
-/// a Secrets Store of its own, unset. The pinned OpenBao (or
-/// `FRAGMENT_OPENBAO_TARBALL`'s), on loopback at `port` (`DEV_OPENBAO_PORT`,
-/// moved with the stack), its state in `target/devstack/openbao-<port>`
-/// (cleared by `--clean`, after which every secret is seeded again). With
-/// it, how long its start took.
-fn dev_openbao(celld: bool, clean: bool, port: u16) -> Result<Option<(devstack::openbao::OpenBao, std::time::Duration)>> {
+/// stand-ins' variables, the default) or `openbao` (the LAN's default); on
+/// wrangler, which has a Secrets Store of its own, unset. The pinned
+/// OpenBao (or `FRAGMENT_OPENBAO_TARBALL`'s), on loopback at `port`
+/// (`DEV_OPENBAO_PORT`, moved with the stack), its state beside the LAN's
+/// (`$FRAGMENT_LAN_STATE/openbao`, which `--clean` keeps) or in
+/// `target/devstack/openbao-<port>` (cleared by `--clean`); either way
+/// every secret is seeded again at each start. With it, how long its start
+/// took.
+fn dev_openbao(celld: bool, lan: Option<&lan::Lan>, clean: bool, port: u16) -> Result<Option<(devstack::openbao::OpenBao, std::time::Duration)>> {
     let var = std::env::var("FRAGMENT_SECRETS_BACKEND").ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
     if !celld {
         if let Some(v) = var {
@@ -440,15 +539,21 @@ fn dev_openbao(celld: bool, clean: bool, port: u16) -> Result<Option<(devstack::
         }
         return Ok(None);
     }
-    match var.as_deref().unwrap_or("vars") {
+    match var.as_deref().unwrap_or(if lan.is_some() { "openbao" } else { "vars" }) {
         "vars" => return Ok(None),
         "openbao" => {}
         other => bail!("FRAGMENT_SECRETS_BACKEND is vars or openbao, not {other:?}"),
     }
-    let dir = devstack::repo_root().join(format!("target/devstack/openbao-{port}"));
-    if clean && dir.exists() {
-        std::fs::remove_dir_all(&dir).with_context(|| format!("clear {}", dir.display()))?;
-    }
+    let dir = match lan {
+        Some(l) => l.settings.state.join("openbao"),
+        None => {
+            let dir = devstack::repo_root().join(format!("target/devstack/openbao-{port}"));
+            if clean && dir.exists() {
+                std::fs::remove_dir_all(&dir).with_context(|| format!("clear {}", dir.display()))?;
+            }
+            dir
+        }
+    };
     let bin = devstack::openbao::locate(&devstack::repo_root().join(devstack::TOOLS_DIR))?;
     let opts = devstack::openbao::Options { dir, port, audit: false };
     Ok(Some(devstack::openbao::OpenBao::start(&bin, opts)?))
@@ -460,12 +565,13 @@ fn dev_openbao(celld: bool, clean: bool, port: u16) -> Result<Option<(devstack::
 /// alone, served on this box at the platform URL's port (the node, or an
 /// edge before it) unless `FRAGMENT_BROWSER_UPSTREAM` (`ip:port`) names
 /// where. `FRAGMENT_BROWSER_CA_FILE` names a private CA's PEM the browser
-/// trusts, for fragments on https under it. With it, what the banner says
-/// the browser is.
-fn dev_renderer(suffix: &str, platform_url: &str) -> Result<(devstack::rendering::Rendering, String)> {
+/// trusts, for fragments on https under it. On the LAN (`lan`), each
+/// defaults to the front door's: its address and the root it serves under.
+/// With it, what the banner says the browser is.
+fn dev_renderer(suffix: &str, platform_url: &str, lan: Option<(std::net::SocketAddr, std::path::PathBuf)>) -> Result<(devstack::rendering::Rendering, String)> {
     let upstream = match std::env::var("FRAGMENT_BROWSER_UPSTREAM") {
         Ok(u) => Some(u.parse().with_context(|| format!("FRAGMENT_BROWSER_UPSTREAM is ip:port, not {u:?}"))?),
-        Err(_) => None,
+        Err(_) => lan.as_ref().map(|(door, _)| *door),
     };
     let origins = devstack::rendering::Origins::of_platform(suffix, platform_url, upstream).map_err(anyhow::Error::msg)?;
     let browser = devstack::browser::locate(&devstack::repo_root().join(devstack::TOOLS_DIR))?;
@@ -473,7 +579,7 @@ fn dev_renderer(suffix: &str, platform_url: &str) -> Result<(devstack::rendering
         browser: browser.bin,
         state: devstack::repo_root().join(format!("target/devstack/renderer-{}", origins.port)),
         origins,
-        ca_file: std::env::var_os("FRAGMENT_BROWSER_CA_FILE").map(std::path::PathBuf::from),
+        ca_file: std::env::var_os("FRAGMENT_BROWSER_CA_FILE").map(std::path::PathBuf::from).or(lan.map(|(_, ca)| ca)),
         port: 0,
     };
     Ok((devstack::rendering::Rendering::start(opts)?, browser.version))
@@ -569,7 +675,10 @@ fn node_images(args: &[String]) -> Result<()> {
     let pinned = devstack::sandcastle::load_images(&engine, &built, &devstack::repo_root().join("target/devstack/images"))?;
     let listed: serde_json::Map<String, serde_json::Value> = pinned.into_iter().map(|(name, reference)| (name, serde_json::json!(reference))).collect();
     println!("the node list's images (FRAGMENT_NODES_FILE), for {}:", std::env::consts::ARCH);
-    println!("  \"images\": {}", serde_json::Value::Object(listed));
+    println!("  \"images\": {}", serde_json::Value::Object(listed.clone()));
+    // the box's node list on the LAN names them by these (lan.rs)
+    lan::NodeImages { engine, arch: std::env::consts::ARCH.into(), images: listed }.write()?;
+    println!("recorded in {} (dev --lan's node list takes them at its next start)", lan::NODE_IMAGES_FILE);
     Ok(())
 }
 
@@ -594,9 +703,14 @@ struct DevModels {
 /// takes none still gets a value, any word). A model the price book does
 /// not price (a self-hosted one) names its price in its slot's `body`, as
 /// a model on OpenRouter does (`provider.max_price`; docs/self-host.md,
-/// seam 3). Unset, every slot is the fake's.
-fn dev_models(read: &dyn Fn(&str) -> Result<Option<String>>) -> Result<Option<DevModels>> {
-    let Some(file) = std::env::var_os("FRAGMENT_MODELS_FILE") else { return Ok(None) };
+/// seam 3). Unset, `default` (a LAN's state: its models file and the
+/// key's file beside it), else every slot is the fake's.
+fn dev_models(read: &dyn Fn(&str) -> Result<Option<String>>, default: Option<(std::path::PathBuf, std::path::PathBuf)>) -> Result<Option<DevModels>> {
+    let (file, default_key) = match (std::env::var_os("FRAGMENT_MODELS_FILE"), default) {
+        (Some(file), _) => (file, None),
+        (None, Some((file, key))) => (file.into_os_string(), Some(key)),
+        (None, None) => return Ok(None),
+    };
     let shown = Path::new(&file).display().to_string();
     let text = std::fs::read_to_string(&file).with_context(|| format!("read {shown} (FRAGMENT_MODELS_FILE)"))?;
     let models: serde_json::Value = serde_json::from_str(&devstack::strip_comments(&text)).with_context(|| format!("{shown} is a deployment's `models`, as JSON"))?;
@@ -608,7 +722,11 @@ fn dev_models(read: &dyn Fn(&str) -> Result<Option<String>>) -> Result<Option<De
     let key = match keys.is_empty() {
         true => None,
         false => {
-            let key = read("FRAGMENT_MODEL_KEY_FILE")?.with_context(|| format!("{shown}'s slots on an OpenAI-compatible API name a key: put its value in a file (any word, for a server that takes none) and name it FRAGMENT_MODEL_KEY_FILE"))?;
+            let key = match (read("FRAGMENT_MODEL_KEY_FILE")?, &default_key) {
+                (Some(key), _) => key,
+                (None, Some(path)) => std::fs::read_to_string(path).with_context(|| format!("{shown}'s slots on an OpenAI-compatible API name a key: put its value in {} (any word, for a server that takes none)", path.display()))?.trim().to_string(),
+                (None, None) => bail!("{shown}'s slots on an OpenAI-compatible API name a key: put its value in a file (any word, for a server that takes none) and name it FRAGMENT_MODEL_KEY_FILE"),
+            };
             anyhow::ensure!(!key.is_empty(), "FRAGMENT_MODEL_KEY_FILE's file is empty: a key is a value (any word, for a server that takes none)");
             Some(key)
         }

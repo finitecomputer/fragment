@@ -106,8 +106,12 @@ const FACET_MAX_BYTES: u64 = 20 << 20;
 /// Starts `celld dev` on `opts.project` (its fleet configured first, as for
 /// wrangler: `Fleet::configure` with `Secrets::Shim`), ready when it says
 /// so. It stops on SIGINT, as Ctrl-C stops it; `Node`'s stop and crash
-/// serve it as they serve wrangler's.
-pub fn start(tools: &CelldTools, opts: &NodeOptions) -> Result<(Node, Duration)> {
+/// serve it as they serve wrangler's. `extra_ca_file` names a private CA's
+/// PEM the cell's own fetches and sockets trust beside the public roots
+/// (`CELLD_EXTRA_CA_FILE`, the fork's: the LAN mode's root, for Dex's
+/// discovery, keys and token at `https://dex.<zone>`); unset, celld takes
+/// it from this process's environment, as any of its variables.
+pub fn start(tools: &CelldTools, opts: &NodeOptions, extra_ca_file: Option<&Path>) -> Result<(Node, Duration)> {
     let config = celld_config(&opts.project)?;
     let esbuild_dir = tools.esbuild.parent().context("esbuild's directory")?;
     let path = std::env::join_paths(std::iter::once(esbuild_dir.to_path_buf()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())))?;
@@ -116,6 +120,9 @@ pub fn start(tools: &CelldTools, opts: &NodeOptions) -> Result<(Node, Duration)>
     // the fork's hardening (docs/hardening.md): a facet's database capped
     // past the cell's own, and loaded code locked down
     cmd.env("PATH", path).env("CELLD_FACET_MAX_BYTES", FACET_MAX_BYTES.to_string()).env("CELLD_DYNAMIC_LOCKDOWN", "1").env("NO_COLOR", "1");
+    if let Some(ca) = extra_ca_file {
+        cmd.env("CELLD_EXTRA_CA_FILE", ca);
+    }
     cmd.current_dir(&opts.project);
     Node::launch(cmd, opts, &format!("ready  http://127.0.0.1:{}", opts.port), "celld dev")
 }

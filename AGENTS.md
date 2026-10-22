@@ -240,6 +240,8 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   docs/self-host.md, seam 1). `FRAGMENT_MODELS_FILE` puts the model
   route's slots where a deployment's `models` says (a self-hosted model's,
   say), its key in the file `FRAGMENT_MODEL_KEY_FILE` names.
+  `--lan` serves the stack on celld to the home network as an intranet
+  (crates/lan, xtask/src/lan.rs; docs/self-host-lan.md, the guide).
 - `cargo xtask try <todo|inbox|notes|doc> [name]` (with `cargo xtask dev` running):
   creates and deploys a fragment from a template under
   `target/devstack/try/` (never in the repo) and prints the link to open,
@@ -314,7 +316,8 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   `embed`, for the CLI and xtask),
   `crates/fakes` (code.storage, Workers AI, WorkOS, Email Sending, a push service),
 
-  `crates/devstack`, `crates/e2e`.
+  `crates/devstack`, `crates/e2e`, `crates/lan` (the LAN mode's CA, DNS,
+  front door and Dex).
 - `images/` (the computer images: the bridge, the stub, our Hermes image;
   docs/bridge.md) is its own workspace: `cargo test --workspace` and
   `cargo clippy --workspace --all-targets -- -D warnings` there (CI:

@@ -77,6 +77,12 @@ impl NodesVars {
         images.keys().next().cloned()
     }
 
+    /// The images the list names.
+    pub fn image_names(&self) -> Vec<String> {
+        let v: Value = serde_json::from_str(&self.nodes).unwrap_or(Value::Null);
+        v["images"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default()
+    }
+
     /// The nodes' ids, in the list's order.
     pub fn ids(&self) -> Vec<String> {
         let v: Value = serde_json::from_str(&self.nodes).unwrap_or(Value::Null);

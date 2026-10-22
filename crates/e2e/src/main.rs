@@ -885,7 +885,7 @@ impl Suite {
         };
         let (node, _) = match &self.celld {
             None => devstack::Node::start(tools, &opts)?,
-            Some(celld) => devstack::celld::start(celld, &opts)?,
+            Some(celld) => devstack::celld::start(celld, &opts, None)?,
         };
         self.node = Some(node);
         // Stripe's events go to the platform's host, as its endpoint would
