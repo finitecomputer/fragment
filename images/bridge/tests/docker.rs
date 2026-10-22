@@ -2114,8 +2114,9 @@ impl Expiry {
 /// chats"), with real Hermes: a card nobody answers is closed `expired` once
 /// its `expiresAt` passes, its turn ends once, as Hermes ends it (its wait
 /// on the card times out with it), and the chat's next message is claimed
-/// and answered, not met by the card asked again; and a message said while
-/// a card is open waits behind its turn, then is answered the same way.
+/// and answered, not met by the card asked again; and its owner's message
+/// said while a card that takes words is open answers it, its turn going on
+/// with the words (Paul on production, 2026-10-22).
 ///
 /// Method: the image with a 20 s card (`HERMES_BOOT_CARD_TIMEOUT_S`: Hermes'
 /// clarify waits as long as the bridge's card lives), the scripted model
@@ -2189,16 +2190,21 @@ async fn an_expired_card_ends_its_turn() {
     });
     assert!(!let_go, "the card holds the computer awake");
 
-    // 2. a message while a card is open waits behind it, then is answered
+    // 2. its owner's message while the card (a clarify's, which takes words)
+    // is open answers it (Paul on production, 2026-10-22: his typed answer
+    // stayed queued, the card open): the card closes with their words,
+    // Hermes' clarify takes them (as "Other" with those words), its turn
+    // replies once with them, and the message starts no turn of its own
     let risky2 = x.say(&format!("{CARD_ASKED} | none"));
     within(fake, chat, &c, 120_000, "the second card", |w| !x.cards(w, &risky2).is_empty()).await;
-    let meanwhile = x.say("hello while you wait");
-    within(fake, chat, &c, CARD_S * 1000 + 90_000, "the second card expired, and its turn's end", |w| x.closed(w, &risky2).iter().any(|p| p["outcome"] == "expired") && !x.ends(w, &risky2).is_empty()).await;
-    within(fake, chat, &c, 120_000, "the message said while it waited answered", |w| x.reply(w, &meanwhile).is_some() && !x.ends(w, &meanwhile).is_empty()).await;
+    let meanwhile = x.say("a terracotta one");
+    within(fake, chat, &c, 120_000, "the card answered by the message, and its turn's end", |w| x.closed(w, &risky2).iter().any(|p| p["outcome"] == "answered") && !x.ends(w, &risky2).is_empty()).await;
     fake.with(|w| {
-        assert_eq!((x.ends(w, &risky2).len(), x.closed(w, &risky2).len()), (1, 1), "each once");
-        assert!(x.cards(w, &meanwhile).is_empty(), "it asks nothing again: {:?}", x.cards(w, &meanwhile));
-        assert!(x.reply(w, &meanwhile).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("hello while you wait")), "{:?}", x.reply(w, &meanwhile));
+        let closed = x.closed(w, &risky2);
+        assert_eq!((closed.len(), closed[0]["option"].as_str(), closed[0]["text"].as_str(), closed[0]["by"].as_str()), (1, Some("other"), Some("a terracotta one"), Some("npub1paul")), "closed once, with their words: {closed:?}");
+        assert_eq!(x.ends(w, &risky2).len(), 1, "its turn ends once");
+        assert!(x.reply(w, &risky2).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("a terracotta one")), "Hermes' clarify had their words: {:?}", x.reply(w, &risky2));
+        assert!(x.ends(w, &meanwhile).is_empty() && x.reply(w, &meanwhile).is_none(), "the message started no turn of its own");
     });
 }
 
