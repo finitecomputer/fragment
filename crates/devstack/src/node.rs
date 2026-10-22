@@ -442,12 +442,12 @@ mod tests {
     fn each_platform_gets_its_tarball_and_hash() {
         let darwin = tarball_for("macos", "aarch64").expect("Apple silicon");
         assert_eq!(darwin.platform, "darwin-arm64");
-        assert_eq!(darwin.sha256, "bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057");
+        assert_eq!(darwin.sha256, "89c682593d76cd44233fa53b1563264e7de9cbb189cad169135c5b4fadfbc0a7");
         assert_eq!(darwin.url(), format!("https://nodejs.org/dist/v{NODE_VERSION}/node-v{NODE_VERSION}-darwin-arm64.tar.gz"));
         assert_eq!(tarball_for("macos", "x86_64").unwrap().platform, "darwin-x64");
         assert_eq!(tarball_for("linux", "aarch64").unwrap().platform, "linux-arm64");
         let linux = tarball_for("linux", "x86_64").expect("CI's runners");
-        assert_eq!((linux.platform, linux.sha256), ("linux-x64", "6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff"));
+        assert_eq!((linux.platform, linux.sha256), ("linux-x64", "eb6728e77c576a35162c122c45ccadf224d89ff00abc8dae46cc2897c6002d7c"));
         assert_eq!(linux.dir_name(), format!("node-v{NODE_VERSION}-linux-x64"));
         for (os, arch) in [("windows", "x86_64"), ("freebsd", "x86_64"), ("linux", "riscv64"), ("macos", "powerpc")] {
             assert!(tarball_for(os, arch).is_none(), "{os}/{arch}");

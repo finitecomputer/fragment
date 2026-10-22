@@ -64,7 +64,7 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   finds; or name one with `CC_wasm32_unknown_unknown` and
   `AR_wasm32_unknown_unknown`), and Docker. No Node install and no `npm
   ci`: xtask (and the e2e) bring their own. On first use they fetch the
-  pinned Node (v24.21.0, `crates/devstack/src/node_release.rs`) from
+  pinned Node (v24.22.1, `crates/devstack/src/node_release.rs`) from
   nodejs.org/dist into `target/tools/node-v<version>-<platform>/`,
   checking the tarball's SHA-256 before unpacking it, and run that Node's
   own npm (`npm ci`) whenever node_modules is missing or was installed
