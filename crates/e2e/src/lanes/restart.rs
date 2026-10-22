@@ -199,6 +199,13 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let pending_key = Keys::generate();
     let pending_code = api.cli_begin(&pending_key)?.body["code"].as_str().unwrap_or("").to_string();
     anyhow::ensure!(!pending_code.is_empty(), "pending CLI code setup");
+    // and a sign-in begun and answered by its provider, its callback not yet
+    // followed (an OpenID Connect one keeps its verifier and nonce in the
+    // registry; its provider's metadata and keys are fetched again after)
+    let signing_in = api.unsigned("GET", "/auth/login?return=/after-restart&login_hint=restart-pending@e2e.test", None)?;
+    let signing_in_cookie = signing_in.cookies().into_iter().find(|c| c.starts_with("fragment_login=")).unwrap_or_default();
+    let signing_in_back = api.external(&signing_in.header("location"))?;
+    anyhow::ensure!(signing_in.status == 302 && signing_in_back.status == 302 && !signing_in_cookie.is_empty(), "a pending sign-in: {signing_in} / {signing_in_back}");
     // an own key's sign-in finishes at its person's computer: none on celld here (seam 2)
     let own_key = match s.on_celld() {
         true => None,
@@ -230,6 +237,17 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         "after a restart a fragment's scheduled record is kept as it was, and fires, as the fragment",
         kept.body["schedules"] == json!([scheduled.body["schedule"]]) && lever.body["records"] == 1 && fired && kept_talk(&api)[0]["principal"] == paid_npub.as_str(),
         json!({ "kept": kept.body, "lever": lever.body, "talk": kept_talk(&api) }),
+    );
+    let r = api.call(crate::api::Call { method: "GET", url: signing_in_back.header("location"), cookie: Some(signing_in_cookie), ..crate::api::Call::default() })?;
+    let signed = r.cookies().into_iter().find_map(|c| c.strip_prefix("fragment_session=").filter(|v| !v.is_empty()).map(str::to_string));
+    let shown = match &signed {
+        Some(session) => who(&api, session)?,
+        None => Value::Null,
+    };
+    s.ok(
+        "after a restart a sign-in begun before it finishes, as the person it began for, back where it began",
+        r.status == 302 && r.header("location").ends_with("/after-restart") && shown["email"] == "restart-pending@e2e.test",
+        format!("{r} / {shown}"),
     );
     let typed = api.type_code(&member_session, &pending_code)?;
     let pressed = api.add_code(&member_session, &pending_code)?;

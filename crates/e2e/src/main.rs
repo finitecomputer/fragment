@@ -131,6 +131,10 @@ pub const UNSAVED_MAX_MS: u64 = 45_000;
 /// The WorkOS fake's environment.
 const WORKOS_CLIENT: &str = "client_fragment_e2e";
 const WORKOS_KEY: &str = "sk_test_fragment_e2e";
+/// The OpenID Connect fake's client (`FRAGMENT_E2E_SIGNIN=oidc`:
+/// docs/self-host.md, seam 4).
+pub const OIDC_CLIENT: &str = "fragment-e2e";
+const OIDC_SECRET: &str = "oidc-secret-fragment-e2e";
 /// The Stripe fake's account key, the node's webhook endpoint's signing
 /// secret, and its portal configuration (docs/billing.md).
 pub const STRIPE_KEY: &str = "sk_test_fragment_e2e_stripe";
@@ -242,6 +246,12 @@ impl<T> Deref for Fake<T> {
     }
 }
 
+/// Whether the run asks for sign-in on OpenID Connect
+/// (`FRAGMENT_E2E_SIGNIN=oidc`).
+fn signin_by_oidc() -> bool {
+    std::env::var("FRAGMENT_E2E_SIGNIN").as_deref() == Ok("oidc")
+}
+
 /// One section as a dry run plans it: what it needs, and why it would be
 /// skipped (`None`: it would run).
 pub struct Planned {
@@ -319,6 +329,9 @@ pub struct Suite {
     /// Sign-in's stand-in: people sign in through it (`Api::person`), and
     /// Pipes', which hands out connections' tokens.
     pub workos: Fake<fragment_fakes::workos::WorkOs>,
+    /// An OpenID Connect provider: people sign in through it in WorkOS's
+    /// place when the run says so (`oidc_signin`); WorkOS then serves Pipes.
+    pub oidc: Fake<fragment_fakes::oidc::Oidc>,
     /// The provider APIs a computer's swap sends to.
     pub upstream: Fake<fragment_fakes::upstream::Upstream>,
     /// OpenRouter: an own key's sign-in (the browser's and the cell's
@@ -365,6 +378,7 @@ impl Suite {
             // a line of the PEM's body: found however the PEM was escaped
             ("code.storage key", self.org_key.lines().find(|l| !l.starts_with("-----") && !l.trim().is_empty()).unwrap_or_default().trim().to_string()),
             ("WorkOS API key", WORKOS_KEY.into()),
+            ("OpenID Connect client secret", OIDC_SECRET.into()),
             ("test secret", self.test_secret.clone()),
         ]
     }
@@ -374,6 +388,13 @@ impl Suite {
     /// vendor or the deployment's own image answers.
     pub fn hosted(&self) -> bool {
         self.hosted_rules
+    }
+
+    /// Whether people sign in through the OpenID Connect fake
+    /// (`FRAGMENT_E2E_SIGNIN=oidc`: docs/self-host.md, seam 4), not WorkOS's.
+    /// A hosted run's sign in through the levers.
+    pub fn oidc_signin(&self) -> bool {
+        !self.hosted_rules && signin_by_oidc()
     }
 
     /// Whether the local node runs on celld (`FRAGMENT_E2E_RUNTIME=celld`).
@@ -648,6 +669,15 @@ impl Suite {
                 client_id: self.workos.node().client_id.clone(),
                 api_key: WORKOS_KEY.into(),
                 api_url: Some(self.workos.node().url.clone()),
+            }),
+            // who signs people in: the OpenID Connect fake when the run says so
+            oidc: self.oidc_signin().then(|| devstack::OidcVars {
+                issuer: self.oidc.node().url.clone(),
+                client_id: OIDC_CLIENT.into(),
+                client_secret: Some(OIDC_SECRET.into()),
+                scopes: None,
+                claims: None,
+                auth: None,
             }),
             stripe: (self.shape != Shape::SellsNothing).then(|| devstack::StripeVars {
                 key: STRIPE_KEY.into(),
@@ -1038,6 +1068,13 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     if let Some(c) = &celld {
         println!("runtime: celld dev ({})", c.celld.display());
     }
+    // who signs people in: the WorkOS fake, or the OpenID Connect fake (docs/self-host.md, seam 4)
+    match std::env::var("FRAGMENT_E2E_SIGNIN").as_deref() {
+        Err(_) | Ok("workos") => {}
+        Ok("oidc") if rehearse.is_some() => bail!("a rehearsal signs people in through the levers: drop FRAGMENT_E2E_SIGNIN=oidc"),
+        Ok("oidc") => println!("sign-in: the OpenID Connect fake (WorkOS's serves Pipes alone)"),
+        Ok(other) => bail!("FRAGMENT_E2E_SIGNIN is workos or oidc, not {other}"),
+    }
     // a local run's people sign in through the WorkOS fake, and pay the fake
     // model; a rehearsal's, through the levers, lent paid calls as on a preview
     let (rung, shared) = match rehearse {
@@ -1085,6 +1122,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         host_secret: devstack::random_hex(32),
         test_secret,
         workos: Fake::of(hidden, "WorkOS", fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY)?),
+        oidc: Fake::of(hidden, "OpenID Connect", fragment_fakes::oidc::Oidc::start(OIDC_CLIENT, OIDC_SECRET)?),
         upstream: Fake::of(hidden, "upstream", fragment_fakes::upstream::Upstream::start_with(vec![(SWAP_ROUTER_HOST.into(), openrouter.handler())])?),
         openrouter: Fake::of(hidden, "OpenRouter", openrouter),
         operator: Keys::generate(),

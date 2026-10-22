@@ -323,6 +323,9 @@ pub struct Fleet {
     pub delivery_retry_s: Option<u32>,
     /// Sign-in: WorkOS AuthKit (the real one, or the fake in `crates/fakes`).
     pub workos: Option<WorkOsVars>,
+    /// Sign-in with an OpenID Connect provider (docs/self-host.md, seam 4):
+    /// it signs people in in WorkOS's place, which then serves Pipes alone.
+    pub oidc: Option<OidcVars>,
     /// Seats sold: Stripe (the fake in `crates/fakes`; docs/billing.md).
     pub stripe: Option<StripeVars>,
     /// The platform's origin (sign-in, the platform session;
@@ -376,6 +379,21 @@ pub struct StripeVars {
     pub tax: bool,
 }
 
+/// An OpenID Connect provider as the cell reads it (`FRAGMENT_OIDC_*`).
+pub struct OidcVars {
+    /// Its issuer, exactly as its id_tokens say it.
+    pub issuer: String,
+    pub client_id: String,
+    /// Bound as `OIDC_CLIENT_SECRET` (`Fleet::bound`); `None`: a public
+    /// client (PKCE alone).
+    pub client_secret: Option<String>,
+    /// `FRAGMENT_OIDC_SCOPES`, `FRAGMENT_OIDC_CLAIMS` (JSON) and
+    /// `FRAGMENT_OIDC_AUTH`; `None`: the cell's defaults.
+    pub scopes: Option<String>,
+    pub claims: Option<String>,
+    pub auth: Option<String>,
+}
+
 /// A WorkOS environment as the cell reads it.
 pub struct WorkOsVars {
     pub client_id: String,
@@ -391,6 +409,9 @@ impl Fleet {
         let slots: Vec<&str> = self.model_key_slots.iter().map(String::as_str).collect();
         let mut bound = store::Bound::conventional(self.workos.is_some(), self.stripe.is_some(), &providers, &slots);
         bound.connection_secrets = self.connection_secret_values.iter().map(|(p, _)| (p.clone(), format!("fragment-{p}-oauth-secret"))).collect();
+        if self.oidc.as_ref().is_some_and(|o| o.client_secret.is_some()) {
+            bound.oidc_client_secret = Some("fragment-oidc-client-secret".into());
+        }
         bound
     }
 
@@ -400,6 +421,9 @@ impl Fleet {
         if let (Some((client, key)), Some(w)) = (&bound.workos, &self.workos) {
             values.push((client.as_str(), w.client_id.as_str()));
             values.push((key.as_str(), w.api_key.as_str()));
+        }
+        if let (Some(name), Some(secret)) = (&bound.oidc_client_secret, self.oidc.as_ref().and_then(|o| o.client_secret.as_ref())) {
+            values.push((name.as_str(), secret.as_str()));
         }
         if let (Some((key, webhook)), Some(s)) = (&bound.stripe, &self.stripe) {
             values.push((key.as_str(), s.key.as_str()));
@@ -501,6 +525,16 @@ impl Fleet {
         }
         if let Some(u) = self.workos.as_ref().and_then(|w| w.api_url.as_ref()) {
             vars.push(("WORKOS_API_URL", u.as_str()));
+        }
+        if let Some(o) = &self.oidc {
+            vars.push(("FRAGMENT_OIDC_ISSUER", o.issuer.as_str()));
+            vars.push(("FRAGMENT_OIDC_CLIENT_ID", o.client_id.as_str()));
+            // its client secret is a store secret (`Fleet::bound`)
+            for (k, v) in [("FRAGMENT_OIDC_SCOPES", &o.scopes), ("FRAGMENT_OIDC_CLAIMS", &o.claims), ("FRAGMENT_OIDC_AUTH", &o.auth)] {
+                if let Some(v) = v {
+                    vars.push((k, v.as_str()));
+                }
+            }
         }
         if let Some(s) = &self.stripe {
             if let Some(u) = &s.api_url {

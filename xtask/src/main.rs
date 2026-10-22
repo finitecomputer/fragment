@@ -14,7 +14,13 @@
 //!                    `dev_models`). --runtime celld runs it on `celld dev`
 //!                    (CELLD_BIN; docs/self-host.md, seam 1): no computers,
 //!                    no cards, the secrets in .dev.vars behind the cell's
-//!                    stand-ins for the store's bindings
+//!                    stand-ins for the store's bindings. Sign-in is the
+//!                    WorkOS fake on :8794, or, with FRAGMENT_SIGNIN=oidc,
+//!                    the OpenID Connect fake on :8802, or a real provider
+//!                    (FRAGMENT_OIDC_ISSUER: `dev_oidc`; docs/self-host.md,
+//!                    seam 4). FRAGMENT_DEV_PORT moves the stack and its
+//!                    fakes together (`dev_shift`), so a second one runs
+//!                    beside one on :8790
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -118,6 +124,11 @@ const DEV_MAIL_PORT: u16 = 8798;
 /// Checkout is a page with a Pay button.
 const DEV_STRIPE_PORT: u16 = 8800;
 const DEV_STRIPE_KEY: &str = "sk_test_fragment_dev";
+/// The OpenID Connect fake (`FRAGMENT_SIGNIN=oidc`: docs/self-host.md,
+/// seam 4), and its client.
+const DEV_OIDC_PORT: u16 = 8802;
+const DEV_OIDC_CLIENT: &str = "fragment-dev";
+const DEV_OIDC_SECRET: &str = "oidc-secret-fragment-dev";
 const DEV_STRIPE_WEBHOOK: &str = "whsec_fragment_dev";
 /// Where dev's mail says it comes from.
 const DEV_MAIL_FROM: &str = "fragment <mail@fragment.localhost>";
@@ -125,6 +136,20 @@ const DEV_MAIL_FROM: &str = "fragment <mail@fragment.localhost>";
 const DEV_WORKOS_CLIENT: &str = "client_fragment_dev";
 const DEV_WORKOS_KEY: &str = "sk_test_fragment_dev";
 const DEV_ORG: &str = "fragment-dev";
+
+/// How far `FRAGMENT_DEV_PORT` moves the dev stack's ports from `DEV_PORT`
+/// (each fake keeps its place above the cell), so a second stack runs
+/// beside one on :8790; none when it is unset.
+fn dev_shift() -> Result<u16> {
+    let top = DEV_OIDC_PORT - DEV_PORT;
+    match std::env::var("FRAGMENT_DEV_PORT") {
+        Err(_) => Ok(0),
+        Ok(p) => match p.parse::<u16>() {
+            Ok(port) if (1024..=u16::MAX - top).contains(&port) => Ok(port.wrapping_sub(DEV_PORT)),
+            _ => bail!("FRAGMENT_DEV_PORT is a port from 1024 to {}, not {p:?}", u16::MAX - top),
+        },
+    }
+}
 
 /// A command as errors show it: the program and its arguments only
 /// (`{cmd:?}` would print the environment set on it, where a deploy may
@@ -158,6 +183,9 @@ fn dev(args: &[String]) -> Result<()> {
     // the pinned Node and node_modules first: one that cannot be had stops
     // the run before a build
     let tools = devstack::Tools::locate()?;
+    let shift = dev_shift()?;
+    let at = |port: u16| port.wrapping_add(shift);
+    let dev_port = at(DEV_PORT);
     build()?;
     let clean = args.iter().any(|a| a == "--clean");
     let state = devstack::repo_root().join("target/devstack/codestorage.json");
@@ -171,7 +199,7 @@ fn dev(args: &[String]) -> Result<()> {
         org: DEV_ORG.into(),
         org_key_pem: Some(key.clone()),
         state_file: Some(state),
-        port: DEV_CODESTORAGE_PORT,
+        port: at(DEV_CODESTORAGE_PORT),
         ..Default::default()
     })?;
     // sign-in: a real WorkOS environment when its files are named (its
@@ -185,18 +213,21 @@ fn dev(args: &[String]) -> Result<()> {
     let (workos, _workos_fake) = match (read("WORKOS_CLIENT_ID_FILE")?, read("WORKOS_API_KEY_FILE")?) {
         (Some(client_id), Some(api_key)) => (devstack::WorkOsVars { client_id, api_key, api_url: None }, None),
         _ => {
-            let fake = fragment_fakes::workos::WorkOs::start_on(DEV_WORKOS_PORT, DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
+            let fake = fragment_fakes::workos::WorkOs::start_on(at(DEV_WORKOS_PORT), DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
             (devstack::WorkOsVars { client_id: DEV_WORKOS_CLIENT.into(), api_key: DEV_WORKOS_KEY.into(), api_url: Some(fake.url.clone()) }, Some(fake))
         }
     };
-    let ai = fragment_fakes::workers_ai::WorkersAi::start(DEV_AI_PORT)?;
+    let ai = fragment_fakes::workers_ai::WorkersAi::start(at(DEV_AI_PORT))?;
     let models = dev_models(&read)?;
-    let mailer = fragment_fakes::mail::Mailer::start(DEV_MAIL_PORT, true)?;
-    let stripe = fragment_fakes::stripe::Stripe::start(DEV_STRIPE_PORT, DEV_STRIPE_KEY)?;
-    stripe.set_endpoint(&format!("http://127.0.0.1:{DEV_PORT}/api/stripe/webhook"), DEV_STRIPE_WEBHOOK);
-    let workos_label = match &workos.api_url {
-        Some(u) => format!("{u} (the fake)"),
-        None => format!("WorkOS {}", workos.client_id),
+    let mailer = fragment_fakes::mail::Mailer::start(at(DEV_MAIL_PORT), true)?;
+    let stripe = fragment_fakes::stripe::Stripe::start(at(DEV_STRIPE_PORT), DEV_STRIPE_KEY)?;
+    stripe.set_endpoint(&format!("http://127.0.0.1:{dev_port}/api/stripe/webhook"), DEV_STRIPE_WEBHOOK);
+    let (oidc, oidc_fake) = dev_oidc(&read, at(DEV_OIDC_PORT))?;
+    let signin_label = match (&oidc, &workos.api_url) {
+        (Some(o), _) if oidc_fake.is_some() => format!("{} (the OpenID Connect fake: any email)", o.issuer),
+        (Some(o), _) => format!("the OpenID Connect provider {}", o.issuer),
+        (None, Some(u)) => format!("{u} (the WorkOS fake)"),
+        (None, None) => format!("WorkOS {}", workos.client_id),
     };
     let fleet = devstack::Fleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
@@ -224,6 +255,7 @@ fn dev(args: &[String]) -> Result<()> {
         default_plan: Some("seat".into()),
         delivery_retry_s: None,
         workos: Some(workos),
+        oidc,
         stripe: Some(devstack::StripeVars {
             key: DEV_STRIPE_KEY.into(),
             webhook_secret: DEV_STRIPE_WEBHOOK.into(),
@@ -232,7 +264,7 @@ fn dev(args: &[String]) -> Result<()> {
             tax: false,
         }),
         // the CLI's host: sign-in and approvals happen where it points
-        platform_url: format!("http://127.0.0.1:{DEV_PORT}"),
+        platform_url: format!("http://127.0.0.1:{dev_port}"),
         operators: None,
         signins_pending_max: None,
         cli_begins_per_ip_minute: None,
@@ -256,7 +288,7 @@ fn dev(args: &[String]) -> Result<()> {
     fleet.configure(&tools, &devstack::cell_dir())?;
     let opts = devstack::NodeOptions {
         project: devstack::cell_dir(),
-        port: DEV_PORT,
+        port: dev_port,
         log_dir: devstack::repo_root().join("target/devstack"),
         // wrangler's own debug logs, when asked for
         node_logs: std::env::var_os("FRAGMENT_NODE_LOGS").is_some(),
@@ -273,7 +305,7 @@ fn dev(args: &[String]) -> Result<()> {
         Some(c) => println!("  runtime:      celld dev ({}): no computers, no cards, no mail but the fake's", c.celld.display()),
     }
     println!("  node log:     {}", node.log.display());
-    println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");
+    println!("  fragments:    http://<name>.fragment.localhost:{dev_port}/");
     println!("  code.storage: {} (the fake)", fake.url);
     match &models {
         Some(m) => println!("  models:       {}; the rest, and image steps, on the Workers AI fake at {}", m.said, ai.url),
@@ -281,7 +313,7 @@ fn dev(args: &[String]) -> Result<()> {
     }
     println!("  seats:        {} (the Stripe fake: its Checkout is a Pay button)", stripe.url);
 
-    println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
+    println!("  sign-in:      http://127.0.0.1:{dev_port}/ via {signin_label}");
     println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");
     // Ctrl-C stops the node, and xtask outlives it to remove the containers
     // it left (wrangler's teardown removes its computers, not their sidecars)
@@ -294,6 +326,39 @@ fn dev(args: &[String]) -> Result<()> {
         println!("removed {} containers the dev node left", removed.containers);
     }
     Ok(())
+}
+
+/// Sign-in on OpenID Connect for dev (docs/self-host.md, seam 4), when
+/// asked for: a real provider (`FRAGMENT_OIDC_ISSUER`, with
+/// `FRAGMENT_OIDC_CLIENT_ID`, the client secret in the file
+/// `FRAGMENT_OIDC_CLIENT_SECRET_FILE` (none: a public client), and
+/// optionally `FRAGMENT_OIDC_SCOPES`, `FRAGMENT_OIDC_CLAIMS`,
+/// `FRAGMENT_OIDC_AUTH`; its client's redirect URI is
+/// `http://127.0.0.1:8790/auth/callback`, its post-logout one
+/// `http://127.0.0.1:8790/`), else with `FRAGMENT_SIGNIN=oidc` the fake on
+/// :8802 (any email), else none: WorkOS signs people in.
+fn dev_oidc(read: &dyn Fn(&str) -> Result<Option<String>>, fake_port: u16) -> Result<(Option<devstack::OidcVars>, Option<fragment_fakes::oidc::Oidc>)> {
+    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    if let Some(issuer) = var("FRAGMENT_OIDC_ISSUER") {
+        let vars = devstack::OidcVars {
+            issuer,
+            client_id: var("FRAGMENT_OIDC_CLIENT_ID").context("FRAGMENT_OIDC_ISSUER needs FRAGMENT_OIDC_CLIENT_ID")?,
+            client_secret: read("FRAGMENT_OIDC_CLIENT_SECRET_FILE")?,
+            scopes: var("FRAGMENT_OIDC_SCOPES"),
+            claims: var("FRAGMENT_OIDC_CLAIMS"),
+            auth: var("FRAGMENT_OIDC_AUTH"),
+        };
+        return Ok((Some(vars), None));
+    }
+    match var("FRAGMENT_SIGNIN").as_deref() {
+        None | Some("workos") => Ok((None, None)),
+        Some("oidc") => {
+            let fake = fragment_fakes::oidc::Oidc::start_on(fake_port, DEV_OIDC_CLIENT, DEV_OIDC_SECRET)?;
+            let vars = devstack::OidcVars { issuer: fake.url.clone(), client_id: DEV_OIDC_CLIENT.into(), client_secret: Some(DEV_OIDC_SECRET.into()), scopes: None, claims: None, auth: None };
+            Ok((Some(vars), Some(fake)))
+        }
+        Some(other) => bail!("FRAGMENT_SIGNIN is workos or oidc, not {other:?}"),
+    }
 }
 
 /// The dev stack's models, from `FRAGMENT_MODELS_FILE`.
@@ -356,13 +421,14 @@ fn try_template(args: &[String]) -> Result<()> {
     if !TRY_TEMPLATES.contains(&tpl.as_str()) {
         bail!("{}", usage());
     }
-    if TcpStream::connect(("127.0.0.1", DEV_PORT)).is_err() {
-        bail!("nothing answers on :{DEV_PORT}: start `cargo xtask dev` in another terminal, wait for `ready`, then try again");
+    let dev_port = DEV_PORT.wrapping_add(dev_shift()?);
+    if TcpStream::connect(("127.0.0.1", dev_port)).is_err() {
+        bail!("nothing answers on :{dev_port}: start `cargo xtask dev` in another terminal, wait for `ready`, then try again");
     }
     let root = devstack::repo_root();
     run(Command::new("cargo").args(["build", "--quiet", "--manifest-path"]).arg(root.join("Cargo.toml")).args(["-p", "fragment-cli"]))?;
     let cli = root.join("target/debug/fragment");
-    let host = format!("http://127.0.0.1:{DEV_PORT}");
+    let host = format!("http://127.0.0.1:{dev_port}");
     let name = args.get(1).cloned().unwrap_or_else(|| format!("{tpl}-{}", devstack::random_hex(2)));
     let dir = root.join("target/devstack/try");
     std::fs::create_dir_all(&dir)?;

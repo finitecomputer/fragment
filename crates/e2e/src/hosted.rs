@@ -328,6 +328,7 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         host_secret: String::new(),
         test_secret: String::new(),
         workos: Fake::absent("WorkOS"),
+        oidc: Fake::absent("OpenID Connect"),
         upstream: Fake::absent("upstream"),
         openrouter: Fake::absent("OpenRouter"),
         // no operator the deployment names: a section that needs one declares Need::Deployment

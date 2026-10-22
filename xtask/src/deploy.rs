@@ -357,6 +357,8 @@ fn bound_for(d: &Deployment, branch: Option<&str>) -> Result<devstack::store::Bo
         host_secret_previous: d.host_secret_previous.clone(),
         codestorage_key: d.codestorage.private_key.clone(),
         workos: Some((d.workos.client_id.clone(), d.workos.api_key.clone())),
+        // sign-in on OpenID Connect is the self-hosted lane's (docs/self-host.md, seam 4)
+        oidc_client_secret: None,
         stripe: d.stripe.as_ref().map(|s| (s.key.clone(), (!makes_endpoint(d, branch)).then(|| s.webhook_secret.clone()))),
         operator_keys,
         connection_secrets,
