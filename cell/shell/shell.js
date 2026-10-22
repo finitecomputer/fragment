@@ -1781,7 +1781,7 @@ async function restartComputer(button) {
   try {
     restarted = c.generation || 0;
     computerIs(await api("POST", `/api/computers/${seg(c.computer)}/restart`, { generation: c.generation || 0 }));
-    if (state.page === "Settings") await openSettings(false);
+    await reopenSettings();
   } catch (e) {
     button.textContent = label;
     const said = button.parentElement.querySelector(".form-error") ?? el("p", "form-error");
@@ -1921,6 +1921,9 @@ function renderSettingsPage(page, sections) {
 // settings are shown: an older one that answers last (an action's reload, a
 // second press, Back) read older state, and is dropped (#441).
 let settingsLoads = 0;
+// Each visit to settings, from another page (never a reload of them): an
+// action's failure is said only in the visit it was pressed in (#439).
+let visits = 0;
 // `failed`: what the action that asked for this load says once it renders
 // (a failure's notice, [title, text]).
 async function openSettings(push = true, failed = null) {
@@ -1935,6 +1938,7 @@ async function openSettings(push = true, failed = null) {
   const tell = () => {
     if (failed && gen === noticeGen) notice(...failed);
   };
+  if (state.page !== "Settings") visits++;
   state.page = "Settings";
   $("layout").classList.add("settings-view");
   $("frames").hidden = true;
@@ -1947,7 +1951,7 @@ async function openSettings(push = true, failed = null) {
   leaveSidebar();
   // a credit pack's Checkout returning, before the ledger is read (its
   // settlement every load awaits, said by the one that renders)
-  const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => openSettings(false), noSeatSaid, switchForm, support: state.support };
+  const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => reopenSettings(), noSeatSaid, switchForm, support: state.support };
   const back = await returning(billingHelpers);
   if (lost()) return;
   const [ledger, mySeat, linked, uses, access] = await Promise.all([
@@ -2000,7 +2004,7 @@ async function openSettings(push = true, failed = null) {
     }
     if (r.ok) {
       state.me = await api("GET", "/api/identities/me");
-      openSettings(false);
+      reopenSettings();
     } else picture.querySelector("span").textContent = (await r.json().catch(() => ({}))).message || "That picture was not taken";
   };
   account.append(actionLine("Picture", picture));
@@ -2095,6 +2099,12 @@ async function openSettings(push = true, failed = null) {
   renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, buildSection(), dataSection()]);
   renderAgentFaces();
   tell();
+}
+// An action's reload of settings, only while they are shown: an answer that
+// comes once the person has gone to a chat leaves them there, and says
+// nothing there (#439). `failed`: openSettings'.
+async function reopenSettings(failed = null) {
+  if (state.page === "Settings") await openSettings(false, failed);
 }
 
 // Building with a coding agent: one prompt that names this platform's
@@ -2591,7 +2601,7 @@ function connectButton(p, label, said) {
     try {
       const { url } = await api("POST", `/api/connections/${encodeURIComponent(p.provider)}/authorize`, {});
       w.location = url;
-      addEventListener("focus", () => openSettings(false).catch(() => {}), { once: true });
+      addEventListener("focus", () => reopenSettings().catch(() => {}), { once: true });
     } catch (e) {
       w.close();
       said.textContent = e.message;
@@ -2601,6 +2611,11 @@ function connectButton(p, label, said) {
   };
   return go;
 }
+// The own keys whose last Disconnect or Remove did not go through, each
+// with the visit of settings it was pressed in: said in their row by
+// whichever load of settings renders in that visit, while the row still
+// has the key, until the next press; in another visit, never (#439).
+const unremoved = new Map();
 function connectionsSection(linked, uses) {
   const s = section("Connections");
   s.id = "settings-connections";
@@ -2628,8 +2643,24 @@ function connectionsSection(linked, uses) {
     row.append(head);
     const actions = el("div", "settings-actions");
     const details = [];
-    // what a Connect press says: a blocked window, or a start refused
+    // what a Connect press says: a blocked window, or a start refused; and
+    // a Disconnect or Remove that did not go through
     const said = el("span", "muted provider-detail provider-said");
+    // Disconnect or Remove: settings then reload, and the row they show says
+    // whether the key is still there; one that failed says so in it
+    const removeKey = (button) => async () => {
+      const visit = visits;
+      button.disabled = true;
+      unremoved.delete(p.provider);
+      try {
+        await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}/key`);
+      } catch {
+        // kept only while its visit is the one shown: an older visit's
+        // answer never replaces a newer one's
+        if (visit === visits && state.page === "Settings") unremoved.set(p.provider, visit);
+      }
+      await reopenSettings();
+    };
     if (p.kind === "connection" && p.state !== "connected") {
       actions.append(connectButton(p, p.state === "needs_reauthorization" ? "Connect again" : "Connect", said));
       details.push(said);
@@ -2647,11 +2678,7 @@ function connectionsSection(linked, uses) {
         const off = el("button", "quiet", "Disconnect");
         off.type = "button";
         off.dataset.action = "disconnect";
-        off.onclick = async () => {
-          off.disabled = true;
-          await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}/key`).catch(() => {});
-          await openSettings(false);
-        };
+        off.onclick = removeKey(off);
         const manage = el("a", "quiet", `Revoke the key at ${providerName(p.provider)}`);
         manage.href = p.signIn.manage;
         manage.target = "_blank";
@@ -2672,7 +2699,7 @@ function connectionsSection(linked, uses) {
         save.disabled = true;
         try {
           await api("PUT", `/api/connections/${encodeURIComponent(p.provider)}/key`, { key: input.value });
-          await openSettings(false);
+          await reopenSettings();
         } catch (err) {
           save.textContent = err.message;
           save.disabled = false;
@@ -2682,14 +2709,15 @@ function connectionsSection(linked, uses) {
       if (p.state === "set") {
         const remove = el("button", "quiet", "Remove");
         remove.type = "button";
-        remove.onclick = async () => {
-          remove.disabled = true;
-          await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}/key`).catch(() => {});
-          await openSettings(false);
-        };
+        remove.dataset.action = "remove-key";
+        remove.onclick = removeKey(remove);
         actions.append(remove);
       }
     }
+    if (p.state === "set" && unremoved.get(p.provider) === visits) {
+      said.textContent = "That didn't go through. Try again.";
+      details.push(said);
+    } else unremoved.delete(p.provider);
     if (p.kind === "operator" && p.price) {
       details.push(el("span", "muted provider-detail", `${money(p.price.micros / p.price.per)} a call at list, metered to your credit`));
     }
@@ -2707,6 +2735,7 @@ function connectionsSection(linked, uses) {
         chip.setAttribute("aria-pressed", String(allowed));
         chip.title = allowed ? `${titleOf(a.fragment)} may use it: press to take it away` : `${titleOf(a.fragment)} may not use it: press to let it`;
         chip.onclick = async () => {
+          const visit = visits;
           chip.disabled = true;
           const all = offered.map((x) => x.provider);
           const now = a.connections ?? all;
@@ -2719,11 +2748,12 @@ function connectionsSection(linked, uses) {
           } catch (e) {
             refused = e;
           }
-          // a failure is said by the reload, while the agent may use it or
-          // not as before (a newer press may have changed it since)
+          // a failure is said by the reload, in the visit it was pressed in,
+          // while the agent may use it or not as before (a newer press may
+          // have changed it since)
           const was = state.agents.get(a.identity) ?? a;
           const unchanged = (was.connections == null || was.connections.includes(p.provider)) === allowed;
-          await openSettings(false, refused && unchanged ? ["That was not changed", refused.message] : null);
+          await reopenSettings(refused && unchanged && visit === visits ? ["That was not changed", refused.message] : null);
         };
         who.append(chip);
       }
@@ -2792,7 +2822,7 @@ async function skillsSection() {
   if (!mine) {
     const add = el("button", "quiet", "Add the managed skills");
     add.type = "button";
-    add.onclick = () => skillsFragment().then(() => openSettings(false)).catch((e) => { add.textContent = e.message; });
+    add.onclick = () => skillsFragment().then(() => reopenSettings()).catch((e) => { add.textContent = e.message; });
     s.append(el("p", "muted", "Your agents have no managed skills yet."), actionLine("Managed skills", add));
   } else {
     const paths = await filesOf(mine.name);
@@ -3256,7 +3286,7 @@ async function load(changed = false) {
   renderAgentFaces();
   for (const f of chats()) if (own(f) && f.title === UNTITLED && f.preview) titleFromFirst(f.name);
   // answered, it goes on with what a failure put off, whoever asked
-  if (computers && unknown && state.page === "Settings") openSettings(false).catch(() => {});
+  if (computers && unknown) reopenSettings().catch(() => {});
   if (computers && firstRunPutOff) resumeFirstRun();
   const touched = changed ? new Set(state.fragments.filter((f) => before.get(f.name) !== JSON.stringify(f)).map((f) => f.name)) : null;
   cardsLoad.wait = 0;

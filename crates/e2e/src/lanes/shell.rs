@@ -1110,7 +1110,8 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
     settings_race_ui(s, api, &mut b, &page, &session)?;
     notice_ui(s, &mut b, &page, &chat, &shots)?;
-    models_ui(s, api, &mut b, &page, &session, &shots)?;
+    models_ui(s, api, &mut b, &page, &session, &chat, &shots)?;
+    left_and_back_ui(s, api, &mut b, &page, &session, &chat)?;
     computer_ui(s, api, &mut b, &page, &session, &shots)?;
     update_ui(s, api, &mut b, &page, &session, &shots)?;
     b.color_scheme(&page, "dark")?;
@@ -2914,8 +2915,10 @@ fn notice_late_ui(s: &mut Suite, b: &mut Browser, page: &Page, chat: &str) -> Re
 /// beside its tier's (named by the tier, never a vendor), and the one
 /// picked is its agent.json's `model`, its tier kept, which its computer
 /// runs its next turn on. Its tier again takes the model away;
-/// disconnecting takes the offer.
-fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
+/// disconnecting takes the offer, and a Disconnect that fails says so in
+/// its row (#439); a Remove that answers once the person has gone to a
+/// chat leaves them there.
+fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, chat: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let row = format!("#settings-connections [data-provider={:?}]", crate::SWAP_ROUTER);
     b.reload(page)?;
@@ -3048,11 +3051,184 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let back = pick(b, "")?;
     let gone = agent_json();
     s.ok("settings shows it again as picked; its tier again takes the model away, its tier kept", shown && back && gone.get("model").is_none() && gone["tier"] == before["tier"], &gone);
+    // a Disconnect that does not go through (#439): settings reload, its row
+    // still connected, saying so, with Disconnect to try again
+    let said = format!("document.querySelector('{row} .provider-said')");
+    b.eval(page, &refuse_once("DELETE", &format!("/api/connections/{}/key$", crate::SWAP_ROUTER)))?;
+    b.click(page, &format!("{row} [data-action=disconnect]"))?;
+    let told = b.until(
+        page,
+        &format!("document.querySelector('{row}')?.dataset.state === 'set' && {said}?.textContent === {} && {said}.checkVisibility() && document.querySelector('{row} [data-action=disconnect]')?.disabled === false", js(UNREMOVED)),
+        wait,
+    );
+    s.ok(
+        "a Disconnect that does not go through: its row, reloaded, still connected, says That didn't go through. Try again., with Disconnect to try again",
+        told,
+        b.eval(page, &format!("document.querySelector('{row}')?.innerText"))?,
+    );
     // disconnected: the key goes, and no agent offers its models
     b.click(page, &format!("{row} [data-action=disconnect]"))?;
-    let off = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'not_set' && document.querySelectorAll('[data-model-for]').length === 0"), wait);
+    let off = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'not_set' && !{said}?.textContent && document.querySelectorAll('[data-model-for]').length === 0"), wait);
     let left = runs_on(&view());
-    s.ok("Disconnect takes the key away, and no agent offers its models, nor may run them", off && left.is_null(), json!({ "row": b.eval(page, &format!("document.querySelector('{row}')?.innerText"))?, "modelProviders": left }));
+    s.ok(
+        "pressed again, Disconnect takes the key away, the failure no longer said, and no agent offers its models, nor may run them",
+        off && left.is_null(),
+        json!({ "row": b.eval(page, &format!("document.querySelector('{row}')?.innerText"))?, "modelProviders": left }),
+    );
+    // an action's answer once the person has gone to a chat leaves them in
+    // it (#439): an own key's Remove, its answer held while a chat opens
+    let own = format!("#settings-connections [data-provider={:?}]", crate::SWAP_OWN);
+    let key = format!("/api/connections/{}/key", crate::SWAP_OWN);
+    let saved = shell(api, session, "PUT", &key, Some(&json!({ "key": "mail-left-e2e-55aa" })), &[])?;
+    b.reload(page)?;
+    let set = b.until(page, &format!("document.querySelector('{own}')?.dataset.state === 'set'"), wait);
+    b.eval(page, &hold("DELETE", &format!("{key}$"), Hold::Answer))?;
+    b.click(page, &format!("{own} [data-action=remove-key]"))?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    open_row(b, page, chat, wait)?;
+    b.eval(page, "(window.__held.release?.(), true)")?;
+    let settled = b.until(page, HELD_SETTLED, wait);
+    let seen = b.eval(page, "({ path: location.pathname, settings: !document.getElementById('settings-page').hidden, chat: [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment ?? null })")?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    let listed = shell(api, session, "GET", "/api/connections", None, &[])?;
+    let gone = listed.body["providers"].as_array().and_then(|l| l.iter().find(|p| p["provider"] == crate::SWAP_OWN)).map(|p| p["state"].clone()).unwrap_or(Value::Null);
+    s.ok(
+        "a Remove that answers once the person has gone to a chat takes the key away and leaves them in the chat: settings stay hidden",
+        saved.status == 200 && set && held && settled && seen == json!({ "path": "/", "settings": false, "chat": chat }) && gone == "not_set",
+        json!({ "seen": seen, "state": gone }),
+    );
+    b.click(page, "#settings")?;
+    anyhow::ensure!(b.until(page, &format!("location.pathname === '/settings' && document.querySelector('{own}')?.dataset.state === 'not_set'"), wait), "settings again");
+    Ok(())
+}
+
+/// What a connection's row says when its Disconnect or Remove did not go
+/// through (shell.js `unremoved`).
+const UNREMOVED: &str = "That didn't go through. Try again.";
+
+/// A failure belongs to the visit of settings it was pressed in (#462
+/// review): an own key's Remove, then an agent's chip, each held before it
+/// is sent while a chat opens and settings open again, then refused; and a
+/// Remove refused at once, its reload's read held while a chat opens and
+/// settings open again: the settings shown say nothing of it, the key
+/// still set and the chip as it was. And the same key's Remove pressed in
+/// two visits, both refused, in either order: the newer visit's failure is
+/// what is said. The key taken away after.
+fn left_and_back_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, chat: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let own = format!("#settings-connections [data-provider={:?}]", crate::SWAP_OWN);
+    let key = format!("/api/connections/{}/key", crate::SWAP_OWN);
+    let chip = "#settings-connections [data-provider=\"perplexity\"] [data-agent]";
+    let pressed = format!("document.querySelector({})?.getAttribute('aria-pressed') === 'true' && document.querySelector({}).disabled === false", js(chip), js(chip));
+    let open_settings = "(document.getElementById('settings').click(), true)";
+    let saved = shell(api, session, "PUT", &key, Some(&json!({ "key": "mail-back-e2e-55aa" })), &[])?;
+    b.reload(page)?;
+    let set = format!("location.pathname === '/settings' && document.querySelector('{own}')?.dataset.state === 'set' && !!document.querySelector('{own} [data-action=remove-key]')");
+    let ready = saved.status == 200 && b.until(page, &format!("{set} && {pressed}"), wait);
+
+    // the Remove: held, a chat, settings again, then refused
+    b.eval(page, &hold("DELETE", &format!("{key}$"), Hold::Request))?;
+    b.click(page, &format!("{own} [data-action=remove-key]"))?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    open_row(b, page, chat, wait)?;
+    b.eval(page, open_settings)?;
+    let back = b.until(page, &set, wait);
+    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
+    let settled = b.until(page, HELD_SETTLED, wait);
+    let row = b.eval(page, &format!("({{ state: document.querySelector('{own}')?.dataset.state ?? null, said: document.querySelector('{own} .provider-said')?.textContent ?? '' }})"))?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "a Remove refused once the person has left settings and come back says nothing in the settings shown: the key still set",
+        ready && held && back && settled && row == json!({ "state": "set", "said": "" }),
+        &row,
+    );
+
+    // the Remove refused here, its reload's read held while a chat opens
+    // and settings open again; then let go
+    b.eval(page, &hold("GET", "^/api/connections$", Hold::Answer))?;
+    b.eval(page, &refuse_once("DELETE", &format!("{key}$")))?;
+    b.click(page, &format!("{own} [data-action=remove-key]"))?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    open_row(b, page, chat, wait)?;
+    b.eval(page, open_settings)?;
+    let back = b.until(page, &set, wait);
+    let shown = b.eval(page, &format!("document.querySelector('{own} .provider-said')?.textContent ?? ''"))?;
+    b.eval(page, "(window.__held.release?.(), true)")?;
+    let settled = b.until(page, HELD_SETTLED, wait);
+    let row = b.eval(page, &format!("({{ state: document.querySelector('{own}')?.dataset.state ?? null, said: document.querySelector('{own} .provider-said')?.textContent ?? '' }})"))?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "a Remove refused in one visit of settings, its reload held until the person has left and come back, says nothing in the settings shown, then or once let go",
+        held && back && settled && shown == "" && row == json!({ "state": "set", "said": "" }),
+        json!({ "shown": shown, "after": row }),
+    );
+
+    // the same key's Remove pressed in two visits, both refused: the newer
+    // visit's first, then the older one's; then the other way round. The
+    // newer visit's failure is said either way.
+    let said = format!("(document.querySelector('{own} .provider-said')?.textContent ?? '')");
+    let remove = format!("(document.querySelector('{own} [data-action=remove-key]').click(), true)");
+    let failed_here = format!("{set} && {said} === {}", js(UNREMOVED));
+    b.eval(page, &hold("DELETE", &format!("{key}$"), Hold::Request))?;
+    b.eval(page, &remove)?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    open_row(b, page, chat, wait)?;
+    b.eval(page, open_settings)?;
+    let back = b.until(page, &set, wait);
+    b.eval(page, &refuse_once("DELETE", &format!("{key}$")))?;
+    b.eval(page, &remove)?;
+    let newer = b.until(page, &failed_here, wait);
+    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
+    let settled = b.until(page, HELD_SETTLED, wait);
+    let kept = b.eval(page, &failed_here)?;
+    let seen = b.eval(page, &said)?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "the same key's Remove refused in a newer visit of settings, then the older visit's refused: the newer visit's failure is still said",
+        held && back && newer && settled && kept == true,
+        &seen,
+    );
+    b.eval(page, &hold("DELETE", &format!("{key}$"), Hold::Request))?;
+    b.eval(page, &remove)?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    b.eval(page, "(window.__older = window.__held, true)")?;
+    open_row(b, page, chat, wait)?;
+    b.eval(page, open_settings)?;
+    let back = b.until(page, &format!("{set} && {said} === ''"), wait);
+    b.eval(page, &hold("DELETE", &format!("{key}$"), Hold::Request))?;
+    b.eval(page, &remove)?;
+    let held_newer = b.until(page, "!!window.__held.release", wait);
+    b.eval(page, "(window.__older.release?.('refuse'), true)")?;
+    let settled = b.until(page, "window.__older.inflight === 0 && performance.now() - window.__older.quiet > 500", wait);
+    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
+    let newer = b.until(page, &failed_here, wait);
+    let seen = b.eval(page, &said)?;
+    b.eval(page, "(window.__held.restore(), window.__older.restore(), true)")?;
+    s.ok(
+        "the same key's Remove refused in an older visit of settings, then the newer visit's refused: the newer visit's failure is said",
+        held && back && held_newer && settled && newer,
+        &seen,
+    );
+
+    // the chip: held, a chat, settings again, then refused
+    b.eval(page, &hold("PUT", "/agents/[^/]+/connections$", Hold::Request))?;
+    b.eval(page, &format!("(document.querySelector({}).click(), true)", js(chip)))?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    open_row(b, page, chat, wait)?;
+    b.eval(page, open_settings)?;
+    let back = b.until(page, &pressed, wait);
+    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
+    let settled = b.until(page, HELD_SETTLED, wait);
+    let quiet = b.eval(page, &format!("document.getElementById('notice').hidden && {pressed}"))?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "an agent's chip refused once the person has left settings and come back says nothing in the settings shown: the chip as it was",
+        held && back && settled && quiet == true,
+        b.eval(page, "document.getElementById('notice').innerText")?,
+    );
+    shell(api, session, "DELETE", &key, None, &[])?;
+    b.reload(page)?;
+    anyhow::ensure!(b.until(page, &format!("document.querySelector('{own}')?.dataset.state === 'not_set' && {pressed}"), wait), "settings, the key gone");
     Ok(())
 }
 
