@@ -77,6 +77,24 @@ pub(crate) struct TrialOffer {
     pub days: u32,
 }
 
+/// `POST /trials/release`: a Checkout that never was (Stripe refused it,
+/// or it failed before a session existed) takes its own part out of the
+/// person's held trial place (`attempt`, `CheckoutPlan::hold`), and the
+/// place goes at once if no other Checkout of theirs holds it: one made,
+/// maybe open on Stripe's page, or one still under way, keeps it
+/// (fragment_core::org::hold_released). Asked again, or of another hold,
+/// it changes nothing.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct TrialRelease {
+    pub person: String,
+    pub attempt: String,
+}
+
+impl Call for TrialRelease {
+    const PATH: &'static str = "/trials/release";
+    type Answer = ();
+}
+
 #[derive(Deserialize)]
 struct CodeRow {
     id: String,
@@ -103,6 +121,16 @@ impl CodeRow {
 #[derive(Deserialize)]
 struct UseRow {
     subscription: Option<String>,
+}
+
+/// `trial_uses.attempts`, read: the attempt ids holding a place.
+fn attempts_of(text: &str) -> CellResult<Vec<String>> {
+    serde_json::from_str(text).map_err(|e| CellError::host(format!("trial_uses.attempts: {e}")))
+}
+
+/// `trial_uses.attempts`, as stored.
+fn attempts_text(ids: &[String]) -> CellResult<String> {
+    serde_json::to_string(ids).map_err(|e| CellError::host(format!("trial_uses.attempts: {e}")))
 }
 
 fn not_a_code() -> CellError {
@@ -302,19 +330,70 @@ impl RegistryCell {
         Ok(TrialOffer { id: r.id.clone(), kind: r.kind()?, days: u32::try_from(r.days).map_err(|_| CellError::host("trial_codes.days"))? })
     }
 
-    /// Holds a code's place for `person`'s Checkout until it expires.
-    pub(super) fn hold_trial_place(&self, code: &str, person: &str, until_ms: i64) -> CellResult<()> {
+    /// Holds a code's place for `person`'s Checkout until it expires: this
+    /// Checkout's own attempt id, among those of their open hold of the
+    /// code (fragment_core::org::hold_taken), which `TrialRelease` takes
+    /// out if it never is.
+    pub(super) fn hold_trial_place(&self, code: &str, person: &str, until_ms: i64) -> CellResult<String> {
+        #[derive(Deserialize)]
+        struct Open {
+            code: String,
+            attempts: Option<String>,
+        }
+        let now = js::now_ms();
+        let open = self.row::<Open>(
+            "SELECT code, attempts FROM trial_uses WHERE person = ? AND subscription IS NULL AND expires_at > ?",
+            vec![person.into(), SqlStorageValue::Integer(now)],
+        )?;
+        let held = match open {
+            Some(o) if o.code == code => Some(match o.attempts {
+                Some(a) => attempts_of(&a)?,
+                // held before attempts were named: kept to its expiry
+                None => vec![org::HOLD_KEPT.to_string()],
+            }),
+            // none open, or another code's (this Checkout moves the hold)
+            _ => None,
+        };
+        let attempt = hex::encode(js::random_bytes::<8>());
+        let ids = org::hold_taken(held, &attempt);
         self.exec(
-            "INSERT INTO trial_uses (person, code, at, expires_at, subscription) VALUES (?, ?, ?, ?, NULL)
-             ON CONFLICT (person) DO UPDATE SET code = excluded.code, at = excluded.at, expires_at = excluded.expires_at
+            "INSERT INTO trial_uses (person, code, at, expires_at, subscription, attempts) VALUES (?, ?, ?, ?, NULL, ?)
+             ON CONFLICT (person) DO UPDATE SET code = excluded.code, at = excluded.at, expires_at = excluded.expires_at, attempts = excluded.attempts
              WHERE trial_uses.subscription IS NULL",
-            vec![person.into(), code.into(), SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(until_ms)],
-        )
+            vec![person.into(), code.into(), SqlStorageValue::Integer(now), SqlStorageValue::Integer(until_ms), attempts_text(&ids)?.into()],
+        )?;
+        Ok(attempt)
     }
 
-    /// A trial's Checkout completed: its use holds its place for good.
+    /// A Checkout that never was takes its part out of the held place, which
+    /// goes once no Checkout holds it (`TrialRelease`).
+    fn trial_release(&self, b: TrialRelease) -> CellResult<()> {
+        #[derive(Deserialize)]
+        struct Held {
+            attempts: Option<String>,
+        }
+        let Some(h) = self.row::<Held>("SELECT attempts FROM trial_uses WHERE person = ? AND subscription IS NULL", vec![b.person.as_str().into()])? else {
+            return Ok(());
+        };
+        let ids = h.attempts.as_deref().map(attempts_of).transpose()?.unwrap_or_default();
+        match org::hold_released(&ids, &b.attempt) {
+            None => Ok(()),
+            Some(left) if left.is_empty() => self.exec("DELETE FROM trial_uses WHERE person = ? AND subscription IS NULL", vec![b.person.into()]),
+            Some(left) => self.exec("UPDATE trial_uses SET attempts = ? WHERE person = ? AND subscription IS NULL", vec![attempts_text(&left)?.into(), b.person.into()]),
+        }
+    }
+
+    /// A trial's Checkout completed: its use holds its place for good,
+    /// however its hold went meanwhile (expired, moved to another code, or
+    /// given back after an answer of Stripe's that was lost while the
+    /// session was made): the person's row is this trial's, bought.
     pub(super) fn trial_bought(&self, code: &str, person: &str, subscription: &str) -> CellResult<()> {
-        self.exec("UPDATE trial_uses SET subscription = ? WHERE person = ? AND code = ?", vec![subscription.into(), person.into(), code.into()])
+        let now = SqlStorageValue::Integer(js::now_ms());
+        self.exec(
+            "INSERT INTO trial_uses (person, code, at, expires_at, subscription) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (person) DO UPDATE SET code = excluded.code, subscription = excluded.subscription",
+            vec![person.into(), code.into(), now.clone(), now, subscription.into()],
+        )
     }
 
     pub(super) fn trials_route(&self, path: &str, bytes: &[u8]) -> Option<CellResult<Response>> {
@@ -323,6 +402,7 @@ impl RegistryCell {
             TrialList::PATH => reply::<TrialList>(self.trial_list()),
             TrialGet::PATH => reply::<TrialGet>(body::<TrialGet>(bytes).and_then(|b| self.trial_view(&self.code_row(&b.id)?, true))),
             TrialChange::PATH => reply::<TrialChange>(body(bytes).and_then(|b| self.trial_change(b))),
+            TrialRelease::PATH => reply::<TrialRelease>(body(bytes).and_then(|b| self.trial_release(b))),
             _ => return None,
         })
     }

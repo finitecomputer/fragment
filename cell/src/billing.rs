@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use worker::*;
 
-use crate::config::Config;
+use crate::config::{Config, StripeConfig};
 use crate::error::{CellError, CellResult};
-use crate::registry::billing::{ApplyCheckout, ApplySubscription, CancelOrphan, CheckoutBegin, CustomerOf, PackBegin, SubscriptionCopy};
+use crate::registry::billing::{ApplyCheckout, ApplySubscription, CancelOrphan, CheckoutBegin, CheckoutPlan, CustomerOf, PackBegin, SubscriptionCopy};
+use crate::registry::trials::TrialRelease;
 use fragment_core::org::Status;
 use crate::registry::calls::By;
 use crate::registry::orgs::Mine;
@@ -100,6 +101,23 @@ async fn checkout(env: &Env, cfg: &Config, by: By, buy: Buy) -> CellResult<Check
     let stripe_cfg = cfg.stripe()?;
     let expires_at_s = js::now_ms() / 1000 + CHECKOUT_TTL_S;
     let plan = ask_registry(env, &CheckoutBegin { by, kind: buy.kind, trial: buy.trial_code, until_ms: expires_at_s * 1000 }).await?;
+    let made = session_of(env, cfg, stripe_cfg, &plan, expires_at_s).await;
+    // a Checkout that never was (Stripe refused it, or it failed before a
+    // session the person could open) takes its part out of the trial's held
+    // place at once, rather than in CHECKOUT_TTL_S; the place goes if no
+    // other Checkout of theirs holds it (one made, maybe open on Stripe's
+    // page, or one still under way keeps it)
+    if let (Err(e), Some(attempt)) = (&made, &plan.hold) {
+        if let Err(again) = ask_registry(env, &TrialRelease { person: plan.person.clone(), attempt: attempt.clone() }).await {
+            // its place is held until the Checkout's own expiry, as before
+            console_error!("{}", json!({ "trial_release": attempt, "after": e.message, "failed": again.message }));
+        }
+    }
+    made
+}
+
+/// The Stripe Checkout for `plan` (`checkout`'s), or why not.
+async fn session_of(env: &Env, cfg: &Config, stripe_cfg: &StripeConfig, plan: &CheckoutPlan, expires_at_s: i64) -> CellResult<Checkout> {
     let kind = plan.kind;
     let stripe = crate::stripe::client(env, cfg).await?;
     let deployment = cfg.stripe_deployment();

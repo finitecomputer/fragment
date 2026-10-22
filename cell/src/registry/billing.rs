@@ -97,6 +97,9 @@ pub(crate) struct CheckoutPlan {
     /// shows the whole).
     pub quantity: u64,
     pub trial: Option<super::trials::TrialOffer>,
+    /// This Checkout's own part of the trial's held place: taken out if it
+    /// never is (`TrialRelease`).
+    pub hold: Option<String>,
 }
 
 impl Call for CheckoutBegin {
@@ -308,8 +311,8 @@ impl RegistryCell {
             None => None,
         };
         let trial = b.trial.as_deref().map(|raw| self.trial_offer(&who.id, raw, again.as_ref().map(|(o, _)| o.id.as_str()))).transpose()?;
-        let plan = match again {
-            None => CheckoutPlan { person: who.id.clone(), email: email.clone(), org: fresh_id("org-"), org_name: email, customer: None, kind, quantity: 1, trial },
+        let mut plan = match again {
+            None => CheckoutPlan { person: who.id.clone(), email: email.clone(), org: fresh_id("org-"), org_name: email, customer: None, kind, quantity: 1, trial, hold: None },
             Some((o, mine)) => {
                 // their own lapsed paid seat is counted; a seatless admin buys one
                 let quantity = self.paid_seats(&o.id)? + u64::from(mine.seat.is_none());
@@ -322,12 +325,12 @@ impl RegistryCell {
                     true => self.billing_row(&o.id)?.and_then(|r| r.customer),
                     false => None,
                 };
-                CheckoutPlan { person: who.id.clone(), email, org: o.id, org_name: o.name, customer, kind, quantity, trial }
+                CheckoutPlan { person: who.id.clone(), email, org: o.id, org_name: o.name, customer, kind, quantity, trial, hold: None }
             }
         };
         assert!(plan.quantity >= 1 && plan.quantity <= fragment_core::org::SEATS_PER_ORG_MAX, "a Checkout bills one seat at least, an org's at most");
         if let Some(t) = &plan.trial {
-            self.hold_trial_place(&t.id, &who.id, b.until_ms)?;
+            plan.hold = Some(self.hold_trial_place(&t.id, &who.id, b.until_ms)?);
         }
         Ok(plan)
     }

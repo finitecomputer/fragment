@@ -346,9 +346,97 @@ pub fn trial_has_place(capacity: u64, subscribed: u64, open: u64) -> bool {
     subscribed.saturating_add(open) < capacity
 }
 
+/// The most Checkouts a person's held trial place names
+/// (`trial_uses.attempts`); past it the oldest give way to `HOLD_KEPT`.
+pub const TRIAL_HOLD_ATTEMPTS_MAX: usize = 16;
+/// An attempt that never gives the place back: one from before attempts
+/// were named, or one the bound let go of. The place is then held until
+/// its expiry, as every Checkout's was.
+pub const HOLD_KEPT: &str = "kept";
+
+/// The Checkouts holding a person's trial place once `attempt` takes it:
+/// added to those of their open hold of the same code (`open`), or alone.
+/// Each is one Checkout under way or made; none is ever taken out but by
+/// its own failure (`hold_released`), so the place goes only once every
+/// one of them failed, and one made, or still under way, keeps it.
+pub fn hold_taken(open: Option<Vec<String>>, attempt: &str) -> Vec<String> {
+    assert!(!attempt.is_empty() && attempt != HOLD_KEPT, "an attempt is named, and not as the kept one");
+    let mut ids = open.unwrap_or_default();
+    ids.push(attempt.to_string());
+    if ids.len() > TRIAL_HOLD_ATTEMPTS_MAX {
+        // the oldest give way to one that never leaves: the place is never
+        // given back early for them
+        let keep = ids.split_off(ids.len() - (TRIAL_HOLD_ATTEMPTS_MAX - 1));
+        ids = std::iter::once(HOLD_KEPT.to_string()).chain(keep).collect();
+    }
+    assert!(ids.len() <= TRIAL_HOLD_ATTEMPTS_MAX);
+    ids
+}
+
+/// What a Checkout that never was (`attempt`) leaves of a held place's
+/// attempts (`ids`): `None` when it holds no part of it (released already,
+/// or it is another hold's); else the attempts left, none meaning the place
+/// goes.
+pub fn hold_released(ids: &[String], attempt: &str) -> Option<Vec<String>> {
+    if attempt == HOLD_KEPT || !ids.iter().any(|i| i == attempt) {
+        return None;
+    }
+    Some(ids.iter().filter(|i| *i != attempt).cloned().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Overlapping Checkouts of one person's trial place (#484's review):
+    /// both failing, the place goes once the last has; one failing while
+    /// another is made (in either order, at any instant), it stays; one
+    /// made before a retry that fails, it stays; a release asked again, or
+    /// of another hold, changes nothing; one from before attempts were
+    /// named never gives it back.
+    #[test]
+    fn a_held_place_goes_only_once_every_checkout_holding_it_failed() {
+        // A takes it, then B (A still under way), both fail: in either order
+        let both = hold_taken(Some(hold_taken(None, "a")), "b");
+        assert_eq!(both, ids(&["a", "b"]));
+        let after_a = hold_released(&both, "a").unwrap();
+        assert_eq!(after_a, ids(&["b"]), "A's failure leaves B's hold");
+        assert_eq!(hold_released(&after_a, "b").unwrap(), ids(&[]), "B's then gives the place back");
+        let after_b = hold_released(&both, "b").unwrap();
+        assert_eq!(hold_released(&after_b, "a").unwrap(), ids(&[]));
+        // A fails, B made (whatever their timing): the place stays B's
+        assert_eq!(hold_released(&both, "a").unwrap(), ids(&["b"]));
+        // A made, then B's retry fails: it stays A's
+        assert_eq!(hold_released(&both, "b").unwrap(), ids(&["a"]));
+        // asked again, or of another hold: nothing
+        assert_eq!(hold_released(&after_a, "a"), None);
+        assert_eq!(hold_released(&both, "z"), None);
+        // a hold from before attempts were named is kept to its expiry
+        let old = hold_taken(Some(ids(&[HOLD_KEPT])), "c");
+        assert_eq!(hold_released(&old, "c").unwrap(), ids(&[HOLD_KEPT]));
+        assert_eq!(hold_released(&old, HOLD_KEPT), None);
+    }
+
+    #[test]
+    fn a_held_place_names_at_most_its_bound_and_never_gives_back_early() {
+        let mut held = None;
+        for i in 0..40 {
+            held = Some(hold_taken(held, &format!("a{i}")));
+        }
+        let held = held.unwrap();
+        assert_eq!(held.len(), TRIAL_HOLD_ATTEMPTS_MAX);
+        assert_eq!(held[0], HOLD_KEPT, "the oldest gave way to one that never leaves");
+        assert_eq!(held.last().map(String::as_str), Some("a39"));
+        let mut left = held.clone();
+        for i in 25..40 {
+            left = hold_released(&left, &format!("a{i}")).unwrap();
+        }
+        assert_eq!(left, ids(&[HOLD_KEPT]), "every named one failing still keeps the place to its expiry");
+    }
 
     const ALL: [Status; 8] =
         [Status::Trialing, Status::Active, Status::PastDue, Status::Canceled, Status::Unpaid, Status::Incomplete, Status::IncompleteExpired, Status::Paused];
