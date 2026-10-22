@@ -1120,6 +1120,10 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         (Method::Get, [""] | ["settings"] | ["welcome"]) => shell::page(&req, env, cfg, &url).await,
         // the operators' admin page: to anyone else, the 404 below
         (Method::Get, ["admin"]) => shell::admin_page(&req, env, cfg, &url).await,
+        // Finite's about page, privacy policy and terms, for anyone (signed out too)
+        (Method::Get | Method::Head, ["about"]) => shell::legal_page(&req, env, "about.html").await,
+        (Method::Get | Method::Head, ["privacy"]) => shell::legal_page(&req, env, "privacy.html").await,
+        (Method::Get | Method::Head, ["terms"]) => shell::legal_page(&req, env, "terms.html").await,
         (_, ["auth", ..] | ["cli"] | ["cli", "begin" | "approve"]) => {
             let segs = segments.clone();
             auth::platform(req, env, ctx, cfg, &url, &segs).await

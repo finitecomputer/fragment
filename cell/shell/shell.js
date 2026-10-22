@@ -1875,6 +1875,22 @@ function actionLine(label, ...actions) {
   row.append(key, control);
   return row;
 }
+// Finite's privacy policy and terms (`/privacy`, `/terms`), small and
+// muted, each in a tab of its own: under the welcome's seat, and at the
+// end of Settings' Account; with its about page first (`/about`) under
+// the signed-out landing's Sign In
+function legalLinks(about = false) {
+  const p = el("p", "muted legal-links");
+  const pages = [...(about ? [["/about", "About"]] : []), ["/privacy", "Privacy"], ["/terms", "Terms"]];
+  pages.forEach(([href, text], i) => {
+    const a = el("a", null, text);
+    a.href = href;
+    a.target = "_blank";
+    a.rel = "noopener";
+    p.append(...(i ? [" · ", a] : [a]));
+  });
+  return p;
+}
 // a sentence whose `quoted` parts are code
 function say(text) {
   const p = el("p");
@@ -2013,6 +2029,7 @@ async function openSettings(push = true, failed = null) {
   // their sign-ins, when they linked several before linking went (off
   // until WorkOS offers an account picker: docs/api.md, Sign-in)
   if (emails.length > 1) account.append(line("Sign-ins", emails.join(", ")));
+  account.append(legalLinks());
   // the person's seat, credit and org (billing.js), and why agents stop
   const billing = await billingSections(billingHelpers, ledger, mySeat, back);
   if (lost()) return;
@@ -2993,7 +3010,7 @@ function signIn() {
   heading.append(el("h1", null, PITCH), el("p", "muted", SUBTITLE));
   const actions = el("div", "splash-actions");
   actions.append(go, other);
-  firstRun(heading, actions);
+  firstRun(heading, actions, legalLinks(true));
   $("first-run").classList.add("splash");
 }
 // "Use another account" (`POST /auth/switch`, docs/api.md, Sign-in), back
@@ -3077,6 +3094,7 @@ async function welcome() {
     el("p", "muted", SUBTITLE),
     ...(back === "canceled" ? [el("p", null, "Checkout was canceled: nothing was bought.")] : []),
     ...seatOffer({ api, el }, mine, trial),
+    legalLinks(),
     imports,
     foot,
   );

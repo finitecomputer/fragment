@@ -54,6 +54,31 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("shell", &[crate::Need::Fakes]) {
         return Ok(());
     }
+    // Finite's about page, privacy policy and terms: pages for anyone,
+    // signed out too, static (no script), never framed; each its title and
+    // its heading
+    let legal: Vec<(Reply, &str, &str)> = vec![
+        (api.unsigned("GET", "/about", None)?, "About Finite", "About Finite"),
+        (api.unsigned("GET", "/privacy", None)?, "Privacy · Finite", "Privacy"),
+        (api.unsigned("GET", "/terms", None)?, "Terms of service · Finite", "Terms of service"),
+    ];
+    let shown = legal.iter().all(|(r, title, h1)| {
+        let header = |name: &str| r.headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+        r.status == 200
+            && header("content-type").starts_with("text/html")
+            && r.text.contains(&format!("<title>{title}</title>"))
+            && r.text.contains(&format!("<h1>{h1}</h1>"))
+            && r.text.contains("/__shell/legal.css")
+            && !r.text.contains("<script")
+            && header("content-security-policy").contains("frame-ancestors 'none'")
+    });
+    let css = api.unsigned("GET", "/__shell/legal.css", None)?;
+    s.ok(
+        "Finite's about page (/about), privacy policy (/privacy) and terms (/terms) answer anyone, signed out: static pages with their titles, their stylesheet published, never framed",
+        shown && css.status == 200 && css.headers.get("content-type").is_some_and(|v| v.as_bytes().starts_with(b"text/css")),
+        json!(legal.iter().map(|(r, title, _)| json!({ "title": title, "status": r.status, "head": r.text.chars().take(300).collect::<String>() })).collect::<Vec<_>>()),
+    );
+
     let email = format!("shell-{}@e2e.test", crate::api::now_s());
     let session = api.sign_in(&email)?;
 
@@ -764,6 +789,16 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         other == json!({ "href": "/auth/login?screen_hint=sign-in&return=%2Fsettings", "says": "Sign In" }),
         &other,
     );
+    // under them, About, Privacy and Terms, small and muted, each in a tab of its own
+    let links = b.eval(
+        &page,
+        "(() => { const p = document.querySelector('#first-run-card .splash-actions + p.legal-links'); return p && { muted: p.classList.contains('muted'), text: p.textContent, links: [...p.querySelectorAll('a')].map((a) => [a.textContent, a.getAttribute('href'), a.target]) }; })()",
+    )?;
+    s.ok(
+        "and under Sign In, About · Privacy · Terms, muted, pointing at /about, /privacy and /terms",
+        links == json!({ "muted": true, "text": "About · Privacy · Terms", "links": [["About", "/about", "_blank"], ["Privacy", "/privacy", "_blank"], ["Terms", "/terms", "_blank"]] }),
+        &links,
+    );
     let logo = b.eval(
         &page,
         "(async () => { const i = document.querySelector('#first-run .first-run-logo'); if (!i) return null; const drawn = await i.decode().then(() => true, () => false); const r = await fetch(i.src); return { src: i.getAttribute('src'), drawn, status: r.status, type: r.headers.get('content-type') }; })()",
@@ -1081,6 +1116,12 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         account_shows(&account, &email) && account["noSeat"] == json!([]) && !text.contains("You are a guest"),
         &account,
     );
+    let legal = b.eval(&page, LEGAL_LINKS_IN_ACCOUNT)?;
+    s.ok(
+        "settings' Account ends with Finite's Privacy and Terms, each in a tab of its own",
+        legal == json!({ "last": true, "links": [["Privacy", "/privacy", "_blank"], ["Terms", "/terms", "_blank"]], "text": "Privacy · Terms" }),
+        &legal,
+    );
     // a prompt for Claude Code or Codex naming this platform's own llms.txt,
     // copied whole; the CLI's install folded below it
     let prompt = format!("Read {}/llms.txt and help me build: ", api.base);
@@ -1348,6 +1389,11 @@ fn visibility(v: &str) -> String {
 const COPY_SEEN: &str = "(() => { const p = document.getElementById('build-prompt'); const said = document.getElementById('build-prompt-said'); \
     return { said: said && !said.hidden && said.checkVisibility() ? said.textContent : null, button: document.querySelector('#settings-page [data-action=copy-prompt]')?.textContent ?? null, \
       focused: !!p && document.activeElement === p, selected: !!p && p.value.length > 0 && p.selectionStart === 0 && p.selectionEnd === p.value.length }; })()";
+
+/// Settings' Account section's Privacy and Terms: whether they end it, and
+/// their links (text, href, target) and words.
+const LEGAL_LINKS_IN_ACCOUNT: &str = "(() => { const s = [...document.querySelectorAll('#settings-page .settings-section')].find((s) => s.querySelector(':scope > h2')?.textContent === 'Account'); \
+    const p = s?.querySelector('.legal-links'); return { last: !!p && s.lastElementChild === p, links: [...(p?.querySelectorAll('a') ?? [])].map((a) => [a.textContent, a.getAttribute('href'), a.target]), text: p?.textContent ?? null }; })()";
 
 /// The chat's composer, ready for the person: its page has its hello.
 const COMPOSER_READY: &str = "(() => { const t = document.getElementById('text'); return !!t && !t.disabled && document.getElementById('say')?.dataset.ready === '1'; })()";

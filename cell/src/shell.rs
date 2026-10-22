@@ -1,5 +1,6 @@
 //! The shell (docs/cloudflare-v1.md, decisions 6–12): the platform's one
-//! page, at `/`, `/settings` and `/welcome`, and its files at
+//! page, at `/`, `/settings` and `/welcome`, Finite's about page, privacy
+//! policy and terms at `/about`, `/privacy` and `/terms`, and its files at
 //! `/__shell/<file>`, the release's (cell/shell/), read from its Static
 //! Assets (assets.rs). It holds no key: its script calls the API with
 //! the person's platform session (lib.rs `shell_session`) and frames their
@@ -97,24 +98,46 @@ pub async fn admin_page(req: &Request, env: &Env, cfg: &Config, url: &Url) -> Ce
     crate::assets::body(env, page_file("admin.html"), h).await
 }
 
+/// `GET /about`, `GET /privacy` and `GET /terms`: Finite's about page,
+/// privacy policy and terms (cell/shell/about.html, privacy.html,
+/// terms.html, with `legal.css`), for anyone, signed in or not: the pages
+/// the landing, the welcome and Settings link, and the deployment names to
+/// WorkOS and Stripe. Static: no script, no form, never
+/// framed. Revalidated by their hash (`no-cache`), a 304 answered before
+/// any read.
+pub async fn legal_page(req: &Request, env: &Env, name: &str) -> CellResult<Response> {
+    let h = Headers::new();
+    h.set("content-type", "text/html; charset=utf-8")?;
+    h.set("content-security-policy", "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")?;
+    h.set("x-frame-options", "DENY")?;
+    h.set("cross-origin-opener-policy", "same-origin")?;
+    h.set("referrer-policy", "strict-origin-when-cross-origin")?;
+    revalidated(req, env, page_file(name), h).await
+}
+
 /// `GET /__shell/<file>`: one of the files it publishes
-/// (`fragment_templates::shell_published`), or `None`. A 304 and a HEAD
-/// are answered from the index, before any read.
+/// (`fragment_templates::shell_published`), or `None`.
 pub async fn asset(req: &Request, env: &Env, name: &str) -> CellResult<Option<Response>> {
     let Some((f, mime)) = fragment_templates::shell_published(name) else { return Ok(None) };
-    let tag = etag(f);
     let h = Headers::new();
     h.set("content-type", mime)?;
-    // revalidated each time: a release changes them under the same names
+    h.set("x-content-type-options", "nosniff")?;
+    Ok(Some(revalidated(req, env, f, h).await?))
+}
+
+/// A file of the release, answered with `h`: revalidated each time by its
+/// hash (a release changes it under the same name), a 304 and a HEAD
+/// answered from the index, before any read.
+async fn revalidated(req: &Request, env: &Env, f: &File, h: Headers) -> CellResult<Response> {
+    let tag = etag(f);
     h.set("cache-control", "no-cache")?;
     h.set("etag", &tag)?;
-    h.set("x-content-type-options", "nosniff")?;
     if not_modified(req, &tag)? {
-        return Ok(Some(Response::empty()?.with_status(304).with_headers(h)));
+        return Ok(Response::empty()?.with_status(304).with_headers(h));
     }
     if req.method() == Method::Head {
         h.set("content-length", &f.size.to_string())?;
-        return Ok(Some(Response::empty()?.with_headers(h)));
+        return Ok(Response::empty()?.with_headers(h));
     }
-    Ok(Some(crate::assets::body(env, f, h).await?))
+    crate::assets::body(env, f, h).await
 }
