@@ -98,6 +98,54 @@ fn held_socket(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, cha
     Ok(())
 }
 
+/// The chat's page whose script does not come, in the shell's frame (the
+/// frame was blank, with nothing to press): after a while it says it is
+/// still loading, with a reload of its own page, in its frame. Valid: a
+/// chat that loads never says it (its script draws the page, and the line
+/// goes with what was there). Its `chat.js` refused (the frame's own
+/// requests) and the frame loaded again: nothing for a while, then "Still
+/// loading… Reload", the link to the frame's own page; its Reload, the
+/// script let through, loads the chat again in its frame, and the shell
+/// around it stays as it was (not reloaded).
+fn still_loading_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let line = "document.getElementById('still-loading')";
+    let ready = format!("document.getElementById('say')?.dataset.ready === '1' && !{line}");
+    let shell = chrome.open(&format!("{}/", api.base))?;
+    chrome.viewport(&shell, 1280, 860, false)?;
+    let row = format!("#chats [data-key={}]", js(&format!("chat:{chat}")));
+    let listed = chrome.until(&shell, &format!("!document.getElementById('layout').hidden && !!document.querySelector({})", js(&row)), wait);
+    chrome.eval(&shell, &format!("(document.querySelector({})?.click(), window.__shellStays = true, true)", js(&row)))?;
+    let framed = s.eventually(wait, || chrome.eval_in_frame(&shell, chat, &ready).ok() == Some(Value::Bool(true)));
+    s.ok("the chat in the shell's frame loads, and never says it is still loading (its script drew the page, the line gone with what was there)", listed && framed, "");
+
+    let frame = chrome.frame(chat)?;
+    chrome.block(&frame, &["*/chat.js"])?;
+    chrome.eval(&frame, "(location.reload(), true)")?;
+    // (styled: its stylesheet in; before it a line is unstyled, which a
+    // person never sees, as the page draws nothing until it has come)
+    let styled = format!("!!{line} && getComputedStyle({line}).position === 'fixed'");
+    let quiet = chrome.until(&frame, &format!("{styled} && getComputedStyle({line}).visibility === 'hidden'"), wait);
+    let t0 = std::time::Instant::now();
+    let shown = quiet && chrome.until(&frame, &format!("{styled} && getComputedStyle({line}).visibility === 'visible'"), wait);
+    let after = t0.elapsed();
+    let seen = chrome.eval(&frame, &format!("({{ said: {line}?.textContent ?? null, link: {line}?.querySelector('a')?.href ?? null, here: location.href }})"))?;
+    s.ok(
+        "its script refused, the chat's frame says nothing for a while, then \"Still loading… Reload\", the link to its own page",
+        shown && after >= Duration::from_secs(8) && seen["said"] == "Still loading… Reload" && seen["link"] == seen["here"],
+        json!({ "seen": seen, "afterMs": after.as_millis() as u64 }),
+    );
+    chrome.block(&frame, &[])?;
+    // (a press, as a script's: with no line, a FAIL here, the checks after it made)
+    chrome.eval(&frame, "(document.querySelector('#still-loading a')?.click(), true)")?;
+    let back = chrome.until(&frame, &ready, wait);
+    let stays = chrome.eval(&shell, "window.__shellStays === true")?;
+    s.ok("its Reload, the script let through, loads the chat again in its frame, and the shell stays as it was", back && stays == true, json!({ "back": back, "stays": stays }));
+    chrome.detach(frame)?;
+    chrome.close(shell)?;
+    Ok(())
+}
+
 /// A JSON array's strings.
 fn strings_of(v: &Value) -> Vec<String> {
     v.as_array().into_iter().flatten().filter_map(|x| x.as_str().map(str::to_string)).collect()
@@ -660,6 +708,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     // (a tab of its own, in front: after the push checks, which ask whether
     // the owner's page is on screen)
     held_socket(s, api, &mut chrome, &owner, &chat_name)?;
+    still_loading_in_frame(s, api, &mut chrome, &chat_name)?;
 
     polish::check(s, api, &owner, &owner_session, &mut chrome, &label)?;
     polish::working_card(s, api, &owner, &mut chrome, &identity, &agent_name)?;

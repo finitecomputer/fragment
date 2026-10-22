@@ -418,6 +418,12 @@ on its own side if it does.
 
 ## The page (`templates/chat`)
 
+**Still loading.** A page whose script has not drawn it 9 s after it
+came (its script, or one it imports, never came) says "Still loading…
+Reload", the link to its own page, in its own frame when framed: its
+HTML holds the line, its CSS shows it after the delay, and drawing the
+page takes it away.
+
 **On a phone, an app's page.** The page never scrolls, bounces or
 zooms, framed or on its own: its html and body are pinned
 (`overscroll-behavior: none`) and the messages scroll, holding their own

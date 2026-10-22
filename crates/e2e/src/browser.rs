@@ -565,6 +565,17 @@ impl Browser {
     /// the frame while its page is between documents (a navigation under
     /// way, which holds the page's own session back until it commits).
     pub fn eval_in_isolated_frame(&mut self, url_part: &str, expr: &str) -> Result<Value> {
+        let frame = self.frame(url_part)?;
+        let r = self.eval(&frame, expr).map_err(|e| anyhow::anyhow!("the frame threw: {e:#}"));
+        self.detach(frame)?;
+        r
+    }
+
+    /// The first frame target of this lease's contexts whose URL contains
+    /// `url_part` (a page of another site than its parent's: a process of
+    /// its own), attached until `detach`: driven as a page, its own
+    /// requests (`block`) and its loads its own.
+    pub fn frame(&mut self, url_part: &str) -> Result<Page> {
         let v = self.send("Target.getTargets", json!({}), None)?;
         let context = self.context.clone();
         let ours = |id: &Value| context.as_deref().is_none_or(|c| id == c || self.others.iter().any(|o| id == o.as_str()));
@@ -575,10 +586,21 @@ impl Browser {
             .find(|t| t["type"] == "iframe" && ours(&t["browserContextId"]) && t["url"].as_str().is_some_and(|u| u.contains(url_part)))
             .and_then(|t| t["targetId"].as_str().map(str::to_string))
             .with_context(|| format!("no frame at {url_part}"))?;
-        let frame = self.attach(&target)?;
-        let r = self.eval(&frame, expr).map_err(|e| anyhow::anyhow!("the frame threw: {e:#}"));
+        self.attach(&target)
+    }
+
+    /// The page's (or frame's) requests to URLs matching `patterns` (`*`
+    /// any run of characters) refused from now on, as a resource that
+    /// never comes; none (`&[]`) lets them through again.
+    pub fn block(&mut self, page: &Page, patterns: &[&str]) -> Result<()> {
+        self.send("Network.enable", json!({}), Some(&page.session))?;
+        self.send("Network.setBlockedURLs", json!({ "urls": patterns }), Some(&page.session))?;
+        Ok(())
+    }
+
+    pub fn detach(&mut self, frame: Page) -> Result<()> {
         self.send("Target.detachFromTarget", json!({ "sessionId": frame.session }), None)?;
-        r
+        Ok(())
     }
 
     /// A click at a point, as a hand makes it: a user gesture, so a popup

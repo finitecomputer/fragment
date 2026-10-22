@@ -64,6 +64,13 @@
    the composer sits just above the keyboard. */
 html, body { position: fixed; inset: 0; margin: 0; overflow: hidden; overscroll-behavior: none; background: var(--bg-chat); color: var(--text-primary); }
 html { -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+/* "Still loading… Reload" (index.html): hidden, then shown 9 s after the
+   page, past a slow phone's whole load of it (its page, its scripts and
+   their first answers), if chat.js has not drawn the page, and so taken
+   it away, by then */
+.still-loading { position: fixed; inset: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0 8px; margin: 0; padding: 24px; font: 14px/1.5 var(--font-sans); color: var(--text-secondary); visibility: hidden; animation: still-loading 0s 9s forwards; }
+.still-loading a { color: var(--accent-blue); }
+@keyframes still-loading { to { visibility: visible; } }
 .fragment-chat { top: var(--viewport-top, 0px); bottom: auto; height: var(--viewport-height, 100%); display: flex; flex-direction: column; overflow: hidden;
   font: 14px/1.5 var(--font-sans); font-feature-settings: "ss01", "cv11", "kern"; -webkit-font-smoothing: antialiased; }
 /* no weight of their own: a component's rule below sets its color and size */

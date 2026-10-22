@@ -322,6 +322,7 @@ export function mount(root) {
   // ships, never text it was given; each icon slot gets its icon
   const page = document.getElementById("chat-page");
   if (!(page instanceof HTMLTemplateElement)) throw new Error("chat: the page has no #chat-page template");
+  // the page drawn: what was there goes, "Still loading…" (index.html) with it
   root.replaceChildren(page.content.cloneNode(true));
   for (const slot of root.querySelectorAll("[data-icon]")) slot.replaceWith(icon(slot.dataset.icon));
   const $ = (id) => root.querySelector(`#${id}`);

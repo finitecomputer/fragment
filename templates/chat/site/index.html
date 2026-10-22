@@ -13,6 +13,13 @@
   <link rel="stylesheet" href="./chat.css">
 </head>
 <body>
+  <!-- said only if the page has not drawn itself after a while (its script,
+       or one it imports, never came: the page would be blank, with nothing
+       to press), with a reload of this same page, in its own frame:
+       chat.css shows it after a delay, and chat.js's mount, drawing the
+       page, takes it away with everything else here. No script of its
+       own: it could fail to come as well. -->
+  <p class="still-loading" id="still-loading">Still loading… <a href="">Reload</a></p>
   <!-- the chat's parts, which chat.js mounts (`mount`); each data-icon is
        a slot its icon fills -->
   <template id="chat-page">
