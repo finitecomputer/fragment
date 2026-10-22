@@ -319,6 +319,12 @@ pub async fn delete_app_facet(ctx: &JsValue, name: &str) -> CellResult<()> {
 }
 
 /// A binding of the node's; `section` is where wrangler.jsonc declares it.
+/// Whether the runtime binds `name` (a runtime without a service has no
+/// binding for it: celld has no Browser Rendering, no Email Sending).
+pub fn has_binding(env: &JsValue, name: &str) -> bool {
+    get(env, name).is_ok_and(|b| !b.is_undefined())
+}
+
 fn binding(env: &JsValue, name: &str, section: &str) -> CellResult<JsValue> {
     let binding = get(env, name)?;
     if binding.is_undefined() {
@@ -362,7 +368,15 @@ pub async fn jobs_status(env: &JsValue, id: &str) -> Result<Option<serde_json::V
 
 /// The fleet's blob store (`BLOBS`, an R2 binding over the fleet bucket).
 fn blobs(env: &Env) -> CellResult<Bucket> {
-    Ok(env.bucket("BLOBS")?)
+    by_what_it_does(env, "BLOBS", "r2_buckets")
+}
+
+/// A binding as `T`, read by what it does: workers-rs's typed reads
+/// (`Env::bucket`, `Env::assets`) take one only when its class has
+/// workerd's name, and celld's R2 and assets bindings' classes read as
+/// `Object` (docs/self-host.md, seam 1). Absent, it is an error naming it.
+pub fn by_what_it_does<T: JsCast>(env: &Env, name: &str, section: &str) -> CellResult<T> {
+    Ok(binding(env.as_ref(), name, section)?.unchecked_into())
 }
 
 async fn await_js(v: Result<JsValue, JsValue>, what: &str) -> CellResult<JsValue> {

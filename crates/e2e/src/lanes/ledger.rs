@@ -933,12 +933,23 @@ fn vision(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     );
     let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let over = png_url(fragment_core::models::MODEL_BODY_MAX_BYTES + 1024);
-    let r = api.signed(hand, "POST", route, Some(&look(&over)))?;
-    s.ok(
-        "one past the route's cap is refused, 413, nothing charged or sent",
-        r.status == 413 && s.ai.calls().len() == calls && aig().len() == before,
-        json!({ "status": r.status, "message": r.message(), "calls": s.ai.calls().len() - calls }),
-    );
+    let sent = api.signed(hand, "POST", route, Some(&look(&over)));
+    let untouched = s.ai.calls().len() == calls && aig().len() == before;
+    match sent {
+        Ok(r) => s.ok(
+            "one past the route's cap is refused, 413, nothing charged or sent",
+            r.status == 413 && untouched,
+            json!({ "status": r.status, "message": r.message(), "calls": s.ai.calls().len() - calls }),
+        ),
+        // celld answers the 413 from the declared length at once and closes
+        // the connection on the body it never read, so this client's upload
+        // breaks before it reads the answer (docs/self-host.md, found 31)
+        Err(e) if s.on_celld() => {
+            s.skip("one past the route's cap is refused, 413", "celld closes the connection under the upload it refused, so this client never reads its 413 (docs/self-host.md, found 31)");
+            s.ok("one past the route's cap is charged nothing and sent nowhere", untouched, format!("{e:#}"));
+        }
+        Err(e) => return Err(e),
+    }
     Ok(())
 }
 
@@ -1082,6 +1093,9 @@ fn transcription(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         r.status == 200 && r.text == "hello from a voice memo" && asked == Some(json!("de")) && r.headers.get("content-type").is_some_and(|t| t.to_str().unwrap_or("").starts_with("text/plain")),
         json!({ "status": r.status, "answer": r.text, "language": asked }),
     );
+    // its charge lands before the refusals are counted: a ledger's queue
+    // may take longer than `quiet`'s second to deliver it (celld's does)
+    s.eventually(wait, || aig().len() == before + 2);
     let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let over = vec![0u8; fragment_core::transcribe::AUDIO_MAX_BYTES + 1];
     let r = transcription_call(api, hand, &[("model", "whisper")], &over)?;
@@ -1112,7 +1126,10 @@ fn meters(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let live = ship(s, &c, LEDGER_APP, LEDGER_JSON);
     landed(s, api, &owner, &name, wait);
     // the deploy's preview card, whose browser time is metered too
-    let card = super::site::card_showing(s, api, &owner, &name, &live);
+    let card = match s.shoots_cards() {
+        true => super::site::card_showing(s, api, &owner, &name, &live),
+        false => None,
+    };
     for _ in 0..5 {
         api.op(&owner, &name, "notes", "q", json!({}))?;
     }
@@ -1140,15 +1157,19 @@ fn meters(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         matches!(usage, Some(Usage::Browser { ms }) if ms > 0) && usage.as_ref().is_some_and(|u| e["entry"]["charge"] == charge(u)) && e["entry"]["row"]["fragment"] == name.as_str()
     };
     let shots = || rows("card");
-    let metered = s.eventually(wait, || {
-        let _ = lever(api, &name, "meter-now", json!({ "sample": false }));
-        shots().iter().any(shot)
-    });
-    s.ok(
-        "its preview card's shot reaches the owner's ledger: its browser time, priced at Browser Rendering's hour",
-        card.is_some() && metered && shots().iter().all(shot),
-        json!({ "card": super::site::card_detail(&card), "ledger": shots() }),
-    );
+    if s.shoots_cards() {
+        let metered = s.eventually(wait, || {
+            let _ = lever(api, &name, "meter-now", json!({ "sample": false }));
+            shots().iter().any(shot)
+        });
+        s.ok(
+            "its preview card's shot reaches the owner's ledger: its browser time, priced at Browser Rendering's hour",
+            card.is_some() && metered && shots().iter().all(shot),
+            json!({ "card": super::site::card_detail(&card), "ledger": shots() }),
+        );
+    } else {
+        s.skip_card("its preview card's shot reaches the owner's ledger");
+    }
     s.ok(
         "a storage sample bills its SQLite as byte-hours",
         rows("store").iter().any(|e| e["entry"]["row"]["usage"]["class"] == "sqlite" && e["entry"]["row"]["usage"]["byte_hours"].as_u64().is_some_and(|b| b > 0)),

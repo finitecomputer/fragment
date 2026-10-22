@@ -315,6 +315,7 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         cron: None,
         chrome: browser::Shared::new(&scratch),
         tools: None,
+        celld: None,
         node: None,
         port: 0,
         run: crate::run_name(),

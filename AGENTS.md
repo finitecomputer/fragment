@@ -157,6 +157,9 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   died. The run's client never reuses a connection idle 4 s: workerd
   closes one idle 5 s, and a request written onto it as it closes is
   lost (`POOL_IDLE`, `crates/e2e/src/api.rs`).
+  `FRAGMENT_E2E_RUNTIME=celld` (with `CELLD_BIN`) runs the node on
+  `celld dev` instead, the self-hosted lane's runtime (docs/self-host.md,
+  seam 1): no computers there, each check it cannot make a skip saying why.
 - `cargo xtask e2e --shard <k>/4`: one of the four shards CI runs, each
   on its own runner with its own build and node (`SHARDS` in
   `crates/e2e/src/lanes/mod.rs`: every section in exactly one, a host
@@ -233,6 +236,8 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   `FRAGMENT_NODE_LOGS=1` adds wrangler's debug logs). Point the CLI at it with
   `FRAGMENT_HOST=http://127.0.0.1:8790` and run `fragment login` once. Dev fleets let jobs
   fetch local addresses (`FRAGMENT_EGRESS_LOCAL=allow`).
+  `--runtime celld` runs the stack on `celld dev` (`CELLD_BIN`;
+  docs/self-host.md, seam 1).
 - `cargo xtask try <todo|inbox|notes|doc> [name]` (with `cargo xtask dev` running):
   creates and deploys a fragment from a template under
   `target/devstack/try/` (never in the repo) and prints the link to open,

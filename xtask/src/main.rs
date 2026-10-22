@@ -1,13 +1,17 @@
 //! `cargo xtask <command>`: the repo's tooling, in Rust.
 //!
 //!   build            build cell/ for wasm32 (worker-build 0.8.5: build.rs)
-//!   dev [--clean]    build, then run the stack in the foreground under
+//!   dev [--clean] [--runtime wrangler|celld]
+//!                    build, then run the stack in the foreground under
 //!                    `wrangler dev`: the cell on :8790 (fragments at
 //!                    <name>.fragment.localhost:8790), the
 //!                    code.storage fake on :8792, and the Workers AI fake on :8796
 //!                    behind the model route (its calls spend their payer's
 //!                    ledger; new people are seats with the month's included
-//!                    credit)
+//!                    credit). --runtime celld runs it on `celld dev`
+//!                    (CELLD_BIN; docs/self-host.md, seam 1): no computers,
+//!                    no cards, the secrets in .dev.vars behind the cell's
+//!                    stand-ins for the store's bindings
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -141,6 +145,13 @@ fn build() -> Result<()> {
 }
 
 fn dev(args: &[String]) -> Result<()> {
+    // the runtime: wrangler's local workerd, or celld (docs/self-host.md,
+    // seam 1), located first: a missing CELLD_BIN stops the run at once
+    let celld = match args.iter().position(|a| a == "--runtime").map(|i| args.get(i + 1).map(String::as_str)) {
+        None | Some(Some("wrangler")) => None,
+        Some(Some("celld")) => Some(devstack::celld::CelldTools::locate()?),
+        Some(other) => bail!("--runtime is wrangler or celld, not {}", other.unwrap_or("nothing")),
+    };
     // the pinned Node and node_modules first: one that cannot be had stops
     // the run before a build
     let tools = devstack::Tools::locate()?;
@@ -222,16 +233,22 @@ fn dev(args: &[String]) -> Result<()> {
         signins_pending_max: None,
         cli_begins_per_ip_minute: None,
         test_secret: None,
-        computer_image: Some("stub".into()),
+        // celld runs no containers of its own here: a self-hosted
+        // deployment's computers are a sandcastle node's (seam 2)
+        computer_image: celld.is_none().then(|| "stub".into()),
         computer_snapshots: false,
         computer_unsaved_max_ms: None,
         providers: None,
         operator_key_values: vec![],
         connection_secret_values: vec![],
         swap_upstream: None,
-        secrets: devstack::Secrets::Store,
+        // wrangler's local store under cell/.wrangler/state; celld has none,
+        // and the cell's stand-ins read .dev.vars (seam 12)
+        secrets: match celld {
+            None => devstack::Secrets::Store,
+            Some(_) => devstack::Secrets::Shim,
+        },
     };
-    // its secrets go to wrangler's local store under cell/.wrangler/state
     fleet.configure(&tools, &devstack::cell_dir())?;
     let opts = devstack::NodeOptions {
         project: devstack::cell_dir(),
@@ -242,8 +259,15 @@ fn dev(args: &[String]) -> Result<()> {
         // in the terminal's group: Ctrl-C stops it with xtask
         own_group: false,
     };
-    let (node, took) = devstack::Node::start(&tools, &opts)?;
+    let (node, took) = match &celld {
+        None => devstack::Node::start(&tools, &opts)?,
+        Some(celld) => devstack::celld::start(celld, &opts)?,
+    };
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
+    match &celld {
+        None => println!("  runtime:      wrangler dev (workerd)"),
+        Some(c) => println!("  runtime:      celld dev ({}): no computers, no cards, no mail but the fake's", c.celld.display()),
+    }
     println!("  node log:     {}", node.log.display());
     println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");
     println!("  code.storage: {} (the fake)", fake.url);
@@ -256,9 +280,12 @@ fn dev(args: &[String]) -> Result<()> {
     // it left (wrangler's teardown removes its computers, not their sidecars)
     devstack::signals::outlive_interrupt()?;
     let status = node.wait()?;
-    println!("wrangler dev exited: {status}");
-    let removed = devstack::containers::remove(&devstack::cell_dir())?;
-    println!("removed {} containers the dev node left", removed.containers);
+    println!("the node exited: {status}");
+    // the runtime's own containers: celld runs none here
+    if celld.is_none() {
+        let removed = devstack::containers::remove(&devstack::cell_dir())?;
+        println!("removed {} containers the dev node left", removed.containers);
+    }
     Ok(())
 }
 
@@ -356,16 +383,20 @@ fn build_suite() -> Result<()> {
 const E2E_BIN: &str = "target/release/fragment-e2e";
 /// What the e2e runs: the cell, the CLI (the e2e drives it too) and the
 /// suite beside it, and the computer images the node's boot builds, built
-/// ahead beside them all so its build finds every layer cached.
+/// ahead beside them all so its build finds every layer cached. A run on
+/// celld (`FRAGMENT_E2E_RUNTIME=celld`) builds no images: celld runs no
+/// containers of its own (docs/self-host.md, seam 2).
 fn build_e2e() -> Result<()> {
     let t0 = std::time::Instant::now();
+    let images = std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() != Ok("celld");
     let built = std::thread::scope(|s| {
-        let images = s.spawn(build::images);
+        let built_images = images.then(|| s.spawn(build::images));
         let native = s.spawn(build_native);
         let cell = build::cell();
-        cell.and(native.join().expect("the native build does not panic")).and(images.join().expect("the images' build does not panic"))
+        let built_images = built_images.map_or(Ok(()), |b| b.join().expect("the images' build does not panic"));
+        cell.and(native.join().expect("the native build does not panic")).and(built_images)
     });
-    println!("built the cell, the CLI, the suite and the images in {:.1?}", t0.elapsed());
+    println!("built the cell, the CLI, the suite{} in {:.1?}", if images { " and the images" } else { "" }, t0.elapsed());
     built
 }
 
@@ -502,7 +533,7 @@ fn main() -> Result<()> {
         Some("teardown") => deploy::teardown(&args[1..]),
         Some("stripe") => deploy::stripe(&args[1..]),
         Some("image") => image::image(&args[1..]),
-        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build | dev [--clean] [--runtime wrangler|celld] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
     }
 }
 

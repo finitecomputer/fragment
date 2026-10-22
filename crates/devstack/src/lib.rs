@@ -1,8 +1,10 @@
 //! The local stack: one `wrangler dev` process serving the platform Worker
 //! (`cell/`), its variables rendered into its `.dev.vars` and its secrets
 //! seeded into wrangler's local Secrets Store, bound by name as a deploy
-//! binds them (store.rs). `xtask dev` runs it in the foreground; the e2e starts,
-//! crashes, and restarts it.
+//! binds them (store.rs); or one `celld dev` process (celld.rs;
+//! docs/self-host.md, seam 1), its secrets in `.dev.vars` behind the cell's
+//! stand-ins for the store's bindings (`Secrets::Shim`). `xtask dev` runs it
+//! in the foreground; the e2e starts, crashes, and restarts it.
 
 use std::fs;
 use std::io::Write;
@@ -16,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
+pub mod celld;
 pub mod containers;
 pub mod node;
 mod node_release;
@@ -180,13 +183,14 @@ fn write_local_config(project: &Path, secrets: &[(String, &str)]) -> Result<Path
     Ok(path)
 }
 
-/// Discards a project's local state (its Durable Objects, R2, Workflows,
-/// queues, and the local store's secrets): before its fleet is configured,
-/// which seeds the store again.
+/// Discards a project's local state on either runtime (its Durable
+/// Objects, R2, Workflows, queues, and the local store's secrets): before
+/// its fleet is configured, which seeds the store again.
 pub fn clear_state(project: &Path) -> Result<()> {
-    let state = state_dir(project);
-    if state.exists() {
-        fs::remove_dir_all(&state).with_context(|| format!("clear {}", state.display()))?;
+    for state in [state_dir(project), celld::state_dir(project)] {
+        if state.exists() {
+            fs::remove_dir_all(&state).with_context(|| format!("clear {}", state.display()))?;
+        }
     }
     Ok(())
 }
@@ -639,12 +643,15 @@ pub fn kill_nodes() {
     }
 }
 
-/// One `wrangler dev` process, which runs workerd as its child: in a
-/// process group of its own (`NodeOptions::own_group`), so a crash kills
-/// both, or in the terminal's.
+/// One node's process: `wrangler dev`, which runs workerd as its child, or
+/// `celld dev` (celld.rs), which supervises its own: in a process group of
+/// its own (`NodeOptions::own_group`), so a crash kills the whole node, or
+/// in the terminal's.
 pub struct Node {
     child: Child,
     own_group: bool,
+    /// What runs it, as errors name it (`wrangler dev`, `celld dev`).
+    what: &'static str,
     pub base: String,
     pub port: u16,
     /// This boot's log.
@@ -653,12 +660,13 @@ pub struct Node {
 }
 
 impl Node {
+    /// `wrangler dev` on the project's local config (`Fleet::configure`
+    /// with `Secrets::Store` writes it).
     pub fn start(tools: &Tools, opts: &NodeOptions) -> Result<(Node, Duration)> {
         let config = local_config(&opts.project);
         if !config.is_file() {
             bail!("{} is not there: configure the fleet first (Fleet::configure)", config.display());
         }
-        let (log, out) = boot_log(&opts.log_dir, opts.port)?;
         let mut cmd = tools.wrangler()?;
         cmd.arg("dev").arg("-c").arg(&config);
         cmd.args(["--ip", "127.0.0.1", "--port", &opts.port.to_string()]);
@@ -670,6 +678,14 @@ impl Node {
         cmd.current_dir(&opts.project)
             .env("WRANGLER_LOG_PATH", &opts.log_dir)
             .env("WRANGLER_REGISTRY_PATH", opts.project.join(".wrangler/registry"));
+        Node::launch(cmd, opts, &format!("Ready on http://127.0.0.1:{}", opts.port), "wrangler dev")
+    }
+
+    /// Spawns a node's process (`cmd`, its output to a new boot log), in a
+    /// group of its own when `opts` says, and waits until its log says
+    /// `ready`: on either runtime.
+    pub(crate) fn launch(mut cmd: Command, opts: &NodeOptions, ready: &str, what: &'static str) -> Result<(Node, Duration)> {
+        let (log, out) = boot_log(&opts.log_dir, opts.port)?;
         if opts.own_group {
             cmd.process_group(0);
         }
@@ -679,25 +695,25 @@ impl Node {
             // group or has already refused it
             let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
             anyhow::ensure!(!live.ending, "this process is ending (a signal): no node starts");
-            let child = cmd.stdout(out.try_clone()?).stderr(out).stdin(Stdio::null()).spawn()?;
+            let child = cmd.stdout(out.try_clone()?).stderr(out).stdin(Stdio::null()).spawn().with_context(|| format!("start {what}"))?;
             if opts.own_group {
                 assert!(live.groups.len() < LIVE_NODES_MAX, "a process runs at most {LIVE_NODES_MAX} nodes at once");
                 live.groups.push(child.id());
             }
             child
         };
-        let mut node = Node { child, own_group: opts.own_group, base: format!("http://127.0.0.1:{}", opts.port), port: opts.port, log: log.clone(), reaped: false };
+        let mut node = Node { child, own_group: opts.own_group, what, base: format!("http://127.0.0.1:{}", opts.port), port: opts.port, log: log.clone(), reaped: false };
         loop {
             let text = fs::read(&log).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-            if text.contains(&format!("Ready on http://127.0.0.1:{}", opts.port)) {
+            if text.contains(ready) {
                 break;
             }
             if let Some(status) = node.child.try_wait()? {
                 node.reaped = true;
-                bail!("wrangler dev exited ({status}) before it was ready:\n{text}");
+                bail!("{what} exited ({status}) before it was ready:\n{text}");
             }
             if t0.elapsed() > READY_TIMEOUT {
-                bail!("wrangler dev on :{} was not ready after {READY_TIMEOUT:?}:\n{text}", opts.port);
+                bail!("{what} on :{} was not ready after {READY_TIMEOUT:?}:\n{text}", opts.port);
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -705,8 +721,8 @@ impl Node {
         Ok((node, t0.elapsed()))
     }
 
-    /// Signals its group when it has one of its own, else wrangler alone
-    /// (which stops workerd).
+    /// Signals its group when it has one of its own, else its process
+    /// alone (wrangler stops workerd; celld its node).
     fn signal_group(&self, signal: &str) -> Result<()> {
         let target = if self.own_group { format!("-{}", self.child.id()) } else { self.child.id().to_string() };
         let status = Command::new("kill").args([signal, "--", &target]).status()?;
@@ -714,15 +730,15 @@ impl Node {
         Ok(())
     }
 
-    /// SIGINT, as Ctrl-C stops it: wrangler shuts workerd down, and every
-    /// write already answered is on disk.
+    /// SIGINT, as Ctrl-C stops it (celld dev, too, stops on it): wrangler
+    /// shuts workerd down, and every write already answered is on disk.
     pub fn stop(mut self) -> Result<()> {
         self.signal_group("-INT")?;
         let t0 = Instant::now();
         while self.child.try_wait()?.is_none() {
             if t0.elapsed() > STOP_TIMEOUT {
                 self.kill();
-                bail!("wrangler dev did not stop within {STOP_TIMEOUT:?}");
+                bail!("{} did not stop within {STOP_TIMEOUT:?}", self.what);
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -732,13 +748,13 @@ impl Node {
         Ok(())
     }
 
-    /// SIGKILL the node and workerd: a crash, with no graceful shutdown.
+    /// SIGKILL the whole node: a crash, with no graceful shutdown.
     pub fn crash(mut self) -> Result<()> {
         self.kill();
         Ok(())
     }
 
-    /// Waits for `wrangler dev` to exit (the foreground `xtask dev`).
+    /// Waits for the node's process to exit (the foreground `xtask dev`).
     pub fn wait(mut self) -> Result<std::process::ExitStatus> {
         let status = self.child.wait()?;
         self.reaped = true;
