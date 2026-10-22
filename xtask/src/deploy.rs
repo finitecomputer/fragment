@@ -1603,6 +1603,32 @@ mod tests {
         }
     }
 
+    /// A provider's note: the example's (its google row's, commented out)
+    /// loads once uncommented and is kept as written; one over its 280
+    /// characters is refused at load, naming its row.
+    #[test]
+    fn a_provider_note_loads_and_an_over_long_one_is_refused() {
+        let path = devstack::repo_root().join("deploy/example.jsonc");
+        let example = fs::read_to_string(&path).unwrap();
+        let commented = example.lines().find(|l| l.trim_start().starts_with("// \"note\":")).expect("the example's google row has a commented note");
+        let field: Value = serde_json::from_str(&format!("{{{}}}", commented.trim_start().trim_start_matches("// ").trim_end_matches(','))).unwrap();
+        let note = field["note"].as_str().unwrap();
+        let dir = devstack::repo_root().join("target/xtask-tests/provider-note");
+        fs::create_dir_all(&dir).unwrap();
+        let with = |note: &str| {
+            let file = dir.join("deploy.jsonc");
+            fs::write(&file,example.replacen(commented, &format!("\"note\": {},", serde_json::to_string(note).unwrap()), 1)).unwrap();
+            load(&file)
+        };
+        let d = with(note).unwrap();
+        let (catalog, _) = catalog_of(&d).unwrap();
+        assert_eq!(catalog.get("google").unwrap().note.as_deref(), Some(note));
+        assert!(catalog.providers().iter().filter(|p| p.name != "google").all(|p| p.note.is_none()), "the other rows have none");
+        let over = "a".repeat(fragment_core::catalog::NOTE_MAX_CHARS + 1);
+        let refused = with(&over).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(refused.contains("providers: google's note: 1 to 280 characters"), "{refused}");
+    }
+
     /// A deployment that sells seats binds Stripe's key and its endpoint's
     /// secret from the store; a branch whose deploy makes its own endpoint
     /// (it names the key's file) binds the key alone: its endpoint's secret

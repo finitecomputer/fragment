@@ -19,7 +19,10 @@
 //!   2026-10-08; `own_signin`);
 //! - an own key's models (`models`): the chat-completions base URL a guest
 //!   sends its model calls to, and the few models a person is offered for
-//!   an agent (its `agent.json`'s `model`).
+//!   an agent (its `agent.json`'s `model`);
+//! - a note (`note`): a line settings' Connections shows people under the
+//!   provider's name (a provider still reviewing the platform's sign-in,
+//!   say).
 //!
 //! Adding a provider is a catalog row (and, for a connection, the provider
 //! enabled in the WorkOS environment): nothing in code names one.
@@ -48,6 +51,9 @@ pub const MODELS_OFFERED_MAX: usize = 16;
 pub const MODEL_ID_MAX_BYTES: usize = 128;
 /// A model's name for people, at most.
 pub const MODEL_NAME_MAX_BYTES: usize = 64;
+/// A provider's note for people, at most, in characters (a post's length:
+/// a line or two under its name).
+pub const NOTE_MAX_CHARS: usize = 280;
 
 /// What a provider's credential is (decisions 22 and 37): a `connection`
 /// (WorkOS Pipes, a short-lived token acting as the person), an `operator`
@@ -219,6 +225,10 @@ pub struct Provider {
     /// An own key's models, which a person may pick for their agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Models>,
+    /// What settings' Connections tells people under its name, whatever
+    /// their state: plain text, one line (`check_note`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// Why a catalog is refused (the deploy checks it first; a node with a
@@ -251,6 +261,9 @@ pub enum CatalogError {
     /// Models on a row that is no own key, a base URL not on its hosts, or
     /// an offer that is empty, too long, or names a model badly or twice.
     Models { provider: String, why: String },
+    /// A note that is blank, over `NOTE_MAX_CHARS`, or more than one line
+    /// of plain text.
+    Note { provider: String, why: String },
 }
 
 impl std::fmt::Display for CatalogError {
@@ -268,6 +281,7 @@ impl std::fmt::Display for CatalogError {
             CatalogError::NoPrice(n) => write!(f, "the operator key {n} has no price: name one (micro-dollars per calls at list), since the price book has none for it"),
             CatalogError::OAuth { provider, why } => write!(f, "{provider}'s oauth: {why}"),
             CatalogError::Models { provider, why } => write!(f, "{provider}'s models: {why}"),
+            CatalogError::Note { provider, why } => write!(f, "{provider}'s note: {why}"),
         }
     }
 }
@@ -440,6 +454,20 @@ fn check_models(m: &Models, hosts: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// A note people read under a provider's name: 1 to `NOTE_MAX_CHARS`
+/// characters, not blank, and no control character (so one line; settings
+/// shows it as text, never as markup).
+fn check_note(note: &str) -> Result<(), String> {
+    let chars = note.chars().count();
+    if !(1..=NOTE_MAX_CHARS).contains(&chars) || note.trim().is_empty() {
+        return Err(format!("1 to {NOTE_MAX_CHARS} characters, not blank (it has {chars})"));
+    }
+    if note.chars().any(char::is_control) {
+        return Err("one line of plain text: no line break or other control character".into());
+    }
+    Ok(())
+}
+
 /// A deployment's providers, checked: each is offered as its row says.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Catalog {
@@ -521,6 +549,9 @@ impl Catalog {
                     return Err(CatalogError::Models { provider, why: format!("a {} offers no models: only an own key does, its owner's credit paying", p.kind.name()) });
                 }
                 check_models(m, &p.hosts).map_err(|why| CatalogError::Models { provider: provider.clone(), why })?;
+            }
+            if let Some(n) = &p.note {
+                check_note(n).map_err(|why| CatalogError::Note { provider: provider.clone(), why })?;
             }
         }
         Ok(Catalog { providers: rows })
@@ -668,6 +699,32 @@ mod tests {
         assert!(matches!(parse(zero), Err(CatalogError::Price { .. })));
         let many: Vec<serde_json::Value> = (0..=PROVIDERS_MAX).map(|i| json!({ "name": format!("p{i}"), "kind": "connection", "hosts": ["a.test"], "placements": [{ "header": "x-api-key" }], "env": [format!("P{i}_KEY")] })).collect();
         assert!(matches!(parse(json!(many)), Err(CatalogError::TooMany(_))));
+    }
+
+    /// A note: any kind's, kept as written, up to `NOTE_MAX_CHARS`
+    /// characters (not bytes); one over, a blank one, or one of two lines
+    /// is refused at load.
+    #[test]
+    fn a_note_is_one_line_of_at_most_its_length() {
+        let with = |note: &str| {
+            let mut g = google();
+            g["note"] = json!(note);
+            parse(json!([g]))
+        };
+        let said = "Google is still reviewing Finite, so Google shows a warning that the app isn't verified when you connect.";
+        assert_eq!(with(said).unwrap().get("google").unwrap().note.as_deref(), Some(said));
+        assert_eq!(parse(json!([google()])).unwrap().get("google").unwrap().note, None, "no note, none");
+        let longest = "é".repeat(NOTE_MAX_CHARS);
+        assert!(with(&longest).is_ok(), "{NOTE_MAX_CHARS} characters, though more bytes");
+        let over = with(&"a".repeat(NOTE_MAX_CHARS + 1));
+        assert!(matches!(&over, Err(CatalogError::Note { provider, .. }) if provider == "google"), "{over:?}");
+        assert_eq!(over.unwrap_err().to_string(), "google's note: 1 to 280 characters, not blank (it has 281)");
+        for bad in ["", "   ", "one line\nand another", "a\u{7}bell"] {
+            assert!(matches!(with(bad), Err(CatalogError::Note { .. })), "{bad:?}");
+        }
+        let mut key = router();
+        key["note"] = json!("Your OpenRouter credit pays.");
+        assert!(parse(json!([key])).is_ok(), "an own key's too");
     }
 
     /// An own key connected through its provider's sign-in, with models: OpenRouter's row.

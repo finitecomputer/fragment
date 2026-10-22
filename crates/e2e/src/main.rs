@@ -140,6 +140,9 @@ pub const REHEARSAL_BRANCH: &str = "rh";
 pub const SWAP_CONNECTION: &str = "google";
 pub const SWAP_CONNECTION_HOST: &str = "www.googleapis.com";
 pub const SWAP_CONNECTION_ENV: &str = "GOOGLE_OAUTH_ACCESS_TOKEN";
+/// The connection's note (its row's `note`, the only one in the e2e's
+/// catalog), which settings shows under its name.
+pub const SWAP_CONNECTION_NOTE: &str = "Google is still reviewing this app, so Google shows a warning that it isn't verified when you connect.";
 /// The operator keys, each its test value and its environment variable.
 pub const SWAP_KEYS: [(&str, &str, &str); 8] = [
     ("x", "x-bearer-e2e-51a3", "X_API_BEARER_TOKEN"),
@@ -170,8 +173,9 @@ pub const SWAP_ROUTER_HOST: &str = "openrouter.ai";
 pub const SWAP_ROUTER_ENV: &str = "OPENROUTER_API_KEY";
 
 /// The fleet's provider catalog: `deploy/e2e.jsonc`'s, its keys' store
-/// names dropped (the deploy's), and the own key's provider; OpenRouter's
-/// sign-in at `router_oauth` (the fake's) when one is named.
+/// names dropped (the deploy's), Google with its note, and the own key's
+/// provider; OpenRouter's sign-in at `router_oauth` (the fake's) when one
+/// is named.
 pub fn swap_providers(router_oauth: Option<Value>) -> Result<Value> {
     let text = std::fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc"))?;
     let config: Value = serde_json::from_str(&devstack::strip_comments(&text))?;
@@ -180,6 +184,9 @@ pub fn swap_providers(router_oauth: Option<Value>) -> Result<Value> {
         r.as_object_mut().context("a provider is an object")?.remove("key");
         if let (Some(o), true) = (&router_oauth, r["name"] == SWAP_ROUTER) {
             r["oauth"] = o.clone();
+        }
+        if r["name"] == SWAP_CONNECTION {
+            r["note"] = json!(SWAP_CONNECTION_NOTE);
         }
     }
     rows.push(json!({ "name": SWAP_OWN, "kind": "own", "hosts": [SWAP_OWN_HOST], "placements": [{ "basic": "password" }], "env": [SWAP_OWN_ENV] }));

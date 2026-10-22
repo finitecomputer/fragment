@@ -171,6 +171,10 @@ pub struct ProviderView {
     /// trusted for access. None when the provider gave none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// The deployment's note on it (its catalog row's `note`), which
+    /// settings shows under its name, connected or not: plain text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// An own key's sign-in, as its person sees it.

@@ -2703,6 +2703,8 @@ function connectionsSection(linked, uses) {
     }
     head.append(identity);
     row.append(head);
+    // the deployment's word on it (its catalog row's note), connected or not
+    if (p.note) row.append(el("span", "muted provider-detail provider-note", p.note));
     const actions = el("div", "settings-actions");
     const details = [];
     // what a Connect press says: a blocked window, or a start refused; and
