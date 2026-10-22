@@ -71,9 +71,10 @@ fragment.club until cutover (decisions 34–35).
   book; OpenRouter routes each call to one of several providers, each at
   its own price under the slot's `max_price`, and reports what the call
   cost in its usage (`usage.cost`, in credits).
-- **Shortcut:** the book's `z-ai/glm-5.3-flash` row is the routing's
-  ceiling ($0.15 in, $0.50 out per million), cached and written tokens
-  at the prompt's, with OpenRouter's 5.5% fee (fragment_core::price), so
+- **Shortcut:** an OpenRouter slot's model is priced at its routing's
+  ceiling, read from the config (`max_price`: $0.15 in, $0.50 out per
+  million on Finite's), cached and written tokens at the prompt's, with
+  OpenRouter's 5.5% fee (fragment_core::models::Upstream::ceiling), so
   no call is charged below what OpenRouter could bill. `usage.cost` is
   not read.
 - **Risk:** cached input is overcharged most: a cached token is charged
@@ -83,9 +84,7 @@ fragment.club until cutover (decisions 34–35).
   call of 30,000 tokens in (25,000 cached) and 600 out is charged about
   $0.0076, against $0.0028 on Workers AI's GLM-5.3 Flash; output is at
   most the call's cost (Novita's endpoint bills $0.28 a million, under the
-  $0.50 charged). And the ceiling in the config and the row in the code
-  are two numbers that must move together (xtask's test checks the
-  example's against the book).
+  $0.50 charged).
 - **First proof:** a person's month on the ledger against the platform's
   OpenRouter activity for the same calls (its generation ids), or a
   person asking why a turn costs more than it did on Workers AI.

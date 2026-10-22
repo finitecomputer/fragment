@@ -32,6 +32,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use fragment_core::models::Models;
 use fragment_core::price::{PriceBook, Usage};
 use fragment_fakes::workers_ai::{Face, Reply, Used};
 use fragment_nip98::Keys;
@@ -65,11 +66,6 @@ fn tokens(model: &str, input: u64, output: u64) -> Usage {
 
 fn cached(model: &str, input: u64, cached_input: u64, output: u64) -> Usage {
     Usage::Tokens { model: model.into(), input, cached_input, cache_write: 0, output }
-}
-
-/// How many of the node's log lines so far are `event`'s.
-fn charge(usage: &Usage) -> i64 {
-    PriceBook::defaults().price(usage).expect("the book prices both models").charge
 }
 
 fn chat(model: &str, stream: bool) -> Value {
@@ -115,6 +111,11 @@ fn checks(s: &mut Suite, api: &Api) -> Result<()> {
     let fell = || vec![(Face::OpenAi, PRIVATE.to_string()), (Face::WorkersAi, FLASH.to_string())];
     let fell_from_routed = || vec![(Face::OpenAi, ROUTED.to_string()), (Face::WorkersAi, FLASH.to_string())];
     let routing = crate::openrouter_routing();
+    // what a usage is charged here: the node's book is the defaults and
+    // OpenRouter's slot at its ceiling, from its config (`Models::priced`)
+    let models = crate::finite_private_models(&s.ai.node().url).to_string();
+    let book = Models::parse(Some(&models), &PriceBook::defaults(), true).expect("the node's models").priced(PriceBook::defaults());
+    let charge = |usage: &Usage| book.price(usage).expect("the node's book prices its models").charge;
     let platform_key = format!("Bearer {FINITE_PRIVATE_KEY}");
     // the one new row since `before`, charged `micros` from its usage, on `model`
     let settled_as = |before: usize, model: &str, micros: i64| {

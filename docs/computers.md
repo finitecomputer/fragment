@@ -1005,8 +1005,9 @@ expires within 30 days. The container application is the deployment's
     `unknown`, and out).
   - `max_price`: dollars per million tokens, prompt and completion; an
     endpoint dearer than either is out, and a call none fits is refused.
-    The price book charges this ceiling (docs/ledger.md, "OpenRouter's
-    price"): raise it and the book together.
+    The ledger charges this ceiling, read from the slot itself
+    (docs/ledger.md, "OpenRouter's price"), so a slot may name any model
+    OpenRouter serves; one on OpenRouter without it is refused.
 
   On 2026-10-15 GLM-5.3 Flash had 34 endpoints on OpenRouter, each taking
   tools and `reasoning_effort` (`/api/v1/models/z-ai/glm-5.3-flash/endpoints`);
