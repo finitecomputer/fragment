@@ -33,6 +33,13 @@ struct Answer {
     message: Option<String>,
 }
 
+/// Whether this deployment can send mail: the Email Sending binding, or
+/// a mailer at `FRAGMENT_MAIL_URL` (dev's and the e2e's fake). celld has
+/// neither: what would be mailed is said to be unsent.
+pub fn mailer(env: &Env, cfg: &Config) -> bool {
+    cfg.mail_url.is_some() || js::has_binding(env.as_ref(), "EMAIL")
+}
+
 /// Sends `mail`: its message id, or none when this runtime has no mailer
 /// (no `EMAIL` binding, and no fake: celld), which is said and is no
 /// error, so the flow around the send goes on.
@@ -45,7 +52,7 @@ pub async fn send(env: &Env, cfg: &Config, mail: &Mail) -> CellResult<Option<Str
     if cfg.mail_url.is_none() && cfg.test_hooks && fragment_core::levers::valid_e2e_email(&mail.to) {
         return Ok(Some(format!("e2e-unsent-{}", js::random_hex::<8>())));
     }
-    if cfg.mail_url.is_none() && !js::has_binding(env.as_ref(), "EMAIL") {
+    if !mailer(env, cfg) {
         console_warn!("{}", serde_json::json!({ "event": "mail.unsent", "message": NO_MAILER, "subject": mail.subject }));
         return Ok(None);
     }

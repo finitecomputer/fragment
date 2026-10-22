@@ -413,6 +413,9 @@ struct Sheet {
     profiles: BTreeMap<String, Profile>,
     /// The page's form token.
     form: String,
+    /// Whether this deployment mails an invite (`mail::mailer`); without
+    /// a mailer, the owner sends its address themselves.
+    mailer: bool,
 }
 
 impl Sheet {
@@ -476,6 +479,7 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
         canonical,
         profiles,
         form: form::issue(session, &purpose("share", name), js::now_ms()),
+        mailer: crate::mail::mailer(env, cfg),
     })
 }
 
@@ -543,15 +547,23 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     let days = fragment_proto::limits::INVITE_TTL_S / 86400;
     match flash {
         Some(Flash::Added { who, role }) => out += &format!("<div class=\"flash\"><p>Added <b>{}</b> as {}: they can open it now.</p></div>", esc(&who), role_phrase(role)),
-        Some(Flash::Invited { who, role, again: false }) => out += &format!(
+        Some(Flash::Invited { who, role, again: false }) if sheet.mailer => out += &format!(
             "<div class=\"flash\"><p>Invited <b>{w}</b> as {r}: we mailed them a link. They are in once they sign in as {w} (within {days} days).</p></div>",
             w = esc(&who),
             r = role_phrase(role),
         ),
-        Some(Flash::Invited { who, role, again: true }) => out += &format!(
+        Some(Flash::Invited { who, role, again: true }) if sheet.mailer => out += &format!(
             "<div class=\"flash\"><p>Invited <b>{w}</b> again, as {r}: we mailed them a new link, and the invite waits {days} more days.</p></div>",
             w = esc(&who),
             r = role_phrase(role),
+        ),
+        // no mailer (a self-hosted deployment's, for now): nothing went, and the sheet says so
+        Some(Flash::Invited { who, role, again }) => out += &format!(
+            "<div class=\"flash\"><p>Invited <b>{w}</b>{a} as {r}. This deployment sends no mail: send them <b>{c}</b> yourself. They are in once they sign in as {w} (within {days} days).</p></div>",
+            w = esc(&who),
+            a = if again { " again" } else { "" },
+            r = role_phrase(role),
+            c = esc(&sheet.canonical),
         ),
         Some(Flash::Already { who, role: Role::Owner }) => out += &format!("<div class=\"flash\"><p><b>{}</b> is you: you own it.</p></div>", esc(&who)),
         Some(Flash::Already { who, role }) => out += &format!(
@@ -578,7 +590,10 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
             ),
             "add",
         );
-        out += "<p class=\"hint\">Viewers can see it; editors can change it too. Someone without an account yet is mailed a link, and is in once they sign in with that address.</p>";
+        out += match sheet.mailer {
+            true => "<p class=\"hint\">Viewers can see it; editors can change it too. Someone without an account yet is mailed a link, and is in once they sign in with that address.</p>",
+            false => "<p class=\"hint\">Viewers can see it; editors can change it too. Someone without an account yet is in once they sign in with that address: this deployment sends no mail, so send them its address yourself.</p>",
+        };
     }
     out += "<h2>People with access</h2><ul class=\"people\">";
     for m in &sheet.members {

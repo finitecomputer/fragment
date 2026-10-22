@@ -575,9 +575,10 @@ const NO_MAILER: &str = "email not sent: this runtime has no mailer, not yet imp
 /// key's) is said in the node's log, never an error. Then the node as the
 /// lanes expect it again.
 fn no_mailer(s: &mut Suite) -> Result<()> {
-    const CHECKS: [&str; 2] = [
+    const CHECKS: [&str; 3] = [
         "with no mailer, an invite to someone new still waits on their email, and their first sign-in as it makes them a member",
         "and each mail it would have sent (the invite, the sign-in's key) is said in the node's log, not sent",
+        "the share sheet says no mail goes, and names the fragment's address to send by hand, never that it mailed one",
     ];
     if !s.on_celld() {
         for c in CHECKS {
@@ -587,7 +588,8 @@ fn no_mailer(s: &mut Suite) -> Result<()> {
     }
     s.stop()?;
     let api = s.start_without_mail()?;
-    let owner = api.person()?;
+    // a person with a CLI key and a browser's session (the sheet's)
+    let (owner, owner_session) = super::templates::person(&api)?;
     let name = s.named(&api, &owner, "no-mailer")?;
     s.create(&api, &owner, &name)?;
     let newcomer = Keys::generate();
@@ -602,6 +604,18 @@ fn no_mailer(s: &mut Suite) -> Result<()> {
     let said = s.eventually(Duration::from_secs(10), || s.node_log().is_some_and(|l| l.matches(NO_MAILER).count() >= 2));
     let log = s.node_log().unwrap_or_default();
     s.ok(CHECKS[1], said, log.lines().filter(|l| l.contains("mail")).collect::<Vec<_>>().join("\n"));
+    // the owner's sheet, as a browser sends its form (docs/self-host-lan.md, step 6)
+    let sheet = format!("/share/{name}");
+    let form = super::share::armed(&api, &sheet, &owner_session)?;
+    let other = format!("another-{}@example.com", &newcomer.pubkey_hex()[..12]);
+    let r = super::share::post(&api, &sheet, &owner_session, &api.base, &[("form", &form), ("action", "invite"), ("email", &other), ("role", "viewer")])?;
+    let host = api.site_url(&name, "");
+    let host = host.trim_end_matches('/');
+    s.ok(
+        CHECKS[2],
+        r.status == 200 && r.text.contains("This deployment sends no mail") && r.text.contains(host) && !r.text.contains("we mailed") && !r.text.contains("is mailed a link"),
+        &r,
+    );
     s.stop()?;
     s.start(false)?;
     Ok(())
