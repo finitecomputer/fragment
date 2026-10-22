@@ -100,7 +100,7 @@ pub fn shell_page(text: &str, release: &str) -> String {
 /// each with its content type: of the rest of cell/shell/, its pages are
 /// served at their own paths, and its credits and licenses not at all.
 #[cfg(feature = "platform")]
-const SHELL_PUBLISHED: [(&str, &str); 18] = [
+const SHELL_PUBLISHED: [(&str, &str); 19] = [
     ("shell.js", "text/javascript; charset=utf-8"),
     ("shell.css", "text/css; charset=utf-8"),
     ("layout.js", "text/javascript; charset=utf-8"),
@@ -115,7 +115,10 @@ const SHELL_PUBLISHED: [(&str, &str); 18] = [
     ("billing.js", "text/javascript; charset=utf-8"),
     ("vendor/split-grid.js", "text/javascript; charset=utf-8"),
     ("manifest.webmanifest", "application/manifest+json"),
+    // the shell's icon (a tab's, the PWA's, and the sign-in page's logo, which WorkOS takes
+    // from it): Finite's mark on the shell's dark tile; iOS's home screen takes only a PNG
     ("icon.svg", "image/svg+xml"),
+    ("apple-touch-icon.png", "image/png"),
     // Finite's logo, above the splash's and the welcome's card (CREDITS.md)
     ("finite-logo.svg", "image/svg+xml"),
     // the desktop's and the launcher's light and dark landscapes (cell/shell/CREDITS.md)
