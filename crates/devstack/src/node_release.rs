@@ -1,7 +1,7 @@
 //! The Node.js release the repo's JavaScript runs on, pinned: its version
 //! and the SHA-256 of each platform's official tarball. Nothing else lives
 //! in this file, so CI's cache of the unpacked Node (`target/tools`) keys
-//! on it alone. Moving the pin: README.md, "The pinned Node".
+//! on it alone. Moving the pin: docs/pinned-node.md.
 
 /// Node 24 ("Krypton"), the Active LTS line since 2025-10-28 and supported
 /// to 2028-04-30 (nodejs/Release's schedule): wrangler 4.145 asks for 22

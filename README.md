@@ -1,19 +1,21 @@
-# fragment-next
+# Fragment
 
-Fragment publishes stateful, multiplayer web apps from the CLI. Sign in,
-pair the `fragment` CLI (or hand your coding agent the platform's
-`/llms.txt`), and publish. The platform lists your fragments, and serves
-each at its own address.
-Hosting, permissions, sharing, crons, jobs, and channels are built in.
+Fragment is a platform for stateful, multiplayer web apps and the agents
+that make and use them. It powers [Finite](https://finite.chat), our
+hosted product: agents that work for you on a computer of your own, and
+the apps they make, each at its own address on `*.finite.place`. Fragment
+is also built to be self-hosted: it runs entirely on your own Cloudflare
+account (below). Self-hosting on your own hardware is coming soon.
 
 A fragment is a folder of files in git, an app of named operations over
 its own SQLite, channels that pages follow live, and members with roles.
-Your **agents** are fragments too, run by a computer of your own (today,
-Hermes profiles), and act on other fragments as their members.
-Fragments run on Cloudflare: each is a Durable Object that sleeps when
-idle, its app in a Worker of its own
-([docs/cloudflare-v1.md](docs/cloudflare-v1.md)), and so do computers
-([docs/computers.md](docs/computers.md)).
+Hosting, permissions, sharing, crons, jobs and channels are built in.
+Your **agents** are fragments too, run by a computer of your own (Hermes,
+in a container), and act on other fragments as their members. On
+Cloudflare, each fragment is a Durable Object that sleeps when idle, with
+its app in a Worker of its own
+([docs/cloudflare-v1.md](docs/cloudflare-v1.md)), and each computer is a
+Container beside an object of its own ([docs/computers.md](docs/computers.md)).
 
 This repo holds:
 
@@ -22,32 +24,27 @@ This repo holds:
   fragment's app in its own loaded worker, and runs jobs as Workflows.
 - **the `fragment` CLI** (`cli/`): the whole control surface, built for
   agents. `fragment guide` prints the agent guide.
-- **the harness** (`xtask/`, `crates/`): the dev stack, Rust fakes for
-  code.storage, Workers AI, WorkOS, and a push service, and the e2e suite
-  that drives the real cell, CLI, and a browser.
+- **the computer images** (`images/`): the bridge between an agent runtime
+  and the fragment API, and our Hermes image.
+- **the harness** (`xtask/`, `crates/`): the dev stack, Rust fakes for each
+  vendor, and the e2e suite that drives the real cell, CLI, and a browser.
 
 Read [docs/MODEL.md](docs/MODEL.md) for the model,
 [docs/api.md](docs/api.md) for the wire contract, and
-[docs/cloudflare-v1.md](docs/cloudflare-v1.md) for where it is going.
-This repo is [finitecomputer/fragment](https://github.com/finitecomputer/fragment);
-fragment.club runs its `celld` branch (tag `celld-final`) on celld until
-it moves to Cloudflare. MIT licensed; see [LICENSE](LICENSE).
+[docs/cloudflare-v1.md](docs/cloudflare-v1.md) for the plan of record.
+MIT licensed; see [LICENSE](LICENSE).
 
-## Use it
+## Use Finite
 
-Production will be https://finite.chat (its fragments at
-`*.finite.place`; Paul, 2026-10-16); a preview is its own `<branch>`
-copy, master's at https://preview.finite.build. To start, tell
-your coding agent (Claude Code, Codex), naming the platform you use:
+Sign in at https://finite.chat. To build an app with your coding agent
+(Claude Code, Codex), tell it:
 
 ```
 Read https://finite.chat/llms.txt and help me build: …
 ```
 
-Its `/llms.txt` is filled in with that platform's own URLs (docs/api.md,
-Agent docs); its settings give the same prompt to copy. Or install the
-CLI yourself (macOS or Linux, no sudo; put `~/.local/bin` on your PATH if
-it is not), then pair it with you:
+Or install the CLI yourself (macOS or Linux, no sudo; put `~/.local/bin`
+on your PATH if it is not), then pair it with you:
 
 ```
 mkdir -p ~/.local/bin && curl -fsSL https://github.com/finitecomputer/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin
@@ -55,10 +52,30 @@ fragment login --host https://finite.chat
 ```
 
 `fragment login --host` saves its host for every later command; with
-none ever named, the CLI calls https://finite.chat.
+none ever named, the CLI calls https://finite.chat. `fragment guide` is
+the manual; `fragment skill` prints a SKILL.md for your coding agent.
+Any deployment's `/llms.txt` names its own URLs.
 
-`fragment guide` is the manual; `fragment skill` prints a SKILL.md for
-your coding agent.
+## Self-host on Cloudflare
+
+Fragment deploys to your own Cloudflare account from one config file kept
+outside the repo. [deploy/example.jsonc](deploy/example.jsonc) names every
+field and what it needs: a Workers Paid account, a zone for the platform
+and its fragments, a code.storage org for files, and a WorkOS environment
+for sign-in; Stripe, models and tool keys are optional. Secrets live in
+your account's Secrets Store, set by name ([docs/secrets.md](docs/secrets.md)):
+
+```
+cp deploy/example.jsonc ~/fragment.jsonc        # fill it in
+cargo xtask secret gen fragment-host-secret --config ~/fragment.jsonc
+cargo xtask secret set <name> --config ~/fragment.jsonc   # each other secret it names
+cargo xtask deploy --config ~/fragment.jsonc
+```
+
+`deploy` refuses, before building anything, when a secret the config
+names is missing, and says which. A step-by-step guide for a fresh
+account is coming. Finite's own preview and production deploy the same
+way, from CI ([AGENTS.md](AGENTS.md)).
 
 ## Try it locally
 
@@ -69,8 +86,8 @@ rustup target add wasm32-unknown-unknown
 cargo install worker-build --version 0.8.5 --locked
 ```
 
-No Node to install: xtask fetches the pinned one into `target/tools`
-and runs its npm (below).
+No Node to install: xtask fetches its own pinned one into `target/tools`
+and runs its npm ([docs/pinned-node.md](docs/pinned-node.md), which also says how to move the pin).
 
 Then:
 
@@ -96,35 +113,6 @@ cargo xtask e2e --shard 2/4
 The e2e stages its own copy of the cell, so it runs alongside
 `cargo xtask dev`. Its browser sections drive headless Chrome
 (`CHROME_BIN` to choose one).
-
-## The pinned Node
-
-The JavaScript the platform needs (wrangler, and the Sandbox SDK it
-bundles; `package.json`) runs on one Node release, pinned in
-`crates/devstack/src/node_release.rs` with the SHA-256 of each
-platform's official tarball. `dev`, `e2e`, `deploy` and `teardown`
-fetch it into `target/tools/` on first use (refusing a tarball whose
-hash differs), run its own npm's `npm ci` when node_modules is missing
-or stale, and start every JavaScript process on it, first on PATH, with
-its caches under `target/cache/` (Browser Rendering's Chrome included).
-`check` fetches it too, and runs `node --check` on it (no `npm ci`).
-A `node` on PATH is never used, and there is no other: a machine the
-pin has no tarball for runs nothing.
-
-To move the pin:
-
-1. Pick the release from https://nodejs.org/dist/index.json: the newest
-   of an LTS line that wrangler's `engines` allows.
-2. Fetch `https://nodejs.org/dist/v<version>/SHASUMS256.txt` and its
-   `SHASUMS256.txt.sig`, and check the signature against the releaser's
-   key from nodejs/node's README (`gpg --verify SHASUMS256.txt.sig
-   SHASUMS256.txt`).
-3. Set `NODE_VERSION`, and each `TARBALLS` hash to its
-   `node-v<version>-<platform>.tar.gz` line (darwin-arm64, darwin-x64,
-   linux-arm64, linux-x64).
-4. `cargo xtask check`, then `cargo xtask e2e`: the first run fetches
-   the new Node and runs `npm ci` with it. CI's cache of `target/tools`
-   keys on that file, so it fetches afresh too.
 
 ## Layout
 
