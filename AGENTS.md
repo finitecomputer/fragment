@@ -237,7 +237,9 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   `FRAGMENT_HOST=http://127.0.0.1:8790` and run `fragment login` once. Dev fleets let jobs
   fetch local addresses (`FRAGMENT_EGRESS_LOCAL=allow`).
   `--runtime celld` runs the stack on `celld dev` (`CELLD_BIN`;
-  docs/self-host.md, seam 1).
+  docs/self-host.md, seam 1). `FRAGMENT_MODELS_FILE` puts the model
+  route's slots where a deployment's `models` says (a self-hosted model's,
+  say), its key in the file `FRAGMENT_MODEL_KEY_FILE` names.
 - `cargo xtask try <todo|inbox|notes|doc> [name]` (with `cargo xtask dev` running):
   creates and deploys a fragment from a template under
   `target/devstack/try/` (never in the repo) and prints the link to open,

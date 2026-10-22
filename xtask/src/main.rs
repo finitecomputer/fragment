@@ -8,7 +8,10 @@
 //!                    code.storage fake on :8792, and the Workers AI fake on :8796
 //!                    behind the model route (its calls spend their payer's
 //!                    ledger; new people are seats with the month's included
-//!                    credit). --runtime celld runs it on `celld dev`
+//!                    credit; FRAGMENT_MODELS_FILE puts the route's slots
+//!                    where a deployment's `models` says, a self-hosted
+//!                    model's say, its key in FRAGMENT_MODEL_KEY_FILE:
+//!                    `dev_models`). --runtime celld runs it on `celld dev`
 //!                    (CELLD_BIN; docs/self-host.md, seam 1): no computers,
 //!                    no cards, the secrets in .dev.vars behind the cell's
 //!                    stand-ins for the store's bindings
@@ -187,6 +190,7 @@ fn dev(args: &[String]) -> Result<()> {
         }
     };
     let ai = fragment_fakes::workers_ai::WorkersAi::start(DEV_AI_PORT)?;
+    let models = dev_models(&read)?;
     let mailer = fragment_fakes::mail::Mailer::start(DEV_MAIL_PORT, true)?;
     let stripe = fragment_fakes::stripe::Stripe::start(DEV_STRIPE_PORT, DEV_STRIPE_KEY)?;
     stripe.set_endpoint(&format!("http://127.0.0.1:{DEV_PORT}/api/stripe/webhook"), DEV_STRIPE_WEBHOOK);
@@ -210,9 +214,9 @@ fn dev(args: &[String]) -> Result<()> {
         // every tier on it
         ai_url: Some(ai.url.clone()),
         ai_gateway: None,
-        models: None,
-        model_key_slots: vec![],
-        model_key_value: None,
+        models: models.as_ref().map(|m| m.cell.to_string()),
+        model_key_slots: models.as_ref().map(|m| m.slots.clone()).unwrap_or_default(),
+        model_key_value: models.as_ref().and_then(|m| m.key.clone()),
         // the mail fake, which prints each message (dev never sends real mail)
         mail_url: Some(mailer.url.clone()),
         mail_from: Some(DEV_MAIL_FROM.into()),
@@ -271,7 +275,10 @@ fn dev(args: &[String]) -> Result<()> {
     println!("  node log:     {}", node.log.display());
     println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");
     println!("  code.storage: {} (the fake)", fake.url);
-    println!("  models:       {} (the Workers AI fake: echoes, never a real model)", ai.url);
+    match &models {
+        Some(m) => println!("  models:       {}; the rest, and image steps, on the Workers AI fake at {}", m.said, ai.url),
+        None => println!("  models:       {} (the Workers AI fake: echoes, never a real model)", ai.url),
+    }
     println!("  seats:        {} (the Stripe fake: its Checkout is a Pay button)", stripe.url);
 
     println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
@@ -287,6 +294,57 @@ fn dev(args: &[String]) -> Result<()> {
         println!("removed {} containers the dev node left", removed.containers);
     }
     Ok(())
+}
+
+/// The dev stack's models, from `FRAGMENT_MODELS_FILE`.
+struct DevModels {
+    /// The cell's `FRAGMENT_MODELS`: each slot's upstream, less its key.
+    cell: serde_json::Value,
+    /// The slots on an OpenAI-compatible API, each bound to `key`.
+    slots: Vec<String>,
+    key: Option<String>,
+    /// What the banner says of them.
+    said: String,
+}
+
+/// Where the dev stack's model route sends its calls, beside the Workers
+/// AI fake: `FRAGMENT_MODELS_FILE` names a file holding a deployment's
+/// `models` as its config writes them (deploy/example.jsonc; JSON, `//`
+/// comments allowed), checked as a deploy checks them but for its URLs,
+/// which may be local (dev's egress is). The key the slots on an
+/// OpenAI-compatible API name is read from the file
+/// `FRAGMENT_MODEL_KEY_FILE` names (dev's store holds one; a server that
+/// takes none still gets a value, any word). A model the price book does
+/// not price (a self-hosted one) names its price in its slot's `body`, as
+/// a model on OpenRouter does (`provider.max_price`; docs/self-host.md,
+/// seam 3). Unset, every slot is the fake's.
+fn dev_models(read: &dyn Fn(&str) -> Result<Option<String>>) -> Result<Option<DevModels>> {
+    let Some(file) = std::env::var_os("FRAGMENT_MODELS_FILE") else { return Ok(None) };
+    let shown = Path::new(&file).display().to_string();
+    let text = std::fs::read_to_string(&file).with_context(|| format!("read {shown} (FRAGMENT_MODELS_FILE)"))?;
+    let models: serde_json::Value = serde_json::from_str(&devstack::strip_comments(&text)).with_context(|| format!("{shown} is a deployment's `models`, as JSON"))?;
+    let (cell, keys) = deploy::split_models(&models, true).with_context(|| format!("{shown} (FRAGMENT_MODELS_FILE)"))?;
+    let names: std::collections::BTreeSet<&str> = keys.iter().map(|(_, name)| name.as_str()).collect();
+    if names.len() > 1 {
+        bail!("{shown}: its slots name {} keys ({}); dev binds one, from FRAGMENT_MODEL_KEY_FILE", names.len(), names.into_iter().collect::<Vec<_>>().join(", "));
+    }
+    let key = match keys.is_empty() {
+        true => None,
+        false => {
+            let key = read("FRAGMENT_MODEL_KEY_FILE")?.with_context(|| format!("{shown}'s slots on an OpenAI-compatible API name a key: put its value in a file (any word, for a server that takes none) and name it FRAGMENT_MODEL_KEY_FILE"))?;
+            anyhow::ensure!(!key.is_empty(), "FRAGMENT_MODEL_KEY_FILE's file is empty: a key is a value (any word, for a server that takes none)");
+            Some(key)
+        }
+    };
+    let slots: Vec<String> = keys.into_iter().map(|(slot, _)| slot).collect();
+    let said = cell
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(slot, u)| format!("{slot}: {} at {}", u["model"].as_str().unwrap_or("?"), u["base_url"].as_str().unwrap_or("Workers AI (the fake)")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(Some(DevModels { cell, slots, key, said: format!("{said} ({shown})") }))
 }
 
 /// The templates `try` scaffolds.
