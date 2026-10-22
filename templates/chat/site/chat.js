@@ -814,12 +814,14 @@ export function mount(root) {
   // ---- rendering: one node per item, made again only when what it shows
   // changed, so a card being clicked is never swapped out under the hand ----
   const nodes = new Map(); // key -> { sig, node }
+  const keyOf = new WeakMap(); // node -> its item's key, so a place survives its node made again
   const fresh = new Set(); // bubbles made since the last fit
   function cached(key, sig, make) {
     const c = nodes.get(key);
     if (c && c.sig === sig) return c.node;
     const node = make();
     nodes.set(key, { sig, node });
+    keyOf.set(node, key);
     return node;
   }
 
@@ -901,8 +903,16 @@ export function mount(root) {
     fresh.clear();
     renderChrome();
     renderHere();
+    // The reader's place is its item, not its node: one made again in this
+    // draw (its poster's name come since, say, while earlier messages load)
+    // is found by its key, so the place holds through the draw that adds
+    // the messages above it.
+    const placed = anchor?.isConnected ? anchor : nodes.get(keyOf.get(anchor))?.node;
     if (stuck) toEnd();
-    else if (anchor?.isConnected) $("scroll").scrollTop += anchor.getBoundingClientRect().top - top;
+    else if (placed?.isConnected) {
+      $("scroll").scrollTop += placed.getBoundingClientRect().top - top;
+      if (history.anchor) history.anchor.node = placed;
+    }
     if (!history.loading) history.anchor = null;
     showLatest();
     animateSentMessages();
