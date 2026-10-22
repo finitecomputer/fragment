@@ -151,6 +151,10 @@ fragment.club until cutover (decisions 34–35).
   non-generic (`ask_registry` and the Stripe client parse their answer in
   the one generic step, so a call type no longer copies a whole async
   round trip): 6.34 MB with #367's 134 KB.
+- **2026-10-22, the self-hosted lane** (`selfhost-port`, never master's
+  as it is): its seams 4, 5, 7 and 12 had it at 6.47 MB, and computers on
+  sandcastle nodes (seam 2: placement, pairing, their routes, 226 KB)
+  took it to 6.70 MB (6,697,133 bytes); the lane's budget is 6.7 MB.
 - **Risk:** every isolate copies the Wasm's data into its memory and
   every deploy uploads it: a bigger cell starts slower and leaves less
   memory to requests, and a budget moved once is easier to move again.
