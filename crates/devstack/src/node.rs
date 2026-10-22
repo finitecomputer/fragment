@@ -204,7 +204,7 @@ fn answers_as_pin(node: &Path) -> Result<(bool, String), io::Error> {
 
 /// `cmd`'s output, its program one just written: run again a few times,
 /// briefly, on ETXTBSY alone (`answers_as_pin` says why). Every pinned
-/// tool's first run is one (the Node, OpenBao's `bao`).
+/// tool's first run is one (the Node, OpenBao's `bao`, the card browser).
 pub(crate) fn output_of_fresh(cmd: &mut Command) -> Result<std::process::Output, io::Error> {
     let mut tried = 1;
     // bounded: BUSY_TRIES runs
@@ -338,7 +338,7 @@ fn remove_dir_if_present(dir: &Path) -> Result<(), NodeError> {
 }
 
 /// Whether a tarball entry's path lies inside its one directory, `top`.
-fn inside(path: &Path, top: &str) -> bool {
+pub(crate) fn inside(path: &Path, top: &str) -> bool {
     let mut components = path.components();
     let first_is_top = matches!(components.next(), Some(Component::Normal(first)) if first == top);
     if first_is_top {

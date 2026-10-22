@@ -51,6 +51,7 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_SECRETS` | where the runtime has no Secrets Store (celld; docs/self-host.md, seam 12): the deployment's secrets as `{"backend": "vars" \| "openbao", "secrets": [{"binding", "secret_name"}, …]}`, the pairs `secrets_store_secrets` binds elsewhere; the cell's stand-ins (cell/secrets.mjs) take each binding's place. `vars` answers the Worker variable of the binding's name; `openbao` (with `addr`, `mount`, and optionally `prefix` and `namespace`) reads Vault's KV v2 API, each secret's field `value`, with the token in `FRAGMENT_SECRETS_TOKEN`, 5 s at most a read. Unset (Cloudflare, `wrangler dev`), the bindings are the store's |
 | `FRAGMENT_MAIL_FROM` | the sender the platform's mail comes from: a bare address or unquoted `Name <address>` (Mail, below; the deploy config's `mail_from`), on a domain onboarded to Email Sending; unset, the deployment sends no mail |
 | `FRAGMENT_MAIL_URL` | dev and the e2e only: the platform's mail is POSTed to `<url>/send` (the `EMAIL` binding's input) instead of sent (the mail fake, a lower rung, which keeps it; `cargo xtask dev` prints it) |
+| `FRAGMENT_BROWSER_URL` | where the runtime has no Browser Rendering (celld; docs/self-host.md, seam 7): an http(s) base whose service answers the `BROWSER` binding's routes (`POST /v1/devtools/browser`, the CDP socket at `/v1/devtools/browser/<id>`, `DELETE`), reached with `fetch`: devstack's renderer over a pinned chrome-headless-shell. Set, it wins over the binding; with neither, a deploy's card is skipped (`card.skipped`, `no_browser`) |
 | `FRAGMENT_DEFAULT_PLAN` | a new person's plan (Ledger, below): `guest` (the default and production's), `seat`, or `seat_always_on`; dev and the e2e set `seat` |
 | `FRAGMENT_COMPUTER_UNSAVED_MAX_MS` | how long a computer whose sleep's save keeps failing stays awake, its container kept, before it sleeps unsaved (the deploy config's `computers.unsaved_max_ms`; default 1800000, thirty minutes; docs/computers.md, "Saves and what a wake restores") |
 | `FRAGMENT_SUPPORT_URL` | where a person whose computer will not start gets help (the deploy config's `support_url`): an `https:` page or a `mailto:` address, at most 512 visible characters, refused at the node's first request otherwise; `GET /api/computers` gives it as `support`, and the shell links it (docs/computers.md, "What its owner is told"). Unset, none |
@@ -1406,7 +1407,8 @@ rules are pure (`fragment_core::card`); cell/src/card.rs runs them.
 
 - **Never in the deploy's request.** The move records the card it wants;
   the fragment's alarm, after the rest of its work, takes the shot itself
-  with the `BROWSER` binding: a Browser Rendering session, CDP over its
+  with the `BROWSER` binding (or the renderer `FRAGMENT_BROWSER_URL`
+  names, where the runtime has none): a Browser Rendering session, CDP over its
   socket, the page at 1280×800 and a device scale of 1, its load waited
   for (at most 15 s), then 1 s for its scripts, a JPEG at quality 70 (40
   if that is over 512 KiB; over the cap at both, the deploy gets no
@@ -1461,7 +1463,7 @@ rules are pure (`fragment_core::card`); cell/src/card.rs runs them.
   new, so neither's deploys are shot (`card.skipped`); a ledger that does
   not answer refuses none.
 - **Events:** `card.made` (`{live, blob, attempt}`), `card.skipped`
-  (`{live, why: not_an_app | members_only | owner_pays}`),
+  (`{live, why: not_an_app | members_only | owner_pays | no_browser}`),
   `card.failed` (`{failures}`), and `page.errors` (the report, when it
   has errors; its summary their count and the first one's first line).
   A retry and a stale shot say nothing.

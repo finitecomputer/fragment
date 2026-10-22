@@ -317,6 +317,7 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         tools: None,
         celld: None,
         openbao: None,
+        renderer: None,
         node: None,
         port: 0,
         run: crate::run_name(),

@@ -19,12 +19,15 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
+pub mod browser;
+mod browser_release;
 pub mod celld;
 pub mod containers;
 pub mod node;
 mod node_release;
 pub mod openbao;
 mod openbao_release;
+pub mod rendering;
 pub mod signals;
 pub mod store;
 
@@ -373,6 +376,10 @@ pub struct Fleet {
     pub swap_upstream: Option<String>,
     /// Where its secrets are (`Secrets`): the runtime's.
     pub secrets: Secrets,
+    /// Where preview cards are shot when the runtime has no `BROWSER`
+    /// binding (`FRAGMENT_BROWSER_URL`: the renderer, rendering/;
+    /// docs/self-host.md, seam 7).
+    pub browser_url: Option<String>,
 }
 
 /// A Stripe account as the cell reads it.
@@ -599,6 +606,9 @@ impl Fleet {
         }
         if let Some(u) = &self.swap_upstream {
             vars.push(("FRAGMENT_SWAP_UPSTREAM", u.as_str()));
+        }
+        if let Some(u) = &self.browser_url {
+            vars.push(("FRAGMENT_BROWSER_URL", u.as_str()));
         }
         vars.extend(shim.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         write_dev_vars(project, &vars)

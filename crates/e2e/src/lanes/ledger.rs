@@ -1126,10 +1126,7 @@ fn meters(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let live = ship(s, &c, LEDGER_APP, LEDGER_JSON);
     landed(s, api, &owner, &name, wait);
     // the deploy's preview card, whose browser time is metered too
-    let card = match s.shoots_cards() {
-        true => super::site::card_showing(s, api, &owner, &name, &live),
-        false => None,
-    };
+    let card = super::site::card_showing(s, api, &owner, &name, &live);
     for _ in 0..5 {
         api.op(&owner, &name, "notes", "q", json!({}))?;
     }
@@ -1157,19 +1154,15 @@ fn meters(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         matches!(usage, Some(Usage::Browser { ms }) if ms > 0) && usage.as_ref().is_some_and(|u| e["entry"]["charge"] == charge(u)) && e["entry"]["row"]["fragment"] == name.as_str()
     };
     let shots = || rows("card");
-    if s.shoots_cards() {
-        let metered = s.eventually(wait, || {
-            let _ = lever(api, &name, "meter-now", json!({ "sample": false }));
-            shots().iter().any(shot)
-        });
-        s.ok(
-            "its preview card's shot reaches the owner's ledger: its browser time, priced at Browser Rendering's hour",
-            card.is_some() && metered && shots().iter().all(shot),
-            json!({ "card": super::site::card_detail(&card), "ledger": shots() }),
-        );
-    } else {
-        s.skip_card("its preview card's shot reaches the owner's ledger");
-    }
+    let metered = s.eventually(wait, || {
+        let _ = lever(api, &name, "meter-now", json!({ "sample": false }));
+        shots().iter().any(shot)
+    });
+    s.ok(
+        "its preview card's shot reaches the owner's ledger: its browser time, priced at Browser Rendering's hour",
+        card.is_some() && metered && shots().iter().all(shot),
+        json!({ "card": super::site::card_detail(&card), "ledger": shots() }),
+    );
     s.ok(
         "a storage sample bills its SQLite as byte-hours",
         rows("store").iter().any(|e| e["entry"]["row"]["usage"]["class"] == "sqlite" && e["entry"]["row"]["usage"]["byte_hours"].as_u64().is_some_and(|b| b > 0)),

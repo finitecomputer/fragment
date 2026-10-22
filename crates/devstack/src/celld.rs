@@ -6,10 +6,10 @@
 //!
 //! What celld lacks is never asked for, and the cell runs without it
 //! (`DROPPED`): no Workers AI (the model route's slots on an
-//! OpenAI-compatible API, or the fake's URL), no Browser Rendering (no
-//! cards), no Email Sending (no mail, said once per send), and no Secrets
-//! Store (the cell's stand-ins for its bindings, cell/secrets.mjs:
-//! `crate::Secrets::Shim`).
+//! OpenAI-compatible API, or the fake's URL), no Browser Rendering (cards
+//! through the renderer: rendering/), no Email Sending (no mail, said once
+//! per send), and no Secrets Store (the cell's stand-ins for its bindings,
+//! cell/secrets.mjs: `crate::Secrets::Shim`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,7 +28,7 @@ use crate::{read_config, Node, NodeOptions};
 /// makes no computers until that seam is ported.
 pub const DROPPED: [(&str, &str); 5] = [
     ("ai", "Workers AI: the model route's slots run on an OpenAI-compatible API (FRAGMENT_MODELS), or on the fake (FRAGMENT_AI_URL)"),
-    ("browser", "Browser Rendering: no preview cards (docs/self-host.md, seam 7)"),
+    ("browser", "Browser Rendering: preview cards are shot through the renderer at FRAGMENT_BROWSER_URL instead (docs/self-host.md, seam 7)"),
     ("send_email", "Email Sending: no mail; each send says so and carries on (docs/technical-debt-ledger.md)"),
     ("build", "worker-build has run (cargo xtask build)"),
     ("containers", "computers are a sandcastle node's (docs/self-host.md, seam 2): none here yet"),

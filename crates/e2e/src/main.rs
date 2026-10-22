@@ -21,11 +21,10 @@
 //! the whole deployment, local Docker) is a skip that says why.
 //!
 //! `FRAGMENT_E2E_RUNTIME=celld` runs the local node on `celld dev` instead
-//! (`CELLD_BIN`; docs/self-host.md, seam 1), on the same fakes: a section
-//! that needs the runtime's own containers is a skip (needs.rs), and so is
-//! a check of what celld has no part in (a card's shot: no Browser
-//! Rendering), each saying why. Its secrets are OpenBao's, behind the
-//! cell's stand-ins (docs/self-host.md, seam 12), unless
+//! (`CELLD_BIN`; docs/self-host.md, seam 1), on the same fakes, its cards
+//! shot by the renderer (seam 7): a section that needs the runtime's own
+//! containers is a skip (needs.rs), saying why. Its secrets are OpenBao's,
+//! behind the cell's stand-ins (docs/self-host.md, seam 12), unless
 //! `FRAGMENT_E2E_SECRETS=vars` puts them in `.dev.vars`.
 
 mod api;
@@ -317,6 +316,10 @@ pub struct Suite {
     /// docs/self-host.md, seam 12), its state and audit log in the run's
     /// scratch.
     openbao: Option<devstack::openbao::OpenBao>,
+    /// Where a node without the `BROWSER` binding (celld) shoots preview
+    /// cards: the renderer over the pinned chrome-headless-shell, its pages
+    /// let reach this run's fragments alone (docs/self-host.md, seam 7).
+    renderer: Option<devstack::rendering::Rendering>,
     node: Option<devstack::Node>,
     port: u16,
     /// Distinguishes this run's fragment names from any earlier state.
@@ -438,18 +441,6 @@ impl Suite {
     /// workerd's hold it as a timer in the process.
     pub fn durable_workflows(&self) -> bool {
         self.on_celld()
-    }
-
-    /// Whether the node shoots preview cards: celld has no Browser
-    /// Rendering (docs/self-host.md, seam 7, to port), and the cell skips
-    /// every shot there (`card.skipped`, `no_browser`).
-    pub fn shoots_cards(&self) -> bool {
-        !self.on_celld()
-    }
-
-    /// A check of a card's shot on a node that takes none: a skip.
-    pub fn skip_card(&mut self, label: &str) {
-        self.skip(label, "celld has no Browser Rendering, so the node shoots no cards (docs/self-host.md, seam 7, to port)");
     }
 
     /// A heavy section runs only when `--only` names it (the real-Hermes
@@ -751,6 +742,7 @@ impl Suite {
                 (Some(_), None) => devstack::Secrets::Shim,
                 (Some(_), Some(bao)) => devstack::Secrets::OpenBao(bao.target()),
             },
+            browser_url: self.renderer.as_ref().map(|r| r.url.clone()),
         };
         fleet.configure(tools, &self.project)?;
         let opts = devstack::NodeOptions {
@@ -1127,6 +1119,11 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     };
     let hidden = rehearse.is_some();
     let openrouter = fragment_fakes::openrouter::OpenRouter::start()?;
+    let port = devstack::free_port()?;
+    let renderer = match &celld {
+        Some(_) => Some(renderer(&scratch, port)?),
+        None => None,
+    };
     let mut s = Suite {
         only,
         except,
@@ -1150,8 +1147,9 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         tools: Some(tools),
         celld,
         openbao,
+        renderer,
         node: None,
-        port: devstack::free_port()?,
+        port,
         run,
         fake: Fake::of(hidden, "code.storage", fake),
         ai: Fake::of(hidden, "Workers AI", fragment_fakes::workers_ai::WorkersAi::start(0)?),
@@ -1191,6 +1189,20 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         });
     }
     finish(&mut s)
+}
+
+/// The renderer a celld node shoots preview cards with: the pinned
+/// chrome-headless-shell (fetched into `target/tools` on first use, or
+/// `FRAGMENT_BROWSER_ZIP`), its pages let through to the run's fragments'
+/// hosts (both sites' suffixes) on the node's port, and to nothing else.
+fn renderer(scratch: &Path, port: u16) -> Result<devstack::rendering::Rendering> {
+    let browser = devstack::browser::locate(&devstack::repo_root().join(devstack::TOOLS_DIR))?;
+    let upstream = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let origins = devstack::rendering::Origins::new(&[SUFFIX, BOATS], port, upstream);
+    let opts = devstack::rendering::Options { browser: browser.bin, state: scratch.join("renderer"), origins, ca_file: None, port: 0 };
+    let r = devstack::rendering::Rendering::start(opts)?;
+    println!("cards: {} (the renderer at {}; its pages reach this run's fragments alone)", browser.version, r.url);
+    Ok(r)
 }
 
 /// A run's end: a name `--only` or `--except` gave that no section has

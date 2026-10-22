@@ -13,8 +13,9 @@
 //!                    model's say, its key in FRAGMENT_MODEL_KEY_FILE:
 //!                    `dev_models`). --runtime celld runs it on `celld dev`
 //!                    (CELLD_BIN; docs/self-host.md, seam 1): no computers,
-//!                    no cards, the secrets behind the cell's stand-ins for
-//!                    the store's bindings, in .dev.vars or, with
+//!                    cards through the renderer (seam 7: `dev_renderer`),
+//!                    the secrets behind the cell's stand-ins for the
+//!                    store's bindings, in .dev.vars or, with
 //!                    FRAGMENT_SECRETS_BACKEND=openbao, in OpenBao on :8804
 //!                    (seam 12: `dev_openbao`). Sign-in is the
 //!                    WorkOS fake on :8794, or, with FRAGMENT_SIGNIN=oidc,
@@ -238,12 +239,19 @@ fn dev(args: &[String]) -> Result<()> {
         (None, Some(u)) => format!("{u} (the WorkOS fake)"),
         (None, None) => format!("WorkOS {}", workos.client_id),
     };
+    // preview cards: wrangler's workerd has Browser Rendering's local mode;
+    // on celld, which has no `browser` binding, the renderer shoots them
+    let (suffix, platform_url) = ("fragment.localhost", format!("http://127.0.0.1:{dev_port}"));
+    let renderer = match celld {
+        Some(_) => Some(dev_renderer(suffix, &platform_url)?),
+        None => None,
+    };
     let fleet = devstack::Fleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
         codestorage_org: DEV_ORG.into(),
         codestorage_key_pem: key,
         codestorage_url: fake.url.clone(),
-        host_suffix: "fragment.localhost".into(),
+        host_suffix: suffix.into(),
         host_label_suffix: None,
         // A dev fragment's pins move by its own moves, the CLI's refresh, and this poll.
         poll_interval_s: 10,
@@ -273,7 +281,7 @@ fn dev(args: &[String]) -> Result<()> {
             tax: false,
         }),
         // the CLI's host: sign-in and approvals happen where it points
-        platform_url: format!("http://127.0.0.1:{dev_port}"),
+        platform_url,
         operators: None,
         signins_pending_max: None,
         cli_begins_per_ip_minute: None,
@@ -294,6 +302,7 @@ fn dev(args: &[String]) -> Result<()> {
             (Some(_), None) => devstack::Secrets::Shim,
             (Some(_), Some((bao, _))) => devstack::Secrets::OpenBao(bao.target()),
         },
+        browser_url: renderer.as_ref().map(|(r, _)| r.url.clone()),
     };
     fleet.configure(&tools, &devstack::cell_dir())?;
     // the cell's token, renewed while the stack runs (each start renews it too)
@@ -314,7 +323,11 @@ fn dev(args: &[String]) -> Result<()> {
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
     match &celld {
         None => println!("  runtime:      wrangler dev (workerd)"),
-        Some(c) => println!("  runtime:      celld dev ({}): no computers, no cards, no mail but the fake's", c.celld.display()),
+        Some(c) => println!("  runtime:      celld dev ({}): no computers, no mail but the fake's", c.celld.display()),
+    }
+    match &renderer {
+        Some((r, said)) => println!("  cards:        {said} (the renderer at {})", r.url),
+        None => println!("  cards:        Browser Rendering's local mode (wrangler's Chrome for Testing)"),
     }
     println!("  node log:     {}", node.log.display());
     println!("  fragments:    http://<name>.fragment.localhost:{dev_port}/");
@@ -412,6 +425,31 @@ fn dev_openbao(celld: bool, clean: bool, port: u16) -> Result<Option<(devstack::
     let bin = devstack::openbao::locate(&devstack::repo_root().join(devstack::TOOLS_DIR))?;
     let opts = devstack::openbao::Options { dir, port, audit: false };
     Ok(Some(devstack::openbao::OpenBao::start(&bin, opts)?))
+}
+
+/// The dev stack's renderer on celld (docs/self-host.md, seam 7): the
+/// pinned chrome-headless-shell (`target/tools`, fetched on first use, or
+/// `FRAGMENT_BROWSER_ZIP`), its pages let reach the fragments' origins
+/// alone, served on this box at the platform URL's port (the node, or an
+/// edge before it) unless `FRAGMENT_BROWSER_UPSTREAM` (`ip:port`) names
+/// where. `FRAGMENT_BROWSER_CA_FILE` names a private CA's PEM the browser
+/// trusts, for fragments on https under it. With it, what the banner says
+/// the browser is.
+fn dev_renderer(suffix: &str, platform_url: &str) -> Result<(devstack::rendering::Rendering, String)> {
+    let upstream = match std::env::var("FRAGMENT_BROWSER_UPSTREAM") {
+        Ok(u) => Some(u.parse().with_context(|| format!("FRAGMENT_BROWSER_UPSTREAM is ip:port, not {u:?}"))?),
+        Err(_) => None,
+    };
+    let origins = devstack::rendering::Origins::of_platform(suffix, platform_url, upstream).map_err(anyhow::Error::msg)?;
+    let browser = devstack::browser::locate(&devstack::repo_root().join(devstack::TOOLS_DIR))?;
+    let opts = devstack::rendering::Options {
+        browser: browser.bin,
+        state: devstack::repo_root().join(format!("target/devstack/renderer-{}", origins.port)),
+        origins,
+        ca_file: std::env::var_os("FRAGMENT_BROWSER_CA_FILE").map(std::path::PathBuf::from),
+        port: 0,
+    };
+    Ok((devstack::rendering::Rendering::start(opts)?, browser.version))
 }
 
 /// The dev stack's models, from `FRAGMENT_MODELS_FILE`.

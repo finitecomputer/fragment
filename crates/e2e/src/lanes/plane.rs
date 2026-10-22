@@ -132,45 +132,28 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
     // the deploy's preview card, shot after it, never in its request (decision 31)
     let keys = s.cli_keys(&home).unwrap_or_else(Keys::generate);
     let live1 = st["pins"]["live"].as_str().unwrap_or("").to_string();
-    let cards = s.shoots_cards();
-    let first = if cards {
-        let first = super::site::card_showing(s, api, &keys, &name, &live1);
-        s.ok("the deploy makes a preview card of the live it deployed", first.as_ref().is_some_and(super::site::is_card), super::site::card_detail(&first));
-        let made = super::site::event_kinds(api, &keys, &name).iter().filter(|k| *k == "card.made").count();
-        s.ok("one card for one deploy", made == 1, made);
-        first
-    } else {
-        let skipped = || {
-            let r = api.signed(&keys, "GET", &format!("/api/f/{name}/events?tail=200"), None).map(|r| r.body).unwrap_or(Value::Null);
-            r["events"].as_array().is_some_and(|l| l.iter().any(|e| e["kind"] == "card.skipped" && e["data"]["why"] == "no_browser"))
-        };
-        let said = s.eventually(super::site::CARD_WAIT, skipped);
-        s.ok("with no browser on the runtime, the deploy's card is skipped, saying why (card.skipped, no_browser)", said, "");
-        s.skip_card("the deploy makes a preview card of the live it deployed, one card for one deploy");
-        None
-    };
+    let first = super::site::card_showing(s, api, &keys, &name, &live1);
+    s.ok("the deploy makes a preview card of the live it deployed", first.as_ref().is_some_and(super::site::is_card), super::site::card_detail(&first));
+    let made = super::site::event_kinds(api, &keys, &name).iter().filter(|k| *k == "card.made").count();
+    s.ok("one card for one deploy", made == 1, made);
 
     std::fs::write(site.join("site/index.html"), "<h1>v2 marker</h1>")?;
     s.cli(api, &home, &["deploy", &name, "--dir", site.to_str().unwrap()]);
     let st2 = s.cli_json(api, &home, &["status", &name, "--json"])?;
     s.ok("a second deploy moves live", st2["pins"]["live"] != st["pins"]["live"], &st2);
     s.ok("the site follows live", page(api).contains("v2 marker"), page(api));
-    if cards {
-        let second = super::site::card_showing(s, api, &keys, &name, st2["pins"]["live"].as_str().unwrap_or(""));
-        let (tag1, tag2) = (first.as_ref().map(|r| r.header("etag")).unwrap_or_default(), second.as_ref().map(|r| r.header("etag")).unwrap_or_default());
-        s.ok(
-            "a second deploy replaces the card: another image, of the new live",
-            second.as_ref().is_some_and(super::site::is_card) && tag2 != tag1 && second.as_ref().map(|r| &r.bytes) != first.as_ref().map(|r| &r.bytes),
-            json!({ "first": super::site::card_detail(&first), "second": super::site::card_detail(&second) }),
-        );
-        let conditional = |tag: &str| {
-            api.call(Call { method: "GET", url: format!("{}/api/f/{name}/card", api.base), keys: Some(&keys), extra: vec![("if-none-match", tag.to_string())], ..Call::default() })
-        };
-        let (same, old) = (conditional(&tag2)?, conditional(&tag1)?);
-        s.ok("the card revalidates by its tag: 304 for the current one, the new image for the one before", same.status == 304 && same.bytes.is_empty() && old.status == 200 && old.header("etag") == tag2, format!("{} | {}", same.status, old.status));
-    } else {
-        s.skip_card("a second deploy replaces the card, which revalidates by its tag");
-    }
+    let second = super::site::card_showing(s, api, &keys, &name, st2["pins"]["live"].as_str().unwrap_or(""));
+    let (tag1, tag2) = (first.as_ref().map(|r| r.header("etag")).unwrap_or_default(), second.as_ref().map(|r| r.header("etag")).unwrap_or_default());
+    s.ok(
+        "a second deploy replaces the card: another image, of the new live",
+        second.as_ref().is_some_and(super::site::is_card) && tag2 != tag1 && second.as_ref().map(|r| &r.bytes) != first.as_ref().map(|r| &r.bytes),
+        json!({ "first": super::site::card_detail(&first), "second": super::site::card_detail(&second) }),
+    );
+    let conditional = |tag: &str| {
+        api.call(Call { method: "GET", url: format!("{}/api/f/{name}/card", api.base), keys: Some(&keys), extra: vec![("if-none-match", tag.to_string())], ..Call::default() })
+    };
+    let (same, old) = (conditional(&tag2)?, conditional(&tag1)?);
+    s.ok("the card revalidates by its tag: 304 for the current one, the new image for the one before", same.status == 304 && same.bytes.is_empty() && old.status == 200 && old.header("etag") == tag2, format!("{} | {}", same.status, old.status));
     let repo = created["repo"].as_str().unwrap_or("");
     match s.hosted() {
         true => s.skip("code.storage holds live where the CLI moved it", "it reads the code.storage fake's branches (a preview's git is real)"),

@@ -147,6 +147,11 @@ pub struct Config {
     /// `<url>/send` (the binding's input) instead: a fake at the vendor
     /// boundary, which never sends it.
     pub mail_url: Option<String>,
+    /// `FRAGMENT_BROWSER_URL`: where preview cards are shot when it is not
+    /// the `BROWSER` binding (docs/self-host.md, seam 7): a service
+    /// answering the binding's routes (`/v1/devtools/browser…`) under this
+    /// base, without a trailing slash. Set, it wins over the binding.
+    pub browser_url: Option<String>,
     workos: Option<WorkOsConfig>,
     oidc: Option<OidcConfig>,
     stripe: Option<StripeConfig>,
@@ -395,6 +400,9 @@ impl Config {
                 fragment_core::mail::Sender::parse(&f.to_string()).unwrap_or_else(|e| panic!("FRAGMENT_MAIL_FROM: {e}"))
             }),
             mail_url: var(env, "FRAGMENT_MAIL_URL").map(|u| u.trim_end_matches('/').to_string()),
+            browser_url: var(env, "FRAGMENT_BROWSER_URL").map(|u| u.trim_end_matches('/').to_string()).inspect(|u| {
+                assert!(u.starts_with("http://") || u.starts_with("https://"), "FRAGMENT_BROWSER_URL is an http(s) URL, not {u:?}");
+            }),
             operators: var(env, "FRAGMENT_OPERATORS").map(|l| fragment_core::npub::parse_list(&l)),
             signins_pending_max: var(env, "FRAGMENT_SIGNINS_PENDING_MAX")
                 .and_then(|s| s.parse::<u64>().ok())
