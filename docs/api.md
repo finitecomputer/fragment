@@ -1757,7 +1757,7 @@ refused:
   ours keeps every request under Clef's 13 MiB body), and all of it at
   most 8 MiB, decoded. No remote URL: Clef takes none.
 
-Everything above is checked before anything is reserved or sent, and a
+Everything above is checked before anything is sent, and a
 refusal says which bound it broke; a job's blobs are sized before any is
 read.
 
@@ -1969,8 +1969,8 @@ phase 4.
 ### Ledger (docs/ledger.md)
 
 Every person has a usage ledger: one `Ledger` Durable Object, named by
-their identity, running `fragment_core::ledger` (plans, credit, holds,
-caps, meters). Money is integer micro-dollars; a month is a UTC calendar
+their identity, running `fragment_core::ledger` (plans, credit, caps,
+meters). Money is integer micro-dollars; a month is a UTC calendar
 month. Plans (decision 25): `guest` (no agents, no AI, billed nothing),
 `seat` ($50 of included credit a month) and `seat_always_on` ($100); a
 new person's is `FRAGMENT_DEFAULT_PLAN`. Included credit expires at the
@@ -2008,7 +2008,7 @@ credit first. What happened is always charged, past zero.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `GET /api/ledger` | a person (an agent: its owner's) | → `LedgerStatus` (`crates/proto` `ledger`): `{plan, seat, month, balanceMicros, includedMicros, includedGrantedMicros, purchasedMicros, reservedMicros, availableMicros, overdraftMicros, standing: {standing: ok \| agents_stopped \| read_only, why?: guest \| seat_canceled \| no_credit \| overdrawn}, priceBook, fragments: [{fragment, spentMicros, capMicros}]}` (this month's spend, the largest 50 first) |
+| `GET /api/ledger` | a person (an agent: its owner's) | → `LedgerStatus` (`crates/proto` `ledger`): `{plan, seat, month, balanceMicros, includedMicros, includedGrantedMicros, purchasedMicros, reservedMicros, availableMicros, overdraftMicros, standing: {standing: ok \| agents_stopped \| read_only, why?: guest \| seat_canceled \| no_credit \| overdrawn}, priceBook, fragments: [{fragment, spentMicros, capMicros}]}` (this month's spend, the largest 50 first). `balanceMicros` is negative while the person owes (a paid call is charged after it, so it can pass zero); `reservedMicros` is always 0 since nothing is held before a call (decision 62), kept for the CLIs that read it; `availableMicros` is what may still be charged before their fragments go read-only, the balance plus the overdraft's room (0 once read-only) |
 | `PUT /api/f/{name}/cap` | the fragment's owner (never an agent) | `{id, micros \| null}` → `{fragment, capMicros, default}`: once by `id` (again: the same answer; another body: 409); `null` is the default |
 | `POST /api/ledger/{person}/grant` | the deployment's operators | `GrantCredit {id, micros, by, why}` → `{}`: purchased credit, once by `id`; `by` is the operator who signs; at most $10,000 |
 | `POST /api/ledger/{person}/plan` | the same | `SetPlan {id, plan}` → `{}`: an override; a seat's holder's plan is the registry's to push (Seats and orgs), and its next push wins (the debt ledger) |

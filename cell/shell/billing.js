@@ -374,7 +374,9 @@ export async function billingSections(helpers, ledger, mine, back) {
             plainly(e, { no_seat: "Credit is for a seat's holder, and you don't hold one now. Open Settings again to see why." }, CHECKOUT_FAILED),
           )
         : null;
-    billing.append(line("Credit this month", `${usd(ledger.availableMicros)} left`, topUp));
+    // the balance: below zero, what is owed (a paid call is charged after it, so one can go past zero)
+    const balance = ledger.balanceMicros;
+    billing.append(line("Credit this month", balance < 0 ? `${usd(-balance)} owed` : `${usd(balance)} left`, topUp));
   }
   if (!alone) return org ? [billing, orgSection(org, offer, mine.pays)] : [billing];
   // an admin alone buys seats for others, where something is sold

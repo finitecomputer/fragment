@@ -1532,7 +1532,7 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let session = r.body["session"].as_str().unwrap_or("").to_string();
     s.stripe.complete(&session).map_err(anyhow::Error::msg)?;
     let purchased = |api: &Api| ledger(api, &gus)["purchasedMicros"].as_i64().unwrap_or(0);
-    let (before, bought) = (ledger(api, &gus)["availableMicros"].as_i64().unwrap_or(0), purchased(api));
+    let (before, bought) = (ledger(api, &gus)["balanceMicros"].as_i64().unwrap_or(0), purchased(api));
     let (paid, seen) = held_return(&mut b, api, &session, wait)?;
     let shown = seen["text"].as_str().unwrap_or("");
     let credit = credit_shown(shown);

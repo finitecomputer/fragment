@@ -374,7 +374,8 @@ per-person credential:*
 the per-person OpenRouter keys (minted with a management key, their
 limit the month's allowance) are gone. Models are Workers AI through the
 deployment's AI Gateway, called through the AI binding, and each call is
-reserved and settled on its payer's usage ledger (docs/ledger.md), which
-is what stops a person, not a vendor's key limit. No BYOK (Paul,
+gated by its payer's standing and charged on their usage ledger
+(docs/ledger.md), which is what stops a person, not a vendor's key
+limit. No BYOK (Paul,
 2026-10-02).
 

@@ -4,13 +4,22 @@
 //! decides who pays a row and asks that person's ledger, which keys on
 //! nothing else (docs/cloudflare-v1.md, decision 36).
 //!
-//! The head (plan, seat, balance, holds, price book) is kept whole as one
+//! The head (plan, seat, balance, price book) is kept whole as one
 //! JSON row, small and bounded; what grows with use (references, batches,
 //! commands, each fragment's spend by month, caps) is in tables, read and
 //! written through `SqlStore`. Each route is one `transactionSync` over
 //! both: the core decides before it writes, so a refusal changes nothing
 //! but the month it rolled to, and a store that failed rolls the whole
 //! route back. Its alarm runs `sweep` at the head's `next_sweep_ms`.
+//!
+//! Nothing is held before a paid call (decision 62): a head or an entry
+//! the releases before kept (holds, reservations) loads, its holds
+//! forgiven uncharged and their entries ended as released in the same
+//! transaction, and a head is written with `holds` empty, so a release
+//! rolled back to one of those reads a ledger with no hold and no held
+//! entry (`fragment_core::ledger`, `retire_holds`). The
+//! `entries.held` column stays (a schema changes only by a new step),
+//! written 0.
 //!
 //! Inner routes (platform code only, through `ask`): each is a POST of a
 //! `Route`'s request (the core's types, or proto's), answered with its
@@ -209,9 +218,9 @@ pub struct Status {}
 /// holds as of its last call (`book`, answering `{book}`), or cap its paid
 /// calls/// (`paid-calls {max?}`, answering `{max, used}`; with no `max` the cap
 /// stays as it is, 0 where there was none: `used` is every model call,
-/// operator key's call and AI step it has charged or holds, by their
-/// references, and once it reaches `max` its gate refuses them as a ledger
-/// at zero does; the hosted e2e's people are capped so), or
+/// operator key's call and AI step it has charged, by their references,
+/// and once it reaches `max` its gate refuses them as a ledger at zero
+/// does; the hosted e2e's people are capped so), or
 /// set its seat at an order of the lever's (`legacy-seat {seat, seq}`,
 /// answering its status), as an operator's `seat` command did before it
 /// went (2026-10-16): a ledger such a command left ahead of the
@@ -237,21 +246,6 @@ pub enum TestHook {
         ms: u64,
     },
     ForgetGate,
-}
-
-impl Route for core::Reserve {
-    const PATH: &'static str = "/reserve";
-    type Answer = core::Reserved;
-}
-
-impl Route for core::Settle {
-    const PATH: &'static str = "/settle";
-    type Answer = core::Settled;
-}
-
-impl Route for core::Release {
-    const PATH: &'static str = "/release";
-    type Answer = core::Released;
 }
 
 impl Route for core::Meter {
@@ -397,18 +391,18 @@ impl Store for SqlStore {
     fn entry(&self, reference: &str) -> Option<Entry> {
         let rows: Vec<Json> = self.rows("SELECT entry AS value FROM entries WHERE ref = ?", vec![reference.into()]);
         let entry = self.read::<Entry>("an entry", &rows.into_iter().next()?.value)?;
-        if let Entry::Reservation { reserve, .. } = &entry {
-            assert_eq!(reserve.reference, reference, "an entry is kept under its own reference");
+        if let Entry::Row { row, .. } = &entry {
+            assert_eq!(row.reference, reference, "an entry is kept under its own reference");
         }
         Some(entry)
     }
 
     fn put_entry(&mut self, reference: &str, entry: Entry) {
-        let held = i64::from(entry.held());
+        // `held` is a column of the releases before decision 62: nothing is held now
         self.exec(
-            "INSERT INTO entries (ref, at_ms, held, entry) VALUES (?, ?, ?, ?)
-             ON CONFLICT (ref) DO UPDATE SET at_ms = excluded.at_ms, held = excluded.held, entry = excluded.entry",
-            vec![reference.into(), SqlStorageValue::Integer(entry.at_ms()), SqlStorageValue::Integer(held), SqlStore::text(&entry).into()],
+            "INSERT INTO entries (ref, at_ms, held, entry) VALUES (?, ?, 0, ?)
+             ON CONFLICT (ref) DO UPDATE SET at_ms = excluded.at_ms, held = 0, entry = excluded.entry",
+            vec![reference.into(), SqlStorageValue::Integer(entry.at_ms()), SqlStore::text(&entry).into()],
         );
     }
 
@@ -489,12 +483,6 @@ impl Store for SqlStore {
 
     fn prune(&mut self, before_ms: i64, before_month: Month) -> u64 {
         let before = SqlStorageValue::Integer(before_ms);
-        // the sweep expired every hold past HOLD_MAX_MS first: one older
-        // than the horizon would be a charge forgotten
-        if self.count("SELECT COUNT(*) AS n FROM entries WHERE at_ms < ? AND held = 1", vec![before.clone()]) != 0 {
-            self.fail("a held reservation is older than what the ledger remembers".into());
-            return 0;
-        }
         let forgotten = self.count(
             "SELECT (SELECT COUNT(*) FROM entries WHERE at_ms < ?) + (SELECT COUNT(*) FROM batches WHERE at_ms < ?) AS n",
             vec![before.clone(), before.clone()],
@@ -513,7 +501,13 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
     let rows: Vec<Json> = store.rows("SELECT ledger AS value FROM head WHERE id = 1", vec![]);
     store.checked()?;
     if let Some(row) = rows.into_iter().next() {
-        let ledger: Ledger = serde_json::from_str(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
+        let mut ledger: Ledger = serde_json::from_str(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
+        // a head of the releases before decision 62: its holds forgiven,
+        // their entries ended, in this transaction with the head's rewrite
+        let retired = ledger.retire_holds(store);
+        if retired > 0 {
+            console_log!("{}", json!({ "event": "ledger.holds-retired", "retired": retired }));
+        }
         ledger.assert_valid();
         return Ok(ledger);
     }
@@ -606,13 +600,10 @@ impl LedgerCell {
     async fn swept(&self) -> CellResult<core::Swept> {
         if self.meta("payer")?.is_none() {
             // a ledger no one has called has nothing to sweep
-            return Ok(core::Swept { expired: Vec::new(), forgotten: 0 });
+            return Ok(core::Swept { forgotten: 0 });
         }
         let (swept, next) = self.transact(|ledger, store, now| Ok(ledger.sweep(store, now)))?;
         let swept = swept.expect("a sweep refuses nothing");
-        if !swept.expired.is_empty() {
-            console_log!("{}", json!({ "event": "ledger.holds-expired", "expired": swept.expired }));
-        }
         self.arm(next).await?;
         Ok(swept)
     }
@@ -654,21 +645,6 @@ impl LedgerCell {
             Done {}
         }
         match path.as_str() {
-            <core::Reserve as Route>::PATH => {
-                let r: core::Reserve = decode(&body)?;
-                if self.cfg.test_hooks {
-                    self.paid_calls(Some(&r.reference))?;
-                }
-                reply(self.mutate(move |l, s, now| l.reserve(s, &r, now)).await?)
-            }
-            <core::Settle as Route>::PATH => {
-                let r: core::Settle = decode(&body)?;
-                reply(self.mutate(move |l, s, now| l.settle(s, &r, now)).await?)
-            }
-            <core::Release as Route>::PATH => {
-                let r: core::Release = decode(&body)?;
-                reply(self.mutate(move |l, s, now| l.release(s, &r, now)).await?)
-            }
             <core::Meter as Route>::PATH => {
                 let m: core::Meter = decode(&body)?;
                 reply(self.mutate(move |l, s, now| l.meter(s, &m, now)).await?)
@@ -676,7 +652,7 @@ impl LedgerCell {
             MaySpend::PATH => {
                 let q: MaySpend = decode(&body)?;
                 if self.cfg.test_hooks && matches!(q.spend, Spend::AgentTurn | Spend::AiStep) {
-                    self.paid_calls(None)?;
+                    self.paid_calls()?;
                 }
                 reply(done(self.mutate(move |l, s, now| l.may_spend(s, q.spend, q.fragment.as_deref(), q.by_owner, now)).await?))
             }
@@ -751,8 +727,9 @@ impl LedgerCell {
     }
 
     /// Fleets with levers: a capped ledger's paid calls used, every model
-    /// call, operator key's call and AI step it has charged or holds (an
-    /// entry under `aig:`, `key:` or `step:`).
+    /// call, operator key's call and AI step it has charged (an entry under
+    /// `aig:`, `key:` or `step:`, a reservation of the releases before
+    /// among them).
     fn paid_calls_used(&self) -> CellResult<u64> {
         let rows: Vec<Value> = self
             .sql()
@@ -762,20 +739,13 @@ impl LedgerCell {
     }
 
     /// Fleets with levers: a ledger whose paid calls are capped
-    /// (`TestHook::PaidCalls`) refuses one more once it has charged or holds
-    /// `max`, as a ledger at zero refuses it: at its gate (which an isolate
-    /// trusts for up to a minute, so the cap is approximate by what starts
-    /// in that window), and at a new reservation (`reference`: a retry of
-    /// one it holds is no new call).
-    fn paid_calls(&self, reference: Option<&str>) -> Result<(), Failed> {
+    /// (`TestHook::PaidCalls`) refuses one more at its gate once it has
+    /// charged `max`, as a ledger at zero refuses it (an isolate trusts the
+    /// gate's answer for up to a minute, so the cap is approximate by what
+    /// starts in that window).
+    fn paid_calls(&self) -> Result<(), Failed> {
         assert!(self.cfg.test_hooks, "only a fleet with levers caps paid calls");
         let Some(max) = self.meta(PAID_CALLS_MAX)?.and_then(|v| v.parse::<u64>().ok()) else { return Ok(()) };
-        if let Some(reference) = reference {
-            let held: Vec<Value> = self.sql().exec("SELECT 1 AS n FROM entries WHERE ref = ? LIMIT 1", vec![reference.into()])?.to_array()?;
-            if !held.is_empty() {
-                return Ok(());
-            }
-        }
         let used = self.paid_calls_used()?;
         if used >= max {
             let message = format!("this test person's {max} paid calls are used up (the hosted e2e's cap)");

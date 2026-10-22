@@ -557,8 +557,8 @@ speaking Cloudflare's APIs) returns once this product works.
     fragment's own blobs or small and inline; agents ask the same
     contract on the model route (`POST /api/models/v1/decide`, and
     `/v1/decide` on a computer's model intercept), metered to their
-    owner. Each reserves its model's context window and settles at its
-    input tokens (docs/api.md, Decisions).
+    owner. Each is charged after its answer at its input tokens
+    (docs/api.md, Decisions; decision 62).
 24. **Every per-person cost is metered** in integer micro-dollars into
     a per-person usage ledger:
     - AI;
