@@ -10,8 +10,8 @@
 //! credits that pay for AI through Unified Billing (spike S4), so it
 //! applies to tokens and neurons only; the margin is the operator's, 50%
 //! unless the book sets another. The book is data the operator sets (the
-//! deploy's configuration); a ledger takes it whenever its contents differ
-//! from the book it charges with (crate::ledger, `set_book`).
+//! deploy's configuration); each release prices its ledgers' batches with
+//! its own (crate::ledger, `meter`; decision 62).
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

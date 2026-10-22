@@ -165,7 +165,7 @@ impl FragmentCell {
         let text = usage.as_ref().map(|u| serde_json::to_string(u).expect("a usage serializes"));
         let charge = match usage {
             Some(usage) => {
-                let micros = ledger::configured_book(self.cfg).price(&usage).map_or(0, |priced| priced.charge);
+                let micros = self.cfg.book.price(&usage).map_or(0, |priced| priced.charge);
                 Some((self.outbox_row(&p.reference, usage, now, p.agent.clone()).map_err(retry)?, micros))
             }
             None => {

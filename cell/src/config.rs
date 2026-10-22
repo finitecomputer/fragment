@@ -164,10 +164,14 @@ pub struct Config {
     /// placements and its environment variables. None by default.
     /// `FRAGMENT_PRICE_BOOK_VERSION` (default the defaults',
     /// `fragment_core::price::DEFAULT_BOOK_VERSION`; the book's is the higher
-    /// of the two) is informational: a ledger takes the configured book
-    /// whenever its contents differ from its own (#451).
+    /// of the two) is informational (#451).
     pub providers: fragment_core::catalog::Catalog,
-    pub price_book_version: u32,
+    /// The price book this release charges with (`configured_book`): the
+    /// core's defaults, the operator keys' prices from `providers`, and the
+    /// version. Built and checked once per isolate; every call into a
+    /// ledger is its own release's, so a ledger keeps none of its own
+    /// (decision 62).
+    pub book: fragment_core::price::PriceBook,
     /// `FRAGMENT_MODELS` (the deploy config's `models`, less its keys): where
     /// each of the model route's names runs, its tiers', `fallback` (a
     /// tier's call is made on it once more when its own fails before
@@ -245,6 +249,25 @@ fn deployed_at(env: &Env) -> Option<u64> {
 /// `FRAGMENT_DEPLOY_ID`.
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
+/// The price book a release charges with: the core's defaults, the
+/// configuration's operator keys' prices, and the higher of its version
+/// and the defaults' (decision 4: pricing lives there). One the core
+/// refuses (its checks are the deploy's too, so none should come) is said
+/// aloud, and the defaults charge instead: a billing problem never stops
+/// an agent (decision 62).
+fn configured_book(providers: &fragment_core::catalog::Catalog, version: u32) -> fragment_core::price::PriceBook {
+    let mut book = fragment_core::price::PriceBook::defaults();
+    book.keys = providers.key_prices();
+    book.version = book.version.max(version);
+    match book.validate() {
+        Ok(()) => book,
+        Err(fault) => {
+            worker::console_error!("{}", serde_json::json!({ "event": "ledger.book-refused", "version": book.version, "fault": format!("{fault:?}") }));
+            fragment_core::price::PriceBook::defaults()
+        }
+    }
+}
+
 impl Config {
     /// The isolate's settings (`CONFIG`): built once, from `env`'s variables.
     pub fn from_env(env: &Env) -> &'static Config {
@@ -272,6 +295,7 @@ impl Config {
         assert!(fragment_core::frames::is_origin(&platform_url), "FRAGMENT_PLATFORM_URL (required) is an origin (scheme://host[:port], lower case, no path)");
         assert!(fragment_core::frames::is_origin(&format!("https://{host_suffix}")), "FRAGMENT_HOST_SUFFIX is a host name");
         let egress_local = var(env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow");
+        let providers = providers(env);
         let levers_fleet = levers_fleet(egress_local, host_label_suffix.is_some());
         let test_secret = test_secret(env, levers_fleet);
         Config {
@@ -340,10 +364,8 @@ impl Config {
             test_secret,
             deploy_id: deploy_id(env),
             deployed_at: deployed_at(env),
-            providers: providers(env),
-            price_book_version: var(env, "FRAGMENT_PRICE_BOOK_VERSION")
-                .map(|v| v.parse().unwrap_or_else(|_| panic!("FRAGMENT_PRICE_BOOK_VERSION is a whole number")))
-                .unwrap_or(1),
+            book: configured_book(&providers, var(env, "FRAGMENT_PRICE_BOOK_VERSION").map(|v| v.parse().unwrap_or_else(|_| panic!("FRAGMENT_PRICE_BOOK_VERSION is a whole number"))).unwrap_or(1)),
+            providers,
             models: fragment_core::models::Models::parse(var(env, "FRAGMENT_MODELS").as_deref(), &fragment_core::price::PriceBook::defaults(), egress_local)
                 .unwrap_or_else(|e| panic!("FRAGMENT_MODELS: {e}")),
             swap_upstream: var(env, "FRAGMENT_SWAP_UPSTREAM").map(|u| u.trim_end_matches('/').to_string()),

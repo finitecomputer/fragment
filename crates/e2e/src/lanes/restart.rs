@@ -3,7 +3,8 @@
 //! included). The graceful restart comes back with one operator key's row
 //! more in its configuration, and the crash's without it again, as an
 //! operator adds a row and then rolls it back: each time, a ledger made
-//! before takes the book configured, no version raised (#451).
+//! before charges with the book its release configured, no version raised
+//! (#451; it keeps none of its own: decision 62).
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -34,9 +35,8 @@ fn count(api: &Api, keys: &Keys, name: &str) -> i64 {
     api.op(keys, name, "count", "q", json!({})).ok().and_then(|r| r.body["result"]["n"].as_i64()).unwrap_or(-1)
 }
 
-/// The price book `owner`'s ledger charges with: a call (their ledger's
-/// status, at which it takes the configured book), then the book its head
-/// holds (the ledger's `book` lever), and the status's `priceBook`.
+/// The price book `owner`'s ledger charges with (the ledger's `book`
+/// lever: its release's), and its status's `priceBook`.
 fn book_of(api: &Api, owner: &Keys) -> Result<(Value, Value)> {
     let status = api.signed(owner, "GET", "/api/ledger", None)?;
     let identity = api.identity(owner)?;
@@ -203,7 +203,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let api = s.start_with_a_key_more()?;
     let (book, shown) = book_of(&api, &owner)?;
     s.ok(
-        "after a restart whose configuration adds an operator key's row, its version as it was, a ledger made before takes that book at its next call: the key at its row's price",
+        "after a restart whose configuration adds an operator key's row, its version as it was, a ledger made before charges with that book: the key at its row's price",
         added_key_price(&book) == Some(json!({ "key": ADDED_KEY.0, "micros": 20_000, "per": 1 })) && shown == version,
         format!("{} (version {shown}, before {version})", book["keys"]),
     );
@@ -377,7 +377,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let api = s.start(false)?;
     let (book, shown) = book_of(&api, &owner)?;
     s.ok(
-        "after a crash back on the configuration from before the key's row (a rollback), the ledger takes that book again at its next call",
+        "after a crash back on the configuration from before the key's row (a rollback), the ledger charges with that book again",
         book == book_before && shown == version,
         format!("{} (before: {})", book["keys"], book_before["keys"]),
     );
