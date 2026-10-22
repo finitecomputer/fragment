@@ -1565,7 +1565,7 @@ impl ComputerCell {
                 return states.clone();
             }
         }
-        let (states, until) = match crate::connections::connection_states(&self.env, self.cfg, self.workos_user(owner)).await {
+        let (states, until) = match crate::connections::connection_states(&self.env, self.cfg, self.workos_user(owner), None).await {
             Ok(s) => (s, now + STATES_TTL_MS),
             Err(e) => {
                 console_error!("{}", json!({ "computer": "connection-states", "error": e.message }));

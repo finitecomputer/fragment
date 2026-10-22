@@ -29,6 +29,16 @@ used on the credential-bearing requests.
 The documented import is `POST /user_management/users/:user_id/connected_accounts/:slug`.
 Only an explicit 409 permits a `PUT` update of that same user's existing account.
 An uncertain result consumes the attempt; reconnect rather than replaying it.
+The import names the account as its person knows it: when the token endpoint
+answers an OpenID Connect `id_token` beside the grant (the row asks for `openid`
+and the provider's email scope: Google's `https://www.googleapis.com/auth/userinfo.email`),
+its `email` becomes the connected account's `account_display_name` (`null` when
+there is none, so an update never keeps an earlier account's). The ID token is
+read without checking its signature: it came straight from the token endpoint
+over TLS (OpenID Connect Core 3.1.3.7, step 6), its `aud` must be the row's
+client, an `email_verified: false` email is not used, and the label is only shown
+to the person (settings, `GET /api/connections`' `account`), never used to decide
+access.
 This deliberately supports confidential clients using `client_secret_post`,
 authorization code, S256, and a space-delimited scope response. Other provider
 protocols require an explicit implementation, not an unbound fallback.

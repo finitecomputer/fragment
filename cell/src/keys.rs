@@ -268,11 +268,19 @@ pub async fn pipes_token(env: &Env, api: &str, provider: &str, user: &str) -> Ce
     post_json(&format!("{api}/data-integrations/{provider}/token"), Method::Post, Some(&key), Some(&json!({ "user_id": user })), "WorkOS").await
 }
 
+/// A connected account as Pipes describes it, with no token: its state, and
+/// the account it is, as its person knows it (its `account_display_name`,
+/// set when it was connected: `connection_signin::account_label`).
+pub struct PipesAccount {
+    pub state: fragment_proto::computer::ProviderState,
+    pub label: Option<String>,
+}
+
 /// A connection's state, without a token (WorkOS Pipes' connected account,
 /// `GET /user_management/users/{user}/connected_accounts/{provider}`):
 /// what Pipes says of `user`'s account at `provider`, never minting or
 /// refreshing a token. 404 is no account.
-pub async fn pipes_state(env: &Env, api: &str, provider: &str, user: &str) -> CellResult<fragment_proto::computer::ProviderState> {
+pub async fn pipes_state(env: &Env, api: &str, provider: &str, user: &str) -> CellResult<PipesAccount> {
     use fragment_proto::computer::ProviderState;
     assert!(fragment_core::catalog::valid_name(provider), "a provider is checked before WorkOS is asked");
     // it goes in a path: a user id is WorkOS' token (`user_01…`), nothing else
@@ -281,12 +289,14 @@ pub async fn pipes_state(env: &Env, api: &str, provider: &str, user: &str) -> Ce
     }
     let key = required(env, store::WORKOS_KEY).await?;
     let (status, answer) = post_json(&format!("{api}/user_management/users/{user}/connected_accounts/{provider}"), Method::Get, Some(&key), None, "WorkOS").await?;
-    match (status, answer["state"].as_str()) {
-        (200, Some("connected")) => Ok(ProviderState::Connected),
-        (200, Some("needs_reauthorization")) => Ok(ProviderState::NeedsReauthorization),
-        (200, _) | (404, _) => Ok(ProviderState::NotConnected),
-        (s, _) => Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS did not say whether {provider} is connected ({s}): {}", answer["message"].as_str().unwrap_or("no reason given")))),
-    }
+    let state = match (status, answer["state"].as_str()) {
+        (200, Some("connected")) => ProviderState::Connected,
+        (200, Some("needs_reauthorization")) => ProviderState::NeedsReauthorization,
+        (200, _) | (404, _) => ProviderState::NotConnected,
+        (s, _) => return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS did not say whether {provider} is connected ({s}): {}", answer["message"].as_str().unwrap_or("no reason given")))),
+    };
+    let label = answer["account_display_name"].as_str().filter(|l| state != ProviderState::NotConnected && fragment_core::connection_signin::label_ok(l)).map(str::to_string);
+    Ok(PipesAccount { state, label })
 }
 
 /// Standard OAuth code exchange. Called only by the Registry after consuming
@@ -315,12 +325,12 @@ async fn confidential_request(url: &str, method: Method, content_type: &str, bea
 /// The documented Pipes import API, after Fragment has validated and spent
 /// the transaction. A known 409 permits update; an uncertain outcome is
 /// never retried. Refresh stays at WorkOS, using the same OAuth client.
-pub(super) async fn pipes_import(env: &Env, api: &str, provider: &str, user: &str, tokens: fragment_core::connection_signin::Tokens) -> CellResult<bool> {
+pub(super) async fn pipes_import(env: &Env, api: &str, provider: &str, user: &str, tokens: fragment_core::connection_signin::Tokens, account: Option<&str>) -> CellResult<bool> {
     assert!(fragment_core::catalog::valid_name(provider));
     if user.is_empty() || !user.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') { return Err(CellError::host("invalid WorkOS user id")); }
     let key = required(env, store::WORKOS_KEY).await?;
     let expires_at = fragment_core::export::rfc3339(js::now_ms() + i64::from(tokens.expires_in) * 1000);
-    let body = tokens.import_body(&expires_at).to_string();
+    let body = tokens.import_body(&expires_at, account).to_string();
     let url = format!("{api}/user_management/users/{user}/connected_accounts/{provider}");
     let (status, _) = confidential_request(&url, Method::Post, "application/json", Some(&key), &body).await?;
     let status = if status == 409 { confidential_request(&url, Method::Put, "application/json", Some(&key), &body).await?.0 } else { status };

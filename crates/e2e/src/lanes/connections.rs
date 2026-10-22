@@ -17,11 +17,16 @@ fn shell(api: &Api, session: &str, method: &'static str, path: &str) -> Result<R
         extra: vec![("x-fragment-shell", "1".into()), ("sec-fetch-site", "same-origin".into()), ("origin", api.base.clone())], ..Call::default() })
 }
 
-/// `provider`'s state in the person's `GET /api/connections`.
-fn listed(api: &Api, session: &str, provider: &str) -> Result<serde_json::Value> {
+/// `provider`'s row in the person's `GET /api/connections`.
+fn row(api: &Api, session: &str, provider: &str) -> Result<serde_json::Value> {
     let r = shell(api, session, "GET", "/api/connections")?;
     anyhow::ensure!(r.status == 200, "list connections: {r}");
-    Ok(r.body["providers"].as_array().and_then(|l| l.iter().find(|p| p["provider"] == provider)).map(|p| p["state"].clone()).unwrap_or_default())
+    Ok(r.body["providers"].as_array().and_then(|l| l.iter().find(|p| p["provider"] == provider)).cloned().unwrap_or_default())
+}
+
+/// `provider`'s state in the person's `GET /api/connections`.
+fn listed(api: &Api, session: &str, provider: &str) -> Result<serde_json::Value> {
+    Ok(row(api, session, provider)?["state"].clone())
 }
 
 fn pending(api: &Api, session: &str, account: &str) -> Result<(String, String, String)> {
@@ -80,6 +85,8 @@ pub fn connections(s: &mut Suite, api: &Api) -> Result<()> {
     let counts = s.workos.connection_counts();
     s.ok("only the original browser and live session imports the account into its own WorkOS user", r.status == 200 && counts == (before.0 + 1, before.1 + 1, before.2)
         && s.workos.imported_accounts().last() == Some(&(user_a.clone(), PROVIDER.into(), "provider-account-a".into())), &r);
+    let listed_a = row(api, &a, PROVIDER)?;
+    s.ok("the connection names its account as the provider's ID token did (its email), which may be no sign-in of the person's here", listed_a["state"] == "connected" && listed_a["account"] == "provider-account-a@oauth.test", &listed_a);
     let r = back(api, &url, Some(&a), Some(&cookie))?;
     s.ok("replaying the callback performs no exchange or import", refused(&r, "not-under-way") && s.workos.connection_counts() == counts, &r);
 
@@ -116,6 +123,13 @@ pub fn connections(s: &mut Suite, api: &Api) -> Result<()> {
     let (replace, cookie, _) = pending(&api, &a, "replacement-a")?;
     let r = back(&api, &replace, Some(&a), Some(&cookie))?;
     s.ok("reauthorization uses documented update after an explicit import conflict", r.status == 200 && s.workos.imported_accounts().last() == Some(&(user_a, PROVIDER.into(), "replacement-a".into())), &r);
+    let listed_a = row(&api, &a, PROVIDER)?;
+    s.ok("connected again as another account, the connection names that account", listed_a["account"] == "replacement-a@oauth.test", &listed_a);
+    s.workos.omit_next_id_token();
+    let (unnamed, cookie, _) = pending(&api, &a, "unnamed-a")?;
+    let r = back(&api, &unnamed, Some(&a), Some(&cookie))?;
+    let listed_a = row(&api, &a, PROVIDER)?;
+    s.ok("connected again with no ID token, it names no account: an earlier account's name is cleared, never kept for another", r.status == 200 && listed_a["state"] == "connected" && listed_a.get("account").is_none(), &listed_a);
 
     let (concurrent, cookie, _) = pending(&api, &b, "concurrent-b")?;
     let counts = s.workos.connection_counts();
@@ -163,6 +177,8 @@ pub fn connections(s: &mut Suite, api: &Api) -> Result<()> {
             && s.workos.revoked().len() == revoked + 1 && s.workos.revoked().last() == Some(&minted)
             && s.workos.deleted().last() == Some(&(user_a, PROVIDER.into())) && s.workos.deleted().len() == deleted + 1
             && listed(&api, &a, PROVIDER)? == "not_connected", format!("was {was}, {r}"));
+    let listed_a = row(&api, &a, PROVIDER)?;
+    s.ok("disconnected, the connection names no account", listed_a["state"] == "not_connected" && listed_a.get("account").is_none(), &listed_a);
     let r = api.signed(&key, "DELETE", &path, None)?;
     s.ok("disconnecting again, with the person's key, asks the provider nothing: no account is left to revoke or delete", r.status == 200 && r.body["revoked"] == false
         && s.workos.revoked().len() == revoked + 1 && s.workos.deleted().len() == deleted + 1, &r);

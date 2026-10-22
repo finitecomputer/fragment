@@ -91,9 +91,11 @@ pub fn tokens(answer: &Value, requested: &[String]) -> Option<Tokens> {
 }
 
 impl Tokens {
-    /// WorkOS's documented connected-account import/update body.
-    pub fn import_body(&self, expires_at: &str) -> Value {
-        json!({ "access_token": self.access, "refresh_token": self.refresh, "expires_at": expires_at, "scopes": self.scopes, "state": "connected" })
+    /// WorkOS's documented connected-account import/update body. `account`
+    /// is its label (`account_label`); `null` clears an earlier account's
+    /// on an update.
+    pub fn import_body(&self, expires_at: &str, account: Option<&str>) -> Value {
+        json!({ "access_token": self.access, "refresh_token": self.refresh, "expires_at": expires_at, "scopes": self.scopes, "state": "connected", "account_display_name": account })
     }
 
     /// Its revocation's form (`revoke_form`): a grant a disconnect fenced
@@ -195,12 +197,72 @@ impl Finishing {
     }
 }
 
+/// An account label, at most (an email address's longest).
+pub const ACCOUNT_LABEL_MAX_BYTES: usize = 254;
+
+/// Whether `label` is one a person may be shown as their account's: no
+/// control character, nor one that reorders the text around it (a bidi
+/// override or isolate, which could show another address than it is).
+pub fn label_ok(label: &str) -> bool {
+    let reorders = |c: char| matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+    (1..=ACCOUNT_LABEL_MAX_BYTES).contains(&label.len()) && !label.chars().any(|c| c.is_control() || reorders(c))
+}
+
+/// The account a grant is for, as its person knows it: the email of the
+/// OpenID Connect ID token the token endpoint answered beside the grant
+/// (when the connection asks for `openid` and its provider's email scope,
+/// Google's `https://www.googleapis.com/auth/userinfo.email`). Its
+/// signature is not checked: it came straight from the provider's token
+/// endpoint over TLS (OpenID Connect Core 3.1.3.7, step 6), it must name
+/// this client as its audience, and the label is only ever shown to its
+/// person, never trusted for access. None: no ID token, or no verified
+/// email in it.
+pub fn account_label(answer: &Value, client_id: &str) -> Option<String> {
+    use base64::Engine;
+    let id_token = answer["id_token"].as_str().filter(|t| t.len() <= TOKEN_MAX_BYTES)?;
+    let payload = id_token.split('.').nth(1)?;
+    let claims: Value = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok()?).ok()?;
+    let ours = claims["aud"] == client_id || claims["aud"].as_array().is_some_and(|a| a.iter().any(|x| x == client_id));
+    // some providers send the boolean as a string
+    if !ours || claims["email_verified"] == false || claims["email_verified"] == "false" {
+        return None;
+    }
+    claims["email"].as_str().filter(|e| label_ok(e)).map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn config() -> ConnectionOAuth {
         ConnectionOAuth { authorize: "https://accounts.example/authorize?access_type=offline&prompt=consent".into(), exchange: "https://accounts.example/token".into(), client_id: "client".into(), scopes: vec!["mail.read".into(), "files.read".into()], revoke: None }
+    }
+
+    fn id_token(claims: Value) -> Value {
+        use base64::Engine;
+        let b64 = |v: &Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
+        json!({ "id_token": format!("{}.{}.signature", b64(&json!({ "alg": "RS256" })), b64(&claims)) })
+    }
+
+    #[test]
+    fn an_account_label_is_a_verified_email_of_an_id_token_for_this_client() {
+        let good = json!({ "aud": "client", "email": "me@example.com", "email_verified": true });
+        assert_eq!(account_label(&id_token(good.clone()), "client").as_deref(), Some("me@example.com"));
+        assert_eq!(account_label(&id_token(json!({ "aud": ["other", "client"], "email": "me@example.com" })), "client").as_deref(), Some("me@example.com"), "an audience list naming this client");
+        let unlabeled = |claims: Value| account_label(&id_token(claims), "client").is_none();
+        assert!(unlabeled(json!({ "aud": "another-client", "email": "me@example.com" })), "another client's token");
+        assert!(unlabeled(json!({ "email": "me@example.com" })), "no audience");
+        assert!(unlabeled(json!({ "aud": "client", "email": "me@example.com", "email_verified": false })), "an unverified email");
+        assert!(unlabeled(json!({ "aud": "client", "email": "me@example.com", "email_verified": "false" })), "an unverified email, as a string");
+        assert!(unlabeled(json!({ "aud": "client", "email": "moc.elpmaxe@\u{202e}me" })), "a bidi override");
+        assert!(unlabeled(json!({ "aud": "client", "email": "me\u{2066}@example.com" })), "a bidi isolate");
+        assert!(unlabeled(json!({ "aud": "client", "email": "" })), "an empty email");
+        assert!(unlabeled(json!({ "aud": "client", "email": "me\n@example.com" })), "a control character");
+        assert!(unlabeled(json!({ "aud": "client", "email": format!("{}@example.com", "x".repeat(ACCOUNT_LABEL_MAX_BYTES)) })), "too long");
+        assert!(unlabeled(json!({ "aud": "client", "email": 7 })), "not a string");
+        for answer in [json!({}), json!({ "id_token": "not-a-jwt" }), json!({ "id_token": "a.!!!.c" }), json!({ "id_token": 1 }), json!({ "id_token": format!("a.{}.c", "x".repeat(TOKEN_MAX_BYTES)) })] {
+            assert!(account_label(&answer, "client").is_none(), "{answer}");
+        }
     }
 
     #[test]
@@ -363,9 +425,11 @@ mod tests {
         let requested = config().scopes;
         let good = json!({ "access_token": "mock-access", "refresh_token": "mock-refresh", "expires_in": 3600, "token_type": "Bearer", "scope": "mail.read files.read" });
         let got = tokens(&good, &requested).expect("complete grant");
-        let body = got.import_body("2026-10-20T20:00:00Z");
+        let body = got.import_body("2026-10-20T20:00:00Z", None);
         assert_eq!(body["state"], "connected");
         assert_eq!(body["scopes"], json!(requested));
+        assert!(body.get("account_display_name").is_some_and(Value::is_null), "an update clears an earlier account's label");
+        assert_eq!(got.import_body("2026-10-20T20:00:00Z", Some("me@example.com"))["account_display_name"], "me@example.com");
         for field in ["access_token", "refresh_token", "expires_in", "token_type"] {
             let mut bad = good.clone();
             bad.as_object_mut().unwrap().remove(field);

@@ -95,6 +95,7 @@ impl RegistryCell {
         let subject = self.subject_of(SubjectOf { identity: live.session.identity.id, issuer })?.subject;
         if subject.as_deref() != Some(&pending.subject) || pending.expires_at <= js::now_ms() { return Ok(NotUnderWay); }
         let api = &self.cfg.workos()?.api;
+        let label = connection_signin::account_label(&answer, &o.client_id);
         // the last check before the import, in its turn: a disconnect that
         // fenced the account while the code was exchanged cancels it, and
         // one from here on is refused until this answers
@@ -107,7 +108,7 @@ impl RegistryCell {
             }
             return Ok(NotUnderWay);
         }
-        if keys::pipes_import(&self.env, api, &b.provider, &pending.subject, tokens).await? { Ok(Connected) } else { Ok(Failed) }
+        if keys::pipes_import(&self.env, api, &b.provider, &pending.subject, tokens, label.as_deref()).await? { Ok(Connected) } else { Ok(Failed) }
     }
 
     /// A disconnect's fence (`calls::FenceConnection`), in one turn, before
