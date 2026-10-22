@@ -283,6 +283,18 @@ export async function billingSections(helpers, ledger, mine, back) {
   } else {
     // no seat of theirs: the deployment's plan gives everyone one
     billing.append(line("Seat", `${KIND[ledger?.plan] ?? "A seat"}, given to everyone here`));
+    // A default plan is no org seat: someone in no org may buy their own,
+    // but the welcome sends this non-guest home before offering Checkout.
+    if (offer && !mine.org) {
+      // its failure's words, said once `button` takes them (#481)
+      const buy = button(
+        `Buy an always-on seat, ${price(offer.seatMicros)} a month`,
+        () => goCheckout({ kind: offer.kind }),
+        () => "Checkout didn't open. Try again in a moment.",
+      );
+      buy.dataset.plan = offer.kind;
+      billing.append(actionLine("Subscription", buy));
+    }
   }
   // what orgs offer them: theirs to accept (a move, from an org they are in) or decline
   for (const box of offers(mine, () => h.reopen())) billing.append(box);

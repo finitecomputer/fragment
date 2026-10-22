@@ -701,6 +701,11 @@ for a seat once someone holds one:
   month's usage and credit, and "Buy $25 of credit" (its `offer`'s price). On `seat_always_on`
   it adds "let it sleep". One who is no admin has "Leave" beside their
   org.
+- **Someone on the deployment's default plan, in no org,** can buy the
+  always-on subscription directly from Billing, at its `offer`'s price.
+  They are no guest, so the welcome sends them home. Opening Checkout
+  leaves their plan and credit alone; payment makes their org and seat
+  through the same Checkout return and webhook as a guest's purchase.
 - **Anyone offered something** sees each offer, its org, who made it and
   what accepting does, with Accept and Decline; a refusal (a move that
   would strand an org) is said under it.

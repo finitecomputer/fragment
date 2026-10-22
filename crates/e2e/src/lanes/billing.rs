@@ -1135,6 +1135,60 @@ const BUYS: &str = "(() => { const shown = [...document.querySelectorAll('[data-
     return { buys: shown.filter((e) => e.matches('[data-plan], form.trial-code') || /^(Get a seat|Start a trial|Pay again|Payment and invoices|Add seats for others|Buy )/.test(e.textContent)).map((e) => e.textContent), \
     prices: document.body.innerText.match(/\\$\\d/g) ?? [] }; })()";
 
+/// A deployment's default plan is no org seat. Its person can buy a
+/// subscription from Settings without first becoming a guest; merely
+/// opening Checkout changes neither their plan nor their credit.
+fn default_plan_checkout(s: &mut Suite, b: &mut Lease, api: &Api, sells: bool, width: u32, shots: &std::path::Path) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let keys = api.person()?;
+    let who = api.identity(&keys)?;
+    let mine = seat(api, &keys);
+    anyhow::ensure!(mine["guest"] == false && mine["seat"].is_null() && mine["org"].is_null(), "a default plan, no org seat: {mine}");
+    let before = ledger(api, &keys);
+    let session = api.sign_in(&Api::email_of(&keys))?;
+    let page = page_of(b, api, &session, "/settings")?;
+    b.viewport(&page, width, 844, width < 600)?;
+    let shown = view(b, &page, "location.pathname === '/settings' && (document.getElementById('settings-page')?.innerText ?? '').includes('given to everyone here')", wait);
+    let buying = b.eval(&page, BUYS)?;
+    let buy = format!("Buy an always-on seat, {} a month", dollars(fragment_core::stripe::offer().seat_micros));
+    s.ok(
+        if sells { "a default-plan person with no org is offered the priced subscription in Settings, but no credit pack or portal" } else { "with no Stripe, a default-plan person's Settings offer no purchase" },
+        shown && buying["buys"] == if sells { json!([buy]) } else { json!([]) },
+        &buying,
+    );
+    if sells {
+        b.eval(&page, "(document.querySelector('#settings-page [data-plan]')?.closest('section')?.scrollIntoView({ block: 'start' }), true)")?;
+        let fits = b.eval(&page, "(() => { const r = document.querySelector('#settings-page [data-plan]')?.getBoundingClientRect(); return !!r && r.width > 0 && r.left >= 0 && r.right <= innerWidth; })()")?;
+        s.ok(&format!("at {width}px, the subscription button fits the viewport"), fits == true, &fits);
+        b.screenshot(&page, &shots.join(format!("default-plan-{width}.png")))?;
+        let requests = s.stripe.requests().len();
+        let customers = s.stripe.customers().len();
+        if !act_at(s, b, &page, "the default-plan person's subscription", "#settings-page [data-plan=seat_always_on]") {
+            b.close(page)?;
+            return Ok(());
+        }
+        let checkout = b.until(&page, &format!("location.href.startsWith({:?})", s.stripe.url), wait);
+        if checkout {
+            b.screenshot(&page, &shots.join(format!("default-plan-checkout-{width}.png")))?;
+        }
+        let asked = s.stripe.requests().into_iter().skip(requests).find(|r| r.path == "/v1/checkout/sessions");
+        let correct = asked.as_ref().is_some_and(|r| {
+            r.form.get("mode").map(String::as_str) == Some("subscription")
+                && r.form.get("line_items[0][quantity]").map(String::as_str) == Some("1")
+                && r.form.get("metadata[fragment_person]") == Some(&who)
+                && r.form.get("metadata[fragment_kind]").map(String::as_str) == Some("seat_always_on")
+        });
+        let after = ledger(api, &keys);
+        s.ok(
+            "the default-plan person's Settings open their own subscription Checkout; before payment no org, customer, plan or credit changes",
+            checkout && correct && seat(api, &keys) == mine && s.stripe.customers().len() == customers && before["plan"] == after["plan"] && before["purchasedMicros"] == after["purchasedMicros"] && before["availableMicros"] == after["availableMicros"],
+            json!({ "checkout": checkout, "correct": correct, "seat": seat(api, &keys), "plan": after["plan"] }),
+        );
+    }
+    b.close(page)?;
+    Ok(())
+}
+
 /// A deployment that sells nothing (no Stripe: billing off, as finite.chat
 /// launched; `Shape::SellsNothing`): `GET /api/seat` offers nothing, and a
 /// guest's welcome, Billing, and home beside what was shared with them
@@ -1237,12 +1291,16 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     s.stop()?;
     let off = s.start_selling_nothing()?;
     let checked = sells_nothing(s, &mut b, &off, &guest, &shots);
+    let default_closed = default_plan_checkout(s, &mut b, &off, false, 1280, &shots);
     s.stop()?;
     s.start(false)?;
     checked?;
+    default_closed?;
     // what is sold, as core has it: every price a page shows is these
     let offer = fragment_core::stripe::offer();
     let (seat_price, included, pack) = (dollars(offer.seat_micros), dollars(offer.included_micros), dollars(offer.pack_micros));
+    default_plan_checkout(s, &mut b, api, true, 1280, &shots)?;
+    default_plan_checkout(s, &mut b, api, true, 390, &shots)?;
 
     // ---- a new guest: the welcome, never settings
     let gus = guest(api, "billing-page-guest")?;
@@ -1375,7 +1433,7 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let warned = b.eval(&page, "[...document.querySelectorAll('.settings-warning')].map((w) => w.textContent)")?;
     s.ok(
         &format!("their Billing shows their seat, an always-on seat at {seat_price} a month: an org of one shows no org's table, only its invoices and seats for others, and no first run of its own"),
-        managed && alone == true && warned == json!([]) && has("Payment and invoices") && has("Add seats for others") && !has("Make your first agent"),
+        managed && alone == true && warned == json!([]) && has("Payment and invoices") && has("Add seats for others") && !has("Make your first agent") && !has(&format!("Buy an always-on seat, {seat_price} a month")),
         json!({ "shown": shown, "buttons": buttons, "warned": warned }),
     );
     if !act(s, &mut b, &page, "Billing's Add seats for others", &click_text("#settings-page button", "Add seats for others"))? {
