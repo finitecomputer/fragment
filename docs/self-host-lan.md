@@ -210,11 +210,11 @@ mkdir -p -m 700 ~/.local/state/fragment-lan/dex/passwords
 ( umask 077; read -rs p && printf '%s' "$p" > ~/.local/state/fragment-lan/dex/passwords/paul )
 ```
 
-**Stopping:** Ctrl-C. It takes a second, or longer while a computer is
-awake (celld lets its calls to the node drain), and frees every port.
-Computers that were awake keep running on the engine while the stack is
-down; the next start finds them, and they sleep when idle. To see them:
-`curl -s --unix-socket /var/lib/sandcastle/engine.sock
+**Stopping:** Ctrl-C. It takes under a second and frees every port; the
+box's node stops last, once the cell has. Computers that were awake keep
+running on the engine while the stack is down; the next start finds them
+as they were, and they sleep when idle. To see them: `curl -s
+--unix-socket /var/lib/sandcastle/engine.sock
 http://engine/v1/containers`.
 
 Every setting, with its default: `FRAGMENT_LAN_STATE`
@@ -492,7 +492,76 @@ sudo security delete-certificate -c 'fragment LAN CA (omarchy)' /Library/Keychai
 
 ## Evidence, 2026-10-22: the guide rehearsed
 
-To be filled by the rehearsal.
+From a fresh worktree of this branch's tip (`../fragment-home-rehearse`,
+detached, as step 2 makes one), its own build of everything, with the
+LAN's state in scratch rather than `~/.local/state/fragment-lan` (Paul's
+stays untouched), on celld v0.6.3 (the fork's `selfhost` line), the real
+engine (`/var/lib/sandcastle`, jailed microVMs; empty before and after),
+and Bonsai-2-27B under NInfer. In place of what needs sudo, the router or
+the devices:
+
+- **1b, 1c**: high ports, `FRAGMENT_LAN_HTTPS_PORT=9543
+  FRAGMENT_LAN_HTTP_PORT=9580 FRAGMENT_LAN_DNS_PORT=9553`, the door on
+  192.168.50.7 alone (the default bind).
+- **1d**: the stack, the CLI and the Mac's node ran in a mount namespace
+  whose `/etc/hosts` maps the zone's two names to 192.168.50.7
+  (`unshare -rm`, then an inner user namespace back to uid 1000).
+- **The iPhone** (4, 5): headless Chromium 152 at 390×844 (3×), touch, an
+  iPhone's user agent, a home of its own whose NSS database trusts the
+  root (1e's `certutil`), the zone mapped by `--host-resolver-rules`.
+- **The Mac** (7): a second such browser at 1280×900 (its "private
+  window"), the CLI with `SSL_CERT_FILE` naming the root (as the Mac's
+  keychain would), and sandcastle's Docker engine double with
+  `sandcastle-node` from sandcastle's `node` (3748374).
+
+Screenshots: `target/rehearse/shots/` in the `selfhost-port-lan`
+worktree.
+
+| Step | What happened |
+|---|---|
+| 2 | the models file and key as written; `node-images` 18 s with Docker's cache (both images' disks already built on the engine) |
+| 3 | ready 128 s after the command in the fresh checkout (the cell's build 71 s; OpenBao, Dex and the card browser fetched once), then in 12 to 19 s; the banner as described. The zone's names answered by the box's DNS with `aa` over UDP and TCP, every other name the router's; the shell 200 under the root |
+| 5 | the root's page by address over http, its fingerprint the banner's, the profile as `application/x-apple-aspen-config`; before the root was trusted, "Your connection is not private", and the door logged each refused handshake |
+| 6.1–6.3 | Sign In, Dex's form, back signed in: 2.5 s. "Your first chat" at once; the first agent's computer placed on `box` and awake as the page landed; **its greeting 9 s later** (Bonsai's call 5.5 s, 15,945 tokens in) |
+| 6.4 | "What is 17 times 23?": "17 × 23 = 391." in 2.8 s. "Run `uname -a` and `nproc`": one terminal step, "Linux 6.12.91, x86_64, 2 CPU cores" (the microVM's kernel), in 4.8 s |
+| 6.5 | the desktop's "Make a shared grocery list my family can add to from their phones", sent as it came: Hermes made `grocery-list--h498` from the todo template and deployed it through the platform in 90 s; its card shot in 1.3 s (through the door, under the root) at each deploy. Then it tried to open the page from its computer, which reaches no private address, and its turn ended 36 steps in, mid-investigation, without the link (step 6.5 now says so) |
+| 6.6 | the app in a window from the dock and in a second tab, each "you and 1 other here"; "Oat milk" added in one showed in the other **231 ms** later |
+| 6.7 | Invite to an email no one signs in as: the sheet says no mail goes and shows the app's address (it said "we mailed them a link" before this branch's fix) |
+| 7, CLI | `fragment login` printed its code; typed at `/cli` on the phone, the page showed the same key's tail, Add this key; the login ended by itself, `whoami` paul@fragment.home.arpa |
+| 7, pairing | `sandcastle-node pair` through the door with the root; mac-test signed in through Dex from its link in the Mac's browser, saw the same code, ticked Run my new computers on it, Add this node: "mac is yours now, as paired-…"; the command wrote the config and its 0600 secret; the node's uplink connected through the door. Open the shell: mac-test's first agent placed on the Mac "as its owner chose"; `hostname` and `uname -r` there in 4 s (a Docker container, the host's kernel); Settings, Computers: `box` Up, the platform's; `mac` Up, theirs, "Your computer runs here", points not charged. Their invite to the grocery list met at that sign-in |
+| 8, in part | while all of it ran, no process of the stack held a connection past the house |
+| stopping | Ctrl-C: 0.2 s, every port freed (TCP, UDP and the sockets), nothing left running; the next start found Paul's computer awake as it was (its file kept). The Mac's node and double stopped on Ctrl-C, the double removing its container |
+
+**The stand-in Mac shares the box's architecture**, and a node list names
+one reference per architecture: the box's digest pins name nothing the
+Docker double holds (it runs Docker's images by name). So step 7 ran on a
+list of its own (`FRAGMENT_NODES_FILE`, a copy of `nodes.json` naming both
+images by their `:local` tags, which both engines hold), restarting the
+stack. A real Mac is arm64, with its own digests (step 7.1).
+
+**What the rehearsal found, and what changed:**
+
+- **Ctrl-C rolled awake computers back.** The stack's node was in the
+  terminal's group, so it stopped at once while celld drained (15 to 25 s):
+  each awake computer's `wait` was cut, the node did not answer the look
+  after it, and the cell read that as the container's exit, started
+  another and, at the next start, restored a save 12 minutes old. The node
+  now has a group of its own and stops after the cell (dac508b3). The
+  cell's reading of a node that does not answer as an exit is seam 2's,
+  and stands for any node outage: Open questions.
+- **The share sheet said it mailed an invite** it could not (no mailer):
+  it now says no mail goes, and shows the address to send (9b929d89).
+- **Fragments' names** in the banner and the guide were master's old
+  `<label>--<username>`; they are `<label>--<suffix>`.
+- **The guide**: the first agent is made at sign-in; apps are asked of the
+  agent (the shell has no catalog); a phone shows no card; the agent cannot
+  open its app from its computer on the LAN; the CLI's `login` and its
+  `/cli` code; one terminal (the stack runs the box's node).
+
+Not rehearsed: ports 53, 80 and 443 (sudo), setcap, ufw,
+systemd-resolved, the router, the iPhone's Safari itself (its profile,
+Private Relay, the home screen), the Mac's Linux VM and the arm64 images,
+and the WAN unplugged.
 
 ## Design notes
 
