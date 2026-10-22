@@ -49,7 +49,7 @@ mod tests {
     /// cannot: that `auth.rs` makes a `Bound` in `trip_bound` alone, from
     /// the request's own cookie; that its fields stay private; that no
     /// other file reads a round trip's cookie or compares states; and that
-    /// the finished round trips (`Exchange`, `computer::SignedIn`) are made
+    /// the finished round trips (`Exchange`, `OidcExchange`, `computer::SignedIn`) are made
     /// only from a `Bound` and are never `Deserialize`. Method: the cell's
     /// source, read.
     #[test]
@@ -74,7 +74,10 @@ mod tests {
         // the finished round trips: made from a Bound, never decoded
         let calls = &files["registry/calls.rs"];
         assert!(calls.contains("#[derive(Serialize)]\n#[serde(rename_all = \"camelCase\")]\npub(crate) struct Exchange {\n    state: String,"), "Exchange is Serialize only, its fields private");
-        assert_eq!(uses(&files, "Exchange { state"), only("registry/calls.rs", 1), "an Exchange is made in Exchange::of alone");
+        // and an OpenID Connect provider's (docs/self-host.md, seam 4), alike
+        assert!(calls.contains("#[derive(Serialize)]\npub(crate) struct OidcExchange {\n    state: String,"), "OidcExchange is Serialize only, its fields private");
+        assert_eq!(uses(&files, "Exchange { state"), only("registry/calls.rs", 2), "an Exchange and an OidcExchange are each made in their `of` alone");
+        assert_eq!(uses(&files, "OidcExchange::of("), only("oidc.rs", 1), "an OidcExchange is made from the callback's Bound");
         assert!(calls.contains("pub(crate) fn of(bound: crate::auth::Bound,"), "from a Bound");
         assert!(calls.contains("#[derive(Serialize)]\npub(crate) struct FinishConnection {\n    state: String,"), "connection completion is Serialize only with private fields");
         assert_eq!(uses(&files, "FinishConnection::of("), only("connections.rs", 1));

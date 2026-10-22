@@ -56,6 +56,7 @@ mod mail;
 mod members;
 mod meter;
 mod models;
+mod oidc;
 mod ops;
 mod orgs;
 mod plane;
