@@ -85,7 +85,8 @@ pub const FINITE_PRIVATE_FLASH: &str = "glm-5-3-flash";
 /// highest throughput under a price ceiling). 34 provider endpoints on
 /// 2026-10-15 (`/api/v1/models/z-ai/glm-5.3-flash/endpoints`), each taking
 /// tools, `reasoning_effort` and `max_tokens`. Priced, as any model there,
-/// at its slot's ceiling (`Upstream::ceiling`).
+/// at its slot's ceiling (`Upstream::ceiling`); its row in the price book
+/// stays for its usage queued past a switch.
 pub const OPENROUTER_FLASH: &str = "z-ai/glm-5.3-flash";
 /// OpenRouter's API's host: a slot there names its price ceiling
 /// (`Upstream::ceiling`).
@@ -287,11 +288,12 @@ impl Upstream {
     }
 }
 
-/// Whether an OpenAI-compatible API's `base_url` (https on a host name, no
-/// port: `check`) is OpenRouter's.
+/// Whether an OpenAI-compatible API's `base_url` is OpenRouter's or one of
+/// its subdomains: by its host as `check` reads it (`catalog::row_url`,
+/// parsed and normalized: lower case, https's port 443 dropped), so no
+/// spelling of the URL that reaches OpenRouter passes for another API's.
 fn on_openrouter(base_url: &str) -> bool {
-    let host = base_url.strip_prefix("https://").and_then(|rest| rest.split('/').next()).unwrap_or("");
-    host.strip_suffix(OPENROUTER_HOST).is_some_and(|sub| sub.is_empty() || sub.ends_with('.'))
+    crate::catalog::row_url(base_url, true).is_ok_and(|host| host.strip_suffix(OPENROUTER_HOST).is_some_and(|sub| sub.is_empty() || sub.ends_with('.')))
 }
 
 fn workers_ai(model: &str) -> Upstream {
@@ -1457,17 +1459,18 @@ mod tests {
     /// ones too, at `prompt`, output at `completion`, its cost basis that
     /// ceiling with OpenRouter's 5.5% fee, not AI Gateway's 5% (a decision
     /// for Paul). Valid: Finite's GLM-5.3 Flash config charged to the
-    /// micro-dollar as its hand-kept row did (150,715 / 502,381 µ$ a
-    /// million); another id at that ceiling priced the same; a ceiling over
-    /// a row of the book's; a ceiling on another API (the e2e's fake).
-    /// Invalid: a slot on OpenRouter with no ceiling, half a ceiling, or
-    /// one that is not dollars from 0 to `CEILING_MAX_USD`; one id at two
-    /// ceilings.
+    /// micro-dollar as its hand-kept row (150,715 / 502,381 µ$ a million),
+    /// which stays for its usage queued past a switch; another id at that
+    /// ceiling priced the same; a ceiling over a row of the book's; a
+    /// ceiling on another API (the e2e's fake). Invalid: a slot on
+    /// OpenRouter, however its URL is spelled (case, port 443, a
+    /// subdomain), with no ceiling, half a ceiling, or one that is not
+    /// dollars from 0 to `CEILING_MAX_USD`; one id at two ceilings.
     #[test]
     fn an_openrouter_slot_is_priced_at_its_ceiling() {
         use crate::price::{Priced, BP, OPENROUTER_FEE_BP};
         let defaults = PriceBook::defaults();
-        assert!(!defaults.models.iter().any(|m| m.model == OPENROUTER_FLASH), "no row of the code's: the config's");
+        let kept = defaults.models.iter().find(|m| m.model == OPENROUTER_FLASH).map(|m| m.price);
         let tokens = |model: &str, input, cached_input, cache_write, output| Usage::Tokens { model: model.into(), input, cached_input, cache_write, output };
         let at = |model: &str, max_price: Value| {
             let tier = json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": model, "body": { "provider": { "zdr": true, "max_price": max_price } } });
@@ -1476,7 +1479,7 @@ mod tests {
         let glm = openrouter().priced(defaults.clone());
         let row = |book: &PriceBook, model: &str| book.models.iter().find(|m| m.model == model).map(|m| m.price);
         assert_eq!(row(&glm, OPENROUTER_FLASH), Some(TokenPrices { input: 150_715, cached_input: 150_715, cache_write: 150_715, output: 502_381 }), "today's GLM-5.3 Flash, unchanged");
-        assert_eq!(glm.models.len(), defaults.models.len() + 1, "one row for the two tiers that run it");
+        assert_eq!((glm.models.len(), kept), (defaults.models.len(), row(&glm, OPENROUTER_FLASH)), "the config's ceiling over the code's row, the same: one row for the two tiers that run it");
         assert_eq!(glm.validate(), Ok(()));
         let deepseek = at("deepseek/deepseek-v4.1-flash", json!({ "prompt": 0.15, "completion": 0.5 })).unwrap().priced(defaults.clone());
         for (book, model) in [(&glm, OPENROUTER_FLASH), (&deepseek, "deepseek/deepseek-v4.1-flash")] {
@@ -1494,7 +1497,10 @@ mod tests {
             let call = |model: &str| book.price(&tokens(model, 5_000, 25_000, 0, 600)).unwrap().charge;
             assert_eq!((call(model), call(GLM_FLASH)), (7_597, 2_835), "{model}");
         }
-        assert_eq!(row(&deepseek, OPENROUTER_FLASH), None, "only the models the config runs");
+        // after the switch, GLM's usage still queued is priced as it was: the code keeps its row
+        assert_eq!(row(&deepseek, OPENROUTER_FLASH), kept);
+        assert_eq!(deepseek.models.len(), defaults.models.len() + 1);
+        assert_eq!(deepseek.price(&tokens(OPENROUTER_FLASH, 26_000, 0, 0, 200)).unwrap(), glm.price(&tokens(OPENROUTER_FLASH, 26_000, 0, 0, 200)).unwrap());
         // a ceiling's cents, rounded up to a micro-dollar a million, never down
         let odd = at("deepseek/deepseek-v4.1-flash", json!({ "prompt": 0.1234567, "completion": 0 })).unwrap().cheap.ceiling().unwrap().unwrap();
         assert_eq!((odd.input, odd.output), (crate::price::openrouter(123_457), 0));
@@ -1503,10 +1509,10 @@ mod tests {
         assert_eq!(row(&opus, "anthropic/claude-opus-5.5").map(|p| (p.input, p.cached_input, p.output)), Some((crate::price::openrouter(5_000_000), crate::price::openrouter(5_000_000), crate::price::openrouter(25_000_000))));
         assert_eq!(opus.models.len(), defaults.models.len());
         // on another API (the e2e's fake), a ceiling prices it too; without one, the book must
-        let fake = |body: Value| json!({ "medium": { "provider": "openai", "base_url": "http://127.0.0.1:4810/v1", "model": OPENROUTER_FLASH, "body": body } }).to_string();
+        let fake = |body: Value| json!({ "medium": { "provider": "openai", "base_url": "http://127.0.0.1:4810/v1", "model": "deepseek/deepseek-v4.1-flash", "body": body } }).to_string();
         let local = Models::parse(Some(&fake(routing())), &defaults, true).unwrap().priced(defaults.clone());
-        assert_eq!(row(&local, OPENROUTER_FLASH), row(&glm, OPENROUTER_FLASH));
-        assert!(Models::parse(Some(&fake(json!({ "provider": { "zdr": true } }))), &defaults, true).unwrap_err().contains("models.medium: the model \"z-ai/glm-5.3-flash\" is not in the price book"));
+        assert_eq!(row(&local, "deepseek/deepseek-v4.1-flash"), row(&glm, OPENROUTER_FLASH));
+        assert!(Models::parse(Some(&fake(json!({ "provider": { "zdr": true } }))), &defaults, true).unwrap_err().contains("models.medium: the model \"deepseek/deepseek-v4.1-flash\" is not in the price book"));
         // refused, saying why
         let refused = |r: Result<Models, String>, says: &str| {
             let e = r.unwrap_err();
@@ -1523,8 +1529,16 @@ mod tests {
         refused(bare(None), no_ceiling);
         refused(bare(Some(json!({ "provider": { "zdr": true, "sort": "throughput" } }))), no_ceiling);
         refused(bare(Some(json!({ "transforms": [] }))), no_ceiling);
-        let eu = json!({ "cheap": { "provider": "openai", "base_url": "https://eu.openrouter.ai/api/v1", "model": OPENROUTER_FLASH } });
-        refused(Models::parse(Some(&eu.to_string()), &defaults, false), no_ceiling);
+        // OpenRouter by its host as the URL parses, however it is spelled, even for a model the book prices
+        let spelled = |base_url: &str, model: &str| Models::parse(Some(&json!({ "cheap": { "provider": "openai", "base_url": base_url, "model": model } }).to_string()), &defaults, false);
+        for base_url in ["https://OPENROUTER.AI/api/v1", "https://openrouter.ai:443/api/v1", "https://OpenRouter.ai:443/api/v1", "https://eu.openrouter.ai/api/v1", "https://EU.OpenRouter.AI/api/v1"] {
+            for model in ["anthropic/claude-opus-5.5", OPENROUTER_FLASH] {
+                refused(spelled(base_url, model), no_ceiling);
+            }
+        }
+        for elsewhere in ["https://notopenrouter.ai/api/v1", "https://openrouter.ai.example/api/v1"] {
+            assert!(spelled(elsewhere, "anthropic/claude-opus-5.5").is_ok(), "{elsewhere} is another API, the book's row its price");
+        }
         refused(at(OPENROUTER_FLASH, json!({ "prompt": 0.15 })), "models.cheap: body.provider.max_price.completion is the dollars a million tokens its calls are priced at, from 0 to 1000, not nothing");
         refused(at(OPENROUTER_FLASH, json!({ "completion": 0.5 })), "body.provider.max_price.prompt is the dollars a million tokens");
         for bad in [json!(-0.01), json!("0.15"), json!(1000.5), json!(null), json!({ "usd": 0.15 })] {

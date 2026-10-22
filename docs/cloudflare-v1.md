@@ -1118,7 +1118,8 @@ Private stays possible by config.
       Gateway's 5%, then the margin (docs/ledger.md, "OpenRouter's
       price"). Price book 7. Since 2026-10-22 (Paul: "we try a config
       out on preview, if we don't like it we revert it") the ceiling is
-      read from the slot's `max_price`, not kept per model in the code:
+      read from the slot's `max_price`, not kept per model in the code
+      (GLM-5.3 Flash's row stays, for its usage queued past a switch):
       any model OpenRouter serves is priced, a tier moves to another by
       config alone, and a slot on OpenRouter without a ceiling is
       refused. Settling from OpenRouter's reported `usage.cost` instead

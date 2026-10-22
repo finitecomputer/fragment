@@ -2005,6 +2005,9 @@ mod tests {
         assert_eq!(with(openrouter(json!({ "prompt": 0.15, "completion": 0.5 }))), "", "an id the book has no row for, at its ceiling");
         refused(row(json!({ "base_url": "https://openrouter.ai/api/v1", "model": "deepseek/deepseek-v4.1-flash", "body": { "provider": { "zdr": true } } })), "models.cheap: a model on OpenRouter is priced at the ceiling its calls route under: name it in body.provider.max_price");
         refused(openrouter(json!({ "prompt": 0.15 })), "models.cheap: body.provider.max_price.completion is the dollars a million tokens");
+        for base_url in ["https://OPENROUTER.AI/api/v1", "https://openrouter.ai:443/api/v1", "https://eu.openrouter.ai/api/v1"] {
+            refused(row(json!({ "base_url": base_url, "model": "anthropic/claude-opus-5.5" })), "models.cheap: a model on OpenRouter is priced at the ceiling its calls route under");
+        }
         refused(json!({ "high": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } }), "unknown field `high`");
         refused(json!([]), "models is an object");
         // a body: the API's own fields, rendered as named; one the cell refuses, refused here

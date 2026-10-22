@@ -268,20 +268,31 @@ pub struct PriceBook {
 /// no cached tokens, so its prompts are all priced uncached.
 ///
 /// A model through OpenRouter (Finite's tiers' since 2026-10-15; decision
-/// 61) has no row here: its slot's ceiling is its row
-/// (`crate::models::Upstream::ceiling`, `Models::priced`), so the model a
-/// tier runs there is the deployment's config alone (Paul, 2026-10-22).
+/// 61) is priced at its slot's ceiling (`crate::models::Upstream::ceiling`,
+/// laid over these by `Models::priced`), so the model a tier runs there is
+/// the deployment's config alone (Paul, 2026-10-22). GLM-5.3 Flash's row
+/// stays, at the ceiling its slots have named since 2026-10-15 ($0.15 in,
+/// cached and written too, $0.50 out per million, with OpenRouter's fee):
+/// usage queued under those tiers (a model call's charge on its queue, an
+/// AI step's in its fragment's outbox) is priced by the release that
+/// takes it, which may run the tiers on another model by then. Any other
+/// model swapped out is not kept so: its queued usage charges nothing and
+/// logs `ledger.unpriced` (decision 62: billing is best effort).
 ///
 /// The Clef family's (decisions: crate::decide) from Workers AI's pricing
 /// page and each model's own (developers.cloudflare.com/workers-ai/models/
 /// clef-flash, clef and clef-omni, read 2026-10-14): input tokens only,
 /// media counted as input, no output charge and no cache, so a cached or
 /// written token is an input token's price.
-pub const DEFAULT_MODELS: [(&str, TokenPrices); 8] = [
+pub const DEFAULT_MODELS: [(&str, TokenPrices); 9] = [
     // $0.15 in, $0.03 cached, $0.50 out per million tokens (the cheap tier's, and vision)
     ("@cf/zai-org/glm-5.3-flash", TokenPrices { input: 150_000, cached_input: 30_000, cache_write: 150_000, output: 500_000 }),
     // Finite Private's (Finite's tiers' by config), at Workers AI's GLM-5.3 Flash's
     ("glm-5-3-flash", TokenPrices { input: 150_000, cached_input: 30_000, cache_write: 150_000, output: 500_000 }),
+    // OpenRouter's (Finite's tiers' from 2026-10-15), for its usage queued
+    // past a switch: its ceiling, $0.15 in (cached and written too) and
+    // $0.50 out, with OpenRouter's 5.5% for the book's 5%
+    (crate::models::OPENROUTER_FLASH, TokenPrices { input: openrouter(150_000), cached_input: openrouter(150_000), cache_write: openrouter(150_000), output: openrouter(500_000) }),
     // $1.40 in, $0.26 cached, $4.40 out
     ("@cf/zai-org/glm-5.3", TokenPrices { input: 1_400_000, cached_input: 260_000, cache_write: 1_400_000, output: 4_400_000 }),
     // $4 in, $0.20 cache read, $5 cache write, $20 out (the high tier, off for now)
@@ -672,7 +683,7 @@ mod tests {
         let book = PriceBook::defaults();
         assert_eq!(book.validate(), Ok(()));
         assert_eq!(book.version, 7);
-        assert_eq!(book.models.len(), 8);
+        assert_eq!(book.models.len(), 9);
         assert_eq!((book.margin_bp, book.credits_fee_bp), (5_000, 500));
     }
 
