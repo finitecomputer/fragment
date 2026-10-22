@@ -926,10 +926,15 @@ fn vision(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let shrunk = png_url(fragment_core::models::IMAGE_DATA_URL_MAX_BYTES);
     let r = api.signed(hand, "POST", route, Some(&look(&shrunk)))?;
     let sent = s.ai.calls().get(calls).map(|c| c.body["messages"][0]["content"][1]["image_url"]["url"].as_str().map_or(0, str::len));
+    // its charge, the second of this section's (the refused calls between
+    // charge nothing), lands after its answer: on celld's meter queue a
+    // second or more later (docs/self-host.md, found 38), so the count the
+    // over-cap call is held to below waits for it
+    let charged_too = s.eventually(wait, || aig().len() == before + 2);
     s.ok(
-        &format!("a call carrying Hermes' shrunk screenshot ({} bytes of image) fits the route and reaches the model whole", shrunk.len()),
-        r.status == 200 && sent == Some(shrunk.len()),
-        json!({ "status": r.status, "sent": sent, "message": r.message() }),
+        &format!("a call carrying Hermes' shrunk screenshot ({} bytes of image) fits the route, reaches the model whole, and is charged", shrunk.len()),
+        r.status == 200 && sent == Some(shrunk.len()) && charged_too,
+        json!({ "status": r.status, "sent": sent, "message": r.message(), "entries": aig().len() - before }),
     );
     let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let over = png_url(fragment_core::models::MODEL_BODY_MAX_BYTES + 1024);
