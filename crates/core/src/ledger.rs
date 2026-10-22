@@ -32,8 +32,11 @@
 //! Nothing is held before a paid call (decision 62): a spend asks the
 //! cell's cached gate (`may_spend`, `fragment_open`; `gate`), and what it
 //! used is metered after it, once by its reference. A head kept before
-//! (2026-10-21) that names holds loads without them: what they held was
-//! never drawn, so they go uncharged.
+//! (2026-10-21) that names holds loads, and its holds are retired as it
+//! does (`retire_holds`): forgiven, never charged (what they held was
+//! never drawn), each one's reservation entry ended as released, so a
+//! release rolled back to one before reads a ledger with no hold and no
+//! held entry.
 //!
 //! Zero (decision 27): at a balance of zero or less, agents stop (no
 //! turns, no wakes, no AI steps). Fragments keep taking writes down to the
@@ -360,29 +363,67 @@ fn valid_names(names: [&Option<String>; 3]) -> bool {
     names.iter().all(|n| n.as_deref().is_none_or(valid_id))
 }
 
-/// A reference's record in the store.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "entry", rename_all = "snake_case")]
+/// A reference's record in the store, `{"entry": "row", …}` (or, from
+/// before, `{"entry": "reservation", …}`).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
     /// A meter row: its price under the book of the time, and its charge
     /// (the price's, or nothing for a waived meter).
     Row { row: MeterRow, priced: Priced, charge: i64, book: u32 },
-    /// A record of the releases before decision 62 (a reservation, held,
-    /// settled or released): read, never written, and forgotten by its
-    /// row's time as any. Its reference is no row's: a row under it is
-    /// another body.
-    #[serde(other)]
-    Before,
+    /// A reservation of the releases before decision 62 (held, settled or
+    /// released), kept as it was written: never charged here, a row under
+    /// its reference another body, forgotten by its time as any. Written
+    /// back only to end a held one as released (`Ledger::retire_holds`), in
+    /// the shape those releases read.
+    Before(serde_json::Value),
+}
+
+impl Serialize for Entry {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Row<'a> {
+            entry: &'static str,
+            row: &'a MeterRow,
+            priced: &'a Priced,
+            charge: i64,
+            book: u32,
+        }
+        match self {
+            Entry::Row { row, priced, charge, book } => Row { entry: "row", row, priced, charge: *charge, book: *book }.serialize(s),
+            Entry::Before(v) => v.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Entry {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Entry, D::Error> {
+        use serde::de::Error;
+        #[derive(Deserialize)]
+        struct Row {
+            row: MeterRow,
+            priced: Priced,
+            charge: i64,
+            book: u32,
+        }
+        let v = serde_json::Value::deserialize(d)?;
+        match v.get("entry").and_then(serde_json::Value::as_str) {
+            Some("row") => {
+                let r: Row = serde_json::from_value(v).map_err(D::Error::custom)?;
+                Ok(Entry::Row { row: r.row, priced: r.priced, charge: r.charge, book: r.book })
+            }
+            Some("reservation") if v.get("at_ms").is_some_and(serde_json::Value::is_i64) => Ok(Entry::Before(v)),
+            other => Err(D::Error::custom(format!("an entry is a row or a reservation from before, not {other:?}"))),
+        }
+    }
 }
 
 impl Entry {
-    /// When it happened: `Store::prune` forgets by this. A record from
-    /// before is never written (its row's time is the store's), so this is
-    /// none of its business: 0.
+    /// When it happened: `Store::prune` forgets by this (a reservation from
+    /// before, by its own time, so a replay of it stays refused as long).
     pub fn at_ms(&self) -> i64 {
         match self {
             Entry::Row { row, .. } => row.at_ms,
-            Entry::Before => 0,
+            Entry::Before(v) => v["at_ms"].as_i64().expect("a reservation from before has its time"),
         }
     }
 
@@ -390,8 +431,13 @@ impl Entry {
     pub fn charge(&self) -> Option<i64> {
         match self {
             Entry::Row { charge, .. } => Some(*charge),
-            Entry::Before => None,
+            Entry::Before(_) => None,
         }
+    }
+
+    /// A reservation from before still held (no `end`).
+    pub fn held_before(&self) -> bool {
+        matches!(self, Entry::Before(v) if v["end"].is_null())
     }
 }
 
@@ -671,30 +717,33 @@ fn gate(money: &Money, spend: Spend) -> Result<(), Refused> {
 pub struct Ledger {
     money: Money,
     book: PriceBook,
-    /// The reservations the releases before decision 62 held: read past
-    /// (forgiven: what they held was never drawn from the balance), and
-    /// written empty, so a release rolled back to one of those, which
+    /// The reservations the releases before decision 62 held, by their
+    /// references as a head of theirs names them, until `retire_holds`
+    /// forgives them (the first thing done with a head read); written as
+    /// an empty map, so a release rolled back to one of those, which
     /// requires the map, reads a head this one wrote.
     #[serde(default)]
-    holds: NoHolds,
+    holds: OldHolds,
 }
 
-/// A head's `holds`, kept for a rollback (`Ledger::holds`): whatever a head
-/// read names is let go, and it is written as an empty map. Goes once no
-/// release that requires the map can be deployed again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct NoHolds;
+/// A head's `holds` (`Ledger::holds`): the references a head read names,
+/// and an empty map written. Goes once no release that requires the map
+/// can be deployed again (the debt ledger).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct OldHolds(Vec<String>);
 
-impl Serialize for NoHolds {
+impl Serialize for OldHolds {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
+        assert!(self.0.is_empty(), "a head's old holds are retired before it is written");
         s.serialize_map(Some(0))?.end()
     }
 }
 
-impl<'de> Deserialize<'de> for NoHolds {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<NoHolds, D::Error> {
-        serde::de::IgnoredAny::deserialize(d).map(|_| NoHolds)
+impl<'de> Deserialize<'de> for OldHolds {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<OldHolds, D::Error> {
+        let held = BTreeMap::<String, serde::de::IgnoredAny>::deserialize(d)?;
+        Ok(OldHolds(held.into_keys().collect()))
     }
 }
 
@@ -715,7 +764,7 @@ impl Ledger {
             read_only: false,
             totals: Totals::default(),
         };
-        let ledger = Ledger { money, book, holds: NoHolds };
+        let ledger = Ledger { money, book, holds: OldHolds::default() };
         ledger.assert_valid();
         ledger
     }
@@ -837,6 +886,27 @@ impl Ledger {
     /// Durable Object checks them again after reading the head back.
     pub fn assert_valid(&self) {
         self.money.assert_valid();
+        assert!(self.holds.0.is_empty(), "a head's old holds are retired as it is read");
+    }
+
+    /// Retires the holds a head kept before decision 62 names, the first
+    /// thing done with a head read: forgiven, never charged (what they
+    /// held was never drawn from the balance), and each one's reservation
+    /// entry, still held, ended as released, in the shape those releases
+    /// read and in the transaction that writes the head back without
+    /// them. So both this release and one rolled back to before read a
+    /// ledger with no hold and no held entry, and a replay of a forgiven
+    /// reference stays refused for its time. Answers how many it retired.
+    pub fn retire_holds(&mut self, store: &mut impl Store) -> usize {
+        let held = std::mem::take(&mut self.holds.0);
+        // bounded: a head held at most 256 (the releases before's HOLDS_MAX)
+        for reference in &held {
+            if let Some(Entry::Before(mut v)) = store.entry(reference).filter(Entry::held_before) {
+                v["end"] = serde_json::json!({ "end": "released" });
+                store.put_entry(reference, Entry::Before(v));
+            }
+        }
+        held.len()
     }
 
     // Commands: each idempotent by its id.

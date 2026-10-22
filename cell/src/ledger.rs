@@ -13,9 +13,11 @@
 //! route back. Its alarm runs `sweep` at the head's `next_sweep_ms`.
 //!
 //! Nothing is held before a paid call (decision 62): a head or an entry
-//! the releases before kept (holds, reservations) loads, its holds dropped
-//! uncharged, and a head is written with `holds` empty, which a release
-//! rolled back to one of those reads (`fragment_core::ledger`). The
+//! the releases before kept (holds, reservations) loads, its holds
+//! forgiven uncharged and their entries ended as released in the same
+//! transaction, and a head is written with `holds` empty, so a release
+//! rolled back to one of those reads a ledger with no hold and no held
+//! entry (`fragment_core::ledger`, `retire_holds`). The
 //! `entries.held` column stays (a schema changes only by a new step),
 //! written 0.
 //!
@@ -499,7 +501,13 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
     let rows: Vec<Json> = store.rows("SELECT ledger AS value FROM head WHERE id = 1", vec![]);
     store.checked()?;
     if let Some(row) = rows.into_iter().next() {
-        let ledger: Ledger = serde_json::from_str(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
+        let mut ledger: Ledger = serde_json::from_str(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
+        // a head of the releases before decision 62: its holds forgiven,
+        // their entries ended, in this transaction with the head's rewrite
+        let retired = ledger.retire_holds(store);
+        if retired > 0 {
+            console_log!("{}", json!({ "event": "ledger.holds-retired", "retired": retired }));
+        }
         ledger.assert_valid();
         return Ok(ledger);
     }
