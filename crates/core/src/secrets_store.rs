@@ -26,6 +26,10 @@ pub const WORKOS_KEY: &str = "WORKOS_KEY";
 /// deployment's webhook endpoint's signing secret.
 pub const STRIPE_KEY: &str = "STRIPE_KEY";
 pub const STRIPE_WEBHOOK: &str = "STRIPE_WEBHOOK";
+/// The OpenID Connect client's secret sign-in authenticates with, where a
+/// provider signs people in (docs/self-host.md, seam 4); a public client
+/// has none.
+pub const OIDC_CLIENT_SECRET: &str = "OIDC_CLIENT_SECRET";
 /// What an operator key's binding starts with (`operator_key`).
 pub const OPERATOR_KEY_PREFIX: &str = "OPERATOR_KEY_";
 /// What the binding of a model's key starts with (`model_key`).
@@ -41,10 +45,10 @@ pub fn connection_secret(provider: &str) -> String {
 /// a value changed in the store (`cargo xtask secret set`) reaches every
 /// warm isolate within this, with no deploy.
 pub const CACHE_MS_MAX: i64 = 60_000;
-/// The bindings one Worker has: the seven above, a model's key per slot of
+/// The bindings one Worker has: the eight above, a model's key per slot of
 /// the model route (`models::SLOTS`), and an operator key per provider of
 /// the catalog, at most.
-pub const CACHE_ENTRIES_MAX: usize = 7 + crate::models::SLOTS.len() + catalog::PROVIDERS_MAX;
+pub const CACHE_ENTRIES_MAX: usize = 8 + crate::models::SLOTS.len() + catalog::PROVIDERS_MAX;
 
 /// The binding that holds operator key `provider` (`perplexity` →
 /// `OPERATOR_KEY_PERPLEXITY`, `google-places` → `OPERATOR_KEY_GOOGLE_PLACES`).
@@ -183,8 +187,8 @@ mod tests {
         assert_eq!(crate::models::SLOTS.map(model_key), ["MODEL_KEY_CHEAP", "MODEL_KEY_MEDIUM", "MODEL_KEY_FALLBACK", "MODEL_KEY_VISION"]);
         assert!(std::panic::catch_unwind(|| model_key("high")).is_err(), "high is no slot");
         // none is a name an earlier deploy's Worker secret had
-        for b in [HOST_SECRET, HOST_SECRET_PREVIOUS, CODESTORAGE_KEY, WORKOS_CLIENT, WORKOS_KEY, STRIPE_KEY, STRIPE_WEBHOOK, &operator_key("xai"), &model_key("cheap")] {
-            assert!(!["FRAGMENT_HOST_SECRET", "FRAGMENT_HOST_SECRET_PREVIOUS", "CODESTORAGE_PRIVATE_KEY", "WORKOS_API_KEY", "WORKOS_CLIENT_ID", "FRAGMENT_KEY_XAI"].contains(&b), "{b}");
+        for b in [HOST_SECRET, HOST_SECRET_PREVIOUS, CODESTORAGE_KEY, WORKOS_CLIENT, WORKOS_KEY, STRIPE_KEY, STRIPE_WEBHOOK, OIDC_CLIENT_SECRET, &operator_key("xai"), &model_key("cheap")] {
+            assert!(!["FRAGMENT_HOST_SECRET", "FRAGMENT_HOST_SECRET_PREVIOUS", "CODESTORAGE_PRIVATE_KEY", "WORKOS_API_KEY", "WORKOS_CLIENT_ID", "FRAGMENT_KEY_XAI", "FRAGMENT_OIDC_CLIENT_SECRET"].contains(&b), "{b}");
         }
     }
 }

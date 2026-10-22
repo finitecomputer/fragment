@@ -10,3 +10,8 @@ license = "MIT"
 
 [profile.release]
 strip = true
+
+# RSA keys are made by the OpenID Connect fake (dev, the e2e) and oidc.rs's
+# tests: its bignums unoptimized make one in seconds, not milliseconds.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
