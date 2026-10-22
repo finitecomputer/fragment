@@ -2539,18 +2539,27 @@ function dataSection() {
 // others are, one write at a time (each reads what the one before wrote),
 // and put live, as its name and picture are: its computer reads main, its
 // page live (`__file`), and both then say the same. Its computer reads
-// agent.json again within seconds and runs its next turn so.
+// agent.json again within seconds and runs its next turn so. A pick is
+// written only onto agent.json as it is now, read just before (none there,
+// 404, is nothing to keep): a read that fails otherwise writes nothing and
+// says so, so no other setting of the agent (its tier, its model) is lost.
 const agentJson = (agent) => api("GET", `/api/f/${seg(agent)}/file?path=agent.json`);
+const UNREAD_SETTINGS = "Couldn't read this agent's settings, so nothing was changed. Try again.";
 function agentSettings(a, row, modeled) {
   const box = el("div", "agent-setting");
   box.dataset.agent = a.fragment;
   const said = el("span", "muted agent-model-said");
-  const read = agentJson(a.fragment).catch(() => null);
+  // what the picks show: agent.json, none (404: the defaults), or unread (null)
+  const read = agentJson(a.fragment).catch((e) => (e.status === 404 ? {} : null));
+  read.then((j) => { if (j === null) said.textContent = "Couldn't read this agent's settings: reload to see them."; });
   let last = Promise.resolve();
   // `change` sets its pick on what agent.json holds now (its tier kept),
   // and says what changed
   const write = (change) => (last = last.catch(() => {}).then(async () => {
-    const now = await agentJson(a.fragment).catch(() => ({}));
+    const now = await agentJson(a.fragment).catch((e) => {
+      if (e.status === 404) return {};
+      throw new Error(UNREAD_SETTINGS);
+    });
     const next = { ...now, tier: now.tier ?? DEFAULT_AGENT_TIER };
     const message = change(next);
     await api("POST", `/api/f/${seg(a.fragment)}/files`, { message, files: [{ path: "agent.json", text: JSON.stringify(next, null, 2) + "\n" }] });
@@ -2560,7 +2569,8 @@ function agentSettings(a, row, modeled) {
   box.append(row, ...picks, said);
   return box;
 }
-// a pick (`value`) being written (`written`), said under its agent's settings
+// a pick (`value`) being written (`written`), said under its agent's
+// settings; one not written shows again what agent.json holds (`was`)
 async function savePick(pick, value, said, written) {
   pick.disabled = true;
   said.textContent = "Saving…";
@@ -2568,8 +2578,10 @@ async function savePick(pick, value, said, written) {
     await written;
     said.textContent = "Saved: its next message uses it.";
     pick.dataset.saved = value;
+    pick.dataset.was = value;
   } catch (e) {
     said.textContent = e.message;
+    pick.value = pick.dataset.was ?? "";
   } finally {
     pick.disabled = false;
   }
@@ -2617,6 +2629,7 @@ function modelPicker(a, modeled, read, write, said) {
       // one named by hand, not offered here, is shown as it is
       if (v && ![...pick.options].some((o) => o.value === v)) pick.append(modelOption(v, j.model.id));
       pick.value = v;
+      pick.dataset.was = v;
     })
     .finally(() => { pick.disabled = false; pick.dataset.read = "1"; });
   pick.onchange = () => {
@@ -2644,7 +2657,7 @@ function reasoningPicker(a, read, write, said) {
   for (const [value, text] of REASONING) pick.append(modelOption(value, text));
   pick.disabled = true;
   read
-    .then((j) => { pick.value = REASONING.some(([v]) => v && v === j?.reasoning) ? j.reasoning : ""; })
+    .then((j) => { pick.value = pick.dataset.was = REASONING.some(([v]) => v && v === j?.reasoning) ? j.reasoning : ""; })
     .finally(() => { pick.disabled = false; pick.dataset.read = "1"; });
   pick.onchange = () => {
     const value = pick.value;

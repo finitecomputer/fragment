@@ -3113,9 +3113,12 @@ fn notice_late_ui(s: &mut Suite, b: &mut Browser, page: &Page, chat: &str) -> Re
 /// in the model picker as an additional dropdown (while showing that our
 /// default is high)"): every agent's settings offer it beside its model,
 /// with no provider connected too, Default (High) shown while its
-/// agent.json names none. Picked, it is agent.json's `reasoning`, its tier
-/// kept, which its computer runs its next turn at; shown again as picked
-/// after a reload; the default again takes it away.
+/// agent.json names none. Picked, it is agent.json's `reasoning`, every
+/// other setting kept (its tier, its model, its own), which its computer
+/// runs its next turn at; shown again as picked after a reload; the
+/// default again takes it away. Invalid: a pick whose read of agent.json
+/// fails writes nothing and says so (Alex's review of #506: it wrote a
+/// fresh file, losing the model); none there (404) is written fresh.
 fn reasoning_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     b.reload(page)?;
@@ -3132,30 +3135,63 @@ fn reasoning_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
         read && !lead.is_empty() && options == json!([["", "Default (High)"], ["low", "Low"], ["high", "High"]]) && shown == "" && every == true && before["tier"] == "cheap" && before.get("reasoning").is_none(),
         json!({ "options": options, "shown": shown, "every": every, "agentJson": before }),
     );
+    // its other settings, which a pick never loses: a model named by hand
+    // (no provider is connected yet) and a field of its own
+    let seed = json!({ "tier": "cheap", "model": { "provider": "openrouter", "id": "z-ai/glm-5.3" }, "kept": "this" });
+    let write_json = |v: &Value| shell(api, session, "POST", &format!("/api/f/{lead}/files"), Some(&json!({ "message": "the e2e's settings", "files": [{ "path": "agent.json", "text": format!("{v:#}\n") }] })), &[]).map(|r| r.status);
+    let seeded = write_json(&seed)?;
+    b.reload(page)?;
+    b.until(page, &format!("{pick_of}?.dataset.read === '1'"), wait);
+    let said_of = format!("document.querySelector('.agent-setting[data-agent={lead:?}] .agent-model-said')?.textContent");
+    let choose = |b: &mut Browser, value: &str| b.eval(page, &format!("(() => {{ const p = {pick_of}; p.value = {value:?}; p.dispatchEvent(new Event('change')); return true; }})()"));
     let pick = |b: &mut Browser, value: &str| -> Result<bool> {
-        b.eval(page, &format!("(() => {{ const p = {pick_of}; p.value = {value:?}; p.dispatchEvent(new Event('change')); return true; }})()"))?;
+        choose(b, value)?;
         Ok(b.until(page, &format!("{pick_of}?.dataset.saved === {value:?} && !{pick_of}.disabled"), wait))
     };
+    // the read of agent.json a pick is written onto fails (Alex's review of
+    // #506): nothing is written, it is said plainly, and the pick shows what
+    // agent.json holds
+    b.eval(page, "(() => { const f = window.fetch; window.__files = 0; window.fetch = (u, o) => { if (o?.method === 'POST' && /\\/files$/.test(String(u))) window.__files++; return f(u, o); }; return true; })()")?;
+    b.eval(page, &refuse_once("GET", "/file\\?path=agent\\.json$"))?;
+    choose(b, "low")?;
+    let refused = b.until(page, &format!("{said_of} === {} && !{pick_of}.disabled", js(UNREAD_SETTINGS)), wait);
+    let unwritten = agent_json();
+    let (posts, showing) = (b.eval(page, "window.__files")?, b.eval(page, &format!("{pick_of}.value"))?);
+    s.ok(
+        "a pick whose read of agent.json fails writes nothing (its model and its other settings kept), says so plainly, and shows what agent.json holds",
+        seeded == 200 && refused && posts == 0 && unwritten == seed && showing == "",
+        json!({ "said": b.eval(page, &said_of)?, "posts": posts, "agentJson": unwritten, "showing": showing }),
+    );
+    // picked again, read: its own field alone changes
     let saved = pick(b, "low")?;
     let after = agent_json();
+    let mut low = seed.clone();
+    low["reasoning"] = json!("low");
     b.eval(page, &format!("({pick_of}?.scrollIntoView({{ block: 'center' }}), true)"))?;
     let _ = b.screenshot(page, &shots.join("desktop-agent-reasoning.png"));
     s.ok(
-        "picked, it is the agent's agent.json `reasoning`, its tier kept, and settings says its next message uses it",
-        saved && after["reasoning"] == "low" && after["tier"] == before["tier"] && b.eval(page, &format!("document.querySelector('.agent-setting[data-agent={lead:?}] .agent-model-said')?.textContent"))? == "Saved: its next message uses it.",
-        json!({ "before": before, "after": after }),
+        "picked again, it is the agent's agent.json `reasoning`, every other setting kept (its tier, its model, its own), and settings says its next message uses it",
+        saved && after == low && b.eval(page, &said_of)? == "Saved: its next message uses it.",
+        json!({ "before": seed, "after": after }),
     );
     b.reload(page)?;
     let again = b.until(page, &format!("{pick_of}?.dataset.read === '1' && {pick_of}.value === 'low'"), wait);
     let back = pick(b, "")?;
     let gone = agent_json();
-    s.ok(
-        "settings shows it again as picked; the default again takes it away, its tier kept",
-        again && back && gone.get("reasoning").is_none() && gone["tier"] == before["tier"],
-        &gone,
-    );
+    s.ok("settings shows it again as picked; the default again takes it away, the rest kept", again && back && gone == seed, &gone);
+    // agent.json not there (404) is nothing to keep: a pick writes one
+    b.eval(page, "(() => { const real = window.fetch; window.fetch = async (u, o) => { if (o?.method === 'GET' && /\\/file\\?path=agent\\.json$/.test(String(u))) { window.fetch = real; return new Response(JSON.stringify({ error: 'not_found', message: 'no such file' }), { status: 404, headers: { 'content-type': 'application/json' } }); } return real(u, o); }; return true; })()")?;
+    let fresh = pick(b, "high")?;
+    let made = agent_json();
+    s.ok("with no agent.json (404), a pick writes one: its tier and its reasoning", fresh && made == json!({ "tier": "cheap", "reasoning": "high" }), &made);
+    // as the lanes after it expect it
+    anyhow::ensure!(write_json(&json!({ "tier": "cheap" }))? == 200, "agent.json put back");
     Ok(())
 }
+
+/// What settings says when the read of agent.json a pick is written onto
+/// fails (cell/shell/shell.js, `UNREAD_SETTINGS`).
+const UNREAD_SETTINGS: &str = "Couldn't read this agent's settings, so nothing was changed. Try again.";
 
 /// Settings' own models (Paul, 2026-10-08: "they should be able to connect
 /// them from settings ideally"): OpenRouter's row is connected with a
