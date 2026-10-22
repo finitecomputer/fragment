@@ -154,7 +154,7 @@ impl RegistryCell {
     /// The org `by` admins, and their row.
     fn admin_of(&self, by: &By) -> CellResult<(Identity, MemberRow)> {
         let who = self.person_by(by)?;
-        let m = self.member_of(&who.id)?.filter(|m| m.admin != 0).ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only an org's admins change its seats and admins"))?;
+        let m = self.member_of(&who.id)?.filter(|m| m.admin != 0).ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only an org's admins change its seats and admins").because(Reason::NotAdmin))?;
         Ok((who, m))
     }
 
@@ -162,7 +162,7 @@ impl RegistryCell {
     fn member_in(&self, org: &str, id: &str) -> CellResult<MemberRow> {
         let m = self.member(id)?;
         if m.org != org {
-            return Err(not_found(format!("no seat {id}")));
+            return Err(not_found(format!("no seat {id}")).because(Reason::Gone));
         }
         Ok(m)
     }
@@ -177,7 +177,7 @@ impl RegistryCell {
     /// org's seats are its operators'.
     fn paying(&self, org: &str) -> CellResult<()> {
         if !self.org_pays(org)? {
-            return Err(CellError::invalid("your org pays for no seats now: buy one first (Checkout), then offer the rest"));
+            return Err(CellError::invalid("your org pays for no seats now: buy one first (Checkout), then offer the rest").because(Reason::OrgNotPaying));
         }
         Ok(())
     }
@@ -213,7 +213,7 @@ impl RegistryCell {
     }
 
     fn email_arg(raw: &str) -> CellResult<String> {
-        super::signin::email_of(raw).ok_or_else(|| CellError::invalid(format!("{raw:?} is not an email")))
+        super::signin::email_of(raw).ok_or_else(|| CellError::invalid(format!("{raw:?} is not an email")).because(Reason::NotAnEmail))
     }
 
     /// The email's person, refused while a wipe of them runs.
@@ -236,7 +236,7 @@ impl RegistryCell {
     fn admins_room(&self, org: &str) -> CellResult<()> {
         // offers count: an admin's place offered is one of the ten
         if self.count("SELECT COUNT(*) AS n FROM org_members WHERE org = ? AND admin = 1", vec![org.into()])? >= ADMINS_PER_ORG_MAX {
-            return Err(CellError::invalid(format!("an org has at most {ADMINS_PER_ORG_MAX} admins, offered ones included")));
+            return Err(CellError::invalid(format!("an org has at most {ADMINS_PER_ORG_MAX} admins, offered ones included")).because(Reason::AdminsFull));
         }
         Ok(())
     }
@@ -254,7 +254,7 @@ impl RegistryCell {
         if let Some(m) = self.member_by_email(&org_row.id, person.as_deref())? {
             return match m.seat()? {
                 Some(k) if k == b.kind && m.comped == 0 => added(&m, false),
-                Some(_) => Err(conflict(format!("{email} holds a seat here already"))),
+                Some(_) => Err(conflict(format!("{email} holds a seat here already")).because(Reason::AlreadyOffered)),
                 None => {
                     self.check_seats_room(&org_row.id)?;
                     self.exec("UPDATE org_members SET seat = ?, comped = 0 WHERE id = ?", vec![b.kind.as_str().into(), m.id.as_str().into()])?;
@@ -275,7 +275,7 @@ impl RegistryCell {
                 if o.seat()? == Some(b.kind) && o.comped == 0 {
                     return added(&o, false);
                 }
-                return Err(conflict(format!("{email} is offered a seat here already")));
+                return Err(conflict(format!("{email} is offered a seat here already")).because(Reason::AlreadyOffered));
             }
             Some(o) => {
                 // an admin's place offered: the seat joins it
@@ -304,7 +304,7 @@ impl RegistryCell {
         match m.seat()? {
             Some(_) if m.comped == 0 => Ok(m),
             Some(_) => Err(CellError::invalid(format!("{seat} is comped: an operator changes it"))),
-            None => Err(not_found(format!("no seat {seat}"))),
+            None => Err(not_found(format!("no seat {seat}")).because(Reason::Gone)),
         }
     }
 
@@ -312,10 +312,10 @@ impl RegistryCell {
         let m = self.paid_seat(&b.by, &b.seat)?;
         let who = self.person_by(&b.by)?;
         if self.payers_own(&m, &who.id)? {
-            return Err(CellError::new(ErrorCode::Forbidden, format!("{} pays for this org: their seat is theirs to give up", m.email)));
+            return Err(CellError::new(ErrorCode::Forbidden, format!("{} pays for this org: their seat is theirs to give up", m.email)).because(Reason::PayerOnly));
         }
         if self.paid_seats(&m.org)? <= 1 {
-            return Err(CellError::invalid("this is the org's last paid seat: cancel its subscription in Payment and invoices (it ends with the period)"));
+            return Err(CellError::invalid("this is the org's last paid seat: cancel its subscription in Payment and invoices (it ends with the period)").because(Reason::LastPaidSeat));
         }
         if m.admin != 0 {
             // an admin (or an admin's place offered) keeps their place
@@ -369,14 +369,14 @@ impl RegistryCell {
         let (who, admin) = self.admin_of(&b.by)?;
         let m = self.member_in(&admin.org, &b.member)?;
         if m.admin == 0 {
-            return Err(not_found(format!("{} is no admin", b.member)));
+            return Err(not_found(format!("{} is no admin", b.member)).because(Reason::Gone));
         }
         // a member's admin's place goes through the one change to a place
         // (offers.rs `depart`: who pays stays while it lives, and the last
         // admin of others stays); who pays is no other admin's to remove
         if m.person.is_some() {
             if self.payers_own(&m, &who.id)? {
-                return Err(CellError::new(ErrorCode::Forbidden, format!("{} pays for this org: only they step down as its admin", m.email)));
+                return Err(CellError::new(ErrorCode::Forbidden, format!("{} pays for this org: only they step down as its admin", m.email)).because(Reason::PayerOnly));
             }
             self.depart(&m, Departure::StepDown)?;
             return m.wire(None);

@@ -101,8 +101,8 @@ struct State {
     held: Option<Vec<Value>>,
     /// Events an API call made, delivered once its answer is on its way.
     pending: Vec<Value>,
-    /// Requests answered 500 while set (`fail`): (method, path prefix).
-    failing: Vec<(String, String)>,
+    /// Requests refused while set (`fail`, `refuse`): (method, path prefix, status).
+    failing: Vec<(String, String, u16)>,
     /// Pending invoice items: id → (customer, subscription, amount), the
     /// prorations a quantity change made, waiting for an invoice.
     items: BTreeMap<String, (String, String, i64)>,
@@ -285,8 +285,9 @@ impl Stripe {
             let f = form(&req.body);
             let mut s = st.lock().expect("stripe state");
             s.asked.push(Asked { method: req.method.clone(), path: req.path.clone(), form: f.clone() });
-            if s.failing.iter().any(|(m, p)| *m == req.method && req.path.starts_with(p.as_str())) {
-                return error(500, "api_error", "the fake fails this request (a lever)");
+            if let Some((_, _, status)) = s.failing.iter().find(|(m, p, _)| *m == req.method && req.path.starts_with(p.as_str())) {
+                let kind = if *status >= 500 { "api_error" } else { "invalid_request_error" };
+                return error(*status, kind, "the fake refuses this request (a lever)");
             }
             let idem = (req.method == "POST").then(|| req.header("idempotency-key").map(|k| format!("{}:{k}", req.path))).flatten();
             if let Some((status, v)) = idem.as_ref().and_then(|k| s.idempotent.get(k)).cloned() {
@@ -445,10 +446,17 @@ impl Stripe {
     /// Requests of `method` under `prefix` are answered 500 while `on` (a
     /// cancel that fails, as an outage would), or answered again.
     pub fn fail(&self, method: &str, prefix: &str, on: bool) {
+        self.refuse(method, prefix, on.then_some(500));
+    }
+
+    /// Requests of `method` under `prefix` are answered `status` (a 4xx is
+    /// a request Stripe will not take: an `invalid_request_error`; a 5xx an
+    /// `api_error`), or, with none, answered again.
+    pub fn refuse(&self, method: &str, prefix: &str, status: Option<u16>) {
         let mut s = self.state.lock().expect("stripe state");
-        s.failing.retain(|(m, p)| !(m == method && p == prefix));
-        if on {
-            s.failing.push((method.to_string(), prefix.to_string()));
+        s.failing.retain(|(m, p, _)| !(m == method && p == prefix));
+        if let Some(status) = status {
+            s.failing.push((method.to_string(), prefix.to_string(), status));
         }
     }
 

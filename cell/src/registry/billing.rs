@@ -292,13 +292,13 @@ impl RegistryCell {
         let who = self.person_by(&b.by)?;
         let email = self.latest_email(&who.id)?.ok_or_else(|| CellError::invalid("a seat is bought by someone who signs in, with their email"))?;
         let again = match self.member_of(&who.id)? {
-            Some(m) if m.comped != 0 => return Err(conflict("you hold a seat already")),
+            Some(m) if m.comped != 0 => return Err(conflict("you hold a seat already").because(Reason::HoldsSeat)),
             Some(m) => {
                 let o = self.stored_org(&m.org)?;
                 let paying = good(self.billing_row(&o.id)?.and_then(|r| r.status).as_deref());
                 match (paying, m.admin != 0) {
-                    (true, _) if m.seat.is_some() => return Err(conflict("you hold a seat already")),
-                    (true, true) => return Err(conflict(format!("{} pays for its seats already: add yours on its page", o.name))),
+                    (true, _) if m.seat.is_some() => return Err(conflict("you hold a seat already").because(Reason::HoldsSeat)),
+                    (true, true) => return Err(conflict(format!("{} pays for its seats already: add yours on its page", o.name)).because(Reason::OrgPays)),
                     (true, false) | (false, false) => return Err(conflict(format!("you are in {}: its admins give you a seat", o.name))),
                     // an admin of their org that pays for nothing (lapsed, or
                     // comped and ended) buys again: their seat, if they had one
@@ -314,7 +314,7 @@ impl RegistryCell {
                 // their own lapsed paid seat is counted; a seatless admin buys one
                 let quantity = self.paid_seats(&o.id)? + u64::from(mine.seat.is_none());
                 if trial.is_some() && quantity != 1 {
-                    return Err(conflict("a trial is for a seat of one"));
+                    return Err(conflict("a trial is for a seat of one").because(Reason::TrialNotHere));
                 }
                 // the org's customer is its last payer's: anyone else buys on
                 // one of their own, which the org then keeps
@@ -338,7 +338,7 @@ impl RegistryCell {
         let mine = self.member_of(&who.id)?;
         let (org, person) = match (&b.member, mine) {
             (None, Some(m)) if m.seat.is_some() => (m.org, who.id.clone()),
-            (None, _) => return Err(CellError::invalid("credit packs are for a seat's holder: you hold none")),
+            (None, _) => return Err(CellError::invalid("credit packs are for a seat's holder: you hold none").because(Reason::NoSeat)),
             (Some(id), Some(m)) if m.admin != 0 => {
                 let member = self.member(id)?;
                 match (member.org == m.org, member.person, member.seat) {
@@ -360,9 +360,9 @@ impl RegistryCell {
     /// Its other admins manage its seats in the shell, never its billing.
     fn customer_of(&self, b: CustomerOf) -> CellResult<Customer> {
         let who = self.person_by(&b.by)?;
-        let m = self.member_of(&who.id)?.ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only who pays for an org opens its billing"))?;
+        let m = self.member_of(&who.id)?.ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only who pays for an org opens its billing").because(Reason::NotPayer))?;
         if self.payer_of(&m.org)?.as_deref() != Some(who.id.as_str()) {
-            return Err(CellError::new(ErrorCode::Forbidden, "only who pays for your org opens its billing: its admins manage its seats here"));
+            return Err(CellError::new(ErrorCode::Forbidden, "only who pays for your org opens its billing: its admins manage its seats here").because(Reason::NotPayer));
         }
         let customer = self.billing_row(&m.org)?.and_then(|r| r.customer).ok_or_else(|| CellError::host(format!("{} pays for {} and it has no customer", who.id, m.org)))?;
         Ok(Customer { customer })

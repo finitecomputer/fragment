@@ -200,7 +200,7 @@ impl RegistryCell {
     /// offer it something already.
     pub(super) fn check_offer_room(&self, email: &str) -> CellResult<()> {
         if self.count("SELECT COUNT(*) AS n FROM org_members WHERE person IS NULL AND email = ?", vec![email.into()])? >= OFFERS_PER_EMAIL_MAX {
-            return Err(CellError::invalid(format!("{OFFERS_PER_EMAIL_MAX} orgs offer {email} something already: it accepts or declines one first")));
+            return Err(CellError::invalid(format!("{OFFERS_PER_EMAIL_MAX} orgs offer {email} something already: it accepts or declines one first")).because(Reason::TooManyOffers));
         }
         Ok(())
     }
@@ -212,7 +212,7 @@ impl RegistryCell {
         let day = js::now_ms() / DAY_MS;
         let mailed = self.count("SELECT COALESCE(SUM(mailed), 0) AS n FROM offer_mails WHERE org = ? AND day = ?", vec![org.into(), SqlStorageValue::Integer(day)])?;
         if mailed >= OFFER_MAILS_PER_ORG_DAILY_MAX {
-            return Err(CellError::new(ErrorCode::RateLimited, format!("your org has mailed {OFFER_MAILS_PER_ORG_DAILY_MAX} offers today, the most a day: offer more tomorrow")));
+            return Err(CellError::new(ErrorCode::RateLimited, format!("your org has mailed {OFFER_MAILS_PER_ORG_DAILY_MAX} offers today, the most a day: offer more tomorrow")).because(Reason::OffersPerDay));
         }
         Ok(())
     }
@@ -254,8 +254,9 @@ impl RegistryCell {
         let change = org::departing(place, how).map_err(|stuck| {
             let name = self.stored_org(&m.org).map(|o| o.name).unwrap_or_else(|_| m.org.clone());
             match stuck {
-                Stuck::Admin => CellError::invalid(stuck.message(&name)),
-                Stuck::Pays | Stuck::LastAdmin => conflict(stuck.message(&name)),
+                Stuck::Admin => CellError::invalid(stuck.message(&name)).because(Reason::StepDownFirst),
+                Stuck::Pays => conflict(stuck.message(&name)).because(Reason::Pays),
+                Stuck::LastAdmin => conflict(stuck.message(&name)).because(Reason::LastAdmin),
             }
         })?;
         match change {
@@ -278,7 +279,7 @@ impl RegistryCell {
         assert_eq!(mine.org, offer.org, "a merge is within one org");
         let person = mine.person.as_deref().ok_or_else(|| CellError::host(format!("{} merges into an offer", offer.id)))?;
         let (seat, comped) = match (mine.seat()?, offer.seat()?) {
-            (Some(_), Some(_)) => return Err(conflict("you hold a seat in this org already: decline this offer")),
+            (Some(_), Some(_)) => return Err(conflict("you hold a seat in this org already: decline this offer").because(Reason::HoldsSeat)),
             (_, Some(k)) => (Some(k), offer.comped),
             (held, None) => (held, mine.comped),
         };
@@ -304,7 +305,7 @@ impl RegistryCell {
         if row.person.is_none() && self.emails_of(who)?.contains(&row.email) {
             return Ok(row);
         }
-        Err(not_found(format!("no offer {id}")))
+        Err(not_found(format!("no offer {id}")).because(Reason::Gone))
     }
 
     /// Whether `who` accepted the offer `id` already: its row is theirs, or
@@ -328,7 +329,7 @@ impl RegistryCell {
         // stands alone): one that lapsed buys again before anyone joins
         if offer.comped == 0 && !self.org_pays(&offer.org)? {
             let o = self.stored_org(&offer.org)?;
-            return Err(CellError::invalid(format!("{} pays for nothing now: its admins buy again before anyone takes its offers", o.name)));
+            return Err(CellError::invalid(format!("{} pays for nothing now: its admins buy again before anyone takes its offers", o.name)).because(Reason::OrgNotPaying));
         }
         match self.member_of(&who.id)? {
             Some(mine) if mine.org == offer.org => self.merge(&mine, &offer)?,
@@ -356,7 +357,7 @@ impl RegistryCell {
 
     fn leave(&self, b: LeaveOrg) -> CellResult<MySeat> {
         let who = self.person_by(&b.by)?;
-        let m = self.member_of(&who.id)?.ok_or_else(|| CellError::invalid("you are in no org"))?;
+        let m = self.member_of(&who.id)?.ok_or_else(|| CellError::invalid("you are in no org").because(Reason::Gone))?;
         self.depart(&m, Departure::Leave)?;
         self.my_seat(&who.id)
     }

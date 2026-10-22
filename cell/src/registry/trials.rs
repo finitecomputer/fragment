@@ -106,7 +106,7 @@ struct UseRow {
 }
 
 fn not_a_code() -> CellError {
-    CellError::new(ErrorCode::NotFound, "no such trial code")
+    CellError::new(ErrorCode::NotFound, "no such trial code").because(Reason::TrialUnknown)
 }
 
 impl RegistryCell {
@@ -275,13 +275,13 @@ impl RegistryCell {
         let code = org::trial_code(raw).ok_or_else(not_a_code)?;
         let r = self.row::<CodeRow>(&format!("SELECT {CODE_COLUMNS} FROM trial_codes WHERE code = ?"), vec![code.into()])?.ok_or_else(not_a_code)?;
         if r.active == 0 || r.expires_at.is_some_and(|at| at <= js::now_ms()) {
-            return Err(CellError::invalid("this trial code has ended"));
+            return Err(CellError::invalid("this trial code has ended").because(Reason::TrialEnded));
         }
         // a code made before the $100 seat stopped being sold (2026-10-15)
-        fragment_core::stripe::for_sale(r.kind()?).map_err(|e| CellError::invalid(format!("this trial code has ended: it is of a {} seat, which is no longer sold", e.0.as_str())))?;
+        fragment_core::stripe::for_sale(r.kind()?).map_err(|e| CellError::invalid(format!("this trial code has ended: it is of a {} seat, which is no longer sold", e.0.as_str())).because(Reason::TrialEnded))?;
         let mine = self.row::<UseRow>("SELECT subscription FROM trial_uses WHERE person = ?", vec![person.into()])?;
         if mine.as_ref().is_some_and(|u| u.subscription.is_some()) {
-            return Err(conflict("a trial is once a person: you had yours"));
+            return Err(conflict("a trial is once a person: you had yours").because(Reason::TrialUsed));
         }
         if let Some(o) = org {
             #[derive(Deserialize)]
@@ -292,12 +292,12 @@ impl RegistryCell {
             // forgets one its payer left: seats.rs `forget_payer`)
             let bought = self.count("SELECT COUNT(*) AS n FROM checkouts WHERE org = ?", vec![o.into()])? > 0;
             if bought || self.row::<Paid>("SELECT subscription FROM orgs WHERE id = ?", vec![o.into()])?.and_then(|p| p.subscription).is_some() {
-                return Err(conflict("a trial is for an org that never paid"));
+                return Err(conflict("a trial is for an org that never paid").because(Reason::TrialNotHere));
             }
         }
         let (subscribed, open) = self.places_taken(&r.id, Some(person))?;
         if !org::trial_has_place(r.capacity as u64, subscribed, open) {
-            return Err(conflict("this trial code's places are taken"));
+            return Err(conflict("this trial code's places are taken").because(Reason::TrialTaken));
         }
         Ok(TrialOffer { id: r.id.clone(), kind: r.kind()?, days: u32::try_from(r.days).map_err(|_| CellError::host("trial_codes.days"))? })
     }
