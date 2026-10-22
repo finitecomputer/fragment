@@ -11,7 +11,9 @@ master.
 
 The first milestone is still Paul's home: the stack on this box, run as an
 intranet would run it, that he can demo from his iPhone. A company's own
-requirements come after.
+requirements come after. **Every seam is ported** (2026-10-22): seam 9, the
+LAN mode, last, and its guide (docs/self-host-lan.md) rehearsed end to end
+from this box, short of sudo, the router and Paul's devices.
 
 ## The four ways fragment runs
 
@@ -62,7 +64,7 @@ configuration and its bindings. A mode flag is a design bug.
 | 6 | Blobs | nothing to port: celld's R2, over its bucket or `celld dev`'s disk |
 | 7 | Preview cards: the renderer over chrome-headless-shell | **done** |
 | 8 | Notifications | design only: push is off offline |
-| 9 | Hosts and TLS: the LAN mode (`--lan`) | to port |
+| 9 | Hosts and TLS: the LAN mode (`--lan`) | **done** (below); its guide rehearsed |
 | 10 | Money: own hardware in points | **done** (below) |
 | 11 | Nothing calls home | design only |
 | 12 | Secrets | **done**: the stand-in, OpenBao behind it |
@@ -592,7 +594,7 @@ With neither, the shot is skipped (`card.skipped`, `no_browser`).
 - **A LAN:** `FRAGMENT_BROWSER_CA_FILE` trusts a private CA (an NSS
   database made with `certutil` in each browser's home);
   `FRAGMENT_BROWSER_UPSTREAM` (`ip:port`) moves where the gate connects.
-  The LAN mode (seam 9, to port) sets both to its door's.
+  The LAN mode (seam 9) sets both to its door's.
 - The e2e on celld and `cargo xtask dev --runtime celld` start it; every
   card check runs on celld (`shoots_cards` and its skips are gone). Shots
   there are metered at Browser Rendering's price: seam 10's question.
@@ -627,6 +629,82 @@ With neither, the shot is skipped (`card.skipped`, `no_browser`).
   private CA refused unnamed, trusted named.
 - The cell's Wasm on this branch (seam 4 included): 6,471,209 bytes,
   28,791 under the budget; the renderer's switch is about 2.4 KB of it.
+
+### 9. Hosts and TLS: the LAN mode (done)
+
+Each fragment's own origin (`<label>--<suffix>.<zone>`) is the isolation
+model, so every way of running needs a wildcard name and a matching
+certificate, or a single-box exemption: `*.fragment.localhost` on one box
+(a secure context with no TLS); on a home network or an intranet, a
+delegated subzone under a CA the devices trust. An intranet's zone is
+same-site with the company's other apps, so isolation rests on the origin
+(host-only `__Host-` cookies, Origin checks), never on SameSite.
+
+`cargo xtask dev --lan` (xtask/src/lan.rs, crates/lan; the guide is
+docs/self-host-lan.md) serves the stack on celld to the home network as an
+intranet runs it, every part the stack's child:
+
+- **`fragment-lan serve`**, the one process holding 53, 80 and 443 (so the
+  one binary given `cap_net_bind_service`): DNS for `fragment.home.arpa`
+  (RFC 8375), each name in it the box's address, every other name
+  forwarded to the router; the TLS front door, `dex.<zone>` to Dex and
+  every other name to celld on loopback, with the forwarded headers its
+  own and WebSockets spliced; the root's page over http. The CA is made
+  once, its root **name-constrained to the zone**; the zone's wildcard is
+  issued at each start.
+- **Sign-in**: Dex (v2.46.1, pinned by its image layer's digest and its
+  binary's SHA-256; its config refuses unknown fields since 2.46) through
+  seam 4's OpenID Connect, one static user per person, passwords in files.
+  No WorkOS, Stripe or mail fake: a self-hosted deployment has none, so an
+  invite is not mailed, and the share sheet says so and shows the address
+  to send (with no mailer, `mail::mailer`).
+- **Secrets** in OpenBao (seam 12), its state beside the LAN's. **Cards**
+  through the door, under the root (seam 7). celld trusts the root for the
+  cell's own fetches (`devstack::celld::start`'s CA file,
+  `CELLD_EXTRA_CA_FILE`).
+- **Computers** on this machine's real engine: the stack runs the box's
+  node (`SANDCASTLE_NODE_BIN`), its platform the door's https origin and
+  its `ca_file` the root, in a process group of its own so it outlives the
+  cell's drain at Ctrl-C (a node gone first cuts each awake computer's
+  `wait`, which the cell reads as an exit). Its list names Hermes and the
+  stub by the digests `cargo xtask node-images` loaded (the record it
+  writes, `target/devstack/node-images.json`), each by architecture: a
+  paired Mac's are its own record, kept in the LAN's state. New computers
+  run Hermes, as master's default is (docs/computers.md, Stable and
+  canary: a deployment's `hermes` by digest; on a node, a load's digest,
+  and a rebuild is a new one, so a computer is told an update is ready).
+  `FRAGMENT_NODES_FILE` replaces the list.
+- **The state** is `~/.local/state/fragment-lan` by default, outside the
+  checkout: the CA, Dex's secrets, OpenBao's, the box's node's, and the
+  deployment's models (`models.jsonc`, `model.key`), which dev reads when
+  `FRAGMENT_MODELS_FILE` names none.
+
+**Evidence, 2026-10-22:** the guide's (docs/self-host-lan.md, Evidence):
+from a fresh worktree of the tip, every step on this box short of sudo,
+the router and the devices, the iPhone a phone-sized headless Chromium.
+Sign-in through Dex in 2.5 s; Hermes' first answer 9 s after the shell
+landed (Bonsai, on a microVM of the real engine); a command turn in 4.8 s;
+an app asked of the agent built and deployed in 90 s, its card shot
+through the door; a live change in a second tab in 231 ms; `fragment
+login` through the door; a second person's Mac (the Docker double, paired
+through the door) holding their first computer; Ctrl-C in 0.2 s, every
+port freed, the awake computer found as it was at the next start. Host
+tests: crates/lan's 27 (the zone's DNS answers and forwarding, the
+certificates and the name constraint, the door's routing, headers,
+streams and WebSockets, Dex's config and the pinned layer) and xtask's
+LAN settings and node list.
+
+After it, on the branch's tip (celld v0.6.3, OpenBao and the renderer on):
+
+- **`cargo xtask check`:** 835 passed, 0 failed.
+- **The real engine** (`FRAGMENT_E2E_NODES=real`; computers, chat,
+  hermes): **428 passed, 0 failed, 1 skipped** (the stub's awake save,
+  master's own skip), as before seam 9.
+- **Two nodes** (`FRAGMENT_E2E_NODES=two`; placement, pairing, restart):
+  **112 passed, 0 failed, 0 skipped**, the no-mailer node's new check of
+  the share sheet among them.
+- The cell's Wasm: 6,698,165 bytes, 1,835 under `CELL_WASM_MAX_BYTES`
+  (the sheet's no-mail words, 934 bytes).
 
 ### 10. Money: own hardware in points (done)
 
@@ -714,7 +792,7 @@ used as it ships:
 - **Choosing it:** `cargo xtask dev --runtime celld` with
   `FRAGMENT_SECRETS_BACKEND=openbao` (on :8804, its state in
   `target/devstack/openbao-8804`, which `--clean` clears); the e2e on celld
-  unless `FRAGMENT_E2E_SECRETS=vars`. The LAN mode (seam 9, to port) makes
+  unless `FRAGMENT_E2E_SECRETS=vars`. The LAN mode (seam 9) makes
   it its default. `wrangler dev` keeps its own store.
 - **A company's Vault:** `FRAGMENT_SECRETS` names it (`{"backend":
   "openbao", "addr": "https://vault.corp.example:8200", "mount": "secret",
@@ -862,6 +940,8 @@ FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… FRAGMENT_E2E_NODES=real SANDCASTLE_DIR=
 cargo xtask node-images
 # the stack with computers on nodes: a node list, each node's "secret_file" beside it
 FRAGMENT_NODES_FILE=nodes.json [FRAGMENT_BYOC=on] CELLD_BIN=… cargo xtask dev --runtime celld
+# the home network as an intranet (docs/self-host-lan.md, the guide)
+CELLD_BIN=… SANDCASTLE_NODE_BIN=~/.local/opt/sandcastle/bin/sandcastle-node cargo xtask dev --lan
 ```
 
 ## Open questions for Paul
@@ -876,3 +956,29 @@ FRAGMENT_NODES_FILE=nodes.json [FRAGMENT_BYOC=on] CELLD_BIN=… cargo xtask dev 
 - **Upstream celld issues** to post: found 31 (a lingering close), 34 (a
   range query in `LocalStore`; the fork carries a stopgap), and 35
   (binding classes named as workerd's).
+- **Found 39 (seam 2): a node that does not answer reads as its
+  containers' exit.** When a `wait` is cut and the node cannot be asked
+  whether the container still runs, `NodeContainer` throws, so an outage
+  of a node (its process restarted, a network blip) ends every awake
+  computer on it: the cell starts each again and rolls it back to its last
+  save, though the container ran on. The LAN mode no longer causes one at
+  Ctrl-C (seam 9), but any outage does. Waiting until the node answers
+  again (a container that still runs is waited on; one gone is an exit)
+  would keep them. No lane takes a node down under an awake computer (the
+  placement lane's sleep theirs first): such a check comes first.
+- **Found 40 (seam 9): an agent cannot open the apps it makes**, on the
+  LAN: the engine refuses a computer every private address and the node's
+  own, and the platform's hosts are the box's. It builds and deploys
+  through the API, then may spend its turn trying to open the page.
+  Intercepting the platform's own hosts (`*.<zone>`) to the platform, as
+  the API host is, would make it work on every deployment (on Cloudflare
+  too, through the platform rather than the internet).
+- **Found 41: a phone shows no card**: the shell shows an app's card only
+  over its dock icon under a pointer (master's shell).
+- **The CLI's invite** still says "they were mailed a link" on a
+  deployment with no mailer: telling it would add a field to `Shared`'s
+  answer (add-only).
+- **The cell's Wasm budget depends on the checkout's path** (panic
+  locations carry it): 1,835 bytes left in `../fragment-port-lan`, 1,583 in
+  a checkout five characters longer. Remapping the path prefix in the
+  build would make the Wasm the same from any checkout (and smaller).

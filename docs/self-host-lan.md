@@ -49,9 +49,10 @@ trust):
   stack's AppRole ids and the cell's token, each 0600. The stack seeds
   every secret into it at each start, so removing it loses nothing;
 - `node/` (0700): the box's node's config and its secret (`node.secret`,
-  0600, made once); `nodes.json`, the node list the cell is given, written
-  at each start from the images `cargo xtask node-images` loaded last
-  (and any `node-images-<arch>.json` here: the Mac's, step 7);
+  0600, made once);
+- `nodes.json`: the node list the cell is given, written at each start
+  from the images `cargo xtask node-images` loaded last (and any
+  `node-images-<arch>.json` here: the Mac's, step 7);
 - `models.jsonc` and `model.key`: the deployment's models (step 2), yours;
 - `serve.json`: the front door's config.
 
@@ -73,8 +74,8 @@ keep it. On the ASUS router (http://192.168.50.1): LAN, DHCP Server,
 (omarchy) with 192.168.50.7, and Apply.
 
 **1b. The privileged ports.** Only `fragment-lan` binds 53, 80 and 443.
-Give that one binary, at a path only root can write, the right to (from
-the checkout of step 2):
+Give that one binary, at a path only root can write, the right to (in
+step 2's checkout: make it first):
 
 ```sh
 cargo build --release -p fragment-lan
