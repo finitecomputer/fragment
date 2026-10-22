@@ -2108,8 +2108,7 @@ async function openSettings(push = true, failed = null) {
     const name = el("span", "settings-agent-name");
     name.dataset.agentFace = a.fragment;
     const [actions, said] = faceControls(a);
-    const agentRow = actionLine(name, actions, row);
-    return [modeled.length ? modelPicker(a, agentRow, modeled) : agentRow, said];
+    return [agentSettings(a, actionLine(name, actions, row), modeled), said];
   }) : [el("p", "muted", "None yet.")]));
   const connections = connectionsSection(linked, uses);
   const skills = await skillsSection();
@@ -2535,12 +2534,74 @@ function dataSection() {
   return s;
 }
 
+// ---- an agent's settings in Settings' Agents: its row, then its
+// agent.json's picks, read once for them all. Each pick is written as the
+// others are, one write at a time (each reads what the one before wrote),
+// and put live, as its name and picture are: its computer reads main, its
+// page live (`__file`), and both then say the same. Its computer reads
+// agent.json again within seconds and runs its next turn so. A pick is
+// written only onto agent.json as it is now, read just before (none there,
+// 404, is nothing to keep): a read that fails otherwise writes nothing and
+// says so, so no other setting of the agent (its tier, its model) is lost.
+const agentJson = (agent) => api("GET", `/api/f/${seg(agent)}/file?path=agent.json`);
+const UNREAD_SETTINGS = "Couldn't read this agent's settings, so nothing was changed. Try again.";
+function agentSettings(a, row, modeled) {
+  const box = el("div", "agent-setting");
+  box.dataset.agent = a.fragment;
+  const said = el("span", "muted agent-model-said");
+  // what the picks show: agent.json, none (404: the defaults), or unread (null)
+  const read = agentJson(a.fragment).catch((e) => (e.status === 404 ? {} : null));
+  read.then((j) => { if (j === null) said.textContent = "Couldn't read this agent's settings: reload to see them."; });
+  let last = Promise.resolve();
+  // `change` sets its pick on what agent.json holds now (its tier kept),
+  // and says what changed
+  const write = (change) => (last = last.catch(() => {}).then(async () => {
+    const now = await agentJson(a.fragment).catch((e) => {
+      if (e.status === 404) return {};
+      throw new Error(UNREAD_SETTINGS);
+    });
+    const next = { ...now, tier: now.tier ?? DEFAULT_AGENT_TIER };
+    const message = change(next);
+    await api("POST", `/api/f/${seg(a.fragment)}/files`, { message, files: [{ path: "agent.json", text: JSON.stringify(next, null, 2) + "\n" }] });
+    await api("POST", `/api/f/${seg(a.fragment)}/deploy`, {});
+  }));
+  const picks = [...(modeled.length ? [modelPicker(a, modeled, read, write, said)] : []), reasoningPicker(a, read, write, said)];
+  box.append(row, ...picks, said);
+  return box;
+}
+// a pick (`value`) being written (`written`), said under its agent's
+// settings; one not written shows again what agent.json holds (`was`)
+async function savePick(pick, value, said, written) {
+  pick.disabled = true;
+  said.textContent = "Saving…";
+  try {
+    await written;
+    said.textContent = "Saved: its next message uses it.";
+    pick.dataset.saved = value;
+    pick.dataset.was = value;
+  } catch (e) {
+    said.textContent = e.message;
+    pick.value = pick.dataset.was ?? "";
+  } finally {
+    pick.disabled = false;
+  }
+}
+function settingLabel(key, pick) {
+  const label = el("label", "agent-model-label");
+  label.append(el("span", "settings-key", key), pick);
+  return label;
+}
+function modelOption(value, text) {
+  const o = el("option", null, text);
+  o.value = value;
+  return o;
+}
+
 // ---- an agent's model: its agent.json's `model` ({provider, id}), a model
 // of a provider the person connected, or none: its `tier`'s (`medium`, else
 // the default: `high` is off, decision 23), shown by the tier's name and its
 // model's id, as their computer's view names it (the deployment's `models`).
-// Its computer reads agent.json again within seconds and runs its next turn
-// on it. Vision and voice notes stay on the platform's own models.
+// Vision and voice notes stay on the platform's own models.
 const TIER = { cheap: "Cheap", medium: "Medium" };
 const tierName = (tier) => {
   const t = tier === "medium" ? "medium" : DEFAULT_AGENT_TIER;
@@ -2548,15 +2609,7 @@ const tierName = (tier) => {
   return id ? `${TIER[t]} (${id})` : TIER[t];
 };
 const modelValue = (provider, id) => `${provider} ${id}`;
-function modelOption(value, text) {
-  const o = el("option", null, text);
-  o.value = value;
-  return o;
-}
-const agentJson = (agent) => api("GET", `/api/f/${seg(agent)}/file?path=agent.json`);
-function modelPicker(a, row, modeled) {
-  const box = el("div", "agent-setting");
-  box.dataset.agent = a.fragment;
+function modelPicker(a, modeled, read, write, said) {
   const pick = el("select", "agent-model");
   pick.dataset.modelFor = a.fragment;
   pick.setAttribute("aria-label", `${titleOf(a.fragment)}'s model`);
@@ -2568,47 +2621,53 @@ function modelPicker(a, row, modeled) {
     for (const m of p.models) group.append(modelOption(modelValue(p.provider, m.id), m.name));
     pick.append(group);
   }
-  const said = el("span", "muted agent-model-said");
   pick.disabled = true;
-  agentJson(a.fragment)
+  read
     .then((j) => {
       tiered.textContent = tierName(j?.tier);
       const v = j?.model?.provider && j?.model?.id ? modelValue(j.model.provider, j.model.id) : "";
       // one named by hand, not offered here, is shown as it is
       if (v && ![...pick.options].some((o) => o.value === v)) pick.append(modelOption(v, j.model.id));
       pick.value = v;
+      pick.dataset.was = v;
     })
-    .catch(() => {})
     .finally(() => { pick.disabled = false; pick.dataset.read = "1"; });
-  pick.onchange = async () => {
-    pick.disabled = true;
-    said.textContent = "Saving…";
-    try {
-      // what agent.json holds now (its tier), the model changed
-      const now = await agentJson(a.fragment).catch(() => ({}));
-      const next = { ...now, tier: now.tier ?? DEFAULT_AGENT_TIER };
-      const [provider, id] = pick.value ? pick.value.split(" ") : [];
+  pick.onchange = () => {
+    const value = pick.value;
+    const [provider, id] = value ? value.split(" ") : [];
+    savePick(pick, value, said, write((next) => {
       if (provider) next.model = { provider, id };
       else delete next.model;
-      await api("POST", `/api/f/${seg(a.fragment)}/files`, {
-        message: `its model: ${provider ? id : next.tier}`,
-        files: [{ path: "agent.json", text: JSON.stringify(next, null, 2) + "\n" }],
-      });
-      // put live, as its name and picture are: its computer reads main, its
-      // page live (`__file`), and both then say the same
-      await api("POST", `/api/f/${seg(a.fragment)}/deploy`, {});
-      said.textContent = "Saved: its next message uses it.";
-      pick.dataset.saved = pick.value;
-    } catch (e) {
-      said.textContent = e.message;
-    } finally {
-      pick.disabled = false;
-    }
+      return `its model: ${provider ? id : next.tier}`;
+    }));
   };
-  const label = el("label", "agent-model-label");
-  label.append(el("span", "settings-key", "Model"), pick);
-  box.append(row, label, said);
-  return box;
+  return settingLabel("Model", pick);
+}
+
+// ---- how hard an agent thinks (Paul, 2026-10-22: "expose the reasoning
+// level in the model picker … high is a good default"): its agent.json's
+// `reasoning`, `low` or `high` (the efforts the platform's model route
+// passes on), or none: the default, high. Its computer runs any other it
+// names at the default too, and so it is shown.
+const REASONING = [["", "Default (High)"], ["low", "Low"], ["high", "High"]];
+function reasoningPicker(a, read, write, said) {
+  const pick = el("select", "agent-model");
+  pick.dataset.reasoningFor = a.fragment;
+  pick.setAttribute("aria-label", `${titleOf(a.fragment)}'s reasoning`);
+  for (const [value, text] of REASONING) pick.append(modelOption(value, text));
+  pick.disabled = true;
+  read
+    .then((j) => { pick.value = pick.dataset.was = REASONING.some(([v]) => v && v === j?.reasoning) ? j.reasoning : ""; })
+    .finally(() => { pick.disabled = false; pick.dataset.read = "1"; });
+  pick.onchange = () => {
+    const value = pick.value;
+    savePick(pick, value, said, write((next) => {
+      if (value) next.reasoning = value;
+      else delete next.reasoning;
+      return `its reasoning: ${value || "the default"}`;
+    }));
+  };
+  return settingLabel("Reasoning", pick);
 }
 
 // ---- connections (decisions 22, 37 and 44): every provider the platform

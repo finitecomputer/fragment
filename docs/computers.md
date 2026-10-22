@@ -1569,7 +1569,18 @@ settings and state):
   beside the tier, is a model of a provider its owner connected, which it
   runs on while its credentials hold that provider (above, "An agent's
   own model"); the image reads `agent.json` again every 10 s while awake
-  (`HERMES_BOOT_MODEL_MS`, a test's), so a pick is its next turn's.
+  (`HERMES_BOOT_MODEL_MS`, a test's), so a pick is its next turn's. Its
+  `reasoning`, `low` or `high` (Paul, 2026-10-22: "expose the reasoning
+  level in the model picker … high is a good default"), is how hard it
+  thinks, whatever its model: its profile's `agent.reasoning_effort`
+  (`hermes::Reasoning`), which Hermes reads at each turn and sends as each
+  call's `reasoning_effort`. Absent, or any other, it is `high`. Those two
+  are what the model route passes on (`fragment_core::models::EFFORTS`;
+  any other it takes as `low`, as GLM takes `medium` for its dearest,
+  `max`), and left unset Hermes sent its own default, `medium`, which the
+  route took as `low`. Settings' Agents offers it beside the model for
+  every agent: Default (High), Low and High; a pick writes `reasoning` to
+  `agent.json` as the model's pick is written, and the default removes it.
 
   Its work (the seam, above): each agent's is `/data/work/<profile>`.
   Its profile's config makes it the terminal's working directory

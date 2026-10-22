@@ -1663,6 +1663,31 @@ mod tests {
         assert_eq!(bound(tier(Tier::Cheap), json!({ "messages": [{}] }), false).unwrap().max_tokens, MAX_TOKENS, "none asked: the cap");
     }
 
+    /// Goal (Paul, 2026-10-22): how hard an agent thinks, as its owner
+    /// picks it (agent.json's `reasoning`, which its Hermes sends as each
+    /// call's `reasoning_effort`), reaches its model as picked, on Workers
+    /// AI and on an OpenAI-compatible API alike; any other effort, Hermes'
+    /// own default (`medium`) among them, is GLM's cheapest, `low`.
+    #[test]
+    fn an_agents_reasoning_reaches_its_model() {
+        let routed = openrouter();
+        let call = |effort: Option<&str>| {
+            let mut body = json!({ "model": "cheap", "messages": [{ "role": "user", "content": "hi" }], "stream": true });
+            if let Some(e) = effort {
+                body["reasoning_effort"] = json!(e);
+            }
+            body
+        };
+        for (asked, sent) in [(Some("low"), "low"), (Some("high"), "high"), (None, "low"), (Some("medium"), "low"), (Some("max"), "low"), (Some("none"), "low")] {
+            let workers_ai = bound(tier(Tier::Cheap), call(asked), true).unwrap();
+            assert_eq!(workers_ai.input["reasoning_effort"], sent, "Workers AI, asked {asked:?}");
+            let capped = routed.capped(Named::Tier(Tier::Cheap)).unwrap();
+            let Upstream::Openai { model, body, .. } = capped.model.upstream.clone() else { panic!("OpenRouter's tier is an OpenAI-compatible API's") };
+            let b = bound(capped, call(asked), true).unwrap();
+            assert_eq!(openai_request(&b.input, &model, body.as_ref())["reasoning_effort"], sent, "OpenRouter, asked {asked:?}");
+        }
+    }
+
     #[test]
     fn a_request_out_of_shape_is_refused() {
         let msgs = || json!([{ "role": "user", "content": "hi" }]);
