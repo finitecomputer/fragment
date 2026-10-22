@@ -229,6 +229,7 @@ fn dev(args: &[String]) -> Result<()> {
         operator_key_values: vec![],
         connection_secret_values: vec![],
         swap_upstream: None,
+        secrets: devstack::Secrets::Store,
     };
     // its secrets go to wrangler's local store under cell/.wrangler/state
     fleet.configure(&tools, &devstack::cell_dir())?;

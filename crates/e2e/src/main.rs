@@ -633,6 +633,7 @@ impl Suite {
             operator_key_values: SWAP_KEYS.iter().chain((self.shape == Shape::OneKeyMore).then_some(&ADDED_KEY)).map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
             connection_secret_values: vec![("e2e-oauth".into(), "mock-connection-secret".into())],
             swap_upstream: Some(self.upstream.node().url.clone()),
+            secrets: devstack::Secrets::Store,
         };
         // its secrets go to wrangler's local store in the node's own state
         // (seeded once a state, bound by name as a deploy binds them)
