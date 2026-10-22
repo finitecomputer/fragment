@@ -795,6 +795,32 @@ fragment.club until cutover (decisions 34–35).
   rules as its conformance suite, and the e2e passes against it as well
   as against the fake.
 
+## No mail without Email Sending
+
+- **Observed:** 2026-10-22, re-porting the self-hosted lane onto master
+  (docs/self-host.md, seam 1). The platform's mail (invites, a key added,
+  an org's seat, an export ready, a trial code) goes through Cloudflare
+  Email Sending's binding (`EMAIL`, `cell/src/mail.rs`), or in dev and the
+  e2e to the mail fake (`FRAGMENT_MAIL_URL`). celld has no Email Sending:
+  its deploy refuses `send_email`, and a self-hosted deployment has no
+  fake.
+- **Shortcut:** with neither, `mail::send` sends nothing and logs one
+  warning per message (`mail.unsent`: "email not sent: this runtime has no
+  mailer, not yet implemented"), and answers no message id, never an
+  error, so the flow around it goes on: an invite still waits on its
+  email and a sign-in as it meets it; a key is still added. An org's
+  `mailed` and a trial's `sent` say false. Paul, 2026-10-22: not solved in
+  this pass.
+- **Risk:** no one hears of what was meant for them: an invitee learns of
+  an invite only from the sharer, and the share sheet still says "we
+  mailed them a link".
+- **First proof:** the restart section on celld (`FRAGMENT_E2E_RUNTIME=
+  celld`): a node with no mailer, an invite to someone new, their first
+  sign-in, and the warnings in the node's log.
+- **Delete when:** a self-hosted deployment names a mailer of its own
+  (SMTP, or a company's relay, behind the same `send`), or the share sheet
+  and its kin say plainly that nothing was mailed.
+
 ## Channel drafts' refusals have no e2e
 
 - **Observed:** the cut (2026-10-02) took the lane that drove

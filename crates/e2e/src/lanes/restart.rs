@@ -443,5 +443,48 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.ok(&format!("after a crash a delete's cleanup it cut short finishes ({lists_left} lists were left to tell)"), lists_left > 0 && cleaned, last);
     let r = api.signed(&member, "GET", "/api/fragments", None)?;
     s.ok("and the deleted fragment has left its member's list", r.status == 200 && !r.text.contains(&format!("\"{ended}\"")), &r);
+    no_mailer(s)
+}
+
+/// What a node with no mailer says of each mail it does not send
+/// (cell/src/mail.rs).
+const NO_MAILER: &str = "email not sent: this runtime has no mailer, not yet implemented";
+
+/// A runtime with no mailer (celld has no Email Sending, and a self-hosted
+/// deployment no mail fake: docs/technical-debt-ledger.md, "No mail without
+/// Email Sending"): an invite still waits on its email, a sign-in as it
+/// meets it, and each mail the platform would have sent (the invite, the
+/// key's) is said in the node's log, never an error. Then the node as the
+/// lanes expect it again.
+fn no_mailer(s: &mut Suite) -> Result<()> {
+    const CHECKS: [&str; 2] = [
+        "with no mailer, an invite to someone new still waits on their email, and their first sign-in as it makes them a member",
+        "and each mail it would have sent (the invite, the sign-in's key) is said in the node's log, not sent",
+    ];
+    if !s.on_celld() {
+        for c in CHECKS {
+            s.skip(c, "wrangler dev binds Email Sending (its local stand-in): a mailer is always there");
+        }
+        return Ok(());
+    }
+    s.stop()?;
+    let api = s.start_without_mail()?;
+    let owner = api.person()?;
+    let name = s.named(&api, &owner, "no-mailer")?;
+    s.create(&api, &owner, &name)?;
+    let newcomer = Keys::generate();
+    // not an e2e person's address, which the cell never mails (its test hooks)
+    let email = format!("newcomer-{}@example.com", &newcomer.pubkey_hex()[..12]);
+    let invited = api.signed(&owner, "POST", &format!("/api/f/{name}/invites"), Some(&json!({ "email": email, "role": "viewer" })))?;
+    let session = api.sign_in(&email)?;
+    api.approve(&session, &newcomer)?;
+    let r = api.signed(&newcomer, "GET", "/api/fragments", None)?;
+    let role = r.body["fragments"].as_array().and_then(|a| a.iter().find(|f| f["name"] == name.as_str())).and_then(|f| f["role"].as_str().map(str::to_string));
+    s.ok(CHECKS[0], invited.status == 200 && invited.body["invited"]["email"] == email.as_str() && role.as_deref() == Some("viewer"), format!("{invited} | {r}"));
+    let said = s.eventually(Duration::from_secs(10), || s.node_log().is_some_and(|l| l.matches(NO_MAILER).count() >= 2));
+    let log = s.node_log().unwrap_or_default();
+    s.ok(CHECKS[1], said, log.lines().filter(|l| l.contains("mail")).collect::<Vec<_>>().join("\n"));
+    s.stop()?;
+    s.start(false)?;
     Ok(())
 }

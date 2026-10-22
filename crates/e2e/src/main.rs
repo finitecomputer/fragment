@@ -78,6 +78,9 @@ enum Shape {
     /// price of its own) and nothing else changed: a row an operator adds,
     /// with no version to raise (#451).
     OneKeyMore,
+    /// As `Plain`, with no mailer: no mail fake and no sender, as a
+    /// self-hosted deployment on celld (no Email Sending) runs.
+    NoMailer,
 }
 
 /// Finite Private's key on a node shaped as Finite's (`Shape::FinitePrivate`):
@@ -582,6 +585,19 @@ impl Suite {
         started
     }
 
+    /// Starts the node with no mailer (`Shape::NoMailer`).
+    pub fn start_without_mail(&mut self) -> Result<Api> {
+        self.shape = Shape::NoMailer;
+        let started = self.start(false);
+        self.shape = Shape::Plain;
+        started
+    }
+
+    /// This node boot's log, as written so far (`None`: no node runs).
+    pub fn node_log(&self) -> Option<String> {
+        self.node.as_ref().map(|n| std::fs::read_to_string(&n.log).unwrap_or_default())
+    }
+
     fn start_shaped(&mut self, shape: Shape) -> Result<Api> {
         self.shape = shape;
         let started = self.start(false);
@@ -624,8 +640,8 @@ impl Suite {
                 _ => vec![],
             },
             model_key_value: matches!(self.shape, Shape::FinitePrivate).then(|| FINITE_PRIVATE_KEY.to_string()),
-            mail_url: Some(self.mail.node().url.clone()),
-            mail_from: Some(MAIL_FROM.into()),
+            mail_url: (self.shape != Shape::NoMailer).then(|| self.mail.node().url.clone()),
+            mail_from: (self.shape != Shape::NoMailer).then(|| MAIL_FROM.into()),
             default_plan: Some(DEFAULT_PLAN.into()),
             delivery_retry_s: Some(1),
             workos: Some(devstack::WorkOsVars {
@@ -642,7 +658,7 @@ impl Suite {
             }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
-                Shape::Plain | Shape::FinitePrivate | Shape::SellsNothing | Shape::OneKeyMore => format!("http://127.0.0.1:{}", self.port),
+                Shape::Plain | Shape::FinitePrivate | Shape::SellsNothing | Shape::OneKeyMore | Shape::NoMailer => format!("http://127.0.0.1:{}", self.port),
             },
             operators: Some(
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
@@ -699,7 +715,7 @@ impl Suite {
     fn suffix(&self) -> &'static str {
         match self.shape {
             Shape::TwoSites => BOATS,
-            Shape::Plain | Shape::FinitePrivate | Shape::SellsNothing | Shape::OneKeyMore => SUFFIX,
+            Shape::Plain | Shape::FinitePrivate | Shape::SellsNothing | Shape::OneKeyMore | Shape::NoMailer => SUFFIX,
         }
     }
 
