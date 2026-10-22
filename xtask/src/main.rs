@@ -242,9 +242,9 @@ fn dev(args: &[String]) -> Result<()> {
         Some(s) => Some(lan::start(s, dev_port, at(DEV_DEX_PORT))?),
         None => None,
     };
-    let box_node = match (&lan, std::env::var_os(devstack::sandcastle::NODES_FILE_VAR)) {
-        (Some(l), None) => lan::box_node(l, at(DEV_NODE_PORT))?,
-        _ => None,
+    let box_node = match &lan {
+        Some(l) => lan::box_node(l, at(DEV_NODE_PORT))?,
+        None => None,
     };
     // sign-in: on the LAN, Dex alone; else a real WorkOS environment when
     // its files are named (its redirect URI must include
@@ -303,8 +303,8 @@ fn dev(args: &[String]) -> Result<()> {
     };
     // computers on sandcastle nodes (docs/self-host.md, seam 2): a node
     // list, each node's secret in a file of its own beside it (on the LAN,
-    // the box's node's, unless FRAGMENT_NODES_FILE names another), and
-    // whether people may pair their own
+    // the one the box's node's start wrote, unless FRAGMENT_NODES_FILE names
+    // another), and whether people may pair their own
     let nodes = match (std::env::var_os(devstack::sandcastle::NODES_FILE_VAR), &box_node) {
         (Some(file), _) => Some(devstack::sandcastle::NodesFile::read(Path::new(&file))?),
         (None, Some(b)) => Some(devstack::sandcastle::NodesFile::read(&b.list)?),
@@ -407,6 +407,13 @@ fn dev(args: &[String]) -> Result<()> {
         None => println!("  cards:        Browser Rendering's local mode (wrangler's Chrome for Testing)"),
     }
     match (&fleet.nodes, &box_node) {
+        (Some(_), Some(b)) if std::env::var_os(devstack::sandcastle::NODES_FILE_VAR).is_some() => println!(
+            "  computers:    on the nodes {} lists; this box's engine through its node at {} (log {}), new ones on {}",
+            std::env::var(devstack::sandcastle::NODES_FILE_VAR).unwrap_or_default(),
+            b.url,
+            b.log.display(),
+            computer_image.as_deref().unwrap_or("?"),
+        ),
         (Some(_), Some(b)) => println!(
             "  computers:    on this box's sandcastle engine, through its node at {} (log {}; the list {}), new ones on {}{}",
             b.url,

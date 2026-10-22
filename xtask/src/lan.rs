@@ -333,22 +333,61 @@ impl NodeImages {
         std::fs::rename(&tmp, &path).with_context(|| format!("write {}", path.display()))
     }
 
-    /// The record for `engine`, or what to do when there is none.
-    fn read(engine: &Path) -> Result<NodeImages> {
-        let path = devstack::repo_root().join(NODE_IMAGES_FILE);
-        let text = std::fs::read_to_string(&path).with_context(|| format!("no {} yet: load the computers' images into the engine first, `cargo xtask node-images` (docs/self-host-lan.md, step 2)", path.display()))?;
-        let record: NodeImages = serde_json::from_str(&text).with_context(|| format!("{} is node-images' record", path.display()))?;
-        anyhow::ensure!(record.engine == engine, "{} names the images loaded into {}, not {}: `cargo xtask node-images --engine {}`", path.display(), record.engine.display(), engine.display(), engine.display());
-        anyhow::ensure!(record.arch == std::env::consts::ARCH, "{} holds {} images, not {}'s", path.display(), record.arch, std::env::consts::ARCH);
-        Ok(record)
+    fn read_file(path: &Path) -> Result<NodeImages> {
+        let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_str(&text).with_context(|| format!("{} is node-images' record", path.display()))
     }
+
+    /// The `images` of the box's node list: this checkout's record for
+    /// `engine` (this machine's architecture), and the records of other
+    /// architectures' engines kept in `state` as `node-images-<arch>.json`
+    /// (a paired Mac's, copied from its checkout), each image by
+    /// architecture: a digest an engine gave names nothing on another's.
+    fn merged(engine: &Path, state: &Path) -> Result<serde_json::Map<String, serde_json::Value>> {
+        let path = devstack::repo_root().join(NODE_IMAGES_FILE);
+        anyhow::ensure!(path.is_file(), "no {} yet: load the computers' images into the engine first, `cargo xtask node-images` (docs/self-host-lan.md, step 2)", path.display());
+        let own = NodeImages::read_file(&path)?;
+        anyhow::ensure!(own.engine == engine, "{} names the images loaded into {}, not {}: `cargo xtask node-images --engine {}`", path.display(), own.engine.display(), engine.display(), engine.display());
+        anyhow::ensure!(own.arch == std::env::consts::ARCH, "{} holds {} images, not {}'s", path.display(), own.arch, std::env::consts::ARCH);
+        let mut records = vec![own];
+        let mut others: Vec<PathBuf> = std::fs::read_dir(state)
+            .with_context(|| format!("read {}", state.display()))?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("node-images-") && n.ends_with(".json")))
+            .collect();
+        others.sort();
+        // bounded: the state's files
+        for path in others {
+            let record = NodeImages::read_file(&path)?;
+            let named = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+            anyhow::ensure!(named == format!("node-images-{}.json", record.arch), "{} holds {} images: name it node-images-{}.json", path.display(), record.arch, record.arch);
+            anyhow::ensure!(record.arch != std::env::consts::ARCH, "{}: this machine's own images are this checkout's record ({NODE_IMAGES_FILE})", path.display());
+            records.push(record);
+        }
+        Ok(by_arch(records))
+    }
+}
+
+/// Each image's references by the architecture of the engine that gave
+/// them (`FRAGMENT_NODES`' `{"<name>": {"<arch>": "<reference>"}}`).
+fn by_arch(records: Vec<NodeImages>) -> serde_json::Map<String, serde_json::Value> {
+    let mut images = serde_json::Map::new();
+    for r in records {
+        for (name, reference) in r.images {
+            let refs = images.entry(name).or_insert_with(|| serde_json::json!({}));
+            refs[r.arch.as_str()] = reference;
+        }
+    }
+    images
 }
 
 /// The box's node: `sandcastle-node serve` in front of this machine's
 /// engine, this process's child, stopped when this is dropped.
 pub struct BoxNode {
-    /// The node list the cell is given (`$FRAGMENT_LAN_STATE/nodes.json`,
-    /// written at each start).
+    /// The node list the stack wrote for it (`$FRAGMENT_LAN_STATE/nodes.json`,
+    /// written at each start): the cell's, unless `FRAGMENT_NODES_FILE`
+    /// names another.
     pub list: PathBuf,
     pub log: PathBuf,
     pub url: String,
@@ -360,15 +399,16 @@ pub struct BoxNode {
 /// `$FRAGMENT_LAN_STATE/node` (the secret made once, 0600), its platform
 /// the front door and its roots the CA's (a computer's intercepts go to
 /// `<platform>/api/nodes/egress`, which the platform takes on its own host
-/// alone), and the node list naming it with the images `cargo xtask
-/// node-images` loaded last. Its capacity is the engine's `vms_max`.
+/// alone), and a node list naming it (`box`, its capacity the engine's
+/// `vms_max`) with the images `cargo xtask node-images` loaded last
+/// (`NodeImages::merged`).
 pub fn box_node(lan: &Lan, port: u16) -> Result<Option<BoxNode>> {
     let s = &lan.settings;
     let Some(engine) = &s.engine else { return Ok(None) };
     let vms = devstack::sandcastle::real_engine_vms(engine).with_context(|| {
         format!("the sandcastle engine at {} (is its service running, and may this user reach its socket? FRAGMENT_LAN_ENGINE=none runs the stack with no computers)", engine.display())
     })?;
-    let images = NodeImages::read(engine)?;
+    let images = NodeImages::merged(engine, &s.state)?;
     let dir = s.state.join("node");
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
@@ -389,7 +429,7 @@ pub fn box_node(lan: &Lan, port: u16) -> Result<Option<BoxNode>> {
     let url = format!("http://{listen}");
     let list = serde_json::json!({
         "nodes": [{ "id": BOX_NODE, "url": url, "arch": std::env::consts::ARCH, "capacity": vms, "secret_file": secret_file }],
-        "images": images.images,
+        "images": images,
     });
     let list_file = s.state.join("nodes.json");
     std::fs::write(&list_file, serde_json::to_string_pretty(&list)?)?;
@@ -545,6 +585,25 @@ mod tests {
             let e = settings(&[(k, v)]).unwrap_err();
             assert!(format!("{e:#}").contains(k), "{k}: {e:#}");
         }
+    }
+
+    // Goal: the box's list names each image by the architecture of the
+    // engine whose digest it is, and parses as the cell parses
+    // FRAGMENT_NODES: a node of each architecture runs its own reference,
+    // and an image one architecture lacks is none of the other's.
+    #[test]
+    fn the_box_list_names_each_image_by_architecture() {
+        use fragment_core::placement::{Arch, Byoc, Nodes};
+        let record = |arch: &str, refs: serde_json::Value| NodeImages { engine: "/var/lib/sandcastle".into(), arch: arch.into(), images: refs.as_object().unwrap().clone() };
+        let images = by_arch(vec![
+            record("x86_64", serde_json::json!({ "hermes": "docker.io/library/fragment-hermes@sha256:aa", "stub": "docker.io/library/fragment-stub@sha256:bb" })),
+            record("aarch64", serde_json::json!({ "hermes": "docker.io/library/fragment-hermes@sha256:cc" })),
+        ]);
+        let list = serde_json::json!({ "nodes": [{ "id": BOX_NODE, "url": "http://127.0.0.1:8808", "arch": "x86_64", "capacity": 16 }], "images": images });
+        let nodes = Nodes::parse(&list.to_string(), Byoc::On).unwrap();
+        assert_eq!(nodes.reference("hermes", Arch::parse("x86_64").unwrap()), Some("docker.io/library/fragment-hermes@sha256:aa"));
+        assert_eq!(nodes.reference("hermes", Arch::parse("aarch64").unwrap()), Some("docker.io/library/fragment-hermes@sha256:cc"));
+        assert_eq!(nodes.reference("stub", Arch::parse("aarch64").unwrap()), None, "an x86_64 digest names nothing on arm64");
     }
 
     // Goal: the default route's gateway is read from the kernel's table.
