@@ -23,7 +23,10 @@
 //!   `✏️ Type your answer:` after "Other") is a `send`: a reply part, and
 //!   the turn asks (`Event::Asked`); the asker's next message comes back as
 //!   an inbound in the same chat at once (`Command::Tell`), which Hermes'
-//!   clarify intercept takes as the answer mid-turn. A Stop while it asks,
+//!   clarify intercept takes as the answer mid-turn; files sent with it
+//!   come as lines of its words (the driver's), as the clarify takes words
+//!   alone. A clarify card's owner's message is its "Other" with those
+//!   words (`Command::Answer`): the answer, then the words. A Stop while it asks,
 //!   or while a clarify's card of choices is open, interrupts, then answers
 //!   `skip` (`wire::STOP_WORDS`) so the waiting clarify lets go;
 //! - `👀` on, then off as the turn ends, then `✅` or `❌` (Hermes'
@@ -478,7 +481,7 @@ impl Loop {
                     self.emit(Event::End { turn, outcome: Outcome::Stopped }).await;
                 }
             }
-            Command::Answer { turn, prompt, option, seq, by, words } => {
+            Command::Answer { turn, prompt, option, seq, by, words, .. } => {
                 // Answered or expired, the card asks no more: a Stop after
                 // it says nothing to a clarify.
                 if let Some(f) = self.inflight.get_mut(&turn) {
@@ -504,7 +507,7 @@ impl Loop {
                 }
             }
             Command::Forget { turn } => self.forget(&turn),
-            Command::Tell { turn, seq, by, by_name, text } => self.tell(&turn, seq, &by, &by_name, &text),
+            Command::Tell { turn, seq, by, by_name, text, .. } => self.tell(&turn, seq, &by, &by_name, &text),
             Command::Aside { agent, fragment, chat_name, turn, id, by, by_name, text } => {
                 // in the agent's chat, as it is, kept until Hermes acks it:
                 // Hermes takes a command mid-turn (`/steer` lands in the

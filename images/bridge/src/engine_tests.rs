@@ -330,7 +330,7 @@ fn an_approval_answered() {
     let bad = said(&mut e, &a, &v, 3, "npub1paul", json!({ "kind": "prompt_response", "prompt": "ab12.0011", "option": "always" }), T0 + 21);
     assert!(commands(&bad).is_empty(), "not an option of this prompt");
     let yes = said(&mut e, &a, &v, 4, "npub1paul", json!({ "kind": "prompt_response", "prompt": "ab12.0011", "option": "once" }), T0 + 22);
-    assert_eq!(commands(&yes), vec![Command::Answer { turn: turn.clone(), prompt: "ab12.0011".into(), option: Some("once".into()), seq: 4, by: "npub1paul".into(), words: None }]);
+    assert_eq!(commands(&yes), vec![Command::Answer { turn: turn.clone(), prompt: "ab12.0011".into(), option: Some("once".into()), seq: 4, by: "npub1paul".into(), words: None, attached: None }]);
     assert_eq!(posts(&yes)[0].1, json!({ "kind": "turn.prompt.closed", "turn": turn, "prompt": "ab12.0011", "outcome": "answered", "option": "once", "by": "npub1paul" }));
     assert_eq!(keepalive(&yes), None, "still awake, running again");
     let second = said(&mut e, &a, &v, 5, "npub1paul", json!({ "kind": "prompt_response", "prompt": "ab12.0011", "option": "deny" }), T0 + 23);
@@ -357,7 +357,7 @@ fn an_answer_to_another_agents_card_of_the_same_prompt_id_answers_nothing() {
     let other_turn = said(&mut e, &a, &v, 3, "npub1paul", answer(&a.identity, "another-turn"), T0 + 21);
     assert!(commands(&other_turn).is_empty() && posts(&other_turn).is_empty(), "nor is one to another turn of its own");
     let mine = said(&mut e, &a, &v, 4, "npub1paul", answer(&a.identity, &turn), T0 + 22);
-    assert_eq!(commands(&mine), vec![Command::Answer { turn: turn.clone(), prompt: "p1".into(), option: Some("once".into()), seq: 4, by: "npub1paul".into(), words: None }], "its own card, named, is answered");
+    assert_eq!(commands(&mine), vec![Command::Answer { turn: turn.clone(), prompt: "p1".into(), option: Some("once".into()), seq: 4, by: "npub1paul".into(), words: None, attached: None }], "its own card, named, is answered");
 }
 
 /// Goal (Paul on p5, 2026-10-09: "'other' type your answer for questions
@@ -376,7 +376,7 @@ fn other_answered_in_words_on_its_card() {
     let p = ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "q.1".into(), text: "Which color?".into(), options: options.clone(), ttl_ms: None }, T0 + 10);
     assert_eq!(posts(&p)[0].1["options"][1], json!({ "id": "other", "label": "Other", "words": true }), "the card says which option takes words");
     let other = said(&mut e, &a, &v, 2, "npub1paul", json!({ "kind": "prompt_response", "prompt": "q.1", "option": "other", "text": "purple" }), T0 + 20);
-    assert_eq!(commands(&other), vec![Command::Answer { turn: turn.clone(), prompt: "q.1".into(), option: Some("other".into()), seq: 2, by: "npub1paul".into(), words: Some("purple".into()) }]);
+    assert_eq!(commands(&other), vec![Command::Answer { turn: turn.clone(), prompt: "q.1".into(), option: Some("other".into()), seq: 2, by: "npub1paul".into(), words: Some("purple".into()), attached: None }]);
     assert_eq!(posts(&other)[0].1, json!({ "kind": "turn.prompt.closed", "turn": turn, "prompt": "q.1", "outcome": "answered", "option": "other", "by": "npub1paul", "text": "purple" }));
     // the turn asks nothing after: the next message waits as a turn of its own
     let next = said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": "and now?" }), T0 + 30);
@@ -386,7 +386,7 @@ fn other_answered_in_words_on_its_card() {
     let p2 = ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "q.2".into(), text: "Again?".into(), options, ttl_ms: None }, T0 + 40);
     assert_eq!(posts(&p2).len(), 1);
     let red = said(&mut e, &a, &v, 4, "npub1paul", json!({ "kind": "prompt_response", "prompt": "q.2", "option": "c0", "text": "sneaky" }), T0 + 50);
-    assert_eq!(commands(&red), vec![Command::Answer { turn: turn.clone(), prompt: "q.2".into(), option: Some("c0".into()), seq: 4, by: "npub1paul".into(), words: None }]);
+    assert_eq!(commands(&red), vec![Command::Answer { turn: turn.clone(), prompt: "q.2".into(), option: Some("c0".into()), seq: 4, by: "npub1paul".into(), words: None, attached: None }]);
     assert!(posts(&red)[0].1.get("text").is_none(), "{:?}", posts(&red));
 }
 
@@ -403,7 +403,7 @@ fn an_approval_expires() {
     assert!(e.step(Input::Tick, T0 + 29_999).effects.is_empty(), "not yet");
     let t = e.step(Input::Tick, T0 + 30_000);
     assert_eq!(posts(&t)[0].1["outcome"], "expired");
-    assert_eq!(commands(&t), vec![Command::Answer { turn: turn.clone(), prompt: "p1".into(), option: None, seq: 0, by: String::new(), words: None }]);
+    assert_eq!(commands(&t), vec![Command::Answer { turn: turn.clone(), prompt: "p1".into(), option: None, seq: 0, by: String::new(), words: None, attached: None }]);
     let late = said(&mut e, &a, &v, 2, "npub1paul", json!({ "kind": "prompt_response", "prompt": "p1", "option": "once" }), T0 + 40_000);
     assert!(commands(&late).is_empty());
     // a prompt no card can show is expired at once
@@ -436,7 +436,7 @@ fn an_open_card_keeps_its_computer_awake_until_it_expires() {
     assert!(quiet.effects.is_empty() && e.keepalive(), "held to the card's last moment");
     let x = e.step(Input::Tick, T0 + 10 + 60_000);
     assert_eq!(posts(&x), vec![(records::work_id(&turn, "pc:p1"), json!({ "kind": "turn.prompt.closed", "turn": turn, "prompt": "p1", "outcome": "expired" }))]);
-    assert_eq!(commands(&x), vec![Command::Answer { turn: turn.clone(), prompt: "p1".into(), option: None, seq: 0, by: String::new(), words: None }]);
+    assert_eq!(commands(&x), vec![Command::Answer { turn: turn.clone(), prompt: "p1".into(), option: None, seq: 0, by: String::new(), words: None, attached: None }]);
     assert_eq!((e.state().turns[&turn].phase, keepalive(&x), e.keepalive()), (Phase::Running, None, true), "running again, as its runtime goes on without the answer");
     // the runtime ends it (Hermes: its approval timed out with the card, the
     // command BLOCKED, then its reply): the message that waited is run
@@ -720,8 +720,8 @@ fn a_question_is_answered_by_the_next_message() {
     // invalid: another person's message, an empty one, one to the other agent
     let skyler = said(&mut e, &a, &v, 2, "npub1skyler", json!({ "text": "tomatoes?" }), T0 + 3);
     assert!(commands(&skyler).is_empty(), "queued behind it, as any message is");
-    let empty = said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": " ", "attachments": [{ "sha256": "c".repeat(64), "size": 1, "type": "image/png", "name": "p.png" }] }), T0 + 4);
-    assert!(!commands(&empty).iter().any(|c| matches!(c, Command::Tell { .. })), "no words, no answer");
+    let empty = said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": " " }), T0 + 4);
+    assert!(!commands(&empty).iter().any(|c| matches!(c, Command::Tell { .. })), "no words and no files, no answer");
     let other = said(&mut e, &b, &v, 4, "npub1paul", json!({ "text": "@rowan hi" }), T0 + 5);
     assert!(!commands(&other).iter().any(|c| matches!(c, Command::Tell { .. })));
     let to_rowan = said(&mut e, &a, &v, 4, "npub1paul", json!({ "text": "@rowan hi" }), T0 + 5);
@@ -729,7 +729,7 @@ fn a_question_is_answered_by_the_next_message() {
 
     // valid: the asker's next message is the answer
     let told = said(&mut e, &a, &v, 5, "npub1paul", json!({ "text": "Tomatoes, at dawn" }), T0 + 6);
-    assert_eq!(commands(&told), vec![Command::Tell { turn: turn.clone(), seq: 5, by: "npub1paul".into(), by_name: "paul".into(), text: "Tomatoes, at dawn".into() }]);
+    assert_eq!(commands(&told), vec![Command::Tell { turn: turn.clone(), seq: 5, by: "npub1paul".into(), by_name: "paul".into(), text: "Tomatoes, at dawn".into(), attached: None }]);
     assert!(posts(&told).is_empty(), "no turn of its own");
     assert!(told.dirty && !e.state().turns[&turn].asking);
     // replay: behind the cursor, nothing
@@ -787,6 +787,99 @@ fn a_question_waits_as_long_as_a_prompt() {
     // asker's next message is a turn of its own, queued behind it
     let after = said(&mut e, &a, &v, 4, "npub1paul", json!({ "text": "never mind" }), T0 + 3_600_005);
     assert!(commands(&after).is_empty() && !e.state().turns.values().any(|t| t.asking), "queued, not told");
+}
+
+/// A photo, as a message's record names it.
+fn photo(name: &str) -> Value {
+    json!({ "sha256": "c".repeat(64), "size": 1, "type": "image/png", "name": name })
+}
+
+/// Files `paul` sent juniper in `talk`, as the engine hands them on.
+fn attached(a: &Agent, names: &[&str]) -> Option<Attached> {
+    Some(Attached { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), by_name: "paul".into(), refs: names.iter().map(|n| serde_json::from_value(photo(n)).expect("a ref")).collect() })
+}
+
+/// Goal: a question in words is answered with files too (photos sent as
+/// the answer), with words or none: the asker's message is the answer, its
+/// files with it for the driver to download and name in its words, never
+/// a turn queued behind the question (where it waited out the question's
+/// hour). Replay: the message again tells nothing; asked no longer, a
+/// message of files is queued as any message is.
+#[test]
+fn a_question_is_answered_with_files() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "which photo?" }), T0)).expect("started").turn;
+    ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 1);
+    let only = said(&mut e, &a, &v, 2, "npub1paul", json!({ "attachments": [photo("a.png"), photo("b.png")] }), T0 + 2);
+    assert_eq!(commands(&only), vec![Command::Tell { turn: turn.clone(), seq: 2, by: "npub1paul".into(), by_name: "paul".into(), text: String::new(), attached: attached(&a, &["a.png", "b.png"]) }], "files alone answer it");
+    assert!(posts(&only).is_empty() && only.dirty && !e.state().turns[&turn].asking, "no turn of its own");
+    assert_eq!(said(&mut e, &a, &v, 2, "npub1paul", json!({ "attachments": [photo("a.png"), photo("b.png")] }), T0 + 3), Step::default(), "replay: nothing");
+    ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 4);
+    let both = said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": "this one", "attachments": [photo("c.png")] }), T0 + 5);
+    assert_eq!(commands(&both), vec![Command::Tell { turn: turn.clone(), seq: 3, by: "npub1paul".into(), by_name: "paul".into(), text: "this one".into(), attached: attached(&a, &["c.png"]) }], "words and files");
+    let next = said(&mut e, &a, &v, 4, "npub1paul", json!({ "attachments": [photo("d.png")] }), T0 + 6);
+    assert!(commands(&next).is_empty() && started(&next).is_none(), "asked no longer: queued");
+    let end = ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 7);
+    assert_eq!(started(&end).map(|t| t.attachments.len()), Some(1), "then run as a turn of its own, its file with it");
+}
+
+/// Goal (Paul on production, 2026-10-22: he typed his answer to a card in
+/// the message box, and it stayed queued, the card open, for up to the
+/// card's hour): while the agent's turn waits on a card that takes words
+/// (a clarify's "Other"), its owner's message in the chat answers it, as
+/// if typed on the card: the card closes answered with their words (or the
+/// names of the files they sent), the turn runs on, and the runtime is
+/// given that option and the words, files and all; no turn is queued.
+/// Invalid: someone else's message is queued (only the owner answers a
+/// card); a card that takes no words (an approval's Allow and Deny) takes a
+/// press alone, its owner's message queued behind it. Replay: the message
+/// again answers nothing; answered, the card takes no more.
+#[test]
+fn a_message_answers_a_card_that_takes_words() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "what should I plant?" }), T0)).expect("started").turn;
+    let options = || vec![PromptOption { id: "c0".into(), label: "Basil".into(), style: None, words: false }, PromptOption { id: "other".into(), label: "Other".into(), style: None, words: true }];
+    let card = |e: &mut Engine, prompt: &str, now: u64| ev(e, Event::Prompt { turn: turn.clone(), prompt: prompt.into(), text: "What should I plant?".into(), options: options(), ttl_ms: None }, now);
+    card(&mut e, "q.1", T0 + 1);
+    let open = |e: &Engine, prompt: &str| e.state().turns[&turn].prompts.iter().any(|p| p.id == prompt && !p.closed);
+
+    // invalid: someone else's message waits its turn, the card open
+    let skyler = said(&mut e, &a, &v, 2, "npub1skyler", json!({ "text": "tomatoes!" }), T0 + 2);
+    assert!(commands(&skyler).is_empty() && open(&e, "q.1") && e.state().turns[&turn].phase == Phase::Waiting, "queued, as any message is");
+
+    // valid: its owner's words answer it
+    let typed = said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": "Tomatoes" }), T0 + 3);
+    let closed = |prompt: &str, text: &str| (records::work_id(&turn, &format!("pc:{prompt}")), json!({ "kind": "turn.prompt.closed", "turn": turn, "prompt": prompt, "outcome": "answered", "option": "other", "by": "npub1paul", "text": text }));
+    assert_eq!(posts(&typed), vec![closed("q.1", "Tomatoes")], "the card closes with their words; no turn of its own");
+    assert_eq!(commands(&typed), vec![Command::Answer { turn: turn.clone(), prompt: "q.1".into(), option: Some("other".into()), seq: 3, by: "npub1paul".into(), words: Some("Tomatoes".into()), attached: None }]);
+    assert!(typed.dirty && !open(&e, "q.1") && e.state().turns[&turn].phase == Phase::Running, "the turn runs on");
+    assert_eq!(said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": "Tomatoes" }), T0 + 4), Step::default(), "replay: nothing");
+    let more = said(&mut e, &a, &v, 4, "npub1paul", json!({ "text": "and basil" }), T0 + 5);
+    assert!(commands(&more).is_empty() && posts(&more).is_empty(), "answered, the card takes no more: queued");
+
+    // words and files; then files alone, the card showing their names
+    card(&mut e, "q.2", T0 + 6);
+    let both = said(&mut e, &a, &v, 5, "npub1paul", json!({ "text": "these", "attachments": [photo("a.png")] }), T0 + 7);
+    assert_eq!(posts(&both), vec![closed("q.2", "these")]);
+    assert_eq!(commands(&both), vec![Command::Answer { turn: turn.clone(), prompt: "q.2".into(), option: Some("other".into()), seq: 5, by: "npub1paul".into(), words: Some("these".into()), attached: attached(&a, &["a.png"]) }]);
+    card(&mut e, "q.3", T0 + 8);
+    let only = said(&mut e, &a, &v, 6, "npub1paul", json!({ "attachments": [photo("a.png"), photo("b.png")] }), T0 + 9);
+    assert_eq!(posts(&only), vec![closed("q.3", "a.png, b.png")]);
+    assert_eq!(commands(&only), vec![Command::Answer { turn: turn.clone(), prompt: "q.3".into(), option: Some("other".into()), seq: 6, by: "npub1paul".into(), words: Some(String::new()), attached: attached(&a, &["a.png", "b.png"]) }]);
+
+    // a card that takes no words takes a press alone
+    let approval = vec![PromptOption { id: "once".into(), label: "Allow".into(), style: None, words: false }, PromptOption { id: "deny".into(), label: "Deny".into(), style: None, words: false }];
+    ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "p.4".into(), text: "Fill your card?".into(), options: approval, ttl_ms: None }, T0 + 10);
+    let yes = said(&mut e, &a, &v, 7, "npub1paul", json!({ "text": "yes go ahead" }), T0 + 11);
+    assert!(commands(&yes).is_empty() && posts(&yes).is_empty() && open(&e, "p.4"), "queued, the card open for its press");
+
+    // its end: what waited runs, in order, skyler's first
+    let end = ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 12);
+    assert_eq!(started(&end).map(|t| t.text), Some("tomatoes!".to_string()));
 }
 
 // ---- commands: the runtime's menu, from the agent's owner ----

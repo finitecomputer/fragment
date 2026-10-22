@@ -12,10 +12,12 @@
 //! - `choose`: a prompt of choices (`c0` Basil, `c1` Mint) and `other`, answered
 //!   in words, as Hermes' clarify asks it; the reply says `(chose: <the
 //!   label, or the words>)`, or `(chose: nothing)` once it expired. `other`
-//!   answered with no words asks "Type your answer:" as `ask-me` does;
+//!   answered with no words asks "Type your answer:" as `ask-me` does; its
+//!   owner's message while it is open is `other` with its words;
 //! - `ask-me`: the reply's first part asks "What should I call it?", and the
 //!   turn waits for the asker's next message (`Event::Asked`), then ends
-//!   saying `(told: <their words>)`;
+//!   saying `(told: <their words>)` (files sent with an answer are lines of
+//!   its words, each where it is: the driver's);
 //! - `slow`: twenty drafts, `pace` apart, before the reply (for Stop);
 //! - `fail`: the turn ends as an error;
 //! - `silent`: the turn ends with no reply;

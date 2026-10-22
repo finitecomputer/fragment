@@ -467,6 +467,22 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the page answered with the option and its words, `{option, text}`", answer["body"]["text"] == "rosemary", &answer);
     let _ = chrome.screenshot(&page, &shots.join("desktop-choices-answered.png"));
 
+    // the same card answered in the message box (Paul on production,
+    // 2026-10-22: his typed reply stayed queued and the card open): the
+    // composer says what they type answers it; sent, the card closes with
+    // their words, the agent has them, and the message waits for nothing
+    say(&mut chrome, "choose again")?;
+    let open = shows(&mut chrome, &page, &format!("!!document.querySelector({}) && {answer_here}", js(field)));
+    s.ok("a card that takes words open, the composer says what its owner types answers it", open, chrome.eval(&page, "document.getElementById('text').placeholder")?);
+    say(&mut chrome, "thyme")?;
+    let closed = shows(&mut chrome, &page, "[...document.querySelectorAll('.prompt.closed .outcome.answered')].some((o) => o.textContent.startsWith('thyme'))");
+    s.ok("sent from the message box, it answers the card: the card closes saying the words", closed, chrome.eval(&page, "[...document.querySelectorAll('.prompt')].map((p) => p.innerText)")?);
+    let ran_on = shows(&mut chrome, &page, &format!("{} && !document.querySelector('.prompt:not(.closed)') && !({answer_here})", replied("choose again (chose: thyme)")));
+    let waits = chrome.eval(&page, "[...document.querySelectorAll('.msg.user.mine')].some((m) => m.querySelector('.bubble')?.textContent === 'thyme' && !!m.querySelector('.queued'))")?;
+    let thyme = posted(s, "thyme");
+    let own_turns = records(api, &owner, &chat_name, "work").iter().filter(|r| r["body"]["kind"] == "turn.start" && r["body"]["cause"]["seq"] == thyme["seq"]).count();
+    s.ok("the turn goes on with them, and the message waits for nothing: never marked queued, no turn of its own", ran_on && waits == false && own_turns == 0, json!({ "queued": waits, "turns": own_turns }));
+
     // Stop: the send circle becomes Stop while the owner's turn runs. The
     // turn is the message's own (docs/chat-records.md): the page may still
     // show Stop for the turn before, whose end it has not heard yet, and a
@@ -592,7 +608,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     // nothing answered twice, and the computer goes back to sleep
     let turns: Vec<String> = records(api, &owner, &chat_name, "work").iter().filter(|r| r["body"]["kind"] == "turn.start").filter_map(|r| r["body"]["turn"].as_str().map(str::to_string)).collect();
     let once: std::collections::BTreeSet<&String> = turns.iter().collect();
-    s.ok("every message the page sent was one turn", turns.len() == 11 && once.len() == turns.len(), json!(turns));
+    s.ok("every message the page sent was one turn (the one that answered a card, none)", turns.len() == 12 && once.len() == turns.len(), json!(turns));
     let first_turn = turn_of(&agent_name, &chat_name, "chat", sent["seq"].as_i64().unwrap_or(0));
     s.ok("the first of them the turn of the page's first message", turns.first() == Some(&first_turn), json!({ "first": first_turn, "turns": turns }));
 
