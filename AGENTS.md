@@ -1,4 +1,4 @@
-# fragment-next
+# fragment
 
 Fragment is the product: stateful, multiplayer web apps published from
 the CLI. Agents are fragments a computer of your own runs (today, Hermes
@@ -76,7 +76,7 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   that preview cards' local Browser Rendering downloads, 126, about 145
   MB, in `target/cache/.wrangler/chrome`), `WRANGLER_CACHE_DIR=
   target/cache/wrangler`, and npm's in `target/cache/npm`; nothing goes
-  to the system's cache. Moving the pin: README.md, "The pinned Node".
+  to the system's cache. Moving the pin: docs/pinned-node.md.
 - `cargo xtask build`: the cell for wasm32, held to its budget
   (`CELL_WASM_MAX_BYTES`, 6.5 MB raw, xtask/src/build.rs: it fails over
   it, saying so), and the release's files (the templates, the shell's
