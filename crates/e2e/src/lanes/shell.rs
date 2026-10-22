@@ -780,6 +780,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.viewport(&page, 375, 812, true)?;
     let _ = b.screenshot(&page, &shots.join("phone-375-signed-out.png"));
     b.close(page)?;
+    still_loading_ui(s, api, &mut b, &shots)?;
 
     let email = format!("shell-ui-{}@e2e.test", crate::api::now_s());
     let session = api.sign_in(&email)?;
@@ -1255,6 +1256,79 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // a guest, in this browser, who then signs in to this seat
     guest_ui(s, api, &mut b, &email, &shots)?;
     println!("      (screenshots: {})", shots.display());
+    Ok(())
+}
+
+/// The shell drawn nothing for a while (#470's run: one of shell.js's
+/// imports never came, and the page stayed blank with nothing to press;
+/// its first answer never coming leaves it the same): it says it is still
+/// loading, with a reload of the same page, and only then. Valid: a page
+/// that loads never says it (drawn, it takes the line away). One of
+/// shell.js's imports refused: nothing for a while (a slow load is no
+/// failure), then "Still loading… Reload", its words and link on a phone's
+/// screen too; its Reload, the import let through, loads the same page,
+/// and the shell starts. Its scripts come but who is signed in is never
+/// answered: the same, and its Reload draws the shell.
+fn still_loading_ui(s: &mut Suite, api: &Api, b: &mut Browser, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let line = "document.getElementById('still-loading')";
+    let started = "(!document.getElementById('first-run').hidden || !document.getElementById('layout').hidden)";
+    let home = format!("{}/", api.base);
+    let page = b.open(&home)?;
+    let up = b.until(&page, started, wait);
+    let gone = b.eval(&page, &format!("!{line}"))?;
+    s.ok("a shell page that loads starts, and never says it is still loading (the line is taken away)", up && gone == true, &gone);
+    b.close(page)?;
+
+    let page = b.open_blocking(&home, &["*/__shell/billing.js"])?;
+    b.viewport(&page, 1280, 800, false)?;
+    let t0 = std::time::Instant::now();
+    let quiet = b.until(&page, &format!("document.readyState === 'complete' && !!{line} && getComputedStyle({line}).visibility === 'hidden'"), wait);
+    let shown = b.until(&page, &format!("!!{line} && getComputedStyle({line}).visibility === 'visible'"), wait);
+    let after = t0.elapsed();
+    let seen = b.eval(&page, &format!("({{ said: {line}?.textContent ?? null, link: {line}?.querySelector('a')?.href ?? null, started: {started} }})"))?;
+    let _ = b.screenshot(&page, &shots.join("still-loading.png"));
+    s.ok(
+        "one of shell.js's imports refused: nothing at first, then \"Still loading… Reload\", the link to this same page, the shell not started",
+        quiet && shown && after >= std::time::Duration::from_secs(8) && seen["said"] == "Still loading… Reload" && seen["link"] == home.as_str() && seen["started"] == false,
+        json!({ "seen": seen, "afterMs": after.as_millis() as u64 }),
+    );
+    b.viewport(&page, 375, 812, true)?;
+    let on_screen = format!(
+        "innerWidth === 375 && document.documentElement.scrollWidth <= innerWidth && [{line}.firstChild, {line}.querySelector('a')].every((n) => {{ const r = document.createRange(); r.selectNodeContents(n); const b = r.getBoundingClientRect(); return b.width > 0 && b.left >= 0 && b.right <= innerWidth && b.top >= 0 && b.bottom <= innerHeight; }})"
+    );
+    let fits = b.until(&page, &on_screen, wait);
+    let _ = b.screenshot(&page, &shots.join("phone-375-still-loading.png"));
+    s.ok("on a phone, its words and its Reload are on screen", fits, b.eval(&page, &format!("{line}?.getBoundingClientRect().toJSON() ?? null"))?);
+    b.unblock(&page)?;
+    b.viewport(&page, 1280, 800, false)?;
+    b.click(&page, "#still-loading a")?;
+    let reloaded = b.until(&page, &format!("{started} && !{line}"), wait);
+    s.ok("its Reload, the import let through now, loads the same page, and the shell starts", reloaded, b.eval(&page, "location.href")?);
+    b.close(page)?;
+
+    // its scripts came, and the first thing it asks (who is signed in) is
+    // never answered: the first document's ask alone, so its Reload is not
+    let hold_me = "if (window === window.top && !sessionStorage.getItem('e2e-held-me')) { sessionStorage.setItem('e2e-held-me', '1'); \
+        const real = window.fetch.bind(window); window.__heldMe = false; \
+        window.fetch = (url, o) => { if (String(url) === '/api/identities/me') { window.__heldMe = true; return new Promise(() => {}); } return real(url, o); }; }";
+    let page = b.open_with_script(&home, hold_me)?;
+    b.viewport(&page, 1280, 800, false)?;
+    let t0 = std::time::Instant::now();
+    let quiet = b.until(&page, &format!("window.__heldMe === true && !!{line} && getComputedStyle({line}).visibility === 'hidden'"), wait);
+    let shown = b.until(&page, &format!("!!{line} && getComputedStyle({line}).visibility === 'visible'"), wait);
+    let after = t0.elapsed();
+    let seen = b.eval(&page, &format!("({{ said: {line}?.textContent ?? null, started: {started}, held: window.__heldMe }})"))?;
+    s.ok(
+        "its scripts come but who is signed in is never answered: nothing at first, then \"Still loading… Reload\", nothing of the shell drawn",
+        quiet && shown && after >= std::time::Duration::from_secs(8) && seen["said"] == "Still loading… Reload" && seen["started"] == false,
+        json!({ "seen": seen, "afterMs": after.as_millis() as u64 }),
+    );
+    // (a press, as a script's: with no line, a FAIL here, the checks after it made)
+    b.eval(&page, "(document.querySelector('#still-loading a')?.click(), true)")?;
+    let reloaded = b.until(&page, &format!("{started} && !{line}"), wait);
+    s.ok("its Reload, answered this time, draws the shell, and the line is gone", reloaded, b.eval(&page, "location.href")?);
+    b.close(page)?;
     Ok(())
 }
 

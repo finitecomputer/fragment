@@ -316,6 +316,22 @@ impl Browser {
         self.open_at(Some(&context.0), url)
     }
 
+    /// A page whose requests to URLs matching `patterns` (`*` any run of
+    /// characters) are refused from its first document, as a resource that
+    /// never comes; `unblock` lets them through again.
+    pub fn open_blocking(&mut self, url: &str, patterns: &[&str]) -> Result<Page> {
+        let page = self.open("about:blank")?;
+        self.send("Network.enable", json!({}), Some(&page.session))?;
+        self.send("Network.setBlockedURLs", json!({ "urls": patterns }), Some(&page.session))?;
+        self.send("Page.navigate", json!({ "url": url }), Some(&page.session))?;
+        Ok(page)
+    }
+
+    pub fn unblock(&mut self, page: &Page) -> Result<()> {
+        self.send("Network.setBlockedURLs", json!({ "urls": [] }), Some(&page.session))?;
+        Ok(())
+    }
+
     fn open_at(&mut self, context: Option<&str>, url: &str) -> Result<Page> {
         let mut params = json!({ "url": url });
         if let Some(context) = context {
