@@ -353,11 +353,11 @@ export async function billingSections(helpers, ledger, mine, back) {
     // A default plan is no org seat: someone in no org may buy their own,
     // but the welcome sends this non-guest home before offering Checkout.
     if (offer && !mine.org) {
-      // its failure's words, said once `button` takes them (#481)
+      // its failure's words by the refusal's reason, as every Checkout's
       const buy = button(
         `Buy an always-on seat, ${price(offer.seatMicros)} a month`,
         () => goCheckout({ kind: offer.kind }),
-        () => "Checkout didn't open. Try again in a moment.",
+        (e) => plainly(e, CHECKOUT, CHECKOUT_FAILED),
       );
       buy.dataset.plan = offer.kind;
       billing.append(actionLine("Subscription", buy));
