@@ -74,7 +74,7 @@ pub fn agent_doc(text: &str, platform: &str, fragment: &str) -> String {
 pub static CATALOG: [&Template; 5] = [&BLANK, &TODO, &INBOX, &CALORIES, &DOC];
 
 /// A file of cell/shell/ by its path there: a published one, or a page
-/// (`index.html`, `admin.html`, `privacy.html`, `terms.html`).
+/// (`index.html`, `admin.html`, `about.html`, `privacy.html`, `terms.html`).
 #[cfg(feature = "platform")]
 pub fn shell(name: &str) -> Option<&'static File> {
     SHELL.binary_search_by(|f| f.path.cmp(name)).ok().map(|i| &SHELL[i])
@@ -129,7 +129,8 @@ const SHELL_PUBLISHED: [(&str, &str); 20] = [
     // the operators' admin page (`/admin`)
     ("admin.js", "text/javascript; charset=utf-8"),
     ("admin.css", "text/css; charset=utf-8"),
-    // Finite's privacy policy's and terms' look (`/privacy`, `/terms`)
+    // the look of Finite's about page, privacy policy and terms (`/about`,
+    // `/privacy`, `/terms`)
     ("legal.css", "text/css; charset=utf-8"),
 ];
 
@@ -292,7 +293,7 @@ pub(crate) mod tests {
         for (name, content_type) in SHELL_PUBLISHED {
             assert_eq!(shell_published(name), Some((shell(name).unwrap(), content_type)), "{name}");
         }
-        for name in ["index.html", "admin.html", "privacy.html", "terms.html", "CREDITS.md", "vendor/lucide-LICENSE", "vendor/split-grid.LICENSE.txt"] {
+        for name in ["index.html", "admin.html", "about.html", "privacy.html", "terms.html", "CREDITS.md", "vendor/lucide-LICENSE", "vendor/split-grid.LICENSE.txt"] {
             assert!(shell(name).is_some() && shell_published(name).is_none(), "{name}");
         }
         assert!(shell_published("nope.js").is_none() && shell_published("../templates/chat/app.mjs").is_none());

@@ -1877,17 +1877,18 @@ function actionLine(label, ...actions) {
 }
 // Finite's privacy policy and terms (`/privacy`, `/terms`), small and
 // muted, each in a tab of its own: under the welcome's seat, and at the
-// end of Settings' Account
-function legalLinks() {
+// end of Settings' Account; with its about page first (`/about`) under
+// the signed-out landing's Sign In
+function legalLinks(about = false) {
   const p = el("p", "muted legal-links");
-  const link = (href, text) => {
+  const pages = [...(about ? [["/about", "About"]] : []), ["/privacy", "Privacy"], ["/terms", "Terms"]];
+  pages.forEach(([href, text], i) => {
     const a = el("a", null, text);
     a.href = href;
     a.target = "_blank";
     a.rel = "noopener";
-    return a;
-  };
-  p.append(link("/privacy", "Privacy"), " · ", link("/terms", "Terms"));
+    p.append(...(i ? [" · ", a] : [a]));
+  });
   return p;
 }
 // a sentence whose `quoted` parts are code
@@ -3009,7 +3010,7 @@ function signIn() {
   heading.append(el("h1", null, PITCH), el("p", "muted", SUBTITLE));
   const actions = el("div", "splash-actions");
   actions.append(go, other);
-  firstRun(heading, actions);
+  firstRun(heading, actions, legalLinks(true));
   $("first-run").classList.add("splash");
 }
 // "Use another account" (`POST /auth/switch`, docs/api.md, Sign-in), back
