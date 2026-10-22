@@ -58,6 +58,7 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "browser-use: its SDK header is swapped only at its catalog host",
     "xai: its SDK header is swapped only at its catalog host",
     "x: its SDK header is swapped only at its catalog host",
+    "disconnected, an account Pipes holds again with no connect known to have imported it (an import landed late) is not its owner's: read as not connected, its swaps refused, no token asked",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -153,6 +154,31 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
             && state_of(&again, SWAP_CONNECTION) == "connected",
         json!({ "redirect": said, "stopped": stopped }),
     );
+
+    // disconnected, then an account at Pipes again with no connect known
+    // to have imported it (an import whose outcome was unknown, landing
+    // late: the fake's lever): its swaps stay refused, no token asked
+    let off = api.signed(w.owner, "DELETE", &format!("/api/connections/{SWAP_CONNECTION}"), None)?;
+    s.workos.connect(&email, SWAP_CONNECTION, true);
+    let (minted, seen_before) = (s.workos.tokens(SWAP_CONNECTION).len(), s.upstream.seen().len());
+    let fenced = api.signed(w.owner, "GET", "/api/connections", None)?;
+    let refused = say(s, 120, &format!("fetch http://{SWAP_CONNECTION_HOST}/drive/v3/files with {}", placeholder(s, w.id, w.agent, SWAP_CONNECTION)))?;
+    s.ok(
+        SWAP_CHECKS[27],
+        off.status == 200
+            && state_of(&fenced, SWAP_CONNECTION) == "not_connected"
+            && refused.starts_with("fetched 403")
+            && refused.contains("connect google first")
+            && s.workos.tokens(SWAP_CONNECTION).len() == minted
+            && s.upstream.seen().len() == seen_before,
+        json!({ "disconnect": off.body, "connections": fenced.body, "refused": refused }),
+    );
+    // connected again for the checks after: a connect known to import lifts
+    // the fence (its row has no `connection_oauth` here: the registry's lever)
+    let hook = api.unsigned("POST", "/api/test/registry", Some(&json!({ "signins": { "unfenceConnection": { "email": email, "provider": SWAP_CONNECTION } } })))?;
+    anyhow::ensure!(hook.status == 200, "lift the fence: {hook}");
+    let again = api.signed(w.owner, "GET", "/api/connections", None)?;
+    anyhow::ensure!(state_of(&again, SWAP_CONNECTION) == "connected", "connected again after the fence: {again}");
 
     // the operator's keys: a bearer token, a header of the provider's own, a query parameter
     let said = say(s, 107, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;

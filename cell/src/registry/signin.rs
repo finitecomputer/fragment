@@ -365,6 +365,12 @@ impl RegistryCell {
             SigninsHook::ExpireConnection(state) => {
                 self.exec("UPDATE connection_signins SET expires_at = ? WHERE state = ?", vec![SqlStorageValue::Integer(js::now_ms()), sha(&state).into()])?;
             }
+            SigninsHook::UnfenceConnection { email, provider } => {
+                self.exec(
+                    "DELETE FROM connection_fences WHERE provider = ? AND (issuer, subject) IN (SELECT issuer, subject FROM subjects WHERE email = ?)",
+                    vec![provider.as_str().into(), email.as_str().into()],
+                )?;
+            }
         }
         self.signin_counts()
     }

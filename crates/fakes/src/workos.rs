@@ -78,12 +78,73 @@ struct State {
     /// Connected accounts' labels (`account_display_name`), as imported.
     labels: HashMap<(String, String), String>,
     omit_id_token: bool,
+    /// The next import is answered 504 and lands only when the test says
+    /// (`land_deferred_import`): one whose outcome its caller cannot know.
+    defer_import: bool,
+    deferred: Option<Import>,
+    /// Pipes' tokens' accounts (user id, provider), for a revocation.
+    pipes_tokens: HashMap<String, (String, String)>,
+}
+
+/// An import as it lands: (user id, provider), its label as sent (absent:
+/// an update keeps the one there), whether it made the account (POST), and
+/// the provider's account its grant is.
+struct Import {
+    user: String,
+    provider: String,
+    label: Option<Value>,
+    made: bool,
+    account: String,
 }
 
 impl State {
     fn next(&mut self, prefix: &str) -> String {
         self.counter += 1;
         format!("{prefix}_{:026}", self.counter)
+    }
+
+    /// An import lands: its account connected, its label set (a string),
+    /// cleared (null) or, omitted, kept by an update.
+    fn land(&mut self, i: Import) {
+        let key = (i.user.clone(), i.provider.clone());
+        self.pipes.insert(key.clone(), true);
+        match i.label {
+            Some(Value::String(label)) => {
+                self.labels.insert(key, label);
+            }
+            Some(Value::Null) => {
+                self.labels.remove(&key);
+            }
+            _ if i.made => {
+                self.labels.remove(&key);
+            }
+            _ => {}
+        }
+        self.imports.push((i.user, i.provider, i.account));
+    }
+
+    /// A revocation of `token` at the provider, as Google's: it ends the
+    /// whole grant of the provider's account it is for, so every Pipes
+    /// account last imported from that account (or, a token Pipes minted
+    /// for an account no import made, that one) needs authorizing again.
+    fn revoke(&mut self, token: &str) {
+        let account = self.oauth_grants.get(token).map(|g| g.1.clone()).or_else(|| {
+            let (user, provider) = self.pipes_tokens.get(token)?;
+            self.imports.iter().rev().find(|i| i.0 == *user && i.1 == *provider).map(|i| i.2.clone())
+        });
+        let mut latest: HashMap<(String, String), String> = HashMap::new();
+        for (user, provider, account) in &self.imports {
+            latest.insert((user.clone(), provider.clone()), account.clone());
+        }
+        let ended: Vec<(String, String)> = match account {
+            Some(account) => latest.into_iter().filter(|(_, a)| *a == account).map(|(k, _)| k).collect(),
+            None => self.pipes_tokens.get(token).cloned().into_iter().collect(),
+        };
+        for key in ended {
+            if let Some(authorized) = self.pipes.get_mut(&key) {
+                *authorized = false;
+            }
+        }
     }
 
     fn user_for(&mut self, email: &str) -> User {
@@ -115,24 +176,31 @@ struct Gates {
 }
 
 /// What a test may hold.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Gate {
     /// `POST /test-oauth/token`, a callback's code exchange.
     Exchange,
+    /// The exchange of one code alone (the code a callback brings back).
+    ExchangeOf(String),
     /// `POST|PUT …/connected_accounts/…`, a callback's import.
     Import,
 }
 
 impl Gates {
-    /// Waits while `gate` is held, counted as waiting.
-    fn pass(&self, gate: Gate) {
+    /// Waits while any of `gates` is held, counted as waiting at each.
+    fn pass(&self, gates: &[Gate]) {
+        let holding = |held: &HashMap<Gate, usize>| gates.iter().any(|g| held.contains_key(g));
         let mut held = self.held.lock().expect("gates");
-        if !held.contains_key(&gate) {
+        if !holding(&held) {
             return;
         }
-        *held.get_mut(&gate).expect("held") += 1;
+        for g in gates {
+            if let Some(n) = held.get_mut(g) {
+                *n += 1;
+            }
+        }
         self.changed.notify_all();
-        while held.contains_key(&gate) {
+        while holding(&held) {
             held = self.changed.wait(held).expect("gates");
         }
     }
@@ -183,6 +251,18 @@ impl WorkOs {
 
     /// The next code exchange answers no ID token, as a provider asked for no `openid`.
     pub fn omit_next_id_token(&self) { self.state.lock().expect("workos state").omit_id_token = true; }
+
+    /// The next import is answered 504, as one whose outcome its caller
+    /// cannot know, and lands only at `land_deferred_import`.
+    pub fn defer_next_import(&self) { self.state.lock().expect("workos state").defer_import = true; }
+
+    /// The deferred import lands now, late: whether there was one.
+    pub fn land_deferred_import(&self) -> bool {
+        let mut s = self.state.lock().expect("workos state");
+        let Some(import) = s.deferred.take() else { return false };
+        s.land(import);
+        true
+    }
 
     /// `gate`'s requests wait from now until `resume`.
     pub fn pause(&self, gate: Gate) {
@@ -242,8 +322,11 @@ impl WorkOs {
         let handler: Handler = Arc::new(move |req: &Request| {
             let q = |k: &str| req.query.get(k).cloned().unwrap_or_default();
             match (req.method.as_str(), req.path.as_str()) {
-                ("POST", "/test-oauth/token") => gated.pass(Gate::Exchange),
-                ("POST" | "PUT", p) if p.starts_with("/user_management/users/") && p.contains("/connected_accounts/") => gated.pass(Gate::Import),
+                ("POST", "/test-oauth/token") => {
+                    let code = url::form_urlencoded::parse(&req.body).find(|(k, _)| k == "code").map(|(_, v)| v.into_owned()).unwrap_or_default();
+                    gated.pass(&[Gate::Exchange, Gate::ExchangeOf(code)]);
+                }
+                ("POST" | "PUT", p) if p.starts_with("/user_management/users/") && p.contains("/connected_accounts/") => gated.pass(&[Gate::Import]),
                 _ => {}
             }
             let mut s = st.lock().expect("workos state");
@@ -290,6 +373,7 @@ impl WorkOs {
                     let token = form.get("token").cloned().unwrap_or_default();
                     let ours = s.tokens.values().flatten().any(|t| *t == token) || s.oauth_grants.contains_key(&token);
                     if form.len() != 1 || !ours { return problem(400, "invalid_token", "not a token handed out here"); }
+                    s.revoke(&token);
                     s.revoked.push(token);
                     Response::json(200, &json!({}))
                 }
@@ -303,15 +387,12 @@ impl WorkOs {
                     let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
                     let Some((refresh, account)) = s.oauth_grants.get(body["access_token"].as_str().unwrap_or("")).cloned() else { return problem(422, "invalid_tokens", "not issued here"); };
                     if body["refresh_token"] != refresh || !body["expires_at"].is_string() || body["state"] != "connected" { return problem(422, "invalid_tokens", "token combination"); }
-                    s.pipes.insert((user.into(), provider.into()), true);
-                    // a string sets the label and null clears it; omitted, an update keeps it
-                    match body.get("account_display_name") {
-                        Some(Value::String(label)) => { s.labels.insert((user.into(), provider.into()), label.clone()); }
-                        Some(Value::Null) => { s.labels.remove(&(user.to_string(), provider.to_string())); }
-                        _ if req.method == "POST" => { s.labels.remove(&(user.to_string(), provider.to_string())); }
-                        _ => {}
+                    let import = Import { user: user.into(), provider: provider.into(), label: body.get("account_display_name").cloned(), made: req.method == "POST", account };
+                    if std::mem::take(&mut s.defer_import) {
+                        s.deferred = Some(import);
+                        return problem(504, "gateway_timeout", "test import deferred: it lands later");
                     }
-                    s.imports.push((user.into(), provider.into(), account));
+                    s.land(import);
                     Response::json(if req.method == "POST" { 201 } else { 200 }, &json!({ "id": format!("conn_{user}_{provider}"), "user_id": user, "state": "connected" }))
                 }
                 ("GET", "/user_management/authorize") | ("GET", "/user_management/authorize/as") => {
@@ -465,6 +546,7 @@ impl WorkOs {
                         Some(false) => Response::json(200, &json!({ "active": false, "error": "needs_reauthorization" })),
                         Some(true) => {
                             let token = s.next(&format!("pipes_{provider}"));
+                            s.pipes_tokens.insert(token.clone(), (user.clone(), provider.clone()));
                             s.tokens.entry(provider).or_default().push(token.clone());
                             let expires = crate::codestorage::iso(crate::codestorage::now_ms() + 3_600_000);
                             Response::json(

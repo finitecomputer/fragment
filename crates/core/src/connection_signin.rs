@@ -17,6 +17,16 @@ pub const TAKE_PENDING: &str = "DELETE FROM connection_signins WHERE state = ? A
 /// session's: (issuer, subject, provider). No index has the subject: it
 /// reads at most the fleet's pending sign-ins (`signins_pending_max`).
 pub const FENCE_PENDING: &str = "DELETE FROM connection_signins WHERE issuer = ? AND subject = ? AND provider = ?";
+/// A disconnect's lasting fence of its account (issuer, subject, provider,
+/// when): kept until a connect of the person's is known to have imported
+/// again (`UNFENCE`), so an import whose outcome was unknown that lands at
+/// Pipes after the disconnect is never taken for a connection.
+pub const FENCE: &str = "INSERT INTO connection_fences (issuer, subject, provider, fenced_at) VALUES (?, ?, ?, ?) ON CONFLICT (issuer, subject, provider) DO UPDATE SET fenced_at = excluded.fenced_at";
+/// A connect of the account known to have imported (Pipes answered it
+/// 200 or 201): its fence goes. Nothing else lifts one.
+pub const UNFENCE: &str = "DELETE FROM connection_fences WHERE issuer = ? AND subject = ? AND provider = ?";
+/// The providers a person's account is fenced at: (issuer, subject).
+pub const FENCED: &str = "SELECT provider FROM connection_fences WHERE issuer = ? AND subject = ?";
 const RESERVED: &[&str] = &["client_id", "redirect_uri", "response_type", "scope", "state", "code_challenge", "code_challenge_method", "code", "code_verifier", "client_secret"];
 
 fn token(s: &str, max: usize) -> bool {
@@ -97,13 +107,6 @@ impl Tokens {
     pub fn import_body(&self, expires_at: &str, account: Option<&str>) -> Value {
         json!({ "access_token": self.access, "refresh_token": self.refresh, "expires_at": expires_at, "scopes": self.scopes, "state": "connected", "account_display_name": account })
     }
-
-    /// Its revocation's form (`revoke_form`): a grant a disconnect fenced
-    /// after its code was exchanged, never imported, goes at the provider
-    /// too (its access token's revocation takes its refresh token with it).
-    pub fn revoke_form(&self) -> String {
-        revoke_form(&self.access)
-    }
 }
 
 /// Whose connection an attempt is: a WorkOS user's (`issuer`, `subject`)
@@ -119,9 +122,14 @@ pub struct Account {
 /// yet answered, which a disconnect fences (`fence`) as it ends the rows
 /// still pending (`FENCE_PENDING`), so that no attempt begun before it
 /// connects the account after it. One still exchanging its code is
-/// cancelled: `may_import` says no, and it imports nothing. One importing
-/// refuses the fence instead, since what it sent Pipes cannot be called
-/// back, and a delete after it could as well remove a newer connect's.
+/// cancelled: `may_import` says no, and it imports nothing (the grant its
+/// exchange made is not revoked: the provider's revocation ends its whole
+/// grant to the client, a newer connect's with it, and this one's tokens
+/// are kept nowhere). One importing refuses the fence instead, since what
+/// it sent Pipes cannot be called back, and a delete after it could as
+/// well remove a newer connect's. An import that answered with no known
+/// outcome is no longer under way, and the lasting fence (`FENCE`) holds
+/// against it should it land later.
 /// The Registry keeps it in memory, not a table: each finish runs inside
 /// the Registry and ends with it, so the one a restart starts has none
 /// under way. It holds one entry per finish under way, each gone at its
@@ -324,6 +332,30 @@ mod tests {
         assert!(take("a-drive", "session-a", "drive"), "the person's attempt at another provider is untouched");
         assert!(take("b", "session-b", "mail"), "another person's attempt at the provider is untouched");
         assert!(take("a-elsewhere", "session-a", "mail"), "another issuer's user is another account");
+    }
+
+    #[test]
+    fn a_lasting_fence_stands_until_a_known_import_and_only_for_its_account() {
+        use rusqlite::{Connection, params};
+        let db = Connection::open_in_memory().unwrap();
+        for step in crate::migrate::REGISTRY.steps {
+            db.execute_batch(step.sql).unwrap();
+        }
+        let fenced = |issuer: &str, subject: &str| -> Vec<String> {
+            let mut q = db.prepare(FENCED).unwrap();
+            let mut providers: Vec<String> = q.query_map(params![issuer, subject], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+            providers.sort();
+            providers
+        };
+        db.execute(FENCE, params!["issuer", "user-a", "mail", 10]).unwrap();
+        db.execute(FENCE, params!["issuer", "user-a", "mail", 20]).unwrap();
+        db.execute(FENCE, params!["issuer", "user-a", "drive", 30]).unwrap();
+        assert_eq!(fenced("issuer", "user-a"), ["drive", "mail"], "a second disconnect keeps one fence, at its later time");
+        assert_eq!(db.query_row("SELECT fenced_at FROM connection_fences WHERE provider = 'mail'", [], |r| r.get::<_, i64>(0)).unwrap(), 20);
+        assert!(fenced("issuer", "user-b").is_empty() && fenced("another-issuer", "user-a").is_empty(), "another person's account is not fenced");
+        assert_eq!(db.execute(UNFENCE, params!["issuer", "user-a", "mail"]).unwrap(), 1, "a known import lifts its provider's fence");
+        assert_eq!(fenced("issuer", "user-a"), ["drive"], "and no other provider's");
+        assert_eq!(db.execute(UNFENCE, params!["issuer", "user-a", "mail"]).unwrap(), 0);
     }
 
     fn account(subject: &str, provider: &str) -> Account {

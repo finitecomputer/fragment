@@ -67,7 +67,16 @@ pub async fn workos_user(env: &Env, cfg: &Config, who: &str) -> CellResult<Optio
     Ok(crate::ask_registry(env, &SubjectOf { identity: who.into(), issuer }).await?.subject)
 }
 
-/// Each connection's state for a person (as Pipes says, with no token),
+/// The providers a WorkOS user's account stands fenced at by a disconnect
+/// (registry/connection_signin.rs `fence_connection`): Pipes' word is not
+/// taken for them until a connect of theirs is known to import again.
+async fn fenced_at(env: &Env, cfg: &Config, user: &str) -> CellResult<Vec<String>> {
+    let issuer = crate::keys::workos(env, cfg).await?.issuer();
+    Ok(crate::ask_registry(env, &crate::registry::calls::ConnectionFences { issuer, subject: user.into() }).await?.providers)
+}
+
+/// Each connection's state for a person (as Pipes says, with no token,
+/// save one their disconnect fences: not connected, Pipes not asked),
 /// whose WorkOS user `user` finds (`workos_user`, or the one their computer
 /// keeps), asked only when the catalog has a connection.
 /// `labels`, when asked for, gets each connected one's account as its
@@ -87,9 +96,16 @@ pub async fn connection_states(
     }
     let user = user.await?;
     let api = &cfg.workos()?.api;
+    let fenced = match &user {
+        Some(u) => fenced_at(env, cfg, u).await?,
+        None => vec![],
+    };
     // at most `catalog::PROVIDERS_MAX` providers, one question each
     for provider in connections {
         let account = match &user {
+            // disconnected, and no connect known to have imported since:
+            // whatever Pipes holds (an import landed late) is not theirs
+            Some(_) if fenced.iter().any(|f| f == provider) => PipesAccount { state: ProviderState::NotConnected, label: None },
             Some(u) => crate::keys::pipes_state(env, api, provider, u).await?,
             None => PipesAccount { state: ProviderState::NotConnected, label: None },
         };
@@ -190,7 +206,7 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                 Some(u) => disconnect(env, cfg, provider, p.connection_oauth.as_ref(), u).await?,
                 None => false,
             };
-            disconnected_told(env, cfg, &computer, provider, user).await;
+            disconnected_told(env, cfg, &computer, provider, user).await?;
             json_response(&json!({ "provider": provider, "state": ProviderState::NotConnected, "revoked": revoked }))
         }
         (Method::Put | Method::Delete, [provider, "key"]) => {
@@ -266,18 +282,20 @@ async fn revoke_grant(env: &Env, cfg: &Config, api: &str, provider: &str, user: 
 }
 
 /// The person's computer told their connections' states after a
-/// disconnect, so its guest is given that one no more at its next read
-/// rather than once its states age out. A computer not made yet has no
-/// guest; a failure is logged (each swap asks Pipes, which refuses now).
-async fn disconnected_told(env: &Env, cfg: &Config, computer: &str, provider: &str, user: Option<String>) {
-    let told = match connection_states(env, cfg, std::future::ready(Ok(user)), None).await {
-        Ok(states) => crate::computer::ask(env, computer, "computer/own-keys", &json!({ "connections": states })).await.map(drop),
-        Err(e) => Err(e),
-    };
-    match told {
-        Ok(()) => {}
-        Err(e) if e.code == ErrorCode::NotFound => {}
-        Err(e) => console_error!("{}", json!({ "connection-disconnect": provider, "computer-not-told": e.message })),
+/// disconnect, so its guest is given that one no more at its next read and
+/// its swaps refuse it at once (they go by these states: computer.rs
+/// `connection_token`), rather than once its states age out. A computer
+/// not made yet has no guest. One not told is the disconnect's failure,
+/// which the person asks again (each step of it may be asked twice).
+async fn disconnected_told(env: &Env, cfg: &Config, computer: &str, provider: &str, user: Option<String>) -> CellResult<()> {
+    let states = connection_states(env, cfg, std::future::ready(Ok(user)), None).await?;
+    match crate::computer::ask(env, computer, "computer/own-keys", &json!({ "connections": states })).await {
+        Ok(_) => Ok(()),
+        Err(e) if e.code == ErrorCode::NotFound => Ok(()),
+        Err(e) => {
+            console_error!("{}", json!({ "connection-disconnect": provider, "computer-not-told": e.message }));
+            Err(CellError::new(e.code, format!("{provider} is disconnected, but your computer could not be told yet: disconnect again ({})", e.message)))
+        }
     }
 }
 

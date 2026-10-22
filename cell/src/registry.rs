@@ -839,6 +839,7 @@ impl RegistryCell {
             calls::BeginConnection::PATH => reply::<calls::BeginConnection>(self.begin_connection(body(&bytes)?).await),
             calls::FinishConnection::PATH => reply::<calls::FinishConnection>(self.finish_connection(body(&bytes)?).await),
             calls::FenceConnection::PATH => reply::<calls::FenceConnection>(self.fence_connection(body(&bytes)?)),
+            calls::ConnectionFences::PATH => reply::<calls::ConnectionFences>(self.connection_fences(body(&bytes)?)),
             Resolve::PATH => reply::<Resolve>(self.key_holder(&body::<Resolve>(&bytes)?.key)),
             Lookup::PATH => reply::<Lookup>(self.lookup(body(&bytes)?)),
             InviteEmail::PATH => reply::<InviteEmail>(self.invite(body(&bytes)?).await),
