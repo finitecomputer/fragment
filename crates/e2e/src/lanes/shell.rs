@@ -2807,6 +2807,15 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     s.ok("each row names which agents may use it: all of them, by default", got.as_array().is_some_and(|l| l.iter().all(|r| r[3] == agents.len())), &got);
     let accounts = b.eval(page, "[...document.querySelectorAll('#settings-connections [data-account]')].map((a) => [a.closest('[data-provider]').dataset.provider, a.textContent])")?;
     s.ok("a connection's row names the account it is connected to, and no other row names one", accounts == json!([[crate::SWAP_CONNECTION, "their-google@gmail.test"]]), &accounts);
+    // each note: its row, its text, and whether it is the line under the
+    // row's name (right after its head)
+    const NOTES: &str = "[...document.querySelectorAll('#settings-connections .provider-note')].map((n) => [n.closest('[data-provider]').dataset.provider, n.textContent, n.previousElementSibling?.classList.contains('provider-head') ?? false, n.classList.contains('muted')])";
+    let notes = b.eval(page, NOTES)?;
+    s.ok(
+        "a row whose catalog row has a note shows it under the provider's name, muted (Google's, connected); a row without one shows none",
+        notes == json!([[crate::SWAP_CONNECTION, crate::SWAP_CONNECTION_NOTE, true, true]]),
+        &notes,
+    );
     s.ok(
         "and this month's use by agent: a connection's calls counted, an operator key's with its cost",
         counted && of(crate::SWAP_CONNECTION)[4] == json!([[lead, 1, 0]]) && of("perplexity")[4] == json!([[lead, 1, perplexity_charge]]),
@@ -2842,6 +2851,8 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     );
     let said = b.eval(page, "document.getElementById('notice').innerText")?;
     s.ok("Disconnect takes a connection away at Pipes; settings shows it not connected, and, unrevoked, says where its access is removed at the provider", off && !s.workos.holds(email, crate::SWAP_CONNECTION), &said);
+    let notes = b.eval(page, NOTES)?;
+    s.ok("not connected, Google's row still shows its note under its name, and still no other row shows one", notes == json!([[crate::SWAP_CONNECTION, crate::SWAP_CONNECTION_NOTE, true, true]]), &notes);
     // connected again for the checks after, the computer told by a read
     s.workos.connect(email, crate::SWAP_CONNECTION, true);
     shell(api, session, "GET", "/api/connections", None, &[])?;

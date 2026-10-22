@@ -140,6 +140,7 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                     sign_in: p.oauth.as_ref().map(|o| ProviderSignIn { manage: o.manage.clone() }),
                     models: p.models.as_ref().map(|m| m.offer.iter().map(|o| ProviderModel { id: o.id.clone(), name: o.name.clone() }).collect()),
                     account: labels.get(&p.name).cloned(),
+                    note: p.note.clone(),
                 })
                 .collect();
             json_response(&Providers { providers })

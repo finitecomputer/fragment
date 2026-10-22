@@ -1225,7 +1225,11 @@ the provider's own hosts.
   - an own key's `models`, `{base_url, offer}`: the provider's
     chat-completions base URL (https, on one of its `hosts`, so the swap
     adds the key), and the 1 to 16 models settings offers for an agent,
-    each `{id, name}`.
+    each `{id, name}`;
+  - any row's `note`: what settings' Connections tells people under its
+    name, connected or not (Google still reviewing the platform's app,
+    say): one line of plain text, 1 to 280 characters, refused at load
+    otherwise.
 
   Adding a provider is a catalog row (and, for a connection, the provider
   enabled in the WorkOS environment); nothing in code names one. The
