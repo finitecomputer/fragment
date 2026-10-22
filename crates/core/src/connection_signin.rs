@@ -178,4 +178,17 @@ mod tests {
         omitted.as_object_mut().unwrap().remove("scope");
         assert!(tokens(&omitted, &requested).is_some(), "RFC 6749 omitted scope is unchanged");
     }
+
+    /// Google's row asks it to show its account chooser, then its consent
+    /// (docs/pipes-browser-binding.md): the authorize URL's own query goes to
+    /// Google as written, its space still one `prompt` of two values.
+    #[test]
+    fn a_fixed_prompt_of_two_values_reaches_the_provider_whole() {
+        let mut o = config();
+        o.authorize = "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=select_account%20consent".into();
+        assert!(check(&o).is_ok());
+        let u = url::Url::parse(&authorize_url(&o, "https://platform.example/api/connections/google/callback", "challenge", "state")).unwrap();
+        let prompts: Vec<String> = u.query_pairs().filter(|(k, _)| k == "prompt").map(|(_, v)| v.into_owned()).collect();
+        assert_eq!(prompts, ["select_account consent"]);
+    }
 }
