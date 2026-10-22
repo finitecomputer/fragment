@@ -13,6 +13,10 @@ pub const PENDING_PER_SESSION_MAX: u64 = 8;
 /// One synchronous SQLite statement: a mismatched callback consumes nothing;
 /// the winner consumes the transaction before the caller awaits any vendor.
 pub const TAKE_PENDING: &str = "DELETE FROM connection_signins WHERE state = ? AND session = ? AND provider = ? AND expires_at > ? RETURNING issuer, subject, config, sealed, expires_at";
+/// A disconnect's end of every attempt at its account still pending, each
+/// session's: (issuer, subject, provider). No index has the subject: it
+/// reads at most the fleet's pending sign-ins (`signins_pending_max`).
+pub const FENCE_PENDING: &str = "DELETE FROM connection_signins WHERE issuer = ? AND subject = ? AND provider = ?";
 const RESERVED: &[&str] = &["client_id", "redirect_uri", "response_type", "scope", "state", "code_challenge", "code_challenge_method", "code", "code_verifier", "client_secret"];
 
 fn token(s: &str, max: usize) -> bool {
@@ -26,6 +30,12 @@ pub fn check(o: &ConnectionOAuth) -> Result<(), String> {
     let e = url::Url::parse(&o.exchange).expect("checked");
     if a.query_pairs().any(|(k, _)| RESERVED.contains(&k.as_ref())) || e.query().is_some() {
         return Err("OAuth endpoints must not supply protocol parameters; exchange has no query".into());
+    }
+    if let Some(r) = &o.revoke {
+        catalog::row_url(r, true)?;
+        if url::Url::parse(r).expect("checked").query().is_some() {
+            return Err("the revocation endpoint has no query: the token is its form's".into());
+        }
     }
     if !token(&o.client_id, 256) || !(1..=SCOPES_MAX).contains(&o.scopes.len()) || o.scopes.iter().any(|s| !token(s, SCOPE_MAX_BYTES) || s.contains(['"', '\\'])) {
         return Err("a connection needs a client id and 1–32 bounded OAuth scopes".into());
@@ -45,6 +55,11 @@ pub fn exchange_form(o: &ConnectionOAuth, callback: &str, code: &str, verifier: 
     url::form_urlencoded::Serializer::new(String::new()).append_pair("grant_type", "authorization_code")
         .append_pair("client_id", &o.client_id).append_pair("client_secret", secret).append_pair("redirect_uri", callback)
         .append_pair("code", code).append_pair("code_verifier", verifier).finish()
+}
+
+/// A revocation's form (RFC 7009 §2.1; Google documents `token` alone).
+pub fn revoke_form(token: &str) -> String {
+    url::form_urlencoded::Serializer::new(String::new()).append_pair("token", token).finish()
 }
 
 /// Tokens are deliberately not Debug. Errors contain no vendor response.
@@ -80,6 +95,104 @@ impl Tokens {
     pub fn import_body(&self, expires_at: &str) -> Value {
         json!({ "access_token": self.access, "refresh_token": self.refresh, "expires_at": expires_at, "scopes": self.scopes, "state": "connected" })
     }
+
+    /// Its revocation's form (`revoke_form`): a grant a disconnect fenced
+    /// after its code was exchanged, never imported, goes at the provider
+    /// too (its access token's revocation takes its refresh token with it).
+    pub fn revoke_form(&self) -> String {
+        revoke_form(&self.access)
+    }
+}
+
+/// Whose connection an attempt is: a WorkOS user's (`issuer`, `subject`)
+/// account at `provider`, as its pending row names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Account {
+    pub issuer: String,
+    pub subject: String,
+    pub provider: String,
+}
+
+/// The callbacks past their pending row (`TAKE_PENDING` spent it) and not
+/// yet answered, which a disconnect fences (`fence`) as it ends the rows
+/// still pending (`FENCE_PENDING`), so that no attempt begun before it
+/// connects the account after it. One still exchanging its code is
+/// cancelled: `may_import` says no, and it imports nothing. One importing
+/// refuses the fence instead, since what it sent Pipes cannot be called
+/// back, and a delete after it could as well remove a newer connect's.
+/// The Registry keeps it in memory, not a table: each finish runs inside
+/// the Registry and ends with it, so the one a restart starts has none
+/// under way. It holds one entry per finish under way, each gone at its
+/// answer (an exchange and an import, each within its vendor's timeout).
+#[derive(Debug, Default)]
+pub struct Finishing {
+    next: u64,
+    under_way: Vec<Finish>,
+}
+
+#[derive(Debug)]
+struct Finish {
+    id: u64,
+    account: Account,
+    step: Step,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Exchanging,
+    /// A fence came while it exchanged: it imports nothing.
+    Cancelled,
+    Importing,
+}
+
+/// A fence refused: a callback is importing into the account now, which
+/// the person's next disconnect, once it answers, fences.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Importing;
+
+impl Finishing {
+    /// A callback that just spent its pending row, under way: its id, for
+    /// `may_import` and `end`.
+    pub fn begin(&mut self, account: Account) -> u64 {
+        self.next += 1;
+        self.under_way.push(Finish { id: self.next, account, step: Step::Exchanging });
+        self.next
+    }
+
+    /// Whether callback `id` may import now: no fence came since it began.
+    /// From a yes it is importing, and each fence of its account is
+    /// refused until it `end`s.
+    pub fn may_import(&mut self, id: u64) -> bool {
+        let f = self.under_way.iter_mut().find(|f| f.id == id).expect("a callback asks while it is under way");
+        assert!(f.step != Step::Importing, "a callback imports once");
+        let may = f.step == Step::Exchanging;
+        if may {
+            f.step = Step::Importing;
+        }
+        may
+    }
+
+    /// Callback `id` answered, whatever it answered.
+    pub fn end(&mut self, id: u64) {
+        let before = self.under_way.len();
+        self.under_way.retain(|f| f.id != id);
+        assert_eq!(self.under_way.len() + 1, before, "a callback ends once");
+    }
+
+    /// A disconnect of `account`: each of its callbacks still exchanging
+    /// is cancelled (how many), unless one is importing, which refuses the
+    /// fence and changes nothing. Another account's are left as they are.
+    pub fn fence(&mut self, account: &Account) -> Result<usize, Importing> {
+        if self.under_way.iter().any(|f| f.account == *account && f.step == Step::Importing) {
+            return Err(Importing);
+        }
+        let mut cancelled = 0;
+        for f in self.under_way.iter_mut().filter(|f| f.account == *account && f.step == Step::Exchanging) {
+            f.step = Step::Cancelled;
+            cancelled += 1;
+        }
+        Ok(cancelled)
+    }
 }
 
 #[cfg(test)]
@@ -87,7 +200,22 @@ mod tests {
     use super::*;
 
     fn config() -> ConnectionOAuth {
-        ConnectionOAuth { authorize: "https://accounts.example/authorize?access_type=offline&prompt=consent".into(), exchange: "https://accounts.example/token".into(), client_id: "client".into(), scopes: vec!["mail.read".into(), "files.read".into()] }
+        ConnectionOAuth { authorize: "https://accounts.example/authorize?access_type=offline&prompt=consent".into(), exchange: "https://accounts.example/token".into(), client_id: "client".into(), scopes: vec!["mail.read".into(), "files.read".into()], revoke: None }
+    }
+
+    #[test]
+    fn a_revocation_endpoint_is_checked_as_the_others_and_absent_from_the_config_hash() {
+        let mut o = config();
+        let without = serde_json::to_string(&o).unwrap();
+        assert!(!without.contains("revoke"), "a row without one hashes as it did before revocation was offered");
+        o.revoke = Some("https://accounts.example/revoke".into());
+        assert!(check(&o).is_ok());
+        for bad in ["http://attacker.example/revoke", "https://accounts.example/revoke?token=fixed", "not a url"] {
+            o.revoke = Some(bad.into());
+            assert!(check(&o).is_err(), "{bad}");
+        }
+        let form: std::collections::BTreeMap<_, _> = url::form_urlencoded::parse(revoke_form("a+b/c=").as_bytes()).into_owned().collect();
+        assert_eq!(form, std::collections::BTreeMap::from([("token".to_string(), "a+b/c=".to_string())]));
     }
 
     #[test]
@@ -110,6 +238,80 @@ mod tests {
         assert!(take("a", "session-a", "mail", 50), "the correct attempt survives mismatches");
         assert!(!take("a", "session-a", "mail", 50), "replay has no transaction");
         assert!(take("b", "session-b", "drive", 50), "another person's transaction was untouched");
+    }
+
+    #[test]
+    fn a_disconnect_ends_every_pending_attempt_at_its_account_and_no_other() {
+        use rusqlite::{Connection, params};
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(crate::migrate::REGISTRY.steps[1].sql).unwrap();
+        for (state, session, issuer, subject, provider) in [
+            ("a1", "session-a", "issuer", "user-a", "mail"),
+            ("a2", "another-session-a", "issuer", "user-a", "mail"),
+            ("a-drive", "session-a", "issuer", "user-a", "drive"),
+            ("b", "session-b", "issuer", "user-b", "mail"),
+            ("a-elsewhere", "session-a", "another-issuer", "user-a", "mail"),
+        ] {
+            db.execute("INSERT INTO connection_signins VALUES (?, ?, ?, ?, ?, 'config', 'sealed', 100)", params![state, session, provider, issuer, subject]).unwrap();
+        }
+        let fence = |issuer: &str, subject: &str, provider: &str| db.execute(FENCE_PENDING, params![issuer, subject, provider]).unwrap();
+        let take = |state: &str, session: &str, provider: &str| db.prepare(TAKE_PENDING).unwrap().query(params![state, session, provider, 50]).unwrap().next().unwrap().is_some();
+        assert_eq!(fence("issuer", "user-a", "mail"), 2, "each of the account's sessions' attempts");
+        assert!(!take("a1", "session-a", "mail") && !take("a2", "another-session-a", "mail"), "a callback after the disconnect has no transaction");
+        assert_eq!(fence("issuer", "user-a", "mail"), 0, "a second disconnect finds none");
+        assert!(take("a-drive", "session-a", "drive"), "the person's attempt at another provider is untouched");
+        assert!(take("b", "session-b", "mail"), "another person's attempt at the provider is untouched");
+        assert!(take("a-elsewhere", "session-a", "mail"), "another issuer's user is another account");
+    }
+
+    fn account(subject: &str, provider: &str) -> Account {
+        Account { issuer: "issuer".into(), subject: subject.into(), provider: provider.into() }
+    }
+
+    #[test]
+    fn a_fence_cancels_the_accounts_exchanging_callbacks_and_waits_for_an_importing_one() {
+        let (a, b, a_drive) = (account("user-a", "mail"), account("user-b", "mail"), account("user-a", "drive"));
+        let mut f = Finishing::default();
+        let (a1, a2, b1, d1) = (f.begin(a.clone()), f.begin(a.clone()), f.begin(b.clone()), f.begin(a_drive.clone()));
+        assert_eq!(f.fence(&a), Ok(2));
+        assert!(!f.may_import(a1) && !f.may_import(a2), "a callback exchanging when its account was disconnected imports nothing");
+        assert!(f.may_import(b1) && f.may_import(d1), "another person's, and another provider's, import");
+        assert_eq!(f.fence(&a), Ok(0), "a cancelled callback holds no fence back");
+        for id in [a1, a2, b1, d1] {
+            f.end(id);
+        }
+        assert!(f.under_way.is_empty());
+
+        let newer = f.begin(a.clone());
+        assert!(f.may_import(newer), "a connect begun after the fence imports");
+        let exchanging = f.begin(a.clone());
+        assert_eq!(f.fence(&a), Err(Importing), "an import under way refuses the disconnect");
+        assert_eq!(f.fence(&b), Ok(0), "and no other account's");
+        assert!(f.may_import(exchanging), "a refused fence cancelled nothing");
+        f.end(newer);
+        assert_eq!(f.fence(&a), Err(Importing));
+        f.end(exchanging);
+        assert_eq!(f.fence(&a), Ok(0), "once the imports answered, the disconnect goes");
+        assert!(f.under_way.is_empty());
+        assert_eq!(Finishing::default().fence(&a), Ok(0), "a restarted Registry has none under way");
+    }
+
+    #[test]
+    #[should_panic(expected = "a callback imports once")]
+    fn a_callback_imports_once() {
+        let mut f = Finishing::default();
+        let id = f.begin(account("user-a", "mail"));
+        assert!(f.may_import(id));
+        f.may_import(id);
+    }
+
+    #[test]
+    #[should_panic(expected = "a callback ends once")]
+    fn a_callback_ends_once() {
+        let mut f = Finishing::default();
+        let id = f.begin(account("user-a", "mail"));
+        f.end(id);
+        f.end(id);
     }
 
     #[test]

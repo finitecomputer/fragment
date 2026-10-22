@@ -2781,6 +2781,20 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let view = shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[])?;
     let back = view.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).is_some_and(|a| a["connections"].is_null());
     s.ok("pressed again, it may use every provider again (null)", again && back, &view);
+    // Disconnect: this row names no revocation endpoint, so settings says
+    // where the person removes the access at the provider
+    let google = row(crate::SWAP_CONNECTION);
+    b.click(page, &format!("{google} [data-action=disconnect]"))?;
+    let off = b.until(
+        page,
+        &format!("document.querySelector('{google}')?.dataset.state === 'not_connected' && !document.querySelector('{google} [data-action=disconnect]') && !document.getElementById('notice').hidden && document.getElementById('notice').innerText.includes('may still list')"),
+        wait,
+    );
+    let said = b.eval(page, "document.getElementById('notice').innerText")?;
+    s.ok("Disconnect takes a connection away at Pipes; settings shows it not connected, and, unrevoked, says where its access is removed at the provider", off && !s.workos.holds(email, crate::SWAP_CONNECTION), &said);
+    // connected again for the checks after, the computer told by a read
+    s.workos.connect(email, crate::SWAP_CONNECTION, true);
+    shell(api, session, "GET", "/api/connections", None, &[])?;
     Ok(())
 }
 

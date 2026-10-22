@@ -33,6 +33,45 @@ This deliberately supports confidential clients using `client_secret_post`,
 authorization code, S256, and a space-delimited scope response. Other provider
 protocols require an explicit implementation, not an unbound fallback.
 
+## Disconnecting
+
+`DELETE /api/connections/:provider` (settings' Disconnect, or a person's key)
+deletes the account at Pipes (`DELETE
+/user_management/users/:user_id/connected_accounts/:slug`, 204), which ends
+every swap of it. Deleting it there leaves the grant at the provider, so a row
+may name a revocation endpoint, `connection_oauth.revoke` (RFC 7009; Google's is
+`https://oauth2.googleapis.com/revoke`). With one, Fragment first asks Pipes for
+an access token for the account and posts it there as `token`; Google revokes
+an access token's refresh token with it. The token goes only to that endpoint,
+with no redirects or retries, and is in no answer or log. A revocation that
+fails is logged and the account is deleted anyway; the answer's `revoked` says
+which happened, and settings tells the person to remove the access at the
+provider when it is false. An account Pipes no longer gives a token for has no
+grant left to revoke this way. Google's revocation ends the Google account's
+whole grant to the OAuth client, so when two people here connected the same
+Google account, one's Disconnect ends the other's connection at its next
+refresh too (Pipes can no longer refresh it).
+
+Before it revokes or deletes anything, a disconnect fences the account in the
+Registry (`POST /connection/fence`, one turn, no await between check and act),
+so no connect begun before it connects the account after it:
+
+- every attempt at that WorkOS user's account at that provider still pending is
+  ended, in each of their sessions (its callback then finds no transaction:
+  `not-under-way`);
+- each callback past its pending row and still exchanging its code is
+  cancelled: it re-checks just before importing, imports nothing, and the grant
+  its exchange made is revoked at `revoke` where the row names one;
+- a callback already importing refuses the fence (429, nothing ended), since
+  what it sent Pipes cannot be called back; the disconnect asked again, once
+  that answered, deletes it.
+
+Callbacks under way are kept in the Registry's memory, not a table: each one
+runs inside the Registry and ends with it, so a Registry that restarts has none
+under way. Another person's attempts, and the person's attempts at another
+provider, are untouched. A connect begun after the fence is a new one and may
+connect.
+
 ## Evidence and scope
 
 - [Google's web-server OAuth flow](https://developers.google.com/identity/protocols/oauth2/web-server)
@@ -105,7 +144,11 @@ none of these secret values were read or printed here.
    the refresh token Pipes needs, every time),
    `exchange: https://oauth2.googleapis.com/token`, and the reviewed compatibility
    scopes. Endpoint/client/scope settings are public configuration; secrets are
-   read only by `cell/src/keys.rs`.
+   read only by `cell/src/keys.rs`. For Disconnect, add `revoke:
+   https://oauth2.googleapis.com/revoke`, but only once a release that knows the
+   field is deployed: a catalog refuses fields it does not know. Like any change
+   to the row, it changes the configuration hash, so a Connect begun before that
+   deploy comes back refused and is started again.
 3. Review prior accounts and pending legacy authorization URLs in any environment
    that used the old flow. This patch cannot invalidate URLs already issued by
    WorkOS or undo existing provider grants. Resolve those before enabling use;

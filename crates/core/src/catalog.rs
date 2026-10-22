@@ -166,6 +166,13 @@ pub struct ConnectionOAuth {
     pub exchange: String,
     pub client_id: String,
     pub scopes: Vec<String>,
+    /// Where a disconnect revokes the grant (RFC 7009, `POST token=`): a
+    /// token Pipes mints for the account, whose grant goes with it
+    /// (Google's `https://oauth2.googleapis.com/revoke` takes an access
+    /// token and revokes its refresh token too). Without it a disconnect
+    /// deletes the account at Pipes and the grant stays at the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoke: Option<String>,
 }
 
 /// A model a person may pick for an agent: its id as the provider names it,

@@ -1,11 +1,11 @@
 //! A connection becomes usable at Pipes only after the initiating browser,
 //! live platform session, provider and one-use pending state are verified.
-use fragment_core::{catalog::{ConnectionOAuth, Kind}, connection_signin, own_signin, roundtrip};
+use fragment_core::{catalog::{ConnectionOAuth, Kind}, connection_signin::{self, Account}, own_signin, roundtrip};
 use fragment_proto::{ErrorCode, IdentityKind};
 use serde::Deserialize;
 use worker::SqlStorageValue;
 
-use super::{RegistryCell, calls::{BeginConnection, ConnectionBegun, ConnectionFinished, FinishConnectionIn, SubjectOf}, signin::{fresh_token, sha}};
+use super::{RegistryCell, calls::{BeginConnection, ConnectionBegun, ConnectionFinished, FenceConnection, FinishConnectionIn, SubjectAnswer, SubjectOf}, signin::{fresh_token, sha}};
 use crate::{error::{CellError, CellResult}, js, keys};
 
 #[derive(Deserialize)]
@@ -64,6 +64,20 @@ impl RegistryCell {
             connection_signin::TAKE_PENDING,
             vec![sha(&b.state).into(), live.hash.into(), b.provider.as_str().into(), SqlStorageValue::Integer(js::now_ms())])?;
         let Some(pending) = pending else { return Ok(NotUnderWay) };
+        // under way from the take, in its turn: a disconnect from here on
+        // fences it (`fence_connection`), whatever it answers
+        let account = Account { issuer: pending.issuer.clone(), subject: pending.subject.clone(), provider: b.provider.clone() };
+        let id = self.finishing.borrow_mut().begin(account);
+        let finished = self.finish_taken(b, o, pending, id).await;
+        self.finishing.borrow_mut().end(id);
+        finished
+    }
+
+    /// A callback's attempt, its pending row spent (`finish_connection`):
+    /// its code exchanged and its grant imported, unless a disconnect of
+    /// its account fenced it meanwhile.
+    async fn finish_taken(&self, b: FinishConnectionIn, o: &ConnectionOAuth, pending: Pending, id: u64) -> CellResult<ConnectionFinished> {
+        use ConnectionFinished::*;
         let issuer = keys::workos(&self.env, self.cfg).await?.issuer();
         if pending.config != sha(&serde_json::to_string(o).expect("OAuth config serializes")) || pending.issuer != issuer { return Ok(NotUnderWay); }
         let Some(code) = b.code.filter(|c| own_signin::valid_code(c)) else { return Ok(Declined) };
@@ -80,6 +94,39 @@ impl RegistryCell {
         let live = self.live_session(&b.session, None, false)?;
         let subject = self.subject_of(SubjectOf { identity: live.session.identity.id, issuer })?.subject;
         if subject.as_deref() != Some(&pending.subject) || pending.expires_at <= js::now_ms() { return Ok(NotUnderWay); }
-        if keys::pipes_import(&self.env, &self.cfg.workos()?.api, &b.provider, &pending.subject, tokens).await? { Ok(Connected) } else { Ok(Failed) }
+        let api = &self.cfg.workos()?.api;
+        // the last check before the import, in its turn: a disconnect that
+        // fenced the account while the code was exchanged cancels it, and
+        // one from here on is refused until this answers
+        if !self.finishing.borrow_mut().may_import(id) {
+            // the grant it was given goes too, where the row says how
+            if let Some(revoke) = o.revoke.as_deref().filter(|r| r.starts_with("https://") || self.cfg.egress_local) {
+                if !keys::connection_revoke(revoke, &tokens.revoke_form()).await.unwrap_or(false) {
+                    worker::console_error!("{}", serde_json::json!({ "connection-fenced": b.provider, "not-revoked": true }));
+                }
+            }
+            return Ok(NotUnderWay);
+        }
+        if keys::pipes_import(&self.env, api, &b.provider, &pending.subject, tokens).await? { Ok(Connected) } else { Ok(Failed) }
+    }
+
+    /// A disconnect's fence (`calls::FenceConnection`), in one turn, before
+    /// it revokes or deletes anything: each attempt at the person's account
+    /// still pending ended (in every session of theirs), and each callback
+    /// still exchanging its code cancelled, so no attempt begun before the
+    /// disconnect connects the account after it. A callback importing now
+    /// refuses it (429) and nothing is ended: what it sent Pipes cannot be
+    /// called back, and the disconnect, asked again once it answered, then
+    /// deletes it. Answers the person's WorkOS user (none: no account, and
+    /// nothing under way, since a connect begins only with one).
+    pub(super) fn fence_connection(&self, b: FenceConnection) -> CellResult<SubjectAnswer> {
+        let answer = self.subject_of(SubjectOf { identity: b.identity, issuer: b.issuer.clone() })?;
+        let Some(subject) = answer.subject.clone() else { return Ok(answer) };
+        let account = Account { issuer: b.issuer, subject, provider: b.provider };
+        self.finishing.borrow_mut().fence(&account).map_err(|connection_signin::Importing| {
+            CellError::new(ErrorCode::RateLimited, format!("a connect of your {} account is finishing now: disconnect again in a moment", account.provider))
+        })?;
+        self.exec(connection_signin::FENCE_PENDING, vec![account.issuer.as_str().into(), account.subject.as_str().into(), account.provider.as_str().into()])?;
+        Ok(answer)
     }
 }
