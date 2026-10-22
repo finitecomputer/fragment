@@ -58,9 +58,9 @@ configuration and its bindings. A mode flag is a design bug.
 | 2 | Computers on sandcastle nodes: placement, the uplink, bring your own computer | to port |
 | 3 | Models | master's; dev's models file **done** |
 | 4 | Sign-in: OpenID Connect | **done** (below): beside WorkOS, on master's npub/email identity |
-| 5 | Files: macrofiche, the code-store contract | to port |
+| 5 | Files: macrofiche, the code-store contract | **done**: the store by configuration; macrofiche#1 and #2 open |
 | 6 | Blobs | nothing to port: celld's R2, over its bucket or `celld dev`'s disk |
-| 7 | Preview cards: the renderer over chrome-headless-shell | to port |
+| 7 | Preview cards: the renderer over chrome-headless-shell | **done** |
 | 8 | Notifications | design only: push is off offline |
 | 9 | Hosts and TLS: the LAN mode (`--lan`) | to port |
 | 10 | Money: own hardware in points | to port |
@@ -337,6 +337,135 @@ branch's registry step 4); whether a deployment moving from WorkOS to a
 provider should keep its people (decision 45 refuses each email to the
 new issuer); and the Wasm headroom (30 KB left).
 
+### 5. Files: macrofiche, the code-store contract (done)
+
+macrofiche (github.com/futurepaul/macrofiche, a sibling project as
+sandcastle is) answers code.storage's API over git on disk (git itself,
+jailed), as its `docs/contract.md` reads it from this repo. Where the git
+lives is configuration:
+
+| Where the git lives | dev (`cargo xtask dev`) | the e2e |
+|---|---|---|
+| the fake in the process (the default) | nothing set | `FRAGMENT_E2E_CODESTORE` unset |
+| macrofiche, started with the stack | `MACROFICHE_BIN` | `FRAGMENT_E2E_CODESTORE=macrofiche` and `MACROFICHE_BIN` |
+| a store already running | `CODESTORAGE_API_URL`, `CODESTORAGE_ORG`, `CODESTORAGE_PRIVATE_KEY_FILE` (the cell's own variables; the key by its file) | the same, with `FRAGMENT_E2E_CODESTORE=external` |
+
+- **`devstack::codestore`** writes macrofiche's config file (its listener,
+  its state, the org with its public key, `OrgKey::public_pem` of the key
+  the cell signs with) and runs it: on :8792 in dev, its repos in
+  `target/devstack/macrofiche`; in the run's scratch in the e2e. It dies
+  with its parent. A cell remembers each fragment's repo, so a dev stack
+  moved to another store takes `--clean`.
+- **The e2e on a store outside it:** the fake is not the store, so
+  `Suite::commit` and `deploy` move git through the platform's routes, as
+  the hosted lane does, and reads past the cell take the store's own
+  routes with tokens signed by the org key (`crates/e2e/src/store.rs`).
+  No store registers the cell's per-fragment webhook: refresh and the poll
+  move the pins. A section that needs the fake's levers declares
+  `Need::StoreFake` and is a skip that says so: appfiles, ops, effects,
+  blobs, brain, ai, ledger, site and sync, not yet ported.
+- **The `codestore` section** probes the store against the contract with
+  the cell's own parsers (`fragment_core::codestorage`): packs refused
+  with nothing landed, a file's identity headers, listings, branches and
+  merges, the merge preview and its restore steps, a repo's delete, the
+  auth floor. It runs only on a store outside the run.
+- **Parity, 2026-10-22:** of what master calls (cell/src/cs.rs, the CLI's
+  codestorage.rs), macrofiche lacked one route: `DELETE /api/repos/{repo}`,
+  which a wipe calls. It answered `404 no_route`, which the cell reads as
+  "never there", so a wipe finished and left the person's repo behind.
+  Fixed in macrofiche#2 (open for Paul). The merge preview and its restore
+  steps already matched. A pack that changes nothing still makes an empty
+  commit on macrofiche's `main` (found 33): macrofiche#1, still open. The
+  runs below used a binary built from `main` with both merged; against
+  `main` alone, `codestore` fails 21 of its 38 checks and `wipe` its
+  repo-deleted check.
+
+```sh
+FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=../celld/target/release/celld \
+  FRAGMENT_E2E_CODESTORE=macrofiche MACROFICHE_BIN=../macrofiche/target/release/macrofiche \
+  cargo xtask e2e --only create,files,deploy,codestore,templates
+MACROFICHE_BIN=../macrofiche/target/release/macrofiche cargo xtask dev --runtime celld --clean
+```
+
+**Evidence, 2026-10-22** (macrofiche built from `main` with #1 and #2):
+
+- On celld, OpenBao and the renderer on: create, files, deploy, codestore
+  (38 probes) and templates, **185 passed, 0 failed, 0 skipped**.
+- On the fake under `wrangler dev`, the same sections: 147 passed, 0
+  failed, 1 skipped (`codestore`, which probes only a store outside the
+  run). `wipe` on `wrangler dev` with macrofiche: 46 passed, 0 failed, 1
+  skipped (a fake's lever). `external` against a macrofiche started by
+  hand (create, files, codestore): 99 passed, 0 failed.
+- `cargo xtask dev --runtime celld` with `MACROFICHE_BIN`: ready in 3.6 s,
+  stopped with every port free.
+
+### 7. Preview cards: the renderer over chrome-headless-shell (done)
+
+celld refuses the `browser` binding, so the cell also takes its browser
+from configuration: `FRAGMENT_BROWSER_URL` names a service answering the
+binding's three routes (`POST /v1/devtools/browser`, the CDP socket at
+`/v1/devtools/browser/<id>`, `DELETE`), reached with `fetch`; it wins over
+the binding. card.rs keeps master's one path (the fragment's alarm takes
+the shot: acquire, CDP with the share link set as a cookie and the page's
+errors heard, release); only where its fetch goes differs (`Renderer`).
+With neither, the shot is skipped (`card.skipped`, `no_browser`).
+
+- **The renderer** (`crates/devstack/src/rendering`), the spike's: a
+  browser per session over `--remote-debugging-pipe` (no port), at most
+  four, each with a fresh profile and home and its own process group,
+  Chrome's sandbox on, stopped after its `keep_alive` without a client.
+- **Isolation:** every connection a card's page makes goes through the
+  gate, a SOCKS5 proxy (with `<-loopback>`, so loopback and `*.localhost`
+  too) that lets `<one label with "--">.<suffix>:<port>` through to one
+  address and resolves no name; the browser resolves nothing itself, and
+  sends no QUIC and no unproxied WebRTC UDP. The engine, a model server,
+  the sign-in provider and the LAN are out of its reach.
+- **The pin:** chrome-headless-shell **156.0.8078.47**, Chrome for
+  Testing's Stable on 2026-10-22 (the spike's was 154). Chrome for Testing
+  publishes no checksums: each platform's zip (linux64, linux-arm64,
+  mac-arm64, mac-x64) was fetched, its MD5 matched against the
+  `x-goog-hash` Google's bucket answers, and its SHA-256 pinned
+  (`browser_release.rs`). `FRAGMENT_BROWSER_ZIP` names an intranet's copy,
+  checked against the same pin.
+- **A LAN:** `FRAGMENT_BROWSER_CA_FILE` trusts a private CA (an NSS
+  database made with `certutil` in each browser's home);
+  `FRAGMENT_BROWSER_UPSTREAM` (`ip:port`) moves where the gate connects.
+  The LAN mode (seam 9, to port) sets both to its door's.
+- The e2e on celld and `cargo xtask dev --runtime celld` start it; every
+  card check runs on celld (`shoots_cards` and its skips are gone). Shots
+  there are metered at Browser Rendering's price: seam 10's question.
+
+- **Found 2026-10-22:** a killed browser's page stayed in a fragment's
+  presence on celld: the todo template's page said "you and 1 other
+  here", the card's browser the other, long after the renderer had killed
+  it. celld seems to keep a socket whose client dropped its connection
+  without a close (not looked into further; it would hold any visitor
+  whose network drops: one for the upstream issues). The renderer now
+  asks a session's browser to close (`Browser.close`, 2 s at most) before
+  it kills its group, so its pages' sockets end with a close.
+
+**Evidence, 2026-10-22:**
+
+- On celld, OpenBao on: auth, signin, keys, secrets, ai, finite-private,
+  connections, files, deploy, site, ledger and restart, **586 passed, 0
+  failed, 3 skipped** (found 31's lost 413, and two that need a computer,
+  seam 2). Every card check ran: a deploy's card and a viewer's copy, a
+  second deploy's, revalidation by its tag, two failed shots then the
+  card, five then one `card.failed`, a guest's and a members-only
+  fragment's none, the shot's browser time on the owner's ledger. The
+  templates section on macrofiche with cards: above (seam 5).
+- `wrangler dev`, master's path (Browser Rendering's local mode): secrets
+  and site, 108 passed, 0 failed; site, files, deploy and ledger, 241
+  passed, 0 failed.
+- Host tests: the renderer against stand-in browsers (sessions, CDP both
+  ways, its refusals, idle and crashed sessions, the WebSocket framing),
+  the gate, the pinned zip; and the two run by name against
+  chrome-headless-shell 156 (`cargo test -p fragment-devstack rendering --
+  --ignored`): a card's page reaching nothing but its own origin, and a
+  private CA refused unnamed, trusted named.
+- The cell's Wasm on this branch (seam 4 included): 6,471,209 bytes,
+  28,791 under the budget; the renderer's switch is about 2.4 KB of it.
+
 ### 12. Secrets: the store's bindings, stood in for, OpenBao behind them (done)
 
 The cell reads each deployment secret as `await env.<BINDING>.get()`
@@ -405,7 +534,32 @@ used as it ships:
   `FRAGMENT_SECRETS_TOKEN`, its CA in `CELLD_EXTRA_CA_FILE`. Only OpenBao
   is tested.
 
-**Evidence:** see "Re-ported, 2026-10-22".
+**Evidence, 2026-10-22:**
+
+- Host tests (`openbao::tests`; the four on the binary run with
+  `--include-ignored`): the state made once and refused spoiled; the
+  config holding no secret; only the pinned tarball taken; the shim
+  against a scripted server (each kind of failure, a hang cut at 5 s, no
+  redirect followed, the token hidden) and a wrong config; and on OpenBao
+  itself, initialised once and unsealed at every start, a wrong key said;
+  the cell's token reading its mount alone; the shim reading a value and
+  saying missing, refused, down and sealed. 8 passed, 0 failed.
+- The e2e on celld, every secret in OpenBao: auth, signin, keys, secrets,
+  ai, finite-private (the model key), connections (an OAuth client's
+  secret), files, deploy, site, ledger and restart, **586 passed, 0
+  failed, 3 skipped** (seam 7's run). restart stops OpenBao under a fresh
+  node: a sign-in fails at once, naming it; started again, it unseals
+  itself, initialised once, and the next sign-in works with no restart of
+  the cell. The cell read the secrets 68 times (261 requests, 723 KiB of
+  audit log): about once a binding an isolate.
+- billing (Stripe's keys) on celld: its secrets read, but its four wipe
+  checks fail, OpenBao or not: a wipe's computer step calls
+  `ctx.container`, which celld lacks (`destroy: Cannot read properties of
+  undefined (reading 'running')`): seam 2's.
+- `cargo xtask dev --runtime celld` with `FRAGMENT_SECRETS_BACKEND=openbao`,
+  started twice (a clean state, then the same): sign-in read WorkOS's
+  client id through OpenBao, the cell's token 0600, and Ctrl-C freed
+  every port.
 
 ## What the spike found, still true
 
