@@ -55,7 +55,7 @@ configuration and its bindings. A mode flag is a design bug.
 | # | Seam | Status |
 |---|---|---|
 | 1 | The runtime: celld | **done** (below) |
-| 2 | Computers on sandcastle nodes: placement, the uplink, bring your own computer | to port |
+| 2 | Computers on sandcastle nodes: placement, the uplink, bring your own computer | **done** (below) |
 | 3 | Models | master's; dev's models file **done** |
 | 4 | Sign-in: OpenID Connect | **done** (below): beside WorkOS, on master's npub/email identity |
 | 5 | Files: macrofiche, the code-store contract | **done**: the store by configuration; macrofiche#1 and #2 open |
@@ -63,7 +63,7 @@ configuration and its bindings. A mode flag is a design bug.
 | 7 | Preview cards: the renderer over chrome-headless-shell | **done** |
 | 8 | Notifications | design only: push is off offline |
 | 9 | Hosts and TLS: the LAN mode (`--lan`) | to port |
-| 10 | Money: own hardware in points | to port |
+| 10 | Money: own hardware in points | **done** (below) |
 | 11 | Nothing calls home | design only |
 | 12 | Secrets | **done**: the stand-in, OpenBao behind it |
 | — | Mail | debt (docs/technical-debt-ledger.md, "No mail without Email Sending") |
@@ -116,6 +116,168 @@ Every binding master's `cell/wrangler.jsonc` uses, against celld (v0.6.2 and v0.
   runtime.
 
 **Evidence:** see "Re-ported, 2026-10-22", below.
+
+### 2. Computers on sandcastle nodes (done)
+
+A computer's container is `ContainerHost`'s (`cell/entry.mjs`), and every
+runtime call it makes, and every call the Sandbox SDK's `DirectoryBackup`
+makes, is a method of one object: `ctx.container` (Cloudflare's, or
+Docker's under `wrangler dev`), or, when the deployment lists sandcastle
+nodes (`FRAGMENT_NODES`), a `NodeContainer` (`cell/node.mjs`) over the
+node's API (sandcastle's docs/node.md), each call signed with the node's
+secret. computer.rs, the restore gate and the images do not know which.
+celld's render drops `containers` (seam 1): on celld, nodes are the only
+computers.
+
+**Master's calls, each checked against the node** (a start's options as
+master passes them): `start({env, enableInternet, instance,
+image | containerSnapshot})`, the instance its custom size (2 vCPU, 6 GiB,
+12 GB: the engine's `Instance::Custom`); `monitor()`; `exec(argv,
+{stderr: "combined", signal})` (an abort is a SIGKILL frame) and the SDK's
+piped stdin and stdout; `signal(n)`; `destroy(reason)`;
+`getTcpPort(port).fetch` (HTTP and WebSocket); `snapshotContainer({name})`;
+`interceptOutboundHttp(s)` (the api and model hosts, the swap's hosts, and
+`DirectoryBackup`'s gateway, set again by each save: a binding replaced,
+never a new intercept); and `setInactivityTimeout`, nothing on a node (the
+Computer's own sleep stops it). Snapshots, master's cache of the save, are
+node-local and keyed by the image's reference, as everywhere; a computer
+is pinned to its node for life, so its snapshots are always there.
+
+**Reach.** A node either listens (`"url"`), or dials the platform's
+`/api/nodes/uplink` (`"uplink": true`, S7) and one `Node` Durable Object
+per node holds the socket (`cell/uplink.mjs`, unchanged from the spike:
+calls are one message each, found 9; a dropped `GET` is asked again on the
+next dial, found 10). Intercepts come back to `/api/nodes/egress`, signed,
+and go to the computer's object, which checks them again. `Node` is the
+one object that runs no Rust and checks no caller's release: its calls are
+the node's protocol (xtask's guard counts it apart).
+
+**The list** (`FRAGMENT_NODES`, checked by `fragment_core::placement` at
+the first request):
+
+```json
+{ "nodes": [
+    { "id": "box", "url": "http://192.168.50.7:9400", "arch": "x86_64", "capacity": 16 },
+    { "id": "mac", "uplink": true, "arch": "aarch64", "capacity": 8 } ],
+  "images": {
+    "stub":   "docker.io/library/fragment-stub@sha256:<64 hex>",
+    "hermes": { "x86_64": "registry.lan/fragment-hermes@sha256:<64 hex>" } } }
+```
+
+A node's secret is `FRAGMENT_NODE_SECRET_<ID>` (the id upper-cased, `-` as
+`_`): a Worker secret, or a Secrets Store binding of that name (its
+`get()`, so seam 12's stand-ins serve it), never in the list. An image has
+one reference for every architecture, or one per architecture (arm64 is
+the Mac's, later).
+
+**Pinned by digest.** Master pins a deployment's images by registry digest
+(docs/computers.md, "Stable and canary"); a node's are pinned the same
+way, and must be: a computer's version is its reference's digest, and a
+snapshot is reused only under the reference it was taken of, so a tag
+rebuilt under the same name would start the old image's snapshot and
+never tell an update. Two ways a node holds one:
+
+- **Pulled**: `name@sha256:…` from a registry the node reaches; the engine
+  checks every digest it pulls.
+- **Loaded** (`cargo xtask node-images`, and the e2e's real engine): the
+  image built here, `docker save`d, loaded over the engine's socket, and
+  named `docker.io/library/fragment-<name>@<digest>` by the digest the
+  load answers (the OCI manifest of its config and layers as loaded, not a
+  registry's). sandcastle's `node-digest-refs` (off `node`) resolves a
+  reference pinned by a digest the node holds to that image, whatever name
+  it came under; a rebuild is a new reference.
+
+The Docker double (two nodes) runs local Docker's tags
+(`fragment-<name>:e2e-<run>`, one per run): Docker knows no digest for an
+image built here.
+
+**Placement** (`computer.rs` `place`, at a computer's first start): every
+node probed at once (health within 6 s, the architecture it reports, its
+object's count); of those up, reporting their listed architecture and
+holding the image for it, the fewest computers for its capacity wins, a
+tie to the one listed first; the node's object takes it once and refuses
+one past capacity, so a race never overfills it. **Pinned for life**
+(`node` and `placed` in its view; moving one is not built). A node that
+does not answer is a typed answer within a bound, never a hang: the wake
+answers 503 `node_down` naming it (and its view's `why` says so until a
+start comes up), 503 `no_node` with each node's reason when none can take
+a new computer, and 410 `node_revoked` for a person's own node they
+revoked. A start that failed for its node is no snapshot's failure.
+
+**Bring your own computer** (experimental; `FRAGMENT_BYOC=on`, off unless
+said): `sandcastle-node pair <platform>` starts a device authorization
+(`POST /api/nodes/pair`, unsigned; RFC 8628's shape,
+`fragment_core::pairing`); the person approves its 8-letter code at
+`/nodes/pair` in their session, from the platform's own origin (ticking
+"Run my new computers on it" chooses it at once); the node's next poll
+takes the id the platform gave it (`paired-<16 hex>`) and its secret,
+once, sealed in the registry for that id (its tables: the Registry's step
+`0005_paired_nodes`). A person's node runs their computers only when they
+chose it (Settings → Computers (experimental), `PUT /api/nodes/prefer`);
+a choice that cannot take a computer falls back to the deployment's rule,
+saying why in `placed`. Revoking (`DELETE /api/nodes/{id}`) drops its
+secret, cuts its uplink (4003) and answers its every call and dial
+`node_revoked`. The bounds are the spike's (10-minute codes, 32 waiting,
+10 a minute, 5 wrong codes, 8 live nodes, live names apart).
+
+**sandcastle's part** (its `node` branch is what this box runs): the
+engine resolving a digest a node holds is `node-digest-refs` (one commit
+off `node`, pushed, not merged: Paul's), installed on this box's engine
+(the binary before it kept beside it as `sandcastle-engine.before-digest-refs`).
+The two-node runs use `node`'s own `sandcastle-node`, double and relay.
+
+**Evidence, 2026-10-22** (celld: the fork's `selfhost` line on v0.6.3;
+OpenBao and the renderer on, as the celld e2e has them):
+
+- **`cargo xtask check`:** 803 passed, 0 failed.
+- **Two nodes on celld** (`FRAGMENT_E2E_NODES=two`; computers, chat,
+  shell-ui, placement, pairing, restart, billing): **757 passed, 0
+  failed, 1 skipped** (the stub's awake save, master's own skip). Among
+  them: each kind of node takes a computer, its container killed under it
+  comes back by itself, each node down answers `node_down` within 15 s,
+  pairing end to end with `sandcastle-node pair`, own hardware in points
+  read by an operator, a computer on a node across a restart and a crash,
+  and billing's four wipe checks (a wipe's computer step had no container
+  on celld before).
+- **The real engine** (`FRAGMENT_E2E_NODES=real`, one node in front of
+  this box's engine, every computer a jailed microVM, the images named by
+  digest; computers, chat, hermes): **428 passed, 0 failed, 1 skipped**
+  (the same). Its first run found the stale `wait` clearing a new start's
+  `running` (22 failed, all of it); fixed in `NodeContainer` (a start's own
+  number).
+- **`cargo xtask node-images`:** the stub and Hermes built, loaded and
+  named `docker.io/library/fragment-<name>@sha256:…`; the stub's digest
+  the e2e's for the same content (`a92db44a…`), Hermes' found built.
+- **Master's path, `wrangler dev` with local Docker** (computers, chat):
+  **367 passed, 0 failed, 2 skipped** (the stub's awake save, and the
+  killed container's check, which needs a node the run started).
+
+**The self-hosted cell's cost:** this seam adds 226 KB to the cell's Wasm
+(6,471,209 bytes with seams 4, 5, 7 and 12, to 6,697,133), the router's
+and the Registry's new routes most of it, past master's 6.5 MB. The
+lane's budget is 6.7 MB (`CELL_WASM_MAX_BYTES`, a commit of its own; the
+debt ledger's Wasm-budget entry): 2.9 KB left.
+
+**What celld needed, found again on master's computers:**
+
+- **found 21**: an exit's report (and a tab's) comes back in through the
+  object's namespace, a request of its own, never as a continuation of
+  the call that started the container (celld ties a WebSocket to its
+  request: denoland/celld#254). Master reported through `this.rs`.
+- **found 22**: a node's `wait` outlives celld's 120 s fetch bound: a cut
+  poll asks whether the container still runs, and waits again
+  (`#waited`).
+- **found 20**: every socket path the harness hands a node fits
+  `sun_path` (`sandcastle::socket_path`).
+- **New, the lanes' timing on celld with nodes** (master's lanes, first
+  run there): a reply's push run (a trigger's Workflow, on celld a cell of
+  its own) can end after its chat's page closed, so the chat lane waits
+  for every reply's run first; a sleep or a start through a node is
+  slower, so the always-on check waits for a sleep under way, and the
+  restart notice's for "It went back to …"; an owner's restart may answer
+  `starting` when its container's exit report (found 21's own request)
+  made the start before the stop's own end, so the recovery check waits
+  for it.
 
 ### 3. Models: master's slots, and dev's models file
 
@@ -466,6 +628,33 @@ With neither, the shot is skipped (`card.skipped`, `no_browser`).
 - The cell's Wasm on this branch (seam 4 included): 6,471,209 bytes,
   28,791 under the budget; the renderer's switch is about 2.4 KB of it.
 
+### 10. Money: own hardware in points (done)
+
+A computer on a node its owner paired costs the platform nothing to keep
+awake: it is never charged, and its use is still counted, so whoever runs
+the deployment sees who used what (Paul, 2026-10-05: "not actually
+billed, but it's useful to keep track of usage").
+
+- **Smaller than the spike's.** Its awake intervals never reach the
+  ledger: the Computer counts their list price in its own meta row
+  (`own_hardware`, by month) instead of metering them. No `MeterRow` field,
+  no ledger table or migration, no status field, nothing on the call path:
+  master's rule that billing is best effort and never refuses holds by
+  construction (an instance the book cannot price counts zero, logged).
+- **Points**: 1 point is $0.001 of list price, rounded up
+  (`fragment_core::price::points`): an hour of the default computer is 65.
+  The computer's view carries `ownHardwarePoints` (this month's) while it
+  is placed on its owner's node; Settings' Computer section says "N points
+  this month, not charged: it runs on your own machine", and an operator
+  reads it on the person's page (`GET /api/admin/people/<npub>`, its
+  computer).
+- **Cut from the spike, a decision for Paul:** a wake on own hardware was
+  let past a person's want of credit. Now it is refused at zero credit as
+  every agent's start is (decision 27): their agents' model calls are the
+  platform's and stop then anyway, and the pass-over needed the wake to
+  place the computer first.
+- A computer on one of the deployment's nodes is billed exactly as before.
+
 ### 12. Secrets: the store's bindings, stood in for, OpenBao behind them (done)
 
 The cell reads each deployment secret as `await env.<BINDING>.get()`
@@ -660,6 +849,19 @@ FRAGMENT_MODELS_FILE=bonsai-models.jsonc FRAGMENT_MODEL_KEY_FILE=bonsai-key \
   CELLD_BIN=../celld/target/release/celld cargo xtask dev --runtime celld
 # the e2e on celld
 FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=../celld/target/release/celld cargo xtask e2e --only auth,signin,…
+# computers on two nodes over sandcastle's Docker double (SANDCASTLE_DIR: its `node`
+# branch, sandcastle-node and sandcastle-docker-engine built, and sandcastle-docker-relay
+# --target x86_64-unknown-linux-musl), one that listens and one that dials in
+FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… FRAGMENT_E2E_NODES=two SANDCASTLE_DIR=../sandcastle-node \
+  cargo xtask e2e --only computers,chat,shell-ui,placement,pairing,restart
+# one node in front of this machine's engine (SANDCASTLE_ENGINE_DIR, default
+# /var/lib/sandcastle; one such run at a time: it destroys what it started there)
+FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… FRAGMENT_E2E_NODES=real SANDCASTLE_DIR=../sandcastle-node \
+  cargo xtask e2e --only computers,chat,hermes
+# the stub and Hermes built and loaded into the engine, named by digest
+cargo xtask node-images
+# the stack with computers on nodes: a node list, each node's "secret_file" beside it
+FRAGMENT_NODES_FILE=nodes.json [FRAGMENT_BYOC=on] CELLD_BIN=… cargo xtask dev --runtime celld
 ```
 
 ## Open questions for Paul
