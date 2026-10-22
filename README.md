@@ -60,13 +60,16 @@ Any deployment's `/llms.txt` names its own URLs.
 
 Fragment deploys to your own Cloudflare account from one config file kept
 outside the repo. [deploy/example.jsonc](deploy/example.jsonc) names every
-field and what it needs: a Workers Paid account, a zone for the platform
-and its fragments, a code.storage org for files, and a WorkOS environment
-for sign-in; Stripe, models and tool keys are optional. Secrets live in
-your account's Secrets Store, set by name ([docs/secrets.md](docs/secrets.md)):
+field and what it needs: a Workers Paid account, two hosts that are each a
+zone on it (one zone may be both), a code.storage org for files, and a
+WorkOS environment for sign-in; Stripe, models and tool keys are optional.
+In your copy, replace the example's `zone` (a branch deployment's) with
+`platform_host`, where people sign in, and `fragment_suffix`, under which
+each fragment gets its own address. Secrets live in your account's Secrets
+Store, set by name ([docs/secrets.md](docs/secrets.md)):
 
 ```
-cp deploy/example.jsonc ~/fragment.jsonc        # fill it in
+cp deploy/example.jsonc ~/fragment.jsonc        # fill it in: platform_host and fragment_suffix, not zone
 cargo xtask secret gen fragment-host-secret --config ~/fragment.jsonc
 cargo xtask secret set <name> --config ~/fragment.jsonc   # each other secret it names
 cargo xtask deploy --config ~/fragment.jsonc
