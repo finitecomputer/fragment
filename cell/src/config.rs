@@ -167,8 +167,8 @@ pub struct Config {
     /// of the two) is informational (#451).
     pub providers: fragment_core::catalog::Catalog,
     /// The price book this release charges with (`configured_book`): the
-    /// core's defaults, the operator keys' prices from `providers`, and the
-    /// version. Built and checked once per isolate; every call into a
+    /// core's defaults, each OpenRouter slot's ceiling from `models`, the
+    /// operator keys' prices from `providers`, and the version. Built and checked once per isolate; every call into a
     /// ledger is its own release's, so a ledger keeps none of its own
     /// (decision 62).
     pub book: fragment_core::price::PriceBook,
@@ -179,8 +179,9 @@ pub struct Config {
     /// AI model, or a model on an OpenAI-compatible API, whose key is bound
     /// for its slot (`secrets_store::model_key`). Each slot unnamed is on
     /// Workers AI as before (`fragment_core::models::Models`); one out of
-    /// shape, or whose model the price book does not price, is refused, at
-    /// the deploy and here. A local fleet's may name its fake on
+    /// shape, or whose model neither the price book nor its slot's ceiling
+    /// prices (one on OpenRouter names its ceiling), is refused, at the
+    /// deploy and here. A local fleet's may name its fake on
     /// 127.0.0.1.
     pub models: fragment_core::models::Models,
     /// `FRAGMENT_SWAP_UPSTREAM` (the e2e only): a swapped request goes here,
@@ -249,14 +250,15 @@ fn deployed_at(env: &Env) -> Option<u64> {
 /// `FRAGMENT_DEPLOY_ID`.
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
-/// The price book a release charges with: the core's defaults, the
+/// The price book a release charges with: the core's defaults, each model
+/// slot's ceiling (an OpenRouter tier's: `Models::priced`), the
 /// configuration's operator keys' prices, and the higher of its version
 /// and the defaults' (decision 4: pricing lives there). One the core
 /// refuses (its checks are the deploy's too, so none should come) is said
 /// aloud, and the defaults charge instead: a billing problem never stops
 /// an agent (decision 62).
-fn configured_book(providers: &fragment_core::catalog::Catalog, version: u32) -> fragment_core::price::PriceBook {
-    let mut book = fragment_core::price::PriceBook::defaults();
+fn configured_book(providers: &fragment_core::catalog::Catalog, models: &fragment_core::models::Models, version: u32) -> fragment_core::price::PriceBook {
+    let mut book = models.priced(fragment_core::price::PriceBook::defaults());
     book.keys = providers.key_prices();
     book.version = book.version.max(version);
     match book.validate() {
@@ -296,6 +298,8 @@ impl Config {
         assert!(fragment_core::frames::is_origin(&format!("https://{host_suffix}")), "FRAGMENT_HOST_SUFFIX is a host name");
         let egress_local = var(env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow");
         let providers = providers(env);
+        let models = fragment_core::models::Models::parse(var(env, "FRAGMENT_MODELS").as_deref(), &fragment_core::price::PriceBook::defaults(), egress_local)
+            .unwrap_or_else(|e| panic!("FRAGMENT_MODELS: {e}"));
         let levers_fleet = levers_fleet(egress_local, host_label_suffix.is_some());
         let test_secret = test_secret(env, levers_fleet);
         Config {
@@ -364,10 +368,9 @@ impl Config {
             test_secret,
             deploy_id: deploy_id(env),
             deployed_at: deployed_at(env),
-            book: configured_book(&providers, var(env, "FRAGMENT_PRICE_BOOK_VERSION").map(|v| v.parse().unwrap_or_else(|_| panic!("FRAGMENT_PRICE_BOOK_VERSION is a whole number"))).unwrap_or(1)),
+            book: configured_book(&providers, &models, var(env, "FRAGMENT_PRICE_BOOK_VERSION").map(|v| v.parse().unwrap_or_else(|_| panic!("FRAGMENT_PRICE_BOOK_VERSION is a whole number"))).unwrap_or(1)),
             providers,
-            models: fragment_core::models::Models::parse(var(env, "FRAGMENT_MODELS").as_deref(), &fragment_core::price::PriceBook::defaults(), egress_local)
-                .unwrap_or_else(|e| panic!("FRAGMENT_MODELS: {e}")),
+            models,
             swap_upstream: var(env, "FRAGMENT_SWAP_UPSTREAM").map(|u| u.trim_end_matches('/').to_string()),
         }
     }

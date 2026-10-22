@@ -1107,17 +1107,23 @@ Private stays possible by config.
       parameter sent, fp8 or bf16, at most $0.15 a million tokens in and
       $0.50 out (6 of GLM-5.3 Flash's 34 endpoints on 2026-10-15). The
       body is generic (any OpenAI-compatible API's own fields, never one
-      the route writes, 4 KiB at most), and nothing in the cell is
-      OpenRouter's: an OpenAI-compatible API's stream is metered from its
-      usage on whichever chunk carries it (OpenRouter's last keeps a
-      choice).
+      the route writes, 4 KiB at most), and the cell knows OpenRouter
+      only by its ceiling (below): an OpenAI-compatible API's stream is
+      metered from its usage on whichever chunk carries it (OpenRouter's
+      last keeps a choice).
     - **Its price** (a decision for Paul): the ceiling above, not what a
       call's provider billed: a cached or written token at the prompt
       ceiling too (none of OpenRouter's cache prices is bounded by
       `max_price`), and OpenRouter's 5.5% fee on credits in place of AI
       Gateway's 5%, then the margin (docs/ledger.md, "OpenRouter's
-      price"). Price book 7. Settling from OpenRouter's reported
-      `usage.cost` instead is a follow-up (docs/technical-debt-ledger.md).
+      price"). Price book 7. Since 2026-10-22 (Paul: "we try a config
+      out on preview, if we don't like it we revert it") the ceiling is
+      read from the slot's `max_price`, not kept per model in the code
+      (GLM-5.3 Flash's row stays, for its usage queued past a switch):
+      any model OpenRouter serves is priced, a tier moves to another by
+      config alone, and a slot on OpenRouter without a ceiling is
+      refused. Settling from OpenRouter's reported `usage.cost` instead
+      is a follow-up (docs/technical-debt-ledger.md).
     - **The platform's trouble falls back** (the coordinator for Paul,
       2026-10-15): on an OpenAI-compatible API, whose key is the
       platform's, a key refused (401) or denied (403), an account out of

@@ -103,8 +103,9 @@
   // stream_options, tools, tool_choice, max_tokens, max_completion_tokens,
   // reasoning_effort). A slot left out is on Workers AI: cheap GLM-5.3
   // Flash, medium GLM-5.3, fallback DeepSeek V4 Flash, vision GLM-5.3 Flash.
-  // Every model is one the price book prices (fragment_core::price), or the
-  // deploy is refused. Leave `models` out (as a preview without a key does)
+  // Every model is one the price book prices (fragment_core::price), or one
+  // on OpenRouter at its slot's ceiling (below), or the deploy is refused.
+  // Leave `models` out (as a preview without a key does)
   // and every tier runs on Workers AI.
   //
   // Finite's own (Paul, 2026-10-15; decision 61): its tiers on GLM-5.3 Flash
@@ -112,9 +113,13 @@
   // provider routing, openrouter.ai/docs/guides/routing/provider-selection):
   // only zero-data-retention endpoints, the fastest first, each taking every
   // parameter the call sends, at fp8 or bf16, at most $0.15 a million
-  // tokens in and $0.50 out (the price book charges that ceiling: raise one
-  // and the other together); Workers AI's GLM-5.3 Flash behind them and for
-  // images.
+  // tokens in and $0.50 out; Workers AI's GLM-5.3 Flash behind them and for
+  // images. Any model id OpenRouter serves works here (say
+  // "deepseek/deepseek-v4.1-flash"): a slot on OpenRouter is priced at its
+  // own `max_price`, every input token at `prompt` and output at
+  // `completion` with OpenRouter's fee (docs/ledger.md, OpenRouter's price),
+  // so trying another model is a change to this file alone. A slot there
+  // without one is refused.
   "models": {
     "cheap": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1",
                "key": "fragment-openrouter-key", "model": "z-ai/glm-5.3-flash",

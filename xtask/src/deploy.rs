@@ -1940,7 +1940,7 @@ mod tests {
         assert_eq!(parsed.cheap.model(), fragment_core::models::OPENROUTER_FLASH);
         // the ceiling OpenRouter routes under is the one the price book charges, with OpenRouter's fee
         use fragment_core::price::{BP, CREDITS_FEE_BP_DEFAULT, OPENROUTER_FEE_BP};
-        let row = fragment_core::price::PriceBook::defaults().models.into_iter().find(|m| m.model == fragment_core::models::OPENROUTER_FLASH).unwrap().price;
+        let row = parsed.priced(fragment_core::price::PriceBook::defaults()).models.into_iter().find(|m| m.model == fragment_core::models::OPENROUTER_FLASH).unwrap().price;
         let ceiling = |per_million: &Value| (per_million.as_f64().unwrap() * 1e6).round() as i64 * i64::from(BP + OPENROUTER_FEE_BP) / i64::from(BP + CREDITS_FEE_BP_DEFAULT);
         let max = &routing["provider"]["max_price"];
         assert!(row.input >= ceiling(&max["prompt"]) && row.cached_input >= row.input && row.cache_write >= row.input && row.output >= ceiling(&max["completion"]), "{row:?}");
@@ -1969,8 +1969,10 @@ mod tests {
     /// it. Invalid: an unknown provider, an OpenAI-compatible API without a
     /// key's name (or with one that is no string, or no store name), a key
     /// on a Workers AI slot, a bad base URL, an unknown slot, an unpriced
-    /// model, `models` no object, and `vision_model` or `fallback_model`.
-    /// Valid: a slot alone, rendered with the rest the cell's.
+    /// model (on OpenRouter, one whose slot names no whole ceiling),
+    /// `models` no object, and `vision_model` or `fallback_model`. Valid: a
+    /// slot alone, rendered with the rest the cell's, and any model on
+    /// OpenRouter at its ceiling.
     #[test]
     fn a_deployments_models_out_of_shape_are_refused() {
         let with = |models: Value| {
@@ -1998,6 +2000,14 @@ mod tests {
         refused(row(json!({ "base_url": "http://127.0.0.1:4810/v1" })), "models.cheap: base_url:");
         refused(row(json!({ "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1/" })), "without a query or a trailing /");
         refused(row(json!({ "model": "glm-6" })), "models.cheap: the model \"glm-6\" is not in the price book");
+        // a model on OpenRouter is priced at the ceiling its slot names: any id, none without one
+        let openrouter = |max_price: Value| row(json!({ "base_url": "https://openrouter.ai/api/v1", "key": "fragment-openrouter-key", "model": "deepseek/deepseek-v4.1-flash", "body": { "provider": { "zdr": true, "max_price": max_price } } }));
+        assert_eq!(with(openrouter(json!({ "prompt": 0.15, "completion": 0.5 }))), "", "an id the book has no row for, at its ceiling");
+        refused(row(json!({ "base_url": "https://openrouter.ai/api/v1", "model": "deepseek/deepseek-v4.1-flash", "body": { "provider": { "zdr": true } } })), "models.cheap: a model on OpenRouter is priced at the ceiling its calls route under: name it in body.provider.max_price");
+        refused(openrouter(json!({ "prompt": 0.15 })), "models.cheap: body.provider.max_price.completion is the dollars a million tokens");
+        for base_url in ["https://OPENROUTER.AI/api/v1", "https://openrouter.ai:443/api/v1", "https://eu.openrouter.ai/api/v1"] {
+            refused(row(json!({ "base_url": base_url, "model": "anthropic/claude-opus-5.5" })), "models.cheap: a model on OpenRouter is priced at the ceiling its calls route under");
+        }
         refused(json!({ "high": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } }), "unknown field `high`");
         refused(json!([]), "models is an object");
         // a body: the API's own fields, rendered as named; one the cell refuses, refused here
