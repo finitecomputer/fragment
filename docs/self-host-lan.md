@@ -13,7 +13,7 @@ is how the home network plays a company's.
 |---|---|
 | delegates a subzone to the team's server | `fragment.home.arpa` (RFC 8375's home domain), answered by DNS on the box (192.168.50.7); every other name goes on to the router |
 | issues certificates from its CA, and pushes the root to every device | a CA made on the box, **constrained to `fragment.home.arpa`** (it can vouch for nothing else, even if its key leaked); its root installed on the iPhone and the Mac by profile |
-| puts one TLS edge in front of the apps | `fragment-lan`'s front door on :443: `https://fragment.home.arpa`, fragments at `https://<label>--<user>.fragment.home.arpa`, Dex at `https://dex.fragment.home.arpa`; WebSockets and event streams pass through |
+| puts one TLS edge in front of the apps | `fragment-lan`'s front door on :443: `https://fragment.home.arpa`, fragments at `https://<label>--<suffix>.fragment.home.arpa`, Dex at `https://dex.fragment.home.arpa`; WebSockets and event streams pass through |
 | runs an identity provider | Dex v2.46.1 (pinned by digest), one static user per person, passwords in files; the cell signs people in through OpenID Connect |
 | runs a secrets service | OpenBao 2.7.1 (pinned by checksum), on loopback: the cell's own secrets, read with a token that reads nothing else (docs/self-host.md, seam 12) |
 | runs the model on its own network | Bonsai (NInfer on this box, `http://127.0.0.1:18087/v1`) |
@@ -194,7 +194,7 @@ compares it), each person with their password's file, and the box's node
 From the box, once 1d is done:
 
 ```sh
-resolvectl query todo--paul.fragment.home.arpa              # 192.168.50.7
+resolvectl query anything.fragment.home.arpa               # 192.168.50.7
 curl --cacert ~/.local/state/fragment-lan/ca/ca.pem -s -o /dev/null -w '%{http_code}\n' https://fragment.home.arpa/   # 200
 ```
 
@@ -300,16 +300,25 @@ names under it only: the phone will not trust it for any other site.
    - **When it asks you something, answer in the chat**: your next message
      is the answer, while its turn waits. Stop works while it waits.
 5. **An app**: the agent makes apps from a message. Open the desktop (the
-   panel button at the top right), **Add** in its dock: three ways to ask
-   (the die deals three more). Tap one, make it yours in the composer, and
-   send it. The agent builds it on its computer with the `fragment` CLI and
-   says where it is; the app appears in the dock, its preview card once it
-   is shot (press and hold its icon).
-6. **Live**: open the app in a second Safari tab ("you and 1 other
-   here"). Change something in one; it shows in the other at once.
-7. **Someone else**: an app's ⋯, **Invite…**, their email
-   (`mac-test@fragment.home.arpa`). No mail goes out: send them the app's
-   link yourself; when they sign in with that email, the invite is met.
+   panel button at the top right): with no apps yet it offers three ways
+   to ask (the die deals three more; later, **Add** in its dock). Tap one,
+   make it yours in the composer, and send it. The agent builds it on its
+   computer with the `fragment` CLI and deploys it, a minute or two on
+   Bonsai; the app appears in the dock. **On the LAN the agent cannot open
+   the app from its own computer** (a computer reaches no private address,
+   and the box is one), so it may spend its turn trying, and say it could
+   not check the page: the app works, open it from the dock. Its preview
+   card (the page as the platform shot it after the deploy) shows over its
+   icon where there is a pointer, on the Mac; a phone shows the icon.
+6. **Live**: tap the app in the dock (it opens in a window), and open its
+   address in a second Safari tab (the window's ⋯, Copy link): each says
+   "you and 1 other here". Add something in one; it shows in the other at
+   once.
+7. **Someone else**: the app window's share button (**Share…**), their
+   email (`mac-test@fragment.home.arpa`), Editor or Viewer, **Invite**.
+   No mail goes out, and the sheet says so, showing the app's address:
+   send it to them yourself. When they sign in with that email, the
+   invite is met and the app is in their list.
 
 Add the shell to the home screen (Share, Add to Home Screen) for an app of
 its own. Push notifications need Apple's push service and the internet;

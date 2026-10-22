@@ -504,7 +504,7 @@ pub fn banner(lan: &Lan) -> Vec<String> {
     let show = |ips: &[IpAddr], port: u16| ips.iter().map(|ip| SocketAddr::new(*ip, port).to_string()).collect::<Vec<_>>().join(", ");
     let mut lines = vec![
         format!("  LAN:          {}/ (the front door on {}; log {})", s.platform_url(), show(&s.bind, s.https_port), lan.door_log.display()),
-        format!("  fragments:    {}", fragment_lan::https_origin(&format!("<label>--<username>.{}", s.zone), s.https_port)),
+        format!("  fragments:    {}", fragment_lan::https_origin(&format!("<label>--<suffix>.{}", s.zone), s.https_port)),
         format!("  DNS:          {} and *.{} -> {}, on {} (every other name to {})", s.zone, s.zone, s.addr, if s.dns_port == 0 { "no port".into() } else { show(&s.bind, s.dns_port) }, s.dns_upstream),
         format!("  the root:     http://{}{}/ca  (SHA-256 {})", s.addr, if s.http_port == 80 { String::new() } else { format!(":{}", s.http_port) }, lan.fingerprint),
         format!("                {}", lan.ca_file.display()),

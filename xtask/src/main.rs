@@ -408,11 +408,12 @@ fn dev(args: &[String]) -> Result<()> {
     }
     match (&fleet.nodes, &box_node) {
         (Some(_), Some(b)) if std::env::var_os(devstack::sandcastle::NODES_FILE_VAR).is_some() => println!(
-            "  computers:    on the nodes {} lists; this box's engine through its node at {} (log {}), new ones on {}",
+            "  computers:    on the nodes {} lists; this box's engine through its node at {} (log {}), new ones on {}{}",
             std::env::var(devstack::sandcastle::NODES_FILE_VAR).unwrap_or_default(),
             b.url,
             b.log.display(),
             computer_image.as_deref().unwrap_or("?"),
+            if byoc { ", and people's own (FRAGMENT_BYOC=on: sandcastle-node pair <platform>)" } else { "" }
         ),
         (Some(_), Some(b)) => println!(
             "  computers:    on this box's sandcastle engine, through its node at {} (log {}; the list {}), new ones on {}{}",
