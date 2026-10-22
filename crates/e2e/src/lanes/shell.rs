@@ -1196,6 +1196,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
     settings_race_ui(s, api, &mut b, &page, &session)?;
     notice_ui(s, &mut b, &page, &chat, &shots)?;
+    reasoning_ui(s, api, &mut b, &page, &session, &shots)?;
     models_ui(s, api, &mut b, &page, &session, &chat, &shots)?;
     left_and_back_ui(s, api, &mut b, &page, &session, &chat)?;
     computer_ui(s, api, &mut b, &page, &session, &shots)?;
@@ -3105,6 +3106,54 @@ fn notice_late_ui(s: &mut Suite, b: &mut Browser, page: &Page, chat: &str) -> Re
     );
     b.eval(page, &press)?;
     anyhow::ensure!(b.until(page, &format!("{fresh} && {}", pressed("true")), wait), "the chip as it was");
+    Ok(())
+}
+
+/// How hard an agent thinks (Paul, 2026-10-22: "expose the reasoning level
+/// in the model picker as an additional dropdown (while showing that our
+/// default is high)"): every agent's settings offer it beside its model,
+/// with no provider connected too, Default (High) shown while its
+/// agent.json names none. Picked, it is agent.json's `reasoning`, its tier
+/// kept, which its computer runs its next turn at; shown again as picked
+/// after a reload; the default again takes it away.
+fn reasoning_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    b.reload(page)?;
+    let read = b.until(page, "document.querySelector('[data-reasoning-for]')?.dataset.read === '1'", wait);
+    let lead = b.eval(page, "document.querySelector('[data-reasoning-for]')?.dataset.reasoningFor ?? ''")?.as_str().unwrap_or("").to_string();
+    let pick_of = format!("document.querySelector('[data-reasoning-for={lead:?}]')");
+    let options = b.eval(page, &format!("[...({pick_of}?.options ?? [])].map((o) => [o.value, o.textContent])"))?;
+    let shown = b.eval(page, &format!("{pick_of}?.value ?? null"))?;
+    let every = b.eval(page, "document.querySelectorAll('.agent-setting').length > 0 && document.querySelectorAll('.agent-setting').length === document.querySelectorAll('.agent-setting [data-reasoning-for]').length && document.querySelectorAll('[data-model-for]').length === 0")?;
+    let agent_json = || shell(api, session, "GET", &format!("/api/f/{lead}/file?path=agent.json"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
+    let before = agent_json();
+    s.ok(
+        "every agent offers how hard it thinks, with no provider connected too: Default (High), Low and High, the default shown while its agent.json names none",
+        read && !lead.is_empty() && options == json!([["", "Default (High)"], ["low", "Low"], ["high", "High"]]) && shown == "" && every == true && before["tier"] == "cheap" && before.get("reasoning").is_none(),
+        json!({ "options": options, "shown": shown, "every": every, "agentJson": before }),
+    );
+    let pick = |b: &mut Browser, value: &str| -> Result<bool> {
+        b.eval(page, &format!("(() => {{ const p = {pick_of}; p.value = {value:?}; p.dispatchEvent(new Event('change')); return true; }})()"))?;
+        Ok(b.until(page, &format!("{pick_of}?.dataset.saved === {value:?} && !{pick_of}.disabled"), wait))
+    };
+    let saved = pick(b, "low")?;
+    let after = agent_json();
+    b.eval(page, &format!("({pick_of}?.scrollIntoView({{ block: 'center' }}), true)"))?;
+    let _ = b.screenshot(page, &shots.join("desktop-agent-reasoning.png"));
+    s.ok(
+        "picked, it is the agent's agent.json `reasoning`, its tier kept, and settings says its next message uses it",
+        saved && after["reasoning"] == "low" && after["tier"] == before["tier"] && b.eval(page, &format!("document.querySelector('.agent-setting[data-agent={lead:?}] .agent-model-said')?.textContent"))? == "Saved: its next message uses it.",
+        json!({ "before": before, "after": after }),
+    );
+    b.reload(page)?;
+    let again = b.until(page, &format!("{pick_of}?.dataset.read === '1' && {pick_of}.value === 'low'"), wait);
+    let back = pick(b, "")?;
+    let gone = agent_json();
+    s.ok(
+        "settings shows it again as picked; the default again takes it away, its tier kept",
+        again && back && gone.get("reasoning").is_none() && gone["tier"] == before["tier"],
+        &gone,
+    );
     Ok(())
 }
 

@@ -2949,6 +2949,32 @@ async fn an_agent_runs_on_its_owners_model() {
     let calls = calls_of(before);
     assert!(!calls.is_empty() && calls.iter().all(|c| c.path == "/v1/chat/completions" && c.model == CHEAP_ID), "its tier, through the route: {calls:?}");
 
+    // how hard it thinks (Paul, 2026-10-22): `high` with no `reasoning` in
+    // its agent.json, each of its turn's calls saying so; its owner's pick,
+    // `low`, from its next turn, nothing restarted
+    // (the turn's own calls: with its tools, its last user message its
+    // message; Hermes' title for the chat, an auxiliary call of its own
+    // with no tools, asks for no reasoning, `none`, which the route takes
+    // as `low`)
+    let efforts = |calls: &[support::model::Call], said: &str| -> Vec<serde_json::Value> {
+        let turns = calls.iter().filter(|c| c.body.get("tools").is_some() && c.body["messages"].as_array().and_then(|m| m.iter().rev().find(|m| m["role"] == "user")).is_some_and(|m| m["content"].to_string().contains(said)));
+        turns.map(|c| c.body["reasoning_effort"].clone()).collect()
+    };
+    let high = efforts(&calls, "hello on the route");
+    assert!(!high.is_empty() && high.iter().all(|e| e == "high"), "it thinks hard by default: {high:?}");
+    fake.with(|w| {
+        w.fragments.get_mut("juniper--k3x9").unwrap().files.insert("agent.json".into(), bytes::Bytes::from_static(br#"{"tier":"cheap","reasoning":"low"}"#));
+    });
+    let t = Instant::now();
+    while !config().contains("\n  reasoning_effort: \"low\"\n") {
+        assert!(t.elapsed() < Duration::from_secs(30), "the profile never took its reasoning; its config:\n{}", config());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let before = model.calls.lock().unwrap().len();
+    asked(&fake, &chat, &c, "hello thinking less", replied).await;
+    let low = efforts(&calls_of(before), "hello thinking less");
+    assert!(!low.is_empty() && low.iter().all(|e| e == "low"), "its owner's pick, at its next turn: {low:?}");
+
     // its owner connects the provider and picks one of its models
     let placeholder = format!("fck_openrouter_{}", "0123456789abcdef0123456789abcdef");
     let base = format!("http://model.fragment.internal:{}/own/api/v1", model.addr.port());

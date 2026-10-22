@@ -2,10 +2,12 @@
 
 The blessed agent template (docs/cloudflare-v1.md, decisions 14–16 and
 40). An agent is a fragment: its repo holds its job (`SOUL.md`), its
-settings (`agent.json`: `{"tier", "model"?}`, `model` a model of a
-provider its owner connected, `{provider, id}`: docs/computers.md, "An
-agent's own model"; its page shows the model it runs by its id, as its
-owner's shell hands over their computer's view of it), its picture
+settings (`agent.json`: `{"tier", "model"?, "reasoning"?}`, `model` a
+model of a provider its owner connected, `{provider, id}`: docs/computers.md,
+"An agent's own model"; its page shows the model it runs by its id, as its
+owner's shell hands over their computer's view of it; `reasoning` how hard
+it thinks, `"low"` or `"high"`, high when absent, which its owner picks
+beside its model in Settings: docs/computers.md, "Our images"), its picture
 (`avatar.png`: a PNG, JPEG, WebP or GIF
 of at most 256 KiB), and what its runtime keeps
 (`memories/`, `skills/`); the platform serves this template's manifest and
