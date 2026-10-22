@@ -1,7 +1,9 @@
 # Credits
 
 - `finite-logo.svg`: Finite's logo supplied by Skyler (2026-10-18),
-  copied unchanged above the splash and welcome cards.
+  copied unchanged above the splash and welcome cards. Its paths are also
+  `icon.svg` (white, on the shell's #181818 tile) and, rendered at 180 px with
+  `rsvg-convert` from a square tile, `apple-touch-icon.png`.
 - `wallpaper.jpg` and `wallpaper-dark.jpg`: light and dark landscapes supplied
   by Skyler (2026-10-13), copied unchanged from `landscapebg-lightmode.jpeg`
   and `landscapebg-darkmode.jpeg` at their original 2616×1632 resolution.
