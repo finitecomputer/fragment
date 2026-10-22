@@ -65,7 +65,7 @@ configuration and its bindings. A mode flag is a design bug.
 | 9 | Hosts and TLS: the LAN mode (`--lan`) | to port |
 | 10 | Money: own hardware in points | to port |
 | 11 | Nothing calls home | design only |
-| 12 | Secrets | the stand-in **done** (`vars`); OpenBao behind it to port |
+| 12 | Secrets | **done**: the stand-in, OpenBao behind it |
 | — | Mail | debt (docs/technical-debt-ledger.md, "No mail without Email Sending") |
 
 ### 1. The runtime: workerd or celld (done)
@@ -337,26 +337,75 @@ branch's registry step 4); whether a deployment moving from WorkOS to a
 provider should keep its people (decision 45 refuses each email to the
 new issuer); and the Wasm headroom (30 KB left).
 
-### 12. Secrets: the store's bindings, stood in for (the stand-in done)
+### 12. Secrets: the store's bindings, stood in for, OpenBao behind them (done)
 
 The cell reads each deployment secret as `await env.<BINDING>.get()`
-(cell/src/keys.rs, through workers-rs's `SecretStore`). celld has no
-Secrets Store, so `cell/secrets.mjs` gives the cell stand-ins with the same
-face: every class in `cell/entry.mjs` takes its env through `withSecrets`,
-which, when `FRAGMENT_SECRETS` names the deployment's secrets (the pairs a
-deploy writes into `secrets_store_secrets`, and a backend), puts an object
-with an async `get()` in each binding's place. Its class is named
-`Fetcher`, as workerd's is, since workers-rs takes a store binding by that
-name (and `keys::bound` relies on the check). Without `FRAGMENT_SECRETS`
+(cell/src/keys.rs, through workers-rs's `SecretStore`): the host secret,
+the code.storage key, WorkOS's, Stripe's, the models' key, the operator
+keys and connections' secrets. celld has no Secrets Store, so
+`cell/secrets.mjs` gives the cell stand-ins with the same face: every
+class in `cell/entry.mjs` takes its env through `withSecrets`, which, when
+`FRAGMENT_SECRETS` names the deployment's secrets (the pairs a deploy
+writes into `secrets_store_secrets`, and a backend), puts an object with an
+async `get()` in each binding's place. Its class is named `Fetcher`, as
+workerd's is, since workers-rs takes a store binding by that name (and
+`keys::bound` relies on the check). Without `FRAGMENT_SECRETS`
 (Cloudflare, `wrangler dev`) the env is as it came; the Rust is the same on
-both and never knows which it read.
+both and never knows which it read. Two backends:
 
-- **`vars`, the backend today:** the Worker variable of the binding's own
-  name, which devstack writes into `.dev.vars` (`devstack::Secrets::Shim`).
-- **`BACKENDS`** is the one place another slots in: OpenBao next (Vault's
-  KV v2 API; Paul approved it 2026-10-05), its token the one secret outside
-  it. The spike's (`crates/devstack/src/openbao.rs`, `selfhost`) is the
-  reference.
+- **`openbao`:** Vault's KV v2 API (OpenBao, or a company's own Vault):
+  `GET <addr>/v1/<mount>/data/[<prefix>/]<secret_name>`, the value its
+  field `value`, with the token in the variable `FRAGMENT_SECRETS_TOKEN`
+  (and `X-Vault-Namespace` when `namespace` is set). The token is the one
+  secret given outside the service, and the stand-ins hide it from the
+  rest of the env. A read takes 5 s at most and follows no redirect; a
+  failure is typed, never a hang: `SecretsError
+  [missing|refused|sealed|down|failed|malformed]`, which keys.rs returns
+  as `host_failed`. The shim caches nothing: keys.rs keeps a value a
+  minute per isolate, as it keeps the store's, and never a failure.
+- **`vars`:** the Worker variable of the binding's own name, which
+  devstack writes into `.dev.vars` (`devstack::Secrets::Shim`).
+
+**OpenBao** (crates/devstack/src/openbao.rs; Paul approved it 2026-10-05),
+used as it ships:
+
+- **The pin:** 2.7.1, still the newest 2.x on 2026-10-22: each platform's
+  tarball by its SHA-256 in the release's `checksums.txt`, whose signature
+  checked good against OpenBao's key (66D1 5FDD … 2853 E6D0) on 2026-10-05
+  and again on 2026-10-22. Fetched once into `target/tools`;
+  `FRAGMENT_OPENBAO_TARBALL` names an intranet's copy, checked the same.
+- **Its state:** a directory of its own (0700): `seal.key`, 32 random
+  bytes (0600), the static seal's, so every start unseals itself
+  unattended; `data/`, pebbledb (2.7 removed `file`); the stack's AppRole
+  ids (0600).
+- **Initialised once, by itself:** the config's `initialize` stanza runs on
+  the first start alone: KV v2 at `fragment/`, the two policies, the
+  cell's token role and the stack's AppRole; then it revokes its root
+  token. No root token or recovery key is left; a lost credential means
+  removing the directory, and the next start seeds everything again.
+- **Seeded at each start:** what `Fleet::configure` would write to
+  wrangler's local store (`store::Bound`: master's Stripe and model keys
+  among them) goes to `fragment/<its store name>`, a new version only
+  where a value changed.
+- **Secret zero:** the cell's token, policy `fragment-cell`: `read` on
+  `fragment/data/*` and nothing else. Periodic (30 days), renewed at each
+  start and hourly while `xtask dev` runs, minted again when it has
+  lapsed; in `.dev.vars` (0600). The stack's AppRole writes the mount and
+  mints the cell's tokens; it deletes nothing and reaches no `sys/` path.
+- **Loopback only**, no TLS: the cell and OpenBao share the box.
+- **Choosing it:** `cargo xtask dev --runtime celld` with
+  `FRAGMENT_SECRETS_BACKEND=openbao` (on :8804, its state in
+  `target/devstack/openbao-8804`, which `--clean` clears); the e2e on celld
+  unless `FRAGMENT_E2E_SECRETS=vars`. The LAN mode (seam 9, to port) makes
+  it its default. `wrangler dev` keeps its own store.
+- **A company's Vault:** `FRAGMENT_SECRETS` names it (`{"backend":
+  "openbao", "addr": "https://vault.corp.example:8200", "mount": "secret",
+  "prefix": "fragment", "namespace": "eng", "secrets": […]}`), each secret
+  a KV v2 entry whose field is `value`, the cell's token in
+  `FRAGMENT_SECRETS_TOKEN`, its CA in `CELLD_EXTRA_CA_FILE`. Only OpenBao
+  is tested.
+
+**Evidence:** see "Re-ported, 2026-10-22".
 
 ## What the spike found, still true
 

@@ -4,7 +4,9 @@
 //! more in its configuration, and the crash's without it again, as an
 //! operator adds a row and then rolls it back: each time, a ledger made
 //! before charges with the book its release configured, no version raised
-//! (#451; it keeps none of its own: decision 62).
+//! (#451; it keeps none of its own: decision 62). Where the cell's secrets
+//! are OpenBao's (celld: docs/self-host.md, seam 12), OpenBao itself stops
+//! and starts under a node.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -461,7 +463,44 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.ok(&format!("after a crash a delete's cleanup it cut short finishes ({lists_left} lists were left to tell)"), lists_left > 0 && cleaned, last);
     let r = api.signed(&member, "GET", "/api/fragments", None)?;
     s.ok("and the deleted fragment has left its member's list", r.status == 200 && !r.text.contains(&format!("\"{ended}\"")), &r);
-    no_mailer(s)
+    no_mailer(s)?;
+    openbao_restart(s)
+}
+
+/// The checks of OpenBao behind the cell's secrets, across its stop and
+/// start (docs/self-host.md, seam 12).
+const OPENBAO: [&str; 2] = [
+    "with OpenBao down, a sign-in fails at once, naming OpenBao: the cell's read of its sign-in's secrets is an error, never a hang",
+    "OpenBao started again unseals itself from its key file, initialised once, and the next sign-in reads its secrets: the cell not restarted",
+];
+
+/// OpenBao down, then up, under a node started fresh: no isolate holds the
+/// secrets a sign-in reads (WorkOS's client id as it begins; an OpenID
+/// Connect client's secret at its callback).
+fn openbao_restart(s: &mut Suite) -> Result<()> {
+    if !s.has_openbao() {
+        for label in OPENBAO {
+            s.skip(label, "the run's secrets are not OpenBao's (FRAGMENT_E2E_SECRETS=vars, or wrangler's own store)");
+        }
+        return Ok(());
+    }
+    s.stop()?;
+    let api = s.start(false)?;
+    s.openbao_down()?;
+    let t0 = std::time::Instant::now();
+    let login = api.unsigned("GET", "/auth/login?return=/&login_hint=openbao-down%40e2e.test", None)?;
+    let r = match login.status {
+        302 => api.provider_callback("openbao-down@e2e.test")?,
+        _ => login,
+    };
+    let took = t0.elapsed();
+    s.ok(OPENBAO[0], r.status >= 500 && r.text.contains("OpenBao") && r.text.contains("is not answering") && took < Duration::from_secs(10), format!("{r} in {took:?}"));
+    let up = s.openbao_up()?;
+    let r = api.provider_callback("openbao-up@e2e.test")?;
+    let signed = r.cookies().into_iter().any(|c| c.starts_with("fragment_session=") && c.len() > "fragment_session=".len() + 1);
+    let once = s.openbao_initialisations()?;
+    s.ok(OPENBAO[1], r.status == 302 && signed && once == 1, format!("{r} (OpenBao up again in {up:?}, initialised {once} time(s))"));
+    Ok(())
 }
 
 /// What a node with no mailer says of each mail it does not send
