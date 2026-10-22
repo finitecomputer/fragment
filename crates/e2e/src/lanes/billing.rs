@@ -1385,6 +1385,16 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
         back && at_stripe && canceled && seat(api, &gus)["seat"].is_null(),
         json!({ "seen": b.eval(&page, SEEN)?, "seat": seat(api, &gus) }),
     );
+    let legal = b.eval(
+        &page,
+        "(() => { const c = document.getElementById('first-run-card'); const p = c?.querySelector('.legal-links'); const plans = c?.querySelector('.plans'); \
+         return { under: !!p && !!plans && !!(plans.compareDocumentPosition(p) & Node.DOCUMENT_POSITION_FOLLOWING), links: [...(p?.querySelectorAll('a') ?? [])].map((a) => [a.textContent, a.getAttribute('href'), a.target]) }; })()",
+    )?;
+    s.ok(
+        "the welcome names Finite's Privacy and Terms under its seat, each in a tab of its own",
+        legal == json!({ "under": true, "links": [["Privacy", "/privacy", "_blank"], ["Terms", "/terms", "_blank"]] }),
+        &legal,
+    );
     let typed = "(() => { const f = document.querySelector('#first-run-card form.trial-code'); if (!f) return false; f.querySelector('input').value = 'ZZZZ-ZZZZ-ZZZZ-ZZZZ'; f.requestSubmit(); return true; })()";
     if !act(s, &mut b, &page, "the welcome's trial code", typed)? {
         return Ok(());

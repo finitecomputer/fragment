@@ -1,0 +1,38 @@
+/* Finite's privacy policy and terms (privacy.html, terms.html): the
+   platform's sheet pages' look (cell/src/share.rs SHEET_STYLE), a card of
+   readable text, on a phone too. */
+:root {
+  color-scheme: light dark;
+  --bg: light-dark(#f7f6f3, #212121);
+  --fg: light-dark(#171717, #ececec);
+  --muted: light-dark(#66615b, #a6a19d);
+  --surface: light-dark(#fffdfa, #2b2b2a);
+  --accent: light-dark(#315fbd, #8ab4ff);
+}
+body {
+  margin: 0 auto;
+  padding: 16px;
+  max-width: 40rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.6 "Funnel Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+main {
+  background: var(--surface);
+  border-radius: 14px;
+  padding: 20px 24px;
+  box-shadow: 0 1px 2px #0000001a, 0 8px 28px #0000001a;
+  overflow-wrap: anywhere;
+}
+h1 { font-size: 1.5rem; font-weight: 600; margin: 0 0 .4em; }
+h2 { font-size: 1rem; font-weight: 600; margin: 1.6em 0 .4em; }
+p, ul { margin: 0 0 .8em; }
+ul { padding-left: 1.2em; }
+li { margin: .3em 0; }
+a { color: var(--accent); }
+.updated { color: var(--muted); font-size: .875rem; }
+@media (max-width: 480px) {
+  body { padding: 8px; }
+  main { padding: 16px; border-radius: 12px; }
+}

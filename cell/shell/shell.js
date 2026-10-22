@@ -1875,6 +1875,21 @@ function actionLine(label, ...actions) {
   row.append(key, control);
   return row;
 }
+// Finite's privacy policy and terms (`/privacy`, `/terms`), small and
+// muted, each in a tab of its own: under the welcome's seat, and at the
+// end of Settings' Account
+function legalLinks() {
+  const p = el("p", "muted legal-links");
+  const link = (href, text) => {
+    const a = el("a", null, text);
+    a.href = href;
+    a.target = "_blank";
+    a.rel = "noopener";
+    return a;
+  };
+  p.append(link("/privacy", "Privacy"), " · ", link("/terms", "Terms"));
+  return p;
+}
 // a sentence whose `quoted` parts are code
 function say(text) {
   const p = el("p");
@@ -2013,6 +2028,7 @@ async function openSettings(push = true, failed = null) {
   // their sign-ins, when they linked several before linking went (off
   // until WorkOS offers an account picker: docs/api.md, Sign-in)
   if (emails.length > 1) account.append(line("Sign-ins", emails.join(", ")));
+  account.append(legalLinks());
   // the person's seat, credit and org (billing.js), and why agents stop
   const billing = await billingSections(billingHelpers, ledger, mySeat, back);
   if (lost()) return;
@@ -3077,6 +3093,7 @@ async function welcome() {
     el("p", "muted", SUBTITLE),
     ...(back === "canceled" ? [el("p", null, "Checkout was canceled: nothing was bought.")] : []),
     ...seatOffer({ api, el }, mine, trial),
+    legalLinks(),
     imports,
     foot,
   );
