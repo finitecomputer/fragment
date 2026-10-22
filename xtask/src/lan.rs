@@ -435,7 +435,24 @@ pub fn box_node(lan: &Lan, port: u16) -> Result<Option<BoxNode>> {
     std::fs::write(&list_file, serde_json::to_string_pretty(&list)?)?;
     let log = devstack::repo_root().join("target/devstack/lan-node.log");
     let (out, err) = log_file(&log)?;
-    let mut node = Owned(Command::new(&s.node_bin).arg("serve").arg("--config").arg(&config_file).stdin(Stdio::null()).stdout(out).stderr(err).spawn().with_context(|| {
+    let mut cmd = Command::new(&s.node_bin);
+    cmd.arg("serve").arg("--config").arg(&config_file).stdin(Stdio::null()).stdout(out).stderr(err);
+    // The node outlives the cell's drain: a Ctrl-C reaches the terminal's
+    // group, and celld takes seconds to let its calls end, while a node
+    // gone first cuts each awake computer's `wait`, which the cell reads as
+    // its container's exit (it is not: the container runs on, and the next
+    // start would roll it back to its last save). So the node has a group
+    // of its own, is stopped once celld has exited (`BoxNode`'s drop), and
+    // dies with this process however it ends.
+    // SAFETY: setpgid and prctl are async-signal-safe and touch nothing of the parent's
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0).pre_exec(|| match libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) {
+            0 => Ok(()),
+            _ => Err(std::io::Error::last_os_error()),
+        });
+    }
+    let mut node = Owned(cmd.spawn().with_context(|| {
         format!("start {} (SANDCASTLE_NODE_BIN: the sandcastle-node of the engine's install, e.g. ~/.local/opt/sandcastle/bin/sandcastle-node)", s.node_bin.display())
     })?);
     wait_ready(&mut node.0, &log, "sandcastle-node", |_| std::net::TcpStream::connect(listen).is_ok())?;

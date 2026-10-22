@@ -3268,6 +3268,7 @@ dependencies = [
  "fragment-lan",
  "fragment-proto",
  "fragment-templates",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
