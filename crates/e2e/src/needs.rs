@@ -13,6 +13,12 @@ pub enum Need {
     /// the scripted model, WorkOS beyond sign-in (Pipes' accounts), the
     /// push service, the swap's upstream, a local server a job fetches.
     Fakes,
+    /// The code.storage fake as the node's git: its levers (an outage,
+    /// sabotaged packs, refused deletes), its counts of the requests it
+    /// answered, or its state read directly. A local run whose git is
+    /// outside it (`FRAGMENT_E2E_CODESTORE`: docs/self-host.md, seam 5)
+    /// lacks it (`Suite::unmet`); so does a hosted run.
+    StoreFake,
     /// The node itself: crashed, restarted, or started with settings of its
     /// own (another shape, test-sized limits, a path-mode fleet), or its
     /// local address and clock.
@@ -51,12 +57,25 @@ pub enum Need {
 }
 
 impl Need {
-    pub const ALL: [Need; 11] =
-        [Need::Fakes, Need::Node, Need::Deployment, Need::Levers, Need::LocalDocker, Need::Chrome, Need::Computers, Need::Models, Need::TwoSites, Need::RealAgent, Need::Operator];
+    pub const ALL: [Need; 12] = [
+        Need::Fakes,
+        Need::StoreFake,
+        Need::Node,
+        Need::Deployment,
+        Need::Levers,
+        Need::LocalDocker,
+        Need::Chrome,
+        Need::Computers,
+        Need::Models,
+        Need::TwoSites,
+        Need::RealAgent,
+        Need::Operator,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             Need::Fakes => "fakes",
+            Need::StoreFake => "store-fake",
             Need::Node => "node",
             Need::Deployment => "deployment",
             Need::Levers => "levers",
@@ -105,6 +124,9 @@ pub enum Rung {
     Hosted(Offers),
 }
 
+/// Why `Need::StoreFake` is missing on a local run whose git is outside it.
+pub const STORE_OUTSIDE: &str = "it reads or pulls the code.storage fake (its levers, its request counts, its state), and the node's git is a store outside the run (FRAGMENT_E2E_CODESTORE): not yet ported to the store's own routes (docs/self-host.md, seam 5)";
+
 const NO_REAL_AGENT: &str = "it needs a real agent (our Hermes image on a real model), which only a preview has: a local run's computers answer through the scripted model";
 
 /// Why `need` is missing on `rung`, or `None` when it is there.
@@ -122,6 +144,7 @@ pub fn missing(need: Need, rung: Rung) -> Option<&'static str> {
     };
     match need {
         Need::Fakes => Some("it needs the vendor fakes (a scripted model, code.storage's git, WorkOS' accounts, the push service, a local upstream), which only a local run has"),
+        Need::StoreFake => Some("it needs the code.storage fake as the node's git (its levers, its counts, its state), which only a local run has"),
         Need::Node => Some("it needs the node itself (a crash, a restart, settings of its own, its local address or clock), which only a local run has"),
         Need::Deployment => Some("it needs the whole deployment (a lever on its registry, its operator's key, its secrets), which a shared preview never lends a run"),
         Need::LocalDocker => Some("it needs Docker on this machine (the stub image's scripted runtime), which a hosted run does not use"),
@@ -198,7 +221,7 @@ mod tests {
     /// node, the deployment, or local Docker, whatever its deployment offers.
     #[test]
     fn a_hosted_run_never_has_the_fakes_the_node_or_the_deployment() {
-        for need in [Need::Fakes, Need::Node, Need::Deployment, Need::LocalDocker, Need::TwoSites] {
+        for need in [Need::Fakes, Need::StoreFake, Need::Node, Need::Deployment, Need::LocalDocker, Need::TwoSites] {
             assert!(missing(need, Rung::Hosted(EVERYTHING)).is_some(), "{need:?}");
             assert_eq!(unmet(&[Need::Levers, need], Rung::Hosted(EVERYTHING)).map(|(n, _)| n), Some(need));
         }

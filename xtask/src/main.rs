@@ -5,7 +5,9 @@
 //!                    build, then run the stack in the foreground under
 //!                    `wrangler dev`: the cell on :8790 (fragments at
 //!                    <name>.fragment.localhost:8790), the
-//!                    code.storage fake on :8792, and the Workers AI fake on :8796
+//!                    code.storage fake on :8792 (or macrofiche there:
+//!                    MACROFICHE_BIN; or a store already running:
+//!                    CODESTORAGE_API_URL; `dev_codestore`), and the Workers AI fake on :8796
 //!                    behind the model route (its calls spend their payer's
 //!                    ledger; new people are seats with the month's included
 //!                    credit; FRAGMENT_MODELS_FILE puts the route's slots
@@ -195,20 +197,11 @@ fn dev(args: &[String]) -> Result<()> {
     let dev_port = at(DEV_PORT);
     build()?;
     let clean = args.iter().any(|a| a == "--clean");
-    let state = devstack::repo_root().join("target/devstack/codestorage.json");
     if clean {
-        let _ = std::fs::remove_file(&state);
-        // the node's state too, before the fleet seeds its local store again
+        // the node's state, before the fleet seeds its local store again
         devstack::clear_state(&devstack::cell_dir())?;
     }
-    let key = devstack::dev_secret("codestorage-org-key.pem", fragment_fakes::codestorage::generate_org_key_pem)?;
-    let fake = fragment_fakes::codestorage::CodeStorage::start(fragment_fakes::codestorage::Options {
-        org: DEV_ORG.into(),
-        org_key_pem: Some(key.clone()),
-        state_file: Some(state),
-        port: at(DEV_CODESTORAGE_PORT),
-        ..Default::default()
-    })?;
+    let store = dev_codestore(clean, at(DEV_CODESTORAGE_PORT))?;
     // sign-in: a real WorkOS environment when its files are named (its
     // redirect URI must include http://127.0.0.1:8790/auth/callback), else the fake
     let read = |var: &str| -> Result<Option<String>> {
@@ -248,9 +241,9 @@ fn dev(args: &[String]) -> Result<()> {
     };
     let fleet = devstack::Fleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
-        codestorage_org: DEV_ORG.into(),
-        codestorage_key_pem: key,
-        codestorage_url: fake.url.clone(),
+        codestorage_org: store.org.clone(),
+        codestorage_key_pem: store.key_pem.clone(),
+        codestorage_url: store.url.clone(),
         host_suffix: suffix.into(),
         host_label_suffix: None,
         // A dev fragment's pins move by its own moves, the CLI's refresh, and this poll.
@@ -331,7 +324,7 @@ fn dev(args: &[String]) -> Result<()> {
     }
     println!("  node log:     {}", node.log.display());
     println!("  fragments:    http://<name>.fragment.localhost:{dev_port}/");
-    println!("  code.storage: {} (the fake)", fake.url);
+    println!("  code.storage: {} ({})", store.url, store.said);
     match &models {
         Some(m) => println!("  models:       {}; the rest, and image steps, on the Workers AI fake at {}", m.said, ai.url),
         None => println!("  models:       {} (the Workers AI fake: echoes, never a real model)", ai.url),
@@ -360,6 +353,10 @@ fn dev(args: &[String]) -> Result<()> {
     if celld.is_none() {
         let removed = devstack::containers::remove(&devstack::cell_dir())?;
         println!("removed {} containers the dev node left", removed.containers);
+    }
+    // the code store started with the stack stops with it
+    if let Some(m) = store.macrofiche {
+        m.stop()?;
     }
     Ok(())
 }
@@ -450,6 +447,64 @@ fn dev_renderer(suffix: &str, platform_url: &str) -> Result<(devstack::rendering
         port: 0,
     };
     Ok((devstack::rendering::Rendering::start(opts)?, browser.version))
+}
+
+/// The dev org's key, made on first run (`target/devstack`).
+fn dev_org_key() -> Result<String> {
+    devstack::dev_secret("codestorage-org-key.pem", fragment_fakes::codestorage::generate_org_key_pem)
+}
+
+/// The dev stack's code store, as it runs (docs/self-host.md, seam 5).
+struct DevStore {
+    url: String,
+    org: String,
+    key_pem: String,
+    /// What the banner says it is.
+    said: String,
+    /// The fake, serving on this process's threads.
+    _fake: Option<fragment_fakes::codestorage::CodeStorage>,
+    /// macrofiche, when the stack started it.
+    macrofiche: Option<devstack::codestore::Macrofiche>,
+}
+
+/// The code store by configuration (`devstack::codestore::CodeStore::from_env`):
+/// the fake on `port`, its repos in `target/devstack/codestorage.json`
+/// (the default); macrofiche (`MACROFICHE_BIN`) on the same port, its
+/// repos in `target/devstack/macrofiche`, given the same org key's public
+/// half; or a store already running (`CODESTORAGE_API_URL`, `CODESTORAGE_ORG`,
+/// `CODESTORAGE_PRIVATE_KEY_FILE`), which `--clean` never touches. A cell
+/// remembers each fragment's repo: moving to another store takes `--clean`.
+fn dev_codestore(clean: bool, port: u16) -> Result<DevStore> {
+    use devstack::codestore::{CodeStore, Macrofiche, MacroficheOptions};
+    let dir = devstack::repo_root().join("target/devstack");
+    match CodeStore::from_env()? {
+        CodeStore::Fake => {
+            let state = dir.join("codestorage.json");
+            if clean {
+                let _ = std::fs::remove_file(&state);
+            }
+            let key = dev_org_key()?;
+            let fake = fragment_fakes::codestorage::CodeStorage::start(fragment_fakes::codestorage::Options {
+                org: DEV_ORG.into(),
+                org_key_pem: Some(key.clone()),
+                state_file: Some(state),
+                port,
+                ..Default::default()
+            })?;
+            Ok(DevStore { url: fake.url.clone(), org: DEV_ORG.into(), key_pem: key, said: "the fake".into(), _fake: Some(fake), macrofiche: None })
+        }
+        CodeStore::External(x) => Ok(DevStore { url: x.url, org: x.org, key_pem: x.key_pem, said: "a store already running: CODESTORAGE_API_URL".into(), _fake: None, macrofiche: None }),
+        CodeStore::Macrofiche(bin) => {
+            let data = dir.join("macrofiche");
+            if clean {
+                let _ = std::fs::remove_dir_all(&data);
+            }
+            let key = dev_org_key()?;
+            let m = Macrofiche::start(&bin, &MacroficheOptions { dir: data.clone(), port, org: DEV_ORG.into(), key_pem: key.clone(), log_dir: dir })?;
+            let said = format!("macrofiche {}, its repos in {}, its log {}", bin.display(), data.display(), m.log.display());
+            Ok(DevStore { url: m.url.clone(), org: DEV_ORG.into(), key_pem: key, said, _fake: None, macrofiche: Some(m) })
+        }
+    }
 }
 
 /// The dev stack's models, from `FRAGMENT_MODELS_FILE`.

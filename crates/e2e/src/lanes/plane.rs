@@ -47,7 +47,7 @@ fn files_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("it lives exactly a storage token's lifetime", claims["exp"].as_i64().unwrap_or(0) - claims["iat"].as_i64().unwrap_or(0) == limits::STORAGE_TOKEN_TTL_S, &claims);
     s.ok("it names who minted it (their identity)", claims["sub"] == format!("editor:{}", api.identity(&owner)?), &claims);
     let http = reqwest::blocking::Client::new();
-    let r = http.get(format!("{}/api/repos/{repo}/branch?name=main", s.fake.url)).bearer_auth(&token).send()?;
+    let r = http.get(format!("{}/api/repos/{repo}/branch?name=main", s.store_url())).bearer_auth(&token).send()?;
     let (st, why) = (r.status().as_u16(), r.json::<Value>().map(|b| b["detail"].clone()).unwrap_or_default());
     s.ok("code.storage accepts it (a fresh repo has no main: 404, branch not found)", st == 404 && why == "branch not found", format!("{st} {why}"));
 
@@ -72,11 +72,11 @@ fn files_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the event log says fragment.json's access keys are ignored", r.text.contains("manifest.ignored"), &r);
 
     // pushes no one refreshed
-    s.fake.external_commit(&repo, "main", &[("quiet.md", Some(b"unannounced"))], "unannounced");
+    s.unrefreshed_commit(&c, &[("quiet.md", Some(b"unannounced"))]);
     let r = api.signed(&owner, "POST", &format!("/api/f/{name}/refresh"), Some(&json!({})))?;
     s.ok("refresh moves main at once", r.status == 200 && r.body["refs"]["main"]["moved"] == true && r.body["refs"]["live"]["absent"] == true, &r);
     s.ok("refresh made the file visible", read(api, &owner, &name, "quiet.md").as_deref() == Some("unannounced"), "");
-    s.fake.external_commit(&repo, "main", &[("polled.md", Some(b"found by the poll"))], "unannounced");
+    s.unrefreshed_commit(&c, &[("polled.md", Some(b"found by the poll"))]);
     let polled = s.eventually(Duration::from_secs(u64::from(crate::POLL_S) * 5), || read(api, &owner, &name, "polled.md").is_some());
     s.ok("the poll backstop finds a commit no one refreshed, a storage token since", polled, "");
     let r = api.unsigned("POST", &format!("/api/f/{name}/webhook"), Some(&json!({})))?;
@@ -156,8 +156,8 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the card revalidates by its tag: 304 for the current one, the new image for the one before", same.status == 304 && same.bytes.is_empty() && old.status == 200 && old.header("etag") == tag2, format!("{} | {}", same.status, old.status));
     let repo = created["repo"].as_str().unwrap_or("");
     match s.hosted() {
-        true => s.skip("code.storage holds live where the CLI moved it", "it reads the code.storage fake's branches (a preview's git is real)"),
-        false => s.ok("code.storage holds live where the CLI moved it", s.fake.branch(repo, "live").as_deref() == st2["pins"]["live"].as_str(), ""),
+        true => s.skip("code.storage holds live where the CLI moved it", "it reads code.storage's branches, and the run holds no key to a preview's"),
+        false => s.ok("code.storage holds live where the CLI moved it", s.head(repo, "live").as_deref() == st2["pins"]["live"].as_str(), ""),
     }
 
     let out = s.cli(api, &home, &["drafts", &name]);

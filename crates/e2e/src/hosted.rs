@@ -322,6 +322,8 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         port: 0,
         run: crate::run_name(),
         fake: Fake::absent("code.storage"),
+        store: None,
+        macrofiche: None,
         ai: Fake::absent("Workers AI"),
         push: Fake::absent("push service"),
         mail: Fake::absent("mail"),

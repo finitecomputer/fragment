@@ -26,12 +26,19 @@
 //! containers is a skip (needs.rs), saying why. Its secrets are OpenBao's,
 //! behind the cell's stand-ins (docs/self-host.md, seam 12), unless
 //! `FRAGMENT_E2E_SECRETS=vars` puts them in `.dev.vars`.
+//!
+//! `FRAGMENT_E2E_CODESTORE=macrofiche` (or `external`) keeps the local
+//! node's git outside the run (store.rs; docs/self-host.md, seam 5): the
+//! fake is not the store, so git moves through the platform's routes as on
+//! the hosted lane, and a section that needs the fake's levers
+//! (`Need::StoreFake`) is a skip that says so.
 
 mod api;
 mod browser;
 mod hosted;
 mod lanes;
 mod needs;
+mod store;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -242,7 +249,7 @@ impl<T> Deref for Fake<T> {
     fn deref(&self) -> &T {
         match (&self.fake, self.lanes) {
             (Some(fake), true) => fake,
-            _ => panic!("the {} fake on the hosted lane: a section that uses it declares Need::Fakes", self.what),
+            _ => panic!("the {} fake is not this run's (a hosted run's, or code.storage's on a store outside the run): a section that uses it declares Need::Fakes, or Need::StoreFake", self.what),
         }
     }
 }
@@ -325,6 +332,12 @@ pub struct Suite {
     /// Distinguishes this run's fragment names from any earlier state.
     run: String,
     pub fake: Fake<CodeStorage>,
+    /// The code store outside the run, when the node's git lives there
+    /// (`FRAGMENT_E2E_CODESTORE`, store.rs; `None`: the fake, or a hosted
+    /// run's own vendor).
+    store: Option<store::External>,
+    /// macrofiche, when the run started it: stopped at the run's end.
+    macrofiche: Option<devstack::codestore::Macrofiche>,
     /// The model route's vendor boundary, text and images: Workers AI, scripted.
     pub ai: Fake<fragment_fakes::workers_ai::WorkersAi>,
     pub push: Fake<fragment_fakes::push::PushService>,
@@ -452,7 +465,7 @@ impl Suite {
         self.asked.push(name.to_string());
         if self.selected(name) {
             // what it needs first: by name it would be skipped all the same
-            let why = match (needs::unmet(needs, self.rung), &self.preview) {
+            let why = match (self.unmet(needs), &self.preview) {
                 (Some((need, missing)), _) => format!("{missing} ({})", need.name()),
                 (None, Some(preview)) => format!("{why}: run it by name, cargo xtask e2e --hosted --config <deploy config> --branch {} --only {name}", preview.branch),
                 (None, None) => format!("{why}: run it by name, cargo xtask e2e --only {name}"),
@@ -474,7 +487,15 @@ impl Suite {
     /// Whether the section `name`, needing `needs`, runs in this suite:
     /// selected, on a rung that has what it needs, and not a dry run.
     pub fn runs(&self, name: &str, needs: &[Need]) -> bool {
-        self.selected(name) && self.plan.is_none() && needs::unmet(needs, self.rung).is_none()
+        self.selected(name) && self.plan.is_none() && self.unmet(needs).is_none()
+    }
+
+    /// The first of `needs` this run lacks, with why: its rung's
+    /// (`needs::unmet`), or the code.storage fake as the store, on a run
+    /// whose git is outside it.
+    fn unmet(&self, needs: &[Need]) -> Option<(Need, &'static str)> {
+        let outside = self.store.is_some() && needs.contains(&Need::StoreFake);
+        needs::unmet(needs, self.rung).or_else(|| outside.then_some((Need::StoreFake, needs::STORE_OUTSIDE)))
     }
 
     /// Whether the section `name` runs (it prints its header when it does).
@@ -485,7 +506,7 @@ impl Suite {
         if !self.selected(name) {
             return false;
         }
-        let unmet = needs::unmet(needs, self.rung);
+        let unmet = self.unmet(needs);
         if let Some(plan) = &mut self.plan {
             let skip = unmet.map(|(need, why)| format!("{why} ({})", need.name()));
             plan.push(Planned { section: name.into(), needs: needs.to_vec(), skip });
@@ -521,8 +542,9 @@ impl Suite {
         }
     }
 
-    /// A check local workerd cannot make (it is the hosted lane's): said,
-    /// counted, and never a pass.
+    /// A check this run cannot make (local workerd's limits, the hosted
+    /// lane's; a runtime's or a store's): said with why, counted, and never
+    /// a pass.
     pub fn skip(&mut self, label: &str, why: &str) {
         self.skipped.push(label.to_string());
         println!("skip  {label}: {why}");
@@ -661,9 +683,9 @@ impl Suite {
         }
         let fleet = devstack::Fleet {
             host_secret: self.host_secret.clone(),
-            codestorage_org: ORG.into(),
+            codestorage_org: self.store.as_ref().map_or(ORG, |x| x.org.as_str()).into(),
             codestorage_key_pem: self.org_key.clone(),
-            codestorage_url: self.fake.node().url.clone(),
+            codestorage_url: self.store_url(),
             host_suffix: self.suffix().to_string(),
             // a rehearsal's node is shaped as a branch deployment, whose
             // levers are scoped as a preview's are
@@ -812,11 +834,12 @@ impl Suite {
     }
 
     /// A commit on main by another writer: a push through the fake, then
-    /// its owner's `refresh`, as the CLI pushes and refreshes. Hosted, its
+    /// its owner's `refresh`, as the CLI pushes and refreshes. Where the
+    /// fake is not the store (hosted, or a store outside the run), its
     /// owner's commit through the files route (`POST /api/f/{name}/files`:
-    /// one commit, main moved at once), since a preview's git is real.
+    /// one commit, main moved at once), since the git is real.
     pub fn commit(&self, created: &Value, changes: &[(&str, Option<&[u8]>)]) -> String {
-        if !self.hosted() {
+        if self.fake_is_the_store() {
             let sha = self.fake.external_commit(created["repo"].as_str().expect("created.repo"), "main", changes, "e2e commit");
             self.refresh(created);
             return sha;
@@ -834,10 +857,11 @@ impl Suite {
     }
 
     /// Moves live to main's tip through the fake, then refreshes (a ref
-    /// move as `fragment rollback` makes one). Hosted, its owner's deploy
-    /// (`POST /api/f/{name}/deploy`), which installs the app at once.
+    /// move as `fragment rollback` makes one). Where the fake is not the
+    /// store, its owner's deploy (`POST /api/f/{name}/deploy`), which
+    /// installs the app at once.
     pub fn deploy(&self, created: &Value) -> String {
-        if !self.hosted() {
+        if self.fake_is_the_store() {
             let repo = created["repo"].as_str().expect("created.repo");
             let tip = self.fake.branch(repo, "main").expect("main has a commit");
             self.fake.set_branch(repo, "live", &tip);
@@ -846,6 +870,95 @@ impl Suite {
         }
         let r = self.as_owner(created, "deploy", &json!({ "note": "e2e deploy" }));
         r["live"].as_str().unwrap_or_else(|| panic!("a deploy answers live: {r}")).to_string()
+    }
+
+    /// Whether the node's git is the code.storage fake in this process,
+    /// whose levers and state the lanes may reach: a local run's, unless
+    /// `FRAGMENT_E2E_CODESTORE` put it outside (store.rs).
+    pub fn fake_is_the_store(&self) -> bool {
+        !self.hosted() && self.store.is_none()
+    }
+
+    /// The store outside the run (`None`: the fake is the store, or a
+    /// hosted run's vendor, which the run holds no key to).
+    pub fn external_store(&self) -> Option<&store::External> {
+        self.store.as_ref()
+    }
+
+    /// The code store's API base, as the node and the CLI reach it.
+    pub fn store_url(&self) -> String {
+        match &self.store {
+            Some(x) => x.url.clone(),
+            None => self.fake.node().url.clone(),
+        }
+    }
+
+    /// The url form of the repo named `name`, as the store lists it.
+    pub fn repo_url(&self, name: &str) -> Option<String> {
+        match &self.store {
+            None => self.fake.repo_url(name),
+            Some(x) => x.repo_url(name).unwrap_or_else(|e| panic!("{e:#}")),
+        }
+    }
+
+    /// A branch's head in `repo` (its url form), as the store holds it.
+    pub fn head(&self, repo: &str, branch: &str) -> Option<String> {
+        match &self.store {
+            None => self.fake.branch(repo, branch),
+            Some(x) => x.head(repo, branch).unwrap_or_else(|e| panic!("{e:#}")),
+        }
+    }
+
+    /// `n` empty repos made after every existing one: a busy org, so a
+    /// lookup by name must page. On a store outside the run, made as the
+    /// cell makes one, named for the run.
+    pub fn seed_filler(&self, n: usize) {
+        let Some(x) = &self.store else { return self.fake.seed_filler(n) };
+        for i in 0..n {
+            x.create_repo(&format!("filler-{}-{i}", self.run)).unwrap_or_else(|e| panic!("{e:#}"));
+        }
+    }
+
+    /// A repo named `name` (its url form the name, as the service's is)
+    /// holding `files` on main: one a fragment made before repos were named
+    /// for their owners.
+    pub fn seed_repo(&self, name: &str, files: &[(&str, Option<&[u8]>)]) {
+        let Some(x) = &self.store else {
+            let files: Vec<(&str, &[u8])> = files.iter().filter_map(|(p, b)| b.map(|b| (*p, b))).collect();
+            return self.fake.seed_repo(name, &files);
+        };
+        let url = x.create_repo(name).unwrap_or_else(|e| panic!("{e:#}"));
+        assert_eq!(url, name, "the store's url form is the repo's name");
+        x.commit(&url, "main", files, "seeded").unwrap_or_else(|e| panic!("{e:#}"));
+    }
+
+    /// Whether the store says `repo` is deleted: on a store outside the
+    /// run, its org no longer lists it, and a delete again reads as the
+    /// cell reads one gone before (`core_cs::repo_deleted`; one still
+    /// there would be deleted now, and is no pass).
+    pub fn repo_deleted(&self, repo: &str) -> bool {
+        use fragment_core::codestorage::{repo_deleted, RepoDeleted};
+        match &self.store {
+            None => self.fake.repo_deleted(repo),
+            Some(x) => x.lists(repo).is_ok_and(|listed| !listed) && x.delete_repo(repo).is_ok_and(|a| repo_deleted(a.status, &a.body) == RepoDeleted::Already),
+        }
+    }
+
+    /// A commit on main by another writer that no one refreshes: only the
+    /// owner's `refresh` or the poll finds it.
+    pub fn unrefreshed_commit(&self, created: &Value, changes: &[(&str, Option<&[u8]>)]) -> String {
+        let repo = created["repo"].as_str().expect("created.repo");
+        match &self.store {
+            None => self.fake.external_commit(repo, "main", changes, "unannounced"),
+            Some(x) => x.commit(repo, "main", changes, "unannounced").unwrap_or_else(|e| panic!("a commit on {repo}: {e:#}")),
+        }
+    }
+
+    /// A check that pulls the code.storage fake's `lever`, where the fake
+    /// is not the store: a skip that says which.
+    pub fn skip_lever(&mut self, label: &str, lever: &str) {
+        let store = self.store.as_ref().map_or("a preview's".to_string(), |x| x.label.clone());
+        self.skip(label, &format!("it pulls the code.storage fake's {lever}, and the node's git is {store} ({}; docs/self-host.md, seam 5)", store::CODESTORE_VAR));
     }
 
     /// The owner's `refresh` after a move through the fake; one that fails
@@ -1060,11 +1173,12 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let root = devstack::repo_root();
     let cli = cli_binary()?;
     let tools = devstack::Tools::locate()?;
-    let org_key = fake::generate_org_key_pem();
-    let fake = CodeStorage::start(fake::Options { org: ORG.into(), org_key_pem: Some(org_key.clone()), ..Default::default() })?;
     let run = run_name();
     let scratch = root.join("target/e2e").join(&run);
     std::fs::create_dir_all(&scratch)?;
+    let hidden = rehearse.is_some();
+    let codestore = codestore(hidden, &scratch)?;
+    println!("code store: {}", codestore.said);
     let project = devstack::stage_project(&scratch.join("cell"))?;
     // Ctrl-C (or SIGTERM, SIGHUP) mid-run: the node runs in a process group
     // of its own, which the terminal's signal does not reach, so the run
@@ -1117,7 +1231,6 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
             (needs::Rung::Hosted(offers), api::Run::signing_in_by_levers(test_secret.clone(), paid_calls))
         }
     };
-    let hidden = rehearse.is_some();
     let openrouter = fragment_fakes::openrouter::OpenRouter::start()?;
     let port = devstack::free_port()?;
     let renderer = match &celld {
@@ -1151,12 +1264,14 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         node: None,
         port,
         run,
-        fake: Fake::of(hidden, "code.storage", fake),
+        fake: codestore.fake,
+        store: codestore.store,
+        macrofiche: codestore.macrofiche,
         ai: Fake::of(hidden, "Workers AI", fragment_fakes::workers_ai::WorkersAi::start(0)?),
         push: Fake::of(hidden, "push service", fragment_fakes::push::PushService::start()?),
         mail: Fake::of(hidden, "mail", fragment_fakes::mail::Mailer::start(0, false)?),
         stripe: Fake::of(hidden, "Stripe", fragment_fakes::stripe::Stripe::start(0, STRIPE_KEY)?),
-        org_key,
+        org_key: codestore.org_key,
         host_secret: devstack::random_hex(32),
         test_secret,
         workos: Fake::of(hidden, "WorkOS", fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY)?),
@@ -1205,6 +1320,48 @@ fn renderer(scratch: &Path, port: u16) -> Result<devstack::rendering::Rendering>
     Ok(r)
 }
 
+/// A local run's code store, as `codestore` started or found it.
+struct RunStore {
+    fake: Fake<CodeStorage>,
+    store: Option<store::External>,
+    macrofiche: Option<devstack::codestore::Macrofiche>,
+    org_key: String,
+    /// What the run's first lines say it is.
+    said: String,
+}
+
+/// The node's code store (`FRAGMENT_E2E_CODESTORE`, store.rs): the fake in
+/// this process (`hidden` from the lanes on a rehearsal), macrofiche
+/// started on the run's scratch with an org key made for the run (its log
+/// beside the node's), or a store already running.
+fn codestore(hidden: bool, scratch: &Path) -> Result<RunStore> {
+    let choice = store::Choice::from_env()?;
+    anyhow::ensure!(!hidden || choice == store::Choice::Fake, "a rehearsal keeps a preview's rules on the fakes: drop {}", store::CODESTORE_VAR);
+    let (x, macrofiche, org_key) = match choice {
+        store::Choice::Fake => {
+            let org_key = fake::generate_org_key_pem();
+            let fake = CodeStorage::start(fake::Options { org: ORG.into(), org_key_pem: Some(org_key.clone()), ..Default::default() })?;
+            let said = format!("{} (the code.storage fake, in this process)", fake.url);
+            return Ok(RunStore { fake: Fake::of(hidden, "code.storage", fake), store: None, macrofiche: None, org_key, said });
+        }
+        store::Choice::External => {
+            let x = devstack::codestore::ExternalStore::from_env()?;
+            let label = format!("the store at {}", x.url);
+            (store::External::new(&x.url, &x.org, &x.key_pem, label)?, None, x.key_pem)
+        }
+        store::Choice::Macrofiche => {
+            let bin = devstack::codestore::macrofiche_bin()?;
+            let org_key = fake::generate_org_key_pem();
+            let opts = devstack::codestore::MacroficheOptions { dir: scratch.join("macrofiche"), port: devstack::free_port()?, org: ORG.into(), key_pem: org_key.clone(), log_dir: scratch.to_path_buf() };
+            let m = devstack::codestore::Macrofiche::start(&bin, &opts)?;
+            let label = format!("macrofiche ({}; its log {})", bin.display(), m.log.display());
+            (store::External::new(&m.url, ORG, &org_key, label)?, Some(m), org_key)
+        }
+    };
+    let said = format!("{}, org {}: {}", x.url, x.org, x.label);
+    Ok(RunStore { fake: Fake::absent("code.storage"), store: Some(x), macrofiche, org_key, said })
+}
+
 /// A run's end: a name `--only` or `--except` gave that no section has
 /// fails it; the node stops; the counts, each FAIL, and (hosted) what the
 /// run spent are printed. Non-zero when any check failed, the scratch kept.
@@ -1246,6 +1403,12 @@ fn finish(s: &mut Suite) -> Result<()> {
         }
         println!("      (the node stopped in {:.1?})", t0.elapsed());
     }
+    // the code store the run started, after the node that wrote to it
+    if let Some(m) = s.macrofiche.take() {
+        if let Err(e) = m.stop() {
+            s.fail("macrofiche stops at the end of the run", format!("{e:#}"));
+        }
+    }
     // its computers' containers and their sidecars, whatever left them
     // (wrangler's teardown removes the containers alone; a crash, neither)
     let t0 = Instant::now();
@@ -1263,7 +1426,7 @@ fn finish(s: &mut Suite) -> Result<()> {
             s.fail("OpenBao stops at the end of the run", format!("{e:#}"));
         }
     }
-    let skipped = match s.hosted() || s.on_celld() {
+    let skipped = match s.hosted() || s.on_celld() || s.store.is_some() {
         true => "skipped (each says why)",
         false => "skipped (the hosted lane's)",
     };

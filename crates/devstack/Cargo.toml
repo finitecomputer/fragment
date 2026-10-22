@@ -29,3 +29,7 @@ zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate
 tungstenite = "=0.29.0"
 # a private CA's PEM blocks, checked as base64 (src/rendering)
 base64 = "0.22"
+
+[dev-dependencies]
+# codestore.rs's tests make a fixed org key
+p256 = { version = "0.13", features = ["pkcs8", "pem"] }

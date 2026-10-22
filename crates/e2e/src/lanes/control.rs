@@ -196,13 +196,19 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
         &r,
     );
     let repo = c["repo"].as_str().unwrap_or("").to_string();
-    s.ok("create returns the url-form repo identity", repo.len() == 36 && repo.matches('-').count() == 4, &r);
     // the one derivation of a repo's name (crates/core codestorage.rs):
     // `<name>--<12 hex of its owner>`; a local node has no prefix
     let named = fragment_core::codestorage::repo_name("", &name, &owner_id).unwrap_or_default();
+    // the fake's url form is UUID-shaped; the service's (and macrofiche's)
+    // is the repo's name
+    let url_form = match s.fake_is_the_store() {
+        true => repo.len() == 36 && repo.matches('-').count() == 4,
+        false => repo == named,
+    };
+    s.ok("create returns the url-form repo identity", url_form, &r);
     s.ok(
         "the repo exists in code.storage as <name>--<its owner's 12 hex>",
-        named.starts_with(&format!("{name}--")) && s.fake.repo_url(&named).as_deref() == Some(repo.as_str()),
+        named.starts_with(&format!("{name}--")) && s.repo_url(&named).as_deref() == Some(repo.as_str()),
         format!("{repo} ({named})"),
     );
     s.ok("create returns the fragment's own origin", c["canonical"] == api.site_url(&name, ""), &r);
@@ -283,7 +289,7 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     let theirs = fragment_core::codestorage::repo_name("", &reused, &api.identity(&other)?).unwrap_or_default();
     s.ok(
         "a name deleted and made again by someone else: a fresh repo, named for its new owner",
-        deleted.status == 200 && remade.status == 200 && remade.body["repo"] != first["repo"] && s.fake.repo_url(&theirs).as_deref() == remade.body["repo"].as_str(),
+        deleted.status == 200 && remade.status == 200 && remade.body["repo"] != first["repo"] && s.repo_url(&theirs).as_deref() == remade.body["repo"].as_str(),
         format!("{deleted} {remade} (the earlier maker's repo {})", first["repo"]),
     );
 
@@ -320,7 +326,7 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "GET", "/api/fragments", None)?;
     s.ok("a deleted fragment leaves the owner's list", !r.text.contains(&format!("\"{name}\"")), &r);
     // a busy org: the repo is on a later page of the org's newest-first list
-    s.fake.seed_filler(150);
+    s.seed_filler(150);
     let r = api.create(&owner, &name)?;
     s.ok("a deleted name can be created again", r.status == 200 && r.body["owner"] == api.identity(&owner)?.as_str(), &r);
     s.ok("created again, it keeps its repo (found past the list's first page)", r.body["repo"] == repo.as_str(), &r);

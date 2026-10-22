@@ -22,6 +22,7 @@ use anyhow::{bail, Context, Result};
 pub mod browser;
 mod browser_release;
 pub mod celld;
+pub mod codestore;
 pub mod containers;
 pub mod node;
 mod node_release;

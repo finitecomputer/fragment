@@ -188,7 +188,7 @@ pub fn push(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("ai", &[crate::Need::Fakes]) {
+    if !s.section("ai", &[crate::Need::Fakes, crate::Need::StoreFake]) {
         return Ok(());
     }
     let owner = api.person()?;

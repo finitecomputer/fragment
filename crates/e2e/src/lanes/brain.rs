@@ -114,7 +114,7 @@ const ASSET: &str = "garden/raw/assets/roof-survey.bin";
 
 pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     // the code.storage fake (a pointer read back), a restart, Chrome
-    if !s.section("brain", &[crate::Need::Fakes, crate::Need::Node, crate::Need::Chrome]) {
+    if !s.section("brain", &[crate::Need::Fakes, crate::Need::StoreFake, crate::Need::Node, crate::Need::Chrome]) {
         return Ok(());
     }
     // an agent's CLI, and its person on the platform (the same person)

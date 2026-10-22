@@ -201,7 +201,7 @@ pub(super) fn logged(s: &Suite, event: &str) -> usize {
 }
 
 pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("ledger", &[crate::Need::Fakes, crate::Need::Deployment, crate::Need::Levers]) {
+    if !s.section("ledger", &[crate::Need::Fakes, crate::Need::StoreFake, crate::Need::Deployment, crate::Need::Levers]) {
         return Ok(());
     }
     let wait = Duration::from_secs(40);

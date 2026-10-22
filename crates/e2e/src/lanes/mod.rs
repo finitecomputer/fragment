@@ -14,6 +14,7 @@ mod chat;
 mod author;
 mod billing;
 mod checkout;
+mod codestore;
 mod computers;
 mod control;
 mod credentials;
@@ -75,6 +76,7 @@ const LANES: &[Lane] = &[
     delegation::delegation,
     plane::files,
     plane::deploy,
+    codestore::codestore,
     templates::templates,
     share::share,
     faces::faces,
@@ -158,7 +160,7 @@ pub const SHARDS: [&[&str]; 4] = [
     &["finite-private", "chat", "shell-ui", "wipe", "sync", "migrations", "restart", "connections"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
-        "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "faces", "isolation", "frames",
+        "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "codestore", "templates", "share", "faces", "isolation", "frames",
         "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "doc", "push", "ai", "ledger", "transcribe", "orgs", "billing", "billing-page", "trials", "admin", "admin-page",
     ],
 ];
