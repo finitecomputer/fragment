@@ -83,8 +83,10 @@ const COMPUTER_PAGE: &str = include_str!("computer.md");
 /// The platform skill's description, which Hermes lists in every turn's
 /// prompt (its skills index): what makes an agent load it.
 const PLATFORM_DESCRIPTION: &str = "You are an agent on a Fragment computer: what that is, and the `fragment` CLI in your terminal, which acts as you. Load it before you list, read, make, change, deploy or share your owner's fragments (apps, sites, brains, chats), when asked what you can do here, to ask another of your owner's agents (`fragment ask`), for anything later or recurring (`fragment schedule`), and for your owner's connections (Google: GOOGLE_OAUTH_ACCESS_TOKEN) or your desktop.";
-/// The platform skill is a page or two, not a manual.
-pub const PLATFORM_MAX_BYTES: usize = 16 * 1024;
+/// The platform skill is a page or two, not a manual. 20 KiB since
+/// 2026-10-22: the computer's page's "Files your owner sends you" took it
+/// past 16 KiB, which it had all but reached.
+pub const PLATFORM_MAX_BYTES: usize = 20 * 1024;
 
 /// The platform skill: `cli_skill` (what `fragment skill` prints, a skill
 /// named `fragment`) with the computer's page before its body, and the

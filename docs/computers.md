@@ -1844,6 +1844,19 @@ bridge's prompt lives (`approvals.timeout` and `agent.clarify_timeout`
 are both `BRIDGE_PROMPT_TTL_MS`'s, an hour; `HERMES_BOOT_CARD_TIMEOUT_S`
 is a test's shorter one).
 
+Beside how to ask, every agent is told on every turn in our chats that a
+file someone attaches is already on its computer (`hermes::FILES`, after
+`hermes::ASKING` in `platform_hints.relay`; 2026-10-22): Hermes' relay
+adapter downloads each attachment before the turn into the profile's
+scratch, which Hermes prunes once a day unused, and the note before the
+message names its path (an image's after `image_url:`); nothing else
+told the agent it was a file it could use. Copied into its work, it is
+kept. Its browser tools have no upload, so to put one on a website it
+clicks the site's upload button with them, then types the path into
+the file dialog on its desktop with `computer_use`. The `fragment`
+skill's first page says the same (`computer.md`, "Files your owner sends
+you").
+
 ### Its name, in our Hermes image
 
 An agent's name is its agent fragment's title (docs/api.md, "An agent's
@@ -2438,7 +2451,8 @@ for a host) and finds the same `HOME`, `~` and modes.
   change that raises its window, a foreground click, `rm -rf`, an
   `execute_code` script, and writes to a project's `AGENTS.md` and to
   `~/.ssh/config` each run with no card and no guardian call, and the
-  model's system prompt says how to ask (`hermes::ASKING`).
+  model's system prompt says how to ask (`hermes::ASKING`) and that a
+  file attached in the chat is on its computer (`hermes::FILES`).
 - The platform's side, with the stub: the `computers` lane's ticket that
   lands on `?agent=` and refuses a path off its port, and an agent's
   screen's control socket through the port (refused for an agent not on

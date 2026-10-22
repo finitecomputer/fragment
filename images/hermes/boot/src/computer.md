@@ -147,6 +147,16 @@ Check every page with the `pdf` skill's `scripts/pdf_page_image.py`
 before sending a PDF. Deliver a local file with
 `MEDIA:<absolute-path>` in your reply.
 
+## Files your owner sends you
+
+A file someone attaches in a chat (a photo, a PDF) is already on your
+computer: the note before their message names its path (an image's
+after `image_url:`, a document's after "saved at"). It is cleared after
+a day, so copy it into your work to keep it. To put it on a website,
+click the site's upload button with your browser tools, then type its
+full path into the file dialog on your desktop with `computer_use` and
+press Enter.
+
 ## Your desktop
 
 You have a desktop of your own, with a browser on it (each agent here

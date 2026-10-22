@@ -222,6 +222,27 @@ pub fn card_timeout_s(setting: Option<&str>) -> u64 {
 /// (`computer.md`, "Asking your owner") says the same at more length.
 pub const ASKING: &str = "You are in a Fragment chat, and its people are not technical. Never ask them to approve a command, a file, a path or code: do the technical work yourself, and tell them what changed in plain words. Ask only about outcomes that are theirs to decide, in plain words, with the clarify tool and its choices (its card is your owner's to answer): before you make something of theirs public or share it with someone new, send an email or a message in their name, delete something of theirs, or spend their money, unless they asked for exactly that in this chat.";
 
+/// What every agent is told of the files people attach in our chats, beside
+/// `ASKING` on every turn (2026-10-22: nothing told it an attachment is a
+/// file it can use). Hermes' relay adapter downloads each attachment before
+/// the turn into the scratch it moves to the profile's cache
+/// (`relay_media_<random>.<ext>`; Hermes prunes what sits a day unused:
+/// its `SCRATCH_MAX_IDLE_HOURS`, 24), and the turn's text names that path
+/// only in its note before the message: an image's as `vision_analyze`'s
+/// `image_url:`, a document's as where it is "saved at". Its browser tools
+/// have no upload: a site's upload button opens the file dialog on its
+/// desktop, where `computer_use` types the path. The `fragment` skill's
+/// first page (`computer.md`, "Files your owner sends you") says the same
+/// at more length.
+pub const FILES: &str = "A file someone attaches in this chat is already on your computer: the note before their message names its path (for an image, after image_url:). It is cleared after a day, so copy it into your work to keep it. To put it on a website, click the site's upload button with your browser tools, then type its full path into the file dialog on your desktop with computer_use and press Enter.";
+
+/// The relay's hint, appended to every agent's system prompt on every turn
+/// in our chats (Hermes' `platform_hints.relay.append`): how it asks
+/// (`ASKING`), then the files it is sent (`FILES`).
+pub fn relay_hint() -> String {
+    format!("{ASKING}\n\n{FILES}")
+}
+
 /// The managed overlay: how every profile streams, shows progress, asks
 /// (nothing technical; a card waits `card_timeout_s`), when its desktop is
 /// idle (`screen_idle_ms`), and what it never runs.
@@ -269,8 +290,9 @@ pub fn managed_config(disabled_plugins: &[String], card_timeout_s: u64, screen_i
     // does, as an approval's (Hermes' default is an hour, the bridge's too).
     y.push_str(&format!("agent:\n  disabled_toolsets: [\"cronjob\"]\n  clarify_timeout: {card_timeout_s}\n"));
     // The agent asks its people about outcomes alone, in plain words
-    // (`ASKING`).
-    y.push_str(&format!("platform_hints:\n  relay:\n    append: {}\n", q(ASKING)));
+    // (`ASKING`), and knows the files they attach are on its computer
+    // (`FILES`).
+    y.push_str(&format!("platform_hints:\n  relay:\n    append: {}\n", q(&relay_hint())));
     // A voice memo's transcript is no message of its own: the agent hears it
     // and answers once (one reply a turn, #160). The gateway reads this from
     // its own home's config, with this overlay merged over it; each profile
@@ -1161,6 +1183,32 @@ mod tests {
         assert_eq!(profile_dir(Path::new("/data/hermes"), "juniper--k3x9"), PathBuf::from("/data/hermes/profiles/juniper--k3x9"));
     }
 
+    /// Goal (2026-10-22): every agent is told, on every turn in our chats,
+    /// that a file someone attaches is already on its computer, where the
+    /// note before the message names its path (an image's after
+    /// `image_url:`, as Hermes' note says it), that it is cleared after a
+    /// day, and how to put it on a website (a site's upload button with
+    /// its browser tools, then the path typed into its desktop's file dialog
+    /// with computer_use), in plain words; and the `fragment` skill's first
+    /// page says the same at more length. Method: the overlay's relay hint
+    /// after `ASKING`, its words, and the page's section.
+    #[test]
+    fn every_agent_is_told_its_chat_files_are_on_its_computer() {
+        let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
+        assert_eq!(relay_hint(), format!("{ASKING}\n\n{FILES}"));
+        assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "its files beside how to ask, in the relay's hint: {m}");
+        for said in ["already on your computer", "the note before their message names its path", "image_url:", "cleared after a day", "copy it into your work", "upload button with your browser tools", "full path into the file dialog on your desktop with computer_use", "press Enter"] {
+            assert!(FILES.contains(said), "{said}: {FILES}");
+        }
+        assert!(!FILES.contains(['`', '\n', '$']) && FILES.len() < 500, "one plain paragraph, nothing Hermes would expand: {FILES}");
+        let page = include_str!("computer.md");
+        let section = page.split("\n## ").find(|s| s.starts_with("Files your owner sends you\n")).expect("computer.md has the section");
+        let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
+        for said in ["already on your computer", "image_url:", "after a day", "copy it into your work", "upload button with your browser tools", "file dialog on your desktop", "computer_use", "press Enter"] {
+            assert!(section.contains(said), "computer.md, \"Files your owner sends you\", says {said}: {section}");
+        }
+    }
+
     /// Goal (Paul, 2026-10-14: "if hermes asks them a technical approval it
     /// makes no sense to them"): nothing technical asks the agent's owner, on
     /// any model. Method: the overlay, merged over every profile, turns
@@ -1177,7 +1225,7 @@ mod tests {
         assert!(m.contains("\napprovals:\n  mode: \"off\"\n  timeout: 3600\n  destructive_slash_confirm: false\n"), "{m}");
         assert!(m.contains("\nsecurity:\n  allow_lazy_installs: false\n  protected_instruction_files: false\n"), "{m}");
         assert!(!m.contains("smart") && !m.contains("yolo") && !m.contains("command_allowlist"), "{m}");
-        assert!(m.contains(&format!("\nplatform_hints:\n  relay:\n    append: {}\n", q(ASKING))), "every agent in our chats is told how to ask: {m}");
+        assert!(m.contains(&format!("\nplatform_hints:\n  relay:\n    append: {}\n", q(&relay_hint()))) && relay_hint().starts_with(ASKING), "every agent in our chats is told how to ask: {m}");
         for said in ["not technical", "Never ask them to approve a command, a file, a path or code", "in plain words", "the clarify tool and its choices", "public", "someone new", "an email", "spend their money"] {
             assert!(ASKING.contains(said), "{said}: {ASKING}");
         }
