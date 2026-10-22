@@ -1,6 +1,7 @@
 //! State survives a graceful restart and a crash of the node (a sleeping
 //! job, sealed secrets and keys, sessions, and a channel's sequence
-//! included). The graceful restart comes back with one operator key's row
+//! included; on a run with sandcastle nodes, a computer's placement, awake
+//! through the restart). The graceful restart comes back with one operator key's row
 //! more in its configuration, and the crash's without it again, as an
 //! operator adds a row and then rolls it back: each time, a ledger made
 //! before charges with the book its release configured, no version raised
@@ -32,6 +33,34 @@ const LEDGER_APP: &[u8] = include_bytes!("../../fixtures/ledger.mjs");
 const LEDGER_JSON: &[u8] = include_bytes!("../../fixtures/ledger.json");
 const SECRET: &str = "sk-e2e-restart-5b2e07";
 const MEMBER_EMAIL: &str = "restart-member@e2e.test";
+
+/// A node that dials in is back once it dials again: after a run's many
+/// restarts its backoff nears its ceiling (a minute, and jitter), and a
+/// dial may wait out its own bound (sandcastle's docs/node.md, The uplink).
+const NODE_BACK: Duration = Duration::from_secs(180);
+
+/// Its owner's wake of a computer placed on a node, again while its node is
+/// not back (each such answer `node_down`, typed): the last answer.
+fn woken(s: &Suite, api: &Api, who: &Keys, id: &str) -> crate::api::Reply {
+    let wake = || api.signed(who, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
+    let mut last = None;
+    s.eventually(NODE_BACK, || {
+        let r = wake();
+        let done = r.as_ref().is_ok_and(|r| r.status == 200 && r.body["phase"] == "awake");
+        if let Ok(r) = r {
+            last = Some(r);
+        }
+        done
+    });
+    last.unwrap_or_else(|| wake().unwrap_or_else(|e| panic!("a wake: {e:#}")))
+}
+
+/// The checks of a computer placed on a sandcastle node, across the restarts.
+const PLACED: [&str; 3] = [
+    "after a restart a computer on a sandcastle node is still placed there, and awake: its new object finds its container on the node, and puts it to sleep",
+    "woken after the restart, it wakes on the node it was placed on",
+    "after a crash it is still placed on its node, and wakes there",
+];
 
 fn count(api: &Api, keys: &Keys, name: &str) -> i64 {
     api.op(keys, name, "count", "q", json!({})).ok().and_then(|r| r.body["result"]["n"].as_i64()).unwrap_or(-1)
@@ -171,10 +200,10 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     );
     // an agent's name and picture (faces.rs): its fragment's, in its own
     // storage and its git, shown from its face. An agent's identity is its
-    // computer's to give: none on celld here (seam 2)
-    let face = match s.on_celld() {
-        true => None,
-        false => {
+    // computer's to give: none on celld without nodes (seam 2)
+    let face = match s.has_computers() {
+        false => None,
+        true => {
             let (face_owner, face_session) = super::templates::person(&api)?;
             let (faced, face_id) = super::faces::agent_of(s, &api, &face_owner, "restart-face", "Juniper")?;
             let faced = faced["name"].as_str().unwrap_or("").to_string();
@@ -208,10 +237,10 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let signing_in_cookie = signing_in.cookies().into_iter().find(|c| c.starts_with("fragment_login=")).unwrap_or_default();
     let signing_in_back = api.external(&signing_in.header("location"))?;
     anyhow::ensure!(signing_in.status == 302 && signing_in_back.status == 302 && !signing_in_cookie.is_empty(), "a pending sign-in: {signing_in} / {signing_in_back}");
-    // an own key's sign-in finishes at its person's computer: none on celld here (seam 2)
-    let own_key = match s.on_celld() {
-        true => None,
-        false => {
+    // an own key's sign-in finishes at its person's computer: none on celld without nodes (seam 2)
+    let own_key = match s.has_computers() {
+        false => None,
+        true => {
             let connector = api.person()?;
             let connector_session = api.sign_in(&Api::email_of(&connector))?;
             let made = api.signed(&connector, "POST", "/api/computers", Some(&json!({})))?;
@@ -222,9 +251,35 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
             Some((connector, connector_session, bound, back))
         }
     };
+    // a computer placed on a sandcastle node, awake as the platform stops
+    // (docs/self-host.md, seam 2): its container is the node's
+    let placed = match s.has_nodes() {
+        true => {
+            let who = api.person()?;
+            let r = api.signed(&who, "POST", "/api/computers", Some(&json!({})))?;
+            let id = r.body["computer"].as_str().unwrap_or("").to_string();
+            let r = api.signed(&who, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
+            let node = r.body["node"].as_str().unwrap_or("").to_string();
+            anyhow::ensure!(r.status == 200 && r.body["phase"] == "awake" && !node.is_empty(), "a computer on a node: {r}");
+            Some((who, id, node))
+        }
+        false => {
+            for label in PLACED {
+                s.skip(label, "it needs sandcastle nodes, and the run started none (FRAGMENT_E2E_NODES)");
+            }
+            None
+        }
+    };
 
     s.stop()?;
     let api = s.start_with_a_key_more()?;
+    if let Some((who, id, node)) = &placed {
+        let v = api.signed(who, "GET", &format!("/api/computers/{id}"), None)?;
+        let r = api.signed(who, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+        s.ok(PLACED[0], v.body["node"] == node.as_str() && v.body["phase"] == "awake" && r.status == 200 && r.body["phase"] == "asleep", format!("{v} / {r}"));
+        let r = woken(s, &api, who, id);
+        s.ok(PLACED[1], r.status == 200 && r.body["phase"] == "awake" && r.body["node"] == node.as_str(), &r);
+    }
     let (book, shown) = book_of(&api, &owner)?;
     s.ok(
         "after a restart whose configuration adds an operator key's row, its version as it was, a ledger made before charges with that book: the key at its row's price",
@@ -270,7 +325,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
                 json!({ "page": page.to_string(), "connections": state.body }),
             );
         }
-        None => s.skip("after a restart an own key's sign-in begun before it finishes, in the browser that began it, signed in: connected", "it needs a computer (an own key's sign-in finishes at its person's), and celld runs none here (docs/self-host.md, seam 2, to port)"),
+        None => s.skip("after a restart an own key's sign-in begun before it finishes, in the browser that began it, signed in: connected", "it needs a computer (an own key's sign-in finishes at its person's), and celld runs none without sandcastle nodes (FRAGMENT_E2E_NODES; docs/self-host.md, seam 2)"),
     }
     const FACE: &str = "after a restart an agent keeps its name and picture: its owner's list, its picture's address, and the share sheet show them";
     match face {
@@ -284,7 +339,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
                 json!({ "row": face_row, "picture": face_got.status, "sheet": face_sheet.status }),
             );
         }
-        None => s.skip(FACE, "an agent's identity is its computer's to give, and celld runs none here (docs/self-host.md, seam 2, to port)"),
+        None => s.skip(FACE, "an agent's identity is its computer's to give, and celld runs none without sandcastle nodes (FRAGMENT_E2E_NODES; docs/self-host.md, seam 2)"),
     }
     let access_after = access_row(&api);
     s.ok(
@@ -434,6 +489,12 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let calls_before_crash = s.ai.calls().iter().filter(|c| c.model == fragment_core::decide::Model::ClefFlash.id()).count();
     s.crash()?;
     let api = s.start(false)?;
+    if let Some((who, id, node)) = &placed {
+        // awake as the platform crashed: its new object adopts the container, or starts it again, there
+        let r = woken(s, &api, who, id);
+        s.ok(PLACED[2], r.status == 200 && r.body["phase"] == "awake" && r.body["node"] == node.as_str(), &r);
+        api.signed(who, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+    }
     if let Some((jobs, started)) = nap {
         let woke = jobs::settle(&api, &owner, &jobs, started, &["succeeded", "held"], Duration::from_secs(60));
         let naps = jobs::records(&api, &owner, &jobs, "feed").iter().filter(|r| r["kind"] == "nap").count();

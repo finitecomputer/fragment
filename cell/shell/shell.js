@@ -1972,12 +1972,15 @@ async function openSettings(push = true, failed = null) {
   const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => reopenSettings(), noSeatSaid, switchForm, support: state.support };
   const back = await returning(billingHelpers);
   if (lost()) return;
-  const [ledger, mySeat, linked, uses, access] = await Promise.all([
+  const [ledger, mySeat, linked, uses, access, nodes] = await Promise.all([
     api("GET", "/api/ledger").catch(() => null),
     api("GET", "/api/seat").catch(() => null),
     api("GET", "/api/connections").catch(() => null),
     state.computer ? api("GET", `/api/computers/${seg(state.computer.computer)}/uses`).catch(() => null) : null,
     api("GET", "/api/access").catch((e) => ({ error: e.message })),
+    // where computers may run, on a platform that runs them on sandcastle
+    // nodes (a 404 elsewhere: no section)
+    api("GET", "/api/nodes").catch(() => null),
   ]);
   if (lost()) return;
   if (mySeat) setGuest(mySeat.guest);
@@ -2060,6 +2063,10 @@ async function openSettings(push = true, failed = null) {
           ...(behind
             ? [line("Latest version", c.latest), el("p", "muted", `Restart to get the latest version.${c.alwaysOn ? "" : " It also updates by itself the next time your computer sleeps."}`)]
             : []),
+          ...(c.node ? [line("Runs on", nodeName(nodes, c.node))] : []),
+          // on a machine of theirs: never charged, its use counted in points
+          // (a point is $0.001 at list: crates/core/src/price.rs `points`)
+          ...(c.ownHardwarePoints != null ? [line("Its use", `${c.ownHardwarePoints.toLocaleString()} ${c.ownHardwarePoints === 1 ? "point" : "points"} this month, not charged: it runs on your own machine`)] : []),
           ...(c.why ? [el("p", "settings-warning", c.why)] : []),
         ]
       : // never read: a failed read is not "none" (shown again once one answers: `load`)
@@ -2115,9 +2122,89 @@ async function openSettings(push = true, failed = null) {
   const skills = await skillsSection();
   if (lost()) return;
   returnSaid(back);
-  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, buildSection(), dataSection()]);
+  renderSettingsPage(page, [account, ...billing, computer, ...nodesSection(nodes), agents, accessSection(access), skills, connections, buildSection(), dataSection()]);
   renderAgentFaces();
   tell();
+}
+
+// ---- computers (experimental; docs/self-host.md, seam 2): on a platform
+// that runs them on sandcastle nodes, the nodes the person's computers may
+// run on, the platform's and their own (a machine they paired), each up or
+// down with their computer on it, and where a new computer runs. A
+// computer stays on the node it first started on; the choice is for the
+// next one.
+const NODE_STATE = { up: "Up", down: "Down", revoked: "Revoked" };
+// the end of a node's id, beside its name (crates/core/src/pairing.rs
+// `id_suffix`, ID_SUFFIX_CHARS)
+const nodeSuffix = (id) => `…${id.slice(-6)}`;
+const nodeName = (nodes, id) => {
+  const n = nodes?.nodes?.find((x) => x.id === id);
+  return n ? (n.kind === "own" ? `${n.name} ${nodeSuffix(n.id)} (yours)` : n.name) : id;
+};
+function nodesSection(nodes) {
+  if (!nodes || (!nodes.nodes.length && !nodes.byoc)) return [];
+  const s = section("Computers (experimental)");
+  s.id = "settings-nodes";
+  s.append(el("p", "muted", "Where your computers run. A computer stays on the machine it first started on: what you choose here is for your next one."));
+  const usable = nodes.nodes.filter((n) => n.state !== "revoked");
+  const pick = el("select");
+  pick.id = "settings-nodes-prefer";
+  const auto = el("option", null, "Automatic (the platform's machines)");
+  auto.value = "";
+  pick.append(auto, ...usable.map((n) => {
+    const o = el("option", null, `${nodeName(nodes, n.id)}, ${n.arch}${n.state === "up" ? "" : ", down now"}`);
+    o.value = n.id;
+    return o;
+  }));
+  pick.value = nodes.prefer && usable.some((n) => n.id === nodes.prefer) ? nodes.prefer : "";
+  pick.onchange = async () => {
+    pick.disabled = true;
+    let failed = null;
+    try {
+      await api("PUT", "/api/nodes/prefer", { node: pick.value || null });
+    } catch (e) {
+      failed = ["That was not changed", e.message];
+    }
+    await reopenSettings(failed);
+  };
+  s.append(actionLine("New computers run on", pick), el("p", "muted", "If that machine is down, or cannot run the computer, the platform's rule places it, and the computer says why."));
+  for (const n of nodes.nodes) {
+    const row = el("div", "settings-node");
+    row.dataset.node = n.id;
+    row.dataset.state = n.state;
+    const kind = n.kind === "own" ? `Yours · ${n.arch} · ${nodeSuffix(n.id)}` : `The platform's · ${n.arch}`;
+    row.append(line(n.name, `${NODE_STATE[n.state] ?? n.state} · ${kind}`));
+    if (n.why && n.state === "down") row.append(el("p", "muted", n.why));
+    if (n.computers.length) row.append(el("p", "muted", "Your computer runs here."));
+    if (n.kind === "own" && n.state !== "revoked") {
+      row.append(el("p", "muted", "What runs here is counted in points, not charged."));
+      const revoke = el("button", "quiet", "Revoke");
+      revoke.type = "button";
+      revoke.onclick = async () => {
+        if (!confirm(`Revoke ${nodeName(nodes, n.id)}? It is cut off at once, and runs none of your computers again${n.computers.length ? ", the one there included" : ""}.`)) return;
+        revoke.disabled = true;
+        let failed = null;
+        try {
+          await api("DELETE", `/api/nodes/${seg(n.id)}`);
+        } catch (e) {
+          failed = ["It was not revoked", e.message];
+        }
+        await reopenSettings(failed);
+      };
+      row.append(actionLine("", revoke));
+    }
+    s.append(row);
+  }
+  if (nodes.byoc) {
+    s.append(
+      say("Bring a machine of yours: start sandcastle on it, then run this there and approve the code it shows here:"),
+      el("pre", "command", `sandcastle-node pair ${location.origin} --config /etc/sandcastle-node/node.json \\\n  --engine /var/lib/sandcastle/engine.sock --ports /var/lib/sandcastle/ports.sock \\\n  --egress /run/sandcastle-node/egress.sock`),
+      say("It takes the machine's name, which none of yours may share: `--name` gives it another. It runs only the computers you choose for it, here, and what runs there is counted in points, not charged."),
+    );
+  } else {
+    s.append(el("p", "muted", "This platform's machines are its operator's: it pairs none of yours."));
+  }
+  return [s];
 }
 // An action's reload of settings, only while they are shown: an answer that
 // comes once the person has gone to a chat leaves them there, and says

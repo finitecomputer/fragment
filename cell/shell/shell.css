@@ -489,6 +489,9 @@ iframe[data-blocked] { display: none; }
 .settings-section { position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 0; min-width: 0; margin-top: 64px; padding: 8px 22px 16px; border: 1px solid var(--border-strong); border-radius: 18px; background: var(--surface-muted); scroll-margin-top: 64px; }
 .settings-section h2 { position: absolute; top: -42px; left: 0; margin: 0; font-size: 18px; font-weight: 600; line-height: 1.35; letter-spacing: -.018em; }
 .settings-section h2:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 4px; border-radius: 2px; }
+/* settings' computers (shell.js nodesSection): a block per node, and the choice */
+.settings-node { align-self: stretch; }
+#settings-nodes-prefer { height: 30px; min-width: 0; max-width: 100%; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 8px; background: none; color: var(--text-primary); font: inherit; font-size: 13px; }
 .settings-section > p { margin: 0; padding: 12px 2px; }
 .settings-section > p.muted { color: var(--text-secondary); font-size: 14px; line-height: 1.55; }
 .settings-section .settings-line { display: flex; align-items: center; gap: 18px; width: 100%; padding: 15px 2px; margin: 0; border-bottom: 1px solid var(--border-strong); font-size: 14px; }

@@ -55,6 +55,7 @@ use fragment_core::computer::{
 };
 use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
 use fragment_core::own_signin;
+use fragment_core::{pairing, placement};
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
@@ -267,6 +268,20 @@ enum MetaKey {
     /// (`fragment_core::computer::Images`): the reference its pinned name
     /// stood for as it last looked, and the version its owner put off.
     Images,
+    /// The sandcastle node it is placed on, for its life (docs/self-host.md,
+    /// seam 2). entry.mjs's `ContainerHost` reads this row as an isolate
+    /// starts, so its container's calls go to that node.
+    Node,
+    /// Why its last start found its node down, or no node to run on. A
+    /// start that comes up clears it.
+    NodeNote,
+    /// How its node was chosen: as its owner chose, by the deployment's
+    /// rule, or by the rule because their choice could not take it.
+    Placed,
+    /// Its awake time on its owner's own node, at list price, in the month
+    /// it was counted (`{month, list}`): tracked in points, never charged
+    /// (docs/self-host.md, seam 10).
+    OwnHardware,
 }
 
 impl MetaKey {
@@ -285,6 +300,10 @@ impl MetaKey {
             MetaKey::AliveCheck => "alive_check",
             MetaKey::WorkosUser => "workos_user",
             MetaKey::Images => "images",
+            MetaKey::Node => "node",
+            MetaKey::NodeNote => "node_note",
+            MetaKey::Placed => "placed",
+            MetaKey::OwnHardware => "own_hardware",
         }
     }
 }
@@ -347,6 +366,9 @@ pub struct ComputerCell {
     dead: std::cell::Cell<Option<u64>>,
     /// Its schema as it started (schema.rs): ready, or refused.
     schema: crate::schema::Schema,
+    /// The last start's failure, when its node did not answer or no node
+    /// could take it: the wake that asked answers with it, typed.
+    node_failure: RefCell<Option<CellError>>,
 }
 
 impl DurableObject for ComputerCell {
@@ -368,6 +390,7 @@ impl DurableObject for ComputerCell {
             heard_ms: std::cell::Cell::new(None),
             dead: std::cell::Cell::new(None),
             schema,
+            node_failure: RefCell::default(),
         }
     }
 
@@ -610,6 +633,12 @@ struct Tab {
     open: bool,
 }
 
+/// Whether a start failed for its node (down, revoked by its owner, or none
+/// to place it on), not for itself (docs/self-host.md, seam 2).
+fn node_failed(e: &CellError) -> bool {
+    matches!(e.code, ErrorCode::NodeDown | ErrorCode::NoNode | ErrorCode::NodeRevoked)
+}
+
 fn sha_hex(s: &str) -> String {
     hex::encode(Sha256::digest(s.as_bytes()))
 }
@@ -711,6 +740,71 @@ impl ComputerCell {
 
     async fn call(&self, method: &str, args: &[JsValue]) -> CellResult<JsValue> {
         js::invoke(&self.host()?, method, args).await
+    }
+
+    /// Places a computer that runs on sandcastle nodes at its first start
+    /// (`fragment_core::placement`: the rule, and why a computer then
+    /// stays): every node probed, ranked by its owner's choice and the
+    /// deployment's rule (`rank_for`), and the best that still has room as
+    /// its object counts takes it. How it was chosen is kept (`placed` in
+    /// its view). Placed already, or on the runtime's containers, nothing.
+    async fn place(&self, id: &str, image: &str) -> CellResult<()> {
+        let Some(nodes) = &self.cfg.nodes else { return Ok(()) };
+        if self.meta(MetaKey::Node)?.is_some() {
+            return Ok(());
+        }
+        let owner = self.must(MetaKey::Owner)?;
+        let chose = crate::ask_registry(&self.env, &crate::registry::calls::ChoiceOf { owner }).await?;
+        let own = match chose.own.as_ref().filter(|r| !r.revoked && r.secret.is_some()) {
+            Some(r) => Some(placement::own_node(&r.id, placement::Arch::parse(&r.arch).ok_or_else(|| CellError::host(format!("a node of {:?}", r.arch)))?)),
+            None => None,
+        };
+        let choice = match (&chose.prefer, &own, &chose.gone) {
+            (None, _, _) => placement::Choice::Automatic,
+            (Some(_), Some(n), _) => placement::Choice::Own(n),
+            (Some(p), None, Some(why)) => placement::Choice::Gone { id: p, why },
+            (Some(p), None, None) => placement::Choice::Listed(p),
+        };
+        // their own node is probed beside the deployment's (its key the registry's: node.mjs `pairedNode`)
+        let own_js = js::to_js(&json!(own.iter().map(|n| json!({ "id": n.id, "arch": n.arch.name() })).collect::<Vec<_>>()));
+        let probes = js::from_js(&self.call("probe", &[own_js]).await?).map_err(CellError::host)?;
+        let probes: Vec<placement::Probe> = serde_json::from_value(probes).map_err(|e| CellError::host(format!("the nodes' probes: {e}")))?;
+        let ranked = placement::rank_for(nodes, choice, image, &probes).map_err(|e| CellError::new(ErrorCode::NoNode, e.to_string()))?;
+        assert!(!ranked.order.is_empty() && ranked.order.len() <= placement::NODES_MAX + 1, "a ranking names a node or says why none");
+        for node in &ranked.order {
+            let capacity = nodes.get(node).map_or(placement::OWN_CAPACITY, |n| n.capacity);
+            // the node's object counts what it holds: a place another computer
+            // took since the probe is not given twice
+            if self.call("take", &[node.as_str().into(), id.into(), JsValue::from_f64(f64::from(capacity))]).await?.as_bool() == Some(true) {
+                let how = match (&chose.prefer, &ranked.passed_over) {
+                    (None, _) => "by the deployment's rule".to_string(),
+                    (Some(p), None) if p == node => "as its owner chose".to_string(),
+                    (Some(p), Some((_, why))) => format!("by the deployment's rule: {p}, its owner's choice, is {why}"),
+                    (Some(p), None) => format!("by the deployment's rule: {p}, its owner's choice, filled as it was placed"),
+                };
+                self.set_meta(MetaKey::Node, node)?;
+                self.set_meta(MetaKey::Placed, &how)?;
+                self.call("pin", &[node.as_str().into()]).await?;
+                console_log!("{}", json!({ "computer": id, "placed": node, "how": how, "probes": probes }));
+                return Ok(());
+            }
+        }
+        Err(CellError::new(ErrorCode::NoNode, format!("no node can take it: {} filled as it was placed", ranked.order.join(", "))))
+    }
+
+    /// The node this computer runs on, when it is one its owner paired
+    /// (own hardware: docs/self-host.md, seams 2 and 10). Its node is its
+    /// own for life, so every interval it was awake ran there.
+    fn own_node(&self) -> CellResult<Option<String>> {
+        Ok(self.meta(MetaKey::Node)?.filter(|n| pairing::is_paired_id(n)))
+    }
+
+    /// Its awake time on its owner's own node: `(month, list micros)`.
+    fn own_hardware(&self) -> CellResult<(Month, i64)> {
+        let Some(text) = self.meta(MetaKey::OwnHardware)? else { return Ok((Month::of(js::now_ms()), 0)) };
+        let v: Value = serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored own hardware: {e}")))?;
+        let month = v["month"].as_u64().and_then(|m| u32::try_from(m).ok()).ok_or_else(|| CellError::host("the stored own hardware names no month"))?;
+        Ok((Month(month), v["list"].as_i64().unwrap_or(0)))
     }
 
     /// Applies `first` and every event its actions report back, each
@@ -884,8 +978,14 @@ impl ComputerCell {
         if !matches!(self.lifecycle()?.phase, Phase::Awake { .. } | Phase::Starting { .. }) {
             self.may_start(json!(why)).await?;
         }
+        self.node_failure.borrow_mut().take();
         // a wake that started nothing says why
-        if let Some(why) = self.drive(Event::Wake { why }).await? {
+        let refused = self.drive(Event::Wake { why }).await?;
+        // as does one whose start found its node down, or no node at all
+        if let Some(e) = self.node_failure.borrow_mut().take() {
+            return Err(e);
+        }
+        if let Some(why) = refused {
             return Err(CellError::new(ErrorCode::WontWake, why));
         }
         Ok(())
@@ -954,6 +1054,23 @@ impl ComputerCell {
         let intervals: Vec<(i64, i64)> = rows.iter().filter_map(|r| Some((r["from_ms"].as_i64()?, r["to_ms"].as_i64()?))).collect();
         let Some((first, _)) = intervals.first().copied() else { return Ok(()) };
         let last = intervals.last().map_or(first, |(from, _)| *from);
+        if self.own_node()?.is_some() {
+            // its owner's own hardware: never charged, so never the ledger's;
+            // its list price counted here, in the month it is counted, and
+            // shown in points (docs/self-host.md, seam 10). Read and written
+            // with no await between.
+            let ms: i64 = intervals.iter().map(|(from, to)| (to - from).max(0)).sum();
+            let listed = self.cfg.book.price(&Usage::Awake { instance: fragment_core::price::INSTANCE.into(), ms: ms as u64 }).map(|p| p.list).unwrap_or_else(|e| {
+                // a book without the instance prices it at nothing: logged, as any gap is
+                console_error!("{}", json!({ "computer": id, "own_hardware": "unpriced", "error": format!("{e:?}") }));
+                0
+            });
+            let now = Month::of(js::now_ms());
+            let (month, list) = self.own_hardware()?;
+            let list = if month == now { list + listed } else { listed };
+            self.set_meta(MetaKey::OwnHardware, &json!({ "month": now.0, "list": list }).to_string())?;
+            return self.exec("DELETE FROM awake WHERE from_ms >= ? AND from_ms <= ?", vec![first.into(), last.into()]);
+        }
         let meter_rows = intervals
             .iter()
             .filter(|(from, to)| to > from)
@@ -1010,7 +1127,7 @@ impl ComputerCell {
     async fn start(&self, generation: u64) -> Event {
         let planned = match self.plan(generation).await {
             Ok(p) => p,
-            Err(e) => return Event::StartFailed { generation, why: e.message },
+            Err(e) => return self.start_failed(generation, e),
         };
         let from = planned.plan.source();
         let save_id = planned.save.as_ref().map(|s| s.id.clone());
@@ -1023,9 +1140,12 @@ impl ComputerCell {
                     Ok(None) => {}
                     Err(e) => console_error!("{}", json!({ "computer": "restored", "generation": generation, "error": e.message })),
                 }
-                // a wake refused before (the ledger's why) is no longer so
-                if let Err(e) = self.delete_meta(MetaKey::Note) {
-                    console_error!("{}", json!({ "computer": "note", "generation": generation, "error": e.message }));
+                // a wake refused before (the ledger's why), or a node that
+                // was down, is no longer so
+                for k in [MetaKey::Note, MetaKey::NodeNote] {
+                    if let Err(e) = self.delete_meta(k) {
+                        console_error!("{}", json!({ "computer": "note", "generation": generation, "error": e.message }));
+                    }
                 }
                 Event::Ready { generation }
             }
@@ -1036,7 +1156,8 @@ impl ComputerCell {
                 let _ = self.destroy(generation, "its save would not restore").await;
                 Event::RestoreFailed { generation, why, older }
             }
-            Err(Unstarted::Failed(e)) if from == RestoreSource::Snapshot => {
+            // a node that is down is no snapshot's failure
+            Err(Unstarted::Failed(e)) if from == RestoreSource::Snapshot && !node_failed(&e) => {
                 // forgotten before the destroy: the exit that reports is the
                 // start's own failure (`exit_of`), and any start after it
                 // restores the save
@@ -1059,15 +1180,30 @@ impl ComputerCell {
             }
             Err(Unstarted::Failed(e)) => {
                 let _ = self.destroy(generation, "the start failed").await;
-                Event::StartFailed { generation, why: e.message }
+                self.start_failed(generation, e)
             }
         }
+    }
+
+    /// A start that failed, as its event. Its node down, or no node to place
+    /// it on: kept, and the wake that asked says so, typed.
+    fn start_failed(&self, generation: u64, e: CellError) -> Event {
+        let why = e.message.clone();
+        if node_failed(&e) {
+            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "start": generation, "node": e.code, "why": e.message }));
+            let _ = self.set_meta(MetaKey::NodeNote, &e.message);
+            *self.node_failure.borrow_mut() = Some(e);
+        }
+        Event::StartFailed { generation, why }
     }
 
     /// What the start `generation` restores, recorded as the start under
     /// way. Nothing awaits between reading the saves and recording it.
     async fn plan(&self, generation: u64) -> CellResult<Planned> {
         let image = self.must(MetaKey::Image)?;
+        // on sandcastle nodes it is placed first (docs/self-host.md, seam
+        // 2): its image's reference is its node's
+        self.place(&self.must(MetaKey::Id)?, &image).await?;
         // what the start runs is what it looked at: the version it comes up on
         let reference = self.look().await?;
         let snapshots = reference.as_deref().filter(|_| self.cfg.computer_snapshots);
@@ -1719,20 +1855,32 @@ impl ComputerCell {
         };
         let origin = self.cfg.computer_origin(&id).ok_or_else(|| CellError::host(format!("{id} is no computer's id")))?;
         let saves = self.saves()?;
-        // why it won't wake; else what its saves' failures say (a sleep that
-        // kept its container, or slept unsaved); else why a wake was refused
+        // why it won't wake; else why its node could not run it (seam 2);
+        // else what its saves' failures say (a sleep that kept its
+        // container, or slept unsaved); else why a wake was refused
         let why = match why {
             Some(why) => Some(why),
-            None => match self.meta(MetaKey::SaveNote)? {
-                Some(note) => Some(note),
-                None => self.meta(MetaKey::Note)?,
+            None => match (self.meta(MetaKey::NodeNote)?, self.meta(MetaKey::SaveNote)?) {
+                (Some(note), _) | (None, Some(note)) => Some(note),
+                (None, None) => self.meta(MetaKey::Note)?,
             },
         };
         let images = self.images()?;
+        // on its owner's own node: this month's use there, in points
+        let own_hardware_points = match self.own_node()? {
+            Some(_) => {
+                let (month, list) = self.own_hardware()?;
+                Some(if month == Month::of(js::now_ms()) { fragment_core::price::points(list.max(0)) } else { 0 })
+            }
+            None => None,
+        };
         Ok(ComputerView {
             computer: id,
             owner: self.must(MetaKey::Owner)?,
             image: self.must(MetaKey::Image)?,
+            node: self.meta(MetaKey::Node)?,
+            placed: self.meta(MetaKey::Placed)?,
+            own_hardware_points,
             version: version_running(&life, &saves),
             latest: images.latest(),
             phase,
@@ -2728,6 +2876,48 @@ async fn host_answer(req: Request, env: &Env, url: &Url, id: &str, signer: Optio
     }
     let inner = Request::new_with_init(&format!("http://container/{tail}{query}"), &init)?;
     crate::routed::send(env, "COMPUTER", id, inner).await
+}
+
+/// The deployment's nodes as entry.mjs's `ContainerHost` and node.mjs read
+/// them (`fragment_core::placement::Nodes::for_js`: each node's reach, its
+/// secret's name and its images), or `null` where computers run in the
+/// runtime's own containers. Checked here, so the JavaScript parses
+/// nothing. A class with a static method, as `InternalRoute` is.
+#[wasm_bindgen(wasm_bindgen = worker::wasm_bindgen)]
+pub struct NodesConfig;
+
+#[wasm_bindgen]
+impl NodesConfig {
+    pub fn read(env: Env) -> JsValue {
+        match &Config::from_env(&env).nodes {
+            Some(nodes) => js::to_js(&nodes.for_js()),
+            None => JsValue::NULL,
+        }
+    }
+}
+
+/// A person's own node by id (bring your own computer: docs/self-host.md,
+/// seam 2), as node.mjs and uplink.mjs need it: its owner, architecture,
+/// and its secret while it is live, from the registry, which keeps it
+/// sealed; `null` for none (or a deployment that pairs none). The uplink's
+/// dial checks a node's signature with it, and a computer's calls to the
+/// node sign with it.
+#[wasm_bindgen(wasm_bindgen = worker::wasm_bindgen)]
+pub struct PairedNodes;
+
+#[wasm_bindgen]
+impl PairedNodes {
+    pub async fn get(env: Env, id: String) -> std::result::Result<JsValue, JsValue> {
+        let byoc = Config::from_env(&env).nodes.as_ref().is_some_and(|n| n.byoc() == placement::Byoc::On);
+        if !byoc || !pairing::is_paired_id(&id) {
+            return Ok(JsValue::NULL);
+        }
+        match crate::ask_registry(&env, &crate::registry::calls::PairedNode { id }).await {
+            Ok(Some(r)) => Ok(js::to_js(&json!({ "id": r.id, "owner": r.owner, "name": r.name, "arch": r.arch, "revoked": r.revoked, "secret": r.secret }))),
+            Ok(None) => Ok(JsValue::NULL),
+            Err(e) => Err(JsValue::from_str(&e.message)),
+        }
+    }
 }
 
 /// Every request a computer's guest sends to `api.fragment.internal`,

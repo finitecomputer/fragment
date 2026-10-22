@@ -36,6 +36,8 @@ pub mod names;
 pub mod npub;
 pub mod oidc;
 pub mod own_signin;
+pub mod pairing;
+pub mod placement;
 pub mod connection_signin;
 pub mod org;
 pub mod price;

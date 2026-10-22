@@ -101,6 +101,11 @@ pub struct Config {
     /// name in wrangler.jsonc's `containers` images). Unset, the deployment
     /// makes no computers.
     pub computer_image: Option<String>,
+    /// `FRAGMENT_NODES`: the sandcastle nodes computers are placed on, and
+    /// their images by architecture (`fragment_core::placement`;
+    /// docs/self-host.md, seam 2), with `FRAGMENT_BYOC`. Unset, computers
+    /// run in the runtime's own containers (`ctx.container`).
+    pub nodes: Option<fragment_core::placement::Nodes>,
     /// `FRAGMENT_COMPUTER_SNAPSHOTS=off`: computers sleep without a
     /// container snapshot and wake from their image and backup (local
     /// workerd takes no snapshots).
@@ -242,6 +247,24 @@ fn var(env: &Env, name: &str) -> Option<String> {
 
 /// The provider catalog (`FRAGMENT_PROVIDERS`): a deployment whose is
 /// malformed is refused at its first request (the deploy checks it first).
+/// The nodes computers are placed on (`FRAGMENT_NODES`), and whether its
+/// people may pair their own (`FRAGMENT_BYOC`, `placement::Byoc`): a
+/// deployment whose list is malformed, or that pairs people's nodes with
+/// no list (whose images they run), is refused at its first request.
+fn nodes(env: &Env, computer_image: Option<&str>) -> Option<fragment_core::placement::Nodes> {
+    use fragment_core::placement::{Byoc, Nodes};
+    let byoc = Byoc::parse(var(env, "FRAGMENT_BYOC").as_deref()).unwrap_or_else(|e| panic!("{e}"));
+    let Some(list) = var(env, "FRAGMENT_NODES") else {
+        assert!(byoc == Byoc::Off, "FRAGMENT_BYOC=on needs FRAGMENT_NODES: its images, by architecture, are what a person's own node runs (docs/self-host.md, seam 2)");
+        return None;
+    };
+    let nodes = Nodes::parse(&list, byoc).unwrap_or_else(|e| panic!("FRAGMENT_NODES: {e}"));
+    if let Some(image) = computer_image {
+        assert!(nodes.image_names().any(|n| n == image), "FRAGMENT_COMPUTER_IMAGE {image:?} is none of FRAGMENT_NODES' images");
+    }
+    Some(nodes)
+}
+
 fn providers(env: &Env) -> fragment_core::catalog::Catalog {
     var(env, "FRAGMENT_PROVIDERS").map(|v| fragment_core::catalog::Catalog::parse(&v).unwrap_or_else(|e| panic!("FRAGMENT_PROVIDERS: {e}"))).unwrap_or_default()
 }
@@ -364,6 +387,7 @@ impl Config {
             host_suffix,
             host_label_suffix,
             computer_image: var(env, "FRAGMENT_COMPUTER_IMAGE"),
+            nodes: nodes(env, var(env, "FRAGMENT_COMPUTER_IMAGE").as_deref()),
             computer_snapshots: var(env, "FRAGMENT_COMPUTER_SNAPSHOTS").as_deref() != Some("off"),
             computer_unsaved_max_ms: var(env, "FRAGMENT_COMPUTER_UNSAVED_MAX_MS")
                 .map(|v| v.parse::<i64>().ok().filter(|ms| *ms >= 0).unwrap_or_else(|| panic!("FRAGMENT_COMPUTER_UNSAVED_MAX_MS is a whole number of ms, not {v:?}")))

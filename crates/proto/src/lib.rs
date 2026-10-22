@@ -602,6 +602,16 @@ pub enum ErrorCode {
     /// side, which refused it before doing anything (docs/MODEL.md, "Calls
     /// between releases"); try again in a few seconds.
     Deploying,
+    /// 503: the sandcastle node a computer is placed on does not answer
+    /// (docs/self-host.md, seam 2); it waits for that node, which holds it.
+    NodeDown,
+    /// 503: no node can take a new computer (each one down, full, or
+    /// without its image); the message says why, node by node.
+    NoNode,
+    /// 410: the person's own node a computer is placed on was revoked by
+    /// them (docs/self-host.md, seam 2, Bring your own computer): it runs
+    /// nothing again, and the computer stays placed there.
+    NodeRevoked,
 }
 
 impl ErrorCode {
@@ -620,8 +630,9 @@ impl ErrorCode {
             ErrorCode::RegistryUnavailable => 503,
             ErrorCode::BudgetUsedUp => 402,
             ErrorCode::StorageFull => 507,
-            ErrorCode::NodeFull | ErrorCode::WontWake | ErrorCode::Deploying => 503,
+            ErrorCode::NodeFull | ErrorCode::WontWake | ErrorCode::Deploying | ErrorCode::NodeDown | ErrorCode::NoNode => 503,
             ErrorCode::NotConnected => 403,
+            ErrorCode::NodeRevoked => 410,
         }
     }
 }
@@ -2056,6 +2067,7 @@ pub mod computer;
 pub mod export;
 pub mod ledger;
 pub mod live;
+pub mod nodes;
 pub mod org;
 pub mod wipe;
 

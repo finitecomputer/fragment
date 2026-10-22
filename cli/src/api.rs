@@ -58,7 +58,8 @@ impl Code {
         match error {
             ErrorCode::InvalidRequest => Code::InvalidRequest,
             ErrorCode::Unauthenticated => Code::AuthFailed,
-            ErrorCode::Forbidden | ErrorCode::NotConnected => Code::Forbidden,
+            // a computer on a node its owner revoked runs nowhere until they act: no retry helps
+            ErrorCode::Forbidden | ErrorCode::NotConnected | ErrorCode::NodeRevoked => Code::Forbidden,
             ErrorCode::NotFound | ErrorCode::UnknownOperation | ErrorCode::NoCode => Code::NotFound,
             ErrorCode::AlreadyExists => Code::NameTaken,
             ErrorCode::ConflictingBody => Code::ConflictingBody,
@@ -70,7 +71,7 @@ impl Code {
             // the platform's own object refuses its schema: nothing an agent can fix
             ErrorCode::HostFailed | ErrorCode::SchemaRefused => Code::ServerError,
             // a deploy going out: the same call again in a few seconds
-            ErrorCode::UpstreamFailed | ErrorCode::RegistryUnavailable | ErrorCode::NodeFull | ErrorCode::WontWake | ErrorCode::Deploying => Code::Unavailable,
+            ErrorCode::UpstreamFailed | ErrorCode::RegistryUnavailable | ErrorCode::NodeFull | ErrorCode::WontWake | ErrorCode::Deploying | ErrorCode::NodeDown | ErrorCode::NoNode => Code::Unavailable,
         }
     }
 
@@ -731,6 +732,9 @@ mod tests {
             (ErrorCode::NotConnected, "forbidden"),
             (ErrorCode::SchemaRefused, "server_error"),
             (ErrorCode::Deploying, "unavailable"),
+            (ErrorCode::NodeDown, "unavailable"),
+            (ErrorCode::NoNode, "unavailable"),
+            (ErrorCode::NodeRevoked, "forbidden"),
         ];
         for (error, cli) in table {
             let body = serde_json::to_vec(&ErrorBody { error, message: "name taken, already exists".into(), reason: None }).unwrap();

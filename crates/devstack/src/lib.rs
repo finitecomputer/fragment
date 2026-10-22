@@ -29,6 +29,7 @@ mod node_release;
 pub mod openbao;
 mod openbao_release;
 pub mod rendering;
+pub mod sandcastle;
 pub mod signals;
 pub mod store;
 
@@ -128,7 +129,7 @@ pub fn stage_project(dir: &Path) -> Result<PathBuf> {
     config.as_object_mut().context("a wrangler config is an object")?.remove("build");
     absolute_images(&mut config, &from)?;
     fs::write(dir.join("wrangler.jsonc"), serde_json::to_string_pretty(&config)?)?;
-    for shim in ["entry.mjs", "secrets.mjs"] {
+    for shim in ["entry.mjs", "secrets.mjs", "node.mjs", "uplink.mjs"] {
         fs::copy(from.join(shim), dir.join(shim)).with_context(|| format!("stage {shim}"))?;
     }
     let _ = fs::remove_dir_all(dir.join("build"));
@@ -174,14 +175,19 @@ pub fn local_config(project: &Path) -> PathBuf {
 /// binding and its secret's name) in wrangler's local store, as a deploy
 /// binds them in the account's, and its computer images built from
 /// Dockerfiles of its own (`containers::scope_images`), so that no other
-/// stack's teardown removes its computers.
-fn write_local_config(project: &Path, secrets: &[(String, &str)]) -> Result<PathBuf> {
+/// stack's teardown removes its computers. Without `containers`, computers
+/// run on sandcastle nodes (docs/self-host.md, seam 2): the runtime's own
+/// containers, and Docker for them, go unused.
+fn write_local_config(project: &Path, secrets: &[(String, &str)], containers: bool) -> Result<PathBuf> {
     let mut config = read_config(project)?;
     absolute_images(&mut config, project)?;
     containers::scope_images(&mut config, project)?;
     let obj = config.as_object_mut().context("a wrangler config is an object")?;
     for b in REMOTE_ONLY_BINDINGS {
         obj.remove(b);
+    }
+    if !containers {
+        obj.remove("containers");
     }
     anyhow::ensure!(!obj.contains_key("secrets_store_secrets"), "{} binds no secrets of its own: the fleet's are bound here", project.join("wrangler.jsonc").display());
     obj.insert("secrets_store_secrets".into(), store::bindings_json(store::LOCAL_STORE_ID, secrets));
@@ -381,6 +387,13 @@ pub struct Fleet {
     /// binding (`FRAGMENT_BROWSER_URL`: the renderer, rendering/;
     /// docs/self-host.md, seam 7).
     pub browser_url: Option<String>,
+    /// The sandcastle nodes computers are placed on (docs/self-host.md,
+    /// seam 2), in place of the runtime's containers (`FRAGMENT_NODES`, and
+    /// each node's secret as the variable the cell looks for).
+    pub nodes: Option<sandcastle::NodesVars>,
+    /// Whether its people may pair nodes of their own (`FRAGMENT_BYOC=on`;
+    /// docs/self-host.md, seam 2, Bring your own computer). Needs `nodes`.
+    pub byoc: bool,
 }
 
 /// A Stripe account as the cell reads it.
@@ -498,7 +511,8 @@ impl Fleet {
         let shim = match &self.secrets {
             Secrets::Store => {
                 store::seed_local(tools, &state_dir(project), &self.values(&bound)?).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
-                write_local_config(project, &bound.cell())?;
+                // on nodes, the runtime's own containers go unused
+                write_local_config(project, &bound.cell(), self.nodes.is_none())?;
                 vec![]
             }
             Secrets::Shim => self.shim_vars(&bound)?,
@@ -610,6 +624,16 @@ impl Fleet {
         }
         if let Some(u) = &self.browser_url {
             vars.push(("FRAGMENT_BROWSER_URL", u.as_str()));
+        }
+        if self.byoc {
+            anyhow::ensure!(self.nodes.is_some(), "FRAGMENT_BYOC=on needs the nodes' list (FRAGMENT_NODES_FILE): its images are what a person's own node runs");
+            vars.push(("FRAGMENT_BYOC", "on"));
+        }
+        if let Some(n) = &self.nodes {
+            vars.push(("FRAGMENT_NODES", n.nodes.as_str()));
+            for (name, secret) in &n.secrets {
+                vars.push((name.as_str(), secret.as_str()));
+            }
         }
         vars.extend(shim.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         write_dev_vars(project, &vars)

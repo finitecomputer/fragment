@@ -14,18 +14,25 @@
 //!                    where a deployment's `models` says, a self-hosted
 //!                    model's say, its key in FRAGMENT_MODEL_KEY_FILE:
 //!                    `dev_models`). --runtime celld runs it on `celld dev`
-//!                    (CELLD_BIN; docs/self-host.md, seam 1): no computers,
-//!                    cards through the renderer (seam 7: `dev_renderer`),
-//!                    the secrets behind the cell's stand-ins for the
-//!                    store's bindings, in .dev.vars or, with
-//!                    FRAGMENT_SECRETS_BACKEND=openbao, in OpenBao on :8804
-//!                    (seam 12: `dev_openbao`). Sign-in is the
+//!                    (CELLD_BIN; docs/self-host.md, seam 1): computers only
+//!                    on sandcastle nodes (FRAGMENT_NODES_FILE lists them,
+//!                    on either runtime: seam 2; FRAGMENT_BYOC=on lets
+//!                    people pair their own), cards through the renderer
+//!                    (seam 7: `dev_renderer`), the secrets behind the
+//!                    cell's stand-ins for the store's bindings, in
+//!                    .dev.vars or, with FRAGMENT_SECRETS_BACKEND=openbao,
+//!                    in OpenBao on :8804 (seam 12: `dev_openbao`). Sign-in is the
 //!                    WorkOS fake on :8794, or, with FRAGMENT_SIGNIN=oidc,
 //!                    the OpenID Connect fake on :8802, or a real provider
 //!                    (FRAGMENT_OIDC_ISSUER: `dev_oidc`; docs/self-host.md,
 //!                    seam 4). FRAGMENT_DEV_PORT moves the stack and its
 //!                    fakes together (`dev_shift`), so a second one runs
 //!                    beside one on :8790
+//!   node-images [--tag <tag>] [--engine <dir>]
+//!                    the stub and our Hermes image built here and loaded
+//!                    into this machine's sandcastle engine (default
+//!                    /var/lib/sandcastle), printing the `images` a node list
+//!                    names them by, each pinned by its digest
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -239,6 +246,18 @@ fn dev(args: &[String]) -> Result<()> {
         Some(_) => Some(dev_renderer(suffix, &platform_url)?),
         None => None,
     };
+    // computers on sandcastle nodes (docs/self-host.md, seam 2): a node
+    // list, each node's secret in a file of its own beside it, and whether
+    // people may pair their own
+    let nodes = match std::env::var_os(devstack::sandcastle::NODES_FILE_VAR) {
+        Some(file) => Some(devstack::sandcastle::NodesFile::read(Path::new(&file))?),
+        None => None,
+    };
+    let byoc = match std::env::var("FRAGMENT_BYOC").as_deref() {
+        Err(_) | Ok("off") => false,
+        Ok("on") => true,
+        Ok(other) => bail!("FRAGMENT_BYOC is on or off, not {other}"),
+    };
     let fleet = devstack::Fleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
         codestorage_org: store.org.clone(),
@@ -280,8 +299,12 @@ fn dev(args: &[String]) -> Result<()> {
         cli_begins_per_ip_minute: None,
         test_secret: None,
         // celld runs no containers of its own here: a self-hosted
-        // deployment's computers are a sandcastle node's (seam 2)
-        computer_image: celld.is_none().then(|| "stub".into()),
+        // deployment's computers are a sandcastle node's (seam 2), the
+        // node list's image (the stub) where it names one
+        computer_image: match &nodes {
+            Some(n) => n.default_image(),
+            None => celld.is_none().then(|| "stub".into()),
+        },
         computer_snapshots: false,
         computer_unsaved_max_ms: None,
         providers: None,
@@ -296,6 +319,8 @@ fn dev(args: &[String]) -> Result<()> {
             (Some(_), Some((bao, _))) => devstack::Secrets::OpenBao(bao.target()),
         },
         browser_url: renderer.as_ref().map(|(r, _)| r.url.clone()),
+        nodes,
+        byoc,
     };
     fleet.configure(&tools, &devstack::cell_dir())?;
     // the cell's token, renewed while the stack runs (each start renews it too)
@@ -316,11 +341,16 @@ fn dev(args: &[String]) -> Result<()> {
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
     match &celld {
         None => println!("  runtime:      wrangler dev (workerd)"),
-        Some(c) => println!("  runtime:      celld dev ({}): no computers, no mail but the fake's", c.celld.display()),
+        Some(c) => println!("  runtime:      celld dev ({}): no mail but the fake's", c.celld.display()),
     }
     match &renderer {
         Some((r, said)) => println!("  cards:        {said} (the renderer at {})", r.url),
         None => println!("  cards:        Browser Rendering's local mode (wrangler's Chrome for Testing)"),
+    }
+    match &fleet.nodes {
+        Some(n) => println!("  computers:    on the nodes {} lists{}", std::env::var(devstack::sandcastle::NODES_FILE_VAR).unwrap_or_default(), if n.ids().is_empty() { String::new() } else { format!(" ({})", n.ids().join(", ")) }),
+        None if celld.is_some() => println!("  computers:    none (no {}: docs/self-host.md, seam 2)", devstack::sandcastle::NODES_FILE_VAR),
+        None => println!("  computers:    the stub, in local Docker"),
     }
     println!("  node log:     {}", node.log.display());
     println!("  fragments:    http://<name>.fragment.localhost:{dev_port}/");
@@ -349,8 +379,8 @@ fn dev(args: &[String]) -> Result<()> {
     devstack::signals::outlive_interrupt()?;
     let status = node.wait()?;
     println!("the node exited: {status}");
-    // the runtime's own containers: celld runs none here
-    if celld.is_none() {
+    // the runtime's own containers: celld runs none here, nor does a stack on nodes
+    if celld.is_none() && fleet.nodes.is_none() {
         let removed = devstack::containers::remove(&devstack::cell_dir())?;
         println!("removed {} containers the dev node left", removed.containers);
     }
@@ -505,6 +535,42 @@ fn dev_codestore(clean: bool, port: u16) -> Result<DevStore> {
             Ok(DevStore { url: m.url.clone(), org: DEV_ORG.into(), key_pem: key, said, _fake: None, macrofiche: Some(m) })
         }
     }
+}
+
+/// `cargo xtask node-images [--tag <tag>] [--engine <dir>]`: the computer
+/// images a sandcastle node on this machine runs (docs/self-host.md, seam
+/// 2): the cell's stub and our Hermes image, built for this machine's
+/// architecture into local Docker as `fragment-<name>:<tag>` (default
+/// `local`), then loaded into the engine whose sockets are in `<dir>`
+/// (default `SANDCASTLE_ENGINE_DIR`, else /var/lib/sandcastle). It prints
+/// the `images` a node list (`FRAGMENT_NODES_FILE`) names them by, each
+/// pinned by the digest the engine gives it: a rebuild is a new reference,
+/// so computers on it are told an update is ready. Run with Docker
+/// reachable and the engine's socket this user's.
+fn node_images(args: &[String]) -> Result<()> {
+    let mut tag = "local".to_string();
+    let mut engine = std::env::var_os("SANDCASTLE_ENGINE_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| "/var/lib/sandcastle".into());
+    let mut rest = args.iter();
+    // bounded: the arguments
+    while let Some(a) = rest.next() {
+        match a.as_str() {
+            "--tag" => tag = rest.next().context("--tag names a tag")?.clone(),
+            "--engine" => engine = rest.next().context("--engine names the engine's directory")?.into(),
+            other => bail!("usage: cargo xtask node-images [--tag <tag>] [--engine <dir>], not {other}"),
+        }
+    }
+    anyhow::ensure!(!tag.is_empty() && tag.len() <= 64 && tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_'), "a tag is 1 to 64 of A-Z, a-z, 0-9, '.', '-' and '_', not {tag:?}");
+    let mut images = devstack::sandcastle::cell_images(&devstack::cell_dir())?;
+    images.retain(|name, _| name == "stub");
+    images.insert("hermes".into(), devstack::sandcastle::hermes_image(None));
+    let t0 = std::time::Instant::now();
+    let built = devstack::sandcastle::build_images(&images, &tag)?;
+    println!("built {} in {:.1?}", built.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join(", "), t0.elapsed());
+    let pinned = devstack::sandcastle::load_images(&engine, &built, &devstack::repo_root().join("target/devstack/images"))?;
+    let listed: serde_json::Map<String, serde_json::Value> = pinned.into_iter().map(|(name, reference)| (name, serde_json::json!(reference))).collect();
+    println!("the node list's images (FRAGMENT_NODES_FILE), for {}:", std::env::consts::ARCH);
+    println!("  \"images\": {}", serde_json::Value::Object(listed));
+    Ok(())
 }
 
 /// The dev stack's models, from `FRAGMENT_MODELS_FILE`.
@@ -795,6 +861,7 @@ fn main() -> Result<()> {
         Some("build") => build(),
         Some("dev") => dev(&args[1..]),
         Some("try") => try_template(&args[1..]),
+        Some("node-images") => node_images(&args[1..]),
         Some("e2e") => e2e(&args[1..]),
         Some("check") => check(),
         Some("schema-lock") => schema_lock::write(&devstack::repo_root()),
@@ -803,7 +870,7 @@ fn main() -> Result<()> {
         Some("teardown") => deploy::teardown(&args[1..]),
         Some("stripe") => deploy::stripe(&args[1..]),
         Some("image") => image::image(&args[1..]),
-        _ => bail!("usage: cargo xtask build | dev [--clean] [--runtime wrangler|celld] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build | dev [--clean] [--runtime wrangler|celld] | try <template> [name] | node-images [--tag <tag>] [--engine <dir>] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
     }
 }
 

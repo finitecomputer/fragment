@@ -24,14 +24,14 @@ use crate::{read_config, Node, NodeOptions};
 /// refuses each of the first four at deploy (its SUPPORTED_KEYS; its
 /// docs/cloudflare-compat.md); it runs `containers` (experimental, on
 /// Docker), but a self-hosted deployment places its computers on sandcastle
-/// nodes (docs/self-host.md, seam 2), so the render drops it and the stack
-/// makes no computers until that seam is ported.
+/// nodes (docs/self-host.md, seam 2: `FRAGMENT_NODES`), so the render drops
+/// it: without nodes, the stack makes no computers.
 pub const DROPPED: [(&str, &str); 5] = [
     ("ai", "Workers AI: the model route's slots run on an OpenAI-compatible API (FRAGMENT_MODELS), or on the fake (FRAGMENT_AI_URL)"),
     ("browser", "Browser Rendering: preview cards are shot through the renderer at FRAGMENT_BROWSER_URL instead (docs/self-host.md, seam 7)"),
     ("send_email", "Email Sending: no mail; each send says so and carries on (docs/technical-debt-ledger.md)"),
     ("build", "worker-build has run (cargo xtask build)"),
-    ("containers", "computers are a sandcastle node's (docs/self-host.md, seam 2): none here yet"),
+    ("containers", "computers are a sandcastle node's (docs/self-host.md, seam 2: FRAGMENT_NODES)"),
 ];
 
 /// The project's config as celld runs it: `wrangler.celld.jsonc`, beside

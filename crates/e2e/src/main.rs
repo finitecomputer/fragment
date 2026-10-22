@@ -328,6 +328,20 @@ pub struct Suite {
     /// let reach this run's fragments alone (docs/self-host.md, seam 7).
     renderer: Option<devstack::rendering::Rendering>,
     node: Option<devstack::Node>,
+    /// The sandcastle nodes the run started, in `FRAGMENT_NODES`' order
+    /// (empty: computers run in the runtime's own containers), and the
+    /// images they hold, by name (`FRAGMENT_NODES`' `images`).
+    nodes: Vec<devstack::sandcastle::SandcastleNode>,
+    node_images: Value,
+    /// The binaries a node is made of, for a section's own (a person's
+    /// node it pairs: lanes/pairing.rs).
+    sandcastle: Option<devstack::sandcastle::Tools>,
+    /// Whether the run's people may pair nodes of their own
+    /// (`FRAGMENT_BYOC`): on wherever the run has nodes, but while a
+    /// section turns it off.
+    byoc: bool,
+    /// The image tags built for the nodes, removed as the run ends.
+    image_tags: Vec<String>,
     port: u16,
     /// Distinguishes this run's fragment names from any earlier state.
     run: String,
@@ -456,6 +470,87 @@ impl Suite {
         self.on_celld()
     }
 
+    /// Whether the run's one node fronts the machine's real engine
+    /// (`FRAGMENT_E2E_NODES=real`).
+    pub fn real_engine(&self) -> bool {
+        self.nodes.iter().any(|n| n.is_real())
+    }
+
+    /// Whether the run's computers are placed on sandcastle nodes it started.
+    pub fn has_nodes(&self) -> bool {
+        !self.nodes.is_empty()
+    }
+
+    /// Whether the local node makes computers: the runtime's own (wrangler
+    /// dev's, in Docker), or, on celld, sandcastle nodes' (seam 2).
+    pub fn has_computers(&self) -> bool {
+        !self.on_celld() || self.has_nodes()
+    }
+
+    /// The nodes' ids, in `FRAGMENT_NODES`' order: the first listens, the
+    /// second dials in.
+    pub fn node_ids(&self) -> Vec<String> {
+        self.nodes.iter().map(|n| n.id.clone()).collect()
+    }
+
+    /// How the platform reaches node `id`: `"listens"` or `"dials in"`.
+    pub fn node_reach(&self, id: &str) -> &'static str {
+        match self.nodes.iter().find(|n| n.id == id).map(|n| n.reach) {
+            Some(devstack::sandcastle::Reach::Listen(_)) => "listens",
+            Some(devstack::sandcastle::Reach::Uplink) => "dials in",
+            None => "is not one of the run's",
+        }
+    }
+
+    /// Node `id`'s process stops: to the platform it is down. Its engine,
+    /// and any container on it, stay.
+    pub fn node_down(&mut self, id: &str) -> Result<()> {
+        self.nodes.iter_mut().find(|n| n.id == id).with_context(|| format!("no node {id}"))?.down()
+    }
+
+    /// Node `id`'s process starts again.
+    pub fn node_up(&mut self, id: &str) -> Result<()> {
+        self.nodes.iter_mut().find(|n| n.id == id).with_context(|| format!("no node {id}"))?.up()
+    }
+
+    /// The containers running on node `id`'s engine that started at or
+    /// after `since_ms` (devstack's `sandcastle::now_ms`), by name.
+    pub fn node_running_since(&self, id: &str, since_ms: u64) -> Result<Vec<String>> {
+        self.nodes.iter().find(|n| n.id == id).with_context(|| format!("no node {id}"))?.running_since(since_ms)
+    }
+
+    /// Container `name` on node `id` killed, behind the platform's back.
+    pub fn node_kill(&self, id: &str, name: &str) -> Result<()> {
+        self.nodes.iter().find(|n| n.id == id).with_context(|| format!("no node {id}"))?.kill(name)
+    }
+
+    /// A node of a person's own, for them to pair (lanes/pairing.rs): its
+    /// engine double started, its label `label` until it is paired.
+    pub fn node_to_pair(&self, label: &str) -> Result<devstack::sandcastle::SandcastleNode> {
+        let tools = self.sandcastle.as_ref().context("a run with nodes locates sandcastle's binaries")?;
+        let spec = devstack::sandcastle::NodeSpec {
+            id: label.into(),
+            reach: devstack::sandcastle::Reach::Uplink,
+            engine: devstack::sandcastle::Engine::Double,
+            // short: its sockets live under it (`sandcastle::socket_path`)
+            dir: self.scratch.join("n").join(label),
+            platform: self.platform(),
+            capacity: 1,
+            log_dir: self.scratch.clone(),
+        };
+        devstack::sandcastle::SandcastleNode::start_to_pair(tools, &spec)
+    }
+
+    /// The local node's platform origin.
+    pub fn platform(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    /// Whether the next node start lets people pair their own nodes.
+    pub fn set_byoc(&mut self, on: bool) {
+        self.byoc = on;
+    }
+
     /// A heavy section runs only when `--only` names it (the real-Hermes
     /// lane builds a 3.8 GB image); otherwise it is a skip that says how.
     pub fn section_by_name(&mut self, name: &str, needs: &[Need], why: &str) -> bool {
@@ -576,6 +671,11 @@ impl Suite {
         }
         self.ai.clear_script();
         self.shape = Shape::Plain;
+        self.byoc = true;
+        // a node a lane left down is up again
+        for n in self.nodes.iter_mut().filter(|n| !n.is_up()) {
+            n.up()?;
+        }
         if let Some(node) = self.node.take() {
             // one that does not stop in time is killed, and starts all the same
             if let Err(e) = node.stop() {
@@ -741,8 +841,9 @@ impl Suite {
             cli_begins_per_ip_minute: Some(CLI_BEGINS_PER_IP_MINUTE),
             // the levers, as a preview has them: each request carries the secret
             test_secret: Some(self.test_secret.clone()),
-            // celld runs no containers of its own: no computers there (seam 2)
-            computer_image: (!self.on_celld()).then(|| "stub".into()),
+            // celld runs no containers of its own: computers there only on
+            // the run's sandcastle nodes (seam 2)
+            computer_image: self.has_computers().then(|| "stub".into()),
             computer_snapshots: false,
             computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
             providers: Some({
@@ -765,6 +866,11 @@ impl Suite {
                 (Some(_), Some(bao)) => devstack::Secrets::OpenBao(bao.target()),
             },
             browser_url: self.renderer.as_ref().map(|r| r.url.clone()),
+            nodes: match self.nodes.is_empty() {
+                true => None,
+                false => Some(devstack::sandcastle::vars(&self.nodes.iter().collect::<Vec<_>>(), &self.node_images)?),
+            },
+            byoc: self.byoc && !self.nodes.is_empty(),
         };
         fleet.configure(tools, &self.project)?;
         let opts = devstack::NodeOptions {
@@ -1220,11 +1326,25 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         (Some(_), None) => bail!("FRAGMENT_E2E_SECRETS is celld's (FRAGMENT_E2E_RUNTIME=celld): wrangler dev keeps the secrets in its own store"),
         (Some(other), Some(_)) => bail!("FRAGMENT_E2E_SECRETS is openbao or vars, not {other}"),
     };
+    // where computers run: the runtime's containers, or sandcastle nodes
+    // (docs/self-host.md, seam 2): two in front of sandcastle's Docker engine
+    // double, or one in front of this machine's real engine
+    let sandcastle = match std::env::var("FRAGMENT_E2E_NODES").as_deref() {
+        Err(_) => None,
+        Ok("two") if rehearse.is_none() => Some((devstack::sandcastle::Tools::locate(false)?, None)),
+        Ok("real") if rehearse.is_none() => {
+            let dir = std::env::var_os("SANDCASTLE_ENGINE_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/var/lib/sandcastle"));
+            Some((devstack::sandcastle::Tools::locate(true)?, Some(dir)))
+        }
+        Ok("two" | "real") => bail!("FRAGMENT_E2E_NODES is a local run's: a rehearsal keeps a preview's rules"),
+        Ok(other) => bail!("FRAGMENT_E2E_NODES is two (one node that listens, one that dials in) or real (one node in front of the machine's engine), not {other}"),
+    };
+    let nodes = sandcastle.is_some();
     // a local run's people sign in through the WorkOS fake, and pay the fake
     // model; a rehearsal's, through the levers, lent paid calls as on a preview
     let (rung, shared) = match rehearse {
-        None if celld.is_some() => (needs::Rung::Celld, api::Run::new(test_secret.clone(), 0)),
-        None => (needs::Rung::Local, api::Run::new(test_secret.clone(), 0)),
+        None if celld.is_some() => (needs::Rung::Celld { nodes }, api::Run::new(test_secret.clone(), 0)),
+        None => (needs::Rung::Local { nodes }, api::Run::new(test_secret.clone(), 0)),
         Some(paid_calls) => {
             // its computers answer through the scripted model: no real agent
             let offers = needs::Offers { levers: true, computers: true, models: paid_calls > 0, chrome: browser::chrome().is_some(), real_agent: false, operator: true };
@@ -1262,6 +1382,11 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         openbao,
         renderer,
         node: None,
+        nodes: vec![],
+        node_images: Value::Null,
+        sandcastle: sandcastle.as_ref().map(|(tools, _)| tools.clone()),
+        byoc: true,
+        image_tags: vec![],
         port,
         run,
         fake: codestore.fake,
@@ -1288,6 +1413,9 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     };
     if let Some(k) = s.shard {
         println!("shard {k}/{}: {}", lanes::SHARDS.len(), lanes::SHARDS[k as usize - 1].join(", "));
+    }
+    if let Some((tools, real)) = &sandcastle {
+        start_nodes(&mut s, tools, real.as_deref())?;
     }
     let t0 = Instant::now();
     s.start(true)?;
@@ -1362,6 +1490,56 @@ fn codestore(hidden: bool, scratch: &Path) -> Result<RunStore> {
     Ok(RunStore { fake: Fake::absent("code.storage"), store: Some(x), macrofiche, org_key, said })
 }
 
+/// The run's two sandcastle nodes (`FRAGMENT_E2E_NODES=two`), in the
+/// order `FRAGMENT_NODES` lists them: `direct`, which listens, and
+/// `uplink`, which dials the platform; each holds the staged cell's images
+/// (the Hermes images among them when its lane runs: `stage_images`),
+/// built here for the run and tagged with its name. With a real engine
+/// (`FRAGMENT_E2E_NODES=real`), one node, `box`, which listens in front of
+/// it, the images loaded into it and named by their digests.
+fn start_nodes(s: &mut Suite, tools: &devstack::sandcastle::Tools, real: Option<&Path>) -> Result<()> {
+    let t0 = Instant::now();
+    let built = devstack::sandcastle::build_cell_images(&s.project, &s.run)?;
+    s.image_tags.extend(built.iter().map(|(_, tag)| tag.clone()));
+    println!("      (the nodes' images built in {:.1?})", t0.elapsed());
+    let platform = s.platform();
+    if let Some(dir) = real {
+        let pinned = devstack::sandcastle::load_images(dir, &built, &s.scratch.join("images"))?;
+        s.node_images = Value::Object(pinned.into_iter().map(|(name, reference)| (name, json!(reference))).collect());
+        let spec = devstack::sandcastle::NodeSpec {
+            id: "box".into(),
+            reach: devstack::sandcastle::Reach::Listen(devstack::free_port()?),
+            engine: devstack::sandcastle::Engine::Real(dir.to_path_buf()),
+            dir: s.scratch.join("n").join("box"),
+            platform,
+            capacity: devstack::sandcastle::real_engine_vms(dir)?,
+            log_dir: s.scratch.clone(),
+        };
+        s.nodes.push(devstack::sandcastle::SandcastleNode::start(tools, &spec)?);
+        println!("nodes: box at {}, in front of the real engine in {}, its images {} loaded (ready in {:.1?})", s.nodes[0].url().unwrap_or_default(), dir.display(), s.node_images, t0.elapsed());
+        return Ok(());
+    }
+    s.node_images = Value::Object(built.iter().map(|(name, tag)| (name.clone(), json!(format!("docker.io/library/{tag}")))).collect());
+    for (id, reach) in [("direct", devstack::sandcastle::Reach::Listen(devstack::free_port()?)), ("uplink", devstack::sandcastle::Reach::Uplink)] {
+        let spec = devstack::sandcastle::NodeSpec {
+            id: id.into(),
+            reach,
+            engine: devstack::sandcastle::Engine::Double,
+            // short: the engine's sockets live under it (`sandcastle::socket_path`)
+            dir: s.scratch.join("n").join(id),
+            platform: platform.clone(),
+            capacity: NODE_CAPACITY,
+            log_dir: s.scratch.clone(),
+        };
+        s.nodes.push(devstack::sandcastle::SandcastleNode::start(tools, &spec)?);
+    }
+    println!("nodes: direct at {}, uplink dialing {platform}, their images {} (ready in {:.1?})", s.nodes[0].url().unwrap_or_default(), s.node_images, t0.elapsed());
+    Ok(())
+}
+
+/// The computers each of the run's nodes holds: room for every section's.
+const NODE_CAPACITY: u32 = 64;
+
 /// A run's end: a name `--only` or `--except` gave that no section has
 /// fails it; the node stops; the counts, each FAIL, and (hosted) what the
 /// run spent are printed. Non-zero when any check failed, the scratch kept.
@@ -1416,6 +1594,18 @@ fn finish(s: &mut Suite) -> Result<()> {
         Ok(Some(r)) => println!("      (removed {} containers of this run in {:.1?})", r.containers, t0.elapsed()),
         Ok(None) => {}
         Err(e) => s.fail("the run removes the containers its nodes left", format!("{e:#}")),
+    }
+    // the sandcastle nodes after the platform (each engine double removes
+    // its containers; a real engine's the run started are destroyed), then
+    // the image tags built for them
+    for n in std::mem::take(&mut s.nodes) {
+        let id = n.id.clone();
+        if let Err(e) = n.stop() {
+            s.fail(&format!("the node {id} stops at the end of the run"), format!("{e:#}"));
+        }
+    }
+    for tag in std::mem::take(&mut s.image_tags) {
+        let _ = std::process::Command::new("docker").args(["image", "rm", &tag]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
     }
     let t0 = Instant::now();
     s.chrome.close();

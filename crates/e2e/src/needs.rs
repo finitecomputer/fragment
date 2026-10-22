@@ -1,10 +1,12 @@
 //! What a section needs to run (`Suite::section`), so a run's set is
 //! chosen by where it runs, never by a hand-kept list. A local run has
-//! everything; one on celld everything but the runtime's own containers; a
-//! hosted one (a branch deployment on real vendors) has the levers its
-//! test secret opens, Chrome when it is installed, and the computers and
-//! models its deployment offers, and nothing that stands in for a vendor
-//! or controls the node.
+//! everything but sandcastle nodes, which it has when it starts them
+//! (`FRAGMENT_E2E_NODES`); one on celld everything but the runtime's own
+//! containers, its computers on nodes when it starts them; a hosted one (a
+//! branch deployment on real vendors) has the levers its test secret
+//! opens, Chrome when it is installed, and the computers and models its
+//! deployment offers, and nothing that stands in for a vendor or controls
+//! the node.
 
 /// One thing a section needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -54,10 +56,13 @@ pub enum Need {
     /// it): a wipe's (docs/api.md, Operators). A local run makes one; a
     /// hosted run has one when it is given its file.
     Operator,
+    /// Computers placed on sandcastle nodes the run started (docs/self-host.md,
+    /// seam 2), which it stops and starts again.
+    Nodes,
 }
 
 impl Need {
-    pub const ALL: [Need; 12] = [
+    pub const ALL: [Need; 13] = [
         Need::Fakes,
         Need::StoreFake,
         Need::Node,
@@ -70,6 +75,7 @@ impl Need {
         Need::TwoSites,
         Need::RealAgent,
         Need::Operator,
+        Need::Nodes,
     ];
 
     pub fn name(self) -> &'static str {
@@ -86,6 +92,7 @@ impl Need {
             Need::TwoSites => "two-sites",
             Need::RealAgent => "real-agent",
             Need::Operator => "operator",
+            Need::Nodes => "nodes",
         }
     }
 }
@@ -110,16 +117,19 @@ pub struct Offers {
     pub operator: bool,
 }
 
-/// Where a run runs.
+/// Where a run runs. `nodes`: its computers are placed on sandcastle nodes
+/// it started (`FRAGMENT_E2E_NODES`: in front of sandcastle's Docker engine
+/// double, so the stub runs in local Docker all the same, or of the
+/// machine's real engine), not in the runtime's own containers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rung {
     /// Under `wrangler dev`, with the fakes: everything.
-    Local,
+    Local { nodes: bool },
     /// Under `celld dev`, with the fakes (`FRAGMENT_E2E_RUNTIME=celld`;
     /// docs/self-host.md, seam 1): everything but the runtime's own
     /// containers, which a self-hosted deployment places on sandcastle
     /// nodes (seam 2).
-    Celld,
+    Celld { nodes: bool },
     /// A branch deployment on real vendors.
     Hosted(Offers),
 }
@@ -128,15 +138,23 @@ pub enum Rung {
 pub const STORE_OUTSIDE: &str = "it reads or pulls the code.storage fake (its levers, its request counts, its state), and the node's git is a store outside the run (FRAGMENT_E2E_CODESTORE): not yet ported to the store's own routes (docs/self-host.md, seam 5)";
 
 const NO_REAL_AGENT: &str = "it needs a real agent (our Hermes image on a real model), which only a preview has: a local run's computers answer through the scripted model";
+const NO_NODES: &str = "it needs sandcastle nodes, and the run started none (FRAGMENT_E2E_NODES=two or real, SANDCASTLE_DIR; docs/self-host.md, seam 2)";
 
 /// Why `need` is missing on `rung`, or `None` when it is there.
 pub fn missing(need: Need, rung: Rung) -> Option<&'static str> {
     let offers = match rung {
-        Rung::Local => return (need == Need::RealAgent).then_some(NO_REAL_AGENT),
-        Rung::Celld => {
+        Rung::Local { nodes } => {
             return match need {
                 Need::RealAgent => Some(NO_REAL_AGENT),
-                Need::LocalDocker | Need::Computers => Some("it needs the runtime's own containers, and celld runs none here: a self-hosted deployment's computers are a sandcastle node's (docs/self-host.md, seam 2, to port)"),
+                Need::Nodes if !nodes => Some(NO_NODES),
+                _ => None,
+            };
+        }
+        Rung::Celld { nodes } => {
+            return match need {
+                Need::RealAgent => Some(NO_REAL_AGENT),
+                Need::LocalDocker | Need::Computers if !nodes => Some("it needs the runtime's own containers, and celld runs none: a self-hosted deployment's computers are a sandcastle node's, and the run started none (FRAGMENT_E2E_NODES; docs/self-host.md, seam 2)"),
+                Need::Nodes if !nodes => Some(NO_NODES),
                 _ => None,
             };
         }
@@ -149,6 +167,7 @@ pub fn missing(need: Need, rung: Rung) -> Option<&'static str> {
         Need::Deployment => Some("it needs the whole deployment (a lever on its registry, its operator's key, its secrets), which a shared preview never lends a run"),
         Need::LocalDocker => Some("it needs Docker on this machine (the stub image's scripted runtime), which a hosted run does not use"),
         Need::TwoSites => Some("it needs the platform cross-site from the fragments, and a branch preview puts both in one zone"),
+        Need::Nodes => Some("it needs sandcastle nodes the run starts and stops, which a preview's are not"),
         Need::Levers if !offers.levers => Some("it needs the deployment's test levers, and the run has no test secret"),
         Need::Chrome if !offers.chrome => Some("it needs Chrome, and none is installed here"),
         Need::Computers if !offers.computers => Some("it needs computers, and the deployment makes none (no `computers` in its config)"),
@@ -180,36 +199,38 @@ mod tests {
     const EVERYTHING: Offers = Offers { levers: true, computers: true, models: true, chrome: true, real_agent: true, operator: true };
     const NOTHING: Offers = Offers { levers: false, computers: false, models: false, chrome: false, real_agent: false, operator: false };
 
-    /// A local run has everything but a real agent: every other need is
-    /// met, as before.
+    /// A local run has everything but a real agent, and nodes when it
+    /// started none: every other need is met, as before.
     #[test]
     fn a_local_run_has_everything_but_a_real_agent() {
         let local: Vec<Need> = Need::ALL.into_iter().filter(|n| *n != Need::RealAgent).collect();
-        assert_eq!(unmet(&local, Rung::Local), None);
+        assert_eq!(unmet(&local, Rung::Local { nodes: true }), None);
         for need in local {
-            assert_eq!(missing(need, Rung::Local), None, "{need:?}");
+            assert_eq!(missing(need, Rung::Local { nodes: true }), None, "{need:?}");
+            assert_eq!(missing(need, Rung::Local { nodes: false }).is_some(), need == Need::Nodes, "{need:?}");
         }
     }
 
-    /// celld runs no containers of its own: its computers are a node's.
-    /// Everything else a local run has, it has.
+    /// celld runs no containers of its own: its computers are a node's, when
+    /// the run started nodes. Everything else a local run has, it has.
     #[test]
-    fn celld_has_everything_but_the_runtimes_containers() {
+    fn celld_has_computers_on_nodes_alone() {
         for need in Need::ALL {
-            let without = matches!(need, Need::LocalDocker | Need::Computers | Need::RealAgent);
-            assert_eq!(missing(need, Rung::Celld).is_some(), without, "{need:?}");
+            let without = matches!(need, Need::LocalDocker | Need::Computers | Need::RealAgent | Need::Nodes);
+            assert_eq!(missing(need, Rung::Celld { nodes: false }).is_some(), without, "{need:?}");
+            assert_eq!(missing(need, Rung::Celld { nodes: true }).is_some(), need == Need::RealAgent, "{need:?}");
         }
-        let (need, why) = unmet(&[Need::Levers, Need::Computers], Rung::Celld).expect("no computers on celld");
+        let (need, why) = unmet(&[Need::Levers, Need::Computers], Rung::Celld { nodes: false }).expect("no computers on celld without nodes");
         assert_eq!(need, Need::Computers);
         assert!(why.contains("sandcastle"), "{why}");
-        assert_eq!(unmet(&[Need::Fakes, Need::Node, Need::Deployment, Need::Chrome, Need::TwoSites], Rung::Celld), None);
+        assert_eq!(unmet(&[Need::Fakes, Need::Node, Need::Deployment, Need::Chrome, Need::TwoSites], Rung::Celld { nodes: false }), None);
     }
 
     /// A real agent (our Hermes on a real model) is a preview's alone: a
     /// local run and a rehearsal answer through the scripted model.
     #[test]
     fn a_real_agent_is_a_previews_alone() {
-        let (need, why) = unmet(&[Need::Computers, Need::RealAgent], Rung::Local).expect("no real agent locally");
+        let (need, why) = unmet(&[Need::Computers, Need::RealAgent], Rung::Local { nodes: false }).expect("no real agent locally");
         assert_eq!(need, Need::RealAgent);
         assert!(why.contains("scripted model"), "{why}");
         let rehearsal = Offers { real_agent: false, ..EVERYTHING };
@@ -221,7 +242,7 @@ mod tests {
     /// node, the deployment, or local Docker, whatever its deployment offers.
     #[test]
     fn a_hosted_run_never_has_the_fakes_the_node_or_the_deployment() {
-        for need in [Need::Fakes, Need::StoreFake, Need::Node, Need::Deployment, Need::LocalDocker, Need::TwoSites] {
+        for need in [Need::Fakes, Need::StoreFake, Need::Node, Need::Deployment, Need::LocalDocker, Need::TwoSites, Need::Nodes] {
             assert!(missing(need, Rung::Hosted(EVERYTHING)).is_some(), "{need:?}");
             assert_eq!(unmet(&[Need::Levers, need], Rung::Hosted(EVERYTHING)).map(|(n, _)| n), Some(need));
         }
@@ -248,7 +269,7 @@ mod tests {
         let no_secret = Offers { levers: false, ..EVERYTHING };
         assert_eq!(unmet(&[], Rung::Hosted(no_secret)).map(|(n, _)| n), Some(Need::Levers));
         assert_eq!(unmet(&[Need::Computers], Rung::Hosted(no_secret)).map(|(n, _)| n), Some(Need::Levers));
-        assert_eq!(unmet(&[], Rung::Local), None);
+        assert_eq!(unmet(&[], Rung::Local { nodes: false }), None);
     }
 
     /// The first need missing is the one said, in the order declared.

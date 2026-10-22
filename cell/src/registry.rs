@@ -49,6 +49,7 @@ pub(crate) mod admin;
 pub(crate) mod billing;
 pub(crate) mod calls;
 mod invites;
+mod nodes;
 pub(crate) mod offers;
 pub(crate) mod orgs;
 pub(crate) mod seats;
@@ -870,6 +871,15 @@ impl RegistryCell {
             WipeBegin::PATH => reply::<WipeBegin>(self.wipe_begin(body(&bytes)?)),
             WipeStep::PATH => reply::<WipeStep>(self.wipe_step(body(&bytes)?)),
             WipeBilling::PATH => reply::<WipeBilling>(self.wipe_billing(body(&bytes)?).await),
+            calls::PairBegin::PATH => reply::<calls::PairBegin>(self.pair_begin(body(&bytes)?)),
+            calls::PairShow::PATH => reply::<calls::PairShow>(self.pair_show(body(&bytes)?)),
+            calls::PairApprove::PATH => reply::<calls::PairApprove>(self.pair_approve(body(&bytes)?).await),
+            calls::PairPoll::PATH => reply::<calls::PairPoll>(self.pair_poll(body(&bytes)?).await),
+            calls::OwnNodes::PATH => reply::<calls::OwnNodes>(self.own_nodes_of(body(&bytes)?)),
+            calls::PairedNode::PATH => reply::<calls::PairedNode>(self.paired_node(body(&bytes)?).await),
+            calls::RevokeNode::PATH => reply::<calls::RevokeNode>(self.revoke_node(body(&bytes)?)),
+            calls::PreferNode::PATH => reply::<calls::PreferNode>(self.prefer_node(body(&bytes)?)),
+            calls::ChoiceOf::PATH => reply::<calls::ChoiceOf>(self.choice_of(body(&bytes)?).await),
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),
         }
     }

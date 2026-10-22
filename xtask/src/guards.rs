@@ -141,7 +141,10 @@ mod tests {
         assert_eq!(uses(&files, "routed::refused(&req, "), checked, "each object checks once, in its fetch");
         let entry = std::fs::read_to_string(crate::devstack::repo_root().join("cell/entry.mjs")).expect("entry.mjs reads");
         let code: Vec<&str> = entry.lines().filter(|l| !l.trim_start().starts_with("//")).collect();
-        assert_eq!(code.iter().filter(|l| l.contains(" extends DurableObject {")).count(), objects.len(), "the platform's objects are the five checked above");
+        // and `Node`, a sandcastle node's (docs/self-host.md, seam 2): it runs
+        // no Rust, and its calls are the node's protocol, no shape of the cell's
+        assert_eq!(code.iter().filter(|l| l.contains(" extends DurableObject {")).count(), objects.len() + 1, "the platform's objects are the five checked above, and a node's");
+        assert_eq!(code.iter().filter(|l| l.contains("export class Node extends DurableObject {")).count(), 1, "the one object beyond them is a node's");
         let made: Vec<&&str> = code.iter().filter(|l| l.contains("InternalRoute.request(")).collect();
         assert!(made.len() >= 3 && made.iter().all(|l| l.contains("InternalRoute.request(this.env, ") || l.contains("InternalRoute.request(env, ")), "the JavaScript's internal calls are stamped from its env: {made:?}");
         let called: Vec<&&str> = code.iter().filter(|l| l.contains("getByName(")).collect();

@@ -2367,7 +2367,13 @@ fn computer_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: 
     );
     // Restart, in the notice: its save fails too, so it goes back, and says so
     b.eval(page, &format!("({}.querySelector('button[data-action=restart]').click(), true)", shown("unsaved")))?;
-    let back = b.until(page, &format!("{n}?.innerText.includes(\"Your restart couldn't save first\") && !!{n}.querySelector('button[data-action=seen]')", n = shown("went_back")), std::time::Duration::from_secs(90));
+    // told as it starts ("It goes back to …"), then as it came up ("It went
+    // back to …"): its start takes longer on a sandcastle node
+    let back = b.until(
+        page,
+        &format!("{n}?.innerText.includes(\"Your restart couldn't save first\") && {n}.innerText.includes('It went back to its save of') && !!{n}.querySelector('button[data-action=seen]')", n = shown("went_back")),
+        std::time::Duration::from_secs(90),
+    );
     let v = view();
     let said = b.eval(page, "document.getElementById('computer-notices').innerText")?;
     let _ = b.screenshot(page, &shots.join("computer-went-back.png"));

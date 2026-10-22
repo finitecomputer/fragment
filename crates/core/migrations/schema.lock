@@ -11,6 +11,7 @@ step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
 step Registry 3 trial_hold_attempts 07e123e05a049abe
 step Registry 4 oidc_signins 1a608b60d3de7ab3
+step Registry 5 paired_nodes 4258f97f553ab136
 step Principal 1 baseline 28b4d4bf3f8cdb71
 step Principal 2 listed 09e5aab70c4f7f61
 step Ledger 1 baseline 6d5c6ebad64a53b2
@@ -100,6 +101,7 @@ Registry table keys: CREATE TABLE keys ( key TEXT PRIMARY KEY, identity TEXT NOT
 Registry index keys_identity: CREATE INDEX keys_identity ON keys (identity)
 Registry table logins: CREATE TABLE logins ( state TEXT PRIMARY KEY, return_to TEXT NOT NULL, link_to TEXT, created_at INTEGER NOT NULL, verifier TEXT, nonce TEXT)
 Registry index logins_created: CREATE INDEX logins_created ON logins (created_at)
+Registry table node_prefs: CREATE TABLE node_prefs (owner TEXT PRIMARY KEY, node TEXT NOT NULL)
 Registry table offer_answers: CREATE TABLE offer_answers ( offer TEXT PRIMARY KEY, person TEXT NOT NULL, at INTEGER NOT NULL)
 Registry index offer_answers_person: CREATE INDEX offer_answers_person ON offer_answers (person)
 Registry table offer_mails: CREATE TABLE offer_mails ( org TEXT NOT NULL, day INTEGER NOT NULL, mailed INTEGER NOT NULL, PRIMARY KEY (org, day))
@@ -111,6 +113,12 @@ Registry table org_payers: CREATE TABLE org_payers ( org TEXT PRIMARY KEY, perso
 Registry index org_payers_person: CREATE INDEX org_payers_person ON org_payers (person)
 Registry table orgs: CREATE TABLE orgs ( id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL, created_by TEXT NOT NULL, status TEXT, customer TEXT UNIQUE, subscription TEXT UNIQUE, items TEXT, period_end INTEGER, trial_end INTEGER, cancel_at_end INTEGER NOT NULL DEFAULT 0, event_at INTEGER, synced_at INTEGER)
 Registry index orgs_synced: CREATE INDEX orgs_synced ON orgs (synced_at) WHERE subscription IS NOT NULL
+Registry table pair_misses: CREATE TABLE pair_misses (identity TEXT NOT NULL, at INTEGER NOT NULL)
+Registry index pair_misses_identity: CREATE INDEX pair_misses_identity ON pair_misses (identity, at)
+Registry table paired_nodes: CREATE TABLE paired_nodes ( id TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL, arch TEXT NOT NULL, paired_at INTEGER NOT NULL, sealed TEXT, revoked_at INTEGER)
+Registry index paired_nodes_owner: CREATE INDEX paired_nodes_owner ON paired_nodes (owner)
+Registry table pairings: CREATE TABLE pairings ( user_code TEXT PRIMARY KEY, device_hash TEXT NOT NULL UNIQUE, name TEXT NOT NULL, arch TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, interval_s INTEGER NOT NULL, polled_at INTEGER, node TEXT)
+Registry index pairings_created: CREATE INDEX pairings_created ON pairings (created_at)
 Registry table person_keys: CREATE TABLE person_keys ( identity TEXT PRIMARY KEY, sealed TEXT NOT NULL)
 Registry table pictures: CREATE TABLE pictures ( identity TEXT PRIMARY KEY, sha TEXT NOT NULL, mime TEXT NOT NULL, set_at INTEGER NOT NULL)
 Registry table plan_seq: CREATE TABLE plan_seq ( one INTEGER PRIMARY KEY CHECK (one = 1), seq INTEGER NOT NULL)
