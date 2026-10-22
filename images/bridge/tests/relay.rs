@@ -259,6 +259,54 @@ async fn other_answered_in_words_through_the_relay() {
     bridge.stop().await;
 }
 
+/// Goal (Paul on production, 2026-10-22: his answer typed in the message box
+/// stayed queued, the card open): a clarify's card is answered by its
+/// owner's message in the chat as by "Other" with those words on the card:
+/// Hermes is given `other`, then the words as its clarify's answer, and
+/// its turn replies once; the card closes with the words. Then an answer
+/// in words that is a file alone (after "Other" pressed with none): Hermes
+/// is told, in its words, where the file is on the computer.
+#[tokio::test]
+async fn a_card_answered_by_a_message_through_the_relay() {
+    let (fake, bridge, hermes, dir) = setup("relay-card-told", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let bytes = bytes::Bytes::from_static(b"a photo of basil");
+    let sha = records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+    fake.with(|w| w.fragments.get_mut(&chat).unwrap().blobs.insert(sha.clone(), ("image/png".into(), bytes.clone())));
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "clarify a color" }));
+    let turn = records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
+    fake.until(WAIT, "the clarify's card", |w| !work_of(w, &chat, &turn, "turn.prompt").is_empty()).await;
+    fake.say(&chat, &person("paul"), json!({ "text": "purple" }));
+    fake.until(WAIT, "the turn's end", |w| !work_of(w, &chat, &turn, "turn.end").is_empty()).await;
+    fake.with(|w| {
+        let said: Vec<String> = replies(w, &chat).iter().filter(|r| r["turn"] == turn.as_str()).map(|r| r["text"].as_str().unwrap_or("").to_string()).collect();
+        assert_eq!(said, vec!["echo: [paul] clarify a color (chose: purple)"], "its one reply, and no 'Type your answer:'");
+        let closed = &work_of(w, &chat, &turn, "turn.prompt.closed")[0];
+        assert_eq!((&closed["outcome"], &closed["option"], &closed["text"]), (&json!("answered"), &json!("other"), &json!("purple")), "{closed}");
+        assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 1, "the answer started no turn");
+    });
+    hermes.with(|s| {
+        let at = s.heard.iter().position(|e| e["prompt_response"]["option_id"] == "other").expect("the card's Other");
+        assert_eq!(s.heard[at + 1]["text"], "purple", "the words right after it, in its chat: {:?}", s.heard);
+    });
+
+    // "Other" pressed with no words; a file alone is the answer
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "clarify again" }));
+    let again = records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
+    fake.until(WAIT, "the second card", |w| !work_of(w, &chat, &again, "turn.prompt").is_empty()).await;
+    let p = fake.with(|w| work_of(w, &chat, &again, "turn.prompt")[0].clone());
+    fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": p["prompt"], "option": "other" }));
+    fake.until(WAIT, "the chat told whose answer it waits for", |w| !work_of(w, &chat, &again, "turn.asked").is_empty()).await;
+    fake.say(&chat, &person("paul"), json!({ "attachments": [{ "sha256": sha, "size": bytes.len(), "type": "image/png", "name": "basil.png" }] }));
+    fake.until(WAIT, "the second turn's end", |w| !work_of(w, &chat, &again, "turn.end").is_empty()).await;
+    let told = format!("[paul sent a file with this answer: 'basil.png' (image/png). It is on your computer at: {}]", dir.join("media").join(&sha).display());
+    hermes.with(|s| assert_eq!(s.heard.last().map(|e| e["text"].clone()), Some(json!(told)), "where the file is, in its answer's words: {:?}", s.heard));
+    fake.with(|w| assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 2, "the answer started no turn"));
+    assert_eq!(std::fs::read(dir.join("media").join(&sha)).expect("the file"), b"a photo of basil");
+    bridge.stop().await;
+}
+
 /// Goal: Stop is `interrupt_inbound` to Hermes; its turn ends stopped with
 /// no reply, and the chat's draft is stopped.
 #[tokio::test]

@@ -74,7 +74,10 @@
 //!   agent first runs there in a life.
 //! - A turn that asks its asker something in words (`Asked`) says so
 //!   (`turn.asked`) and takes their next message in the chat as its answer
-//!   (`Tell`), never as a turn behind it. It is a running turn of this
+//!   (`Tell`), never as a turn behind it; a turn waiting on a card that
+//!   takes words (a clarify's "Other") takes its owner's next message as
+//!   that option answered in those words, the card closed. Words, files or
+//!   both: an answer's files go with it. It is a running turn of this
 //!   life: a restart ends it as lost, and that message, read by the next
 //!   life, is a turn of its own.
 //! - The computer is kept awake while a turn waits to run, runs, or waits
@@ -90,7 +93,7 @@ use serde_json::Value;
 
 use crate::limits;
 use crate::records::{self, AttachmentRef, Cause, Closed, CommandSaid, Message, NoticeCategory, Outcome, PromptOption, Record, Said, Task};
-use crate::runtime::{Agent, Command, Event, How, LocalFile, MenuItem, TurnStart};
+use crate::runtime::{Agent, Attached, Command, Event, How, LocalFile, MenuItem, TurnStart};
 
 /// The state file's format. 2: one life per turn (no `handed` phase).
 pub const STATE_VERSION: u32 = 2;
@@ -1082,30 +1085,53 @@ impl Engine {
 
     // ---- Stop and answers ----
 
-    /// A message from the asker of the agent's turn in this chat that asked
-    /// them something (`asking`): handed to that turn as its answer (true),
-    /// never queued behind it, where the turn would wait for it forever.
+    /// A message sent while the agent's turn in this chat waits on a
+    /// question: handed to that turn as its answer (true), never queued
+    /// behind it, where the turn would wait for it until the question's
+    /// life ran out. Its words, its files (photos sent as the answer), or
+    /// both: the files go with it (`Attached`). A question in words
+    /// (`asking`) takes its asker's message as its answer
+    /// (`Command::Tell`); a card that takes words (a clarify's "Other"), its
+    /// owner's, as that option answered in those words
+    /// (`answered`), as if typed on the card. A card that takes no words
+    /// (an approval's Allow and Deny) takes a press alone: a message
+    /// meanwhile is queued, as anyone else's is.
     /// Only a turn this life runs asks (its claim was answered as this
     /// life's; a restart ends every turn an earlier life ran), so an answer
     /// goes only to the life that claimed its turn. Read by a later life, it
     /// asks nothing, and the message is a turn of its own, claimed and run
     /// as any other.
     fn told(&mut self, agent: &Agent, fragment: &str, principal: &str, view: &ChatView, m: &Message, seq: u64) -> bool {
-        if m.text.trim().is_empty() {
+        if m.text.trim().is_empty() && m.attachments.is_empty() {
             return false;
         }
-        let found = self.state.turns.values().find(|t| t.agent == agent.fragment && t.fragment == fragment && t.asking && t.active()).map(|t| (t.id.clone(), t.asker.clone()));
-        let Some((id, asker)) = found else { return false };
-        if asker != principal {
-            return false;
-        }
-        let t = self.state.turns.get_mut(&id).expect("found");
-        t.asking = false;
-        t.last_ms = self.now;
-        self.dirty = true;
-        crate::ev!("turn.told", { "turn": id, "seq": seq });
+        let text = records::cut_bytes(&m.text, limits::MESSAGE_TEXT_MAX_BYTES);
         let by_name = view.names.get(principal).cloned().unwrap_or_else(|| "someone".into());
-        self.out.push(Effect::Runtime(Command::Tell { turn: id, seq, by: principal.to_string(), by_name, text: records::cut_bytes(&m.text, limits::MESSAGE_TEXT_MAX_BYTES) }));
+        let attached = (!m.attachments.is_empty()).then(|| Attached { agent: agent.fragment.clone(), fragment: fragment.to_string(), by_name: by_name.clone(), refs: m.attachments.clone() });
+        let mine = |t: &&Turn| t.agent == agent.fragment && t.fragment == fragment;
+        if let Some((id, asker)) = self.state.turns.values().filter(mine).find(|t| t.asking && t.active()).map(|t| (t.id.clone(), t.asker.clone())) {
+            if asker != principal {
+                return false;
+            }
+            let t = self.state.turns.get_mut(&id).expect("found");
+            t.asking = false;
+            t.last_ms = self.now;
+            self.dirty = true;
+            crate::ev!("turn.told", { "turn": id, "seq": seq, "files": m.attachments.len() });
+            self.out.push(Effect::Runtime(Command::Tell { turn: id, seq, by: principal.to_string(), by_name, text, attached }));
+            return true;
+        }
+        // its card that takes words, the oldest open one: its owner's alone
+        // to answer, as its options are
+        let carded = self.state.turns.values().filter(mine).filter(|t| t.phase == Phase::Waiting).find_map(|t| t.prompts.iter().find(|p| !p.closed && !p.words.is_empty()).map(|p| (t.id.clone(), p.id.clone(), p.words[0].clone())));
+        let Some((id, prompt, option)) = carded else { return false };
+        if principal != agent.owner {
+            return false;
+        }
+        // what the card shows it was answered with: the words, or the files' names
+        let shown = if text.trim().is_empty() { m.attachments.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ") } else { text.trim().to_string() };
+        crate::ev!("prompt.told", { "turn": id, "prompt": prompt, "seq": seq, "files": m.attachments.len() });
+        self.answered(&agent.fragment, fragment, &id, &prompt, &option, principal, Some(shown), Some(text), attached, seq);
         true
     }
 
@@ -1189,9 +1215,7 @@ impl Engine {
             crate::ev!("prompt.ignored", { "turn": id, "prompt": prompt, "why": "only the agent's owner answers" });
             return;
         }
-        let now = self.now;
-        let t = self.state.turns.get_mut(&id).expect("found");
-        let p = t.prompts.iter_mut().find(|p| p.id == prompt).expect("found");
+        let p = self.state.turns[&id].prompts.iter().find(|p| p.id == prompt).expect("found");
         if p.closed {
             crate::ev!("prompt.ignored", { "turn": id, "prompt": prompt, "why": "already closed: the first answer won" });
             return;
@@ -1200,17 +1224,30 @@ impl Engine {
             crate::ev!("prompt.ignored", { "turn": id, "prompt": prompt, "why": "not one of its options" });
             return;
         }
-        p.closed = true;
         let words = text.filter(|_| p.words.iter().any(|w| w == option));
+        self.answered(&agent.fragment, fragment, &id, prompt, option, principal, words.clone(), words, None, seq);
+    }
+
+    /// An open prompt of turn `id` answered with `option` by `principal`:
+    /// closed, its card saying `shown` (the words, typed on it or sent as a
+    /// message), the runtime given `words` and the files `attached`; the
+    /// turn runs on once none of its prompts is open.
+    #[allow(clippy::too_many_arguments)]
+    fn answered(&mut self, agent: &str, fragment: &str, id: &str, prompt: &str, option: &str, principal: &str, shown: Option<String>, words: Option<String>, attached: Option<Attached>, seq: u64) {
+        let now = self.now;
+        let t = self.state.turns.get_mut(id).expect("an open turn's");
+        let p = t.prompts.iter_mut().find(|p| p.id == prompt).expect("its prompt");
+        assert!(!p.closed, "a prompt is answered once");
+        p.closed = true;
         if t.prompts.iter().all(|p| p.closed) && t.phase == Phase::Waiting {
             t.phase = Phase::Running;
         }
         t.last_ms = now;
         self.dirty = true;
         crate::ev!("prompt.answered", { "turn": id, "prompt": prompt, "option": option, "words": words.is_some() });
-        let closed = records::turn_prompt_closed(&id, prompt, Closed::Answered, Some((option, principal, words.as_deref())));
-        self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, &format!("pc:{prompt}")), closed, Vec::new());
-        self.out.push(Effect::Runtime(Command::Answer { turn: id, prompt: prompt.to_string(), option: Some(option.to_string()), seq, by: principal.to_string(), words }));
+        let closed = records::turn_prompt_closed(id, prompt, Closed::Answered, Some((option, principal, shown.as_deref())));
+        self.post(agent, fragment, records::WORK, records::work_id(id, &format!("pc:{prompt}")), closed, Vec::new());
+        self.out.push(Effect::Runtime(Command::Answer { turn: id.to_string(), prompt: prompt.to_string(), option: Some(option.to_string()), seq, by: principal.to_string(), words, attached }));
     }
 
     // ---- the runtime ----
@@ -1395,7 +1432,7 @@ impl Engine {
             // A prompt no card can show is expired at once, so the runtime
             // never waits on it.
             crate::ev!("prompt.refused", { "turn": id, "why": "not a prompt a card can show" });
-            self.out.push(Effect::Runtime(Command::Answer { turn: id.to_string(), prompt, option: None, seq: 0, by: String::new(), words: None }));
+            self.out.push(Effect::Runtime(Command::Answer { turn: id.to_string(), prompt, option: None, seq: 0, by: String::new(), words: None, attached: None }));
             return;
         }
         self.seal(id);
@@ -1475,7 +1512,7 @@ impl Engine {
             let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
             crate::ev!("prompt.expired", { "turn": id, "prompt": prompt });
             self.post(&agent, &fragment, records::WORK, records::work_id(&id, &format!("pc:{prompt}")), records::turn_prompt_closed(&id, &prompt, Closed::Expired, None), Vec::new());
-            self.out.push(Effect::Runtime(Command::Answer { turn: id, prompt, option: None, seq: 0, by: String::new(), words: None }));
+            self.out.push(Effect::Runtime(Command::Answer { turn: id, prompt, option: None, seq: 0, by: String::new(), words: None, attached: None }));
         }
         for id in quiet {
             self.out.push(Effect::Runtime(Command::Forget { turn: id.clone() }));

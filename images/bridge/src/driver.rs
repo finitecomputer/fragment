@@ -1135,7 +1135,7 @@ async fn upload(api: &Api, fragment: &str, agent: &str, files: &[LocalFile]) -> 
 
 /// Commands to the runtime in order; a turn's attachments are downloaded,
 /// and its note read from its chat's journal, before it is handed (so a Stop
-/// never overtakes its Start).
+/// never overtakes its Start), as an answer's are before it is.
 struct RuntimeLane {
     tx: mpsc::UnboundedSender<Command>,
 }
@@ -1146,6 +1146,23 @@ impl RuntimeLane {
         tokio::spawn(async move {
             // bounded by the engine: ends when it drops its sender
             while let Some(mut c) = rx.recv().await {
+                // an answer's files, downloaded as a turn's are, then named
+                // in its words with where each is (`with_files`)
+                match &mut c {
+                    Command::Tell { text, attached, .. } => {
+                        if let Some(a) = attached.take() {
+                            let files = download(&api, &a.agent, &a.fragment, &a.refs, &media_dir).await;
+                            *text = crate::runtime::with_files(text, &a, &files);
+                        }
+                    }
+                    Command::Answer { words, attached, .. } => {
+                        if let Some(a) = attached.take() {
+                            let files = download(&api, &a.agent, &a.fragment, &a.refs, &media_dir).await;
+                            *words = Some(crate::runtime::with_files(words.as_deref().unwrap_or(""), &a, &files));
+                        }
+                    }
+                    _ => {}
+                }
                 if let Command::Start(ts) = &mut c {
                     let note = async {
                         let read = tokio::time::timeout(Duration::from_millis(limits::NOTE_READ_MS_MAX), note_for(&api, ts)).await;

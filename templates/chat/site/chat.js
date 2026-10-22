@@ -37,7 +37,9 @@
 // `{kind: "commands"}` on `work`), for the agent's owner alone; one typed
 // whole is sent as `{kind: "command", command, args, to}`. A message sent
 // while its agent works is marked queued until its turn starts, and its
-// owner may Steer the running turn with it instead (`/steer`). Reply quotes
+// owner may Steer the running turn with it instead (`/steer`); one its
+// card's asker sends while a card that takes words is open answers that
+// card, and waits for nothing (the composer says so). Reply quotes
 // a message (`reply_to`, its seq), shown above the one that quotes it.
 //
 // It speaks only chat records: nothing here knows which runtime an agent
@@ -621,6 +623,14 @@ export function mount(root) {
   // a turn waiting on its asker's words (`turn.asked`): until they say
   // something to the chat after it, or the turn goes on or ends
   const waitsOnWords = (t) => running(t) && !!t.asked && !state.chat.some((m) => m.principal === t.asked.asks && !m.turn && m.at >= t.asked.at);
+  // a card that takes words (an option answered in words): its asker's
+  // message in the chat while it is open answers it as that option, as if
+  // typed on the card (docs/chat-records.md, "A person's message")
+  const takesWords = (p) => p.options.some((o) => o.words === true);
+  const cardFor = (t, principal) => running(t) && [...t.prompts.values()].some((p) => takesWords(p) && p.asks === principal && !t.closed.has(p.prompt) && !expired(p));
+  // whether message `m` answered one of turn `t`'s cards: by its asker, said
+  // after the card and before its close
+  const answeredCard = (t, m) => [...t.prompts.values()].some((p) => takesWords(p) && p.asks === m.principal && p.at <= m.at && t.closed.get(p.prompt)?.outcome === "answered" && t.closed.get(p.prompt).at >= m.at);
 
   function onChat(record, historical = false) {
     if (state.seen.has(record.seq)) return;
@@ -719,7 +729,7 @@ export function mount(root) {
       t.prompts.set(b.prompt, { ...b, options: Array.isArray(b.options) ? b.options.filter((o) => o && typeof o.id === "string") : [], at: record.at, n });
       expiryTimer();
     } else if (b.kind === "turn.prompt.closed" && typeof b.prompt === "string") {
-      t.closed.set(b.prompt, b);
+      t.closed.set(b.prompt, { ...b, at: record.at });
       state.answering.delete(cardKey(t.key, b.prompt));
       state.typed.delete(cardKey(t.key, b.prompt));
       tellBusy();
@@ -1039,8 +1049,9 @@ export function mount(root) {
       const others = mentionable().length > 1;
       // while it works, a message waits its turn (marked queued); its owner may steer it instead
       const steers = mine && menuOf(mine.agent).some((c) => c.name === "steer");
-      // an agent waiting on this person's words: what they type is the answer
-      const askedMe = [...state.turns.values()].find((t) => waitsOnWords(t) && t.asked.asks === state.me?.principal);
+      // an agent waiting on this person's words, or on their card that takes
+      // words: what they type is the answer
+      const askedMe = [...state.turns.values()].find((t) => (waitsOnWords(t) && t.asked.asks === state.me?.principal) || cardFor(t, state.me?.principal));
       input.placeholder = askedMe
         ? `Your answer for ${who(askedMe.agent).name}`
         : mine
@@ -1080,6 +1091,8 @@ export function mount(root) {
     const targets = m.to.length ? m.to : named.length ? named : [lead()];
     return turns.some((t) => {
       if (!running(t) || !targets.includes(t.agent) || t.startAt > m.at) return false;
+      // it answered the turn's card: it waits for nothing
+      if (answeredCard(t, m)) return false;
       if (t.asker !== m.principal) return true;
       // Chat and work have independent sequence cursors. Compare their
       // times so loading older work cannot change whether a reply waits.

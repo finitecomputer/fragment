@@ -255,6 +255,100 @@ async fn a_question_answered_in_words() {
     bridge.stop().await;
 }
 
+/// A photo in `chat`'s blobs, and how the agent is told of it when `paul`
+/// sends it with an answer: the file the bridge downloaded, and where.
+fn a_photo(fake: &Fake, chat: &str, dir: &std::path::Path) -> (Value, std::path::PathBuf, String) {
+    let bytes = bytes::Bytes::from_static(b"a photo of basil");
+    let sha = records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+    fake.with(|w| w.fragments.get_mut(chat).unwrap().blobs.insert(sha.clone(), ("image/png".into(), bytes.clone())));
+    let at = dir.join("media").join(&sha);
+    let told = format!("[paul sent a file with this answer: 'basil.png' (image/png). It is on your computer at: {}]", at.display());
+    (json!({ "sha256": sha, "size": bytes.len(), "type": "image/png", "name": "basil.png" }), at, told)
+}
+
+/// Goal: a question in words is answered with files too (photos sent as
+/// the answer), with words or none: the asker's message is its answer,
+/// mid-turn, its files downloaded to the computer as a turn's are and
+/// named in its words with where each is (Hermes' clarify takes words
+/// alone); it starts no turn of its own.
+#[tokio::test]
+async fn a_question_answered_with_files() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("question-files");
+    let (photo, at, told) = a_photo(&fake, &chat, &dir);
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 2).await;
+    let mut turns = Vec::new();
+    for (asked, answer, said) in [("name my plant, ask-me", json!({ "attachments": [photo] }), told.clone()), ("name it again, ask-me", json!({ "text": "Fernando", "attachments": [photo] }), format!("Fernando\n{told}"))] {
+        let n = turns.len();
+        let turn = turn_of("juniper", &chat, seq(&fake.say(&chat, &person("paul"), json!({ "text": asked }))));
+        fake.until(WAIT, "the question", |w| replies(w, &chat).iter().filter(|r| r["turn"] == turn.as_str()).any(|r| r["text"] == "What should I call it?")).await;
+        let answer = fake.say(&chat, &person("paul"), answer);
+        turns.push(turn.clone());
+        fake.until(WAIT, "the asking turn's end", |w| w.bodies(&chat, "work", "turn.end").len() == n + 1).await;
+        fake.with(|w| {
+            let r: Vec<Value> = replies(w, &chat).into_iter().filter(|r| r["turn"] == turn.as_str()).collect();
+            assert_eq!(r[1]["text"].as_str(), Some(format!("echo: [paul] {asked} (told: {said})").as_str()), "the answer, its file named with where it is");
+            let started: Vec<Value> = w.bodies(&chat, "work", "turn.start").iter().map(|b| b["turn"].clone()).collect();
+            assert_eq!(started, turns.iter().map(|t| json!(t)).collect::<Vec<_>>(), "the answer started no turn");
+            assert!(!started.contains(&json!(turn_of("juniper", &chat, seq(&answer)))));
+        });
+        assert_eq!(std::fs::read(&at).expect("the file, where the answer says"), b"a photo of basil");
+    }
+    bridge.stop().await;
+}
+
+/// Goal (Paul on production, 2026-10-22: he typed his answer to a card in
+/// the message box; it stayed queued and the card open): while a turn
+/// waits on a card that takes words (a clarify's "Other"), its owner's
+/// message in the chat answers it, as if typed on the card: the card
+/// closes answered with their words, the turn runs on to its reply, and
+/// the message starts no turn of its own; someone else's message meanwhile
+/// waits its turn. Then words and files: the card shows the words, and the
+/// agent is told where the files are.
+#[tokio::test]
+async fn a_card_answered_by_a_message() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.add_member(&chat, &person("skyler"), "editor");
+    let dir = support::dir("card-told");
+    let (photo, at, told) = a_photo(&fake, &chat, &dir);
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 2).await;
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "help me choose" }));
+    let turn = turn_of("juniper", &chat, seq(&asked));
+    fake.until(WAIT, "the card", |w| !w.bodies(&chat, "work", "turn.prompt").is_empty()).await;
+    let other = fake.say(&chat, &person("skyler"), json!({ "text": "hello juniper" }));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    fake.with(|w| assert!(w.bodies(&chat, "work", "turn.prompt.closed").is_empty(), "someone else's message answers no card"));
+    let answer = fake.say(&chat, &person("paul"), json!({ "text": "Tomatoes" }));
+    fake.until(WAIT, "the card's turn's end, then skyler's", |w| w.bodies(&chat, "work", "turn.end").len() == 2).await;
+    fake.with(|w| {
+        let closed = w.bodies(&chat, "work", "turn.prompt.closed");
+        assert_eq!(closed.len(), 1);
+        assert_eq!((closed[0]["outcome"].as_str(), closed[0]["option"].as_str(), closed[0]["by"].as_str(), closed[0]["text"].as_str()), (Some("answered"), Some("other"), Some("npub1paul"), Some("Tomatoes")), "closed with their words");
+        let r: Vec<Value> = replies(w, &chat).into_iter().filter(|r| r["turn"] == turn.as_str()).collect();
+        assert_eq!(r.iter().map(|r| r["text"].clone()).collect::<Vec<_>>(), vec![json!("echo: [paul] help me choose (chose: Tomatoes)")], "the turn ran on, its one reply");
+        let started: Vec<Value> = w.bodies(&chat, "work", "turn.start").iter().map(|b| b["turn"].clone()).collect();
+        assert_eq!(started, vec![json!(turn), json!(turn_of("juniper", &chat, seq(&other)))], "the answer started no turn; skyler's ran after");
+        assert!(!started.contains(&json!(turn_of("juniper", &chat, seq(&answer)))));
+    });
+    // words and files
+    let again = turn_of("juniper", &chat, seq(&fake.say(&chat, &person("paul"), json!({ "text": "choose again" }))));
+    fake.until(WAIT, "the second card", |w| w.bodies(&chat, "work", "turn.prompt").len() == 2).await;
+    fake.say(&chat, &person("paul"), json!({ "text": "these", "attachments": [photo] }));
+    fake.until(WAIT, "its end", |w| w.bodies(&chat, "work", "turn.end").len() == 3).await;
+    fake.with(|w| {
+        assert_eq!(w.bodies(&chat, "work", "turn.prompt.closed")[1]["text"], "these", "the card shows the words");
+        let r: Vec<Value> = replies(w, &chat).into_iter().filter(|r| r["turn"] == again.as_str()).collect();
+        assert_eq!(r[0]["text"].as_str(), Some(format!("echo: [paul] choose again (chose: these\n{told})").as_str()));
+        assert_eq!(w.bodies(&chat, "work", "turn.start").len(), 3, "no turn of its own");
+    });
+    assert_eq!(std::fs::read(&at).expect("the file, where the answer says"), b"a photo of basil");
+    bridge.stop().await;
+}
+
 /// Goal (P1, with a question in flight): a turn asking in words that a
 /// crash cuts ends once, as lost, and is never run again, whether the next
 /// life wakes with the state the crash left (the turn asking), one from

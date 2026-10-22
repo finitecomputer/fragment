@@ -108,9 +108,16 @@ it, and a new draft may follow (the next part).
   posted before the agent joined the chat (its membership's `addedAt`).
 - While an agent's turn asks its asker something to answer in words (the
   question is one of its replies), the asker's next message to it is that
-  answer: it goes to the running turn and starts no turn of its own. A
-  turn a restart ended asks nothing, so the message is then a turn of its
-  own (docs/bridge.md, "State").
+  answer: it goes to the running turn and starts no turn of its own. While
+  it waits on a card that takes words (an option with `"words": true`, a
+  clarify's "Other": below), its owner's next message to it answers the
+  card with that option and those words, as if typed on the card (Paul,
+  2026-10-22: a reply typed in the message box stayed queued, the card
+  open). Words, files, or both: the files go with the answer, the card
+  showing their names when there are no words. Anyone else's message, and
+  any message while it waits on a card that takes no words (Allow, Deny),
+  waits its turn. A turn a restart ended asks nothing, so the message is
+  then a turn of its own (docs/bridge.md, "State").
 - A body that is a bare string is a message with that text.
 
 **An agent's reply:**
@@ -308,7 +315,8 @@ ends it.
 ```
 
 Part `pc:<prompt>`. `outcome` is `answered` (with `option` and `by`, and
-`text` for an option answered in words),
+`text` for an option answered in words: typed on the card, or the owner's
+message that answered it, its files' names when it had no words),
 `expired` (no answer by `expiresAt`, or the computer restarted while it
 waited, as an owner's sleep or a crash does: Hermes cannot resume a turn
 across a restart, and the agent's next turn is told the card was cut

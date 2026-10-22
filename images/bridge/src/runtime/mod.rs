@@ -83,6 +83,43 @@ pub struct LocalFile {
     pub size: u64,
 }
 
+/// Files a person sent with an answer (`Command::Tell`, `Command::Answer`),
+/// as their message names them. The driver downloads them as a turn's
+/// attachments are, adds each one's name and where it is on this computer
+/// to the answer's words (`with_files`), and takes them off the command
+/// before the runtime hears it: a runtime takes an answer in words alone
+/// (Hermes' clarify does), so its words are how the agent learns of them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Attached {
+    /// The agent, and the chat its blobs are read from.
+    pub agent: String,
+    pub fragment: String,
+    /// Who sent them, as the agent calls them.
+    pub by_name: String,
+    pub refs: Vec<crate::records::AttachmentRef>,
+}
+
+/// An answer's words (none: files alone), then a line for each file sent
+/// with it (`files`, those of `attached` the driver downloaded): its name,
+/// its type, and where it is on this computer; and one for any it could not
+/// read. Names are the sender's: anything but plain text in them is a space.
+pub fn with_files(words: &str, attached: &Attached, files: &[LocalFile]) -> String {
+    let plain = |s: &str| s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>();
+    let by = plain(&attached.by_name);
+    let mut lines: Vec<String> = Vec::new();
+    if !words.trim().is_empty() {
+        lines.push(words.to_string());
+    }
+    for f in files {
+        lines.push(format!("[{by} sent a file with this answer: '{}' ({}). It is on your computer at: {}]", plain(&f.name), plain(&f.media_type), f.path.display()));
+    }
+    let unread = attached.refs.len().saturating_sub(files.len());
+    if unread > 0 {
+        lines.push(format!("[{by} also sent {unread} file{} with this answer that could not be read]", if unread == 1 { "" } else { "s" }));
+    }
+    lines.join("\n")
+}
+
 /// One of the commands a runtime takes from its agent's owner (a chat's
 /// `{kind: "command"}` record, docs/chat-records.md): its menu, which the
 /// bridge publishes in each chat (`commands` on `work`), and how the
@@ -199,16 +236,21 @@ pub enum Command {
     Stop { turn: String },
     /// A prompt's answer (`option`), or its expiry (`None`): only ever once
     /// per prompt. `seq` is the answering record's (a fresh message id).
-    /// `words`: what was typed for an option answered in words.
-    Answer { turn: String, prompt: String, option: Option<String>, seq: u64, by: String, words: Option<String> },
+    /// `words`: what was typed for an option answered in words, on its card
+    /// or as a message in its chat (that option's answer). `attached`: the
+    /// files sent with such a message, which the driver puts in its words
+    /// and takes off (`Attached`): a runtime never sees them here.
+    Answer { turn: String, prompt: String, option: Option<String>, seq: u64, by: String, words: Option<String>, attached: Option<Attached> },
     /// The bridge ended the turn itself (it went quiet too long, or its
     /// agent left): forget it.
     Forget { turn: String },
     /// The asker's next message in the turn's chat, while the turn asked
     /// them something to answer in words (`Event::Asked`): the answer,
     /// handed to the running turn at once, never a turn of its own. `seq`
-    /// is the message's record (a fresh message id).
-    Tell { turn: String, seq: u64, by: String, by_name: String, text: String },
+    /// is the message's record (a fresh message id). Its words, its files
+    /// or both: `attached`, which the driver puts in its words and takes off
+    /// (`Attached`): a runtime never sees them here.
+    Tell { turn: String, seq: u64, by: String, by_name: String, text: String, attached: Option<Attached> },
     /// A command of the menu said in the agent's chat at once, beside
     /// whatever turn runs there, no turn of its own (`How::Steer` into the
     /// running turn `turn`, `How::Aside`): `/<name> <args>`, its id the
@@ -296,4 +338,34 @@ pub trait Runtime: Send + 'static {
     /// Runs until `shutdown` turns true (then returns promptly: the whole
     /// bridge has `limits::SHUTDOWN_MS_MAX`), or fails for good.
     fn run(self: Box<Self>, io: RuntimeIo) -> RuntimeFuture;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(name: &str, at: &str) -> LocalFile {
+        LocalFile { path: PathBuf::from(at), media_type: "image/png".into(), name: name.into(), size: 1 }
+    }
+
+    fn attached(by: &str, n: usize) -> Attached {
+        let r: crate::records::AttachmentRef = serde_json::from_value(serde_json::json!({ "sha256": "c".repeat(64), "size": 1, "type": "image/png", "name": "p.png" })).expect("a ref");
+        Attached { agent: "juniper--k3x9".into(), fragment: "talk--k3x9".into(), by_name: by.into(), refs: vec![r; n] }
+    }
+
+    /// Goal: an answer's words name each file sent with it and where it is
+    /// on the computer, a line each after the words (files alone: no words
+    /// line); those not downloaded are counted; a sender's name or a file's
+    /// that would break a line is one line still.
+    #[test]
+    fn an_answers_files_are_named_in_its_words() {
+        let a = file("a.png", "/tmp/bridge-media/aa");
+        let line = "[paul sent a file with this answer: 'a.png' (image/png). It is on your computer at: /tmp/bridge-media/aa]";
+        assert_eq!(with_files("these", &attached("paul", 1), std::slice::from_ref(&a)), format!("these\n{line}"));
+        assert_eq!(with_files(" ", &attached("paul", 1), std::slice::from_ref(&a)), line, "files alone");
+        assert_eq!(with_files("", &attached("paul", 3), std::slice::from_ref(&a)).lines().last(), Some("[paul also sent 2 files with this answer that could not be read]"));
+        assert_eq!(with_files("ok", &attached("paul", 1), &[]), "ok\n[paul also sent 1 file with this answer that could not be read]", "one unread, said so");
+        let odd = with_files("", &attached("pa\nul", 1), &[file("a]\n[b.png", "/tmp/x")]);
+        assert_eq!(odd.lines().count(), 1, "{odd}");
+    }
 }
