@@ -2048,6 +2048,14 @@ mod tests {
         let models: Value = serde_json::from_str(cell["vars"]["FRAGMENT_MODELS"].as_str().unwrap()).unwrap();
         assert_eq!(models, json!({ "fallback": { "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "model": "deepseek-v4-1-flash", "price": listed } }), "no key in the cell's variable, the price in it");
         assert_eq!(bound(&d).unwrap().model_keys, [("fallback".to_string(), "fragment-tinfoil-api-key".to_string())]);
+        // a private tier whose fallback is not private is refused before anything is made (Paul, 2026-10-22)
+        let mut private = row(json!({ "private": true }));
+        private["vision"] = private["cheap"].clone();
+        private["fallback"] = json!({ "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" });
+        refused(private.clone(), "models.fallback: a private slot's calls fall back to it");
+        private["fallback"] = tinfoil(listed.clone())["fallback"].clone();
+        private["fallback"]["private"] = json!(true);
+        assert_eq!(with(private), "", "the private tier: every slot its calls reach private");
         // the fields it replaced
         for (field, now) in [("vision_model", "models.vision"), ("fallback_model", "models.fallback")] {
             let mut v = v.clone();

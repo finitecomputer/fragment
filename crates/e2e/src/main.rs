@@ -91,10 +91,11 @@ pub const TINFOIL_KEY: &str = "tk_e2e0c0ffee";
 /// (deploy/example.jsonc's third alternative), less its keys, each API's
 /// base URL the model fake's: `cheap`, `medium` and `vision` on Finite
 /// Private, `fallback` on Tinfoil's DeepSeek V4.1 Flash at the list price
-/// its slot names (`tinfoil_price`), saying it reads images.
+/// its slot names (`tinfoil_price`), saying it reads images; every slot
+/// private.
 pub fn private_tier_models(fake: &str) -> Value {
-    let private = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::FINITE_PRIVATE_FLASH });
-    let tinfoil = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::TINFOIL_FLASH, "price": tinfoil_price(), "images": true });
+    let private = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::FINITE_PRIVATE_FLASH, "private": true });
+    let tinfoil = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::TINFOIL_FLASH, "price": tinfoil_price(), "images": true, "private": true });
     json!({ "cheap": private, "medium": private, "fallback": tinfoil, "vision": private })
 }
 

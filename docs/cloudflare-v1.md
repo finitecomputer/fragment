@@ -1255,6 +1255,13 @@ Private stays possible by config.
     (the private tier's `vision` on Finite Private, Tinfoil's DeepSeek
     V4.1 Flash, which reads images, behind it): decision 23's "`vision`
     and transcriptions do not" holds for a fallback that says nothing.
+    Paul, 2026-10-22: "When a user has private selected, it's not
+    appropriate to fall back to a non-private model" (Tinfoil counts as
+    private). A slot may say `"private": true` (never one on Workers AI
+    or OpenRouter), and a private tier's `vision` and every private
+    slot's fallback must be private too, or the deploy is refused
+    (docs/computers.md, "A slot's `private`", which lists what is not
+    private yet: transcription, decisions, speech, vendors' tools).
 
     **Going live** (Paul's): finite-mono issues the key; `cargo xtask
     secret set fragment-finite-private-key --config <production's

@@ -105,7 +105,10 @@
   // price at that API, dollars a million tokens, `{"input", "cached_input"?,
   // "output"}`, for an API that is not OpenRouter. `"images": true` (either
   // provider) says its model reads images: a `vision` call falls back to the
-  // fallback only when the fallback's slot says so. A slot left out is on
+  // fallback only when the fallback's slot says so. `"private": true` says
+  // its model is private (confidential inference that keeps nothing: never
+  // Workers AI or OpenRouter); a private tier's vision and fallback, and a
+  // private vision model's fallback, must be private too. A slot left out is on
   // Workers AI: cheap GLM-5.3 Flash, medium GLM-5.3, fallback DeepSeek V4
   // Flash, vision GLM-5.3 Flash. Every model is one the price book prices
   // (fragment_core::price), one its slot names a price for, or one on
@@ -155,14 +158,14 @@
   // price named here):
   // "models": {
   //   "cheap": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
-  //              "key": "fragment-finite-private-key", "model": "glm-5-3-flash" },
+  //              "key": "fragment-finite-private-key", "model": "glm-5-3-flash", "private": true },
   //   "medium": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
-  //               "key": "fragment-finite-private-key", "model": "glm-5-3-flash" },
+  //               "key": "fragment-finite-private-key", "model": "glm-5-3-flash", "private": true },
   //   "fallback": { "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1",
   //                 "key": "fragment-tinfoil-api-key", "model": "deepseek-v4-1-flash",
-  //                 "price": { "input": 0.65, "cached_input": 0.13, "output": 1.45 }, "images": true },
+  //                 "price": { "input": 0.65, "cached_input": 0.13, "output": 1.45 }, "images": true, "private": true },
   //   "vision": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
-  //               "key": "fragment-finite-private-key", "model": "glm-5-3-flash" }
+  //               "key": "fragment-finite-private-key", "model": "glm-5-3-flash", "private": true }
   // },
   // A new person's plan: guest (the default), seat, or seat_always_on.
   // "default_plan": "guest",

@@ -1104,6 +1104,37 @@ expires within 30 days. The container application is the deployment's
   fallback otherwise (an image sent to a model that reads none is its
   refusal). A slot that says nothing reads none.
 
+  **A slot's `private`** (Paul, 2026-10-22: "When a user has private
+  selected, it's not appropriate to fall back to a non-private model").
+  Either kind of slot may say `"private": true`: its model is
+  confidential inference that keeps nothing (Finite Private's, Tinfoil's;
+  never Workers AI or OpenRouter, which the deploy and the cell refuse to
+  see marked). A private slot's calls reach only private models, and a
+  config that breaks that is refused, naming the slot: a private tier's
+  `vision` (Hermes sends it every image, whatever the tier) and every
+  private slot's `fallback` (the route's on a failure, Hermes' own on a
+  stall) are private too. What a private tier's agent reaches, read from
+  Hermes v0.21.7 (`agent/auxiliary_client.py`, `hermes_cli/
+  config_defaults.py`):
+  - **Private:** its turns, its failures and stalls (`fallback`), its
+    screenshots and attachments (`auxiliary.vision`: `vision`), and
+    Hermes' other model tasks (compression, titles, memory review, the
+    skills hub, MCP, approvals, the curator, the goal judge and the
+    rest), each `provider: auto`, which inherits the main model, then
+    the main `fallback_providers` on a failure. Hermes' discovery chain
+    (OpenRouter, Nous, any API key in the environment) runs only when no
+    main provider is selected (`_discovery_chain_allowed`), and ours is
+    always `custom`. Delegated subagents inherit the parent's provider
+    and fallbacks.
+  - **Not private yet:** voice notes' transcription (`whisper`: Workers
+    AI's Whisper), decisions (`/v1/decide`: the Clef family on Workers
+    AI), Hermes' speech (ElevenLabs when the catalog offers it, else
+    Hermes' default, Microsoft Edge's online voices), and the tools that
+    send a query to a vendor (web search on Firecrawl or Perplexity,
+    xAI's `x_search`, FAL's images). An agent on its owner's own model
+    (Settings) has left private by that pick; its images stay on the
+    platform's `vision`.
+
   **A slot's `price`.** A slot on an OpenAI-compatible API that is not
   OpenRouter may name its model's list price there, dollars a million
   tokens as its vendor lists them: `{"input": <$>, "cached_input"?: <$>,
