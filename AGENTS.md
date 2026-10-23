@@ -172,8 +172,8 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   `https://<b>.<zone>` on its real vendors (crates/e2e/src/hosted.rs). Its
   people sign in through the preview's levers as `<name>@e2e.test` (the
   config's `test_secret_file`, read from its file; docs/secrets.md), its
-  fragments are `e2e-<run>-…` (the run's id, 6 hex digits, printed as it
-  starts), and a section that needs what a preview lacks is
+  fragments are `e2e-<run>-…` (the run's id, 10 hex digits: its clock's 6
+  and 4 random, printed as it starts), and a section that needs what a preview lacks is
   a skip that says why. Paid calls (models, AI steps) are lent from the
   run's budget (default 60), each person's capped by their ledger, and the
   run ends saying what it spent. `agent-smoke` runs only here, and only

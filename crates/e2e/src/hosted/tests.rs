@@ -115,29 +115,30 @@ fn a_sweep_names_its_run_or_all() {
     let with = |more: &[&str]| -> Vec<String> { strings(&base).into_iter().chain(strings(more)).collect() };
     let action = |more: &[&str]| parse(&with(more)).unwrap().hosted.expect("a hosted run").action;
     assert_eq!(action(&["--sweep"]), Action::Sweep(SweepOf::LastRun));
-    assert_eq!(action(&["--sweep", "c58b2a"]), Action::Sweep(SweepOf::Run("c58b2a".into())));
-    assert_eq!(action(&["--sweep", "000000"]), Action::Sweep(SweepOf::Run("000000".into())));
+    assert_eq!(action(&["--sweep", "c58b2a3f9e"]), Action::Sweep(SweepOf::Run("c58b2a3f9e".into())));
+    assert_eq!(action(&["--sweep", "0000000000"]), Action::Sweep(SweepOf::Run("0000000000".into())));
     assert_eq!(action(&["--sweep-all"]), Action::Sweep(SweepOf::All));
     let last = parse(&with(&["--sweep", "--max-paid-calls", "0"])).unwrap().hosted.unwrap();
     assert_eq!((last.action, last.max_paid_calls), (Action::Sweep(SweepOf::LastRun), 0), "a flag after --sweep is not its run");
-    let named = parse(&with(&["--sweep", "c58b2a", "--max-paid-calls", "0"])).unwrap().hosted.unwrap();
-    assert_eq!((named.action, named.max_paid_calls), (Action::Sweep(SweepOf::Run("c58b2a".into())), 0));
+    let named = parse(&with(&["--sweep", "c58b2a3f9e", "--max-paid-calls", "0"])).unwrap().hosted.unwrap();
+    assert_eq!((named.action, named.max_paid_calls), (Action::Sweep(SweepOf::Run("c58b2a3f9e".into())), 0));
     for bad in [
-        with(&["--sweep", "C58B2A"]),
+        with(&["--sweep", "C58B2A3F9E"]),
         with(&["--sweep", "c58b2"]),
-        with(&["--sweep", "c58b2a0"]),
-        with(&["--sweep", "e2e-c58b2a-todo"]),
-        with(&["--sweep", "c58b2g"]),
-        with(&["--sweep", "c58b2a", "--sweep", "c58b2b"]),
+        with(&["--sweep", "c58b2a3f9e0"]),
+        with(&["--sweep", "c58b2a"]),
+        with(&["--sweep", "e2e-c58b2a3f9e-todo"]),
+        with(&["--sweep", "c58b2a3f9g"]),
+        with(&["--sweep", "c58b2a3f9e", "--sweep", "c58b2b3f9e"]),
         with(&["--sweep", "--sweep-all"]),
         with(&["--sweep-all", "--sweep"]),
         with(&["--sweep-all", "--sweep-all"]),
-        with(&["--sweep-all", "c58b2a"]),
+        with(&["--sweep-all", "c58b2a3f9e"]),
         with(&["--sweep-all", "--dry-run"]),
         with(&["--sweep-all", "--only", "auth"]),
         strings(&["--hosted", "--zone", "finite.place", "--branch", "p5", "--sweep-all"]),
         strings(&["--sweep-all"]),
-        strings(&["--sweep", "c58b2a"]),
+        strings(&["--sweep", "c58b2a3f9e"]),
     ] {
         assert!(parse(&bad).is_err(), "{bad:?}");
     }
@@ -402,23 +403,28 @@ fn a_preview_names_its_hosts() {
 
 // ---- the sweep: what it chooses, and the whole of one against a fake preview
 
-/// A run's id is six hex digits of its clock, padded and wrapped; a label
+/// A run's id is six hex digits of its clock, padded and wrapped, then
+/// four of its nonce, so runs started in the same second differ; a label
 /// names its run right after `e2e-`, so a label a lane extends still names
-/// it, and one of the older layout (`e2e-<base>-<run>`) names none.
+/// it, and one of an older layout (`e2e-<base>-<run>`, or a six-digit id)
+/// names none.
 #[test]
 fn a_label_names_its_run() {
-    assert_eq!(sweep::run_id(5), "000005");
-    assert_eq!(sweep::run_id(0xc5_8b2a), "c58b2a");
-    assert_eq!(sweep::run_id((1 << 24) + 5), "000005", "the clock wraps every 16^6 s");
-    assert_eq!(sweep::run_id(api::now_s()).len(), sweep::RUN_HEX);
-    let run = "c58b2a";
+    assert_eq!(sweep::run_id(5, 0), "0000050000");
+    assert_eq!(sweep::run_id(0xc5_8b2a, 0x3f9e), "c58b2a3f9e");
+    assert_eq!(sweep::run_id((1 << 24) + 5, 0xffff), "000005ffff", "the clock wraps every 16^6 s");
+    assert_ne!(sweep::run_id(0xc5_8b2a, 1), sweep::run_id(0xc5_8b2a, 2), "one second, two runs");
+    assert_eq!(sweep::run_id(api::now_s(), 7).len(), sweep::RUN_HEX);
+    assert!(sweep::is_run(&crate::run_name()), "a run's name is its id");
+    let run = "c58b2a3f9e";
     for base in ["todo", "agent", "ledger-guest-agent", "juniper", "e2e", "000000"] {
         let label = sweep::label(run, base);
         assert!(fragment_proto::valid_label(&label), "{label}");
+        assert!(label.len() + "-chat".len() <= fragment_proto::limits::LABEL_ROOM_MIN_BYTES, "{label} fits any deployment, extended");
         assert_eq!(sweep::run_of(&label), Some(run), "{label}");
     }
     assert_eq!(sweep::run_of(&format!("{}-chat", sweep::label(run, "agent"))), Some(run), "agent-smoke's chat extends its agent's label");
-    for none in ["e2e-todo-c5065a", "e2e-agent-c5065a-chat", "e2e-c58b2a", "e2e-c58b2a-", "e2e-C58B2A-todo", "e2e-c58b2-todo", "e2e-c58b2a0-todo", "c58b2a-todo", "todo", ""] {
+    for none in ["e2e-todo-c5065a", "e2e-agent-c5065a-chat", "e2e-c58b2a3f9e", "e2e-c58b2a3f9e-", "e2e-C58B2A3F9E-todo", "e2e-c58b2-todo", "e2e-c58b2a3f9e0-todo", "e2e-c58b2a-todo", "c58b2a3f9e-todo", "todo", ""] {
         assert_eq!(sweep::run_of(none), None, "{none:?}");
     }
 }
@@ -436,12 +442,12 @@ fn never_asked() -> Option<i64> {
 #[test]
 fn a_runs_sweep_chooses_its_runs_fragments_alone() {
     use sweep::{choose, Choice, Kept, Scope};
-    let ours = Scope::Run("c58b2a".into());
-    assert_eq!(choose(&ours, "e2e-c58b2a-todo", never_asked, NOW_MS), Choice::Delete);
-    assert_eq!(choose(&ours, "e2e-c58b2a-agent-chat", never_asked, NOW_MS), Choice::Delete);
-    assert_eq!(choose(&ours, "e2e-c58c01-todo", never_asked, NOW_MS), Choice::Keep(Kept::OtherRun(Some("c58c01".into()))));
-    assert_eq!(choose(&ours, "e2e-todo-c58b2a", never_asked, NOW_MS), Choice::Keep(Kept::OtherRun(None)), "the older layout names no run, even this one's id");
-    assert_eq!(choose(&ours, "c58b2a-todo", never_asked, NOW_MS), Choice::Keep(Kept::NotE2e));
+    let ours = Scope::Run("c58b2a3f9e".into());
+    assert_eq!(choose(&ours, "e2e-c58b2a3f9e-todo", never_asked, NOW_MS), Choice::Delete);
+    assert_eq!(choose(&ours, "e2e-c58b2a3f9e-agent-chat", never_asked, NOW_MS), Choice::Delete);
+    assert_eq!(choose(&ours, "e2e-c58c013f9e-todo", never_asked, NOW_MS), Choice::Keep(Kept::OtherRun(Some("c58c013f9e".into()))));
+    assert_eq!(choose(&ours, "e2e-todo-c58b2a3f9e", never_asked, NOW_MS), Choice::Keep(Kept::OtherRun(None)), "the older layout names no run, even this one's id");
+    assert_eq!(choose(&ours, "c58b2a3f9e-todo", never_asked, NOW_MS), Choice::Keep(Kept::NotE2e));
     assert_eq!(choose(&ours, "juniper", never_asked, NOW_MS), Choice::Keep(Kept::NotE2e));
 }
 
@@ -454,7 +460,7 @@ fn the_whole_sweep_takes_all_but_the_young() {
     use sweep::{choose, Choice, Kept, Scope, SPARED_FOR_MS};
     let all = Scope::All { spared_for_ms: SPARED_FOR_MS };
     let made = |ago_ms: i64| move || Some(NOW_MS - ago_ms);
-    for label in ["e2e-c58b2a-todo", "e2e-c58c01-todo", "e2e-todo-c5065a", "e2e-decoy"] {
+    for label in ["e2e-c58b2a3f9e-todo", "e2e-c58c013f9e-todo", "e2e-todo-c5065a", "e2e-decoy"] {
         assert_eq!(choose(&all, label, made(2 * SPARED_FOR_MS), NOW_MS), Choice::Delete, "{label}");
         assert_eq!(choose(&all, label, made(SPARED_FOR_MS), NOW_MS), Choice::Delete, "{label}, exactly as old as it spares");
         assert_eq!(choose(&all, label, made(SPARED_FOR_MS - 1), NOW_MS), Choice::Keep(Kept::Young(SPARED_FOR_MS - 1)), "{label}");
@@ -464,7 +470,7 @@ fn the_whole_sweep_takes_all_but_the_young() {
     }
     assert_eq!(choose(&all, "juniper", never_asked, NOW_MS), Choice::Keep(Kept::NotE2e));
     // sparing nothing (a rehearsal's last sweep) takes even the newest
-    assert_eq!(choose(&Scope::All { spared_for_ms: 0 }, "e2e-c58c01-todo", made(0), NOW_MS), Choice::Delete);
+    assert_eq!(choose(&Scope::All { spared_for_ms: 0 }, "e2e-c58c013f9e-todo", made(0), NOW_MS), Choice::Delete);
 }
 
 /// A run's sweep puts a person's computers to sleep when it deleted one of
@@ -474,7 +480,7 @@ fn the_whole_sweep_takes_all_but_the_young() {
 #[test]
 fn a_computer_sleeps_when_its_person_is_the_sweeps_alone() {
     use sweep::{computers, Computers, Scope};
-    let ours = Scope::Run("c58b2a".into());
+    let ours = Scope::Run("c58b2a3f9e".into());
     assert_eq!(computers(&ours, 0, 0), Computers::Untouched, "no fragment of the run's: not the run's person");
     assert_eq!(computers(&ours, 0, 3), Computers::Untouched);
     assert_eq!(computers(&ours, 2, 0), Computers::Sleep);
@@ -488,31 +494,31 @@ fn a_computer_sleeps_when_its_person_is_the_sweeps_alone() {
 /// A fake preview for a whole sweep: two pages of e2e people, each signed
 /// in to a session that names them, with these fragments (made this long
 /// ago) and an awake computer each:
-/// - `a`, run c58b2a's: two of its fragments and one not the e2e's;
-/// - `b`, run c58c01's, still going: one made five minutes ago, and an
+/// - `a`, run c58b2a3f9e's: two of its fragments and one not the e2e's;
+/// - `b`, run c58c013f9e's, still going: one made five minutes ago, and an
 ///   editor's seat on one of `a`'s (not theirs to delete);
-/// - `c`, leftovers: one of the older layout and one of run 0a0a0a's;
+/// - `c`, leftovers: one of the older layout and one of run 0a0a0a0a0a's;
 /// - `d`, a fixed email signed in by both runs: one fragment of each.
 fn fake_preview(req: &Seen) -> (u16, String) {
     const H: i64 = 60 * MIN_MS;
     let who = req.header("cookie").and_then(|c| c.strip_prefix("fragment_session=s-")).unwrap_or("").to_string();
     let owned = |names: &[(&str, i64)]| names.iter().map(|(n, _)| json!({ "name": n, "role": "owner" })).collect::<Vec<_>>();
     let fragments: &[(&str, i64)] = match who.as_str() {
-        "a" => &[("e2e-c58b2a-todo--pa22", 2 * H), ("e2e-c58b2a-agent-chat--pa22", 2 * H), ("notes--pa22", 9 * H)],
-        "b" => &[("e2e-c58c01-todo--pb22", 5 * MIN_MS)],
-        "c" => &[("e2e-todo-c5065a--pc22", 48 * H), ("e2e-0a0a0a-files--pc22", 3 * H)],
-        "d" => &[("e2e-c58b2a-x--pd22", 2 * H), ("e2e-c58c01-y--pd22", 10 * MIN_MS)],
+        "a" => &[("e2e-c58b2a3f9e-todo--pa22", 2 * H), ("e2e-c58b2a3f9e-agent-chat--pa22", 2 * H), ("notes--pa22", 9 * H)],
+        "b" => &[("e2e-c58c013f9e-todo--pb22", 5 * MIN_MS)],
+        "c" => &[("e2e-todo-c5065a--pc22", 48 * H), ("e2e-0a0a0a0a0a-files--pc22", 3 * H)],
+        "d" => &[("e2e-c58b2a3f9e-x--pd22", 2 * H), ("e2e-c58c013f9e-y--pd22", 10 * MIN_MS)],
         _ => &[],
     };
     let all: &[(&str, i64)] = &[
-        ("e2e-c58b2a-todo--pa22", 2 * H),
-        ("e2e-c58b2a-agent-chat--pa22", 2 * H),
+        ("e2e-c58b2a3f9e-todo--pa22", 2 * H),
+        ("e2e-c58b2a3f9e-agent-chat--pa22", 2 * H),
         ("notes--pa22", 9 * H),
-        ("e2e-c58c01-todo--pb22", 5 * MIN_MS),
+        ("e2e-c58c013f9e-todo--pb22", 5 * MIN_MS),
         ("e2e-todo-c5065a--pc22", 48 * H),
-        ("e2e-0a0a0a-files--pc22", 3 * H),
-        ("e2e-c58b2a-x--pd22", 2 * H),
-        ("e2e-c58c01-y--pd22", 10 * MIN_MS),
+        ("e2e-0a0a0a0a0a-files--pc22", 3 * H),
+        ("e2e-c58b2a3f9e-x--pd22", 2 * H),
+        ("e2e-c58c013f9e-y--pd22", 10 * MIN_MS),
     ];
     let body: Value = serde_json::from_str(&req.body).unwrap_or_default();
     match (req.method.as_str(), req.path.as_str()) {
@@ -531,7 +537,7 @@ fn fake_preview(req: &Seen) -> (u16, String) {
         ("GET", "/api/fragments") => {
             let mut listed = owned(fragments);
             if who == "b" {
-                listed.push(json!({ "name": "e2e-c58b2a-todo--pa22", "role": "editor" }));
+                listed.push(json!({ "name": "e2e-c58b2a3f9e-todo--pa22", "role": "editor" }));
             }
             (200, json!({ "fragments": listed }).to_string())
         }
@@ -572,9 +578,9 @@ fn a_sweep_against_a_shared_preview() {
     let run = Run::signing_in_by_levers(SECRET.into(), 0);
     let api = api_at(addr, &run);
 
-    let ours = sweep_on(&api, &Scope::Run("c58b2a".into()), NOW_MS).unwrap();
+    let ours = sweep_on(&api, &Scope::Run("c58b2a3f9e".into()), NOW_MS).unwrap();
     let (deleted, slept, aged) = asked(&seen);
-    assert_eq!(deleted, ["e2e-c58b2a-agent-chat--pa22", "e2e-c58b2a-todo--pa22", "e2e-c58b2a-x--pd22"], "the run's, and none of another run's (b is an editor of one: not theirs to delete)");
+    assert_eq!(deleted, ["e2e-c58b2a3f9e-agent-chat--pa22", "e2e-c58b2a3f9e-todo--pa22", "e2e-c58b2a3f9e-x--pd22"], "the run's, and none of another run's (b is an editor of one: not theirs to delete)");
     assert_eq!(slept, ["ca"], "a's computer alone: d also owns another run's fragment, and b and c are not the run's");
     assert!(!aged, "a run's sweep asks no fragment's age");
     assert_eq!((ours.people, ours.deleted, ours.slept, ours.not_e2e, ours.awake), (4, 3, 1, 1, 1));
@@ -583,26 +589,26 @@ fn a_sweep_against_a_shared_preview() {
     assert_eq!(
         spared,
         [
-            ("e2e-0a0a0a-files--pc22".to_string(), Kept::OtherRun(Some("0a0a0a".into()))),
-            ("e2e-c58c01-todo--pb22".to_string(), Kept::OtherRun(Some("c58c01".into()))),
-            ("e2e-c58c01-y--pd22".to_string(), Kept::OtherRun(Some("c58c01".into()))),
+            ("e2e-0a0a0a0a0a-files--pc22".to_string(), Kept::OtherRun(Some("0a0a0a0a0a".into()))),
+            ("e2e-c58c013f9e-todo--pb22".to_string(), Kept::OtherRun(Some("c58c013f9e".into()))),
+            ("e2e-c58c013f9e-y--pd22".to_string(), Kept::OtherRun(Some("c58c013f9e".into()))),
             ("e2e-todo-c5065a--pc22".to_string(), Kept::OtherRun(None)),
         ]
     );
     let report = ours.report();
-    for part in ["kept 4 e2e- fragments", "4 of other runs: 0a0a0a (1), c58c01 (2), no run id (1)", "kept 1 fragment not the e2e's", "left 1 computer awake"] {
+    for part in ["kept 4 e2e- fragments", "4 of other runs: 0a0a0a0a0a (1), c58c013f9e (2), no run id (1)", "kept 1 fragment not the e2e's", "left 1 computer awake"] {
         assert!(report.contains(part), "{part} in:\n{report}");
     }
 
     let all = sweep_on(&api, &Scope::All { spared_for_ms: sweep::SPARED_FOR_MS }, NOW_MS).unwrap();
     let (deleted, slept, aged) = asked(&seen);
-    assert_eq!(deleted, ["e2e-0a0a0a-files--pc22", "e2e-c58b2a-agent-chat--pa22", "e2e-c58b2a-todo--pa22", "e2e-c58b2a-x--pd22", "e2e-todo-c5065a--pc22"], "every run's an hour old, and none's");
+    assert_eq!(deleted, ["e2e-0a0a0a0a0a-files--pc22", "e2e-c58b2a3f9e-agent-chat--pa22", "e2e-c58b2a3f9e-todo--pa22", "e2e-c58b2a3f9e-x--pd22", "e2e-todo-c5065a--pc22"], "every run's an hour old, and none's");
     assert_eq!(slept, ["ca", "cc"], "b's and d's own a young fragment: a run may be using their computers");
     assert!(aged);
     assert_eq!((all.deleted, all.slept, all.not_e2e, all.awake), (5, 2, 1, 2));
-    assert_eq!(all.spared_for(|k| matches!(k, Kept::Young(_))), ["e2e-c58c01-todo--pb22", "e2e-c58c01-y--pd22"]);
+    assert_eq!(all.spared_for(|k| matches!(k, Kept::Young(_))), ["e2e-c58c013f9e-todo--pb22", "e2e-c58c013f9e-y--pd22"]);
     let report = all.report();
-    for part in ["kept 2 e2e- fragments", "2 younger than 60 min (a run may be using them): e2e-c58c01-todo--pb22 (5 min old), e2e-c58c01-y--pd22 (10 min old)", "left 2 computers awake"] {
+    for part in ["kept 2 e2e- fragments", "2 younger than 60 min (a run may be using them): e2e-c58c013f9e-todo--pb22 (5 min old), e2e-c58c013f9e-y--pd22 (10 min old)", "left 2 computers awake"] {
         assert!(report.contains(part), "{part} in:\n{report}");
     }
 }

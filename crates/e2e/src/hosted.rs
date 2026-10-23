@@ -245,13 +245,13 @@ fn image_name(text: &str) -> Result<String> {
     }
 }
 
-/// `--sweep <run>`'s run: the id a run prints as it starts, the 6 hex
-/// digits after `e2e-` in its labels.
+/// `--sweep <run>`'s run: the id a run prints as it starts, the
+/// `RUN_HEX` hex digits after `e2e-` in its labels.
 fn sweep_run(text: &str) -> Result<String> {
     if sweep::is_run(text) {
         Ok(text.to_string())
     } else {
-        bail!("--sweep <run> names a run by its id, {} hex digits (the c58b2a of e2e-c58b2a-todo), not {text:?}", sweep::RUN_HEX)
+        bail!("--sweep <run> names a run by its id, {} hex digits (the c58b2a3f9e of e2e-c58b2a3f9e-todo), not {text:?}", sweep::RUN_HEX)
     }
 }
 
@@ -452,7 +452,7 @@ fn sections(only: Option<Vec<String>>, except: Vec<String>, hosted: Hosted) -> R
     let run = s.run.clone();
     println!("hosted: {} (deploy {deploy}), run {run} (its fragments e2e-{run}-…); at most {} paid calls", hosted.preview.platform(), hosted.max_paid_calls);
     s.scratch = devstack::repo_root().join("target/e2e").join(format!("hosted-{run}"));
-    std::fs::create_dir_all(&s.scratch)?;
+    crate::make_scratch(&s.scratch)?;
     s.chrome = browser::Shared::new(&s.scratch);
     crate::lanes::run(&mut s);
     // noted as it finishes, so `--sweep` never takes a run still going here
@@ -547,7 +547,7 @@ fn rehearse_sweeps(s: &mut Suite) -> Result<()> {
     let api = s.api();
     // another run's fragment, and one of an older layout, whose label names
     // no run: a person of their own makes them now
-    let other = if s.run == "abcdef" { "fedcba" } else { "abcdef" };
+    let other = if s.run == "abcdef0123" { "fedcba3210" } else { "abcdef0123" };
     let stranger = api.person_paying(0)?;
     let theirs = api.qualified(&stranger, &sweep::label(other, "decoy"))?;
     let older = api.qualified(&stranger, "e2e-decoy-older")?;
