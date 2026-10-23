@@ -376,10 +376,15 @@ setting).
   the form; no redirect is followed, and the answer is read for its
   id_token only.
 - **The id_token** (`fragment_core::oidc::verify`): its signature by a key
-  of the provider's JWKS only, RS256 (the `rsa` crate, public-key
-  operations only) or ES256 (`p256`); never `none`, an HMAC, an algorithm
-  the provider does not list, a `crit` header, an access token, or a key
-  the token names. Then `iss` exactly, `aud` (and `azp` when there are
+  of the provider's JWKS only, RS256 or ES256; never `none`, an HMAC, an
+  algorithm the provider does not list, a `crit` header, an access token,
+  or a key the token names. The rules choose the key and check its size
+  and the signature's length; the arithmetic is the runtime's WebCrypto
+  (`js::signature_verifies`: `crypto.subtle.importKey` of a JWK the rules
+  make from the key's numbers alone, then `verify`, RSASSA-PKCS1-v1_5 or
+  ECDSA P-256 over SHA-256), the one seam in the rules, which the host
+  tests stand in for with the `rsa` and `p256` crates (dev-dependencies
+  only). Then `iss` exactly, `aud` (and `azp` when there are
   several audiences), `exp`, `iat` and `nbf` within two minutes of skew,
   an `iat` at most 15 minutes old, the nonce, and `sub`. A token that fails
   is 401, on a page, logged as `signin.refused` with why.
@@ -450,9 +455,13 @@ The platform's session lasts 30 days whatever the provider says, so a
 person disabled at the provider keeps theirs until it ends or they sign
 out (Open questions).
 
-**Costs.** The cell's Wasm grows 127 KB (6.34 MB to 6.47 MB): the
+**Costs.** The cell's Wasm grew 127 KB (6.34 MB to 6.47 MB): the
 verification code and its JSON, and `num-bigint-dig` (27 KB) under `rsa`.
-30 KB of `CELL_WASM_MAX_BYTES` is left.
+The signature's arithmetic then went to the runtime's WebCrypto
+(2026-10-22): the `rsa` crate left the cell, and with it `p256`'s
+verification, 42,683 bytes (6,711,722 to 6,669,039 at this branch's tip
+then; 130,961 bytes of `CELL_WASM_MAX_BYTES` left). `p256` stays for
+code.storage's tokens and web push.
 
 **Evidence, 2026-10-22** (celld: the fork's `selfhost` line on v0.6.3):
 
@@ -495,6 +504,17 @@ verification code and its JSON, and `num-bigint-dig` (27 KB) under `rsa`.
   after. A refusal at the provider was a 400 page, and the node's log said
   `{"event":"signin.refused","issuer":"http://127.0.0.1:5556/dex","why":"the
   provider answered the authorization access_denied: …"}`.
+- **The signature by WebCrypto** (2026-10-22, on `36d781dd`): `cargo
+  xtask check` 838 passed, 0 failed (one new: the seam is handed the
+  JWK, the input and the signature, is asked only after every rule before
+  it, and its no or its failure refuses the token before any claim is
+  read). The e2e's spoiled id_tokens grow to eleven: a forgery under a
+  published kid (`Spoil::ForeignKey`) beside a byte changed, under RS256
+  and ES256 alike, each refused as a signature that does not verify. The
+  same sections through the OpenID Connect fake: on celld **331 passed, 0
+  failed, 5 skipped**; on `wrangler dev` 327 passed, 0 failed, 9 skipped.
+  Through the WorkOS fake: on celld 328 passed, 0 failed, 5 skipped; on
+  `wrangler dev` 324 passed, 0 failed, 9 skipped.
 
 **For Paul:** the schema step's number (it collides with any other
 branch's registry step 4); whether a deployment moving from WorkOS to a

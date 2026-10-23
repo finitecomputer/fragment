@@ -701,6 +701,26 @@ impl Laps {
 extern "C" {
     #[wasm_bindgen(js_namespace = crypto, js_name = getRandomValues)]
     fn get_random_values(buf: &mut [u8]);
+    #[wasm_bindgen(js_namespace = ["crypto", "subtle"], js_name = importKey, catch)]
+    fn subtle_import_key(format: &str, key: &JsValue, algorithm: &JsValue, extractable: bool, usages: &Array) -> Result<Promise, JsValue>;
+    #[wasm_bindgen(js_namespace = ["crypto", "subtle"], js_name = verify, catch)]
+    fn subtle_verify(algorithm: &JsValue, key: &JsValue, signature: &js_sys::Uint8Array, data: &js_sys::Uint8Array) -> Result<Promise, JsValue>;
+}
+
+/// An id_token's signature, checked by the runtime's WebCrypto (the seam
+/// of `fragment_core::oidc::verify`, which chose the key and the algorithm):
+/// the provider's key imported from the JWK the rules made of it, then
+/// `verify`, RSASSA-PKCS1-v1_5 or ECDSA P-256, over SHA-256. A key the
+/// runtime will not import, or a call that throws, is why it could not tell.
+pub async fn signature_verifies(c: fragment_core::oidc::Check<'_>) -> Result<bool, String> {
+    let usages = Array::of1(&JsValue::from_str("verify"));
+    let import = subtle_import_key("jwk", &to_js(&c.key.jwk()), &to_js(&c.alg.import_params()), false, &usages).map_err(|e| format!("importKey: {}", js_message(&e)))?;
+    let key = JsFuture::from(import).await.map_err(|e| format!("importKey: {}", js_message(&e)))?;
+    // copies, never views of the Wasm's memory, which may grow meanwhile
+    let (signature, data) = (js_sys::Uint8Array::from(c.signature), js_sys::Uint8Array::from(c.input));
+    let verify = subtle_verify(&to_js(&c.alg.verify_params()), &key, &signature, &data).map_err(|e| format!("verify: {}", js_message(&e)))?;
+    let good = JsFuture::from(verify).await.map_err(|e| format!("verify: {}", js_message(&e)))?;
+    good.as_bool().ok_or_else(|| format!("verify answered {good:?}, not a boolean"))
 }
 
 /// Cryptographically random bytes (the runtime's `crypto.getRandomValues`).

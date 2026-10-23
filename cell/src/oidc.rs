@@ -2,7 +2,8 @@
 //! half, beside WorkOS's in auth.rs and chosen by configuration
 //! (`Config::oidc`), and the provider's metadata and keys, fetched and kept
 //! per isolate, with an id_token verified by them. The rules are
-//! `fragment_core::oidc`'s; the registry exchanges the code with the
+//! `fragment_core::oidc`'s, its signature checked by the runtime's WebCrypto
+//! (`js::signature_verifies`); the registry exchanges the code with the
 //! client's secret from keys.rs (`registry/oidc_signin.rs`).
 //!
 //! What it shares with WorkOS's sign-in, in auth.rs: the round trip bound
@@ -106,11 +107,12 @@ async fn fetch_keys(cfg: &OidcConfig, provider: &Provider, now: i64) -> CellResu
 }
 
 /// An id_token from the provider's token endpoint, verified for this
-/// sign-in (its `nonce`). A key the isolate's JWKS lacks fetches the JWKS
-/// again, once, unless the last fetch was within `JWKS_REFETCH_MIN_MS` (the
-/// provider rotated); nothing else is tried again. A refusal is 401,
-/// logged with why: an id_token that fails is a provider misconfigured
-/// (another client's audience, a skewed clock) or one not to trust.
+/// sign-in (its `nonce`), its signature by the runtime's WebCrypto. A key
+/// the isolate's JWKS lacks fetches the JWKS again, once, unless the last
+/// fetch was within `JWKS_REFETCH_MIN_MS` (the provider rotated); nothing
+/// else is tried again. A refusal is 401, logged with why: an id_token that
+/// fails is a provider misconfigured (another client's audience, a skewed
+/// clock) or one not to trust.
 pub async fn verify(cfg: &OidcConfig, provider: &Provider, token: &str, nonce: &str) -> CellResult<Verified> {
     let now = js::now_ms();
     let expect = Expect { issuer: &cfg.issuer, client_id: &cfg.client_id, nonce, now_s: now.div_euclid(1000), algs: &provider.algs };
@@ -119,8 +121,8 @@ pub async fn verify(cfg: &OidcConfig, provider: &Provider, token: &str, nonce: &
         Some(k) => k,
         None => (fetch_keys(cfg, provider, now).await?, now),
     };
-    let verified = match oidc::verify(token, &keys, &expect) {
-        Err(IdTokenError::UnknownKey(_)) if oidc::may_refetch(fetched_at, now) => oidc::verify(token, &*fetch_keys(cfg, provider, now).await?, &expect),
+    let verified = match oidc::verify(token, &keys, &expect, js::signature_verifies).await {
+        Err(IdTokenError::UnknownKey(_)) if oidc::may_refetch(fetched_at, now) => oidc::verify(token, &*fetch_keys(cfg, provider, now).await?, &expect, js::signature_verifies).await,
         verified => verified,
     };
     verified.map_err(|e| {
