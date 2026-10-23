@@ -2153,10 +2153,10 @@ and how a runtime finds them, is the image's.
   platform skill by the platform skill leaving the view. An agent's profile has
   its own, the managed set, which is what the shell's Skills section
   lists, the platform skill, and Hermes' pinned bundled skills. The managed
-  release has fifteen workflows: apps, git, brains, connected Google,
+  release has sixteen workflows: apps, git, brains, connected Google,
   image steps, model tiers and a chat's attachments, plus Cashu, Nostr CLI, X API, direct music,
-  market analysis, Polymarket and design, and the upstream `gws-docs` command guide
-  alongside connected Google (templates/skills/README.md). Generic skills
+  market analysis, Polymarket and design, and the upstream `gws-docs` and
+  `gws-slides` command guides alongside connected Google (templates/skills/README.md). Generic skills
   come from Hermes; optional ones remain in its hub. At build, the image
   moves Hermes' bundled tree to `/opt/fragment/bundled-skills`, so stage2
   and the gateway sync nothing into a saved profile. The boot copies each
