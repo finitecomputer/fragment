@@ -100,7 +100,7 @@ pub fn shell_page(text: &str, release: &str) -> String {
 /// each with its content type: of the rest of cell/shell/, its pages are
 /// served at their own paths, and its credits and licenses not at all.
 #[cfg(feature = "platform")]
-const SHELL_PUBLISHED: [(&str, &str); 28] = [
+const SHELL_PUBLISHED: [(&str, &str); 29] = [
     // the platform's pages' look and Funnel Sans (vendor/funnel-sans-OFL.txt),
     // which the shell loads too: its type, and its first run's card
     ("platform-pages.css", "text/css; charset=utf-8"),
@@ -142,8 +142,9 @@ const SHELL_PUBLISHED: [(&str, &str); 28] = [
     ("admin.js", "text/javascript; charset=utf-8"),
     ("admin.css", "text/css; charset=utf-8"),
     // the look of Finite's about page, privacy policy and terms (`/about`,
-    // `/privacy`, `/terms`)
+    // `/privacy`, `/terms`): a sheet of paper, its edges bowed by this mask
     ("legal.css", "text/css; charset=utf-8"),
+    ("paper-edge.svg", "image/svg+xml"),
 ];
 
 /// A file the shell publishes, by its name, and its content type.

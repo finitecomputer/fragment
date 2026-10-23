@@ -68,18 +68,21 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
             && header("content-type").starts_with("text/html")
             && r.text.contains(&format!("<title>{title}</title>"))
             && r.text.contains(&format!("<h1>{h1}</h1>"))
+            && r.text.contains("/__shell/platform-pages.css")
             && r.text.contains("/__shell/legal.css")
             && !r.text.contains("<script")
             && header("content-security-policy").contains("frame-ancestors 'none'")
+            && header("content-security-policy").contains("font-src 'self'")
     });
-    // their stylesheet, and the shell's type (platform-pages.css), the release's own
-    let published = ["legal.css", "platform-pages.css", "funnel-sans-400.ttf", "funnel-sans-500.ttf", "funnel-sans-600.ttf", "funnel-sans-700.ttf"]
+    // their stylesheets, their paper's edge, and the type they and the shell
+    // share (platform-pages.css), the release's own
+    let published = ["legal.css", "platform-pages.css", "funnel-sans-400.ttf", "funnel-sans-500.ttf", "funnel-sans-600.ttf", "funnel-sans-700.ttf", "paper-edge.svg"]
         .iter()
         .map(|f| api.unsigned("GET", &format!("/__shell/{f}"), None).map(|r| (r.status, r.headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string())))
         .collect::<Result<Vec<_>>>()?;
-    let typed = published.iter().zip(["text/css", "text/css", "font/ttf", "font/ttf", "font/ttf", "font/ttf"]).all(|((status, got), want)| *status == 200 && got.starts_with(want));
+    let typed = published.iter().zip(["text/css", "text/css", "font/ttf", "font/ttf", "font/ttf", "font/ttf", "image/svg+xml"]).all(|((status, got), want)| *status == 200 && got.starts_with(want));
     s.ok(
-        "Finite's about page (/about), privacy policy (/privacy) and terms (/terms) answer anyone, signed out: static pages with their titles, their stylesheet published, never framed; the shell's type (platform-pages.css, its fonts) published too",
+        "Finite's about page (/about), privacy policy (/privacy) and terms (/terms) answer anyone, signed out: static pages with their titles, in the release's own type (their CSP allows its fonts), their stylesheets and paper published, never framed",
         shown && typed,
         json!({ "pages": legal.iter().map(|(r, title, _)| json!({ "title": title, "status": r.status, "head": r.text.chars().take(300).collect::<String>() })).collect::<Vec<_>>(), "published": published }),
     );

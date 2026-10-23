@@ -1,38 +1,68 @@
-/* Finite's privacy policy and terms (privacy.html, terms.html): the
-   platform's sheet pages' look (cell/src/share.rs SHEET_STYLE), a card of
-   readable text, on a phone too. */
-:root {
-  color-scheme: light dark;
-  --bg: light-dark(#f7f6f3, #212121);
-  --fg: light-dark(#171717, #ececec);
-  --muted: light-dark(#66615b, #a6a19d);
-  --surface: light-dark(#fffdfa, #2b2b2a);
-  --accent: light-dark(#315fbd, #8ab4ff);
+/* Finite's about page, privacy policy and terms (about.html, privacy.html,
+   terms.html): a sheet of paper on the dimmed landscape, in the platform
+   pages' Funnel Sans (platform-pages.css: Skyler's onboarding design,
+   2026-10-22; this is its policy documents' sheet). The
+   sheet is as tall as the screen allows and its text scrolls inside it,
+   under its heading; it rests at a slight angle, straightens a little under
+   a pointer, and rises in as the page opens. Printed, it is plain text. */
+html { color-scheme: light dark; height: 100%; }
+html::before {
+  content: ""; position: fixed; inset: 0; z-index: -1;
+  background: linear-gradient(rgba(10, 15, 12, .48), rgba(10, 15, 12, .48)), #80b2df url("wallpaper.jpg") center / cover no-repeat;
+}
+@media (prefers-color-scheme: dark) {
+  html::before { background: linear-gradient(rgba(10, 15, 12, .48), rgba(10, 15, 12, .48)), #071f3d url("wallpaper-dark.jpg") center / cover no-repeat; }
 }
 body {
-  margin: 0 auto;
-  padding: 16px;
-  max-width: 40rem;
-  background: var(--bg);
-  color: var(--fg);
-  font: 15px/1.6 "Funnel Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
-  -webkit-font-smoothing: antialiased;
+  box-sizing: border-box; min-height: 100%; margin: 0; padding: 36px 24px; display: grid; place-items: center;
+  font: 400 16px/1.75 "Funnel Sans", ui-sans-serif, system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased;
 }
-main {
-  background: var(--surface);
-  border-radius: 14px;
-  padding: 20px 24px;
-  box-shadow: 0 1px 2px #0000001a, 0 8px 28px #0000001a;
-  overflow-wrap: anywhere;
+.paper {
+  --paper-angle: -.65deg; --paper-hover: -.35deg;
+  position: relative; isolation: isolate; box-sizing: border-box; display: flex; flex-direction: column;
+  width: min(720px, 100%); height: min(880px, calc(100dvh - 72px)); padding: 64px 64px 40px;
+  color: #252622; color-scheme: light; overflow-wrap: anywhere;
+  transform: rotate(var(--paper-angle)); transition: transform 600ms cubic-bezier(.2, .7, .2, 1);
+  filter: drop-shadow(0 22px 32px rgba(0, 0, 0, .28)) drop-shadow(0 3px 5px rgba(0, 0, 0, .16));
+  animation: paper-arrive 360ms cubic-bezier(.2, .75, .25, 1) backwards;
 }
-h1 { font-size: 1.5rem; font-weight: 600; margin: 0 0 .4em; }
-h2 { font-size: 1rem; font-weight: 600; margin: 1.6em 0 .4em; }
-p, ul { margin: 0 0 .8em; }
-ul { padding-left: 1.2em; }
-li { margin: .3em 0; }
-a { color: var(--accent); }
-.updated { color: var(--muted); font-size: .875rem; }
-@media (max-width: 480px) {
-  body { padding: 8px; }
-  main { padding: 16px; border-radius: 12px; }
+.paper.terms { --paper-angle: .55deg; --paper-hover: .3deg; }
+/* the paper itself: gently shaded, its edges almost straight, bowed */
+.paper::before {
+  content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  background: linear-gradient(115deg, #fffefa 0%, #fffefb 36%, #faf8f1 100%);
+  -webkit-mask: url("paper-edge.svg") center / 100% 100% no-repeat; mask: url("paper-edge.svg") center / 100% 100% no-repeat;
+}
+@media (hover: hover) and (pointer: fine) { .paper:hover { transform: rotate(var(--paper-hover)); } }
+@keyframes paper-arrive { from { opacity: 0; transform: translateY(26px) rotate(calc(var(--paper-angle) - .6deg)) scale(.985); } }
+.paper-heading { flex: none; padding-bottom: 28px; border-bottom: 1px solid #e5e4df; }
+.paper-heading > span { font-size: 14px; line-height: 1.5; color: #6c6e65; }
+.paper-heading h1 { margin: 18px 0 0; font-size: 34px; font-weight: 500; line-height: 1.2; letter-spacing: -1px; }
+.paper-content { flex: 1; min-height: 0; overflow-y: auto; padding: 28px 12px 0 0; scrollbar-width: thin; scrollbar-color: #d8d6cc transparent; overscroll-behavior: contain; }
+.paper-content h2 { margin: 28px 0 12px; font-size: 19px; font-weight: 600; line-height: 1.3; letter-spacing: -.3px; color: #252622; }
+.paper-content :is(p, ul) { margin: 0 0 16px; color: #505149; }
+.paper-content ul { padding-left: 1.2em; }
+.paper-content li { margin: .3em 0; }
+.paper-content strong { font-weight: 600; color: #252622; }
+.paper-content a { color: #252622; text-decoration-color: #9a9c90; text-underline-offset: 3px; }
+.paper-content a:hover { text-decoration-color: currentColor; }
+.paper-content a:focus-visible { outline: 3px solid #779a53; outline-offset: 2px; border-radius: 2px; }
+.paper-content .updated { margin-bottom: 26px; font-size: 14px; line-height: 1.5; color: #6c6e65; }
+@media (max-width: 600px) {
+  body { padding: 20px 16px; }
+  .paper { --paper-angle: -.35deg; --paper-hover: -.2deg; height: calc(100dvh - 40px); padding: 48px 26px 28px; }
+  .paper.terms { --paper-angle: .3deg; --paper-hover: .15deg; }
+  .paper-heading { padding-bottom: 22px; }
+  .paper-heading h1 { font-size: 29px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .paper { animation: none; transition: none; }
+  .paper:hover { transform: rotate(var(--paper-angle)); }
+}
+@media print {
+  html::before { display: none; }
+  body { display: block; padding: 0; }
+  .paper { width: auto; height: auto; padding: 0; transform: none; filter: none; animation: none; }
+  .paper::before { display: none; }
+  .paper-content { overflow: visible; padding: 0; }
 }

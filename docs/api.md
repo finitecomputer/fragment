@@ -2665,9 +2665,11 @@ settings at `/settings`, the welcome at `/welcome`, and the person's
 chats at `/`, and puts the view it shows in the address, so a reload
 stays put. Finite's about page, privacy policy and terms are `/about`,
 `/privacy` and `/terms` (cell/shell/about.html, privacy.html,
-terms.html: static pages, for anyone, signed out too), linked from the
-first run's footer (all three, with Contact: index.html) and at the end
-of Settings' Account (privacy and terms). The first run's screens (the landing, the welcome, a seat's
+terms.html: static pages, for anyone, signed out too, each a sheet of
+paper on the landscape: `platform-pages.css` and `legal.css`, their CSP
+allowing the release's own fonts), linked from the first run's footer
+(all three, with Contact: index.html) and at the end of Settings'
+Account (privacy and terms). The first run's screens (the landing, the welcome, a seat's
 step) are the platform pages' grid and card (`platform-pages.css`):
 Finite's logo, one glass card, and that footer (Skyler's onboarding
 design, 2026-10-22); the shell's type, Funnel Sans, is the release's own

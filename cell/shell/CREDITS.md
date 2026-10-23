@@ -6,6 +6,9 @@
   `shell.js`, `billing.js`) and the design's inner tickets, plan list and
   footer (`platform-pages.css`): Skyler's onboarding design
   (`finite-onboarding.html`), supplied by Skyler (2026-10-22).
+- `legal.css` and `paper-edge.svg` (the paper's bowed edges, a mask copied
+  unchanged): the design's policy documents' sheet, supplied by Skyler
+  (2026-10-22).
 - `funnel-sans-400.ttf` to `-700.ttf`: Funnel Sans (The Funnel Project
   Authors, github.com/Dicotype/Funnel), under the SIL Open Font License 1.1
   (`vendor/funnel-sans-OFL.txt`), supplied by Skyler (2026-10-22), copied
