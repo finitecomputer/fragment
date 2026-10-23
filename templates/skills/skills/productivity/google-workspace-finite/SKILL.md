@@ -1,7 +1,7 @@
 ---
 name: google-workspace-finite
 description: Gmail, Calendar, Drive, Contacts, Sheets, and Docs through the person's connected Google account, with `gws` (Google's Workspace CLI, in your computer's image) or the bundled helper. No OAuth setup, no keys on the computer.
-version: 2.3.0
+version: 2.3.1
 author: Nous Research (rewritten for fragment)
 license: MIT
 metadata:
@@ -31,6 +31,10 @@ library only) does the common calls the same way.
 Hermes' standalone `google-workspace` skill is omitted from this image:
 its OAuth setup and token-file helpers are for a different authentication
 contract. Use this skill and `gws` here.
+
+For Google Docs tasks, load `skill_view("gws-docs")` if not already loaded
+for Docs command and schema discovery. This skill owns the connection
+and authentication.
 
 ## Connected?
 

@@ -357,7 +357,8 @@ mod tests {
         for gone in ["shared-skills-finite", "finite-sites-publishing-finite", "publish-web-apps-finite", "website-building-finite", "finitebrain", "llm-wiki-finite", "fal-image-editing-finite", "ml-paper-writing-finite", "powerpoint-finite"] {
             assert!(!names.contains(gone), "{gone} is replaced");
         }
-        assert_eq!(names.len(), 12, "Fragment contracts and the six operator integrations Paul retains");
+        assert!(names.contains("gws-docs"), "the upstream Docs guide complements connected Google");
+        assert_eq!(names.len(), 13, "Fragment contracts, the six operator integrations Paul retains, and the upstream Docs guide");
         assert!(data_file("skills", "fragment.json").is_none() && data_file("skills", "skills/nope/SKILL.md").is_none());
     }
 
