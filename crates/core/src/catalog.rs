@@ -394,11 +394,25 @@ pub fn is_loopback(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "[::1]")
 }
 
-/// A URL a row names, checked: https on a host name (no port), or with
-/// `loopback`, a local fleet's fake at `http://127.0.0.1:<port>` (the
-/// cell refuses one but on a fleet whose egress may reach local addresses).
-/// No user, no fragment. Answers its host.
-pub fn row_url(u: &str, loopback: bool) -> Result<String, String> {
+/// Where a URL a row names may be plain http (`row_url`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Plain {
+    /// Nowhere: https on a host name alone.
+    Never,
+    /// A local fleet's fake: `http://127.0.0.1:<port>` (a loopback address
+    /// or `localhost`, with a port).
+    Fake,
+    /// A local fleet's own server: a loopback address, `localhost`, or a
+    /// name under `.localhost` (RFC 6761: `http://bonsai.localhost/v1`, a
+    /// reverse proxy on port 80 routing by name), with a port or none.
+    Local,
+}
+
+/// A URL a row names, checked: https on a host name (no port), or plain
+/// http where `plain` allows it (the cell refuses one but on a fleet whose
+/// egress may reach local addresses). No user, no fragment. Answers its
+/// host.
+pub fn row_url(u: &str, plain: Plain) -> Result<String, String> {
     if u.len() > URL_MAX_BYTES {
         return Err(format!("a URL is at most {URL_MAX_BYTES} bytes"));
     }
@@ -407,10 +421,19 @@ pub fn row_url(u: &str, loopback: bool) -> Result<String, String> {
         return Err(format!("{u:?} names a user or a fragment"));
     }
     let host = parsed.host_str().unwrap_or_default().to_string();
-    match parsed.scheme() {
-        "https" if valid_host(&host) && parsed.port().is_none() => Ok(host),
-        "http" if loopback && is_loopback(&host) && parsed.port().is_some() => Ok(host),
-        _ => Err(format!("{u:?} is not https on a host name{}", if loopback { " (nor a local fleet's http://127.0.0.1:<port>)" } else { "" })),
+    let local_name = host.ends_with(".localhost") && valid_host(&host);
+    match (parsed.scheme(), plain) {
+        ("https", _) if valid_host(&host) && parsed.port().is_none() => Ok(host),
+        ("http", Plain::Fake) if is_loopback(&host) && parsed.port().is_some() => Ok(host),
+        ("http", Plain::Local) if is_loopback(&host) || local_name => Ok(host),
+        _ => Err(format!(
+            "{u:?} is not https on a host name{}",
+            match plain {
+                Plain::Never => "",
+                Plain::Fake => " (nor a local fleet's http://127.0.0.1:<port>)",
+                Plain::Local => " (nor, on a local fleet, http to this machine: 127.0.0.1, localhost or a name under .localhost)",
+            }
+        )),
     }
 }
 
@@ -421,14 +444,14 @@ pub fn valid_model_id(id: &str) -> bool {
 }
 
 fn check_oauth(o: &KeyOAuth) -> Result<(), String> {
-    row_url(&o.authorize, true).map_err(|e| format!("authorize: {e}"))?;
-    row_url(&o.exchange, true).map_err(|e| format!("exchange: {e}"))?;
-    row_url(&o.manage, false).map_err(|e| format!("manage: {e}"))?;
+    row_url(&o.authorize, Plain::Fake).map_err(|e| format!("authorize: {e}"))?;
+    row_url(&o.exchange, Plain::Fake).map_err(|e| format!("exchange: {e}"))?;
+    row_url(&o.manage, Plain::Never).map_err(|e| format!("manage: {e}"))?;
     Ok(())
 }
 
 fn check_models(m: &Models, hosts: &[String]) -> Result<(), String> {
-    let host = row_url(&m.base_url, false).map_err(|e| format!("base_url: {e}"))?;
+    let host = row_url(&m.base_url, Plain::Never).map_err(|e| format!("base_url: {e}"))?;
     if !hosts.contains(&host) {
         return Err(format!("base_url's host {host} is none of its hosts, so its key would never be added"));
     }
@@ -751,7 +774,10 @@ mod tests {
         local["oauth"]["authorize"] = json!("http://127.0.0.1:4810/auth");
         local["oauth"]["exchange"] = json!("http://localhost:4810/api/v1/auth/keys");
         assert!(parse(json!([local])).is_ok(), "a local fleet's fake");
-        assert_eq!(row_url("https://openrouter.ai/auth", false).unwrap(), "openrouter.ai");
+        // a sign-in's fake is a port on loopback alone: local names are a model's (`Plain::Local`)
+        local["oauth"]["authorize"] = json!("http://bonsai.localhost/auth");
+        assert!(parse(json!([local])).is_err(), "a local name is no sign-in's fake");
+        assert_eq!(row_url("https://openrouter.ai/auth", Plain::Never).unwrap(), "openrouter.ai");
     }
 
     /// Invalid: a sign-in or models on a row that is no own key, a URL that

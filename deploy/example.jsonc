@@ -97,12 +97,16 @@
   // the gateway, `{"provider": "workers_ai", "model": <catalog id>}`, or a
   // model on an OpenAI-compatible API, `{"provider": "openai", "base_url",
   // "key": <its secret's name in the store>, "model": <its id there>,
-  // "body"?: {…}}`. `body` is fields of that API's own that every call to it
-  // carries, over the agent's of the same names: at most 4 KiB of JSON,
-  // naming none of the fields the route writes (model, messages, stream,
-  // stream_options, tools, tool_choice, max_tokens, max_completion_tokens,
-  // reasoning_effort). A slot left out is on Workers AI: cheap GLM-5.3
-  // Flash, medium GLM-5.3, fallback DeepSeek V4 Flash, vision GLM-5.3 Flash.
+  // "body"?: {…}}`: `base_url` is https on a host name (on a local fleet,
+  // whose egress reaches this machine, http to it too: 127.0.0.1,
+  // localhost or a name under .localhost, on any port or none, as
+  // `http://bonsai.localhost/v1`). `body` is fields of that API's own
+  // that every call to it carries, over the agent's of the same names: at
+  // most 4 KiB of JSON, naming none of the fields the route writes (model,
+  // messages, stream, stream_options, tools, tool_choice, max_tokens,
+  // max_completion_tokens, reasoning_effort). A slot left out is on
+  // Workers AI: cheap GLM-5.3 Flash, medium GLM-5.3, fallback DeepSeek V4
+  // Flash, vision GLM-5.3 Flash.
   // Every model is one the price book prices (fragment_core::price), or one
   // on OpenRouter at its slot's ceiling (below), or the deploy is refused.
   // Leave `models` out (as a preview without a key does)

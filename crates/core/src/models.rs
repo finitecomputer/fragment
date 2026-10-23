@@ -293,7 +293,7 @@ impl Upstream {
 /// parsed and normalized: lower case, https's port 443 dropped), so no
 /// spelling of the URL that reaches OpenRouter passes for another API's.
 fn on_openrouter(base_url: &str) -> bool {
-    crate::catalog::row_url(base_url, true).is_ok_and(|host| host.strip_suffix(OPENROUTER_HOST).is_some_and(|sub| sub.is_empty() || sub.ends_with('.')))
+    crate::catalog::row_url(base_url, crate::catalog::Plain::Fake).is_ok_and(|host| host.strip_suffix(OPENROUTER_HOST).is_some_and(|sub| sub.is_empty() || sub.ends_with('.')))
 }
 
 fn workers_ai(model: &str) -> Upstream {
@@ -335,8 +335,8 @@ impl Models {
     /// price book nor its slot's ceiling prices (a ledger would charge none
     /// of its calls; `Upstream::ceiling`, which refuses a slot on OpenRouter
     /// without one), an OpenAI-compatible API's `base_url` that is not
-    /// https on a host name (`loopback`: or a local fleet's fake at
-    /// `http://127.0.0.1:<port>`), or names a query or a trailing `/`, and
+    /// https on a host name (`loopback`: or, on a local fleet, http to this
+    /// machine: `catalog::Plain::Local`), or names a query or a trailing `/`, and
     /// its `body` when it is no object, is past `UPSTREAM_BODY_MAX_BYTES`,
     /// or names a key the route writes (`ROUTE_KEYS`); and a model id two
     /// slots name at two places (`same_place`) or at two ceilings: a call
@@ -489,7 +489,8 @@ impl UnknownModel {
 /// One slot's model, checked (`Models::parse`).
 fn check(upstream: &Upstream, book: &PriceBook, loopback: bool) -> Result<(), String> {
     if let Upstream::Openai { base_url, model, body } = upstream {
-        crate::catalog::row_url(base_url, loopback).map_err(|e| format!("base_url: {e}"))?;
+        let plain = if loopback { crate::catalog::Plain::Local } else { crate::catalog::Plain::Never };
+        crate::catalog::row_url(base_url, plain).map_err(|e| format!("base_url: {e}"))?;
         if base_url.ends_with('/') || base_url.contains('?') {
             return Err("base_url is named without a query or a trailing /: the route adds /chat/completions".into());
         }
@@ -1440,6 +1441,17 @@ mod tests {
         let local = slot(json!({ "provider": "openai", "base_url": "http://127.0.0.1:4810/v1", "model": "glm-5-3-flash" }));
         assert_eq!(parse(&local, true).unwrap().cheap, openai("http://127.0.0.1:4810/v1", FINITE_PRIVATE_FLASH));
         assert!(parse(&local, false).is_err(), "a deployment never names one");
+        // and its own server by a local name, on port 80 too (a reverse
+        // proxy routing by name: Bonsai behind Caddy, Paul's, 2026-10-22)
+        for at in ["http://bonsai.localhost/v1", "http://bonsai.localhost:8080/v1", "http://a.b.localhost/v1", "http://localhost/v1", "http://127.0.0.1/v1", "http://[::1]/v1"] {
+            let named = slot(json!({ "provider": "openai", "base_url": at, "model": "glm-5-3-flash" }));
+            assert_eq!(parse(&named, true).unwrap().cheap, openai(at, FINITE_PRIVATE_FLASH), "{at}");
+            assert!(parse(&named, false).is_err(), "a deployment that is no local fleet never names {at}");
+        }
+        for bad in ["http://localhost.example/v1", "http://bonsailocalhost/v1", "http://bonsai.localhost.example/v1", "http://-x.localhost/v1", "http://10.0.0.1/v1", "http://user@bonsai.localhost/v1"] {
+            let named = slot(json!({ "provider": "openai", "base_url": bad, "model": "glm-5-3-flash" }));
+            assert!(parse(&named, true).is_err(), "{bad} is no name of this machine's");
+        }
         // an id is one model: two slots naming it name one place (a call names it by its id)
         let elsewhere = json!({ "cheap": { "provider": "openai", "base_url": "https://a.example/v1", "model": GLM_FLASH } }).to_string();
         refused(&elsewhere, "models.vision: \"@cf/zai-org/glm-5.3-flash\" is models.cheap's model too, where it runs elsewhere");
