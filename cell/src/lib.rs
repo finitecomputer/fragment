@@ -660,15 +660,19 @@ fn command_body<T: serde::de::DeserializeOwned>(body: &[u8], what: &str) -> Cell
 }
 
 /// `/api/ledger…` (docs/ledger.md; docs/api.md, Ledger): `GET` reads the
-/// signer's (an agent's: its owner's); the deployment's operators grant
+/// signer's (an agent's: its owner's), and `GET /usage` what they used this
+/// month, in units; the deployment's operators grant
 /// credit and set a person's plan and overdraft, the person named by email
 /// or identity. A seat's state has one writer, the registry (docs/billing.md):
 /// an operator comps or ends a seat through it.
 async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest: &[&str]) -> CellResult<Response> {
     let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
-    if let (Method::Get, []) = (req.method(), rest) {
-        let who = signer(env, &req, url, &body).await?;
-        return json_answer(&ledger::ask(env, &payer_of(&who)?, &ledger::Status {}).await?);
+    if let (Method::Get, [] | ["usage"]) = (req.method(), rest) {
+        let payer = payer_of(&signer(env, &req, url, &body).await?)?;
+        return match rest {
+            [] => json_answer(&ledger::ask(env, &payer, &ledger::Status {}).await?),
+            _ => json_answer(&ledger::used(env, &payer).await?),
+        };
     }
     let (Method::Post, [person, command]) = (req.method(), rest) else {
         return Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", req.method().as_ref(), url.path())));

@@ -428,6 +428,18 @@ enum OperatorCmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
+    /// Who used what this month, in units, not money: each person's model
+    /// calls and tokens, and their computers' hours awake (on the
+    /// deployment's machines, and on their own); a page of people at a
+    /// time, --q by the start of their email
+    Usage {
+        #[arg(long)]
+        q: Option<String>,
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
     /// One person: their seat, org, ledger and computer
     Person {
         npub: String,
@@ -1224,6 +1236,39 @@ fn run(cli: Cli) -> Result<()> {
                 println!("{}  {}  {seat}  {}", p["npub"].as_str().unwrap_or("?"), p["email"].as_str().unwrap_or("-"), p["org"]["name"].as_str().unwrap_or(""));
             }
             if let Some(next) = v["next"].as_str() {
+                println!("more: --after {next}");
+            }
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Usage { q, after, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let mut path = "/api/admin/usage?".to_string();
+            if let Some(q) = &q {
+                path.push_str(&format!("q={}&", api::encode_q(q)));
+            }
+            if let Some(a) = &after {
+                path.push_str(&format!("after={}", api::encode_q(a)));
+            }
+            let v: fragment_proto::org::AdminUsage = c.call_as(c.get(&path)?)?;
+            json_exit(j, &v);
+            let hours = |ms: u64| format!("{:.1} h", ms as f64 / 3_600_000.0);
+            for p in &v.people {
+                let who = p.email.as_deref().unwrap_or(&p.npub);
+                let Some(u) = &p.used else {
+                    println!("{who}  (their ledger did not answer)");
+                    continue;
+                };
+                for m in &u.models {
+                    println!("{who}  {}  {}  {} calls, {} tokens in, {} out", u.month, m.model, m.calls, m.input_tokens, m.output_tokens);
+                }
+                if u.awake_ms + u.own_awake_ms > 0 {
+                    println!("{who}  {}  computer  {} awake on the deployment's machines, {} on their own", u.month, hours(u.awake_ms), hours(u.own_awake_ms));
+                }
+                if u.models.is_empty() && u.awake_ms + u.own_awake_ms == 0 {
+                    println!("{who}  {}  nothing", u.month);
+                }
+            }
+            if let Some(next) = &v.next {
                 println!("more: --after {next}");
             }
             return Ok(());

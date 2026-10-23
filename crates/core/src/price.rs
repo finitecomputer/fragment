@@ -347,11 +347,18 @@ pub const DEFAULT_NEURONS: i64 = 11_000;
 /// - CPU, billed on active use only, which the Computer DO cannot see:
 ///   5% of 2 vCPU (an idle guest) × $0.000020 a vCPU-second = $0.0072 an hour.
 ///
-/// $0.064224 an awake hour, about $46 for an always-on month.
-pub const DEFAULT_INSTANCES: [(&str, i64); 1] = [(INSTANCE, 64_224)];
+/// $0.064224 an awake hour, about $46 for an always-on month. And
+/// `OWN_HARDWARE`, at nothing.
+pub const DEFAULT_INSTANCES: [(&str, i64); 2] = [(INSTANCE, 64_224), (OWN_HARDWARE, 0)];
 /// The instance every computer runs on: its container starts at its size
 /// (`instance_size`), and its awake time is priced by the book's row for it.
 pub const INSTANCE: &str = "2vcpu-6gib";
+/// The instance a computer's awake time is metered on while it runs on a
+/// node its owner paired (docs/self-host.md, seams 2 and 10): their own
+/// machine, which costs the platform nothing, so the book prices it at
+/// nothing. Its hours still reach their ledger, as anyone's do, and show
+/// as theirs (`ledger::used`). No container is sized by it.
+pub const OWN_HARDWARE: &str = "own-hardware";
 
 /// The size a computer's container starts at (`ctx.container.start`'s
 /// `instance`): one of Containers' named types, or a size of its own.

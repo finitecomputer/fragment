@@ -70,6 +70,7 @@ pub mod gate;
 mod sim;
 #[cfg(test)]
 mod tests;
+pub mod used;
 
 const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 24 * HOUR_MS;
@@ -133,6 +134,22 @@ impl Month {
     /// `YYYY-MM`, for people.
     pub fn label(self) -> String {
         format!("{:04}-{:02}", 1970 + self.0 / 12, self.0 % 12 + 1)
+    }
+
+    /// Its first instant, Unix ms (`of`'s inverse: Hinnant's
+    /// days_from_civil, for its 1st).
+    pub fn start_ms(self) -> i64 {
+        let (year, month) = (1970 + i64::from(self.0 / 12), i64::from(self.0 % 12) + 1);
+        let year = if month <= 2 { year - 1 } else { year };
+        let era = year.div_euclid(400);
+        let yoe = year - era * 400;
+        let doy = (153 * ((month + 9) % 12) + 2) / 5;
+        let doe = 365 * yoe + yoe / 4 - yoe / 100 + doy;
+        (era * 146_097 + doe - 719_468) * DAY_MS
+    }
+
+    pub fn next(self) -> Month {
+        Month(self.0 + 1)
     }
 
     /// The month `label` (`YYYY-MM`, `label`'s inverse) names.

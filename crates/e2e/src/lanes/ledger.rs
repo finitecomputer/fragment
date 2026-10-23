@@ -691,7 +691,106 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
 
     // ---- the meters: requests, dynamic workers and storage, once each
     s.ai.clear_script();
-    meters(s, api, wait)
+    meters(s, api, wait)?;
+
+    // ---- who used what, in units, on a model of the deployment's own at no price
+    self_hosted(s)
+}
+
+/// A person's line of the operators' usage table (`GET /api/admin/usage`,
+/// found by their email, the run's operator key signing): `Null` when it
+/// does not list them.
+pub(super) fn operator_usage(s: &Suite, api: &Api, person: &Keys) -> Result<Value> {
+    let id = api.identity(person)?;
+    let r = api.signed(&s.operator, "GET", &format!("/api/admin/usage?q={}", url_enc(&Api::email_of(person))), None)?;
+    anyhow::ensure!(r.status == 200, "the operators' usage table: {r}");
+    Ok(r.body["people"].as_array().into_iter().flatten().find(|p| p["npub"] == id.as_str()).cloned().unwrap_or(Value::Null))
+}
+
+/// Who used what, in units, not money (docs/self-host.md, seam 10), on a
+/// node whose model route runs a model of the deployment's own at no
+/// price, as a self-hosted one runs Bonsai (`Shape::SelfHosted`): an
+/// agent's calls on it, streamed and not, are charged nothing and kept
+/// with their tokens on its owner's ledger; the owner reads their month's
+/// use, and an operator's table (the API, and `fragment operator usage`)
+/// shows the same line; anyone else is refused the table (403).
+fn self_hosted(s: &mut Suite) -> Result<()> {
+    s.stop()?;
+    let api = s.start_self_hosted()?;
+    s.ai.accept_key(crate::FINITE_PRIVATE_KEY);
+    s.ai.clear_script();
+    let checked = self_hosted_checks(s, &api);
+    // the node as the lanes after it expect it: every tier on Workers AI
+    s.ai.clear_script();
+    s.stop()?;
+    s.start(false)?;
+    checked
+}
+
+fn self_hosted_checks(s: &mut Suite, api: &Api) -> Result<()> {
+    let wait = Duration::from_secs(40);
+    let own = fragment_core::models::FINITE_PRIVATE_FLASH;
+    let owner = api.person()?;
+    let owner_id = api.identity(&owner)?;
+    let hand = Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &owner) })))?;
+    anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
+    let before = ledger(api, &owner);
+    s.ai.set_usage(&[Used { prompt: 50, cached: 0, completion: 20 }, Used { prompt: 30, cached: 0, completion: 12 }]);
+    let one = api.signed(&hand, "POST", MODEL_ROUTE, Some(&hello()))?;
+    let two = api.signed(&hand, "POST", MODEL_ROUTE, Some(&json!({ "model": "medium", "stream": true, "messages": [{ "role": "user", "content": "hello" }] })))?;
+    let aig = || entries(api, &owner_id, "aig:");
+    let kept = s.eventually(wait, || aig().len() == 2);
+    let rows = aig();
+    let mut used: Vec<(u64, u64)> = rows.iter().filter_map(|e| Some((usage(e)["input"].as_u64()?, usage(e)["output"].as_u64()?))).collect();
+    used.sort_unstable();
+    s.ok(
+        "an agent's calls on a model of the deployment's own at no price (a self-hosted one's), streamed and not, are kept on its owner's ledger with their tokens, charged nothing",
+        one.status == 200 && two.status == 200 && kept && rows.iter().all(|e| charged(e) == Some(0) && usage(e)["model"] == own) && used == [(30, 12), (50, 20)],
+        json!({ "statuses": [one.status, two.status], "entries": rows }),
+    );
+    let after = ledger(api, &owner);
+    s.ok("their balance is as it was", after["balanceMicros"] == before["balanceMicros"] && after["balanceMicros"].is_i64(), json!({ "before": before, "after": after }));
+    let month = fragment_core::ledger::Month::of(crate::api::now_ms()).label();
+    let want = json!({ "month": month, "models": [{ "model": own, "calls": 2, "inputTokens": 80, "outputTokens": 32 }], "awakeMs": 0, "ownAwakeMs": 0 });
+    let mine = api.signed(&owner, "GET", "/api/ledger/usage", None)?;
+    let theirs = api.signed(&hand, "GET", "/api/ledger/usage", None)?;
+    s.ok(
+        "they read their month's use in units: the model's calls and tokens in and out; their agent reads its owner's",
+        mine.status == 200 && mine.body == want && theirs.body == want,
+        json!({ "mine": mine.body, "agent's": theirs.body }),
+    );
+    let line = operator_usage(s, api, &owner)?;
+    s.ok(
+        "an operator's usage table shows their line, though their calls cost nothing: who they are, and the same use",
+        line["email"] == Api::email_of(&owner).as_str() && line["used"] == want,
+        &line,
+    );
+    let refused = [api.signed(&owner, "GET", "/api/admin/usage", None)?, api.signed(&hand, "GET", "/api/admin/usage", None)?];
+    let unsigned = api.unsigned("GET", "/api/admin/usage", None)?;
+    s.ok(
+        "anyone else is refused the table (403): the person, their agent; unsigned is 401",
+        refused.iter().all(|r| r.status == 403) && unsigned.status == 401,
+        json!([refused.iter().map(|r| r.status).collect::<Vec<_>>(), unsigned.status]),
+    );
+    // `fragment operator usage`, with an operator key's file
+    let key = s.wiper.clone().unwrap_or_else(|| s.operator.clone());
+    let dir = s.dir("usage-operator");
+    let file = dir.join("operator.key");
+    std::fs::write(&file, format!("{}\n", key.secret_hex()))?;
+    std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    let path = file.to_string_lossy().to_string();
+    let email = Api::email_of(&owner);
+    let listed = s.cli_json(api, &s.dir("usage-cli"), &["operator", "usage", "--q", &email, "--key-file", &path, "--json"]);
+    let printed = String::from_utf8_lossy(&s.cli(api, &s.dir("usage-cli"), &["operator", "usage", "--q", &email, "--key-file", &path]).stdout).to_string();
+    s.ok(
+        "`fragment operator usage --q` with an operator key's file shows the same line, as JSON and as text",
+        listed.as_ref().is_ok_and(|v| v["people"].as_array().is_some_and(|p| p.iter().any(|p| p["npub"] == owner_id.as_str() && p["used"] == want)))
+            && printed.contains(&format!("{email}  {month}  {own}  2 calls, 80 tokens in, 32 out")),
+        format!("{listed:?} | {printed}"),
+    );
+    Ok(())
 }
 
 /// A model by its own id (Paul, 2026-10-16: "be able to run `/model` with

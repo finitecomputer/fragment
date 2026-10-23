@@ -1,6 +1,6 @@
 // The operators' admin page (docs/billing.md, "The operator's admin";
-// decision 59): people, orgs, trial codes, billing's health and the log
-// of what operators did, through `/api/admin/*` with the operator's own
+// decision 59): people, who used what, orgs, trial codes, billing's health
+// and the log of what operators did, through `/api/admin/*` with the operator's own
 // platform session (`x-fragment-shell`, same-origin only). The page is
 // served to an operator's session alone (anyone else gets the 404 of a
 // missing path), and the API decides again: anyone else is answered 403
@@ -134,6 +134,45 @@ async function openPerson(npub) {
   box.hidden = false;
 }
 
+// ---- who used what this month, in units, not money (docs/self-host.md,
+// seam 10): each person's models and their computers' hours, a row each
+let usageNext = null;
+let usageUsed = 0;
+
+const n = (v) => v.toLocaleString();
+const hours = (ms) => (ms / 3_600_000).toFixed(2);
+
+async function usage(more = false) {
+  const p = new URLSearchParams();
+  if (more && usageNext) p.set("after", usageNext);
+  const v = await api("GET", `/api/admin/usage?${p}`);
+  const rows = $("usage-rows");
+  if (!more) {
+    rows.replaceChildren();
+    usageUsed = 0;
+  }
+  let month = "";
+  for (const person of v.people) {
+    const who = person.email || person.npub;
+    const u = person.used;
+    if (!u) {
+      rows.append(row([who, "(their ledger did not answer)"]));
+      continue;
+    }
+    month = u.month;
+    const lines = [
+      ...u.models.map((m) => [m.model, n(m.calls), n(m.inputTokens), n(m.outputTokens), ""]),
+      ...(u.awakeMs ? [["computer, the deployment's machines", "", "", "", hours(u.awakeMs)]] : []),
+      ...(u.ownAwakeMs ? [["computer, their own machine", "", "", "", hours(u.ownAwakeMs)]] : []),
+    ];
+    if (lines.length) usageUsed++;
+    for (const l of lines) rows.append(row([who, ...l], guard(() => show("people").then(() => openPerson(person.npub)))));
+  }
+  usageNext = v.next;
+  $("usage-more").hidden = !v.next;
+  say(`${usageUsed} ${usageUsed === 1 ? "person" : "people"} used something${month ? ` in ${month}` : ""}${v.next ? " (more to load)" : ""}`);
+}
+
 // ---- orgs
 let orgsNext = null;
 
@@ -233,7 +272,7 @@ async function log(more = false) {
 }
 
 // ---- tabs
-const load = { people: () => people(), orgs: () => orgs(), trials, health, log: () => log() };
+const load = { people: () => people(), usage: () => usage(), orgs: () => orgs(), trials, health, log: () => log() };
 
 function show(tab) {
   for (const b of document.querySelectorAll("#tabs button")) b.classList.toggle("on", b.dataset.tab === tab);
@@ -271,6 +310,7 @@ document.addEventListener("DOMContentLoaded", guard(async () => {
     say(`made ${t.code}`);
   }));
   $("people-more").addEventListener("click", guard(() => people(true)));
+  $("usage-more").addEventListener("click", guard(() => usage(true)));
   $("orgs-more").addEventListener("click", guard(() => orgs(true)));
   $("log-more").addEventListener("click", guard(() => log(true)));
   await show(location.hash.slice(1) in load ? location.hash.slice(1) : "people");

@@ -1972,8 +1972,9 @@ async function openSettings(push = true, failed = null) {
   const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => reopenSettings(), noSeatSaid, switchForm, support: state.support };
   const back = await returning(billingHelpers);
   if (lost()) return;
-  const [ledger, mySeat, linked, uses, access, nodes] = await Promise.all([
+  const [ledger, used, mySeat, linked, uses, access, nodes] = await Promise.all([
     api("GET", "/api/ledger").catch(() => null),
+    api("GET", "/api/ledger/usage").catch(() => null),
     api("GET", "/api/seat").catch(() => null),
     api("GET", "/api/connections").catch(() => null),
     state.computer ? api("GET", `/api/computers/${seg(state.computer.computer)}/uses`).catch(() => null) : null,
@@ -2122,9 +2123,26 @@ async function openSettings(push = true, failed = null) {
   const skills = await skillsSection();
   if (lost()) return;
   returnSaid(back);
-  renderSettingsPage(page, [account, ...billing, computer, ...nodesSection(nodes), agents, accessSection(access), skills, connections, buildSection(), dataSection()]);
+  renderSettingsPage(page, [account, ...billing, ...usageSection(used), computer, ...nodesSection(nodes), agents, accessSection(access), skills, connections, buildSection(), dataSection()]);
   renderAgentFaces();
   tell();
+}
+
+// What they used this month, in units, not money (GET /api/ledger/usage;
+// docs/self-host.md, seam 10): each model's calls and tokens, and their
+// computer's hours, the platform's machines and their own apart. A failed
+// read shows no section (never "nothing").
+const countOf = (n, one, many) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+const hoursOf = (ms) => (ms < 3_600_000 ? `${Math.max(1, Math.round(ms / 60_000))} min` : `${(ms / 3_600_000).toLocaleString(undefined, { maximumFractionDigits: 1 })} h`);
+function usageSection(used) {
+  if (!used) return [];
+  const s = section("Usage this month");
+  s.id = "settings-usage";
+  for (const m of used.models) s.append(line(m.model, `${countOf(m.calls, "call", "calls")} · ${countOf(m.inputTokens, "token", "tokens")} in · ${m.outputTokens.toLocaleString()} out`));
+  if (used.awakeMs) s.append(line("Computer", `${hoursOf(used.awakeMs)} awake`));
+  if (used.ownAwakeMs) s.append(line("Your own machine", `${hoursOf(used.ownAwakeMs)} awake, never charged`));
+  if (!used.models.length && !used.awakeMs && !used.ownAwakeMs) s.append(el("p", "muted", "Nothing yet this month."));
+  return [s];
 }
 
 // ---- computers (experimental; docs/self-host.md, seam 2): on a platform
