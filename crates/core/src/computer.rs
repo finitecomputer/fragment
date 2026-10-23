@@ -277,6 +277,8 @@ pub enum Event {
     /// The sleep `generation` finished: the container is gone.
     Asleep { generation: u64 },
     /// The container stopped on its own (a crash, the runtime's idle stop).
+    /// Heard during a sleep's stop, which signalled it, it is nothing: that
+    /// stop reports its end itself (`Asleep`).
     Exited { generation: u64 },
     Alarm,
     /// Its owner put it to sleep: what held it is let go (its sockets close
@@ -1037,11 +1039,14 @@ impl Lifecycle {
                     self.gone(now_ms, &mut step);
                 }
             }
+            // its stop signalled it: the stop's own end (`Asleep`) reports
+            // that, so the start after it (a restart's, a wake's) is made by
+            // whatever performs the stop and waits on it (the restart's own
+            // request), never by this report, a request of its own
+            (Phase::Sleeping { generation, .. }, Event::Exited { generation: g }) if g == generation && matches!(self.saving, Some(Saving::Stop { .. })) => {}
             (Phase::Sleeping { generation, .. }, Event::Exited { generation: g }) if g == generation => {
-                // its sleep ended it (signalled after the save), or it died
-                // as it was held or saved, before the sleep stopped it (an
-                // exit: `end_life`)
-                self.end_life(LifeEnd::Sleep, now_ms, &mut step);
+                // it died as it was held or saved, before the sleep stopped it
+                self.end_life(LifeEnd::Exit, now_ms, &mut step);
                 self.gone(now_ms, &mut step);
             }
             (Phase::Awake { generation, .. } | Phase::Sleeping { generation, .. }, Event::Held { generation: g, held }) if g == generation && matches!(self.saving, Some(Saving::Hold { .. })) => {
@@ -2677,9 +2682,11 @@ mod tests {
         assert_eq!(s.actions, vec![Action::Stop { generation: g, saved: true }]);
         let s = l.apply(Event::Alarm, at + 4_000 + SLEEP_DEADLINE_MS);
         assert_eq!(s.actions, vec![Action::Stop { generation: g, saved: true }], "its stop, again");
-        // its container exits as it is signalled: the sleep ended it, saved
-        let s = l.apply(Event::Exited { generation: g }, at + 5_000 + SLEEP_DEADLINE_MS);
-        assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved: true, at_ms: at + 5_000 + SLEEP_DEADLINE_MS, restart: false }));
+        // its container exits as it is signalled: the stop reports that
+        // itself, and its end is the sleep's, saved
+        assert!(l.apply(Event::Exited { generation: g }, at + 5_000 + SLEEP_DEADLINE_MS).actions.is_empty());
+        let s = l.apply(Event::Asleep { generation: g }, at + 5_100 + SLEEP_DEADLINE_MS);
+        assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved: true, at_ms: at + 5_100 + SLEEP_DEADLINE_MS, restart: false }));
         // a lifecycle stored mid-sleep before saves were its own reads as in
         // its stop: its deadline asks for the stop, unsaved
         let mut v = serde_json::to_value(Lifecycle { phase: Phase::Sleeping { generation: 1, since_ms: T }, generation: 1, ..Lifecycle::new() }).unwrap();
@@ -3303,6 +3310,66 @@ mod tests {
         // what it knows survives a restart of its Durable Object
         let back: Lifecycle = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
         assert_eq!(back, l);
+    }
+
+    /// Goal (docs/self-host.md, found 21): its owner's restart answers once
+    /// its start is up. The DO performs the restart's sleep and the start
+    /// after it in the restart's own request, and answers with the view at
+    /// its end; the container's exit report is a request of its own, which
+    /// comes in as the stop signals it, before the stop's own end. That
+    /// report starts nothing: the stop's `Asleep` does, in the request that
+    /// waits on it. Before, the report ended the sleep and made the start,
+    /// so the restart answered `starting` with its start under way
+    /// elsewhere. Valid (saved, and its save failing), replay (the exit
+    /// reported again, or after the start), and an exit before the stop (a
+    /// crash as it was held) that still starts it. Method: the lifecycle's
+    /// steps, the exit report applied before the stop's own end.
+    #[test]
+    fn a_restarts_start_is_its_stops_not_the_exit_reports() {
+        for saved in [true, false] {
+            let mut l = Lifecycle::new();
+            let g = started(&mut l, T);
+            assert_eq!(l.apply(Event::Restart { generation: g }, T + 10_000).actions, vec![Action::Sleep { generation: g }]);
+            let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, T + 10_500));
+            let s = match saved {
+                true => l.apply(Event::Saved { generation: g, seq }, T + 12_000),
+                false => l.apply(Event::SaveFailed { generation: g, seq, why: "R2 is down".into() }, T + 12_000),
+            };
+            assert_eq!(s.actions, vec![Action::Stop { generation: g, saved }]);
+            // the stop signals it: its exit is reported, before the stop's end
+            for at in [T + 12_100, T + 12_200] {
+                let s = l.apply(Event::Exited { generation: g }, at);
+                assert!(s.actions.is_empty() && s.ended.is_none(), "the exit report starts nothing (saved {saved}): {s:?}");
+                assert!(matches!(l.phase, Phase::Sleeping { generation, .. } if generation == g), "still the restart's sleep: {:?}", l.phase);
+            }
+            let s = l.apply(Event::Asleep { generation: g }, T + 12_300);
+            assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep, saved, at_ms: T + 12_300, restart: true }));
+            assert!(s.actions.contains(&Action::Start { generation: g + 1 }), "the stop's end starts it, in the restart's request: {s:?}");
+            // a report of the stopped one, late, changes nothing
+            let before = l.clone();
+            assert!(l.apply(Event::Exited { generation: g }, T + 12_400).actions.is_empty() && l == before);
+            l.apply(Event::Ready { generation: g + 1 }, T + 15_000);
+            assert!(matches!(l.phase, Phase::Awake { generation, .. } if generation == g + 1));
+        }
+        // its owner's plain sleep: the stop's end puts it to sleep, the exit
+        // report before it nothing
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        l.apply(Event::Sleep, T + 10_000);
+        let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, T + 10_500));
+        l.apply(Event::Saved { generation: g, seq }, T + 12_000);
+        assert!(l.apply(Event::Exited { generation: g }, T + 12_100).actions.is_empty());
+        let s = l.apply(Event::Asleep { generation: g }, T + 12_300);
+        assert!(l.phase == Phase::Asleep && !s.actions.iter().any(|a| matches!(a, Action::Start { .. })), "{s:?}");
+        // a container that dies as the restart holds it, before any stop,
+        // stopped on its own: an exit, and it starts again from that report
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        l.apply(Event::Restart { generation: g }, T + 10_000);
+        let s = l.apply(Event::Exited { generation: g }, T + 10_200);
+        assert_eq!(s.ended.map(|e| e.by), Some(LifeEnd::Exit));
+        assert!(s.actions.contains(&Action::Start { generation: g + 1 }), "{s:?}");
+        assert!(l.apply(Event::Held { generation: g, held: true }, T + 10_500).actions.is_empty(), "its hold's late answer is nothing");
     }
 
     /// Goal: a restart whose save fails keeps no container (its owner asked
@@ -3937,7 +4004,12 @@ mod tests {
                         Action::Unhold { generation: g } => assert_eq!(*g, l.generation(), "only the current start is let go"),
                         Action::Stop { generation: g, .. } => {
                             assert_eq!(*g, l.generation(), "only the current start stops");
-                            pending.push(if rng(&mut seed).is_multiple_of(5) { Event::Exited { generation: *g } } else { Event::Asleep { generation: *g } });
+                            // the stop reports its end; its container's exit,
+                            // a report of its own, may come before it or after
+                            pending.push(Event::Asleep { generation: *g });
+                            if rng(&mut seed).is_multiple_of(2) {
+                                pending.push(Event::Exited { generation: *g });
+                            }
                         }
                     }
                 }
