@@ -2846,7 +2846,11 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
         None => return Err(CellError::new(ErrorCode::NotFound, "the API is /api/… and a fragment's routes /f/<fragment>/…")),
     };
     let method = req.method();
-    let storage_token = method == Method::Get && path.ends_with("/storage-token");
+    // Only the platform's token endpoint: a channel or app route with
+    // this suffix keeps its own body. Decode as the fragment router does.
+    let segments: Vec<&str> = path.split('/').collect();
+    let storage_token = method == Method::Get
+        && matches!(segments.as_slice(), ["", "api", "f", _, endpoint] if crate::fragment::decode_segment(endpoint) == "storage-token");
     let socket = req.headers().get("upgrade")?.is_some_and(|u| u.eq_ignore_ascii_case("websocket"));
     let body = match method {
         Method::Get | Method::Head => vec![],
