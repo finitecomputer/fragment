@@ -1984,6 +1984,11 @@ memo is one the agent transcribes itself, through this route):
   a small object of numbers and short strings (`{"keys": […], "usage":
   …}`), never its words. The e2e's `transcribe` section prints it, so a
   hosted run shows what Workers AI answers.
+- **The browsers' own recordings.** The route sends the audio on as it
+  came, whatever its container: the chat's voice memo reaches Whisper as
+  the browser recorded it, WebM/Opus (Chrome, Firefox, Safari 18.4+),
+  MP4/AAC (an older Safari) or Ogg/Opus. The `transcribe` section sends
+  one of each, so a hosted run proves that Whisper reads them.
 - **What Workers AI answers.** Read on the e2e preview, 2026-10-08: the
   catalog's schema unwrapped (`text`, `transcription_info`, `segments`,
   `vtt`, `word_count`), plus a `usage` the schema does not name. The

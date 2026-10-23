@@ -54,6 +54,21 @@ const MODEL_ROUTE: &str = "/api/models/v1/chat/completions";
 const MODELS_ROUTE: &str = "/api/models/v1/models";
 /// Its transcriptions (decision 9).
 const TRANSCRIBE_ROUTE: &str = "/api/models/v1/audio/transcriptions";
+/// A voice memo as each browser's recorder makes it (the chat template's
+/// `MEMO_TYPES`, WebM first; docs/chat-records.md, "A voice memo"):
+/// Chrome's and Firefox's (and Safari's since 18.4) WebM/Opus with no
+/// duration in its header, an older Safari's fragmented MP4/AAC, and
+/// Ogg/Opus, the recorder's next choice and other apps' voice notes. Each
+/// is 2 s of a quiet 440 Hz tone, made with FFmpeg 9 (`-f
+/// lavfi -i sine=frequency=440:duration=2:sample_rate=48000 -af
+/// volume=-30dB -ac 1 -b:a 32k`, then `-c:a libopus -f webm -live 1`, `-c:a
+/// aac -movflags frag_keyframe+empty_moov+default_base_moof -f mp4`, and
+/// `-c:a libopus -f ogg`).
+const BROWSER_MEMOS: [(&str, &[u8]); 3] = [
+    ("WebM/Opus (Chrome, Firefox, Safari 18.4+)", include_bytes!("../../fixtures/memo-chrome.webm")),
+    ("MP4/AAC (an older Safari)", include_bytes!("../../fixtures/memo-safari.m4a")),
+    ("Ogg/Opus", include_bytes!("../../fixtures/memo-opus.ogg")),
+];
 /// Its decisions (fragment_core::decide).
 const DECIDE_ROUTE: &str = "/api/models/v1/decide";
 const GLM: &str = "@cf/zai-org/glm-5.3";
@@ -1186,12 +1201,15 @@ fn meters(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
 /// Hosted, it is the proof that Workers AI's own answer reads as the route
 /// reads it: it prints that answer's shape (the route's
 /// `x-fragment-answer-shape`: its keys, and its `usage`) and the settle,
-/// pass or fail. One paid call.
+/// pass or fail; and that Whisper reads each browser's own recording
+/// (`BROWSER_MEMOS`: WebM/Opus, MP4/AAC, Ogg/Opus), which the route sends
+/// on as it came, printing what it heard. Four paid calls.
 pub fn transcribe_lane(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("transcribe", &[crate::Need::Models, crate::Need::Levers]) {
         return Ok(());
     }
-    let owner = api.person_paying(1)?;
+    // its memo, then each browser's
+    let owner = api.person_paying(1 + BROWSER_MEMOS.len() as u64)?;
     let owner_id = api.identity(&owner)?;
     let hand = &Keys::generate();
     let reg = "/api/identities";
@@ -1212,5 +1230,22 @@ pub fn transcribe_lane(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && r.body["text"].is_string() && aig.len() == 1 && aig.iter().all(heard),
         json!({ "status": r.status, "answer": r.text.chars().take(300).collect::<String>(), "shape": shape, "entries": aig }),
     );
+    // the containers a person's browser records in, sent on as they came:
+    // Whisper must read each itself
+    for (browser, memo) in BROWSER_MEMOS {
+        let before = entries(api, &owner_id, "aig:").len();
+        let r = transcription_call(api, hand, &[("model", "whisper"), ("response_format", "json")], memo)?;
+        println!("      ({browser}: {} {})", r.status, r.text.chars().take(200).collect::<String>());
+        if r.status == 200 {
+            s.eventually(Duration::from_secs(60), || entries(api, &owner_id, "aig:").len() > before);
+        }
+        let aig = entries(api, &owner_id, "aig:");
+        let charged_its_length = |e: &Value| charged(e).is_some() && usage(e)["kind"] == "neurons" && usage(e)["milli"].as_u64().is_some_and(|m| m > 0);
+        s.ok(
+            &format!("a memo in {browser} is heard on the deployment's Whisper, and charged at its length"),
+            r.status == 200 && r.body["text"].is_string() && aig.len() == before + 1 && aig.iter().all(charged_its_length),
+            json!({ "status": r.status, "answer": r.text.chars().take(300).collect::<String>(), "entries": aig }),
+        );
+    }
     Ok(())
 }
