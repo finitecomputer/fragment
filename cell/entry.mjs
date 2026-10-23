@@ -389,13 +389,15 @@ class ContainerHost {
   }
 
   // Starts `image` (or a snapshot of it), then watches it: its exit, for
-  // any reason, is reported as `computer/exited` for this generation.
-  start(generation, image, snapshot, env, instance) {
+  // any reason, is reported as `computer/exited` for this generation. With
+  // `internet` false (a test fleet's lever alone) it reaches its intercepts
+  // and nothing else.
+  start(generation, image, snapshot, env, instance, internet) {
     if (this.#nodes && !this.#node) throw new Error("a computer on nodes is placed before it starts (computer.rs `place`)");
     // a node it can no longer reach says why, not that it lacks the image
     if (this.#def?.error) throw this.#def.error();
     this.#generation = generation;
-    const opts = { env, enableInternet: true };
+    const opts = { env, enableInternet: internet !== false };
     if (instance) opts.instance = instance;
     if (snapshot) opts.containerSnapshot = { id: snapshot };
     else if (this.#c.images && this.#c.images[image]) opts.image = this.#c.images[image];

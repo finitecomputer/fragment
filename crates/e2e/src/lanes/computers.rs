@@ -789,10 +789,11 @@ fn dialed(api: &Api, name: &str, path: &str) -> String {
 /// The page `shelf`'s app serves.
 const SHELF_PAGE: &str = "<p>the e2e shelf</p>";
 
-/// An app of `owner`'s, made as an agent makes one (open to its share
-/// link), serving `SHELF_PAGE`: its name and its share link's token.
-fn shelf(s: &Suite, api: &Api, owner: &crate::Keys) -> Result<(String, String)> {
-    let name = s.named(api, owner, "shelf")?;
+/// An app of `owner`'s named for `label`, made as an agent makes one (open
+/// to its share link), serving `SHELF_PAGE`: its name and its share link's
+/// token.
+fn shelf(s: &Suite, api: &Api, owner: &crate::Keys, label: &str) -> Result<(String, String)> {
+    let name = s.named(api, owner, label)?;
     let app = s.create(api, owner, &name)?;
     s.commit(&app, &[("site/index.html", Some(format!("{SHELF_PAGE}\n").as_bytes()))]);
     s.deploy(&app);
@@ -808,7 +809,7 @@ fn shelf(s: &Suite, api: &Api, owner: &crate::Keys) -> Result<(String, String)> 
 /// or its agent's rides along. The replies it adds.
 fn platform_host_checks(s: &mut Suite, api: &Api, owner: &crate::Keys, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
     let page = SHELF_PAGE;
-    let (name, token) = shelf(s, api, owner)?;
+    let (name, token) = shelf(s, api, owner, "shelf")?;
     let fetch = |s: &Suite, n: u32, path: &str| fetched(s, n, &format!("fetch {} with e2e in x-e2e-probe", dialed(api, &name, path)));
     let opened = fetch(s, 140, &format!("?view={token}"))?;
     s.ok(PLATFORM_HOST_CHECKS[0], opened.starts_with("fetched 200") && opened.contains(page), &opened);
@@ -820,6 +821,40 @@ fn platform_host_checks(s: &mut Suite, api: &Api, owner: &crate::Keys, fetched: 
     s.ok(PLATFORM_HOST_CHECKS[2], !members.starts_with("fetched 200") && members.starts_with("fetched ") && !members.contains(page), &members);
     let nobody = fetched(s, 143, &format!("fetch {} with e2e in x-e2e-probe", dialed(api, "no-one-here", "")))?;
     s.ok(PLATFORM_HOST_CHECKS[3], nobody.starts_with("fetched 404") && nobody.contains("no fragment here"), &nobody);
+    Ok(4)
+}
+
+/// The checks `lockdown_checks` makes.
+const LOCKDOWN_CHECKS: [&str; 4] = [
+    "started with the internet off (a test fleet's lever), its guest still opens its owner's app through the platform",
+    "and reads its own view through the API",
+    "and calls a model through the platform's route",
+    "and reaches no public host",
+];
+
+/// A lockdown rehearsed (docs/self-host.md, found 40; a test fleet's
+/// lever, not a mode): started with the internet off, a computer reaches
+/// what it needs of the platform through its intercepts alone, and nothing
+/// past them. It is woken again with the internet on. The replies it adds.
+fn lockdown_checks(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+    let (name, token) = shelf(s, api, owner, "offline-shelf")?;
+    let restart = |internet: bool| -> Result<()> {
+        let lever = lever_with(api, id, json!({ "op": "offline", "on": !internet }))?;
+        let slept = api.signed(owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+        let woke = api.signed(owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
+        anyhow::ensure!(lever.status == 200 && slept.body["phase"] == "asleep" && woke.body["phase"] == "awake", "woken with the internet {}: {lever} / {slept} / {woke}", if internet { "on" } else { "off" });
+        Ok(())
+    };
+    restart(false)?;
+    let opened = fetched(s, 150, &format!("fetch {} with e2e in x-e2e-probe", dialed(api, &name, &format!("?view={token}"))))?;
+    s.ok(LOCKDOWN_CHECKS[0], opened.starts_with("fetched 200") && opened.contains(SHELF_PAGE), &opened);
+    let given = fetched(s, 151, "credentials")?;
+    s.ok(LOCKDOWN_CHECKS[1], given.starts_with("credentials: "), &given);
+    let thought = fetched(s, 152, "think hello offline")?;
+    s.ok(LOCKDOWN_CHECKS[2], thought == "thought: echo: hello offline", &thought);
+    let public = fetched(s, 153, "fetch http://example.com/ with e2e in x-e2e-probe")?;
+    s.ok(LOCKDOWN_CHECKS[3], public.starts_with("fetch failed"), &public);
+    restart(true)?;
     Ok(4)
 }
 
@@ -1413,12 +1448,13 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     // dials them by name, which the Docker double resolves to nothing
     if scripted && fakes && !(s.has_nodes() && !s.real_engine()) {
         replies_so_far += platform_host_checks(s, api, &owner, &fetched)?;
+        replies_so_far += lockdown_checks(s, api, &owner, &id, &fetched)?;
     } else {
         let why = match scripted && fakes {
-            true => "the Docker double resolves no name under a glob intercept (sandcastle's docs/node.md): the real engine's run, or wrangler's containers, make it",
+            true => "the Docker double resolves no name under a glob intercept, nor turns the internet off (sandcastle's docs/node.md): the real engine's run, or wrangler's containers, make it",
             false => "it needs the stub's fetch, on a local run",
         };
-        for label in PLATFORM_HOST_CHECKS {
+        for label in PLATFORM_HOST_CHECKS.iter().chain(&LOCKDOWN_CHECKS) {
             s.skip(label, why);
         }
     }
