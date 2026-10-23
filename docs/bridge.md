@@ -31,6 +31,13 @@ ended.
   flock, its epoch one on at every change): Take over is that lease, so
   the agent's tools refuse while a person holds it (`human_has_control`).
   A screen with no lease file keeps one of its own, by the same rules.
+- `loopback.rs`: on a `.localhost` platform (the view's `origin` plain
+  HTTP under `.localhost`), the platform's hosts on the guest's own
+  loopback at the platform's port, where Chrome and curl take a
+  `.localhost` name: each connection's `Host` in the zone dialed by name
+  on port 80, where the computer's intercept catches it; any other, 421
+  (docs/computers.md, "The platform's hosts"). A port the guest already
+  holds is logged (`loopback.unavailable`) and left to it.
 
 ## A runtime
 
@@ -73,7 +80,7 @@ Bodies are JSON. `api.rs` has one method for each.
 
 | Method and path | Body | Reads |
 |---|---|---|
-| `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute, and within a second of a change to the ready file (below) |
+| `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}], origin}` (`origin` for `loopback.rs`, at start); at start, then every minute, and within a second of a change to the ready file (below) |
 | `GET /api/computer/keepalive` (no agent), WebSocket | | held while a turn waits to run, runs, or waits on its card (below, "A card keeps its computer awake") |
 | `GET /api/fragments` | | `{fragments: [{name, role}]}`: what the agent follows, listed at start, on a `joined` of it (as the agent the engine runs, no read of the computer first), and every 5 minutes. A listing a read of which fails with no answer, a 429 or a 5xx is asked again after a jittered backoff (from 1 s, at most 30 s) until it answers: the list, or only the fragments whose channels did not read; what was found meanwhile is followed, so one fragment that fails keeps the agent from no other. One listing an agent at a time: a newer one takes the place of one under way |
 | `GET /api/f/{f}/channels` | | `{channels: [{name, post, seq}]}`: a postable `chat` is a chat; the agent's own `tasks` |

@@ -97,6 +97,10 @@ pub struct Computer {
     /// (`modelPatience`, beside `models`); none, the runtime's own.
     #[serde(default, rename = "modelPatience")]
     pub model_patience: StaleTimeouts,
+    /// The computer's own origin, on the platform's scheme and port, under
+    /// its zone: where the loopback forwarder learns them (loopback.rs).
+    #[serde(default)]
+    pub origin: String,
 }
 
 /// The model route's models' ids, by its names: what a call may name each

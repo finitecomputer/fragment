@@ -4,7 +4,8 @@
 //! the runtimes; `api` every route it calls; `ready` which agents the image
 //! has made ready, when it says; `note` what a turn after a cut one is told,
 //! from the journal; `screen` each agent's screen, `screens` the image's
-//! map of their displays, `lease` who drives one.
+//! map of their displays, `lease` who drives one; `loopback` the platform's
+//! hosts on the guest's own loopback, on a `.localhost` platform.
 
 pub mod api;
 pub mod driver;
@@ -12,6 +13,7 @@ pub mod engine;
 pub mod lease;
 pub mod limits;
 pub mod log;
+pub mod loopback;
 pub mod net;
 pub mod note;
 pub mod ready;

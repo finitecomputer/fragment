@@ -243,6 +243,22 @@ pub const INBOX_MAX: usize = 1024;
 /// Effects queued for one fragment, at most; past it the producer waits.
 pub const LANE_MAX: usize = 4096;
 
+/// A request's head the loopback forwarder reads to find its `Host`, at
+/// most (loopback.rs): a browser's is a few KB with its cookies; nginx
+/// takes 32 KB by default.
+pub const LOOPBACK_HEAD_MAX_BYTES: usize = 64 * 1024;
+
+/// A connection's first request, whole, within this; else it is dropped.
+pub const LOOPBACK_HEAD_WAIT_MS: u64 = 10_000;
+
+/// One address of the name the forwarder dials, connected within this.
+pub const LOOPBACK_DIAL_MS: u64 = 10_000;
+
+/// Connections the forwarder holds at once, at most; past it a connection
+/// waits for one to end. A browser opens six to a host, and each page's
+/// live socket holds one.
+pub const LOOPBACK_CONNECTIONS_MAX: usize = 256;
+
 // Design checks that run before the program does.
 const _: () = assert!(REPLY_TEXT_MAX_BYTES < 64 * 1024);
 const _: () = assert!(DRAFT_TEXT_MAX_BYTES <= 64 * 1024);

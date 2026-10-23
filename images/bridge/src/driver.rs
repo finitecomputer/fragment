@@ -320,6 +320,11 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
         r = &mut runtime_task => return runtime_result(r, name),
     };
     let Some(mut computer) = computer else { return Ok(()) };
+    // on a `.localhost` platform, its hosts on the guest's own loopback,
+    // where Chrome and curl take them (loopback.rs)
+    if let Some(apps) = crate::loopback::Apps::of_origin(&computer.origin) {
+        tokio::spawn(crate::loopback::serve(apps, stop.clone()));
+    }
     let listed = computer.agents.len();
     computer.agents = gated(computer.agents, &ready);
     screen_agents.send_replace(Some(named(&computer.agents)));
