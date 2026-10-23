@@ -544,7 +544,12 @@ fenced code with a language label and Copy). Share reply uses the native
 share sheet where available, otherwise copies the reply. Cancelling a
 share sheet copies nothing. Video and PDFs show inline beside open,
 download and share actions; PDFs retain those actions when a browser
-cannot embed them.
+cannot embed them. Download saves the file through the page: it reads
+the bytes with a fetch of its own origin, as it reads the chat, and
+saves them. A link's own download is the browser's request, which
+carries none of a frame's cookies, so in the shell's frame (signed in by
+the frame's partitioned cookie alone) it was refused (Paul, 2026-10-23:
+"file wasn't available on site").
 
 A channel post that fails has its error and Retry on the message itself.
 Retry keeps its id and body so a lost answer cannot write it twice. Until

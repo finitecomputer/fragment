@@ -20,6 +20,25 @@ function link(href, label, cls) {
   return node;
 }
 
+// A file saved by the page itself. A link's own download is the browser's
+// request, which carries no cookie of a frame's: in the shell the page is
+// signed in by its frame's partitioned cookie alone, so a members-only
+// chat's file answered 401, "file wasn't available on site" (Paul,
+// 2026-10-23), while a tab of its own signed in and saved it. The page
+// reads it as it reads everything else, with a fetch of its own origin,
+// and saves those bytes; no other way in is opened for it.
+async function save(href, filename) {
+  const r = await fetch(href);
+  if (!r.ok) throw new Error(`the file answered ${r.status}`);
+  const url = URL.createObjectURL(await r.blob());
+  const a = el("a");
+  Object.assign(a, { href: url, download: filename });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
 // Only passive types the cell serves inline are embedded. All attachments
 // retain open/download actions, including when a browser cannot show PDFs.
 export function renderAttachments(list) {
@@ -56,6 +75,12 @@ export function renderAttachments(list) {
     const download = link(href, "Download", "attachment-download");
     download.download = attachment.name || attachment.sha256.slice(0, 12);
     download.setAttribute("aria-label", `Download ${name}`);
+    // a plain click saves through the page (`save`); a modified one is the browser's
+    download.onclick = (e) => {
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      feedback(download, () => save(href, download.download).then(() => null, () => "Could not download"));
+    };
     const button = el("button", "attachment-share", "Share");
     button.type = "button";
     button.setAttribute("aria-label", `Share ${name}`);
