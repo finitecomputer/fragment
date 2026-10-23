@@ -10,8 +10,11 @@
 //! node in turn goes down: a wake of a computer on it answers 503
 //! `node_down`, typed and within seconds, its view says why, and a new
 //! computer goes to the node that is up; the node back, the computer wakes
-//! on it again. That pinning outlives a restart of the platform is the
-//! restart section's.
+//! on it again. A node down under an awake computer (`outage`, found 39):
+//! its process restarted, the computer stays awake, its work kept; down
+//! for good, the computer says its node is down, and goes on when it is
+//! back (on each kind of node, and on a real engine's one). That pinning
+//! outlives a restart of the platform is the restart section's.
 
 use std::time::{Duration, Instant};
 
@@ -31,6 +34,21 @@ const WAKE: Duration = Duration::from_secs(90);
 const DOWN_ANSWER: Duration = Duration::from_secs(15);
 /// The stub's bridge has booted and made its state under `/data` by then.
 const BOOTED: Duration = Duration::from_secs(2);
+/// A node's process restarting under an awake computer is down this long.
+const RESTARTING: Duration = Duration::from_secs(3);
+/// The computer's watch has looked at a node back from a restart by then:
+/// its looks' pauses (node.mjs: 1 s, doubling), each look's bound (6 s).
+const LOOKED: Duration = Duration::from_secs(15);
+/// A node silent past node.mjs's SILENT_MS (2 minutes) is said to be down
+/// by then: that bound, the uplink's wait for a dial before a call it
+/// holds is cut (uplink.mjs's AGAIN_WAIT_MS, 30 s), a look's longest pause
+/// (30 s) and its bound (6 s).
+const SAID_DOWN: Duration = Duration::from_secs(120 + 30 + 30 + 6 + 14);
+/// The node back, the computer goes on by then: a look's longest pause and
+/// its bound, and an uplink's dial.
+const GOES_ON: Duration = Duration::from_secs(30 + 6 + 24);
+/// The file each computer keeps across its node's outage.
+const KEPT: &str = "/data/outage.txt";
 
 /// A person's computer, made.
 fn computer(api: &Api, owner: &Keys) -> Result<(String, Value)> {
@@ -74,11 +92,116 @@ pub(crate) fn killed_comes_back(s: &Suite, api: &Api, owner: &Keys, id: &str, no
     Ok((back && v["node"] == node && v["why"].is_null(), format!("{v} in {:.1?}", t0.elapsed())))
 }
 
+/// Runs `argv` in computer `id`'s container (the lever's `exec`): its
+/// output when it exits 0, else what the lever answered.
+fn exec(api: &Api, id: &str, argv: &[&str]) -> std::result::Result<String, String> {
+    let r = super::computers::lever_with(api, id, json!({ "op": "exec", "argv": argv })).map_err(|e| e.to_string())?;
+    match r.status == 200 && r.body["exitCode"] == 0 {
+        true => Ok(r.body["output"].as_str().unwrap_or("").trim().to_string()),
+        false => Err(r.to_string()),
+    }
+}
+
+/// A node down under an awake computer (docs/self-host.md, found 39), on
+/// each of `on` (`(owner, computer, node)`, each awake on its node, the
+/// nodes all different) at once: a file written in it first. Its node's
+/// process restarted (its engine, and the container, kept): the computer
+/// stays awake on the same start, its file kept, no rollback. Its node
+/// down past node.mjs's SILENT_MS: it says its node is down (its view, and
+/// a wake's 503 `node_down`), still on the same start. The node back: it
+/// goes on by itself, its file kept, its screen answering, and its
+/// container is watched as before (killed under it, it is started again).
+/// `since_ms`: before their containers started, the only ones on their
+/// nodes since.
+fn outage(s: &mut Suite, api: &Api, on: &[(&Keys, String, String)], since_ms: u64) -> Result<()> {
+    let start_of = |owner: &Keys, id: &str| {
+        let v = view(api, owner, id);
+        (v["generation"].clone(), v["rollbacks"].clone(), v["restored"].clone())
+    };
+    let mut before = vec![];
+    for (owner, id, node) in on {
+        std::thread::sleep(BOOTED);
+        let token = format!("{node} {}", fragment_devstack::sandcastle::now_ms());
+        if let Err(e) = exec(api, id, &["sh", "-c", &format!("echo '{token}' > {KEPT}")]) {
+            anyhow::bail!("writing {KEPT} in {id}: {e}");
+        }
+        before.push((token, start_of(owner, id)));
+    }
+    let same = |owner: &Keys, id: &str, i: usize| start_of(owner, id) == before[i].1 && exec(api, id, &["cat", KEPT]).as_deref() == Ok(before[i].0.as_str());
+
+    // its process restarts, its engine keeping the container
+    for (_, _, node) in on {
+        s.node_down(node)?;
+        std::thread::sleep(RESTARTING);
+        s.node_up(node)?;
+    }
+    std::thread::sleep(LOOKED);
+    for (i, (owner, id, node)) in on.iter().enumerate() {
+        let v = view(api, owner, id);
+        s.ok(
+            &format!("its node's process restarted under it (one that {}), the computer stays awake on the same start: its file kept, no restart, no rollback", s.node_reach(node)),
+            v["phase"] == "awake" && v["why"].is_null() && same(owner, id, i),
+            format!("{v} / {:?}", exec(api, id, &["cat", KEPT])),
+        );
+    }
+
+    // down past the bound: it says so, and runs on there
+    for (_, _, node) in on {
+        s.node_down(node)?;
+    }
+    let t0 = Instant::now();
+    let said = |owner: &Keys, id: &str, node: &str| view(api, owner, id)["why"].as_str().is_some_and(|w| w.contains(node) && w.contains("has not answered"));
+    s.eventually(SAID_DOWN, || on.iter().all(|(owner, id, node)| said(owner, id, node)));
+    let took = t0.elapsed();
+    for (i, (owner, id, node)) in on.iter().enumerate() {
+        let r = wake(api, owner, id)?;
+        let v = view(api, owner, id);
+        s.ok(
+            &format!("its node down past two minutes (one that {}), the computer says so, naming it, and a wake answers 503 node_down; the same start, no rollback", s.node_reach(node)),
+            said(owner, id, node) && r.status == 503 && r.body["error"] == "node_down" && r.body["message"].as_str().is_some_and(|m| m.contains(node.as_str())) && start_of(owner, id) == before[i].1,
+            format!("{v} / {r} after {took:.1?}"),
+        );
+    }
+
+    // back, it goes on by itself
+    for (_, _, node) in on {
+        s.node_up(node)?;
+    }
+    let t0 = Instant::now();
+    s.eventually(GOES_ON, || on.iter().all(|(owner, id, _)| view(api, owner, id)["why"].is_null()));
+    let took = t0.elapsed();
+    for (i, (owner, id, node)) in on.iter().enumerate() {
+        let v = view(api, owner, id);
+        let origin = v["origin"].as_str().unwrap_or("").to_string();
+        s.ok(
+            &format!("its node back (one that {}), the computer goes on by itself: the same start, its file kept, its screen answering, no rollback", s.node_reach(node)),
+            v["phase"] == "awake" && v["why"].is_null() && same(owner, id, i) && version(api, owner, &origin) == "1",
+            format!("{v} after {took:.1?}"),
+        );
+    }
+    // still watched: its watch went on through the outage, not lost in it
+    for (owner, id, node) in on {
+        let origin = view(api, owner, id)["origin"].as_str().unwrap_or("").to_string();
+        let (back, shown) = killed_comes_back(s, api, owner, id, node, &origin, since_ms)?;
+        s.ok(&format!("after its node's outage (one that {}), its container is watched as before: killed under it, the computer starts it again by itself", s.node_reach(node)), back, shown);
+    }
+    Ok(())
+}
+
 pub fn placement(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("placement", &[crate::Need::Nodes, crate::Need::Computers, crate::Need::Node]) {
         return Ok(());
     }
     if s.node_ids().len() < 2 {
+        // the real engine's one node: its outage under an awake computer
+        let node = s.node_ids().first().cloned().unwrap_or_default();
+        let a = api.person()?;
+        let (c, _) = computer(api, &a)?;
+        let since = fragment_devstack::sandcastle::now_ms();
+        let r = wake(api, &a, &c)?;
+        anyhow::ensure!(r.status == 200 && r.body["phase"] == "awake" && r.body["node"] == node.as_str(), "waking a computer on {node}: {r}");
+        outage(s, api, &[(&a, c.clone(), node)], since)?;
+        sleep(api, &a, &c)?;
         s.skip("computers spread across nodes, each pinned to its own", "it needs two nodes (FRAGMENT_E2E_NODES=two); this run's one is the real engine's");
         return Ok(());
     }
@@ -153,5 +276,15 @@ pub fn placement(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok("its node back, the computer wakes on it again, and its view no longer says its node is down", back && v["node"] == id.as_str() && !why.contains(&id), &v);
         sleep(api, owner, &pinned)?;
     }
+
+    // each kind of node down under an awake computer, both at once
+    let since = fragment_devstack::sandcastle::now_ms();
+    for (owner, id) in [(&a, &ca), (&b, &cb)] {
+        let r = wake(api, owner, id)?;
+        anyhow::ensure!(r.status == 200 && r.body["phase"] == "awake", "waking {id} again: {r}");
+    }
+    outage(s, api, &[(&a, ca.clone(), na.clone()), (&b, cb.clone(), nb.clone())], since)?;
+    sleep(api, &a, &ca)?;
+    sleep(api, &b, &cb)?;
     Ok(())
 }

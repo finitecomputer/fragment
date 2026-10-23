@@ -46,6 +46,20 @@ const CLOSE_WAIT_MS = 2000;
 // most WAIT_QUICK_MAX of those in a row are asked again (`#waited`)
 const WAIT_QUICK_MS = 5000;
 const WAIT_QUICK_MAX = 3;
+// A node silent this long under a running container (its `wait` cut, and
+// every look since unanswered) is said to be down (docs/self-host.md, found
+// 39). Longer than every outage a node heals by itself: its process or its
+// engine restarting (seconds; the engine keeps its VMs), and an uplink that
+// lost its connection, which the node notices within its SILENT_MAX (60 s)
+// and dials again within its DIAL_WAIT (15 s). Short enough that the owner
+// hears within two minutes, not after an awake computer that answers
+// nothing. Saying so changes what the computer says, never what runs: the
+// container is still waited on, and goes on when its node answers.
+const SILENT_MS = 120_000;
+// the pause between looks at a silent node: doubling from the first to the
+// most, which is how late a node that answers again is heard
+const LOOK_PAUSE_MS = 1000;
+const LOOK_PAUSE_MAX_MS = 30_000;
 const enc = new TextEncoder();
 
 // A sandcastle node that did not answer, or answered that it is unreachable:
@@ -55,6 +69,7 @@ export class NodeDown extends Error {
     super(`its node ${node} does not answer: ${why}`);
     this.name = "NodeDown";
     this.node = node;
+    this.why = why;
   }
 }
 
@@ -499,6 +514,17 @@ export class NodeContainer {
     if (!this.#known) await this.refresh();
   }
 
+  // A container whose node could not be asked (`known` found it silent),
+  // taken as running from now on: its watch (`monitor`) learns what became
+  // of it, since silence is no exit (docs/self-host.md, found 39). False
+  // when the node has said.
+  presume() {
+    if (this.#known) return false;
+    this.#running = true;
+    this.#known = true;
+    return true;
+  }
+
   // The node it is on.
   get node() {
     return this.#node.id;
@@ -571,7 +597,9 @@ export class NodeContainer {
 
   // Resolves when the container exits cleanly or is destroyed; rejects on a
   // failed start, a nonzero exit, a signal, or a destroy with an error.
-  async monitor() {
+  // `said` hears why its node has been silent past SILENT_MS, and null once
+  // it answers again (`#look`).
+  async monitor(said = async () => {}) {
     const life = this.#life;
     try {
       await this.#started();
@@ -580,7 +608,7 @@ export class NodeContainer {
       // `arm` throws it), never an exit of a container that ran
       throw Object.assign(new Error(String((e && e.message) || e)), { startFailed: true });
     }
-    const exit = await this.#waited();
+    const exit = await this.#waited(life, said);
     // the container it watched is gone; a start since is another's
     if (this.#life === life) this.#running = false;
     if (exit.error) throw new Error(exit.error);
@@ -593,27 +621,64 @@ export class NodeContainer {
   // outbound fetch at 120 s, CELLD_FETCH_TIMEOUT_S; a proxy may close a
   // quiet connection), and that is no exit: the node is asked whether the
   // container still runs, and one that does is waited on again
-  // (docs/self-host.md, found 22). Thrown: a refusal of the node's own; a
-  // cut poll when the container no longer runs there, or the node does not
-  // answer the look; and the fourth quick cut in a row (a node that answers
-  // its look but drops its wait).
-  async #waited() {
+  // (docs/self-host.md, found 22); a node that does not answer is asked
+  // until it does (`#look`, found 39). Thrown: a refusal of the node's own;
+  // a cut poll when the container no longer runs there, or another start
+  // took its name; and the fourth quick cut in a row the node answered at
+  // once (a node that answers its look but drops its wait).
+  async #waited(life, said) {
     let quick = 0;
     // bounded: each pass is a poll the container outlived, the quick ones
-    // (under WAIT_QUICK_MS) at most WAIT_QUICK_MAX in a row
+    // (under WAIT_QUICK_MS, the node answering the look at once) at most
+    // WAIT_QUICK_MAX in a row
     for (;;) {
       const asked = Date.now();
       try {
         return await this.#json("GET", `/v1/containers/${this.#name}/wait`, undefined, null);
       } catch (e) {
         if (e.status !== undefined) throw e;
-        quick = Date.now() - asked < WAIT_QUICK_MS ? quick + 1 : 0;
-        if (quick > WAIT_QUICK_MAX) throw e;
-        const look = await this.#call("GET", `/v1/containers/${this.#name}`, undefined, [404], HEALTH_MS).catch(() => null);
-        const running = look !== null && look.status === 200 && (await look.json().catch(() => ({}))).running === true;
-        console.log(JSON.stringify({ node: this.#node.id, container: this.#name, waitCut: String((e && e.message) || e), afterMs: Date.now() - asked, stillRunning: running }));
-        if (!running) throw e;
+        const cutMs = Date.now() - asked;
+        const look = await this.#look(life, said);
+        quick = cutMs < WAIT_QUICK_MS && !look.silent ? quick + 1 : 0;
+        console.log(JSON.stringify({ node: this.#node.id, container: this.#name, waitCut: String((e && e.message) || e), afterMs: cutMs, silentMs: look.silentMs, stillRunning: look.running }));
+        if (!look.running || quick > WAIT_QUICK_MAX) throw e;
       }
+    }
+  }
+
+  // After a cut `wait`: whether the container still runs, as the node says
+  // (404: it is gone). A node that does not answer (NodeDown) has said
+  // nothing, and is asked again, the pause doubling from LOOK_PAUSE_MS to
+  // LOOK_PAUSE_MAX_MS, for as long as it is silent; past SILENT_MS `said`
+  // hears why (the computer says its node is down), and null once it
+  // answers. Another start under its name ends the look: what runs is no
+  // longer this start's. Thrown: a refusal of the node's own (revoked, say).
+  // `{running, silent, silentMs}`.
+  async #look(life, said) {
+    const since = Date.now();
+    let pause = LOOK_PAUSE_MS;
+    let told = false;
+    // Unbounded by design, as the `wait` it stands in for: each look is
+    // bounded by HEALTH_MS and each pause by LOOK_PAUSE_MAX_MS, for as long
+    // as the node is silent and this start is the latest
+    for (let silent = false; ; silent = true) {
+      let r;
+      try {
+        r = await this.#call("GET", `/v1/containers/${this.#name}`, undefined, [404], HEALTH_MS);
+      } catch (e) {
+        if (!(e instanceof NodeDown)) throw e;
+        if (this.#life !== life) return { running: false, silent, silentMs: Date.now() - since };
+        if (!told && Date.now() - since >= SILENT_MS) {
+          told = true;
+          await said(`its node ${this.#node.id} has not answered for ${Math.floor((Date.now() - since) / 60_000)} minutes (${e.why}): its computer is kept as it was, and goes on when its node answers`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, pause));
+        pause = Math.min(2 * pause, LOOK_PAUSE_MAX_MS);
+        continue;
+      }
+      const running = r.status === 200 && (await r.json().catch(() => ({}))).running === true;
+      if (told) await said(null);
+      return { running, silent, silentMs: Date.now() - since };
     }
   }
 
@@ -698,7 +763,10 @@ export class NodeContainer {
         const headers = new Headers(request.headers);
         headers.set(AUTH, await signed(this.#node, request.method, path, "UNSIGNED-PAYLOAD"));
         headers.set("x-sandcastle-url", request.url);
-        return this.#node.fetch(path, { method: request.method, headers, body: request.body, redirect: "manual" });
+        // a node that does not answer says so, typed, as every other call's does
+        return this.#node.fetch(path, { method: request.method, headers, body: request.body, redirect: "manual" }).catch((e) => {
+          throw e instanceof NodeDown || e instanceof NodeRevoked ? e : new NodeDown(this.#node.id, String((e && e.message) || e));
+        });
       },
     };
   }

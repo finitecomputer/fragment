@@ -206,6 +206,42 @@ start comes up), 503 `no_node` with each node's reason when none can take
 a new computer, and 410 `node_revoked` for a person's own node they
 revoked. A start that failed for its node is no snapshot's failure.
 
+**A node silent under an awake computer** (found 39): silence is no exit.
+A computer's watch is its node's `wait`; cut (the node's process
+restarting, a blip, its uplink dropping), the node is asked whether the
+container still runs, and a node that does not answer is asked again, the
+pause doubling from 1 s to 30 s, for as long as it is silent
+(`NodeContainer`'s `#look`). When it answers, a container still running
+is waited on again (no restart, no rollback), and one gone is an exit.
+Silent past **two minutes** (`SILENT_MS`), the computer says its node is
+down: its view's `why` names it, and a wake answers 503 `node_down`
+(`computer/node`, its watch's report); nothing else changes, and it goes
+on by itself when its node answers. A new isolate whose node is silent
+takes the container as running (`presume`), and its watch decides the
+same way; a port's request to a silent node is `node_down` too. Why two
+minutes: longer than every outage a node heals by itself (its process or
+its engine restarting, seconds, the engine keeping its VMs; an uplink that
+lost its connection, which the node notices within its `SILENT_MAX`, 60 s,
+and dials again within its `DIAL_WAIT`, 15 s), and short enough that the
+owner hears within two minutes, not after an awake computer that answers
+nothing. A report changes only what the computer says, so one made just
+before the node answers costs a note that clears itself. sandcastle needs
+nothing for it: `sandcastle-node` keeps no state of a container (every
+call goes to the engine's socket, and the handler socket the engine dials
+for each intercept is bound again at the same path), so a node restarted
+in front of an engine that kept its VMs answers `wait`, `inspect` and
+`exec` for the containers started before. An uplink's `GET` cut by its
+node's restart is asked again on the next dial (found 10), so its `wait`
+is not even cut; the first run found it asked again on the very uplink
+being lost (celld still reads one open as its close is heard), where it
+waited for good, so the computer never heard of the outage, nor of an exit
+after it: `Uplink` never asks again on the one it lost. Still true, a
+decision for Paul: an idle computer whose
+node stays down tries to sleep after its 20 minutes; its saves fail, and
+past the unsaved bound (30 minutes) it sleeps unsaved, as any computer
+whose saves keep failing does, so its next wake goes back to its last
+save.
+
 **Bring your own computer** (experimental; `FRAGMENT_BYOC=on`, off unless
 said): `sandcastle-node pair <platform>` starts a device authorization
 (`POST /api/nodes/pair`, unsigned; RFC 8628's shape,
@@ -247,6 +283,19 @@ OpenBao and the renderer on, as the celld e2e has them):
   (the same). Its first run found the stale `wait` clearing a new start's
   `running` (22 failed, all of it); fixed in `NodeContainer` (a start's own
   number).
+- **Found 39** (two nodes on celld, `--only placement`, the Docker
+  double): **23 passed, 0 failed**, eight of them new (`outage`, both
+  nodes at once): each node's process restarted under an awake computer
+  (the same start, the file it wrote kept); down past two minutes (its view
+  names its node, a wake answers 503 `node_down`, the same start); back
+  (it goes on by itself, its file and screen there, no rollback); and its
+  container watched as before after (killed under it, started again). Its
+  first runs found the uplink's lost `wait` (above). With it, computers
+  and restart on two nodes: 247 passed, 0 failed, 1 skipped (a run before
+  had 3 failures, one flake: a container that exited in the fail-saves
+  check, 39 s before its bound; not seen again). `cargo xtask check`: 835
+  passed, 0 failed. The real engine's run of it waits: Paul's own
+  computers are on this box's engine.
 - **`cargo xtask node-images`:** the stub and Hermes built, loaded and
   named `docker.io/library/fragment-<name>@sha256:…`; the stub's digest
   the e2e's for the same content (`a92db44a…`), Hermes' found built.
@@ -1066,16 +1115,19 @@ CELLD_BIN=… SANDCASTLE_NODE_BIN=~/.local/opt/sandcastle/bin/sandcastle-node ca
 - **Upstream celld issues** to post: found 31 (a lingering close), 34 (a
   range query in `LocalStore`; the fork carries a stopgap), and 35
   (binding classes named as workerd's).
-- **Found 39 (seam 2): a node that does not answer reads as its
-  containers' exit.** When a `wait` is cut and the node cannot be asked
-  whether the container still runs, `NodeContainer` throws, so an outage
-  of a node (its process restarted, a network blip) ends every awake
-  computer on it: the cell starts each again and rolls it back to its last
-  save, though the container ran on. The LAN mode no longer causes one at
-  Ctrl-C (seam 9), but any outage does. Waiting until the node answers
-  again (a container that still runs is waited on; one gone is an exit)
-  would keep them. No lane takes a node down under an awake computer (the
-  placement lane's sleep theirs first): such a check comes first.
+- **Found 39 (seam 2), fixed 2026-10-22 as Paul chose: a silent node is
+  no exit.** It was: when a `wait` was cut and the node could not be asked
+  whether the container still ran, `NodeContainer` threw, so any outage of
+  a node (its process restarted, a blip, its uplink dropping) ended every
+  awake computer on it, started again and rolled back to its last save,
+  though the container ran on. Now the watch asks until the node answers,
+  and past two minutes the computer says its node is down, typed, and goes
+  on when it answers (seam 2, "A node silent under an awake computer"; the
+  placement lane's `outage`). What remains, a decision for Paul: an idle
+  computer whose node stays down still sleeps unsaved after its 20 idle
+  minutes and the 30-minute unsaved bound, as any whose saves keep failing
+  does. Stopping that clock while its node is silent would be a change to
+  the lifecycle (crates/core), not to the watch.
 - **Found 40 (seam 9): an agent cannot open the apps it makes**, on the
   LAN: the engine refuses a computer every private address and the node's
   own, and the platform's hosts are the box's. It builds and deploys

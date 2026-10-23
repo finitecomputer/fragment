@@ -161,6 +161,8 @@ const SAVED_DIRS: [&str; 2] = ["/data", "/data/work"];
 const WORK_LEFT_OUT: &str = "/work/";
 /// The lever's failed saves at most at once (`fail-saves`).
 const FAIL_SAVES_MAX: u32 = 100;
+/// The words of a command the `exec` lever runs, at most.
+const LEVER_ARGV_MAX: usize = 16;
 /// The lever's `hang-backups`: the guest's `sandbox-shim`, which its saves'
 /// backups run, swapped for one that never answers, as a sick container's
 /// (r4, r6), the real one kept beside it; and put back.
@@ -272,8 +274,10 @@ enum MetaKey {
     /// seam 2). entry.mjs's `ContainerHost` reads this row as an isolate
     /// starts, so its container's calls go to that node.
     Node,
-    /// Why its last start found its node down, or no node to run on. A
-    /// start that comes up clears it.
+    /// Why its last start found its node down, or no node to run on; or,
+    /// awake, why its node has been silent under it too long (its watch's
+    /// `computer/node`, docs/self-host.md found 39). A start that comes up
+    /// clears it, as does its node answering again.
     NodeNote,
     /// How its node was chosen: as its owner chose, by the deployment's
     /// rule, or by the rule because their choice could not take it.
@@ -604,9 +608,17 @@ struct Exited {
     generation: u64,
 }
 
+/// `computer/node`'s body: what start `generation`'s watch says of its node
+/// (`down`: why it has been silent too long; none: it answers again).
+#[derive(Deserialize)]
+struct NodeSaid {
+    generation: u64,
+    down: Option<String>,
+}
+
 /// `computer/test`'s body (a test fleet's: `POST /api/test/computer`):
 /// `times` is `fail-saves`', `on` is `always-on`'s, `ms` is `hang-backups`'
-/// and `alive-check`'s, `freeze` is `alive-check`'s.
+/// and `alive-check`'s, `freeze` is `alive-check`'s, `argv` is `exec`'s.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TestLever {
@@ -621,6 +633,9 @@ struct TestLever {
     /// `alive-check`'s: its start's guest stopped as it starts.
     #[serde(default)]
     freeze: Option<bool>,
+    /// `exec`'s: the command run in its container.
+    #[serde(default)]
+    argv: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -928,6 +943,11 @@ impl ComputerCell {
         }
         let id = self.must(MetaKey::Id)?;
         self.call("arm", &[g, id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts()]).await?;
+        // armed, its node answered: an earlier isolate's word that it was
+        // silent is stale (found 39)
+        if self.meta(MetaKey::NodeNote)?.is_some() {
+            self.delete_meta(MetaKey::NodeNote)?;
+        }
         Ok(None)
     }
 
@@ -975,6 +995,13 @@ impl ComputerCell {
         // as does one whose start found its node down, or no node at all
         if let Some(e) = self.node_failure.borrow_mut().take() {
             return Err(e);
+        }
+        // or one awake on a node that has been silent under it too long
+        // (`computer/node`, found 39): its container is kept, not restarted
+        if matches!(self.lifecycle()?.phase, Phase::Awake { .. }) {
+            if let Some(note) = self.meta(MetaKey::NodeNote)? {
+                return Err(CellError::new(ErrorCode::NodeDown, note));
+            }
         }
         if let Some(why) = refused {
             return Err(CellError::new(ErrorCode::WontWake, why));
@@ -2025,6 +2052,18 @@ impl ComputerCell {
                 let pending = self.rows("SELECT COUNT(*) AS n FROM own_signins", vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
                 Ok(json!({ "computer": id, "expiredSignIns": pending }))
             }
+            "exec" => {
+                // a command in its running container, as the cell runs one: a
+                // test's look inside (the file a node's outage keeps, found 39)
+                let argv = b.argv.as_ref().filter(|a| (1..=LEVER_ARGV_MAX).contains(&a.len())).ok_or_else(|| CellError::invalid(format!("exec names its argv, 1 to {LEVER_ARGV_MAX} words")))?;
+                let Some(generation) = self.lifecycle()?.running() else {
+                    return Err(CellError::invalid("it is not running: wake it first"));
+                };
+                let g = JsValue::from_f64(generation as f64);
+                let out = js::from_js(&self.call("exec", &[g, js::to_js(&json!(argv)), JsValue::from_f64(MARK_EXEC_MS as f64)]).await?).map_err(CellError::host)?;
+                console_log!("{}", json!({ "computer": id, "lever": "exec", "generation": generation, "argv": argv, "exitCode": out["exitCode"] }));
+                Ok(json!({ "computer": id, "generation": generation, "exitCode": out["exitCode"], "output": out["output"] }))
+            }
             "always-on" => {
                 let on = b.on.ok_or_else(|| CellError::invalid("always-on names on: true or false"))?;
                 self.drive(Event::AlwaysOn { on }).await?;
@@ -2352,6 +2391,34 @@ impl ComputerCell {
                 // its guest is alive: what a start that waits for it waits for
                 self.heard_ms.set(Some(js::now_ms()));
                 json_response(&self.guest_view().await?)
+            }
+            "computer/node" => {
+                // silence is no exit (docs/self-host.md, found 39): its view
+                // says its node is down, and a wake answers `node_down`,
+                // while its container is still waited on. Said of the start
+                // that runs; a node that answers again is down for no one
+                let b: NodeSaid = body_json(&mut req).await?;
+                let told = match &b.down {
+                    Some(why) => {
+                        let running = self.lifecycle()?.running() == Some(b.generation);
+                        if running {
+                            self.set_meta(MetaKey::NodeNote, why)?;
+                        }
+                        running
+                    }
+                    None => {
+                        let noted = self.meta(MetaKey::NodeNote)?.is_some();
+                        if noted {
+                            self.delete_meta(MetaKey::NodeNote)?;
+                        }
+                        noted
+                    }
+                };
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "node": if b.down.is_some() { "silent" } else { "answers" }, "generation": b.generation, "why": b.down, "told": told }));
+                if told {
+                    self.tell_owner().await;
+                }
+                json_response(&json!({ "ok": true }))
             }
             "computer/exited" => {
                 let b: Exited = body_json(&mut req).await?;
