@@ -850,3 +850,96 @@ async fn the_bridge_runs_a_linked_core() {
     let (code, _) = c.http("GET", "/simplex/state?agent=nobody--k3x9");
     assert_eq!(code, 404);
 }
+
+/// The relayed records on `chat` (an agent's, carrying its owner's words).
+fn relayed_on(fake: &support::fake::Fake, chat: &str) -> Vec<Value> {
+    fake.with(|w| w.records(chat, "chat").into_iter().filter(|r| r["body"]["relayed"]["via"] == "simplex").collect())
+}
+
+/// Goal: messages both ways through the agent's own chat with its owner,
+/// against the real core: the owner's SimpleX message is a relayed record
+/// on its Bot Chat, by the agent, for its owner, by its sender's id, and a
+/// turn asked as its owner (the scripted runtime's echo names them); that
+/// turn's reply reaches their app; a reply to a message typed in the chat
+/// does not; a voice message is the record's attachment, whole, as an
+/// `audio/mp4`; and a start again (its catch-up) posts nothing twice.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker and ffmpeg; run by hand"]
+async fn messages_go_both_ways_through_the_chat() {
+    build_bridge_image();
+    let mut lab = Lab::up_with("messages", true);
+    let mut person = lab.start("person", false).await;
+    let fake = support::fake::Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let chat = fake.chat_named("juniper-chat--h6j7", &["juniper"]);
+    fake.with(|w| {
+        w.computer["alwaysOn"] = json!(true);
+        w.computer["generation"] = json!(1);
+    });
+    let data = lab.dir.join("computer-data");
+    let c = Computer::start(&lab, &fake, &data);
+    c.state_until(Duration::from_secs(60), "its state", |v| v["phase"] == "off").await;
+    c.http("POST", "/simplex/link?agent=juniper--k3x9");
+    let v = c.state_until(Duration::from_secs(60), "an invitation", |v| v["phase"] == "inviting").await;
+    person.cmd(&format!("/connect {}", v["link"].as_str().expect("its link"))).await;
+    c.state_until(Duration::from_secs(90), "linked", |v| v["phase"] == "linked").await;
+    let at_person = person.wait(Duration::from_secs(60), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the agent, at the person's");
+    received(&mut person, Duration::from_secs(30), |got| got.iter().any(|t| t.contains("You're linked"))).await;
+
+    // the owner's message: a relayed record, a turn as theirs, its reply back
+    let t0 = Instant::now();
+    let sent_id = say(&mut person, at_person, "hello from my phone").await;
+    let got = received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t == "echo: [paul] hello from my phone")).await;
+    println!("SimpleX message to the agent's reply on SimpleX: {} ms ({got:?})", t0.elapsed().as_millis());
+    let r = relayed_on(&fake, &chat);
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(r[0]["principal"], "npub1juniper", "posted by the agent");
+    assert_eq!(r[0]["body"]["relayed"]["for"], "npub1paul", "for its owner");
+    assert_eq!(r[0]["body"]["text"], "hello from my phone");
+    assert_eq!(r[0]["body"]["to"], json!(["npub1juniper"]));
+    let id = fragment_bridge::records::relayed_id("juniper--k3x9", &sent_id);
+    assert_eq!(fake.with(|w| w.fragments[&chat].channels["chat"].ids.get(&id).map(|(seq, _)| *seq)), r[0]["seq"].as_u64(), "by its sender's id");
+
+    // a message typed in the chat: answered there, not over SimpleX
+    fake.say(&chat, "npub1paul", json!({ "text": "typed on the web" }));
+    fake.until(30_000, "the chat's reply", |w| w.bodies(&chat, "chat", "reply").iter().any(|b| b["text"] == "echo: [paul] typed on the web")).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    person.drain(Duration::from_millis(500)).await;
+    let late: Vec<String> = person
+        .events
+        .iter()
+        .filter(|e| tag(e) == "newChatItems")
+        .flat_map(|e| e["chatItems"].as_array().cloned().unwrap_or_default())
+        .filter_map(|ci| ci["chatItem"]["content"]["msgContent"]["text"].as_str().map(str::to_string))
+        .collect();
+    assert!(!late.iter().any(|t| t.contains("typed on the web")), "a reply to the chat stays in the chat: {late:?}");
+
+    // a voice message: its file, whole, the record's attachment
+    let voice = lab.db_dir("person").join("files").join("memo.m4a");
+    voice_file(&voice, 20, false);
+    let body = json!([{ "filePath": "/data/files/memo.m4a", "msgContent": { "type": "voice", "text": "", "duration": 20 } }]);
+    let r = person.cmd(&format!("/_send @{at_person} json {body}")).await;
+    assert_eq!(tag(&r), "newChatItems", "{r}");
+    let t0 = Instant::now();
+    fake.until(60_000, "the voice message's record", |w| w.records(&chat, "chat").iter().any(|r| r["body"]["relayed"]["via"] == "simplex" && r["body"]["attachments"].is_array())).await;
+    println!("a voice message on the agent's chat: {} ms after it was sent", t0.elapsed().as_millis());
+    let rec = relayed_on(&fake, &chat).into_iter().find(|r| r["body"]["attachments"].is_array()).expect("its record");
+    let a = &rec["body"]["attachments"][0];
+    assert_eq!(a["type"], "audio/mp4");
+    assert_eq!(a["sha256"].as_str(), Some(sha256_of(&voice).as_str()), "whole");
+    assert_eq!(a["size"].as_u64(), std::fs::metadata(&voice).ok().map(|m| m.len()));
+    assert!(fake.with(|w| w.fragments[&chat].blobs.contains_key(a["sha256"].as_str().unwrap())), "its blob uploaded");
+    let got = received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t.starts_with("echo: [paul]") && t.contains("memo.m4a"))).await;
+    println!("the voice message answered on SimpleX: {got:?} (the runtime was handed its file)");
+    assert!(c.exec("ls /data/simplex/juniper--k3x9/files").trim().is_empty(), "its file let go once carried");
+
+    // a start again (SIGTERM, a save, a start): its catch-up posts nothing twice
+    let before = relayed_on(&fake, &chat).len();
+    c.stop();
+    fake.with(|w| w.computer["generation"] = json!(2));
+    let c = Computer::start(&lab, &fake, &data);
+    c.state_until(Duration::from_secs(60), "running again", |v| v["running"] == true).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(relayed_on(&fake, &chat).len(), before, "the catch-up's forwards are replays");
+    say(&mut person, at_person, "after the restart").await;
+    received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t == "echo: [paul] after the restart")).await;
+}

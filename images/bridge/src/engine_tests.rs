@@ -2597,3 +2597,79 @@ fn a_crash_that_drops_a_turns_end_leaves_nothing_open() {
     assert_eq!(w.ends(&running)[0]["error"], LOST, "the one the crash cut is lost");
     w.check().unwrap();
 }
+
+fn relaying(e: &mut Engine, agents: &[&Agent]) {
+    e.step(Input::Relaying(agents.iter().map(|a| a.fragment.clone()).collect()), T0);
+}
+
+/// Goal (SimpleX, valid): a linked agent's own relayed record is its
+/// owner's message: one turn, asked as its owner and by their name, marked
+/// `via` so its replies go back that way; read again, nothing; and its
+/// state, written and read back (a restart), keeps the mark.
+#[test]
+fn a_relayed_message_is_its_owners() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    relaying(&mut e, &[&a]);
+    let body = records::relayed_message("hi from my phone", &a.identity, "npub1paul", records::VIA_SIMPLEX, &[]);
+    let s = said(&mut e, &a, &v, 1, &a.identity, body.clone(), T0);
+    let t = started(&s).expect("a turn, handed to the runtime");
+    assert_eq!((t.text.as_str(), t.asker.as_str(), t.asker_name.as_str()), ("hi from my phone", "npub1paul", "paul"));
+    assert_eq!(e.state().turns[&t.turn].via.as_deref(), Some(records::VIA_SIMPLEX));
+    assert_eq!(said(&mut e, &a, &v, 1, &a.identity, body, T0 + 1), Step::default(), "read again: nothing");
+    let written = serde_json::to_string(e.state()).expect("a state serializes");
+    let back: State = serde_json::from_str(&written).expect("and reads back");
+    assert_eq!(back.turns[&t.turn].via.as_deref(), Some(records::VIA_SIMPLEX));
+    // its owner's Stop stops it, as a turn they asked
+    let s = said(&mut e, &a, &v, 2, "npub1paul", json!({ "kind": "stop", "turn": t.turn }), T0 + 2);
+    assert!(commands(&s).iter().any(|c| matches!(c, Command::Stop { turn } if *turn == t.turn)), "{:?}", commands(&s));
+}
+
+/// Goal (SimpleX, invalid): a relayed record is honored only from the
+/// agent itself, only while its link is bound, only for its owner, and
+/// only by `simplex`: from anyone else it is what it would be without the
+/// mark, and no turn of it goes back over SimpleX.
+#[test]
+fn a_relayed_record_is_honored_only_from_a_linked_agent_for_its_owner() {
+    let (a, b) = (agent("juniper"), agent("maple"));
+    let v = view(&[&a, &b]);
+    let mut e = engine(&[a.clone(), b.clone()]);
+    let mine = |text: &str| records::relayed_message(text, &a.identity, "npub1paul", records::VIA_SIMPLEX, &[]);
+    // not linked: the agent's own words, as ever
+    assert!(started(&said(&mut e, &a, &v, 1, &a.identity, mine("not linked"), T0)).is_none());
+    relaying(&mut e, &[&a]);
+    // for someone not its owner
+    let skyler = records::relayed_message("for skyler", &a.identity, "npub1skyler", records::VIA_SIMPLEX, &[]);
+    assert!(started(&said(&mut e, &a, &v, 2, &a.identity, skyler, T0)).is_none());
+    // by another way than SimpleX
+    let mut other = mine("telegram");
+    other["relayed"]["via"] = json!("telegram");
+    assert!(started(&said(&mut e, &a, &v, 3, &a.identity, other, T0)).is_none());
+    // posted by its owner with the mark: their own message, sent no other way
+    let s = said(&mut e, &a, &v, 4, "npub1paul", mine("paul typed this"), T0);
+    let t = started(&s).expect("their message, a turn");
+    assert_eq!(e.state().turns[&t.turn].via, None, "a person's mark is no relay");
+    ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, T0 + 1);
+    // posted by another agent of the computer: a hand-off at most, never its owner's
+    assert!(started(&said(&mut e, &b, &v, 5, &a.identity, mine("juniper's, not maple's"), T0 + 2)).is_none(), "not to maple at all");
+    let from_maple = records::relayed_message("a hand-off", &a.identity, "npub1paul", records::VIA_SIMPLEX, &[]);
+    let s = said(&mut e, &a, &v, 6, &b.identity, from_maple, T0 + 2);
+    let t = started(&s).expect("from maple to juniper: a hand-off");
+    assert_eq!(t.asker, b.identity, "asked by maple, never as its owner");
+    assert_eq!(e.state().turns[&t.turn].via, None);
+    // let go: nothing more
+    e.step(Input::Relaying(BTreeSet::new()), T0 + 3);
+    assert!(started(&said(&mut e, &a, &v, 7, &a.identity, mine("unlinked"), T0 + 3)).is_none());
+}
+
+/// Goal: a turn of no relayed record writes nothing new into the state: a
+/// computer without SimpleX keeps its `state.json` as it was.
+#[test]
+fn a_plain_turn_writes_no_via() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "hi" }), T0)).expect("a turn");
+    assert!(!serde_json::to_string(e.state()).expect("a state serializes").contains("via"));
+}

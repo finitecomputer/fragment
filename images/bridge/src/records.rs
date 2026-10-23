@@ -60,6 +60,10 @@ pub struct Message {
     pub hop: u32,
     /// The seq on `chat` of the message it quotes (a person's reply to it).
     pub reply_to: Option<u64>,
+    /// How its owner said it, when its agent relays it (`relayed`, below:
+    /// `simplex`); none for every message a person posts. Never read from
+    /// a body here: the engine sets it for the relayed records it honors.
+    pub via: Option<String>,
 }
 
 /// A command for an agent's runtime (`{kind: "command"}`), from a person:
@@ -261,7 +265,60 @@ fn message(o: &Map<String, Value>) -> Said {
             None => return Said::Other,
         },
     };
-    Said::Message(Message { text, to, attachments, turn, hop, reply_to })
+    Said::Message(Message { text, to, attachments, turn, hop, reply_to, via: None })
+}
+
+/// The one way an owner's message is relayed (docs/chat-records.md, "A
+/// relayed message").
+pub const VIA_SIMPLEX: &str = "simplex";
+
+/// What a relayed message says it relays: the person it speaks for, and
+/// how they said it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relayed {
+    /// The person whose message it is (an agent relays only its owner's).
+    pub for_: String,
+    pub via: &'static str,
+}
+
+/// A relayed message's `relayed` (docs/chat-records.md): a message an agent
+/// posts on its own chat with its owner carrying what its owner said
+/// elsewhere (`{"via": "simplex", "for": <owner>}`). None for any other
+/// body, a message of another shape, or another `via`. Whether it is
+/// honored (by whom, for whom) is the engine's.
+pub fn relayed(body: &Value) -> Option<Relayed> {
+    let Value::Object(o) = body else { return None };
+    if !matches!(o.get("kind"), None | Some(Value::Null)) && o.get("kind") != Some(&Value::String("message".into())) {
+        return None;
+    }
+    let r = o.get("relayed")?.as_object()?;
+    let via = match r.get("via")?.as_str()? {
+        VIA_SIMPLEX => VIA_SIMPLEX,
+        _ => return None,
+    };
+    let for_ = r.get("for")?.as_str().filter(|p| is_identity(p) && p.len() <= 128)?.to_string();
+    matches!(message(o), Said::Message(_)).then_some(Relayed { for_, via })
+}
+
+/// A relayed message's body: `text` (cut as a person's is), `to` its agent
+/// alone, what it relays, and its files (`attachments`, uploaded first).
+pub fn relayed_message(text: &str, agent: &str, owner: &str, via: &'static str, attachments: &[AttachmentRef]) -> Value {
+    assert!(is_identity(agent) && is_identity(owner), "a relayed message is an agent's, for a person");
+    let mut body = json!({ "text": cut_bytes(text, limits::MESSAGE_TEXT_MAX_BYTES), "to": [agent], "relayed": { "via": via, "for": owner } });
+    if !attachments.is_empty() {
+        body["attachments"] = json!(attachments);
+    }
+    body
+}
+
+/// A relayed message's post id: `sx:` and 32 hex of SHA-256 of `<agent
+/// fragment>|<its sender's id for it>`: the same however often the agent's
+/// SimpleX core reads it, a catch-up or a rollback's included.
+pub fn relayed_id(agent: &str, sender_id: &str) -> String {
+    let digest = Sha256::digest(format!("{agent}|{sender_id}").as_bytes());
+    let id = format!("sx:{}", &hex(&digest)[..32]);
+    assert!(valid_post_id(&id), "a relayed id is a post id: {id}");
+    id
 }
 
 /// Reads a `tasks` record's body.
@@ -629,6 +686,38 @@ pub fn reply(text: &str, turn: &str, to: &[String], hop: u32, interim: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal: a relayed message is a message that names `simplex` and a
+    /// person, nothing else; its body round-trips through `said` as a
+    /// message to its agent; its id is the same for the same message.
+    #[test]
+    fn a_relayed_message_reads_strictly() {
+        let body = relayed_message("hi from my phone", "npub1juniper", "npub1paul", VIA_SIMPLEX, &[]);
+        assert_eq!(body, json!({ "text": "hi from my phone", "to": ["npub1juniper"], "relayed": { "via": "simplex", "for": "npub1paul" } }));
+        assert_eq!(relayed(&body), Some(Relayed { for_: "npub1paul".into(), via: VIA_SIMPLEX }));
+        let Said::Message(m) = said(&body) else { panic!("a message") };
+        assert_eq!((m.text.as_str(), m.to.as_slice(), m.via.as_deref()), ("hi from my phone", ["npub1juniper".to_string()].as_slice(), None), "a body sets no via");
+        for bad in [
+            json!({ "text": "x", "relayed": { "via": "telegram", "for": "npub1paul" } }),
+            json!({ "text": "x", "relayed": { "via": "simplex", "for": "paul" } }),
+            json!({ "text": "x", "relayed": { "via": "simplex" } }),
+            json!({ "text": "x", "relayed": "simplex" }),
+            json!({ "kind": "stop", "relayed": { "via": "simplex", "for": "npub1paul" } }),
+            json!({ "text": 3, "relayed": { "via": "simplex", "for": "npub1paul" } }),
+            json!({ "text": "x" }),
+            json!("x"),
+        ] {
+            assert_eq!(relayed(&bad), None, "{bad}");
+        }
+        let voice = AttachmentRef { sha256: "a".repeat(64), size: 10, media_type: "audio/mp4".into(), name: "voice.m4a".into() };
+        let with = relayed_message("", "npub1juniper", "npub1paul", VIA_SIMPLEX, std::slice::from_ref(&voice));
+        assert!(relayed(&with).is_some(), "a voice message, its words none");
+        let Said::Message(m) = said(&with) else { panic!("a message") };
+        assert_eq!(m.attachments, vec![voice]);
+        assert_eq!(relayed_id("juniper--k3x9", "RlBFOStpcVFyc1VrNDJyZQ=="), relayed_id("juniper--k3x9", "RlBFOStpcVFyc1VrNDJyZQ=="));
+        assert_ne!(relayed_id("juniper--k3x9", "a"), relayed_id("maple--k3x9", "a"), "each agent's own");
+        assert_eq!(relayed_id("juniper--k3x9", "a").len(), 35);
+    }
 
     #[test]
     fn messages_read_strictly() {

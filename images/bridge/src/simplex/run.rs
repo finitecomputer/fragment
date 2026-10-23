@@ -26,8 +26,14 @@
 //!   minutes of the next turn.
 //! - **What a core prints is not logged**: it echoes the commands it gets,
 //!   message text among them. Its exits are, by their code.
+//! - **The owner's messages** go to the agent's own chat with them (its Bot
+//!   Chat) as relayed records (docs/chat-records.md, "A relayed message"),
+//!   each by its sender's id, so a message read again is one record; a
+//!   file it carries (a voice message's) is received first and carried as
+//!   its attachment. **Replies** to them come back here once posted
+//!   (`Handle::reply`), and go to the owner's app.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -39,10 +45,11 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_tungstenite::tungstenite::Message;
 
-use super::link::{Action, Input, Link, Notice, Phase};
-use super::wire::{self, Cmd, Resp};
+use super::link::{Action, Inbound, Input, Link, Notice, Phase};
+use super::wire::{self, Cmd, FileId, Resp};
 use crate::api::{self, Api};
-use crate::runtime::Agent;
+use crate::records;
+use crate::runtime::{Agent, LocalFile};
 
 /// Each agent's state, under its directory.
 pub const LINK_FILE: &str = "link.json";
@@ -74,6 +81,13 @@ const WRITER_MAX: usize = 64;
 const STDERR_TAIL_BYTES: usize = 2_048;
 /// An agent's name, as its SimpleX profile shows it, at most.
 const DISPLAY_NAME_MAX: usize = 32;
+/// Messages waiting to be posted for one agent, at most; past it the
+/// oldest wait for the next start's catch-up.
+const POSTS_MAX: usize = 64;
+/// Files a link waits to receive at once, at most.
+const FILES_MAX: usize = 32;
+/// The Bot Chat is looked for this often while none is found.
+const CHAT_LOOK_MS: u64 = 30_000;
 
 /// What the image gives the bridge for SimpleX (main.rs reads it).
 #[derive(Debug, Clone)]
@@ -130,6 +144,9 @@ pub enum Msg {
     Exited { agent: String, epoch: u64, why: String },
     /// A core's bot API closed while its process may live on.
     Lost { agent: String, epoch: u64 },
+    /// The agent's reply to a message relayed from SimpleX, posted: to
+    /// its owner's app.
+    Reply { agent: String, text: String },
 }
 
 /// How the rest of the bridge reaches the manager.
@@ -167,6 +184,54 @@ impl Handle {
     pub async fn unlink(&self, agent: &str) -> Option<View> {
         self.ask(|reply| Msg::Unlink { agent: agent.to_string(), reply }).await
     }
+
+    /// `agent`'s reply to a message its owner sent over SimpleX, posted on
+    /// its chat: sent to their app too. Never waits (a lane calls it).
+    pub fn reply(&self, agent: &str, text: &str) {
+        if self.tx.try_send(Msg::Reply { agent: agent.to_string(), text: text.to_string() }).is_err() {
+            crate::ev!("simplex.busy", { "dropped": "reply", "agent": agent });
+        }
+    }
+}
+
+/// A message of the owner's, to post on the agent's chat: with the file it
+/// carries, once received, or a note of why none.
+struct Post {
+    inbound: Inbound,
+    file: Option<LocalFile>,
+    note: Option<String>,
+}
+
+/// What a file a message carries is, by the message's kind and its name.
+pub fn media_type(kind: &str, name: &str) -> &'static str {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    match (kind, ext.as_str()) {
+        // SimpleX's apps record a voice message as MPEG-4 AAC
+        ("voice", _) | (_, "m4a") => "audio/mp4",
+        (_, "jpg" | "jpeg") => "image/jpeg",
+        ("image", _) => "image/jpeg",
+        (_, "png") => "image/png",
+        (_, "gif") => "image/gif",
+        (_, "webp") => "image/webp",
+        ("video", _) | (_, "mp4") => "video/mp4",
+        (_, "mp3") => "audio/mpeg",
+        (_, "ogg" | "opus") => "audio/ogg",
+        (_, "wav") => "audio/wav",
+        (_, "pdf") => "application/pdf",
+        (_, "txt" | "md") => "text/plain",
+        _ => "application/octet-stream",
+    }
+}
+
+/// What the agent's chat says of a file that could not be carried.
+fn file_note(kind: &str, why: &str) -> String {
+    let what = match kind {
+        "voice" => "a voice message",
+        "image" => "a photo",
+        "video" => "a video",
+        _ => "a file",
+    };
+    format!("(I sent {what} over SimpleX that {why}.)")
 }
 
 /// An agent's `link.json`: its link, the agent it is of (a fragment's name
@@ -310,6 +375,10 @@ struct Slot {
     note: Option<String>,
     /// Since when it should not run but has commands under way.
     draining_since: Option<Instant>,
+    /// Messages whose file it waits to receive, by the file.
+    files: BTreeMap<FileId, Inbound>,
+    /// Its poster: its messages, posted in order on its chat.
+    poster: Option<mpsc::Sender<Post>>,
 }
 
 impl Slot {
@@ -341,17 +410,21 @@ struct Manager {
     held: bool,
     pulse: watch::Sender<bool>,
     pulse_until: Option<Instant>,
+    /// The agents whose link is bound: the bridge's engine honors only
+    /// their relayed records.
+    relaying: watch::Sender<BTreeSet<String>>,
+    stop: watch::Receiver<bool>,
 }
 
 /// Starts the manager: its handle. `quiet` is true while no core runs
 /// (the bridge's answer to a hold waits on it); `hold` is the platform's
 /// hold file.
-pub fn start(cfg: Config, api: Api, quiet: Arc<AtomicBool>, hold: PathBuf, stop: watch::Receiver<bool>) -> Handle {
+pub fn start(cfg: Config, api: Api, quiet: Arc<AtomicBool>, hold: PathBuf, relaying: watch::Sender<BTreeSet<String>>, stop: watch::Receiver<bool>) -> Handle {
     let (tx, rx) = mpsc::channel(INBOX_MAX);
     let (pulse, pulse_rx) = watch::channel(false);
     // held for a moment at a link's change, at the pace the bridge's own pings by default
     tokio::spawn(crate::driver::keepalive(api.clone(), pulse_rx, Duration::from_millis(crate::limits::KEEPALIVE_PING_MS), stop.clone()));
-    let m = Manager { cfg, api, quiet, hold, tx: tx.clone(), slots: BTreeMap::new(), computer: None, held: false, pulse, pulse_until: None };
+    let m = Manager { cfg, api, quiet, hold, tx: tx.clone(), slots: BTreeMap::new(), computer: None, held: false, pulse, pulse_until: None, relaying, stop: stop.clone() };
     tokio::spawn(m.run(rx, stop));
     Handle { tx }
 }
@@ -413,6 +486,7 @@ impl Manager {
             Msg::Frame { agent, epoch, text } => self.frame(&agent, epoch, &text),
             Msg::Exited { agent, epoch, why } => self.exited(&agent, epoch, &why),
             Msg::Lost { agent, epoch } => self.lost(&agent, epoch).await,
+            Msg::Reply { agent, text } => self.apply(&agent, Input::Reply(&text)),
         }
     }
 
@@ -454,6 +528,8 @@ impl Manager {
                 broken: None,
                 note: None,
                 draining_since: None,
+                files: BTreeMap::new(),
+                poster: None,
             });
             self.look_up_title(a.clone());
         }
@@ -769,6 +845,83 @@ impl Manager {
             },
             None => self.apply(f, Input::Said(&frame.resp)),
         }
+        self.file_event(f, &frame.resp);
+    }
+
+    /// A file a forwarded message waits on: received once its description
+    /// is ready, posted with its message once whole, or the message posted
+    /// with a note once it will not arrive.
+    fn file_event(&mut self, f: &str, resp: &Resp) {
+        let Some(s) = self.slots.get_mut(f) else { return };
+        match resp {
+            Resp::FileReady { file } if s.files.contains_key(file) => self.act(f, Action::Ask(Cmd::Receive { file: *file })),
+            Resp::FileDone { file, path } => {
+                if let Some(inbound) = s.files.remove(file) {
+                    let local = LocalFile { path: s.dir.join("files").join(path), media_type: media_type(&inbound.kind, path).into(), name: wire::cut(path.rsplit('/').next().unwrap_or(path), 200).into(), size: inbound.file.as_ref().map_or(0, |r| r.size) };
+                    self.post(f, Post { inbound, file: Some(local), note: None });
+                }
+            }
+            Resp::FileFailed { file } => {
+                if let Some(inbound) = s.files.remove(file) {
+                    let note = file_note(&inbound.kind, "did not arrive");
+                    self.post(f, Post { inbound, file: None, note: Some(note) });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// An owner's message the link forwards: posted now, or once the file
+    /// it carries is received.
+    fn forward(&mut self, f: &str, inbound: Inbound) {
+        let Some(s) = self.slots.get_mut(f) else { return };
+        let Some(file) = inbound.file.clone() else {
+            return self.post(f, Post { inbound, file: None, note: None });
+        };
+        if file.size > crate::limits::ATTACHMENT_MAX_BYTES {
+            let note = file_note(&inbound.kind, &format!("was too large to carry here ({} MB)", file.size / 1_000_000));
+            return self.post(f, Post { inbound, file: None, note: Some(note) });
+        }
+        if let Some(path) = file.path.clone() {
+            // received already (a catch-up of one received before)
+            let local = LocalFile { path: s.dir.join("files").join(&path), media_type: media_type(&inbound.kind, &path).into(), name: wire::cut(path.rsplit('/').next().unwrap_or(&path), 200).into(), size: file.size };
+            return self.post(f, Post { inbound, file: Some(local), note: None });
+        }
+        if s.files.len() >= FILES_MAX && !s.files.contains_key(&file.id) {
+            crate::ev!("simplex.files_bounded", { "agent": f, "max": FILES_MAX });
+            return;
+        }
+        s.files.insert(file.id, inbound);
+        // its description may not be ready yet: then FileReady asks again
+        self.act(f, Action::Ask(Cmd::Receive { file: file.id }));
+    }
+
+    /// Hands a message to the agent's poster, started at its first.
+    fn post(&mut self, f: &str, p: Post) {
+        let Some(s) = self.slots.get_mut(f) else { return };
+        if s.poster.as_ref().is_none_or(|tx| tx.is_closed()) {
+            let (tx, rx) = mpsc::channel(POSTS_MAX);
+            tokio::spawn(poster(self.api.clone(), s.agent.clone(), rx, self.stop.clone()));
+            s.poster = Some(tx);
+        }
+        let tx = s.poster.as_ref().expect("its poster");
+        if tx.try_send(p).is_err() {
+            // the next start's catch-up reads it again (by the same id)
+            crate::ev!("simplex.posts_bounded", { "agent": f, "max": POSTS_MAX });
+        }
+    }
+
+    /// The agents whose link is bound, for the bridge's engine.
+    fn publish_relaying(&self) {
+        let now: BTreeSet<String> = self.slots.iter().filter(|(_, s)| matches!(s.saved.link.phase, Phase::Linked { .. })).map(|(f, _)| f.clone()).collect();
+        self.relaying.send_if_modified(|was| {
+            if *was == now {
+                false
+            } else {
+                *was = now;
+                true
+            }
+        });
     }
 
     fn exited(&mut self, f: &str, epoch: u64, why: &str) {
@@ -819,6 +972,7 @@ impl Manager {
         for a in actions {
             self.act(f, a);
         }
+        self.publish_relaying();
     }
 
     fn act(&mut self, f: &str, a: Action) {
@@ -839,9 +993,8 @@ impl Manager {
                 }
             }
             Action::Forward(i) => {
-                // carried to the agent's chat by the next part of the stack
-                // (docs/explorations/simplex-complexity.md)
                 crate::ev!("simplex.forward", { "agent": f, "kind": i.kind, "bytes": i.text.len(), "file": i.file.is_some() });
+                self.forward(f, i);
             }
             Action::Tell(n) => {
                 match &n {
@@ -947,6 +1100,49 @@ pub fn kill_cores() {
     }
 }
 
+/// One agent's poster: each of its owner's messages, in order, as a
+/// relayed record on its Bot Chat (looked for until found), its file
+/// uploaded first and let go once posted.
+async fn poster(api: Api, agent: Agent, mut rx: mpsc::Receiver<Post>, stop: watch::Receiver<bool>) {
+    let mut chat: Option<String> = None;
+    // bounded by the bridge's life: one message per pass
+    while let Some(p) = rx.recv().await {
+        let t0 = Instant::now();
+        // bounded: a look every CHAT_LOOK_MS until found, or the bridge stops
+        while chat.is_none() {
+            match api.fragments_for(&agent.fragment, &agent.owner).await {
+                Ok(list) => chat = api::bot_chat(&agent.fragment, &list),
+                Err(e) => crate::ev!("simplex.chat_unread", { "agent": agent.fragment, "error": e.to_string() }),
+            }
+            if chat.is_some() {
+                break;
+            }
+            crate::ev!("simplex.no_chat", { "agent": agent.fragment, "waitedMs": t0.elapsed().as_millis() as u64 });
+            let mut stop = stop.clone();
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(CHAT_LOOK_MS)) => {}
+                _ = crate::net::stopped(&mut stop) => return,
+            }
+        }
+        let chat = chat.clone().expect("found");
+        let text = match &p.note {
+            Some(note) if p.inbound.text.trim().is_empty() => note.clone(),
+            Some(note) => format!("{}\n\n{note}", p.inbound.text),
+            None => p.inbound.text.clone(),
+        };
+        let body = records::relayed_message(&text, &agent.identity, &agent.owner, records::VIA_SIMPLEX, &[]);
+        let id = records::relayed_id(&agent.fragment, &p.inbound.id);
+        let files: Vec<LocalFile> = p.file.iter().cloned().collect();
+        if !crate::driver::post(&api, &chat, &agent.fragment, records::CHAT, &id, body, &files, stop.clone()).await {
+            return;
+        }
+        crate::ev!("simplex.posted", { "agent": agent.fragment, "chat": chat, "id": id, "kind": p.inbound.kind, "file": p.file.is_some() });
+        for f in &files {
+            let _ = tokio::fs::remove_file(&f.path).await;
+        }
+    }
+}
+
 /// SIGTERM, then (past `STOP_MS_MAX`) SIGKILL; until its process ended.
 async fn stop_process(f: &str, mut core: Core) {
     let t0 = Instant::now();
@@ -1032,6 +1228,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Goal: a file is named what it is, a voice message as SimpleX's apps
+    /// record one; a file that cannot be carried says so in plain words.
+    #[test]
+    fn files_are_what_they_are() {
+        assert_eq!(media_type("voice", "voice_2026.m4a"), "audio/mp4");
+        assert_eq!(media_type("voice", "noext"), "audio/mp4");
+        assert_eq!(media_type("image", "IMG_1.JPG"), "image/jpeg");
+        assert_eq!(media_type("file", "report.pdf"), "application/pdf");
+        assert_eq!(media_type("file", "x"), "application/octet-stream");
+        assert_eq!(file_note("voice", "did not arrive"), "(I sent a voice message over SimpleX that did not arrive.)");
+    }
+
     /// Goal: an agent's SimpleX name is its title, cleaned and cut, else its
     /// label; a fragment's name is a directory only in its own shape.
     #[test]
@@ -1068,6 +1276,8 @@ mod tests {
             broken: None,
             note: None,
             draining_since: None,
+            files: BTreeMap::new(),
+            poster: None,
         };
         let v = s.view(true);
         assert_eq!((v.phase, v.link.as_deref(), v.running, v.why.as_deref()), ("inviting", Some("simplex:/invitation#/x"), false, None));
@@ -1142,9 +1352,11 @@ mod tests {
             broken: None,
             note: None,
             draining_since: None,
+            files: BTreeMap::new(),
+            poster: None,
         };
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
-        let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(false)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None };
+        let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(false)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeSet::new()).0, stop: watch::channel(false).1 };
         m.lost("juniper--k3x9", 3).await;
         assert!(m.slots["juniper--k3x9"].core.is_some(), "another life's word: nothing");
         m.lost("juniper--k3x9", 4).await;

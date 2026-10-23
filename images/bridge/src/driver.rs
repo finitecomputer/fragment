@@ -294,8 +294,12 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
         crate::simplex::run::kill_strays(sc).await;
     }
     tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), answer, claims_in_flight.clone(), quiet.clone(), stop.clone()));
-    // SimpleX, when the image names its core: told of the computer at each read
-    let simplex = cfg.simplex.clone().map(|sc| crate::simplex::run::start(sc, api.clone(), quiet.clone(), cfg.hold.clone(), stop.clone()));
+    // SimpleX, when the image names its core: told of the computer at each
+    // read; it says which agents' links are bound (`relaying`), whose
+    // relayed records alone the engine honors. The sender lives as long as
+    // the bridge, so the engine's watch of it never ends on its own.
+    let (relaying_tx, mut relaying_rx) = watch::channel(std::collections::BTreeSet::<String>::new());
+    let simplex = cfg.simplex.clone().map(|sc| crate::simplex::run::start(sc, api.clone(), quiet.clone(), cfg.hold.clone(), relaying_tx.clone(), stop.clone()));
     if let Some(h) = &simplex {
         let _ = simplex_page.handle.set(h.clone());
     }
@@ -348,7 +352,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     }
     crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtime": name, "boot": engine.state().boot + 1, "life": life });
 
-    let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight });
+    let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight, simplex: simplex.clone() });
     let runtime_lane = RuntimeLane::spawn(api.clone(), cmd_tx, cfg.media_dir.clone());
     tokio::spawn(keepalive(api.clone(), keep_rx, cfg.keepalive_ping, stop.clone()));
     let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), discovering: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()) };
@@ -360,7 +364,11 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
         }
         for e in step.effects {
             match e {
-                Effect::Post { agent, fragment, channel, id, body, files } => lanes.push(&fragment, Job::Post { agent, channel, id, body, files }),
+                Effect::Post { agent, fragment, channel, id, body, files } => {
+                    // a reply of a turn its owner asked over SimpleX goes back there, once posted
+                    let relay = simplex.is_some() && channel == records::CHAT && reply_turn(&id).is_some_and(|t| engine.state().turns.get(t).is_some_and(|t| t.via.as_deref() == Some(records::VIA_SIMPLEX)));
+                    lanes.push(&fragment, Job::Post { agent, channel, id, body, files, relay })
+                }
                 Effect::Claim { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Claim { agent, turn, id, body }),
                 Effect::Owed { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Owed { agent, turn, id, body }),
                 Effect::Draft { agent, fragment, turn, text } => lanes.push(&fragment, Job::Draft { agent, turn, text }),
@@ -385,6 +393,14 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
 
     let s = engine.step(Input::Agents(computer.agents.clone()), crate::log::now_ms());
     act(&engine, s)?;
+    // the agents whose SimpleX link is bound, as their files say, before any
+    // record: a relayed record a cut life posted and never ran is honored
+    if let Some(sc) = &cfg.simplex {
+        let linked: std::collections::BTreeSet<String> = crate::simplex::run::linked_on_disk(&sc.dir, &computer.agents).into_iter().collect();
+        relaying_tx.send_replace(linked.clone());
+        let s = engine.step(Input::Relaying(linked), crate::log::now_ms());
+        act(&engine, s)?;
+    }
     let s = engine.recover(crate::log::now_ms());
     act(&engine, s)?;
     for a in &computer.agents {
@@ -419,6 +435,16 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                     }
                 };
                 if let Err(e) = act(&engine, step) {
+                    break Err(e);
+                }
+            }
+            r = relaying_rx.changed() => {
+                if r.is_err() {
+                    break Ok(());
+                }
+                let linked = relaying_rx.borrow_and_update().clone();
+                let s = engine.step(Input::Relaying(linked), crate::log::now_ms());
+                if let Err(e) = act(&engine, s) {
                     break Err(e);
                 }
             }
@@ -888,9 +914,31 @@ async fn ensure_wake(api: &Api, agent: &Agent, fragment: &str, channel: &str) ->
 
 // ---- lanes: each fragment's posts, claims and drafts, in order ----
 
+/// The turn a reply's post id names (`rp:<turn>:<n>`).
+fn reply_turn(id: &str) -> Option<&str> {
+    id.strip_prefix("rp:")?.rsplit_once(':').map(|(turn, _)| turn)
+}
+
+/// What the owner's SimpleX app is told of a reply's files, which go only
+/// to the chat.
+fn with_files_noted(text: &str, files: usize) -> String {
+    match files {
+        0 => text.to_string(),
+        n => {
+            let note = if n == 1 { "(I sent a file, in our chat.)".to_string() } else { format!("(I sent {n} files, in our chat.)") };
+            if text.trim().is_empty() {
+                note
+            } else {
+                format!("{text}\n\n{note}")
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Job {
-    Post { agent: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile> },
+    /// `relay`: a reply of a turn asked over SimpleX, sent there once posted.
+    Post { agent: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile>, relay: bool },
     /// A turn's `turn.start` on `work`, whose answer the engine waits for.
     Claim { agent: String, turn: String, id: String, body: Value },
     /// One of a turn's last records on `work`: the engine hears when the
@@ -913,6 +961,8 @@ struct Claims {
     inbox: mpsc::Sender<Msg>,
     hold: PathBuf,
     in_flight: Arc<AtomicUsize>,
+    /// Where a SimpleX turn's posted reply goes (none without SimpleX).
+    simplex: Option<crate::simplex::run::Handle>,
 }
 
 /// One claim's try in flight, counted while it lives.
@@ -1018,8 +1068,12 @@ async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut s
                     Err(e) => crate::ev!("draft.failed", { "fragment": fragment, "turn": turn, "error": e.to_string() }),
                 }
             }
-            Job::Post { agent, channel, id, body, files } => {
-                post(&api, &fragment, &agent, channel, &id, body, &files, stop.clone()).await;
+            Job::Post { agent, channel, id, body, files, relay } => {
+                let text = body["text"].as_str().unwrap_or("").to_string();
+                let done = post(&api, &fragment, &agent, channel, &id, body, &files, stop.clone()).await;
+                if let (true, true, Some(sx)) = (relay, done, claims.simplex.as_ref()) {
+                    sx.reply(&agent, &with_files_noted(&text, files.len()));
+                }
             }
             Job::Owed { agent, turn, id, body } => {
                 // Done (answered, or given up after its tries) unless the
@@ -1092,7 +1146,7 @@ async fn claim(api: &Api, fragment: &str, agent: &str, id: &str, body: &Value, c
 /// or refused at once: true when done so, false when the bridge stopped
 /// first.
 #[allow(clippy::too_many_arguments)]
-async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, mut body: Value, files: &[LocalFile], stop: watch::Receiver<bool>) -> bool {
+pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, mut body: Value, files: &[LocalFile], stop: watch::Receiver<bool>) -> bool {
     let mut backoff = Backoff::default();
     for attempt in 1..=limits::POST_TRIES_MAX {
         let uploaded = upload(api, fragment, agent, files).await;
