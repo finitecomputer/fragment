@@ -283,7 +283,7 @@ details.tools[open] summary .chev { transform: rotate(90deg); }
 .step-status.running svg { color: var(--chat-agent-color); }
 .step-status.failed svg { color: var(--danger-text); }
 .step.error pre, .step.error .step-name, .step.error .step-args { color: var(--danger-text); }
-.step-text { border-top: 1px solid var(--border); padding: 10px 14px 0; font-size: 13px; line-height: 1.5; color: var(--text-secondary); overflow-wrap: anywhere; }
+.step-text { border-top: 1px solid var(--border); padding: 10px 14px; font-size: 13px; line-height: 1.5; color: var(--text-secondary); overflow-wrap: anywhere; }
 .step-text .md > :last-child { margin-bottom: 0; }
 .step-text .md code { background: var(--surface-muted); }
 .note-expand { border: 0; padding: 2px 0; background: none; color: var(--text-tertiary); font: inherit; cursor: pointer; }
