@@ -804,6 +804,34 @@ fn platform_host_checks(s: &mut Suite, api: &Api, owner: &crate::Keys, fetched: 
     Ok(5)
 }
 
+/// The check `resolver_check` makes, as a run that cannot make it skips it.
+const RESOLVER_CHECK: &str = "a client that asks DNS for the app's name (busybox's wget, on musl's resolver, as glibc's Python and Node ask) gets the egress's own address for it and opens the app at its own address, port and all, through the platform";
+
+/// The platform's own hosts from a computer, by a client that asks DNS
+/// (found 40 on `.localhost`, docs/self-host.md): Chrome and curl take a
+/// `.localhost` name for their own loopback, where the bridge's forwarder
+/// takes them on (`platform_host_checks`), but a resolver asks the
+/// engine's DNS, which answers an intercepted name with an address of the
+/// egress's own (198.18.0.0/15), and the client dials it on the platform's
+/// port. A node's computer intercepts the platform's hosts on that port
+/// too (`fragment_core::computer::platform_intercepts`); before, an HTTP
+/// intercept took a name on 80 alone, and the connection went to the
+/// name's real host, which is no public address. Made with the lever's
+/// `exec`, busybox's `nslookup` and `wget` in the stub.
+fn resolver_check(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str) -> Result<()> {
+    let (name, token) = shelf(s, api, owner, "dns-shelf")?;
+    let url = api.site_url(&name, &format!("?view={token}"));
+    let host = url.strip_prefix("http://").and_then(|r| r.split(':').next()).unwrap_or_default().to_string();
+    let script = format!("nslookup {host} 2>&1; echo ---; wget -q -O - -T 20 '{url}' 2>&1");
+    let r = lever_with(api, id, json!({ "op": "exec", "argv": ["sh", "-c", script] }))?;
+    let out = r.body["output"].as_str().unwrap_or_default().to_string();
+    let (looked, opened) = out.split_once("---").unwrap_or(("", &out));
+    // the egress's own range, 198.18.0.0/15 (sandcastle's fakeip.rs), never loopback
+    let egress = looked.lines().filter(|l| l.trim_start().starts_with("Address")).flat_map(str::split_whitespace).any(|w| w.starts_with("198.18.") || w.starts_with("198.19."));
+    s.ok(RESOLVER_CHECK, r.status == 200 && r.body["exitCode"] == 0 && egress && opened.contains(SHELF_PAGE), json!({ "url": url, "exitCode": r.body["exitCode"], "output": out }));
+    Ok(())
+}
+
 /// The checks `lockdown_checks` makes.
 const LOCKDOWN_CHECKS: [&str; 4] = [
     "started with the internet off (a test fleet's lever), its guest still opens its owner's app through the platform",
@@ -1457,6 +1485,13 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         for label in PLATFORM_HOST_CHECKS.iter().chain(&LOCKDOWN_CHECKS) {
             s.skip(label, why);
         }
+    }
+    // and by a client that asks DNS, on a node's port intercept
+    match (scripted && fakes, s.real_engine()) {
+        (true, true) => resolver_check(s, api, &owner, &id)?,
+        (true, false) if s.has_nodes() => s.skip(RESOLVER_CHECK, "the Docker double resolves no name under a glob intercept: its container's DNS is Docker's (sandcastle's docs/node.md); the real engine's run makes it"),
+        (true, false) => s.skip(RESOLVER_CHECK, "on Cloudflare's containers (wrangler's) an HTTP intercept takes a name on port 80 alone, so the platform sets its port on a node only, and a container's DNS here is Docker's: the real engine's run makes it"),
+        (false, _) => s.skip(RESOLVER_CHECK, "it needs the stub's busybox, on a local run"),
     }
 
     // asleep, a record wakes it, restored, and nothing runs twice
