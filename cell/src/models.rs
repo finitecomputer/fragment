@@ -388,16 +388,18 @@ async fn tried(env: &Env, cfg: &Config, bounded: &Bounded<'static>, fallback: Op
         calls += 1;
         let answer = transport(env, cfg, model, &bounded.input, meta).await;
         let status = answer.as_ref().ok().map(Response::status_code);
+        // the platform's own key refused or its credit spent, on any try (a
+        // fallback's own key too): every call to it falls back, or fails
+        // where it has none, until someone fixes it
+        if let Some(alarm) = status.and_then(|s| bounds::key_alarm(model.upstream, s)) {
+            console_error!("{}", json!({ "event": "model.platform-key", "model": model.id(), "status": status, "alarm": alarm }));
+        }
         let Some(next) = tries.after(status.map_or(Tried::Unreached, Tried::Answered)) else { return (answer, model, calls) };
         // what the vendor said (its error, never the request's words)
         let why = match answer {
             Ok(mut failed) => bounded_text(&mut failed).await.chars().take(300).collect::<String>(),
             Err(e) => e.message,
         };
-        // the platform's own key refused or its credit spent: every call falls back until someone fixes it
-        if let Some(alarm) = status.and_then(|s| bounds::key_alarm(model.upstream, s)) {
-            console_error!("{}", json!({ "event": "model.platform-key", "model": model.id(), "status": status, "alarm": alarm, "why": why }));
-        }
         console_log!("{}", json!({ "event": "model.fallback", "from": model.id(), "to": next.id(), "status": status, "ms": js::now_ms() - t0, "why": why }));
     }
 }
@@ -467,7 +469,7 @@ struct Metadata {
 async fn transport(env: &Env, cfg: &Config, model: Model<'_>, input: &Value, meta: &Metadata) -> CellResult<Response> {
     match model.upstream {
         Upstream::WorkersAi { model } => workers_ai(env, cfg, model, input, meta).await,
-        Upstream::Openai { base_url, model: id, body } => openai(env, model.named, base_url, &bounds::openai_request(input, id, body.as_ref())).await,
+        Upstream::Openai { base_url, model: id, body, .. } => openai(env, model.named, base_url, &bounds::openai_request(input, id, body.as_ref())).await,
     }
 }
 

@@ -87,6 +87,11 @@
 //!   `upstream_unavailable`. It takes no images (they are not qualified
 //!   there: the route sends them to Workers AI).
 //!
+//! It also serves Tinfoil's DeepSeek V4.1 Flash (`TINFOIL_FLASH`, the
+//! private tier's fallback by config), answered as Finite Private's is but
+//! on a key of its own (`accept_key_for`): another API's key, Finite
+//! Private's among them, is its 401.
+//!
 //! It also serves GLM-5.3 Flash by OpenRouter's id (`OPENROUTER_FLASH`, a
 //! Finite deployment's tiers since 2026-10-15), answered as OpenRouter
 //! answers: its usage tells cached tokens and a `cost`, and a stream's
@@ -127,10 +132,15 @@ pub const NO_WORDS: &str = "(no words)";
 /// medium tier's, have none). Finite Private's is not among them: its
 /// images are not qualified (decision 61).
 pub const TAKES_IMAGES: [&str; 1] = [fragment_core::models::VISION_MODEL_DEFAULT];
+/// Tinfoil's DeepSeek V4.1 Flash, as its API names it
+/// (`https://inference.tinfoil.sh/v1`, `GET /v1/models`, read 2026-10-22):
+/// a model only a deployment's config names (deploy/example.jsonc), so its
+/// id is the fake's and the e2e's, not the cell's.
+pub const TINFOIL_FLASH: &str = "deepseek-v4-1-flash";
 /// The models the OpenAI-compatible face serves: Finite Private's GLM-5.3
 /// Flash, by the id its limiter takes (its aliases are not the route's),
-/// and OpenRouter's.
-pub const OPENAI_MODELS: [&str; 2] = [fragment_core::models::FINITE_PRIVATE_FLASH, fragment_core::models::OPENROUTER_FLASH];
+/// OpenRouter's, and Tinfoil's DeepSeek V4.1 Flash.
+pub const OPENAI_MODELS: [&str; 3] = [fragment_core::models::FINITE_PRIVATE_FLASH, fragment_core::models::OPENROUTER_FLASH, TINFOIL_FLASH];
 /// The largest request the OpenAI-compatible face takes: Finite Private's
 /// limiter's (axum's default body limit, 2 MiB).
 pub const OPENAI_BODY_MAX_BYTES: usize = 2 * 1024 * 1024;
@@ -253,6 +263,9 @@ struct State {
     down: Vec<String>,
     /// The key the OpenAI-compatible face lets in (`accept_key`).
     key: Option<String>,
+    /// A model's own key, in place of `key` (`accept_key_for`): another
+    /// API's, on the same face.
+    model_keys: Vec<(String, String)>,
 }
 
 /// Workers AI's answer when it cannot reach a model (as the binding passed
@@ -438,13 +451,17 @@ fn delta_usage(prompt: u64, completion: u64) -> Value {
 /// A call's usage on the OpenAI-compatible face: as SGLang reports it
 /// behind Finite Private's limiter, no cached tokens told (a test's
 /// `cached` is counted as prompt); as OpenRouter reports it, its cached
-/// tokens and what it cost in credits.
+/// tokens and what it cost in credits; as Tinfoil's vLLM reports it, its
+/// cached tokens (Tinfoil bills them at a price of their own).
 fn openai_usage(model: &str, u: Used) -> Value {
     if model == fragment_core::models::OPENROUTER_FLASH {
         return json!({
             "prompt_tokens": u.prompt, "completion_tokens": u.completion, "total_tokens": u.prompt + u.completion,
             "cost": 0.0, "prompt_tokens_details": { "cached_tokens": u.cached, "cache_write_tokens": 0 },
         });
+    }
+    if model == TINFOIL_FLASH {
+        return json!({ "prompt_tokens": u.prompt, "completion_tokens": u.completion, "total_tokens": u.prompt + u.completion, "prompt_tokens_details": { "cached_tokens": u.cached } });
     }
     json!({ "prompt_tokens": u.prompt, "completion_tokens": u.completion, "total_tokens": u.prompt + u.completion, "prompt_tokens_details": null })
 }
@@ -822,7 +839,8 @@ fn openai_answer(s: &mut State, req: &Request) -> Response {
         return limiter_error(413, "invalid_request_error", "payload_too_large", "length limit exceeded");
     }
     let presented = authorization.as_deref().and_then(|a| a.strip_prefix("Bearer ")).map(str::trim);
-    match (presented, s.key.as_deref()) {
+    let wanted = s.model_keys.iter().find(|(m, _)| *m == model).map(|(_, k)| k.as_str()).or(s.key.as_deref());
+    match (presented, wanted) {
         (None, _) => return limiter_error(401, "invalid_api_key", "missing_authorization", "Finite Private API key is required."),
         (Some(p), Some(k)) if p == k => {}
         (Some(_), _) => return limiter_error(401, "usage_limit", "invalid_api_key", "Finite Private API key is invalid or revoked."),
@@ -1056,6 +1074,15 @@ impl WorkersAi {
     /// another, or none, is its 401.
     pub fn accept_key(&self, key: &str) {
         self.state().key = Some(key.to_string());
+    }
+
+    /// The key the OpenAI-compatible face lets in for `model` alone, as
+    /// another API (Tinfoil's) lets in its own: every call to it with
+    /// another key, the one `accept_key` let in among them, is its 401.
+    pub fn accept_key_for(&self, model: &str, key: &str) {
+        let mut s = self.state();
+        s.model_keys.retain(|(m, _)| m != model);
+        s.model_keys.push((model.to_string(), key.to_string()));
     }
 
     /// Calls answer from their transcript (`transcript_reply`), in pieces

@@ -1242,6 +1242,16 @@ Private stays possible by config.
     6. Nothing of fbfc's users reaches them: no user id, no header but
        the key; the route sends OpenAI's chat completion and nothing else.
 
+    *Status (2026-10-22, Paul: "For the $200 tier we are going to offer
+    finite private, on by default … Fallback should be tinfoil's
+    deepseek flash"):* a slot off OpenRouter may name its model's list
+    price (`price`; docs/ledger.md, "A slot's own price"), so Tinfoil's
+    DeepSeek V4.1 Flash (`deepseek-v4-1-flash` at
+    `https://inference.tinfoil.sh/v1`, on its own key) runs as the
+    fallback by config alone (deploy/example.jsonc's third alternative,
+    the private tier), and a fallback's own key refused is logged aloud
+    as the tiers' is.
+
     **Going live** (Paul's): finite-mono issues the key; `cargo xtask
     secret set fragment-finite-private-key --config <production's
     config>` (it prompts); add example.jsonc's `models` to that config

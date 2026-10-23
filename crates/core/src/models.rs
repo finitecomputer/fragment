@@ -187,19 +187,51 @@ pub enum Upstream {
     /// `FRAGMENT_AI_URL`).
     WorkersAi { model: String },
     /// A model on an OpenAI-compatible API (OpenRouter's, Finite
-    /// Private's): `POST <base_url>/chat/completions`, its `model` the id
-    /// there, with the key the deployment binds for the slot naming it
-    /// (`secrets_store::model_key`) as a bearer token. `body`, when named,
-    /// is fields of the API's own that every call to it carries, over any
-    /// of the client's of the same name (`openai_request`): OpenRouter's
-    /// `provider` routing, say. It names none of the keys the route writes
-    /// (`ROUTE_KEYS`), in at most `UPSTREAM_BODY_MAX_BYTES` (`check`).
+    /// Private's, Tinfoil's): `POST <base_url>/chat/completions`, its
+    /// `model` the id there, with the key the deployment binds for the slot
+    /// naming it (`secrets_store::model_key`) as a bearer token. `body`,
+    /// when named, is fields of the API's own that every call to it
+    /// carries, over any of the client's of the same name
+    /// (`openai_request`): OpenRouter's `provider` routing, say. It names
+    /// none of the keys the route writes (`ROUTE_KEYS`), in at most
+    /// `UPSTREAM_BODY_MAX_BYTES` (`check`). `price`, when named, is its
+    /// model's list price there (`ListPrice`; `Upstream::own_price`).
     Openai {
         base_url: String,
         model: String,
         #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "fields")]
         body: Option<Map<String, Value>>,
+        #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "price_fields")]
+        price: Option<Map<String, Value>>,
     },
+}
+
+/// The fields a slot's `price` names (`Upstream::own_price`): a model's
+/// list price at an API that is not OpenRouter, as its vendor lists it,
+/// dollars a million tokens of input (uncached), of cached input (`input`'s
+/// when unnamed: never cheaper than it could be), and of output. Its row
+/// in the book is that list, with the book's credits fee and margin on it
+/// as on any model's (a vendor billing a card bills no such fee: such a
+/// model is charged that much above its cost, never below). A cache write,
+/// which none of these APIs bills, is at `input`. So a model on any
+/// OpenAI-compatible API is the config's alone (Paul, 2026-10-22: "we try
+/// a config out on preview, if we don't like it we revert it"). Read as
+/// JSON, as a ceiling is, so it costs the cell's wasm no serde of its own.
+pub const PRICE_FIELDS: [&str; 3] = ["input", "cached_input", "output"];
+
+/// A slot's `price`: a JSON object, or refused saying so.
+fn price_fields<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Map<String, Value>>, D::Error> {
+    match Value::deserialize(d)? {
+        Value::Object(o) => Ok(Some(o)),
+        other => Err(serde::de::Error::custom(format!("price is a JSON object, {{\"input\": <$>, \"cached_input\"?: <$>, \"output\": <$>}} a million tokens, not {other}"))),
+    }
+}
+
+/// Dollars a million tokens as the book's micro-dollars a million, rounded
+/// up past a float's last digit (never below what was named), or `None`
+/// when they are not from 0 to `CEILING_MAX_USD`.
+fn usd_a_million(v: f64) -> Option<i64> {
+    (0.0..=f64::from(CEILING_MAX_USD)).contains(&v).then(|| (v * 1e6 - 1e-6).ceil().max(0.0) as i64)
 }
 
 /// A slot's `body`: a JSON object, or refused saying so.
@@ -278,13 +310,40 @@ impl Upstream {
             }
             return Ok(None);
         };
-        let usd = |field: &str| match max.get(field).and_then(Value::as_f64).filter(|v| (0.0..=f64::from(CEILING_MAX_USD)).contains(v)) {
-            // micro-dollars a million tokens, rounded up past a float's last digit: never below the ceiling
-            Some(v) => Ok(crate::price::openrouter((v * 1e6 - 1e-6).ceil() as i64)),
+        let usd = |field: &str| match max.get(field).and_then(Value::as_f64).and_then(usd_a_million) {
+            // never below the ceiling, with OpenRouter's fee
+            Some(micros) => Ok(crate::price::openrouter(micros)),
             None => Err(format!("body.provider.max_price.{field} is the dollars a million tokens its calls are priced at, from 0 to {CEILING_MAX_USD}, not {}", max.get(field).map_or("nothing".into(), Value::to_string))),
         };
         let (prompt, completion) = (usd("prompt")?, usd("completion")?);
         Ok(Some(TokenPrices { input: prompt, cached_input: prompt, cache_write: prompt, output: completion }))
+    }
+
+    /// Its model's row in the price book when its slot sets one: the list
+    /// price it names (`ListPrice`), or, on OpenRouter, its ceiling
+    /// (`ceiling`). None when it names neither (the book's row of its id
+    /// prices it). Refused, saying why: a `price` on OpenRouter (which
+    /// bills each call its provider's price, up to the ceiling: the ceiling
+    /// is the price), a `price` beside a ceiling, and a `price` that is not
+    /// dollars from 0 to `CEILING_MAX_USD`.
+    pub fn own_price(&self) -> Result<Option<TokenPrices>, String> {
+        let Upstream::Openai { base_url, price: Some(p), .. } = self else { return self.ceiling() };
+        if on_openrouter(base_url) {
+            return Err("a model on OpenRouter is priced at its ceiling (body.provider.max_price), not a price of its own: OpenRouter bills each call its provider's price, up to the ceiling".into());
+        }
+        if self.ceiling()?.is_some() {
+            return Err("name its price, or a ceiling (body.provider.max_price), not both".into());
+        }
+        if let Some(other) = p.keys().find(|k| !PRICE_FIELDS.contains(&k.as_str())) {
+            return Err(format!("price names {other:?}: it names input, cached_input (optional) and output"));
+        }
+        let usd = |field: &str| match p.get(field) {
+            None => Ok(None),
+            Some(v) => v.as_f64().and_then(usd_a_million).map(Some).ok_or_else(|| format!("price.{field} is the dollars a million tokens its API lists, from 0 to {CEILING_MAX_USD}, not {v}")),
+        };
+        let named = |field: &str| usd(field)?.ok_or_else(|| format!("price.{field} is the dollars a million tokens its API lists, from 0 to {CEILING_MAX_USD}, not nothing"));
+        let input = named("input")?;
+        Ok(Some(TokenPrices { input, cached_input: usd("cached_input")?.unwrap_or(input), cache_write: input, output: named("output")? }))
     }
 }
 
@@ -358,19 +417,20 @@ impl Models {
             if let Some((first, _)) = slots[..i].iter().find(|(_, u)| u.model() == upstream.model() && !same_place(u, upstream)) {
                 return Err(format!("models.{slot}: {:?} is models.{first}'s model too, where it runs elsewhere: a call names a model by its id, so name it where models.{first} does, or name another", upstream.model()));
             }
-            if let Some((first, _)) = slots[..i].iter().find(|(_, u)| u.model() == upstream.model() && u.ceiling() != upstream.ceiling()) {
-                return Err(format!("models.{slot}: {:?} is models.{first}'s model too, at another ceiling: a model is one row of the price book, so name the max_price models.{first} does", upstream.model()));
+            if let Some((first, _)) = slots[..i].iter().find(|(_, u)| u.model() == upstream.model() && u.own_price() != upstream.own_price()) {
+                return Err(format!("models.{slot}: {:?} is models.{first}'s model too, at another price: a model is one row of the price book, so name the price (or max_price) models.{first} does", upstream.model()));
             }
         }
         Ok(models)
     }
 
-    /// `book` with each slot's ceiling (`Upstream::ceiling`) as its model's
-    /// row, over any row of that id: the book the deployment charges with,
-    /// so a change to its config re-prices its calls with the deploy.
+    /// `book` with each slot's own price (`Upstream::own_price`: its list
+    /// price, or its ceiling) as its model's row, over any row of that id:
+    /// the book the deployment charges with, so a change to its config
+    /// re-prices its calls with the deploy.
     pub fn priced(&self, mut book: PriceBook) -> PriceBook {
         for (_, upstream) in self.slots() {
-            if let Some(price) = upstream.ceiling().expect("a slot's ceiling is checked as it is parsed") {
+            if let Some(price) = upstream.own_price().expect("a slot's price is checked as it is parsed") {
                 book.models.retain(|m| m.model != upstream.model());
                 book.models.push(ModelPrice { model: upstream.model().to_string(), price });
             }
@@ -488,7 +548,7 @@ impl UnknownModel {
 
 /// One slot's model, checked (`Models::parse`).
 fn check(upstream: &Upstream, book: &PriceBook, loopback: bool) -> Result<(), String> {
-    if let Upstream::Openai { base_url, model, body } = upstream {
+    if let Upstream::Openai { base_url, model, body, .. } = upstream {
         crate::catalog::row_url(base_url, loopback).map_err(|e| format!("base_url: {e}"))?;
         if base_url.ends_with('/') || base_url.contains('?') {
             return Err("base_url is named without a query or a trailing /: the route adds /chat/completions".into());
@@ -508,9 +568,12 @@ fn check(upstream: &Upstream, book: &PriceBook, loopback: bool) -> Result<(), St
         }
     }
     let model = upstream.model();
-    if upstream.ceiling()?.is_none() && !book.models.iter().any(|m| m.model == model) {
+    if upstream.own_price()?.is_none() && !book.models.iter().any(|m| m.model == model) {
         let priced: Vec<&str> = book.models.iter().map(|m| m.model.as_str()).collect();
-        return Err(format!("the model {model:?} is not in the price book, which prices {}: add its prices (fragment_core::price), name one of those, or, on OpenRouter, the ceiling it is priced at (body.provider.max_price)", priced.join(", ")));
+        return Err(format!(
+            "the model {model:?} is not in the price book, which prices {}: name its list price at its API (price: {{\"input\": <$>, \"cached_input\"?: <$>, \"output\": <$>}} a million tokens), or, on OpenRouter, the ceiling it is priced at (body.provider.max_price), or name one of those",
+            priced.join(", ")
+        ));
     }
     Ok(())
 }
@@ -820,12 +883,14 @@ pub fn falls_back(upstream: &Upstream, status: u16) -> bool {
 pub const PLATFORM_KEY_REFUSALS: [u16; 4] = [401, 402, 403, 404];
 
 /// Why a try that answered `status` from `upstream` says the platform's own
-/// key there wants someone (its log line, loud: every call falls back
-/// until it is fixed): refused (401) or out of credit (402).
+/// key there wants someone (its log line, loud: every call to it falls
+/// back, or fails where it has no fallback, until it is fixed): refused
+/// (401) or out of credit (402). Said of any try: the fallback's too, which
+/// may be on a key of its own (Tinfoil's, behind Finite Private).
 pub fn key_alarm(upstream: &Upstream, status: u16) -> Option<&'static str> {
     match (upstream, status) {
-        (Upstream::Openai { .. }, 401) => Some("the platform's key for this API is refused: every call falls back until it is set again (cargo xtask secret set)"),
-        (Upstream::Openai { .. }, 402) => Some("the platform's account at this API is out of credit: every call falls back until it is topped up"),
+        (Upstream::Openai { .. }, 401) => Some("the platform's key for this API is refused: its calls fall back, or fail with no fallback, until it is set again (cargo xtask secret set)"),
+        (Upstream::Openai { .. }, 402) => Some("the platform's account at this API is out of credit: its calls fall back, or fail with no fallback, until it is topped up"),
         _ => None,
     }
 }
@@ -1223,7 +1288,7 @@ mod tests {
     }
 
     fn openai(base_url: &str, model: &str) -> Upstream {
-        Upstream::Openai { base_url: base_url.into(), model: model.into(), body: None }
+        Upstream::Openai { base_url: base_url.into(), model: model.into(), body: None, price: None }
     }
 
     /// OpenRouter's provider routing, as Finite's slots name it
@@ -1380,11 +1445,11 @@ mod tests {
         assert_eq!(serde_json::to_value(&private).unwrap(), json!({ "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1", "model": "glm-5-3-flash" }));
         assert_eq!(serde_json::to_value(workers_ai(GLM_FLASH)).unwrap(), json!({ "provider": "workers_ai", "model": GLM_FLASH }));
         // OpenRouter's (Finite's since 2026-10-15): its tiers routed by their body, the rest on Workers AI
-        let routed = Upstream::Openai { base_url: "https://openrouter.ai/api/v1".into(), model: OPENROUTER_FLASH.into(), body: routing().as_object().cloned() };
+        let routed = Upstream::Openai { base_url: "https://openrouter.ai/api/v1".into(), model: OPENROUTER_FLASH.into(), body: routing().as_object().cloned(), price: None };
         assert_eq!(openrouter(), Models { cheap: routed.clone(), medium: routed.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH) });
         assert_eq!(serde_json::to_value(&routed).unwrap(), json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": "z-ai/glm-5.3-flash", "body": routing() }));
         let empty = Models::parse(Some(&json!({ "cheap": { "provider": "openai", "base_url": "https://a.example/v1", "model": FINITE_PRIVATE_FLASH, "body": {} } }).to_string()), &book, false).unwrap();
-        assert_eq!(empty.cheap, Upstream::Openai { base_url: "https://a.example/v1".into(), model: FINITE_PRIVATE_FLASH.into(), body: Some(Map::new()) }, "an empty body adds nothing");
+        assert_eq!(empty.cheap, Upstream::Openai { base_url: "https://a.example/v1".into(), model: FINITE_PRIVATE_FLASH.into(), body: Some(Map::new()), price: None }, "an empty body adds nothing");
     }
 
     /// Goal: a deployment's `models` that the route could not serve is
@@ -1547,7 +1612,86 @@ mod tests {
         refused(at(OPENROUTER_FLASH, json!(0.15)), "body.provider.max_price.prompt is the dollars a million tokens");
         assert!(at(OPENROUTER_FLASH, json!({ "prompt": 1000, "completion": 0 })).is_ok(), "{CEILING_MAX_USD} at most");
         let two = json!({ "cheap": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": OPENROUTER_FLASH, "body": routing() }, "medium": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": OPENROUTER_FLASH, "body": { "provider": { "max_price": { "prompt": 0.2, "completion": 0.5 } } } } });
-        refused(Models::parse(Some(&two.to_string()), &defaults, false), "models.medium: \"z-ai/glm-5.3-flash\" is models.cheap's model too, at another ceiling");
+        refused(Models::parse(Some(&two.to_string()), &defaults, false), "models.medium: \"z-ai/glm-5.3-flash\" is models.cheap's model too, at another price");
+    }
+
+    /// Tinfoil's DeepSeek V4.1 Flash as a slot names it: its list on
+    /// 2026-10-22 (`GET https://inference.tinfoil.sh/v1/models`), $0.65 in,
+    /// $0.13 cached, $1.45 out a million tokens.
+    fn tinfoil(price: Value) -> Value {
+        json!({ "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "model": "deepseek-v4-1-flash", "price": price })
+    }
+
+    /// Goal: a model on an API that is not OpenRouter is priced at the list
+    /// price its slot names (`price`), from the config alone, whatever its
+    /// id (Paul, 2026-10-22: a model is a config's choice): input at
+    /// `input`, cached input at `cached_input` (else `input`), a cache write
+    /// at `input`, output at `output`, then the book's fee and margin as on
+    /// any row. Valid: Tinfoil's DeepSeek V4.1 Flash as the fallback,
+    /// charged to the micro-dollar; its cached price left out; a price over
+    /// a row of the book's (Finite Private's); one id at one price in two
+    /// slots; a price of 0. Invalid: a price on OpenRouter (its ceiling is
+    /// its price), beside a ceiling, out of 0 to `CEILING_MAX_USD`, a field
+    /// it does not take, one missing, one not a number; one id at two prices.
+    #[test]
+    fn a_slot_names_its_models_list_price() {
+        use crate::price::Priced;
+        let defaults = PriceBook::defaults();
+        let row = |book: &PriceBook, model: &str| book.models.iter().find(|m| m.model == model).map(|m| m.price);
+        let parse = |models: Value| Models::parse(Some(&models.to_string()), &defaults, false);
+        let listed = json!({ "input": 0.65, "cached_input": 0.13, "output": 1.45 });
+        let models = parse(json!({ "fallback": tinfoil(listed.clone()) })).unwrap();
+        assert!(matches!(&models.fallback, Upstream::Openai { price: Some(p), .. } if Value::Object(p.clone()) == listed), "the fallback names its price: {:?}", models.fallback);
+        assert_eq!(serde_json::to_value(&models.fallback).unwrap(), tinfoil(listed.clone()), "its wire form is the config's");
+        let book = models.priced(defaults.clone());
+        assert_eq!(row(&book, "deepseek-v4-1-flash"), Some(TokenPrices { input: 650_000, cached_input: 130_000, cache_write: 650_000, output: 1_450_000 }));
+        assert_eq!(book.models.len(), defaults.models.len() + 1);
+        assert_eq!(book.validate(), Ok(()));
+        let tokens = |input, cached_input, output| Usage::Tokens { model: "deepseek-v4-1-flash".into(), input, cached_input, cache_write: 0, output };
+        // the list, the book's 5% fee on it, then its 50% margin
+        assert_eq!(book.price(&tokens(1_000_000, 0, 0)).unwrap(), Priced { list: 650_000, cost: 682_500, charge: 1_023_750 });
+        assert_eq!(book.price(&tokens(0, 1_000_000, 0)).unwrap(), Priced { list: 130_000, cost: 136_500, charge: 204_750 });
+        assert_eq!(book.price(&tokens(0, 0, 1_000_000)).unwrap(), Priced { list: 1_450_000, cost: 1_522_500, charge: 2_283_750 });
+        // an agent's call, most of its prompt cached
+        assert_eq!(book.price(&tokens(5_000, 25_000, 600)).unwrap().charge, 11_608);
+        // its cached price left out: its input's, never cheaper than it could be
+        let uncached = parse(json!({ "fallback": tinfoil(json!({ "input": 0.65, "output": 1.45 })) })).unwrap().priced(defaults.clone());
+        assert_eq!(row(&uncached, "deepseek-v4-1-flash").map(|p| p.cached_input), Some(650_000));
+        // over the book's own row of that id: Finite Private's, named by the config
+        let private = json!({ "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1", "model": FINITE_PRIVATE_FLASH, "price": { "input": 0.2, "cached_input": 0.04, "output": 0.6 } });
+        let book = parse(json!({ "cheap": private, "medium": private, "vision": private })).unwrap().priced(defaults.clone());
+        assert_eq!(row(&book, FINITE_PRIVATE_FLASH), Some(TokenPrices { input: 200_000, cached_input: 40_000, cache_write: 200_000, output: 600_000 }));
+        assert_eq!(book.models.len(), defaults.models.len(), "one row, the config's over the code's");
+        assert!(parse(json!({ "fallback": tinfoil(json!({ "input": 0, "output": 0 })) })).is_ok(), "a free model is priced at nothing");
+        assert!(parse(json!({ "fallback": tinfoil(json!({ "input": 1000, "output": 1000 })) })).is_ok(), "{CEILING_MAX_USD} at most");
+        // refused, saying why
+        let refused = |models: Value, says: &str| {
+            let e = parse(models.clone()).unwrap_err();
+            assert!(e.contains(says), "{models}: {e}");
+        };
+        let routed = json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": OPENROUTER_FLASH, "body": routing(), "price": listed });
+        refused(json!({ "cheap": routed }), "models.cheap: a model on OpenRouter is priced at its ceiling (body.provider.max_price), not a price of its own");
+        let mut both = tinfoil(listed.clone());
+        both["body"] = json!({ "provider": { "max_price": { "prompt": 1, "completion": 2 } } });
+        refused(json!({ "fallback": both }), "models.fallback: name its price, or a ceiling (body.provider.max_price), not both");
+        for (field, bad) in [("input", json!(-0.01)), ("output", json!(1000.5)), ("cached_input", json!(-1))] {
+            let mut p = listed.clone();
+            p[field] = bad.clone();
+            refused(json!({ "fallback": tinfoil(p) }), &format!("models.fallback: price.{field} is the dollars a million tokens its API lists, from 0 to 1000, not {bad}"));
+        }
+        refused(json!({ "fallback": tinfoil(json!({ "input": 0.65, "output": 1.45, "cache_write": 0.65 })) }), "models.fallback: price names \"cache_write\": it names input, cached_input (optional) and output");
+        refused(json!({ "fallback": tinfoil(json!({ "input": 0.65 })) }), "models.fallback: price.output is the dollars a million tokens its API lists, from 0 to 1000, not nothing");
+        refused(json!({ "fallback": tinfoil(json!({ "input": "0.65", "output": 1.45 })) }), "models.fallback: price.input is the dollars a million tokens its API lists, from 0 to 1000, not \"0.65\"");
+        refused(json!({ "fallback": tinfoil(json!(0.65)) }), "models: price is a JSON object, {\"input\": <$>, \"cached_input\"?: <$>, \"output\": <$>} a million tokens, not 0.65");
+        refused(json!({ "fallback": { "provider": "workers_ai", "model": GLM_FLASH, "price": listed } }), "unknown field `price`");
+        // one id is one row: two slots running it name one price
+        let dearer = tinfoil(json!({ "input": 0.7, "output": 1.45 }));
+        refused(json!({ "fallback": tinfoil(listed.clone()), "vision": dearer }), "models.vision: \"deepseek-v4-1-flash\" is models.fallback's model too, at another price");
+        assert!(parse(json!({ "fallback": tinfoil(listed.clone()), "vision": tinfoil(listed.clone()) })).is_ok(), "one id at one price, twice");
+        // without one, a model the book does not price is refused, saying what to name
+        let bare = json!({ "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "model": "deepseek-v4-1-flash" });
+        refused(json!({ "fallback": bare }), "models.fallback: the model \"deepseek-v4-1-flash\" is not in the price book, which prices");
+        refused(json!({ "fallback": bare }), "name its list price at its API (price: {\"input\": <$>, \"cached_input\"?: <$>, \"output\": <$>} a million tokens)");
     }
 
     /// Goal: one rule names the agent a guest's model call is for, chat and
