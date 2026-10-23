@@ -79,10 +79,10 @@ pub(crate) const FACES_MAX: usize = 64;
 /// pill buttons), as a card: the page's, or, in the shell's dialog
 /// (`framed`), the dialog's whole.
 const SHEET_STYLE: &str = ":root{color-scheme:light dark;--bg:light-dark(#f7f6f3,#212121);--fg:light-dark(#171717,#ececec);--muted:light-dark(#66615b,#a6a19d);--line:light-dark(rgba(20,20,20,.105),rgba(255,255,255,.085));--line-strong:light-dark(rgba(20,20,20,.18),rgba(255,255,255,.16));--surface:light-dark(#fffdfa,#2b2b2a);--soft:light-dark(#f0eee9,#262625);--accent:light-dark(#315fbd,#8ab4ff);--danger:light-dark(#81112f,#f3b3b3);--open:light-dark(#167a52,#39d98a)}
-body{margin:0 auto;padding:16px;max-width:32rem;background:var(--bg);color:var(--fg);font:15px/1.5 \"Funnel Sans\",ui-sans-serif,system-ui,-apple-system,sans-serif;-webkit-font-smoothing:antialiased}
-main{background:var(--surface);border-radius:14px;padding:20px 24px;box-shadow:0 1px 2px #0000001a,0 8px 28px #0000001a}
+body{box-sizing:border-box;margin:0 auto;padding:16px;max-width:34rem;min-height:100vh;min-height:100dvh;display:flex;flex-direction:column;background:var(--bg);color:var(--fg);font:15px/1.5 \"Funnel Sans\",ui-sans-serif,system-ui,-apple-system,sans-serif;-webkit-font-smoothing:antialiased}
+main{flex:none;margin-block:auto;background:var(--surface);border-radius:14px;padding:20px 24px;box-shadow:0 1px 2px #0000001a,0 8px 28px #0000001a}
 h1{font-size:1.25rem;font-weight:600;margin:0 0 .9em;overflow-wrap:anywhere}h2{font-size:.8125rem;font-weight:600;color:var(--muted);margin:1.4em 0 .4em}
-a{color:var(--accent)}code{background:var(--soft)}form{margin:0}
+a{color:var(--accent)}code{background:var(--soft);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}pre code{display:block;padding:.6em .8em;white-space:pre-wrap;word-break:break-all}form{margin:0}
 ul.people{list-style:none;padding:0;margin:0}.people li{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:6px 0;min-height:40px;border-top:1px solid var(--line)}.people li:first-child{border-top:0}
 .av{width:32px;height:32px;border-radius:50%;object-fit:cover;background:var(--soft);display:inline-grid;place-items:center;font-size:14px;font-weight:600;flex:none}
 .who{flex:1 1 10rem;min-width:0;overflow-wrap:anywhere}.who small{display:block;color:var(--muted);font-size:.8125rem}
@@ -106,7 +106,7 @@ button.text.away{color:var(--muted)}button[data-sure]{color:var(--danger)!import
 .more{margin-top:1.2em;padding-top:.2em;border-top:1px solid var(--line)}.more .row{display:flex;gap:12px;align-items:center;justify-content:space-between}
 footer{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin-top:1.4em}footer .leave{margin-right:auto}
 .flash{padding:4px 14px;border-radius:10px;background:var(--soft);margin-bottom:1em}.flash.error{background:color-mix(in srgb,var(--danger) 18%,transparent)}
-.framed body{max-width:none;padding:0;background:var(--surface)}.framed main{box-shadow:none;border-radius:0}
+.framed body{max-width:none;min-height:0;display:block;padding:0;background:var(--surface)}.framed main{box-shadow:none;border-radius:0}
 @media (max-width:420px){body{padding:8px}main{padding:16px}}
 html{-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%;text-size-adjust:100%}body{overscroll-behavior:none}
 button,.seg,.option{-webkit-user-select:none;user-select:none;touch-action:manipulation}
@@ -175,7 +175,7 @@ fn script() -> String {
 /// platform, and who may frame it (`ancestors`).
 fn policy(forms_here: bool, ancestors: &str) -> String {
     let forms = if forms_here { " form-action 'self';" } else { "" };
-    format!("default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline';{forms} base-uri 'none'; frame-ancestors {ancestors}")
+    format!("default-src 'none'; img-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'unsafe-inline';{forms} base-uri 'none'; frame-ancestors {ancestors}")
 }
 
 /// One of sharing's pages: the platform's look, its protections, and
@@ -183,16 +183,7 @@ fn policy(forms_here: bool, ancestors: &str) -> String {
 /// join page's redirects on to the fragment's, which `form-action` would
 /// refuse).
 pub(crate) fn sheet_page(status: u16, title: &str, body: &str, forms_here: bool) -> CellResult<Response> {
-    let html = format!(
-        r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{t}</title>
-<style>{style}
-{sheet}</style>
-<main><h1>{t}</h1>{body}</main>{script}"#,
-        t = esc(title),
-        style = auth::STYLE,
-        sheet = SHEET_STYLE,
-        script = script(),
-    );
+    let html = format!("{}{}", platform_html(title, body), script());
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;
     h.set("cache-control", "no-store")?;
@@ -202,6 +193,29 @@ pub(crate) fn sheet_page(status: u16, title: &str, body: &str, forms_here: bool)
     // the join page's URL holds its token: no other origin hears it
     h.set("referrer-policy", "same-origin")?;
     Ok(Response::ok(html)?.with_status(status).with_headers(h))
+}
+
+/// Shared markup only: callers keep their own framing, navigation and
+/// script policies. Plain notices need none of the sharing controls.
+pub(crate) fn sheet_html(title: &str, body: &str) -> String {
+    format!(
+        r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{t}</title>
+<style>{sheet}</style>
+<main><h1>{t}</h1>{body}</main>"#,
+        t = esc(title),
+        sheet = SHEET_STYLE,
+    )
+}
+
+/// Platform-origin pages can load the onboarding assets from the release.
+/// Fragment-origin notices retain the self-contained sheet above.
+pub(crate) fn platform_html(title: &str, body: &str) -> String {
+    sheet_html(title, body)
+        .replacen("<html lang=\"en\">", "<html lang=\"en\" class=\"platform-page\">", 1)
+        .replacen("<main>", "<link rel=\"stylesheet\" href=\"/__shell/platform-pages.css\"><div class=\"platform-brand\"><img src=\"/__shell/finite-logo.svg\" alt=\"Finite\" width=\"44\" height=\"46\"></div><main>", 1)
+        + "<script>"
+        + include_str!("../shell/platform-pages.js")
+        + "</script>"
 }
 
 /// The share sheet itself: a sharing page only the platform's own pages

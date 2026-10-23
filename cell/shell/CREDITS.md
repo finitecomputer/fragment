@@ -1,5 +1,8 @@
 # Credits
 
+- Platform page styles, fonts and landscapes: supplied onboarding HTML reference
+  (2026-10-22), including its pointer-following card rim.
+
 - `finite-logo.svg`: Finite's logo supplied by Skyler (2026-10-18),
   copied unchanged above the splash and welcome cards. Its paths are also
   `icon.svg` (full-bleed: black, or white in a dark color scheme), `app-icon.svg`
