@@ -19,9 +19,12 @@
 //! Each of those four names runs where the deployment says (`Models`, its
 //! config's `models`): a Workers AI model through its AI Gateway, or a
 //! model on an OpenAI-compatible API, its key a Secrets Store secret
-//! (`Upstream`). Unnamed, each is today's Workers AI model; Finite's own
-//! deployment runs its tiers on GLM-5.3 Flash through OpenRouter (Paul,
-//! 2026-10-15; decision 61), or, by config, on Finite Private. What the
+//! (`Upstream`); a tier's or the fallback's may name its stale patience
+//! (`Slots`), which the route never reads and a computer's guest does
+//! (`Models::ids_by_name`). Unnamed, each is today's Workers AI model;
+//! Finite's own deployment runs its tiers on GLM-5.3 Flash through
+//! OpenRouter (Paul, 2026-10-15; decision 61), or, by config, on Finite
+//! Private. What the
 //! platform sends is the client's OpenAI-shaped chat completion with only
 //! these changes (`bound`): no `model` (the tier's is the call's),
 //! `max_tokens` at most the tier's cap, `reasoning_effort` clamped to `low`
@@ -60,6 +63,7 @@
 //! stopped, and never the model's reasoning, of which only its length is
 //! counted (a draft's "thinking").
 
+use fragment_proto::computer::StaleTimeouts;
 use fragment_proto::{valid_channel_name, valid_op_id, Tier, BUILTIN_CHANNELS};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -302,16 +306,29 @@ fn workers_ai(model: &str) -> Upstream {
 
 /// The route's models, one for each of its names (`SLOTS`): the deployment's
 /// `models` (`FRAGMENT_MODELS`), each slot it does not name on Workers AI as
-/// before (`Models::defaults`).
+/// before (`Models::defaults`); and the stale patience its slots name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Models {
     pub cheap: Upstream,
     pub medium: Upstream,
     pub fallback: Upstream,
     pub vision: Upstream,
+    pub stale_timeout_s: StaleTimeouts,
 }
 
-/// The slots a deployment names; the rest are the defaults'.
+/// A slot's stale patience at most (`stale_timeout_s`): an hour, past any
+/// call a model streams nothing for and still answers.
+pub const STALE_TIMEOUT_S_MAX: u32 = 3_600;
+
+/// The slots a deployment names; the rest are the defaults'. A tier's or
+/// the fallback's `stale_timeout_s` is taken out before they are read
+/// (`Models::parse`): how long an agent's call to its model may stream
+/// nothing before the agent's runtime gives up on it (none, the runtime's
+/// own: Hermes' is 20 s for a tier, images/hermes/boot). A model that
+/// streams a long tool call's arguments in one piece at its end (a
+/// self-hosted NInfer, 2026-10-22) is silent for as long as it writes
+/// them. The route itself never reads it; vision's calls keep their
+/// runtime's.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Slots {
@@ -325,11 +342,18 @@ impl Models {
     /// Every slot on Workers AI: GLM-5.3 Flash cheap, GLM-5.3 medium,
     /// DeepSeek V4 Flash the fallback, GLM-5.3 Flash vision.
     pub fn defaults() -> Models {
-        Models { cheap: workers_ai(CHEAP_MODEL), medium: workers_ai(MEDIUM_MODEL), fallback: workers_ai(FALLBACK_MODEL_DEFAULT), vision: workers_ai(VISION_MODEL_DEFAULT) }
+        Models {
+            cheap: workers_ai(CHEAP_MODEL),
+            medium: workers_ai(MEDIUM_MODEL),
+            fallback: workers_ai(FALLBACK_MODEL_DEFAULT),
+            vision: workers_ai(VISION_MODEL_DEFAULT),
+            stale_timeout_s: StaleTimeouts::default(),
+        }
     }
 
     /// A deployment's models: `named` (`FRAGMENT_MODELS`: an object of the
-    /// slots it names, each an `Upstream`) over the defaults, checked.
+    /// slots it names, each an `Upstream`, a tier's or the fallback's with
+    /// its `stale_timeout_s` beside it) over the defaults, checked.
     /// Refused, saying why: a slot that is none of `SLOTS` (`high` among
     /// them: decision 23), a provider that is neither, a model neither the
     /// price book nor its slot's ceiling prices (a ledger would charge none
@@ -341,11 +365,20 @@ impl Models {
     /// or names a key the route writes (`ROUTE_KEYS`); and a model id two
     /// slots name at two places (`same_place`) or at two ceilings: a call
     /// names a model by its id (`named`), so an id is one model, and one
-    /// row of the book (`priced`), wherever slots name it.
+    /// row of the book (`priced`), wherever slots name it. A stale patience
+    /// of 0 or past `STALE_TIMEOUT_S_MAX` is refused too.
     pub fn parse(named: Option<&str>, book: &PriceBook, loopback: bool) -> Result<Models, String> {
         let mut models = Models::defaults();
         if let Some(text) = named {
-            let n: Slots = serde_json::from_str(text).map_err(|e| format!("models: {e}"))?;
+            let mut v: Value = serde_json::from_str(text).map_err(|e| format!("models: {e}"))?;
+            let stale = &mut models.stale_timeout_s;
+            for (name, patience) in [("cheap", &mut stale.cheap), ("medium", &mut stale.medium), ("fallback", &mut stale.fallback)] {
+                let Some(s) = v.get_mut(name).and_then(Value::as_object_mut).and_then(|row| row.remove("stale_timeout_s")) else { continue };
+                let seconds = s.as_u64().filter(|s| (1..=u64::from(STALE_TIMEOUT_S_MAX)).contains(s));
+                *patience = Some(seconds.ok_or_else(|| format!("models.{name}: stale_timeout_s is the seconds an agent's call may stream nothing, from 1 to {STALE_TIMEOUT_S_MAX}, not {s}"))? as u32);
+            }
+            // read as text, as before, so the cell's Wasm holds one reader of the slots
+            let n: Slots = serde_json::from_str(&v.to_string()).map_err(|e| format!("models: {e}"))?;
             for (slot, upstream) in [(&mut models.cheap, n.cheap), (&mut models.medium, n.medium), (&mut models.fallback, n.fallback), (&mut models.vision, n.vision)] {
                 if let Some(u) = upstream {
                     *slot = u;
@@ -409,11 +442,12 @@ impl Models {
         json!({ "object": "list", "data": data })
     }
 
-    /// Each slot's model id by its name, as a computer's guest reads them in
-    /// its view (`GET /api/computer`'s `models`).
+    /// Each slot's model id by its name, and the stale patience its slots
+    /// name, as a computer's guest reads them in its view (`GET
+    /// /api/computer`'s `models`).
     pub fn ids_by_name(&self) -> fragment_proto::computer::ModelIds {
         let id = |u: &Upstream| u.model().to_string();
-        fragment_proto::computer::ModelIds { cheap: id(&self.cheap), medium: id(&self.medium), fallback: id(&self.fallback), vision: id(&self.vision) }
+        fragment_proto::computer::ModelIds { cheap: id(&self.cheap), medium: id(&self.medium), fallback: id(&self.fallback), vision: id(&self.vision), stale_timeout_s: self.stale_timeout_s }
     }
 
     /// What a call naming `model` runs, as the route reads its body's
@@ -1369,7 +1403,7 @@ mod tests {
         assert!(d.slots().iter().all(|(_, u)| matches!(u, Upstream::WorkersAi { .. })));
         let finite = finite();
         let private = openai("https://finite-private.finite.containers.tinfoil.dev/v1", FINITE_PRIVATE_FLASH);
-        assert_eq!(finite, Models { cheap: private.clone(), medium: private.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH) });
+        assert_eq!(finite, Models { cheap: private.clone(), medium: private.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH), stale_timeout_s: StaleTimeouts::default() });
         assert_eq!(finite.route(Named::Tier(Tier::Cheap)).unwrap(), Model { named: Named::Tier(Tier::Cheap), upstream: &private });
         assert_eq!(finite.route(Named::Tier(Tier::Medium)).unwrap().id(), "glm-5-3-flash");
         assert_eq!(finite.route(Named::Tier(Tier::High)), Err(Refusal::HighOff), "high stays off wherever the tiers run");
@@ -1381,7 +1415,7 @@ mod tests {
         assert_eq!(serde_json::to_value(workers_ai(GLM_FLASH)).unwrap(), json!({ "provider": "workers_ai", "model": GLM_FLASH }));
         // OpenRouter's (Finite's since 2026-10-15): its tiers routed by their body, the rest on Workers AI
         let routed = Upstream::Openai { base_url: "https://openrouter.ai/api/v1".into(), model: OPENROUTER_FLASH.into(), body: routing().as_object().cloned() };
-        assert_eq!(openrouter(), Models { cheap: routed.clone(), medium: routed.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH) });
+        assert_eq!(openrouter(), Models { cheap: routed.clone(), medium: routed.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH), stale_timeout_s: StaleTimeouts::default() });
         assert_eq!(serde_json::to_value(&routed).unwrap(), json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": "z-ai/glm-5.3-flash", "body": routing() }));
         let empty = Models::parse(Some(&json!({ "cheap": { "provider": "openai", "base_url": "https://a.example/v1", "model": FINITE_PRIVATE_FLASH, "body": {} } }).to_string()), &book, false).unwrap();
         assert_eq!(empty.cheap, Upstream::Openai { base_url: "https://a.example/v1".into(), model: FINITE_PRIVATE_FLASH.into(), body: Some(Map::new()) }, "an empty body adds nothing");
@@ -1451,6 +1485,55 @@ mod tests {
         let mut other = book.clone();
         other.models.retain(|m| m.model != FINITE_PRIVATE_FLASH);
         assert!(Models::parse(Some(FINITE), &other, false).unwrap_err().contains("models.cheap: the model \"glm-5-3-flash\" is not in the price book"));
+    }
+
+    /// Goal (a self-hosted Bonsai, 2026-10-22): a tier's or the fallback's slot
+    /// names how long an agent's call to it may stream nothing, which a
+    /// computer's guest reads in its view beside the ids; a slot naming
+    /// none leaves its runtime's own, and the view as it was. Valid:
+    /// Bonsai's slots at 900 s, one tier's alone, the bounds, none, and a
+    /// view from before it. Invalid: 0, past the bound, not a whole number
+    /// of seconds, and on vision.
+    #[test]
+    fn a_slots_stale_patience_reaches_the_guest() {
+        let book = PriceBook::defaults();
+        let bonsai = |stale: Value| {
+            let mut row = json!({ "provider": "openai", "base_url": "http://127.0.0.1:18087/v1", "model": "bonsai-2-27b", "body": { "provider": { "max_price": { "prompt": 0, "completion": 0 } } } });
+            if !stale.is_null() {
+                row["stale_timeout_s"] = stale;
+            }
+            row
+        };
+        let text = json!({ "cheap": bonsai(json!(900)), "medium": bonsai(json!(900)), "fallback": bonsai(json!(900)) }).to_string();
+        let m = Models::parse(Some(&text), &book, true).unwrap();
+        assert_eq!(m.stale_timeout_s, StaleTimeouts { cheap: Some(900), medium: Some(900), fallback: Some(900) });
+        assert_eq!(m.cheap.model(), "bonsai-2-27b");
+        assert_eq!(m.cheap, m.fallback, "where it runs is the same upstream, its patience beside it: the route's fallback is no second try of it (`Tries`)");
+        let view = serde_json::to_value(m.ids_by_name()).unwrap();
+        assert_eq!(view, json!({ "cheap": "bonsai-2-27b", "medium": "bonsai-2-27b", "fallback": "bonsai-2-27b", "vision": GLM_FLASH, "stale_timeout_s": { "cheap": 900, "medium": 900, "fallback": 900 } }));
+        let one = Models::parse(Some(&json!({ "cheap": bonsai(json!(60)) }).to_string()), &book, true).unwrap();
+        assert_eq!(one.stale_timeout_s, StaleTimeouts { cheap: Some(60), ..StaleTimeouts::default() });
+        assert_eq!(serde_json::to_value(one.ids_by_name()).unwrap()["stale_timeout_s"], json!({ "cheap": 60 }), "only what a slot names");
+        for edge in [1, STALE_TIMEOUT_S_MAX] {
+            assert_eq!(Models::parse(Some(&json!({ "medium": bonsai(json!(edge)) }).to_string()), &book, true).unwrap().stale_timeout_s.medium, Some(edge));
+        }
+        // none named: the view as it was, which a guest from before it reads, and a view from before it reads as none
+        for none in [Models::defaults(), finite(), Models::parse(Some(&json!({ "cheap": bonsai(Value::Null) }).to_string()), &book, true).unwrap()] {
+            assert!(none.stale_timeout_s.is_none());
+            assert_eq!(serde_json::to_value(none.ids_by_name()).unwrap().as_object().unwrap().len(), 4, "four ids, nothing else");
+        }
+        let before: fragment_proto::computer::ModelIds = serde_json::from_value(json!({ "cheap": "a", "medium": "b", "fallback": "c", "vision": "d" })).unwrap();
+        assert!(before.stale_timeout_s.is_none());
+        // invalid
+        for bad in [json!(0), json!(STALE_TIMEOUT_S_MAX + 1), json!(-1), json!("900"), json!(1.5), json!(null), json!(u64::MAX)] {
+            let mut row = bonsai(Value::Null);
+            row["stale_timeout_s"] = bad.clone();
+            let e = Models::parse(Some(&json!({ "fallback": row }).to_string()), &book, true).unwrap_err();
+            assert_eq!(e, format!("models.fallback: stale_timeout_s is the seconds an agent's call may stream nothing, from 1 to 3600, not {bad}"));
+        }
+        let vision = json!({ "vision": { "provider": "workers_ai", "model": GLM_FLASH, "stale_timeout_s": 900 } }).to_string();
+        let e = Models::parse(Some(&vision), &book, false).unwrap_err();
+        assert!(e.contains("unknown field `stale_timeout_s`"), "vision's calls keep their runtime's patience: {e}");
     }
 
     /// Goal: a model on OpenRouter is priced at the ceiling its slot routes
