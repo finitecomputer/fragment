@@ -768,6 +768,61 @@ fn intercept_names_by_key(s: &mut Suite, api: &Api, owner_id: &str, agent: &str,
     Ok(8)
 }
 
+/// The checks `platform_host_checks` makes, as a run that cannot make them
+/// skips them.
+const PLATFORM_HOST_CHECKS: [&str; 4] = [
+    "its guest opens its owner's app at the app's own address, through the platform, with the share link anyone with it has",
+    "as no one: without the share link the address opens nothing, its owner a member and all",
+    "members only, the share link opens nothing from the guest either: no one's identity rides along",
+    "a name under the suffix that is no one's is the platform's own 404, reaching nothing past it",
+];
+
+/// A fragment's address as a guest dials it: on an http platform, the
+/// intercepts take its names on port 80 alone
+/// (`fragment_core::computer::platform_intercepts`).
+fn dialed(api: &Api, name: &str, path: &str) -> String {
+    let mut url = reqwest::Url::parse(&api.site_url(name, path)).expect("a fragment's URL parses");
+    url.set_port(None).expect("http takes a port");
+    url.to_string()
+}
+
+/// The page `shelf`'s app serves.
+const SHELF_PAGE: &str = "<p>the e2e shelf</p>";
+
+/// An app of `owner`'s, made as an agent makes one (open to its share
+/// link), serving `SHELF_PAGE`: its name and its share link's token.
+fn shelf(s: &Suite, api: &Api, owner: &crate::Keys) -> Result<(String, String)> {
+    let name = s.named(api, owner, "shelf")?;
+    let app = s.create(api, owner, &name)?;
+    s.commit(&app, &[("site/index.html", Some(format!("{SHELF_PAGE}\n").as_bytes()))]);
+    s.deploy(&app);
+    let status = api.status(owner, &name)?;
+    anyhow::ensure!(status.body["visibility"] == "link", "a new app opens to its share link: {status}");
+    Ok((name, status.body["viewToken"].as_str().unwrap_or("-").to_string()))
+}
+
+/// The platform's own hosts from a computer (found 40, docs/self-host.md;
+/// docs/computers.md, "The platform's hosts"): its guest opens its owner's
+/// app at its address through the platform, as any browser anywhere
+/// would, as no one: the share link opens it, and nothing of its owner's
+/// or its agent's rides along. The replies it adds.
+fn platform_host_checks(s: &mut Suite, api: &Api, owner: &crate::Keys, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+    let page = SHELF_PAGE;
+    let (name, token) = shelf(s, api, owner)?;
+    let fetch = |s: &Suite, n: u32, path: &str| fetched(s, n, &format!("fetch {} with e2e in x-e2e-probe", dialed(api, &name, path)));
+    let opened = fetch(s, 140, &format!("?view={token}"))?;
+    s.ok(PLATFORM_HOST_CHECKS[0], opened.starts_with("fetched 200") && opened.contains(page), &opened);
+    let bare = fetch(s, 141, "")?;
+    s.ok(PLATFORM_HOST_CHECKS[1], !bare.starts_with("fetched 200") && bare.starts_with("fetched ") && !bare.contains(page), &bare);
+    let r = api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    anyhow::ensure!(r.status == 200, "the app made members only: {r}");
+    let members = fetch(s, 142, &format!("?view={token}"))?;
+    s.ok(PLATFORM_HOST_CHECKS[2], !members.starts_with("fetched 200") && members.starts_with("fetched ") && !members.contains(page), &members);
+    let nobody = fetched(s, 143, &format!("fetch {} with e2e in x-e2e-probe", dialed(api, "no-one-here", "")))?;
+    s.ok(PLATFORM_HOST_CHECKS[3], nobody.starts_with("fetched 404") && nobody.contains("no fragment here"), &nobody);
+    Ok(4)
+}
+
 /// The route's models by their ids, through the intercept (Paul,
 /// 2026-10-16: "be able to run `/model` with hermes and see the real
 /// model"): `GET /v1/models` lists the ids the route takes, naming no agent
@@ -1352,6 +1407,20 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             settled(&aig),
             json!(aig),
         );
+    }
+
+    // the platform's own hosts, from its guest (found 40): the stub's fetch
+    // dials them by name, which the Docker double resolves to nothing
+    if scripted && fakes && !(s.has_nodes() && !s.real_engine()) {
+        replies_so_far += platform_host_checks(s, api, &owner, &fetched)?;
+    } else {
+        let why = match scripted && fakes {
+            true => "the Docker double resolves no name under a glob intercept (sandcastle's docs/node.md): the real engine's run, or wrangler's containers, make it",
+            false => "it needs the stub's fetch, on a local run",
+        };
+        for label in PLATFORM_HOST_CHECKS {
+            s.skip(label, why);
+        }
     }
 
     // asleep, a record wakes it, restored, and nothing runs twice
