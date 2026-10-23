@@ -272,15 +272,20 @@ class ContainerHost {
   // The egress intercepts (one entry per host: `ComputerEgress` with the
   // route as props) and the runtime's idle stop, the safety net under the
   // Computer DO's own sleep. Neither survives a stop, so each start sets
-  // them again. `swapHosts` are the connections' and operator keys' hosts,
-  // caught on HTTPS and on plain HTTP alike: the swap always sends on over
-  // HTTPS, so a credential never crosses the internet in the clear.
-  async arm(generation, computer, idleMs, swapHosts) {
+  // them again. `platform` is where the platform's own hosts are caught
+  // (`{https, hosts}`: computer.rs `egress_platform`). `swapHosts` are the
+  // connections' and operator keys' hosts, caught on HTTPS and on plain
+  // HTTP alike: the swap always sends on over HTTPS, so a credential never
+  // crosses the internet in the clear.
+  async arm(generation, computer, idleMs, swapHosts, platform) {
     if (generation !== this.#generation) return false;
     const c = this.#c;
     const egress = (route) => this.#ctx.exports.ComputerEgress({ props: { computer, route } });
     await this.#settled(() => c.interceptOutboundHttp("api.fragment.internal", egress("api")));
     await this.#settled(() => c.interceptOutboundHttp("model.fragment.internal", egress("model")));
+    for (const host of platform.hosts) {
+      await this.#settled(() => (platform.https ? c.interceptOutboundHttps(host, egress("platform")) : c.interceptOutboundHttp(host, egress("platform"))));
+    }
     for (const host of swapHosts) {
       await this.#settled(() => c.interceptOutboundHttp(host, egress("swap")));
       await this.#settled(() => c.interceptOutboundHttps(host, egress("swap")));
