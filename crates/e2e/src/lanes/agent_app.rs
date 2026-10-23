@@ -33,7 +33,10 @@
 //!   agent made. It runs on a preview's Hermes image on its real model, by
 //!   name (`cargo xtask e2e --hosted … --only agent-app`), for up to half an
 //!   hour, spending up to `PAID_CALLS` of the run's paid calls. A local run
-//!   never has a real agent (needs.rs `RealAgent`).
+//!   has a real agent on a model of its own (`FRAGMENT_E2E_MODELS_FILE`, as
+//!   a self-hosted box runs Bonsai; docs/self-host.md, seam 3): there it
+//!   runs alone (`--only agent-app`), its computer on the staged Hermes
+//!   image, on celld and sandcastle nodes too.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -108,19 +111,30 @@ pub fn agent_app(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section_by_name(SECTION, &[Need::Levers, Need::Computers, Need::Models, Need::Chrome, Need::RealAgent], &why) {
         return Ok(());
     }
-    anyhow::ensure!(api.signs_in_by_levers(), "a real agent's person signs in through a preview's levers");
     let evidence = s.dir(SECTION);
     let keys = Keys::generate();
-    let (session, owner_id) = api.e2e_sign_in(&Api::email_of(&keys), PAID_CALLS)?;
+    // a preview's person signs in through its levers, lent paid calls; a
+    // local run's (its own model, which costs nothing) through the fake
+    let hosted = api.signs_in_by_levers();
+    let session = match hosted {
+        true => api.e2e_sign_in(&Api::email_of(&keys), PAID_CALLS)?.0,
+        false => api.sign_in(&Api::email_of(&keys))?,
+    };
     let me = api.approve(&session, &keys)?;
     let email = me.body["email"].as_str().context("the person has an email")?.to_string();
-    println!("      ({email} as {owner_id}, lent {PAID_CALLS} paid calls)");
+    let owner_id = api.identity(&keys)?;
+    println!("      ({email} as {owner_id}{})", if hosted { format!(", lent {PAID_CALLS} paid calls") } else { String::new() });
     // their skills fragment, as the shell makes a person's: the managed
     // skills (apps-finite among them) an agent making an app reads
     let skills = api.create_with(&keys, json!({ "label": s.name("skills"), "template": "skills" }))?;
     let made = api.signed(&keys, "POST", "/api/computers", Some(&json!({})))?;
     let id = made.body["computer"].as_str().unwrap_or("").to_string();
     super::computers::on_candidate(s, api, &keys, &id)?;
+    if !hosted {
+        // a local node's own image is the stub: Hermes is staged beside it
+        let r = api.signed(&keys, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": "hermes" })))?;
+        anyhow::ensure!(r.status == 200 && r.body["image"] == "hermes", "its computer, pinned to the Hermes image: {r}");
+    }
     let label = s.name("juniper");
     let (agent, identity) = super::agent_ask::agent(api, &keys, &id, &label, "Juniper", &format!("You are Juniper, {email}'s agent. Help with whatever they ask.\n"))?;
     let chat = api.create_with(&keys, json!({ "label": format!("{label}-chat"), "template": "chat", "title": "Juniper" }))?;
@@ -183,7 +197,10 @@ pub fn agent_app(s: &mut Suite, api: &Api) -> Result<()> {
         }
     }
     let spent = paid(api, &owner_id);
-    s.ok(&format!("its paid calls stay within the {PAID_CALLS} lent"), spent as u64 <= PAID_CALLS, spent);
+    match hosted {
+        true => s.ok(&format!("its paid calls stay within the {PAID_CALLS} lent"), spent as u64 <= PAID_CALLS, spent),
+        false => println!("      (its model calls: {spent}, on the run's own model)"),
+    }
 
     // asleep at the end; the run's sweep deletes its `e2e-<run>-` fragments
     std::thread::sleep(QUEUE_DRAIN);

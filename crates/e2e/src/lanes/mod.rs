@@ -2,6 +2,7 @@
 
 mod admin;
 mod agent_app;
+pub use agent_app::SECTION as AGENT_APP;
 mod agent_ask;
 mod agent_restart;
 mod agent_smoke;

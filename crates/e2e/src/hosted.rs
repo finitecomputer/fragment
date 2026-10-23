@@ -324,6 +324,7 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         sandcastle: None,
         byoc: false,
         image_tags: vec![],
+        own_models: None,
         port: 0,
         run: crate::run_name(),
         fake: Fake::absent("code.storage"),
