@@ -615,6 +615,9 @@ impl FragmentCell {
                         let ended = self.end_life_wiped()?;
                         console_log!("{}", json!({ "event": "wipe.fragment-ended", "fragment": name, "owner": owner }));
                         self.tell_ended(Some(&ended.owner)).await;
+                        if let Some(name) = &name {
+                            self.forget_invites(name).await;
+                        }
                         true
                     }
                     (Some(_), Some(_)) => return Err(CellError::new(ErrorCode::Forbidden, format!("{} is someone else's: a wipe ends only its person's", name.unwrap_or_default()))),

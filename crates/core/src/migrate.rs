@@ -118,7 +118,19 @@ pub const FRAGMENT: Class = Class {
     kept: &["ended", "ended_index", "ended_repos", "ended_agents", "ended_errors"],
 };
 
-pub const REGISTRY: Class = Class { name: "Registry", steps: &[step!("baseline", "registry/0001_baseline.sql"), step!("connection_signins", "registry/0002_connection_signins.sql"), step!("trial_hold_attempts", "registry/0003_trial_hold_attempts.sql"), step!("connection_fences", "registry/0004_connection_fences.sql"), step!("connection_accounts", "registry/0005_connection_accounts.sql")], variants: &[], kept: &[] };
+pub const REGISTRY: Class = Class {
+    name: "Registry",
+    steps: &[
+        step!("baseline", "registry/0001_baseline.sql"),
+        step!("connection_signins", "registry/0002_connection_signins.sql"),
+        step!("trial_hold_attempts", "registry/0003_trial_hold_attempts.sql"),
+        step!("connection_fences", "registry/0004_connection_fences.sql"),
+        step!("invites_answered", "registry/0005_invites_answered.sql"),
+        step!("connection_accounts", "registry/0006_connection_accounts.sql"),
+    ],
+    variants: &[],
+    kept: &[],
+};
 
 pub const PRINCIPAL: Class = Class {
     name: "Principal",

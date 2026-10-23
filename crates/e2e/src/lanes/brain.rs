@@ -245,7 +245,7 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
 
     // access is the brain's members: a viewer searches, a stranger may not
     let (viewer, viewer_session) = person(api)?;
-    let r = api.signed(&keys, "PUT", &format!("/api/f/{name}/members/{}", npub::encode(viewer.pubkey_hex())), Some(&json!({ "role": "viewer" })))?;
+    let r = api.share(&name, &npub::encode(viewer.pubkey_hex()), "viewer")?;
     anyhow::ensure!(r.status == 200, "adding a viewer: {r}");
     let r = search(api, &viewer, &name, json!({ "q": "inverter" }))?;
     s.ok("a viewer may search", r.status == 200 && found(&r).first().is_some_and(|f| f.0 == SOLAR), &r);

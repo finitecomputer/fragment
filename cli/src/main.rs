@@ -250,6 +250,12 @@ enum Cmd {
         #[command(subcommand)]
         sub: InviteCmd,
     },
+    /// The invites waiting for your yes (an agent: its owner's, acting for
+    /// them): list them, or accept or decline one
+    Invites {
+        #[command(subcommand)]
+        sub: Option<InvitesCmd>,
+    },
     /// Call an operation; prints its result (a retry with the same --id is a replay)
     Call {
         name: String,
@@ -689,9 +695,11 @@ enum MembersCmd {
     /// List members and their roles
     List { name: String },
     /// Add a member (the owner, or their agent for them): a person and
-    /// their agents, by email, or an identity by npub. An email no one
-    /// signs in as yet is mailed an invite: they are in once they sign in
-    /// as it. Someone in already is refused: `members role` changes a role
+    /// their agents, by email; or one of its owner's own agents, by npub,
+    /// at once. An email is mailed an invite, and its person (and their
+    /// agents) are in once they accept it, signed in as it (`invite list`
+    /// shows it waiting). Anyone else by npub is refused: invite them by
+    /// email. Someone in already is refused: `members role` changes a role
     Add {
         name: String,
         /// an email, or an identity or key (an npub, or 64 hex)
@@ -712,6 +720,15 @@ enum MembersCmd {
     Rm { name: String, who: String },
     /// Leave a fragment you are a member of
     Leave { name: String },
+}
+
+#[derive(Subcommand)]
+enum InvitesCmd {
+    /// Accept one (its name, or its label): you are a member at its role,
+    /// and it is in your list (an agent's: its owner is, and its owner's list)
+    Accept { name: String },
+    /// Decline one: it waits no more
+    Decline { name: String },
 }
 
 #[derive(Subcommand)]
@@ -1945,7 +1962,7 @@ fn run(cli: Cli) -> Result<()> {
                             Shared::Invited(i) => {
                                 json_exit(j, &Shared::Invited(i.clone()));
                                 let expires_s = u64::try_from(i.expires_at / 1000).unwrap_or(0);
-                                println!("invited {email} as {} on {name}: they were mailed a link, and are in once they sign in as {email}", i.role.as_str());
+                                println!("invited {email} as {} on {name}: they were mailed a link, and are in once they accept it, signed in as {email}", i.role.as_str());
                                 println!("  it waits until {}; `fragment invite revoke {name} {email}` takes it back", chrono_like(expires_s));
                                 return Ok(());
                             }
@@ -1994,6 +2011,39 @@ fn run(cli: Cli) -> Result<()> {
                 println!("revoked the invite waiting on {email}");
             }
         },
+        Cmd::Invites { sub } => {
+            let waiting: fragment_proto::InvitesWaiting = c.call_as(c.get("/api/invites")?)?;
+            let Some(sub) = sub else {
+                json_exit(j, &waiting);
+                if waiting.invites.is_empty() {
+                    println!("no invites wait for a yes");
+                }
+                for i in &waiting.invites {
+                    let expires_s = u64::try_from(i.expires_at / 1000).unwrap_or(0);
+                    let from = i.from.as_deref().unwrap_or("someone");
+                    println!("{}\t{}\t{}\tfrom {from}, to {}, until {}", i.fragment, i.role.as_str(), i.title, i.email, chrono_like(expires_s));
+                }
+                return Ok(());
+            };
+            let (name, yes) = match &sub {
+                InvitesCmd::Accept { name } => (name, true),
+                InvitesCmd::Decline { name } => (name, false),
+            };
+            // a name in full, or the label of one invite waiting
+            let label = |f: &str| fragment_proto::split_fragment_name(f).map(|(l, _)| l.to_string());
+            let named: Vec<&str> = waiting.invites.iter().map(|i| i.fragment.as_str()).filter(|f| *f == name.as_str() || label(f).as_deref() == Some(name.as_str())).collect();
+            let full = match named.as_slice() {
+                [one] => one.to_string(),
+                [] => return Err(anyhow::Error::new(CodedError { code: Code::NotFound, msg: format!("no invite waits for a yes on {name} (`fragment invites` lists them)") })),
+                _ => return Err(usage(format!("several invites wait on fragments labeled {name}: name one in full ({})", named.join(", ")))),
+            };
+            let v = c.call(c.post_json(&format!("/api/invites/{full}/{}", if yes { "accept" } else { "decline" }), &serde_json::json!({}))?)?;
+            json_exit(j, &v);
+            match yes {
+                true => println!("accepted: {full} is shared with you now, as {}", v["role"].as_str().unwrap_or("?")),
+                false => println!("declined the invite to {full}"),
+            }
+        }
         Cmd::Call { name, op, input, id } => {
             let input = match (input.as_str(), input.strip_prefix('@')) {
                 ("-", _) => std::io::read_to_string(std::io::stdin()).map_err(|e| usage(format!("--input -: reading stdin: {e}")))?,

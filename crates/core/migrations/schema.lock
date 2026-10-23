@@ -11,7 +11,8 @@ step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
 step Registry 3 trial_hold_attempts 07e123e05a049abe
 step Registry 4 connection_fences ac8ad73c1302c4be
-step Registry 5 connection_accounts 05c1285d594517cb
+step Registry 5 invites_answered 189ad3c09884ab61
+step Registry 6 connection_accounts 05c1285d594517cb
 step Principal 1 baseline 28b4d4bf3f8cdb71
 step Principal 2 listed 09e5aab70c4f7f61
 step Ledger 1 baseline 6d5c6ebad64a53b2
@@ -99,7 +100,7 @@ Registry index identities_owner: CREATE INDEX identities_owner ON identities (ow
 Registry table invite_claims: CREATE TABLE invite_claims ( email TEXT NOT NULL, fragment TEXT NOT NULL, due INTEGER NOT NULL, failed INTEGER NOT NULL, PRIMARY KEY (email, fragment))
 Registry index invite_claims_due: CREATE INDEX invite_claims_due ON invite_claims (due)
 Registry table invite_mails: CREATE TABLE invite_mails ( sharer TEXT NOT NULL, day INTEGER NOT NULL, mailed INTEGER NOT NULL, PRIMARY KEY (sharer, day))
-Registry table invites_waiting: CREATE TABLE invites_waiting ( email TEXT NOT NULL, fragment TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (email, fragment))
+Registry table invites_waiting: CREATE TABLE invites_waiting ( email TEXT NOT NULL, fragment TEXT NOT NULL, expires_at INTEGER NOT NULL, role TEXT, title TEXT, sharer TEXT, PRIMARY KEY (email, fragment))
 Registry index invites_waiting_expiry: CREATE INDEX invites_waiting_expiry ON invites_waiting (expires_at)
 Registry table keys: CREATE TABLE keys ( key TEXT PRIMARY KEY, identity TEXT NOT NULL, added_at INTEGER NOT NULL, added_by TEXT NOT NULL, revoked_at INTEGER)
 Registry index keys_identity: CREATE INDEX keys_identity ON keys (identity)

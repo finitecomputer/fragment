@@ -38,7 +38,7 @@ pub fn ops(s: &mut Suite, api: &Api) -> Result<()> {
     let other = api.person()?;
     let name = s.named(api, &owner, "ops")?;
     let c = s.create(api, &owner, &name)?;
-    api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", editor.pubkey_hex()), Some(&json!({ "role": "editor" })))?;
+    api.share(&name, editor.pubkey_hex(), "editor")?;
     let live = ship(s, &c, TODO_APP, TODO_JSON);
     let r = api.status(&owner, &name)?;
     let own = r.body["code"]["id"].as_str().is_some_and(|id| id.starts_with("app:"));

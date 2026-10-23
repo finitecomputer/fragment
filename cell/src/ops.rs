@@ -552,6 +552,11 @@ impl FragmentCell {
                 let fill = body["fill"].as_u64().ok_or_else(|| CellError::invalid("fill is a count"))?;
                 json!({ "members": self.fill_members(fill)? })
             }
+            Some("member") => {
+                let who = body["who"].as_str().ok_or_else(|| CellError::invalid("member names who (an npub, a key, or an email)"))?;
+                let role = body["role"].as_str().and_then(Role::parse).ok_or_else(|| CellError::invalid("member names a role"))?;
+                json!(self.lever_member(who, role).await?)
+            }
             Some("code-builds") => json!({ "builds": self.app.builds() }),
             Some("meter-now") => {
                 // every counted minute closed, a storage sample taken, and

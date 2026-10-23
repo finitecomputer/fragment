@@ -1477,8 +1477,8 @@ pub struct CreateInvite {
     pub role: Role,
 }
 
-/// An invite waiting on an email: whoever signs in as it becomes a member,
-/// at its role.
+/// An invite waiting on an email: whoever signs in as it, and accepts it,
+/// becomes a member at its role.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Invite {
@@ -1488,13 +1488,49 @@ pub struct Invite {
     pub created_by: String,
 }
 
-/// The answer to `POST /api/f/<name>/invites`: the person who holds the
-/// email, a member at once; or, when no one does yet, the invite, mailed.
+/// The answer to `POST /api/f/<name>/invites`: the invite, mailed, waiting
+/// on its person's yes. `Member` is what it answered before invites waited
+/// for one (the person who held the email, a member at once): no invite
+/// answers it now, and clients still read it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Shared {
     Member(Member),
     Invited(Invite),
+}
+
+/// `GET /api/invites` (a person): the invites waiting on the emails they
+/// sign in with, theirs to accept or decline, the soonest to run out
+/// first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InvitesWaiting {
+    pub invites: Vec<WaitingInvite>,
+}
+
+/// An invite waiting on an email of the asker's: the fragment, the role
+/// it grants, what it was called as it was sent, who shared it (their
+/// email; null when no one signs in as them now), the email it waits on,
+/// and when it runs out. The cell answers it as its registry reads it
+/// (cell/src/registry/invites.rs `waiting_for`, which names each column
+/// as this names its field), not through this type.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitingInvite {
+    pub fragment: String,
+    pub role: Role,
+    pub title: String,
+    #[serde(default)]
+    pub from: Option<String>,
+    pub email: String,
+    pub expires_at: i64,
+}
+
+/// The answer to `POST /api/invites/<fragment>/accept`: the role they
+/// hold there now (a stronger one they held already is kept).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InviteAccepted {
+    pub fragment: String,
+    pub role: Role,
 }
 
 /// `GET /api/f/<name>/invites` (owner): the invites waiting.

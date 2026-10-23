@@ -144,10 +144,10 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     };
     // their memberships elsewhere, and someone else's agent in theirs
     let joined = [
-        api.signed(&bob, "PUT", &format!("/api/f/{shared}/members/{paul_id}"), Some(&json!({ "role": "editor" })))?,
-        api.signed(&bob, "PUT", &format!("/api/f/{shared}/members/{agent_id}"), Some(&json!({ "role": "viewer" })))?,
+        api.share(&shared, &paul_id, "editor")?,
+        api.share(&shared, &agent_id, "viewer")?,
         api.signed(&bob, "PUT", &format!("/api/f/{shared}/members/{bob_agent_id}"), Some(&json!({ "role": "viewer" })))?,
-        api.signed(&paul, "PUT", &format!("/api/f/{app_name}/members/{bob_agent_id}"), Some(&json!({ "role": "viewer" })))?,
+        api.share(&app_name, &bob_agent_id, "viewer")?,
     ];
     s.ok("they and their agent are in someone else's fragment, and that one's agent in their app", joined.iter().all(|r| r.status == 200), json!(joined.iter().map(|r| r.status).collect::<Vec<_>>()));
     let ours = [&agent_name, &chat_name, &app_name];

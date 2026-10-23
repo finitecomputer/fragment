@@ -857,13 +857,16 @@ impl FragmentCell {
             let body: Value = body_json(&mut req).await?;
             return self.cap_files(&op, &body).await;
         }
-        if path == "/invites/claim" {
-            // Only the registry's sign-in sets the header; the router never passes it.
+        if path == "/invites/claim" || path == "/invites/decline" {
+            // Only the registry sets the header (a person's yes or no); the router never passes it.
             if req.headers().get(crate::members::CLAIM_HEADER)?.is_none() {
                 return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
             }
             let claim = body_json(&mut req).await?;
-            return json_response(&self.claim_invite(&claim).await?);
+            return json_response(&match path.as_str() {
+                "/invites/claim" => self.claim_invite(&claim).await?,
+                _ => self.decline_invite(&claim).await?,
+            });
         }
         if let Some(route) = path.strip_prefix("/wipe/") {
             // Only a wipe's orchestrator sets the header; the router never passes it.
@@ -1153,6 +1156,7 @@ impl FragmentCell {
         self.require(caller, false, Role::Owner)?;
         let ended = self.end_life()?;
         self.tell_ended(Some(&ended.owner)).await;
+        self.forget_invites(&name).await;
         self.schedule().await?;
         json_response(&json!({ "ok": true, "deleted": name }))
     }

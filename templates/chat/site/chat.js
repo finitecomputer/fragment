@@ -310,12 +310,20 @@ export function mount(root) {
   // and Safari pans it, leaving the layout viewport be, so the page follows
   // it and the composer sits just above the keyboard; the page itself never
   // scrolls under it. Framed, the frame is the viewport, as tall as the
-  // shell gives it (the shell follows the keyboard the same way).
+  // shell gives it (the shell follows the keyboard the same way). Only the
+  // page on its own, with no keyboard up, sits on the screen's bottom edge
+  // and keeps clear of its inset (the home indicator's; chat.css,
+  // --inset-bottom): framed, the shell keeps its frame off that edge, and a
+  // keyboard up covers it (what is visible is shorter than the layout
+  // viewport, whose bottom Safari may pan into view above the keyboard).
+  document.documentElement.toggleAttribute("data-framed", framed);
   const visible = window.visualViewport;
   const fitViewport = () => {
     if (!visible) return;
-    document.documentElement.style.setProperty("--viewport-height", `${Math.round(visible.height)}px`);
-    document.documentElement.style.setProperty("--viewport-top", `${Math.round(visible.offsetTop)}px`);
+    const html = document.documentElement;
+    html.style.setProperty("--viewport-height", `${Math.round(visible.height)}px`);
+    html.style.setProperty("--viewport-top", `${Math.round(visible.offsetTop)}px`);
+    html.toggleAttribute("data-keyboard", visible.height * visible.scale < html.clientHeight - 1);
   };
   visible?.addEventListener("resize", fitViewport);
   visible?.addEventListener("scroll", fitViewport);
@@ -1789,12 +1797,27 @@ export function mount(root) {
     const words = input.value.trim();
     if (words) send(`/steer ${words}`);
   };
+  // the field as tall as its lines, measured once Send, Stop and Steer are
+  // as the words have them: on a phone they share its row (chat.css)
   function grow() {
-    input.style.height = "auto";
-    input.style.height = `${Math.min(Math.max(input.scrollHeight, 27), 220)}px`;
     refreshSend();
+    fit();
     draftChanged();
   }
+  function fit() {
+    input.style.height = "auto";
+    input.style.height = `${Math.min(Math.max(input.scrollHeight, 27), 220)}px`;
+  }
+  // on a phone its width moves with the buttons beside it (recording's
+  // clock and Discard, Steer as the agent starts and stops), so its lines
+  // are measured again whenever its width changes, not only as it is typed in
+  let fieldWidth = 0;
+  new ResizeObserver(([entry]) => {
+    const width = Math.round(entry.contentRect.width);
+    if (width === fieldWidth) return;
+    fieldWidth = width;
+    fit();
+  }).observe(input);
   // ---- the composer's draft: kept in this origin's storage as its
   // person's, a moment after each change and as the page goes, and put
   // back as it loads, so words typed survive any reload of the page (the

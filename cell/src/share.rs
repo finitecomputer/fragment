@@ -17,9 +17,14 @@
 //! change at once), and what takes access away (removing someone, a new
 //! share link, leaving) asks a second click.
 //!
-//! An email no one signs in as yet is mailed a link to the fragment, and
-//! their first sign-in as it makes them a member (decision 48): there is no
-//! page to accept an invite on.
+//! An email is mailed a link to the platform's page, where whoever signs
+//! in as it accepts the invite, or declines it (decision 63: the shell's
+//! sidebar, through `/api/invites`, below): nobody is made a member by an
+//! invite without their yes.
+//!
+//!   GET  /api/invites                    the invites waiting on a person's emails
+//!   POST /api/invites/<name>/accept      their yes: a member now
+//!   POST /api/invites/<name>/decline     their no: it waits no more
 //!
 //! A fragment's page (its author's code, or an agent's) is cross-site from
 //! the platform on fragment.club, but one site
@@ -46,7 +51,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::{form, npub};
 use fragment_proto::{
-    limits, Access, AccessAgent, AccessMember, AccessRow, ErrorBody, ErrorCode, IdentityKind, Invite, InviteList, ListedFragment, Member, MemberList, Role, Shared, Visibility,
+    limits, Access, AccessMember, AccessRow, ErrorBody, ErrorCode, IdentityKind, Invite, InviteAccepted, InviteList, ListedFragment, Member, MemberList, Role, Shared, Visibility,
 };
 use futures_util::future::{join, join_all};
 use serde_json::{json, Value};
@@ -58,6 +63,7 @@ use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::js;
 use crate::registry::calls::{self, Profile};
+use crate::registry::invites::{AnswerInvite, InvitesFor};
 use crate::routed::{Routed, Signed};
 
 /// A form of a few short fields (the longest: an email).
@@ -286,18 +292,18 @@ fn decoded<T: serde::de::DeserializeOwned>(v: Value, what: &str) -> CellResult<T
     serde_json::from_value(v).map_err(|e| CellError::host(format!("{what}: {e}")))
 }
 
-/// Emails and pictures for identities, and a person's agents, asked of
-/// the registry `PROFILES_MAX` at a time. One it cannot answer shows as its
-/// id. Their emails are shown: the sheet and the access view are of a
-/// fragment's people, shown to its members (docs/cloudflare-v1.md,
-/// decision 48), and an agent member's owner, who reads what it reads. A
-/// person's agents are named: they reach what the person does (Paul,
-/// 2026-10-13).
+/// Emails and pictures for identities, asked of the registry
+/// `PROFILES_MAX` at a time. One it cannot answer shows as its id. Their
+/// emails are shown: the sheet and the access view are of a fragment's
+/// people, shown to its members (docs/cloudflare-v1.md, decision 48), and
+/// an agent member's owner, who reads what it reads. A person's own agents
+/// are not named (decision 63: "I invite Skyler and his agents, not Skyler
+/// and his agent Agent123"): they reach what the person does, unnamed.
 pub(crate) async fn profiles(env: &Env, mut ids: Vec<String>) -> BTreeMap<String, Profile> {
     ids.sort();
     ids.dedup();
     let asked = ids.chunks(crate::registry::PROFILES_MAX).map(|chunk| {
-        let call = calls::Profiles { ids: chunk.to_vec(), emails_of: chunk.to_vec(), agents_of: chunk.to_vec() };
+        let call = calls::Profiles { ids: chunk.to_vec(), emails_of: chunk.to_vec() };
         async move { ask_registry(env, &call).await }
     });
     let mut all = BTreeMap::new();
@@ -311,16 +317,14 @@ pub(crate) async fn profiles(env: &Env, mut ids: Vec<String>) -> BTreeMap<String
     all
 }
 
-/// Names each agent among `profiles`, and each person's agents they list,
-/// by its agent fragment's face (its title, and its picture's address on
-/// the platform), the one source every page and the platform show an agent
-/// by (docs/api.md, "An agent's name and picture"): at most `FACES_MAX`
-/// fragments asked at once, the profiles' own agents first. One not asked,
-/// or whose fragment does not answer, keeps its label.
+/// Names each agent among `profiles` by its agent fragment's face (its
+/// title, and its picture's address on the platform), the one source every
+/// page and the platform show an agent by (docs/api.md, "An agent's name
+/// and picture"): at most `FACES_MAX` fragments asked at once. One not
+/// asked, or whose fragment does not answer, keeps its label.
 pub(crate) async fn name_agents(env: &Env, profiles: &mut BTreeMap<String, Profile>) {
     let mut asked: Vec<String> = vec![];
-    let own = profiles.values().filter_map(|p| p.fragment.clone());
-    for f in own.chain(profiles.values().flat_map(|p| p.agents.iter().filter_map(|a| a.fragment.clone()))) {
+    for f in profiles.values().filter_map(|p| p.fragment.clone()) {
         if asked.len() < FACES_MAX && !asked.contains(&f) {
             asked.push(f);
         }
@@ -333,9 +337,6 @@ pub(crate) async fn name_agents(env: &Env, profiles: &mut BTreeMap<String, Profi
         if p.kind == IdentityKind::Agent && p.fragment.is_some() {
             p.title = face(&p.fragment, "title");
             p.picture = face(&p.fragment, "picture");
-        }
-        for a in &mut p.agents {
-            a.title = face(&a.fragment, "title");
         }
     }
 }
@@ -384,10 +385,6 @@ fn person(m: &Member, sheet: &Sheet) -> String {
             None => "An agent".to_string(),
         });
     }
-    let theirs: Vec<String> = p.map_or(&[][..], |p| &p.agents[..]).iter().map(|a| esc(a.title.as_deref().or(a.name.as_deref()).unwrap_or(&npub::display(&a.id)))).collect();
-    if !theirs.is_empty() {
-        under.push(format!("With their agent{} {}", if theirs.len() == 1 { "" } else { "s" }, theirs.join(", ")));
-    }
     let under = if under.is_empty() { String::new() } else { format!("<small>{}</small>", under.join(" · ")) };
     format!("{picture}<span class=\"who\">{name}{you}{under}</span>")
 }
@@ -428,10 +425,8 @@ impl Sheet {
 
 /// What happened, shown above the sheet.
 enum Flash {
-    /// A person who signs in as the email: a member now.
-    Added { who: String, role: Role },
-    /// No one does yet: an invite waits on it, and they were mailed
-    /// (`again`: it waited already, and was renewed).
+    /// An invite waits on the email for its person's yes, and they were
+    /// mailed (`again`: it waited already, and was renewed).
     Invited { who: String, role: Role, again: bool },
     /// They are in already, at `role`: the list changes roles.
     Already { who: String, role: Role },
@@ -542,9 +537,8 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     let mut out = String::new();
     let days = fragment_proto::limits::INVITE_TTL_S / 86400;
     match flash {
-        Some(Flash::Added { who, role }) => out += &format!("<div class=\"flash\"><p>Added <b>{}</b> as {}: they can open it now.</p></div>", esc(&who), role_phrase(role)),
         Some(Flash::Invited { who, role, again: false }) => out += &format!(
-            "<div class=\"flash\"><p>Invited <b>{w}</b> as {r}: we mailed them a link. They are in once they sign in as {w} (within {days} days).</p></div>",
+            "<div class=\"flash\"><p>Invited <b>{w}</b> as {r}: we mailed them a link. They are in once they accept it, signed in as {w} (within {days} days).</p></div>",
             w = esc(&who),
             r = role_phrase(role),
         ),
@@ -802,10 +796,10 @@ fn left(title: &str) -> CellResult<Response> {
     )
 }
 
-/// Shares it with whoever signs in as `email` (decision 48): the person
-/// who does, a member now; or, when no one does yet, the invite waiting on
-/// it, mailed to them. Someone in already is not added again: a role
-/// changes in the list, so an Add at the default role never lowers one.
+/// Shares it with whoever signs in as `email` (decisions 48 and 63): the
+/// invite waiting on it, mailed to them, theirs once they accept it.
+/// Someone in already is not added again: a role changes in the list, so
+/// an Add at the default role never lowers one.
 #[allow(clippy::too_many_arguments)]
 async fn invite(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, session: &str, email: &str, role: CellResult<Role>) -> CellResult<Response> {
     let role = role?;
@@ -824,10 +818,35 @@ async fn invite(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, se
     let again = before.invites.iter().any(|i| i.email == email);
     let shared = ask(env, url, name, who, Method::Post, "/api/invites", Some(json!({ "email": email, "role": role }))).await?;
     let flash = match decoded::<Shared>(shared, "the invite")? {
-        Shared::Member(m) => Flash::Added { who: email, role: m.role },
         Shared::Invited(i) => Flash::Invited { who: email, role: i.role, again },
+        Shared::Member(_) => return Err(CellError::host("an invite made a member at once: invites wait for a yes (decision 63)")),
     };
     shown(env, cfg, url, name, who, session, Some(flash), 200).await
+}
+
+/// `/api/invites…`: a person's own answers to the invites waiting on the
+/// emails they sign in with (decision 63; registry/invites.rs). `GET`
+/// them; `POST <fragment>/accept`, their yes, which makes them a member
+/// there; `POST <fragment>/decline`, their no. Each takes no body (or
+/// `{}`). Their agent answers them for them, acting `for` them (the
+/// registry decides: invites.rs `invitee_by`).
+pub(crate) async fn invites(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> CellResult<Response> {
+    let bytes = crate::read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+    let (by, acting_for) = (crate::orgs::signed_by(env, &req, url, &bytes)?, crate::acting_for(url)?);
+    let empty = bytes.is_empty() || serde_json::from_slice::<serde_json::Map<String, Value>>(&bytes).is_ok_and(|m| m.is_empty());
+    match (req.method(), rest) {
+        (Method::Get, []) => crate::json_answer(&ask_registry(env, &InvitesFor { by, acting_for }).await?),
+        (Method::Post, [_, "accept" | "decline"]) if !empty => Err(CellError::invalid("this takes no body (or {})")),
+        (Method::Post, [fragment, verb @ ("accept" | "decline")]) => {
+            let (fragment, yes) = (crate::named_fragment(fragment)?, *verb == "accept");
+            match (ask_registry(env, &AnswerInvite { by, acting_for, fragment: fragment.clone(), yes }).await?, yes) {
+                (Some(role), true) => crate::json_answer(&InviteAccepted { fragment, role }),
+                (None, false) => crate::json_answer(&json!({ "ok": true, "declined": fragment })),
+                _ => Err(CellError::host("the registry's answer to an invite's yes or no named no role, or one after a no")),
+            }
+        }
+        (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
+    }
 }
 
 /// `GET /api/access`: the fragments `who` owns, in their list's order,
@@ -897,10 +916,8 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
                             title: named.get(&m.principal).and_then(|p| p.title.clone()),
                             owner: m.owner.clone(),
                             owner_email: m.owner.as_deref().and_then(email),
-                            agents: named
-                                .get(&m.principal)
-                                .map(|p| p.agents.iter().map(|a| AccessAgent { principal: a.id.clone(), name: a.name.clone(), title: a.title.clone() }).collect())
-                                .unwrap_or_default(),
+                            // a person's own agents are never named (decision 63)
+                            agents: vec![],
                         })
                         .collect();
                     (Some(listed), more, invites)

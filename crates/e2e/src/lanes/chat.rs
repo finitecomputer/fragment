@@ -200,7 +200,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the agent joins the chat on the template", r.status == 200, &r);
     // the platform tells the agent it joined (Paul, 2026-10-03), and wakes its computer
     let member_id = api.identity(&member)?;
-    let r = api.signed(&owner, "PUT", &format!("/api/f/{chat_name}/members/{member_id}"), Some(&json!({ "role": "viewer" })))?;
+    let r = api.share(&chat_name, &member_id, "viewer")?;
     anyhow::ensure!(r.status == 200, "adding a viewer: {r}");
 
     // ---- the template's code runs from the platform's release (decision 40): its push job

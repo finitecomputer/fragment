@@ -83,9 +83,9 @@ impl Call for Lookup {
 }
 
 /// `POST /invite`: a fragment shared with whoever signs in as `email`
-/// (decision 48): the person who holds it, or, when no one does yet, the
-/// invite kept against the email and mailed to it, counted in the
-/// sharer's day (429 past `limits::INVITE_MAILS_DAILY_MAX`).
+/// (decisions 48 and 63): the invite kept against the email for its
+/// person's yes, and mailed to it, counted in the sharer's day (429 past
+/// `limits::INVITE_MAILS_DAILY_MAX`).
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct InviteEmail {
@@ -95,33 +95,22 @@ pub(crate) struct InviteEmail {
     /// The person whose day it counts in (an agent's owner).
     pub sharer: String,
     pub role: Role,
-    /// What the mail calls the fragment: its title, or its label.
+    /// What the mail, and the invite's person's list of them, call the
+    /// fragment: its title, or its label.
     pub title: String,
     pub expires_at: i64,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum Invited {
-    /// The person who holds the email: the fragment makes them a member.
-    Holder(Identity),
-    /// No one does: the invite waits on it, and the mail went.
-    Mailed,
-}
-
+/// Answered, the invite waits on the email, and its mail went.
 impl Call for InviteEmail {
     const PATH: &'static str = "/invite";
-    type Answer = Invited;
-    fn checked(answer: Invited) -> CellResult<Invited> {
-        match answer {
-            Invited::Holder(person) => Ok(Invited::Holder(identity_checked(person)?)),
-            Invited::Mailed => Ok(Invited::Mailed),
-        }
-    }
+    type Answer = ();
 }
 
-/// A fragment's `invites/claim`: the person `identity` signed in as
-/// `email`, verified, and meets the invite waiting on it there.
+/// A fragment's `invites/claim` (and `invites/decline`): the person
+/// `identity`, who signs in as `email`, verified, accepts (declines) the
+/// invite waiting on it there; or, for an invite from before invites
+/// waited for a yes, signed in as it and meets it.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ClaimInvite {
     pub email: String,
@@ -280,29 +269,16 @@ impl Call for PictureOf {
 /// only for those `emails_of` names: the members of the fragment that
 /// asks, when its asker is a member too (docs/cloudflare-v1.md, decision
 /// 48). The caller decides; the registry gives none unless named.
+///
+/// A person's own agents are never named to anyone else (Paul,
+/// 2026-10-22: "I invite Skyler and his agents, not Skyler and his agent
+/// Agent123"): they reach what the person does, acting for them (R17),
+/// unnamed. An agent is named only as itself, a member.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Profiles {
     pub ids: Vec<String>,
     #[serde(default)]
     pub emails_of: Vec<String>,
-    /// People whose agents to name: a share is a person's and their
-    /// agents' (Paul, 2026-10-13), so who has access says them.
-    #[serde(default)]
-    pub agents_of: Vec<String>,
-}
-
-/// A person's agent, as who has access names it.
-#[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct ProfileAgent {
-    pub id: String,
-    /// Its agent fragment's label, made from one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fragment: Option<String>,
-    /// Its agent fragment's title, filled as `Profile::title` is.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
 }
 
 /// A person's picture, and their email when the caller may show it; an
@@ -323,9 +299,6 @@ pub(crate) struct Profile {
     /// An agent's fragment's title (`XBT-2000`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// A person's agents, when the caller named them in `agents_of`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub agents: Vec<ProfileAgent>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -495,6 +468,10 @@ pub(crate) enum TestHook {
     /// The steps its schema holds (schema.rs `view`), answered by a
     /// registry that refuses its schema too.
     Schema,
+    /// Makes every invite waiting on this email one mailed before invites
+    /// waited for a yes (decision 63: no role, title or sharer kept), which
+    /// a sign-in as it still meets (`{before}`: how many).
+    InvitesBefore(String),
 }
 
 /// `TestHook::E2eSignIn`: who, and the paid calls they are lent (the

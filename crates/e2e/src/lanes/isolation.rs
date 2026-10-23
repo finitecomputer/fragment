@@ -142,7 +142,7 @@ fn attacks(s: &mut Suite, api: &Api) -> Result<()> {
     let z = made(api, &owner, &s.name("iz"), "blank", json!([]), "members")?;
     let evil = made(api, &mallory, &s.name("ievil"), "blank", json!([]), "public")?;
     let r = api.signed(&member, "GET", "/api/identities/me", None)?;
-    let r = api.signed(&owner, "PUT", &format!("/api/f/{y}/members/{}", r.body["id"].as_str().unwrap_or("")), Some(&json!({ "role": "viewer" })))?;
+    let r = api.share(&y, r.body["id"].as_str().unwrap_or(""), "viewer")?;
     anyhow::ensure!(r.status == 200, "adding a member to {y}: {r}");
 
     // ---- the owner, signed in on x's own page
@@ -318,7 +318,7 @@ fn by_url(s: &mut Suite, api: &Api) -> Result<()> {
     let shared = made(api, &owner, &s.name("ushared"), "blank", pages("inside shared"), "members")?;
     let theirs = made(api, &stranger, &s.name("utheirs"), "blank", pages("inside theirs"), "link")?;
     let open = made(api, &stranger, &s.name("uopen"), "blank", pages("inside open"), "public")?;
-    let r = api.signed(&owner, "PUT", &format!("/api/f/{shared}/members/{guest_id}"), Some(&json!({ "role": "viewer" })))?;
+    let r = api.share(&shared, &guest_id, "viewer")?;
     anyhow::ensure!(r.status == 200, "sharing {shared}: {r}");
     let host_of = |name: &str| name.to_string();
     let says = |text: &str| format!("document.contentType === 'text/html' && (document.body?.innerText ?? '').includes({text:?})");

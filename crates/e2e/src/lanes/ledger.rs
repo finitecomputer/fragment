@@ -328,7 +328,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     landed(s, api, &owner, &name, wait);
 
     // a guest editor of a seat's fragment still writes there: its owner pays (decision 26)
-    api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{guest_id}"), Some(&json!({ "role": "editor" })))?;
+    api.share(&name, &guest_id, "editor")?;
     let w = api.op(&guest, &name, "note", "gn-seat", json!({ "text": "a guest edits a seat's fragment" }))?;
     let post = api.signed(&guest, "POST", &format!("/api/f/{name}/channels/talk"), Some(&json!({ "id": "g-talk", "body": { "text": "a guest posts" } })))?;
     s.ok("a guest editor still writes to a seat's fragment, and posts there", w.status == 200 && post.status == 200, format!("{w} | {post}"));
@@ -595,7 +595,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     // ---- a fragment's cap stops everyone but its owner (decision 26)
     let visitor = api.person()?;
     let visitor_id = api.identity(&visitor)?;
-    api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{visitor_id}"), Some(&json!({ "role": "viewer" })))?;
+    api.share(&name, &visitor_id, "viewer")?;
     let r = api.signed(&visitor, "PUT", &format!("/api/f/{name}/cap"), Some(&json!({ "id": "c0", "micros": 1 })))?;
     s.ok("only a fragment's owner sets its cap", r.status == 403, &r);
     let cap = json!({ "id": "c1", "micros": 1_000 });

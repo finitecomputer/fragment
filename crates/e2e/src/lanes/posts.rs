@@ -75,7 +75,7 @@ pub fn posts(s: &mut Suite, api: &Api) -> Result<()> {
     let stranger = api.person()?;
     let (name, c) = room(s, api, &owner, "room", false)?;
     for (who, role) in [(&editor, "editor"), (&viewer, "viewer")] {
-        api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", who.pubkey_hex()), Some(&json!({ "role": role })))?;
+        api.share(&name, who.pubkey_hex(), role)?;
     }
     let (owner_id, editor_id) = (api.identity(&owner)?, api.identity(&editor)?);
 
@@ -265,7 +265,7 @@ fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let (viewer, editor, outsider) = (api.person()?, api.person()?, api.person()?);
     let (viewer_id, editor_id) = (api.identity(&viewer)?, api.identity(&editor)?);
     let (agent, agent_id) = super::delegation::agent_of(api, owner)?;
-    let set_role = |who: &str, role: &str| api.signed(owner, "PUT", &format!("/api/f/{name}/members/{who}"), Some(&json!({ "role": role })));
+    let set_role = |who: &str, role: &str| api.share(&name, who, role);
     for (who, role) in [(viewer_id.as_str(), "viewer"), (editor_id.as_str(), "editor"), (agent_id.as_str(), "editor")] {
         let r = set_role(who, role)?;
         anyhow::ensure!(r.status == 200, "adding {who} as {role}: {r}");
@@ -483,7 +483,7 @@ fn posters_kind(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let (agent, agent_id) = super::delegation::agent_of(api, owner)?;
     let owner_id = api.identity(owner)?;
     for who in [api.identity(&editor)?, agent_id.clone()] {
-        let r = api.signed(owner, "PUT", &format!("/api/f/{name}/members/{who}"), Some(&json!({ "role": "editor" })))?;
+        let r = api.share(&name, &who, "editor")?;
         anyhow::ensure!(r.status == 200, "adding {who} as an editor: {r}");
     }
     s.commit(&c, &[("fragment.json", Some(br#"{"channels":{"work":{"read":"viewer","post":"editor","from":"agent"},"notes":{"post":"editor"}}}"#))]);

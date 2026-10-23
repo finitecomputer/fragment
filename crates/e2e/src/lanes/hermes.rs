@@ -547,12 +547,14 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "reply": live, "token": !token.is_empty() }),
     );
     // it shares as its owner would (Paul, 2026-10-04): it makes the app
-    // public, and adds another person to it as a viewer
+    // public, and invites another person to it as a viewer, by email, who
+    // is in once they accept it (decision 63)
     let guest = api.person()?;
-    let guest_id = api.identity(&guest)?;
+    let guest_email = Api::email_of(&guest);
     let public = run(s, 66, "fragment visibility groceries public --json | grep -c '\"ok\":true' | sed 's/^/public-/'")?;
-    let added = run(s, 67, &format!("fragment members add groceries {guest_id} --role viewer --json | grep -c '\"ok\":true' | sed 's/^/added-/'"))?;
+    let added = run(s, 67, &format!("fragment members add groceries {guest_email} --role viewer --json | grep -c '\"ok\":true' | sed 's/^/added-/'"))?;
     let anonymous = api.call(Call { method: "GET", url: api.site_url(&app, "hello.html"), ..Call::default() })?;
+    api.signed(&guest, "POST", &format!("/api/invites/{app}/accept"), Some(&json!({})))?;
     let lists = api.signed(&guest, "GET", "/api/fragments", None)?;
     let guest_role = lists.body["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == app.as_str()).map(|f| f["role"].clone());
     s.ok(
@@ -561,7 +563,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "reply": public, "page": anonymous.status }),
     );
     s.ok(
-        "and adds another person as a viewer, who sees it in their list as one",
+        "and invites another person as a viewer, by email, who sees it in their list as one once they accept it",
         said(&added, "added-1") && guest_role == Some(json!("viewer")),
         json!({ "reply": added, "role": guest_role }),
     );
@@ -590,7 +592,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let notes = s.create(api, &skyler, &notes_name)?;
     s.commit(&notes, &[("fragment.json", Some(NOTES_JSON))]);
     s.deploy(&notes);
-    api.signed(&skyler, "PUT", &format!("/api/f/{notes_name}/members/{owner_id}"), Some(&json!({ "role": "editor" })))?;
+    api.share(&notes_name, &owner_id, "editor")?;
     let post_note = |n: u32| {
         let body = json!({ "id": format!("d{n}"), "body": { "text": "from juniper" } }).to_string();
         format!("run: curl -s -o /dev/null -w 'status %{{http_code}}' -X POST 'http://api.fragment.internal/api/f/{notes_name}/channels/notes?for={owner_id}' -H 'x-fragment-agent: {agent_name}' -H 'content-type: application/json' -d '{body}'")

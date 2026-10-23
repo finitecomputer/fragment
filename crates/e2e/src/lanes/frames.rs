@@ -90,7 +90,7 @@ pub fn frames(s: &mut Suite, api: &Api) -> Result<()> {
     let (owner_id, guest_id) = (api.identity(&owner)?, api.identity(&guest)?);
     let own = made(api, &owner, &s.name("fown"), "blank", who("own"), "members")?;
     let shared = made(api, &owner, &s.name("fshared"), "blank", who("shared"), "members")?;
-    let r = api.signed(&owner, "PUT", &format!("/api/f/{shared}/members/{guest_id}"), Some(&json!({ "role": "viewer" })))?;
+    let r = api.share(&shared, &guest_id, "viewer")?;
     anyhow::ensure!(r.status == 200, "sharing {shared}: {r}");
     let theirs = made(api, &stranger, &s.name("ftheirs"), "blank", who("theirs"), "members")?;
     let open = made(api, &stranger, &s.name("fopen"), "blank", who("open"), "public")?;
