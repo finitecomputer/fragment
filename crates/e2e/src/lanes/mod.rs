@@ -1,6 +1,7 @@
 //! The sections, in the order they run.
 
 mod admin;
+mod agent_app;
 mod agent_ask;
 mod agent_restart;
 mod agent_smoke;
@@ -136,6 +137,7 @@ const LANES: &[Lane] = &[
     hermes::hermes,
     agent_smoke::agent_smoke,
     agent_ask::agent_ask,
+    agent_app::agent_app,
     agent_restart::agent_restart,
     bot_mode::bot_mode,
     checkout::checkout,
@@ -148,7 +150,7 @@ const LANES: &[Lane] = &[
 /// its own, with its own build and node, the sections it lists in the
 /// lanes' order. Every section is in exactly one shard (a test below), so
 /// the shards together run what one whole run does. `hermes` runs only by
-/// name, and `agent-smoke`, `agent-ask`, `agent-restart`, `bot-mode` and `checkout` only
+/// name, and `agent-smoke`, `agent-ask`, `agent-app`, `agent-restart`, `bot-mode` and `checkout` only
 /// on a preview, so their shard reports each as the whole run does: one
 /// skip.
 ///
@@ -160,7 +162,7 @@ const LANES: &[Lane] = &[
 /// fragment's deploy (after `effects`) up to it, so its first cron minute
 /// passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [
-    &["shell", "computers", "export", "hermes", "agent-smoke", "agent-ask", "agent-restart", "bot-mode", "checkout"],
+    &["shell", "computers", "export", "hermes", "agent-smoke", "agent-ask", "agent-app", "agent-restart", "bot-mode", "checkout"],
     &["finite-private", "chat", "shell-ui", "placement", "pairing", "wipe", "sync", "migrations", "restart", "connections"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
