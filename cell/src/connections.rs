@@ -171,8 +171,9 @@ enum Going {
 
 /// The account a disconnect at `provider` takes away: the one `named` (its
 /// id), only ever one of the person's own, as their list names it, fenced
-/// or not, or as their own fence names it once Pipes deleted it; naming
-/// none, the one they have (with several, they name it).
+/// or not, or as their own disconnect of it recorded it once Pipes deleted
+/// it (an account with no identifier too); naming none, the one they have
+/// (with several, they name it).
 async fn going(env: &Env, cfg: &Config, who: &str, provider: &str, named: Option<&str>) -> CellResult<Going> {
     let theirs = accounts_of(env, cfg, who, provider).await?;
     let others = |a: &PipesAccount| theirs.iter().filter(|x| !x.fenced && x.id != a.id).count();
@@ -190,10 +191,9 @@ async fn going(env: &Env, cfg: &Config, who: &str, provider: &str, named: Option
     if let Some(a) = theirs.iter().find(|a| a.id.as_deref() == Some(id)) {
         return Ok(Going::Held(a.clone(), others(a)));
     }
-    let deleted = match workos_user(env, cfg, who).await? {
-        Some(u) => fenced_at(env, cfg, &u).await?.accounts.iter().any(|f| f.provider == provider && f.account == id),
-        None => false,
-    };
+    let issuer = crate::keys::workos(env, cfg).await?.issuer();
+    let asked = crate::registry::calls::Disconnected { identity: who.into(), issuer, provider: provider.to_string(), account: id.to_string() };
+    let deleted = crate::ask_registry(env, &asked).await?.disconnected;
     match deleted {
         true => Ok(Going::Deleted(id.to_string())),
         false => Err(CellError::new(ErrorCode::NotFound, format!("no {provider} account {id:?} of yours: GET /api/connections lists them"))),
@@ -337,13 +337,15 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                 Some(Going::Deleted(_)) => accounts::Lasting::Nothing,
                 Some(Going::Nothing) | None => accounts::Lasting::Provider,
             };
-            let fence = crate::registry::calls::FenceConnection { identity: who.into(), issuer, provider: provider.to_string(), lasting };
-            let user = crate::ask_registry(env, &fence).await?.subject;
             let id = match &going {
                 Some(Going::Held(a, _)) => a.id.clone(),
                 Some(Going::Deleted(id)) => Some(id.clone()),
                 Some(Going::Nothing) | None => None,
             };
+            // of several, the account it takes is recorded by its id, its
+            // fence or none, so a disconnect asked again finishes
+            let fence = crate::registry::calls::FenceConnection { identity: who.into(), issuer, provider: provider.to_string(), lasting, account: id.clone() };
+            let user = crate::ask_registry(env, &fence).await?.subject;
             // each step may be asked again: a token Pipes no longer gives
             // revokes nothing, and an account it no longer holds is deleted
             let revoked = match (&user, &going) {

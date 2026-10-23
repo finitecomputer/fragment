@@ -5,9 +5,11 @@
 //! reauthorized rather than made twice, Pipes' refusals (one account for
 //! now, its limit) and the row's own, one account disconnected while the
 //! others stay, and its lasting fence holding against an import of it
-//! that lands late; a disconnect that did not finish, asked again; and two
-//! callbacks finishing together, one deciding after the other. A row of
-//! one account refuses all of it.
+//! that lands late; a disconnect that did not finish, asked again (an
+//! account from before identifiers too); two callbacks finishing together,
+//! one deciding after the other; and one that waited its turn past a
+//! logout or its time, importing nothing. A row of one account refuses all
+//! of it.
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
@@ -208,6 +210,7 @@ pub(super) fn several(s: &mut Suite, api: &Api) -> Result<()> {
 
     retried(s, api)?;
     raced(s, api)?;
+    outlasted(s, api)?;
 
     // one account and no name: that one
     let b_email = "several-b@e2e.test";
@@ -270,6 +273,29 @@ fn retried(s: &mut Suite, api: &Api) -> Result<()> {
             && ids(&accounts).len() == 1 && accounts[0]["disconnecting"] != true && row["state"] == "connected",
         json!({ "failed": failed.to_string(), "again": again.body, "more": more.body, "accounts": accounts }),
     );
+    // accounts connected before identifiers were (the fake's lever names
+    // none): beside another, and as the last, each finished when asked again
+    for (email, beside) in [("several-e@e2e.test", true), ("several-f@e2e.test", false)] {
+        let e = api.sign_in(email)?;
+        s.workos.connect(email, SEVERAL, true);
+        s.workos.label(email, SEVERAL, "legacy@oauth.test");
+        if beside {
+            s.workos.add_account(email, SEVERAL, "e-other", "other@oauth.test");
+        }
+        let (accounts, _) = listed(api, &e)?;
+        let legacy = accounts.iter().find(|a| a["account"] == "legacy@oauth.test").and_then(|a| a["id"].as_str()).unwrap_or_default().to_string();
+        s.workos.fail_list_after(1);
+        let failed = shell(api, &e, "DELETE", &format!("{path}?account={legacy}"), None)?;
+        let gone = !s.workos.accounts(email, SEVERAL).iter().any(|a| a.id == legacy);
+        let again = shell(api, &e, "DELETE", &format!("{path}?account={legacy}"), None)?;
+        let (accounts, row) = listed(api, &e)?;
+        s.ok(
+            &format!("an account that names no identifier, disconnected {}, failing after its delete at Pipes, finishes when asked again", if beside { "beside another" } else { "as the last" }),
+            !legacy.is_empty() && failed.status >= 500 && gone && again.status == 200 && again.body["account"] == legacy.as_str()
+                && accounts.len() == usize::from(beside) && row["state"] == if beside { "connected" } else { "not_connected" },
+            json!({ "failed": failed.to_string(), "again": again.body, "accounts": accounts }),
+        );
+    }
     let other = s.workos.accounts("several-a@e2e.test", SEVERAL).first().map(|a| a.id.clone()).unwrap_or_default();
     let theirs = shell(api, &c, "DELETE", &format!("{path}?account={other}"), None)?;
     let none = shell(api, &c, "DELETE", &format!("{path}?account=data_installation_nonesuch"), None)?;
@@ -328,6 +354,78 @@ fn raced(s: &mut Suite, api: &Api) -> Result<()> {
         "two callbacks adding two accounts into the last place together: the first connects, the second, reading the list after it, is refused as account-limit",
         waited && a.status == 200 && refused(&b, "account-limit") && held.len() == usize::from(crate::SEVERAL_MAX) && held.iter().any(|x| x.identifier.as_deref() == Some("d-three")),
         json!({ "waited": waited, "first": a.status, "second": b.to_string(), "held": held.len() }),
+    );
+    Ok(())
+}
+
+/// A callback that waited its turn while another imported, past its
+/// session's logout or its attempt's time: checked again once it has its
+/// turn and the list, it imports nothing, and one import results.
+fn outlasted(s: &mut Suite, api: &Api) -> Result<()> {
+    use fragment_fakes::workos::Gate;
+    let email = "several-g@e2e.test";
+    let one = api.sign_in(email)?;
+    let first = connect(api, &one, json!({}), "g-one", None)?;
+    anyhow::ensure!(ok(&first), "connect g's first account");
+    let wait = std::time::Duration::from_secs(20);
+    let add = || json!({ "add": true });
+    let state_of = |r: &Reply| reqwest::Url::parse(r.body["url"].as_str().unwrap_or_default()).ok().and_then(|u| u.query_pairs().find(|(k, _)| k == "state").map(|(_, v)| v.into_owned())).unwrap_or_default();
+    // the first held at its import, the second past its exchange and its
+    // checks, waiting its turn; then `meanwhile`, then the first let go
+    let waited = |s: &mut Suite, first: (String, String), second: (&str, String, String), meanwhile: &dyn Fn() -> Result<()>| -> Result<(Reply, Reply, bool)> {
+        let exchanged = s.workos.connection_counts().0;
+        s.workos.pause(Gate::Import);
+        let (a, b, held) = std::thread::scope(|scope| {
+            let a = scope.spawn(|| back(api, &first.0, Some(&one), Some(&first.1)));
+            let importing = s.eventually(wait, || s.workos.paused(Gate::Import) == 1);
+            let b = scope.spawn(|| back(api, &second.1, Some(second.0), Some(&second.2)));
+            let past = s.eventually(wait, || s.workos.connection_counts().0 == exchanged + 2);
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let done = meanwhile();
+            let held = importing && past && done.is_ok() && s.workos.paused(Gate::Import) == 1;
+            s.workos.resume(Gate::Import);
+            (a.join().expect("first callback"), b.join().expect("second callback"), held)
+        });
+        Ok((a?, b?, held))
+    };
+
+    // logged out while it waits
+    let two = api.sign_in(email)?;
+    let (_, x) = prepared(api, &one, add(), "g-two", None)?;
+    let (_, y) = prepared(api, &two, add(), "g-three", None)?;
+    let (x, y) = (x.context("first")?, y.context("second")?);
+    let imports = s.workos.connection_counts().1;
+    let end = || -> Result<()> {
+        let hook = api.unsigned("POST", "/api/test/registry", Some(&json!({ "signins": { "expireSession": two } })))?;
+        anyhow::ensure!(hook.status == 200, "end the second session: {hook}");
+        Ok(())
+    };
+    let (a, b, held) = waited(s, x, (&two, y.0, y.1), &end)?;
+    let has = |s: &Suite, identifier: &str| s.workos.accounts(email, SEVERAL).iter().any(|x| x.identifier.as_deref() == Some(identifier));
+    s.ok(
+        "a callback whose session logs out while it waits its turn imports nothing once it has it (signed-out); the first's import is the one",
+        held && a.status == 200 && refused(&b, "signed-out") && has(s, "g-two") && !has(s, "g-three") && s.workos.connection_counts().1 == imports + 1,
+        json!({ "held": held, "first": a.status, "second": b.to_string() }),
+    );
+
+    // past its time while it waits
+    let three = api.sign_in(email)?;
+    let (_, x) = prepared(api, &one, add(), "g-four", None)?;
+    let (r, y) = prepared(api, &three, add(), "g-five", None)?;
+    let (x, y, nonce) = (x.context("first")?, y.context("second")?, state_of(&r));
+    let imports = s.workos.connection_counts().1;
+    let lever = api.unsigned("POST", "/api/test/registry", Some(&json!({ "signins": { "expireConnectionIn": { "state": nonce, "ms": 3000 } } })))?;
+    anyhow::ensure!(lever.status == 200, "the second attempt's time: {lever}");
+    let set = std::time::Instant::now();
+    let lapse = || -> Result<()> {
+        std::thread::sleep(std::time::Duration::from_millis(3500).saturating_sub(set.elapsed()));
+        Ok(())
+    };
+    let (a, b, held) = waited(s, x, (&three, y.0, y.1), &lapse)?;
+    s.ok(
+        "a callback whose attempt's ten minutes run out while it waits its turn imports nothing once it has it (not-under-way); the first's import is the one",
+        held && a.status == 200 && refused(&b, "not-under-way") && has(s, "g-four") && !has(s, "g-five") && s.workos.connection_counts().1 == imports + 1,
+        json!({ "held": held, "first": a.status, "second": b.to_string() }),
     );
     Ok(())
 }

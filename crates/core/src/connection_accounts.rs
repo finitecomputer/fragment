@@ -150,10 +150,8 @@ pub enum Lasting {
     /// The provider whole: nothing Pipes holds there is taken for the
     /// person's (as with one account).
     Provider,
-    /// The account of this identifier alone (`connection_signin::
-    /// FENCE_ACCOUNT`), and its id, by which a disconnect asked again is
-    /// known for the person's once Pipes deleted it.
-    Account { identifier: String, account: String },
+    /// The account of this identifier alone (`connection_signin::FENCE_ACCOUNT`).
+    Account(String),
     /// Nothing: an account that names no identifier, which no later import
     /// can be told apart from the person's others by.
     Nothing,
@@ -166,9 +164,9 @@ pub enum Lasting {
 /// they have others, whom a fence of it could not tell from it; the last
 /// of theirs, or none, the provider whole, as with one.
 pub fn lasting(gone: Option<&PipesAccount>, others: usize) -> Lasting {
-    match gone.map(|a| (a.identifier.clone(), a.id.clone())) {
-        Some((Some(identifier), Some(account))) => Lasting::Account { identifier, account },
-        Some((None, _)) if others > 0 => Lasting::Nothing,
+    match gone.map(|a| a.identifier.clone()) {
+        Some(Some(identifier)) => Lasting::Account(identifier),
+        Some(None) if others > 0 => Lasting::Nothing,
         _ => Lasting::Provider,
     }
 }
@@ -508,8 +506,8 @@ mod tests {
         assert_eq!(default_of(&fenced(accounts.clone(), true, &[])), None);
         // what a disconnect leaves fenced
         let (a, n) = (&accounts[0], &accounts[2]);
-        let of_a = Lasting::Account { identifier: "sub-a".into(), account: "data_installation_a".into() };
-        assert_eq!(lasting(Some(a), 2), of_a, "an account, by its identifier, and its id");
+        let of_a = Lasting::Account("sub-a".into());
+        assert_eq!(lasting(Some(a), 2), of_a, "an account, by its identifier");
         assert_eq!(lasting(Some(a), 0), of_a, "the last too");
         assert_eq!(lasting(Some(n), 2), Lasting::Nothing, "one with none, while others are there, which a fence of it would hide");
         assert_eq!(lasting(Some(n), 0), Lasting::Provider, "the last, with none: the provider whole, as with one");

@@ -588,6 +588,9 @@ pub(crate) enum SigninsHook {
     ExpireSession(String),
     /// Expire just this local test's connection attempt (its nonce).
     ExpireConnection(String),
+    /// This local test's connection attempt (its nonce) expires `ms` from
+    /// now: a callback taking it before then finds it past its time later.
+    ExpireConnectionIn { state: String, ms: i64 },
     /// Lift the fence of the account an email signed in with, at a
     /// provider, as a connect known to import does (a test connects a row
     /// with no `connection_oauth` through the WorkOS fake, never a callback).
@@ -685,13 +688,37 @@ impl Call for FinishConnection {
 /// disconnect then deletes (none: no account, and nothing was under way).
 /// `lasting` is what stays fenced after (`connection_accounts::lasting`):
 /// the provider whole, as with one account, or of several, the one the
-/// disconnect takes away, or nothing.
+/// disconnect takes away, or nothing. `account`, of several, is the Pipes
+/// id it takes away, recorded whatever stays fenced
+/// (`connection_signin::DISCONNECTING`).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct FenceConnection {
     pub identity: String,
     pub issuer: String,
     pub provider: String,
     pub lasting: fragment_core::connection_accounts::Lasting,
+    pub account: Option<String>,
+}
+
+/// `POST /connection/disconnected`: whether a person disconnected their
+/// account `account` (its Pipes id) at `provider`, as a disconnect of it
+/// asked again, once Pipes deleted it, asks: only theirs is ever found.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Disconnected {
+    pub identity: String,
+    pub issuer: String,
+    pub provider: String,
+    pub account: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct WasDisconnected {
+    pub disconnected: bool,
+}
+
+impl Call for Disconnected {
+    const PATH: &'static str = "/connection/disconnected";
+    type Answer = WasDisconnected;
 }
 
 impl Call for FenceConnection {
@@ -716,13 +743,11 @@ pub(crate) struct FencedProviders {
     pub accounts: Vec<FencedAccount>,
 }
 
-/// One account a disconnect fenced: its provider, its identifier, and the
-/// Pipes id it took.
+/// One account a disconnect fenced: its provider, and its identifier.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct FencedAccount {
     pub provider: String,
     pub identifier: String,
-    pub account: String,
 }
 
 impl Call for ConnectionFences {

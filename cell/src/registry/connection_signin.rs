@@ -5,7 +5,7 @@ use fragment_proto::{ErrorCode, IdentityKind};
 use serde::Deserialize;
 use worker::SqlStorageValue;
 
-use super::{RegistryCell, calls::{BeginConnection, ConnectionBegun, ConnectionFences, ConnectionFinished, FenceConnection, FencedAccount, FencedProviders, FinishConnectionIn, SubjectAnswer, SubjectOf}, signin::{fresh_token, sha}};
+use super::{RegistryCell, calls::{BeginConnection, ConnectionBegun, ConnectionFences, ConnectionFinished, Disconnected, FenceConnection, FencedAccount, FencedProviders, FinishConnectionIn, SubjectAnswer, SubjectOf, WasDisconnected}, signin::{fresh_token, sha}};
 use crate::{error::{CellError, CellResult}, js, keys};
 
 /// How often a callback waiting for another's decision at the same
@@ -148,6 +148,13 @@ impl RegistryCell {
         let import = match several {
             Some(max) => {
                 let listed = accounts::listed(&keys::pipes_accounts(&self.env, api, &pending.subject).await?, &b.provider).map_err(|e| CellError::new(ErrorCode::UpstreamFailed, e))?;
+                // the turn and the list may have outlasted the session or
+                // the attempt (a wait of up to `DECIDE_WAIT_MS`): checked
+                // again, as above, before anything is decided, a refusal
+                // giving the turn back
+                let live = self.live_session(&b.session, None, false)?;
+                let subject = self.subject_of(SubjectOf { identity: live.session.identity.id, issuer: pending.issuer.clone() })?.subject;
+                if subject.as_deref() != Some(&pending.subject) || pending.expires_at <= js::now_ms() { return Ok(NotUnderWay); }
                 match accounts::import_of(&intent, &listed, identifier.as_deref(), max) {
                     Ok(import) => Some(import),
                     Err(accounts::Full) => return Ok(AccountLimit),
@@ -240,14 +247,27 @@ impl RegistryCell {
         self.exec(connection_signin::FENCE_PENDING, row())?;
         let now = SqlStorageValue::Integer(js::now_ms());
         match &b.lasting {
-            Lasting::Account { identifier, account } => {
-                self.exec(connection_signin::FENCE_ACCOUNT, [row(), vec![identifier.as_str().into(), account.as_str().into(), now]].concat())?;
+            Lasting::Account(identifier) => {
+                self.exec(connection_signin::FENCE_ACCOUNT, [row(), vec![identifier.as_str().into(), now]].concat())?;
                 self.exec(connection_signin::TRIM_ACCOUNT_FENCES, row())?;
             }
             Lasting::Provider => self.exec(connection_signin::FENCE, [row(), vec![now]].concat())?,
             Lasting::Nothing => {}
         }
+        // of several, the account it takes, whatever stays fenced: asked
+        // again once Pipes deleted it, it is the person's own
+        if let Some(id) = &b.account {
+            self.exec(connection_signin::DISCONNECTING, [row(), vec![id.as_str().into(), SqlStorageValue::Integer(js::now_ms())]].concat())?;
+            self.exec(connection_signin::TRIM_DISCONNECTS, row())?;
+        }
         Ok(answer)
+    }
+
+    /// Whether a person disconnected that account of theirs (`calls::Disconnected`).
+    pub(super) fn disconnected(&self, b: Disconnected) -> CellResult<WasDisconnected> {
+        let Some(subject) = self.subject_of(SubjectOf { identity: b.identity, issuer: b.issuer.clone() })?.subject else { return Ok(WasDisconnected { disconnected: false }) };
+        let n = self.count(connection_signin::DISCONNECTED, vec![b.issuer.into(), subject.into(), b.provider.into(), b.account.into()])?;
+        Ok(WasDisconnected { disconnected: n > 0 })
     }
 
     /// The providers an account stands fenced at (`calls::ConnectionFences`).

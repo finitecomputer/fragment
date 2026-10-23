@@ -181,7 +181,9 @@ the shapes as workos-node's `src/pipes/pipes.ts` sends them):
   and two into the last place are one and `account-limit`. An import whose
   outcome is unknown keeps its turn a minute more: a connect there meanwhile
   imports nothing (`?refused=finishing`, connect again in a minute), since a
-  list read then could lack it. An account imported before
+  list read then could lack it. Its session, its person's sign-in and its
+  ten minutes are checked again once it has its turn and the list, so a
+  callback that waited past a logout or its time imports nothing. An account imported before
   this release names no identifier, so a grant of it again is not told apart
   from another; a reconnect names one, which it keeps if Pipes keeps what a
   `PUT` names (WorkOS' SDK sends no identifier on an update: unverified).
@@ -193,9 +195,11 @@ the shapes as workos-node's `src/pipes/pipes.ts` sends them):
   as with one: an account the person disconnected that Pipes holds still (its
   delete failed, or an import landed after) is listed with `disconnecting`,
   not connected and used by no agent, and settings offers Disconnect again;
-  one Pipes deleted already is known as theirs by their own fence (which
-  keeps its id), so a disconnect that failed telling their computer finishes
-  when asked again. An id neither names is 404: never another person's.
+  one Pipes deleted already is known as theirs by their own record of the
+  disconnect (`connection_disconnects`, by its id, whatever its fence, an
+  account with no identifier too; their newest 64 a provider), so a
+  disconnect that failed telling their computer finishes when asked again.
+  An id neither names is 404: never another person's.
 - The fence stays per provider for what is under way: a disconnect of one
   account ends every attempt at the provider still pending and cancels every
   callback exchanging (coarser, and safe). The lasting fence is the account's

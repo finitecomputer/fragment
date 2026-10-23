@@ -34,7 +34,7 @@ pub const FENCED: &str = "SELECT provider FROM connection_fences WHERE issuer = 
 /// unknown that lands after is not taken for a connection, and their other
 /// accounts there stay connected. A connect of that identifier known to
 /// have imported lifts it (`UNFENCE_ACCOUNT`), as does a wipe.
-pub const FENCE_ACCOUNT: &str = "INSERT INTO connection_account_fences (issuer, subject, provider, identifier, account, fenced_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (issuer, subject, provider, identifier) DO UPDATE SET account = excluded.account, fenced_at = excluded.fenced_at";
+pub const FENCE_ACCOUNT: &str = "INSERT INTO connection_account_fences (issuer, subject, provider, identifier, fenced_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (issuer, subject, provider, identifier) DO UPDATE SET fenced_at = excluded.fenced_at";
 /// The most fences of one person's accounts at a provider kept: the
 /// newest (`TRIM_ACCOUNT_FENCES`), far more accounts than Pipes connects.
 pub const ACCOUNT_FENCES_MAX: u64 = 64;
@@ -45,8 +45,23 @@ pub const TRIM_ACCOUNT_FENCES: &str = "DELETE FROM connection_account_fences WHE
 /// goes (issuer, subject, provider, identifier).
 pub const UNFENCE_ACCOUNT: &str = "DELETE FROM connection_account_fences WHERE issuer = ? AND subject = ? AND provider = ? AND identifier = ?";
 /// The accounts a person stands fenced at: (issuer, subject) → (provider,
-/// identifier, the account's Pipes id).
-pub const FENCED_ACCOUNTS: &str = "SELECT provider, identifier, account FROM connection_account_fences WHERE issuer = ? AND subject = ?";
+/// identifier).
+pub const FENCED_ACCOUNTS: &str = "SELECT provider, identifier FROM connection_account_fences WHERE issuer = ? AND subject = ?";
+/// A disconnect of one of several accounts, recorded by the account's
+/// Pipes id before anything goes (issuer, subject, provider, account,
+/// when), whatever its fence (`connection_accounts::lasting`): asked again
+/// once Pipes deleted the account, it is known for the person's own
+/// (`DISCONNECTED`), and finishes. Kept, the newest `DISCONNECTS_MAX`, so
+/// it may be asked as often as wanted.
+pub const DISCONNECTING: &str = "INSERT INTO connection_disconnects (issuer, subject, provider, account, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (issuer, subject, provider, account) DO UPDATE SET at = excluded.at";
+/// The most disconnects of a person's accounts at a provider kept.
+pub const DISCONNECTS_MAX: u64 = 64;
+/// Keeps a person's newest `DISCONNECTS_MAX` disconnects at a provider:
+/// (issuer, subject, provider).
+pub const TRIM_DISCONNECTS: &str = "DELETE FROM connection_disconnects WHERE issuer = ?1 AND subject = ?2 AND provider = ?3 AND account NOT IN (SELECT account FROM connection_disconnects WHERE issuer = ?1 AND subject = ?2 AND provider = ?3 ORDER BY at DESC LIMIT 64)";
+/// Whether a person disconnected an account at a provider: (issuer,
+/// subject, provider, account).
+pub const DISCONNECTED: &str = "SELECT COUNT(*) AS n FROM connection_disconnects WHERE issuer = ? AND subject = ? AND provider = ? AND account = ?";
 const RESERVED: &[&str] = &["client_id", "redirect_uri", "response_type", "scope", "state", "code_challenge", "code_challenge_method", "code", "code_verifier", "client_secret"];
 
 fn token(s: &str, max: usize) -> bool {
@@ -474,18 +489,16 @@ mod tests {
             l
         };
         let pair = |p: &str, i: &str| (p.to_string(), i.to_string());
-        db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "mail", "sub-1", "data_installation_1", 10]).unwrap();
-        db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "mail", "sub-1", "data_installation_3", 20]).unwrap();
-        db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "mail", "sub-2", "data_installation_2", 30]).unwrap();
-        db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "drive", "sub-1", "data_installation_4", 40]).unwrap();
-        let account: String = db.query_row("SELECT account FROM connection_account_fences WHERE provider = 'mail' AND identifier = 'sub-1'", [], |r| r.get(0)).unwrap();
-        assert_eq!(account, "data_installation_3", "a second disconnect of the identifier names the account it took");
+        db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "mail", "sub-1", 10]).unwrap();
+        db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "mail", "sub-1", 20]).unwrap();
+        db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "mail", "sub-2", 30]).unwrap();
+        db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "drive", "sub-1", 40]).unwrap();
         assert_eq!(fenced("user-a"), [pair("drive", "sub-1"), pair("mail", "sub-1"), pair("mail", "sub-2")], "one fence an identifier and provider");
         assert!(fenced("user-b").is_empty(), "another person's accounts are not fenced");
         assert_eq!(db.execute(UNFENCE_ACCOUNT, params!["issuer", "user-a", "mail", "sub-1"]).unwrap(), 1, "a known import of that account lifts its fence");
         assert_eq!(fenced("user-a"), [pair("drive", "sub-1"), pair("mail", "sub-2")], "and no other's");
         for i in 0..ACCOUNT_FENCES_MAX + 3 {
-            db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "mail", format!("many-{i}"), format!("data_installation_m{i}"), 100 + i as i64]).unwrap();
+            db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "mail", format!("many-{i}"), 100 + i as i64]).unwrap();
             db.execute(TRIM_ACCOUNT_FENCES, params!["issuer", "user-a", "mail"]).unwrap();
         }
         let mail: Vec<String> = fenced("user-a").into_iter().filter(|(p, _)| p == "mail").map(|(_, i)| i).collect();
@@ -493,6 +506,21 @@ mod tests {
         assert!(!mail.contains(&"many-0".to_string()) && mail.contains(&format!("many-{}", ACCOUNT_FENCES_MAX + 2)));
         assert_eq!(fenced("user-a").iter().filter(|(p, _)| p == "drive").count(), 1, "another provider's are not trimmed");
         assert!(TRIM_ACCOUNT_FENCES.ends_with(&format!("LIMIT {ACCOUNT_FENCES_MAX})")), "the trim keeps ACCOUNT_FENCES_MAX");
+        // every disconnect of one of several, by its id, its fence or none:
+        // the person's own, at that provider, the newest kept
+        let disconnected = |subject: &str, provider: &str, account: &str| db.query_row(DISCONNECTED, params!["issuer", subject, provider, account], |r| r.get::<_, i64>(0)).unwrap() == 1;
+        db.execute(DISCONNECTING, params!["issuer", "user-a", "mail", "data_installation_1", 10]).unwrap();
+        db.execute(DISCONNECTING, params!["issuer", "user-a", "mail", "data_installation_1", 20]).unwrap();
+        assert!(disconnected("user-a", "mail", "data_installation_1"), "asked twice, one record");
+        assert!(!disconnected("user-b", "mail", "data_installation_1") && !disconnected("user-a", "drive", "data_installation_1"), "never another person's, nor at another provider");
+        for i in 0..DISCONNECTS_MAX + 2 {
+            db.execute(DISCONNECTING, params!["issuer", "user-a", "mail", format!("data_installation_d{i}"), 100 + i as i64]).unwrap();
+            db.execute(TRIM_DISCONNECTS, params!["issuer", "user-a", "mail"]).unwrap();
+        }
+        let kept: i64 = db.query_row("SELECT COUNT(*) FROM connection_disconnects WHERE provider = 'mail'", [], |r| r.get(0)).unwrap();
+        assert_eq!(kept as u64, DISCONNECTS_MAX, "the newest are kept");
+        assert!(!disconnected("user-a", "mail", "data_installation_1") && disconnected("user-a", "mail", &format!("data_installation_d{}", DISCONNECTS_MAX + 1)));
+        assert!(TRIM_DISCONNECTS.ends_with(&format!("LIMIT {DISCONNECTS_MAX})")), "the trim keeps DISCONNECTS_MAX");
         // a pending row from before several accounts is a connect
         db.execute("INSERT INTO connection_signins (state, session, provider, issuer, subject, config, sealed, expires_at) VALUES ('s', 'session', 'mail', 'issuer', 'user-a', 'config', 'sealed', 100)", []).unwrap();
         let taken: (String, Option<String>) = db.query_row(TAKE_PENDING, params!["s", "session", "mail", 50], |r| Ok((r.get(5)?, r.get(6)?))).unwrap();
