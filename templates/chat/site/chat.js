@@ -1801,10 +1801,23 @@ export function mount(root) {
   // as the words have them: on a phone they share its row (chat.css)
   function grow() {
     refreshSend();
-    input.style.height = "auto";
-    input.style.height = `${Math.min(Math.max(input.scrollHeight, 27), 220)}px`;
+    fit();
     draftChanged();
   }
+  function fit() {
+    input.style.height = "auto";
+    input.style.height = `${Math.min(Math.max(input.scrollHeight, 27), 220)}px`;
+  }
+  // on a phone its width moves with the buttons beside it (recording's
+  // clock and Discard, Steer as the agent starts and stops), so its lines
+  // are measured again whenever its width changes, not only as it is typed in
+  let fieldWidth = 0;
+  new ResizeObserver(([entry]) => {
+    const width = Math.round(entry.contentRect.width);
+    if (width === fieldWidth) return;
+    fieldWidth = width;
+    fit();
+  }).observe(input);
   // ---- the composer's draft: kept in this origin's storage as its
   // person's, a moment after each change and as the page goes, and put
   // back as it loads, so words typed survive any reload of the page (the
