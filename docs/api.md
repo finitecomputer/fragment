@@ -450,7 +450,7 @@ and a computer's host label, `<24 hex>--computer--<branch>`, fits too.
 
 The deployment's operators run it from `/admin` (a platform page, plain
 like the shell, that holds nothing), from
-`fragment operator people|person|pin|orgs|comp|uncomp|trials|health|log`,
+`fragment operator people|usage|person|pin|orgs|comp|uncomp|trials|health|log`,
 or over `/api/admin/*`. An operator is: a key the deployment's
 `operators` lists, held by anyone or no one (no registry is asked of one
 no one holds, as a wipe's); an identity it lists, signed or through the
@@ -469,6 +469,7 @@ learns the page is there. Its API decides again on every call.
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `GET /api/admin/people?q=&after=` | operators | → `AdminPeople {people: [AdminPerson {npub, email, joinedAt, lastSignInAt, org, admin, seat: {id, kind, comped, good}}], next}`: a page of 100 by npub, after `after`; `q`, the start of their email (any case; its wildcards only themselves) |
+| `GET /api/admin/usage?q=&after=` | the same | → `AdminUsage {people: [{npub, email, used: Used \| null}], next}`: who used what this month, in units, not money (docs/self-host.md, seam 10): the people a page at a time as `/api/admin/people` pages them, each one's `Used` (`GET /api/ledger/usage`) from their ledger, asked at once; `null`, their ledger did not answer (logged) |
 | `GET /api/admin/people/{npub}` | the same | → `{person: AdminPerson, ledger: LedgerStatus, computer: ComputerView \| null, references: {running, next} \| null}`: `references` are the whole references of the image its computer runs (`null` while it runs nothing) and of the one its next start runs, `registry.cloudflare.com/<account>/<repository>@sha256:<hex>` on a deployment (the view's `version` and `latest` are their first 12 hex digits), which a promotion copies into the config (docs/computers.md, "Stable and canary") |
 | `PUT /api/admin/people/{npub}/computer/image` | the same | `{image}` → `ComputerView`: their computer pinned to `image`, as its owner's `PUT /api/computers/{id}/image` pins it (a canary, or back to the default): its next start runs it, and awake on another, its owner is told an update is ready. Logged (`pin`, the image its detail). An image the deployment lacks is 400; a person with no computer, 404 |
 | `GET /api/admin/orgs?after=` | the same | → `AdminOrgs {orgs: [AdminOrg {id, name, createdAt, status, customer, subscription, periodEnd, cancelAtEnd, admins, paidSeats, compedSeats, pending}], next}` (`admins`: those who said yes; `pending`: its offers) |
@@ -2012,6 +2013,7 @@ credit first. What happened is always charged, past zero.
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `GET /api/ledger` | a person (an agent: its owner's) | → `LedgerStatus` (`crates/proto` `ledger`): `{plan, seat, month, balanceMicros, includedMicros, includedGrantedMicros, purchasedMicros, reservedMicros, availableMicros, overdraftMicros, standing: {standing: ok \| agents_stopped \| read_only, why?: guest \| seat_canceled \| no_credit \| overdrawn}, priceBook, fragments: [{fragment, spentMicros, capMicros}]}` (this month's spend, the largest 50 first). `balanceMicros` is negative while the person owes (a paid call is charged after it, so it can pass zero); `reservedMicros` is always 0 since nothing is held before a call (decision 62), kept for the CLIs that read it; `availableMicros` is what may still be charged before their fragments go read-only, the balance plus the overdraft's room (0 once read-only); `priceBook` is the version of the book the answering release charges with (a ledger keeps none: docs/ledger.md, The price book) |
+| `GET /api/ledger/usage` | the same | → `Used {month, models: [{model, calls, inputTokens, outputTokens}], awakeMs, ownAwakeMs}`: what they used this month, in units, not money, read from their ledger's rows whatever those charged (a self-hosted model priced at nothing counts as any): each model's calls and tokens (in, the cached among them; out), the most calls first, and their computers' time awake on the deployment's machines and on nodes of their own (docs/self-host.md, seams 2 and 10) |
 | `PUT /api/f/{name}/cap` | the fragment's owner (never an agent) | `{id, micros \| null}` → `{fragment, capMicros, default}`: once by `id` (again: the same answer; another body: 409); `null` is the default |
 | `POST /api/ledger/{person}/grant` | the deployment's operators | `GrantCredit {id, micros, by, why}` → `{}`: purchased credit, once by `id`; `by` is the operator who signs; at most $10,000 |
 | `POST /api/ledger/{person}/plan` | the same | `SetPlan {id, plan}` → `{}`: an override; a seat's holder's plan is the registry's to push (Seats and orgs), and its next push wins (the debt ledger) |

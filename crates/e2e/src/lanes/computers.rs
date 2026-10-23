@@ -38,7 +38,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::jobs::records;
-use super::ledger::{charged, entries, quiet};
+use super::ledger::{charged, entries, operator_usage, quiet};
 use crate::api::{Api, Call, Socket};
 use super::credentials::{model_checks, placeholder, swap_checks, Swapping, MODEL_CHECKS, SWAP_CHECKS};
 use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_HOST};
@@ -1374,6 +1374,15 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         !awake.is_empty() && awake.iter().all(|e| e["entry"]["row"]["usage"]["ms"].as_u64().is_some_and(|ms| ms > 0) && e["entry"]["charge"].as_i64().is_some_and(|c| c > 0)),
         json!(awake),
     );
+    // who used what (docs/self-host.md, seam 10): its hours, as the operators' table reads them
+    const HOURS: &str = "the operators' usage table shows its owner's hours awake, on the deployment's machines, as their ledger has them";
+    if s.runs("computers", &[crate::Need::Operator]) {
+        let ms: u64 = entries(api, &owner_id, "awake:").iter().filter_map(|e| e["entry"]["row"]["usage"]["ms"].as_u64()).sum();
+        let line = operator_usage(s, api, &owner)?;
+        s.ok(HOURS, ms > 0 && line["used"]["awakeMs"] == ms && line["used"]["ownAwakeMs"] == 0, json!({ "ledger": ms, "line": line }));
+    } else {
+        s.skip(HOURS, "this run has no operator key");
+    }
     // its wake goes from the chat's outbox to the computer itself, never
     // through the delivery queue: with every queue send of the chat's
     // failing, the record wakes it all the same

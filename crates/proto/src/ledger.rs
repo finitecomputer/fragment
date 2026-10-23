@@ -102,6 +102,37 @@ pub struct LedgerStatus {
     pub fragments: Vec<FragmentSpend>,
 }
 
+/// What a person used in a UTC month, in units, not money: each model's
+/// calls and tokens, and their computers' time awake (`GET
+/// /api/ledger/usage`, their own; `GET /api/admin/usage`, everyone's, for
+/// operators). Read from their ledger's rows whatever those charged, so a
+/// call on a self-hosted model, which costs nothing, counts as any
+/// (docs/self-host.md, seam 10; `fragment_core::ledger::used`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Used {
+    /// The UTC month, `YYYY-MM`.
+    pub month: String,
+    /// Each model they called, the most calls first.
+    pub models: Vec<ModelUse>,
+    /// Their computers' time awake on the deployment's machines, in ms.
+    pub awake_ms: u64,
+    /// On machines of their own (nodes they paired), in ms: never charged.
+    pub own_awake_ms: u64,
+}
+
+/// One model's calls in a month (`Used`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelUse {
+    /// Its id, as the price book names it.
+    pub model: String,
+    pub calls: u64,
+    /// Tokens in, the cached ones among them.
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
 /// Credit granted: bought (Stripe's hook), or given by an operator. Once
 /// per `id` (Stripe's payment id, or the operator's command id).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -12,6 +12,7 @@
   <h1>fragment admin</h1>
   <nav id="tabs">
     <button data-tab="people" class="on">People</button>
+    <button data-tab="usage">Usage</button>
     <button data-tab="orgs">Orgs</button>
     <button data-tab="trials">Trials</button>
     <button data-tab="health">Health</button>
@@ -29,6 +30,10 @@
     <table><thead><tr><th>Email</th><th>Seat</th><th>Org</th><th>Joined</th><th>Last sign-in</th></tr></thead><tbody id="people-rows"></tbody></table>
     <button id="people-more" hidden>More</button>
     <aside id="person" hidden></aside>
+  </section>
+  <section id="usage" hidden>
+    <table><thead><tr><th>Person</th><th>What</th><th>Calls</th><th>Tokens in</th><th>Tokens out</th><th>Hours awake</th></tr></thead><tbody id="usage-rows"></tbody></table>
+    <button id="usage-more" hidden>More</button>
   </section>
   <section id="orgs" hidden>
     <table><thead><tr><th>Name</th><th>Status</th><th>Paid</th><th>Comped</th><th>Pending</th><th>Admins</th><th>Customer</th></tr></thead><tbody id="org-rows"></tbody></table>

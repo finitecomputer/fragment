@@ -769,6 +769,7 @@ fragment ledger grant ann 20 --why "a top-up"   # operators only
 fragment operator people --q ann@                 # operators: people, orgs, comps,
 fragment operator comp ann@example.com --kind always-on   # trial codes, health, the log
 fragment operator pin <npub> hermes-canary        # a person's computer onto the canary (or back)
+fragment operator usage                           # who used what this month: model calls and tokens, computer hours
 ```
 
 ## You and your keys
@@ -939,6 +940,7 @@ fragment schedule list [<name>]          fragment schedule pause|resume|rm [<nam
 fragment operator key <file>
 fragment operator wipe <email|npub> [--dry-run | --yes] [--key-file F]
 fragment operator people [--q Q] [--after A] [--key-file F]
+fragment operator usage [--q Q] [--after A] [--key-file F]
 fragment operator person <npub> [--key-file F]
 fragment operator pin <npub> <image> [--key-file F]
 fragment operator orgs [--after A] [--key-file F]

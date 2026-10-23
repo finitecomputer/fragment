@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ledger::Plan;
+use crate::ledger::{Plan, Used};
 
 /// A seat's kind: the plan it gives its holder (decision 25).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -309,6 +309,26 @@ pub struct AdminPeople {
     pub people: Vec<AdminPerson>,
     /// Ask after this for the next page (`None`: the last).
     pub next: Option<String>,
+}
+
+/// Who used what this month, the people a page at a time as
+/// `AdminPeople` pages them (`GET /api/admin/usage`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminUsage {
+    pub people: Vec<AdminUsed>,
+    /// Ask after this for the next page (`None`: the last).
+    pub next: Option<String>,
+}
+
+/// One person's line of `AdminUsage`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminUsed {
+    pub npub: String,
+    pub email: Option<String>,
+    /// `None`: their ledger did not answer.
+    pub used: Option<Used>,
 }
 
 /// An org as the operators' list shows it (`GET /api/admin/orgs`).

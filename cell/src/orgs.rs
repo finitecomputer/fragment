@@ -6,7 +6,7 @@
 //! and computer; this module only checks who asks.
 
 use fragment_core::mail::PRODUCT;
-use fragment_proto::org::{CompSeat, Comped, OrgMember, SeatKind, SeatStatus, SetSeatKind, SetSleeps};
+use fragment_proto::org::{AdminPeople, CompSeat, Comped, OrgMember, SeatKind, SeatStatus, SetSeatKind, SetSleeps};
 use fragment_proto::{limits, ErrorCode};
 use worker::*;
 
@@ -186,8 +186,8 @@ fn param(url: &Url, k: &str) -> Option<String> {
 }
 
 /// `/api/admin/…`: the deployment's operators' (docs/api.md, Operators):
-/// comps, orgs, people, trial codes and their mail, billing's health, and
-/// the log of what operators did.
+/// comps, orgs, people and who used what, trial codes and their mail,
+/// billing's health, and the log of what operators did.
 pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest: &[&str]) -> CellResult<Response> {
     let bytes = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     let by = operator(env, cfg, &req, url, &bytes).await?;
@@ -207,7 +207,14 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
         (Method::Delete, ["seats", seat]) => json_answer(&ask_registry(env, &EndComp { by, seat: seat.to_string() }).await?),
         (Method::Get, ["orgs"]) => json_answer(&ask_registry(env, &admin::Orgs { after: param(url, "after") }).await?),
         (Method::Get, ["orgs", org]) => json_answer(&ask_registry(env, &OrgOf { by: None, org: Some(org.to_string()) }).await?),
-        (Method::Get, ["people"]) => json_answer(&ask_registry(env, &admin::People { q: param(url, "q"), after: param(url, "after") }).await?),
+        // one page of people: as listed, or who used what (`usage`)
+        (Method::Get, [list @ ("people" | "usage")]) => {
+            let page = ask_registry(env, &admin::People { q: param(url, "q"), after: param(url, "after") }).await?;
+            match *list {
+                "people" => json_answer(&page),
+                _ => json_answer(&usage(env, page).await),
+            }
+        }
         (Method::Get, ["people", person]) => json_answer(&person_page(env, person).await?),
         (Method::Put, ["people", person, "computer", "image"]) => json_answer(&pin(env, &by, person, &bytes).await?),
         (Method::Get, ["health"]) => json_answer(&ask_registry(env, &admin::Health {}).await?),
@@ -264,6 +271,27 @@ async fn person_page(env: &Env, person: &str) -> CellResult<serde_json::Value> {
         Err(e) => return Err(e),
     };
     Ok(serde_json::json!({ "person": row, "ledger": ledger, "computer": computer, "references": references }))
+}
+
+/// Who used what this month (docs/self-host.md, seam 10): a page of people
+/// as the list pages them, each one's use from their ledger, asked at
+/// once: `AdminUsage`. One that does not answer is shown as none read, and
+/// logged.
+async fn usage(env: &Env, page: AdminPeople) -> serde_json::Value {
+    let used = futures_util::future::join_all(page.people.iter().map(|p| crate::ledger::used(env, &p.npub))).await;
+    let people: Vec<serde_json::Value> = page
+        .people
+        .into_iter()
+        .zip(used)
+        .map(|(p, used)| {
+            let used = used.unwrap_or_else(|e| {
+                console_error!("{}", serde_json::json!({ "usage": p.npub, "failed": e.message }));
+                serde_json::Value::Null
+            });
+            serde_json::json!({ "npub": p.npub, "email": p.email, "used": used })
+        })
+        .collect();
+    serde_json::json!({ "people": people, "next": page.next })
 }
 
 /// An operator pins a person's computer to another of the deployment's

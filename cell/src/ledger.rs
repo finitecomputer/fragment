@@ -45,8 +45,8 @@ use std::cell::{Cell, RefCell};
 
 use fragment_core::ledger::gate::Gate;
 use fragment_core::price::PriceBook;
-use fragment_core::ledger::{self as core, BatchRecord, CommandRecord, Entry, Ledger, Month, Refused, Spend, Store};
-use fragment_proto::ledger::{GrantCredit, LedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Why};
+use fragment_core::ledger::{self as core, used, BatchRecord, CommandRecord, Entry, Ledger, Month, Refused, Spend, Store};
+use fragment_proto::ledger::{GrantCredit, LedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Used, Why};
 use fragment_proto::ErrorCode;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -203,6 +203,11 @@ pub struct FragmentOpen {
 #[serde(deny_unknown_fields)]
 pub struct Status {}
 
+/// What its person used this month, in units (`fragment_core::ledger::used`).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsedNow {}
+
 /// Fleets with levers only (`FRAGMENT_TEST_SECRET`; cell/src/levers.rs):
 /// move this ledger's clock (`clock {offsetMs}`), run its sweep now
 /// (`sweep`), list the references under a prefix (`entries {prefix}`),
@@ -283,6 +288,11 @@ impl Route for SetFragmentCap {
 impl Route for Status {
     const PATH: &'static str = "/status";
     type Answer = LedgerStatus;
+}
+
+impl Route for UsedNow {
+    const PATH: &'static str = "/used";
+    type Answer = Used;
 }
 
 impl Route for TestHook {
@@ -669,6 +679,14 @@ impl LedgerCell {
                 let book = &self.cfg.book;
                 reply(self.mutate(move |l, s, now| Ok(l.status(s, now, book))).await?)
             }
+            UsedNow::PATH => {
+                let UsedNow {} = decode(&body)?;
+                // a read of its rows alone: no head, nothing written
+                let month = Month::of(js::now_ms() + self.offset_ms()?);
+                let binds = vec![month.start_ms().into(), month.next().start_ms().into(), (used::GROUPS_MAX as i64).into()];
+                let groups: Vec<Value> = self.sql().exec(used::SQL, binds)?.to_array()?;
+                reply(used::summed(month, &groups))
+            }
             TestHook::PATH if self.cfg.test_hooks => self.test_hook(decode(&body)?).await,
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}")).into()),
         }
@@ -840,6 +858,14 @@ impl From<worker::Error> for LedgerError {
 pub async fn ask<R: Route>(env: &Env, payer: &str, request: &R) -> Result<R::Answer, LedgerError> {
     let bytes = asked(env, payer, R::PATH, serde_json::to_string(request).expect("a ledger request serializes")).await?;
     serde_json::from_slice(&bytes).map_err(|e| CellError::host(format!("the ledger's answer to {}: {e}", R::PATH)).into())
+}
+
+/// What `person` used this month (`UsedNow`), as their ledger wrote it:
+/// passed on whole, never read here (a typed copy of `ask` costs the
+/// Wasm's budget).
+pub async fn used(env: &Env, person: &str) -> Result<Value, LedgerError> {
+    let bytes = asked(env, person, UsedNow::PATH, "{}".into()).await?;
+    serde_json::from_slice(&bytes).map_err(|e| CellError::host(format!("the ledger's answer to {}: {e}", UsedNow::PATH)).into())
 }
 
 /// `ask`'s round trip, one copy for every route (the cell's Wasm is held

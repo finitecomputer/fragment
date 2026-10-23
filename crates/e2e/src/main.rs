@@ -89,6 +89,10 @@ enum Shape {
     /// As `Plain`, with no mailer: no mail fake and no sender, as a
     /// self-hosted deployment on celld (no Email Sending) runs.
     NoMailer,
+    /// As `Plain`, its model route on a model of the deployment's own, at
+    /// no price (`self_hosted_models`), as docs/self-host.md, seam 3, runs
+    /// Bonsai.
+    SelfHosted,
 }
 
 /// Finite Private's key on a node shaped as Finite's (`Shape::FinitePrivate`):
@@ -105,6 +109,16 @@ pub fn finite_private_models(fake: &str) -> Value {
     let routed = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::OPENROUTER_FLASH, "body": openrouter_routing() });
     let flash = json!({ "provider": "workers_ai", "model": fragment_core::models::GLM_FLASH });
     json!({ "cheap": private, "medium": routed, "fallback": flash, "vision": flash })
+}
+
+/// `FRAGMENT_MODELS` on a node shaped as a self-hosted deployment
+/// (`Shape::SelfHosted`; docs/self-host.md, seam 3): every tier and the
+/// fallback on one model of an OpenAI-compatible server of its own (the
+/// model fake's face, answering Finite Private's id), priced at its slots'
+/// ceiling, zero; vision on Workers AI, which the server lacks.
+pub fn self_hosted_models(fake: &str) -> Value {
+    let own = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::FINITE_PRIVATE_FLASH, "body": { "provider": { "max_price": { "prompt": 0, "completion": 0 } } } });
+    json!({ "cheap": own, "medium": own, "fallback": own })
 }
 
 /// The `body` of OpenRouter's slot on a node shaped as Finite's:
@@ -750,6 +764,15 @@ impl Suite {
         started
     }
 
+    /// Starts the node with its model route on a model of its own, at no
+    /// price (`Shape::SelfHosted`).
+    pub fn start_self_hosted(&mut self) -> Result<Api> {
+        self.shape = Shape::SelfHosted;
+        let started = self.start(false);
+        self.shape = Shape::Plain;
+        started
+    }
+
     /// Starts the node with no mailer (`Shape::NoMailer`).
     pub fn start_without_mail(&mut self) -> Result<Api> {
         self.shape = Shape::NoMailer;
@@ -799,12 +822,17 @@ impl Suite {
             // OpenAI-compatible face as Finite Private (lanes/upstream.rs)
             ai_url: Some(self.ai.node().url.clone()),
             ai_gateway: None,
-            models: matches!(self.shape, Shape::FinitePrivate).then(|| finite_private_models(&self.ai.node().url).to_string()),
+            models: match self.shape {
+                Shape::FinitePrivate => Some(finite_private_models(&self.ai.node().url).to_string()),
+                Shape::SelfHosted => Some(self_hosted_models(&self.ai.node().url).to_string()),
+                _ => None,
+            },
             model_key_slots: match self.shape {
                 Shape::FinitePrivate => vec!["cheap".into(), "medium".into()],
+                Shape::SelfHosted => vec!["cheap".into(), "medium".into(), "fallback".into()],
                 _ => vec![],
             },
-            model_key_value: matches!(self.shape, Shape::FinitePrivate).then(|| FINITE_PRIVATE_KEY.to_string()),
+            model_key_value: matches!(self.shape, Shape::FinitePrivate | Shape::SelfHosted).then(|| FINITE_PRIVATE_KEY.to_string()),
             mail_url: (self.shape != Shape::NoMailer).then(|| self.mail.node().url.clone()),
             mail_from: (self.shape != Shape::NoMailer).then(|| MAIL_FROM.into()),
             default_plan: Some(DEFAULT_PLAN.into()),
@@ -832,7 +860,7 @@ impl Suite {
             }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
-                Shape::Plain | Shape::FinitePrivate | Shape::SellsNothing | Shape::OneKeyMore | Shape::NoMailer => format!("http://127.0.0.1:{}", self.port),
+                Shape::Plain | Shape::FinitePrivate | Shape::SellsNothing | Shape::OneKeyMore | Shape::NoMailer | Shape::SelfHosted => format!("http://127.0.0.1:{}", self.port),
             },
             operators: Some(
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
@@ -897,7 +925,7 @@ impl Suite {
     fn suffix(&self) -> &'static str {
         match self.shape {
             Shape::TwoSites => BOATS,
-            Shape::Plain | Shape::FinitePrivate | Shape::SellsNothing | Shape::OneKeyMore | Shape::NoMailer => SUFFIX,
+            Shape::Plain | Shape::FinitePrivate | Shape::SellsNothing | Shape::OneKeyMore | Shape::NoMailer | Shape::SelfHosted => SUFFIX,
         }
     }
 
