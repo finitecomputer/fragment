@@ -25,6 +25,7 @@ Usage:
   python google_api.py sheets update SHEET_ID RANGE --values '[[...]]'
   python google_api.py sheets append SHEET_ID RANGE --values '[[...]]'
   python google_api.py docs get DOC_ID
+  python google_api.py slides get PRESENTATION_ID
   python google_api.py check
 
 Environment:
@@ -53,6 +54,7 @@ DRIVE = "https://www.googleapis.com/drive/v3"
 PEOPLE = "https://people.googleapis.com/v1"
 SHEETS = "https://sheets.googleapis.com/v4/spreadsheets"
 DOCS = "https://docs.googleapis.com/v1/documents"
+SLIDES = "https://slides.googleapis.com/v1/presentations"
 
 # A search reads at most this many messages' metadata, one request each.
 SEARCH_MAX = 50
@@ -258,7 +260,7 @@ def calendar_delete(args):
     print(json.dumps({"status": "deleted", "eventId": args.event_id}))
 
 
-# ---- Drive, Contacts, Sheets, Docs ----
+# ---- Drive, Contacts, Sheets, Docs, Slides ----
 
 
 def drive_search(args):
@@ -299,6 +301,39 @@ def docs_get(args):
             if pe.get("textRun", {}).get("content"):
                 text.append(pe["textRun"]["content"])
     out({"title": doc.get("title", ""), "documentId": doc.get("documentId", ""), "body": "".join(text)})
+
+
+def text_runs(text):
+    return "".join(e.get("textRun", {}).get("content", "") for e in (text or {}).get("textElements", []))
+
+
+def element_text(element):
+    """The text a slide's element holds: a shape's, a table's cells', a
+    group's children's (an image, a line or a video holds none)."""
+    if "shape" in element:
+        return text_runs(element["shape"].get("text"))
+    if "table" in element:
+        return "".join(text_runs(cell.get("text")) for row in element["table"].get("tableRows", []) for cell in row.get("tableCells", []))
+    if "elementGroup" in element:
+        return "".join(element_text(child) for child in element["elementGroup"].get("children", []))
+    return ""
+
+
+def deck_text(deck):
+    """A presentation's text, slide by slide, with each slide's speaker
+    notes (its notes page's speakerNotesObjectId shape, not the slide's
+    thumbnail there)."""
+    slides = []
+    for page in deck.get("slides", []):
+        notes_page = page.get("slideProperties", {}).get("notesPage", {})
+        notes_id = notes_page.get("notesProperties", {}).get("speakerNotesObjectId")
+        notes = "".join(element_text(e) for e in notes_page.get("pageElements", []) if e.get("objectId") == notes_id)
+        slides.append({"objectId": page.get("objectId", ""), "text": "".join(element_text(e) for e in page.get("pageElements", [])), "notes": notes})
+    return {"title": deck.get("title", ""), "presentationId": deck.get("presentationId", ""), "slides": slides}
+
+
+def slides_get(args):
+    out(deck_text(call("GET", f"{SLIDES}/{urllib.parse.quote(args.presentation_id, safe='')}")))
 
 
 def check(args):
@@ -398,6 +433,12 @@ def main():
     p = docs_sub.add_parser("get")
     p.add_argument("doc_id")
     p.set_defaults(func=docs_get)
+
+    slides = sub.add_parser("slides")
+    slides_sub = slides.add_subparsers(dest="action", required=True)
+    p = slides_sub.add_parser("get")
+    p.add_argument("presentation_id")
+    p.set_defaults(func=slides_get)
 
     p = sub.add_parser("check", help="whether the Google connection answers for this agent")
     p.set_defaults(func=check)

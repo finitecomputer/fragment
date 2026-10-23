@@ -65,7 +65,7 @@
       "placements": [{ "header": "x-browser-use-api-key" }],
       "env": ["BROWSER_USE_API_KEY"], "key": "fragment-browser-use-api-key" },
     { "name": "google", "kind": "connection",
-      "hosts": ["gmail.googleapis.com", "www.googleapis.com", "people.googleapis.com", "sheets.googleapis.com", "docs.googleapis.com"],
+      "hosts": ["gmail.googleapis.com", "www.googleapis.com", "people.googleapis.com", "sheets.googleapis.com", "docs.googleapis.com", "slides.googleapis.com"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
       "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"] },
     { "name": "perplexity", "kind": "operator", "hosts": ["api.perplexity.ai"],
