@@ -36,7 +36,7 @@ default agent. A fragment on it names it and holds nothing else:
 
 ## The managed set
 
-Twelve skills. Six are Fragment platform contracts:
+Thirteen skills. Six are Fragment platform contracts:
 
 | Skill | Why it is ours |
 |---|---|
@@ -57,6 +57,12 @@ And six are integrations Paul retains:
 | music-generation-finite | Direct ElevenLabs/FAL music execution; operator key required |
 | trading-agent-finite | Multi-source market analysis and charts; public reads are keyless |
 | polymarket-finite | Deterministic public-data helper; no trading or key required |
+
+One service skill complements the shared Google connection:
+
+| Skill | Its prerequisites |
+|---|---|
+| gws-slides | Google Workspace CLI v0.22.5's Slides guidance, adapted to `google-workspace-finite` authentication; the deployment allows `slides.googleapis.com` and enables the Slides API on its OAuth client's Cloud project |
 
 The 2026-10-08 audit, amended by Paul on 2026-10-09, removed 29 generic copies from the Finite skills
 snapshot imported on 2026-10-03. It also removed apps' generic design and

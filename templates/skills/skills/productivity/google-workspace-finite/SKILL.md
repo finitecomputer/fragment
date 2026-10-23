@@ -1,18 +1,18 @@
 ---
 name: google-workspace-finite
-description: Gmail, Calendar, Drive, Contacts, Sheets, and Docs through the person's connected Google account, with `gws` (Google's Workspace CLI, in your computer's image) or the bundled helper. No OAuth setup, no keys on the computer.
-version: 2.3.0
+description: Gmail, Calendar, Drive, Contacts, Sheets, Docs, and Slides through the person's connected Google account, with `gws` (Google's Workspace CLI, in your computer's image) or the bundled helper. No OAuth setup, no keys on the computer.
+version: 2.4.0
 author: Nous Research (rewritten for fragment)
 license: MIT
 metadata:
   hermes:
-    tags: [Google, Gmail, Calendar, Drive, Sheets, Docs, Contacts, Email]
+    tags: [Google, Gmail, Calendar, Drive, Sheets, Docs, Slides, Contacts, Email]
     homepage: https://github.com/NousResearch/hermes-agent
 ---
 
 # Google Workspace
 
-Gmail, Calendar, Drive, Contacts, Sheets, and Docs through your owner's
+Gmail, Calendar, Drive, Contacts, Sheets, Docs, and Slides through your owner's
 connected Google account. Your computer holds no Google credential:
 `GOOGLE_OAUTH_ACCESS_TOKEN` holds the connection's placeholder (it names
 you), it goes as a bearer token to Google's own hosts, and the computer
@@ -32,6 +32,10 @@ Hermes' standalone `google-workspace` skill is omitted from this image:
 its OAuth setup and token-file helpers are for a different authentication
 contract. Use this skill and `gws` here.
 
+For Google Slides tasks, load `skill_view("gws-slides")` if not already
+loaded for Slides command and schema discovery. This skill owns the
+connection and authentication.
+
 ## Connected?
 
 ```bash
@@ -50,10 +54,10 @@ $GAPI check
 
 The deployment's Google connection (`google`) is swapped for the hosts
 `gmail.googleapis.com`, `www.googleapis.com` (Drive, Calendar),
-`people.googleapis.com`, `sheets.googleapis.com` and `docs.googleapis.com`
-only. An API on any other host (Tasks, Chat, Slides, Forms, Apps Script,
-and the `gws workflow` helpers that use them) gets the placeholder itself,
-which Google refuses (401): do not use those. The scopes the connection
+`people.googleapis.com`, `sheets.googleapis.com`, `docs.googleapis.com` and
+`slides.googleapis.com` only. An API on any other host (Tasks, Chat, Forms,
+Apps Script, and the `gws workflow` helpers that use them) gets the
+placeholder itself, which Google refuses (401): do not use those. The scopes the connection
 asks for are in `references/google-workspace-scopes.json`.
 
 ## Not allowed
@@ -69,6 +73,9 @@ which: Gmail, Drive, Sheets, Docs, Calendar or Contacts) when connecting
 it, and that they can add it in Settings → Connections → Reconnect to add.
 Do not retry the call until they say they have; go on with what they did
 allow.
+
+Slides uses the connection's Drive permission; ask for Drive when a Slides
+call reports insufficient scope.
 
 ## gws
 
