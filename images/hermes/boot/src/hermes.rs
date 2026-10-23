@@ -633,6 +633,36 @@ pub fn chromium_script(full: &Path) -> String {
 /// Hermes' home, locked.
 pub const CHROMIUM_TMP: &str = "/tmp";
 
+/// Where the image's Chromium takes the interception CA. Hermes' pinned
+/// Chromium is Chrome for Testing, which reads no system bundle (the CA
+/// appended there is curl's and Python's): it trusts its own roots and
+/// those its managed policy names (`CACertificates`, read from its
+/// branding's policy directory). Without it, every page whose host is
+/// intercepted on HTTPS (a provider's the swap catches, the platform's
+/// own: docs/computers.md, "The platform's hosts") is an interstitial in
+/// its browser.
+pub const CHROMIUM_CA_POLICY: &str = "/etc/opt/chrome_for_testing/policies/managed/fragment-ca.json";
+
+/// The managed policy that trusts each certificate of `pem`: a PEM's body
+/// is its DER in base64, as the policy names one. `None` for no
+/// certificate.
+pub fn chromium_ca_policy(pem: &str) -> Option<String> {
+    let mut certs = vec![];
+    let mut body: Option<String> = None;
+    for line in pem.lines().map(str::trim) {
+        match line {
+            "-----BEGIN CERTIFICATE-----" => body = Some(String::new()),
+            "-----END CERTIFICATE-----" => certs.extend(body.take().filter(|b| !b.is_empty())),
+            _ => {
+                if let Some(b) = body.as_mut() {
+                    b.push_str(line);
+                }
+            }
+        }
+    }
+    (!certs.is_empty()).then(|| serde_json::json!({ "CACertificates": certs }).to_string())
+}
+
 /// What Hermes would otherwise decide by guessing whether it runs in a
 /// container, pinned in the boot's environment (and so the gateway's, its
 /// agents' terminals' and the desktop's) the same on every runtime. Its
@@ -1325,6 +1355,18 @@ mod tests {
             assert_eq!(p.contains("fallback_providers:"), falls_back, "only a text tier falls back to the route's fallback (an owner's own model is theirs): {p}");
         }
         assert!(!default_config("http://model.fragment.internal").contains("approvals"), "the gateway's own profile runs no turns");
+    }
+
+    /// The interception CA's policy names each certificate's DER, as the
+    /// PEM carries it; a PEM with none names none.
+    #[test]
+    fn the_interception_ca_is_the_browsers_by_policy() {
+        let pem = "-----BEGIN CERTIFICATE-----\nMIIBAAAA\nBBBB==\n-----END CERTIFICATE-----\n\n-----BEGIN CERTIFICATE-----\nCCCC\n-----END CERTIFICATE-----\n";
+        let policy: serde_json::Value = serde_json::from_str(&chromium_ca_policy(pem).unwrap()).unwrap();
+        assert_eq!(policy, serde_json::json!({ "CACertificates": ["MIIBAAAABBBB==", "CCCC"] }));
+        assert_eq!(chromium_ca_policy(""), None);
+        assert_eq!(chromium_ca_policy("-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n"), None);
+        assert!(CHROMIUM_CA_POLICY.starts_with("/etc/opt/chrome_for_testing/policies/managed/"), "Chrome for Testing's branding reads its policies there");
     }
 
     /// The image's Chromium starts Hermes' pinned one with the container's
