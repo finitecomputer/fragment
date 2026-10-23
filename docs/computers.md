@@ -1206,7 +1206,12 @@ revokes the grant at `revoke` when the row names one, then deletes the account
 at Pipes, and fences it until a connect is known to import again. A computer
 swaps a connection only when its states say it is connected (a fenced one reads
 as not connected whatever Pipes holds), so it asks Pipes for no token for one
-its owner disconnected.
+its owner disconnected. A connection holds what its person allowed: Google's
+consent lets them untick each of the row's scopes, and a grant of any beyond
+signing in connects with those (pipes-browser-binding.md, Partial grants).
+Settings names what is missing, with a Reconnect to add it; an agent's call
+outside the grant gets the provider's own 403, which the Google skill explains
+to the person.
 
 Paul, 2026-10-04 (decisions 22, 37 and 44): every credential a guest uses
 is a per-agent placeholder in the environment variable its provider's own
@@ -1298,7 +1303,9 @@ the provider's own hosts.
   - a connection its owner has connected (Pipes says `connected`: the
     connected account's state, read with no token minted, believed for a
     minute; the owner's own read of their connections, and each swap's
-    answer from Pipes, tell the computer at once);
+    answer from Pipes, tell the computer at once), whatever of its scopes
+    they allowed (the view names none: a call outside them is the
+    provider's refusal, not the swap's);
   - an operator key the deployment holds;
   - an own key its owner gave (`PUT /api/connections/{provider}/key`,
     sealed by the computer);

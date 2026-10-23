@@ -26,6 +26,13 @@
 //! deletes it (`DELETE` of the same path, 204), after revoking its grant at
 //! the stand-in OAuth provider (`POST /test-oauth/revoke token=`, a token
 //! Pipes handed out).
+//!
+//! The stand-in provider's consent grants what it was asked for, or, as a
+//! person who unticks boxes on Google's consent screen, only those of the
+//! asked-for scopes its `grant` names (a test's, on the authorize URL).
+//! Pipes keeps the scopes an import names, and answers them in the
+//! account's state (`scopes`) and its tokens (`scopes`, and the
+//! connection's `missing_scopes`).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -77,6 +84,8 @@ struct State {
     deleted: Vec<(String, String)>,
     /// Connected accounts' labels (`account_display_name`), as imported.
     labels: HashMap<(String, String), String>,
+    /// Connected accounts' scopes, as imported (none: connected otherwise).
+    scopes: HashMap<(String, String), Vec<String>>,
     omit_id_token: bool,
     /// The next import is answered 504 and lands only when the test says
     /// (`land_deferred_import`): one whose outcome its caller cannot know.
@@ -87,12 +96,14 @@ struct State {
 }
 
 /// An import as it lands: (user id, provider), its label as sent (absent:
-/// an update keeps the one there), whether it made the account (POST), and
-/// the provider's account its grant is.
+/// an update keeps the one there), the scopes it names (none: none kept),
+/// whether it made the account (POST), and the provider's account its
+/// grant is.
 struct Import {
     user: String,
     provider: String,
     label: Option<Value>,
+    scopes: Option<Vec<String>>,
     made: bool,
     account: String,
 }
@@ -108,6 +119,14 @@ impl State {
     fn land(&mut self, i: Import) {
         let key = (i.user.clone(), i.provider.clone());
         self.pipes.insert(key.clone(), true);
+        match i.scopes {
+            Some(scopes) => {
+                self.scopes.insert(key.clone(), scopes);
+            }
+            None => {
+                self.scopes.remove(&key);
+            }
+        }
         match i.label {
             Some(Value::String(label)) => {
                 self.labels.insert(key, label);
@@ -244,9 +263,12 @@ fn now_s() -> i64 {
     crate::codestorage::now_ms() / 1000
 }
 
+/// What the stand-in provider's connection asks for (`connection_oauth`).
+pub const CONNECTION_SCOPES: [&str; 3] = ["mail.read", "files.read", "openid"];
+
 impl WorkOs {
     pub fn connection_oauth(&self) -> Value {
-        json!({ "authorize": format!("{}/test-oauth/authorize", self.url), "exchange": format!("{}/test-oauth/token", self.url), "client_id": "mock-connection-client", "scopes": ["mail.read", "files.read", "openid"], "revoke": format!("{}/test-oauth/revoke", self.url) })
+        json!({ "authorize": format!("{}/test-oauth/authorize", self.url), "exchange": format!("{}/test-oauth/token", self.url), "client_id": "mock-connection-client", "scopes": CONNECTION_SCOPES, "revoke": format!("{}/test-oauth/revoke", self.url) })
     }
 
     /// The next code exchange answers no ID token, as a provider asked for no `openid`.
@@ -336,7 +358,12 @@ impl WorkOs {
                     let Ok(mut back) = url::Url::parse(&q("redirect_uri")) else { return problem(400, "invalid_request", "callback"); };
                     if q("decline") != "yes" {
                         let code = s.next("oauth_code");
-                        s.oauth_codes.insert(code.clone(), (q("code_challenge"), q("redirect_uri"), q("scope"), q("account")));
+                        // the boxes the person left ticked: all, unless the test says
+                        let granted = match req.query.get("grant") {
+                            Some(grant) => q("scope").split(' ').filter(|s| grant.split(' ').any(|g| g == *s)).collect::<Vec<_>>().join(" "),
+                            None => q("scope"),
+                        };
+                        s.oauth_codes.insert(code.clone(), (q("code_challenge"), q("redirect_uri"), granted, q("account")));
                         back.query_pairs_mut().append_pair("code", &code);
                     }
                     back.query_pairs_mut().append_pair("state", &q("state"));
@@ -387,7 +414,8 @@ impl WorkOs {
                     let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
                     let Some((refresh, account)) = s.oauth_grants.get(body["access_token"].as_str().unwrap_or("")).cloned() else { return problem(422, "invalid_tokens", "not issued here"); };
                     if body["refresh_token"] != refresh || !body["expires_at"].is_string() || body["state"] != "connected" { return problem(422, "invalid_tokens", "token combination"); }
-                    let import = Import { user: user.into(), provider: provider.into(), label: body.get("account_display_name").cloned(), made: req.method == "POST", account };
+                    let scopes = serde_json::from_value::<Vec<String>>(body["scopes"].clone()).ok();
+                    let import = Import { user: user.into(), provider: provider.into(), label: body.get("account_display_name").cloned(), scopes, made: req.method == "POST", account };
                     if std::mem::take(&mut s.defer_import) {
                         s.deferred = Some(import);
                         return problem(504, "gateway_timeout", "test import deferred: it lands later");
@@ -504,6 +532,7 @@ impl WorkOs {
                     let Some((user, provider)) = rest.split_once("/connected_accounts/") else { return problem(404, "not_found", "no such route") };
                     s.states_read += 1;
                     let label = s.labels.get(&(user.to_string(), provider.to_string())).cloned();
+                    let scopes = s.scopes.get(&(user.to_string(), provider.to_string())).cloned().unwrap_or_default();
                     match s.pipes.get(&(user.to_string(), provider.to_string())).copied() {
                         None => problem(404, "not_found", "no connected account"),
                         Some(authorized) => Response::json(
@@ -511,7 +540,7 @@ impl WorkOs {
                             &json!({
                                 "object": "connected_account", "id": format!("conn_{user}_{provider}"), "user_id": user, "organization_id": null,
                                 "account_display_name": label,
-                                "scopes": [], "state": if authorized { "connected" } else { "needs_reauthorization" },
+                                "scopes": scopes, "state": if authorized { "connected" } else { "needs_reauthorization" },
                                 "created_at": "2026-10-01T00:00:00.000Z", "updated_at": "2026-10-01T00:00:00.000Z",
                             }),
                         ),
@@ -527,6 +556,7 @@ impl WorkOs {
                         None => problem(404, "not_found", "no connected account"),
                         Some(_) => {
                             s.labels.remove(&(user.to_string(), provider.to_string()));
+                            s.scopes.remove(&(user.to_string(), provider.to_string()));
                             s.deleted.push((user.into(), provider.into()));
                             Response::bytes(204, "text/plain", vec![])
                         }
@@ -547,11 +577,14 @@ impl WorkOs {
                         Some(true) => {
                             let token = s.next(&format!("pipes_{provider}"));
                             s.pipes_tokens.insert(token.clone(), (user.clone(), provider.clone()));
+                            // what the account holds, and what of the connection's asks it lacks
+                            let scopes = s.scopes.get(&(user.clone(), provider.clone())).cloned().unwrap_or_default();
+                            let missing: Vec<&str> = if scopes.is_empty() { vec![] } else { CONNECTION_SCOPES.into_iter().filter(|c| !scopes.iter().any(|s| s == c)).collect() };
                             s.tokens.entry(provider).or_default().push(token.clone());
                             let expires = crate::codestorage::iso(crate::codestorage::now_ms() + 3_600_000);
                             Response::json(
                                 200,
-                                &json!({ "active": true, "access_token": { "object": "access_token", "access_token": token, "expires_at": expires, "scopes": [], "missing_scopes": [] } }),
+                                &json!({ "active": true, "access_token": { "object": "access_token", "access_token": token, "expires_at": expires, "scopes": scopes, "missing_scopes": missing } }),
                             )
                         }
                     }
@@ -604,6 +637,21 @@ impl WorkOs {
         let mut s = self.state.lock().expect("workos state");
         let user = s.user_for(email);
         s.labels.insert((user.id, provider.to_string()), label.to_string());
+    }
+
+    /// `email`'s account at `provider` holds `scopes` (its `scopes`), as a
+    /// connect through the platform imports what the person allowed.
+    pub fn grant(&self, email: &str, provider: &str, scopes: &[&str]) {
+        let mut s = self.state.lock().expect("workos state");
+        let user = s.user_for(email);
+        s.scopes.insert((user.id, provider.to_string()), scopes.iter().map(|s| s.to_string()).collect());
+    }
+
+    /// The scopes `email`'s account at `provider` holds, as imported (empty: none named).
+    pub fn scopes(&self, email: &str, provider: &str) -> Vec<String> {
+        let mut s = self.state.lock().expect("workos state");
+        let user = s.user_for(email);
+        s.scopes.get(&(user.id, provider.to_string())).cloned().unwrap_or_default()
     }
 
     /// How many connected accounts' states were read.

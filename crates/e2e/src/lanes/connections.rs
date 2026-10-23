@@ -30,12 +30,21 @@ fn listed(api: &Api, session: &str, provider: &str) -> Result<serde_json::Value>
 }
 
 fn pending(api: &Api, session: &str, account: &str) -> Result<(String, String, String)> {
+    granting(api, session, account, None)
+}
+
+/// An attempt through the provider's consent, as `pending`, where the
+/// person leaves only `grant`'s boxes ticked (of the scopes asked for).
+fn granting(api: &Api, session: &str, account: &str, grant: Option<&str>) -> Result<(String, String, String)> {
     let r = begin(api, session, PROVIDER)?;
     anyhow::ensure!(r.status == 200, "begin connection: {r}");
     let cookie = r.cookies().into_iter().find(|c| c.starts_with("fragment_connection=")).context("connection cookie")?;
     let mut to = reqwest::Url::parse(r.body["url"].as_str().context("authorize URL")?)?;
     let state = to.query_pairs().find(|(k, _)| k == "state").context("state")?.1.into_owned();
     to.query_pairs_mut().append_pair("account", account);
+    if let Some(grant) = grant {
+        to.query_pairs_mut().append_pair("grant", grant);
+    }
     let consent = api.external(to.as_str())?;
     anyhow::ensure!(consent.status == 302, "fake consent: {consent}");
     Ok((consent.header("location"), cookie, state))
@@ -87,6 +96,7 @@ pub fn connections(s: &mut Suite, api: &Api) -> Result<()> {
         && s.workos.imported_accounts().last() == Some(&(user_a.clone(), PROVIDER.into(), "provider-account-a".into())), &r);
     let listed_a = row(api, &a, PROVIDER)?;
     s.ok("the connection names its account as the provider's ID token did (its email), which may be no sign-in of the person's here", listed_a["state"] == "connected" && listed_a["account"] == "provider-account-a@oauth.test", &listed_a);
+    s.ok("granted all it asked for, the connection names those scopes, as Pipes holds them, and nothing missing", listed_a["granted"] == json!(["mail.read", "files.read", "openid"]) && listed_a["missing"] == json!([]), &listed_a);
     let r = back(api, &url, Some(&a), Some(&cookie))?;
     s.ok("replaying the callback performs no exchange or import", refused(&r, "not-under-way") && s.workos.connection_counts() == counts, &r);
 
@@ -130,6 +140,30 @@ pub fn connections(s: &mut Suite, api: &Api) -> Result<()> {
     let r = back(&api, &unnamed, Some(&a), Some(&cookie))?;
     let listed_a = row(&api, &a, PROVIDER)?;
     s.ok("connected again with no ID token, it names no account: an earlier account's name is cleared, never kept for another", r.status == 200 && listed_a["state"] == "connected" && listed_a.get("account").is_none(), &listed_a);
+
+    // the person unticks boxes on the provider's consent (Google's granular
+    // consent): what they allowed is connected, and what they left out said
+    let (partial, cookie, _) = granting(&api, &a, "partial-a", Some("mail.read openid"))?;
+    let r = back(&api, &partial, Some(&a), Some(&cookie))?;
+    let listed_a = row(&api, &a, PROVIDER)?;
+    s.ok("a partial grant connects with exactly what the person allowed: Pipes holds those scopes, and the list names them granted and the one left out missing",
+        r.status == 200 && listed_a["state"] == "connected" && s.workos.scopes("connection-a@e2e.test", PROVIDER) == ["mail.read", "openid"]
+            && listed_a["granted"] == json!(["mail.read", "openid"]) && listed_a["missing"] == json!(["files.read"]), &listed_a);
+    let counts = s.workos.connection_counts();
+    let (signing_in, cookie, _) = granting(&api, &a, "identity-a", Some("openid"))?;
+    let r = back(&api, &signing_in, Some(&a), Some(&cookie))?;
+    let said = back(&api, &r.header("location"), Some(&a), None)?;
+    let listed_a = row(&api, &a, PROVIDER)?;
+    s.ok("a grant of who the person is alone imports nothing: refused as no-scopes, a page that says to leave a permission ticked, and the connection as it was",
+        refused(&r, "no-scopes") && said.status == 400 && said.text.contains("leave at least one permission ticked")
+            && s.workos.connection_counts() == (counts.0 + 1, counts.1, counts.2) && listed_a["granted"] == json!(["mail.read", "openid"]),
+        format!("{r}; {said}; {listed_a}"));
+    let (all, cookie, _) = pending(&api, &a, "partial-a")?;
+    let r = back(&api, &all, Some(&a), Some(&cookie))?;
+    let listed_a = row(&api, &a, PROVIDER)?;
+    s.ok("connected again allowing what was left out, the update records the new grant: nothing is missing",
+        r.status == 200 && s.workos.scopes("connection-a@e2e.test", PROVIDER) == ["mail.read", "files.read", "openid"]
+            && listed_a["granted"] == json!(["mail.read", "files.read", "openid"]) && listed_a["missing"] == json!([]), &listed_a);
 
     let (concurrent, cookie, _) = pending(&api, &b, "concurrent-b")?;
     let counts = s.workos.connection_counts();

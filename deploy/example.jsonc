@@ -212,6 +212,13 @@
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
       // while Google reviews the app's sign-in:
       // "note": "Google is still reviewing Finite, so Google shows a warning that the app isn't verified when you connect. Your data is handled the same way either way.",
+      // its browser-bound connect, once its OAuth client's secret is in the
+      // store (docs/pipes-browser-binding.md): `include_granted_scopes` keeps
+      // what the person allowed before, so a reconnect asks only for the rest
+      // "key": "<the client secret's store name>",
+      // "connection_oauth": { "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&include_granted_scopes=true&prompt=select_account%20consent",
+      //   "exchange": "https://oauth2.googleapis.com/token", "revoke": "https://oauth2.googleapis.com/revoke",
+      //   "client_id": "<the client's id>", "scopes": <the Google skill's references/google-workspace-scopes.json> },
       "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"] },
     { "name": "perplexity", "kind": "operator", "hosts": ["api.perplexity.ai"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],

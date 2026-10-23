@@ -171,6 +171,17 @@ pub struct ProviderView {
     /// trusted for access. None when the provider gave none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// The scopes a connection's account holds, as Pipes says of it: what
+    /// the person allowed when they connected it, which may be less than
+    /// its row asks for. None when Pipes names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granted: Option<Vec<String>>,
+    /// What its row asks for that `granted` lacks, never a sign-in scope
+    /// (`connection_signin::missing`): settings names them, with a
+    /// reconnect to add them. Empty when nothing is; None when `granted`
+    /// is, or its row names no scopes (no `connection_oauth`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing: Option<Vec<String>>,
     /// The deployment's note on it (its catalog row's `note`), which
     /// settings shows under its name, connected or not: plain text.
     #[serde(default, skip_serializing_if = "Option::is_none")]

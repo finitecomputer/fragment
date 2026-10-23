@@ -45,6 +45,9 @@ from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
+# who the connected account is: any grant holds its sign-in scopes, so this
+# answers whatever else the person allowed
+USERINFO = "https://www.googleapis.com/oauth2/v3/userinfo"
 CALENDAR = "https://www.googleapis.com/calendar/v3"
 DRIVE = "https://www.googleapis.com/drive/v3"
 PEOPLE = "https://people.googleapis.com/v1"
@@ -97,6 +100,8 @@ def call(method, url, params=None, body=None):
         elif isinstance(e, dict):
             # Google's: {error: {code, message, status}}
             code, message = e.get("status", ""), e.get("message")
+            if insufficient_scope(exc, e):
+                code = "insufficient_scope"
         else:
             code, message = "", None
         raise GoogleError(exc.code, code or "", message or text[:500] or f"HTTP {exc.code}") from None
@@ -105,6 +110,19 @@ def call(method, url, params=None, body=None):
     if not raw:
         return {}
     return json.loads(raw.decode("utf-8"))
+
+
+def insufficient_scope(exc, error):
+    """Whether Google refused for a scope the connection lacks: the person
+    left it unticked when they connected Google (its 403 says so in
+    WWW-Authenticate and in its reasons)."""
+    if exc.code != 403:
+        return False
+    if 'error="insufficient_scope"' in (exc.headers.get("WWW-Authenticate") or ""):
+        return True
+    reasons = [d.get("reason") for d in error.get("details") or [] if isinstance(d, dict)]
+    reasons += [d.get("reason") for d in error.get("errors") or [] if isinstance(d, dict)]
+    return "ACCESS_TOKEN_SCOPE_INSUFFICIENT" in reasons or "insufficientPermissions" in reasons
 
 
 def out(value):
@@ -285,8 +303,8 @@ def docs_get(args):
 
 def check(args):
     # one cheap read: whether the connection answers for this agent
-    profile = call("GET", f"{GMAIL}/profile")
-    out({"status": "connected", "email": profile.get("emailAddress", "")})
+    me = call("GET", USERINFO)
+    out({"status": "connected", "email": me.get("email", "")})
 
 
 def main():
@@ -390,7 +408,8 @@ def main():
     except GoogleError as e:
         hint = {
             "not_connected": "the person has not connected Google (or must again): ask them to, in the shell's Settings, under Connections",
-            "forbidden": "the person narrowed this agent's connections, or Google refused the scope",
+            "forbidden": "the person narrowed this agent's connections and left Google out",
+            "insufficient_scope": "your owner didn't allow this part of Google when they connected it: they can add it in Settings, Connections, Reconnect to add",
         }.get(e.code, "")
         print(json.dumps({"error": e.code or "google_error", "status": e.status, "message": str(e), "hint": hint}), file=sys.stderr)
         sys.exit(1)
