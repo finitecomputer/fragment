@@ -57,7 +57,16 @@ container starts until someone asks again).
 - **Awake while:** a port tab is open, or the guest holds the keepalive
   socket (below). Traffic from the container does not count (spike S3).
   Twenty minutes after neither holds, it sleeps. A $200 seat's computer
-  never sleeps (decision 25).
+  never sleeps (decision 25). A keepalive counts as long as the runtime
+  holds its socket: before each event the DO closes those it counts that
+  the runtime no longer holds open for the running start
+  (`Lifecycle::keepalives_lost`, `getWebSockets`), never one it holds
+  (#557). A deploy restarts every Durable Object and disconnects every
+  socket, and the guest's close after it reaches no release: on the
+  preview (2026-10-22) one stayed counted open for 14 hours, so its
+  computer never slept, took a busy save every 15 minutes and was
+  metered. Closed so, it is held as any closed one is (the 20 minutes),
+  and the guest opens it again if its turn still runs (below).
 - **Saved** (below, "Saves and what a wake restores"): when its work
   ends (the guest's last keepalive closes, and 30 s pass with none opened
   again), every 15 minutes while a keepalive stays open, and at every
@@ -841,7 +850,12 @@ expires within 30 days. The container application is the deployment's
   - `GET /api/computer/keepalive` (a WebSocket): while it is open the
     computer stays awake. Hold it while busy, and while a turn waits on
     its card, until the card is answered or expires (decision 42 as
-    amended; docs/bridge.md, "A card keeps its computer awake").
+    amended; docs/bridge.md, "A card keeps its computer awake"). It
+    answers `{"type":"ping"}` with `{"type":"pong"}`: a deploy can cut
+    the platform's side of it with no close reaching the guest (#557),
+    and the platform then counts it closed, so a guest still busy pings
+    it and opens it again when it goes silent (our bridge: every 15 s,
+    silent after 30).
 - A subscription with `{channel, wake: true}` (in place of `url`), sent
   as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
   computer on each new record (the fragment asks the computer itself just
@@ -2409,6 +2423,14 @@ for a host) and finds the same `HOME`, `~` and modes.
   same wake starts it again from the save (#362). A check of
   what ran counts runs (the model fake's calls, the ledger's rows, the
   computer's `uses`), never records, which a second run replays. The
+  A turn's keepalive across a reload of the node's Worker (`Suite::reload`,
+  which restarts every Durable Object and disconnects every socket, as a
+  deploy does) is counted open with none held, and at the computer's next
+  event only those held; nothing stays counted once the turn answers
+  (#557). Its bridge opening it again is the bridge's own test, against
+  its fake API (`a_keepalive_a_deploy_cut_is_opened_again`): after a local
+  reload, workerd destroys every keepalive the computer's egress upgrades
+  at once, which a deploy on Cloudflare does not. The
   e2e's bound is 45 s (`crate::UNSAVED_MAX_MS`), so the `computers`
   lane's recovery checks see it run out: a failed sleep told at once with
   its stop time, a restart asked twice (its save failing too) going back

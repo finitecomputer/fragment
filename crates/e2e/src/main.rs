@@ -672,6 +672,26 @@ impl Suite {
         self.node.take().expect("a running node").crash()
     }
 
+    /// Reloads the node's Worker as a deploy does: a new build of its shim
+    /// (a comment more), which `wrangler dev` runs as a new version, every
+    /// Durable Object starting again; back once wrangler says it is ready.
+    pub fn reload(&mut self) -> Result<()> {
+        anyhow::ensure!(!self.hosted_rules, "the hosted lane reloads no node: a section that does declares Need::Node");
+        let log = self.node.as_ref().context("a running node")?.log.clone();
+        let ready = || std::fs::read_to_string(&log).map(|t| t.matches("Local server updated and ready").count()).unwrap_or(0);
+        let before = ready();
+        let entry = self.project.join("entry.mjs");
+        let mut text = std::fs::read_to_string(&entry)?;
+        text.push_str(&format!("// reloaded at {}\n", api::now_ms()));
+        std::fs::write(&entry, text)?;
+        let t0 = Instant::now();
+        while ready() == before {
+            anyhow::ensure!(t0.elapsed() < Duration::from_secs(90), "the node did not reload within 90 s ({})", log.display());
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        Ok(())
+    }
+
     /// Removes the containers the run's nodes left (devstack::containers),
     /// once, its node stopped: none on a hosted run, which starts no node.
     fn remove_containers(&mut self) -> Result<Option<devstack::containers::Removed>> {

@@ -142,6 +142,10 @@ pub const SAVES_KEPT: usize = 3;
 /// its intercepts were set waits out its backoff, at most 30 s and half
 /// again of jitter for our bridge's (`net::Backoff`).
 pub const ALIVE_MS: i64 = 45_000;
+/// Keepalives closed at most per event for want of a socket
+/// (`Lifecycle::keepalives_lost`): each close is an event of its own, and
+/// the next event closes the rest.
+pub const KEEPALIVES_LOST_MAX: u32 = 16;
 
 const _: () = assert!(PREWAKE_MS < IDLE_MS, "a pre-wake holds less than a record");
 const _: () = assert!(RETRY_PAUSE_MS << STARTS_FAILED_MAX < START_DEADLINE_MS, "retries stay within a start's deadline");
@@ -578,6 +582,20 @@ impl Lifecycle {
     /// The guest's keepalives it counts open now (its turns running).
     pub fn keepalives(&self) -> u32 {
         self.keepalives
+    }
+
+    /// The keepalives it counts beyond the `held` sockets its Durable
+    /// Object's runtime still holds open for the running start, at most
+    /// `KEEPALIVES_LOST_MAX`: each went without a close it heard. A deploy
+    /// disconnects every socket, and the guest's close after it reaches no
+    /// release (#557): counted open for good, the computer never slept,
+    /// saved every 15 minutes and metered. The DO closes each
+    /// (`Event::Closed`), as its close would have, before each event. One
+    /// the runtime holds is never among them, and none is ever counted open
+    /// for a socket the lifecycle did not hear open.
+    pub fn keepalives_lost(&self, held: usize) -> u32 {
+        let held = u32::try_from(held).unwrap_or(u32::MAX);
+        self.keepalives.saturating_sub(held).min(KEEPALIVES_LOST_MAX)
     }
 
     pub fn held_until_ms(&self) -> i64 {
@@ -2301,6 +2319,69 @@ mod tests {
         let g = started(&mut l, T);
         let s = l.apply(Event::Exited { generation: g }, late);
         assert!(!s.actions.iter().any(|a| matches!(a, Action::Start { .. })), "{s:?}");
+    }
+
+    /// Goal (#557): a keepalive its Durable Object's runtime no longer holds
+    /// (a deploy disconnected it, and its guest's close reached no release)
+    /// is closed before the next event, as its close would have been: the
+    /// computer is saved once that work settles and sleeps once nothing
+    /// holds it, where on the preview it stayed awake 14 hours, saved every
+    /// 15 minutes and metered. One the runtime holds is never closed, however
+    /// long its turn runs; none is counted open that it did not hear open.
+    /// Replay: reconciled, nothing more is lost, and a late close, counted
+    /// against the sockets still open, closes nothing more. Restart: the
+    /// same from a lifecycle stored and read back (a deploy restarts the
+    /// DO). Method: the lifecycle's steps, as the DO drives them.
+    #[test]
+    fn a_keepalive_the_runtime_lost_is_closed_and_a_held_one_never() {
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        l.apply(Event::Opened { socket: Socket::Keepalive }, T + 4_000);
+        // a turn that runs on, its keepalive held: never lost, saved on
+        // the busy timer, never put to sleep
+        let mut at = T + 4_000;
+        for _ in 0..8 {
+            at += SAVE_EVERY_MS;
+            assert_eq!(l.keepalives_lost(1), 0, "one the runtime holds is never lost");
+            assert_eq!(l.apply(Event::Alarm, at).actions.last(), Some(&Action::Hold { generation: g }), "busy: saved on its timer");
+            let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, at + 500));
+            l.apply(Event::Saved { generation: g, seq }, at + 3_000);
+            assert!(matches!(l.phase, Phase::Awake { .. }) && l.keepalives() == 1, "{l:?}");
+        }
+        // a deploy restarts the DO and disconnects the socket; its guest's
+        // close after it never comes
+        let mut l: Lifecycle = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+        assert_eq!((l.keepalives_lost(1), l.keepalives_lost(0)), (0, 1), "read back, the same");
+        at += 60_000;
+        assert!(l.apply(Event::Closed { socket: Socket::Keepalive }, at).actions.is_empty());
+        assert_eq!((l.keepalives(), l.keepalives_lost(0)), (0, 0), "reconciled, nothing more is lost");
+        // its work ended there: saved once it settles, asleep once nothing holds it
+        assert_eq!(l.apply(Event::Alarm, at + SAVE_SETTLE_MS).actions.last(), Some(&Action::Hold { generation: g }));
+        let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, at + SAVE_SETTLE_MS + 500));
+        l.apply(Event::Saved { generation: g, seq }, at + SAVE_SETTLE_MS + 3_000);
+        let s = l.apply(Event::Alarm, at + IDLE_MS);
+        assert!(s.actions.contains(&Action::Sleep { generation: g }), "asleep once its hold runs out: {s:?}");
+        // two open, the runtime holding one: one is closed, and the other
+        // keeps it busy; the lost one's late close then closes nothing more
+        let mut two = Lifecycle::new();
+        let g = started(&mut two, T);
+        two.apply(Event::Opened { socket: Socket::Keepalive }, T + 4_000);
+        two.apply(Event::Opened { socket: Socket::Keepalive }, T + 5_000);
+        assert_eq!(two.keepalives_lost(1), 1);
+        two.apply(Event::Closed { socket: Socket::Keepalive }, T + 6_000);
+        assert_eq!((two.keepalives(), two.keepalives_lost(1)), (1, 0), "the held one stays counted");
+        let s = two.apply(Event::Alarm, T + 6_000 + IDLE_MS);
+        assert_eq!(s.actions.last(), Some(&Action::Hold { generation: g }), "busy: saved on its timer, never put to sleep: {s:?}");
+        assert!(matches!(two.phase, Phase::Awake { generation, .. } if generation == g));
+        // invalid: never more than it counts, nor more than the cap at once
+        let mut many = Lifecycle::new();
+        started(&mut many, T);
+        for i in 0..40 {
+            many.apply(Event::Opened { socket: Socket::Keepalive }, T + 4_000 + i);
+        }
+        assert_eq!((many.keepalives_lost(0), many.keepalives_lost(39), many.keepalives_lost(40)), (KEEPALIVES_LOST_MAX, 1, 0));
+        assert_eq!((many.keepalives_lost(1_000), many.keepalives_lost(usize::MAX)), (0, 0), "none counted open that it did not hear open");
+        assert_eq!(Lifecycle::new().keepalives_lost(0), 0, "asleep, nothing to close");
     }
 
     /// Goal (P3, F7): a start from a snapshot that fails starts again at
@@ -4076,7 +4157,7 @@ mod tests {
         }
         // the sim's bound is shorter than the default, so it is reached
         let rules = Rules { unsaved_max_ms: 10 * 60_000 };
-        let mut reached = [0u32; 12];
+        let mut reached = [0u32; 13];
         // the images deploys pin, one after another and back
         let deployed = [IMAGE, "registry/stub@sha256:2", "registry/stub@sha256:3"];
         for seed0 in 1..=8u64 {
@@ -4287,6 +4368,20 @@ mod tests {
                 if rng(&mut seed).is_multiple_of(29) {
                     images.looked(Some(deployed[(rng(&mut seed) % 3) as usize]));
                 }
+                // and, now and then, some of the keepalives it counts are
+                // disconnected without a close it hears (#557): the DO closes
+                // those its runtime no longer holds, never one it holds
+                if l.keepalives() > 0 && rng(&mut seed).is_multiple_of(7) {
+                    let held = (rng(&mut seed) % u64::from(l.keepalives() + 1)) as usize;
+                    let (before, lost) = (l.keepalives(), l.keepalives_lost(held));
+                    for _ in 0..lost {
+                        let s = l.apply_with(Event::Closed { socket: Socket::Keepalive }, now, &rules);
+                        assert!(s.actions.is_empty() && s.ended.is_none(), "a close acts on nothing at once (seed {seed0}): {s:?}");
+                    }
+                    assert!(lost >= 1 || before as usize <= held, "one counted beyond what is held is lost (seed {seed0})");
+                    assert!(l.keepalives() == before - lost && l.keepalives() as usize >= held, "closed down to what the runtime holds, never below (seed {seed0}): {held} held, {before} counted");
+                    reached[12] += u32::from(lost > 0);
+                }
                 // what its owner is told is its state's, whatever happened
                 let told = notices(&l, &saves, &images, &rules);
                 for n in &told {
@@ -4332,6 +4427,6 @@ mod tests {
             assert!(!came_up.is_empty() && !ended.is_empty() && saves.rollbacks() > 0, "the simulation reached lives, their ends, and rollbacks (seed {seed0})");
         }
         // every kind of save the lifecycle has was reached, across the seeds
-        assert!(reached.iter().all(|n| *n > 0), "saves kept, saves failed, sleeps unsaved, sleeps cancelled, unsaved work due, failed sleeps kept awake, restarts, unsaved told, went back told, free windows, updates told, rollbacks that lost nothing told nothing: {reached:?}");
+        assert!(reached.iter().all(|n| *n > 0), "saves kept, saves failed, sleeps unsaved, sleeps cancelled, unsaved work due, failed sleeps kept awake, restarts, unsaved told, went back told, free windows, updates told, rollbacks that lost nothing told nothing, lost keepalives closed: {reached:?}");
     }
 }

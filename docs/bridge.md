@@ -74,7 +74,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | Method and path | Body | Reads |
 |---|---|---|
 | `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute, and within a second of a change to the ready file (below) |
-| `GET /api/computer/keepalive` (no agent), WebSocket | | held while a turn waits to run, runs, or waits on its card (below, "A card keeps its computer awake") |
+| `GET /api/computer/keepalive` (no agent), WebSocket | | held while a turn waits to run, runs, or waits on its card (below, "A card keeps its computer awake"); pinged every `BRIDGE_KEEPALIVE_PING_MS` (15 s), and opened again after twice that with nothing heard, since a deploy can cut the platform's side of it with no close reaching here (#557) |
 | `GET /api/fragments` | | `{fragments: [{name, role}]}`: what the agent follows, listed at start, on a `joined` of it (as the agent the engine runs, no read of the computer first), and every 5 minutes. A listing a read of which fails with no answer, a 429 or a 5xx is asked again after a jittered backoff (from 1 s, at most 30 s) until it answers: the list, or only the fragments whose channels did not read; what was found meanwhile is followed, so one fragment that fails keeps the agent from no other. One listing an agent at a time: a newer one takes the place of one under way |
 | `GET /api/f/{f}/channels` | | `{channels: [{name, post, seq}]}`: a postable `chat` is a chat; the agent's own `tasks` |
 | `GET /api/f/{f}/members` | | `{members: [{principal, kind, addedAt}]}`: the lead (first `kind: agent` by `addedAt`), and when this agent joined; read again after 30 s, and at once after a `joined` of one of the computer's agents to that fragment (so its lead never answers an `@mention` of an agent that just joined) |
@@ -119,6 +119,7 @@ on a computer.
 | `BRIDGE_MEDIA_LOCAL` | | `allow`: a file Hermes sends by URL may come over plain `http`, from a local address (a test's fake server: tests/docker.rs). Unset in every image |
 | `BRIDGE_PROMPT_TTL_MS` | 3 600 000 | a card's life unless the runtime says |
 | `BRIDGE_TURN_IDLE_MS` | 900 000 | a running turn this quiet ends as an error |
+| `BRIDGE_KEEPALIVE_PING_MS` | 15 000 | how often the keepalive pings; silent twice that, it is opened again (#557) |
 | `BRIDGE_RELAY_LISTEN` | `127.0.0.1:8650` | where Hermes dials |
 | `BRIDGE_RELAY_SECRET_FILE` | required for `relay` | the per-boot secret (32+ characters) |
 | `GATEWAY_RELAY_ID` | `fragment-computer` | the gateway id both sides name |

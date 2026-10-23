@@ -101,6 +101,9 @@ pub struct World {
     pub page: usize,
     live: Vec<LiveSock>,
     keepalives: Vec<(u64, mpsc::UnboundedSender<Message>)>,
+    /// Keepalives whose platform side a deploy cut (`cut_keepalives`):
+    /// counted closed, their sockets left open and silent.
+    keepalives_cut: Vec<(u64, mpsc::UnboundedSender<Message>)>,
     next_sock: u64,
     clock: i64,
 }
@@ -320,6 +323,19 @@ impl Fake {
         });
     }
 
+    /// Cuts the platform's side of every keepalive as a deploy does, with no
+    /// close reaching the bridge (#557): each is counted closed here, and its
+    /// socket stays open, answering nothing, not even a ping.
+    pub fn cut_keepalives(&self) {
+        self.with(|w| {
+            for cut in std::mem::take(&mut w.keepalives) {
+                w.keepalives_cut.push(cut);
+                w.keepalive_open -= 1;
+                w.keepalive_log.push(false);
+            }
+        });
+    }
+
     /// Polls until `cond` holds, or panics naming `what` after `ms`.
     pub async fn until(&self, ms: u64, what: &str, cond: impl Fn(&World) -> bool) {
         let started = Instant::now();
@@ -427,10 +443,25 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
                             Some(m) => { let close = matches!(m, Message::Close(_)); let _ = sink.send(m).await; if close { break; } }
                             None => break,
                         },
-                        m = stream.next() => match m { Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break, _ => {} },
+                        m = stream.next() => match m {
+                            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                            // a ping is answered, as the Computer DO answers it; a cut one's is not
+                            Some(Ok(Message::Text(t))) => {
+                                let cut = world.lock().unwrap().keepalives_cut.iter().any(|(i, _)| *i == id);
+                                if !cut && serde_json::from_str::<Value>(&t).is_ok_and(|v| v["type"] == "ping") {
+                                    let _ = sink.send(Message::text(json!({ "type": "pong" }).to_string())).await;
+                                }
+                            }
+                            _ => {}
+                        },
                     }
                 }
                 let mut w = world.lock().unwrap();
+                // a cut one was counted closed as it was cut
+                if let Some(at) = w.keepalives_cut.iter().position(|(i, _)| *i == id) {
+                    w.keepalives_cut.remove(at);
+                    return;
+                }
                 w.keepalives.retain(|(i, _)| *i != id);
                 w.keepalive_open -= 1;
                 w.keepalive_log.push(false);

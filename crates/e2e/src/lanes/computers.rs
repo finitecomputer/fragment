@@ -487,6 +487,44 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     Ok(added)
 }
 
+/// The keepalive across a deploy (#557), each skipped off a local node,
+/// the stub, and the fakes.
+const KEEPALIVE_CHECKS: [&str; 2] = [
+    "a keepalive open across a reload of the cell (a deploy: every socket disconnected, its guest's close reaching no release) is counted open, none held; at its next event the computer counts only those held",
+    "the turn answers, and nothing is counted open after it: none held, none counted",
+];
+
+/// A turn's keepalive across a reload of the node's Worker, which restarts
+/// every Durable Object and disconnects every socket as a deploy does: on
+/// the preview its guest's close after one never reached the computer,
+/// which counted it open for 14 hours, never slept, and was metered
+/// (#557); the reload shows the same, counted open, none held. The turn's
+/// model call is held, so it runs across the reload. Its guest opening its
+/// keepalive again is the bridge's own test (`a_keepalive_a_deploy_cut_is_
+/// opened_again`): after a local reload, workerd destroys every keepalive
+/// the computer's egress upgrades at once (`other end of WebSocketPipe was
+/// destroyed`), which a deploy on Cloudflare does not (the preview's
+/// computer opened its next keepalive after each, and was held by it). The
+/// replies it adds.
+fn keepalive_across_a_reload(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str, say: &dyn Fn(u32, &str) -> Result<crate::api::Reply>, replied: &dyn Fn(i64) -> bool) -> Result<usize> {
+    let counts = || lever(api, id, "saves").map(|r| (r.body["keepalives"].as_u64().unwrap_or(u64::MAX), r.body["keepalivesHeld"].as_u64().unwrap_or(u64::MAX))).unwrap_or((u64::MAX, u64::MAX));
+    let called = s.ai.chats().len();
+    s.ai.delay_next(&[15_000]);
+    let r = say(95, "think slowly across a reload")?;
+    let seq = r.body["record"]["seq"].as_i64().unwrap_or(0);
+    let in_flight = s.eventually(WAKE, || s.ai.chats().len() > called && counts() == (1, 1));
+    s.reload()?;
+    let reloaded = counts();
+    // its owner's wake of it awake: an event, after which it counts only what is held
+    let woke = api.signed(owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
+    let after = counts();
+    s.ok(KEEPALIVE_CHECKS[0], in_flight && reloaded.0 > reloaded.1 && woke.body["phase"] == "awake" && after.0 == after.1, json!({ "reloaded": reloaded, "woke": woke.body["phase"], "after": after }));
+    let answered = s.eventually(WAKE, || replied(seq));
+    let closed = s.eventually(Duration::from_secs(10), || counts() == (0, 0));
+    s.ok(KEEPALIVE_CHECKS[1], answered && closed, json!({ "answered": answered, "counts": counts() }));
+    Ok(1)
+}
+
 /// The recovery checks (docs/computers.md, "What its owner is told"), each
 /// skipped off the stub and the fakes (the lever fails saves, and the
 /// node's bound is short: `crate::UNSAVED_MAX_MS`).
@@ -1362,6 +1400,17 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         );
     }
 
+    // a turn's keepalive across a deploy; then a sleep, and a fresh container
+    if scripted && fakes {
+        replies_so_far += keepalive_across_a_reload(s, api, &owner, &id, &|n, text| say(n, text), &|seq| {
+            let turn = turn_of(&agent_name, &chat_name, "chat", seq);
+            agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|r| r["body"]["turn"] == turn.as_str())
+        })?;
+    } else {
+        for label in KEEPALIVE_CHECKS {
+            s.skip(label, "it reloads the local node, under the stub's scripted runtime and the fakes' held model call");
+        }
+    }
     // asleep, a record wakes it, restored, and nothing runs twice
     std::thread::sleep(QUEUE_DRAIN);
     let ran = fakes.then(|| runs(s, api, &owner, &owner_id, &id));

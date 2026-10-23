@@ -909,6 +909,34 @@ async fn sigterm_exits_within_five_seconds() {
     fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0 && w.keepalive_open == 0).await;
 }
 
+/// Goal (#557): a keepalive whose platform side a deploy cut, with no
+/// close reaching the bridge, is opened again while its turn still runs:
+/// silent twice its ping, it is dropped and opened afresh, so the platform
+/// holds the computer awake for that turn again. One that answers its
+/// pings is never dropped, however many pings long its turn runs.
+#[tokio::test]
+async fn a_keepalive_a_deploy_cut_is_opened_again() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("keepalive-cut");
+    let mut cfg = support::config(&fake.url(), &dir, support::settings());
+    cfg.keepalive_ping = Duration::from_millis(250);
+    // `slow` is twenty drafts: four seconds, sixteen pings
+    let bridge = support::start(cfg, support::script_paced(Duration::from_millis(200)));
+    following(&fake, 2).await;
+    fake.say(&chat, &person("paul"), json!({ "text": "slow, its pings answered" }));
+    fake.until(WAIT, "held, then let go at its end, once", |w| w.keepalive_log == [true, false]).await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "slow, then cut" }));
+    fake.until(WAIT, "its turn running", |w| w.keepalive_open == 1 && w.keepalive_log.len() == 3).await;
+    fake.cut_keepalives();
+    fake.until(WAIT, "opened again as it runs", |w| w.keepalive_open == 1 && keepalive_opens(w) == 3).await;
+    let turn = turn_of("juniper", &chat, seq(&said));
+    fake.with(|w| assert!(ends_of(w, &chat, &turn).is_empty(), "still running as it was opened again"));
+    fake.until(WAIT, "let go at its end", |w| !ends_of(w, &chat, &turn).is_empty() && w.keepalive_open == 0).await;
+    fake.with(|w| assert_eq!(w.keepalive_log, [true, false, true, false, true, false]));
+    bridge.stop().await;
+}
+
 /// Invalid: a corrupt state file is refused, not repaired, and not run on.
 #[tokio::test]
 async fn a_corrupt_state_is_refused() {

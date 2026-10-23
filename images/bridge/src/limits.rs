@@ -193,6 +193,12 @@ pub const WS_OPEN_TIMEOUT_MS: u64 = 10_000;
 /// A `__live` socket pings this often, and is given up on after twice that
 /// with nothing heard.
 pub const LIVE_PING_MS: u64 = 30_000;
+/// The keepalive pings this often (`BRIDGE_KEEPALIVE_PING_MS`), and is
+/// opened again after twice that with nothing heard. A deploy can cut the
+/// platform's side of it with no close reaching the bridge (#557): the
+/// platform then counts it closed, and its computer would sleep under the
+/// turn that holds it.
+pub const KEEPALIVE_PING_MS: u64 = 15_000;
 
 /// A post the platform did not take is tried this many times, waiting a
 /// jittered backoff between (ids make every retry the same record).
@@ -252,6 +258,7 @@ const _: () = assert!(PROMPT_TTL_MS_MIN <= PROMPT_TTL_MS_DEFAULT && PROMPT_TTL_M
 const _: () = assert!(SHUTDOWN_MS_MAX < 5_000, "the platform kills the guest 5 s after SIGTERM");
 const _: () = assert!(QUEUED_PER_CHAT_MAX < TURNS_OPEN_MAX);
 const _: () = assert!(LIVE_PING_MS > HTTP_TIMEOUT_MS);
+const _: () = assert!(2 * KEEPALIVE_PING_MS < 60_000, "a cut keepalive is opened again well within the platform's idle hold (20 minutes)");
 const _: () = assert!(NOTE_MAX_BYTES < MESSAGE_TEXT_MAX_BYTES, "a note is small beside the message it comes with");
 const _: () = assert!(2 * NOTE_MAX_BYTES + 2 < MESSAGE_TEXT_MAX_BYTES, "a cut turn's note and a forgotten one's, together, are small beside it too");
 const _: () = assert!(NOTE_FORGOTTEN_MAX >= 1, "a forgotten turn is named");

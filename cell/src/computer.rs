@@ -417,6 +417,8 @@ impl DurableObject for ComputerCell {
     }
 
     async fn websocket_error(&self, ws: WebSocket, _error: worker::Error) -> Result<()> {
+        // closed here too, so the keepalives held open count it no more
+        let _ = ws.close(Some(1011), None::<&str>);
         self.keepalive_closed(&ws).await;
         Ok(())
     }
@@ -724,6 +726,13 @@ impl ComputerCell {
     /// wake while a start is under way) applies its own event between, and
     /// the generations keep a late report from changing anything.
     async fn drive(&self, first: Event) -> CellResult<Option<String>> {
+        self.drive_after(Some(first)).await
+    }
+
+    /// `drive`, after closing the keepalives its lifecycle counts that the
+    /// runtime no longer holds open (`keepalives_lost`); with no `first`,
+    /// those alone (a keepalive's close).
+    async fn drive_after(&self, first: Option<Event>) -> CellResult<Option<String>> {
         let told = self.notices()?;
         // a deploy since its last look is news, told as any change is
         self.look_logged().await;
@@ -784,12 +793,18 @@ impl ComputerCell {
         }
     }
 
-    async fn drive_events(&self, first: Event) -> CellResult<Option<String>> {
-        let mut queue = vec![first];
+    async fn drive_events(&self, first: Option<Event>) -> CellResult<Option<String>> {
+        let mut queue: Vec<Event> = first.into_iter().collect();
         if let Some(exited) = self.take_over().await? {
             // the event that brought this isolate up applies after the exit
             queue.push(exited);
         }
+        // before them all, the keepalives it counts that the runtime no
+        // longer holds open close, as their closes would have (#557: a deploy
+        // disconnects every socket, and the guest's close after it reaches no
+        // release); one the runtime holds never does
+        let lost = self.lifecycle()?.keepalives_lost(self.keepalives_held()?);
+        queue.extend((0..lost).map(|_| Event::Closed { socket: Socket::Keepalive }));
         let mut refused = None;
         let rules = self.rules();
         // bounded: each event's actions report at most one event each, and a
@@ -1959,6 +1974,8 @@ impl ComputerCell {
                 v["unsavedSince"] = json!(life.unsaved_since_ms());
                 v["freeSince"] = json!(life.free_since_ms());
                 v["keepalives"] = json!(life.keepalives());
+                // the keepalives the runtime holds open, beside those it counts
+                v["keepalivesHeld"] = json!(self.keepalives_held()?);
                 v["failSaves"] = json!(self.meta(MetaKey::FailSaves)?.and_then(|n| n.parse::<u32>().ok()).unwrap_or(0));
                 v["hangBackups"] = json!(self.meta(MetaKey::HangBackups)?.and_then(|n| n.parse::<i64>().ok()).unwrap_or(0));
                 Ok(v)
@@ -2412,15 +2429,28 @@ impl ComputerCell {
         self.exec(&format!("DELETE FROM {table} WHERE hash NOT IN (SELECT hash FROM {table} ORDER BY expires_at DESC LIMIT {max})"), vec![])
     }
 
-    /// A keepalive closed: it counts only if its container is the running one.
+    /// A keepalive closed: it counts only if its container is the running
+    /// one, and as the lifecycle's count coming down to the keepalives still
+    /// open (`drive_after`): one closed already for want of its socket (a
+    /// deploy's, its close late) counts once.
     async fn keepalive_closed(&self, ws: &WebSocket) {
         let current = self.lifecycle().map(|l| format!("g{}", l.generation())).unwrap_or_default();
         if !self.state.get_tags(ws).contains(&current) {
             return;
         }
-        if let Err(e) = self.drive(Event::Closed { socket: Socket::Keepalive }).await {
+        if let Err(e) = self.drive_after(None).await {
             console_error!("{}", json!({ "computer": "keepalive-closed", "error": e.message }));
         }
+    }
+
+    /// The running start's keepalives the runtime holds open: each socket
+    /// accepted for that start (tagged with its generation) and open, so not
+    /// one closing (its close handler closed it first) nor one a deploy
+    /// disconnected (the runtime lists none such).
+    fn keepalives_held(&self) -> CellResult<usize> {
+        let tag = format!("g{}", self.lifecycle()?.generation());
+        let open = |ws: &WebSocket| AsRef::<worker_sys::web_sys::WebSocket>::as_ref(ws).ready_state() == worker_sys::web_sys::WebSocket::OPEN;
+        Ok(self.state.get_websockets_with_tag(&tag).iter().filter(|ws| open(ws)).count())
     }
 
     /// The guest's keepalive: accepted here, so it is the Computer DO's own
