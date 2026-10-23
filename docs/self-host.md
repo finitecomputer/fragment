@@ -1059,10 +1059,11 @@ used as it ships:
 ## Where the time goes, 2026-10-22
 
 Measured, not guessed: the same operations on master's path (`wrangler
-dev`, its containers in local Docker) and on celld with computers on two
+dev`, its containers in local Docker), on celld with computers on two
 nodes over sandcastle's Docker double (one that listens, one that dials
-in). The real engine's column waits: Paul's own computers were on it that
-day. The bench is a lane on the branch `selfhost-perf-bench` (not for
+in), and on celld with one node in front of this box's real engine
+(jailed microVMs, sandcastle `node` 57cd969; Paul's idle Hermes computer
+stayed on the engine throughout, its one other VM). The bench is a lane on the branch `selfhost-perf-bench` (not for
 merge: `cargo xtask e2e --only perf`, `FRAGMENT_PERF_SNAPSHOTS=1` for
 snapshots), which logs each host call, each node call, each exec's
 phases and each request's time in the router and in each object. Medians
@@ -1071,22 +1072,30 @@ of 20 runs (3 sleep, wake and restart cycles) on a quiet box (load 1 to
 under load (6 to 13: the box is shared, and one celld run under the
 heaviest load read 50, 24 and 65 ms for the first three rows).
 
-| Operation (ms) | wrangler, local Docker | celld, node that listens | celld, node that dials in |
-|---|---|---|---|
-| fragment op (`POST …/ops/say`) | 13 → 12 | 9 → 7 | (the same cell) |
-| channel read | 9 | 5 → 4 | |
-| live update (an op to its frame) | 13 → 11 | 9 → 8 | |
-| a computer's view (`GET`) | 8–10 | 1 | 1 |
-| cold start to ready | 570 | 1,310 → 335 | 1,160 → 240 |
-| wake from its save | 665–680 | 1,490 → 525 | 1,440 → 495 |
-| sleep (hold, save, stop) | 510–570 | 650 | 625 |
-| restart, to awake | 5,590 → 1,270 | 5,510 → 1,175 | 5,470 → 1,135 |
-| exec round trip (`true`) | 54–55 | 22 | 22 |
-| guest → platform API | 11–14 | 1.4–1.6 | 1.4–1.5 |
-| guest → model call (the fake) | 20–25 | 3 | 3 |
-| snapshot save (loaded) | 190–300 | 220–470 | 120–450 |
-| sleep with a snapshot (loaded) | 920–1,080 | 1,140–1,420 | 720–1,750 |
-| wake from its snapshot (loaded) | 450–950 | 950–1,530 | 1,350–1,890 |
+| Operation (ms) | wrangler, local Docker | celld, node that listens | celld, node that dials in | celld, the real engine |
+|---|---|---|---|---|
+| fragment op (`POST …/ops/say`) | 13 → 12 | 9 → 7 | (the same cell) | 9 |
+| channel read | 9 | 5 → 4 | | 4 |
+| live update (an op to its frame) | 13 → 11 | 9 → 8 | | 8 |
+| a computer's view (`GET`) | 8–10 | 1 | 1 | 1 |
+| cold start to ready | 570 | 1,310 → 335 | 1,160 → 240 | 130–145 |
+| wake from its save | 665–680 | 1,490 → 525 | 1,440 → 495 | 245–310 |
+| sleep (hold, save, stop) | 510–570 | 650 | 625 | 370–410 |
+| restart, to awake | 5,590 → 1,270 | 5,510 → 1,175 | 5,470 → 1,135 | 620–780 |
+| exec round trip (`true`) | 54–55 | 22 | 22 | 4 |
+| guest → platform API | 11–14 | 1.4–1.6 | 1.4–1.5 | 1.2–1.4 |
+| guest → model call (the fake) | 20–25 | 3 | 3 | 3 |
+| snapshot save (loaded) | 190–300 | 220–470 | 120–450 | 58–80 |
+| sleep with a snapshot (loaded) | 920–1,080 | 1,140–1,420 | 720–1,750 | 415–500 |
+| wake from its snapshot (loaded) | 450–950 | 950–1,530 | 1,350–1,890 | 140 (360–420 loaded) |
+
+The real engine's column comes from three runs after the fixes, two of
+them with snapshots.
+- On a quiet box, its starts were ready in 105 to 150 ms (`ready in`,
+  the engine's journal), and a wake from a snapshot took 140 ms: the
+  start and the hold's mark, no restore.
+- While another session's e2e loaded the box (load 3 to 4), the same
+  starts took 270 to 380 ms.
 
 **Where it goes:**
 
@@ -1119,17 +1128,47 @@ heaviest load read 50, 24 and 65 ms for the first three rows).
   `/api/nodes/egress` (1 to 2 ms in the router), the computer's object
   (HMAC, its binding), the route. Under wrangler, workerd's local egress
   is the slow hop (10 to 30 ms).
-- **A wake from a snapshot on a node** waits 0.5 to 1.2 s for its guest:
-  found 42.
+- **A wake from a snapshot on the double** waits 0.5 to 1.2 s for its
+  guest: found 42. On the real engine it waits none (`heardInMs` 0).
 - **Sleep:**
   - the hold's poll for `held` takes 150 ms (it polls every 100 ms);
   - the save takes 110 to 130 ms;
   - the stop's wait for the exit takes 200 to 300 ms (the stop polls
     `running` every 100 ms; on a node, `running` turns false when the
     node's `wait` answers).
-- **The real engine** says a VM is ready in 107 to 115 ms (its journal's
-  `ready in`), against 240 to 300 ms for the double's start. Its execs,
-  intercepts and snapshots are still to measure end to end.
+- **A wake on the real engine** (245 to 310 ms from its save):
+  - The node's start, answered once the guest is up: 113 ms (median),
+    from the engine's own timings:
+    - prepared at 0.7 ms, jailed at 5, the VMM built at 12;
+    - the guest's hello at 109, its own uptime then 37 ms: about 60 ms
+      go to libkrun loading the kernel before the guest's clock starts;
+    - ready at 112.
+  - Then:
+    - the intercepts in one PUT: 1 ms;
+    - the exec that finds it up: 8 ms;
+    - the restore of `/data`: 56 ms;
+    - the image's check, and the gate's mark: about 8 ms each.
+
+  On the double, Docker's CLI is most of a wake:
+  - its start (`docker run`, the relay) is 240 to 300 ms;
+  - each exec is 22 ms (`docker exec`);
+  - the restore is about 106 ms.
+
+  On the engine, the VM's boot and the restore are most of it: a wake
+  from a snapshot, with no restore, is 140 ms. A loaded box stretches
+  the guest's boot: its uptime at hello went from 37 to 280 ms while
+  another session's e2e ran.
+- **Sleep on the real engine** (370 to 410 ms): two 100 ms polls are
+  half of it: found 46.
+  - The hold's poll for `held` takes 108 ms.
+  - The stop's poll of `running` takes 102 ms.
+  - The save takes 64 ms, the signal 8.
+- **Execs and calls on the real engine:**
+  - An exec is 4 ms in the object, its WebSocket to the node 0 to 1 ms.
+  - An exec that prints four lines around a 50 ms sleep takes 52 ms,
+    with no stall.
+  - A guest's call to the platform is 1.2 to 1.4 ms, the same as on the
+    double.
 
 **Fixed:**
 
@@ -1144,7 +1183,13 @@ heaviest load read 50, 24 and 65 ms for the first three rows).
 
 **Found:**
 
-- **42. A wake from a snapshot on a node waits out the guest's backoff.**
+- **42. A wake from a snapshot on the double waits out the guest's
+  backoff.** The real engine never does (`heardInMs` 0 at every wake
+  from a snapshot): its start answers once the guest is up, and the
+  start's one intercept PUT lands before the bridge's first read. The
+  double answers once its relay is up, after its entrypoint started, so
+  only the double's guest reads first. What follows is the double's
+  case, a test stand-in's: no fix is needed for a real node.
   - The guest's first `GET /api/computer` comes before the start's
     intercepts are set (`arm` waits for the node's start, then sends
     them).
@@ -1160,17 +1205,30 @@ heaviest load read 50, 24 and 65 ms for the first three rows).
     - or the bridge's first read retries every 100 ms for its first
       seconds. That is an image change, every deployment's: a decision
       for Paul.
-- **43. Nagle on the node's listening sockets:** they lack `TCP_NODELAY`
-  (the uplink and the egress set it).
-  - sandcastle `node-perf` (off `node`, pushed, no PR) sets it.
-  - On the double nothing changes: an exec with four lines of output is
-    77 ms either way, the double's `docker exec` dominating.
-  - The real engine's 4 ms execs are where it could show: measure there
-    before merging it.
-- **44. The double is not the engine:** its exec, intercept and snapshot
-  times are Docker's CLI (`docker exec`, `docker commit`). The real
-  engine's column, once Paul's computers are off the engine, is what
-  says where a node's time goes.
+- **43. Nagle on the node's listening sockets:** they lack
+  `TCP_NODELAY` (the uplink and the egress set it), but nothing waits on
+  it.
+  - On the double, an exec with four lines of output is 77 ms either
+    way.
+  - On the real engine, the same exec is 52 ms around its 50 ms sleep,
+    and a bare exec 4 ms.
+  - sandcastle `node-perf` sets it, saves nothing, and can go.
+- **44. The double is not the engine:** its exec, intercept and
+  snapshot times are Docker's CLI (`docker exec`, `docker commit`).
+  - A wake from the save takes twice as long on the double (495 to
+    525 ms, against 245 to 310 on the engine).
+  - A snapshot takes four times as long (120 to 470 ms, against 58 to
+    80).
+  - Read the engine's column for a node's time.
+- **46. A sleep spends two 100 ms polls** (master's `ContainerHost`):
+  - `execUntil` polls the guest's `held` every 100 ms;
+  - `exited` polls `running` every 100 ms after the stop's SIGTERM.
+
+  On the real engine that is about 210 ms of a 380 ms sleep, and of
+  every restart; on Cloudflare too. A stop that awaits the container's
+  exit (it watches it already, for the exit report), and a faster poll
+  for `held`, would take most of it. A small master PR, if a sleep's
+  200 ms is worth it: a decision for Paul.
 - **45. celld's dev node halts when its lease store stalls.**
   - A lease renewal usually takes 2 to 4 ms. One took 2.5 s
     (`outcome="ambiguous"`).
@@ -1415,5 +1473,5 @@ CELLD_BIN=… SANDCASTLE_NODE_BIN=~/.local/opt/sandcastle/bin/sandcastle-node ca
   - remapping the path prefixes saved 1.6 KB of that 9 KB.
 
   The lane's budget is 6.72 MB.
-- **Found 42 (above):** the node's start takes the intercepts, or the
-  bridge's first read retries quickly (an image change).
+- **Found 46 (above):** a sleep's two 100 ms polls (master's), about
+  210 ms of every sleep and restart: worth a small master PR?
