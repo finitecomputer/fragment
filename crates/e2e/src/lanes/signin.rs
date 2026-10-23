@@ -822,7 +822,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         );
         ship(s, &c, CHAT_APP, CHAT_JSON);
         api.signed(&owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
-        api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", member.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;
+        api.share(name, member.pubkey_hex(), "viewer")?;
     }
     let r = api.page(&f, "__signin?return=/", None)?;
     s.ok("a fragment's sign-in starts at the platform", r.status == 302 && r.header("location").starts_with(&format!("{}/auth/fragment?name={f}", api.base)), &r);

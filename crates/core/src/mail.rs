@@ -145,20 +145,21 @@ fn one_line(s: &str, max: usize) -> String {
     }
 }
 
-/// The mail an invite by email sends `to` (docs/cloudflare-v1.md, decision
-/// 48): who shares what, whether they may edit it, and its address (`link`),
-/// which signs them in. It waits `days`.
+/// The mail an invite by email sends `to` (docs/cloudflare-v1.md,
+/// decisions 48 and 63): who shares what, whether they may edit it, and
+/// the platform's page (`link`), where they sign in and accept it, or
+/// decline it. It waits `days`, and is theirs only once they accept it.
 pub fn invite(to: &str, from: &str, title: &str, edit: bool, link: &str, days: i64) -> Mail {
     let (title, from) = (one_line(title, SUBJECT_PART_MAX), one_line(from, SUBJECT_PART_MAX));
     let may = if edit { "edit" } else { "view" };
     Mail {
         to: to.to_string(),
-        subject: format!("{from} shared \u{201c}{title}\u{201d} with you"),
+        subject: format!("{from} invited you to \u{201c}{title}\u{201d}"),
         text: format!(
             "{from} invited you to {may} \u{201c}{title}\u{201d} on {PRODUCT}.\n\n\
-             Open it: {link}\n\n\
-             Sign in as {to} to open it. The invite waits {days} days.\n\n\
-             If you did not expect this, ignore this mail: nothing happens unless you sign in as {to}.\n"
+             Accept it: {link}\n\n\
+             Sign in as {to}, then accept or decline it there. The invite waits {days} days.\n\n\
+             If you did not expect this, ignore this mail: nothing happens unless you accept it.\n"
         ),
     }
 }
@@ -307,19 +308,20 @@ mod tests {
     }
 
     /// Goal: an invite's mail says who shares what, as which role, and
-    /// where, and stays a message the service takes whatever the title
-    /// holds. Method: a title with a newline, and a title and sharer far
-    /// past a subject's length.
+    /// where to accept it, and stays a message the service takes whatever
+    /// the title holds. Method: a title with a newline, and a title and
+    /// sharer far past a subject's length.
     #[test]
     fn an_invite_names_its_sharer_fragment_and_role_on_one_line() {
-        let m = invite("bea@example.com", "ann@example.com", "Garden\nplans", true, "https://garden--k3x9.fragment.boats/", 30);
-        assert_eq!(m.subject, "ann@example.com shared \u{201c}Garden plans\u{201d} with you");
+        let m = invite("bea@example.com", "ann@example.com", "Garden\nplans", true, "https://finite.chat/", 30);
+        assert_eq!(m.subject, "ann@example.com invited you to \u{201c}Garden plans\u{201d}");
         assert!(m.text.contains("invited you to edit \u{201c}Garden plans\u{201d} on Finite.Computer.\n"), "{}", m.text);
-        assert!(m.text.contains("Open it: https://garden--k3x9.fragment.boats/\n"), "{}", m.text);
-        assert!(m.text.contains("Sign in as bea@example.com to open it. The invite waits 30 days."), "{}", m.text);
+        assert!(m.text.contains("Accept it: https://finite.chat/\n"), "{}", m.text);
+        assert!(m.text.contains("Sign in as bea@example.com, then accept or decline it there. The invite waits 30 days."), "{}", m.text);
+        assert!(m.text.contains("nothing happens unless you accept it"), "{}", m.text);
         assert_eq!(refusal(&m), None);
         let long = "x".repeat(500);
-        let m = invite("bea@example.com", &long, &long, false, "https://a--k3x9.fragment.boats/", 30);
+        let m = invite("bea@example.com", &long, &long, false, "https://finite.chat/", 30);
         assert_eq!(refusal(&m), None, "{}", m.subject);
         assert!(m.text.contains("invited you to view"));
     }

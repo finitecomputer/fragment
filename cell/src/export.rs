@@ -1676,12 +1676,10 @@ impl PrincipalCell {
             }
             m["email"] = json!(mail);
             m["name"] = json!(shown);
+            // (a person member's own agents are never named: decision 63)
             if m["kind"] == "agent" {
                 m["title"] = json!(title);
                 m["ownerEmail"] = json!(email(m["owner"].as_str()));
-            } else {
-                let agents: Vec<Value> = p.map(|p| p.agents.iter().map(|a| json!({ "principal": a.id, "name": a.name, "title": a.title })).collect()).unwrap_or_default();
-                m["agents"] = json!(agents);
             }
             meta.members.push(m);
         }

@@ -265,7 +265,7 @@ fn unread_and_seen(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
     // each person's own: a member never marked counts all three; theirs moves alone
     let member = api.person()?;
     let member_id = api.identity(&member)?;
-    let r = shell(api, session, "PUT", &format!("/api/f/{chat}/members/{member_id}"), Some(&json!({ "role": "viewer" })), &[])?;
+    let r = api.share(&chat, &member_id, "viewer")?;
     anyhow::ensure!(r.status == 200, "adding the member: {r}");
     let theirs = || api.signed(&member, "GET", "/api/fragments", None).map(|r| row_in(&r)).unwrap_or(Value::Null);
     let three = s.eventually(SEARCH_WAIT, || theirs()["unread"] == 3);
@@ -277,7 +277,7 @@ fn unread_and_seen(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
     );
     // leaving drops their mark: back in, all three count again
     let out = shell(api, session, "DELETE", &format!("/api/f/{chat}/members/{member_id}"), None, &[])?;
-    let back = shell(api, session, "PUT", &format!("/api/f/{chat}/members/{member_id}"), Some(&json!({ "role": "viewer" })), &[])?;
+    let back = api.share(&chat, &member_id, "viewer")?;
     let again = s.eventually(SEARCH_WAIT, || theirs()["unread"] == 3);
     s.ok("removed and added again, the member counts all three again (their mark went with them)", out.status == 200 && back.status == 200 && again, theirs());
 
@@ -316,7 +316,8 @@ fn told(w: &mut Result<Socket, String>) -> Value {
 /// reloaded). Their Principal tells each socket only that the list
 /// changed, and the page reads it again. Valid: the shell's socket (its
 /// session, from the platform's own page) is told of a fragment made, one
-/// shared with them by someone else, an archive, a removal and a delete;
+/// shared with them by someone else, an invite to their email (as
+/// `invited`) and their yes to it, an archive, a removal and a delete;
 /// a second tab's is told too, and a key's (the CLI's) of its own list.
 /// Invalid: the session from any other page (no Origin, a fragment's), no
 /// one, or no upgrade. Its frame names nothing. Past the most sockets a
@@ -341,11 +342,68 @@ fn list_watch(s: &mut Suite, api: &Api, session: &str, id: &str) -> Result<()> {
     let r = api.create(&other, &theirs)?;
     let own = told(&mut cli);
     s.ok("a key's socket (the CLI's, naming no page) watches its own list: told of a fragment it made", r.status == 200 && own == changed, json!([r.status, own]));
-    let r = api.signed(&other, "PUT", &format!("/api/f/{theirs}/members/{id}"), Some(&json!({ "role": "viewer" })))?;
+    let r = api.share(&theirs, id, "viewer")?;
     let shared = told(&mut tab);
     let list = shell(api, session, "GET", "/api/fragments", None, &[])?;
     let listed = list.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == theirs.as_str() && f["role"] == "viewer"));
     s.ok("one someone else shares with them is told, and their list then has it", r.status == 200 && shared == changed && listed, json!([r.status, shared, list.body]));
+
+    // an invite to their email waits for their yes (decision 63): it is
+    // told as `invited`, naming nothing, to every tab, and the shell reads
+    // the invites then; their yes, the shell's with its session, is a share
+    // like any, told as a change of their list
+    let me = shell(api, session, "GET", "/api/identities/me", None, &[])?;
+    let email = me.body["email"].as_str().unwrap_or("").to_string();
+    // (the second tab was told of the share above too: its frame read here)
+    let shared_too = told(&mut second);
+    let asks = s.named(api, &other, "asks")?;
+    let r = api.create(&other, &asks)?;
+    let invited = json!({ "type": "invited" });
+    let r2 = api.signed(&other, "POST", &format!("/api/f/{asks}/invites"), Some(&json!({ "email": email, "role": "viewer" })))?;
+    let (one, two) = (told(&mut tab), told(&mut second));
+    let seen = shell(api, session, "GET", "/api/invites", None, &[])?;
+    let waits = seen.body["invites"].as_array().is_some_and(|l| l.iter().any(|i| i["fragment"] == asks.as_str() && i["email"] == email.as_str()));
+    s.ok(
+        "an invite to their email is told to every tab as `invited`, naming nothing, and the shell then reads it with its session (GET /api/invites)",
+        shared_too == changed && r.status == 200 && r2.status == 200 && !r2.body["invited"].is_null() && one == invited && two == invited && waits,
+        json!([shared_too, r2.body, one, two, seen.body]),
+    );
+    let yes = shell(api, session, "POST", &format!("/api/invites/{asks}/accept"), Some(&json!({})), &[])?;
+    let (one, two) = (told(&mut tab), told(&mut second));
+    let (one_more, two_more) = (told(&mut tab), told(&mut second));
+    let list = shell(api, session, "GET", "/api/fragments", None, &[])?;
+    let listed = list.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == asks.as_str() && f["role"] == "viewer"));
+    s.ok(
+        "their yes, the shell's with its session, is a share like any: told as a change of their list, which has it; and as `invited`, so another tab's sidebar drops it",
+        yes.status == 200 && one == changed && two == changed && one_more == invited && two_more == invited && listed,
+        json!([yes.body, one, two, one_more, two_more]),
+    );
+    // their no, in one tab: every tab is told, and it waits no more
+    let declined = s.named(api, &other, "asks-again")?;
+    let r = api.create(&other, &declined)?;
+    let r2 = api.signed(&other, "POST", &format!("/api/f/{declined}/invites"), Some(&json!({ "email": email, "role": "editor" })))?;
+    let (_, _) = (told(&mut tab), told(&mut second));
+    let no = shell(api, session, "POST", &format!("/api/invites/{declined}/decline"), Some(&json!({})), &[])?;
+    let (one, two) = (told(&mut tab), told(&mut second));
+    let seen = shell(api, session, "GET", "/api/invites", None, &[])?;
+    let gone = seen.body["invites"].as_array().is_some_and(|l| !l.iter().any(|i| i["fragment"] == declined.as_str()));
+    s.ok(
+        "their no, in one tab, is told to every tab as `invited` at once, and the invite waits no more",
+        r.status == 200 && r2.status == 200 && no.status == 200 && one == invited && two == invited && gone,
+        json!([no.body, one, two, seen.body]),
+    );
+    // an invite to a fragment deleted meanwhile goes from every tab too
+    let r2 = api.signed(&other, "POST", &format!("/api/f/{declined}/invites"), Some(&json!({ "email": email, "role": "viewer" })))?;
+    let (_, _) = (told(&mut tab), told(&mut second));
+    let deleted = api.signed(&other, "DELETE", &format!("/api/f/{declined}"), None)?;
+    let (one, two) = (told(&mut tab), told(&mut second));
+    let seen = shell(api, session, "GET", "/api/invites", None, &[])?;
+    let gone = seen.body["invites"].as_array().is_some_and(|l| !l.iter().any(|i| i["fragment"] == declined.as_str()));
+    s.ok(
+        "an invite to a fragment its owner deletes is told to every tab as `invited`, and waits no more",
+        r2.status == 200 && deleted.status == 200 && one == invited && two == invited && gone,
+        json!([deleted.body, one, two, seen.body]),
+    );
     let r = shell(api, session, "PUT", &format!("/api/fragments/{made}/archived"), Some(&json!({ "archived": true })), &[])?;
     let (one, two) = (told(&mut tab), told(&mut second));
     s.ok("an archive in one tab is told to every tab", r.status == 200 && one == changed && two == changed, json!([r.status, one, two]));
@@ -433,7 +491,7 @@ fn search_and_archive(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
     anyhow::ensure!(r.status == 200, "making the steps' chat: {r}");
     let gardener = api.person()?;
     let (hand, hand_id) = super::delegation::agent_of(api, &gardener)?;
-    let joined = shell(api, session, "PUT", &format!("/api/f/{steps}/members/{hand_id}"), Some(&json!({ "role": "editor" })), &[])?;
+    let joined = api.share(&steps, &hand_id, "editor")?;
     anyhow::ensure!(joined.status == 200, "an agent joins the chat: {joined}");
     let step = api.signed(&hand, "POST", &format!("/api/f/{steps}/channels/work"), Some(&json!({ "id": "w1", "body": { "kind": "turn.step", "turn": "t1", "step": 1, "text": "zucchini plans" } })))?;
     anyhow::ensure!(step.status == 200, "the agent posts its step: {step}");
@@ -518,7 +576,7 @@ fn search_and_archive(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
     let member = api.person()?;
     let outsider = api.person()?;
     let member_id = api.identity(&member)?;
-    let r = shell(api, session, "PUT", &format!("/api/f/{chat}/members/{member_id}"), Some(&json!({ "role": "viewer" })), &[])?;
+    let r = api.share(&chat, &member_id, "viewer")?;
     anyhow::ensure!(r.status == 200, "adding the member: {r}");
     let theirs = |keys: &fragment_nip98::Keys, q: &str| api.signed(keys, "GET", &format!("/api/search?q={}", query(q)), None);
     let found = s.eventually(SEARCH_WAIT, || theirs(&member, "tomatoes").is_ok_and(|r| !hits_in(&r, &chat).is_empty()));
@@ -528,7 +586,7 @@ fn search_and_archive(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
     let rows = || -> Result<(Value, Value)> { Ok((row(&mine()?), row(&api.signed(&member, "GET", "/api/fragments", None)?))) };
     let (_, lead) = super::delegation::agent_of(api, &member)?;
     let (_, second) = super::delegation::agent_of(api, &member)?;
-    let added = [&lead, &second].map(|a| shell(api, session, "PUT", &format!("/api/f/{chat}/members/{a}"), Some(&json!({ "role": "viewer" })), &[]));
+    let added = [&lead, &second].map(|a| api.share(&chat, a, "viewer"));
     let (my_row, their_row) = rows()?;
     s.ok(
         "agents added are named in every member's row, the first added first; the member's row shows the newest message from their own search",
@@ -611,7 +669,7 @@ fn search_and_archive(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
     s.ok("a removed member's search finds nothing of the chat, by its words or its title", gone && !titled, &r);
     let r = api.signed(&member, "PUT", &format!("/api/fragments/{chat}/archived"), Some(&json!({ "archived": false })))?;
     s.ok("nor may they archive it now (404)", r.status == 404, &r);
-    let r = shell(api, session, "PUT", &format!("/api/f/{chat}/members/{member_id}"), Some(&json!({ "role": "viewer" })), &[])?;
+    let r = api.share(&chat, &member_id, "viewer")?;
     anyhow::ensure!(r.status == 200, "adding the member again: {r}");
     let back = s.eventually(SEARCH_WAIT, || theirs(&member, "tomatoes").is_ok_and(|r| hits_in(&r, &chat).len() == 1));
     let member_list = list(Some(&member))?;
@@ -638,7 +696,7 @@ fn search_follows_reading(s: &mut Suite, api: &Api) -> Result<()> {
     let c = s.create(api, &owner, &name)?;
     s.commit(&c, &[("fragment.json", Some(OPEN))]);
     s.deploy(&c);
-    let add = |keys: &fragment_nip98::Keys| api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", keys.pubkey_hex()), Some(&json!({ "role": "viewer" })));
+    let add = |keys: &fragment_nip98::Keys| api.share(&name, keys.pubkey_hex(), "viewer");
     anyhow::ensure!(add(&viewer)?.status == 200, "adding the viewer");
     let post = |channel: &str, id: &str, text: &str| api.signed(&owner, "POST", &format!("/api/f/{name}/channels/{channel}"), Some(&json!({ "id": id, "body": { "text": text } })));
     let search = |keys: &fragment_nip98::Keys| api.signed(keys, "GET", "/api/search?q=rhubarb", None);
@@ -1691,7 +1749,7 @@ fn release_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session
     let other_email = format!("shell-ui-release-{run}@e2e.test");
     let other_session = api.sign_in(&other_email)?;
     let other_id = super::signin::who(api, &other_session)?["id"].as_str().unwrap_or("").to_string();
-    let shared = shell(api, session, "PUT", &format!("/api/f/{chat}/members/{other_id}"), Some(&json!({ "role": "editor" })), &[])?;
+    let shared = api.share(chat, &other_id, "editor")?;
     anyhow::ensure!(shared.status == 200, "the first chat shared with another account: {shared}");
     b.set_cookie(&platform, RELEASE_COOKIE, "")?;
     b.set_cookie(&platform, "fragment_session", &other_session)?;
@@ -3647,7 +3705,7 @@ fn sidebar_live(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let theirs = api.qualified(&other, "potluck")?;
     let r = api.create(&other, &theirs)?;
     anyhow::ensure!(r.status == 200, "the other person's app: {r}");
-    let r = api.signed(&other, "PUT", &format!("/api/f/{theirs}/members/{me}"), Some(&json!({ "role": "viewer" })))?;
+    let r = api.share(&theirs, &me, "viewer")?;
     let lent = both(b, &format!("{}?.dataset.role === 'viewer' && {}.title.endsWith('(viewer)')", row(&theirs), row(&theirs)));
     s.ok("an app someone else shares with them shows in both tabs' docks, as a viewer's", r.status == 200 && lent, &r);
     let there = b.eval(page, &format!("!!{}", row(&name)))? == true;
@@ -4427,7 +4485,7 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     let r = api.create_with(&other, json!({ "name": theirs, "template": "chat", "title": "Their chat" }))?;
     anyhow::ensure!(r.status == 200, "their chat: {r}");
     for (who, role) in [(first.as_str(), "editor"), (me_id.as_str(), "editor")] {
-        let r = api.signed(&other, "PUT", &format!("/api/f/{theirs}/members/{who}"), Some(&json!({ "role": role })))?;
+        let r = api.share(&theirs, who, role)?;
         anyhow::ensure!(r.status == 200, "a member of their chat: {r}");
     }
     let row = format!("#chats [data-key={}]", js(&format!("chat:{theirs}")));

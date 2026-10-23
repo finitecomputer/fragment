@@ -194,7 +194,7 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     let owner = api.person()?;
     let viewer = api.person()?;
     let (name, _) = jobs_fragment(s, api, &owner, "jobs", |_| {})?;
-    api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", viewer.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;
+    api.share(&name, viewer.pubkey_hex(), "viewer")?;
     let r = set_secret(api, &owner, &name, SECRET, &["127.0.0.1"])?;
     anyhow::ensure!(r.status == 200, "secret setup: {r}");
     let long = Duration::from_secs(40);
@@ -396,7 +396,7 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     let home = s.dir("jobs-cli");
     s.login(api, &home);
     let cli = s.cli_keys(&home).expect("the CLI logged in");
-    api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", cli.pubkey_hex()), Some(&json!({ "role": "editor" })))?;
+    api.share(&name, cli.pubkey_hex(), "editor")?;
     let wrong_id = wrong["id"].as_i64().unwrap_or(0).to_string();
     let r = s.cli_json(api, &home, &["runs", &name, "--status", "held", "--json"])?;
     s.ok("fragment runs --status held lists the held runs", r["runs"].as_array().is_some_and(|a| a.len() == 1 && a[0]["op"] == "wrong"), &r);
@@ -488,7 +488,7 @@ fn channel_run_inputs(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let editor = api.person()?;
     let (name, c) = jobs_fragment(s, api, owner, "gated", |m| m["channels"]["alarms"] = json!({ "read": "editor" }))?;
     for (who, role) in [(&viewer, "viewer"), (&editor, "editor")] {
-        api.signed(owner, "PUT", &format!("/api/f/{name}/members/{}", who.pubkey_hex()), Some(&json!({ "role": role })))?;
+        api.share(&name, who.pubkey_hex(), role)?;
     }
     api.op(owner, &name, "raise", "gated-1", json!({}))?;
     let mut id = 0;
@@ -563,7 +563,7 @@ fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
         m["triggers"].as_array_mut().expect("the fixture's triggers").push(json!({ "channel": "pings", "run": "ingest" }));
     })?;
     for (who, role) in [(&editor, "editor"), (&viewer, "viewer")] {
-        api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", who.pubkey_hex()), Some(&json!({ "role": role })))?;
+        api.share(&name, who.pubkey_hex(), role)?;
     }
     let (own, editor_id) = (api.status(&owner, &name)?.body["npub"].as_str().unwrap_or("").to_string(), api.identity(&editor)?);
     let path = format!("/api/f/{name}/schedules");

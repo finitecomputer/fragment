@@ -626,7 +626,9 @@ Checked against finite-mono's code (2026-10-08):
 settings (Paul, 2026-10-13: "fixed onboarding (shouldn't go through the
 settings page)").
 
-- **Who sees it:** a guest with nothing shared with them, who lands
+- **Who sees it:** a guest with nothing shared with them and no invite
+  waiting (an invitee lands at home, the invite in the sidebar to
+  accept: docs/api.md, Invites by email), who lands
   there from `/`. It holds a line of what this is, the one seat ($200 a
   month, always on, its time not metered, $100 of credit included each
   month) and a trial-code field, then Checkout, a line on what more

@@ -675,6 +675,17 @@ iframe[data-blocked] { display: none; }
 @media (prefers-reduced-motion: reduce) {
   .sidebar-agent::before, .sidebar-agent::after, .sidebar-new-chat::before, .sidebar-new-chat::after, .agent-menu-edge::before, .agent-menu-edge::after { transition: none; }
 }
+/* an invite waiting on the person's email, above their chats: what it
+   shares, who invited them and as what, Accept and Decline (shell.js renderInvites) */
+.invites { display: flex; flex: none; flex-direction: column; gap: 6px; max-height: 30vh; margin: 0 0 8px; overflow-y: auto; scrollbar-width: thin; }
+.invites[hidden] { display: none; }
+.invite { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 14px; }
+.invite-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.invite-from { overflow-wrap: anywhere; font-size: 12px; color: var(--text-secondary); }
+.invite-actions { display: flex; gap: 6px; margin-top: 6px; }
+.invite-actions button { height: 28px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-primary); font-size: 12px; font-weight: 600; }
+.invite-actions .invite-accept { border-color: transparent; background: var(--text-primary); color: var(--bg-window); }
+.invite-actions button:disabled { opacity: .55; cursor: default; }
 #chats { gap: 2px; padding: 0 0 6px; }
 #chats .chat-row { width: 100%; min-height: 32px; padding: 4px 10px; font-size: 14px; color: var(--text-secondary); }
 #chats .chat-row.active { color: var(--text-primary); }

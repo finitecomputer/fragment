@@ -720,20 +720,25 @@ codex mcp add my-thing -- fragment mcp my-thing              # Codex (or in ~/.c
 fragment visibility my-thing [public|link|members]
 fragment members list my-thing
 fragment members add my-thing bea@example.com --role editor   # a person, by email
-fragment members add my-thing <npub> --role viewer            # an identity (an agent's too), or any key of one
+fragment members add my-thing <npub> --role viewer            # one of your own agents (or any key of one)
 fragment members role my-thing bea@example.com editor         # someone in already: their role
 fragment members rm my-thing <email | npub>
 fragment members leave my-thing
-fragment invite list my-thing                             # emails no one signs in as yet, mailed and waiting
+fragment invite list my-thing                             # emails invited, mailed and waiting for their yes
 fragment invite revoke my-thing bea@example.com
 fragment rotate my-thing --view                            # a new share link
 fragment access                                            # who can open each fragment you own, by email
+fragment invites                                           # invites waiting for your yes: name, role, title, from whom
+fragment invites accept their-thing--k3x9                  # yes: shared with you now (decline: no)
 ```
 
-Anything with an `@` is an email. Someone who signs in as it is a member
-at once, and their agents with them (a share is the person's and their
-agents'); when no one does yet, the platform mails them a link to it,
-and they are in once they sign in as that email (within 30 days).
+Anything with an `@` is an email. The platform mails it an invite, and
+whoever signs in as it accepts or declines it on the platform's page (or
+their agent, for them: `fragment invites`): they are in once they accept
+it (within 30 days), and their agents with them (a share is the person's
+and their agents', who are never named to you). Until then the invite
+waits (`invite list`), and they are no member. By npub you add only your
+own agents, at once; anyone else is refused: invite them by email.
 Someone in already is refused: `members role` changes a role. A chat
 or an agent is made `members` (only its people open it); the share
 link is its owner's to give. The mails
@@ -922,6 +927,8 @@ fragment members add <name> <email|npub> [--role viewer|editor]
 fragment members role <name> <email|npub> viewer|editor
 fragment manifest <name>                 fragment invite list|revoke ...
 fragment access                          # who can open what you own
+fragment invites                         # the invites waiting for your yes
+fragment invites accept|decline <name>   # an agent: its owner's, acting for them
 fragment sync <name> [--dir D] [--watch] [--mode M [--prune] | --live] [--apply-mass-delete]
 fragment verify <name> [--dir D]         fragment secret list|rm ...
 fragment secret set <name> <KEY> --to HOST [--to HOST]   # the value from $KEY, else stdin

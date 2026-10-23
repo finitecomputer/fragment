@@ -63,8 +63,9 @@ const promptDeck = { hand: APP_PROMPTS.map((_, i) => i).slice(0, PROMPT_HAND), d
 // title, agents, preview, sharing, archived: a chat's agents the lead
 // first, and its newest message); computer: theirs, with its agents;
 // agents: by identity; computerFailed: whether the last read of their computer
-// failed (what an earlier one said stays: a failure is not "none")
-const state = { me: null, guest: false, fragments: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null };
+// failed (what an earlier one said stays: a failure is not "none");
+// invites: those waiting on their emails, theirs to answer (`GET /api/invites`)
+const state = { me: null, guest: false, fragments: [], invites: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null };
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -787,6 +788,62 @@ function renderChats() {
     return row;
   });
   patch($("chats"), rows.length ? rows : [el("div", "empty-row", chats().length ? "Every chat is archived" : state.guest ? "Chats shared with you show here" : "Your chats will appear here")]);
+}
+
+// ---- invites: shared by email, and theirs only once they accept (decision 63) ----
+// The invites waiting on the emails the person signs in with, above their
+// chats: what each shares, who shared it, and as what, with Accept and
+// Decline. Read as the page starts, as its list's socket opens, and when
+// the socket says they changed (`invited`: one made, renewed or taken
+// back). Accepted, it is in their list, and opens; declined, it goes.
+const invitesRead = { asked: 0, shown: 0 };
+async function loadInvites() {
+  const mine = ++invitesRead.asked;
+  // failed, what was read before stays: a failure is not "none"
+  const got = await api("GET", "/api/invites").catch(() => null);
+  if (!got || mine < invitesRead.shown) return;
+  invitesRead.shown = mine;
+  state.invites = got.invites ?? [];
+  renderInvites();
+}
+function renderInvites() {
+  const rows = state.invites.map((i) => {
+    const box = el("div", "invite");
+    box.dataset.key = `invite:${i.fragment}`;
+    box.dataset.invite = i.fragment;
+    const may = i.role === "editor" ? "edit" : "view";
+    box.append(el("strong", "invite-title", i.title), el("span", "invite-from", `${i.from ?? "Someone"} invited you to ${may} it`));
+    const actions = el("div", "invite-actions");
+    actions.append(inviteButton(i, "accept", "Accept"), inviteButton(i, "decline", "Decline"));
+    box.append(actions);
+    return box;
+  });
+  patch($("invites"), rows);
+  $("invites").hidden = !rows.length;
+}
+// What it shares opens as its kind does: a chat in the middle, else a window.
+const openShared = (name) => (byName(name)?.kind === "chat" ? openChat(name) : openApp(name));
+function inviteButton(invite, verb, text) {
+  const b = el("button", `invite-${verb}`, text);
+  b.type = "button";
+  b.onclick = async () => {
+    const both = [...b.parentElement.children];
+    for (const x of both) x.disabled = true;
+    try {
+      await api("POST", `/api/invites/${seg(invite.fragment)}/${verb}`, {});
+      await Promise.all([load(), loadInvites()]);
+      if (verb === "accept") { openShared(invite.fragment); leaveSidebar(); }
+    } catch (e) {
+      // gone (taken back, answered in another tab, run out): read again, and
+      // one theirs already (accepted elsewhere) opens
+      await Promise.all([load(), loadInvites()]).catch(() => {});
+      if (e.status === 404 && verb === "accept" && byName(invite.fragment)) return openShared(invite.fragment);
+      const gone = e.status === 404 ? "It isn't open any more: it was taken back, answered, or ran out." : "Try again in a moment.";
+      notice(verb === "accept" ? "The invite wasn't accepted" : "The invite wasn't declined", gone);
+      for (const x of both) x.disabled = false;
+    }
+  };
+  return b;
 }
 // The agent's own menu: where it is doing something (each chat opens),
 // another chat with it, its name, its profile and its screen. A chat's own
@@ -2308,13 +2365,12 @@ let accessBy = "fragment";
 // an identity too long to read whole: its npub's ends
 const shortId = (id) => (id.length > 16 ? `${id.slice(0, 9)}…${id.slice(-4)}` : id);
 // a member as the view names them, and what they are to the person; a
-// person's agents reach what they do (a share is "all the pubkeys under the
-// umbrella of this email": Paul, 2026-10-13)
-// (an agent by its title, its agent fragment's: docs/api.md, "An agent's
-// name and picture")
-const theirAgents = (m) => (m.agents ?? []).map((a) => a.title ?? a.name ?? shortId(a.principal));
+// person's agents reach what they do, never named (decision 63: "I invite
+// Skyler and his agents, not Skyler and his agent Agent123")
+// (an agent member by its title, its agent fragment's: docs/api.md, "An
+// agent's name and picture")
 function accessWho(m) {
-  if (m.kind !== "agent") return { name: m.email ?? shortId(m.principal), about: theirAgents(m).length ? `with their agents ${theirAgents(m).join(", ")}` : "" };
+  if (m.kind !== "agent") return { name: m.email ?? shortId(m.principal), about: "" };
   if (m.owner === state.me.id) {
     const mine = state.agents.get(m.principal);
     return { name: mine ? titleOf(mine.fragment) : m.title ?? m.name ?? shortId(m.principal), about: "your agent" };
@@ -2355,7 +2411,7 @@ function accessByFragment(rows) {
     }
     for (const i of row.invites ?? []) {
       const li = el("li");
-      li.append(el("span", "access-who", i.email), el("span", "muted", `invited as ${(ROLE[i.role] ?? i.role).toLowerCase()}, not signed in yet`));
+      li.append(el("span", "access-who", i.email), el("span", "muted", `invited as ${(ROLE[i.role] ?? i.role).toLowerCase()}, waiting for their yes`));
       people.append(li);
     }
     if (row.more) people.append(el("li", "muted", `and ${row.more} more`));
@@ -2383,35 +2439,28 @@ function accessByFragment(rows) {
 // their owners, and those anyone may open
 function accessByPerson(rows) {
   const people = new Map();
-  const add = (key, name, about, row, role, agents = []) => {
-    if (!people.has(key)) people.set(key, { name, about, rows: [], agents: new Set() });
+  const add = (key, name, about, row, role) => {
+    if (!people.has(key)) people.set(key, { name, about, rows: [] });
     people.get(key).rows.push({ row, role });
-    for (const a of agents) people.get(key).agents.add(a);
   };
   for (const row of rows) {
     for (const m of row.members ?? []) {
       // the person's own agents see all of theirs anyway (decision 44)
       if (m.kind === "agent" && m.owner === state.me.id) continue;
       const who = accessWho(m);
-      add(m.principal, who.name, m.kind === "agent" ? who.about : "", row, ROLE[m.role] ?? m.role, theirAgents(m));
+      add(m.principal, who.name, m.kind === "agent" ? who.about : "", row, ROLE[m.role] ?? m.role);
     }
-    for (const i of row.invites ?? []) add(`invite:${i.email}`, i.email, "invited, not signed in yet", row, ROLE[i.role] ?? i.role);
+    for (const i of row.invites ?? []) add(`invite:${i.email}`, i.email, "invited, waiting for their yes", row, ROLE[i.role] ?? i.role);
   }
   const anyone = rows.filter((r) => r.sharing?.visibility === "public");
   const linked = rows.filter((r) => r.sharing?.visibility === "link");
   const list = el("div", "access-list");
-  const group = (name, about, entries, open = true, agents = []) => {
+  const group = (name, about, entries, open = true) => {
     const item = el("details", "access-person");
     item.open = open;
     const summary = el("summary");
     summary.append(el("span", "access-who", name), el("span", "muted", [about, `${entries.length} ${entries.length === 1 ? "fragment" : "fragments"}`].filter(Boolean).join(" · ")));
     const ul = el("ul", "access-people");
-    // a person's agents, with the same access as them
-    for (const a of agents) {
-      const li = el("li", "access-agent");
-      li.append(el("span", "access-who", a), el("span", "muted", "their agent, the same access"));
-      ul.append(li);
-    }
     for (const { row, role } of entries) {
       const li = el("li");
       const open = el("button", "access-name", byName(row.name) ? titleOf(row.name) : row.title || labelOf(row.name));
@@ -2423,7 +2472,7 @@ function accessByPerson(rows) {
     item.append(summary, ul);
     list.append(item);
   };
-  for (const p of people.values()) group(p.name, p.about, p.rows, true, [...p.agents]);
+  for (const p of people.values()) group(p.name, p.about, p.rows, true);
   if (anyone.length) group("Everyone", "public: no link needed", anyone.map((row) => ({ row, role: "Viewer" })));
   if (linked.length) group("Anyone with the share link", "you hold the links; each sheet copies its own", linked.map((row) => ({ row, role: "Viewer" })), false);
   if (!list.children.length) list.append(el("p", "muted", "No one else can open anything of yours."));
@@ -3162,8 +3211,9 @@ async function welcome() {
   const trial = q.get("trial");
   const foot = el("div", "welcome-foot");
   foot.append(noSeatSaid(), switchForm(trial ? `${WELCOME}?trial=${encodeURIComponent(trial)}` : WELCOME));
-  // someone shared something with them first: it is still theirs to open
-  if (state.fragments.length) {
+  // someone shared something with them first, or invited them: it is still
+  // theirs to open, or to answer
+  if (state.fragments.length || state.invites.length) {
     const home = el("a", "quiet", "Not now");
     home.href = "/";
     foot.append(home);
@@ -3510,10 +3560,14 @@ function watchList() {
     clearTimeout(opening);
     watching.wait = 1000;
     listChanged();
+    loadInvites().catch(() => {});
   };
   ws.onmessage = (e) => {
     try {
-      if (JSON.parse(e.data).type === "changed") listChanged();
+      const type = JSON.parse(e.data).type;
+      if (type === "changed") listChanged();
+      // the invites waiting on their emails (the registry's), and only those
+      else if (type === "invited") loadInvites().catch(() => {});
     } catch {}
   };
   ws.onclose = () => {
@@ -3768,25 +3822,28 @@ async function start(open) {
     throw e;
   }
   state.me = me;
-  const [, mine] = await Promise.all([load(), api("GET", "/api/seat").catch(() => null)]);
+  const [, mine] = await Promise.all([load(), api("GET", "/api/seat").catch(() => null), loadInvites()]);
   setGuest(!!mine?.guest);
   watchList();
   if (!open && location.pathname === WELCOME) return welcome();
   // the first agent is made at home; settings open as asked, chats or not;
-  // a guest makes nothing (decision 49): with nothing shared with them,
-  // their home is the welcome; once something is (an invitee's), it is
-  // what is shared with them, and a seat offered. A seat of theirs (not the
-  // deployment's plan) may reach their ledger a moment after it is given:
-  // its first run waits for it (`seatFirst`)
+  // a guest makes nothing (decision 49): with nothing shared with them, nor
+  // an invite waiting, their home is the welcome; once something is (an
+  // invitee's), it is what is shared with them, and a seat offered. A seat
+  // of theirs (not the deployment's plan) may reach their ledger a moment
+  // after it is given: its first run waits for it (`seatFirst`)
   const settings = !open && location.pathname === SETTINGS;
   if (!open && !settings && await owesFirstAgent()) return creatingAgent(mine?.seat ? {} : null);
-  if (!state.fragments.length && !open && !settings && state.guest) return welcome();
+  if (!state.fragments.length && !state.invites.length && !open && !settings && state.guest) return welcome();
   showLayout();
   const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);
   if (settings) await openSettings(false);
   else if (pick) openChat(pick);
   else if (state.guest) guestHome(mine.offer);
   else notice("No chats yet", "Make an agent to start.");
+  // an invite waits, and nothing it shares is open yet: a phone's sidebar,
+  // where it is answered, shows over the page
+  if (!settings && !pick && state.invites.length && layout.narrow) layout.show("left");
   // after a reload for a new release, its windows where they were
   reopenWindows(settings);
   prewake();
@@ -3815,7 +3872,7 @@ function guestHome(offer) {
     at(WELCOME);
     welcome().catch((err) => notice("This page did not load", err.message));
   };
-  notice("You're a guest", [`You see and edit what people share with you: it shows in the sidebar as they share it. ${seatGives(offer)}`, noSeatSaid()], [...(offer ? [seat] : []), switchForm("/", "allow")]);
+  notice("You're a guest", [`You see and edit what people share with you, once you accept their invite in the sidebar. ${seatGives(offer)}`, noSeatSaid()], [...(offer ? [seat] : []), switchForm("/", "allow")]);
 }
 
 start().catch((e) => {

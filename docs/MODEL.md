@@ -205,7 +205,9 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   transaction; a revoke closes that principal's sockets. The `events`
   channel records every change. Membership leaves `fragment.json` (a git
   commit can no longer grant access). Only the owner manages members,
-  invites, visibility, and tokens; a member may leave. Members name
+  invites, visibility, and tokens; a member may leave, and no one is
+  made a member of someone else's fragment but by their own yes to an
+  invite (decision 63: a direct add is the owner's own agents). Members name
   identities, so replacing a key rewrites no grant. Each identity's list
   of fragments is an index in its own `Principal` cell, fed from the
   fragment's outbox. A request sends at most one round of the outbox (32
@@ -263,7 +265,7 @@ Every change is checked against this table.
 | File bytes, their history, `main` and `live` | code.storage git | a local folder is a disposable working copy |
 | Tree index (path, size, SHA per pinned commit) | derived from git | in the cell's SQLite; names its pinned SHA; moved by the platform's own moves (its commits, a deploy), a writer's refresh after its push, or the poll backstop |
 | Manifest and declared operations | `fragment.json` in git | the cell's copy at the pin; an invalid one at a new pin keeps the last good and says why (`status.code.error`) |
-| Members, roles, invites | the fragment's supervisor | grants and revokes are transactional; `events` records each. The registry keeps each invite waiting on an email against that email, to meet it at a sign-in: a pointer the fragment overrules (one with none waiting is forgotten); a claim the fragment could not take is tried again by the registry's alarm, bounded, then waits on the next sign-in |
+| Members, roles, invites | the fragment's supervisor | grants and revokes are transactional; `events` records each. The registry keeps each invite waiting on an email against that email, with its role, the title it was sent with and its sharer, for the person who signs in as it to accept or decline (decision 63; `GET /api/invites` reads it): a pointer the fragment overrules (an accept or a decline the fragment finds none waiting for is forgotten; a revoke tells the registry to forget it). An invite from before decision 63 (no role) is met at a sign-in still, and a claim the fragment could not take is tried again by the registry's alarm, bounded, then waits on the next sign-in |
 | Cell state (supervisor tables, the operation ledger, channels, the app's SQL) | the Durable Objects' own storage | none |
 | A platform object's schema: its tables, and the steps that made them | its class's steps, `crates/core/migrations/<class>/` (Schemas, below) | each object's `_schema` holds the steps it took (number, name, SHA, ran or adopted) and refuses code whose steps differ (`schema_refused`); `crates/core/migrations/schema.lock` locks each step and what the steps make, and `cargo xtask check` holds the tree to it. An app facet's SQLite is its author's |
 | The release a call between the Worker and an object (or two objects) was made by | the caller's `FRAGMENT_DEPLOY_ID`, its deploy's commit, and `FRAGMENT_DEPLOYED_AT`, its deploy's second (Calls between releases, below) | stamped on each call (`x-fragment-release`, `x-fragment-release-deployed`) and checked first by the object, which refuses another's (503 `deploying`) before it acts, and restarts onto it when it was deployed later; never stored |

@@ -882,7 +882,9 @@ runaround".
 48. **Sharing is by email** (Paul: shared fragments "feel like sharing
     google docs"). The share sheet and the CLI take an email and a
     role.
-    - A person who holds that verified email is a member at once.
+    - (Changed by decision 63: every invite waits for its person's yes,
+      in the shell; signing in meets nothing.) A person who holds that
+      verified email is a member at once.
     - Otherwise the invite waits on the email, and the platform mails a
       link to the fragment. Whoever signs in with that verified email
       becomes a member as the invite said, from then on by their npub.
@@ -1282,6 +1284,67 @@ Paul:
       and charged from its meter outbox under `step:<step's key>`, once
       whatever attempt or replay makes the call; one that fails for good
       is charged nothing, as nothing was held.
+
+63. **An invite waits for its person's yes** (Paul, 2026-10-22: "When
+    inviting someone as an editor on a fragment it shouldn't auto add to
+    their app list, they should see the invite somewhere in shell and be
+    able to accept it"). It changes decision 48's first bullet; the rest
+    of 48 holds.
+    - An invite by email (the share sheet's Add, `fragment members add
+      <name> <email>`, an agent's for its owner) is never a membership at
+      once, whether someone signs in as the email already or not yet: it
+      waits on the email in the fragment and in the registry, which mails
+      it a link to the platform's page (never the fragment's) and keeps,
+      beside it, the role, the title it was sent with and whose day it
+      counted in.
+    - Whoever signs in with that verified email sees it at the top of
+      the shell's sidebar (`GET /api/invites`), and accepts it (`POST
+      /api/invites/<name>/accept`: the fragment's claim, as a sign-in's
+      was) or declines it (`…/decline`: taken back, as a revoke). Their
+      open pages are told as one is made, renewed, revoked, answered (in
+      another tab, or by their agent) or its fragment deleted (`{type:
+      "invited"}` on the list's socket), so it goes from every sidebar at
+      once. Signing in meets nothing.
+    - Their agent answers for them (Paul, 2026-10-22: "It can already
+      publish for you and edit your own stuff! Why shouldn't it be able
+      to handle 'skyler invited me to edit a fragment, do you see it?'"):
+      signed with `for` its owner and not held below them, an agent
+      lists, accepts and declines its owner's invites (`fragment invites`,
+      `fragment invites accept|decline <name>`); its yes makes its owner
+      a member. Any other agent is 403.
+    - An invite is to a person and their agents: accepted, their agents
+      reach it acting for them (R17, as any share of a person's), and
+      none is ever named to anyone else ("I invite Skyler and his agents,
+      not Skyler and his agent Agent123"): not in the invite, its mail,
+      the API's answers, the share sheet, the access view, nor an export.
+    - Adding someone directly (`PUT members`, by npub, key or email) works
+      only within one person (Paul: "I shouldn't be able to add someone
+      to something and then it just shows up for them. That's weird: it
+      means I could spam people that don't know me with fragments"): the
+      owner, or their agent for them, adds the owner's own agents. Anyone
+      else is 403, saying to invite them by email instead (refusing is
+      simpler than turning an npub into an invite: an npub names no email
+      to mail). A role change of someone in already is no add. The e2e's
+      setups share by a lever (`/api/test/fragment {op: "member"}`).
+    - The wire is added to, never changed: `POST invites` answers
+      `{invited}` (the shape it answered for an email no one held);
+      `{member}` stays a shape clients read, which no invite answers now;
+      the access view's `agents` is never sent. An agent's invite keeps
+      working, and its CLI says the person is in once they accept it; a
+      shipped CLI or Hermes image that adds a person by npub gets the
+      refusal, saying to invite by email.
+    - Invites mailed before it (their registry row names no role) said
+      "sign in to open it": a sign-in still meets them, until the last
+      runs out (docs/technical-debt-ledger.md, "Invites from before their
+      yes").
+    - Open: a person in someone else's fragment cannot add their own agent
+      there as a member (only its owner manages members); their agents
+      reach it acting for them, but a chat's @ roster lists its member
+      agents alone.
+    - Status (2026-10-22): approved by Paul with the four changes above
+      (agents answer for their owner, direct adds within one person,
+      agents unnamed, an answer goes from every tab); built on
+      `claude/editor-invites`.
 
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 

@@ -54,7 +54,11 @@
 //!
 //!   Their computer tells the same sockets when what its owner is told of
 //!   it changes (`/changed`, from the Computer DO: `tell_changed`), so a
-//!   page reads it again with the list.
+//!   page reads it again with the list. The registry tells them when the
+//!   invites waiting on their emails change (`/invited`, `tell_invited`:
+//!   one made, renewed or taken back), as `{type: "invited"}`, naming
+//!   nothing, so a page reads those again (`GET /api/invites`), and only
+//!   those: the list is told of an invite accepted, a share like any.
 //! - **Their export** (docs/api.md, Export; export.rs): everything that is
 //!   theirs as one archive in R2, built here on this cell's alarm, which is
 //!   its only use, its place kept in its tables (`exports`, `export_tail`,
@@ -88,6 +92,9 @@ const WATCH_TAG: &str = "watch";
 const HELLO: &str = r#"{"type":"hello"}"#;
 /// What a watching socket is told of a change: no more.
 const CHANGED: &str = r#"{"type":"changed"}"#;
+/// What it is told of a change to the invites waiting on its person's
+/// emails, which the registry holds: no more.
+const INVITED: &str = r#"{"type":"invited"}"#;
 
 /// The columns `/list` and a search read of a row, its listed records
 /// (`listed`), a chat's newest search
@@ -392,6 +399,11 @@ impl PrincipalCell {
                 self.tell();
                 Ok(Response::from_json(&json!({ "ok": true }))?)
             }
+            // the invites waiting on their emails changed (the registry's)
+            (Method::Post, "/invited") => {
+                self.tell_with(INVITED);
+                Ok(Response::from_json(&json!({ "ok": true }))?)
+            }
             (m, p) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {p}", m.as_ref()))),
         }
     }
@@ -495,10 +507,15 @@ impl PrincipalCell {
     /// (closing as it is told) is its page's to reconnect, which reads the
     /// list again then.
     fn tell(&self) {
+        self.tell_with(CHANGED);
+    }
+
+    /// Tells every watching socket `frame` (`CHANGED`, `INVITED`).
+    fn tell_with(&self, frame: &str) {
         let watching = self.state.get_websockets_with_tag(WATCH_TAG);
         assert!(watching.len() <= limits::LIST_WATCHERS_MAX, "a list holds at most its watchers");
         for ws in watching {
-            let _ = ws.send_with_str(CHANGED);
+            let _ = ws.send_with_str(frame);
         }
     }
 
@@ -759,9 +776,20 @@ impl PrincipalCell {
 /// reads the list, and their computer, again. A page that missed it reads
 /// again as it reconnects.
 pub(crate) async fn tell_changed(env: &Env, identity: &str) -> CellResult<()> {
+    tell_pages(env, identity, "changed").await
+}
+
+/// Tells `identity`'s open pages that the invites waiting on their emails
+/// changed (the registry's, registry/invites.rs): each reads them again. A
+/// page that missed it reads them again as it reconnects.
+pub(crate) async fn tell_invited(env: &Env, identity: &str) -> CellResult<()> {
+    tell_pages(env, identity, "invited").await
+}
+
+async fn tell_pages(env: &Env, identity: &str, route: &str) -> CellResult<()> {
     let mut init = RequestInit::new();
     init.with_method(Method::Post);
-    let req = Request::new_with_init("https://principal.internal/changed", &init)?;
+    let req = Request::new_with_init(&format!("https://principal.internal/{route}"), &init)?;
     let resp = crate::routed::send(env, "PRINCIPAL", identity, req).await?;
     if resp.status_code() != 200 {
         return Err(CellError::host(format!("{identity}'s list answered {} to a change", resp.status_code())));

@@ -1242,7 +1242,8 @@ fn sells_nothing(s: &mut Suite, b: &mut Lease, api: &Api, guest: &dyn Fn(&Api, &
     anyhow::ensure!(made.status == 200, "making the app to share: {made}");
     let app = made.body["name"].as_str().unwrap_or("").to_string();
     let r = api.signed(&owner, "POST", &format!("/api/f/{app}/invites"), Some(&json!({ "email": email, "role": "editor" })))?;
-    anyhow::ensure!(r.status == 200, "sharing it with the guest: {r}");
+    let yes = api.signed(&gus, "POST", &format!("/api/invites/{app}/accept"), Some(&json!({})))?;
+    anyhow::ensure!(r.status == 200 && yes.status == 200, "sharing it with the guest, and their yes: {r} {yes}");
     let page = page_of(b, api, &session, "/")?;
     let home = view(b, &page, &format!("location.pathname === '/' && !!document.querySelector('.viewer iframe[data-fragment={app:?}]') && (document.getElementById('notice')?.innerText ?? '').includes({CLOSED:?})"), wait);
     let seen = json!({ "buying": b.eval(&page, BUYS)?, "row": b.eval(&page, "[...document.querySelectorAll('#notice .notice-row > *')].map((e) => e.textContent)")? });
@@ -1677,9 +1678,11 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     );
     b.close(page)?;
 
-    // ---- an invited guest: someone with a seat shares an app they titled
-    // with the guest's email, and the guest lands on it, not the welcome
+    // ---- an invited guest: someone with a seat invites the guest's email
+    // to an app they titled; the guest lands home, not the welcome, the
+    // invite in their sidebar (decision 63), and their Accept opens it
     let owner = api.person()?;
+    let owner_email = Api::email_of(&owner);
     let label = format!("garden-{}", &Keys::generate().pubkey_hex()[..6]);
     let made = api.signed(&owner, "POST", "/api/fragments", Some(&json!({ "label": label, "template": "todo", "title": "Garden plans" })))?;
     anyhow::ensure!(made.status == 200, "making the app to share: {made}");
@@ -1689,6 +1692,23 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "sharing it with the guest: {r}");
     let session = api.sign_in(&Api::email_of(&bea))?;
     let page = page_of(&mut b, api, &session, "/")?;
+    let invite = format!("#invites .invite[data-invite={app:?}]");
+    let waits = view(
+        &mut b,
+        &page,
+        &format!("location.pathname === '/' && !!document.querySelector({:?}) && !document.querySelector('#apps [data-key=\"app:{app}\"]') && /accept their invite in the sidebar/.test(document.getElementById('notice')?.innerText ?? '')", format!("{invite} .invite-accept")),
+        wait,
+    );
+    let said = b.eval(&page, &format!("document.querySelector({invite:?})?.innerText ?? ''"))?;
+    let _ = b.screenshot(&page, &shots.join("6-invited-guest-invite.png"));
+    s.ok(
+        "an invited guest lands home, not the welcome: the invite in their sidebar, titled as its owner titled it, from whom and as what, with Accept and Decline; nothing of it in their dock yet, and their note says where to accept it",
+        waits && said.as_str().is_some_and(|t| t.contains("Garden plans") && t.contains(&format!("{owner_email} invited you to edit it")) && t.contains("Decline")),
+        &said,
+    );
+    if !act(s, &mut b, &page, "the invite's Accept", &click(&format!("{invite} .invite-accept")))? {
+        return Ok(());
+    }
     let landed = view(
         &mut b,
         &page,
@@ -1715,7 +1735,7 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     b.eval(&page, "(document.getElementById('search-dialog')?.dispatchEvent(new Event('cancel')), true)")?;
     b.until(&page, "!document.getElementById('search-dialog')?.open", wait);
     s.ok(
-        "an invited guest lands home on what was shared with them, not the welcome: its window open and titled as its owner titled it, a seat offered beside it, and no control that only fails (their launcher only finds)",
+        "their Accept opens what was shared with them: its window open and titled as its owner titled it, a seat offered beside it, and no control that only fails (their launcher only finds)",
         landed && row == json!("Garden plans") && found && makes == json!([]),
         json!({ "row": row, "makes": makes }),
     );
