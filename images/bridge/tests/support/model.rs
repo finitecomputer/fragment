@@ -53,6 +53,12 @@
 //! at `GET /v1/models` as the intercept does (`CHEAP_ID`, `FALLBACK_ID`:
 //! the ids the fake API's view names, `ids`).
 //!
+//! It speaks too, `POST /v1/audio/speech` in OpenAI's shape, as the
+//! route's `speech` does: an MP3's ID3 tag and the text (`SPOKEN`), for a
+//! call that names its agent and the model `speech`, recording its body
+//! and key. `speak: <text>` is a `text_to_speech` call of that text, and
+//! its answer sends the file it made (its `MEDIA:` tag, as `send:`'s).
+//!
 //! It answers transcriptions too, `POST /v1/audio/transcriptions` in
 //! OpenAI's multipart shape, as the route's `whisper` does (decision 9):
 //! the text is the words a memo (`memo`, a WAV) says in a chunk of its own,
@@ -214,6 +220,9 @@ fn unhurried(body: &Value) -> bool {
 pub const WRITTEN: &str = "written by the agent\n";
 /// The image the model's server serves at `/generated/…png`: a 1×1 PNG,
 /// one pixel of the agents' violet.
+/// The audio the speech route answers with: an MP3's ID3 tag, then the
+/// text it spoke.
+pub const SPOKEN: &[u8] = b"ID3 spoken: ";
 pub const IMAGE: &[u8] = b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0d\x49\x44\x41\x54\x78\x9c\x63\x58\xd1\xfd\xea\x3f\x00\x07\x19\x03\x1d\x5b\xc5\x9f\x97\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82";
 /// What Hermes' memory review saves (its `memory` tool, `add`).
 pub const REMEMBERED: &str = "Paul tests the bridge in Docker.";
@@ -271,6 +280,8 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     let desk = last_user.lines().find_map(|l| l.split_once("desk: ").and_then(|(_, a)| serde_json::from_str::<Value>(a.trim()).ok())).filter(Value::is_object);
     // `write: <path>`: Hermes' write_file puts `WRITTEN` there
     let write = last_user.lines().find_map(|l| l.split_once("write: ").map(|(_, p)| p.trim().to_string())).filter(|p| !p.is_empty());
+    // `speak: <text>`: Hermes' text_to_speech says it
+    let speak = last_user.lines().find_map(|l| l.split_once("speak: ").map(|(_, t)| t.trim().to_string())).filter(|t| !t.is_empty());
     // `code: <python>`: Hermes' execute_code runs that line
     let code = last_user.lines().find_map(|l| l.split_once("code: ").map(|(_, p)| p.trim().to_string())).filter(|p| !p.is_empty());
     // `clarify: <question> | <choice> | …`: Hermes' clarify asks it, with those choices
@@ -288,6 +299,11 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
         if send.is_some() {
             let made: String = result.split_once("made=").map(|(_, rest)| rest.chars().take_while(|c| !c.is_whitespace() && !matches!(c, '"' | '\\' | ',')).collect()).unwrap_or_default();
             return (format!("scripted: sent\nMEDIA:{made}"), None);
+        }
+        if speak.is_some() {
+            // the audio file text_to_speech made, sent as a model sends it: Hermes' `MEDIA:` tag
+            let made: String = result.split_once("MEDIA:").map(|(_, rest)| rest.chars().take_while(|c| !c.is_whitespace() && !matches!(c, '"' | '\\' | ',')).collect()).unwrap_or_default();
+            return (format!("scripted: spoken\nMEDIA:{made}"), None);
         }
         if run.is_some() || start.is_some() || notify.is_some() || browse.is_some() || look || desk.is_some() || write.is_some() || code.is_some() || clarify.is_some() || dm.is_some() || dm_back.is_some() {
             return (format!("scripted: the tool said: {}", result.chars().take(4000).collect::<String>()), None);
@@ -375,6 +391,16 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
         let args = json!({ "questions": [{ "question": q[0], "choices": q[1..] }] });
         return if offered("clarify") { (String::new(), Some(call("clarify", args))) } else { ("scripted: no clarify among my tools".into(), None) };
     }
+    if let Some(text) = speak {
+        let args = json!({ "text": text });
+        return if offered("text_to_speech") {
+            (String::new(), Some(call("text_to_speech", args)))
+        } else if deferred("text_to_speech") {
+            (String::new(), Some(call("tool_call", json!({ "calls": [{ "name": "text_to_speech", "arguments": args }] }))))
+        } else {
+            ("scripted: no text_to_speech among my tools".into(), None)
+        };
+    }
     if let Some(code) = code {
         let args = json!({ "code": code });
         return if offered("execute_code") {
@@ -414,6 +440,19 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Respons
         return net::json_answer(StatusCode::OK, &json!({ "object": "list", "data": [model(CHEAP_ID), model(FALLBACK_ID)] }));
     }
     let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+    if path.ends_with("/audio/speech") {
+        let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        calls.lock().unwrap().push(Call { path, model: v["model"].as_str().unwrap_or("").into(), agent: agent.clone(), tier, stream: false, body: v.clone(), authorization: authorization.clone() });
+        let keyed = authorization.as_deref().and_then(|a| a.strip_prefix("Bearer agent:"));
+        if agent.is_none() && keyed.is_none() {
+            return net::refusal(StatusCode::UNAUTHORIZED, "unauthenticated", "name the agent this call is for");
+        }
+        if v["model"] != "speech" {
+            return net::refusal(StatusCode::BAD_REQUEST, "invalid", "speech's model is \"speech\"");
+        }
+        let audio = [SPOKEN, v["input"].as_str().unwrap_or("").as_bytes()].concat();
+        return Response::builder().status(StatusCode::OK).header("content-type", "audio/mpeg").body(http_body_util::Full::new(bytes::Bytes::from(audio))).unwrap();
+    }
     if path.ends_with("/audio/transcriptions") {
         let (fields, answer) = transcription(&content_type, &body, &agent, &authorization);
         calls.lock().unwrap().push(Call { path, model: fields["model"].as_str().unwrap_or("").into(), agent, tier, stream: false, body: fields, authorization });

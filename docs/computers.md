@@ -1127,6 +1127,18 @@ expires within 30 days. The container application is the deployment's
 
   The Docker lane's `a_voice_memo_is_transcribed_through_the_route`
   proves it.
+- **Its voice** goes to `speech` (OpenAI's tts-1 through the AI
+  Gateway; Paul, 2026-10-22), whatever the agent's tier.
+  - **Config.** Each profile has `tts: {provider: openai, openai:
+    {base_url: <route>/v1, api_key: "agent:<name>", model: speech,
+    voice: alloy}}`.
+  - **When it runs.** Hermes' `text_to_speech`, and its replies in
+    voice when its owner turns `/voice` on, each a reply's audio part.
+    Any of tts-1's voices speaks the text's own language.
+  - **Before (2026-10-22).** An agent offered the ElevenLabs key spoke
+    through it (`tts.provider: elevenlabs`), with no zero data retention
+    and one flat price a call; one without it, through Edge's speech.
+    ElevenLabs' key stays the music skill's.
 - A call is at most 6 MiB (`fragment_core::models::MODEL_BODY_MAX_BYTES`):
   Hermes shrinks a screenshot (a 1456-pixel long side for a capture) and
   sends it whole; one refused as too large (413) it shrinks to 5 MiB of
@@ -1270,8 +1282,9 @@ the provider's own hosts.
   Hermes' tool selections are the image's `profile_config`, conditional on
   the agent's currently held placeholders, never just `credentialEnv`:
   Firecrawl sets `web.backend`, `search_backend` and `extract_backend`;
-  FAL sets `image_gen.provider: fal`, `model: fal-ai/flux-2/klein/9b`;
-  ElevenLabs sets `tts.provider: elevenlabs`. Without those credentials
+  FAL sets `image_gen.provider: fal`, `model: fal-ai/flux-2/klein/9b`.
+  `tts` is the route's `speech` whatever is offered (Its voice, above).
+  Without those credentials
   the category is untouched, so Hermes keeps its keyless defaults. With
   only Perplexity, `web.search_backend: perplexity`; when Firecrawl is
   also offered it wins for full-page extraction (Perplexity returns
@@ -2197,7 +2210,7 @@ and how a runtime finds them, is the image's.
   `hermes-boot` writes each agent's placeholders into its profile's `.env`
   under their variables (`PERPLEXITY_API_KEY=fck_perplexity_…`), which
   Hermes reads again at every turn, so its own tools (its Perplexity web
-  search, ElevenLabs speech, xAI) use them too; and the profile's config
+  search, ElevenLabs music, xAI) use them too; and the profile's config
   lists the catalog's allowed variables (`credentialEnv`) in its terminal's
   passthrough, including `GOOGLE_OAUTH_ACCESS_TOKEN` and `X_API_BEARER_TOKEN`.
   Provider names are left out of that list (Hermes otherwise warns on

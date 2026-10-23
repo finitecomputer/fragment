@@ -117,8 +117,9 @@ anything Google. If it is unset, Google is not connected: ask your owner
 to connect it, and it reaches you within seconds. `PERPLEXITY_API_KEY`,
 `XAI_API_KEY` and the others work the same way.
 
-When offered, native `web_search` and `web_extract` use Firecrawl, native
-`image_generate` uses FAL, and `text_to_speech` uses ElevenLabs. With
+When offered, native `web_search` and `web_extract` use Firecrawl, and
+native `image_generate` uses FAL. `text_to_speech` always speaks through
+the platform, in the text's own language. With
 only Perplexity offered, native search uses Perplexity. With
 `XAI_API_KEY`, native `x_search` searches X posts. Check which variables
 are set first: deployments may offer a subset.
