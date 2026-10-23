@@ -93,16 +93,34 @@ pub struct Computer {
     /// platform before them.
     #[serde(default)]
     pub models: Option<ModelIds>,
+    /// Each slot's stale patience, where the deployment names one
+    /// (`modelPatience`, beside `models`); none, the runtime's own.
+    #[serde(default, rename = "modelPatience")]
+    pub model_patience: StaleTimeouts,
 }
 
 /// The model route's models' ids, by its names: what a call may name each
-/// slot by besides its name.
+/// slot by besides its name. Route name to id, nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelIds {
     pub cheap: String,
     pub medium: String,
     pub fallback: String,
     pub vision: String,
+}
+
+/// How long an agent's call to a slot's model may stream nothing before
+/// its runtime gives up on it, in seconds (an hour at most, the platform's
+/// bound), where the deployment's `models.<slot>.stale_timeout_s` names it;
+/// none, the runtime's own.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaleTimeouts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cheap: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub medium: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<u32>,
 }
 
 /// A model's id, at most (`anthropic/claude-sonnet-5.5`; the platform's

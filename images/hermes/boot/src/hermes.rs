@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use fragment_bridge::api::{model_id_ok, ModelIds};
+use fragment_bridge::api::{model_id_ok, ModelIds, StaleTimeouts};
 use fragment_bridge::runtime::relay::wire;
 use fragment_bridge::runtime::Agent;
 
@@ -183,14 +183,38 @@ impl MainModel {
 pub struct Route {
     pub base: String,
     pub ids: ModelIds,
+    /// Each slot's stale patience, as the view names it (`modelPatience`).
+    pub patience: StaleTimeouts,
 }
 
 impl Route {
     /// The route at `base`, its ids the view's (`models`), or the route's
-    /// own names, which it takes as well, from a platform that names none.
-    pub fn new(base: &str, models: Option<&ModelIds>) -> Route {
+    /// own names, which it takes as well, from a platform that names none;
+    /// its slots' patience the view's (`modelPatience`).
+    pub fn new(base: &str, models: Option<&ModelIds>, patience: StaleTimeouts) -> Route {
         let names = || ModelIds { cheap: Tier::Cheap.name().into(), medium: Tier::Medium.name().into(), fallback: FALLBACK_MODEL.into(), vision: VISION_MODEL.into() };
-        Route { base: base.into(), ids: models.cloned().unwrap_or_else(names) }
+        Route { base: base.into(), ids: models.cloned().unwrap_or_else(names), patience }
+    }
+
+    /// How long a text tier's call may stream nothing before Hermes kills
+    /// it: its slot's patience as the view names it (`modelPatience`: the
+    /// deployment's `models.<tier>.stale_timeout_s`), else `STALE_TIMEOUT_S`.
+    pub fn stale_timeout_s(&self, tier: Tier) -> u32 {
+        let named = match tier {
+            Tier::Cheap => self.patience.cheap,
+            Tier::Medium => self.patience.medium,
+            Tier::High => None,
+        };
+        named.unwrap_or(STALE_TIMEOUT_S)
+    }
+
+    /// Whether a text tier's agent has a fallback to switch to: the
+    /// route's `fallback` runs another model than its tier's. One id is one
+    /// model at one place (the platform refuses an id two slots run at two:
+    /// `fragment_core::models::Models::parse`), so a fallback of the tier's
+    /// own id is the same server, which a switch would only ask twice.
+    pub fn falls_back(&self, tier: Tier) -> bool {
+        self.ids.fallback != self.tier(tier)
     }
 
     /// The model a tier agent's profile names: its tier's id (`high`, off
@@ -225,11 +249,15 @@ pub const TRANSCRIBE_MODEL: &str = "whisper";
 pub const FALLBACK_MODEL: &str = "fallback";
 /// How long a tier agent's call may stream nothing before Hermes kills it
 /// (its `providers.<id>.models.<model>.stale_timeout_seconds`; Paul,
-/// 2026-10-09): a stalled call is tried once more (`HERMES_STREAM_RETRIES`,
+/// 2026-10-09), unless its slot names its own (`Route::stale_timeout_s`): a
+/// stalled call is tried once more (`HERMES_STREAM_RETRIES`,
 /// `gateway_env`), then the agent switches to `fallback_providers` (its
 /// `agent.api_max_retries: 1`), about 40 s after the stall began. GLM-5.3
 /// Flash's first bytes are 1 to 5 s; DeepSeek's were 11 to 61 s when
-/// Workers AI was short of it.
+/// Workers AI was short of it. A model that streams a tool call's arguments
+/// in one piece at its end is silent for as long as it writes them (NInfer:
+/// 22 s for a 300-line page, 2026-10-22): its slot names
+/// more.
 pub const STALE_TIMEOUT_S: u32 = 20;
 /// Hermes' in-place retries of a stream that dropped or went stale
 /// (`HERMES_STREAM_RETRIES`, its default 2): one, so a stall reaches the
@@ -507,24 +535,33 @@ pub fn profile_config(agent: &Agent, name: &str, main: &MainModel, reasoning: Re
     ));
     // A text tier's stall (Paul, 2026-10-09: a time-based fallback "only if
     // time-based fallback is built into hermes"; it is): Hermes' own stale
-    // detector kills a call that streams nothing for `STALE_TIMEOUT_S`
-    // (this model's alone: `vision`, whose answers are whole and slower,
-    // keeps Hermes' default), tries it once more (`STREAM_RETRIES`), then,
-    // its one retry spent (`api_max_retries`, in `agent` above), switches to its
-    // `fallback_providers`: the route's `fallback`, the deployment's
-    // fallback model by its id, through the intercept as the agent (its key
-    // names the agent). The next turn starts on its tier again (Hermes'
-    // `restore_primary_runtime`). The route itself falls back when a model
-    // answers 429 or a 5xx (cell/src/models.rs); this is for a call that
-    // answers nothing. An owner's own model and the high tier have none.
+    // detector kills a call that streams nothing for its slot's patience
+    // (`Route::stale_timeout_s`: `STALE_TIMEOUT_S` unless the slot names
+    // its own; this model's alone: `vision`, whose answers are whole and
+    // slower, keeps Hermes' default), tries it once more (`STREAM_RETRIES`),
+    // then, its one retry spent (`api_max_retries`, in `agent` above),
+    // switches to its `fallback_providers`: the route's `fallback`, the
+    // deployment's fallback model by its id (its slot's patience too, if it
+    // names one), through the intercept as the agent (its key names the
+    // agent). The next turn starts on its tier again (Hermes'
+    // `restore_primary_runtime`). A fallback on the tier's own model is
+    // none (`Route::falls_back`): switching to it asks the one server
+    // twice (a self-hosted Bonsai, 2026-10-22). The route itself falls back when
+    // a model answers 429 or a 5xx (cell/src/models.rs); this is for a call
+    // that answers nothing. An owner's own model and the high tier have none.
     if let MainModel::Tier(tier @ (Tier::Cheap | Tier::Medium)) = main {
-        y.push_str(&format!("providers:\n  custom:\n    models:\n      {}:\n        stale_timeout_seconds: {STALE_TIMEOUT_S}\n", q(route.tier(*tier))));
-        y.push_str(&format!(
-            "fallback_providers:\n  - provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: {}\n",
-            q(&format!("{base}/v1")),
-            q(&route.ids.fallback),
-            q(&format!("agent:{}", agent.fragment))
-        ));
+        y.push_str(&format!("providers:\n  custom:\n    models:\n      {}:\n        stale_timeout_seconds: {}\n", q(route.tier(*tier)), route.stale_timeout_s(*tier)));
+        if route.falls_back(*tier) {
+            if let Some(s) = route.patience.fallback {
+                y.push_str(&format!("      {}:\n        stale_timeout_seconds: {s}\n", q(&route.ids.fallback)));
+            }
+            y.push_str(&format!(
+                "fallback_providers:\n  - provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: {}\n",
+                q(&format!("{base}/v1")),
+                q(&route.ids.fallback),
+                q(&format!("agent:{}", agent.fragment))
+            ));
+        }
     }
     // Stored selections, never inferred by Hermes from credential presence.
     // Only placeholders actually held by this agent count: the catalog's
@@ -1034,7 +1071,7 @@ mod tests {
     }
 
     fn route(base: &str) -> Route {
-        Route::new(base, Some(&ids()))
+        Route::new(base, Some(&ids()), StaleTimeouts::default())
     }
 
     /// Valid, renamed, replay and invalid: an agent's profile config tells
@@ -1068,7 +1105,7 @@ mod tests {
     fn the_routes_ids_are_the_views() {
         let r = route("http://m");
         assert_eq!((r.tier(Tier::Cheap), r.tier(Tier::Medium), r.tier(Tier::High)), (CHEAP_ID, MEDIUM_ID, "high"), "high has no slot");
-        let named = Route::new("http://m", None);
+        let named = Route::new("http://m", None, StaleTimeouts::default());
         assert_eq!((named.tier(Tier::Cheap), named.tier(Tier::Medium), named.ids.fallback.as_str(), named.ids.vision.as_str()), ("cheap", "medium", "fallback", "vision"));
     }
 
@@ -1121,6 +1158,66 @@ mod tests {
         assert!(!m.contains("reasoning"), "a profile's own, never the overlay's, which would win over it: {m}");
     }
 
+    /// Goal (a self-hosted Bonsai, 2026-10-22): a text tier's stale patience is
+    /// its slot's, as the computer's view names it, else 20 s as before;
+    /// a fallback on the tier's own model is none (one server, asked
+    /// twice), while another model stays its switch, with its own slot's
+    /// patience beside it when that names one. Valid: with patience and
+    /// without, one tier's alone, a fallback the same as the tier's and
+    /// another, and a view from before patience. Replay: the same view,
+    /// the same config; another patience, another config (rewritten).
+    #[test]
+    fn a_tiers_patience_is_its_slots_and_its_own_server_is_no_fallback() {
+        let creds = Path::new("/c.sh");
+        let config = |ids: &ModelIds, patience: StaleTimeouts, tier: Tier| profile_config(&agent(), "Juniper", &tier.into(), Reasoning::High, &Route::new("http://model.fragment.internal", Some(ids), patience), &[], creds);
+        let stale = |id: &str, s: u32| format!("      {}:\n        stale_timeout_seconds: {s}\n", q(id));
+        let models = |entries: &[String]| format!("providers:\n  custom:\n    models:\n{}", entries.concat());
+        let fallback = |id: &str| format!("fallback_providers:\n  - provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: {}\n    api_key: \"agent:juniper--k3x9\"\n", q(id));
+        let none = StaleTimeouts::default();
+        // without: the tier's model 20 s, the fallback's Hermes' own
+        for (tier, id) in [(Tier::Cheap, CHEAP_ID), (Tier::Medium, MEDIUM_ID)] {
+            let c = config(&ids(), none, tier);
+            assert!(c.contains(&format!("{}{}", models(&[stale(id, STALE_TIMEOUT_S)]), fallback(FALLBACK_ID))), "{c}");
+        }
+        // with: each tier's slot's, and the fallback's beside it
+        let patient = StaleTimeouts { cheap: Some(900), medium: Some(300), fallback: Some(600) };
+        let c = config(&ids(), patient, Tier::Cheap);
+        assert!(c.contains(&format!("{}{}", models(&[stale(CHEAP_ID, 900), stale(FALLBACK_ID, 600)]), fallback(FALLBACK_ID))), "{c}");
+        let m = config(&ids(), patient, Tier::Medium);
+        assert!(m.contains(&format!("{}{}", models(&[stale(MEDIUM_ID, 300), stale(FALLBACK_ID, 600)]), fallback(FALLBACK_ID))), "{m}");
+        // one tier's alone: the other tier's 20 s, and no fallback's
+        let one = StaleTimeouts { cheap: Some(900), ..none };
+        assert!(config(&ids(), one, Tier::Cheap).contains(&format!("{}{}", models(&[stale(CHEAP_ID, 900)]), fallback(FALLBACK_ID))));
+        assert!(config(&ids(), one, Tier::Medium).contains(&format!("{}{}", models(&[stale(MEDIUM_ID, STALE_TIMEOUT_S)]), fallback(FALLBACK_ID))));
+        // one server for every slot (Bonsai): its patience, and nothing to switch to
+        let bonsai = ModelIds { cheap: "bonsai-2-27b".into(), medium: "bonsai-2-27b".into(), fallback: "bonsai-2-27b".into(), vision: "bonsai-2-27b".into() };
+        let all = StaleTimeouts { cheap: Some(900), medium: Some(900), fallback: Some(900) };
+        for tier in [Tier::Cheap, Tier::Medium] {
+            let b = config(&bonsai, all, tier);
+            assert!(b.contains(&models(&[stale("bonsai-2-27b", 900)])) && b.matches("stale_timeout_seconds").count() == 1, "{b}");
+            assert!(!b.contains("fallback_providers"), "no fallback to its own server: {b}");
+            assert!(b.contains("  api_max_retries: 1\n"), "one retry still: {b}");
+        }
+        assert!(!config(&bonsai, none, Tier::Cheap).contains("fallback_providers"), "whatever its patience");
+        // the fallback on one tier's model: that tier has none, the other still switches
+        let shared = ModelIds { fallback: MEDIUM_ID.into(), ..ids() };
+        assert!(config(&shared, none, Tier::Cheap).contains(&fallback(MEDIUM_ID)));
+        assert!(!config(&shared, none, Tier::Medium).contains("fallback_providers"));
+        // a platform that names no ids: by the route's names, which differ, so it falls back
+        let named = Route::new("http://model.fragment.internal", None, none);
+        assert!(named.falls_back(Tier::Cheap) && named.falls_back(Tier::Medium) && named.stale_timeout_s(Tier::Cheap) == STALE_TIMEOUT_S);
+        // replay, and a change of patience (the boot rewrites each profile when the view's models or patience change)
+        assert_eq!(config(&ids(), patient, Tier::Cheap), config(&ids(), patient, Tier::Cheap));
+        assert_ne!(config(&ids(), patient, Tier::Cheap), config(&ids(), none, Tier::Cheap));
+        // the view's wire: patience is `modelPatience`, beside `models`, whose ids alone a guest lists
+        let view = |extra: &str| serde_json::from_str::<fragment_bridge::api::Computer>(&format!(r#"{{"computer": "c", "owner": "o", "agents": [], "models": {{"cheap": "a", "medium": "b", "fallback": "c", "vision": "d"}}{extra}}}"#)).unwrap();
+        assert_eq!(view("").model_patience, none, "a view from before patience reads as none");
+        let given = view(r#", "modelPatience": {"cheap": 900}"#);
+        assert_eq!(given.model_patience, StaleTimeouts { cheap: Some(900), ..none });
+        assert_eq!(serde_json::to_value(given.models.unwrap()).unwrap(), serde_json::json!({ "cheap": "a", "medium": "b", "fallback": "c", "vision": "d" }), "models is route name to id, nothing else");
+        assert_eq!(serde_json::to_value(StaleTimeouts { cheap: Some(900), ..none }).unwrap(), serde_json::json!({ "cheap": 900 }), "no nulls");
+    }
+
     /// Goal: a new agent without settings runs on Flash, its config naming
     /// the cheap tier's model by its id and saying its tier; with no ids
     /// given, by the tier's name. Method: read no agent.json and check the
@@ -1131,7 +1228,7 @@ mod tests {
         let config = profile_config(&agent(), "Juniper", &tier.into(), DEFAULT_REASONING, &route("http://model.fragment.internal"), &[], Path::new("/c.sh"));
         assert!(config.contains("  default: \"z-ai/glm-5.3-flash\"\n"), "{config}");
         assert!(config.contains("  default_headers:\n    x-fragment-agent: \"juniper--k3x9\"\n    x-fragment-tier: \"cheap\"\n"), "{config}");
-        let named = Route::new("http://model.fragment.internal", None);
+        let named = Route::new("http://model.fragment.internal", None, StaleTimeouts::default());
         let config = profile_config(&agent(), "Juniper", &tier.into(), DEFAULT_REASONING, &named, &[], Path::new("/c.sh"));
         assert!(config.contains("  default: \"cheap\"\n") && config.contains("    model: \"fallback\"\n"), "{config}");
     }

@@ -71,13 +71,36 @@ pub struct ComputerAgent {
 
 /// The model route's models' ids by the route's names
 /// (`fragment_core::models::Models::ids_by_name`): what a call may name
-/// each slot by besides its name.
+/// each slot by besides its name. A map of route name to id, which pages
+/// and guests list: nothing else goes in it (patience is `ComputerView`'s
+/// `model_patience`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelIds {
     pub cheap: String,
     pub medium: String,
     pub fallback: String,
     pub vision: String,
+}
+
+/// How long an agent's call to a slot's model may stream nothing before
+/// its runtime gives up on it, in seconds, where the deployment's
+/// `models.<slot>.stale_timeout_s` names it
+/// (`fragment_core::models::STALE_TIMEOUT_S_MAX` at most); none, the
+/// runtime's own. Vision's calls keep the runtime's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaleTimeouts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cheap: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub medium: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<u32>,
+}
+
+impl StaleTimeouts {
+    pub fn is_none(&self) -> bool {
+        *self == StaleTimeouts::default()
+    }
 }
 
 /// What a provider's credential is (docs/computers.md, "Connections and
@@ -296,6 +319,11 @@ pub struct ComputerView {
     /// runs, and its owner's pages show the model each agent runs by its id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<ModelIds>,
+    /// The guest's view only: each slot's stale patience, where the
+    /// deployment names one (`modelPatience`, beside `models`, omitted when
+    /// none is named).
+    #[serde(default, skip_serializing_if = "StaleTimeouts::is_none")]
+    pub model_patience: StaleTimeouts,
     /// What its last start that came up restored (docs/computers.md, "What
     /// a wake restored"); none before its first.
     #[serde(default, skip_serializing_if = "Option::is_none")]

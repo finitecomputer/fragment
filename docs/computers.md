@@ -835,11 +835,14 @@ expires within 30 days. The container application is the deployment's
   - `GET /api/computer` → `{computer, owner, image, agents: [{fragment,
     identity, name, owner, connections, modelProviders?, credentials:
     [{provider, kind, env, placeholder, hosts, modelBase?}]}],
-    credentialEnv, models: {cheap, medium, fallback, vision}}`: the agents
+    credentialEnv, models: {cheap, medium, fallback, vision},
+    modelPatience?: {cheap?, medium?, fallback?}}`: the agents
     to run, each one's credentials (below, Connections and operator keys;
     `modelProviders` names those of them with a `modelBase`, as its owner's
-    view does: "An agent's own model"), and the model route's models'
-    ids by its names (below, Models, "A model by its id"). **They
+    view does: "An agent's own model"), the model route's models'
+    ids by its names (below, Models, "A model by its id"), and the
+    seconds a call to a slot's model may stream nothing where the
+    deployment names them (below, Models; omitted when none). **They
     may change while the computer runs** (its owner assigns or unassigns
     an agent, connects an account, narrows an agent): the guest reads them
     again while awake and runs the new set, with nothing restarted. The
@@ -1103,6 +1106,19 @@ expires within 30 days. The container application is the deployment's
   again (Hermes' `restore_primary_runtime`). An owner's own model and the
   high tier have none. The Docker lane stalls the scripted model to prove
   it (images/bridge/tests/docker.rs).
+  A slot of the deployment's `models` may name its own patience,
+  `stale_timeout_s` (a tier's or the fallback's, 1 to 3,600 s): the
+  guest's view carries it (`modelPatience`, by slot, beside `models`,
+  whose route name to id map it never enters) and the
+  image writes it for that slot's model in place of the 20 s (the
+  fallback's beside it; none named, Hermes' own, as before). A model that
+  streams a long tool call's arguments in one piece at its end is silent
+  for as long as it writes them (a self-hosted NInfer: 22 s for a
+  300-line page, 2026-10-22), so its slots name more. A
+  fallback that runs the tier's own model (one id is one model at one
+  place) is no fallback: the profile names none, as switching to it would
+  only ask the same server twice (the route's own fallback skips the same
+  upstream too: `Tries`).
 - A call its owner's ledger refuses (zero credit or a canceled seat:
   402 `budget_used_up`; a guest: 403) gets the ledger's reason, and no
   call is made.
