@@ -971,6 +971,27 @@ fn made_while_its_seat_sync_fails(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
+/// A computer woken for the first time (nothing to restore, so its start
+/// waits on no exec) is awake once its container takes an exec: put to
+/// sleep at once, its sleep holds, saves and stops it. On a sandcastle
+/// node a start that answered before its guest was up let the sleep's
+/// hold meet the engine's 409 "still starting", and the computer stayed
+/// awake, unsaved (docs/self-host.md, seam 2).
+fn woken_then_slept_at_once(s: &mut Suite, api: &Api) -> Result<()> {
+    let person = api.person()?;
+    let made = api.signed(&person, "POST", "/api/computers", Some(&json!({})))?;
+    let id = made.body["computer"].as_str().unwrap_or("").to_string();
+    let woke = api.signed(&person, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
+    let slept = api.signed(&person, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+    let saved = newest_save(api, &id);
+    s.ok(
+        "woken for the first time and put to sleep at once, it saves and sleeps",
+        woke.body["phase"] == "awake" && slept.body["phase"] == "asleep" && saved["generation"] == 1 && slept.body["notices"].as_array().is_none_or(|l| l.is_empty()),
+        json!({ "woke": woke.body["phase"], "slept": slept.body, "save": saved }),
+    );
+    Ok(())
+}
+
 /// An agent's routine (docs/chat-records.md, `tasks`): the record a
 /// scheduled record on its own fragment's `tasks` appends, as `fragment
 /// schedule add --routine` builds it.
@@ -1868,6 +1889,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     s.ok("it sleeps at the end", r.body["phase"] == "asleep", &r);
     made_while_its_seat_sync_fails(s, &api)?;
+    woken_then_slept_at_once(s, &api)?;
 
     // at zero credit agents stop, and no wake starts (decision 27): an
     // operator makes its owner a guest
