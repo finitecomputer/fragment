@@ -16,7 +16,7 @@ is how the home network plays a company's.
 | puts one TLS edge in front of the apps | `fragment-lan`'s front door on :443: `https://fragment.home.arpa`, fragments at `https://<label>--<suffix>.fragment.home.arpa`, Dex at `https://dex.fragment.home.arpa`; WebSockets and event streams pass through |
 | runs an identity provider | Dex v2.46.1 (pinned by digest), one static user per person, passwords in files; the cell signs people in through OpenID Connect |
 | runs a secrets service | OpenBao 2.7.1 (pinned by checksum), on loopback: the cell's own secrets, read with a token that reads nothing else (docs/self-host.md, seam 12) |
-| runs the model on its own network | Bonsai (NInfer on this box, `http://127.0.0.1:18087/v1`) |
+| runs the model on its own network | Bonsai (NInfer on this box, behind Caddy: `http://bonsai.localhost/v1`) |
 | runs the workloads on its own machines | sandcastle's engine on the box (microVMs, jailed) behind a `sandcastle-node` the stack runs; a person's own machine (the Mac) paired to them |
 | opens the firewall to the office subnet only | ufw: 53, 80 and 443 from 192.168.50.0/24 |
 | runs a mail server | **none yet**: the platform sends no mail (docs/technical-debt-ledger.md, "No mail without Email Sending"). Invite people by email as usual and **share the link yourself**: the invite is met when they sign in with that email |
@@ -136,10 +136,12 @@ cd ~/dev/finite/fragment-home
 ```
 
 **The model**, Bonsai, for every tier (a deployment's `models`, as its
-config writes them: docs/self-host.md, seam 3). Its URL is NInfer's own
-port: the platform refuses `http://bonsai.localhost/v1`. Bonsai has no
-list price, so each slot names its ceiling, zero. NInfer takes no key, but
-the slot names one, so the key's file holds any word. Each slot's patience
+config writes them: docs/self-host.md, seam 3), at its name on this box,
+`http://bonsai.localhost/v1` (Caddy on port 80, routing by name to
+NInfer; a local fleet's model may be http to this machine by any local
+name). Bonsai has no list price, so each slot names its ceiling, zero.
+NInfer takes no key, but the slot names one, so the key's file holds any
+word. Each slot's patience
 is 900 s: a local model can stream nothing for longer than the agent's
 20 s for cloud models (a long prompt, another caller ahead of it on the
 GPU, a tool call sent whole at its end), and the agent would give up on
@@ -149,16 +151,16 @@ it (docs/self-host.md, found 42):
 mkdir -p -m 700 ~/.local/state/fragment-lan
 cat > ~/.local/state/fragment-lan/models.jsonc <<'JSON'
 {
-  "cheap":    { "provider": "openai", "base_url": "http://127.0.0.1:18087/v1", "key": "fragment-bonsai-key", "model": "bonsai-2-27b",
+  "cheap":    { "provider": "openai", "base_url": "http://bonsai.localhost/v1", "key": "fragment-bonsai-key", "model": "bonsai-2-27b",
                 "body": { "provider": { "max_price": { "prompt": 0, "completion": 0 } } }, "stale_timeout_s": 900 },
-  "medium":   { "provider": "openai", "base_url": "http://127.0.0.1:18087/v1", "key": "fragment-bonsai-key", "model": "bonsai-2-27b",
+  "medium":   { "provider": "openai", "base_url": "http://bonsai.localhost/v1", "key": "fragment-bonsai-key", "model": "bonsai-2-27b",
                 "body": { "provider": { "max_price": { "prompt": 0, "completion": 0 } } }, "stale_timeout_s": 900 },
-  "fallback": { "provider": "openai", "base_url": "http://127.0.0.1:18087/v1", "key": "fragment-bonsai-key", "model": "bonsai-2-27b",
+  "fallback": { "provider": "openai", "base_url": "http://bonsai.localhost/v1", "key": "fragment-bonsai-key", "model": "bonsai-2-27b",
                 "body": { "provider": { "max_price": { "prompt": 0, "completion": 0 } } }, "stale_timeout_s": 900 }
 }
 JSON
 (umask 077; echo none > ~/.local/state/fragment-lan/model.key)
-curl -s http://127.0.0.1:18087/v1/models   # names bonsai-2-27b
+curl -s http://bonsai.localhost/v1/models   # names bonsai-2-27b
 ```
 
 **The images.** Computers run Hermes (our image) in microVMs on the box's
@@ -309,12 +311,13 @@ names under it only: the phone will not trust it for any other site.
    to ask (the die deals three more; later, **Add** in its dock). Tap one,
    make it yours in the composer, and send it. The agent builds it on its
    computer with the `fragment` CLI and deploys it, a minute or two on
-   Bonsai; the app appears in the dock. **On the LAN the agent cannot open
-   the app from its own computer** (a computer reaches no private address,
-   and the box is one), so it may spend its turn trying, and say it could
-   not check the page: the app works, open it from the dock. Its preview
-   card (the page as the platform shot it after the deploy) shows over its
-   icon where there is a pointer, on the Mac; a phone shows the icon.
+   Bonsai; the app appears in the dock. It opens the app from its own
+   computer to check it, with its browser or `curl` (a computer reaches
+   no private address, but the platform's own hosts reach the platform
+   through it: docs/computers.md, "The platform's hosts"), and gives you
+   its link. Its preview card (the page as the platform shot it after the
+   deploy) shows over its icon where there is a pointer, on the Mac; a
+   phone shows the icon.
 6. **Live**: tap the app in the dock (it opens in a window), and open its
    address in a second Safari tab (the window's ⋯, Copy link): each says
    "you and 1 other here". Add something in one; it shows in the other at

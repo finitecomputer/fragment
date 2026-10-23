@@ -138,7 +138,8 @@ image | containerSnapshot})`, the instance its custom size (2 vCPU, 6 GiB,
 {stderr: "combined", signal})` (an abort is a SIGKILL frame) and the SDK's
 piped stdin and stdout; `signal(n)`; `destroy(reason)`;
 `getTcpPort(port).fetch` (HTTP and WebSocket); `snapshotContainer({name})`;
-`interceptOutboundHttp(s)` (the api and model hosts, the swap's hosts, and
+`interceptOutboundHttp(s)` (the api and model hosts, the platform's own
+hosts by a glob, `*.<zone>`: seam 9, found 40; the swap's hosts, and
 `DirectoryBackup`'s gateway, set again by each save: a binding replaced,
 never a new intercept); and `setInactivityTimeout`, nothing on a node (the
 Computer's own sleep stops it). Snapshots, master's cache of the save, are
@@ -293,7 +294,7 @@ Bonsai on this box, every tier and the fallback:
 
 ```jsonc
 {
-  "cheap":    { "provider": "openai", "base_url": "http://127.0.0.1:18087/v1", "key": "bonsai-key", "model": "bonsai-2-27b",
+  "cheap":    { "provider": "openai", "base_url": "http://bonsai.localhost/v1", "key": "bonsai-key", "model": "bonsai-2-27b",
                 "body": { "provider": { "max_price": { "prompt": 0, "completion": 0 } } },
                 "stale_timeout_s": 900 },
   "medium":   { … the same },
@@ -301,10 +302,14 @@ Bonsai on this box, every tier and the fallback:
 }
 ```
 
-- **Its URL** is NInfer's own port, not Caddy's `http://bonsai.localhost/v1`:
-  the route takes https on a host name, or on a fleet whose egress is local
-  `http://127.0.0.1:<port>` (`catalog::row_url`), and refuses the rest
-  (found 36).
+- **Its URL** is Caddy's name for it, `http://bonsai.localhost/v1`: the
+  route takes https on a host name, or on a fleet whose egress is local
+  http to this machine by any local name, a loopback address,
+  `localhost` or a name under `.localhost`, on any port or none
+  (`catalog::Plain::Local`; found 36, which Paul answered yes,
+  2026-10-22). celld and workerd both reach such a name on this box
+  through its resolver (systemd-resolved answers `*.localhost` with
+  loopback): the platform resolves nothing itself.
 - **Its price** is its slot's ceiling, zero: a self-hosted model has no
   list price, and master prices a model the book lacks only from
   `body.provider.max_price`, OpenRouter's field, which goes to the server
@@ -693,6 +698,41 @@ intranet runs it, every part the stack's child:
   canary: a deployment's `hermes` by digest; on a node, a load's digest,
   and a rebuild is a new one, so a computer is told an update is ready).
   `FRAGMENT_NODES_FILE` replaces the list.
+- **An agent opens the apps it makes** (found 40, done 2026-10-22): the
+  engine refuses a computer every private address, and the platform's
+  hosts are the box's, so an agent built and deployed an app, then spent
+  its turn failing to open it. Each computer now intercepts the
+  platform's own hosts, its origin and `*.<zone>`, on the platform's
+  scheme and port, as it does `api.fragment.internal`, and the platform
+  answers them itself (`egress_platform`; docs/computers.md, "The
+  platform's hosts"). It is master's behaviour, not the LAN's: on
+  Cloudflare the same requests go through the platform rather than the
+  internet. **Whose request it is:** exactly what the guest put on it, as
+  a browser's anywhere: an app shared by link opens with its share link,
+  one for its members alone opens to no one, its owner a member and all.
+  The intercept adds no one: not the owner (whose session a computer
+  never holds), not an agent (whose requests are `api.fragment.internal`'s,
+  signed as itself). It sets only what an edge sets: the scheme and port
+  dialed, and `cf-connecting-ip` as the computer's id, which a limit
+  counts by. A name under the zone that is no host of this deployment's
+  (Dex's) is the router's 404: nothing past the platform. Hermes' browser
+  trusts the interception CA by Chrome's managed policy
+  (`CACertificates`): Chrome for Testing, Hermes' pinned Chromium, reads no
+  system bundle, so every intercepted HTTPS page was an interstitial in
+  it, on Cloudflare too. Node takes it from the system bundle with
+  `NODE_USE_SYSTEM_CA=1` (its own roots refused it).
+- **With the internet off** (Paul's lockdown, 2026-10-22: later, not
+  built): the platform's hosts reach the platform and nothing past it, so
+  the design holds with `enableInternet: false`. A test fleet's lever,
+  `offline {on}`, starts a computer so (nothing else does); the
+  computers lane then opens its owner's app through the platform, reads
+  its view through the API, calls a model through the route, and reaches
+  no public host. The flag already ran end to end (the cell's start, the
+  node, the engine's `Policy.internet`); the cell passed `true` to every
+  start. What a mode needs past this: a setting that starts computers so,
+  in place of the lever; and whatever Hermes fetches from the internet
+  (skills from npm or a CDN, its installs, the CLI's updates) then fails
+  unless the platform serves it.
 - **The state** is `~/.local/state/fragment-lan` by default, outside the
   checkout: the CA, Dex's secrets, OpenBao's, the box's node's, and the
   deployment's models (`models.jsonc`, `model.key`), which dev reads when
@@ -724,6 +764,34 @@ After it, on the branch's tip (celld v0.6.3, OpenBao and the renderer on):
   the share sheet among them.
 - The cell's Wasm: 6,698,165 bytes, 1,835 under `CELL_WASM_MAX_BYTES`
   (the sheet's no-mail words, 934 bytes).
+
+**Evidence for found 40, 2026-10-22** (branch `selfhost-f40`, on
+`selfhost` 84d8766e; master's half is three draft PRs, each a decision
+for Paul: #533 the image's CA trust, #534 the platform's hosts, #535 a
+local fleet's model names):
+
+- **`cargo xtask check`:** 839 passed, 0 failed (its schema lock held
+  to d8e0f86b, the master the lane is ported onto: `origin/master` has
+  since released a Registry step the lane lacks, which the next port
+  takes).
+- **wrangler, local Docker** (computers): 204 passed, 0 failed, 2
+  skipped (the hosted lane's), the platform's hosts' 4 and the lockdown's
+  4 among them. The stub opened the app with its share link (200),
+  without it and made members only it got 401, a name no one has 404;
+  with the internet off it still opened the app, read its view, called a
+  model, and `example.com` failed.
+- **Two nodes on celld** (the Docker double; computers, chat, shell-ui,
+  placement, pairing, restart): 616 passed, 2 failed, 9 skipped; the two
+  were shell-ui stopping under a concurrent build's load, and shell-ui
+  alone again passed 205/0. The double resolves no name under a glob nor
+  turns the internet off, so those 8 checks are skips there (sandcastle
+  `node-platform-globs`: the double takes a glob instead of failing every
+  start).
+- **Bonsai at `http://bonsai.localhost/v1`** from a Worker: 200 under
+  celld and under wrangler's workerd.
+- **The real engine and Hermes on the LAN:** not run yet (the engine was
+  Paul's for a live test); the lane's run, and Hermes opening its own app
+  with its browser and curl over the door's https, come next.
 
 ### 10. Money: who used what, in units (done)
 
@@ -947,8 +1015,10 @@ New, 2026-10-22:
     name or on a LAN's plain http (`http://bonsai.localhost/v1`,
     `http://192.168.50.7:8080/v1`) is refused at the config's parse. On a
     LAN, https under the operator's CA works (`CELLD_EXTRA_CA_FILE`).
-    Whether `*.localhost` and a port-less loopback URL should pass is a
-    decision for Paul.
+    **Paul, 2026-10-22: yes** for this machine's names: a local fleet's
+    model may now be http to a loopback address, `localhost` or a name
+    under `.localhost`, on any port or none (seam 3); a LAN's other
+    addresses stay https.
 37. **A self-hosted model has no list price,** and master prices a model
     the book lacks only by its slot's `body.provider.max_price`,
     OpenRouter's routing field, sent to the server with each call. A price
@@ -1056,8 +1126,6 @@ CELLD_BIN=… SANDCASTLE_NODE_BIN=~/.local/opt/sandcastle/bin/sandcastle-node ca
 
 ## Open questions for Paul
 
-- **Found 36:** should the route take `*.localhost` names and a port-less
-  loopback URL, so `http://bonsai.localhost/v1` works as written?
 - **Found 37:** a self-hosted model's price from its slot (say `price`),
   rather than OpenRouter's `max_price` in its body.
 - **Sign-in's sessions against the provider's** (seam 4): a platform
@@ -1076,13 +1144,6 @@ CELLD_BIN=… SANDCASTLE_NODE_BIN=~/.local/opt/sandcastle/bin/sandcastle-node ca
   again (a container that still runs is waited on; one gone is an exit)
   would keep them. No lane takes a node down under an awake computer (the
   placement lane's sleep theirs first): such a check comes first.
-- **Found 40 (seam 9): an agent cannot open the apps it makes**, on the
-  LAN: the engine refuses a computer every private address and the node's
-  own, and the platform's hosts are the box's. It builds and deploys
-  through the API, then may spend its turn trying to open the page.
-  Intercepting the platform's own hosts (`*.<zone>`) to the platform, as
-  the API host is, would make it work on every deployment (on Cloudflare
-  too, through the platform rather than the internet).
 - **Found 41: a phone shows no card**: the shell shows an app's card only
   over its dock icon under a pointer (master's shell).
 - **Found 42's next bound:** celld cuts an outbound fetch at 120 s in
