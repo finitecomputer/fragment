@@ -12,6 +12,8 @@
 //! `cargo test -p fragment-bridge --test simplex -- --ignored --nocapture`.
 //! CI's Docker lane runs docker.rs alone, not this.
 
+mod support;
+
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -29,6 +31,9 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 /// Hub), the version the spike ran (docs/explorations/simplex-connector.md).
 const SMP_IMAGE: &str = "simplexchat/smp-server:v7.0.1@sha256:7d825822839a9d5ee9e9a99563d77a319816c7a8e0b4b7bf4dcebe448897af54";
 const LAB_IMAGE: &str = "fragment-simplex-lab:7.0.3";
+/// The lab's computer: the bridge with SimpleX's core
+/// (`tests/simplex/bridge.Dockerfile`).
+const BRIDGE_IMAGE: &str = "fragment-simplex-bridge:test";
 /// The SMP server's name on the lab's network: a domain, as its image's
 /// entrypoint wants one with a dot.
 const SMP_HOST: &str = "smp.lab.test";
@@ -617,4 +622,231 @@ async fn voice_against_the_real_core() {
     let took = freceive(&mut person, id, Duration::from_secs(120)).await;
     assert_eq!(sha256_of(&lab.db_dir("person").join("files").join("reply.m4a")), sha256_of(&reply), "the reply arrives whole");
     println!("the agent's voice reply ({protocol}) received whole in {} ms", took.as_millis());
+}
+
+// ---- the bridge's SimpleX, as a computer runs it ----
+
+/// The lab's computer, a container of `BRIDGE_IMAGE` on the lab's network:
+/// its fragment API the fake on this host, its `/data` the directory
+/// `data` here, its screen port on this host's loopback.
+struct Computer {
+    name: String,
+    port: u16,
+}
+
+impl Computer {
+    fn start(lab: &Lab, fake: &support::fake::Fake, data: &Path) -> Computer {
+        let name = lab.container("computer");
+        let _ = docker(&["rm", "-f", &name]);
+        std::fs::create_dir_all(data).expect("its /data");
+        let (net, ids, vol) = (format!("{}-net", lab.prefix), uid_gid(), format!("{}:/data", data.display()));
+        let api = format!("FRAGMENT_API=http://api.fragment.internal:{}", fake.addr.port());
+        let smp = format!("BRIDGE_SIMPLEX_SMP={}", lab.server);
+        let xftp = format!("BRIDGE_SIMPLEX_XFTP={}", lab.xftp.as_deref().expect("a lab with files"));
+        docker(&[
+            "run", "-d", "--name", &name, "--network", &net, "--add-host", "api.fragment.internal:host-gateway", "--user", &ids, "-e", "HOME=/data", "-e", &api, "-e", &smp, "-e", &xftp, "-e", "FRAGMENT_COMPUTER=computer:00aa", "-v", &vol, "-p", "127.0.0.1::6080", BRIDGE_IMAGE,
+        ])
+        .expect("the computer starts");
+        let port = docker(&["port", &name, "6080/tcp"]).expect("its port").lines().next().and_then(|l| l.rsplit_once(':')).and_then(|(_, p)| p.parse().ok()).expect("a port");
+        Computer { name, port }
+    }
+
+    /// `method` on its screen port: the status and the JSON answered.
+    fn http(&self, method: &str, path: &str) -> (u16, Value) {
+        let out = Command::new("curl").args(["-s", "-X", method, "-w", "\n%{http_code}", &format!("http://127.0.0.1:{}{path}", self.port)]).output().expect("curl runs");
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        let (body, code) = text.rsplit_once('\n').unwrap_or(("", "0"));
+        (code.trim().parse().unwrap_or(0), serde_json::from_str(body).unwrap_or(Value::Null))
+    }
+
+    /// Its SimpleX state, once `done` holds (within `within`).
+    async fn state_until(&self, within: Duration, what: &str, done: impl Fn(&Value) -> bool) -> Value {
+        let t0 = Instant::now();
+        // bounded by `within`
+        loop {
+            let (code, v) = self.http("GET", "/simplex/state?agent=juniper--k3x9");
+            if code == 200 && done(&v) {
+                return v;
+            }
+            assert!(t0.elapsed() < within, "{what}: not within {within:?}; last {code} {v}\n{}", wire::cut(&logs(&self.name), 6_000));
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    fn exec(&self, cmd: &str) -> String {
+        docker(&["exec", &self.name, "sh", "-c", cmd]).unwrap_or_default()
+    }
+
+    /// How many SimpleX cores run in it now.
+    fn cores(&self) -> usize {
+        self.exec("for c in /proc/[0-9]*/comm; do cat $c 2>/dev/null; done").lines().filter(|l| l.trim() == "simplex-chat").count()
+    }
+
+    fn events(&self, kind: &str) -> Vec<Value> {
+        logs(&self.name).lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(|v| v["event"] == kind).collect()
+    }
+
+    /// SIGTERM, as a sleep's stop sends it; gone.
+    fn stop(&self) {
+        let _ = std::fs::write(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{}.log", self.name)), logs(&self.name));
+        docker(&["stop", "-t", "10", &self.name]).expect("it stops");
+        docker(&["rm", "-f", &self.name]).expect("it goes");
+    }
+}
+
+impl Drop for Computer {
+    fn drop(&mut self) {
+        let _ = std::fs::write(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{}.log", self.name)), logs(&self.name));
+        let _ = docker(&["rm", "-f", &self.name]);
+    }
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    let _ = std::fs::remove_dir_all(to);
+    std::fs::create_dir_all(to).expect("a directory");
+    for e in std::fs::read_dir(from).expect("a directory").flatten() {
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        if e.file_type().expect("its type").is_dir() {
+            copy_tree(&src, &dst);
+        } else {
+            std::fs::copy(&src, &dst).expect("copied");
+        }
+    }
+}
+
+fn build_bridge_image() {
+    if std::env::var("FRAGMENT_DOCKER_SKIP_BUILD").is_ok() {
+        return;
+    }
+    let images = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().expect("images/").to_path_buf();
+    let status = Command::new("docker").args(["build", "--platform", "linux/amd64", "-q", "-f", "bridge/tests/simplex/bridge.Dockerfile", "-t", BRIDGE_IMAGE, "."]).current_dir(images).status().expect("docker runs");
+    assert!(status.success(), "the lab's computer builds");
+}
+
+/// Goal: the bridge runs a linked agent's core as the platform's lifecycle
+/// asks, against the real core: linked from its routes (the owner's link
+/// asked, the invitation shown, the person's app bound, greeted, a save
+/// asked); stopped under a hold before the bridge answers it, its databases
+/// whole, and started again after; stopped while the computer is not always
+/// on, and started again when it is; through a planned restart, as it was;
+/// and after a rollback of its `/data`, its forced sync heals the link, the
+/// owner is told a message may be lost, and both directions work.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run by hand"]
+async fn the_bridge_runs_a_linked_core() {
+    build_bridge_image();
+    let mut lab = Lab::up_with("bridge", true);
+    let mut person = lab.start("person", false).await;
+    let fake = support::fake::Fake::start("0.0.0.0:0", &["juniper"]).await;
+    fake.with(|w| {
+        w.computer["alwaysOn"] = json!(true);
+        w.computer["generation"] = json!(1);
+    });
+    let data = lab.dir.join("computer-data");
+    let c = Computer::start(&lab, &fake, &data);
+    let v = c.state_until(Duration::from_secs(60), "its state", |v| v["phase"] == "off").await;
+    assert_eq!(v["alwaysOn"], true);
+    assert_eq!(c.cores(), 0, "nothing linked, no core");
+
+    // linked from its routes
+    let (code, _) = c.http("POST", "/simplex/link?agent=juniper--k3x9");
+    assert_eq!(code, 200);
+    let v = c.state_until(Duration::from_secs(60), "an invitation", |v| v["phase"] == "inviting").await;
+    let link = v["link"].as_str().expect("its link").to_string();
+    assert!(link.starts_with("simplex:/invitation#"));
+    let r = person.cmd(&format!("/connect {link}")).await;
+    assert_eq!(tag(&r), "sentConfirmation", "{r}");
+    let v = c.state_until(Duration::from_secs(90), "linked", |v| v["phase"] == "linked").await;
+    assert_eq!(v["name"], "person");
+    let at_person = person.wait(Duration::from_secs(60), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the agent, at the person's");
+    let greeted = received(&mut person, Duration::from_secs(30), |got| got.iter().any(|t| t.contains("You're linked"))).await;
+    assert!(greeted.iter().any(|t| t.starts_with("Hi, it's Juniper.")), "named by its title: {greeted:?}");
+    fake.until(20_000, "a save asked as the link was made", |w| w.keepalive_log.windows(2).any(|p| p == [true, false])).await;
+    assert_eq!(c.cores(), 1);
+
+    // the hold: stopped before it is answered, whole, started again after
+    c.exec("touch /run/computer/hold");
+    let t0 = Instant::now();
+    // bounded: 20 s, the platform's wait for an answer
+    while c.exec("test -e /run/computer/held && echo yes").trim() != "yes" {
+        assert!(t0.elapsed() < Duration::from_secs(20), "the hold answered within 20 s");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    println!("the hold answered in {} ms, its core stopped first", t0.elapsed().as_millis());
+    assert_eq!(c.cores(), 0, "no core runs under the hold");
+    let files: Vec<String> = c.exec("ls /data/simplex/juniper--k3x9").lines().map(str::to_string).collect();
+    assert!(files.contains(&"sx_chat.db".into()) && files.contains(&"sx_agent.db".into()) && files.contains(&"link.json".into()), "{files:?}");
+    assert!(!files.iter().any(|f| f.ends_with("-wal")), "whole: {files:?}");
+    c.exec("rm -f /run/computer/hold /run/computer/held");
+    c.state_until(Duration::from_secs(30), "running again", |v| v["running"] == true).await;
+    say(&mut person, at_person, "after the hold").await;
+    let t0 = Instant::now();
+    // bounded by 30 s
+    while !c.events("simplex.forward").iter().any(|e| e["kind"] == "text") {
+        assert!(t0.elapsed() < Duration::from_secs(30), "the message after the hold reached the bridge");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // not always on: no core; always on again: its core again
+    fake.with(|w| w.computer["alwaysOn"] = json!(false));
+    let v = c.state_until(Duration::from_secs(75), "stopped, not always on", |v| v["running"] == false && v["alwaysOn"] == false).await;
+    assert!(v["why"].as_str().is_some_and(|w| w.contains("always-on")), "{v}");
+    assert_eq!(c.cores(), 0);
+    fake.with(|w| w.computer["alwaysOn"] = json!(true));
+    c.state_until(Duration::from_secs(75), "running, always on again", |v| v["running"] == true).await;
+
+    // a planned restart (SIGTERM, as a sleep's stop), then its save: kept as it was
+    c.stop();
+    let save = lab.dir.join("computer-save");
+    copy_tree(&data, &save);
+    fake.with(|w| {
+        w.computer["generation"] = json!(2);
+        w.computer["restored"] = json!({ "generation": 2, "rollback": false, "from": "backup", "at": 1 });
+    });
+    let c = Computer::start(&lab, &fake, &data);
+    c.state_until(Duration::from_secs(60), "linked and running after a restart", |v| v["phase"] == "linked" && v["running"] == true).await;
+    let before = c.events("simplex.forward").len();
+    say(&mut person, at_person, "said after the save").await;
+    let t0 = Instant::now();
+    // bounded by 30 s
+    while c.events("simplex.forward").len() <= before {
+        assert!(t0.elapsed() < Duration::from_secs(30), "a message after the restart reached the bridge");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(c.events("simplex.core_up").iter().all(|e| e["rollback"] == false), "a restart that saved forces nothing");
+
+    // a rollback: the save before that message, restored, as a crash's next start
+    c.stop();
+    copy_tree(&save, &data);
+    fake.with(|w| {
+        w.computer["generation"] = json!(3);
+        w.computer["restored"] = json!({ "generation": 3, "rollback": true, "from": "backup", "at": 1 });
+    });
+    let t0 = Instant::now();
+    let c = Computer::start(&lab, &fake, &data);
+    let told = received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t.contains("may have missed a message"))).await;
+    println!("after a rollback, the owner told {} ms after the start: {told:?}", t0.elapsed().as_millis());
+    assert!(c.events("simplex.core_up").iter().any(|e| e["rollback"] == true), "its start forced a sync");
+    let before = c.events("simplex.forward").len();
+    say(&mut person, at_person, "after the rollback").await;
+    let t0 = Instant::now();
+    // bounded by 30 s
+    while c.events("simplex.forward").len() <= before {
+        assert!(t0.elapsed() < Duration::from_secs(30), "a message after the rollback reached the bridge");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // a bridge started again in the same start forces nothing twice
+    c.stop();
+    let c = Computer::start(&lab, &fake, &data);
+    c.state_until(Duration::from_secs(60), "running again", |v| v["running"] == true).await;
+    assert!(c.events("simplex.core_up").iter().all(|e| e["rollback"] == false), "the same start's rollback is handled once");
+
+    // unlinked from its routes: its contact let go, at the person's too
+    let (code, v) = c.http("POST", "/simplex/unlink?agent=juniper--k3x9");
+    assert_eq!((code, v["phase"].as_str()), (200, Some("off")));
+    person.wait(Duration::from_secs(30), |e| tag(e) == "contactDeletedByContact").await;
+    c.state_until(Duration::from_secs(30), "its core stopped", |v| v["running"] == false).await;
+    // an agent this bridge does not run has no link here
+    let (code, _) = c.http("GET", "/simplex/state?agent=nobody--k3x9");
+    assert_eq!(code, 404);
 }

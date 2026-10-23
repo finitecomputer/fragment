@@ -16,6 +16,8 @@ use serde_json::{json, Value};
 pub type ContactId = i64;
 /// A connection's id in the core's own database (`pccConnId`, `connId`).
 pub type ConnId = i64;
+/// A file's id in the core's own database (`fileId`).
+pub type FileId = i64;
 
 /// A frame from the core, at most (a chat's last items, each with its
 /// contact's profile, come to a few KB each).
@@ -59,6 +61,9 @@ pub enum Cmd {
     /// The contact's newest `count` items, or with `before`, the `count`
     /// just older than that item (a catch-up's next page back).
     Chat { contact: ContactId, count: u16, before: Option<i64> },
+    /// Receive a file a contact sent (`/freceive`): over XFTP, once its
+    /// description is ready (`FileReady`); done, `FileDone`.
+    Receive { file: FileId },
 }
 
 impl Cmd {
@@ -93,6 +98,10 @@ impl Cmd {
                     Some(item) => format!("/_get chat @{contact} before={item} count={count}"),
                     None => format!("/_get chat @{contact} count={count}"),
                 }
+            }
+            Cmd::Receive { file } => {
+                assert!(*file > 0, "a receive names a file");
+                format!("/freceive {file}")
             }
         }
     }
@@ -173,6 +182,14 @@ pub enum Resp {
     Deleted { contact: ContactId, by_them: bool },
     /// A pending connection deleted (`contactConnectionDeleted`).
     ConnDeleted { conn: ConnId },
+    /// A file's description is ready: it may be received now
+    /// (`rcvFileDescrReady`).
+    FileReady { file: FileId },
+    /// A file received whole (`rcvFileComplete`), at `path` in the core's
+    /// files folder.
+    FileDone { file: FileId, path: String },
+    /// A file that will not arrive (`rcvFileError`, its sender's cancel).
+    FileFailed { file: FileId },
     /// A command failed (`chatCmdError`), or the core reports an error of
     /// its own (`chatError`): what it said, cut.
     Error { what: String },
@@ -209,6 +226,19 @@ pub struct Item {
     pub shared: Option<String>,
     /// `itemTs`, as the core wrote it.
     pub at: String,
+    /// The file it carries (a voice message's, a photo's), when it has one.
+    pub file: Option<FileRef>,
+}
+
+/// A file an item carries, as the core names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRef {
+    pub id: FileId,
+    /// Its name as its sender gave it, cut.
+    pub name: String,
+    pub size: u64,
+    /// Received whole already (`rcvComplete`), at `path` in the files folder.
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -316,6 +346,13 @@ fn read_resp(r: &Value) -> Result<Resp, WireError> {
         "contactRatchetSyncStarted" => Resp::SyncStarted { contact: id(&r["contact"]["contactId"], "a sync with no contact")? },
         "contactDeleted" | "contactDeletedByContact" => Resp::Deleted { contact: id(&r["contact"]["contactId"], "a delete with no contact")?, by_them: t == "contactDeletedByContact" },
         "contactConnectionDeleted" => Resp::ConnDeleted { conn: id(&r["connection"]["pccConnId"], "a delete with no connection")? },
+        "rcvFileDescrReady" => Resp::FileReady { file: id(&r["chatItem"]["chatItem"]["file"]["fileId"], "a file with no id")? },
+        "rcvFileComplete" => {
+            let file = &r["chatItem"]["chatItem"]["file"];
+            let path = file["fileSource"]["filePath"].as_str().filter(|p| file_path_ok(p)).ok_or_else(|| shape("a file received to no path"))?;
+            Resp::FileDone { file: id(&file["fileId"], "a file with no id")?, path: path.into() }
+        }
+        "rcvFileError" | "rcvFileSndCancelled" | "rcvFileAcceptedSndCancelled" => Resp::FileFailed { file: id(&r["chatItem"]["chatItem"]["file"]["fileId"], "a file with no id")? },
         "chatCmdError" | "chatError" => Resp::Error { what: error_of(&r["chatError"]) },
         other => Resp::Other(cut(other, 64).into()),
     })
@@ -344,8 +381,21 @@ fn item(info: &Value, ci: &Value) -> Option<Item> {
     };
     let meta = &ci["meta"];
     let shared = meta["itemSharedMsgId"].as_str().filter(|s| !s.is_empty() && s.len() <= 64).map(str::to_string);
+    let f = &ci["file"];
+    let file = f["fileId"].as_i64().filter(|n| *n > 0).map(|id| FileRef {
+        id,
+        name: cut(f["fileName"].as_str().unwrap_or("file"), 128).into(),
+        size: f["fileSize"].as_u64().unwrap_or(0),
+        path: if f["fileStatus"]["type"] == "rcvComplete" { f["fileSource"]["filePath"].as_str().filter(|p| file_path_ok(p)).map(str::to_string) } else { None },
+    });
     let id = meta["itemId"].as_i64().filter(|n| *n > 0).unwrap_or(0);
-    Some(Item { id, contact, received, content, shared, at: cut(meta["itemTs"].as_str().unwrap_or(""), 64).into() })
+    Some(Item { id, contact, received, content, shared, at: cut(meta["itemTs"].as_str().unwrap_or(""), 64).into(), file })
+}
+
+/// A path the core names in its files folder: relative, one name or a few,
+/// none of them `.` or `..`.
+pub fn file_path_ok(p: &str) -> bool {
+    !p.is_empty() && p.len() <= 512 && !p.starts_with('/') && p.split('/').all(|c| !c.is_empty() && c != "." && c != "..")
 }
 
 /// An error, as short words: its type and what is inside it.
@@ -385,6 +435,9 @@ mod tests {
             "largeMsg" => include_str!("fixtures/largeMsg.json"),
             "contactDeleted" => include_str!("fixtures/contactDeleted.json"),
             "contactConnectionDeleted" => include_str!("fixtures/contactConnectionDeleted.json"),
+            "voiceItem" => include_str!("fixtures/voiceItem.json"),
+            "fileReady" => include_str!("fixtures/fileReady.json"),
+            "fileDone" => include_str!("fixtures/fileDone.json"),
             other => panic!("no fixture {other}"),
         };
         parse(text).unwrap_or_else(|e| panic!("{name}: {e}")).resp
@@ -400,7 +453,7 @@ mod tests {
         assert!(short.is_some_and(|s| s.starts_with("https://smp.lab.test/i#")));
         assert_eq!(fixture("contactConnected"), Resp::Connected { contact: 3, conn: 1, name: "person".into() });
         let Resp::Items(items) = fixture("newChatItems") else { panic!("items") };
-        assert_eq!(items, vec![Item { id: items[0].id, contact: 3, received: true, content: Content::Message { kind: "text".into(), text: "hello agent".into() }, shared: Some("RlBFOStpcVFyc1VrNDJyZQ==".into()), at: items[0].at.clone() }]);
+        assert_eq!(items, vec![Item { id: items[0].id, contact: 3, received: true, content: Content::Message { kind: "text".into(), text: "hello agent".into() }, shared: Some("RlBFOStpcVFyc1VrNDJyZQ==".into()), at: items[0].at.clone(), file: None }]);
         assert!(items[0].id > 0, "its item id");
         assert!(items[0].at.starts_with("2026-10-23T"), "{}", items[0].at);
         let Resp::Items(sent) = fixture("sent") else { panic!("a send's answer") };
@@ -420,6 +473,13 @@ mod tests {
         assert_eq!(fixture("largeMsg"), Resp::Error { what: "errorStore largeMsg".into() });
         assert_eq!(fixture("contactDeleted"), Resp::Deleted { contact: 4, by_them: false });
         assert_eq!(fixture("contactConnectionDeleted"), Resp::ConnDeleted { conn: 2 });
+        // a voice message and its file, received (the lab's `voice_against_the_real_core`)
+        let Resp::Items(voice) = fixture("voiceItem") else { panic!("items") };
+        assert!(matches!(&voice[0].content, Content::Message { kind, text } if kind == "voice" && text.is_empty()), "{voice:?}");
+        assert_eq!(voice[0].file, Some(FileRef { id: 1, name: "short.m4a".into(), size: 82_659, path: None }));
+        assert!(voice[0].shared.is_some());
+        assert_eq!(fixture("fileReady"), Resp::FileReady { file: 1 });
+        assert_eq!(fixture("fileDone"), Resp::FileDone { file: 1, path: "short.m4a".into() });
     }
 
     /// Goal: a command's line is what the lab's core took.
@@ -432,6 +492,7 @@ mod tests {
         assert_eq!(Cmd::DeleteConn { conn: 2 }.line(), "/_delete :2");
         assert_eq!(Cmd::Chat { contact: 3, count: 20, before: None }.line(), "/_get chat @3 count=20");
         assert_eq!(Cmd::Chat { contact: 3, count: 20, before: Some(41) }.line(), "/_get chat @3 before=41 count=20");
+        assert_eq!(Cmd::Receive { file: 7 }.line(), "/freceive 7");
         // a text is JSON, so nothing in it reads as more of the command
         let line = Cmd::Send { contact: 3, text: "hi\" json [] /_delete @3\nthere".into() }.line();
         let body = line.strip_prefix("/_send @3 json ").expect("its prefix");
@@ -475,6 +536,13 @@ mod tests {
         // a group's items are not a contact's
         let group = r#"{"resp":{"type":"newChatItems","chatItems":[{"chatInfo":{"type":"group","groupInfo":{"groupId":1}},"chatItem":{"chatDir":{"type":"groupRcv"},"content":{"type":"rcvMsgContent","msgContent":{"type":"text","text":"hi"}},"meta":{}}}]}}"#;
         assert_eq!(parse(group).expect("read").resp, Resp::Items(vec![]));
+        // a file the core says it put outside its folder is no file of ours
+        for bad in ["/etc/passwd", "../x", "a/../b", "", "a//b"] {
+            assert!(!file_path_ok(bad), "{bad}");
+            let done = json!({ "resp": { "type": "rcvFileComplete", "chatItem": { "chatItem": { "file": { "fileId": 1, "fileSource": { "filePath": bad } } } } } });
+            assert!(matches!(parse(&done.to_string()), Err(WireError::Shape(_))), "{bad}");
+        }
+        assert!(file_path_ok("voice_1.m4a") && file_path_ok("sub/voice.m4a"));
         // a corrId that is no number of ours is an event
         assert_eq!(parse(r#"{"corrId":"x","resp":{"type":"chatStopped"}}"#).expect("read").corr, None);
         // a text past the chat's bound is cut, at a char boundary

@@ -20,6 +20,8 @@ hmac.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+# SIGTERM to a SimpleX core (simplex/run.rs): already in the lock, through tokio
+libc = "0.2"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

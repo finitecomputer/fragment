@@ -93,6 +93,35 @@ pub struct Computer {
     /// platform before them.
     #[serde(default)]
     pub models: Option<ModelIds>,
+    /// It stays awake whatever is open: its owner's always-on seat
+    /// (docs/billing.md). SimpleX runs only while it does.
+    #[serde(default, rename = "alwaysOn")]
+    pub always_on: bool,
+    /// Its newest start (the Computer DO's generation; 0 from a platform
+    /// before it).
+    #[serde(default)]
+    pub generation: u64,
+    /// What its last start that came up restored; none before its first.
+    #[serde(default)]
+    pub restored: Option<Restored>,
+}
+
+/// What a start restored, as far as the bridge reads it (docs/computers.md,
+/// "What a wake restored").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Restored {
+    /// The start it is of.
+    pub generation: u64,
+    /// It went back in time: what the life before it did since its save is
+    /// in no save.
+    pub rollback: bool,
+}
+
+impl Computer {
+    /// Whether this start went back in time, as the platform recorded it.
+    pub fn rolled_back(&self) -> bool {
+        self.generation > 0 && self.restored.is_some_and(|r| r.rollback && r.generation == self.generation)
+    }
 }
 
 /// The model route's models' ids, by its names: what a call may name each
