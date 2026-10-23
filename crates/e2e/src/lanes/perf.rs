@@ -142,6 +142,9 @@ fn computer(s: &mut Suite, api: &Api, owner: &crate::Keys, rows: &mut Vec<String
     bench("true", 3)?;
     let exec = ms_of(&bench("true", n)?);
     row(rows, &label("computer: exec round trip (in the DO)"), &exec);
+    let printed = bench("echo started; echo more; echo and more; sleep 0.05; echo done", n)?;
+    anyhow::ensure!(printed["last"]["exitCode"] == 0, "the exec with output: {printed}");
+    row(rows, &label("computer: exec with output, 4 lines (in the DO)"), &ms_of(&printed));
     let t0 = Instant::now();
     bench("true", 1)?;
     rows.push(format!("{:<44} {:.1} ms", label("computer: one exec through the lever (outside)"), ms_since(t0)));
