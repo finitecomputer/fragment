@@ -577,8 +577,12 @@ export class NodeContainer {
     this.#running = true;
     this.#intercepts = [];
     // its health first: a node that is down says so within HEALTH_MS, where
-    // a start's own bound is the boot's
-    const path = `/v1/containers/${this.#name}/start`;
+    // a start's own bound is the boot's. Answered once its guest is up
+    // (`wait=ready`): every later call waits for this start, as calls to
+    // Cloudflare's container follow its start, and the engine refuses an
+    // exec before its guest is up (409 "still starting"), which an immediate
+    // sleep's hold met once a start's intercepts took one call
+    const path = `/v1/containers/${this.#name}/start?wait=ready`;
     const begin = () => this.#json("POST", path, body, START_MS);
     this.#known = true;
     this.#starting = this.#call("GET", "/v1/health", undefined, [], HEALTH_MS)
