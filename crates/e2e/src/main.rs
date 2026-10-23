@@ -936,7 +936,7 @@ impl Suite {
             // celld runs no containers of its own: computers there only on
             // the run's sandcastle nodes (seam 2)
             computer_image: self.has_computers().then(|| "stub".into()),
-            computer_snapshots: false,
+            computer_snapshots: std::env::var_os("FRAGMENT_PERF_SNAPSHOTS").is_some(), // BENCH
             computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
             providers: Some({
                 let mut rows = swap_providers(Some(self.openrouter.node().oauth()))?;
