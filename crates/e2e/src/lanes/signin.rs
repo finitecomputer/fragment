@@ -775,6 +775,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         codes.iter().all(|c| cli_code::normalize(c).is_some()) && oldest.status == 400 && newest.status == 200 && newest.text.contains(&many_tail),
         json!({ "oldest": oldest.to_string(), "newest": newest.status }),
     );
+    s.ok("the confirmation tells you to return to the terminal", added_page.text.contains("You can return to your terminal."), &added_page);
     // every platform page refuses frames; its redirects need not (a
     // redirect shows nothing)
     let pages = [
@@ -791,6 +792,8 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     // a page that opens one of them in a window of its own keeps no hold on it
     let held: Vec<&str> = pages.iter().filter(|(_, _, r)| r.header("cross-origin-opener-policy") != "same-origin").map(|(page, _, _)| *page).collect();
     s.ok("and every one severs a window that opened it (Cross-Origin-Opener-Policy: same-origin)", held.is_empty(), format!("{held:?}"));
+    let plain: Vec<&str> = pages.iter().skip(3).filter(|(_, _, r)| !r.text.contains("<main><h1>") || r.header("cache-control") != "no-store").map(|(page, _, _)| *page).collect();
+    s.ok("confirmation, sign-out and expired-link pages use the shared sheet and are never cached", plain.is_empty(), format!("{plain:?}"));
     // a person who signs in may hold no key at all
     let lone = api.sign_in("lone@e2e.test")?;
     let lone_key = Keys::generate();

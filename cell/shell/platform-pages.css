@@ -1,0 +1,45 @@
+/* Standalone platform sheets, from finite-onboarding (1).html.
+   Equal outer rows keep the card centered without clipping tall content. */
+@font-face{font-family:"Funnel Sans";font-style:normal;font-weight:400;font-display:swap;src:url("funnel-sans-400.ttf") format("truetype")}
+@font-face{font-family:"Funnel Sans";font-style:normal;font-weight:500;font-display:swap;src:url("funnel-sans-500.ttf") format("truetype")}
+@font-face{font-family:"Funnel Sans";font-style:normal;font-weight:600;font-display:swap;src:url("funnel-sans-600.ttf") format("truetype")}
+.platform-page{--fg:#20251f;--muted:#646e63;--bg:#f5f6f1;--line:rgba(43,59,40,.17);--line-strong:rgba(43,59,40,.24);--surface:#fff;--soft:rgba(120,145,95,.09);--accent:#466437;background:#f5f6f1 url("platform-landscape.jpg") center/cover fixed no-repeat}
+.platform-page body{max-width:none;width:100%;margin:0;padding:0 24px;display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(110px,1fr) auto minmax(110px,1fr);justify-items:center;background:transparent;font:400 16px/1.5 "Funnel Sans",sans-serif}
+.platform-brand{grid-row:1;align-self:end;margin:32px 0;line-height:0}
+.platform-brand img{display:block;width:43.56px;height:45.98px;object-fit:contain;filter:brightness(0)}
+.platform-page main{position:relative;--edge-light:0;box-sizing:border-box;grid-row:2;align-self:center;width:100%;max-width:410px;margin:0;padding:30px 32px;border:0;border-radius:18px;text-align:center;background:linear-gradient(150deg,rgba(255,255,255,.26),rgba(255,255,255,.08)),rgba(255,255,255,.84);box-shadow:0 12px 36px rgba(26,45,32,.08);-webkit-backdrop-filter:blur(24px) saturate(1.08);backdrop-filter:blur(24px) saturate(1.08);overflow-wrap:anywhere}
+.platform-page h1{font-size:30px;font-weight:500;line-height:1.2;letter-spacing:-1px;margin:0}
+.platform-page main>p{font-size:16px;line-height:1.5;color:var(--muted);margin:0}
+.platform-page main>h1+p{line-height:1.4}
+.platform-page button{font-size:14px;font-weight:500;line-height:1.5;min-height:44px;padding:12px 15px;border:1px solid var(--line);border-radius:999px;white-space:normal}
+.platform-page main>form>button{width:100%;margin-top:0}
+.platform-page main>p>a:only-child{box-sizing:border-box;display:block;width:100%;padding:12px 15px;border:1px solid var(--line);border-radius:999px;background:var(--fg);color:var(--bg);font-size:14px;font-weight:500;text-decoration:none}
+.platform-page main>p>a.secondary{background:transparent;color:var(--fg)}
+.platform-page main>p:last-child{margin-bottom:0}
+.platform-page input,.platform-page textarea{box-sizing:border-box;font:400 14px/1.5 "Funnel Sans",sans-serif;padding:12px;border:1px solid var(--line);border-radius:7px;background:rgba(255,255,255,.45)}
+.platform-page label{font-size:12px}
+.platform-page :focus-visible{outline:3px solid #779a53;outline-offset:3px}
+.platform-page .people,.platform-page .options,.platform-page .more{text-align:left;font-size:14px}
+.platform-page code{font-size:14px}
+@media(prefers-color-scheme:dark){
+ .platform-page{--fg:#f1f3e9;--muted:#bec8bb;--bg:#141c1b;--line:rgba(222,236,216,.18);--line-strong:rgba(222,236,216,.28);--surface:#26312e;--soft:rgba(255,255,255,.06);--accent:#afc58e;background-color:#141c1b;background-image:url("platform-landscape-dark.jpg")}
+ .platform-page main{background:linear-gradient(150deg,rgba(255,255,255,.065),rgba(255,255,255,.01)),rgba(25,34,34,.72);box-shadow:0 18px 44px rgba(0,0,0,.18);-webkit-backdrop-filter:blur(24px) saturate(1.15);backdrop-filter:blur(24px) saturate(1.15)}
+ .platform-brand img{filter:brightness(0) invert(1)}
+ .platform-page input,.platform-page textarea{background:#ffffff08}
+}
+@media(max-width:600px){.platform-page body{padding-inline:16px}.platform-page main{padding:28px 22px}}
+/* A dialog supplies its own positioning and surface; do not add wallpaper
+   or viewport-sized rows inside an iframe that measures its own height. */
+.platform-page.framed{background:var(--surface)}
+.platform-page.framed body{display:block;min-height:0;padding:0;background:var(--surface)}
+.platform-page.framed .platform-brand{display:none}
+.platform-page.framed main{max-width:none;border-radius:0;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;background:var(--surface)}
+
+/* Consistent content rhythm, regardless of whether an action is a form or link. */
+.platform-page main>:where(h1,p,form)+p{margin-top:16px}
+.platform-page main>form,.platform-page main>p:has(>a:only-child){margin-top:24px}
+.platform-page main>form+p{margin-top:20px}
+.platform-page main::before,.platform-page main::after{content:'';position:absolute;inset:-1px;border-radius:inherit;padding:1px;pointer-events:none;background:radial-gradient(180px circle at var(--edge-x,50%) var(--edge-y,50%),rgba(255,255,255,.85),rgba(255,255,255,.25) 45%,transparent 100%);-webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);-webkit-mask-composite:xor;mask-composite:exclude;opacity:var(--edge-light);transition:opacity 160ms ease-out}
+.platform-page main::after{filter:blur(2px);opacity:calc(var(--edge-light) * .35)}
+.platform-page.framed main::before,.platform-page.framed main::after{display:none}
+@media(prefers-reduced-motion:reduce){.platform-page main::before,.platform-page main::after{transition:none}}
