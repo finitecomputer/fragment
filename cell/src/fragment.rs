@@ -680,12 +680,17 @@ impl FragmentCell {
         )?;
         let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
         let mut member = row.role.as_deref().and_then(Role::parse);
-        // as itself, a hold caps an agent in someone else's fragment, in
-        // with its person there (decision 64: the whole entity is secured);
-        // never its own memberships, its owner's chats and its agent
-        // fragment (decision 36), where it answers and records its turns
+        // as itself, a hold caps an agent in with its person here, a
+        // member who is not the owner (decision 64: the whole entity is
+        // secured; members.rs `entity_of`); never its own memberships, its
+        // owner's chats, its agent fragment, one it holds on its own
+        // (decision 36), where it answers and records its turns
         if let Some((held, signed)) = caller.signed.as_ref().and_then(|s| Some((s.held?, s))) {
-            if signed.owner.as_deref() != Some(self.must(MetaKey::Owner)?.as_str()) {
+            let in_with_person = match signed.owner.as_deref() {
+                Some(person) => self.member_role(person)?.is_some_and(|r| r != Role::Owner),
+                None => false,
+            };
+            if in_with_person {
                 member = member.map(|m| m.min(held));
             }
         }

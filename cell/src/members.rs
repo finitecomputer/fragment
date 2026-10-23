@@ -67,8 +67,10 @@ pub(crate) const INDEX_FLUSH_MAX: i64 = 32;
 /// `members/agent` (`agent_made`); the router never sets it.
 pub(crate) const CLAIM_HEADER: &str = "x-fragment-invite-claim";
 
-/// `agent`, just made by `person` (registered: lib.rs `identities`,
-/// runs_on.rs), comes in beside them wherever they are a member of
+/// `agent`, just made by `person` (registered: lib.rs `identities`; or
+/// taken by their computer: computer.rs, once both its agent fragment and
+/// the computer hold it, so its computer hears each join), comes in
+/// beside them wherever they are a member of
 /// someone else's fragment (decision 64: their membership is their
 /// agents'), each fragment asked once, `INDEX_FLUSH_MAX` at a time. Best
 /// effort: one not told keeps it out until its person's next yes there,

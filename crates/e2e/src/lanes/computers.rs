@@ -1705,6 +1705,36 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let answered = s.eventually(wake, || agent_replies(&records(api, &owner, &next_name, "chat"), &identity).len() == 1);
     s.ok("it answers there", r.status == 200 && answered, json!(agent_replies(&records(api, &owner, &next_name, "chat"), &identity)));
 
+    // an agent its person makes after their yes elsewhere comes in there
+    // beside them as their computer takes it, and that computer hears it
+    // joined (decision 64): its join is sent once both its agent fragment
+    // and the computer hold it; a replay of the assignment joins nothing twice
+    let theirs = s.named(api, &stranger, "their-chat")?;
+    let made = api.create_with(&stranger, json!({ "name": theirs, "template": "chat" }))?;
+    let invited = api.signed(&stranger, "POST", &format!("/api/f/{theirs}/invites"), Some(&json!({ "email": Api::email_of(&owner), "role": "editor" })))?;
+    let yes = api.signed(&owner, "POST", &format!("/api/invites/{theirs}/accept"), Some(&json!({})))?;
+    anyhow::ensure!(made.status == 200 && invited.status == 200 && yes.status == 200, "their chat, and its owner's yes: {made} {invited} {yes}");
+    let later_name = s.named(api, &owner, "later")?;
+    let later = s.create(api, &owner, &later_name)?;
+    s.commit(&later, &[("fragment.json", Some(AGENT_JSON))]);
+    s.deploy(&later);
+    let assign = || api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{later_name}"), Some(&json!({})));
+    let r = assign()?;
+    let later_id = r.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == later_name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
+    let joined = s.eventually(Duration::from_secs(30), || told(api, &owner, &later_name, &theirs).len() == 1);
+    let row = api.signed(&stranger, "GET", &format!("/api/f/{theirs}/members"), None)?.body["members"]
+        .as_array()
+        .and_then(|m| m.iter().find(|m| m["principal"] == later_id.as_str()).cloned())
+        .unwrap_or_default();
+    s.ok(
+        "an agent assigned after its person's yes elsewhere is in there beside them, at their role, and its computer heard it joined (its first assignment)",
+        r.status == 200 && fragment_core::npub::is_identity(&later_id) && joined && row["owner"] == owner_id.as_str() && row["role"] == "editor",
+        json!({ "row": row, "told": told(api, &owner, &later_name, &theirs) }),
+    );
+    let again = assign()?;
+    std::thread::sleep(QUEUE_DRAIN);
+    s.ok("assigned again (a replay), it joins nothing twice: one join told", again.status == 200 && told(api, &owner, &later_name, &theirs).len() == 1, json!(told(api, &owner, &later_name, &theirs)));
+
     if !fakes {
         // the node and the deployment's operator are a local run's; a
         // preview's computer is put to sleep, so it bills no awake time after

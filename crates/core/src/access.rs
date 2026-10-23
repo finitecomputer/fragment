@@ -288,11 +288,39 @@ pub fn refuse_remove(actor: Option<Role>, actor_is_target: bool, target_current:
     }
 }
 
+/// The agents an owner's access view names on one of their fragments
+/// (docs/cloudflare-v1.md, decision 64: a person's agents in with them are
+/// never named to the owner). Its members read (`entity`: the agents in
+/// with a person there), its listed agents less those; its members unread
+/// (past the view's bound, or not answering) while someone else may be in
+/// it (`others`), none, since one of theirs may be among them; with no one
+/// else in it, its listed agents, the owner's own.
+pub fn access_agents(listed: Vec<String>, entity: Option<&[String]>, others: bool) -> Vec<String> {
+    match (entity, others) {
+        (Some(entity), _) => listed.into_iter().filter(|a| !entity.contains(a)).collect(),
+        (None, true) => vec![],
+        (None, false) => listed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use Role::*;
     use Visibility as V;
+
+    /// Goal: the access view never names a guest's agent, read or not
+    /// (decision 64). Method: each way a row is drawn: its members read; its
+    /// members unread with others possible (the view's 65th fragment, a
+    /// fragment that did not answer); and no one else in it.
+    #[test]
+    fn the_access_view_names_no_agent_in_with_its_person() {
+        let listed = || vec!["npub1mine".to_string(), "npub1guests".to_string()];
+        let entity = ["npub1guests".to_string()];
+        assert_eq!(access_agents(listed(), Some(&entity), true), vec!["npub1mine".to_string()], "read: the guest's agent goes, the owner's stays");
+        assert_eq!(access_agents(listed(), None, true), Vec::<String>::new(), "unread, past the bound or failed, with others possible: none named");
+        assert_eq!(access_agents(vec!["npub1mine".to_string()], None, false), vec!["npub1mine".to_string()], "no one else in it: its agents are its owner's");
+    }
 
     fn st(member: Option<Role>, link: bool, signed: bool) -> Standing {
         Standing { member, owns_member_agent: false, link, signed, cap: None, held: None }

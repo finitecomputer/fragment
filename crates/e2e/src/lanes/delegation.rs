@@ -109,11 +109,23 @@ pub fn delegation(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("no one but its owner holds an agent", r.status == 403, &r);
     let r = held(&skyler, json!("owner"))?;
     s.ok("an agent is held at viewer or editor, never owner", r.status == 400, &r);
+    // a membership of its own elsewhere (one of before decision 64, no
+    // person of its in there: a lever makes it), which a hold never caps
+    let solo = s.named(api, &paul, "solo")?;
+    s.create(api, &paul, &solo)?;
+    let r = api.share(&solo, &juniper_id, "editor")?;
+    anyhow::ensure!(r.status == 200, "Skyler's agent on its own in {solo}: {r}");
     let r = held(&skyler, json!("viewer"))?;
     s.ok("Skyler holds the agent at viewer", r.status == 200, &r);
     let r = add(true)?;
     let alone = add(false)?;
     s.ok("held below Skyler, it no longer edits: acting for them, nor as itself, in with them (the hold secures the whole entity)", r.status == 403 && alone.status == 403, format!("{r} {alone}"));
+    let (with_person, on_its_own) = (api.status(&juniper, &name)?, api.status(&juniper, &solo)?);
+    s.ok(
+        "the hold caps it only where it is in with Skyler (a viewer there), never a membership of its own (an editor still, where Skyler is not)",
+        with_person.body["role"] == "viewer" && on_its_own.body["role"] == "editor",
+        format!("{} / {}", with_person.body["role"], on_its_own.body["role"]),
+    );
     let q = api.signed(&juniper, "POST", &format!("/api/f/{name}/ops/count?for={skyler_id}"), Some(&json!({ "id": "q1", "input": {} })))?;
     s.ok("and still reads", q.status == 200, &q);
     held(&skyler, Value::Null)?;

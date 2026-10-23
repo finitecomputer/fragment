@@ -963,8 +963,9 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
                 }
                 None => (None, 0, vec![]),
             };
-            let hidden = unnamed.get(&f.name);
-            let agents = f.agents.into_iter().filter(|a| !hidden.is_some_and(|h| h.contains(a))).collect();
+            // a guest's agent named nowhere, its members read or not (decision 64)
+            let others = f.sharing.as_ref().is_none_or(|s| s.with_others());
+            let agents = fragment_core::access::access_agents(f.agents, unnamed.get(&f.name).map(Vec::as_slice), others);
             AccessRow { name: f.name, kind: f.kind, title: f.title, sharing: f.sharing, agents, members, more, invites }
         })
         .collect();

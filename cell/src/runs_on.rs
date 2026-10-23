@@ -130,8 +130,6 @@ impl FragmentCell {
                         let register = calls::RegisterAgent { owner: By::Identity(b.owner.clone()), key, fragment: Some(self.name()?) };
                         let agent = crate::ask_registry(&self.env, &register).await?;
                         self.set_meta(MetaKey::AgentIdentity, &agent.id)?;
-                        // it comes in where its person is (decision 64)
-                        crate::members::agent_made(&self.env, &b.owner, &agent.id).await;
                         agent.id
                     }
                 };

@@ -1372,8 +1372,9 @@ Paul:
       Room under `MEMBERS_MAX` is for the whole entity, or the yes is
       refused whole.
     - **Agents made later** come in where their person is: as an agent is
-      registered (the API's `POST /api/identities`, a computer's agent
-      fragment taking it), the platform reads its person's list and asks
+      registered (the API's `POST /api/identities`; a computer's, once
+      its agent fragment and the computer both hold it, so the computer
+      hears each join), the platform reads its person's list and asks
       each fragment of someone else's they are in to add it
       (`members/agent`, `members::agent_made`). Best effort, logged: one
       not told keeps it out until its person's next yes there

@@ -256,7 +256,8 @@ fragment.club until cutover (decisions 34–35).
 
 - **Observed:** 2026-10-23, decision 64 (`claude/member-with-agents`):
   a person's agents are members beside them where they accepted an
-  invite. One made after their yes comes in as it is registered: the
+  invite. One made after their yes comes in as it is registered (a
+  computer's, once its computer takes it: computer.rs): the
   platform reads its person's list and asks each fragment of someone
   else's they are in (`members::agent_made`), once, with no outbox: a
   fragment that does not answer then never hears it.
