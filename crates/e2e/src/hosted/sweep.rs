@@ -3,12 +3,12 @@
 //! A preview is shared: several sessions run the hosted lane on it at
 //! once, so a sweep removes one run's fragments unless told otherwise. A
 //! hosted run labels its fragments `e2e-<run>-<base>` (`label`): its id
-//! (`RUN_HEX` hex digits, from the clock as it starts) right after the
-//! prefix, so a label a lane extends (`<agent label>-chat`) still names its
-//! run. A sweep walks every e2e person (the levers' list), signs each in
-//! again (a session that leaves the paid calls they were lent as they are:
-//! a run beside it may be spending them) and acts as them: it has no power
-//! of its own.
+//! (`RUN_HEX` hex digits: the clock as it starts, then a random nonce)
+//! right after the prefix, so a label a lane extends (`<agent label>-chat`)
+//! still names its run. A sweep walks every e2e person (the levers' list),
+//! signs each in again (a session that leaves the paid calls they were lent
+//! as they are: a run beside it may be spending them) and acts as them: it
+//! has no power of its own.
 //!
 //! - **`Scope::Run`** (`--sweep <run>`; `--sweep`, the last run that
 //!   finished here; a rehearsal's end) deletes that run's fragments,
@@ -34,11 +34,17 @@ use serde_json::json;
 
 use crate::api::{Api, Call, Preview, Reply};
 
+/// A run's id starts with this many hex digits of its clock, so ids sort
+/// by when their runs started.
+const CLOCK_HEX: usize = 6;
+/// Then this many of a random nonce (a `u16`), so two runs started in the
+/// same second, in one checkout or on one preview, have ids of their own.
+const NONCE_HEX: usize = 4;
 /// A run's id is this many lowercase hex digits.
-pub const RUN_HEX: usize = 6;
-/// The ids a run's clock cycles through (16^6 seconds: about 194 days, so
-/// a run's labels are new beside any earlier run's still on the preview).
-const RUN_IDS: i64 = 1 << (4 * RUN_HEX);
+pub const RUN_HEX: usize = CLOCK_HEX + NONCE_HEX;
+/// The values a run's clock cycles through (16^6 seconds: about 194 days,
+/// so a run's labels are new beside any earlier run's still on the preview).
+const CLOCKS: i64 = 1 << (4 * CLOCK_HEX);
 /// `--sweep-all` spares a fragment younger than this: a run started after
 /// whoever chose to sweep everything may be using it. A whole hosted run
 /// takes well under an hour (agent-smoke, the longest section, half of one).
@@ -48,12 +54,13 @@ const PAGES_MAX: usize = 100;
 /// The spared fragments a report names one by one; the rest it counts.
 const NAMED_MAX: usize = 20;
 
-const _: () = assert!(RUN_HEX * 4 < 63, "a run's ids fit an i64");
+const _: () = assert!(CLOCK_HEX * 4 < 63, "a run's clock fits an i64");
+const _: () = assert!(NONCE_HEX == 2 * std::mem::size_of::<u16>(), "a nonce is a u16's hex");
 const _: () = assert!(SPARED_FOR_MS > 0);
 
-/// The id of a run that starts at `now_s`.
-pub fn run_id(now_s: i64) -> String {
-    let id = format!("{:0width$x}", now_s.rem_euclid(RUN_IDS), width = RUN_HEX);
+/// The id of a run that starts at `now_s`, drawing `nonce`.
+pub fn run_id(now_s: i64, nonce: u16) -> String {
+    let id = format!("{:0clock$x}{nonce:0NONCE_HEX$x}", now_s.rem_euclid(CLOCKS), clock = CLOCK_HEX);
     assert!(is_run(&id), "a run's id is {RUN_HEX} hex digits: {id:?}");
     id
 }

@@ -925,9 +925,19 @@ fn cli_binary() -> Result<PathBuf> {
 }
 
 /// A run's name: distinguishes its fragments from any earlier state, and
-/// (hosted) names the run its sweep removes.
+/// (hosted) names the run its sweep removes; its scratch is
+/// `target/e2e/<run>`. Its clock and a random nonce, so runs started in the
+/// same second still have names of their own.
 fn run_name() -> String {
-    hosted::sweep::run_id(api::now_s())
+    let nonce = u16::from_str_radix(&devstack::random_hex(2), 16).expect("two random bytes are a u16");
+    hosted::sweep::run_id(api::now_s(), nonce)
+}
+
+/// Makes a run's scratch, `dir`: never one another run has made (an id
+/// they share is refused, never trampled).
+fn make_scratch(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir.parent().expect("a run's scratch is in target/e2e"))?;
+    std::fs::create_dir(dir).with_context(|| format!("{}: this run's scratch, made by another run first", dir.display()))
 }
 
 /// A local run's settings beside its sections (hosted.rs `Args`).
@@ -953,7 +963,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let fake = CodeStorage::start(fake::Options { org: ORG.into(), org_key_pem: Some(org_key.clone()), ..Default::default() })?;
     let run = run_name();
     let scratch = root.join("target/e2e").join(&run);
-    std::fs::create_dir_all(&scratch)?;
+    make_scratch(&scratch)?;
     let project = devstack::stage_project(&scratch.join("cell"))?;
     // Ctrl-C (or SIGTERM, SIGHUP) mid-run: the node runs in a process group
     // of its own, which the terminal's signal does not reach, so the run
