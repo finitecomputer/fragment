@@ -121,6 +121,63 @@ pub fn self_hosted_models(fake: &str) -> Value {
     json!({ "cheap": own, "medium": own, "fallback": own })
 }
 
+/// A local run's own model for its agents (docs/self-host.md, seam 3):
+/// `FRAGMENT_E2E_MODELS_FILE` names a file holding a deployment's `models`
+/// as its config writes them (JSON, `//` comments allowed: dev's
+/// `FRAGMENT_MODELS_FILE`'s shape), and `FRAGMENT_E2E_MODEL_KEY_FILE` the
+/// file holding the value of the key its OpenAI-compatible slots name (one,
+/// as dev binds one). Its agents are then real ones (`Rung`'s `real_agent`).
+#[derive(Debug, Clone)]
+struct OwnModels {
+    /// The cell's `FRAGMENT_MODELS`: each slot less its key.
+    cell: String,
+    /// The slots on an OpenAI-compatible API, which name the key.
+    slots: Vec<String>,
+    key: Option<String>,
+    /// What the run says of them.
+    said: String,
+}
+
+fn own_models() -> Result<Option<OwnModels>> {
+    let Some(file) = std::env::var_os("FRAGMENT_E2E_MODELS_FILE") else { return Ok(None) };
+    let shown = Path::new(&file).display().to_string();
+    let text = std::fs::read_to_string(&file).with_context(|| format!("read {shown} (FRAGMENT_E2E_MODELS_FILE)"))?;
+    let models: Value = serde_json::from_str(&devstack::strip_comments(&text)).with_context(|| format!("{shown} is a deployment's `models`, as JSON"))?;
+    let (cell, slots) = models_less_keys(&models).with_context(|| format!("{shown} (FRAGMENT_E2E_MODELS_FILE)"))?;
+    let key = match slots.is_empty() {
+        true => None,
+        false => {
+            let path = std::env::var_os("FRAGMENT_E2E_MODEL_KEY_FILE").with_context(|| format!("{shown}'s slots on an OpenAI-compatible API name a key: name the file holding its value FRAGMENT_E2E_MODEL_KEY_FILE (any word, for a server that takes none)"))?;
+            let key = std::fs::read_to_string(&path).with_context(|| format!("read {} (FRAGMENT_E2E_MODEL_KEY_FILE)", Path::new(&path).display()))?.trim().to_string();
+            anyhow::ensure!(!key.is_empty(), "FRAGMENT_E2E_MODEL_KEY_FILE's file is empty: a key is a value (any word, for a server that takes none)");
+            Some(key)
+        }
+    };
+    let rows: Value = serde_json::from_str(&cell)?;
+    let said = rows.as_object().into_iter().flatten().map(|(slot, u)| format!("{slot}: {} at {}", u["model"].as_str().unwrap_or("?"), u["base_url"].as_str().unwrap_or("Workers AI (the fake)"))).collect::<Vec<_>>().join(", ");
+    Ok(Some(OwnModels { cell, slots, key, said: format!("{said} ({shown})") }))
+}
+
+/// A deployment's `models` as the cell takes them, each slot's `key` (its
+/// secret's name) taken out, checked as the cell reads them (a loopback
+/// URL allowed: the run's egress is local), and the slots that named a key.
+fn models_less_keys(models: &Value) -> Result<(String, Vec<String>)> {
+    let mut rows = models.as_object().context("models is an object: each slot, where it runs")?.clone();
+    let mut slots = vec![];
+    for (slot, row) in rows.iter_mut() {
+        let key = row.as_object_mut().with_context(|| format!("models.{slot} is an object"))?.remove("key");
+        match (row["provider"].as_str(), key) {
+            (Some("openai"), Some(Value::String(_))) => slots.push(slot.clone()),
+            (Some("openai"), _) => anyhow::bail!("models.{slot}: an OpenAI-compatible API names its key, a string"),
+            (_, Some(_)) => anyhow::bail!("models.{slot}: only an OpenAI-compatible API (provider openai) names a key"),
+            (_, None) => {}
+        }
+    }
+    let cell = Value::Object(rows).to_string();
+    fragment_core::models::Models::parse(Some(&cell), &fragment_core::price::PriceBook::defaults(), true).map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok((cell, slots))
+}
+
 /// The `body` of OpenRouter's slot on a node shaped as Finite's:
 /// deploy/example.jsonc's provider routing.
 pub fn openrouter_routing() -> Value {
@@ -356,6 +413,8 @@ pub struct Suite {
     byoc: bool,
     /// The image tags built for the nodes, removed as the run ends.
     image_tags: Vec<String>,
+    /// The agents' own model, a local run's (`FRAGMENT_E2E_MODELS_FILE`).
+    own_models: Option<OwnModels>,
     port: u16,
     /// Distinguishes this run's fragment names from any earlier state.
     run: String,
@@ -827,14 +886,17 @@ impl Suite {
             models: match self.shape {
                 Shape::FinitePrivate => Some(finite_private_models(&self.ai.node().url).to_string()),
                 Shape::SelfHosted => Some(self_hosted_models(&self.ai.node().url).to_string()),
-                _ => None,
+                _ => self.own_models.as_ref().map(|m| m.cell.clone()),
             },
             model_key_slots: match self.shape {
                 Shape::FinitePrivate => vec!["cheap".into(), "medium".into()],
                 Shape::SelfHosted => vec!["cheap".into(), "medium".into(), "fallback".into()],
-                _ => vec![],
+                _ => self.own_models.as_ref().map(|m| m.slots.clone()).unwrap_or_default(),
             },
-            model_key_value: matches!(self.shape, Shape::FinitePrivate | Shape::SelfHosted).then(|| FINITE_PRIVATE_KEY.to_string()),
+            model_key_value: match self.shape {
+                Shape::FinitePrivate | Shape::SelfHosted => Some(FINITE_PRIVATE_KEY.to_string()),
+                _ => self.own_models.as_ref().and_then(|m| m.key.clone()),
+            },
             mail_url: (self.shape != Shape::NoMailer).then(|| self.mail.node().url.clone()),
             mail_from: (self.shape != Shape::NoMailer).then(|| MAIL_FROM.into()),
             default_plan: Some(DEFAULT_PLAN.into()),
@@ -1351,7 +1413,17 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
             }
         }
     })?;
-    if only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION)) {
+    // a real model for its agents (docs/self-host.md, seam 3): agent-app alone
+    let own_models = own_models()?;
+    if let Some(m) = &own_models {
+        anyhow::ensure!(rehearse.is_none(), "a rehearsal's agents answer through the scripted model: drop FRAGMENT_E2E_MODELS_FILE");
+        anyhow::ensure!(
+            only.as_deref() == Some(&[lanes::AGENT_APP.to_string()][..]),
+            "a run on a model of its own (FRAGMENT_E2E_MODELS_FILE) runs agent-app alone (--only agent-app): every other section scripts the model"
+        );
+        println!("models: {}", m.said);
+    }
+    if only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION || n == lanes::AGENT_APP)) {
         lanes::hermes::stage_images(&project)?;
     }
     let test_secret = devstack::random_hex(32);
@@ -1383,8 +1455,8 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     // a local run's people sign in through the WorkOS fake, and pay the fake
     // model; a rehearsal's, through the levers, lent paid calls as on a preview
     let (rung, shared) = match rehearse {
-        None if celld.is_some() => (needs::Rung::Celld { nodes }, api::Run::new(test_secret.clone(), 0)),
-        None => (needs::Rung::Local { nodes }, api::Run::new(test_secret.clone(), 0)),
+        None if celld.is_some() => (needs::Rung::Celld { nodes, real_agent: own_models.is_some() }, api::Run::new(test_secret.clone(), 0)),
+        None => (needs::Rung::Local { nodes, real_agent: own_models.is_some() }, api::Run::new(test_secret.clone(), 0)),
         Some(paid_calls) => {
             // its computers answer through the scripted model: no real agent
             let offers = needs::Offers { levers: true, computers: true, models: paid_calls > 0, chrome: browser::chrome().is_some(), real_agent: false, operator: true };
@@ -1427,6 +1499,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         sandcastle: sandcastle.as_ref().map(|(tools, _)| tools.clone()),
         byoc: true,
         image_tags: vec![],
+        own_models,
         port,
         run,
         fake: codestore.fake,
@@ -1679,4 +1752,29 @@ fn finish(s: &mut Suite) -> Result<()> {
         println!("could not remove {}: {e}", s.scratch.display());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Goal: a local run's own models are the cell's as a deploy writes
+    /// them, each key's name taken out and its slot named, and a file a
+    /// deploy would refuse is refused. Method: the box's Bonsai file's
+    /// shape, then each way one goes wrong.
+    #[test]
+    fn a_runs_own_models_are_read_less_their_keys() {
+        let bonsai = json!({ "provider": "openai", "base_url": "http://127.0.0.1:18087/v1", "key": "bonsai-key", "model": "bonsai-2-27b",
+            "body": { "provider": { "max_price": { "prompt": 0, "completion": 0 } } }, "stale_timeout_s": 900 });
+        let (cell, slots) = models_less_keys(&json!({ "cheap": bonsai, "medium": bonsai, "fallback": bonsai })).expect("Bonsai's file");
+        assert_eq!(slots, ["cheap", "fallback", "medium"]);
+        assert!(!cell.contains("bonsai-key") && cell.contains("bonsai-2-27b") && cell.contains("stale_timeout_s"), "{cell}");
+        let (_, none) = models_less_keys(&json!({ "cheap": { "provider": "workers_ai", "model": fragment_core::models::GLM_FLASH } })).expect("Workers AI names no key");
+        assert!(none.is_empty());
+        let refused = |m: Value| models_less_keys(&m).map(|_| ()).unwrap_err().to_string();
+        assert!(refused(json!([])).contains("an object"));
+        assert!(refused(json!({ "cheap": { "provider": "openai", "base_url": "http://127.0.0.1:18087/v1", "model": "m" } })).contains("names its key"));
+        assert!(refused(json!({ "cheap": { "provider": "workers_ai", "model": "m", "key": "k" } })).contains("only an OpenAI-compatible API"));
+        assert!(!refused(json!({ "nonesuch": bonsai })).is_empty(), "a slot the cell has not is refused as the cell refuses it");
+    }
 }

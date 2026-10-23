@@ -395,6 +395,12 @@ Bonsai on this box, every tier and the fallback:
   the same server again (the route's own fallback skips the same
   upstream too).
 
+The e2e takes the same file as `FRAGMENT_E2E_MODELS_FILE` (its key's in
+`FRAGMENT_E2E_MODEL_KEY_FILE`): its agents are then real ones (needs.rs
+`Rung`'s `real_agent`), and the run is `agent-app` alone, which asks a
+Hermes on that model for a shared grocery list and opens what it made in
+Chrome (every other section scripts the model).
+
 **Evidence:** see "Re-ported, 2026-10-22".
 
 ### 4. Sign-in: OpenID Connect (done, beside WorkOS)
@@ -1304,6 +1310,20 @@ built 2026-10-22 15:20.
 - **The same sections on `wrangler dev`, master's path:** 758 passed, 0
   failed, 3 skipped (local Workflows' crash, and the no-mailer node's two:
   wrangler binds Email Sending).
+- **An app Hermes made on Bonsai, opened in Chrome** (`agent-app`, on
+  celld and the real engine, its tiers on `bonsai-2-27b`): asked for a
+  shared grocery list, Hermes made one in one turn (506 s, 39 steps: it
+  read the apps-finite skill, began from the todo template, rewrote its
+  three files and deployed with the CLI), and Chrome opened it as its
+  owner in two tabs: **13 passed, 0 failed**: it loads, throws nothing,
+  its live socket says hello, each tab sees the other, an item added in
+  one shows live in the other, and its `list` query answered every run.
+  Its own browser never opened it: in a computer, Chrome resolves
+  `*.localhost` to its own loopback without asking, so the intercept of
+  the platform's hosts (found 40) never sees the request on a stack whose
+  zone is `fragment.localhost` (it tried four addresses, then reported the
+  app live from `fragment status`). The LAN's zone is a real name, and so
+  is Cloudflare's.
 - **Bonsai** (`FRAGMENT_MODELS_FILE`, its tiers and fallback on
   `bonsai-2-27b`): an agent's `POST /api/models/v1/chat/completions`
   (`model: cheap`) through the dev stack, 200 in 565 ms on celld ("Tomatoes
@@ -1334,6 +1354,14 @@ FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… FRAGMENT_E2E_NODES=two SANDCASTLE_DIR=.
 # alone at its end or on a signal; other nodes' containers there stay
 FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… FRAGMENT_E2E_NODES=real SANDCASTLE_DIR=../sandcastle-node \
   cargo xtask e2e --only computers,chat,hermes
+# an app an agent made, opened in Chrome (lanes/agent_app.rs): agent-app alone, its
+# Hermes on the box's own model (a deployment's `models` in a file, its key in another;
+# celld's fetch bound raised as dev's start.sh raises it, for a local model's long streams).
+# On the real engine: Hermes intercepts `*.<zone>` (found 40), which the Docker double,
+# routing exact hosts alone, refuses
+FRAGMENT_E2E_MODELS_FILE=bonsai-models.jsonc FRAGMENT_E2E_MODEL_KEY_FILE=bonsai-key CELLD_FETCH_TIMEOUT_S=900 \
+  FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… FRAGMENT_E2E_NODES=real SANDCASTLE_DIR=../sandcastle-node \
+  cargo xtask e2e --only agent-app
 # the stub and Hermes built and loaded into the engine, named by digest
 cargo xtask node-images
 # the stack with computers on nodes: a node list, each node's "secret_file" beside it

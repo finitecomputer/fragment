@@ -121,15 +121,17 @@ pub struct Offers {
 /// it started (`FRAGMENT_E2E_NODES`: in front of sandcastle's Docker engine
 /// double, so the stub runs in local Docker all the same, or of the
 /// machine's real engine), not in the runtime's own containers.
+/// `real_agent`: its agents' model is a real server's
+/// (`FRAGMENT_E2E_MODELS_FILE`, a deployment's `models`), not the scripted one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rung {
     /// Under `wrangler dev`, with the fakes: everything.
-    Local { nodes: bool },
+    Local { nodes: bool, real_agent: bool },
     /// Under `celld dev`, with the fakes (`FRAGMENT_E2E_RUNTIME=celld`;
     /// docs/self-host.md, seam 1): everything but the runtime's own
     /// containers, which a self-hosted deployment places on sandcastle
     /// nodes (seam 2).
-    Celld { nodes: bool },
+    Celld { nodes: bool, real_agent: bool },
     /// A branch deployment on real vendors.
     Hosted(Offers),
 }
@@ -137,22 +139,23 @@ pub enum Rung {
 /// Why `Need::StoreFake` is missing on a local run whose git is outside it.
 pub const STORE_OUTSIDE: &str = "it reads or pulls the code.storage fake (its levers, its request counts, its state), and the node's git is a store outside the run (FRAGMENT_E2E_CODESTORE): not yet ported to the store's own routes (docs/self-host.md, seam 5)";
 
-const NO_REAL_AGENT: &str = "it needs a real agent (our Hermes image on a real model), which only a preview has: a local run's computers answer through the scripted model";
+const NO_REAL_AGENT: &str =
+    "it needs a real agent (our Hermes image on a real model): a preview's, or a local run's on a model of its own (FRAGMENT_E2E_MODELS_FILE); this run's computers answer through the scripted model";
 const NO_NODES: &str = "it needs sandcastle nodes, and the run started none (FRAGMENT_E2E_NODES=two or real, SANDCASTLE_DIR; docs/self-host.md, seam 2)";
 
 /// Why `need` is missing on `rung`, or `None` when it is there.
 pub fn missing(need: Need, rung: Rung) -> Option<&'static str> {
     let offers = match rung {
-        Rung::Local { nodes } => {
+        Rung::Local { nodes, real_agent } => {
             return match need {
-                Need::RealAgent => Some(NO_REAL_AGENT),
+                Need::RealAgent if !real_agent => Some(NO_REAL_AGENT),
                 Need::Nodes if !nodes => Some(NO_NODES),
                 _ => None,
             };
         }
-        Rung::Celld { nodes } => {
+        Rung::Celld { nodes, real_agent } => {
             return match need {
-                Need::RealAgent => Some(NO_REAL_AGENT),
+                Need::RealAgent if !real_agent => Some(NO_REAL_AGENT),
                 Need::LocalDocker | Need::Computers if !nodes => Some("it needs the runtime's own containers, and celld runs none: a self-hosted deployment's computers are a sandcastle node's, and the run started none (FRAGMENT_E2E_NODES; docs/self-host.md, seam 2)"),
                 Need::Nodes if !nodes => Some(NO_NODES),
                 _ => None,
@@ -204,10 +207,10 @@ mod tests {
     #[test]
     fn a_local_run_has_everything_but_a_real_agent() {
         let local: Vec<Need> = Need::ALL.into_iter().filter(|n| *n != Need::RealAgent).collect();
-        assert_eq!(unmet(&local, Rung::Local { nodes: true }), None);
+        assert_eq!(unmet(&local, Rung::Local { nodes: true, real_agent: false }), None);
         for need in local {
-            assert_eq!(missing(need, Rung::Local { nodes: true }), None, "{need:?}");
-            assert_eq!(missing(need, Rung::Local { nodes: false }).is_some(), need == Need::Nodes, "{need:?}");
+            assert_eq!(missing(need, Rung::Local { nodes: true, real_agent: false }), None, "{need:?}");
+            assert_eq!(missing(need, Rung::Local { nodes: false, real_agent: false }).is_some(), need == Need::Nodes, "{need:?}");
         }
     }
 
@@ -217,25 +220,30 @@ mod tests {
     fn celld_has_computers_on_nodes_alone() {
         for need in Need::ALL {
             let without = matches!(need, Need::LocalDocker | Need::Computers | Need::RealAgent | Need::Nodes);
-            assert_eq!(missing(need, Rung::Celld { nodes: false }).is_some(), without, "{need:?}");
-            assert_eq!(missing(need, Rung::Celld { nodes: true }).is_some(), need == Need::RealAgent, "{need:?}");
+            assert_eq!(missing(need, Rung::Celld { nodes: false, real_agent: false }).is_some(), without, "{need:?}");
+            assert_eq!(missing(need, Rung::Celld { nodes: true, real_agent: false }).is_some(), need == Need::RealAgent, "{need:?}");
         }
-        let (need, why) = unmet(&[Need::Levers, Need::Computers], Rung::Celld { nodes: false }).expect("no computers on celld without nodes");
+        let (need, why) = unmet(&[Need::Levers, Need::Computers], Rung::Celld { nodes: false, real_agent: false }).expect("no computers on celld without nodes");
         assert_eq!(need, Need::Computers);
         assert!(why.contains("sandcastle"), "{why}");
-        assert_eq!(unmet(&[Need::Fakes, Need::Node, Need::Deployment, Need::Chrome, Need::TwoSites], Rung::Celld { nodes: false }), None);
+        assert_eq!(unmet(&[Need::Fakes, Need::Node, Need::Deployment, Need::Chrome, Need::TwoSites], Rung::Celld { nodes: false, real_agent: false }), None);
     }
 
-    /// A real agent (our Hermes on a real model) is a preview's alone: a
-    /// local run and a rehearsal answer through the scripted model.
+    /// A real agent (our Hermes on a real model) is a preview's, and a local
+    /// run's on a model of its own: a local run on the scripted model and a
+    /// rehearsal answer through the scripted model.
     #[test]
-    fn a_real_agent_is_a_previews_alone() {
-        let (need, why) = unmet(&[Need::Computers, Need::RealAgent], Rung::Local { nodes: false }).expect("no real agent locally");
+    fn a_real_agent_is_a_previews_or_a_local_models() {
+        let (need, why) = unmet(&[Need::Computers, Need::RealAgent], Rung::Local { nodes: false, real_agent: false }).expect("no real agent locally");
         assert_eq!(need, Need::RealAgent);
         assert!(why.contains("scripted model"), "{why}");
         let rehearsal = Offers { real_agent: false, ..EVERYTHING };
         assert_eq!(unmet(&[Need::Levers, Need::Computers, Need::Models, Need::RealAgent], Rung::Hosted(rehearsal)).map(|(n, _)| n), Some(Need::RealAgent));
         assert_eq!(unmet(&[Need::Levers, Need::Computers, Need::Models, Need::RealAgent], Rung::Hosted(EVERYTHING)), None);
+        let needs = [Need::Levers, Need::Computers, Need::Models, Need::Chrome, Need::RealAgent];
+        assert_eq!(unmet(&needs, Rung::Local { nodes: false, real_agent: true }), None, "a local run on a model of its own");
+        assert_eq!(unmet(&needs, Rung::Celld { nodes: true, real_agent: true }), None, "and on celld, its computers on nodes");
+        assert_eq!(unmet(&needs, Rung::Celld { nodes: false, real_agent: true }).map(|(n, _)| n), Some(Need::Computers), "a real agent needs a computer to run on");
     }
 
     /// A hosted run never has what stands in for a vendor or controls the
@@ -269,7 +277,7 @@ mod tests {
         let no_secret = Offers { levers: false, ..EVERYTHING };
         assert_eq!(unmet(&[], Rung::Hosted(no_secret)).map(|(n, _)| n), Some(Need::Levers));
         assert_eq!(unmet(&[Need::Computers], Rung::Hosted(no_secret)).map(|(n, _)| n), Some(Need::Levers));
-        assert_eq!(unmet(&[], Rung::Local { nodes: false }), None);
+        assert_eq!(unmet(&[], Rung::Local { nodes: false, real_agent: false }), None);
     }
 
     /// The first need missing is the one said, in the order declared.
