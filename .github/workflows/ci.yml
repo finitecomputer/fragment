@@ -65,10 +65,21 @@ jobs:
   #   is the one this merge brings to master. A squash or a rebase merge
   #   has no such parent.
   #
-  # Proven, the tests skip and `deploy` runs at once; otherwise (a hotfix
-  # pushed straight to production, master moved since the pull request's
-  # run, a run red or still running) they run as on any push. Should this
-  # job fail, nothing after it runs and nothing deploys.
+  # Proven, the e2e's shards skip and `deploy` runs once `check` is green;
+  # otherwise (a hotfix pushed straight to production, master moved since
+  # the pull request's run, a run red or still running) they run as on any
+  # push. Should this job fail, nothing after it runs and nothing deploys.
+  #
+  # `check` runs on every push, proven or not: besides the tree's own
+  # checks it holds the tree's schema lock to the one at what the push
+  # moved from (`github.event.before`; xtask/src/schema_lock.rs), which no
+  # tree can prove ahead of the push. A tree proven before a migration
+  # step shipped, and pushed again after it (a revert), drops that step,
+  # and every object that took it refuses code without it (docs/MODEL.md,
+  # Schemas): its `check` fails, and nothing deploys. On production too:
+  # its last deploy can hold a step its new commit lost (a hotfix's, lost
+  # in a merge back), which no run of master's checked against. `check`
+  # takes about two minutes, beside `proven`; the shards are the 15 to 20.
   proven:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/production')
     runs-on: ubuntu-latest
@@ -116,12 +127,8 @@ jobs:
           echo "no run of this workflow proved $GITHUB_SHA's tree: testing it first"
           echo proven=false >> "$GITHUB_OUTPUT"
 
+  # on every run, a proven push's too (`proven`, above, says why)
   check:
-    # on every run but a push whose tree a run proved
-    # (`proven`, which skips on every other run: `!cancelled()` keeps its
-    # skip from skipping this), and never after `proven` fails
-    needs: proven
-    if: ${{ !cancelled() && (needs.proven.result == 'skipped' || (needs.proven.result == 'success' && needs.proven.outputs.proven == 'false')) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -157,7 +164,9 @@ jobs:
 
   e2e-shard:
     name: e2e shard ${{ matrix.shard }}/4
-    # as `check`
+    # on every run but a push whose tree a run proved (`proven`, which
+    # skips on every other run: `!cancelled()` keeps its skip from skipping
+    # this), and never after `proven` fails
     needs: proven
     if: ${{ !cancelled() && (needs.proven.result == 'skipped' || (needs.proven.result == 'success' && needs.proven.outputs.proven == 'false')) }}
     runs-on: ubuntu-latest
@@ -242,9 +251,9 @@ jobs:
           retention-days: 7
 
   # the check named `e2e`: green when every shard is (a re-run's, by each
-  # shard's latest attempt). It runs whenever the shards were to run, as
-  # `check`, whatever they did (unless the run was cancelled), so a red or
-  # skipped shard makes it red; it skips with them alone.
+  # shard's latest attempt). It runs whenever the shards were to run,
+  # whatever they did (unless the run was cancelled), so a red or skipped
+  # shard makes it red; it skips with them alone.
   e2e:
     needs: [proven, e2e-shard]
     if: ${{ !cancelled() && (needs.proven.result == 'skipped' || (needs.proven.result == 'success' && needs.proven.outputs.proven == 'false')) }}
@@ -284,10 +293,11 @@ jobs:
           retention-days: 30
 
   # Continuous deployment, on a green push: master's to the preview
-  # (`--branch preview`), production's to production, at once when a run
-  # proved its tree (`proven`), and never after a red test or a failed
-  # `proven`. Only Paul updates `production` (a protected branch): his
-  # push, or the pull request he merges into it, is the approval. Each
+  # (`--branch preview`), production's to production, after `check` and
+  # the e2e, or after `check` alone when a run proved its tree (`proven`),
+  # and never after a red test or a failed `proven`. Only Paul updates
+  # `production` (a protected branch): his push, or the pull request he
+  # merges into it, is the approval. Each
   # deploys from a GitHub environment of its name, `preview` or
   # `production`, which the repo's settings let
   # only its branch use, and which holds the variable DEPLOY_HOST (its
@@ -306,8 +316,9 @@ jobs:
     if: >-
       ${{ !cancelled() && github.event_name == 'push'
       && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/production')
+      && needs.check.result == 'success'
       && ((needs.proven.result == 'success' && needs.proven.outputs.proven == 'true')
-      || (needs.check.result == 'success' && needs.e2e.result == 'success')) }}
+      || needs.e2e.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

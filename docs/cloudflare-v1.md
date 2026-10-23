@@ -78,12 +78,14 @@ speaking Cloudflare's APIs) returns once this product works.
    production. Only Paul updates `production`: his push, or the pull
    request he merges into it, is a production deploy's approval.
    Promoting a commit master's run has proved green deploys in minutes,
-   untested again (ci.yml's `proven`); anything else, a hotfix pushed
+   its e2e not run again (ci.yml's `proven`); anything else, a hotfix pushed
    straight there or a commit whose master run is red or still running,
    runs the full tests first (Paul, 2026-10-20). So does a merge to
    master, unless its pull request's green run tested the merge's very
-   tree (master unmoved since): it deploys the preview at once (Paul,
-   2026-10-23; `proven` matches trees, which every run records). Each
+   tree (master unmoved since): it deploys the preview once `check`, a
+   couple of minutes, is green (Paul, 2026-10-23; `proven` matches trees,
+   which every run records; `check` runs on every push, as it holds the
+   schema lock to what the push moved from). Each
    deploys from a GitHub environment (`preview`, `production`) that only
    its branch may use, holding its Cloudflare token and a token that
    reads its config: a file in the private repo

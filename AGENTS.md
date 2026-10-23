@@ -319,8 +319,10 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
 - `.github/workflows/ci.yml` runs `check`, the e2e's four shards (`e2e
   shard k/4`), and `e2e`, green when they all are, on Linux, and then, on
   a push to master or `production` that both are green for, `deploy`
-  (below). A push whose tree a green run already tested skips them and
-  deploys at once: its first job, `proven`, asks the API. Each run's
+  (below). A push whose tree a green run already tested skips the e2e's
+  shards and deploys once `check` is green (about two minutes: it holds
+  the schema lock to what the push moved from, which no earlier run can
+  prove): its first job, `proven`, asks the API. Each run's
   `e2e` job records the tree its shards tested (an artifact,
   `tested-tree-<tree>`). On `production`, a run of ci.yml that succeeded
   on a push to master of that SHA, or of a commit with that tree, proves
