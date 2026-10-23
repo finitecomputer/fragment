@@ -455,6 +455,8 @@ export class NodeContainer {
   #life = 0;
   // the intercepts this start set, in order: the node names one by its index
   #intercepts = [];
+  // inside `intercepting`: the list is sent once, at its end
+  #batched = false;
 
   constructor(node, name) {
     this.#node = node;
@@ -655,6 +657,25 @@ export class NodeContainer {
     const i = this.#intercepts.findIndex((x) => x.scheme === scheme && x.target === target);
     if (i >= 0) this.#intercepts[i].fetcher = fetcher;
     else this.#intercepts.push({ scheme, target, fetcher });
+    if (!this.#batched) await this.#sendIntercepts();
+  }
+
+  // Every intercept `set` makes, sent to the node as one list at its end:
+  // each alone is a PUT of the whole list, and a start sets one for each
+  // host the swap catches, on http and https (46 calls, 1.3 s of a start
+  // on the Docker double; docs/self-host.md, seam 2).
+  async intercepting(set) {
+    await this.#started();
+    this.#batched = true;
+    try {
+      await set();
+    } finally {
+      this.#batched = false;
+    }
+    await this.#sendIntercepts();
+  }
+
+  async #sendIntercepts() {
     const intercepts = this.#intercepts.map((x) => ({ scheme: x.scheme, target: x.target, action: { kind: "handler" } }));
     await this.#json("PUT", `/v1/containers/${this.#name}/intercepts`, { intercepts });
   }
