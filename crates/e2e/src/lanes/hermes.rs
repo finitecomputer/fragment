@@ -566,6 +566,31 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
             super::agent_app::app_works(s, api, &mut chrome, &session, &owner, &app, super::agent_app::Made::Fixed, &evidence)?;
         }
     }
+    // and Hermes opens it itself, at its own address, with its share link
+    // (docs/self-host.md, found 40): curl and Chromium take a `.localhost`
+    // name for the guest's own loopback, where the bridge takes it on to the
+    // platform's intercepts (images/bridge `loopback`); before it, nothing
+    // there answered, and Paul's Hermes reported the app live from `fragment
+    // status` instead (2026-10-22)
+    let hello = format!("{}?view={token}", api.site_url(&app, "hello.html"));
+    let curled = run(s, 68, &format!("curl -sS -m 20 '{hello}' | grep -c 'Picked by the agent' | sed 's/^/curl-/'"))?;
+    s.ok("Hermes opens the app it made at its own address, port and all, with curl in its terminal", said(&curled, "curl-1"), json!({ "url": hello, "reply": curled }));
+    let page = format!("{}?view={token}", api.site_url(&app, ""));
+    // the image's Chromium, as Hermes' browser tools start it (named at the
+    // daemon's start alone: a later command naming it is warned)
+    let ab = "agent-browser --session loopback";
+    let browsed = run(
+        s,
+        69,
+        &format!("{ab} --executable-path /opt/fragment/bin/chromium open '{page}' >/dev/null 2>&1; if {ab} wait --fn \"document.getElementById('here').textContent.endsWith(' here')\" >/dev/null 2>&1; then echo \"browser-live: $({ab} get text '#here')\"; else echo \"browser-dead: $({ab} get text body 2>/dev/null | tr '\\n' ' ' | head -c 300)\"; fi; {ab} close >/dev/null 2>&1"),
+    )?;
+    // the page's list may come over HTTP; who is here comes only over its
+    // socket (the hello), which the router takes only from the app's origin
+    s.ok(
+        "and in its own browser (agent-browser's Chromium), where the app's live socket comes up from the app's own origin: it shows who is here",
+        said(&browsed, "browser-live:"),
+        json!({ "url": page, "reply": browsed }),
+    );
     // it shares as its owner would (Paul, 2026-10-04): it makes the app
     // public, and adds another person to it as a viewer
     let guest = api.person()?;

@@ -274,6 +274,19 @@ async fn credential(agent: &str, name: &str) -> Result<String, String> {
     all.iter().find(|c| c.env.iter().any(|e| e == name)).map(|c| c.placeholder.clone()).ok_or_else(|| format!("no credential of {agent}'s is in ${name}"))
 }
 
+/// Where `fetch` connects for `url`: a `.localhost` name to the guest's own
+/// loopback, as Chrome and curl take one without asking DNS (RFC 6761), its
+/// `Host` still the name; any other as written.
+fn dialed(url: &str, base: &crate::net::Base) -> String {
+    let host = base.host.to_ascii_lowercase();
+    if host != "localhost" && !host.ends_with(".localhost") {
+        return url.to_string();
+    }
+    let rest = url.strip_prefix("http://").unwrap_or(url);
+    let path = rest.find('/').map_or("/", |i| &rest[i..]);
+    format!("http://127.0.0.1:{}{path}", base.port)
+}
+
 /// `fetch <url> with <value> [in <header> | in query <param> | as basic
 /// <user>]`, as `agent`'s guest sends it (no header of ours): the answer's
 /// status and body.
@@ -295,7 +308,7 @@ async fn fetch(agent: &str, text: &str) -> Result<(u16, String), String> {
         Place::Basic(user) => (url.to_string(), "authorization", format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{user}:{value}")))),
     };
     let base = crate::net::Base::parse(&url)?;
-    let req = hyper::Request::get(&url)
+    let req = hyper::Request::get(dialed(&url, &base))
         .header("host", base.authority())
         .header(header, header_value)
         .body(Empty::<bytes::Bytes>::new())
@@ -784,6 +797,20 @@ mod tests {
         assert_eq!(fetch_words("fetch http://a.test/x with fck_p_00 as basic api").unwrap(), ("http://a.test/x", "fck_p_00", Place::Basic("api")));
         for bad in ["fetch http://a.test/x", "fetch http://a.test/x with", "fetch http://a.test/x with $K in", "fetch http://a.test/x with $K as basic"] {
             assert!(fetch_words(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// `fetch` connects for a `.localhost` name to its own loopback, as
+    /// Chrome and curl do, on the port named; any other name as written.
+    #[test]
+    fn fetch_takes_localhost_for_its_loopback() {
+        let at = |url: &str| dialed(url, &crate::net::Base::parse(url).unwrap());
+        assert_eq!(at("http://shelf--e2e.fragment.localhost:41234/?view=t"), "http://127.0.0.1:41234/?view=t");
+        assert_eq!(at("http://Shelf.Fragment.LOCALHOST:41234/x?view=t"), "http://127.0.0.1:41234/x?view=t");
+        assert_eq!(at("http://localhost:8790"), "http://127.0.0.1:8790/");
+        assert_eq!(at("http://a.localhost/x"), "http://127.0.0.1:80/x");
+        for elsewhere in ["http://example.com/", "http://a.localhost.example.com:8790/", "http://api.fragment.internal/api/computer"] {
+            assert_eq!(at(elsewhere), elsewhere);
         }
     }
 

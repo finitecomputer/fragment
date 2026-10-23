@@ -752,21 +752,13 @@ fn intercept_names_by_key(s: &mut Suite, api: &Api, owner_id: &str, agent: &str,
 
 /// The checks `platform_host_checks` makes, as a run that cannot make them
 /// skips them.
-const PLATFORM_HOST_CHECKS: [&str; 4] = [
-    "its guest opens its owner's app at the app's own address, through the platform, with the share link anyone with it has",
+const PLATFORM_HOST_CHECKS: [&str; 5] = [
+    "its guest opens its owner's app at the app's own address, port and all, on its loopback as Chrome and curl take a .localhost name, through the platform, with the share link anyone with it has",
     "as no one: without the share link the address opens nothing, its owner a member and all",
     "members only, the share link opens nothing from the guest either: no one's identity rides along",
     "a name under the suffix that is no one's is the platform's own 404, reaching nothing past it",
+    "on the platform's port of its loopback, a host that is not the platform's is refused there (421), reaching nothing",
 ];
-
-/// A fragment's address as a guest dials it: on an http platform, the
-/// intercepts take its names on port 80 alone
-/// (`fragment_core::computer::platform_intercepts`).
-fn dialed(api: &Api, name: &str, path: &str) -> String {
-    let mut url = reqwest::Url::parse(&api.site_url(name, path)).expect("a fragment's URL parses");
-    url.set_port(None).expect("http takes a port");
-    url.to_string()
-}
 
 /// The page `shelf`'s app serves.
 const SHELF_PAGE: &str = "<p>the e2e shelf</p>";
@@ -788,11 +780,15 @@ fn shelf(s: &Suite, api: &Api, owner: &crate::Keys, label: &str) -> Result<(Stri
 /// docs/computers.md, "The platform's hosts"): its guest opens its owner's
 /// app at its address through the platform, as any browser anywhere
 /// would, as no one: the share link opens it, and nothing of its owner's
-/// or its agent's rides along. The replies it adds.
+/// or its agent's rides along. The stub's fetch takes a `.localhost` name
+/// for its own loopback, as Chrome and curl do (a local run's zone is
+/// one), where the bridge's forwarder takes it on to the intercepts
+/// (images/bridge `loopback`); before it, nothing there answered. The
+/// replies it adds.
 fn platform_host_checks(s: &mut Suite, api: &Api, owner: &crate::Keys, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
     let page = SHELF_PAGE;
     let (name, token) = shelf(s, api, owner, "shelf")?;
-    let fetch = |s: &Suite, n: u32, path: &str| fetched(s, n, &format!("fetch {} with e2e in x-e2e-probe", dialed(api, &name, path)));
+    let fetch = |s: &Suite, n: u32, path: &str| fetched(s, n, &format!("fetch {} with e2e in x-e2e-probe", api.site_url(&name, path)));
     let opened = fetch(s, 140, &format!("?view={token}"))?;
     s.ok(PLATFORM_HOST_CHECKS[0], opened.starts_with("fetched 200") && opened.contains(page), &opened);
     let bare = fetch(s, 141, "")?;
@@ -801,9 +797,11 @@ fn platform_host_checks(s: &mut Suite, api: &Api, owner: &crate::Keys, fetched: 
     anyhow::ensure!(r.status == 200, "the app made members only: {r}");
     let members = fetch(s, 142, &format!("?view={token}"))?;
     s.ok(PLATFORM_HOST_CHECKS[2], !members.starts_with("fetched 200") && members.starts_with("fetched ") && !members.contains(page), &members);
-    let nobody = fetched(s, 143, &format!("fetch {} with e2e in x-e2e-probe", dialed(api, "no-one-here", "")))?;
+    let nobody = fetched(s, 143, &format!("fetch {} with e2e in x-e2e-probe", api.site_url("no-one-here", "")))?;
     s.ok(PLATFORM_HOST_CHECKS[3], nobody.starts_with("fetched 404") && nobody.contains("no fragment here"), &nobody);
-    Ok(4)
+    let other = fetched(s, 144, &format!("fetch http://localhost:{}/ with e2e in x-e2e-probe", api.port))?;
+    s.ok(PLATFORM_HOST_CHECKS[4], other.starts_with("fetched 421") && other.contains(&format!("not localhost:{}", api.port)), &other);
+    Ok(5)
 }
 
 /// The checks `lockdown_checks` makes.
@@ -828,7 +826,7 @@ fn lockdown_checks(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str, fetc
         Ok(())
     };
     restart(false)?;
-    let opened = fetched(s, 150, &format!("fetch {} with e2e in x-e2e-probe", dialed(api, &name, &format!("?view={token}"))))?;
+    let opened = fetched(s, 150, &format!("fetch {} with e2e in x-e2e-probe", api.site_url(&name, &format!("?view={token}"))))?;
     s.ok(LOCKDOWN_CHECKS[0], opened.starts_with("fetched 200") && opened.contains(SHELF_PAGE), &opened);
     let given = fetched(s, 151, "credentials")?;
     s.ok(LOCKDOWN_CHECKS[1], given.starts_with("credentials: "), &given);
