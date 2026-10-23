@@ -2259,6 +2259,7 @@ async fn nothing_technical_asks_its_owner() {
     assert!(!calls.iter().any(|m| m.body["messages"].to_string().contains("APPROVE, DENY, or ESCALATE")), "no guardian");
     let told = calls.iter().filter(|m| m.path.ends_with("/chat/completions")).filter(|m| m.body["messages"][0]["role"] == "system").map(|m| m.body["messages"][0]["content"].to_string()).find(|s| s.contains("Never ask them to approve a command, a file, a path or code"));
     assert!(told.as_ref().is_some_and(|s| s.contains("already on your computer") && s.contains("into the file dialog on your desktop with computer_use")), "and that a file attached in the chat is on its computer, and how to upload it (hermes::FILES)");
+    assert!(told.as_ref().is_some_and(|s| s.contains("put MEDIA: and its absolute path on a line of its own")), "and how it attaches a file in the chat (hermes::SENDING)");
     assert!(told.is_some_and(|s| s.contains("with the clarify tool and its choices")), "every turn's system prompt says how to ask (the image's platform_hints.relay)");
 }
 

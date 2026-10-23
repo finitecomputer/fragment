@@ -277,11 +277,24 @@ pub const ASKING: &str = "You are in a Fragment chat, and its people are not tec
 /// at more length.
 pub const FILES: &str = "A file someone attaches in this chat is already on your computer: the note before their message names its path (for an image, after image_url:). It is cleared after a day, so copy it into your work to keep it. To put it on a website, click the site's upload button with your browser tools, then type its full path into the file dialog on your desktop with computer_use and press Enter.";
 
+/// What every agent is told of the files it sends in our chats, after
+/// `FILES` on every turn (Paul, 2026-10-23: asked for a PDF in the chat,
+/// his agent named a path on its computer, then emailed it, and attached
+/// it only when told to). Hermes tells every platform it knows that a
+/// reply's `MEDIA:` tag sends a file (its `_MEDIA_NATIVE` hint); `relay`
+/// has no hint of Hermes', so this is ours. Hermes delivers a tag only
+/// outside code and quotes (its `_mask_media_scan_text`), and the bridge
+/// posts each file as the reply's attachment (docs/bridge.md). The
+/// `fragment` skill's first page (`computer.md`, "Files you send") says
+/// the same at more length.
+pub const SENDING: &str = "To give someone in this chat a file (a PDF, an image, a document, a spreadsheet, audio or video), put MEDIA: and its absolute path on a line of its own in your reply, outside code and quotes, for example MEDIA:/data/work/report.pdf. It arrives in this chat as an attachment they can open and download. Attach it whenever they ask for a file here, rather than emailing it or naming a path on your computer.";
+
 /// The relay's hint, appended to every agent's system prompt on every turn
 /// in our chats (Hermes' `platform_hints.relay.append`): how it asks
-/// (`ASKING`), then the files it is sent (`FILES`).
+/// (`ASKING`), then the files it is sent (`FILES`), then how it sends one
+/// (`SENDING`).
 pub fn relay_hint() -> String {
-    format!("{ASKING}\n\n{FILES}")
+    format!("{ASKING}\n\n{FILES}\n\n{SENDING}")
 }
 
 /// The managed overlay: how every profile streams, shows progress, asks
@@ -1276,7 +1289,7 @@ mod tests {
     #[test]
     fn every_agent_is_told_its_chat_files_are_on_its_computer() {
         let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
-        assert_eq!(relay_hint(), format!("{ASKING}\n\n{FILES}"));
+        assert_eq!(relay_hint(), format!("{ASKING}\n\n{FILES}\n\n{SENDING}"));
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "its files beside how to ask, in the relay's hint: {m}");
         for said in ["already on your computer", "the note before their message names its path", "image_url:", "cleared after a day", "copy it into your work", "upload button with your browser tools", "full path into the file dialog on your desktop with computer_use", "press Enter"] {
             assert!(FILES.contains(said), "{said}: {FILES}");
@@ -1287,6 +1300,31 @@ mod tests {
         let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
         for said in ["already on your computer", "image_url:", "after a day", "copy it into your work", "upload button with your browser tools", "file dialog on your desktop", "computer_use", "press Enter"] {
             assert!(section.contains(said), "computer.md, \"Files your owner sends you\", says {said}: {section}");
+        }
+    }
+
+    /// Goal (Paul, 2026-10-23: asked for a PDF in the chat, his agent named
+    /// a path, then emailed it): every agent is told, on every turn in our
+    /// chats, that a file it sends goes into the chat as an attachment, by
+    /// a `MEDIA:` line of its own outside code and quotes (the only tag
+    /// Hermes delivers), and to attach one asked for there rather than
+    /// email it or name a path; and the `fragment` skill's first page says
+    /// the same. Method: the overlay's relay hint after `FILES`, its words,
+    /// and the page's section.
+    #[test]
+    fn every_agent_is_told_it_attaches_files_in_its_chat() {
+        let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
+        assert!(relay_hint().ends_with(&format!("{FILES}\n\n{SENDING}")), "after the files it is sent: {}", relay_hint());
+        assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "in the relay's hint: {m}");
+        for said in ["a file (a PDF, an image", "put MEDIA: and its absolute path on a line of its own", "outside code and quotes", "MEDIA:/data/work/report.pdf", "arrives in this chat as an attachment", "rather than emailing it or naming a path"] {
+            assert!(SENDING.contains(said), "{said}: {SENDING}");
+        }
+        assert!(!SENDING.contains(['`', '\n', '$']) && SENDING.len() < 500, "one plain paragraph, nothing Hermes would expand: {SENDING}");
+        let page = include_str!("computer.md");
+        let section = page.split("\n## ").find(|s| s.starts_with("Files you send\n")).expect("computer.md has the section");
+        let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
+        for said in ["`MEDIA:<absolute-path>`", "a line of its own", "outside code and quotes", "attachment they can open and download", "email it only when they ask for email", "never answer with a path"] {
+            assert!(section.contains(said), "computer.md, \"Files you send\", says {said}: {section}");
         }
     }
 
