@@ -1284,7 +1284,7 @@ the provider's own hosts.
 
   | Provider | Kind | Hosts | Placement | Environment variable | Price per call (list) |
   |---|---|---|---|---|---|
-  | `google` | connection | `gmail`, `www`, `people`, `sheets`, `docs` `.googleapis.com` | `Authorization: Bearer {}` | `GOOGLE_OAUTH_ACCESS_TOKEN` (Terraform's Google provider reads it; Google's client libraries take a token as given) | none |
+  | `google` | connection | `gmail`, `www`, `people`, `sheets`, `docs`, `slides` `.googleapis.com` | `Authorization: Bearer {}` | `GOOGLE_OAUTH_ACCESS_TOKEN` (Terraform's Google provider reads it; Google's client libraries take a token as given) | none |
   | `firecrawl` | operator | `api.firecrawl.dev` | `Authorization: Bearer {}` | `FIRECRAWL_API_KEY` | $0.01 (10-result search, Hobby PAYG) |
   | `fal` | operator | `queue.fal.run`, `fal.run`, `rest.fal.ai` | `Authorization: Key {}` | `FAL_KEY` | $0.006 (1 MP Klein 9B image) |
   | `browser-use` | operator | `api.browser-use.com` | `X-Browser-Use-API-Key: {}` | `BROWSER_USE_API_KEY` | $0.02/12 (five browser minutes per control call) |
