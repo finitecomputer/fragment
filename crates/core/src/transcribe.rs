@@ -10,9 +10,10 @@
 //!
 //! A call is charged after its answer at the length Whisper reports
 //! (`usage_of`; docs/ledger.md), nothing held before it. A first try that
-//! fails fast for want of capacity is made once more (`again`). What reaches the
-//! model is the audio and, when the client sent them, its
-//! language and prompt (`bound`); the client's answer is OpenAI's shape,
+//! fails fast for want of capacity is made once more (`again`). What
+//! reaches the model is the audio, its voice-activity filter on, and, when
+//! the client sent them, its language and prompt (`bound`); the client's
+//! answer is OpenAI's shape,
 //! `{"text": …}` or the text alone (`answer`).
 
 use base64::Engine;
@@ -25,8 +26,8 @@ use crate::price::Usage;
 pub const WHISPER: &str = "whisper";
 /// The model, by its Workers AI catalog id
 /// (developers.cloudflare.com/workers-ai/models/whisper-large-v3-turbo/,
-/// read 2026-10-07): `{audio: <base64>, task, language?, initial_prompt?}`
-/// in, `{text, transcription_info: {duration, …}, …}` out.
+/// read 2026-10-07): `{audio: <base64>, task, vad_filter, language?,
+/// initial_prompt?}` in, `{text, transcription_info: {duration, …}, …}` out.
 pub const TRANSCRIBE_MODEL: &str = "@cf/openai/whisper-large-v3-turbo";
 /// Its price (Workers AI's pricing page, read 2026-10-07): 46.63 neurons
 /// per audio minute, which at $0.011 per thousand neurons
@@ -131,6 +132,10 @@ fn text<'a>(p: &'a Part<'_>) -> Result<&'a str, Refusal> {
 /// A form's fields, bounded: its audio as Whisper's input, its language
 /// and prompt when it named them, nothing else (OpenAI's `temperature`
 /// and `timestamp_granularities` have no Whisper input, and are let go).
+/// Whisper hears it through its voice-activity filter (`vad_filter`, the
+/// catalog's own input): silence and noise are heard as no words, not as a
+/// phrase Whisper is known to make up in them ("Thank you."), so an agent
+/// asks for the memo again instead of answering what no one said.
 pub fn bound(parts: &[Part<'_>]) -> Result<Bounded, Refusal> {
     let field = |name: &str| parts.iter().find(|p| p.name == name);
     match field("model").map(text).transpose()? {
@@ -146,7 +151,7 @@ pub fn bound(parts: &[Part<'_>]) -> Result<Bounded, Refusal> {
         Some("text") => Format::Text,
         Some(_) => return Err(Refusal::Format),
     };
-    let mut input = json!({ "audio": base64::engine::general_purpose::STANDARD.encode(audio), "task": "transcribe" });
+    let mut input = json!({ "audio": base64::engine::general_purpose::STANDARD.encode(audio), "task": "transcribe", "vad_filter": true });
     if let Some(l) = field("language").map(text).transpose()?.map(str::trim).filter(|l| !l.is_empty()) {
         if !(2..=3).contains(&l.len()) || !l.bytes().all(|b| b.is_ascii_lowercase()) {
             return Err(Refusal::Language);
@@ -231,7 +236,7 @@ mod tests {
     fn a_form_is_whispers_input() {
         let audio = b"OggS\x00voice".to_vec();
         let b = bound(&[part("model", b"whisper"), part("file", &audio), part("response_format", b"json")]).unwrap();
-        assert_eq!(b.input, json!({ "audio": base64::engine::general_purpose::STANDARD.encode(&audio), "task": "transcribe" }), "no language: Whisper detects it");
+        assert_eq!(b.input, json!({ "audio": base64::engine::general_purpose::STANDARD.encode(&audio), "task": "transcribe", "vad_filter": true }), "no language: Whisper detects it, through its voice-activity filter");
         assert_eq!(b.format, Format::Json);
         let b = bound(&[part("model", b" whisper "), part("file", &audio), part("language", b"de"), part("prompt", b"Paul, fragment"), part("response_format", b"text"), part("temperature", b"0")]).unwrap();
         assert_eq!((b.input["language"].clone(), b.input["initial_prompt"].clone(), b.format), (json!("de"), json!("Paul, fragment"), Format::Text));

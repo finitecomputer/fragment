@@ -1066,12 +1066,12 @@ fn transcription(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let call = s.ai.calls().get(calls).cloned();
     use base64::Engine;
     let sent = call.as_ref().is_some_and(|c| {
-        c.model == TRANSCRIBE_MODEL && c.body["audio"] == base64::engine::general_purpose::STANDARD.encode(&memo) && c.body["task"] == "transcribe" && c.body.get("language").is_none() && c.authorization.is_none()
+        c.model == TRANSCRIBE_MODEL && c.body["audio"] == base64::engine::general_purpose::STANDARD.encode(&memo) && c.body["task"] == "transcribe" && c.body["vad_filter"] == true && c.body.get("language").is_none() && c.authorization.is_none()
     });
     let heard = charge(&Usage::Neurons { milli: 2_332 });
     let settled = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| charged(e) == Some(heard)));
     s.ok(
-        "a transcription is OpenAI's shape on Workers AI's Whisper (the audio as it came, no language: Whisper detects it), charged at the 3 s it heard",
+        "a transcription is OpenAI's shape on Workers AI's Whisper (the audio as it came, its voice-activity filter on, no language: Whisper detects it), charged at the 3 s it heard",
         r.status == 200 && r.body == json!({ "text": "hello from a voice memo" }) && sent && settled,
         json!({ "status": r.status, "answer": r.text, "model": call.as_ref().map(|c| c.model.clone()), "entries": aig() }),
     );
