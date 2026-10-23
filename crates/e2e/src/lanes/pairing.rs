@@ -20,11 +20,12 @@
 //!   is refused, saying how to go on, and settings show each node's id's
 //!   end beside its name;
 //! - own hardware (seam 10): the computer on their node is never charged
-//!   (its awake time never reaches their ledger), its use is counted in
-//!   points on the computer, and their balance is unchanged; an operator
-//!   reads it; a computer on the deployment's node is charged as ever;
+//!   (its awake time reaches their ledger at no price), their balance is
+//!   unchanged, and an operator's usage table and their settings show its
+//!   hours as on their own machine; a computer on the deployment's node is
+//!   charged as ever, its hours the deployment's;
 //! - across a restart of the platform, the pairing, the choice and the
-//!   points hold, and the computer on their node wakes there;
+//!   hours hold, and the computer on their node wakes there;
 //! - revoked, the node's uplink is cut and its dial refused, and its
 //!   computer's wake answers `node_revoked`, typed, before and after a
 //!   restart;
@@ -156,8 +157,8 @@ fn impostor(s: &Suite, id: &str, label: &str) -> Result<String> {
 /// The shell's settings, as the person sees them (when the run has
 /// Chrome): "Computers (experimental)", their node up with their computer
 /// on it, chosen for new computers, with Revoke, the end of its id beside
-/// its name in the list and in the choice; their computer's use in points;
-/// a screenshot kept.
+/// its name in the list and in the choice; their hours on their own
+/// machine, never charged; a screenshot kept.
 fn settings_page(s: &mut Suite, api: &Api, session: &str, id: &str) -> Result<()> {
     let Some(mut b) = s.browser()? else {
         s.skip("the shell's settings show the person's node (in Chrome)", "no Chrome (CHROME_BIN)");
@@ -186,12 +187,12 @@ fn settings_page(s: &mut Suite, api: &Api, session: &str, id: &str) -> Result<()
         row_text.as_str().is_some_and(|t| t.contains(end)) && chosen.as_str().is_some_and(|t| t.contains(end) && t.contains("(yours)")),
         format!("{} | {}", row_text.as_str().unwrap_or("").replace('\n', " "), chosen.as_str().unwrap_or("")),
     );
-    let computer = b.eval(&page, "document.querySelector('#settings-page')?.innerText ?? ''")?;
+    let used = b.eval(&page, "document.getElementById('settings-usage')?.innerText ?? ''")?;
     s.ok(
-        "their computer shows its use in points, not charged, as it runs on their own machine",
-        // as read, in the case the page's style gives each part; one point, or several
-        computer.as_str().map(str::to_lowercase).is_some_and(|t| (t.contains(" point this month, not charged") || t.contains(" points this month, not charged")) && t.contains("it runs on your own machine")),
-        computer.as_str().unwrap_or("").replace('\n', " | "),
+        "their usage this month shows their computer's time on their own machine, never charged",
+        // as read, in the case the page's style gives each part
+        used.as_str().map(str::to_lowercase).is_some_and(|t| t.contains("usage this month") && t.contains("your own machine") && t.contains("awake, never charged")),
+        used.as_str().unwrap_or("").replace('\n', " | "),
     );
     b.eval(&page, "(document.getElementById('settings-nodes')?.scrollIntoView(), true)")?;
     let _ = b.screenshot(&page, &s.dir("pairing").join("settings-computers.png"));
@@ -360,32 +361,31 @@ pub fn pairing(s: &mut Suite, _: &Api) -> Result<()> {
         format!("{} | {}", theirs.status, freed.status),
     );
 
-    // ---- own hardware: counted in points, never charged (docs/self-host.md, seam 10)
+    // ---- own hardware: its hours counted, never charged (docs/self-host.md, seam 10)
     // the stub's bridge makes /data as it boots, within a second: a sleep
     // sooner saves nothing (lanes/placement.rs)
     std::thread::sleep(BOOTED);
     sleep(&api, &ann, &c)?;
     let ann_id = api.identity(&ann)?;
-    let mut counted = Value::Null;
-    let points = s.eventually(METERED, || {
-        counted = view(&api, &ann, &c);
-        counted["ownHardwarePoints"].as_i64().is_some_and(|p| p >= 1)
+    let mut awake = vec![];
+    s.eventually(METERED, || {
+        awake = super::ledger::entries(&api, &ann_id, &format!("awake:{c}:"));
+        !awake.is_empty()
     });
-    let awake = super::ledger::entries(&api, &ann_id, &format!("awake:{c}:"));
+    let own_ms: u64 = awake.iter().filter_map(|e| e["entry"]["row"]["usage"]["ms"].as_u64()).sum();
     let worked = ledger(&api, &ann);
     s.ok(
-        "its awake time on their node is counted in points on the computer, and never reaches their ledger: their balance is as it was",
-        points && awake.is_empty() && worked["balanceMicros"] == unworked["balanceMicros"],
-        json!({ "computer": counted, "awake": awake, "before": unworked, "after": worked }),
+        "its awake time on their node reaches their ledger on their own hardware, charged nothing: their balance is as it was",
+        own_ms > 0
+            && awake.iter().all(|e| e["entry"]["row"]["usage"]["instance"] == fragment_core::price::OWN_HARDWARE && e["entry"]["charge"] == 0)
+            && worked["balanceMicros"] == unworked["balanceMicros"],
+        json!({ "awake": awake, "before": unworked, "after": worked }),
     );
-    let op_session = api.sign_in("operator@e2e.test")?;
-    // the admin section approves the operator's key when it runs first
-    let _ = api.approve(&op_session, &s.operator);
-    let read = api.signed(&s.operator, "GET", &format!("/api/admin/people/{ann_id}"), None)?;
+    let line = super::ledger::operator_usage(s, &api, &ann)?;
     s.ok(
-        "an operator reads their points on the person's page, with their computer (who used what)",
-        read.status == 200 && read.body["computer"]["ownHardwarePoints"] == counted["ownHardwarePoints"] && read.body["computer"]["node"] == id.as_str(),
-        &read,
+        "an operator's usage table shows those hours as on their own machine, none on the deployment's (who used what)",
+        line["used"]["ownAwakeMs"] == own_ms && line["used"]["awakeMs"] == 0,
+        &line,
     );
     settings_page(s, &api, &ann_session, &id)?;
 
@@ -413,10 +413,15 @@ pub fn pairing(s: &mut Suite, _: &Api) -> Result<()> {
         !charged.is_empty()
     });
     let theirs = ledger(&api, &dee);
+    let dee_ms: u64 = charged.iter().filter_map(|e| e["entry"]["row"]["usage"]["ms"].as_u64()).sum();
+    let line = super::ledger::operator_usage(s, &api, &dee)?;
     s.ok(
-        "a computer on the deployment's node is charged as ever: each interval in dollars, from their balance, no points",
-        !charged.is_empty() && charged.iter().all(|e| e["entry"]["charge"].as_i64().is_some_and(|c| c > 0)) && view(&api, &dee, &dc).get("ownHardwarePoints").is_none(),
-        json!({ "awake": charged, "ledger": theirs }),
+        "a computer on the deployment's node is charged as ever: each interval in dollars, from their balance, its hours the deployment's",
+        !charged.is_empty()
+            && charged.iter().all(|e| e["entry"]["charge"].as_i64().is_some_and(|c| c > 0) && e["entry"]["row"]["usage"]["instance"] == fragment_core::price::INSTANCE)
+            && line["used"]["awakeMs"] == dee_ms
+            && line["used"]["ownAwakeMs"] == 0,
+        json!({ "awake": charged, "ledger": theirs, "line": line }),
     );
 
     // ---- across a restart of the platform ----
@@ -432,10 +437,11 @@ pub fn pairing(s: &mut Suite, _: &Api) -> Result<()> {
     s.ok("after a restart, the node dials again, and the computer wakes on it", back && last["node"] == id.as_str(), &last);
     s.ok("the pairing and the choice held", nodes(&api, &ann)["prefer"] == id.as_str(), nodes(&api, &ann));
     let held = ledger(&api, &ann);
+    let mine = api.signed(&ann, "GET", "/api/ledger/usage", None)?;
     s.ok(
-        "their points held, and their balance with them",
-        held["balanceMicros"] == worked["balanceMicros"] && last["ownHardwarePoints"].as_i64() >= counted["ownHardwarePoints"].as_i64(),
-        json!({ "before": counted, "after": last, "ledger": held }),
+        "their hours held, and their balance with them",
+        held["balanceMicros"] == worked["balanceMicros"] && mine.body["ownAwakeMs"].as_u64() >= Some(own_ms),
+        json!({ "usage": mine.body, "ledger": held }),
     );
     sleep(&api, &ann, &c)?;
 

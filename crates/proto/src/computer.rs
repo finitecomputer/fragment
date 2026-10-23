@@ -255,12 +255,6 @@ pub struct ComputerView {
     /// could not take it, and why (docs/self-host.md, seam 2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placed: Option<String>,
-    /// This month's use of its owner's own hardware, in points
-    /// (`fragment_core::price::points`): present while it is placed on a
-    /// node its owner paired, whose awake time is tracked here and never
-    /// charged (docs/self-host.md, seam 10).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub own_hardware_points: Option<i64>,
     /// The version of the image it runs now (`fragment_core::computer::
     /// version_of`): its running start's; none while it runs nothing
     /// (asleep, starting, won't wake).
