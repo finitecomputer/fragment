@@ -606,6 +606,54 @@ restart), leaving master whole.
    - Checks the transport through a real Cloudflare egress, where
      `connect()` refuses private addresses (read).
 
+## The lab, 2026-10-22
+
+Paul (2026-10-22): "simplex … for the $200 tier (requires always on
+agent). Needs to work well across restarts and updates." The lab is
+`images/bridge/tests/simplex.rs` (run by hand: `cargo test -p
+fragment-bridge --test simplex -- --ignored`), simplex-chat v7.0.3 on
+Debian trixie (our Hermes image's base, whose libraries its release
+binary links: run), one local SMP server. It drives the bridge's
+`simplex::link` rules. All **run**, three passing runs each:
+
+- **A rollback the core cannot see.** These runs correct "Rollback breaks
+  a connection" above, which held for the spike's runs only.
+  - Restored across received messages alone, the core reads the
+    person's next message fine (one `rcvIntegrityError`, "skipped message
+    ID"). Its own next sends then reach the person's app as duplicates,
+    dropped there (`A_DUPLICATE`), while this side shows them sent.
+  - Restored across an exchange both ways, the next message may still
+    decrypt.
+  - Either way no `required` state comes, and an unforced `/_sync` is
+    refused (`CMD PROHIBITED`, "synchronizeRatchet: not allowed").
+  - So waiting for the core to notice is not enough. A **forced** sync
+    (`/_sync @<id> force=on`), asked as the start that went back in time
+    comes up, put both directions in step 0.47 to 0.68 s after the core
+    started. A reply held through it arrived after.
+- **The hold must stop the process.** `/_stop` answers `chatStopped`, but
+  `/_start` after it exits the CLI (`simplex-chat: AsyncCancelled`). A
+  SIGTERM leaves the two databases whole, with no `-wal` or `-shm` files.
+  A start takes about half a second.
+- **Linking by a one-time invitation.** `/connect` answers `invitation`,
+  with its link and its connection (`pccConnId`). The contact that comes
+  through it is announced with that connection (`activeConn.connId`), so
+  the link binds exactly the person who used it. The spent link is
+  refused to anyone after (`AUTH`). No address and no auto-accept are
+  needed. A contact the link did not make is deleted (`/_delete @<id>
+  full notify=off`, answered `contactDeleted`).
+- **Ids.** Each message carries `itemSharedMsgId`, its sender's id, the
+  same on both sides. The core's own item ids, and SQLite's row ids
+  behind them, are reused after a rollback or a delete. Record ids come
+  from the sender's id.
+- **Size.** A text of 15,400 bytes is sent; one of 15,600 is refused
+  (`errorStore largeMsg`). Replies go in parts of at most 12,000 JSON
+  bytes, which arrive whole.
+- **A core killed mid-burst** (its disk intact) is caught up from its own
+  chat (`/_get chat @<id> count=32`) as it starts. Every message is
+  forwarded, by its id.
+- **The person deleting the agent in their app** reaches the core as
+  `contactDeletedByContact`, and the link lets go.
+
 ## What it changes in decision 32
 
 Decision 32 now reads: "SimpleX on $200 seats only. The simplex-chat
