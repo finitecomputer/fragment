@@ -340,8 +340,8 @@ the move if it ever outgrows that, not before.
 - **Checkout** makes the subscription (`mode: subscription`).
   - It carries `client_reference_id` (the org: the one its payment will
     make, its id minted and carried in the metadata, or the org buying
-    again), the metadata, a card always, and `allow_promotion_codes`
-    (discounts are Stripe's, below).
+    again), the metadata, a card always (but a trial's: Trials, below),
+    and `allow_promotion_codes` (discounts are Stripe's, below).
   - It bills `customer_email` (a new org's buyer, or anyone but its last
     payer buying an org again; Checkout makes the customer), or the
     org's own `customer` when its last payer buys it again, for its paid
@@ -521,8 +521,9 @@ Checked against finite-mono's code (2026-10-08):
       deployment's).
 - **An e2e section, `billing`.** Each case below is a check:
   - **Valid:** buy (nothing made before the payment), offer and remove a
-    seat; an offer accepted, declined, a move, a leave; a 30-day trial; a
-    pack; a comped seat.
+    seat; an offer accepted, declined, a move, a leave; a 30-day trial
+    with no card, its end with none, and paying again; a pack; a comped
+    seat.
   - **Invalid:** a forged or foreign event; a member changing seats; a
     `seat` bought, added, or made a trial code's kind; a code used twice;
     a full code; a guest creating; a lapsed person waking; who pays
@@ -545,8 +546,8 @@ Checked against finite-mono's code (2026-10-08):
 - **The hosted lane**, on a preview with the sandbox.
   - It creates subscriptions through the API with `pm_card_visa`,
     since Checkout's page needs a person.
-  - A test clock carries a trial past its end and a renewal into a
-    decline (`pm_card_chargeCustomerFail`).
+  - A test clock carries a trial with no card past its end (canceled)
+    and a renewal into a decline (`pm_card_chargeCustomerFail`).
   - Each preview registers its own sandbox endpoint (decision 58).
 
 ## Trials
@@ -566,14 +567,28 @@ Checked against finite-mono's code (2026-10-08):
     trialed. The places taken are uses with a subscription plus uses
     whose session has not yet expired. It then records the use.
   - **Checkout:** one always-on seat, `trial_period_days` (a month at
-    most: 30), a card always, no promotion codes. It expires in 30
-    minutes, Stripe's least.
+    most: 30), no card asked (`payment_method_collection: if_required`:
+    nothing is due until its end; Alex, 2026-10-23), no promotion
+    codes. It expires in 30 minutes, Stripe's least.
   - **Freeing a place:** the use's own expiry frees it. This needs no
     `checkout.session.expired` handler, unlike finite-mono's.
-- **At the trial's end** Stripe charges the card. A decline is
-  `past_due`, then Stripe's retries, then lapse, as for any seat. As a
-  belt to the braces, `trial_settings.end_behavior.missing_payment_method`
-  is `cancel`.
+- **During the trial** Billing says when it ends and that a card added
+  in Payment and invoices (Stripe's portal, which makes it the
+  customer's default) keeps the seat after it.
+- **At the trial's end** Stripe charges a card added meanwhile. A
+  decline is `past_due`, then Stripe's retries, then lapse, as for any
+  seat. With no card,
+  `trial_settings.end_behavior.missing_payment_method: cancel` cancels
+  the subscription: the seat lapses (agents stop, nothing is deleted),
+  and they pay again from Billing's Pay again, a Checkout of the seat
+  that takes a card, on the trial's own customer, in the org they
+  trialed in.
+  - **Cancel, not pause** (Alex, 2026-10-23): Pay again is already the
+    way back for any lapsed org, and a paused subscription would need
+    it to resume that one rather than make another. What pause would
+    give, the reminder's link still working after the end, is Stripe's
+    trial-ending email, a setting of the whole account (finite-mono's
+    too), not relied on here.
 - **Who gets one:** one trial per person ever, for a seat of one. Team
   trials are later.
 

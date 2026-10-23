@@ -2170,7 +2170,7 @@ On a deployment that sells seats (its config's `stripe`; else these are
 400, and seats are comped only), a person buys their own through Stripe
 Checkout: a monthly subscription to one always-on seat, $200, at its
 price's lookup key (`fragment_seat_always_on_month`; the only seat sold,
-Paul, 2026-10-15), a card always, Stripe's automatic tax unless the
+Paul, 2026-10-15), a card always (a trial's asks none), Stripe's automatic tax unless the
 deployment turns it off, and promotion codes allowed. Nothing is made
 before it is paid: someone in no org buys an org of one, its id minted
 into the session and the org made once paid (its customer the one
@@ -2214,7 +2214,7 @@ and orgs).
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/billing/checkout` | a person (409 holding a good seat, or in an org whose admins give seats) | `{kind?, trialCode?}` → `{url, session}`: Stripe's Checkout of one always-on seat (an org buying again: its paid seats), for 31 minutes; nothing is made until it is paid. `kind` is `seat_always_on`, the default; `seat` is 400 (not sold). With a trial code (as typed: any case, spaces and dashes aside), Stripe's trial of its days (30 at most), a card taken first, and no promotion code on top. A code that is unknown is 404; ended (off, past its expiry, or of the `seat` no longer sold), 400; full, or redeemed by someone who had a trial or whose org has paid, 409. Nothing is made for a refused one |
+| `POST /api/billing/checkout` | a person (409 holding a good seat, or in an org whose admins give seats) | `{kind?, trialCode?}` → `{url, session}`: Stripe's Checkout of one always-on seat (an org buying again: its paid seats), for 31 minutes; nothing is made until it is paid. `kind` is `seat_always_on`, the default; `seat` is 400 (not sold). With a trial code (as typed: any case, spaces and dashes aside), Stripe's trial of its days (30 at most), no card asked (its end with none on file cancels it: the seat lapses until they pay again), and no promotion code on top. A code that is unknown is 404; ended (off, past its expiry, or of the `seat` no longer sold), 400; full, or redeemed by someone who had a trial or whose org has paid, 409. Nothing is made for a refused one |
 | `POST /api/billing/sessions/{id}` | its buyer (anyone else, or a session Stripe never made: 404) | → `MySeat`: the Checkout's return (a seat's `/welcome?checkout={id}`, a pack's `/settings?pack={id}`; Back from Checkout, `?checkout=canceled` or `?pack=canceled`): a completed one's seat is theirs at once, whatever the webhook's timing; again, it changes nothing |
 | `POST /api/billing/packs` | a seat's holder; an org's admin for a member who holds a seat (`member`: their row's id; 403 otherwise; 400 holding no seat) | `{member?}` → `{url, session}`: a Checkout for a $25 credit pack (decision 55; the one-time price `fragment_credit_pack`). Paid, its webhook or its return grants $25 of purchased credit on the member's ledger, kept until spent, once by its Checkout (`GrantCredit {id: pack:<session>, by: stripe}`). Its return is its buyer's |
 | `POST /api/billing/portal` | who pays for the asker's org (`MySeat`'s `pays`; anyone else, its other admins included, 403) | → `{url}`: Stripe's portal on the deployment's own configuration (`stripe.portal`): card, invoices, billing address, cancel at period end |
