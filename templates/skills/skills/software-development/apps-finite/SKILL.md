@@ -49,7 +49,7 @@ an aesthetic direction the human has not seen or approved.
 For a new app or substantial redesign:
 
 1. Infer a credible initial direction from the prompt and existing brand context.
-   Use Hermes' design skills for art direction when useful. Ask a question first
+   Load `design-finite` for art direction. Ask a question first
    only when the answer is truly blocking.
 2. Build the smallest coherent draft that makes the direction tangible. Prefer a
    strong above-the-fold experience plus one representative section or state over
@@ -227,10 +227,9 @@ fragment invites decline their-garden--k3x9            # no: it waits no more
 
 ## Design and platform references
 
-Hermes' `popular-web-designs` and `design-md` skills cover design research
-and visual systems. Use them when useful; this skill supplies the Fragment
-publishing and state contract. For a design audit, Hermes' hub offers
-`impeccable` as an optional skill.
+Load `design-finite` for art direction, critique and polish; this skill
+supplies the Fragment publishing and state contract. Hermes' design skills
+remain available for additional references.
 
 Read `fragment guide` for the build and publish loop, operations, SQLite,
 channels, jobs, AI steps and outbound fetches. Check the live page with

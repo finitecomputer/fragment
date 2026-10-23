@@ -351,13 +351,13 @@ mod tests {
                 assert!(names.insert(name.to_string()), "{name} twice");
             }
         }
-        for rewritten in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "chat-attachments-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite"] {
+        for rewritten in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "chat-attachments-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite", "design-finite"] {
             assert!(names.contains(rewritten), "{rewritten}");
         }
         for gone in ["shared-skills-finite", "finite-sites-publishing-finite", "publish-web-apps-finite", "website-building-finite", "finitebrain", "llm-wiki-finite", "fal-image-editing-finite", "ml-paper-writing-finite", "powerpoint-finite"] {
             assert!(!names.contains(gone), "{gone} is replaced");
         }
-        assert_eq!(names.len(), 13, "seven Fragment contracts and the six operator integrations Paul retains");
+        assert_eq!(names.len(), 14, "Fragment contracts, the six operator integrations Paul retains, and design-finite");
         assert!(data_file("skills", "fragment.json").is_none() && data_file("skills", "skills/nope/SKILL.md").is_none());
     }
 
