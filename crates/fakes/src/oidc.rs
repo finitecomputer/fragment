@@ -77,6 +77,9 @@ pub enum Spoil {
     Hs256,
     /// Signed by a key the JWKS never publishes.
     UnpublishedKey,
+    /// Signed by a key the JWKS never publishes, under the kid of one it
+    /// does: a forgery only the signature's check tells.
+    ForeignKey,
 }
 
 /// Which algorithm the provider signs with.
@@ -155,7 +158,7 @@ struct State {
     codes: HashMap<String, Code>,
     /// The newest last; at most `KEY_GENERATIONS`.
     keys: Vec<Keys>,
-    /// A key never published (`Spoil::UnpublishedKey` signs with it).
+    /// A key never published (`Spoil::UnpublishedKey` and `ForeignKey` sign with it).
     stray: Keys,
     alg: Alg,
     next_error: Option<String>,
@@ -392,10 +395,11 @@ impl Oidc {
                         claims["email"] = json!(email);
                         claims["email_verified"] = json!(user.verified);
                     }
-                    let keys = if spoil == Some(Spoil::UnpublishedKey) { &s.stray } else { s.signer() };
+                    let keys = if matches!(spoil, Some(Spoil::UnpublishedKey | Spoil::ForeignKey)) { &s.stray } else { s.signer() };
+                    let named = if spoil == Some(Spoil::ForeignKey) { s.signer() } else { keys };
                     let (alg, kid) = match s.alg {
-                        Alg::Rs256 => ("RS256", keys.rsa_kid()),
-                        Alg::Es256 => ("ES256", keys.ec_kid()),
+                        Alg::Rs256 => ("RS256", named.rsa_kid()),
+                        Alg::Es256 => ("ES256", named.ec_kid()),
                     };
                     let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
                     let id_token = match spoil {
@@ -587,8 +591,9 @@ mod tests {
 
     // Goal: the fake is a provider the cell's own rules accept, and as
     // strict as a real one: its metadata parses, its code exchange takes
-    // PKCE and Basic, once, and its id_token verifies against its JWKS,
-    // with RS256, with ES256, and after a rotation; a spoiled one does not;
+    // PKCE and Basic, once, and its id_token passes the rules against its
+    // JWKS (the signature's arithmetic is the runtime's, proven in the
+    // e2e), with RS256, with ES256, and after a rotation; a spoiled one does not;
     // the email is the verified handle. Method: the cell's half of the
     // flow, by hand.
     #[test]
@@ -624,10 +629,16 @@ mod tests {
             assert_eq!(again.status, 400, "a code is spent once");
             rules::id_token_of(r.status, &r.body).unwrap()
         };
+        // the signature itself is the runtime's WebCrypto to check: the
+        // e2e's, through this fake, on workerd and celld
         let verify = |token: &str, nonce: &str| {
-            let keys = get(&provider.jwks_uri).body;
+            let keys = Jwks::parse(&get(&provider.jwks_uri).body).unwrap();
             let expect = Expect { issuer: &fake.url, client_id: "client-1", nonce, now_s: now_s(), algs: &provider.algs };
-            rules::verify(token, &Jwks::parse(&keys).unwrap(), &expect)
+            let verified = std::pin::pin!(rules::verify(token, &keys, &expect, async |_| Ok(true)));
+            match std::future::Future::poll(verified, &mut std::task::Context::from_waker(std::task::Waker::noop())) {
+                std::task::Poll::Ready(v) => v,
+                std::task::Poll::Pending => panic!("nothing here waits"),
+            }
         };
         let map = rules::ClaimMap::default();
         let v = verify(&sign_in("jane@corp.example", "n1"), "n1").unwrap();
@@ -647,6 +658,9 @@ mod tests {
         assert_eq!(verify(&sign_in("jane@corp.example", "n4"), "n4").unwrap_err(), rules::IdTokenError::Audience);
         fake.spoil_next(Spoil::UnpublishedKey);
         assert!(matches!(verify(&sign_in("jane@corp.example", "n5"), "n5").unwrap_err(), rules::IdTokenError::UnknownKey(_)));
+        // a forgery under a published kid passes every rule but the signature's
+        fake.spoil_next(Spoil::ForeignKey);
+        assert!(verify(&sign_in("jane@corp.example", "n5b"), "n5b").is_ok(), "the runtime's check alone refuses it (the e2e)");
 
         // strict: no nonce, or no S256, is refused back to the client
         let no_nonce = authorize(Some("jane@corp.example"), "n6", &own_signin::b64url(&[6; 32]), false).replace("&nonce=n6", "");

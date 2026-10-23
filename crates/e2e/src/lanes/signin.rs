@@ -1655,19 +1655,32 @@ fn oidc_cases(s: &mut Suite, api: &Api) -> Result<()> {
 
     // Goal: an id_token that is wrong in any way signs no one in. Method:
     // the fake spoils the next one each time, as a provider misconfigured
-    // (or someone between it and the cell) would.
-    let spoils = [Spoil::WrongAudience, Spoil::WrongIssuer, Spoil::Expired, Spoil::WrongNonce, Spoil::BadSignature, Spoil::AlgNone, Spoil::Hs256, Spoil::UnpublishedKey];
+    // (or someone between it and the cell) would. The signature's are the
+    // runtime's WebCrypto to refuse, RS256's and ES256's: a byte changed, and
+    // a key never published signing under a published one's kid.
+    let signature = |spoil| matches!(spoil, Spoil::BadSignature | Spoil::ForeignKey);
+    let spoils = [Spoil::WrongAudience, Spoil::WrongIssuer, Spoil::Expired, Spoil::WrongNonce, Spoil::BadSignature, Spoil::AlgNone, Spoil::Hs256, Spoil::UnpublishedKey, Spoil::ForeignKey]
+        .map(|spoil| (Alg::Rs256, spoil))
+        .into_iter()
+        .chain([(Alg::Es256, Spoil::BadSignature), (Alg::Es256, Spoil::ForeignKey)])
+        .collect::<Vec<_>>();
     let mut let_in = vec![];
-    for (i, spoil) in spoils.iter().enumerate() {
+    for (i, (alg, spoil)) in spoils.iter().enumerate() {
+        s.oidc.sign_with(*alg);
         s.oidc.spoil_next(*spoil);
         let (callback, cookie) = begun(api, &format!("oidc-spoiled-{i}@e2e.test"))?;
         let r = finished(api, &callback, &cookie)?;
-        if !(r.status == 401 && r.text.contains("refused the provider") && no_session(&r)) {
-            let_in.push(format!("{spoil:?}: {r}"));
+        let why = !signature(*spoil) || r.text.contains("signature does not verify");
+        if !(r.status == 401 && r.text.contains("refused the provider") && why && no_session(&r)) {
+            let_in.push(format!("{alg:?} {spoil:?}: {r}"));
         }
     }
+    s.oidc.sign_with(Alg::Rs256);
     s.ok(
-        &format!("an id_token for another client, from another issuer, expired, for another sign-in, badly signed, alg none, HS256 keyed with the client secret, or by a key never published signs no one in (401, on a page; {} of them)", spoils.len()),
+        &format!(
+            "an id_token for another client, from another issuer, expired, for another sign-in, alg none, HS256 keyed with the client secret, by a key never published, or whose signature does not verify (a byte changed, a forgery under a published kid; RS256 and ES256) signs no one in (401, on a page; {} of them)",
+            spoils.len()
+        ),
         let_in.is_empty(),
         format!("{let_in:?}"),
     );

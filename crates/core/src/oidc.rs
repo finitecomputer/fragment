@@ -17,7 +17,11 @@
 //! - **The id_token**: a compact JWS signed RS256 or ES256 by a key in the
 //!   provider's JWKS (never a key the token names itself, never `none` or an
 //!   HMAC), then `iss`, `aud` (with `azp`), `exp`, `iat` and `nbf` within
-//!   `SKEW_S`, `nonce`, and `sub` (OpenID Connect Core 1.0, 3.1.3.7).
+//!   `SKEW_S`, `nonce`, and `sub` (OpenID Connect Core 1.0, 3.1.3.7). The
+//!   signature's arithmetic is the runtime's WebCrypto, behind one seam
+//!   (`verify`'s `check`, handed a `Check`): every rule around it, which
+//!   algorithm, which key, its size, the signature's length, and every
+//!   claim, is here, and host-tested with a stand-in for it.
 //! - **Who it is**: `(issuer URL, sub)` names the sign-in, which names a
 //!   person (an npub the registry makes at their first sign-in, as WorkOS's
 //!   does); the email is their handle, so it must be there and verified
@@ -31,8 +35,7 @@
 
 use base64::Engine;
 use serde::Deserialize;
-use serde_json::{Map, Value};
-use sha2::Sha256;
+use serde_json::{json, Map, Value};
 
 /// The largest id_token read (Entra's, with groups, run to a few KiB).
 pub const ID_TOKEN_MAX_BYTES: usize = 16 * 1024;
@@ -45,9 +48,14 @@ pub const SKEW_S: i64 = 120;
 /// How old an id_token may be when it arrives: it is minted at the token
 /// request, moments before, and a sign-in lasts ten minutes at most.
 pub const ID_TOKEN_AGE_MAX_S: i64 = 15 * 60;
-/// RSA keys outside these sizes are not used (4096 is `rsa`'s own cap).
+/// RSA keys outside these sizes are not used.
 pub const RSA_BITS_MIN: usize = 2048;
 pub const RSA_BITS_MAX: usize = 4096;
+/// The largest RSA public exponent taken (BoringSSL's bound; 65537 is
+/// every provider's).
+pub const RSA_EXPONENT_MAX: u64 = (1 << 33) - 1;
+/// An ES256 signature: P-256's r and s, 32 bytes each (RFC 7518, 3.4).
+const ES256_SIGNATURE_BYTES: usize = 64;
 /// A subject's length (OpenID Connect Core 1.0, 2: at most 255 ASCII).
 pub const SUBJECT_MAX: usize = 255;
 /// The longest authorization code taken (Entra's run to a couple of KiB).
@@ -179,6 +187,22 @@ impl Alg {
             "RS256" => Some(Alg::Rs256),
             "ES256" => Some(Alg::Es256),
             _ => None,
+        }
+    }
+
+    /// WebCrypto's `importKey` algorithm for a key of this algorithm.
+    pub fn import_params(self) -> Value {
+        match self {
+            Alg::Rs256 => json!({ "name": "RSASSA-PKCS1-v1_5", "hash": "SHA-256" }),
+            Alg::Es256 => json!({ "name": "ECDSA", "namedCurve": "P-256" }),
+        }
+    }
+
+    /// WebCrypto's `verify` algorithm (RSASSA's hash is its key's).
+    pub fn verify_params(self) -> Value {
+        match self {
+            Alg::Rs256 => json!({ "name": "RSASSA-PKCS1-v1_5" }),
+            Alg::Es256 => json!({ "name": "ECDSA", "hash": "SHA-256" }),
         }
     }
 }
@@ -414,9 +438,34 @@ pub fn end_session_url(endpoint: &str, id_token_hint: Option<&str>, client_id: &
 
 // ------------------------------------------------------------------ keys
 
-enum Public {
-    Rsa(rsa::pkcs1v15::VerifyingKey<Sha256>, usize),
-    Ec(p256::ecdsa::VerifyingKey),
+/// A provider's public key, its numbers as the JWKS gave them, checked for
+/// size (`key_of`); the runtime's WebCrypto imports it (`jwk`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Public {
+    /// RSA's modulus and public exponent, big-endian, no leading zeros.
+    Rsa { n: Vec<u8>, e: Vec<u8> },
+    /// A P-256 point.
+    Ec { x: [u8; 32], y: [u8; 32] },
+}
+
+impl Public {
+    /// The JWK WebCrypto imports (`importKey("jwk", …)`): the key's numbers
+    /// and its algorithm, made here, so nothing else the provider's JWK says
+    /// reaches the runtime.
+    pub fn jwk(&self) -> Value {
+        match self {
+            Public::Rsa { n, e } => json!({ "kty": "RSA", "alg": "RS256", "n": b64().encode(n), "e": b64().encode(e) }),
+            Public::Ec { x, y } => json!({ "kty": "EC", "alg": "ES256", "crv": "P-256", "x": b64().encode(x), "y": b64().encode(y) }),
+        }
+    }
+
+    /// The length of a signature this key makes.
+    fn signature_len(&self) -> usize {
+        match self {
+            Public::Rsa { n, .. } => n.len(),
+            Public::Ec { .. } => ES256_SIGNATURE_BYTES,
+        }
+    }
 }
 
 /// One signing key of the provider's.
@@ -429,7 +478,7 @@ struct Key {
 
 impl Key {
     fn fits(&self, alg: Alg) -> bool {
-        let kind = matches!((&self.public, alg), (Public::Rsa(..), Alg::Rs256) | (Public::Ec(_), Alg::Es256));
+        let kind = matches!((&self.public, alg), (Public::Rsa { .. }, Alg::Rs256) | (Public::Ec { .. }, Alg::Es256));
         kind && self.alg.is_none_or(|a| a == alg)
     }
 }
@@ -465,9 +514,20 @@ struct JwksDoc {
     keys: Vec<Value>,
 }
 
+/// A big-endian unsigned number less its leading zeros (a JWK's may carry
+/// one).
+fn unsigned(mut bytes: &[u8]) -> &[u8] {
+    while let [0, rest @ ..] = bytes {
+        bytes = rest;
+    }
+    bytes
+}
+
 /// A JWK the cell can verify with, or `None`: one for encryption, another
-/// algorithm or curve, an RSA key outside the sizes, or malformed. A set
-/// often holds such keys beside its signing ones.
+/// algorithm or curve, an RSA key outside the sizes or with an exponent no
+/// runtime takes, or malformed. A set often holds such keys beside its
+/// signing ones. Whether an EC point is on the curve is the runtime's to
+/// say, as it imports the key: a point off it verifies nothing.
 fn key_of(doc: JwkDoc) -> Option<Key> {
     if doc.use_.as_deref().is_some_and(|u| u != "sig") {
         return None;
@@ -479,26 +539,19 @@ fn key_of(doc: JwkDoc) -> Option<Key> {
     let bytes = |s: &Option<String>| s.as_deref().and_then(|v| b64().decode(v).ok());
     let public = match doc.kty.as_str() {
         "RSA" => {
-            use rsa::traits::PublicKeyParts;
             let (n, e) = (bytes(&doc.n)?, bytes(&doc.e)?);
-            let key = rsa::RsaPublicKey::new_with_max_size(rsa::BigUint::from_bytes_be(&n), rsa::BigUint::from_bytes_be(&e), RSA_BITS_MAX).ok()?;
-            let bits = key.n().bits();
+            let (n, e) = (unsigned(&n), unsigned(&e));
+            let bits = n.first().map_or(0, |top| n.len() * 8 - top.leading_zeros() as usize);
             if !(RSA_BITS_MIN..=RSA_BITS_MAX).contains(&bits) {
                 return None;
             }
-            let size = key.size();
-            Public::Rsa(rsa::pkcs1v15::VerifyingKey::<Sha256>::new(key), size)
-        }
-        "EC" if doc.crv.as_deref() == Some("P-256") => {
-            let (x, y) = (bytes(&doc.x)?, bytes(&doc.y)?);
-            if x.len() != 32 || y.len() != 32 {
+            let exponent = (e.len() <= 8).then(|| e.iter().fold(0u64, |acc, b| acc << 8 | u64::from(*b)))?;
+            if exponent < 3 || exponent % 2 == 0 || exponent > RSA_EXPONENT_MAX {
                 return None;
             }
-            let mut sec1 = vec![0x04];
-            sec1.extend_from_slice(&x);
-            sec1.extend_from_slice(&y);
-            Public::Ec(p256::ecdsa::VerifyingKey::from_sec1_bytes(&sec1).ok()?)
+            Public::Rsa { n: n.to_vec(), e: e.to_vec() }
         }
+        "EC" if doc.crv.as_deref() == Some("P-256") => Public::Ec { x: bytes(&doc.x)?.try_into().ok()?, y: bytes(&doc.y)?.try_into().ok()? },
         _ => return None,
     };
     Some(Key { kid: doc.kid, alg, public })
@@ -574,6 +627,9 @@ pub enum IdTokenError {
     /// caller may fetch the JWKS again, once (`may_refetch`).
     UnknownKey(Option<String>),
     Signature,
+    /// The runtime could not check the signature (it would not import the
+    /// key, or its WebCrypto threw): why.
+    Unchecked(String),
     Issuer,
     Audience,
     AuthorizedParty,
@@ -594,6 +650,7 @@ impl std::fmt::Display for IdTokenError {
             IdTokenError::UnknownKey(Some(kid)) => write!(f, "the id_token is signed by a key ({kid}) the provider's JWKS does not hold"),
             IdTokenError::UnknownKey(None) => write!(f, "the id_token names no key, and the provider's JWKS holds no single one for it"),
             IdTokenError::Signature => write!(f, "the id_token's signature does not verify"),
+            IdTokenError::Unchecked(why) => write!(f, "the id_token's signature could not be checked: {why}"),
             IdTokenError::Issuer => write!(f, "the id_token is from another issuer"),
             IdTokenError::Audience => write!(f, "the id_token is for another client"),
             IdTokenError::AuthorizedParty => write!(f, "the id_token was issued to another party (azp)"),
@@ -637,10 +694,30 @@ fn seconds(claims: &Map<String, Value>, name: &str) -> Result<Option<i64>, IdTok
     }
 }
 
+/// What the runtime checks of an id_token (`verify`'s `check`): that
+/// `signature` is `key`'s, by `alg`, over `input`. The rules chose the key
+/// (one of the provider's JWKS, never one the token names) and checked the
+/// signature's length.
+#[derive(Debug)]
+pub struct Check<'a> {
+    pub alg: Alg,
+    pub key: &'a Public,
+    /// The JWS signing input: the header and the claims as they came.
+    pub input: &'a [u8],
+    pub signature: &'a [u8],
+}
+
+/// How much of the runtime's word for why it could not check a signature
+/// is kept (it is logged, and said on a page).
+const UNCHECKED_MAX: usize = 200;
+
 /// An id_token checked against the provider's keys and this sign-in
-/// (Core 1.0, 3.1.3.7): the signature first, by a key of the JWKS only,
-/// then each claim.
-pub fn verify(token: &str, jwks: &Jwks, expect: &Expect<'_>) -> Result<Verified, IdTokenError> {
+/// (Core 1.0, 3.1.3.7): its header and key first, then its signature by
+/// `check` (the runtime's WebCrypto, `cell/src/js.rs`; a test's stand-in),
+/// and only then each claim. `check` answers whether the signature
+/// verifies, or why it could not tell. It is asked once at most, and never
+/// for a token refused before it.
+pub async fn verify(token: &str, jwks: &Jwks, expect: &Expect<'_>, check: impl AsyncFnOnce(Check<'_>) -> Result<bool, String>) -> Result<Verified, IdTokenError> {
     assert!(!expect.issuer.is_empty() && !expect.client_id.is_empty() && !expect.nonce.is_empty(), "a sign-in expects an issuer, a client, and a nonce");
     if token.len() > ID_TOKEN_MAX_BYTES {
         return Err(IdTokenError::TooLarge);
@@ -665,20 +742,15 @@ pub fn verify(token: &str, jwks: &Jwks, expect: &Expect<'_>) -> Result<Verified,
         Some(_) => return Err(IdTokenError::Malformed("its kid is not a string")),
     };
     let key = jwks.select(alg, kid)?;
-    let signed = &token.as_bytes()[..h.len() + 1 + p.len()];
-    let sig = part(s)?;
-    let good = match &key.public {
-        Public::Rsa(vk, size) => {
-            use rsa::signature::Verifier;
-            sig.len() == *size && rsa::pkcs1v15::Signature::try_from(sig.as_slice()).is_ok_and(|sig| vk.verify(signed, &sig).is_ok())
-        }
-        Public::Ec(vk) => {
-            use p256::ecdsa::signature::Verifier;
-            sig.len() == 64 && p256::ecdsa::Signature::from_slice(&sig).is_ok_and(|sig| vk.verify(signed, &sig).is_ok())
-        }
-    };
-    if !good {
+    let input = &token.as_bytes()[..h.len() + 1 + p.len()];
+    let signature = part(s)?;
+    if signature.len() != key.public.signature_len() {
         return Err(IdTokenError::Signature);
+    }
+    match check(Check { alg, key: &key.public, input, signature: &signature }).await {
+        Ok(true) => {}
+        Ok(false) => return Err(IdTokenError::Signature),
+        Err(why) => return Err(IdTokenError::Unchecked(why.chars().take(UNCHECKED_MAX).collect())),
     }
     let claims: Map<String, Value> = serde_json::from_slice(&part(p)?).map_err(|_| IdTokenError::Malformed("the claims are not a JSON object"))?;
     if claims.get("iss").and_then(Value::as_str) != Some(expect.issuer) {
@@ -809,8 +881,7 @@ mod tests {
     use rsa::pkcs1v15::SigningKey;
     use rsa::signature::{SignatureEncoding, Signer};
     use rsa::traits::PublicKeyParts;
-    use serde_json::json;
-    use sha2::Digest;
+    use sha2::{Digest, Sha256};
     use std::sync::OnceLock;
 
     const ISSUER: &str = "https://idp.example/realms/corp";
@@ -867,6 +938,47 @@ mod tests {
         Expect { issuer: ISSUER, client_id: CLIENT, nonce: NONCE, now_s: NOW, algs: &[Alg::Rs256, Alg::Es256] }
     }
 
+    /// The seam's stand-in: the signature checked on the host by the `rsa`
+    /// and `p256` crates (dev-dependencies: the cell's check is the
+    /// runtime's WebCrypto), from the JWK and the algorithm the cell hands
+    /// WebCrypto.
+    fn host_check(c: Check<'_>) -> Result<bool, String> {
+        let jwk = c.key.jwk();
+        let num = |k: &str| b64().decode(jwk[k].as_str().expect("a JWK's number")).expect("base64url");
+        let name = c.alg.verify_params()["name"].clone();
+        match (c.alg, name.as_str(), jwk["kty"].as_str(), jwk["alg"].as_str()) {
+            (Alg::Rs256, Some("RSASSA-PKCS1-v1_5"), Some("RSA"), Some("RS256")) => {
+                use rsa::signature::Verifier;
+                let key = rsa::RsaPublicKey::new(rsa::BigUint::from_bytes_be(&num("n")), rsa::BigUint::from_bytes_be(&num("e"))).map_err(|e| e.to_string())?;
+                let sig = rsa::pkcs1v15::Signature::try_from(c.signature).map_err(|e| e.to_string())?;
+                Ok(rsa::pkcs1v15::VerifyingKey::<Sha256>::new(key).verify(c.input, &sig).is_ok())
+            }
+            (Alg::Es256, Some("ECDSA"), Some("EC"), Some("ES256")) => {
+                use p256::ecdsa::signature::Verifier;
+                let sec1 = [&[0x04][..], &num("x"), &num("y")].concat();
+                let key = p256::ecdsa::VerifyingKey::from_sec1_bytes(&sec1).map_err(|e| e.to_string())?;
+                let sig = p256::ecdsa::Signature::from_slice(c.signature).map_err(|e| e.to_string())?;
+                Ok(key.verify(c.input, &sig).is_ok())
+            }
+            other => Err(format!("WebCrypto refuses {other:?}")),
+        }
+    }
+
+    /// A future the stand-ins answer at once, awaited.
+    fn now<T>(f: impl std::future::Future<Output = T>) -> T {
+        use std::task::{Context, Poll, Waker};
+        let mut f = std::pin::pin!(f);
+        match f.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(v) => v,
+            Poll::Pending => panic!("a stand-in answers at once"),
+        }
+    }
+
+    /// `super::verify`, the signature checked by the host's stand-in.
+    fn verify(token: &str, jwks: &Jwks, expect: &Expect<'_>) -> Result<Verified, IdTokenError> {
+        now(super::verify(token, jwks, expect, async |c| host_check(c)))
+    }
+
     // Goal: a well-formed id_token signed by a key the provider published
     // signs its subject in, with RS256 and with ES256, by kid or as the
     // only key of its kind.
@@ -892,7 +1004,8 @@ mod tests {
     // Goal: a token whose signature does not verify is refused, whatever
     // it claims. Method: a flipped byte in the signature, in the claims
     // after signing, a signature by another key under the published kid,
-    // and an RSA signature cut short.
+    // one by a key the token carries itself (`jwk`, no kid), and an RSA
+    // signature cut short.
     #[test]
     fn bad_signatures_are_refused() {
         let set = jwks();
@@ -912,6 +1025,67 @@ mod tests {
         let input = format!("{header}.{}", b64().encode(claims().to_string()));
         let s: p256::ecdsa::Signature = other.sign(input.as_bytes());
         assert_eq!(verify(&format!("{input}.{}", b64().encode(s.to_bytes())), &set, &expect()).unwrap_err(), IdTokenError::Signature);
+        let header = b64().encode(json!({ "alg": "ES256", "jwk": ec_jwk("mine", &other) }).to_string());
+        let input = format!("{header}.{}", b64().encode(claims().to_string()));
+        let s: p256::ecdsa::Signature = other.sign(input.as_bytes());
+        assert_eq!(verify(&format!("{input}.{}", b64().encode(s.to_bytes())), &set, &expect()).unwrap_err(), IdTokenError::Signature, "the key is the JWKS's, never the token's");
+    }
+
+    // Goal: the signature is the runtime's to check, through the seam
+    // alone: it is handed the provider's key as a JWK of the rules' making
+    // (its numbers and algorithm, nothing else the provider's said), the
+    // signing input as it came, and the signature; its no, and its failure,
+    // refuse the token before any claim is read; and a token refused before
+    // it (an algorithm not taken, a key not published, a signature of the
+    // wrong length) never asks it. Method: stand-ins that record, refuse,
+    // fail, or must never be called.
+    #[test]
+    fn the_signature_is_the_runtimes_to_check() {
+        let set = jwks();
+        for (alg, kid) in [("RS256", "r1"), ("ES256", "e1")] {
+            let token = sign(alg, Some(kid), &claims());
+            let (input, sig) = token.rsplit_once('.').unwrap();
+            let asked = std::cell::RefCell::new(vec![]);
+            let record = async |c: Check<'_>| {
+                asked.borrow_mut().push((c.alg, c.key.jwk(), c.input.to_vec(), c.signature.to_vec()));
+                host_check(c)
+            };
+            assert!(now(super::verify(&token, &set, &expect(), record)).is_ok(), "{alg}");
+            let asked = asked.take();
+            let [(seen, jwk, seen_input, seen_sig)] = asked.as_slice() else { panic!("{alg}: asked once, not {}", asked.len()) };
+            assert_eq!((*seen, seen_input.as_slice(), seen_sig), (Alg::parse(alg).unwrap(), input.as_bytes(), &b64().decode(sig).unwrap()));
+            let published = match alg {
+                "RS256" => rsa_jwk(kid, rsa_key()),
+                _ => ec_jwk(kid, &ec_key()),
+            };
+            let numbers: &[&str] = if alg == "RS256" { &["n", "e"] } else { &["crv", "x", "y"] };
+            let mut made = json!({ "kty": published["kty"], "alg": alg });
+            for k in numbers {
+                made[k] = published[k].clone();
+            }
+            assert_eq!(*jwk, made, "{alg}: the key's numbers and algorithm, not its kid or use");
+        }
+        assert_eq!(Alg::Rs256.import_params(), json!({ "name": "RSASSA-PKCS1-v1_5", "hash": "SHA-256" }));
+        assert_eq!(Alg::Es256.import_params(), json!({ "name": "ECDSA", "namedCurve": "P-256" }));
+        assert_eq!(Alg::Es256.verify_params(), json!({ "name": "ECDSA", "hash": "SHA-256" }));
+        // its no and its failure come before the claims: this token is also another issuer's
+        let mut c = claims();
+        c["iss"] = json!("https://evil.example");
+        let token = sign("RS256", Some("r1"), &c);
+        assert_eq!(now(super::verify(&token, &set, &expect(), async |_| Ok(false))).unwrap_err(), IdTokenError::Signature);
+        let failed = now(super::verify(&token, &set, &expect(), async |_| Err(format!("DataError: {}", "x".repeat(500))))).unwrap_err();
+        assert_eq!(failed, IdTokenError::Unchecked(format!("DataError: {}", "x".repeat(UNCHECKED_MAX - 11))), "its word, cut");
+        assert!(now(super::verify(&sign("RS256", Some("r1"), &claims()), &set, &expect(), async |_| Ok(true))).is_ok());
+        // refused before it: never asked
+        let good = sign("RS256", Some("r1"), &claims());
+        let (input, sig) = good.rsplit_once('.').unwrap();
+        let short = format!("{input}.{}", b64().encode(&b64().decode(sig).unwrap()[1..]));
+        let unsigned = format!("{}.{}.", b64().encode(json!({ "alg": "none" }).to_string()), b64().encode(claims().to_string()));
+        let es_short = format!("{}.{}", sign("ES256", Some("e1"), &claims()).rsplit_once('.').unwrap().0, b64().encode([1u8; 63]));
+        for (token, why) in [(unsigned, IdTokenError::Alg("none".into())), (sign("RS256", Some("r9"), &claims()), IdTokenError::UnknownKey(Some("r9".into()))), (short, IdTokenError::Signature), (es_short, IdTokenError::Signature)] {
+            let never = async |_: Check<'_>| -> Result<bool, String> { panic!("a token refused before its signature never asks the runtime") };
+            assert_eq!(now(super::verify(&token, &set, &expect(), never)).unwrap_err(), why);
+        }
     }
 
     // Goal: the algorithm is the cell's choice, never the token's. Method:
@@ -1054,16 +1228,28 @@ mod tests {
     }
 
     // Goal: a JWKS keeps the keys it can use and refuses sets it cannot.
-    // Method: encryption keys, a short RSA key, another curve, an unknown
-    // alg and junk beside a good key; an empty and an oversized set.
+    // Method: encryption keys, a short RSA key, exponents no runtime takes,
+    // another curve, a short EC coordinate, an unknown alg and junk beside a
+    // good key; a modulus with a leading zero kept as its number; an empty
+    // and an oversized set.
     #[test]
     fn jwks_keeps_only_usable_keys() {
         let small = rsa::RsaPrivateKey::new(&mut rand_core::OsRng, 1024).unwrap();
+        let exponent = |kid: &str, e: &[u8]| {
+            let mut k = rsa_jwk(kid, rsa_key());
+            k["e"] = json!(b64().encode(e));
+            k
+        };
+        let ec = ec_jwk("short", &ec_key());
         let set = Jwks::parse(
             json!({ "keys": [
                 rsa_jwk("good", rsa_key()),
                 { "kty": "RSA", "kid": "enc", "use": "enc", "n": "AQAB", "e": "AQAB" },
                 rsa_jwk("small", &small),
+                exponent("e1", &[1]),
+                exponent("e2", &[2]),
+                exponent("e-huge", &[2, 0, 0, 0, 1]),
+                { "kty": "EC", "kid": "short", "crv": "P-256", "x": b64().encode(&b64().decode(ec["x"].as_str().unwrap()).unwrap()[1..]), "y": ec["y"] },
                 { "kty": "EC", "kid": "p384", "crv": "P-384", "x": "AA", "y": "AA" },
                 { "kty": "RSA", "kid": "ps", "alg": "PS256", "n": "AQAB", "e": "AQAB" },
                 { "kty": "OKP", "kid": "ed", "crv": "Ed25519", "x": "AA" },
@@ -1075,6 +1261,12 @@ mod tests {
         .unwrap();
         assert_eq!(set.len(), 1);
         assert_eq!(verify(&sign("RS256", None, &claims()), &set, &expect()).map(|v| v.subject), Ok("248289761001".into()));
+        let mut zero = rsa_jwk("zero", rsa_key());
+        let n = rsa_key().to_public_key().n().to_bytes_be();
+        zero["n"] = json!(b64().encode([&[0u8][..], &n].concat()));
+        let padded = Jwks::parse(json!({ "keys": [zero] }).to_string().as_bytes()).unwrap();
+        assert_eq!(padded.keys[0].public, Public::Rsa { n, e: vec![1, 0, 1] }, "a leading zero is no part of the number");
+        assert_eq!(verify(&sign("RS256", Some("zero"), &claims()), &padded, &expect()).map(|v| v.subject), Ok("248289761001".into()));
         assert!(Jwks::parse(br#"{"keys": []}"#).is_err());
         let many: Vec<Value> = (0..=JWKS_KEYS_MAX).map(|i| ec_jwk(&format!("k{i}"), &ec_key())).collect();
         assert!(Jwks::parse(json!({ "keys": many }).to_string().as_bytes()).is_err());
