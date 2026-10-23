@@ -294,7 +294,8 @@ Bonsai on this box, every tier and the fallback:
 ```jsonc
 {
   "cheap":    { "provider": "openai", "base_url": "http://127.0.0.1:18087/v1", "key": "bonsai-key", "model": "bonsai-2-27b",
-                "body": { "provider": { "max_price": { "prompt": 0, "completion": 0 } } } },
+                "body": { "provider": { "max_price": { "prompt": 0, "completion": 0 } } },
+                "stale_timeout_s": 900 },
   "medium":   { … the same },
   "fallback": { … the same }
 }
@@ -308,6 +309,24 @@ Bonsai on this box, every tier and the fallback:
   list price, and master prices a model the book lacks only from
   `body.provider.max_price`, OpenRouter's field, which goes to the server
   with each call (NInfer ignores it; found 37).
+- **Its patience** is 900 s (`stale_timeout_s`, a tier's or the
+  fallback's; found 42, and master's draft #527): how long an agent's
+  call may stream nothing before Hermes gives up on it. Without it, our
+  image's 20 s for cloud models kills a call that a local server is
+  silent on for longer: a tool call it sends in one piece at its end (as
+  NInfer did), a long prompt's prefill, or its turn behind another caller
+  on the one GPU (found 42). 900 s is Hermes' own patience for a server
+  it knows is local (`agent.local_stream_stale_timeout`), which behind
+  the computer's intercept it cannot know. Leaving it out is not Hermes'
+  own patience: the image's 20 s stands. Hermes' cloud default (180 s,
+  240 s past 50,000 tokens of context) would cut a long write on a busy
+  box, and a kill on a deployment's one server only asks it again. A
+  hung server still ends the turn, after 900 s and the one more try a
+  stalled call gets.
+- **No fallback to itself.** With every slot on one model, an agent has
+  no fallback: its profile names none, since switching would only ask
+  the same server again (the route's own fallback skips the same
+  upstream too).
 
 **Evidence:** see "Re-ported, 2026-10-22".
 
@@ -939,6 +958,44 @@ New, 2026-10-22:
     (past a second): the ledger's transcription checks counted the
     owner's rows before the last call's had landed. They now wait for it,
     on either runtime.
+42. **A self-hosted model's long tool call read as a stall** (Paul's
+    stack, 2026-10-22: a turn writing an app's files ended "custom
+    rejected the request … Provider has been unresponsive (no response
+    received) for 6 consecutive stale attempts"). NInfer streamed a tool
+    call's arguments as one chunk at its end: asked to `write_file` a
+    page, it streamed its reasoning, then nothing while it wrote the
+    call, then all of it at once (60 lines, 5.1 s of silence; 300 lines,
+    22 s and 12 KB, on an idle box at 351 tokens of context; the cell's
+    log has calls of 45,000 tokens taking 45 to 105 s). Our Hermes image
+    gave every text tier 20 s (`STALE_TIMEOUT_S`, tuned for cloud models'
+    first bytes), and an explicit value overrides Hermes' own patience
+    (180 s scaled by context, reasoning models' floors; its
+    `_cloud_stale_timeout_for`). So Hermes killed each write at 20 s,
+    tried it once more, then switched to the deployment's `fallback`: the
+    same Bonsai, every try piling onto the one server. **Fixed** (master's
+    too, as draft #527): a slot names its patience (`stale_timeout_s`,
+    seam 3), which the computer's view carries to the image; a fallback on
+    the tier's own model is none.
+    **Evidence** (a stack of its own on :8840, celld, a node over the
+    Docker double, Bonsai through a pass-through that timed each call's
+    chunks): Hermes, asked to write a garden planner of 350 lines or
+    more in one `write_file`, wrote 840 lines in a turn of 176 s, its
+    four calls 83 s (25 KB of arguments), 24 s, 57 s and 3 s. The third
+    (34,528 tokens of context) streamed nothing for 56 s, behind another
+    caller on the one GPU: 20 s would have killed it, tried it again,
+    and switched to the same server. Its profile named
+    `stale_timeout_seconds: 900` and no `fallback_providers`, and Hermes
+    logged no stale kill. NInfer changed during the check (restarted at
+    20:21 by its own session): it now streams a tool call's arguments as
+    it writes them (1,739 and 3,322 chunks a call), so the silences left
+    are a busy server's and a long prompt's. The hermes lane on celld
+    with two nodes over the Docker double (`FRAGMENT_E2E_NODES=two`, by
+    name): 60 passed, 0 failed. `cargo xtask check`: 838 passed, 0
+    failed (held to master d8e0f86b's schema lock, the lane's base).
+    **The next bound:** celld cuts an outbound fetch at 120 s in all
+    (found 22), a model's stream included, however patient Hermes is: the
+    first write took 83 s. A bigger write, or a busier box, ends there
+    (`CELLD_FETCH_TIMEOUT_S`; a decision for Paul).
 
 ## Re-ported, 2026-10-22
 
@@ -1028,6 +1085,11 @@ CELLD_BIN=… SANDCASTLE_NODE_BIN=~/.local/opt/sandcastle/bin/sandcastle-node ca
   too, through the platform rather than the internet).
 - **Found 41: a phone shows no card**: the shell shows an app's card only
   over its dock icon under a pointer (master's shell).
+- **Found 42's next bound:** celld cuts an outbound fetch at 120 s in
+  all (`CELLD_FETCH_TIMEOUT_S`), so a model call that streams longer (a
+  big write on a busy box) is cut whatever its patience. Raising it for
+  the self-hosted stacks (dev and the LAN start celld) would bound a
+  black-hole host later too.
 - **The CLI's invite** still says "they were mailed a link" on a
   deployment with no mailer: telling it would add a field to `Shared`'s
   answer (add-only).

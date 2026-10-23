@@ -139,18 +139,22 @@ cd ~/dev/finite/fragment-home
 config writes them: docs/self-host.md, seam 3). Its URL is NInfer's own
 port: the platform refuses `http://bonsai.localhost/v1`. Bonsai has no
 list price, so each slot names its ceiling, zero. NInfer takes no key, but
-the slot names one, so the key's file holds any word:
+the slot names one, so the key's file holds any word. Each slot's patience
+is 900 s: a local model can stream nothing for longer than the agent's
+20 s for cloud models (a long prompt, another caller ahead of it on the
+GPU, a tool call sent whole at its end), and the agent would give up on
+it (docs/self-host.md, found 42):
 
 ```sh
 mkdir -p -m 700 ~/.local/state/fragment-lan
 cat > ~/.local/state/fragment-lan/models.jsonc <<'JSON'
 {
   "cheap":    { "provider": "openai", "base_url": "http://127.0.0.1:18087/v1", "key": "fragment-bonsai-key", "model": "bonsai-2-27b",
-                "body": { "provider": { "max_price": { "prompt": 0, "completion": 0 } } } },
+                "body": { "provider": { "max_price": { "prompt": 0, "completion": 0 } } }, "stale_timeout_s": 900 },
   "medium":   { "provider": "openai", "base_url": "http://127.0.0.1:18087/v1", "key": "fragment-bonsai-key", "model": "bonsai-2-27b",
-                "body": { "provider": { "max_price": { "prompt": 0, "completion": 0 } } } },
+                "body": { "provider": { "max_price": { "prompt": 0, "completion": 0 } } }, "stale_timeout_s": 900 },
   "fallback": { "provider": "openai", "base_url": "http://127.0.0.1:18087/v1", "key": "fragment-bonsai-key", "model": "bonsai-2-27b",
-                "body": { "provider": { "max_price": { "prompt": 0, "completion": 0 } } } }
+                "body": { "provider": { "max_price": { "prompt": 0, "completion": 0 } } }, "stale_timeout_s": 900 }
 }
 JSON
 (umask 077; echo none > ~/.local/state/fragment-lan/model.key)
