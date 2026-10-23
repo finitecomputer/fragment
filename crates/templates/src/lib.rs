@@ -100,13 +100,16 @@ pub fn shell_page(text: &str, release: &str) -> String {
 /// each with its content type: of the rest of cell/shell/, its pages are
 /// served at their own paths, and its credits and licenses not at all.
 #[cfg(feature = "platform")]
-const SHELL_PUBLISHED: [(&str, &str); 27] = [
+const SHELL_PUBLISHED: [(&str, &str); 28] = [
+    // the platform's pages' look and Funnel Sans (vendor/funnel-sans-OFL.txt),
+    // which the shell loads too: its type, and its first run's card
     ("platform-pages.css", "text/css; charset=utf-8"),
     ("platform-landscape.jpg", "image/jpeg"),
     ("platform-landscape-dark.jpg", "image/jpeg"),
     ("funnel-sans-400.ttf", "font/ttf"),
     ("funnel-sans-500.ttf", "font/ttf"),
     ("funnel-sans-600.ttf", "font/ttf"),
+    ("funnel-sans-700.ttf", "font/ttf"),
     ("shell.js", "text/javascript; charset=utf-8"),
     ("shell.css", "text/css; charset=utf-8"),
     ("layout.js", "text/javascript; charset=utf-8"),
@@ -302,7 +305,7 @@ pub(crate) mod tests {
         for (name, content_type) in SHELL_PUBLISHED {
             assert_eq!(shell_published(name), Some((shell(name).unwrap(), content_type)), "{name}");
         }
-        for name in ["index.html", "admin.html", "about.html", "privacy.html", "terms.html", "CREDITS.md", "vendor/lucide-LICENSE", "vendor/split-grid.LICENSE.txt"] {
+        for name in ["index.html", "admin.html", "about.html", "privacy.html", "terms.html", "CREDITS.md", "vendor/lucide-LICENSE", "vendor/split-grid.LICENSE.txt", "vendor/funnel-sans-OFL.txt"] {
             assert!(shell(name).is_some() && shell_published(name).is_none(), "{name}");
         }
         assert!(shell_published("nope.js").is_none() && shell_published("../templates/chat/app.mjs").is_none());
