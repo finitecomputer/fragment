@@ -17,13 +17,14 @@
 //! `sandcastle-node` is needed. The run's images are loaded into it
 //! (`load_images`) and named by the digest the engine gives each, as a
 //! deployment pins its images (docs/computers.md, "Stable and canary"); the
-//! containers the run started there are destroyed when the node stops: the
-//! engine itself stays up.
+//! containers the run's node started there (each carries its `RUN_LABEL`)
+//! are destroyed when the node stops: the engine itself stays up, and so do
+//! the containers other nodes in front of it started (a person's own).
 
 use std::fs;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -40,6 +41,10 @@ pub const NODE_READY_TIMEOUT: Duration = Duration::from_secs(30);
 pub const NODE_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 /// A node's secret, made here: 32 random bytes, as hex.
 const SECRET_HEX_BYTES: usize = 32;
+/// The label every container a node started here carries (its config's
+/// `labels`, sandcastle's docs/node.md), naming the run: on a real engine
+/// that other nodes front too, what tells the run's containers from theirs.
+pub const RUN_LABEL: &str = "fragment-run";
 /// A unix socket's path, at most this many bytes: Linux's `sun_path` holds
 /// 108, the last a NUL. A node handed a longer one cannot bind it, and says
 /// so only in its own log.
@@ -197,6 +202,8 @@ pub struct NodeSpec {
     pub capacity: u32,
     /// Where its two logs go (`sandcastle-<id>-engine.log`, `-node.log`).
     pub log_dir: PathBuf,
+    /// The run it serves: each container it starts carries it as `RUN_LABEL`.
+    pub run: String,
 }
 
 /// The node's config (sandcastle's crates/node/src/config.rs).
@@ -208,6 +215,7 @@ fn node_config(spec: &NodeSpec) -> Result<Value> {
         "egress": socket_path(&spec.dir, "egress.sock")?,
         "secret_file": spec.dir.join("node.secret"),
         "platform": spec.platform,
+        "labels": { RUN_LABEL: spec.run },
     });
     match spec.reach {
         Reach::Listen(port) => config["listen"] = json!(format!("127.0.0.1:{port}")),
@@ -227,13 +235,15 @@ pub struct SandcastleNode {
     config: PathBuf,
     log: PathBuf,
     /// The engine double this node started; none in front of a real one.
-    engine: Option<Child>,
-    /// A real engine's API socket, and when this node started: the
-    /// containers started there since are the run's, destroyed at `stop`.
-    real: Option<(PathBuf, u64)>,
+    engine: Option<crate::Started>,
+    /// In front of a real engine, until `stop`: the containers there that
+    /// carry its run's label are destroyed then.
+    real: bool,
+    /// The run its containers carry as `RUN_LABEL`.
+    run: String,
     /// Its engine's API socket (the double's, or the real one).
     engine_sock: PathBuf,
-    node: Option<Child>,
+    node: Option<crate::Started>,
 }
 
 impl SandcastleNode {
@@ -243,6 +253,7 @@ impl SandcastleNode {
     /// until the platform answers.
     pub fn start(tools: &Tools, spec: &NodeSpec) -> Result<SandcastleNode> {
         assert!(placement::valid_node_id(&spec.id), "a node's id is the platform's form");
+        assert!(!spec.run.is_empty(), "a node's containers carry its run's name");
         let engine_dir = spec.engine.dir(&spec.dir);
         fs::create_dir_all(&spec.dir).with_context(|| format!("create {}", spec.dir.display()))?;
         fs::create_dir_all(&spec.log_dir)?;
@@ -258,24 +269,16 @@ impl SandcastleNode {
             Engine::Double => {
                 fs::create_dir_all(&engine_dir).with_context(|| format!("create {}", engine_dir.display()))?;
                 let out = fs::OpenOptions::new().create(true).append(true).open(&engine_log)?;
-                let child = Command::new(&tools.engine)
-                    .arg("--dir")
-                    .arg(&engine_dir)
-                    .arg("--relay")
-                    .arg(&tools.relay)
-                    .stdin(Stdio::null())
-                    .stdout(out.try_clone()?)
-                    .stderr(out)
-                    .spawn()
+                let child = crate::spawn(Command::new(&tools.engine).arg("--dir").arg(&engine_dir).arg("--relay").arg(&tools.relay).stdin(Stdio::null()).stdout(out.try_clone()?).stderr(out))
                     .with_context(|| format!("start {}", tools.engine.display()))?;
-                (Some(child), None)
+                (Some(child), false)
             }
             Engine::Real(_) => {
                 let (status, body) = engine_call(&sock, "GET", "/v1/health", None).with_context(|| format!("the real engine at {} (is its service running, and may this user reach its socket?)", sock.display()))?;
                 if status != 200 {
                     bail!("the real engine's health at {}: {status} {}", sock.display(), String::from_utf8_lossy(&body));
                 }
-                (None, Some((sock.clone(), now_ms())))
+                (None, true)
             }
         };
         let mut n = SandcastleNode {
@@ -288,6 +291,7 @@ impl SandcastleNode {
             log: log_of("node"),
             engine,
             real,
+            run: spec.run.clone(),
             engine_sock: sock.clone(),
             node: None,
         };
@@ -306,15 +310,7 @@ impl SandcastleNode {
         let log_of = |what: &str| spec.log_dir.join(format!("sandcastle-{}-{what}.log", spec.id));
         let engine_log = log_of("engine");
         let out = fs::OpenOptions::new().create(true).append(true).open(&engine_log)?;
-        let engine = Command::new(&tools.engine)
-            .arg("--dir")
-            .arg(&engine_dir)
-            .arg("--relay")
-            .arg(&tools.relay)
-            .stdin(Stdio::null())
-            .stdout(out.try_clone()?)
-            .stderr(out)
-            .spawn()
+        let engine = crate::spawn(Command::new(&tools.engine).arg("--dir").arg(&engine_dir).arg("--relay").arg(&tools.relay).stdin(Stdio::null()).stdout(out.try_clone()?).stderr(out))
             .with_context(|| format!("start {}", tools.engine.display()))?;
         // its id until it is paired: the label its logs carry
         let mut n = SandcastleNode {
@@ -326,7 +322,8 @@ impl SandcastleNode {
             config: spec.dir.join("node.json"),
             log: log_of("node"),
             engine: Some(engine),
-            real: None,
+            real: false,
+            run: spec.run.clone(),
             engine_sock: engine_dir.join("engine.sock"),
             node: None,
         };
@@ -342,23 +339,24 @@ impl SandcastleNode {
         let dir = self.config.parent().context("a node's config has a directory")?;
         let engine = dir.join("e");
         let err = fs::OpenOptions::new().create(true).append(true).open(&self.log)?;
-        let mut child = Command::new(&self.node_bin)
-            .arg("pair")
-            .arg(platform)
-            .arg("--config")
-            .arg(&self.config)
-            .args(["--name", name])
-            .arg("--engine")
-            .arg(socket_path(&engine, "engine.sock")?)
-            .arg("--ports")
-            .arg(socket_path(&engine, "ports.sock")?)
-            .arg("--egress")
-            .arg(socket_path(dir, "egress.sock")?)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(err)
-            .spawn()
-            .with_context(|| format!("start {} pair", self.node_bin.display()))?;
+        let mut child = crate::spawn(
+            Command::new(&self.node_bin)
+                .arg("pair")
+                .arg(platform)
+                .arg("--config")
+                .arg(&self.config)
+                .args(["--name", name])
+                .arg("--engine")
+                .arg(socket_path(&engine, "engine.sock")?)
+                .arg("--ports")
+                .arg(socket_path(&engine, "ports.sock")?)
+                .arg("--egress")
+                .arg(socket_path(dir, "egress.sock")?)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(err),
+        )
+        .with_context(|| format!("start {} pair", self.node_bin.display()))?;
         let out = child.stdout.take().context("pair's output")?;
         let (tx, lines) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -408,7 +406,7 @@ impl SandcastleNode {
 
     /// Whether it fronts the machine's real engine (`Engine::Real`).
     pub fn is_real(&self) -> bool {
-        self.real.is_some()
+        self.real
     }
 
     /// Whether the node process runs (not `down`).
@@ -420,14 +418,7 @@ impl SandcastleNode {
     pub fn up(&mut self) -> Result<()> {
         assert!(self.node.is_none(), "one node process at a time");
         let out = fs::OpenOptions::new().create(true).append(true).open(&self.log)?;
-        let child = Command::new(&self.node_bin)
-            .arg("serve")
-            .arg("--config")
-            .arg(&self.config)
-            .stdin(Stdio::null())
-            .stdout(out.try_clone()?)
-            .stderr(out)
-            .spawn()
+        let child = crate::spawn(Command::new(&self.node_bin).arg("serve").arg("--config").arg(&self.config).stdin(Stdio::null()).stdout(out.try_clone()?).stderr(out))
             .with_context(|| format!("start {}", self.node_bin.display()))?;
         self.node = Some(child);
         if let Reach::Listen(port) = self.reach {
@@ -445,11 +436,11 @@ impl SandcastleNode {
         stop(child, "sandcastle-node")
     }
 
-    /// The containers running on its engine that started at or after
-    /// `since_ms` (on a real engine, which other runs share, only this
-    /// run's), by name.
+    /// The containers running on its engine that its run's nodes started at
+    /// or after `since_ms` (on a real engine, which other nodes share, only
+    /// this run's), by name.
     pub fn running_since(&self, since_ms: u64) -> Result<Vec<String>> {
-        Ok(containers(&self.engine_sock)?.into_iter().filter(|c| c.running && c.started_at_ms >= since_ms).map(|c| c.name).collect())
+        Ok(containers(&self.engine_sock)?.into_iter().filter(|c| c.running && c.started_at_ms >= since_ms && c.run.as_deref() == Some(self.run.as_str())).map(|c| c.name).collect())
     }
 
     /// Kills container `name` on its engine (SIGKILL), behind the platform's
@@ -461,11 +452,11 @@ impl SandcastleNode {
     }
 
     /// Both processes stop: the node, then the engine double, which removes
-    /// its containers.
+    /// its containers; on a real engine, the run's are destroyed.
     pub fn stop(mut self) -> Result<()> {
         let node = self.node.take().map(|c| stop(c, "sandcastle-node"));
         let engine = self.engine.take().map(|c| stop(c, "the engine double"));
-        let real = self.real.take().map(|(sock, since)| destroy_since(&sock, since));
+        let real = std::mem::take(&mut self.real).then(|| destroy_run(&self.engine_sock, &self.run));
         node.transpose()?;
         engine.transpose()?;
         real.transpose()?;
@@ -482,7 +473,7 @@ impl SandcastleNode {
                 return Ok(());
             }
             for (name, child) in [("the engine double", &mut self.engine), ("sandcastle-node", &mut self.node)] {
-                if let Some(status) = child.as_mut().map(Child::try_wait).transpose()?.flatten() {
+                if let Some(status) = child.as_mut().map(|c| c.try_wait()).transpose()?.flatten() {
                     *child = None;
                     bail!("{name} of the node {} exited ({status}) before {what} answered:\n{}", self.id, fs::read_to_string(log).unwrap_or_default());
                 }
@@ -497,7 +488,7 @@ impl SandcastleNode {
 
 /// A `sandcastle-node pair` under way (`SandcastleNode::pair`).
 pub struct Pairing {
-    child: Option<Child>,
+    child: Option<crate::Started>,
     lines: std::sync::mpsc::Receiver<String>,
     /// What it printed so far.
     pub said: Vec<String>,
@@ -518,7 +509,7 @@ impl Pairing {
                 let code = link.split("code=").nth(1).context("the link names its code")?.to_string();
                 return Ok((code, link));
             }
-            if let Some(status) = self.child.as_mut().map(Child::try_wait).transpose()?.flatten() {
+            if let Some(status) = self.child.as_mut().map(|c| c.try_wait()).transpose()?.flatten() {
                 bail!("sandcastle-node pair exited ({status}) before it showed a code:\n{}\n{}", self.said.join("\n"), fs::read_to_string(&self.log).unwrap_or_default());
             }
         }
@@ -559,7 +550,7 @@ impl Drop for Pairing {
 
 /// SIGTERM to a child this process started, and its exit awaited; killed
 /// past NODE_STOP_TIMEOUT.
-fn stop(mut child: Child, what: &str) -> Result<()> {
+fn stop(mut child: crate::Started, what: &str) -> Result<()> {
     let _ = Command::new("kill").args(["-TERM", &child.id().to_string()]).stderr(Stdio::null()).status();
     let t0 = Instant::now();
     // Bounded by NODE_STOP_TIMEOUT.
@@ -577,15 +568,15 @@ fn stop(mut child: Child, what: &str) -> Result<()> {
 impl Drop for SandcastleNode {
     /// An early error must not leave its processes running: the engine is
     /// told to stop (it removes its containers), never killed outright; a
-    /// real engine's containers the run started are destroyed.
+    /// real engine's containers the run's node started are destroyed.
     fn drop(&mut self) {
         for (child, what) in [(self.node.take(), "sandcastle-node"), (self.engine.take(), "the engine double")] {
             if let Some(c) = child {
                 let _ = stop(c, what);
             }
         }
-        if let Some((sock, since)) = self.real.take() {
-            let _ = destroy_since(&sock, since);
+        if std::mem::take(&mut self.real) {
+            let _ = destroy_run(&self.engine_sock, &self.run);
         }
     }
 }
@@ -727,6 +718,8 @@ struct Listed {
     name: String,
     running: bool,
     started_at_ms: u64,
+    /// Its `RUN_LABEL`: the run whose node started it.
+    run: Option<String>,
 }
 
 /// The containers an engine holds (at most its VMs).
@@ -737,16 +730,24 @@ fn containers(sock: &Path) -> Result<Vec<Listed>> {
     let all = list.as_array().cloned().or_else(|| list["containers"].as_array().cloned()).unwrap_or_default();
     Ok(all
         .iter()
-        .filter_map(|c| Some(Listed { name: c["name"].as_str()?.to_string(), running: c["running"].as_bool().unwrap_or(false), started_at_ms: c["startedAtMs"].as_u64()? }))
+        .filter_map(|c| {
+            Some(Listed {
+                name: c["name"].as_str()?.to_string(),
+                running: c["running"].as_bool().unwrap_or(false),
+                started_at_ms: c["startedAtMs"].as_u64()?,
+                run: c["labels"][RUN_LABEL].as_str().map(str::to_string),
+            })
+        })
         .collect())
 }
 
-/// Every container on a real engine started at or after `since_ms` (the
-/// run's), destroyed.
-fn destroy_since(sock: &Path, since_ms: u64) -> Result<()> {
+/// Every container on the engine at `sock` that carries `run` as its
+/// `RUN_LABEL` (the run's nodes started it), destroyed; the rest stay.
+pub fn destroy_run(sock: &Path, run: &str) -> Result<()> {
+    assert!(!run.is_empty(), "a run's name");
     // bounded: the engine's containers (at most its VMs)
     for c in containers(sock)? {
-        if c.started_at_ms >= since_ms {
+        if c.run.as_deref() == Some(run) {
             let _ = engine_call(sock, "POST", &format!("/v1/containers/{}/destroy", c.name), Some(EngineBody::Bytes(b"{}".to_vec())));
         }
     }
@@ -832,12 +833,12 @@ mod tests {
     use super::*;
 
     fn spec(reach: Reach) -> NodeSpec {
-        NodeSpec { id: "uplink".into(), reach, engine: Engine::Double, dir: PathBuf::from("/tmp/n"), platform: "http://127.0.0.1:9000".into(), capacity: 8, log_dir: PathBuf::from("/tmp") }
+        NodeSpec { id: "uplink".into(), reach, engine: Engine::Double, dir: PathBuf::from("/tmp/n"), platform: "http://127.0.0.1:9000".into(), capacity: 8, log_dir: PathBuf::from("/tmp"), run: "1f2e3d".into() }
     }
 
     /// Goal: a node that listens is given its port, one that dials the
     /// platform's uplink as a WebSocket URL and its id; both the engine's
-    /// sockets, their secret's file and the platform.
+    /// sockets, their secret's file, the platform, and the run's label.
     #[test]
     fn a_node_is_configured_to_listen_or_dial() {
         let listen = node_config(&spec(Reach::Listen(9401))).unwrap();
@@ -849,6 +850,9 @@ mod tests {
         assert!(dial.get("listen").is_none());
         assert_eq!(dial["uplink"], json!({ "url": "ws://127.0.0.1:9000/api/nodes/uplink", "id": "uplink" }));
         assert_eq!(dial["platform"], "http://127.0.0.1:9000");
+        // each container either starts carries the run's name
+        assert_eq!(listen["labels"], json!({ RUN_LABEL: "1f2e3d" }));
+        assert_eq!(dial["labels"], listen["labels"]);
         // in front of a real engine, its own sockets
         let real = node_config(&NodeSpec { engine: Engine::Real(PathBuf::from("/var/lib/sandcastle")), ..spec(Reach::Listen(9401)) }).unwrap();
         assert_eq!(real["engine"], "/var/lib/sandcastle/engine.sock");

@@ -43,7 +43,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -664,7 +664,7 @@ pub struct OpenBao {
     bin: PathBuf,
     opts: Options,
     layout: Layout,
-    child: Option<Child>,
+    child: Option<crate::Started>,
     starts: u32,
 }
 
@@ -709,15 +709,7 @@ impl OpenBao {
         let err = log.try_clone().map_err(io_error("clone the log"))?;
         let t0 = Instant::now();
         // nothing from this environment: every setting is the config's
-        let child = Command::new(&self.bin)
-            .arg("server")
-            .arg(format!("-config={}", layout.config().display()))
-            .env_clear()
-            .env("HOME", &layout.dir)
-            .stdin(Stdio::null())
-            .stdout(log)
-            .stderr(err)
-            .spawn()
+        let child = crate::spawn(Command::new(&self.bin).arg("server").arg(format!("-config={}", layout.config().display())).env_clear().env("HOME", &layout.dir).stdin(Stdio::null()).stdout(log).stderr(err))
             .map_err(io_error(format!("start {}", self.bin.display())))?;
         self.child = Some(child);
         if let Err(e) = self.wait_ready(t0) {

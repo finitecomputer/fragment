@@ -187,6 +187,16 @@ fn shown(cmd: &Command) -> String {
     std::iter::once(cmd.get_program()).chain(cmd.get_args()).map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" ")
 }
 
+/// Becomes `cmd` (exec), so that the signals sent to this process reach it:
+/// a SIGTERM to `cargo xtask e2e` reaches the suite, which stops what it
+/// started (as a child of this process, it would be left running).
+fn exec(cmd: &mut Command) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    let shown = shown(cmd);
+    let e = cmd.exec();
+    Err(anyhow::Error::new(e).context(format!("could not start {shown}")))
+}
+
 fn run(cmd: &mut Command) -> Result<()> {
     let shown = shown(cmd);
     let status = cmd.status().with_context(|| format!("could not start {shown}"))?;
@@ -810,7 +820,7 @@ fn e2e(args: &[String]) -> Result<()> {
             true => build_suite()?,
             false => build_native()?,
         }
-        return run(Command::new(devstack::repo_root().join(E2E_BIN)).args(suite_args));
+        return exec(Command::new(devstack::repo_root().join(E2E_BIN)).args(suite_args));
     }
     // CI's split: `--build-only` builds (and the cache is saved after it,
     // so a red run still saves), then `--no-build` runs what it left
@@ -832,7 +842,7 @@ fn e2e(args: &[String]) -> Result<()> {
     if build_only {
         return Ok(());
     }
-    run(Command::new(devstack::repo_root().join(E2E_BIN)).args(suite_args))
+    exec(Command::new(devstack::repo_root().join(E2E_BIN)).args(suite_args))
 }
 
 /// The suite alone, for this machine.

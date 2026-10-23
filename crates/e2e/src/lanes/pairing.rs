@@ -146,7 +146,7 @@ fn impostor(s: &Suite, id: &str, label: &str) -> Result<String> {
     std::fs::write(dir.join("node.json"), config.to_string())?;
     let log = dir.join("node.log");
     let out = std::fs::File::create(&log)?;
-    let mut child = std::process::Command::new(&tools.node).arg("serve").arg("--config").arg(dir.join("node.json")).stdout(out.try_clone()?).stderr(out).spawn()?;
+    let mut child = fragment_devstack::spawn(std::process::Command::new(&tools.node).arg("serve").arg("--config").arg(dir.join("node.json")).stdout(out.try_clone()?).stderr(out))?;
     let refused = s.eventually(Duration::from_secs(20), || std::fs::read_to_string(&log).is_ok_and(|t| t.contains("refused the dial")));
     let _ = std::process::Command::new("kill").args(["-TERM", &child.id().to_string()]).status();
     let _ = child.wait();
