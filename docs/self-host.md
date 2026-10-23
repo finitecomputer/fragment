@@ -254,6 +254,17 @@ OpenBao and the renderer on, as the celld e2e has them):
   **367 passed, 0 failed, 2 skipped** (the stub's awake save, and the
   killed container's check, which needs a node the run started).
 
+- **After the timing work** (`selfhost-perf`: master's restart fix, the
+  restart waits gone, a start's intercepts in one call):
+  - **Two nodes on celld:** computers 197 passed, 0 failed, 1 skipped.
+    Chat, shell-ui, placement, pairing and restart had 0 failed in a run
+    whose computers section ended when celld fenced itself (found 45).
+  - **Master's path:** computers and chat, 367 passed, 0 failed, 2
+    skipped.
+  - **Without the race fix:** two nodes' computers with the waits gone
+    had 190 passed and 7 failed (each read a restart, or what came after
+    one).
+
 **The self-hosted cell's cost:** this seam adds 226 KB to the cell's Wasm
 (6,471,209 bytes with seams 4, 5, 7 and 12, to 6,697,133), the router's
 and the Registry's new routes most of it, past master's 6.5 MB. The
@@ -274,12 +285,14 @@ debt ledger's Wasm-budget entry): 2.9 KB left.
 - **New, the lanes' timing on celld with nodes** (master's lanes, first
   run there): a reply's push run (a trigger's Workflow, on celld a cell of
   its own) can end after its chat's page closed, so the chat lane waits
-  for every reply's run first; a sleep or a start through a node is
-  slower, so the always-on check waits for a sleep under way, and the
-  restart notice's for "It went back to …"; an owner's restart may answer
-  `starting` when its container's exit report (found 21's own request)
-  made the start before the stop's own end, so the recovery check waits
-  for it.
+  for every reply's run first; a sleep through a node is slower, so the
+  always-on check waits for a sleep under way (its owner's sleep then
+  answers `sleeping`, as it should). An owner's restart answered
+  `starting` while its container's exit report (found 21's own request)
+  made the start: that was master's race, fixed there (#518: the exit
+  report during a sleep's stop starts nothing, the stop's own end does),
+  so the restart checks and the shell's restart notice read the
+  restart's answer again, as on master ("Where the time goes", below).
 
 ### 3. Models: master's slots, and dev's models file
 
@@ -828,6 +841,140 @@ used as it ships:
   client id through OpenBao, the cell's token 0600, and Ctrl-C freed
   every port.
 
+## Where the time goes, 2026-10-22
+
+Measured, not guessed: the same operations on master's path (`wrangler
+dev`, its containers in local Docker) and on celld with computers on two
+nodes over sandcastle's Docker double (one that listens, one that dials
+in). The real engine's column waits: Paul's own computers were on it that
+day. The bench is a lane on the branch `selfhost-perf-bench` (not for
+merge: `cargo xtask e2e --only perf`, `FRAGMENT_PERF_SNAPSHOTS=1` for
+snapshots), which logs each host call, each node call, each exec's
+phases and each request's time in the router and in each object. Medians
+of 20 runs (3 sleep, wake and restart cycles) on a quiet box (load 1 to
+3), before the fixes below and after; the snapshot rows are from a run
+under load (6 to 13: the box is shared, and one celld run under the
+heaviest load read 50, 24 and 65 ms for the first three rows).
+
+| Operation (ms) | wrangler, local Docker | celld, node that listens | celld, node that dials in |
+|---|---|---|---|
+| fragment op (`POST …/ops/say`) | 13 → 12 | 9 → 7 | (the same cell) |
+| channel read | 9 | 5 → 4 | |
+| live update (an op to its frame) | 13 → 11 | 9 → 8 | |
+| a computer's view (`GET`) | 8–10 | 1 | 1 |
+| cold start to ready | 570 | 1,310 → 335 | 1,160 → 240 |
+| wake from its save | 665–680 | 1,490 → 525 | 1,440 → 495 |
+| sleep (hold, save, stop) | 510–570 | 650 | 625 |
+| restart, to awake | 5,590 → 1,270 | 5,510 → 1,175 | 5,470 → 1,135 |
+| exec round trip (`true`) | 54–55 | 22 | 22 |
+| guest → platform API | 11–14 | 1.4–1.6 | 1.4–1.5 |
+| guest → model call (the fake) | 20–25 | 3 | 3 |
+| snapshot save (loaded) | 190–300 | 220–470 | 120–450 |
+| sleep with a snapshot (loaded) | 920–1,080 | 1,140–1,420 | 720–1,750 |
+| wake from its snapshot (loaded) | 450–950 | 950–1,530 | 1,350–1,890 |
+
+**Where it goes:**
+
+- **The platform alone:** celld is no slower than workerd under
+  `wrangler dev`. Each object answers within a millisecond on both.
+  - The router's own time is 1 to 4 ms on celld, against 6 to 7 ms under
+    wrangler (a computer's view: 1 against 7).
+  - Wrangler's dev proxy adds 1 to 2 ms more.
+  - An op is 9 ms in the router on either runtime, 3 to 5 of them in the
+    fragment's object.
+- **A start on a node, before:** `arm` took 1.4 s (median). That is the
+  node's start, then 46 `PUT …/intercepts`, one for each host the swap
+  catches, on http and on https, each sending the whole list again.
+  - The node's start is 240 to 300 ms on the double (`docker run`, its
+    relay, the relay's ready file polled every 25 ms).
+  - Each PUT is 20 to 30 ms on the double (a `docker exec` rewriting
+    `/etc/hosts`). After the fix, one PUT: `arm` is 290 ms.
+- **A restart, before:** about 5 s of it was the stop's `EXIT_WAIT_MS`
+  wait, watching the next container that the exit report had started
+  (master's race), on every path.
+- **An exec on a node:**
+  - the WebSocket to the node: 1 ms;
+  - the double's `docker exec`: about 22 ms;
+  - the platform: under 1 ms;
+  - the socket's close answered within 2 ms every time (never
+    `CLOSE_WAIT_MS`).
+
+  Under wrangler, workerd's local exec is about 53 ms.
+- **The guest's calls on a node:** the node's egress, then
+  `/api/nodes/egress` (1 to 2 ms in the router), the computer's object
+  (HMAC, its binding), the route. Under wrangler, workerd's local egress
+  is the slow hop (10 to 30 ms).
+- **A wake from a snapshot on a node** waits 0.5 to 1.2 s for its guest:
+  found 42.
+- **Sleep:**
+  - the hold's poll for `held` takes 150 ms (it polls every 100 ms);
+  - the save takes 110 to 130 ms;
+  - the stop's wait for the exit takes 200 to 300 ms (the stop polls
+    `running` every 100 ms; on a node, `running` turns false when the
+    node's `wait` answers).
+- **The real engine** says a VM is ready in 107 to 115 ms (its journal's
+  `ready in`), against 240 to 300 ms for the double's start. Its execs,
+  intercepts and snapshots are still to measure end to end.
+
+**Fixed:**
+
+- **The restart race** (master #518, carried here): a restart is about
+  4.3 s shorter on every path, and it answers `awake` (5.5 s to 1.2 s on
+  the double, 5.6 s to 1.3 s under wrangler).
+- **A start's intercepts in one call** (`NodeContainer.intercepting`):
+  about 0.95 s off every start on the double on a quiet box, and 1.0 to
+  1.9 s under load (a cold start, a wake from the save, a restart). On
+  the real engine it saves the same 45 round trips through the node to
+  its engine.
+
+**Found:**
+
+- **42. A wake from a snapshot on a node waits out the guest's backoff.**
+  - The guest's first `GET /api/computer` comes before the start's
+    intercepts are set (`arm` waits for the node's start, then sends
+    them).
+  - It fails at once, and the bridge waits its reconnect backoff
+    (`RECONNECT_MS_MIN`, 1 s ± 50%).
+  - The alive check (#362) waits for that read: 0.5 to 1.2 s of each
+    wake from a snapshot on a node. Under wrangler it is 0: there, the
+    intercepts are set before the guest's first request.
+  - Fix, either way:
+    - the node's start takes the intercepts (its API has them at start,
+      and the list is the last arm's), with the bindings set as they are
+      now;
+    - or the bridge's first read retries every 100 ms for its first
+      seconds. That is an image change, every deployment's: a decision
+      for Paul.
+- **43. Nagle on the node's listening sockets:** they lack `TCP_NODELAY`
+  (the uplink and the egress set it).
+  - sandcastle `node-perf` (off `node`, pushed, no PR) sets it.
+  - On the double nothing changes: an exec with four lines of output is
+    77 ms either way, the double's `docker exec` dominating.
+  - The real engine's 4 ms execs are where it could show: measure there
+    before merging it.
+- **44. The double is not the engine:** its exec, intercept and snapshot
+  times are Docker's CLI (`docker exec`, `docker commit`). The real
+  engine's column, once Paul's computers are off the engine, is what
+  says where a node's time goes.
+- **45. celld's dev node halts when its lease store stalls.**
+  - A lease renewal usually takes 2 to 4 ms. One took 2.5 s
+    (`outcome="ambiguous"`).
+  - The posture repair's `list` of `objects.sqlite3/nodes` then failed,
+    and the node fenced itself (`SELF-FENCE … halting`, exit 3) at the
+    lease's TTL. That ended an e2e run mid-section.
+  - The box was loaded by other sessions at the time.
+  - Its system lines are in `~/dev/finite/celld-issue-self-fence/`.
+  - Likely found 34's store under load. An upstream celld issue for Paul,
+    once it repeats on stock v0.6.3.
+- Of master's lanes' waits on this branch, four stay, each for real
+  latency:
+  - the chat lane's push runs (celld's Workflows end later);
+  - the hermes lane's ledger (found 38, celld's queues);
+  - its one-second tool (found 24, Hermes' 0.3 s progress poll);
+  - the always-on check's sleep under way.
+
+  The restart waits went with the race.
+
 ## What the spike found, still true
 
 The spike's numbering is kept; items gone with master's cuts (goose's
@@ -940,6 +1087,8 @@ FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… FRAGMENT_E2E_NODES=real SANDCASTLE_DIR=
 cargo xtask node-images
 # the stack with computers on nodes: a node list, each node's "secret_file" beside it
 FRAGMENT_NODES_FILE=nodes.json [FRAGMENT_BYOC=on] CELLD_BIN=… cargo xtask dev --runtime celld
+# the timings ("Where the time goes"), from the branch selfhost-perf-bench
+FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… FRAGMENT_E2E_NODES=two SANDCASTLE_DIR=… cargo xtask e2e --only perf
 # the home network as an intranet (docs/self-host-lan.md, the guide)
 CELLD_BIN=… SANDCASTLE_NODE_BIN=~/.local/opt/sandcastle/bin/sandcastle-node cargo xtask dev --lan
 ```
@@ -954,8 +1103,10 @@ CELLD_BIN=… SANDCASTLE_NODE_BIN=~/.local/opt/sandcastle/bin/sandcastle-node ca
   session lasts 30 days whatever the provider says; back-channel logout,
   or a shorter session, when a company asks.
 - **Upstream celld issues** to post: found 31 (a lingering close), 34 (a
-  range query in `LocalStore`; the fork carries a stopgap), and 35
-  (binding classes named as workerd's).
+  range query in `LocalStore`; the fork carries a stopgap), 35 (binding
+  classes named as workerd's), and perhaps 45 (a dev node fencing itself
+  when its lease store stalls). The timings found nothing else of celld's:
+  its platform requests are no slower than workerd's under wrangler.
 - **Found 39 (seam 2): a node that does not answer reads as its
   containers' exit.** When a `wait` is cut and the node cannot be asked
   whether the container still runs, `NodeContainer` throws, so an outage
@@ -978,7 +1129,13 @@ CELLD_BIN=… SANDCASTLE_NODE_BIN=~/.local/opt/sandcastle/bin/sandcastle-node ca
 - **The CLI's invite** still says "they were mailed a link" on a
   deployment with no mailer: telling it would add a field to `Shared`'s
   answer (add-only).
-- **The cell's Wasm budget depends on the checkout's path** (panic
-  locations carry it): 1,835 bytes left in `../fragment-port-lan`, 1,583 in
-  a checkout five characters longer. Remapping the path prefix in the
-  build would make the Wasm the same from any checkout (and smaller).
+- **The cell's Wasm size depends on the checkout's path:**
+  - 1,835 bytes left in `../fragment-port-lan`, and 1,583 in a checkout
+    five characters longer;
+  - on 2026-10-22, the same commit built to 6,700,438 bytes in one
+    checkout and 6,709,219 in another;
+  - remapping the path prefixes saved 1.6 KB of that 9 KB.
+
+  The lane's budget is 6.72 MB.
+- **Found 42 (above):** the node's start takes the intercepts, or the
+  bridge's first read retries quickly (an image change).
