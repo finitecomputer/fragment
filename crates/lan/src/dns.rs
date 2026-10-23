@@ -434,9 +434,17 @@ mod tests {
 
     async fn serve(upstream: SocketAddr) -> SocketAddr {
         let server = Server::new(Zone::new(ZONE, vec![BOX]), upstream);
-        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let addr = udp.local_addr().unwrap();
-        let tcp = TcpListener::bind(addr).await.unwrap();
+        // a free UDP port's TCP twin may be taken: try a few, not forever
+        let (udp, addr, tcp) = 'bind: {
+            for _ in 0..16 {
+                let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                let addr = udp.local_addr().unwrap();
+                if let Ok(tcp) = TcpListener::bind(addr).await {
+                    break 'bind (udp, addr, tcp);
+                }
+            }
+            panic!("no port free on both UDP and TCP in 16 tries");
+        };
         tokio::spawn(server.clone().serve_udp(udp));
         tokio::spawn(server.serve_tcp(tcp));
         addr
