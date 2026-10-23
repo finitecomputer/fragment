@@ -108,7 +108,8 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
   brain, doc, push, ai, ledger, transcribe, finite-private, orgs, billing,
   billing-page, trials, admin, admin-page, shell, computers, chat,
-  shell-ui, wipe, hermes, agent-smoke, sync, migrations, restart;
+  shell-ui, wipe, hermes, agent-smoke, agent-ask, agent-app, agent-restart,
+  bot-mode, checkout, sync, migrations, restart;
   `crates/e2e/src/lanes/mod.rs`). `finite-private` starts its own node
   shaped as Finite's deployment (`cheap` on Finite Private, `medium` on
   OpenRouter with its provider routing, both the model fake's
@@ -182,6 +183,16 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   uses (a first reply, the CLI, an app, the desktop and its screen, a
   command that asks no one, a sleep and a wake), for about half an hour
   and up to 50 paid calls (crates/e2e/src/lanes/agent_smoke.rs).
+  `agent-app` runs only here too, by name: a real agent asked in words
+  for a shared grocery list, which it makes and deploys; then Chrome opens
+  it as its owner at its own origin, in two tabs, and reads what the page
+  did from its DevTools events: it loads, throws and logs nothing (a card
+  shot's signals), its live socket says hello, an item typed in one tab
+  shows in the other, and its own query answers; a failure says what the
+  page did ("the page threw: …"). Up to half an hour and 30 paid calls
+  (crates/e2e/src/lanes/agent_app.rs). The `hermes` section runs the same
+  check on the app its Hermes makes on the scripted model (the todo
+  template: fixed, so a failure is the platform's).
   `agent-restart` runs only here too, by name: its owner's Restart of a real Hermes computer awake
   after a reply (its newest save restored, fresh from the image, asked
   twice made once), then a reply after it; up to 10 paid calls (16 with
