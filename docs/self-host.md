@@ -65,7 +65,7 @@ configuration and its bindings. A mode flag is a design bug.
 | 7 | Preview cards: the renderer over chrome-headless-shell | **done** |
 | 8 | Notifications | design only: push is off offline |
 | 9 | Hosts and TLS: the LAN mode (`--lan`) | **done** (below); its guide rehearsed |
-| 10 | Money: own hardware in points | **done** (below) |
+| 10 | Money: who used what, in units (own hardware among it) | **done** (below) |
 | 11 | Nothing calls home | design only |
 | 12 | Secrets | **done**: the stand-in, OpenBao behind it |
 | — | Mail | debt (docs/technical-debt-ledger.md, "No mail without Email Sending") |
@@ -706,32 +706,85 @@ After it, on the branch's tip (celld v0.6.3, OpenBao and the renderer on):
 - The cell's Wasm: 6,698,165 bytes, 1,835 under `CELL_WASM_MAX_BYTES`
   (the sheet's no-mail words, 934 bytes).
 
-### 10. Money: own hardware in points (done)
+### 10. Money: who used what, in units (done)
 
-A computer on a node its owner paired costs the platform nothing to keep
-awake: it is never charged, and its use is still counted, so whoever runs
-the deployment sees who used what (Paul, 2026-10-05: "not actually
-billed, but it's useful to keep track of usage").
+Paul, 2026-10-22: "credits don't matter for the local version, just a
+lightweight way for the admin to see who is using resources (on a shared
+local inference setup for instance)". Credits and billing stay as master
+has them (off with no Stripe key); what this seam adds is one view, in
+units, of what master's ledger already records.
 
-- **Smaller than the spike's.** Its awake intervals never reach the
-  ledger: the Computer counts their list price in its own meta row
-  (`own_hardware`, by month) instead of metering them. No `MeterRow` field,
-  no ledger table or migration, no status field, nothing on the call path:
-  master's rule that billing is best effort and never refuses holds by
-  construction (an instance the book cannot price counts zero, logged).
-- **Points**: 1 point is $0.001 of list price, rounded up
-  (`fragment_core::price::points`): an hour of the default computer is 65.
-  The computer's view carries `ownHardwarePoints` (this month's) while it
-  is placed on its owner's node; Settings' Computer section says "N points
-  this month, not charged: it runs on your own machine", and an operator
-  reads it on the person's page (`GET /api/admin/people/<npub>`, its
-  computer).
-- **Cut from the spike, a decision for Paul:** a wake on own hardware was
-  let past a person's want of credit. Now it is refused at zero credit as
-  every agent's start is (decision 27): their agents' model calls are the
-  platform's and stop then anyway, and the pass-over needed the wake to
-  place the computer first.
+- **Read from the ledger; nothing new kept.** Every model call is a meter
+  row on its payer's ledger (`aig:…`, after `model.settled`), its model
+  and tokens in it, whatever it charged: a self-hosted model, priced at
+  zero through its slot's ceiling (seam 3), is kept at a charge of 0, as
+  is a job's AI step on it. Master drops no row for costing nothing (the
+  ledger keeps each row it prices; the host test below meters Bonsai's
+  calls through `Ledger::meter` and finds them), so nothing went to
+  master. A ledger keeps its rows 90 days, so this month is whole.
+  `fragment_core::ledger::used` is one query over a ledger's `entries`,
+  host-tested on a real SQLite: this month's token rows by model (calls;
+  tokens in, the cached among them; tokens out), the most calls first, and
+  its awake rows by instance.
+- **Own hardware is an instance priced at nothing.** A computer on a node
+  its owner paired meters its awake time to their ledger as any computer
+  does, on the instance `own-hardware` (`price::OWN_HARDWARE`), which the
+  default book prices at zero: never charged, its hours theirs, apart from
+  hours on the deployment's machines. Nothing on the call path: the meter
+  is the computer's flush of its awake intervals, as before.
+- **Where:**
+  - `GET /api/ledger/usage`, a person's own (an agent's: its owner's):
+    `Used {month, models: [{model, calls, inputTokens, outputTokens}],
+    awakeMs, ownAwakeMs}`; Settings shows it as "Usage this month".
+  - `GET /api/admin/usage?q=&after=`, operators': the people a page of 100
+    at a time as `/api/admin/people` pages them, each one's ledger asked
+    at once, `{people: [{npub, email, used}], next}` (anyone else: 403).
+    The admin page's Usage tab is its one table (person; a model, or their
+    computer on the deployment's machines or their own; calls; tokens in
+    and out; hours), and `fragment operator usage [--q] [--after]` prints
+    it.
+- **Points are cut** (a decision for Paul): hours shown directly made
+  them a second unit for the same use, kept by a second mechanism (the
+  computer's own `own_hardware` meta row, `price::points`,
+  `ownHardwarePoints` in its view, Settings' points line). The ledger
+  already had the rows; an hour on one's own machine is now one of them.
+  Lost: own hardware's use in list-price terms, which is its hours times
+  the default instance's $0.064224.
+- **Cut from the spike, a decision for Paul (as before):** a wake on own
+  hardware was let past a person's want of credit. It is refused at zero
+  credit as every agent's start is (decision 27): their agents' model
+  calls are the platform's and stop then anyway, and the pass-over needed
+  the wake to place the computer first.
 - A computer on one of the deployment's nodes is billed exactly as before.
+- **Evidence, 2026-10-22:**
+  - `cargo xtask check`: 837 passed, 0 failed. Among the host tests,
+    `ledger::used`: a seat's ledger meters a self-hosted deployment's
+    calls (Bonsai's slots, priced from their ceiling of zero) beside a
+    priced model, hours on the deployment's instance and on its owner's
+    own, and other meters' rows, through `Ledger::meter`; the free rows are
+    kept at a charge of 0, the balance moves by the priced ones alone, and
+    the cell's own query over a real SQLite (the ledger's baseline step)
+    reads this month's alone, last month's apart.
+  - The e2e on `wrangler dev`, master's path (ledger, admin, admin-page,
+    computers): 335 passed, 0 failed, 2 skipped (the hosted lane's). The
+    ledger section ends on a node shaped as a self-hosted deployment
+    (`Shape::SelfHosted`: every tier on a model of its own at no price):
+    an agent's calls, streamed and not, are kept with their tokens at no
+    charge, the balance as it was; the person, their agent, an operator's
+    table and `fragment operator usage` read the same line; anyone else
+    gets 403. The computers section reads its owner's hours on the
+    deployment's machines in the operators' table; the admin page's Usage
+    tab loads.
+  - On celld (ledger, admin, admin-page): 135 passed, 0 failed, 3
+    skipped (no computers without nodes).
+  - Two nodes on celld (`FRAGMENT_E2E_NODES=two`; computers, pairing):
+    245 passed, 0 failed, 1 skipped (the stub's awake save, master's own).
+    A computer on its owner's node: its awake rows reach their ledger as
+    own hardware at no charge, the balance unchanged, the operators' table
+    and Settings show its hours as on their own machine, and they hold
+    across a restart; one on the deployment's node is charged as ever,
+    its hours the deployment's.
+  - The cell's Wasm: 6,713,080 bytes, 6,920 under the 6.72 MB budget.
 
 ### 12. Secrets: the store's bindings, stood in for, OpenBao behind them (done)
 
