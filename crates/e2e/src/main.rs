@@ -620,6 +620,7 @@ impl Suite {
             // the levers, as a preview has them: each request carries the secret
             test_secret: Some(self.test_secret.clone()),
             computer_image: Some("stub".into()),
+            images: vec![],
             computer_snapshots: false,
             computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
             providers: Some({
