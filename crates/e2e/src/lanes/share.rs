@@ -438,18 +438,25 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
             && own.status == 400 && own.message().contains("owns it"),
         format!("{r} {own}"),
     );
-    // a share is the person's and their agents' (Paul, 2026-10-13), and the
-    // sheet names the person, never their agents (decision 63: "I invite
-    // Skyler and his agents, not Skyler and his agent Agent123")
-    let theirs = Keys::generate();
+    // a person's membership is their agents' (decision 64): one they make
+    // now comes in beside them, and the sheet names the person, one entry
+    // "with their agents", never the agent (decision 63: "I invite Skyler
+    // and his agents, not Skyler and his agent Agent123")
+    let member_agent = Keys::generate();
     let reg = "/api/identities";
-    let made = api.signed(&member, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&theirs, "POST", reg, &member) })))?;
+    let made = api.signed(&member, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&member_agent, "POST", reg, &member) })))?;
     let theirs_id = made.body["id"].as_str().unwrap_or("-").to_string();
     let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "role"), ("member", &member_id), ("role", "editor")])?;
     let shown = with_session(api, "GET", &sheet, &owner_session)?;
     s.ok(
-        "the owner changes a role on the sheet; the person is named there, their agents never (no name, no npub)",
-        made.status == 200 && r.status == 303 && role_of(&member_id)?.as_deref() == Some("editor") && shown.text.contains(&member_name) && !shown.text.contains("With their agent") && !shown.text.contains(&theirs_id),
+        "an agent the member makes comes in beside them; the owner changes their role on the sheet, and it follows; the person is one entry there, \"with their agents\", the agent never named (no name, no npub)",
+        made.status == 200
+            && r.status == 303
+            && role_of(&member_id)?.as_deref() == Some("editor")
+            && role_of(&theirs_id)?.as_deref() == Some("editor")
+            && shown.text.contains(&member_name)
+            && shown.text.contains("With their agents")
+            && !shown.text.contains(&theirs_id),
         format!("{r} {made}"),
     );
     let r = api.signed(&owner, "PUT", &format!("/api/f/{chat}/members/{member_id}"), Some(&json!({ "role": "viewer" })))?;
@@ -561,6 +568,27 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         "a chat is made members only, and its sheet keeps its own agent's place: no role buttons, no Remove, saying why",
         r.status == 200 && r.text.contains("This chat's own agent") && controls == 0 && r.text.contains("value=\"members\" aria-pressed=\"true\""),
         &r,
+    );
+    // a person who accepts brings their agents into its roster, after its
+    // own agent, its lead (decision 64): each takes part as itself
+    let r = api.signed(&owner, "POST", &format!("/api/f/{talk}/invites"), Some(&json!({ "email": member_name, "role": "editor" })))?;
+    let yes = api.signed(&member, "POST", &format!("/api/invites/{talk}/accept"), Some(&json!({})))?;
+    let roster = api.signed(&member, "GET", &format!("/api/f/{talk}/members"), None)?;
+    let agents: Vec<&str> = roster.body["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").filter_map(|m| m["principal"].as_str()).collect();
+    let its_list = api.signed(&member_agent, "GET", "/api/fragments", None)?;
+    let listed_there = its_list.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == talk.as_str()));
+    let said = api.signed(&member_agent, "POST", &format!("/api/f/{talk}/channels/chat"), Some(&json!({ "id": "theirs-1", "body": { "text": "hello from the member's agent" } })))?;
+    let sheet_now = with_session(api, "GET", &format!("/share/{talk}"), &owner_session)?;
+    s.ok(
+        "a member who accepts a chat's invite brings their agent into its roster after its own (the lead stays first), in the agent's own list; it speaks there as itself; the sheet shows the member once, \"with their agents\", never naming it",
+        r.status == 200
+            && yes.status == 200
+            && agents == vec![agent.as_str(), theirs_id.as_str()]
+            && listed_there
+            && said.status == 200
+            && sheet_now.text.contains("With their agents")
+            && !sheet_now.text.contains(&theirs_id),
+        format!("{yes} {roster} {said}"),
     );
 
     // ---- the owner sets who can open it, and makes a new link

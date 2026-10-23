@@ -2621,7 +2621,12 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             let took = crate::fragment::ask(env, fragment, "computer/assign", &json!({ "computer": id, "owner": who })).await?;
             let identity = took["identity"].as_str().ok_or_else(|| CellError::host("the agent fragment named no identity"))?;
             let body = json!({ "fragment": fragment, "identity": identity, "owner": who });
-            json_response(&view_of(ask(env, id, "computer/assign", &body).await?)?)
+            let view = view_of(ask(env, id, "computer/assign", &body).await?)?;
+            // it comes in where its person is (decision 64), once both the
+            // fragment and the computer hold it, so its computer hears each
+            // join; a replay joins nothing twice
+            crate::members::agent_made(env, who, identity).await;
+            json_response(&view)
         }
         (Method::Put, [id, "agents", fragment, "connections"]) => {
             owned(env, who, id).await?;

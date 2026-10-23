@@ -679,9 +679,21 @@ impl FragmentCell {
             vec![principal.into(), principal.into()],
         )?;
         let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
-        let member = row.role.as_deref().and_then(Role::parse);
-        // as itself, a hold limits nothing: it caps an agent acting for
-        // someone (`standing_for`), never its own memberships
+        let mut member = row.role.as_deref().and_then(Role::parse);
+        // as itself, a hold caps an agent in with its person here, a
+        // member who is not the owner (decision 64: the whole entity is
+        // secured; members.rs `entity_of`); never its own memberships, its
+        // owner's chats, its agent fragment, one it holds on its own
+        // (decision 36), where it answers and records its turns
+        if let Some((held, signed)) = caller.signed.as_ref().and_then(|s| Some((s.held?, s))) {
+            let in_with_person = match signed.owner.as_deref() {
+                Some(person) => self.member_role(person)?.is_some_and(|r| r != Role::Owner),
+                None => false,
+            };
+            if in_with_person {
+                member = member.map(|m| m.min(held));
+            }
+        }
         Ok(Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: None, held: None })
     }
 
@@ -857,10 +869,15 @@ impl FragmentCell {
             let body: Value = body_json(&mut req).await?;
             return self.cap_files(&op, &body).await;
         }
-        if path == "/invites/claim" || path == "/invites/decline" {
-            // Only the registry sets the header (a person's yes or no); the router never passes it.
+        if path == "/invites/claim" || path == "/invites/decline" || path == "/members/agent" {
+            // Only the platform sets the header (a person's yes or no; an
+            // agent of theirs made); the router never passes it.
             if req.headers().get(crate::members::CLAIM_HEADER)?.is_none() {
                 return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
+            }
+            if path == "/members/agent" {
+                let body: Value = body_json(&mut req).await?;
+                return json_response(&self.agent_with_person(&body).await?);
             }
             let claim = body_json(&mut req).await?;
             return json_response(&match path.as_str() {

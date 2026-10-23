@@ -355,6 +355,14 @@ pub(crate) async fn name_agents(env: &Env, profiles: &mut BTreeMap<String, Profi
     }
 }
 
+/// Whether `m` is an agent in with its person, a member who is not the
+/// owner (decision 64; members.rs `entity_of`): never an entry of its own,
+/// nor named; its person is the one entry. The owner's agents are each in
+/// as the owner chose them, and shown as theirs.
+pub(crate) fn with_their_person(m: &Member, members: &[Member]) -> bool {
+    m.kind == Some(IdentityKind::Agent) && m.owner.as_deref().is_some_and(|o| members.iter().any(|p| p.principal == o && p.role != Role::Owner))
+}
+
 /// The ids a member list needs named: its members, and its agent
 /// members' owners.
 fn named_ids(members: &[Member]) -> Vec<String> {
@@ -399,6 +407,9 @@ fn person(m: &Member, sheet: &Sheet) -> String {
             None => "An agent".to_string(),
         });
     }
+    if sheet.with_agents.contains(&m.principal) {
+        under.push("With their agents".to_string());
+    }
     let under = if under.is_empty() { String::new() } else { format!("<small>{}</small>", under.join(" · ")) };
     format!("{picture}<span class=\"who\">{name}{you}{under}</span>")
 }
@@ -408,7 +419,10 @@ struct Sheet {
     me: String,
     /// The person's own role (`None`: they read through an agent of theirs).
     role: Option<Role>,
+    /// Its members, less the agents in with their person.
     members: Vec<Member>,
+    /// The people whose agents are in with them.
+    with_agents: Vec<String>,
     /// The invites waiting: the owner's only.
     invites: Vec<Invite>,
     visibility: Visibility,
@@ -471,12 +485,18 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
         (Some(Role::Owner), Some(token)) => Some(format!("{canonical}?view={token}")),
         _ => None,
     };
+    // an agent in with its person is no entry of its own (decision 64):
+    // its person is the one, "with their agents", never named
+    let all = members.members;
+    let with_agents: Vec<String> = all.iter().filter(|m| with_their_person(m, &all)).filter_map(|m| m.owner.clone()).collect();
+    let members: Vec<Member> = all.iter().filter(|m| !with_their_person(m, &all)).cloned().collect();
     // an agent by its title and picture, as the shell shows it
-    let profiles = profiles(env, named_ids(&members.members)).await;
+    let profiles = profiles(env, named_ids(&members)).await;
     Ok(Sheet {
         me: who.id.clone(),
         role,
-        members: members.members,
+        members,
+        with_agents,
         invites,
         visibility,
         title,
@@ -879,6 +899,7 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
     let asked: Vec<String> = owned.iter().filter(|f| f.sharing.is_none_or(|s| s.with_others())).take(limits::ACCESS_ASKED_MAX).map(|f| f.name.clone()).collect();
     assert!(asked.len() <= limits::ACCESS_ASKED_MAX, "the access view asks a bounded number of fragments");
     let mut found: BTreeMap<String, (Vec<Member>, Vec<Invite>)> = BTreeMap::new();
+    let mut unnamed: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for round in asked.chunks(limits::ACCESS_ASKED_AT_ONCE) {
         let answers = join_all(round.iter().map(|name| async move {
             let (members, invites) = join(ask(env, url, name, who, Method::Get, "/api/members", None), ask(env, url, name, who, Method::Get, "/api/invites", None)).await;
@@ -891,8 +912,12 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
         .await;
         for (name, read) in answers {
             match read {
-                Ok(read) => {
-                    found.insert(name, read);
+                // an agent in with its person is no entry of its own, nor
+                // named among its agents (decision 64)
+                Ok((all, invites)) => {
+                    let (entity, members): (Vec<Member>, Vec<Member>) = all.iter().cloned().partition(|m| with_their_person(m, &all));
+                    unnamed.insert(name.clone(), entity.into_iter().map(|m| m.principal).collect());
+                    found.insert(name, (members, invites));
                 }
                 // deleted since its row was read, or not answering now:
                 // its row keeps its counts
@@ -938,7 +963,10 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
                 }
                 None => (None, 0, vec![]),
             };
-            AccessRow { name: f.name, kind: f.kind, title: f.title, sharing: f.sharing, agents: f.agents, members, more, invites }
+            // a guest's agent named nowhere, its members read or not (decision 64)
+            let others = f.sharing.as_ref().is_none_or(|s| s.with_others());
+            let agents = fragment_core::access::access_agents(f.agents, unnamed.get(&f.name).map(Vec::as_slice), others);
+            AccessRow { name: f.name, kind: f.kind, title: f.title, sharing: f.sharing, agents, members, more, invites }
         })
         .collect();
     Ok(Access { fragments })
