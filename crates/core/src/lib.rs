@@ -50,6 +50,7 @@ pub mod secrets;
 pub mod secrets_store;
 pub mod webpush;
 pub mod site;
+pub mod speech;
 pub mod steps;
 pub mod stripe;
 pub mod wipe;

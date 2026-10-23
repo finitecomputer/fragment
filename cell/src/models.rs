@@ -88,7 +88,7 @@ use std::pin::Pin;
 use fragment_core::ledger::{MeterRow, Spend};
 use fragment_core::models::{self as bounds, Bounded, Model, Named, Stream, Tried, Tries, Upstream};
 use fragment_core::price::Usage;
-use fragment_core::{decide, multipart, transcribe};
+use fragment_core::{decide, multipart, speech, transcribe};
 use fragment_proto::{valid_fragment_name, ErrorCode, IdentityKind, Tier};
 use futures_util::future::LocalBoxFuture;
 use futures_util::StreamExt;
@@ -722,6 +722,91 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url, 
     resp.headers_mut().set("content-type", kind)?;
     resp.headers_mut().set(ANSWER_SHAPE_HEADER, &shape.to_string())?;
     Ok(resp)
+}
+
+/// `POST /api/models/v1/audio/speech`: an agent's speech (fragment_core::
+/// speech), signed by the agent; OpenAI's shape, its `model` `speech`, on
+/// tts-1 through the deployment's AI Gateway. Its owner pays, after the
+/// answer, per character. Answered with the audio itself, as OpenAI's API
+/// answers. The model's refusal is passed through and charged nothing; an
+/// answer whose audio cannot be read was paid for, so it is charged, and
+/// answered 502.
+pub(crate) async fn speech_route(mut req: Request, env: &Env, url: &Url, after: &dyn Background) -> CellResult<Response> {
+    let body = read_body(&mut req, speech::BODY_MAX_BYTES).await?;
+    let agent = crate::signer_for(env, &req, url, &body).await?;
+    if agent.kind != IdentityKind::Agent {
+        return Err(CellError::new(ErrorCode::Forbidden, "the model route is an agent's: its owner pays for its calls"));
+    }
+    let owner = agent.owner.clone().ok_or_else(|| CellError::host("an agent without an owner"))?;
+    let asked: Value = serde_json::from_slice(&body).map_err(|_| CellError::invalid(speech::Refusal::Body.message()))?;
+    drop(body);
+    let bounded = speech::bound(&asked).map_err(|why| CellError::invalid(why.message()))?;
+    drop(asked);
+    let mut charge = gate(env, &owner, Some(&agent.id), None, speech::SPEECH_MODEL, speech::SPEECH).await?;
+    let meta = Metadata { user_id: opaque(&owner), agent_id: Some(opaque(&agent.id)) };
+    let cfg = Config::from_env(env);
+    // not reached: it used nothing, and nothing is charged
+    let mut upstream = workers_ai(env, cfg, speech::SPEECH_MODEL, &bounded.input, &meta).await?;
+    charge.first_ms = Some(js::now_ms() - charge.t0);
+    let status = upstream.status_code();
+    let log_id = upstream.headers().get("cf-aig-log-id")?;
+    if status != 200 {
+        return passed(status, bounded_text(&mut upstream).await);
+    }
+    // it answered, so it was paid for: charged whatever its audio
+    let reference = charge.reference.clone();
+    charge.later(after, Some(speech::usage_of(bounded.chars)), log_id);
+    let kind = upstream.headers().get("content-type")?.unwrap_or_default();
+    let unread = |why: String| CellError::new(ErrorCode::UpstreamFailed, format!("the model's speech: {why}: the call is charged"));
+    // the audio itself (a raw answer), or JSON naming it (the catalog's `audio`)
+    let (audio, shape) = if kind.starts_with("audio/") || kind.starts_with("application/octet-stream") {
+        (read_audio(&mut upstream).await.map_err(|e| unread(e.message))?, speech::shape(&kind, None))
+    } else {
+        let (bytes, over) = crate::cs::read_answer(&mut upstream, speech::ANSWER_MAX_BYTES).await.map_err(|e| unread(e.message))?;
+        if over {
+            return Err(unread(format!("its answer is over {} bytes", speech::ANSWER_MAX_BYTES)));
+        }
+        let answer: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        drop(bytes);
+        let shape = speech::shape(&kind, Some(&answer));
+        let audio = match speech::audio_of(&answer) {
+            Some(speech::Audio::Inline(a)) => a,
+            Some(speech::Audio::At(at)) => fetched_audio(cfg, &at).await.map_err(|e| unread(e.message))?,
+            None => return Err(unread("it named no audio".into())),
+        };
+        (audio, shape)
+    };
+    // its shape, never its audio or a URL: logged, and told the client
+    console_log!("{}", json!({ "event": "model.spoken", "ref": reference, "shape": shape, "bytes": audio.len() }));
+    let mut resp = Response::from_bytes(audio)?;
+    resp.headers_mut().set("content-type", bounded.format.content_type())?;
+    resp.headers_mut().set(ANSWER_SHAPE_HEADER, &shape.to_string())?;
+    Ok(resp)
+}
+
+/// A raw answer's audio, at most `speech::AUDIO_MAX_BYTES`.
+async fn read_audio(resp: &mut Response) -> CellResult<Vec<u8>> {
+    match crate::cs::read_answer(resp, speech::AUDIO_MAX_BYTES).await? {
+        (_, true) => Err(CellError::new(ErrorCode::UpstreamFailed, format!("its audio is over {} bytes", speech::AUDIO_MAX_BYTES))),
+        (bytes, false) => Ok(bytes),
+    }
+}
+
+/// The audio an answer names by its URL: over HTTPS only (the gateway's
+/// own file), or from the fake at `FRAGMENT_AI_URL` in dev and the e2e.
+async fn fetched_audio(cfg: &Config, at: &str) -> CellResult<Vec<u8>> {
+    let local = cfg.ai_url.as_deref().is_some_and(|fake| at.starts_with(&format!("{fake}/")));
+    if !at.starts_with("https://") && !local {
+        return Err(CellError::new(ErrorCode::UpstreamFailed, "its audio's URL is not https"));
+    }
+    let mut resp = Fetch::Url(Url::parse(at).map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("its audio's URL: {e}")))?)
+        .send()
+        .await
+        .map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("its audio did not come: {e}")))?;
+    if resp.status_code() != 200 {
+        return Err(CellError::new(ErrorCode::UpstreamFailed, format!("its audio answered {}", resp.status_code())));
+    }
+    read_audio(&mut resp).await
 }
 
 /// A transcription's answer names the shape of the model's own (its
