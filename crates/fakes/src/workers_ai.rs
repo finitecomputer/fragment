@@ -84,8 +84,9 @@
 //! - the same levers as the Workers AI face, one queue for both: a failure
 //!   queued is the limiter's error shape (a 429 its spent window's,
 //!   `usage_limit`), and a model that is down answers its 502
-//!   `upstream_unavailable`. It takes no images (they are not qualified
-//!   there: the route sends them to Workers AI).
+//!   `upstream_unavailable`. It takes images, as finite-agentd declares
+//!   Finite Private's model does (`supports_vision`), though no real call
+//!   of ours has qualified them.
 //!
 //! It also serves Tinfoil's DeepSeek V4.1 Flash (`TINFOIL_FLASH`, the
 //! private tier's fallback by config), answered as Finite Private's is but
@@ -129,9 +130,10 @@ pub const NO_WORDS: &str = "(no words)";
 /// The chat models the platform calls that read images: those Workers AI's
 /// catalog marks "Vision: Yes" (GLM-5.3 Flash, the cheap tier's and the
 /// default vision model; DeepSeek V4 Flash, the fallback, and GLM-5.3, the
-/// medium tier's, have none). Finite Private's is not among them: its
-/// images are not qualified (decision 61).
-pub const TAKES_IMAGES: [&str; 1] = [fragment_core::models::VISION_MODEL_DEFAULT];
+/// medium tier's, have none); Finite Private's GLM-5.3 Flash, as
+/// finite-agentd declares it (its images not qualified by a real call of
+/// ours); and Tinfoil's DeepSeek V4.1 Flash (its catalog's `multimodal`).
+pub const TAKES_IMAGES: [&str; 3] = [fragment_core::models::VISION_MODEL_DEFAULT, fragment_core::models::FINITE_PRIVATE_FLASH, TINFOIL_FLASH];
 /// Tinfoil's DeepSeek V4.1 Flash, as its API names it
 /// (`https://inference.tinfoil.sh/v1`, `GET /v1/models`, read 2026-10-22):
 /// a model only a deployment's config names (deploy/example.jsonc), so its
@@ -1376,7 +1378,7 @@ mod tests {
         let large = json!({ "model": "glm-5-3-flash", "messages": [{ "role": "user", "content": "x".repeat(OPENAI_BODY_MAX_BYTES) }] });
         assert_eq!(refusal(answer(&mut s, &ask(&large, key))), (413, "payload_too_large".into()));
         let image = json!({ "model": "glm-5-3-flash", "messages": [{ "role": "user", "content": [{ "type": "image_url", "image_url": { "url": png_url() } }] }] });
-        assert_eq!(answer(&mut s, &ask(&image, key)).status, 400, "no images: they are not qualified there");
+        assert_eq!(answer(&mut s, &ask(&image, key)).status, 200, "it takes images, as finite-agentd declares");
         assert_eq!(s.calls.len(), before + 5);
         assert!(s.calls[before..].iter().all(|c| c.face == Face::OpenAi));
         assert_eq!(s.calls[before + 1].authorization.as_deref(), Some("Bearer fpk_live_other"), "the key each carried, for a test to read");

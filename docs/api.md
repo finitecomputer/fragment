@@ -1841,8 +1841,11 @@ once; a 401 or 402 is also logged aloud (`model.platform-key`). An
 answer that began is final; a refusal of the request (400, another 4xx)
 is the call's; when the fallback fails too, its failure is the call's,
 charged nothing, after two tries in all.
-`vision` and transcriptions have no fallback. A job's text step falls
-back the same, and its output's `model` names the model that answered.
+`vision` falls back so only when the fallback's slot says its model
+reads images (`"images": true` in the deployment's `models`; the
+default fallback, DeepSeek V4 Flash, reads none), and transcriptions
+never. A job's text step falls back the same, and its output's `model`
+names the model that answered.
 
 `fallback` names the deployment's fallback model itself: a runtime's own
 switch when its model stalls, streaming nothing (our Hermes image's

@@ -103,7 +103,9 @@
   // messages, stream, stream_options, tools, tool_choice, max_tokens,
   // max_completion_tokens, reasoning_effort). `price` is its model's list
   // price at that API, dollars a million tokens, `{"input", "cached_input"?,
-  // "output"}`, for an API that is not OpenRouter. A slot left out is on
+  // "output"}`, for an API that is not OpenRouter. `"images": true` (either
+  // provider) says its model reads images: a `vision` call falls back to the
+  // fallback only when the fallback's slot says so. A slot left out is on
   // Workers AI: cheap GLM-5.3 Flash, medium GLM-5.3, fallback DeepSeek V4
   // Flash, vision GLM-5.3 Flash. Every model is one the price book prices
   // (fragment_core::price), one its slot names a price for, or one on
@@ -147,9 +149,10 @@
   //   "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" },
   //   "vision": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" }
   // },
-  // Or the private tier (Paul, 2026-10-22): its tiers on Finite Private, and
-  // Tinfoil's DeepSeek V4.1 Flash behind them on Tinfoil's own key
-  // (tinfoil.sh's confidential inference, its list price named here):
+  // Or the private tier (Paul, 2026-10-22): its tiers and vision on Finite
+  // Private, and Tinfoil's DeepSeek V4.1 Flash behind them, text and images,
+  // on Tinfoil's own key (tinfoil.sh's confidential inference, its list
+  // price named here):
   // "models": {
   //   "cheap": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
   //              "key": "fragment-finite-private-key", "model": "glm-5-3-flash" },
@@ -157,8 +160,9 @@
   //               "key": "fragment-finite-private-key", "model": "glm-5-3-flash" },
   //   "fallback": { "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1",
   //                 "key": "fragment-tinfoil-api-key", "model": "deepseek-v4-1-flash",
-  //                 "price": { "input": 0.65, "cached_input": 0.13, "output": 1.45 } },
-  //   "vision": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" }
+  //                 "price": { "input": 0.65, "cached_input": 0.13, "output": 1.45 }, "images": true },
+  //   "vision": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
+  //               "key": "fragment-finite-private-key", "model": "glm-5-3-flash" }
   // },
   // A new person's plan: guest (the default), seat, or seat_always_on.
   // "default_plan": "guest",
