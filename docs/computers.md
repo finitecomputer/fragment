@@ -85,6 +85,16 @@ container starts until someone asks again).
   that fails keeps no container, since its owner asked. Asleep or won't
   wake, a start. Either way the start is fresh: from the image and the
   newest good save, never the snapshot.
+- **A sleep's end is its stop's to report** (`Asleep`): the container's
+  exit, which the stop's SIGTERM causes and the runtime reports as a
+  request of its own (`computer/exited`), changes nothing while that stop
+  is under way. So the start after a sleep (a restart's, a wake asked as
+  it slept) is made by the request performing the stop, and a restart
+  answers with its start up (`awake`), or what stopped it (asleep after a
+  failed start, `won't wake`); `starting` or `sleeping` only when it was
+  asked as a start or a sleep was under way, which then makes it. A new
+  isolate that finds the container of a stop under way gone (its stop
+  lost with the isolate before it) reads that as the sleep's end.
 - **Wake from a snapshot** when it caches the current save for the pinned
   image (`start({containerSnapshot})`; below, "Saves and what a wake
   restores"); otherwise start the image with `RESTORE_PENDING=1`, restore
