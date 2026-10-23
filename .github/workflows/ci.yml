@@ -220,9 +220,12 @@ jobs:
       # The stub image's layers (images/stub/Dockerfile), BuildKit's, in the
       # Actions cache (scope e2e-stub), built first and here, where a build
       # can read and write that cache: into a builder of BuildKit's own
-      # (setup-buildx's, made the runner's default), whose cache the builds
-      # after it find every step in, xtask's beside the Rust and the node's
-      # boot (wrangler's). An unchanged bridge (images/bridge,
+      # (setup-buildx's), whose cache the builds after it find every step in,
+      # xtask's beside the Rust and the node's boot (wrangler's): their
+      # `docker build` goes to it by BUILDX_BUILDER (below), as it would
+      # otherwise to the Docker engine's own builder, which has none of
+      # these layers (`buildx use` does not move `docker build`). An
+      # unchanged bridge (images/bridge,
       # images/hermes/boot, the images' manifest and lock: about one master
       # commit in eight changes one) is its layers fetched in seconds, not
       # its bridge compiled (about 100 s alone, 250 beside the Rust); a
@@ -230,7 +233,8 @@ jobs:
       # Saved from the first shard on master's pushes, every stage's layers
       # (mode=max: the build stage's base too, 345 MB in all, each layer
       # kept once by its digest).
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - id: buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         env:
           # no job summary, and no build record artifact
@@ -246,6 +250,8 @@ jobs:
       # the cell, the CLI and the suite, and the computer images the
       # node's boot builds (xtask/src/build.rs), all at once
       - run: cargo xtask e2e --build-only
+        env:
+          BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
       # this commit's builds, with the tree they were built from, for the
       # runs after it: the first shard's, on master's pushes (a red e2e's
       # too: its build was green), unless this commit's are kept already
@@ -271,6 +277,7 @@ jobs:
       # uploaded below
       - run: cargo xtask e2e --no-build --shard ${{ matrix.shard }}/4
         env:
+          BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
           CHROME_BIN: /usr/bin/google-chrome
       # after the run, from any shard that shot a preview card: miniflare
       # fetches its Chrome for the first one during the run (the first
