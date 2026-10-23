@@ -853,7 +853,7 @@ impl ComputerCell {
             }));
         }
         let id = self.must(MetaKey::Id)?;
-        self.call("arm", &[g, id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts()]).await?;
+        self.call("arm", &[g, id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts(), self.codestorage_through_egress()]).await?;
         Ok(None)
     }
 
@@ -991,6 +991,12 @@ impl ComputerCell {
     /// The hosts the swap intercepts: every provider's in the catalog.
     fn swap_hosts(&self) -> JsValue {
         js::to_js(&json!(self.cfg.providers.hosts()))
+    }
+
+    /// Whether the guest reaches code.storage through its egress
+    /// (`egress_codestorage`): a local fleet's, at a loopback address.
+    fn codestorage_through_egress(&self) -> JsValue {
+        JsValue::from_bool(fragment_core::codestorage::guest_api(&self.cfg.codestorage().api).is_some())
     }
 
     /// The environment every image may rely on (docs/computers.md).
@@ -1135,7 +1141,7 @@ impl ComputerCell {
         }
         let started_ms = js::now_ms();
         self.call("start", &[g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size)]).await?;
-        let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts()]).await?;
+        let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts(), self.codestorage_through_egress()]).await?;
         if armed.as_bool() != Some(true) {
             return Err(CellError::host(format!("start {generation} was superseded before it was armed")).into());
         }
@@ -2775,6 +2781,7 @@ impl ComputerEgress {
             "api" => egress_api(req, &env, &ctx, &computer).await,
             "model" => egress_model(req, &env, &ctx, &computer).await,
             "swap" => egress_swap(req, &env, &ctx, &computer).await,
+            "codestorage" => egress_codestorage(req, &env).await,
             r => Err(CellError::new(ErrorCode::NotFound, format!("no egress route {r}"))),
         };
         // one line per refusal (lesson 14): the guest's requests never reach
@@ -2795,7 +2802,9 @@ impl ComputerEgress {
 /// own routes (`/f/<fragment>/…`), as the agent its `x-fragment-agent`
 /// names: the agent fragment signs it (NIP-98) only when it runs on this
 /// computer, and the router answers it as it would from the internet.
-/// Without the header, only the computer's own routes answer.
+/// Without the header, only the computer's own routes answer. A storage
+/// token names the code.storage the guest can reach: its egress's, on a
+/// local fleet (`egress_codestorage`).
 async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     let url = req.url()?;
@@ -2837,6 +2846,7 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
         None => return Err(CellError::new(ErrorCode::NotFound, "the API is /api/… and a fragment's routes /f/<fragment>/…")),
     };
     let method = req.method();
+    let storage_token = method == Method::Get && path.ends_with("/storage-token");
     let socket = req.headers().get("upgrade")?.is_some_and(|u| u.eq_ignore_ascii_case("websocket"));
     let body = match method {
         Method::Get | Method::Head => vec![],
@@ -2892,7 +2902,49 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
         init.with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
     }
     let out = Request::new_with_init(&target, &init)?;
-    crate::route(out, env, ctx).await
+    let mut answered = crate::route(out, env, ctx).await?;
+    if let Some(api) = fragment_core::codestorage::guest_api(&cfg.codestorage().api).filter(|_| storage_token && answered.status_code() == 200) {
+        let mut token: fragment_proto::StorageToken = answered.json().await?;
+        token.api = api;
+        return json_response(&token);
+    }
+    Ok(answered)
+}
+
+/// The guest's call to code.storage on a local fleet, whose code.storage
+/// is at a loopback address the guest's container cannot reach (the
+/// machine's, not the container's): at `GUEST_HOST`, which a storage token
+/// minted through its egress names (`egress_api`), sent on as it came, its
+/// token with it, to `CODESTORAGE_API_URL`. On a deployment the guest
+/// reaches code.storage itself, and this is 404.
+async fn egress_codestorage(mut req: Request, env: &Env) -> CellResult<Response> {
+    let cfg = Config::from_env(env);
+    if fragment_core::codestorage::guest_api(&cfg.codestorage().api).is_none() {
+        return Err(CellError::new(ErrorCode::NotFound, "code.storage is reached directly here"));
+    }
+    let url = req.url()?;
+    let query = url.query().map(|q| format!("?{q}")).unwrap_or_default();
+    let target = format!("{}{}{query}", cfg.codestorage().api, url.path());
+    let method = req.method();
+    let body = match method {
+        Method::Get | Method::Head => vec![],
+        _ => crate::read_body(&mut req, EGRESS_BODY_MAX_BYTES).await?,
+    };
+    let headers = Headers::new();
+    for k in ["authorization", "content-type", "accept"] {
+        if let Some(v) = req.headers().get(k)? {
+            headers.set(k, &v)?;
+        }
+    }
+    if !body.is_empty() {
+        headers.set("content-length", &body.len().to_string())?;
+    }
+    let mut init = RequestInit::new();
+    init.with_method(method).with_headers(headers);
+    if !body.is_empty() {
+        init.with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
+    }
+    Ok(Fetch::Request(Request::new_with_init(&target, &init)?).send().await?)
 }
 
 /// The guest's model call (docs/computers.md, Models): `POST

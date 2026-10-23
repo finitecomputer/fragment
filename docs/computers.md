@@ -817,6 +817,14 @@ expires within 30 days. The container application is the deployment's
 - `http://api.fragment.internal/<path>` is the platform's API
   (`docs/api.md`), and `http://api.fragment.internal/f/<fragment>/<path>`
   is a fragment's own routes (`__live` sockets included), as on its host.
+- On a local fleet, whose code.storage is the dev stack's fake at the
+  machine's loopback (which a container's loopback is not), a storage
+  token minted through the egress (`GET …/storage-token`, as `fragment
+  sync` and `deploy` ask it) names `http://codestorage.fragment.internal`
+  as its `api`, which the egress sends on to the fake as it came, the
+  guest's token with it. On a deployment the guest reaches code.storage
+  itself (docs/technical-debt-ledger.md, "An agent's sync and deploy
+  reach code.storage directly").
 - `x-fragment-agent: <agent fragment name>` says which of its agents the
   request acts as. The intercept refuses an agent not assigned to this
   computer, then signs the request (NIP-98) as that agent's identity.

@@ -275,12 +275,15 @@ class ContainerHost {
   // them again. `swapHosts` are the connections' and operator keys' hosts,
   // caught on HTTPS and on plain HTTP alike: the swap always sends on over
   // HTTPS, so a credential never crosses the internet in the clear.
-  async arm(generation, computer, idleMs, swapHosts) {
+  // `codestorage`: a local fleet's code.storage, at a loopback address the
+  // container cannot reach, is reached through the egress too.
+  async arm(generation, computer, idleMs, swapHosts, codestorage) {
     if (generation !== this.#generation) return false;
     const c = this.#c;
     const egress = (route) => this.#ctx.exports.ComputerEgress({ props: { computer, route } });
     await this.#settled(() => c.interceptOutboundHttp("api.fragment.internal", egress("api")));
     await this.#settled(() => c.interceptOutboundHttp("model.fragment.internal", egress("model")));
+    if (codestorage) await this.#settled(() => c.interceptOutboundHttp("codestorage.fragment.internal", egress("codestorage")));
     for (const host of swapHosts) {
       await this.#settled(() => c.interceptOutboundHttp(host, egress("swap")));
       await this.#settled(() => c.interceptOutboundHttps(host, egress("swap")));

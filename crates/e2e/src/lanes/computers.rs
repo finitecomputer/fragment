@@ -787,6 +787,24 @@ fn intercept_names_by_key(s: &mut Suite, api: &Api, owner_id: &str, agent: &str,
 /// names by the route's names (`GET /api/computer`'s `models`); a call
 /// naming one runs on it, metered to the agent's owner; one no slot runs is
 /// refused, naming them, nothing reserved or sent. The replies it adds.
+/// A local fleet's code.storage is at the machine's loopback, which the
+/// guest's container cannot reach (its loopback is its own): the guest
+/// reaches it through its egress at `codestorage.fragment.internal`, as an
+/// agent's `fragment sync` and `deploy` do, with the token it was minted
+/// and nothing of the egress's (docs/computers.md, "The fragment API").
+/// Two replies.
+fn codestorage_through_egress(s: &mut Suite, api: &Api, owner: &crate::Keys, agent: &str, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+    let r = api.signed(owner, "GET", &format!("/api/f/{agent}/storage-token"), None)?;
+    let (token, repo) = (r.body["token"].as_str().unwrap_or_default(), r.body["repo"].as_str().unwrap_or_default());
+    s.ok("(its owner mints a storage token for the agent's fragment, naming the fake at its loopback address)", r.status == 200 && r.body["api"].as_str().is_some_and(|a| a.starts_with("http://127.0.0.1:")), &r);
+    let branch = format!("http://{}/api/repos/{repo}/branch?name=main", fragment_core::codestorage::GUEST_HOST);
+    let said = fetched(s, 83, &format!("fetch {branch} with {token}"))?;
+    s.ok("the guest reaches a local fleet's code.storage through its egress, with its token", said.starts_with("fetched 200") && said.contains("head_sha"), &said);
+    let said = fetched(s, 84, &format!("fetch {branch} with not-a-token"))?;
+    s.ok("and with no token of its own, the egress adds none: code.storage refuses it", said.starts_with("fetched 401"), &said);
+    Ok(2)
+}
+
 fn intercept_takes_model_ids(s: &mut Suite, api: &Api, owner_id: &str, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
     use fragment_core::models::{DEEPSEEK_FLASH, GLM_FLASH, MEDIUM_MODEL};
     let said = fetched(s, 80, "models")?;
@@ -1345,6 +1363,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         if fakes {
             replies_so_far += intercept_names_by_key(s, api, &owner_id, &agent_name, &chat_name, &fetched)?;
             replies_so_far += intercept_takes_model_ids(s, api, &owner_id, &fetched)?;
+            replies_so_far += codestorage_through_egress(s, api, &owner, &agent_name, &fetched)?;
         }
     } else {
         // a real runtime called its model to answer at all: each call went
