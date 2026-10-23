@@ -282,10 +282,11 @@ run), `web` (a search of the web), `read` (a file, page or skill read, or
 files searched), `write` (a file written or edited), `browser` (its
 browser or desktop driven), `image` (an image made), `delegate` (work
 handed to another agent), `memory` (what it remembers, changed), or
-`other`; a page shows each with its own icon and verb ("Running: ls -la",
-"Searching the web: …"), and a step with another or none (one from before
-steps said) as `other`, by its `tool`. The bridge's runtime says which
-(our Hermes image's: one table of Hermes' tools, docs/bridge.md).
+`other`; a page shows each by its own icon, which its verb ("Running",
+"Searching the web") names for assistive technology, then its arguments
+(`ls -la`), and a step with another or none (one from before steps said)
+as `other`, its `tool` in words. The bridge's runtime says which (our
+Hermes image's: one table of Hermes' tools, docs/bridge.md).
 
 ```json
 { "kind": "turn.prompt", "turn": "…", "prompt": "<prompt>",

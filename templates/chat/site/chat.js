@@ -1253,8 +1253,10 @@ export function mount(root) {
 
   // A turn's steps, one card: open while it works, saying what it does now
   // ("Running: npm test"), folded once done ("Worked through N steps")
-  // unless someone opened it. Each step is its icon, its verb and its
-  // arguments, with a compact status and any useful result.
+  // unless someone opened it. Each step is its icon and its arguments, with
+  // a compact status and any useful result. The icon says the verb (its
+  // accessible name), so the verb shows only where the icon cannot say it:
+  // a step with no arguments, or another tool's, whose wrench names none.
   function stepNote(t, s) {
     const note = el("div", "step-text");
     const body = el("div", "md");
@@ -1320,11 +1322,17 @@ export function mount(root) {
           if (s.text) d.append(stepNote(t, s));
           const step = el("div", `step${s.ok === false ? " error" : ""}`);
           const says = stepSays(s);
-          step.dataset.category = Object.hasOwn(STEP_SAYS, s.category) ? s.category : "other";
+          const known = Object.hasOwn(STEP_SAYS, s.category);
+          step.dataset.category = known ? s.category : "other";
           const name = el("div", "step-name");
-          name.replaceChildren(icon(says.icon));
+          const glyph = icon(says.icon);
+          name.replaceChildren(glyph);
           const label = el("div", "step-label");
-          label.append(el("span", "step-verb", says.args ? `${says.verb}:` : says.verb));
+          if (known && says.args) {
+            glyph.removeAttribute("aria-hidden");
+            glyph.setAttribute("role", "img");
+            glyph.setAttribute("aria-label", says.verb);
+          } else label.append(el("span", "step-verb", says.args ? `${says.verb}:` : says.verb));
           if (says.args) {
             const args = el("code", "step-args", shortStepArgs(says.args, agent));
             args.title = says.args;
