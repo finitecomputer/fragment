@@ -1532,6 +1532,8 @@ impl ComputerCell {
         view.notices = vec![];
         let catalog = &self.cfg.providers;
         view.credential_env = catalog.env_names();
+        // how long its runtime waits on a slot's model (docs/computers.md, Models)
+        view.model_patience = self.cfg.models.stale_timeout_s;
         if catalog.is_empty() || view.agents.is_empty() {
             return Ok(view);
         }
@@ -1762,6 +1764,7 @@ impl ComputerCell {
             credential_env: vec![],
             // not secret: its owner's pages show each agent's model by its id
             models: Some(self.cfg.models.ids_by_name()),
+            model_patience: Default::default(),
             restored: saves.restored().cloned(),
             rollbacks: saves.rollbacks(),
             saves: saves.views(),

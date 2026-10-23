@@ -21,7 +21,7 @@
 //! model on an OpenAI-compatible API, its key a Secrets Store secret
 //! (`Upstream`); a tier's or the fallback's may name its stale patience
 //! (`Slots`), which the route never reads and a computer's guest does
-//! (`Models::ids_by_name`). Unnamed, each is today's Workers AI model;
+//! (its view's `modelPatience`). Unnamed, each is today's Workers AI model;
 //! Finite's own deployment runs its tiers on GLM-5.3 Flash through
 //! OpenRouter (Paul, 2026-10-15; decision 61), or, by config, on Finite
 //! Private. What the
@@ -442,12 +442,12 @@ impl Models {
         json!({ "object": "list", "data": data })
     }
 
-    /// Each slot's model id by its name, and the stale patience its slots
-    /// name, as a computer's guest reads them in its view (`GET
-    /// /api/computer`'s `models`).
+    /// Each slot's model id by its name, as a computer's guest reads them in
+    /// its view (`GET /api/computer`'s `models`; the stale patience its
+    /// slots name is the view's `modelPatience`, `stale_timeout_s`).
     pub fn ids_by_name(&self) -> fragment_proto::computer::ModelIds {
         let id = |u: &Upstream| u.model().to_string();
-        fragment_proto::computer::ModelIds { cheap: id(&self.cheap), medium: id(&self.medium), fallback: id(&self.fallback), vision: id(&self.vision), stale_timeout_s: self.stale_timeout_s }
+        fragment_proto::computer::ModelIds { cheap: id(&self.cheap), medium: id(&self.medium), fallback: id(&self.fallback), vision: id(&self.vision) }
     }
 
     /// What a call naming `model` runs, as the route reads its body's
@@ -1509,21 +1509,35 @@ mod tests {
         assert_eq!(m.stale_timeout_s, StaleTimeouts { cheap: Some(900), medium: Some(900), fallback: Some(900) });
         assert_eq!(m.cheap.model(), "bonsai-2-27b");
         assert_eq!(m.cheap, m.fallback, "where it runs is the same upstream, its patience beside it: the route's fallback is no second try of it (`Tries`)");
-        let view = serde_json::to_value(m.ids_by_name()).unwrap();
-        assert_eq!(view, json!({ "cheap": "bonsai-2-27b", "medium": "bonsai-2-27b", "fallback": "bonsai-2-27b", "vision": GLM_FLASH, "stale_timeout_s": { "cheap": 900, "medium": 900, "fallback": 900 } }));
+        // the view's `models` is route name to id alone, whatever the patience; it is the view's `modelPatience`
+        let ids = json!({ "cheap": "bonsai-2-27b", "medium": "bonsai-2-27b", "fallback": "bonsai-2-27b", "vision": GLM_FLASH });
+        assert_eq!(serde_json::to_value(m.ids_by_name()).unwrap(), ids);
+        assert_eq!(serde_json::to_value(m.stale_timeout_s).unwrap(), json!({ "cheap": 900, "medium": 900, "fallback": 900 }));
         let one = Models::parse(Some(&json!({ "cheap": bonsai(json!(60)) }).to_string()), &book, true).unwrap();
         assert_eq!(one.stale_timeout_s, StaleTimeouts { cheap: Some(60), ..StaleTimeouts::default() });
-        assert_eq!(serde_json::to_value(one.ids_by_name()).unwrap()["stale_timeout_s"], json!({ "cheap": 60 }), "only what a slot names");
+        assert_eq!(serde_json::to_value(one.stale_timeout_s).unwrap(), json!({ "cheap": 60 }), "only what a slot names, no nulls");
         for edge in [1, STALE_TIMEOUT_S_MAX] {
             assert_eq!(Models::parse(Some(&json!({ "medium": bonsai(json!(edge)) }).to_string()), &book, true).unwrap().stale_timeout_s.medium, Some(edge));
         }
-        // none named: the view as it was, which a guest from before it reads, and a view from before it reads as none
+        // none named: the view says nothing of it
         for none in [Models::defaults(), finite(), Models::parse(Some(&json!({ "cheap": bonsai(Value::Null) }).to_string()), &book, true).unwrap()] {
             assert!(none.stale_timeout_s.is_none());
             assert_eq!(serde_json::to_value(none.ids_by_name()).unwrap().as_object().unwrap().len(), 4, "four ids, nothing else");
         }
-        let before: fragment_proto::computer::ModelIds = serde_json::from_value(json!({ "cheap": "a", "medium": "b", "fallback": "c", "vision": "d" })).unwrap();
-        assert!(before.stale_timeout_s.is_none());
+        let view = |patience: Option<Value>| {
+            let mut v = json!({ "computer": "computer:1", "owner": "npub1o", "image": "hermes", "phase": "awake", "agents": [], "origin": "https://c.example", "models": ids });
+            if let Some(p) = patience {
+                v["modelPatience"] = p;
+            }
+            serde_json::from_value::<fragment_proto::computer::ComputerView>(v).unwrap()
+        };
+        let mut given = view(None);
+        assert!(given.model_patience.is_none(), "a view from before patience reads as none");
+        assert!(serde_json::to_value(&given).unwrap().get("modelPatience").is_none(), "and says none");
+        given.model_patience = m.stale_timeout_s;
+        let wire = serde_json::to_value(&given).unwrap();
+        assert_eq!((&wire["models"], &wire["modelPatience"]), (&ids, &json!({ "cheap": 900, "medium": 900, "fallback": 900 })), "beside models, never in it");
+        assert_eq!(view(Some(json!({ "cheap": 900, "medium": 900, "fallback": 900 }))), given);
         // invalid
         for bad in [json!(0), json!(STALE_TIMEOUT_S_MAX + 1), json!(-1), json!("900"), json!(1.5), json!(null), json!(u64::MAX)] {
             let mut row = bonsai(Value::Null);

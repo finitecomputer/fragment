@@ -93,19 +93,20 @@ pub struct Computer {
     /// platform before them.
     #[serde(default)]
     pub models: Option<ModelIds>,
+    /// Each slot's stale patience, where the deployment names one
+    /// (`modelPatience`, beside `models`); none, the runtime's own.
+    #[serde(default, rename = "modelPatience")]
+    pub model_patience: StaleTimeouts,
 }
 
 /// The model route's models' ids, by its names: what a call may name each
-/// slot by besides its name; and each slot's stale patience, where the
-/// deployment names one.
+/// slot by besides its name. Route name to id, nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelIds {
     pub cheap: String,
     pub medium: String,
     pub fallback: String,
     pub vision: String,
-    #[serde(default)]
-    pub stale_timeout_s: StaleTimeouts,
 }
 
 /// How long an agent's call to a slot's model may stream nothing before
@@ -114,11 +115,11 @@ pub struct ModelIds {
 /// none, the runtime's own.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StaleTimeouts {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cheap: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub medium: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback: Option<u32>,
 }
 
