@@ -83,7 +83,25 @@ pub fn perf(s: &mut Suite, api: &Api) -> Result<()> {
     row(&mut rows, "platform: live update (op to its frame)", &live);
     row(&mut rows, "platform: live frame after the op's answer", &live_after_answer);
 
-    // a computer: cold start, exec, intercepted calls, sleep, warm wake, restart
+    // a computer: on nodes, one on each (the first placed takes the first
+    // listed, the one that listens; the second the one that dials in)
+    let kinds = if s.has_nodes() { 2 } else { 1 };
+    for k in 0..kinds {
+        let owner = if k == 0 { owner.clone() } else { api.person()? };
+        computer(s, api, &owner, &mut rows, n, cycles)?;
+    }
+
+    println!("\n      perf ({}; {} reps, {} cycles):", if s.has_nodes() { "nodes" } else { "this runtime's containers" }, n, cycles);
+    for r in &rows {
+        println!("      {r}");
+    }
+    s.ok("the benchmark ran", true, "");
+    Ok(())
+}
+
+/// A computer: cold start, exec, intercepted calls, sleep, warm wake, restart.
+fn computer(s: &mut Suite, api: &Api, owner: &crate::Keys, rows: &mut Vec<String>, n: usize, cycles: usize) -> Result<()> {
+    let owner = owner.clone();
     let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
     let id = r.body["computer"].as_str().unwrap_or("").to_string();
     anyhow::ensure!(r.status == 200, "made: {r}");
@@ -93,7 +111,7 @@ pub fn perf(s: &mut Suite, api: &Api) -> Result<()> {
         api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?;
         views.push(ms_since(t0));
     }
-    row(&mut rows, "platform: computer's view (GET, asleep)", &views);
+    row(rows, "platform: computer's view (GET, asleep)", &views);
     // an agent on it, for the guest's model calls
     let agent_name = s.named(api, &owner, "perfagent")?;
     let agent = s.create(api, &owner, &agent_name)?;
@@ -109,9 +127,11 @@ pub fn perf(s: &mut Suite, api: &Api) -> Result<()> {
         Ok((ms_since(t0), r.body))
     };
     let (cold, v) = wake(&patient)?;
+    let at = v["node"].as_str().map(|n| format!("[{n}] ")).unwrap_or_default();
+    let label = |l: &str| format!("{at}{l}");
     println!("      cold wake answered {} on node {:?} in {cold:.0} ms", v["phase"], v["node"]);
     s.eventually(Duration::from_secs(120), || phase(api, &owner, &id) == "awake");
-    rows.push(format!("{:<44} {cold:.1} ms (answered {})", "computer: cold start (first wake, POST)", v["phase"]));
+    rows.push(format!("{:<44} {cold:.1} ms (answered {})", label("computer: cold start (first wake, POST)"), v["phase"]));
 
     let bench = |script: &str, times: usize| -> Result<Value> {
         let r = lever_with(&patient, &id, json!({ "op": "bench-exec", "times": times, "script": script }))?;
@@ -121,10 +141,10 @@ pub fn perf(s: &mut Suite, api: &Api) -> Result<()> {
     let ms_of = |v: &Value| -> Vec<f64> { v["ms"].as_array().map(|l| l.iter().filter_map(Value::as_f64).collect()).unwrap_or_default() };
     bench("true", 3)?;
     let exec = ms_of(&bench("true", n)?);
-    row(&mut rows, "computer: exec round trip (in the DO)", &exec);
+    row(rows, &label("computer: exec round trip (in the DO)"), &exec);
     let t0 = Instant::now();
     bench("true", 1)?;
-    rows.push(format!("{:<44} {:.1} ms", "computer: one exec through the lever (outside)", ms_since(t0)));
+    rows.push(format!("{:<44} {:.1} ms", label("computer: one exec through the lever (outside)"), ms_since(t0)));
     // the guest's intercepted calls: a loop of `k` in one exec, less the empty loop
     let k = 20;
     let looped = |cmd: &str| format!("i=0; while [ $i -lt {k} ]; do {cmd} || exit 9; i=$((i+1)); done");
@@ -137,18 +157,18 @@ pub fn perf(s: &mut Suite, api: &Api) -> Result<()> {
     let per = |v: &Value| -> Vec<f64> { ms_of(v).iter().map(|t| (t - base) / k as f64).collect() };
     let api_get = bench(&looped("wget -q -O /dev/null http://api.fragment.internal/api/computer"), 5)?;
     anyhow::ensure!(api_get["last"]["exitCode"] == 0, "the guest's API call: {api_get}");
-    row(&mut rows, "computer: guest -> platform API (GET /api/computer)", &per(&api_get));
+    row(rows, &label("computer: guest -> platform API (GET /api/computer)"), &per(&api_get));
     let models = bench(&looped("wget -q -O /dev/null http://model.fragment.internal/v1/models"), 5)?;
     anyhow::ensure!(models["last"]["exitCode"] == 0, "the guest's models list: {models}");
-    row(&mut rows, "computer: guest -> model intercept (GET /v1/models)", &per(&models));
+    row(rows, &label("computer: guest -> model intercept (GET /v1/models)"), &per(&models));
     let call = format!(
         "wget -q -O /dev/null --header 'x-fragment-agent: {agent_name}' --header 'content-type: application/json' --post-data '{{\"model\":\"cheap\",\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}' http://model.fragment.internal/v1/chat/completions"
     );
     let chat = bench(&looped(&call), 3)?;
     if chat["last"]["exitCode"] == 0 {
-        row(&mut rows, "computer: guest -> model call (POST completions)", &per(&chat));
+        row(rows, &label("computer: guest -> model call (POST completions)"), &per(&chat));
     } else {
-        rows.push(format!("computer: guest -> model call failed: {}", chat["last"]));
+        rows.push(format!("{at}computer: guest -> model call failed: {}", chat["last"]));
     }
     let mut awake_views = vec![];
     for _ in 0..n {
@@ -156,7 +176,7 @@ pub fn perf(s: &mut Suite, api: &Api) -> Result<()> {
         api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?;
         awake_views.push(ms_since(t0));
     }
-    row(&mut rows, "platform: computer's view (GET, awake)", &awake_views);
+    row(rows, &label("platform: computer's view (GET, awake)"), &awake_views);
 
     // sleep (hold, save, snapshot, stop), warm wake (from the snapshot), restart (image + restore)
     let (mut sleeps, mut warm, mut restarts) = (vec![], vec![], vec![]);
@@ -181,16 +201,10 @@ pub fn perf(s: &mut Suite, api: &Api) -> Result<()> {
         restarts.push(ms_since(t0));
         println!("      restart {c}: answered {answered} in {:.0} ms (awake by {:.0} ms), restored {}", 0.0, restarts[c], r.body["restored"]["from"]);
     }
-    row(&mut rows, "computer: sleep, to asleep (POST sleep)", &sleeps);
-    row(&mut rows, "computer: warm wake (from its snapshot)", &warm);
-    row(&mut rows, "computer: restart, to awake (save, stop, start)", &restarts);
-    let r = patient.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
-    let _ = r;
-
-    println!("\n      perf ({}; {} reps, {} cycles):", if s.has_nodes() { "nodes" } else { "this runtime's containers" }, n, cycles);
-    for r in &rows {
-        println!("      {r}");
-    }
-    s.ok("the benchmark ran", true, "");
+    row(rows, &label("computer: sleep, to asleep (POST sleep)"), &sleeps);
+    row(rows, &label("computer: warm wake (from its snapshot)"), &warm);
+    row(rows, &label("computer: restart, to awake (save, stop, start)"), &restarts);
+    // asleep at the end: placed for life, it still counts on its node
+    patient.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     Ok(())
 }
