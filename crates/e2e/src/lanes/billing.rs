@@ -1862,16 +1862,30 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     if !act(s, &mut b, &page, "the welcome's Start a trial", started)? {
         return Ok(());
     }
-    let at_stripe = b.until(&page, &format!("location.href.startsWith({:?}) && /30-day trial/.test(document.body.innerText)", s.stripe.url), wait);
+    let at_stripe = b.until(&page, &format!("location.href.startsWith({:?}) && /30-day trial/.test(document.body.innerText) && /no card asked/.test(document.body.innerText)", s.stripe.url), wait);
     if !act_at(s, &mut b, &page, "Stripe's Pay", "form button") {
         return Ok(());
     }
     let seated = view(&mut b, &page, SEATED, wait);
     let mine = seat(api, &jo);
     s.ok(
-        "signed in, the link's welcome has its code filled in; its 30-day trial takes a card on Stripe's page and comes back to the welcome, which seats them in their trial of the always-on seat and goes on to their first agent",
+        "signed in, the link's welcome has its code filled in; its 30-day trial asks no card on Stripe's page and comes back to the welcome, which seats them in their trial of the always-on seat and goes on to their first agent",
         filled && at_stripe && seated && mine["seat"]["good"] == true && mine["seat"]["kind"] == "seat_always_on" && mine["seat"]["trialEnds"].as_i64().is_some(),
         json!({ "seen": b.eval(&page, SEEN)?, "seat": mine }),
+    );
+    b.close(page)?;
+    // their Billing, in the trial: when it ends, and how to keep the seat after it
+    let page = page_of(&mut b, api, &session, "/settings")?;
+    let told = view(
+        &mut b,
+        &page,
+        "location.pathname === '/settings' && ((t) => /Trial ends/.test(t) && /add a card in Payment and invoices/.test(t))(document.getElementById('settings-page')?.innerText ?? '') && [...document.querySelectorAll('#settings-page button')].some((b) => b.textContent === 'Payment and invoices')",
+        wait,
+    );
+    s.ok(
+        "in their trial, their Billing says when it ends and that a card added in Payment and invoices keeps the seat after it (none asked at its start)",
+        told,
+        json!({ "shown": text(&mut b, &page) }),
     );
     b.close(page)?;
 

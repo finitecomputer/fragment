@@ -1,9 +1,10 @@
 //! Trials (docs/billing.md, "Trials"; decision 56), on the Stripe fake: an
 //! operator makes a code; a person who never paid redeems it through a
-//! Checkout that takes a card first, with Stripe's trial of its days; its
-//! places are held by open Checkouts and subscriptions; one trial per
-//! person. Operators list, raise, edit and end codes, compare-and-set.
-//! Valid, invalid, replay.
+//! Checkout that asks no card, with Stripe's trial of its days; its end
+//! with no card cancels it, and they pay again with one; its places are
+//! held by open Checkouts and subscriptions; one trial per person.
+//! Operators list, raise, edit and end codes, compare-and-set. Valid,
+//! invalid, replay.
 
 use std::time::Duration;
 
@@ -64,13 +65,13 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
     let asked = s.stripe.requests().into_iter().rev().find(|a| a.path == "/v1/checkout/sessions").context("a Checkout")?;
     let f = |k: &str| asked.form.get(k).cloned().unwrap_or_default();
     s.ok(
-        "a code as typed (any case, spaces) opens a Checkout: Stripe's 30-day trial of one always-on seat, a card first, no discount on top, back to the welcome paid or canceled",
+        "a code as typed (any case, spaces) opens a Checkout: Stripe's 30-day trial of one always-on seat, no card asked (its end with none cancels it), no discount on top, back to the welcome paid or canceled",
         r.status == 200
             && f("success_url").ends_with("/welcome?checkout={CHECKOUT_SESSION_ID}")
             && f("cancel_url").ends_with("/welcome?checkout=canceled")
             && f("subscription_data[trial_period_days]") == "30"
             && f("subscription_data[trial_settings][end_behavior][missing_payment_method]") == "cancel"
-            && f("payment_method_collection") == "always"
+            && f("payment_method_collection") == "if_required"
             && f("line_items[0][quantity]") == "1"
             && !asked.form.contains_key("allow_promotion_codes")
             && f("metadata[fragment_kind]") == "seat_always_on"
@@ -83,7 +84,7 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
     let sub = s.stripe.requests().iter().rev().find_map(|a| a.path.strip_prefix("/v1/subscriptions/").map(str::to_string)).context("the trial's subscription")?;
     let items = s.stripe.subscription(&sub).map(|x| x.items.iter().map(|(_, k, q)| (k.clone(), *q)).collect::<Vec<_>>()).unwrap_or_default();
     s.ok(
-        "paid with a card through the fake's Checkout, they hold a good $200 always-on seat in its 30-day trial, which says when it ends, on the always-on price alone",
+        "through the fake's Checkout, with no card, they hold a good $200 always-on seat in its 30-day trial, which says when it ends, on the always-on price alone",
         trialing
             && mine["seat"]["kind"] == "seat_always_on"
             && mine["seat"]["trialEnds"].as_i64().is_some_and(|t| t > crate::api::now_s() + 29 * 86_400 && t <= crate::api::now_s() + 30 * 86_400)
@@ -121,15 +122,34 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
     // ---- once a person; for those who never paid
     let mine_again = api.signed(&kim, "POST", "/api/billing/checkout", Some(&json!({ "trialCode": code })))?;
     s.ok("someone with a seat redeems none (409)", mine_again.status == 409, &mine_again);
+    // its end with no card added: Stripe cancels it (`missing_payment_method: cancel`)
     s.stripe.set_status(&sub, "canceled").map_err(anyhow::Error::msg)?;
     let lapsed = s.eventually(PUSHED, || seat(api, &kim)["seat"]["good"] == false);
     let twice = api.signed(&kim, "POST", "/api/billing/checkout", Some(&json!({ "trialCode": code })))?;
     let hundred = api.signed(&kim, "POST", "/api/billing/checkout", Some(&json!({ "kind": "seat" })))?;
     let paid = api.signed(&kim, "POST", "/api/billing/checkout", Some(&json!({})))?;
     s.ok(
-        "a trial ended unpaid lapses its seat; a trial is once a person (409), but they may buy the seat sold (not a $100 one: 400)",
+        "a trial ended with no card lapses its seat; a trial is once a person (409), but they may buy the seat sold (not a $100 one: 400)",
         lapsed && twice.status == 409 && hundred.status == 400 && hundred.message().contains("not sold") && paid.status == 200,
         json!([seat(api, &kim), twice.status, twice.message(), hundred.status, paid.status]),
+    );
+    // ---- they pay again (Billing's Pay again), a card now, and keep the org they trialed in
+    let org = mine["seat"]["org"]["id"].clone();
+    let asked = s.stripe.requests().into_iter().rev().find(|a| a.path == "/v1/checkout/sessions").context("Pay again's Checkout")?;
+    let f = |k: &str| asked.form.get(k).cloned().unwrap_or_default();
+    let own = s.stripe.subscription(&sub).map(|x| x.customer).context("the trial's customer")?;
+    s.stripe.complete(paid.body["session"].as_str().unwrap_or("")).map_err(anyhow::Error::msg)?;
+    let again = s.eventually(PUSHED, || seat(api, &kim)["seat"]["good"] == true);
+    let back = seat(api, &kim);
+    s.ok(
+        "paying again takes a card, no trial, on the trial's own customer, and its seat is good again in the org they trialed in, its trial over",
+        f("payment_method_collection") == "always"
+            && !asked.form.contains_key("subscription_data[trial_period_days]")
+            && f("customer") == own
+            && again
+            && back["seat"]["org"]["id"] == org
+            && back["seat"]["trialEnds"].is_null(),
+        json!({ "seat": back, "form": format!("{:?}", asked.form) }),
     );
 
     // ---- codes that refuse

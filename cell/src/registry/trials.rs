@@ -2,14 +2,16 @@
 //! trial. An operator makes a code of the seat sold (`seat_always_on`: any
 //! other kind is refused), its days (1 to 30), its places (1 to 10,000)
 //! and when it stops; a person who never
-//! paid redeems it through a Checkout that takes a card first, with
-//! Stripe's `trial_period_days`. One trial per person, ever.
+//! paid redeems it through a Checkout that asks no card, with Stripe's
+//! `trial_period_days`. One trial per person, ever.
 //!
 //! A place is held by a Checkout still open (its use's `expires_at`, the
 //! Checkout's own) or by a subscription the use bought; a Checkout never
 //! completed frees its place when it expires, so nothing waits on
-//! `checkout.session.expired`. A trial's end is Stripe's: it charges the
-//! card, and a decline lapses the seat as any seat's (decision 53).
+//! `checkout.session.expired`. A trial's end is Stripe's: it charges a
+//! card added in the portal meanwhile (a decline lapses the seat as any
+//! seat's, decision 53), or, with none, cancels the subscription, which
+//! lapses it.
 
 use fragment_core::org::{self, TRIAL_CAPACITY_MAX, TRIAL_CODES_MAX, TRIAL_DAYS_MAX, TRIAL_NAME_MAX_BYTES};
 use fragment_proto::org::{NewTrialCode, SeatKind, TrialCode, TrialCodeChange, TrialUse};

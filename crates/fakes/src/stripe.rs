@@ -63,6 +63,10 @@ struct Session {
     metadata: BTreeMap<String, String>,
     sub_metadata: BTreeMap<String, String>,
     trial_days: Option<i64>,
+    /// Whether its page asks a card: always, but for a trial that asks one
+    /// only if required (`payment_method_collection: if_required`), as
+    /// nothing is due until its end.
+    card: bool,
     client_reference_id: Option<String>,
     success_url: String,
     /// Where its page's Back goes, as Stripe's does: nothing bought.
@@ -566,6 +570,7 @@ fn answer(s: &mut State, req: &Request, f: &BTreeMap<String, String>, base: &str
             }
             let amount = lines.iter().map(|(p, q)| s.key_of_price(p).and_then(|k| s.prices.get(&k).map(|(_, a)| a * *q as i64)).unwrap_or(0)).sum::<i64>()
                 + f.get("line_items[0][price_data][unit_amount]").and_then(|a| a.parse::<i64>().ok()).unwrap_or(0);
+            let trial_days: Option<i64> = f.get("subscription_data[trial_period_days]").and_then(|d| d.parse().ok());
             let session = Session {
                 id: s.next("cs"),
                 mode,
@@ -574,7 +579,8 @@ fn answer(s: &mut State, req: &Request, f: &BTreeMap<String, String>, base: &str
                 lines,
                 metadata: nested(f, "metadata"),
                 sub_metadata: f.iter().filter_map(|(k, v)| k.strip_prefix("subscription_data[metadata][").and_then(|r| r.strip_suffix(']')).map(|m| (m.to_string(), v.clone()))).collect(),
-                trial_days: f.get("subscription_data[trial_period_days]").and_then(|d| d.parse().ok()),
+                trial_days,
+                card: !(trial_days.is_some() && f.get("payment_method_collection").map(String::as_str) == Some("if_required")),
                 client_reference_id: f.get("client_reference_id").cloned(),
                 success_url: f.get("success_url").cloned().unwrap_or_default(),
                 cancel_url: f.get("cancel_url").cloned().unwrap_or_default(),
@@ -766,11 +772,12 @@ fn pay_page(st: &Arc<Mutex<State>>, req: &Request, id: &str, base: &str) -> Resp
         let Some(session) = s.sessions.get(id) else { return error(404, "invalid_request_error", "no such session") };
         let back = session.cancel_url.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;");
         let page = format!(
-            r#"<!doctype html><title>Stripe Checkout (fake)</title><form method="post"><p>The Stripe fake: pay {} (test card)</p><button>Pay</button></form><p><a id="back" href="{back}">Back</a></p>"#,
+            r#"<!doctype html><title>Stripe Checkout (fake)</title><form method="post"><p>The Stripe fake: pay {} ({})</p><button>Pay</button></form><p><a id="back" href="{back}">Back</a></p>"#,
             match session.trial_days {
                 Some(d) => format!("nothing today, a {d}-day trial"),
                 None => format!("${:.2}", session.amount as f64 / 100.0),
-            }
+            },
+            if session.card { "test card" } else { "no card asked" }
         );
         return Response::bytes(200, "text/html; charset=utf-8", page.into_bytes());
     }

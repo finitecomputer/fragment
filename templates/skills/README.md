@@ -36,7 +36,7 @@ default agent. A fragment on it names it and holds nothing else:
 
 ## The managed set
 
-Fourteen skills. Seven are Fragment platform contracts:
+Fifteen skills. Seven are Fragment platform contracts:
 
 | Skill | Why it is ours |
 |---|---|
@@ -59,7 +59,14 @@ And six are integrations Paul retains:
 | trading-agent-finite | Multi-source market analysis and charts; public reads are keyless |
 | polymarket-finite | Deterministic public-data helper; no trading or key required |
 
-The fourteenth is `gws-docs`, Google Workspace CLI's Docs command guide,
+`design-finite` distills Austin's design workflow into guidance on direction,
+hierarchy, composition and review, with short references for charts and games.
+It follows the project's visual system and checks contrast for readable text,
+including placeholders. `apps-finite` points to it for art direction and keeps
+the Fragment build, publish and sharing contract. Image generation follows
+`image-generation-finite` and its platform limits.
+
+`gws-docs` is Google Workspace CLI's Docs command guide,
 pinned to v0.22.5 like the image's CLI (source and Apache-2.0 license in
 the skill). It covers Docs method and schema discovery;
 `google-workspace-finite` owns connected-account authentication. Its two
@@ -76,8 +83,9 @@ Our Hermes image exposes its own pinned bundled skills to every profile,
 read-only, with the agent's own skills and managed overrides winning by
 name (docs/computers.md, Skills and the CLI). The image also installs the
 PDF and Office helpers' pinned Python dependencies. Generic PDF, OCR,
-Office, research, code and design workflows belong to Hermes and its hub;
-they are not maintained as `-finite` forks here. Optional skills are
+Office, research and code workflows belong to Hermes and its hub;
+they are not maintained as `-finite` forks here. Hermes' design skills stay
+available alongside the managed `design-finite` workflow. Optional skills are
 available for explicit installation through Hermes' hub, not enabled in
 all profiles merely because the image contains them.
 

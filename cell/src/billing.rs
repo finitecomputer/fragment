@@ -95,8 +95,8 @@ fn billed(form: Form, customer: Option<&str>, email: &str, tax: bool) -> Form {
 /// `POST /api/billing/checkout {kind?, trialCode?}`: a Checkout for the
 /// asker's own seat (the one sold, `seat_always_on`): a new org of one,
 /// made once it is paid, or their org that buys again (its paid seats, on
-/// its own customer); with a trial code, Stripe's trial of its days, a
-/// card taken first.
+/// its own customer); with a trial code, Stripe's trial of its days, no
+/// card asked.
 async fn checkout(env: &Env, cfg: &Config, by: By, buy: Buy) -> CellResult<Checkout> {
     let stripe_cfg = cfg.stripe()?;
     let expires_at_s = js::now_ms() / 1000 + CHECKOUT_TTL_S;
@@ -130,7 +130,6 @@ async fn session_of(env: &Env, cfg: &Config, stripe_cfg: &StripeConfig, plan: &C
         .push("client_reference_id", plan.org.clone())
         .push("line_items[0][price]", price)
         .push("line_items[0][quantity]", plan.quantity.to_string())
-        .push("payment_method_collection", "always")
         .push("success_url", format!("{platform}/welcome?checkout={{CHECKOUT_SESSION_ID}}"))
         .push("cancel_url", format!("{platform}/welcome?checkout=canceled"))
         .push("expires_at", expires_at_s.to_string())
@@ -141,13 +140,16 @@ async fn session_of(env: &Env, cfg: &Config, stripe_cfg: &StripeConfig, plan: &C
         .push(format!("subscription_data[metadata][{META_DEPLOYMENT}]"), deployment)
         .push(format!("subscription_data[metadata][{META_ORG}]"), plan.org.clone());
     form = match &plan.trial {
-        // a trial: Stripe's days, its card taken now and charged at the end
-        // (none on file at the end cancels it); no discount on top
+        // a trial: Stripe's days and no card asked (Alex, 2026-10-23). A card
+        // added in the portal before the end is charged then; with none, the
+        // end cancels it, and its person pays again at a Checkout of the seat
+        // (Billing's Pay again). No discount on top
         Some(t) => form
+            .push("payment_method_collection", "if_required")
             .push("subscription_data[trial_period_days]", t.days.to_string())
             .push("subscription_data[trial_settings][end_behavior][missing_payment_method]", "cancel")
             .push(format!("metadata[{META_TRIAL}]"), t.id.clone()),
-        None => form.push("allow_promotion_codes", "true"),
+        None => form.push("payment_method_collection", "always").push("allow_promotion_codes", "true"),
     };
     if stripe_cfg.tax {
         form = form.push("automatic_tax[enabled]", "true");

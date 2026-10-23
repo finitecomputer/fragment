@@ -1284,7 +1284,7 @@ the provider's own hosts.
 
   | Provider | Kind | Hosts | Placement | Environment variable | Price per call (list) |
   |---|---|---|---|---|---|
-  | `google` | connection | `gmail`, `www`, `people`, `sheets`, `docs` `.googleapis.com` | `Authorization: Bearer {}` | `GOOGLE_OAUTH_ACCESS_TOKEN` (Terraform's Google provider reads it; Google's client libraries take a token as given) | none |
+  | `google` | connection | `gmail`, `www`, `people`, `sheets`, `docs`, `slides` `.googleapis.com` | `Authorization: Bearer {}` | `GOOGLE_OAUTH_ACCESS_TOKEN` (Terraform's Google provider reads it; Google's client libraries take a token as given) | none |
   | `firecrawl` | operator | `api.firecrawl.dev` | `Authorization: Bearer {}` | `FIRECRAWL_API_KEY` | $0.01 (10-result search, Hobby PAYG) |
   | `fal` | operator | `queue.fal.run`, `fal.run`, `rest.fal.ai` | `Authorization: Key {}` | `FAL_KEY` | $0.006 (1 MP Klein 9B image) |
   | `browser-use` | operator | `api.browser-use.com` | `X-Browser-Use-API-Key: {}` | `BROWSER_USE_API_KEY` | $0.02/12 (five browser minutes per control call) |
@@ -2153,9 +2153,9 @@ and how a runtime finds them, is the image's.
   platform skill by the platform skill leaving the view. An agent's profile has
   its own, the managed set, which is what the shell's Skills section
   lists, the platform skill, and Hermes' pinned bundled skills. The managed
-  release has fourteen workflows: apps, git, brains, connected Google,
+  release has fifteen workflows: apps, git, brains, connected Google,
   image steps, model tiers and a chat's attachments, plus Cashu, Nostr CLI, X API, direct music,
-  market analysis and Polymarket, and the upstream `gws-docs` command guide
+  market analysis, Polymarket and design, and the upstream `gws-docs` command guide
   alongside connected Google (templates/skills/README.md). Generic skills
   come from Hermes; optional ones remain in its hub. At build, the image
   moves Hermes' bundled tree to `/opt/fragment/bundled-skills`, so stage2
