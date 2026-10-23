@@ -594,7 +594,7 @@ speaking Cloudflare's APIs) returns once this product works.
     neither its Product nor its Price. The `seat` plan stays for an
     operator's comp and a deployment's `default_plan` (dev's and the
     e2e's people are seats). Trials are a month at most, of the $200
-    seat, a card first (decision 56). SimpleX is still not built.
+    seat, no card asked (decision 56). SimpleX is still not built.
 26. **A fragment's costs bill its owner**, with a monthly cap the owner
     sets per fragment (default $5). Past it, AI steps and agent turns
     stop for everyone but the owner.
@@ -1002,8 +1002,11 @@ Paul's (its slice 10).
     on the ledger by its payment's id. Usage never goes to Stripe.
 56. **Trials are our codes on Stripe's trial**, finite-mono's shape: a
     code names a kind (since 2026-10-15, `seat_always_on` only), days
-    (1 to 30), a capacity and an expiry; a
-    card is taken first; one trial per person ever, for a seat of one.
+    (1 to 30), a capacity and an expiry; no card is asked (Alex,
+    2026-10-23: a card was taken first until then): one added before
+    the end is charged then, and with none the end cancels the
+    subscription, its person paying again with a card to go on; one
+    trial per person ever, for a seat of one.
     A place is held by a Checkout that has not expired, and freed by
     its expiry. Discounts are Stripe promotion codes, made in Stripe's
     dashboard.

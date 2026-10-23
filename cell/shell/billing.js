@@ -258,7 +258,7 @@ export function seatOffer(helpers, mine, trial, top) {
   begin.type = "submit";
   const back = el("button", "text", "Back");
   back.type = "button";
-  form.append(el("h1", null, "Start a trial"), el("p", null, "Enter your trial code."), field, begin, back, el("p", "fine", "A trial takes a card first, and charges it when the trial ends unless you cancel."));
+  form.append(el("h1", null, "Start a trial"), el("p", null, "Enter your trial code."), field, begin, back, el("p", "fine", "No card needed. To keep your seat after the trial, add one in Settings before it ends."));
   // the step shown, and what is said put in it, above its Continue
   const show = (step) => {
     (step === seat ? b : begin).before(said);
@@ -367,6 +367,8 @@ export async function billingSections(helpers, ledger, mine, back) {
         );
     if (!alone) billing.append(line("Org", seat.org.name + (seat.admin ? " (you admin it)" : ""), leave));
     if (seat.trialEnds) billing.append(line("Trial ends", new Date(seat.trialEnds * 1000).toLocaleDateString()));
+    // a trial asks no card: one added before its end keeps the seat, else it lapses then
+    if (seat.trialEnds && mine.pays) billing.append(el("p", "muted", "To keep your seat after the trial, add a card in Payment and invoices. Without one, your seat lapses when the trial ends; nothing of yours is deleted, and Pay again here brings it back."));
     if (!seat.good) {
       billing.append(el("p", "settings-warning", "Your seat lapsed: your agents are stopped. Nothing of yours is gone."));
       // paid again at Checkout, where something is sold
