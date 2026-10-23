@@ -70,17 +70,32 @@ so no connect begun before it connects the account after it:
   ended, in each of their sessions (its callback then finds no transaction:
   `not-under-way`);
 - each callback past its pending row and still exchanging its code is
-  cancelled: it re-checks just before importing, imports nothing, and the grant
-  its exchange made is revoked at `revoke` where the row names one;
+  cancelled: it re-checks just before importing and imports nothing. The grant
+  its exchange made is not revoked: Google's revocation ends the account's
+  whole grant to the client, so it could end a newer connect of the same
+  account, and the cancelled callback's tokens are kept nowhere;
 - a callback already importing refuses the fence (429, nothing ended), since
   what it sent Pipes cannot be called back; the disconnect asked again, once
-  that answered, deletes it.
+  that answered, deletes it;
+- and the account stays fenced, in a Registry table (`connection_fences`), until
+  a connect of the person's is known to have imported again (Pipes answered it
+  200 or 201; the fence goes in that same turn). An import that fails, or
+  whose outcome is unknown (a timeout, a 5xx), lifts nothing, so if it lands
+  at Pipes after the disconnect deleted the account, it is not taken for a
+  connection: `GET /api/connections` reads it as `not_connected` with Pipes
+  not asked, and the person's computer, which swaps only a connection its
+  states say is connected (the disconnect tells it them at once; a refresh
+  begun before that does not draw over them), refuses its swaps and asks
+  Pipes for no token. The account lingers at Pipes, used by no one, until the
+  person connects again, which replaces it.
 
 Callbacks under way are kept in the Registry's memory, not a table: each one
 runs inside the Registry and ends with it, so a Registry that restarts has none
-under way. Another person's attempts, and the person's attempts at another
-provider, are untouched. A connect begun after the fence is a new one and may
-connect.
+under way, while the lasting fence is a row and outlives it. Another person's
+attempts, and the person's attempts at another provider, are untouched. A
+connect begun after the fence is a new one and may connect. A disconnect that
+cannot tell the person's computer fails, and is asked again (every step of it
+may be asked twice). A wipe deletes the person's fences with their sign-ins.
 
 ## Evidence and scope
 

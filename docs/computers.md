@@ -1193,7 +1193,10 @@ starting consent fails closed. Only after a validated one-use callback are token
 imported into WorkOS Pipes; the existing computer swap still obtains short-lived
 tokens from Pipes. Settings' Disconnect (`DELETE /api/connections/{provider}`)
 revokes the grant at `revoke` when the row names one, then deletes the account
-at Pipes.
+at Pipes, and fences it until a connect is known to import again. A computer
+swaps a connection only when its states say it is connected (a fenced one reads
+as not connected whatever Pipes holds), so it asks Pipes for no token for one
+its owner disconnected.
 
 Paul, 2026-10-04 (decisions 22, 37 and 44): every credential a guest uses
 is a per-agent placeholder in the environment variable its provider's own

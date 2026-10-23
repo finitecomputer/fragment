@@ -332,9 +332,14 @@ pub struct ComputerCell {
     /// running (lesson 6: `adopt`).
     adopted: std::cell::Cell<bool>,
     /// The owner's connections' states as Pipes last said them, and until
-    /// when they are believed (`STATES_TTL_MS`). In memory only. Only what
-    /// the guest's view lists: a token is asked of Pipes for each swap.
+    /// when they are believed (`STATES_TTL_MS`). In memory only. What the
+    /// guest's view lists, and what a swap may use: a token is asked of
+    /// Pipes for each swap of a connection these say is connected.
     states: RefCell<Option<(BTreeMap<String, ProviderState>, i64)>>,
+    /// How many times the owner's reads (and disconnects) told it their
+    /// states (`computer/own-keys`): a read of its own begun before one
+    /// answers older states, and does not draw over them.
+    states_told: std::cell::Cell<u64>,
     /// Its owner was wiped (`wiped`'s row, read as it starts, or set by
     /// the wipe): no write lands, and it answers as no computer.
     wiped: std::cell::Cell<bool>,
@@ -364,6 +369,7 @@ impl DurableObject for ComputerCell {
             env,
             adopted: std::cell::Cell::new(false),
             states: RefCell::default(),
+            states_told: std::cell::Cell::new(0),
             wiped: std::cell::Cell::new(wiped),
             heard_ms: std::cell::Cell::new(None),
             dead: std::cell::Cell::new(None),
@@ -1565,6 +1571,7 @@ impl ComputerCell {
                 return states.clone();
             }
         }
+        let told = self.states_told.get();
         let (states, until) = match crate::connections::connection_states(&self.env, self.cfg, self.workos_user(owner), None).await {
             Ok(s) => (s, now + STATES_TTL_MS),
             Err(e) => {
@@ -1572,6 +1579,12 @@ impl ComputerCell {
                 (BTreeMap::new(), now + STATES_RETRY_MS)
             }
         };
+        // told newer ones meanwhile (a disconnect's): those stand
+        if self.states_told.get() != told {
+            if let Some((newer, _)) = self.states.borrow().as_ref() {
+                return newer.clone();
+            }
+        }
         *self.states.borrow_mut() = Some((states.clone(), until));
         states
     }
@@ -2195,6 +2208,7 @@ impl ComputerCell {
                 // the owner just read their connections: believed as fresh
                 if let Some(states) = b.connections {
                     *self.states.borrow_mut() = Some((states, js::now_ms() + STATES_TTL_MS));
+                    self.states_told.set(self.states_told.get() + 1);
                 }
                 json_response(&json!({ "providers": self.own_key_names()? }))
             }
@@ -2358,6 +2372,15 @@ impl ComputerCell {
     /// request. What Pipes answers is the connection's state too, as the
     /// guest's view lists it (`note_state`).
     async fn connection_token(&self, owner: &str, provider: &str) -> CellResult<String> {
+        // only one its states say is connected, as the guest's view lists
+        // them: one its owner disconnected stays refused, whatever Pipes
+        // may hold for it since (an import landed late: registry/
+        // connection_signin.rs `fence_connection`), and no token is asked
+        match self.connection_states(owner).await.get(provider) {
+            Some(ProviderState::Connected) => {}
+            Some(ProviderState::NeedsReauthorization) => return Err(CellError::new(ErrorCode::NotConnected, format!("connect {provider} again: its account needs authorizing again"))),
+            _ => return Err(CellError::new(ErrorCode::NotConnected, format!("connect {provider} first: no account is connected"))),
+        }
         let user = self.workos_user(owner).await?.ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("{owner} has no WorkOS account to connect {provider} with")))?;
         let (status, answer) = crate::keys::pipes_token(&self.env, &self.cfg.workos()?.api, provider, &user).await?;
         if status != 200 {
