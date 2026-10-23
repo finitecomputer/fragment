@@ -1266,7 +1266,9 @@ New, 2026-10-22:
     tried it once more, then switched to the deployment's `fallback`: the
     same Bonsai, every try piling onto the one server. **Fixed** (master's
     too, as draft #527): a slot names its patience (`stale_timeout_s`,
-    seam 3), which the computer's view carries to the image; a fallback on
+    seam 3), which the guest's view carries to the image (`modelPatience`,
+    beside `models`: inside it, the first port broke the computers lane's
+    list of its ids); a fallback on
     the tier's own model is none.
     **Evidence** (a stack of its own on :8840, celld, a node over the
     Docker double, Bonsai through a pass-through that timed each call's
