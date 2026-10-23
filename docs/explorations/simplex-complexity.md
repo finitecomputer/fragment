@@ -83,6 +83,35 @@ each is inert without a link):
 6. **Two things are not proven in a browser**: the shell's section and
    pane, and the chat page's "via SimpleX".
 
+**Pending, not built (Paul, 2026-10-23): a person's "home".** In Hermes,
+"home" is where notifications go, such as a scheduled task firing. Today:
+
+- Hermes' own home is off on our computers (`RELAY_HOME_CHANNEL=none`;
+  its cron is off, decision 38).
+- A routine is a platform schedule on the agent's `tasks`: it wakes the
+  computer and runs as a turn in the chat it names, asked as its owner.
+  Its reply lands in that chat, and the chat's push job sends it to the
+  owner's browser by web push if they are not looking at it.
+- None of it reaches SimpleX. Only replies to a SimpleX message go back
+  there; a routine's turn, or something the agent says unasked, has no
+  `via`.
+
+The smallest design, if Paul wants SimpleX as home:
+
+- one home per person, the shell (web push) by default;
+- SimpleX offered once linked, from the link page (a "Send my
+  notifications here" choice);
+- kept by the bridge (a file beside the links in `/data/simplex`), so the
+  platform stays unaware;
+- when home is SimpleX, the bridge also sends to the owner's app the
+  replies of routine turns in the agent's own chat with them, and what the
+  agent says there unasked. Web push goes on as before.
+
+What it would add: one file, one rule in the bridge's post path, and one
+control on the link page. No wire and no cell change. A home the platform
+knows of (for the native app, or to mute web push) would be a person's
+preference on the platform: a cell change, later.
+
 **Decisions taken by default, Paul's to overturn:** SimpleX's preset
 servers; only replies to SimpleX messages go back; the privacy line
 "encrypted between your SimpleX app and your computer"; voice in as an
