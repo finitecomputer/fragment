@@ -36,7 +36,7 @@ default agent. A fragment on it names it and holds nothing else:
 
 ## The managed set
 
-Twelve skills. Six are Fragment platform contracts:
+Thirteen skills. Six are Fragment platform contracts:
 
 | Skill | Why it is ours |
 |---|---|
@@ -46,6 +46,12 @@ Twelve skills. Six are Fragment platform contracts:
 | google-workspace-finite | Connected Google access through per-agent placeholders; gws, no local OAuth |
 | image-generation-finite | Metered Workers AI images through a fragment job |
 | model-council-finite | Fragment model tiers through the computer's model intercept |
+
+One connects an upstream authoring workflow to Fragment hosting:
+
+| Skill | Its boundary |
+|---|---|
+| open-slide-finite | Pinned open-slide workspace skills; static decks and recoverable source published through apps-finite |
 
 And six are integrations Paul retains:
 

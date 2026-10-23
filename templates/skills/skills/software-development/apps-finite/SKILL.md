@@ -15,6 +15,10 @@ computer's terminal.
 This skill replaces Finite Sites publishing (`fsite`), `publish-web-apps`
 and `website-building` on fragment.
 
+For a browser slide deck, also load `open-slide-finite`: it supplies the
+pinned authoring workflow and builds the presentation into `site/`. This
+skill still owns publishing, visibility and sharing.
+
 ## On your computer
 
 The `fragment` CLI is installed, and already acts as you: no login, no key.
