@@ -4,11 +4,13 @@ target/
 node_modules/
 cell/.celld/
 cell/.dev.vars
+agent/.dev.vars
 cell/build/
 cell/client/
 cell/target/
 .wrangler/
 cell/wrangler.local.jsonc
 cell/wrangler.celld.jsonc
+agent/wrangler.celld.jsonc
 # CI's deploy checks out finitecomputer/fragment-deploy, the configs, here
 /deploy-config/

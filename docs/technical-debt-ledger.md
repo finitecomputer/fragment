@@ -155,6 +155,10 @@ fragment.club until cutover (decisions 34–35).
   as it is): its seams 4, 5, 7 and 12 had it at 6.47 MB, and computers on
   sandcastle nodes (seam 2: placement, pairing, their routes, 226 KB)
   took it to 6.70 MB (6,697,133 bytes); the lane's budget is 6.7 MB.
+  Then 6.8 MB: the same tree built 448 bytes over from
+  `~/dev/finite/fragment-selfhost`, a longer path than the checkout that
+  measured it, as the Wasm's panic locations carry the path. Remapping the
+  path prefix in the build (in flight as a master PR) takes that away.
 - **Risk:** every isolate copies the Wasm's data into its memory and
   every deploy uploads it: a bigger cell starts slower and leaves less
   memory to requests, and a budget moved once is easier to move again.
