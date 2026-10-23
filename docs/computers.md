@@ -842,11 +842,13 @@ expires within 30 days. The container application is the deployment's
 - Without the header only the computer's own routes answer:
   - `GET /api/computer` → `{computer, owner, image, agents: [{fragment,
     identity, name, owner, connections, modelProviders?, credentials:
-    [{provider, kind, env, placeholder, hosts, modelBase?}]}],
+    [{provider, kind, env, placeholder, hosts, modelBase?}], key}],
     credentialEnv, models: {cheap, medium, fallback, vision}}`: the agents
     to run, each one's credentials (below, Connections and operator keys;
     `modelProviders` names those of them with a `modelBase`, as its owner's
-    view does: "An agent's own model"), and the model route's models'
+    view does: "An agent's own model"), the key its fragment signs as
+    (`key`, 64 hex: what a door's ticket is checked with, docs/api.md, "An
+    agent's doors"), and the model route's models'
     ids by its names (below, Models, "A model by its id"). **They
     may change while the computer runs** (its owner assigns or unassigns
     an agent, connects an account, narrows an agent): the guest reads them
@@ -864,6 +866,10 @@ expires within 30 days. The container application is the deployment's
     and the platform then counts it closed, so a guest still busy pings
     it and opens it again when it goes silent (our bridge: every 15 s,
     silent after 30).
+  - `POST /api/computer/door {agent, door, nonce, key}`: the link ticket
+    its agent's owner made last (its `nonce`, within its ten minutes),
+    redeemed once with the public key of that link's door (docs/api.md,
+    "An agent's doors"); 403 for any other.
 - A subscription with `{channel, wake: true}` (in place of `url`), sent
   as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
   computer on each new record (the fragment asks the computer itself just

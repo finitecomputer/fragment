@@ -11,10 +11,14 @@
 //!   child process, only while the computer is always on, stopped under
 //!   every hold, its link's file, a save asked when it changes.
 //! - `http`: each agent's link on the screen port (`/simplex/…`).
+//! - `door`: only its owner links or unlinks it (a ticket the platform
+//!   signs), and only the link's door key speaks for them (Paul's design of
+//!   2026-10-23).
 //!
 //! What it adds to the platform, entry by entry, is
 //! docs/explorations/simplex-complexity.md.
 
+pub mod door;
 pub mod http;
 pub mod link;
 pub mod run;

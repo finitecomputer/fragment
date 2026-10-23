@@ -3,8 +3,11 @@
      computer's screen port, framed by the platform's page for its owner.
      It reads and moves the link through `state`, `link` and `unlink`
      beside it, and shows the one-time invitation as a QR code the bridge
-     draws (`qr.svg`). Its words are for someone who has never heard of
-     SimpleX. -->
+     draws (`qr.svg`). A link or an unlink takes a ticket, which it asks
+     the platform's page framing it for (which asks the platform, for the
+     agent's owner alone); the invitation is shown to the page whose link
+     ticket made it (its nonce, `s`). Its words are for someone who has
+     never heard of SimpleX. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -43,8 +46,12 @@
   let view = null;
   let busy = false;
   let timer = 0;
+  // the platform's page framing this one (its first word's origin), and the
+  // nonce of the link ticket this page was handed last: its invitation's
+  let parentOrigin = "";
+  let session = "";
   const main = document.getElementById("main");
-  const q = (path) => `${path}?agent=${encodeURIComponent(agent)}`;
+  const q = (path) => `${path}?agent=${encodeURIComponent(agent)}${session ? `&s=${session}` : ""}`;
 
   function el(tag, cls, text) {
     const e = document.createElement(tag);
@@ -61,23 +68,46 @@
   }
   const PRIVATE = "Your messages are encrypted between your SimpleX app and your computer.";
 
-  async function ask(method, path) {
-    const r = await fetch(q(path), { method, credentials: "same-origin" });
+  async function ask(method, path, ticket) {
+    const sent = ticket ? { body: JSON.stringify(ticket), headers: { "content-type": "application/json" } } : {};
+    const r = await fetch(q(path), { method, credentials: "same-origin", ...sent });
     const body = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(body.message || `${r.status}`);
     return body;
   }
+  // a ticket to link or unlink, from the platform's page framing this one
+  function ticketFor(want) {
+    return new Promise((resolve, reject) => {
+      if (!parentOrigin) return reject(new Error("open this from your Settings"));
+      const heard = (e) => {
+        const m = e.data;
+        if (e.source !== window.parent || e.origin !== parentOrigin || !m || m.fragment !== "simplex" || m.agent !== agent || m.for !== want) return;
+        removeEventListener("message", heard);
+        clearTimeout(late);
+        if (m.ticket) resolve(m.ticket);
+        else reject(new Error(m.error || "no ticket"));
+      };
+      const late = setTimeout(() => {
+        removeEventListener("message", heard);
+        reject(new Error("your Settings didn't answer"));
+      }, 15000);
+      addEventListener("message", heard);
+      window.parent.postMessage({ fragment: "simplex", agent, want }, parentOrigin);
+    });
+  }
   // each change of the link moves this on: a poll begun before it is
   // obsolete, success or failure, and changes nothing it shows
   let epoch = 0;
-  async function act(path, confirmWith) {
+  async function act(want, confirmWith) {
     if (confirmWith && !window.confirm(confirmWith)) return;
     epoch++;
     clearTimeout(timer);
     busy = true;
     render();
     try {
-      view = await ask("POST", path);
+      const ticket = await ticketFor(want);
+      if (want === "link") session = ticket.nonce;
+      view = await ask("POST", want, ticket);
     } catch (e) {
       view = { ...(view || {}), why: `That didn't go through: ${e.message}` };
     }
@@ -144,6 +174,14 @@
       }
       case "inviting": {
         main.append(el("h1", null, `Link SimpleX to ${name}`));
+        if (view.hidden) {
+          // its code is shown only where it was made: made again, here
+          main.append(el("p", null, "Your link's code was made in another window. Show it here to finish linking."));
+          const a = el("div", "actions");
+          a.append(button("Show the code", "primary", () => act("link")), button("Cancel", null, () => act("unlink")));
+          main.append(a, el("p", "private", PRIVATE), ...why());
+          break;
+        }
         const steps = el("ol");
         const get = el("li");
         const site = el("a", null, "simplex.chat");
@@ -188,10 +226,12 @@
     }
   }
 
-  // the agent's name, from the platform's page framing this one, for its own agent
-  window.addEventListener("message", (e) => {
+  // the agent's name, from the platform's page framing this one, for its
+  // own agent: its first word names the origin tickets are asked of
+  addEventListener("message", (e) => {
     const m = e.data;
     if (e.source !== window.parent || !m || m.fragment !== "simplex" || m.agent !== agent || typeof m.name !== "string" || !m.name.trim()) return;
+    parentOrigin ||= e.origin;
     name = m.name.trim().slice(0, 80);
     render();
   });

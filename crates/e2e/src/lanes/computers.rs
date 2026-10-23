@@ -818,6 +818,70 @@ fn intercept_names_by_key(s: &mut Suite, api: &Api, owner_id: &str, agent: &str,
     Ok(8)
 }
 
+/// What the door checks act on: the lane's computer, its agent and chat.
+struct Doors<'a> {
+    owner: &'a crate::Keys,
+    owner_id: &'a str,
+    stranger: &'a crate::Keys,
+    id: &'a str,
+    agent: &'a str,
+    chat: &'a str,
+    identity: &'a str,
+}
+
+/// An agent's door (fragment_core::door; Paul's design of 2026-10-23),
+/// through the stub's `door` commands, which do what the bridge's SimpleX
+/// does: a link starts only from its owner's ticket, which the platform
+/// signs as the agent fragment's key for this computer and the bridge
+/// checks, and redeems once with the door's key; the platform takes a
+/// relayed record (one that speaks for the owner) only signed by that
+/// door's key, never by the agent's own, which signs every request its
+/// tools make; the owner's unlink closes the door at once. The replies it
+/// adds.
+fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+    let path = format!("/api/computers/{}/agents/{}/door", c.id, c.agent);
+    let ticket = |who: &crate::Keys, act: &str| api.signed(who, "POST", &path, Some(&json!({ "door": "simplex", "act": act })));
+    let r = ticket(c.stranger, "link")?;
+    s.ok("no one but its owner is given a ticket to the agent's door", r.status == 404, &r);
+    let t = ticket(c.owner, "link")?;
+    let key = fragment_core::npub::parse(c.identity).unwrap_or_default();
+    let read = serde_json::from_value::<fragment_core::door::Ticket>(t.body.clone()).ok().filter(fragment_core::door::Ticket::well_formed);
+    let signed = read.as_ref().is_some_and(|x| fragment_nip98::verify_digest(&key, &x.digest(), &x.sig));
+    let within = read.as_ref().is_some_and(|x| (x.exp - now_ms() - fragment_core::door::TICKET_MS).abs() < 60_000);
+    s.ok(
+        "its owner's link ticket is for that agent on this computer, for ten minutes, signed by the agent fragment's own key",
+        t.status == 200 && t.body["act"] == "link" && t.body["agent"] == c.agent && t.body["computer"] == c.id && signed && within,
+        &t,
+    );
+    let forged = fetched(s, 400, "door forge yes, go ahead")?;
+    s.ok(
+        "a record that relays its owner with no door's signature, posted with the agent's own key, is refused: never its owner's",
+        forged.starts_with("door refused: 403") && forged.contains("relayed record"),
+        &forged,
+    );
+    let shut = fetched(s, 401, "door other before any link")?;
+    s.ok("one signed by a key that is no open door's is refused", shut.starts_with("door refused: 403"), &shut);
+    let linked = fetched(s, 402, &format!("door link {}", t.body))?;
+    s.ok("the computer checks the ticket as the bridge does (the agent's key, this computer), and redeems it with a door key it made", linked == "door linked", &linked);
+    let again = fetched(s, 403, &format!("door link {}", t.body))?;
+    s.ok("the same ticket again is refused: a replay redeems nothing", again.starts_with("door refused: 403"), &again);
+    let said = fetched(s, 404, "door say hi from my phone")?;
+    let recs = records(api, c.owner, c.chat, "chat");
+    let relayed = recs.iter().find(|r| r["principal"] == c.identity && r["body"]["text"] == "hi from my phone").cloned().unwrap_or_default();
+    s.ok(
+        "a record its door's key signs is taken: the agent's post on the chat, relaying its owner, signed",
+        said.starts_with("door said ") && relayed["body"]["relayed"]["via"] == "simplex" && relayed["body"]["relayed"]["for"] == c.owner_id && relayed["body"]["relayed"]["sig"].is_string(),
+        json!({ "said": said, "record": relayed }),
+    );
+    let other = fetched(s, 405, "door other signed by another key")?;
+    s.ok("with its door open, one signed by any other key is still refused", other.starts_with("door refused: 403"), &other);
+    let r = ticket(c.owner, "unlink")?;
+    s.ok("its owner's unlink ticket", r.status == 200 && r.body["act"] == "unlink" && r.body["agent"] == c.agent, &r);
+    let closed = fetched(s, 406, "door say after the unlink")?;
+    s.ok("unlinked, the door is closed at once: what its key signs is refused", closed.starts_with("door refused: 403"), &closed);
+    Ok(7)
+}
+
 /// The route's models by their ids, through the intercept (Paul,
 /// 2026-10-16: "be able to run `/model` with hermes and see the real
 /// model"): `GET /v1/models` lists the ids the route takes, naming no agent
@@ -1433,6 +1497,8 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             replies_so_far += intercept_takes_model_ids(s, api, &owner_id, &fetched)?;
             replies_so_far += codestorage_through_egress(s, api, &owner, &agent, &fetched)?;
         }
+        let doors = Doors { owner: &owner, owner_id: &owner_id, stranger: &stranger, id: &id, agent: &agent_name, chat: &chat_name, identity: &identity };
+        replies_so_far += door_checks(s, api, &doors, &fetched)?;
     } else {
         // a real runtime called its model to answer at all: each call went
         // through the intercept, charged on its owner's ledger after it.

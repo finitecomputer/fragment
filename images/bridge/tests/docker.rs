@@ -3082,20 +3082,27 @@ async fn model_shown(fake: &Fake, chat: &str, c: &Container) -> String {
 
 // ---- SimpleX on our Hermes image (docs/bridge.md, "SimpleX") ----
 
-/// What `c`'s screen port answers `method path` with: its status and JSON.
-fn screen_call(c: &Container, method: &str, path: &str) -> (u16, serde_json::Value) {
-    let out = Command::new("curl").args(["-s", "-X", method, "-w", "\n%{http_code}", &format!("http://127.0.0.1:{}{path}", c.port(6080))]).output().expect("curl runs");
+/// What `c`'s screen port answers `method path` (with `body`, JSON) with:
+/// its status and JSON.
+fn screen_call(c: &Container, method: &str, path: &str, body: Option<&serde_json::Value>) -> (u16, serde_json::Value) {
+    let (url, sent) = (format!("http://127.0.0.1:{}{path}", c.port(6080)), body.map(|b| b.to_string()).unwrap_or_default());
+    let mut args = vec!["-s", "-X", method, "-w", "\n%{http_code}", url.as_str()];
+    if body.is_some() {
+        args.extend(["-H", "content-type: application/json", "--data-binary", sent.as_str()]);
+    }
+    let out = Command::new("curl").args(&args).output().expect("curl runs");
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     let (body, code) = text.rsplit_once('\n').unwrap_or(("", "0"));
     (code.trim().parse().unwrap_or(0), serde_json::from_str(body).unwrap_or(serde_json::Value::Null))
 }
 
-/// `c`'s SimpleX link, once `done` holds.
-async fn simplex_until(c: &Container, ms: u64, what: &str, done: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+/// `c`'s SimpleX link, as the page of `session` (its link ticket's nonce)
+/// sees it, once `done` holds.
+async fn simplex_until(c: &Container, session: &str, ms: u64, what: &str, done: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
     let t = Instant::now();
     // bounded by `ms`
     loop {
-        let (code, v) = screen_call(c, "GET", "/simplex/state?agent=juniper--k3x9");
+        let (code, v) = screen_call(c, "GET", &format!("/simplex/state?agent=juniper--k3x9&s={session}"), None);
         if code == 200 && done(&v) {
             return v;
         }
@@ -3139,14 +3146,24 @@ async fn simplex_on_the_hermes_image() {
     let servers = [("BRIDGE_SIMPLEX_SMP", lab.server.as_str()), ("BRIDGE_SIMPLEX_XFTP", xftp.as_str())];
     let c = Container::run_with(Runtime::Docker, &hermes_tag(), fake.addr.port(), model.addr.port(), &servers, &["--network", &net]);
     fake.until(180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
-    simplex_until(&c, 60_000, "its SimpleX, off", |v| v["phase"] == "off").await;
+    simplex_until(&c, "", 60_000, "its SimpleX, off", |v| v["phase"] == "off").await;
     assert_eq!(simplex_cores(&c), 0, "nothing linked, no core");
 
-    // linked from its screen port, as its owner's pane does
-    screen_call(&c, "POST", "/simplex/link?agent=juniper--k3x9");
-    let v = simplex_until(&c, 60_000, "an invitation", |v| v["phase"] == "inviting").await;
+    // linked from its screen port, as its owner's pane does: by the ticket
+    // their Settings were given (none, no link: Hermes' tools reach this
+    // port, and hold none)
+    let (code, _) = screen_call(&c, "POST", "/simplex/link?agent=juniper--k3x9", None);
+    assert_eq!(code, 403, "no ticket, no link");
+    let ticket = fake.ticket("juniper", "link");
+    let session = ticket["nonce"].as_str().expect("a nonce").to_string();
+    let (code, _) = screen_call(&c, "POST", "/simplex/link?agent=juniper--k3x9", Some(&ticket));
+    assert_eq!(code, 200, "its owner's ticket links it");
+    let v = simplex_until(&c, &session, 60_000, "an invitation", |v| v["phase"] == "inviting").await;
+    let hidden = simplex_until(&c, "", 1_000, "another page's view", |v| v["phase"] == "inviting").await;
+    assert!(hidden.get("link").is_none() && hidden["hidden"] == true, "the invitation is the page's that asked alone: {hidden}");
     person.cmd(&format!("/connect {}", v["link"].as_str().expect("its link"))).await;
-    simplex_until(&c, 90_000, "linked", |v| v["phase"] == "linked").await;
+    simplex_until(&c, "", 90_000, "linked", |v| v["phase"] == "linked").await;
+    assert!(fake.with(|w| w.doors.contains_key("juniper--k3x9")), "its door's key registered with the ticket");
     let at_person = person.wait(Duration::from_secs(60), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the agent, at the person's");
     received(&mut person, Duration::from_secs(30), |got| got.iter().any(|t| t.contains("You're linked"))).await;
 
@@ -3180,7 +3197,7 @@ async fn simplex_on_the_hermes_image() {
     let save = dir.join("save.tar");
     save_data(&c, &left_out, &save);
     unhold(&c);
-    simplex_until(&c, 30_000, "its core again", |v| v["running"] == true).await;
+    simplex_until(&c, "", 30_000, "its core again", |v| v["running"] == true).await;
 
     // after the save: an exchange the save does not hold
     say(&mut person, at_person, "said after the save").await;
@@ -3188,7 +3205,7 @@ async fn simplex_on_the_hermes_image() {
 
     // a restart, its disk kept: linked still, and answering
     c.restart();
-    simplex_until(&c, 180_000, "linked and running after a restart", |v| v["phase"] == "linked" && v["running"] == true).await;
+    simplex_until(&c, "", 180_000, "linked and running after a restart", |v| v["phase"] == "linked" && v["running"] == true).await;
     say(&mut person, at_person, "after the restart").await;
     received(&mut person, Duration::from_secs(180), |got| got.iter().any(|t| t.contains("after the restart"))).await;
 

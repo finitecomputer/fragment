@@ -26,6 +26,11 @@
 //!   minutes of the next turn.
 //! - **What a core prints is not logged**: it echoes the commands it gets,
 //!   message text among them. Its exits are, by their code.
+//! - **Only its owner links or unlinks it**, from their Settings, which
+//!   hand the link page a ticket the platform signed (`door`): the bridge
+//!   takes each once, makes the link's door key, and registers it at the
+//!   platform before any invitation exists; the invitation is shown only to
+//!   the page whose ticket made it (`View`'s `session`).
 //! - **The owner's messages** go to the agent's own chat with them (its Bot
 //!   Chat) as relayed records (docs/chat-records.md, "A relayed message"),
 //!   each by its sender's id, so a message read again is one record; a
@@ -45,6 +50,7 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_tungstenite::tungstenite::Message;
 
+use super::door::{self, Key, Ticket};
 use super::link::{Action, Inbound, Input, Link, Notice, Phase};
 use super::wire::{self, Cmd, FileId, Resp};
 use crate::api::{self, Api};
@@ -88,6 +94,9 @@ const POSTS_MAX: usize = 64;
 const FILES_MAX: usize = 32;
 /// The Bot Chat is looked for this often while none is found.
 const CHAT_LOOK_MS: u64 = 30_000;
+/// The tickets an agent's link took, kept until they would have run out
+/// anyway, at most (each holds 10 minutes; its owner makes them by hand).
+const USED_MAX: usize = 64;
 
 /// What the image gives the bridge for SimpleX (main.rs reads it).
 #[derive(Debug, Clone)]
@@ -119,6 +128,10 @@ pub struct View {
     /// The SimpleX contact it is linked to, by their name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// While inviting: whether the invitation is for whoever asks (`link`
+    /// and `short` are shown only to the page whose ticket made it).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
     pub always_on: bool,
     /// Its core runs now.
     pub running: bool,
@@ -127,13 +140,34 @@ pub struct View {
     pub why: Option<String>,
 }
 
+/// Why a link page's ask was refused: its status, and why in plain words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused {
+    pub status: u16,
+    pub why: String,
+}
+
+impl Refused {
+    fn new(status: u16, why: impl Into<String>) -> Refused {
+        Refused { status, why: why.into() }
+    }
+}
+
+type Answer = oneshot::Sender<Result<View, Refused>>;
+
 /// What reaches the manager.
 pub enum Msg {
     /// The computer as the bridge last read it, and the agents it runs.
     Computer { computer: Box<api::Computer>, agents: Vec<Agent> },
-    View { agent: String, reply: oneshot::Sender<Option<View>> },
-    Want { agent: String, reply: oneshot::Sender<Option<View>> },
-    Unlink { agent: String, reply: oneshot::Sender<Option<View>> },
+    /// What `agent`'s page is told: its invitation only for `session`.
+    View { agent: String, session: Option<String>, reply: oneshot::Sender<Option<View>> },
+    /// A link's ticket, checked and taken (`door::check`, once).
+    Ticket { agent: String, ticket: Box<Ticket>, reply: Answer },
+    /// Its owner's link, its door's key registered: an invitation, shown
+    /// to `session`.
+    Want { agent: String, key: Box<Key>, session: String, reply: Answer },
+    /// Its owner's unlink, by an unlink's ticket.
+    Unlink { agent: String, ticket: Box<Ticket>, reply: Answer },
     /// An agent's name, as its owner titled it (looked up off the loop).
     Titled { agent: String, title: String },
     /// A core's bot API answered.
@@ -156,6 +190,7 @@ pub enum Msg {
 #[derive(Clone)]
 pub struct Handle {
     tx: mpsc::Sender<Msg>,
+    api: Api,
 }
 
 impl Handle {
@@ -172,20 +207,38 @@ impl Handle {
         answer.await.ok().flatten()
     }
 
-    /// What `agent`'s link page shows; none for an agent this bridge does
-    /// not run.
-    pub async fn view(&self, agent: &str) -> Option<View> {
-        self.ask(|reply| Msg::View { agent: agent.to_string(), reply }).await
+    /// What `agent`'s link page shows, its invitation to `session` alone;
+    /// none for an agent this bridge does not run.
+    pub async fn view(&self, agent: &str, session: Option<&str>) -> Option<View> {
+        self.ask(|reply| Msg::View { agent: agent.to_string(), session: session.map(str::to_string), reply }).await
     }
 
-    /// Its owner asked to link `agent` (an invitation, shown).
-    pub async fn want(&self, agent: &str) -> Option<View> {
-        self.ask(|reply| Msg::Want { agent: agent.to_string(), reply }).await
+    async fn answered(&self, make: impl FnOnce(Answer) -> Msg) -> Result<View, Refused> {
+        let (reply, answer) = oneshot::channel();
+        let gone = || Refused::new(503, "this computer is stopping: try again in a moment");
+        self.tx.send(make(reply)).await.map_err(|_| gone())?;
+        answer.await.map_err(|_| gone())?
     }
 
-    /// Its owner asked to unlink `agent`.
-    pub async fn unlink(&self, agent: &str) -> Option<View> {
-        self.ask(|reply| Msg::Unlink { agent: agent.to_string(), reply }).await
+    /// Its owner links `agent`, by the ticket their Settings handed its
+    /// page: checked and taken, its door's key made and registered at the
+    /// platform with it, then an invitation, shown to that page alone.
+    pub async fn link(&self, agent: &str, ticket: Ticket) -> Result<View, Refused> {
+        self.answered(|reply| Msg::Ticket { agent: agent.to_string(), ticket: Box::new(ticket.clone()), reply }).await?;
+        let key = Key::generate().map_err(|e| Refused::new(500, format!("SimpleX could not make its key: {e}")))?;
+        if let Err(e) = self.api.door(agent, door::DOOR, &ticket.nonce, &key.public_hex()).await {
+            crate::ev!("simplex.door_refused", { "agent": agent, "error": e.to_string() });
+            let status = if e.status() == Some(403) { 403 } else { 502 };
+            return Err(Refused::new(status, "the platform did not take this link: start again from your Settings"));
+        }
+        crate::ev!("simplex.door_opened", { "agent": agent, "key": key.public_hex() });
+        self.answered(|reply| Msg::Want { agent: agent.to_string(), key: Box::new(key), session: ticket.nonce.clone(), reply }).await
+    }
+
+    /// Its owner unlinks `agent`, by the ticket their Settings handed its
+    /// page (the platform closed its door as it made it).
+    pub async fn unlink(&self, agent: &str, ticket: Ticket) -> Result<View, Refused> {
+        self.answered(|reply| Msg::Unlink { agent: agent.to_string(), ticket: Box::new(ticket), reply }).await
     }
 
     /// `agent`'s reply to a message its owner sent over SimpleX, posted on
@@ -198,11 +251,12 @@ impl Handle {
 }
 
 /// A message of the owner's, to post on the agent's chat: with the file it
-/// carries, once received, or a note of why none.
+/// carries, once received, or a note of why none, signed by its door.
 struct Post {
     inbound: Inbound,
     file: Option<LocalFile>,
     note: Option<String>,
+    door: Key,
 }
 
 /// What a file a message carries is: by its name's extension when it is
@@ -243,8 +297,9 @@ fn file_note(kind: &str, why: &str) -> String {
 }
 
 /// An agent's `link.json`: its link, the agent it is of (a fragment's name
-/// may come back as another agent's), and the computer's start it last
-/// ran in.
+/// may come back as another agent's), the computer's start it last ran
+/// in, and the tickets it took (nonce → when it runs out), so none is
+/// taken twice.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Saved {
     pub identity: String,
@@ -252,6 +307,8 @@ pub struct Saved {
     pub generation: u64,
     #[serde(flatten)]
     pub link: Link,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub used: BTreeMap<String, i64>,
 }
 
 /// Whether a core's first start in this life went back in time: the
@@ -292,6 +349,10 @@ fn greeting(name: &str) -> String {
 
 /// What the owner's SimpleX app is told after a start that went back in time.
 const MAYBE_LOST: &str = "I restarted and may have missed a message you sent me just before. If I don't answer something, please send it again.";
+
+/// What it is told when its message cannot be carried: this link has no
+/// door key (one made before doors, or one a rollback took).
+const NO_DOOR: &str = "Your message didn't reach me. Please link SimpleX to me again from your Settings.";
 
 /// Reads an agent's `link.json`: none when there is none; one that does
 /// not read, contradicts itself, or is another agent's is set aside (its
@@ -397,22 +458,29 @@ struct Slot {
     outstanding: std::collections::BTreeSet<i64>,
     /// The newest message acknowledged as posted.
     acked: i64,
+    /// Its link's door key (`door.key`): what it relays is signed by it.
+    door: Option<Key>,
+    /// The ticket nonce of the page that asked for its invitation last:
+    /// that page alone is shown it.
+    session: Option<String>,
 }
 
 impl Slot {
-    fn view(&self, always_on: bool) -> View {
-        let (phase, link, short, name) = match &self.saved.link.phase {
-            Phase::Off => ("off", None, None, None),
-            Phase::Asking => ("asking", None, None, None),
-            Phase::Inviting { link, short, .. } => ("inviting", Some(link.clone()), short.clone(), None),
-            Phase::Linked { name, .. } => ("linked", None, None, Some(name.clone())),
+    fn view(&self, always_on: bool, session: Option<&str>) -> View {
+        let shown = session.is_some() && session == self.session.as_deref();
+        let (phase, link, short, name, hidden) = match &self.saved.link.phase {
+            Phase::Off => ("off", None, None, None, false),
+            Phase::Asking => ("asking", None, None, None, false),
+            Phase::Inviting { link, short, .. } if shown => ("inviting", Some(link.clone()), short.clone(), None, false),
+            Phase::Inviting { .. } => ("inviting", None, None, None, true),
+            Phase::Linked { name, .. } => ("linked", None, None, Some(name.clone()), false),
         };
         let why = if !always_on {
             Some("SimpleX works while your computer stays on, which the always-on plan does.".to_string())
         } else {
             self.broken.clone().or_else(|| self.note.clone())
         };
-        View { agent: self.agent.fragment.clone(), phase, link, short, name, always_on, running: self.core.is_some() && self.up, why }
+        View { agent: self.agent.fragment.clone(), phase, link, short, name, hidden, always_on, running: self.core.is_some() && self.up, why }
     }
 }
 
@@ -442,9 +510,9 @@ pub fn start(cfg: Config, api: Api, quiet: Arc<AtomicBool>, hold: PathBuf, relay
     let (pulse, pulse_rx) = watch::channel(false);
     // held for a moment at a link's change, at the pace the bridge's own pings by default
     tokio::spawn(crate::driver::keepalive(api.clone(), pulse_rx, Duration::from_millis(crate::limits::KEEPALIVE_PING_MS), stop.clone()));
-    let m = Manager { cfg, api, quiet, hold, tx: tx.clone(), slots: BTreeMap::new(), computer: None, held: false, pulse, pulse_until: None, relaying, stop: stop.clone() };
+    let m = Manager { cfg, api: api.clone(), quiet, hold, tx: tx.clone(), slots: BTreeMap::new(), computer: None, held: false, pulse, pulse_until: None, relaying, stop: stop.clone() };
     tokio::spawn(m.run(rx, stop));
-    Handle { tx }
+    Handle { tx, api }
 }
 
 impl Manager {
@@ -472,28 +540,24 @@ impl Manager {
     async fn on(&mut self, m: Msg) {
         match m {
             Msg::Computer { computer, agents } => self.computer(*computer, agents).await,
-            Msg::View { agent, reply } => {
-                let _ = reply.send(self.view(&agent));
+            Msg::View { agent, session, reply } => {
+                let _ = reply.send(self.view(&agent, session.as_deref()));
             }
-            Msg::Want { agent, reply } => {
-                if let Some(s) = self.slots.get_mut(&agent) {
-                    // asked by its owner: a core that stopped too often is tried again
-                    s.broken = None;
-                    s.exits.clear();
-                    s.retry_at = None;
-                    s.note = None;
-                    self.apply(&agent, Input::Want);
-                    self.tick().await;
-                }
-                let _ = reply.send(self.view(&agent));
+            Msg::Ticket { agent, ticket, reply } => {
+                let _ = reply.send(self.take(&agent, &ticket, "link").map(|()| self.view(&agent, None).expect("its slot")));
             }
-            Msg::Unlink { agent, reply } => {
-                if let Some(s) = self.slots.get_mut(&agent) {
+            Msg::Want { agent, key, session, reply } => {
+                let _ = reply.send(self.want(&agent, *key, session).await);
+            }
+            Msg::Unlink { agent, ticket, reply } => {
+                let answer = self.take(&agent, &ticket, "unlink").map(|()| {
+                    let s = self.slots.get_mut(&agent).expect("its slot");
                     s.broken = None;
                     s.note = None;
                     self.apply(&agent, Input::Unlink);
-                }
-                let _ = reply.send(self.view(&agent));
+                    self.view(&agent, None).expect("its slot")
+                });
+                let _ = reply.send(answer);
             }
             Msg::Titled { agent, title } => {
                 if let Some(s) = self.slots.get_mut(&agent) {
@@ -509,9 +573,63 @@ impl Manager {
         }
     }
 
-    fn view(&self, agent: &str) -> Option<View> {
+    fn view(&self, agent: &str, session: Option<&str>) -> Option<View> {
         let always_on = self.computer.as_ref().is_some_and(|c| c.always_on);
-        self.slots.get(agent).map(|s| s.view(always_on))
+        self.slots.get(agent).map(|s| s.view(always_on, session))
+    }
+
+    /// A ticket for `act` on `agent`, checked (`door::check`: this
+    /// computer's, that agent's, signed by its key, in its time), and taken
+    /// once: kept in its link's file until it would have run out. A link's
+    /// is refused while one is bound.
+    fn take(&mut self, agent: &str, t: &Ticket, act: &str) -> Result<(), Refused> {
+        let computer = self.computer.as_ref().map(|c| c.computer.clone()).ok_or_else(|| Refused::new(503, "this computer is starting: try again in a moment"))?;
+        let s = self.slots.get_mut(agent).ok_or_else(|| Refused::new(404, format!("no agent {agent} runs on this computer")))?;
+        let key = s.agent.key.clone().ok_or_else(|| Refused::new(403, "this platform does not sign links yet"))?;
+        let now = crate::log::now_ms() as i64;
+        door::check(t, act, agent, &computer, &key, now).map_err(|why| Refused::new(403, why))?;
+        s.saved.used.retain(|_, exp| *exp >= now);
+        if s.saved.used.contains_key(&t.nonce) {
+            return Err(Refused::new(403, "that ticket was used already: start again from your Settings"));
+        }
+        if act == "link" && matches!(s.saved.link.phase, Phase::Linked { .. }) {
+            return Err(Refused::new(409, "it is linked already: unlink it first"));
+        }
+        s.saved.used.insert(t.nonce.clone(), t.exp);
+        // bounded: the soonest to run out go first
+        while s.saved.used.len() > USED_MAX {
+            let soonest = s.saved.used.iter().min_by_key(|(_, exp)| **exp).map(|(n, _)| n.clone()).expect("not empty");
+            s.saved.used.remove(&soonest);
+        }
+        if let Err(e) = store(&s.dir, &s.saved) {
+            crate::ev!("simplex.store_failed", { "agent": agent, "error": e.to_string() });
+        }
+        crate::ev!("simplex.ticket", { "agent": agent, "act": act });
+        Ok(())
+    }
+
+    /// Its owner's link, its door's key registered: the key kept, then an
+    /// invitation shown to `session`'s page (the same one while one is
+    /// shown already).
+    async fn want(&mut self, agent: &str, key: Key, session: String) -> Result<View, Refused> {
+        let s = self.slots.get_mut(agent).ok_or_else(|| Refused::new(404, format!("no agent {agent} runs on this computer")))?;
+        if matches!(s.saved.link.phase, Phase::Linked { .. }) {
+            return Err(Refused::new(409, "it is linked already: unlink it first"));
+        }
+        if let Err(e) = key.store(&s.dir) {
+            crate::ev!("simplex.door_unkept", { "agent": agent, "error": e.to_string() });
+            return Err(Refused::new(500, format!("SimpleX could not keep its key: {e}")));
+        }
+        s.door = Some(key);
+        s.session = Some(session.clone());
+        // asked by its owner: a core that stopped too often is tried again
+        s.broken = None;
+        s.exits.clear();
+        s.retry_at = None;
+        s.note = None;
+        self.apply(agent, Input::Want);
+        self.tick().await;
+        Ok(self.view(agent, Some(&session)).expect("its slot"))
     }
 
     /// The computer as read: a slot for each agent it runs (its link read
@@ -529,7 +647,8 @@ impl Manager {
                 continue;
             }
             let dir = self.cfg.dir.join(&a.fragment);
-            let saved = load(&dir, a).unwrap_or_else(|| Saved { identity: a.identity.clone(), generation: 0, link: Link::default() });
+            let saved = load(&dir, a).unwrap_or_else(|| Saved { identity: a.identity.clone(), generation: 0, link: Link::default(), used: BTreeMap::new() });
+            let door = Key::load(&dir);
             self.slots.insert(a.fragment.clone(), Slot {
                 agent: a.clone(),
                 dir,
@@ -552,6 +671,8 @@ impl Manager {
                 gap: false,
                 outstanding: Default::default(),
                 acked: 0,
+                door,
+                session: None,
             });
             self.look_up_title(a.clone());
         }
@@ -844,7 +965,7 @@ impl Manager {
             s.saved.generation = c.generation;
         }
         s.started = true;
-        crate::ev!("simplex.core_up", { "agent": f, "epoch": epoch, "rollback": rollback, "phase": s.view(c.always_on).phase });
+        crate::ev!("simplex.core_up", { "agent": f, "epoch": epoch, "rollback": rollback, "phase": s.view(c.always_on, None).phase });
         self.apply(f, Input::Started { rollback });
     }
 
@@ -880,13 +1001,13 @@ impl Manager {
             Resp::FileDone { file, path } => {
                 if let Some(inbound) = s.files.remove(file) {
                     let local = LocalFile { path: s.dir.join("files").join(path), media_type: media_type(&inbound.kind, path).into(), name: wire::cut(path.rsplit('/').next().unwrap_or(path), 200).into(), size: inbound.file.as_ref().map_or(0, |r| r.size) };
-                    self.post(f, Post { inbound, file: Some(local), note: None });
+                    self.post(f, inbound, Some(local), None);
                 }
             }
             Resp::FileFailed { file } => {
                 if let Some(inbound) = s.files.remove(file) {
                     let note = file_note(&inbound.kind, "did not arrive");
-                    self.post(f, Post { inbound, file: None, note: Some(note) });
+                    self.post(f, inbound, None, Some(note));
                 }
             }
             _ => {}
@@ -898,16 +1019,16 @@ impl Manager {
     fn forward(&mut self, f: &str, inbound: Inbound) {
         let Some(s) = self.slots.get_mut(f) else { return };
         let Some(file) = inbound.file.clone() else {
-            return self.post(f, Post { inbound, file: None, note: None });
+            return self.post(f, inbound, None, None);
         };
         if file.size > crate::limits::ATTACHMENT_MAX_BYTES {
             let note = file_note(&inbound.kind, &format!("was too large to carry here ({} MB)", file.size / 1_000_000));
-            return self.post(f, Post { inbound, file: None, note: Some(note) });
+            return self.post(f, inbound, None, Some(note));
         }
         if let Some(path) = file.path.clone() {
             // received already (a catch-up of one received before)
             let local = LocalFile { path: s.dir.join("files").join(&path), media_type: media_type(&inbound.kind, &path).into(), name: wire::cut(path.rsplit('/').next().unwrap_or(&path), 200).into(), size: file.size };
-            return self.post(f, Post { inbound, file: Some(local), note: None });
+            return self.post(f, inbound, Some(local), None);
         }
         if s.files.len() >= FILES_MAX && !s.files.contains_key(&file.id) {
             crate::ev!("simplex.files_bounded", { "agent": f, "max": FILES_MAX });
@@ -918,7 +1039,6 @@ impl Manager {
         self.act(f, Action::Ask(Cmd::Receive { file: file.id }));
     }
 
-    /// Hands a message to the agent's poster, started at its first.
     /// A message's post, confirmed or refused: the link's delivered mark
     /// moves to it, short of a message still waiting for its file, and
     /// never past one this life did not post (`gap`).
@@ -945,8 +1065,17 @@ impl Manager {
         }
     }
 
-    fn post(&mut self, f: &str, p: Post) {
+    /// Hands a message to the agent's poster, started at its first, with
+    /// its door's key to sign it; with none, its owner is told it did not
+    /// arrive (the platform would refuse it).
+    fn post(&mut self, f: &str, inbound: Inbound, file: Option<LocalFile>, note: Option<String>) {
         let Some(s) = self.slots.get_mut(f) else { return };
+        let Some(door) = s.door.clone() else {
+            crate::ev!("simplex.no_door", { "agent": f });
+            self.dropped(f, inbound.item);
+            return self.apply(f, Input::Reply(NO_DOOR));
+        };
+        let p = Post { inbound, file, note, door };
         if s.poster.as_ref().is_none_or(|tx| tx.is_closed()) {
             let (tx, rx) = mpsc::channel(POSTS_MAX);
             tokio::spawn(poster(self.api.clone(), s.agent.clone(), rx, self.tx.clone(), self.stop.clone()));
@@ -1018,6 +1147,12 @@ impl Manager {
                 // the link moves on; a restart before it is written may go back
                 crate::ev!("simplex.store_failed", { "agent": f, "error": e.to_string() });
             }
+        }
+        // a link let go (unlinked, by either side) keeps no door key
+        if s.saved.link.phase == Phase::Off && s.door.take().is_some() {
+            Key::forget(&s.dir);
+            s.session = None;
+            crate::ev!("simplex.door_forgotten", { "agent": f });
         }
         for a in actions {
             self.act(f, a);
@@ -1183,10 +1318,10 @@ async fn poster(api: Api, agent: Agent, mut rx: mpsc::Receiver<Post>, manager: m
             Some(note) => format!("{}\n\n{note}", p.inbound.text),
             None => p.inbound.text.clone(),
         };
-        let body = records::relayed_message(&text, &agent.identity, &agent.owner, records::VIA_SIMPLEX, &[]);
+        let body = records::relayed_message(&text, &agent, records::VIA_SIMPLEX, &[]);
         let id = records::relayed_id(&agent.fragment, &p.inbound.id);
         let files: Vec<LocalFile> = p.file.iter().cloned().collect();
-        match crate::driver::post(&api, &chat, &agent.fragment, records::CHAT, &id, body, &files, stop.clone()).await {
+        match crate::driver::post(&api, &chat, &agent.fragment, records::CHAT, &id, body, &files, Some(&p.door), stop.clone()).await {
             crate::driver::Sent::Stopped => return,
             // its file kept: the message is read again at the next start's
             // catch-up (by the same id), and carried then if it can be
@@ -1234,9 +1369,11 @@ fn kind_of(cmd: &Cmd) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use sha2::Digest;
 
     fn agent() -> Agent {
-        Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![] }
+        Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None }
     }
 
     fn computer(always_on: bool, generation: u64, restored: Option<(u64, bool)>) -> api::Computer {
@@ -1259,7 +1396,7 @@ mod tests {
     /// says nothing (an old one) forces nothing.
     #[test]
     fn a_rollback_is_this_starts_and_once() {
-        let saved = |generation| Saved { identity: "npub1juniper".into(), generation, link: Link::default() };
+        let saved = |generation| Saved { identity: "npub1juniper".into(), generation, link: Link::default(), used: BTreeMap::new() };
         assert!(rolled_back(&computer(true, 5, Some((5, true))), &saved(4)));
         assert!(!rolled_back(&computer(true, 5, Some((5, true))), &saved(5)), "this start's, handled already");
         assert!(!rolled_back(&computer(true, 5, Some((4, true))), &saved(3)), "an older start's restore");
@@ -1275,7 +1412,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("juniper--k3x9");
         assert_eq!(load(&dir, &agent()), None, "none yet");
-        let saved = Saved { identity: "npub1juniper".into(), generation: 7, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() } };
+        let saved = Saved { identity: "npub1juniper".into(), generation: 7, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::from([("0f".repeat(16), 5)]) };
         store(&dir, &saved).expect("written");
         assert_eq!(load(&dir, &agent()), Some(saved.clone()));
         assert_eq!(linked_on_disk(&root, &[agent()]), vec!["juniper--k3x9".to_string()]);
@@ -1318,14 +1455,11 @@ mod tests {
         }
     }
 
-    /// Goal: the page says why SimpleX does not run, in plain words, and
-    /// shows the invitation only while it is one.
-    #[test]
-    fn its_view_says_what_it_is() {
-        let mut s = Slot {
+    fn slot(dir: PathBuf, phase: Phase) -> Slot {
+        Slot {
             agent: agent(),
-            dir: PathBuf::from("/x"),
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Inviting { conn: 1, link: "simplex:/invitation#/x".into(), short: None }, ..Link::default() } },
+            dir,
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase, ..Link::default() }, used: BTreeMap::new() },
             title: None,
             epoch: 0,
             core: None,
@@ -1344,17 +1478,104 @@ mod tests {
             gap: false,
             outstanding: Default::default(),
             acked: 0,
-        };
-        let v = s.view(true);
-        assert_eq!((v.phase, v.link.as_deref(), v.running, v.why.as_deref()), ("inviting", Some("simplex:/invitation#/x"), false, None));
-        let v = s.view(false);
+            door: None,
+            session: None,
+        }
+    }
+
+    /// Goal: the page says why SimpleX does not run, in plain words, and
+    /// shows the invitation only while it is one, and only to the page
+    /// whose ticket asked for it (the agent's tools reach this port too).
+    #[test]
+    fn its_view_says_what_it_is() {
+        let mut s = slot(PathBuf::from("/x"), Phase::Inviting { conn: 1, link: "simplex:/invitation#/x".into(), short: None });
+        s.session = Some("0f".repeat(16));
+        let v = s.view(true, Some(&"0f".repeat(16)));
+        assert_eq!((v.phase, v.link.as_deref(), v.hidden, v.running, v.why.as_deref()), ("inviting", Some("simplex:/invitation#/x"), false, false, None));
+        for other in [None, Some("1f".repeat(16))] {
+            let v = s.view(true, other.as_deref());
+            assert_eq!((v.phase, v.link.as_deref(), v.short.as_deref(), v.hidden), ("inviting", None, None, true), "{other:?}: no invitation to another");
+        }
+        s.session = None;
+        assert!(s.view(true, None).link.is_none(), "no page asked: no one is shown it");
+        let v = s.view(false, None);
         assert!(v.why.is_some_and(|w| w.contains("always-on")), "not always on: says so");
         s.saved.link.phase = Phase::Linked { contact: 3, name: "paul".into() };
         s.broken = Some("SimpleX stopped 3 times".into());
-        let v = s.view(true);
+        let v = s.view(true, None);
         assert_eq!((v.phase, v.link.as_deref(), v.name.as_deref()), ("linked", None, Some("paul")));
         assert_eq!(v.why.as_deref(), Some("SimpleX stopped 3 times"));
-        assert_eq!(serde_json::to_value(&v).expect("a view")["alwaysOn"], true);
+        let json = serde_json::to_value(&v).expect("a view");
+        assert_eq!((json["alwaysOn"].clone(), json.get("hidden")), (json!(true), None));
+    }
+
+    /// A manager over one agent, juniper, whose key is `key`, on
+    /// `computer:00aa` (always on), its state in `dir`; nothing started.
+    fn manager(dir: &Path, key: &Key, phase: Phase) -> Manager {
+        let (tx, _rx) = mpsc::channel(4);
+        let (pulse, _) = watch::channel(false);
+        let (relaying, _) = watch::channel(BTreeSet::new());
+        let (_stop_tx, stop) = watch::channel(false);
+        let cfg = Config { bin: PathBuf::from("/nowhere"), dir: dir.to_path_buf(), smp: None, xftp: None };
+        let mut s = slot(dir.join("juniper--k3x9"), phase);
+        s.agent.key = Some(key.public_hex());
+        let api = Api::new("http://127.0.0.1:9").expect("an address");
+        Manager { cfg, api, quiet: Arc::new(AtomicBool::new(true)), hold: dir.join("hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), s)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying, stop }
+    }
+
+    /// The vectors' agent key (crates/core/src/door.rs: secret 0x07 × 32),
+    /// made the way the bridge reads a door key.
+    fn agent_key(dir: &Path) -> Key {
+        std::fs::create_dir_all(dir).expect("a directory");
+        std::fs::write(dir.join(door::KEY_FILE), "07".repeat(32)).expect("written");
+        Key::load(dir).expect("a key")
+    }
+
+    /// A ticket for `act` signed by the agent's key, valid for 10 minutes.
+    fn signed(act: &str, nonce: &str) -> Ticket {
+        let exp = crate::log::now_ms() as i64 + 600_000;
+        let mut t = Ticket { door: door::DOOR.into(), act: act.into(), agent: "juniper--k3x9".into(), computer: "computer:00aa".into(), nonce: nonce.into(), exp, sig: "ab".repeat(64) };
+        let text = format!("fragment door ticket 1\n{}\n{}\n{}\n{}\n{}\n{}", t.door, t.act, t.agent, t.computer, t.nonce, t.exp);
+        let digest: [u8; 32] = sha2::Sha256::digest(text.as_bytes()).into();
+        assert_eq!(digest, t.digest(), "the same digest as door.rs");
+        t.sig = k256::schnorr::SigningKey::from_bytes(&[7u8; 32]).expect("a key").sign_raw(&digest, &[0u8; 32]).map(|s| crate::records::hex(&s.to_bytes())).expect("signed");
+        t
+    }
+
+    /// Goal (the signed link start): a link or an unlink is taken only by a
+    /// ticket its agent's key signed, for this computer and agent, once
+    /// (kept across a restart, in its file); a link's, never while linked.
+    #[test]
+    fn a_ticket_is_taken_signed_and_once() {
+        let root = std::env::temp_dir().join(format!("simplex-take-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let key = agent_key(&root.join("keys"));
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime");
+        let _in = rt.enter();
+        let mut m = manager(&root, &key, Phase::Off);
+        let unsigned = Ticket { sig: String::new(), ..signed("link", &"01".repeat(16)) };
+        assert_eq!(m.take("juniper--k3x9", &unsigned, "link").map_err(|r| r.status), Err(403), "unsigned");
+        let forged = Ticket { sig: "ab".repeat(64), ..signed("link", &"02".repeat(16)) };
+        assert_eq!(m.take("juniper--k3x9", &forged, "link").map_err(|r| r.status), Err(403), "forged");
+        let t = signed("link", &"03".repeat(16));
+        assert_eq!(m.take("juniper--k3x9", &t, "unlink").map_err(|r| r.status), Err(403), "a link's ticket unlinks nothing");
+        assert_eq!(m.take("juniper--k3x9", &t, "link"), Ok(()));
+        let replayed = m.take("juniper--k3x9", &t, "link").expect_err("replayed");
+        assert!(replayed.status == 403 && replayed.why.contains("used already"), "{replayed:?}");
+        // a restart reads the nonces it took back from its file
+        let saved = load(&root.join("juniper--k3x9"), &agent()).expect("its file");
+        assert!(saved.used.contains_key(&t.nonce));
+        let mut again = manager(&root, &key, Phase::Off);
+        again.slots.get_mut("juniper--k3x9").expect("its slot").saved = saved;
+        assert_eq!(again.take("juniper--k3x9", &t, "link").map_err(|r| r.status), Err(403), "replayed after a restart");
+        // linked: another link waits for an unlink, which an unlink's ticket takes
+        let mut linked = manager(&root.join("linked"), &key, Phase::Linked { contact: 3, name: "paul".into() });
+        assert_eq!(linked.take("juniper--k3x9", &signed("link", &"04".repeat(16)), "link").map_err(|r| r.status), Err(409));
+        assert_eq!(linked.take("juniper--k3x9", &signed("unlink", &"05".repeat(16)), "unlink"), Ok(()));
+        // no key in its view (a platform before doors): nothing is taken
+        linked.slots.get_mut("juniper--k3x9").expect("its slot").agent.key = None;
+        assert_eq!(linked.take("juniper--k3x9", &signed("unlink", &"06".repeat(16)), "unlink").map_err(|r| r.status), Err(403));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A child as a core is one: registered from its spawn, reaped and
@@ -1400,7 +1621,7 @@ mod tests {
         let (writer, _writes) = mpsc::channel(1);
         let (tx, _rx) = mpsc::channel(4);
         let (pulse, _) = watch::channel(false);
-        let saved = Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() } };
+        let saved = Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new() };
         let slot = Slot {
             agent: agent(),
             dir: PathBuf::from("/nowhere"),
@@ -1423,6 +1644,8 @@ mod tests {
             gap: false,
             outstanding: Default::default(),
             acked: 0,
+            door: None,
+            session: None,
         };
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
         let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(false)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeSet::new()).0, stop: watch::channel(false).1 };
@@ -1489,7 +1712,7 @@ mod tests {
         let mut slot = Slot {
             agent: agent(),
             dir: PathBuf::from("/nowhere"),
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link },
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link, used: BTreeMap::new() },
             title: None,
             epoch: 1,
             core: None,
@@ -1508,6 +1731,8 @@ mod tests {
             gap: false,
             outstanding: Default::default(),
             acked: 0,
+            door: None,
+            session: None,
         };
         slot.up = true;
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
@@ -1534,7 +1759,7 @@ mod tests {
         let slot = Slot {
             agent: agent(),
             dir: std::env::temp_dir().join(format!("simplex-ack-{}", std::process::id())),
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() } },
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new() },
             title: None,
             epoch: 1,
             core: None,
@@ -1553,6 +1778,8 @@ mod tests {
             gap: false,
             outstanding: Default::default(),
             acked: 0,
+            door: None,
+            session: None,
         };
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
         let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(true)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeSet::new()).0, stop: watch::channel(false).1 };

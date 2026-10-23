@@ -543,7 +543,7 @@ mod tests {
 
     #[test]
     fn the_reader_is_an_agent_of_the_computers_owner() {
-        let a = |f: &str, o: &str| Agent { fragment: f.into(), identity: format!("npub1{f}"), name: f.into(), owner: o.into(), credentials: vec![] };
+        let a = |f: &str, o: &str| Agent { fragment: f.into(), identity: format!("npub1{f}"), name: f.into(), owner: o.into(), credentials: vec![], key: None };
         let agents = [a("x.skyler", "npub1skyler"), a("juniper--k3x9", "npub1paul")];
         assert_eq!(reader(&agents, "npub1paul").map(|r| r.fragment.as_str()), Some("juniper--k3x9"));
         assert!(reader(&agents[..1], "npub1paul").is_none());
@@ -564,7 +564,7 @@ mod tests {
         let down = Arc::new(Mutex::new(false));
         let (addr, _stop) = fake::start(files.clone(), down.clone(), Arc::new(Mutex::new(true))).await;
         let api = Api::new(&format!("http://{addr}")).unwrap();
-        let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![] };
+        let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None };
         let root = std::env::temp_dir().join(format!("hermes-boot-skills-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (dir, manifest) = (root.join("managed"), root.join("sync/managed.json"));
@@ -784,7 +784,7 @@ mod tests {
         let listed = Arc::new(Mutex::new(false));
         let (addr, _stop) = fake::start(files.clone(), Arc::new(Mutex::new(false)), listed.clone()).await;
         let api = Api::new(&format!("http://{addr}")).unwrap();
-        let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![] };
+        let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None };
         let root = std::env::temp_dir().join(format!("hermes-boot-platform-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (own, manifest) = (root.join("profile/skills"), root.join("sync/managed.json"));

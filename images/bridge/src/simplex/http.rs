@@ -5,25 +5,36 @@
 //! - `GET /simplex/?agent=<fragment>`: its link page (`page.html`, in the
 //!   bridge, so every image serves the same one), which the shell opens in
 //!   a pane through a port ticket;
-//! - `GET /simplex/state?agent=…`: what its link is (`run::View`);
-//! - `GET /simplex/qr.svg?agent=…`: its one-time invitation, while it is
-//!   one, as a QR code (its short link when the server made one, which
-//!   SimpleX's apps open, else the full one);
-//! - `POST /simplex/link?agent=…`: its owner asks to link it (a one-time
-//!   invitation, shown in the state while unused);
-//! - `POST /simplex/unlink?agent=…`.
+//! - `GET /simplex/state?agent=…[&s=<session>]`: what its link is
+//!   (`run::View`), its invitation only to the page that asked for it;
+//! - `GET /simplex/qr.svg?agent=…&s=<session>`: that invitation, while it
+//!   is one, as a QR code (its short link when the server made one, which
+//!   SimpleX's apps open, else the full one), to that page alone;
+//! - `POST /simplex/link?agent=…` with a link's ticket (the body): its
+//!   owner links it (a one-time invitation, shown to the page whose
+//!   ticket's nonce is its session);
+//! - `POST /simplex/unlink?agent=…` with an unlink's ticket.
 //!
-//! An image that names no core answers its page, which says SimpleX is not
-//! on this computer, and 404 to the rest; an agent the bridge does not run
-//! is 404; a bridge not yet past its restore gate is 503.
+//! The tickets come from the owner's Settings alone, signed by the
+//! platform (`door`): the agent's tools, which reach this port too, can
+//! neither link it nor see an invitation. An image that names no core
+//! answers its page, which says SimpleX is not on this computer, and 404
+//! to the rest; an agent the bridge does not run is 404; a bridge not yet
+//! past its restore gate is 503; a link or an unlink without a ticket, or
+//! with one that is not good, 403 (409 a link while linked).
 
 use std::sync::{Arc, OnceLock};
 
+use http_body_util::{BodyExt, Limited};
 use hyper::body::Incoming;
 use hyper::{Method, Request, Response, StatusCode};
 
-use super::run::Handle;
+use super::door::Ticket;
+use super::run::{Handle, Refused};
 use crate::net::{self, Body};
+
+/// A ticket's body is at most this.
+const TICKET_MAX_BYTES: usize = 2_048;
 
 /// The screen's way to SimpleX: whether the image names a core, and the
 /// manager once the bridge has started it (past the restore gate).
@@ -36,6 +47,11 @@ pub struct Simplex {
 /// Whether `path` is SimpleX's.
 pub fn ours(path: &str) -> bool {
     path == "/simplex" || path.starts_with("/simplex/")
+}
+
+/// `?s=`: the page's session (its link ticket's nonce), when it names one.
+fn session_of(query: Option<&str>) -> Option<String> {
+    query.unwrap_or("").split('&').filter_map(|kv| kv.split_once('=')).find(|(k, v)| *k == "s" && v.len() == 32 && v.bytes().all(|b| b.is_ascii_hexdigit())).map(|(_, v)| v.to_string())
 }
 
 /// `?agent=` alone, an agent fragment's name.
@@ -73,23 +89,46 @@ pub async fn handle(req: Request<Incoming>, simplex: &Simplex) -> Response<Body>
         Ok(a) => a,
         Err(why) => return net::refusal(StatusCode::BAD_REQUEST, "invalid", &why),
     };
+    let session = session_of(req.uri().query());
     if req.method() == Method::GET && req.uri().path() == "/simplex/qr.svg" {
-        let link = h.view(&agent).await.and_then(|v| v.short.or(v.link));
+        let link = h.view(&agent, session.as_deref()).await.and_then(|v| v.short.or(v.link));
         return match link.as_deref().and_then(qr_svg) {
             Some(svg) => net::respond(StatusCode::OK, "image/svg+xml", svg),
             None => net::refusal(StatusCode::NOT_FOUND, "not_found", "no invitation to show"),
         };
     }
-    let view = match (req.method(), req.uri().path()) {
-        (&Method::GET, "/simplex/state") => h.view(&agent).await,
-        (&Method::POST, "/simplex/link") => h.want(&agent).await,
-        (&Method::POST, "/simplex/unlink") => h.unlink(&agent).await,
+    let path = req.uri().path().to_string();
+    let answer = match (req.method().clone(), path.as_str()) {
+        (Method::GET, "/simplex/state") => h.view(&agent, session.as_deref()).await.ok_or_else(|| Refused { status: 404, why: format!("no agent {agent} runs on this computer") }),
+        (Method::POST, "/simplex/link" | "/simplex/unlink") => match ticket_of(req).await {
+            Err(why) => Err(Refused { status: 403, why }),
+            Ok(t) if path == "/simplex/link" => h.link(&agent, t).await,
+            Ok(t) => h.unlink(&agent, t).await,
+        },
         _ => return net::refusal(StatusCode::NOT_FOUND, "not_found", "GET /simplex/, /simplex/state or /simplex/qr.svg; POST /simplex/link or /simplex/unlink"),
     };
-    match view {
-        Some(v) => net::json_answer(StatusCode::OK, &serde_json::to_value(v).expect("a view serializes")),
-        None => net::refusal(StatusCode::NOT_FOUND, "not_found", &format!("no agent {agent} runs on this computer")),
+    match answer {
+        Ok(v) => net::json_answer(StatusCode::OK, &serde_json::to_value(v).expect("a view serializes")),
+        Err(r) => {
+            let status = StatusCode::from_u16(r.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code = match r.status {
+                403 => "forbidden",
+                404 => "not_found",
+                409 => "conflict",
+                503 => "starting",
+                _ => "failed",
+            };
+            net::refusal(status, code, &r.why)
+        }
     }
+}
+
+/// A link's or an unlink's ticket: the request's body, as the owner's
+/// Settings handed it to the page.
+async fn ticket_of(req: Request<Incoming>) -> Result<Ticket, String> {
+    let none = || "a link or an unlink starts from your Settings, which hand this page a ticket".to_string();
+    let bytes = Limited::new(req.into_body(), TICKET_MAX_BYTES).collect().await.map_err(|_| none())?.to_bytes();
+    serde_json::from_slice(&bytes).map_err(|_| none())
 }
 
 #[cfg(test)]
@@ -101,6 +140,8 @@ mod tests {
     fn its_routes_name_one_agent() {
         assert!(ours("/simplex/state") && ours("/simplex") && !ours("/simplexx") && !ours("/"));
         assert_eq!(agent_of(Some("agent=juniper--k3x9")), Ok("juniper--k3x9".into()));
+        assert_eq!(session_of(Some(&format!("agent=juniper--k3x9&s={}", "0f".repeat(16)))), Some("0f".repeat(16)));
+        assert_eq!(session_of(Some("agent=juniper--k3x9&s=short")), None);
         assert!(agent_of(Some("agent=juniper--k3x9&agent=x--y")).is_err());
         assert!(agent_of(None).is_err());
         assert!(agent_of(Some("agent=../etc")).is_err());
@@ -117,7 +158,7 @@ mod tests {
         let full = format!("simplex:/invitation#/?v=2-7&smp={}", "x".repeat(700));
         assert!(qr_svg(&full).is_some(), "a full invitation fits");
         assert!(qr_svg(&"x".repeat(5_000)).is_none(), "past what a QR code holds");
-        for path in ["ask(\"GET\", \"state\")", "q(\"qr.svg\")", "act(\"link\")", "act(\"unlink\""] {
+        for path in ["ask(\"GET\", \"state\")", "q(\"qr.svg\")", "act(\"link\")", "act(\"unlink\"", "window.parent.postMessage({ fragment: \"simplex\", agent, want }, parentOrigin)"] {
             assert!(PAGE.contains(path), "{path}");
         }
         assert!(!PAGE.contains("fetch(\"/"), "no absolute path: it runs under /p/6080/");

@@ -646,6 +646,16 @@ speaking Cloudflare's APIs) returns once this product works.
     "The lab, 2026-10-22"). What it adds to the platform is
     docs/explorations/simplex-complexity.md. Its image change ships only
     through an image round.
+    Securing the link, Paul, 2026-10-23: once the owner has linked their
+    SimpleX app from their own Settings, what it sends is the owner, with
+    what the shell can do (questions and word-cards answered); the threat
+    is only the agent forging either end. So a link starts only from a
+    ticket the owner's Settings get, which the platform signs and the
+    bridge takes once, and only the link's door key makes a record that
+    speaks for the owner: the platform refuses one the agent's own key
+    posts (docs/api.md, "An agent's doors"). Root in the container can
+    still read the door key; the fix later is running the agent as a
+    non-root user.
 
 ### The cut
 

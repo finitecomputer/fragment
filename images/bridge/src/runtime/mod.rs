@@ -48,6 +48,11 @@ pub struct Agent {
     /// none itself.
     #[serde(default)]
     pub credentials: Vec<Credential>,
+    /// Its identity's key (64 hex), which its fragment signs as: a door's
+    /// ticket is checked with it (simplex/door.rs). None from a platform
+    /// before doors, which starts no link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 /// One credential of an agent's (`GET /api/computer`'s `agents[].credentials`).
