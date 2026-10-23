@@ -502,7 +502,10 @@ follows `chat` from its last 400 records and, for a viewer, `work` from
 its last 1000 (each agent's menu among them), and lays them out in time:
 a person's message (or command); an
 agent's consecutive steps as one card (each its category's icon, verb and
-arguments; while it works, the card's head says what it does now); a
+arguments; while it works, the card's head says how long it has worked
+and how many steps, and only its last three lines show under it, each
+older one fainter; once done, it folds to one line: how long it worked,
+how many steps, and an icon for each kind of work); a
 prompt as a card whose buttons
 only `asks` may press (enabled for them alone, and only their answer
 marks it sent: anyone else's changes nothing on it), an option answered in
@@ -513,7 +516,8 @@ words; and a turn's end when it was not `idle` (Stopped, or the error,
 quietly). A turn's draft (its agent's own: a draft
 naming another poster's turn shows nothing) shows after the turn's last
 record, and while
-a turn runs with no draft nor open card, a working line does: "Waiting
+a turn runs with no draft nor open card, and its last record is not a
+step (the card's head says it works), a working line does: "Waiting
 for your answer" in its place while the turn waits on the page's person's
 words (`turn.asked`), its composer saying what they type answers it
 ("Your answer for Juniper"), or whose answer it waits for, to anyone
@@ -526,14 +530,17 @@ one record never keeps the rest of the chat from drawing (the page draws
 its whole timeline each time, so one item that threw once drew nothing).
 
 Commentary uses the replies' safe markdown, smaller and muted; a long note
-folds at a whole block or sentence and expands on request. A step's line
-has a check for `ok: true`, an error mark for `ok: false`, or a spinner
-without a result; an `excerpt` shows below it, with failures in red. The
+folds at a whole block or sentence and expands on request (while the card
+works, each note is its first line). A step is one line in a quieter grey
+than the commentary, its verb in the tense it is in: "Running" while it is
+the turn's last record without a result, "Ran" once done, "Failed running"
+for `ok: false`, which alone is in colour; a step of no category is its
+tool's name. A step opened shows its whole arguments and its `excerpt`. The
 posting agent's own `/data/work/<agent>/home/` shows as `~/`, its workspace
 as `work/`, and `/data/hermes/managed-skills/` as `skills/`; the full
-arguments stay in a title on their text. Paths wrap to two lines before
-directories are shortened in the middle, keeping the filename. These
-rules also apply to steps without a category.
+arguments stay in a title on their text. A line too long for its width has
+its directories shortened in the middle, keeping the filename, before it
+ends in an ellipsis. These rules also apply to steps without a category.
 
 Load earlier messages reads older pages of both channels, keeping the
 visible message in place and the live cursor at its end. When scrolled

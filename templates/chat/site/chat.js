@@ -111,28 +111,46 @@ const MEMO_BITS_PER_S = 64000;
 const MEMO_MAX_MS = 5 * 60 * 1000;
 const MEMO_EXT = { "audio/webm": "webm", "audio/ogg": "ogg", "audio/mp4": "m4a", "audio/mpeg": "mp3", "audio/wav": "wav" };
 
-// What a step does (its `category`, docs/chat-records.md): an icon and the
-// verb its line starts with. A step of any other (`other`, or one from before
-// steps said) is its tool's own name.
+// What a step does (its `category`, docs/chat-records.md): an icon, the
+// verb its line starts with while it runs and once it ran, and what ends
+// the verb before its arguments. A step of any other (`other`, or one from
+// before steps said) is its tool's own name, in no tense.
 const STEP_SAYS = {
-  shell: ["terminal", "Running"],
-  web: ["globe", "Searching the web"],
-  read: ["book-open", "Reading"],
-  write: ["pencil", "Writing"],
-  browser: ["app-window", "Browsing"],
-  image: ["image", "Making an image"],
-  delegate: ["users", "Delegating"],
-  memory: ["brain", "Updating memory"],
+  shell: ["terminal", "Running", "Ran", ""],
+  web: ["globe", "Searching the web", "Searched the web", " for"],
+  read: ["book-open", "Reading", "Read", ""],
+  write: ["pencil", "Writing", "Wrote", ""],
+  browser: ["app-window", "Browsing", "Browsed", ""],
+  image: ["image", "Making an image", "Made an image", ":"],
+  delegate: ["users", "Delegating", "Delegated", ":"],
+  memory: ["brain", "Updating memory", "Updated memory", ":"],
 };
 
 // What a runtime's notice is about (its `category`): its icon. Any other is `info`.
 const NOTICE_ICON = { info: "info", warning: "alert", memory: "brain" };
 
-/// A step as a line reads it: `{icon, verb, args}` ("Running", `npm test`).
-export function stepSays(s) {
+/// A step as a line reads it: `{icon, verb, args}` ("Ran", `npm test`), as
+/// it runs (`now`) or once it ran ("Failed running", for `ok: false`); the
+/// verb ends as it joins its arguments ("Searched the web for").
+export function stepSays(s, now = false) {
   const args = typeof s.args === "string" ? s.args : "";
-  const [icon, verb] = Object.hasOwn(STEP_SAYS, s.category) ? STEP_SAYS[s.category] : ["wrench", typeof s.tool === "string" && s.tool ? s.tool : "a tool"];
-  return { icon, verb, args };
+  const failed = s.ok === false ? "Failed " : "";
+  if (!Object.hasOwn(STEP_SAYS, s.category)) {
+    const tool = typeof s.tool === "string" && s.tool ? s.tool : "a tool";
+    return { icon: "wrench", verb: `${failed}${tool}${args ? ":" : ""}`, args };
+  }
+  const [icon, doing, did, joins] = STEP_SAYS[s.category];
+  const verb = failed ? `${failed}${doing.charAt(0).toLowerCase()}${doing.slice(1)}` : now ? doing : did;
+  return { icon, verb: `${verb}${args ? joins : ""}`, args };
+}
+
+// How long, as a card's head says it: "40s", "3m 05s", "1h 5m".
+function took(ms) {
+  const s = Math.max(1, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${String(s % 60).padStart(2, "0")}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
 // Only the posting agent's own workspace is home. Other agents' paths
@@ -155,19 +173,19 @@ function middlePaths(text, room) {
   });
 }
 
-// Fit after layout and again on resize/open. Two lines are available before
-// any directories disappear, including on phones; filenames stay at the end.
+// Fit after layout and again on resize/open: a step is one line, its
+// directories shortened in the middle before it ends in an ellipsis, so
+// its filename stays, on phones too.
 function fitStepArgs(node) {
   const text = node.dataset.short;
   node.textContent = text;
-  if (!node.clientWidth) return; // a folded card is measured when opened
-  const height = Number.parseFloat(getComputedStyle(node).lineHeight) * 2 + 1;
-  if (node.scrollHeight <= height) return;
+  if (!node.clientWidth) return; // a folded card's line, or one rolled past, is measured when shown
+  if (node.scrollWidth <= node.clientWidth) return;
   let low = 1, high = text.length;
   while (low < high) {
     const room = Math.ceil((low + high) / 2);
     node.textContent = middlePaths(text, room);
-    if (node.scrollHeight <= height) low = room;
+    if (node.scrollWidth <= node.clientWidth) low = room;
     else high = room - 1;
   }
   node.textContent = middlePaths(text, low);
@@ -360,8 +378,9 @@ export function mount(root) {
     stopping: new Set(), // turns this page asked to stop
     pending: null, // { seq, at, n, target }: this page's message no turn has started on yet
     here: [], // the fragment's presence: [{ id, principal, data }]
-    toggled: new Map(), // a step card's key -> open, once someone opened or closed it
+    toggled: new Map(), // a step card's key -> true, once someone opened it whole
     expandedNotes: new Set(), // turn:step, a commentary someone expanded
+    openSteps: new Set(), // turn:step, a step someone opened to its arguments and result
     roster: [], // the owner's agents, from the shell that frames the chat: [{ identity, name, title, picture }]
     failed: new Map(), // post id -> the message and its transport error
     sending: new Map(), // post id -> a message of this page's the platform has not answered yet
@@ -823,9 +842,17 @@ export function mount(root) {
     const out = [];
     for (const it of items) {
       const prev = out[out.length - 1];
-      if (it.type === "step" && prev?.type === "steps" && prev.t === it.t) prev.steps.push(it.s);
-      else if (it.type === "step") out.push({ type: "steps", t: it.t, steps: [it.s] });
-      else out.push(it);
+      if (it.type === "step" && prev?.type === "steps" && prev.t === it.t) {
+        prev.steps.push(it.s);
+        continue;
+      }
+      if (prev?.type === "steps") {
+        // a running card's head says its turn works: no working line under it
+        if (it.type === "working" && prev.t === it.t) continue;
+        // a card's work ends where the next record begins
+        if (it.type !== "draft" && it.type !== "working" && it.type !== "asked") prev.until ??= it.at;
+      }
+      out.push(it.type === "step" ? { type: "steps", t: it.t, steps: [it.s] } : it);
     }
     return out;
   }
@@ -859,7 +886,7 @@ export function mount(root) {
       case "message":
         return messageNode(it.m);
       case "steps":
-        return stepsNode(it.t, it.steps);
+        return stepsNode(it.t, it.steps, it.until ?? null);
       case "prompt":
         return promptNode(it.t, it.p);
       case "end":
@@ -1251,12 +1278,12 @@ export function mount(root) {
     }
   }
 
-  // A turn's steps, one card: open while it works, saying what it does now
-  // ("Running: npm test"), folded once done ("Worked through N steps")
-  // unless someone opened it. Each step is its icon and its arguments, with
-  // a compact status and any useful result. The icon says the verb (its
-  // accessible name), so the verb shows only where the icon cannot say it:
-  // a step with no arguments, or another tool's, whose wrench names none.
+  // A turn's steps, one card. While its turn works the card's head says for
+  // how long, and only its last three lines show under it (chat.css), each
+  // older one fainter; once done it folds to one line, how long it worked.
+  // Opened, it is every line: the agent's commentary, and what each step
+  // does (its icon, its verb in the tense it is in, its arguments, on one
+  // line). A step opened shows its whole arguments and what came of it.
   function stepNote(t, s) {
     const note = el("div", "step-text");
     const body = el("div", "md");
@@ -1294,65 +1321,114 @@ export function mount(root) {
     for (const args of $("messages").querySelectorAll(".step-args")) fitStepArgs(args);
   });
   stepWidths.observe($("messages"));
-  function stepsNode(t, steps) {
+  // Each live card's head counts the time its turn has worked.
+  setInterval(() => {
+    for (const n of $("messages").querySelectorAll(".tools [data-since]")) n.textContent = `Working for ${took(Date.now() - Number(n.dataset.since))}`;
+  }, 1000);
+  function stepsNode(t, steps, until) {
     const key = `s:${t.key}:${steps[0].step}`;
     const live = running(t) && steps[steps.length - 1].n === t.lastN;
     const agent = profiles.get(t.agent)?.fragment ?? null;
-    const sig = JSON.stringify([steps, live, agent]);
+    const sig = JSON.stringify([steps, live, agent, until]);
+    const before = nodes.get(key)?.node;
     return [
       key,
       cached(key, sig, () => {
-        const d = el("details", `tools${live ? " live" : ""}`);
+        const d = el("details", "tools");
         d.dataset.turn = t.id;
-        d.open = state.toggled.has(key) ? state.toggled.get(key) : live;
-        d.ontoggle = () => {
-          if (d.open !== live) state.toggled.set(key, d.open);
-          else state.toggled.delete(key);
-          if (d.open) for (const args of d.querySelectorAll(".step-args")) fitStepArgs(args);
-        };
+        d.style.setProperty("--step-agent", colorOf(t.agent));
+        // the turn's first card counts from its start, any later one from its first step
+        const first = Math.min(...[...t.steps.values()].map((s) => s.at));
+        const from = steps[0].at === first ? t.startAt : steps[0].at;
         const summary = el("summary");
-        summary.replaceChildren(icon(live ? "loader" : "wrench", live ? "spin" : ""));
-        const now = stepSays(steps[steps.length - 1]);
-        const heading = el("span", "grow", live ? `${now.verb}${now.args ? `: ${shortStepArgs(now.args, agent)}` : ""}` : `Worked through ${plural(steps.length, "step")}`);
-        if (live && now.args) heading.title = `${now.verb}: ${now.args}`;
-        summary.append(heading);
-        summary.append(icon("chevron", "chev"));
-        d.append(summary);
-        for (const s of steps) {
-          if (s.text) d.append(stepNote(t, s));
-          const step = el("div", `step${s.ok === false ? " error" : ""}`);
-          const says = stepSays(s);
-          const known = Object.hasOwn(STEP_SAYS, s.category);
-          step.dataset.category = known ? s.category : "other";
-          const name = el("div", "step-name");
-          const glyph = icon(says.icon);
-          name.replaceChildren(glyph);
-          const label = el("div", "step-label");
-          if (known && says.args) {
-            glyph.removeAttribute("aria-hidden");
-            glyph.setAttribute("role", "img");
-            glyph.setAttribute("aria-label", says.verb);
-          } else label.append(el("span", "step-verb", says.args ? `${says.verb}:` : says.verb));
-          if (says.args) {
-            const args = el("code", "step-args", shortStepArgs(says.args, agent));
-            args.title = says.args;
-            args.dataset.short = args.textContent;
-            label.append(args);
+        if (live) {
+          summary.append(el("span", "step-dot"));
+          const since = el("span", "shimmer", `Working for ${took(Date.now() - from)}`);
+          since.dataset.since = String(from);
+          summary.append(since);
+        } else {
+          const kinds = el("span", "step-kinds");
+          for (const name of [...new Set(steps.map((s) => stepSays(s).icon))].slice(0, 4)) {
+            const i = el("i");
+            i.append(icon(name));
+            kinds.append(i);
           }
-          const status = s.ok === false ? "failed" : s.ok === true ? "done" : "running";
-          const mark = el("span", `step-status ${status}`);
-          mark.setAttribute("role", "img");
-          mark.setAttribute("aria-label", status);
-          mark.replaceChildren(icon(status === "failed" ? "x" : status === "done" ? "check" : "loader", status === "running" ? "spin" : ""));
-          name.append(label, mark);
-          step.append(name);
-          if (s.excerpt) step.append(el("pre", "step-result", s.excerpt));
-          d.append(step);
+          summary.append(kinds, el("span", null, `Worked for ${took((until ?? t.end?.at ?? t.lastAt) - from)}`));
         }
-        requestAnimationFrame(() => { for (const args of d.querySelectorAll(".step-args")) fitStepArgs(args); });
+        summary.append(el("span", null, `· ${plural(steps.length, "step")}`), icon("chevron", "chev"));
+        const lines = [];
+        steps.forEach((s, i) => {
+          if (s.text) lines.push(stepNote(t, s));
+          lines.push(stepLine(t, s, live && i === steps.length - 1 && typeof s.ok !== "boolean", agent));
+        });
+        d.dataset.lines = String(lines.length);
+        d.append(summary, ...lines);
+        // a line come since the last draw arrives as the ones before it step back
+        if (live && before && Number(before.dataset.lines) < lines.length) {
+          d.classList.add("advanced");
+          setTimeout(() => d.classList.remove("advanced"), 400);
+        }
+        const show = () => {
+          const whole = state.toggled.get(key) === true;
+          d.open = live || whole;
+          d.classList.toggle("rolling", live && !whole);
+          requestAnimationFrame(() => { for (const args of d.querySelectorAll(".step-args")) fitStepArgs(args); });
+        };
+        const toggle = () => {
+          if (state.toggled.get(key) === true) state.toggled.delete(key);
+          else state.toggled.set(key, true);
+          d.classList.remove("advanced");
+          show();
+        };
+        summary.onclick = (e) => {
+          e.preventDefault();
+          toggle();
+        };
+        // the rolling lines open the card whole too
+        d.onclick = (e) => {
+          if (d.classList.contains("rolling") && !summary.contains(e.target)) toggle();
+        };
+        show();
         return d;
       }),
     ];
+  }
+
+  function stepLine(t, s, now, agent) {
+    const says = stepSays(s, now);
+    const step = el("div", `step${s.ok === false ? " error" : ""}${now ? " running" : ""}`);
+    step.dataset.category = Object.hasOwn(STEP_SAYS, s.category) ? s.category : "other";
+    const opens = !!(says.args || s.excerpt);
+    const line = el(opens ? "button" : "div", "step-name");
+    const label = el("span", "step-label");
+    label.append(el("span", `step-verb${now ? " shimmer" : ""}`, says.verb));
+    if (says.args) {
+      const args = el("span", `step-args${now ? " shimmer" : ""}`, shortStepArgs(says.args, agent));
+      args.title = says.args;
+      args.dataset.short = args.textContent;
+      label.append(args);
+    }
+    line.append(icon(says.icon), label);
+    step.append(line);
+    if (!opens) return step;
+    line.type = "button";
+    const id = `${t.key}:${s.step}`;
+    const detail = el("div", "step-detail");
+    if (says.args) detail.append(el("pre", "step-call", shortStepArgs(says.args, agent)));
+    if (s.excerpt) detail.append(el("pre", "step-result", s.excerpt));
+    const show = () => {
+      const open = state.openSteps.has(id);
+      detail.hidden = !open;
+      line.setAttribute("aria-expanded", String(open));
+    };
+    line.onclick = () => {
+      if (state.openSteps.has(id)) state.openSteps.delete(id);
+      else state.openSteps.add(id);
+      show();
+    };
+    show();
+    step.append(detail);
+    return step;
   }
 
   // An approval: the agent's question and its options, which only the
