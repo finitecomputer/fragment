@@ -550,7 +550,9 @@ What every image may rely on, and must do.
 
 The guest holds no credential. Every outbound request to the hosts above
 is caught by the Computer DO's intercepts, which add what the platform
-holds. Other internet traffic goes out as it is (decision 43).
+holds. So is every request to the platform's own hosts, which add
+nothing (below, The platform's hosts). Other internet traffic goes out as
+it is (decision 43).
 
 ### Its process
 
@@ -880,6 +882,42 @@ expires within 30 days. The container application is the deployment's
 - What was said before an agent joined a chat is not for it: the guest
   skips a record whose `at` is before the agent's membership's `addedAt`
   (`GET /api/f/{name}/members`).
+
+### The platform's hosts
+
+An agent opens the apps it makes at their own addresses, with its
+browser and its `curl`, as its person does. The platform's own hosts are
+caught on the way out and answered by the platform itself, never the
+network: its origin's host (`FRAGMENT_PLATFORM_URL`) and every name under
+the fragments' suffix (`*.<suffix>`: fragments, computers' origins), on
+the platform's scheme, and on HTTPS its port
+(`fragment_core::computer::platform_intercepts`; HTTP intercepts take a
+name on port 80 alone, so dev's and the e2e's `http://…:<port>` hosts are
+caught at port 80). So it works wherever the computer runs: on
+Cloudflare through the platform rather than the internet, and on a
+self-hosted network whose platform is on an address a computer may not
+reach (the self-hosted lane's found 40, docs/self-host.md on `selfhost`),
+with the internet on or off.
+
+- **Whose request it is.** The router answers it as it answers the same
+  request from the internet: as whoever the guest's own cookies or
+  signature name, or as no one. The intercept adds no one: not the
+  computer's owner (whose session a browser of theirs holds, and the
+  computer never does), not an agent (an agent acts on the platform
+  through `api.fragment.internal`, signed as itself, above). So a
+  computer reaches nothing there that a browser anywhere could not: an
+  app shared by link opens with its share link, one for its members
+  alone opens to no one, and a person who signs in from the computer's
+  browser is that person there, as on any browser.
+- **What it sets**, as an edge sets it and never as the guest says: the
+  scheme and port it dialed (an intercept may hand over the host alone),
+  and the address a limit counts the request by, the computer's id
+  (`CF-Connecting-IP`). The guest's own forwarding headers go nowhere.
+- **A name under the suffix that is no host of this deployment's**
+  (another branch's, on a zone it shares) is the router's to answer, as
+  no one's (404): these intercepts reach the platform and nothing past it.
+- HTTPS takes the interception CA, which our Hermes image trusts in curl
+  and in its browser (Connections and operator keys, below).
 
 ### Models
 
