@@ -130,11 +130,22 @@ pub fn tokens(answer: &Value, requested: &[String]) -> Result<Tokens, Refused> {
     Ok(Tokens { access: access.into(), refresh: refresh.into(), expires_in, scopes })
 }
 
+/// Google's broader scopes its APIs take in place of narrower ones: Drive
+/// opens every file, so Sheets' and Docs' APIs accept it; Gmail's modify
+/// reads and sends. A scope one of these covers is not missing, since an
+/// agent holding the broader one can do what it does.
+const COVERS: &[(&str, &[&str])] = &[
+    ("https://www.googleapis.com/auth/drive", &["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/documents"]),
+    ("https://www.googleapis.com/auth/gmail.modify", &["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send"]),
+];
+
 /// What a connection's row asks for that its grant lacks, in the row's
-/// order: each requested scope not granted, never a sign-in one. Settings
-/// names them, and offers a reconnect to add them.
+/// order: each requested scope neither granted nor covered by a broader
+/// one granted (`COVERS`), never a sign-in one. Settings names them, and
+/// offers a reconnect to add them.
 pub fn missing(requested: &[String], granted: &[String]) -> Vec<String> {
-    requested.iter().filter(|s| !identity(s) && !granted.contains(s)).cloned().collect()
+    let covered = |s: &str| COVERS.iter().any(|(broad, narrow)| narrow.contains(&s) && granted.iter().any(|g| g == broad));
+    requested.iter().filter(|s| !identity(s) && !granted.contains(s) && !covered(s)).cloned().collect()
 }
 
 /// The scopes a connected account holds, as Pipes says of it (its
@@ -557,6 +568,14 @@ mod tests {
         assert_eq!(of(&["mail.read", "files.read"]), Vec::<String>::new(), "sign-in's scopes are never missing");
         assert_eq!(of(&["openid"]), ["mail.read", "files.read"], "in the row's order");
         assert_eq!(of(&["calendar", "files.read", "mail.read", EMAIL, "openid"]), Vec::<String>::new());
+        // Google's broader scopes cover narrower ones its APIs accept them for:
+        // Drive opens Sheets and Docs, Gmail's modify reads and sends
+        let g = |s: &str| format!("https://www.googleapis.com/auth/{s}");
+        let google: Vec<String> = ["drive", "spreadsheets", "documents", "gmail.readonly", "gmail.send", "gmail.modify", "calendar"].map(g).to_vec();
+        let lacks = |granted: &[&str]| missing(&google, &granted.iter().map(|s| g(s)).collect::<Vec<_>>());
+        assert_eq!(lacks(&["drive", "documents", "gmail.readonly", "gmail.send", "gmail.modify", "calendar"]), Vec::<String>::new(), "Sheets unticked, Drive allowed: nothing is missing");
+        assert_eq!(lacks(&["spreadsheets", "documents", "gmail.modify", "calendar"]), [g("drive")], "Sheets and Docs never cover Drive");
+        assert_eq!(lacks(&["gmail.readonly", "calendar"]), [g("drive"), g("spreadsheets"), g("documents"), g("gmail.send"), g("gmail.modify")], "read alone covers neither send nor modify");
         // what Pipes holds of a connected account, read back as a grant is
         assert_eq!(pipes_scopes(&json!({ "scopes": ["openid", "mail.read"] })), Some(vec!["openid".to_string(), "mail.read".to_string()]));
         let too_many = vec!["mail.read"; SCOPES_MAX + 1];

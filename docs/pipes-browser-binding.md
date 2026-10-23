@@ -65,7 +65,10 @@ it.
 `GET /api/connections` reads the grant back from Pipes (the connected
 account's `scopes`, read with no token minted): each connection's `granted`,
 and its `missing`, what its row asks for beyond signing in that the grant
-lacks. Settings names what is missing in words ("Not allowed: Sheets, Drive")
+lacks, where a broader scope granted covers a narrower one Google's APIs
+accept it for (Drive opens Sheets and Docs; Gmail's modify reads and sends:
+`connection_signin::COVERS`), so a person who unticks Sheets but allows Drive
+is not told Sheets is blocked. Settings names what is missing in words ("Not allowed: Sheets, Drive")
 with a **Reconnect to add**, the same Connect flow. Google's row asks for
 `include_granted_scopes=true`, so Google keeps what the person allowed before
 and its consent asks only for the rest; the grant it answers names them all,
