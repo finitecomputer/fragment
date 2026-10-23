@@ -1013,10 +1013,9 @@ fn routine_checks(s: &mut Suite, api: &Api, c: &Routined, say: &dyn Fn(u32, &str
     // in it died at the next one) touches no schedule: they are its fragment's
     let generation = api.signed(c.owner, "GET", &format!("/api/computers/{}", c.id), None)?.body["generation"].as_u64().unwrap_or(0);
     let r = api.patient(c.wake + Duration::from_secs(60)).signed(c.owner, "POST", &format!("/api/computers/{}/restart", c.id), Some(&json!({ "generation": generation })))?;
-    // the restart may answer while its start is still under way (a real
-    // Hermes on a preview: `starting`), so awake is waited for, not read
-    let restarted = r.status == 200 && (r.body["phase"] == "awake" || s.eventually(c.wake, || phase(api, c.owner, c.id) == "awake"));
-    s.ok("its computer restarts, and its routine is kept as it was", restarted && list(api) == vec![first.clone()], json!({ "restart": r.body, "schedules": list(api) }));
+    // it answers once its start is up (a real Hermes on a preview answered
+    // `starting` while its container's exit report made that start)
+    s.ok("its computer restarts, and its routine is kept as it was", r.status == 200 && r.body["phase"] == "awake" && list(api) == vec![first.clone()], json!({ "restart": r.body, "schedules": list(api) }));
 
     // asleep, due: its record on tasks wakes the computer, and the agent does it in the chat
     let (slept, last) = put_to_sleep(s, api, c.owner, c.id);
