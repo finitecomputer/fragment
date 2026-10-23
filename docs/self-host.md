@@ -809,6 +809,33 @@ intranet runs it, every part the stack's child:
   system bundle, so every intercepted HTTPS page was an interstitial in
   it, on Cloudflare too. Node takes it from the system bundle with
   `NODE_USE_SYSTEM_CA=1` (its own roots refused it).
+- **On a `.localhost` stack too** (found 40's other half, done
+  2026-10-23): Paul's Hermes built an app on his local stack and could
+  not open it in its own browser. Chrome and curl take a `.localhost`
+  name for the machine's own loopback without asking DNS (RFC 6761), so
+  `http://<app>.fragment.localhost:8790/` went to the guest's own
+  127.0.0.1 and never left the VM. The egress could not have caught it
+  anyway: sandcastle's proxy knows a connection's name only by the fake
+  address its DNS gave for it (198.18.0.0/15, `fakeip.rs`), never by
+  `Host` or SNI, and an HTTP intercept matches a name on port 80 alone
+  (`rules.rs`, as Cloudflare's), so the platform's port missed it even by
+  DNS. Now the bridge, which every image runs, listens on the guest's
+  loopback at the platform's port when the computer's origin is plain
+  HTTP under `.localhost` (images/bridge `loopback.rs`): it reads each
+  connection's `Host`, dials a name in the zone on port 80 through the
+  guest's resolver (with the internet off too: an intercepted name always
+  resolves), and passes the bytes both ways, a WebSocket's included; any
+  other host there is a 421. `egress_platform` now hands the router the
+  platform's port on HTTP as on HTTPS, so the app's origin is the one its
+  page names and its live socket's `Origin` passes (it handed it port 80:
+  with the forwarder alone, Hermes' browser loaded the app and its list,
+  over HTTP, and sat on "connecting…", its socket refused). The
+  forwarder holds the platform's port on the guest's loopback (8790 on
+  dev), so an agent's own server cannot take that port there. Left: a
+  client that asks DNS for a `.localhost` name (glibc's, so Python's and
+  Node's) gets the intercept's address on the platform's port, which
+  nothing catches; it reaches the app at its name on port 80 alone
+  (below, open questions).
 - **With the internet off** (Paul's lockdown, 2026-10-22: later, not
   built): the platform's hosts reach the platform and nothing past it, so
   the design holds with `enableInternet: false`. A test fleet's lever,
@@ -880,6 +907,36 @@ local fleet's model names):
 - **The real engine and Hermes on the LAN:** not run yet (the engine was
   Paul's for a live test); the lane's run, and Hermes opening its own app
   with its browser and curl over the door's https, come next.
+
+**Evidence for found 40 on `.localhost`, 2026-10-23** (branch
+`selfhost-localhost-apps`, on `selfhost` a8e0baef; sandcastle `node`
+57cd969 and celld unchanged; every run on celld):
+
+- **Before** (the new checks alone, the bridge without its forwarder; the
+  real engine, computers): 202 passed, **6 failed**, 1 skipped: each of the
+  stub's opens of the app at its own address
+  (`http://<app>.fragment.localhost:<port>/`, on its loopback as Chrome and
+  curl dial it) was `client error (Connect)`, the lockdown's too.
+- **The real engine** (`FRAGMENT_E2E_NODES=real`, computers): 208 passed,
+  0 failed, 1 skipped (the stub's awake save, master's own skip): at its
+  own address the app opened with its share link (200), without it and
+  members only it did not, a name no one has was the router's 404,
+  `localhost:<port>` the forwarder's 421, and with the internet off it
+  opened.
+- **The real engine, Hermes** (hermes): 71 passed, 0 failed: curl in
+  Hermes' terminal read the app it made, and agent-browser's Chromium
+  opened it and showed who is here, which comes over its live socket
+  alone. With the forwarder but not the port: 70 passed, 1 failed,
+  `browser-dead: connecting… Add oat milk ×` (its list over HTTP, its
+  socket refused).
+- **Two nodes on the Docker double** (computers): 199 passed, 0 failed, 10
+  skipped (the double's 9 of the platform's hosts and the lockdown: it
+  resolves no name under a glob).
+- **wrangler, local Docker** (computers, master's path): 207 passed, 0
+  failed, 2 skipped (the hosted lane's): the forwarder's dial on 80
+  reaches workerd's egress too.
+- **`cargo xtask check`** (`FRAGMENT_SCHEMA_BASE=d8e0f86b`): 848 passed, 0
+  failed; `images/`: 262 passed, clippy clean.
 
 ### 10. Money: who used what, in units (done)
 
@@ -1383,7 +1440,9 @@ built 2026-10-22 15:20.
   the platform's hosts (found 40) never sees the request on a stack whose
   zone is `fragment.localhost` (it tried four addresses, then reported the
   app live from `fragment status`). The LAN's zone is a real name, and so
-  is Cloudflare's.
+  is Cloudflare's. Since fixed (found 40, "On a `.localhost` stack too",
+  2026-10-23): the bridge's loopback forwarder, and the hermes lane's
+  check that Hermes opens its app with curl and in its browser.
 - **Bonsai** (`FRAGMENT_MODELS_FILE`, its tiers and fallback on
   `bonsai-2-27b`): an agent's `POST /api/models/v1/chat/completions`
   (`model: cheap`) through the dev stack, 200 in 565 ms on celld ("Tomatoes
@@ -1477,3 +1536,12 @@ CELLD_BIN=… SANDCASTLE_NODE_BIN=~/.local/opt/sandcastle/bin/sandcastle-node ca
   The lane's budget is 6.72 MB.
 - **Found 46 (above):** a sleep's two 100 ms polls (master's), about
   210 ms of every sleep and restart: filed as #552, not urgent.
+- **Found 40 on `.localhost`: a client that asks DNS** (glibc's: Python's,
+  Node's) for an app's name gets the intercept's address on the platform's
+  port, which no intercept catches (HTTP's take port 80 alone), so it
+  reaches the app only at its name on port 80. Chrome and curl, which
+  Hermes opens apps with, work. Two ways, if it matters: `libnss-myhostname`
+  in the Hermes image's base (every `.localhost` name to loopback, where
+  the forwarder takes it; the base's 1.4 GB pulled again), or sandcastle's
+  HTTP intercepts taking a name with a port (beyond Cloudflare's), set on
+  nodes for the platform's port.
