@@ -1,0 +1,21 @@
+{
+  "compatibility_date": "2026-01-01",
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "Agent",
+        "name": "AGENT"
+      }
+    ]
+  },
+  "main": "celld.mjs",
+  "migrations": [
+    {
+      "new_sqlite_classes": [
+        "Agent"
+      ],
+      "tag": "v1"
+    }
+  ],
+  "name": "fragment-agent"
+}
