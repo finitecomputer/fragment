@@ -198,6 +198,9 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 freeze: Option<bool>,
                 #[serde(default)]
                 argv: Option<Vec<String>>,
+                /// BENCH: `bench-exec`'s script.
+                #[serde(default)]
+                script: Option<String>,
             }
             let t: TestComputer = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             if !valid_computer_id(&t.computer) {
@@ -210,7 +213,7 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                     return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the computer levers reach e2e people's computers alone"));
                 }
             }
-            json_answer(&crate::computer::ask(env, &t.computer, "computer/test", &serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze, "argv": t.argv })).await?)
+            json_answer(&crate::computer::ask(env, &t.computer, "computer/test", &serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze, "argv": t.argv, "script": t.script })).await?)
         }
         // the registry is the whole deployment's: a preview's is everyone's
         (Method::Post, ["registry"]) if cfg.levers_scoped => Err(no_route("/api/test/registry")),
