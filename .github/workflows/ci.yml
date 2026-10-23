@@ -259,18 +259,23 @@ jobs:
       # recorded once they are all green as an artifact named by it (the
       # commit and the tree in it). `proven` counts it only for a run that
       # succeeded, `check` and every shard of its latest attempt included.
-      # A re-run's replaces its own.
+      # A re-run's replaces its own. Recording is a saving, not a test: a
+      # step of it that fails warns and leaves the run as green as its
+      # shards, unrecorded (a push of its tree is then tested again).
       - id: tree
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tree=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$GITHUB_SHA" --jq .tree.sha)
-          [[ $tree =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || { echo "::error::the API named no tree for $GITHUB_SHA: '$tree'"; exit 1; }
+          [[ $tree =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || { echo "::warning::the API named no tree for $GITHUB_SHA: '$tree'"; exit 1; }
           echo "this run tested $GITHUB_SHA, whose tree is $tree"
           echo "$GITHUB_SHA $tree" > "$RUNNER_TEMP/tested-tree"
           echo "tree=$tree" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - if: steps.tree.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
         with:
           name: tested-tree-${{ steps.tree.outputs.tree }}
           path: ${{ runner.temp }}/tested-tree
