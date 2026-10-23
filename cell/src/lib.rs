@@ -732,7 +732,12 @@ async fn identities(mut req: Request, env: &Env, ctx: &Context, url: &Url, rest:
                 let owner_key = authenticate(&req, url, Payload::Read(&body))?;
                 let proof = reg.proof.ok_or_else(|| CellError::invalid("registering an agent needs a proof by its key"))?;
                 let key = proven_key(&proof, &req, url, &owner_key)?;
-                json_answer(&ask_registry(env, &calls::RegisterAgent { owner: calls::By::Key(owner_key), key, fragment: None }).await?)
+                let agent = ask_registry(env, &calls::RegisterAgent { owner: calls::By::Key(owner_key), key, fragment: None }).await?;
+                // it comes in where its person is (decision 64)
+                if let Some(person) = &agent.owner {
+                    members::agent_made(env, person, &agent.id).await;
+                }
+                json_answer(&agent)
             }
         };
     }

@@ -590,10 +590,12 @@ fn search_and_archive(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
     let found = s.eventually(SEARCH_WAIT, || theirs(&member, "tomatoes").is_ok_and(|r| !hits_in(&r, &chat).is_empty()));
     s.ok("a new member's search finds what the chat said before they joined (signed, with their key)", found, theirs(&member, "tomatoes")?);
 
-    // the chat's agents, the first added first, are named in every member's row
+    // the chat's agents, the first added first, are named in every member's
+    // row (agents of someone in no part of it, by a lever: a member's own
+    // come in with them, decision 64, and leave with them)
     let rows = || -> Result<(Value, Value)> { Ok((row(&mine()?), row(&api.signed(&member, "GET", "/api/fragments", None)?))) };
-    let (_, lead) = super::delegation::agent_of(api, &member)?;
-    let (_, second) = super::delegation::agent_of(api, &member)?;
+    let (_, lead) = super::delegation::agent_of(api, &outsider)?;
+    let (_, second) = super::delegation::agent_of(api, &outsider)?;
     let added = [&lead, &second].map(|a| api.share(&chat, a, "viewer"));
     let (my_row, their_row) = rows()?;
     s.ok(

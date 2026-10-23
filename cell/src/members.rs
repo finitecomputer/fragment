@@ -63,8 +63,31 @@ use crate::registry::invites::ForgetInvite;
 pub(crate) const INDEX_FLUSH_MAX: i64 = 32;
 
 /// Marks the registry's `invites/claim` and `invites/decline`, a person's
-/// yes or no to the invite waiting on their email; the router never sets it.
+/// yes or no to the invite waiting on their email, and the platform's
+/// `members/agent` (`agent_made`); the router never sets it.
 pub(crate) const CLAIM_HEADER: &str = "x-fragment-invite-claim";
+
+/// `agent`, just made by `person` (registered: lib.rs `identities`,
+/// runs_on.rs), comes in beside them wherever they are a member of
+/// someone else's fragment (decision 64: their membership is their
+/// agents'), each fragment asked once, `INDEX_FLUSH_MAX` at a time. Best
+/// effort: one not told keeps it out until its person's next yes there,
+/// said in the log.
+pub(crate) async fn agent_made(env: &Env, person: &str, agent: &str) {
+    let theirs: Vec<String> = match crate::listed(env, person).await {
+        Ok(list) => list.fragments.into_iter().filter(|f| matches!(f.role, Role::Viewer | Role::Editor)).map(|f| f.name).collect(),
+        Err(e) => return console_error!("{}", json!({ "agent-made": agent, "list": person, "failed": e.message })),
+    };
+    let body = json!({ "person": person, "agent": agent });
+    for round in theirs.chunks(INDEX_FLUSH_MAX as usize) {
+        let told = join_all(round.iter().map(|f| crate::fragment::ask(env, f, "members/agent", &body))).await;
+        for (f, told) in round.iter().zip(told) {
+            if let Err(e) = told {
+                console_error!("{}", json!({ "agent-made": agent, "fragment": f, "failed": e.message, "code": e.code }));
+            }
+        }
+    }
+}
 
 /// Why a chat's own agent (`chat_agent`) keeps its place: the chat is its
 /// conversation, and its replies and steps post there as an editor.
@@ -459,10 +482,11 @@ impl FragmentCell {
         Ok(rows.iter().filter_map(|r| r["principal"].as_str().map(str::to_string)).collect())
     }
 
-    /// A new member needs room under `MEMBERS_MAX`; a role change does not.
-    fn check_room(&self, current: Option<Role>) -> CellResult<()> {
-        if current.is_none() && self.count("SELECT COUNT(*) AS n FROM members")? >= limits::MEMBERS_MAX as u64 {
-            return Err(CellError::invalid(format!("a fragment has at most {} members", limits::MEMBERS_MAX)));
+    /// `adding` new members (a person, and the agents in with them) need
+    /// room under `MEMBERS_MAX`; a role change needs none.
+    fn room_for(&self, adding: u64) -> CellResult<()> {
+        if adding > 0 && self.count("SELECT COUNT(*) AS n FROM members")? + adding > limits::MEMBERS_MAX as u64 {
+            return Err(CellError::invalid(format!("a fragment has at most {} members (a person's agents count, in with them)", limits::MEMBERS_MAX)));
         }
         Ok(())
     }
@@ -527,7 +551,11 @@ impl FragmentCell {
         if current.is_some() && body.role < Role::Editor && self.chat_agent()?.as_deref() == Some(target.id.as_str()) {
             return Err(refusal(true, CHAT_AGENT_STAYS_EDITOR));
         }
-        self.check_room(current)?;
+        // an agent in with its person holds their role (decision 64)
+        if target.kind == IdentityKind::Agent && self.entity_of(&target.id)?.is_some() {
+            return Err(refusal(true, "it is in with its person, at their role: change theirs, and it follows"));
+        }
+        self.room_for(u64::from(current.is_none()))?;
         let by = actor.by.as_str();
         let now = js::now_ms();
         self.exec(
@@ -567,6 +595,11 @@ impl FragmentCell {
             if let Some(owner) = &target.owner {
                 self.reopen_sockets(&format!("p:{owner}"), "your agent's role changed");
             }
+            // a person's agents in with them take their role (decision 64)
+            if target.kind == IdentityKind::Person && self.entity_of(&target.id)?.is_some() {
+                let agents = self.entity_agents(&target.id)?;
+                self.agents_join(&target.id, &agents, body.role)?;
+            }
         }
         // the agent's list holds this fragment before its computer is told
         self.flush_index().await;
@@ -599,34 +632,50 @@ impl FragmentCell {
                 Some(_) => refusal(actor.role == Some(Role::Owner), why),
             });
         }
+        // the whole entity goes (decision 64): a person with the agents in
+        // with them, or such an agent with its person and theirs
+        let entity = self.entity_of(&target)?;
+        let gone: Vec<String> = match &entity {
+            Some(person) => std::iter::once(person.clone()).chain(self.entity_agents(person)?).collect(),
+            None => vec![target.clone()],
+        };
         // a chat's own agent is not removed by anyone else (it may leave:
         // its owner's wipe does so, ended.rs)
-        if !is_self && self.chat_agent()?.as_deref() == Some(target.as_str()) {
+        let lead = self.chat_agent()?;
+        if !is_self && gone.iter().any(|g| lead.as_deref() == Some(g.as_str())) {
             return Err(refusal(actor.role == Some(Role::Owner), CHAT_AGENT_STAYS));
         }
-        let removed = self.rows("SELECT owner, kind FROM members WHERE principal = ?", vec![target.as_str().into()])?;
-        let owner = removed.first().and_then(|r| r["owner"].as_str()).map(str::to_string);
-        self.exec("DELETE FROM members WHERE principal = ?", vec![target.as_str().into()])?;
-        self.listed_left(&target)?;
-        self.drop_subscriptions(&target)?;
-        self.agent_removed(&target)?;
-        self.index_change(&target, None)?;
-        self.sharing_changed()?;
-        // every list's row names the agents left
-        if removed.first().is_some_and(|r| r["kind"] == "agent") {
-            self.reindex()?;
-        }
-        self.close_sockets(&format!("p:{target}"), "membership revoked");
-        // an agent's owner who read through it, and has no standing of their own now
-        if let Some(owner) = owner {
-            let still = self.member_role(&owner)?.is_some()
-                || !self.rows("SELECT principal FROM members WHERE owner = ? LIMIT 1", vec![owner.as_str().into()])?.is_empty();
-            if !still {
-                self.close_sockets(&format!("p:{owner}"), "their agent's membership was revoked");
+        let mut agents_left = false;
+        // bounded: one person and their agents
+        for who in &gone {
+            let removed = self.rows("DELETE FROM members WHERE principal = ? RETURNING owner, kind", vec![who.as_str().into()])?;
+            agents_left |= removed.first().is_some_and(|r| r["kind"] == "agent");
+            self.listed_left(who)?;
+            self.drop_subscriptions(who)?;
+            self.agent_removed(who)?;
+            self.index_change(who, None)?;
+            self.close_sockets(&format!("p:{who}"), "membership revoked");
+            // an agent's owner who read through it, and has no standing of their own now
+            if let Some(owner) = removed.first().and_then(|r| r["owner"].as_str()) {
+                let still = self.member_role(owner)?.is_some() || !self.rows("SELECT principal FROM members WHERE owner = ? LIMIT 1", vec![owner.into()])?.is_empty();
+                if !still {
+                    self.close_sockets(&format!("p:{owner}"), "their agent's membership was revoked");
+                }
             }
         }
-        let how = if is_self { "left" } else { "was removed" };
-        self.event("member.removed", &format!("{} {how}{}", npub::display(&target), actor.said()), actor.noted(json!({ "principal": npub::display(&target) })));
+        self.sharing_changed()?;
+        // every list's row names the agents left
+        if agents_left {
+            self.reindex()?;
+        }
+        let principal = npub::display(entity.as_deref().unwrap_or(&target));
+        let how = match (is_self, gone.len() > 1) {
+            (true, true) => "left, with their agents",
+            (true, false) => "left",
+            (false, true) => "was removed, with their agents",
+            (false, false) => "was removed",
+        };
+        self.event("member.removed", &format!("{principal} {how}{}", actor.said()), actor.noted(json!({ "principal": principal })));
         self.flush_index().await;
         json_response(&json!({ "ok": true, "removed": npub::display(&target) }))
     }
@@ -807,6 +856,8 @@ impl FragmentCell {
     /// role they hold kept; either way it is spent, and its owner's list
     /// counts it no more. 404 when none waits (revoked, expired, or met
     /// already), and the registry forgets it. A full fragment keeps it.
+    /// Their agents (`claim.agents`, the registry's) come in with them
+    /// (decision 64: `agents_join`), or the claim is refused whole.
     pub(crate) async fn claim_invite(&self, claim: &ClaimInvite) -> CellResult<Value> {
         self.name()?;
         assert!(npub::is_identity(&claim.identity), "the registry names a person by their npub");
@@ -820,33 +871,140 @@ impl FragmentCell {
         let who = claim.identity.as_str();
         let current = self.member_role(who)?;
         let kept = current.is_some_and(|c| c >= role);
-        if !kept {
-            self.check_room(current)?;
-        }
+        // the owner is in already, with their agents as they chose them
+        let owner = current == Some(Role::Owner);
+        let agents: &[String] = if owner { &[] } else { &claim.agents };
+        self.room_for(u64::from(current.is_none()) + self.not_members(agents)?)?;
         self.exec("DELETE FROM invites WHERE email = ?", vec![claim.email.as_str().into()])?;
         // met, whatever it grants: the owner's list counts it no more
         self.sharing_changed()?;
-        if kept {
-            self.flush_index().await;
-            return Ok(json!({ "role": current }));
+        let now = if kept { current.expect("kept is a role held") } else { role };
+        if !kept {
+            self.exec(
+                "INSERT INTO members (principal, role, added_by, added_at, kind) VALUES (?, ?, ?, ?, 'person')
+                 ON CONFLICT (principal) DO UPDATE SET role = excluded.role",
+                vec![who.into(), role.as_str().into(), by.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
+            )?;
+            self.index_change(who, Some(role))?;
+            self.event("member.joined", &format!("{who} joined as {}, invited by email, with their agents", role.as_str()), json!({ "principal": who, "role": role, "by": by }));
+            if current.is_some() {
+                self.reopen_sockets(&format!("p:{who}"), "your role changed");
+            }
         }
-        self.exec(
-            "INSERT INTO members (principal, role, added_by, added_at, kind) VALUES (?, ?, ?, ?, 'person')
-             ON CONFLICT (principal) DO UPDATE SET role = excluded.role",
-            vec![who.into(), role.as_str().into(), by.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
-        )?;
-        self.index_change(who, Some(role))?;
-        self.event("member.joined", &format!("{who} joined as {}, invited by email", role.as_str()), json!({ "principal": who, "role": role, "by": by }));
-        if current.is_some() {
-            self.reopen_sockets(&format!("p:{who}"), "your role changed");
+        if !owner {
+            self.agents_join(who, agents, now)?;
         }
         self.flush_index().await;
-        Ok(json!({ "role": role }))
+        self.flush_joined().await;
+        Ok(json!({ "role": now }))
+    }
+
+    /// How many of `ids` are no members here.
+    fn not_members(&self, ids: &[String]) -> CellResult<u64> {
+        let mut n = 0;
+        // bounded by the caller's list (a person's agents)
+        for id in ids {
+            n += u64::from(self.member_role(id)?.is_none());
+        }
+        Ok(n)
+    }
+
+    /// `person`'s agents in with them, at their role (decision 64; Paul,
+    /// 2026-10-23: "If I invite a member to a fragment, when they accept
+    /// they add their agent... We have to treat them as one entity and work
+    /// to secure the whole entity"): each a member as itself, so its own
+    /// list names the fragment, a chat's roster has it and its computer
+    /// hears it joined; one in already takes the role. No event names
+    /// them (the person's says "with their agents"), nor does the sheet
+    /// (share.rs `with_their_person`). The caller made the room. Bounded:
+    /// a person has at most `AGENTS_PER_OWNER_MAX` agents.
+    fn agents_join(&self, person: &str, agents: &[String], role: Role) -> CellResult<()> {
+        assert!(agents.len() as u64 <= limits::AGENTS_PER_OWNER_MAX, "a person has a bounded number of agents");
+        assert!(matches!(role, Role::Viewer | Role::Editor), "an agent is in at its person's role, never owner (R17)");
+        let now = js::now_ms();
+        let mut joined = false;
+        for agent in agents {
+            let current = self.member_role(agent)?;
+            if current == Some(role) {
+                continue;
+            }
+            self.exec(
+                "INSERT INTO members (principal, role, added_by, added_at, kind, owner) VALUES (?, ?, ?, ?, 'agent', ?)
+                 ON CONFLICT (principal) DO UPDATE SET role = excluded.role",
+                vec![agent.as_str().into(), role.as_str().into(), person.into(), SqlStorageValue::Integer(now), person.into()],
+            )?;
+            self.index_change(agent, Some(role))?;
+            match current {
+                None => {
+                    self.agent_added(agent, Some(person), now)?;
+                    joined = true;
+                }
+                Some(_) => self.reopen_sockets(&format!("p:{agent}"), "your role changed"),
+            }
+        }
+        // every list's row names its agents
+        if joined {
+            self.reindex()?;
+        }
+        Ok(())
+    }
+
+    /// The person whose entity `principal` is part of here (decision 64):
+    /// themselves, a member who is not the owner; or, for an agent, its
+    /// person, such a member. None for the owner and their own agents
+    /// (each in as its owner chose), and for anyone not in.
+    fn entity_of(&self, principal: &str) -> CellResult<Option<String>> {
+        let rows = self.rows(
+            "SELECT m.kind, m.owner, (SELECT role FROM members WHERE principal = m.owner) AS owner_role, m.role FROM members m WHERE m.principal = ?",
+            vec![principal.into()],
+        )?;
+        let Some(r) = rows.first() else { return Ok(None) };
+        let in_with = |role: &Value| role.as_str().is_some_and(|r| r != Role::Owner.as_str());
+        Ok(match (r["kind"].as_str(), r["owner"].as_str()) {
+            (Some("agent"), Some(person)) if in_with(&r["owner_role"]) => Some(person.to_string()),
+            (Some("agent"), _) => None,
+            _ if in_with(&r["role"]) => Some(principal.to_string()),
+            _ => None,
+        })
+    }
+
+    /// `person`'s agents in with them.
+    fn entity_agents(&self, person: &str) -> CellResult<Vec<String>> {
+        let rows = self.rows(
+            "SELECT principal FROM members WHERE owner = ? AND kind = 'agent' ORDER BY added_at, principal LIMIT ?",
+            vec![person.into(), SqlStorageValue::Integer(limits::AGENTS_PER_OWNER_MAX as i64)],
+        )?;
+        Ok(rows.iter().filter_map(|r| r["principal"].as_str().map(str::to_string)).collect())
+    }
+
+    /// `members/agent` (the platform's, as an agent is made: `agent_made`):
+    /// `agent`, just made by `person`, comes in beside them when they are a
+    /// member here who is not its owner, at their role. Anything else
+    /// changes nothing.
+    pub(crate) async fn agent_with_person(&self, body: &Value) -> CellResult<Value> {
+        self.name()?;
+        let (Some(person), Some(agent)) = (body["person"].as_str(), body["agent"].as_str()) else {
+            return Err(CellError::invalid("members/agent names a person and their agent"));
+        };
+        if !npub::is_identity(person) || !npub::is_identity(agent) {
+            return Err(CellError::invalid("members/agent names identities"));
+        }
+        if self.entity_of(person)?.as_deref() != Some(person) {
+            return Ok(json!({ "joined": false }));
+        }
+        let role = self.member_role(person)?.expect("a person in is a member");
+        let agents = [agent.to_string()];
+        self.room_for(self.not_members(&agents)?)?;
+        self.agents_join(person, &agents, role)?;
+        self.flush_index().await;
+        self.flush_joined().await;
+        Ok(json!({ "joined": true }))
     }
 
     /// The fragment's sharing, as its owner's list carries it: `guests`
     /// counts the members who are neither the owner nor an agent of theirs,
-    /// and `invites` those waiting on an email (as of this change: one
+    /// nor an agent in with its person (decision 64: one entity, counted
+    /// once), and `invites` those waiting on an email (as of this change: one
     /// that runs out later is counted until the alarm drops it at its
     /// expiry, which sends the row again: `drop_spent_invites`).
     pub(crate) fn sharing_counts(&self) -> CellResult<Sharing> {
@@ -860,7 +1018,8 @@ impl FragmentCell {
         }
         let counts: Vec<Counts> = self.typed(
             "SELECT (SELECT COUNT(*) FROM members) AS members,
-                    (SELECT COUNT(*) FROM members WHERE principal != ? AND (owner IS NULL OR owner != ?)) AS guests,
+                    (SELECT COUNT(*) FROM members m WHERE principal != ? AND (owner IS NULL OR owner != ?)
+                       AND NOT EXISTS (SELECT 1 FROM members p WHERE p.principal = m.owner)) AS guests,
                     (SELECT COUNT(*) FROM invites WHERE expires_at > ?) AS invites",
             vec![owner.as_str().into(), owner.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
         )?;

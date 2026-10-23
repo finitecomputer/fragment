@@ -201,8 +201,10 @@ fragment invites decline their-garden--k3x9            # no: it waits no more
 ```
 
 - Accept or decline only when your owner asked you to, and say which you
-  did. Accepted, it is in their list (`fragment list`), and you act there
-  for them.
+  did. Accepted, it is in their list (`fragment list`), and you and their
+  other agents are in it with them, as yourselves, at their role: in a
+  chat you are in its `@` roster. Leaving it (`fragment members leave`)
+  takes your owner and all their agents out.
 
 - Send the person the links the CLI prints; never construct one.
 - `public` makes it anyone's to open, no share link needed. Before it, say plainly

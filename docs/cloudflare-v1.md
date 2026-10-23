@@ -1337,14 +1337,76 @@ Paul:
       "sign in to open it": a sign-in still meets them, until the last
       runs out (docs/technical-debt-ledger.md, "Invites from before their
       yes").
-    - Open: a person in someone else's fragment cannot add their own agent
-      there as a member (only its owner manages members); their agents
-      reach it acting for them, but a chat's @ roster lists its member
-      agents alone.
+    - (The open question this left, a member adding their own agent, is
+      decision 64's.)
     - Status (2026-10-22): approved by Paul with the four changes above
       (agents answer for their owner, direct adds within one person,
-      agents unnamed, an answer goes from every tab); built on
-      `claude/editor-invites`.
+      agents unnamed, an answer goes from every tab); merged (#536).
+
+64. **A person's membership is their agents'** (Paul, 2026-10-23: "If I
+    invite a member to a fragment, when they accept they add their agent.
+    That should be the default. It's too confusing for people to try to
+    remember what 'they' have access to vs their 'agent'. We have to
+    treat them as one entity and work to secure the whole entity").
+    - **Rows, kept in step with the person's.** Accepting an invite makes
+      the person a member and each of their agents a member beside them,
+      as itself, at the person's role (`members.rs` `agents_join`; the
+      registry's claim names their agents). An agent is then in as any
+      agent member is: it acts there as itself, a chat's roster has it
+      (after the chat's own agent, its lead, which stays first), its own
+      list names the fragment (its computer follows it) and its computer
+      hears it joined. Rows rather than a membership derived at access
+      time because everything that makes an agent take part reads rows:
+      the roster (`__members`), its list (the bridge's discovery), its
+      join, a channel's `from: agent`; a derived membership would reach
+      the fragment but take part in nothing. The person's row stays the
+      one truth: an agent's row is the person's, kept in the same
+      fragment, in the same turn, by every change to them.
+    - **One entity.** The person's role is their agents' (a role change
+      moves them all; an agent's own is refused, 400, saying so). Removing
+      or leaving, by the person or by any agent of theirs, takes the
+      person and every agent of theirs out (`remove_member`). No yes,
+      role change, removal or leaving leaves a person in without their
+      agents, nor an agent without its person (an agent made later and
+      not told, below, is the one gap).
+      Room under `MEMBERS_MAX` is for the whole entity, or the yes is
+      refused whole.
+    - **Agents made later** come in where their person is: as an agent is
+      registered (the API's `POST /api/identities`, a computer's agent
+      fragment taking it), the platform reads its person's list and asks
+      each fragment of someone else's they are in to add it
+      (`members/agent`, `members::agent_made`). Best effort, logged: one
+      not told keeps it out until its person's next yes there
+      (docs/technical-debt-ledger.md, "An agent made later joins best
+      effort").
+    - **The owner's side is unchanged and consistent.** The owner's own
+      agents reach everything the owner owns acting for them (R17;
+      Hermes always acts `for` its owner) and are members of what the
+      owner puts them in (a chat's lead, an agent fragment), each as the
+      owner chose: a chat of the owner's is not given every agent of
+      theirs. The owner is never half in: they own it whole.
+    - **Never named to the inviter.** The invite, its mail and its
+      answers name no agent; the share sheet, the access view and an
+      export show the person as one entry, "with their agents", and name
+      none (`share.rs` `with_their_person`). In a chat, an agent that
+      takes part shows as itself (it speaks), and the `@` list shows each
+      agent under its person ("Skyler's agent"). The fragment's own
+      members list (the API's, `GET members`) has every row, its truth.
+    - **Securing the whole entity.** An agent in with its person reaches
+      what they do, capped as agents are (R17: never above editor, never
+      owner, its own membership never shares). A hold now caps it there as
+      itself too (`standing`: a hold caps an agent in someone else's
+      fragment, never its own memberships, decision 36). What this opens:
+      someone else's chat now has their agents in it, and a Hermes agent
+      acts `for` its owner whoever asks it, so whoever speaks in a shared
+      chat can ask a guest's agent to act on the guest's own things (as
+      before for any agent in a shared chat; now any accepted invite to a
+      chat brings one). Closing it is the bridge's: acting `for` each
+      turn's asker, not always its owner (open, for Paul).
+    - Storage: no new column (an agent row names its owner already: in
+      with its person when its owner is a member who is not the fragment's
+      owner); a rollback reads the rows as agent members, as before.
+    - Status (2026-10-23): built on `claude/member-with-agents`.
 
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 

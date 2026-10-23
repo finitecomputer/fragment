@@ -1656,12 +1656,14 @@ impl PrincipalCell {
                 vec![]
             }
         };
+        // an agent in with its person is no entry of its own (decision 64)
+        let people: Vec<String> = members.iter().filter(|m| m["kind"] != "agent" && m["role"] != "owner").filter_map(|m| m["principal"].as_str().map(str::to_string)).collect();
+        let members: Vec<Value> = members.into_iter().filter(|m| !(m["kind"] == "agent" && m["owner"].as_str().is_some_and(|o| people.iter().any(|p| p == o)))).collect();
         // who they are, as its owner's share sheet and access view show them
-        // (share.rs `profiles`): a person by their email, with their agents,
-        // who reach what the person does (a share is a person's and their
-        // agents'); an agent by its name (its label) and its title, and its
-        // owner's email. A fragment its person reads only through an agent
-        // of theirs names no one.
+        // (share.rs `profiles`): a person by their email, never their
+        // agents (decision 64: in with them, unnamed); an agent member by its
+        // name (its label) and its title, and its owner's email. A fragment
+        // its person reads only through an agent of theirs names no one.
         let owned = meta.owner.as_deref() == Some(person);
         let ids: Vec<String> = members.iter().flat_map(|m| [m["principal"].as_str(), m["owner"].as_str()]).flatten().map(str::to_string).collect();
         let named = if owned { crate::share::profiles(&self.env, ids).await } else { BTreeMap::new() };

@@ -2071,6 +2071,10 @@ export function mount(root) {
         b.setAttribute("aria-selected", String(i === picking.index));
         b.dataset.agent = a;
         b.append(face(a, who(a)), who(a).name);
+        // someone else's agent shows under its person, in with them
+        // (docs/cloudflare-v1.md, decision 64): "theirs", by their name
+        const whose = state.members.find((m) => m.principal === a)?.owner;
+        if (whose && whose !== state.me?.principal) b.append(el("span", "mention-note", `${who(whose).name}'s agent`));
         if (!here.includes(a)) {
           b.classList.add("outside");
           b.append(el("span", "mention-note", "adds them to this chat"));
