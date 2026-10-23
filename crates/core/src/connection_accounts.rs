@@ -36,7 +36,8 @@ pub fn identifier_ok(identifier: &str) -> bool {
 /// account_identifier`, set by the import), its label as its person knows
 /// it (`account_display_name`: `connection_signin::account_label`), its
 /// state, the scopes it holds (`connection_signin::pipes_scopes`; None
-/// when it names none), and when it was made.
+/// when it names none), and when it was made. `fenced`: one the person
+/// disconnected that Pipes holds still (`fenced`), not theirs to use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipesAccount {
     pub id: Option<String>,
@@ -45,12 +46,13 @@ pub struct PipesAccount {
     pub state: ProviderState,
     pub scopes: Option<Vec<String>>,
     pub created_at: String,
+    pub fenced: bool,
 }
 
 impl PipesAccount {
     /// No account: not connected, naming nothing.
     pub fn none() -> PipesAccount {
-        PipesAccount { id: None, identifier: None, label: None, state: ProviderState::NotConnected, scopes: None, created_at: String::new() }
+        PipesAccount { id: None, identifier: None, label: None, state: ProviderState::NotConnected, scopes: None, created_at: String::new(), fenced: false }
     }
 }
 
@@ -71,6 +73,7 @@ pub fn described(account: &Value) -> PipesAccount {
         state,
         scopes: held.then(|| pipes_scopes(account)).flatten(),
         created_at: account["created_at"].as_str().filter(|t| t.len() <= 64).unwrap_or_default().to_string(),
+        fenced: false,
     }
 }
 
@@ -108,9 +111,11 @@ pub fn listed(answer: &Value, provider: &str) -> Result<Vec<PipesAccount>, Strin
 }
 
 /// The account a person's agents use at a provider unless one picked
-/// another: the oldest connected one, else (none connected) the oldest.
+/// another: the oldest connected one, else (none connected) the oldest;
+/// never one they disconnected.
 pub fn default_of(accounts: &[PipesAccount]) -> Option<&PipesAccount> {
-    accounts.iter().find(|a| a.state == ProviderState::Connected).or(accounts.first())
+    let theirs = || accounts.iter().filter(|a| !a.fenced);
+    theirs().find(|a| a.state == ProviderState::Connected).or(theirs().next())
 }
 
 /// A provider's state, from its accounts: connected while any is.
@@ -121,10 +126,20 @@ pub fn state_of(accounts: &[PipesAccount]) -> ProviderState {
     }
 }
 
-/// The accounts a disconnect's lasting fences leave a person: none whose
-/// identifier is fenced. One that names none is never fenced so (`lasting`).
-pub fn unfenced(accounts: Vec<PipesAccount>, fenced: &[&str]) -> Vec<PipesAccount> {
-    accounts.into_iter().filter(|a| !a.identifier.as_deref().is_some_and(|i| fenced.contains(&i))).collect()
+/// A person's accounts, each a disconnect's lasting fence stands for marked
+/// `fenced` and not connected: all of them while the provider is fenced
+/// whole, else each whose identifier is fenced (one that names none is
+/// never fenced so: `lasting`). Pipes holds them still (a disconnect that
+/// did not finish, or an import that landed after it), and settings offers
+/// to disconnect them again; no agent uses one.
+pub fn fenced(accounts: Vec<PipesAccount>, whole: bool, identifiers: &[&str]) -> Vec<PipesAccount> {
+    accounts
+        .into_iter()
+        .map(|a| match whole || a.identifier.as_deref().is_some_and(|i| identifiers.contains(&i)) {
+            true => PipesAccount { state: ProviderState::NotConnected, fenced: true, ..a },
+            false => a,
+        })
+        .collect()
 }
 
 /// What of a disconnect stays fenced until a connect is known to import
@@ -135,23 +150,25 @@ pub enum Lasting {
     /// The provider whole: nothing Pipes holds there is taken for the
     /// person's (as with one account).
     Provider,
-    /// The account of this identifier alone (`connection_signin::FENCE_ACCOUNT`).
-    Account(String),
+    /// The account of this identifier alone (`connection_signin::
+    /// FENCE_ACCOUNT`), and its id, by which a disconnect asked again is
+    /// known for the person's once Pipes deleted it.
+    Account { identifier: String, account: String },
     /// Nothing: an account that names no identifier, which no later import
     /// can be told apart from the person's others by.
     Nothing,
 }
 
-/// What a disconnect of `gone`, one of the `theirs` accounts a person has
-/// at a provider that takes several, leaves fenced: that account, by its
-/// identifier; one that names none (imported before identifiers were, or
-/// with no ID token), nothing, while they have others there, whom a fence
-/// of it could not tell from it; the last of theirs, or none, the provider
-/// whole, as with one.
-pub fn lasting(gone: Option<&PipesAccount>, theirs: usize) -> Lasting {
-    match gone.map(|a| a.identifier.clone()) {
-        Some(Some(identifier)) => Lasting::Account(identifier),
-        Some(None) if theirs > 1 => Lasting::Nothing,
+/// What a disconnect of `gone`, an account of a person's at a provider
+/// that takes several, leaves fenced, with `others` of theirs there still
+/// (not fenced): that account, by its identifier; one that names none
+/// (imported before identifiers were, or with no ID token), nothing while
+/// they have others, whom a fence of it could not tell from it; the last
+/// of theirs, or none, the provider whole, as with one.
+pub fn lasting(gone: Option<&PipesAccount>, others: usize) -> Lasting {
+    match gone.map(|a| (a.identifier.clone(), a.id.clone())) {
+        Some((Some(identifier), Some(account))) => Lasting::Account { identifier, account },
+        Some((None, _)) if others > 0 => Lasting::Nothing,
         _ => Lasting::Provider,
     }
 }
@@ -164,9 +181,10 @@ pub struct Held {
     pub state: ProviderState,
 }
 
-/// What a computer holds of each account: those with an id, in order.
+/// What a computer holds of each account: those with an id, in order,
+/// never one the person disconnected.
 pub fn held(accounts: &[PipesAccount]) -> Vec<Held> {
-    accounts.iter().filter_map(|a| a.id.clone().map(|id| Held { id, state: a.state })).collect()
+    accounts.iter().filter(|a| !a.fenced).filter_map(|a| a.id.clone().map(|id| Held { id, state: a.state })).collect()
 }
 
 /// Why no account is chosen for a swap.
@@ -326,7 +344,10 @@ pub enum Imported {
     /// 404 `multiple_connections_unavailable`: Pipes connects one account
     /// a person for now (until WorkOS enables additional connections).
     Unavailable,
-    /// Anything else: failed, or its outcome unknown (never asked again).
+    /// Another 4xx: refused, nothing imported.
+    Refused,
+    /// Anything else: its outcome unknown (a 5xx, no answer), never asked
+    /// again; it may yet land at Pipes.
     Failed,
 }
 
@@ -338,7 +359,89 @@ pub fn imported(status: u16, answer: &Value) -> Imported {
         (404, Some("multiple_connections_unavailable")) => Imported::Unavailable,
         (409, Some("connected_account_limit_reached")) => Imported::Full,
         (409, _) => Imported::Conflict,
+        (400..=499, _) => Imported::Refused,
         _ => Imported::Failed,
+    }
+}
+
+/// A callback's longest wait for another's decision at the same account
+/// (`Deciding`): its read of the list and its import, each within the
+/// vendor's 30 s, and an update after a 409.
+pub const DECIDE_WAIT_MS: i64 = 95_000;
+/// How long an import whose outcome is unknown keeps others from deciding
+/// at its account (`Deciding::release`): it may land meanwhile, and a list
+/// read before it does would lack it.
+pub const UNCERTAIN_HOLD_MS: i64 = 60_000;
+
+/// The callbacks deciding which import to make at an account of several
+/// (`connection_signin::Account`: a person's at a provider), one at a time
+/// from its read of the list to its import's answer, so two that finish
+/// together never both add the same provider account, nor both pass the
+/// row's `accounts_max`: the second reads the list once the first has
+/// imported. An import whose outcome is unknown holds the account a while
+/// longer (`UNCERTAIN_HOLD_MS`), refusing others, which could read a list
+/// that lacks it. The Registry keeps it in memory, as `Finishing`: a
+/// restarted one has none under way. At most one hold a callback under
+/// way, and the uncertain ones of the last `UNCERTAIN_HOLD_MS`.
+#[derive(Debug, Default)]
+pub struct Deciding {
+    holds: Vec<Hold>,
+}
+
+#[derive(Debug)]
+struct Hold {
+    account: crate::connection_signin::Account,
+    /// The callback deciding, or none: an import's outcome unknown, until
+    /// `until`.
+    by: Option<u64>,
+    until: i64,
+}
+
+/// What a callback's ask to decide at an account finds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Turn {
+    /// Its turn: it holds the account until it releases it.
+    Taken,
+    /// Another callback decides there now: ask again shortly.
+    Busy,
+    /// An import there has no known outcome yet: refused.
+    Uncertain,
+}
+
+impl Deciding {
+    /// Callback `id` asks to decide at `account`, at `now`.
+    pub fn take(&mut self, account: &crate::connection_signin::Account, id: u64, now: i64) -> Turn {
+        self.holds.retain(|h| h.by.is_some() || h.until > now);
+        assert!(!self.holds.iter().any(|h| h.by == Some(id)), "a callback decides once");
+        match self.holds.iter().find(|h| h.account == *account) {
+            Some(h) if h.by.is_some() => Turn::Busy,
+            Some(_) => Turn::Uncertain,
+            None => {
+                self.holds.push(Hold { account: account.clone(), by: Some(id), until: i64::MAX });
+                Turn::Taken
+            }
+        }
+    }
+
+    /// Every import whose outcome was unknown is let go, as its while
+    /// running out (a test's lever).
+    pub fn forget_uncertain(&mut self) {
+        self.holds.retain(|h| h.by.is_some());
+    }
+
+    /// Callback `id`'s turn over: its import's outcome known (None), or
+    /// unknown, holding the account until `uncertain_until`.
+    pub fn release(&mut self, id: u64, uncertain_until: Option<i64>) {
+        let at = self.holds.iter().position(|h| h.by == Some(id)).expect("a callback releases the turn it took");
+        match uncertain_until {
+            Some(until) => {
+                self.holds[at].by = None;
+                self.holds[at].until = until;
+            }
+            None => {
+                self.holds.remove(at);
+            }
+        }
     }
 }
 
@@ -391,18 +494,59 @@ mod tests {
     }
 
     #[test]
-    fn a_fenced_identifier_hides_its_accounts_and_no_other() {
+    fn a_fenced_identifier_marks_its_accounts_and_no_other() {
         let accounts = listed(&list("google", vec![account("data_installation_a", Some("sub-a"), "connected", "1"), account("data_installation_b", Some("sub-b"), "connected", "2"), account("data_installation_n", None, "connected", "3")]), "google").unwrap();
-        assert_eq!(ids(&unfenced(accounts.clone(), &["sub-a"])), ["data_installation_b", "data_installation_n"]);
-        assert_eq!(ids(&unfenced(accounts.clone(), &["", "sub-x"])), ["data_installation_a", "data_installation_b", "data_installation_n"], "an account that names no identifier is never fenced by one");
-        assert_eq!(ids(&unfenced(accounts.clone(), &[])), ["data_installation_a", "data_installation_b", "data_installation_n"]);
+        let marked = |l: Vec<PipesAccount>| l.iter().map(|a| (a.fenced, a.state)).collect::<Vec<_>>();
+        use ProviderState::{Connected, NotConnected};
+        let one = fenced(accounts.clone(), false, &["sub-a"]);
+        assert_eq!(marked(one.clone()), [(true, NotConnected), (false, Connected), (false, Connected)], "its identifier's account is marked, not dropped: Pipes holds it");
+        assert_eq!(default_of(&one).and_then(|a| a.id.as_deref()), Some("data_installation_b"), "never the default");
+        assert_eq!(held(&one).iter().map(|h| h.id.as_str()).collect::<Vec<_>>(), ["data_installation_b", "data_installation_n"], "nor held for a swap");
+        assert_eq!(marked(fenced(accounts.clone(), false, &["", "sub-x"])), [(false, Connected); 3], "an account that names no identifier is never fenced by one");
+        assert_eq!(marked(fenced(accounts.clone(), true, &[])), [(true, NotConnected); 3], "the provider whole: each");
+        assert_eq!(state_of(&fenced(accounts.clone(), true, &[])), NotConnected);
+        assert_eq!(default_of(&fenced(accounts.clone(), true, &[])), None);
         // what a disconnect leaves fenced
         let (a, n) = (&accounts[0], &accounts[2]);
-        assert_eq!(lasting(Some(a), 3), Lasting::Account("sub-a".into()), "an account, by its identifier");
-        assert_eq!(lasting(Some(a), 1), Lasting::Account("sub-a".into()), "the last too");
-        assert_eq!(lasting(Some(n), 3), Lasting::Nothing, "one with none, while others are there, which a fence of it would hide");
-        assert_eq!(lasting(Some(n), 1), Lasting::Provider, "the last, with none: the provider whole, as with one");
+        let of_a = Lasting::Account { identifier: "sub-a".into(), account: "data_installation_a".into() };
+        assert_eq!(lasting(Some(a), 2), of_a, "an account, by its identifier, and its id");
+        assert_eq!(lasting(Some(a), 0), of_a, "the last too");
+        assert_eq!(lasting(Some(n), 2), Lasting::Nothing, "one with none, while others are there, which a fence of it would hide");
+        assert_eq!(lasting(Some(n), 0), Lasting::Provider, "the last, with none: the provider whole, as with one");
         assert_eq!(lasting(None, 0), Lasting::Provider, "none there: the provider whole");
+    }
+
+    fn at(subject: &str) -> crate::connection_signin::Account {
+        crate::connection_signin::Account { issuer: "issuer".into(), subject: subject.into(), provider: "google".into() }
+    }
+
+    #[test]
+    fn one_callback_at_a_time_decides_at_an_account_and_an_unknown_import_holds_it() {
+        let mut d = Deciding::default();
+        let (a, b) = (at("user-a"), at("user-b"));
+        assert_eq!(d.take(&a, 1, 0), Turn::Taken);
+        assert_eq!(d.take(&a, 2, 0), Turn::Busy, "a second callback of the same person and provider waits");
+        assert_eq!(d.take(&b, 3, 0), Turn::Taken, "another person's does not");
+        d.release(1, None);
+        assert_eq!(d.take(&a, 2, 10), Turn::Taken, "the first answered: the second's turn, reading the list afresh");
+        d.release(2, Some(100));
+        assert_eq!(d.take(&a, 4, 50), Turn::Uncertain, "an import whose outcome is unknown refuses others while it may land");
+        assert_eq!(d.take(&a, 5, 100), Turn::Taken, "and holds no longer than its while");
+        d.release(5, Some(1_000));
+        d.forget_uncertain();
+        assert_eq!(d.take(&a, 6, 200), Turn::Taken, "forgotten, it holds nothing");
+        d.release(6, None);
+        d.release(3, None);
+        assert!(d.holds.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "a callback releases the turn it took")]
+    fn a_turn_is_released_once() {
+        let mut d = Deciding::default();
+        assert_eq!(d.take(&at("user-a"), 1, 0), Turn::Taken);
+        d.release(1, None);
+        d.release(1, None);
     }
 
     #[test]
@@ -470,8 +614,11 @@ mod tests {
         assert_eq!(imported(409, &json!({ "code": "connected_account_limit_reached" })), Imported::Full);
         assert_eq!(imported(409, &json!({ "code": "conflict" })), Imported::Conflict);
         assert_eq!(imported(409, &Value::Null), Imported::Conflict);
-        for (status, answer) in [(404, json!({ "code": "not_found" })), (504, Value::Null), (422, json!({ "code": "invalid_tokens" })), (500, json!({ "code": "multiple_connections_unavailable" }))] {
-            assert_eq!(imported(status, &answer), Imported::Failed, "{status} {answer}");
+        for (status, answer) in [(404, json!({ "code": "not_found" })), (422, json!({ "code": "invalid_tokens" })), (400, Value::Null)] {
+            assert_eq!(imported(status, &answer), Imported::Refused, "{status} {answer}");
+        }
+        for (status, answer) in [(504, Value::Null), (500, json!({ "code": "multiple_connections_unavailable" })), (0, Value::Null), (302, Value::Null)] {
+            assert_eq!(imported(status, &answer), Imported::Failed, "{status} {answer}: its outcome unknown");
         }
     }
 }

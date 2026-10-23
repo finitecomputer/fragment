@@ -105,6 +105,10 @@ struct State {
     /// An `add` for a person with an account already is refused, as Pipes
     /// does until WorkOS enables additional connections.
     refuse_additional: bool,
+    /// The next delete of a connected account fails (503), deleting nothing.
+    fail_delete: bool,
+    /// The plural list fails (503) once this many more reads have answered.
+    fail_list_after: Option<usize>,
     /// The most accounts a person connects at a provider (None: Pipes' 25).
     account_limit: Option<usize>,
     /// The next import is answered 504 and lands only when the test says
@@ -459,6 +463,23 @@ impl WorkOs {
     /// A person connects at most `n` accounts at a provider (None: Pipes' 25).
     pub fn limit_accounts(&self, n: Option<usize>) { self.state.lock().expect("workos state").account_limit = n; }
 
+    /// The next delete of a connected account fails (503), deleting nothing,
+    /// as Pipes not answering.
+    pub fn fail_next_delete(&self) { self.state.lock().expect("workos state").fail_delete = true; }
+
+    /// The plural list fails (503) once `reads` more reads have answered.
+    pub fn fail_list_after(&self, reads: usize) { self.state.lock().expect("workos state").fail_list_after = Some(reads); }
+
+    /// `email`'s account `id` at `provider` is connected (`true`), or comes
+    /// to need authorizing again (`false`).
+    pub fn authorize_account(&self, email: &str, provider: &str, id: &str, authorized: bool) {
+        let mut s = self.state.lock().expect("workos state");
+        let user = s.user_for(email);
+        if let Some(a) = s.accounts.get_mut(&(user.id, provider.to_string())).and_then(|l| l.iter_mut().find(|a| a.id == id)) {
+            a.authorized = authorized;
+        }
+    }
+
     pub fn connection_counts(&self) -> (usize, usize, usize) {
         let s = self.state.lock().expect("workos state");
         (s.oauth_exchanges, s.imports.len(), s.legacy_authorizations)
@@ -709,6 +730,14 @@ impl WorkOs {
                     }
                     let user = &p["/user_management/users/".len()..p.len() - "/data_providers".len()];
                     if !s.users.iter().any(|u| u.id == user) { return pipes_problem(404, "not_found", "user"); }
+                    match s.fail_list_after {
+                        Some(0) => {
+                            s.fail_list_after = None;
+                            return pipes_problem(503, "unavailable", "test list failure");
+                        }
+                        Some(n) => s.fail_list_after = Some(n - 1),
+                        None => {}
+                    }
                     s.states_read += 1;
                     let plural = q("supports_multiple_connections") == "true";
                     let mut data: Vec<Value> = s.accounts.iter().filter(|((u, _), _)| u == user).map(|((_, provider), list)| {
@@ -727,6 +756,7 @@ impl WorkOs {
                     if req.header("authorization") != Some(format!("Bearer {key}").as_str()) {
                         return problem(401, "unauthorized", "the API key is wrong");
                     }
+                    if std::mem::take(&mut s.fail_delete) { return pipes_problem(503, "unavailable", "test delete failure"); }
                     let Some((user, provider)) = p["/user_management/users/".len()..].split_once("/connected_accounts/") else { return problem(404, "not_found", "no such route") };
                     let Some(id) = s.named(user, provider, req.query.get("connected_account_id").map(String::as_str)).map(|a| a.id.clone()) else { return problem(404, "not_found", "no connected account") };
                     let key = (user.to_string(), provider.to_string());

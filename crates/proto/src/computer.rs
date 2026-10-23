@@ -218,6 +218,11 @@ pub struct ConnectionAccount {
     pub granted: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missing: Option<Vec<String>>,
+    /// One they disconnected that Pipes holds still (its disconnect did not
+    /// finish, or an import landed after it): not connected, used by no
+    /// agent; settings offers to disconnect it again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disconnecting: bool,
 }
 
 /// An own key's sign-in, as its person sees it.

@@ -11,7 +11,7 @@ step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
 step Registry 3 trial_hold_attempts 07e123e05a049abe
 step Registry 4 connection_fences ac8ad73c1302c4be
-step Registry 5 connection_accounts 1cc582a35fd6058a
+step Registry 5 connection_accounts bb3e6c16b8311e8e
 step Principal 1 baseline 28b4d4bf3f8cdb71
 step Principal 2 listed 09e5aab70c4f7f61
 step Ledger 1 baseline 6d5c6ebad64a53b2
@@ -85,7 +85,7 @@ Registry index cli_codes_created: CREATE INDEX cli_codes_created ON cli_codes (c
 Registry index cli_codes_key: CREATE INDEX cli_codes_key ON cli_codes (key)
 Registry table cli_misses: CREATE TABLE cli_misses ( identity TEXT PRIMARY KEY, misses INTEGER NOT NULL, since INTEGER NOT NULL)
 Registry index cli_misses_since: CREATE INDEX cli_misses_since ON cli_misses (since)
-Registry table connection_account_fences: CREATE TABLE connection_account_fences ( issuer TEXT NOT NULL, subject TEXT NOT NULL, provider TEXT NOT NULL, identifier TEXT NOT NULL, fenced_at INTEGER NOT NULL, PRIMARY KEY (issuer, subject, provider, identifier))
+Registry table connection_account_fences: CREATE TABLE connection_account_fences ( issuer TEXT NOT NULL, subject TEXT NOT NULL, provider TEXT NOT NULL, identifier TEXT NOT NULL, account TEXT NOT NULL, fenced_at INTEGER NOT NULL, PRIMARY KEY (issuer, subject, provider, identifier))
 Registry table connection_fences: CREATE TABLE connection_fences ( issuer TEXT NOT NULL, subject TEXT NOT NULL, provider TEXT NOT NULL, fenced_at INTEGER NOT NULL, PRIMARY KEY (issuer, subject, provider))
 Registry table connection_signins: CREATE TABLE connection_signins ( state TEXT PRIMARY KEY, session TEXT NOT NULL, provider TEXT NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL, config TEXT NOT NULL, sealed TEXT NOT NULL, expires_at INTEGER NOT NULL, intent TEXT NOT NULL DEFAULT 'connect', account TEXT)
 Registry index connection_signins_expires: CREATE INDEX connection_signins_expires ON connection_signins (expires_at)

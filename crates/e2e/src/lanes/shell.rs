@@ -2941,10 +2941,11 @@ fn connected_in_window(s: &mut Suite, b: &mut Browser, page: &Page, button: &str
 /// A connection that takes several accounts (`crate::SEVERAL`): its row
 /// lists each account, with its label, state, what it was not allowed
 /// (with a Reconnect to add) and its own Disconnect; Add another, through
-/// the provider's page, adds one; with two connected, each agent allowed
-/// gets a choice of which it uses, its default first, which persists; and
-/// one account disconnected leaves the other, with no choice left to make.
-/// Its accounts are disconnected again for the checks after.
+/// the provider's page, adds one; with two, each agent allowed gets a
+/// choice of which it uses, Default first, which persists; a saved choice
+/// that needs reconnecting is shown as it is, and may be changed back to
+/// Default; and one account disconnected leaves the other, with no choice
+/// left to make. Its accounts are disconnected again for the checks after.
 #[allow(clippy::too_many_arguments)]
 fn several_accounts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, email: &str, lead: &str, computer: &str) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
@@ -2974,8 +2975,8 @@ fn several_accounts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, s
     let ids: Vec<String> = held.iter().map(|a| a.id.clone()).collect();
     let choice = b.eval(page, &format!("((p) => [p?.getAttribute('aria-label') ?? null, p?.value ?? null, [...(p?.options ?? [])].map((o) => o.value)])(document.querySelector('{pick}'))"))?;
     s.ok(
-        "Add another goes through the provider's page and adds an account; with two connected, each agent allowed is asked which it uses, its default (the oldest) chosen and first",
-        came_back && connected && two && held.len() == 2 && choice[0].as_str().is_some_and(|l| l.ends_with("'s E2e Several account")) && choice[1] == ids[0].as_str() && choice[2] == json!(ids),
+        "Add another goes through the provider's page and adds an account; with two, each agent allowed is asked which it uses, Default (the oldest connected) chosen and first, then each account",
+        came_back && connected && two && held.len() == 2 && choice[0].as_str().is_some_and(|l| l.ends_with("'s E2e Several account")) && choice[1] == "" && choice[2] == json!(["", ids[0], ids[1]]),
         json!({ "choice": choice, "held": ids }),
     );
     b.eval(page, &format!("((p) => (p.value = {:?}, p.dispatchEvent(new Event('change')), true))(document.querySelector('{pick}'))", ids[1]))?;
@@ -2989,6 +2990,26 @@ fn several_accounts_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, s
     b.reload(page)?;
     let kept = b.until(page, &format!("document.querySelector('{pick}')?.value === {:?}", ids[1]), wait);
     s.ok("the agent's choice is its computer's, and settings shows it chosen when read again", stored && kept, json!({ "uses": agent_uses() }));
+    // the account it chose comes to need reconnecting: shown as it is, never
+    // as the other, and Default takes the agent back
+    s.workos.authorize_account(email, several, &ids[1], false);
+    b.reload(page)?;
+    let shown = b.until(page, &format!("document.querySelector('{row} [data-account-id={:?}]')?.dataset.state === 'needs_reauthorization' && document.querySelector('{pick}')?.value === {:?}", ids[1], ids[1]), wait);
+    let said = b.eval(page, &format!("((p) => p?.selectedOptions[0]?.textContent ?? null)(document.querySelector('{pick}'))"))?;
+    s.ok(
+        "a saved choice that needs reconnecting is shown as it is stored, saying so, with Default and the other account to change to",
+        shown && said.as_str().is_some_and(|t| t.ends_with("(needs reconnecting)")),
+        &said,
+    );
+    b.eval(page, &format!("((p) => (p.value = '', p.dispatchEvent(new Event('change')), true))(document.querySelector('{pick}'))"))?;
+    let reset = s.eventually(wait, || agent_uses().is_null());
+    b.reload(page)?;
+    let default = b.until(page, &format!("document.querySelector('{pick}')?.value === ''"), wait);
+    s.ok("Default takes the agent back to the oldest connected account: its choice cleared, and still offered with two accounts", reset && default, json!({ "uses": agent_uses() }));
+    s.workos.authorize_account(email, several, &ids[1], true);
+    b.reload(page)?;
+    let off = format!("{row} [data-account-id={:?}] [data-action=disconnect]", ids[1]);
+    anyhow::ensure!(b.until(page, &format!("document.querySelector('{row} [data-account-id={:?}]')?.dataset.state === 'connected' && !!document.querySelector('{off}')", ids[1]), wait), "{several}'s second account connected again in settings");
     b.click(page, &format!("{row} [data-account-id={:?}] [data-action=disconnect]", ids[1]))?;
     let left = b.until(page, &format!("document.querySelectorAll('{row} .provider-account-row').length === 1 && !document.querySelector('{pick}') && document.querySelector('{row}')?.dataset.state === 'connected'"), wait);
     let held = s.workos.accounts(email, several);

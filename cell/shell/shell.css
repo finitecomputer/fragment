@@ -564,7 +564,7 @@ iframe[data-blocked] { display: none; }
 .provider-state { font-size: 13px; color: var(--text-secondary); }
 .provider-account { font-size: 12.5px; color: var(--text-secondary); overflow-wrap: anywhere; }
 .provider-state.connected, .provider-state.set, .provider-state.offered { color: var(--success); }
-.provider-state.needs_reauthorization { color: var(--danger-text); }
+.provider-state.needs_reauthorization, .provider-state.disconnecting { color: var(--danger-text); }
 .provider-agents, .provider-uses { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; font-size: 13px; }
 .provider-agents { justify-content: flex-end; }
 .provider-agents .settings-key { margin-right: auto; }

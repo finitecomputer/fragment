@@ -172,7 +172,16 @@ the shapes as workos-node's `src/pipes/pipes.ts` sends them):
   while WorkOS has not enabled additional connections, Pipes answers an add for
   a person who has an account 404 `multiple_connections_unavailable`, which
   imports nothing and is said in plain words (`?refused=one-account`). An
-  uncertain outcome is never retried, as above. An account imported before
+  uncertain outcome is never retried, as above.
+- One callback at a time decides at a person's accounts at a provider: it
+  holds its turn from its read of the list to its import's answer (the
+  Registry's memory, beside the callbacks under way), and another finishing
+  meanwhile, its code spent already, waits for it (up to 95 s), then reads
+  the list the first left, so the same provider account twice is one account,
+  and two into the last place are one and `account-limit`. An import whose
+  outcome is unknown keeps its turn a minute more: a connect there meanwhile
+  imports nothing (`?refused=finishing`, connect again in a minute), since a
+  list read then could lack it. An account imported before
   this release names no identifier, so a grant of it again is not told apart
   from another; a reconnect names one, which it keeps if Pipes keeps what a
   `PUT` names (WorkOS' SDK sends no identifier on an update: unverified).
@@ -180,7 +189,13 @@ the shapes as workos-node's `src/pipes/pipes.ts` sends them):
   token Pipes mints for it (`connected_account_id` in the token's body), then
   it alone deleted (`?connected_account_id=` on Pipes' `DELETE`); the person's
   other accounts stay connected. With several and none named it is refused
-  (400, naming them); with one, it is that one.
+  (400, naming them); with one, it is that one. Each step may be asked again,
+  as with one: an account the person disconnected that Pipes holds still (its
+  delete failed, or an import landed after) is listed with `disconnecting`,
+  not connected and used by no agent, and settings offers Disconnect again;
+  one Pipes deleted already is known as theirs by their own fence (which
+  keeps its id), so a disconnect that failed telling their computer finishes
+  when asked again. An id neither names is 404: never another person's.
 - The fence stays per provider for what is under way: a disconnect of one
   account ends every attempt at the provider still pending and cancels every
   callback exchanging (coarser, and safe). The lasting fence is the account's
@@ -201,7 +216,10 @@ that account to Pipes (`connected_account_id` with the plural opt-in), only one
 the person's list named: the agent's pick while it is listed (one that needs
 authorizing again is refused, never swapped for another account), else the
 default; a pick whose account is gone falls back to the default and stays
-until it is next written. The placeholder is the same: it names the agent,
+until it is next written. Settings offers the choice with two accounts or
+more, or a pick saved: Default first, then each account, its state said where
+it is not connected, and the saved pick as it is stored, never another in its
+place, so a pick the swap refuses can be seen and changed. The placeholder is the same: it names the agent,
 never an account.
 
 ## Evidence and scope

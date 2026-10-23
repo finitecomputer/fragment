@@ -5,7 +5,9 @@
 //! reauthorized rather than made twice, Pipes' refusals (one account for
 //! now, its limit) and the row's own, one account disconnected while the
 //! others stay, and its lasting fence holding against an import of it
-//! that lands late. A row of one account refuses all of it.
+//! that lands late; a disconnect that did not finish, asked again; and two
+//! callbacks finishing together, one deciding after the other. A row of
+//! one account refuses all of it.
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
@@ -38,6 +40,17 @@ fn listed(api: &Api, session: &str) -> Result<(Vec<Value>, Value)> {
 /// stand-in `account`, leaving only `grant`'s boxes ticked (or all), and
 /// its callback: (the authorize answer, the callback's).
 fn connect(api: &Api, session: &str, body: Value, account: &str, grant: Option<&str>) -> Result<(Reply, Option<Reply>)> {
+    let (r, back_to) = prepared(api, session, body, account, grant)?;
+    let came = match back_to {
+        Some((url, cookie)) => Some(back(api, &url, Some(session), Some(&cookie))?),
+        None => None,
+    };
+    Ok((r, came))
+}
+
+/// A connect as `connect`, up to its callback: the authorize answer, and
+/// where the browser goes back with its cookie (none: refused).
+fn prepared(api: &Api, session: &str, body: Value, account: &str, grant: Option<&str>) -> Result<(Reply, Option<(String, String)>)> {
     let r = shell(api, session, "POST", &format!("/api/connections/{SEVERAL}/authorize"), Some(&body))?;
     if r.status != 200 {
         return Ok((r, None));
@@ -50,8 +63,7 @@ fn connect(api: &Api, session: &str, body: Value, account: &str, grant: Option<&
     }
     let consent = api.external(to.as_str())?;
     anyhow::ensure!(consent.status == 302, "fake consent: {consent}");
-    let came = back(api, &consent.header("location"), Some(session), Some(&cookie))?;
-    Ok((r, Some(came)))
+    Ok((r, Some((consent.header("location"), cookie))))
 }
 
 fn ok(r: &(Reply, Option<Reply>)) -> bool {
@@ -162,17 +174,28 @@ pub(super) fn several(s: &mut Suite, api: &Api) -> Result<()> {
     // that account was disconnected: fenced by its identifier alone
     s.workos.defer_next_import();
     let uncertain = connect(api, &a, add(), "late-a", None)?;
+    let held = connect(api, &a, add(), "late-a", None)?;
+    s.ok(
+        "while an import's outcome is unknown, another connect at that person's accounts is refused as finishing, nothing imported: a list read now could lack it",
+        refused_as(&uncertain, "no-key") && refused_as(&held, "finishing") && !s.workos.accounts(email, SEVERAL).iter().any(|x| x.identifier.as_deref() == Some("late-a")),
+        held.1.as_ref().map(|r| r.to_string()).unwrap_or_default(),
+    );
+    // its while run out
+    let hook = api.unsigned("POST", "/api/test/registry", Some(&json!({ "signins": "forgetUncertainImports" })))?;
+    anyhow::ensure!(hook.status == 200, "let the unknown import go: {hook}");
     let known = connect(api, &a, add(), "late-a", None)?;
     let (accounts, _) = listed(api, &a)?;
     let late = accounts.iter().find(|x| x["account"] == "late-a@oauth.test").and_then(|x| x["id"].as_str()).unwrap_or_default().to_string();
     let off = shell(api, &a, "DELETE", &format!("{path}?account={late}"), None)?;
     let landed = s.workos.land_deferred_import();
     let (accounts, row) = listed(api, &a)?;
+    let theirs = |l: &[Value]| l.iter().filter(|x| x["disconnecting"] != true).count();
     s.ok(
-        "an import of an account whose outcome was unknown, landing after that account was disconnected, is not taken for it; the person's other accounts stay connected",
-        refused_as(&uncertain, "no-key") && ok(&known) && off.status == 200 && landed
+        "an import of an account whose outcome was unknown, landing after that account was disconnected, is not taken for it (listed as a disconnect to finish, used by no one); the person's other accounts stay connected",
+        ok(&known) && off.status == 200 && landed
             && s.workos.accounts(email, SEVERAL).iter().any(|x| x.identifier.as_deref() == Some("late-a"))
-            && !accounts.iter().any(|x| x["account"] == "late-a@oauth.test") && accounts.len() == 2 && row["state"] == "connected",
+            && accounts.iter().filter(|x| x["account"] == "late-a@oauth.test").all(|x| x["disconnecting"] == true && x["state"] == "not_connected")
+            && theirs(&accounts) == 2 && row["state"] == "connected",
         json!({ "accounts": accounts, "landed": landed }),
     );
     let lifted = connect(api, &a, add(), "late-a", None)?;
@@ -182,6 +205,9 @@ pub(super) fn several(s: &mut Suite, api: &Api) -> Result<()> {
         ok(&lifted) && accounts.iter().filter(|x| x["account"] == "late-a@oauth.test").count() == 1 && s.workos.accounts(email, SEVERAL).len() == 3,
         json!(accounts),
     );
+
+    retried(s, api)?;
+    raced(s, api)?;
 
     // one account and no name: that one
     let b_email = "several-b@e2e.test";
@@ -193,6 +219,115 @@ pub(super) fn several(s: &mut Suite, api: &Api) -> Result<()> {
         "with one account, a disconnect naming none takes that one away",
         ok(&solo) && off.status == 200 && off.body["state"] == "not_connected" && accounts.is_empty() && row["state"] == "not_connected" && !s.workos.holds(b_email, SEVERAL),
         &off,
+    );
+    Ok(())
+}
+
+/// A disconnect that did not finish, asked again: Pipes failing its delete
+/// after the fence (the account still theirs to disconnect, said so in
+/// settings), and failing after its delete (telling the computer), each
+/// finished by the same disconnect asked again, as often as asked; never
+/// one of another person's.
+fn retried(s: &mut Suite, api: &Api) -> Result<()> {
+    let email = "several-c@e2e.test";
+    let c = api.sign_in(email)?;
+    let path = format!("/api/connections/{SEVERAL}");
+    let work = connect(api, &c, json!({}), "c-work", None)?;
+    let home = connect(api, &c, json!({ "add": true }), "c-home", None)?;
+    let third = connect(api, &c, json!({ "add": true }), "c-third", None)?;
+    anyhow::ensure!(ok(&work) && ok(&home) && ok(&third), "connect c's accounts");
+    let id_of = |identifier: &str| s.workos.accounts(email, SEVERAL).into_iter().find(|a| a.identifier.as_deref() == Some(identifier)).map(|a| a.id).unwrap_or_default();
+    let (home, third) = (id_of("c-home"), id_of("c-third"));
+
+    s.workos.fail_next_delete();
+    let failed = shell(api, &c, "DELETE", &format!("{path}?account={home}"), None)?;
+    let (accounts, row) = listed(api, &c)?;
+    let shown = accounts.iter().find(|a| a["id"] == home.as_str()).cloned().unwrap_or_default();
+    s.ok(
+        "a disconnect whose delete at Pipes fails is refused, and settings lists the account as a disconnect to finish, not connected, used by no one; the others stay",
+        failed.status >= 500 && shown["disconnecting"] == true && shown["state"] == "not_connected" && row["state"] == "connected" && s.workos.accounts(email, SEVERAL).len() == 3,
+        json!({ "failed": failed.to_string(), "accounts": accounts }),
+    );
+    let again = shell(api, &c, "DELETE", &format!("{path}?account={home}"), None)?;
+    let (accounts, _) = listed(api, &c)?;
+    s.ok(
+        "asked again, the same disconnect finishes: the account deleted at Pipes, and listed no more",
+        again.status == 200 && again.body["account"] == home.as_str() && !ids(&accounts).contains(&home) && !s.workos.accounts(email, SEVERAL).iter().any(|a| a.id == home),
+        json!({ "again": again.body, "accounts": accounts }),
+    );
+
+    // its delete answered, then telling the person's computer fails (the
+    // list it tells it from)
+    s.workos.fail_list_after(1);
+    let failed = shell(api, &c, "DELETE", &format!("{path}?account={third}"), None)?;
+    let gone = !s.workos.accounts(email, SEVERAL).iter().any(|a| a.id == third);
+    let again = shell(api, &c, "DELETE", &format!("{path}?account={third}"), None)?;
+    let more = shell(api, &c, "DELETE", &format!("{path}?account={third}"), None)?;
+    let (accounts, row) = listed(api, &c)?;
+    s.ok(
+        "a disconnect that fails after its delete at Pipes finishes when asked again, and again, as the person's own account: one connected account left",
+        failed.status >= 500 && gone && again.status == 200 && more.status == 200 && again.body["account"] == third.as_str() && again.body["revoked"] == false
+            && ids(&accounts).len() == 1 && accounts[0]["disconnecting"] != true && row["state"] == "connected",
+        json!({ "failed": failed.to_string(), "again": again.body, "more": more.body, "accounts": accounts }),
+    );
+    let other = s.workos.accounts("several-a@e2e.test", SEVERAL).first().map(|a| a.id.clone()).unwrap_or_default();
+    let theirs = shell(api, &c, "DELETE", &format!("{path}?account={other}"), None)?;
+    let none = shell(api, &c, "DELETE", &format!("{path}?account=data_installation_nonesuch"), None)?;
+    s.ok(
+        "a disconnect naming another person's account, or none Pipes ever held, is 404, and nothing of theirs goes",
+        !other.is_empty() && theirs.status == 404 && none.status == 404 && s.workos.accounts("several-a@e2e.test", SEVERAL).iter().any(|a| a.id == other),
+        format!("{theirs}; {none}"),
+    );
+    Ok(())
+}
+
+/// Two callbacks of one person at one provider finishing together, from
+/// two browsers: the first holds its import (the fake's gate) while the
+/// second waits for its turn, never at the import, then reads the list
+/// the first left. The same provider account twice is one account; two
+/// into the last place, one, the other refused as account-limit.
+fn raced(s: &mut Suite, api: &Api) -> Result<()> {
+    use fragment_fakes::workos::Gate;
+    let email = "several-d@e2e.test";
+    let (one, two) = (api.sign_in(email)?, api.sign_in(email)?);
+    let first = connect(api, &one, json!({}), "d-one", None)?;
+    anyhow::ensure!(ok(&first), "connect d's first account");
+    let wait = std::time::Duration::from_secs(20);
+    // the two callbacks, the first held at its import until the second has
+    // exchanged its code and had time to reach its own
+    let together = |s: &mut Suite, first: (String, String), second: (String, String)| -> Result<(Reply, Reply, bool)> {
+        let exchanged = s.workos.connection_counts().0;
+        s.workos.pause(Gate::Import);
+        let (a, b, waited) = std::thread::scope(|scope| {
+            let a = scope.spawn(|| back(api, &first.0, Some(&one), Some(&first.1)));
+            let importing = s.eventually(wait, || s.workos.paused(Gate::Import) == 1);
+            let b = scope.spawn(|| back(api, &second.0, Some(&two), Some(&second.1)));
+            let second_exchanged = s.eventually(wait, || s.workos.connection_counts().0 == exchanged + 2);
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let waited = importing && second_exchanged && s.workos.paused(Gate::Import) == 1;
+            s.workos.resume(Gate::Import);
+            (a.join().expect("first callback"), b.join().expect("second callback"), waited)
+        });
+        Ok((a?, b?, waited))
+    };
+    let add = || json!({ "add": true });
+    let (_, x) = prepared(api, &one, add(), "d-two", None)?;
+    let (_, y) = prepared(api, &two, add(), "d-two", None)?;
+    let (a, b, waited) = together(s, x.context("first")?, y.context("second")?)?;
+    let held = s.workos.accounts(email, SEVERAL);
+    s.ok(
+        "two callbacks adding the same provider account together: the second waits for the first's import, then reauthorizes it; one account, never two",
+        waited && a.status == 200 && b.status == 200 && held.len() == 2 && held.iter().filter(|x| x.identifier.as_deref() == Some("d-two")).count() == 1,
+        json!({ "waited": waited, "first": a.status, "second": b.status, "held": held.len() }),
+    );
+    let (_, x) = prepared(api, &one, add(), "d-three", None)?;
+    let (_, y) = prepared(api, &two, add(), "d-four", None)?;
+    let (a, b, waited) = together(s, x.context("first")?, y.context("second")?)?;
+    let held = s.workos.accounts(email, SEVERAL);
+    s.ok(
+        "two callbacks adding two accounts into the last place together: the first connects, the second, reading the list after it, is refused as account-limit",
+        waited && a.status == 200 && refused(&b, "account-limit") && held.len() == usize::from(crate::SEVERAL_MAX) && held.iter().any(|x| x.identifier.as_deref() == Some("d-three")),
+        json!({ "waited": waited, "first": a.status, "second": b.to_string(), "held": held.len() }),
     );
     Ok(())
 }

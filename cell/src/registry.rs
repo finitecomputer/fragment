@@ -111,6 +111,10 @@ pub struct RegistryCell {
     /// disconnect fences (connection_signin.rs). In memory: each runs
     /// inside this cell and ends with it, so a restart has none.
     finishing: RefCell<fragment_core::connection_signin::Finishing>,
+    /// Of several accounts at a provider, the callback deciding which
+    /// import to make at each person's (connection_signin.rs `turn`). In
+    /// memory, as `finishing`.
+    deciding: RefCell<fragment_core::connection_accounts::Deciding>,
     /// Its schema as it started (schema.rs): ready, or refused, which
     /// refuses every sign-in and key until newer code or a reset.
     schema: crate::schema::Schema,
@@ -138,6 +142,7 @@ impl DurableObject for RegistryCell {
             hold_ms: Cell::new(0),
             cli_begins,
             finishing: RefCell::default(),
+            deciding: RefCell::default(),
             schema,
         }
     }

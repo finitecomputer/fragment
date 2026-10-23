@@ -372,13 +372,13 @@ pub(super) async fn pipes_import(env: &Env, api: &str, provider: &str, user: &st
     };
     Ok(match (import, imported(status, &answer)) {
         (Import::Compatibility, Imported::Conflict) => match imported(confidential_request(&url, Method::Put, "application/json", Some(&key), &body).await?.0, &Value::Null) {
-            Imported::Done => Imported::Done,
-            _ => Imported::Failed,
+            i @ (Imported::Done | Imported::Refused | Imported::Failed) => i,
+            _ => Imported::Refused,
         },
         // a refusal only an addition is answered
-        (Import::Add, i @ (Imported::Done | Imported::Full | Imported::Unavailable)) => i,
-        (_, Imported::Done) => Imported::Done,
-        _ => Imported::Failed,
+        (Import::Add, i @ (Imported::Full | Imported::Unavailable)) => i,
+        (_, i @ (Imported::Done | Imported::Refused | Imported::Failed)) => i,
+        (_, Imported::Conflict | Imported::Full | Imported::Unavailable) => Imported::Refused,
     })
 }
 

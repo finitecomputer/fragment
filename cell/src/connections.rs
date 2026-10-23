@@ -118,16 +118,19 @@ pub async fn connection_states(
     // at most `catalog::PROVIDERS_MAX` providers, one question each
     for p in connections {
         let provider = p.name.as_str();
+        // disconnected, and no connect known to have imported since:
+        // whatever Pipes holds (an import landed late) is not theirs
+        let whole = fenced.providers.iter().any(|f| f == provider);
         let held = match (&user, &plural) {
             (None, _) => vec![],
-            // disconnected, and no connect known to have imported since:
-            // whatever Pipes holds (an import landed late) is not theirs
-            (Some(_), _) if fenced.providers.iter().any(|f| f == provider) => vec![],
+            // of several, marked, so a disconnect that did not finish is
+            // theirs to ask again (`accounts::fenced`)
             (Some(_), Some(list)) if p.several() => {
                 let theirs = accounts::listed(list, provider).map_err(|e| CellError::new(ErrorCode::UpstreamFailed, e))?;
-                let here: Vec<&str> = fenced.accounts.iter().filter(|(f, _)| f == provider).map(|(_, i)| i.as_str()).collect();
-                accounts::unfenced(theirs, &here)
+                let here: Vec<&str> = fenced.accounts.iter().filter(|f| f.provider == provider).map(|f| f.identifier.as_str()).collect();
+                accounts::fenced(theirs, whole, &here)
             }
+            (Some(_), _) if whole => vec![],
             (Some(u), _) => Some(crate::keys::pipes_state(env, api, provider, u).await?).filter(|a| a.state != ProviderState::NotConnected).into_iter().collect(),
         };
         states.insert(provider.to_string(), accounts::state_of(&held));
@@ -146,11 +149,55 @@ pub fn held_of(cfg: &Config, listed: &BTreeMap<String, Vec<PipesAccount>>) -> BT
 }
 
 /// `provider`'s accounts of the person signed in as `who`, as their list
-/// names them (`connection_states`).
+/// names them (`connection_states`), those they disconnected marked.
 async fn accounts_of(env: &Env, cfg: &Config, who: &str, provider: &str) -> CellResult<Vec<PipesAccount>> {
     let mut listed = BTreeMap::new();
     connection_states(env, cfg, workos_user(env, cfg, who), Some(&mut listed)).await?;
     Ok(listed.remove(provider).unwrap_or_default())
+}
+
+/// What a disconnect of one of a person's several accounts takes away.
+enum Going {
+    /// An account Pipes holds, fenced or not (a disconnect asked again
+    /// finishes what the one before did not), and how many others of
+    /// theirs are there.
+    Held(PipesAccount, usize),
+    /// One a disconnect of theirs fenced, which Pipes deleted already: what
+    /// is left is telling their computer.
+    Deleted(String),
+    /// None: they have none there.
+    Nothing,
+}
+
+/// The account a disconnect at `provider` takes away: the one `named` (its
+/// id), only ever one of the person's own, as their list names it, fenced
+/// or not, or as their own fence names it once Pipes deleted it; naming
+/// none, the one they have (with several, they name it).
+async fn going(env: &Env, cfg: &Config, who: &str, provider: &str, named: Option<&str>) -> CellResult<Going> {
+    let theirs = accounts_of(env, cfg, who, provider).await?;
+    let others = |a: &PipesAccount| theirs.iter().filter(|x| !x.fenced && x.id != a.id).count();
+    let Some(id) = named else {
+        let visible: Vec<&PipesAccount> = theirs.iter().filter(|a| !a.fenced).collect();
+        return match visible.as_slice() {
+            [] => Ok(Going::Nothing),
+            [a] => Ok(Going::Held((*a).clone(), 0)),
+            _ => {
+                let named: Vec<String> = visible.iter().map(|a| format!("{} ({})", a.id.as_deref().unwrap_or_default(), a.label.as_deref().unwrap_or("no name"))).collect();
+                Err(CellError::invalid(format!("you have {} {provider} accounts connected: name the one to disconnect, ?account=<id> (yours: {})", visible.len(), named.join(", "))))
+            }
+        };
+    };
+    if let Some(a) = theirs.iter().find(|a| a.id.as_deref() == Some(id)) {
+        return Ok(Going::Held(a.clone(), others(a)));
+    }
+    let deleted = match workos_user(env, cfg, who).await? {
+        Some(u) => fenced_at(env, cfg, &u).await?.accounts.iter().any(|f| f.provider == provider && f.account == id),
+        None => false,
+    };
+    match deleted {
+        true => Ok(Going::Deleted(id.to_string())),
+        false => Err(CellError::new(ErrorCode::NotFound, format!("no {provider} account {id:?} of yours: GET /api/connections lists them"))),
+    }
 }
 
 pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, method: Method, rest: &[&str], body: &[u8]) -> CellResult<Response> {
@@ -201,7 +248,13 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                     note: p.note.clone(),
                     accounts: p.several().then(|| {
                         held.iter()
-                            .filter_map(|a| Some(ConnectionAccount { id: a.id.clone()?, account: a.label.clone(), state: a.state, granted: a.scopes.clone(), missing: missing(p.connection_oauth.as_ref(), a) }))
+                            .filter_map(|a| {
+                                let (granted, missing) = match a.fenced {
+                                    true => (None, None),
+                                    false => (a.scopes.clone(), missing(p.connection_oauth.as_ref(), a)),
+                                };
+                                Some(ConnectionAccount { id: a.id.clone()?, account: a.label.clone(), state: a.state, granted, missing, disconnecting: a.fenced })
+                            })
                             .collect()
                     }),
                     accounts_max: p.several().then(|| p.accounts_max()),
@@ -237,7 +290,7 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                     return Err(CellError::invalid(format!("{provider} connects one account here: connect it with no body")));
                 }
                 // said before the provider's page: the callback checks again
-                let theirs = accounts_of(env, cfg, who, provider).await?;
+                let theirs: Vec<PipesAccount> = accounts_of(env, cfg, who, provider).await?.into_iter().filter(|a| !a.fenced).collect();
                 match &intent {
                     Intent::Add if theirs.len() >= usize::from(p.accounts_max()) => {
                         return Err(CellError::invalid(format!("you have {} {provider} accounts connected, the most this platform connects: disconnect one to add another", theirs.len())));
@@ -267,13 +320,10 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
             if named.is_some() && !p.several() {
                 return Err(CellError::invalid(format!("{provider} connects one account here: disconnect it with no account named")));
             }
-            // of several: the one going, and how many they have there
-            let one = match p.several() {
-                true => {
-                    let theirs = accounts_of(env, cfg, who, provider).await?;
-                    let count = theirs.len();
-                    Some((one_of(theirs, named.as_deref(), provider)?, count))
-                }
+            // of several: the one going (asked again, still the person's
+            // once fenced, or deleted at Pipes), and their others there
+            let going = match p.several() {
+                true => Some(going(env, cfg, who, provider, named.as_deref()).await?),
                 false => None,
             };
             // first, no connect begun before this one connects it after:
@@ -281,17 +331,24 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
             // (429 while one imports), and names the person's WorkOS user;
             // of several, it fences that account alone for good
             let issuer = crate::keys::workos(env, cfg).await?.issuer();
-            let lasting = match &one {
-                Some((gone, theirs)) => accounts::lasting(gone.as_ref(), *theirs),
-                None => accounts::Lasting::Provider,
+            let lasting = match &going {
+                Some(Going::Held(a, others)) => accounts::lasting(Some(a), *others),
+                // its fence stands already
+                Some(Going::Deleted(_)) => accounts::Lasting::Nothing,
+                Some(Going::Nothing) | None => accounts::Lasting::Provider,
             };
             let fence = crate::registry::calls::FenceConnection { identity: who.into(), issuer, provider: provider.to_string(), lasting };
             let user = crate::ask_registry(env, &fence).await?.subject;
-            let id = one.as_ref().and_then(|(a, _)| a.as_ref()).and_then(|a| a.id.clone());
-            let revoked = match (&user, &one) {
-                // of several, none there: nothing to revoke or delete
-                (Some(_), Some((None, _))) | (None, _) => false,
-                (Some(u), _) => disconnect(env, cfg, provider, p.connection_oauth.as_ref(), u, id.as_deref()).await?,
+            let id = match &going {
+                Some(Going::Held(a, _)) => a.id.clone(),
+                Some(Going::Deleted(id)) => Some(id.clone()),
+                Some(Going::Nothing) | None => None,
+            };
+            // each step may be asked again: a token Pipes no longer gives
+            // revokes nothing, and an account it no longer holds is deleted
+            let revoked = match (&user, &going) {
+                (Some(u), Some(Going::Held(..)) | None) => disconnect(env, cfg, provider, p.connection_oauth.as_ref(), u, id.as_deref()).await?,
+                _ => false,
             };
             let states = disconnected_told(env, cfg, &computer, provider, user).await?;
             let state = states.get(*provider).copied().unwrap_or(ProviderState::NotConnected);
@@ -340,23 +397,6 @@ fn missing(o: Option<&ConnectionOAuth>, account: &PipesAccount) -> Option<Vec<St
 /// Where the provider sends the person's browser back.
 fn callback_url(cfg: &Config, provider: &str) -> String {
     format!("{}/api/connections/{provider}/callback", cfg.platform())
-}
-
-/// The one of a person's several accounts at `provider` a disconnect
-/// takes away: the one `named` (its id), or, naming none, the one they
-/// have (with several, they name it; with none, none).
-fn one_of(theirs: Vec<PipesAccount>, named: Option<&str>, provider: &str) -> CellResult<Option<PipesAccount>> {
-    match named {
-        Some(id) => match theirs.into_iter().find(|a| a.id.as_deref() == Some(id)) {
-            Some(a) => Ok(Some(a)),
-            None => Err(CellError::new(ErrorCode::NotFound, format!("no {provider} account {id:?} of yours: GET /api/connections lists them"))),
-        },
-        None if theirs.len() > 1 => {
-            let named: Vec<String> = theirs.iter().map(|a| format!("{} ({})", a.id.as_deref().unwrap_or_default(), a.label.as_deref().unwrap_or("no name"))).collect();
-            Err(CellError::invalid(format!("you have {} {provider} accounts connected: name the one to disconnect, ?account=<id> (yours: {})", theirs.len(), named.join(", "))))
-        }
-        None => Ok(theirs.into_iter().next()),
-    }
 }
 
 /// `user`'s connection to `provider` taken away (of several, the account
@@ -462,12 +502,15 @@ enum Unfinished {
     /// Another account, past the row's `accounts_max` or Pipes' limit.
     /// Nothing imported.
     AccountLimit,
+    /// Of several accounts, an earlier connect there may still land (its
+    /// outcome unknown). Nothing imported.
+    Finishing,
     /// The provider failed, or answered no key.
     NoKey,
 }
 
 impl Unfinished {
-    const ALL: [Unfinished; 9] = [
+    const ALL: [Unfinished; 10] = [
         Unfinished::NotBegunHere,
         Unfinished::SignedOut,
         Unfinished::Declined,
@@ -476,6 +519,7 @@ impl Unfinished {
         Unfinished::NoScopes,
         Unfinished::OneAccount,
         Unfinished::AccountLimit,
+        Unfinished::Finishing,
         Unfinished::NoKey,
     ];
 
@@ -490,6 +534,7 @@ impl Unfinished {
             Unfinished::NoScopes => "no-scopes",
             Unfinished::OneAccount => "one-account",
             Unfinished::AccountLimit => "account-limit",
+            Unfinished::Finishing => "finishing",
             Unfinished::NoKey => "no-key",
         }
     }
@@ -511,6 +556,7 @@ impl Unfinished {
                 return format!("This platform can connect one {} account for now, and you have one connected, so nothing was added. To use another, disconnect the one you have in settings, then connect again.", named(provider));
             }
             Unfinished::AccountLimit => return format!("You have connected as many {} accounts as this platform allows, so nothing was added: disconnect one in settings to add another.", named(provider)),
+            Unfinished::Finishing => return format!("An earlier connect of a {} account may still be finishing, so nothing was connected: connect again from settings in a minute.", named(provider)),
             Unfinished::NoKey => "The provider gave no key back: connect again from settings.",
         };
         says.to_string()
@@ -580,6 +626,7 @@ async fn finish_connection(req: &Request, env: &Env, url: &Url, provider: &str) 
         Ok(ConnectionFinished::NoScopes) => Err(Unfinished::NoScopes),
         Ok(ConnectionFinished::OneAccount) => Err(Unfinished::OneAccount),
         Ok(ConnectionFinished::AccountLimit) => Err(Unfinished::AccountLimit),
+        Ok(ConnectionFinished::Finishing) => Err(Unfinished::Finishing),
         Ok(ConnectionFinished::Failed) => Err(Unfinished::NoKey),
         Err(e) if e.code == ErrorCode::Unauthenticated => Err(Unfinished::SignedOut),
         // Do not leave a code in the URL on network/import failures. The

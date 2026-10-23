@@ -5,8 +5,28 @@ use fragment_proto::{ErrorCode, IdentityKind};
 use serde::Deserialize;
 use worker::SqlStorageValue;
 
-use super::{RegistryCell, calls::{BeginConnection, ConnectionBegun, ConnectionFences, ConnectionFinished, FenceConnection, FencedProviders, FinishConnectionIn, SubjectAnswer, SubjectOf}, signin::{fresh_token, sha}};
+use super::{RegistryCell, calls::{BeginConnection, ConnectionBegun, ConnectionFences, ConnectionFinished, FenceConnection, FencedAccount, FencedProviders, FinishConnectionIn, SubjectAnswer, SubjectOf}, signin::{fresh_token, sha}};
 use crate::{error::{CellError, CellResult}, js, keys};
+
+/// How often a callback waiting for another's decision at the same
+/// account asks again (`RegistryCell::turn`).
+const TURN_POLL_MS: u64 = 250;
+
+/// A callback's turn deciding at an account of several (`connection_accounts::
+/// Deciding`), given back however its finish ends, an error or a dropped
+/// call included: with its import's outcome unknown (`uncertain`, set
+/// before the import and cleared at a known answer), held a while longer.
+struct Turn<'a> {
+    deciding: &'a std::cell::RefCell<accounts::Deciding>,
+    id: u64,
+    uncertain: std::cell::Cell<Option<i64>>,
+}
+
+impl Drop for Turn<'_> {
+    fn drop(&mut self) {
+        self.deciding.borrow_mut().release(self.id, self.uncertain.get());
+    }
+}
 
 #[derive(Deserialize)]
 struct Pending {
@@ -114,6 +134,17 @@ impl RegistryCell {
         let Some(intent) = Intent::of_columns(&pending.intent, pending.account.as_deref()) else { return Ok(NotUnderWay) };
         let several = self.cfg.providers.get(&b.provider).filter(|p| p.several()).map(|p| p.accounts_max());
         let identifier = several.and_then(|_| connection_signin::account_identifier(&answer, &o.client_id));
+        // one callback at a time reads the person's list there and imports,
+        // so two finishing together neither add one account twice nor both
+        // pass `accounts_max`; the second reads the list the first left
+        let account = Account { issuer: pending.issuer.clone(), subject: pending.subject.clone(), provider: b.provider.clone() };
+        let turn = match several {
+            Some(_) => match self.turn(&account, id).await {
+                Some(turn) => Some(turn),
+                None => return Ok(Finishing),
+            },
+            None => None,
+        };
         let import = match several {
             Some(max) => {
                 let listed = accounts::listed(&keys::pipes_accounts(&self.env, api, &pending.subject).await?, &b.provider).map_err(|e| CellError::new(ErrorCode::UpstreamFailed, e))?;
@@ -133,12 +164,21 @@ impl RegistryCell {
         if !self.finishing.borrow_mut().may_import(id) { return Ok(NotUnderWay); }
         // An import that fails, or whose outcome is unknown (a timeout, a
         // 5xx), leaves a disconnect's lasting fence standing: it may yet
-        // land at Pipes, and is never taken for a connection.
-        match keys::pipes_import(&self.env, api, &b.provider, &pending.subject, tokens, label.as_deref(), import.as_ref().map(|i: &Import| (i, identifier.as_deref()))).await? {
+        // land at Pipes, and is never taken for a connection. Of several,
+        // one whose outcome is unknown keeps its turn a while (no answer, or
+        // an error, keeps it too), so no other decides on a list that lacks it.
+        if let Some(t) = &turn {
+            t.uncertain.set(Some(js::now_ms() + accounts::UNCERTAIN_HOLD_MS));
+        }
+        let imported = keys::pipes_import(&self.env, api, &b.provider, &pending.subject, tokens, label.as_deref(), import.as_ref().map(|i: &Import| (i, identifier.as_deref()))).await?;
+        if let Some(t) = turn.as_ref().filter(|_| imported != Imported::Failed) {
+            t.uncertain.set(None);
+        }
+        match imported {
             Imported::Done => {}
             Imported::Full => return Ok(AccountLimit),
             Imported::Unavailable => return Ok(OneAccount),
-            Imported::Conflict | Imported::Failed => return Ok(Failed),
+            Imported::Conflict | Imported::Refused | Imported::Failed => return Ok(Failed),
         }
         // known to have imported, in the turn it answered and before it is
         // no longer under way, so no disconnect comes between: the fence of
@@ -149,6 +189,26 @@ impl RegistryCell {
             self.exec(connection_signin::UNFENCE_ACCOUNT, [row(), vec![identifier.as_str().into()]].concat())?;
         }
         Ok(Connected)
+    }
+
+    /// Callback `id`'s turn deciding at `account`: at once when no other
+    /// callback decides there, else once it answers (asked again each
+    /// `TURN_POLL_MS`, up to `connection_accounts::DECIDE_WAIT_MS`), since
+    /// its person's code is spent already. None: refused, while an import
+    /// there has no known outcome, or past the wait.
+    async fn turn(&self, account: &Account, id: u64) -> Option<Turn<'_>> {
+        let until = js::now_ms() + accounts::DECIDE_WAIT_MS;
+        loop {
+            match self.deciding.borrow_mut().take(account, id, js::now_ms()) {
+                accounts::Turn::Taken => return Some(Turn { deciding: &self.deciding, id, uncertain: std::cell::Cell::new(None) }),
+                accounts::Turn::Uncertain => return None,
+                accounts::Turn::Busy => {}
+            }
+            if js::now_ms() >= until {
+                return None;
+            }
+            worker::Delay::from(std::time::Duration::from_millis(TURN_POLL_MS)).await;
+        }
     }
 
     /// A disconnect's fence (`calls::FenceConnection`), in one turn, before
@@ -180,8 +240,8 @@ impl RegistryCell {
         self.exec(connection_signin::FENCE_PENDING, row())?;
         let now = SqlStorageValue::Integer(js::now_ms());
         match &b.lasting {
-            Lasting::Account(identifier) => {
-                self.exec(connection_signin::FENCE_ACCOUNT, [row(), vec![identifier.as_str().into(), now]].concat())?;
+            Lasting::Account { identifier, account } => {
+                self.exec(connection_signin::FENCE_ACCOUNT, [row(), vec![identifier.as_str().into(), account.as_str().into(), now]].concat())?;
                 self.exec(connection_signin::TRIM_ACCOUNT_FENCES, row())?;
             }
             Lasting::Provider => self.exec(connection_signin::FENCE, [row(), vec![now]].concat())?,
@@ -196,13 +256,8 @@ impl RegistryCell {
         struct Row {
             provider: String,
         }
-        #[derive(Deserialize)]
-        struct One {
-            provider: String,
-            identifier: String,
-        }
         let rows = self.rows::<Row>(connection_signin::FENCED, vec![b.issuer.as_str().into(), b.subject.as_str().into()])?;
-        let ones = self.rows::<One>(connection_signin::FENCED_ACCOUNTS, vec![b.issuer.into(), b.subject.into()])?;
-        Ok(FencedProviders { providers: rows.into_iter().map(|r| r.provider).collect(), accounts: ones.into_iter().map(|o| (o.provider, o.identifier)).collect() })
+        let accounts = self.rows::<FencedAccount>(connection_signin::FENCED_ACCOUNTS, vec![b.issuer.into(), b.subject.into()])?;
+        Ok(FencedProviders { providers: rows.into_iter().map(|r| r.provider).collect(), accounts })
     }
 }

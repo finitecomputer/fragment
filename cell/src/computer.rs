@@ -2721,7 +2721,7 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
                 // one of the owner's accounts there, as their list names it
                 let mut listed = BTreeMap::new();
                 crate::connections::connection_states(env, cfg, crate::connections::workos_user(env, cfg, who), Some(&mut listed)).await?;
-                if !listed.get(*provider).is_some_and(|l| l.iter().any(|a| a.id.as_deref() == Some(account.as_str()))) {
+                if !listed.get(*provider).is_some_and(|l| l.iter().any(|a| !a.fenced && a.id.as_deref() == Some(account.as_str()))) {
                     return Err(CellError::new(ErrorCode::NotFound, format!("no {provider} account {account:?} of yours: GET /api/connections lists them")));
                 }
             }

@@ -34,7 +34,7 @@ pub const FENCED: &str = "SELECT provider FROM connection_fences WHERE issuer = 
 /// unknown that lands after is not taken for a connection, and their other
 /// accounts there stay connected. A connect of that identifier known to
 /// have imported lifts it (`UNFENCE_ACCOUNT`), as does a wipe.
-pub const FENCE_ACCOUNT: &str = "INSERT INTO connection_account_fences (issuer, subject, provider, identifier, fenced_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (issuer, subject, provider, identifier) DO UPDATE SET fenced_at = excluded.fenced_at";
+pub const FENCE_ACCOUNT: &str = "INSERT INTO connection_account_fences (issuer, subject, provider, identifier, account, fenced_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (issuer, subject, provider, identifier) DO UPDATE SET account = excluded.account, fenced_at = excluded.fenced_at";
 /// The most fences of one person's accounts at a provider kept: the
 /// newest (`TRIM_ACCOUNT_FENCES`), far more accounts than Pipes connects.
 pub const ACCOUNT_FENCES_MAX: u64 = 64;
@@ -45,8 +45,8 @@ pub const TRIM_ACCOUNT_FENCES: &str = "DELETE FROM connection_account_fences WHE
 /// goes (issuer, subject, provider, identifier).
 pub const UNFENCE_ACCOUNT: &str = "DELETE FROM connection_account_fences WHERE issuer = ? AND subject = ? AND provider = ? AND identifier = ?";
 /// The accounts a person stands fenced at: (issuer, subject) → (provider,
-/// identifier).
-pub const FENCED_ACCOUNTS: &str = "SELECT provider, identifier FROM connection_account_fences WHERE issuer = ? AND subject = ?";
+/// identifier, the account's Pipes id).
+pub const FENCED_ACCOUNTS: &str = "SELECT provider, identifier, account FROM connection_account_fences WHERE issuer = ? AND subject = ?";
 const RESERVED: &[&str] = &["client_id", "redirect_uri", "response_type", "scope", "state", "code_challenge", "code_challenge_method", "code", "code_verifier", "client_secret"];
 
 fn token(s: &str, max: usize) -> bool {
@@ -474,16 +474,18 @@ mod tests {
             l
         };
         let pair = |p: &str, i: &str| (p.to_string(), i.to_string());
-        db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "mail", "sub-1", 10]).unwrap();
-        db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "mail", "sub-1", 20]).unwrap();
-        db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "mail", "sub-2", 30]).unwrap();
-        db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "drive", "sub-1", 40]).unwrap();
+        db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "mail", "sub-1", "data_installation_1", 10]).unwrap();
+        db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "mail", "sub-1", "data_installation_3", 20]).unwrap();
+        db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "mail", "sub-2", "data_installation_2", 30]).unwrap();
+        db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "drive", "sub-1", "data_installation_4", 40]).unwrap();
+        let account: String = db.query_row("SELECT account FROM connection_account_fences WHERE provider = 'mail' AND identifier = 'sub-1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(account, "data_installation_3", "a second disconnect of the identifier names the account it took");
         assert_eq!(fenced("user-a"), [pair("drive", "sub-1"), pair("mail", "sub-1"), pair("mail", "sub-2")], "one fence an identifier and provider");
         assert!(fenced("user-b").is_empty(), "another person's accounts are not fenced");
         assert_eq!(db.execute(UNFENCE_ACCOUNT, params!["issuer", "user-a", "mail", "sub-1"]).unwrap(), 1, "a known import of that account lifts its fence");
         assert_eq!(fenced("user-a"), [pair("drive", "sub-1"), pair("mail", "sub-2")], "and no other's");
         for i in 0..ACCOUNT_FENCES_MAX + 3 {
-            db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "mail", format!("many-{i}"), 100 + i as i64]).unwrap();
+            db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "mail", format!("many-{i}"), format!("data_installation_m{i}"), 100 + i as i64]).unwrap();
             db.execute(TRIM_ACCOUNT_FENCES, params!["issuer", "user-a", "mail"]).unwrap();
         }
         let mail: Vec<String> = fenced("user-a").into_iter().filter(|(p, _)| p == "mail").map(|(_, i)| i).collect();

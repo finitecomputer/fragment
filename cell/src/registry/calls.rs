@@ -592,6 +592,9 @@ pub(crate) enum SigninsHook {
     /// provider, as a connect known to import does (a test connects a row
     /// with no `connection_oauth` through the WorkOS fake, never a callback).
     UnfenceConnection { email: String, provider: String },
+    /// Every connect import whose outcome was unknown is let go, as its
+    /// while running out (`connection_accounts::Deciding`).
+    ForgetUncertainImports,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -662,9 +665,11 @@ pub(in crate::registry) struct FinishConnectionIn {
 /// Refused::NoScopes`), and nothing was imported. `OneAccount` and
 /// `AccountLimit`: another of several accounts, refused (Pipes connects one
 /// a person for now; the row's `accounts_max`, or Pipes' limit, reached),
-/// and nothing was imported.
+/// and nothing was imported. `Finishing`: of several accounts, an earlier
+/// connect of theirs there may still land (its outcome unknown), or
+/// another decided too long, and nothing was imported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum ConnectionFinished { Connected, NotUnderWay, Declined, CodeRefused, NoScopes, OneAccount, AccountLimit, Failed }
+pub(crate) enum ConnectionFinished { Connected, NotUnderWay, Declined, CodeRefused, NoScopes, OneAccount, AccountLimit, Finishing, Failed }
 
 impl Call for FinishConnection {
     const PATH: &'static str = "/connection/finish";
@@ -703,12 +708,21 @@ pub(crate) struct ConnectionFences {
     pub subject: String,
 }
 
-/// The providers fenced whole, and each account fenced alone: (provider,
-/// identifier), at most `connection_signin::ACCOUNT_FENCES_MAX` a provider.
+/// The providers fenced whole, and each account fenced alone, at most
+/// `connection_signin::ACCOUNT_FENCES_MAX` a provider.
 #[derive(Default, Serialize, Deserialize)]
 pub(crate) struct FencedProviders {
     pub providers: Vec<String>,
-    pub accounts: Vec<(String, String)>,
+    pub accounts: Vec<FencedAccount>,
+}
+
+/// One account a disconnect fenced: its provider, its identifier, and the
+/// Pipes id it took.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct FencedAccount {
+    pub provider: String,
+    pub identifier: String,
+    pub account: String,
 }
 
 impl Call for ConnectionFences {
