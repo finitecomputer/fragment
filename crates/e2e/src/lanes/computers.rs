@@ -506,19 +506,6 @@ const RECOVERY_CHECKS: [&str; 11] = [
     "the time it was kept for failed saves is free (Paul, 2026-10-08): nothing is charged from the start of a sleep's try whose save failed to its bound, or to the restart that ended it; the time before and after is",
 ];
 
-/// A restart's answer, or, when it answered while its start was still
-/// under way (`starting`: a real Hermes on a preview, or a start a
-/// container's exit report made on a sandcastle node, docs/self-host.md,
-/// found 21), the computer's view once it is up, waited for within `wait`.
-fn restarted(s: &Suite, api: &Api, owner: &crate::Keys, id: &str, answer: &Value, wait: Duration) -> Value {
-    if answer["phase"] != "starting" {
-        return answer.clone();
-    }
-    let view = || api.signed(owner, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
-    s.eventually(wait, || view()["phase"] == "awake");
-    view()
-}
-
 /// What its owner is told, and the way back to working (rung 4 of
 /// docs/explorations/pi-durable.md, with the platform's notices): a sleep
 /// whose save fails tells them at once, a restart (asked twice) goes back to
@@ -575,15 +562,11 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
     let restart = || api.signed(c.owner, "POST", &path("/restart"), Some(&json!({ "generation": g })));
     let restarted_at = crate::api::now_ms();
     let r = restart()?;
-    // its stop's own end, or the report of its container's exit (a request
-    // of its own: docs/self-host.md, found 21), whichever comes first, starts
-    // it again: the restart may answer while that start is under way
-    let up = restarted(s, api, c.owner, c.id, &r.body, c.wake);
-    let restored = up["restored"].clone();
+    let restored = r.body["restored"].clone();
     s.ok(
         RECOVERY_CHECKS[2],
-        r.status == 200 && up["phase"] == "awake" && up["generation"].as_u64() == Some(g + 1) && restored["rollback"] == true && restored["from"] == "backup" && restored["save"] == newest["id"],
-        json!([r.body, up]),
+        r.status == 200 && r.body["phase"] == "awake" && r.body["generation"].as_u64() == Some(g + 1) && restored["rollback"] == true && restored["from"] == "backup" && restored["save"] == newest["id"],
+        &r,
     );
     let again = restart()?;
     s.ok(RECOVERY_CHECKS[3], again.status == 200 && again.body["generation"].as_u64() == Some(g + 1) && again.body["restored"] == restored, &again);
@@ -694,15 +677,14 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
     let r = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
     let asleep = r.body["generation"].as_u64().unwrap_or(0);
     let woke = api.signed(c.owner, "POST", &path("/restart"), Some(&json!({ "generation": asleep })))?;
-    let up = restarted(s, api, c.owner, c.id, &woke.body, c.wake);
     s.ok(
         RECOVERY_CHECKS[9],
         r.body["phase"] == "asleep"
-            && up["phase"] == "awake"
-            && up["generation"].as_u64() == Some(asleep + 1)
-            && up["restored"]["from"] == "backup"
-            && up["restored"]["rollback"] == false
-            && up["notices"].as_array().is_none_or(|l| l.is_empty()),
+            && woke.body["phase"] == "awake"
+            && woke.body["generation"].as_u64() == Some(asleep + 1)
+            && woke.body["restored"]["from"] == "backup"
+            && woke.body["restored"]["rollback"] == false
+            && woke.body["notices"].as_array().is_none_or(|l| l.is_empty()),
         format!("{r} / {woke}"),
     );
     Ok(3)
@@ -1608,11 +1590,10 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let ran = fakes.then(|| runs(s, api, &owner, &owner_id, &id));
         let generation = view()["generation"].as_u64().unwrap_or(0);
         let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/restart"), Some(&json!({ "generation": generation })))?;
-        let up = restarted(s, api, &owner, &id, &r.body, wake);
         s.ok(
             PINS[7],
-            r.status == 200 && up["phase"] == "awake" && up["generation"].as_u64() == Some(generation + 1) && up["version"] == latest.as_str() && up["latest"] == latest.as_str() && notice(&up, "update").is_null() && version() == "2",
-            json!({ "served": version(), "view": up }),
+            r.status == 200 && r.body["phase"] == "awake" && r.body["generation"].as_u64() == Some(generation + 1) && r.body["version"] == latest.as_str() && r.body["latest"] == latest.as_str() && notice(&r.body, "update").is_null() && version() == "2",
+            json!({ "served": version(), "view": r.body }),
         );
         say(30, "after the upgrade")?;
         replies_so_far += 1;
