@@ -1379,11 +1379,12 @@ the provider's own hosts.
   something lets their agents use it, with no approval of the platform's
   (what Hermes asks about: "Approvals in our Hermes image").
 - HTTPS interception needs Cloudflare's CA: the image waits for it at
-  boot and appends it to its trust store (curl's, Python's), and names it
-  in its browser's managed policy (`CACertificates`, in Chrome for
-  Testing's policy directory: `hermes::CHROMIUM_CA_POLICY`), since
-  Hermes' pinned Chromium reads no system bundle: without it, every page
-  on an intercepted host is an interstitial in the agent's browser.
+  boot and appends it to its trust store (curl's, Python's, and Node's,
+  which reads it with `NODE_USE_SYSTEM_CA=1`: its own roots alone refused
+  it), and names it in its browser's managed policy (`CACertificates`, in
+  Chrome for Testing's policy directory: `hermes::CHROMIUM_CA_POLICY`),
+  since Hermes' pinned Chromium reads no system bundle: without it, every
+  page on an intercepted host is an interstitial in the agent's browser.
 - What the catalog cannot express is never swapped: a key in a path is
   refused, and a body goes as it came (a placeholder in it reaches the
   provider, which refuses it). A vendor that signs its requests with the
