@@ -448,16 +448,20 @@ class ContainerHost {
     if (generation !== this.#generation) return false;
     const c = this.#c;
     const egress = (route) => this.#ctx.exports.ComputerEgress({ props: { computer, route } });
-    await this.#settled(() => c.interceptOutboundHttp("api.fragment.internal", egress("api")));
-    await this.#settled(() => c.interceptOutboundHttp("model.fragment.internal", egress("model")));
-    for (const host of platform.hosts) {
-      await this.#settled(() => (platform.https ? c.interceptOutboundHttps(host, egress("platform")) : c.interceptOutboundHttp(host, egress("platform"))));
-    }
-    for (const host of swapHosts) {
-      await this.#settled(() => c.interceptOutboundHttp(host, egress("swap")));
-      await this.#settled(() => c.interceptOutboundHttps(host, egress("swap")));
-    }
-    await this.#settled(() => this.#backups.intercept());
+    const set = async () => {
+      await this.#settled(() => c.interceptOutboundHttp("api.fragment.internal", egress("api")));
+      await this.#settled(() => c.interceptOutboundHttp("model.fragment.internal", egress("model")));
+      for (const host of platform.hosts) {
+        await this.#settled(() => (platform.https ? c.interceptOutboundHttps(host, egress("platform")) : c.interceptOutboundHttp(host, egress("platform"))));
+      }
+      for (const host of swapHosts) {
+        await this.#settled(() => c.interceptOutboundHttp(host, egress("swap")));
+        await this.#settled(() => c.interceptOutboundHttps(host, egress("swap")));
+      }
+      await this.#settled(() => this.#backups.intercept());
+    };
+    // a node takes them as one list (NodeContainer's `intercepting`)
+    await (this.#node ? c.intercepting(set) : set());
     await this.#settled(() => c.setInactivityTimeout(idleMs));
     if (this.#node) await this.#ctx.storage.put(NODE_ARM, { generation, computer, idleMs, swapHosts, platform });
     return true;
