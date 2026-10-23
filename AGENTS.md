@@ -319,10 +319,17 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
 - `.github/workflows/ci.yml` runs `check`, the e2e's four shards (`e2e
   shard k/4`), and `e2e`, green when they all are, on Linux, and then, on
   a push to master or `production` that both are green for, `deploy`
-  (below). A push to `production` of a commit master already proved (a
-  run of ci.yml on a push to master of that SHA succeeded, its preview
-  deploy included) skips them and deploys at once: its first job,
-  `proven`, asks the API (Paul, 2026-10-20). Its caches restore on
+  (below). A push whose tree a green run already tested skips them and
+  deploys at once: its first job, `proven`, asks the API. Each run's
+  `e2e` job records the tree its shards tested (an artifact,
+  `tested-tree-<tree>`). On `production`, a run of ci.yml that succeeded
+  on a push to master of that SHA, or of a commit with that tree, proves
+  it, its preview deploy included (Paul, 2026-10-20); on master, such a
+  run, or the green run of the pull request a merge commit merges (its
+  head the commit's second parent) that recorded the merge commit's
+  tree: a pull request's run tests its merge into master as master
+  stood, so this holds when master has not moved since (Paul,
+  2026-10-23). Its caches restore on
   every run and save only from master's pushes (each one's contents are
   named in the workflow): Rust's through
   `Swatinem/rust-cache`, the pinned Node's and the JavaScript caches
