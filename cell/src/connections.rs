@@ -14,13 +14,17 @@
 //!   person's browser goes to connect a connection. Its own provider's code
 //!   returns to Fragment; browser/session/provider binding is checked before
 //!   exchanging it and importing tokens into Pipes (docs/pipes-browser-binding.md).
-//! - `DELETE /api/connections/{provider}` → `{provider, state, revoked}`: a
-//!   connection disconnected. Its grant is revoked at the provider where its
-//!   row names a `revoke` endpoint (with a token Pipes mints for it), then its
-//!   account is deleted at Pipes, which ends every swap of it; `revoked` says
-//!   whether the provider confirmed. The person's computer is told at once.
-//!   Before anything goes, the registry fences the account: no connect begun
-//!   before the disconnect connects it after (a 429 while one is importing).
+//!   Where the row takes several accounts (`accounts_max`), its body may
+//!   ask for another (`{add: true}`) or one of theirs again (`{account}`).
+//! - `DELETE /api/connections/{provider}[?account=<id>]` → `{provider,
+//!   state, revoked}`: a connection disconnected (one of several accounts,
+//!   by its id; with several, one must be named). Its grant is revoked at
+//!   the provider where its row names a `revoke` endpoint (with a token
+//!   Pipes mints for it), then its account is deleted at Pipes, which ends
+//!   every swap of it; `revoked` says whether the provider confirmed. The
+//!   person's computer is told at once. Before anything goes, the registry
+//!   fences the account: no connect begun before the disconnect connects
+//!   it after (a 429 while one is importing).
 //! - `PUT /api/connections/{provider}/key {key}` and `DELETE …/key`: the
 //!   person's own key for an `own` provider, kept sealed by their computer
 //!   (one computer per person for now: decision 13), which swaps it in.
@@ -39,9 +43,10 @@
 use std::collections::BTreeMap;
 
 use fragment_core::catalog::{ConnectionOAuth, Kind, KeyOAuth};
+use fragment_core::connection_accounts::{self as accounts, Held, Intent};
 use fragment_core::own_signin;
 use fragment_core::roundtrip::{self, Trip};
-use fragment_proto::computer::{ProviderModel, ProviderPrice, ProviderSignIn, ProviderState, ProviderView, Providers};
+use fragment_proto::computer::{ConnectionAccount, ProviderModel, ProviderPrice, ProviderSignIn, ProviderState, ProviderView, Providers};
 use fragment_proto::{ErrorCode, IdentityKind};
 use serde_json::{json, Value};
 use worker::*;
@@ -67,29 +72,35 @@ pub async fn workos_user(env: &Env, cfg: &Config, who: &str) -> CellResult<Optio
     Ok(crate::ask_registry(env, &SubjectOf { identity: who.into(), issuer }).await?.subject)
 }
 
-/// The providers a WorkOS user's account stands fenced at by a disconnect
-/// (registry/connection_signin.rs `fence_connection`): Pipes' word is not
+/// What a WorkOS user's account stands fenced at by their disconnects
+/// (registry/connection_signin.rs `fence_connection`): providers whole,
+/// and single accounts of several, by identifier. Pipes' word is not
 /// taken for them until a connect of theirs is known to import again.
-async fn fenced_at(env: &Env, cfg: &Config, user: &str) -> CellResult<Vec<String>> {
+async fn fenced_at(env: &Env, cfg: &Config, user: &str) -> CellResult<crate::registry::calls::FencedProviders> {
     let issuer = crate::keys::workos(env, cfg).await?.issuer();
-    Ok(crate::ask_registry(env, &crate::registry::calls::ConnectionFences { issuer, subject: user.into() }).await?.providers)
+    crate::ask_registry(env, &crate::registry::calls::ConnectionFences { issuer, subject: user.into() }).await
 }
 
 /// Each connection's state for a person (as Pipes says, with no token,
 /// save one their disconnect fences: not connected, Pipes not asked),
 /// whose WorkOS user `user` finds (`workos_user`, or the one their computer
-/// keeps), asked only when the catalog has a connection.
-/// `accounts`, when asked for, gets each one's account as Pipes describes
-/// it (`keys::PipesAccount`: its label and the scopes it was granted),
-/// from the same answers. (One function, not a second beside it: each is
-/// instantiated once per caller's future, and the cell's Wasm has a budget.)
+/// keeps), asked only when the catalog has a connection: connected while
+/// any of their accounts there is. One account a provider is its
+/// compatibility connection, asked of Pipes alone; where the row takes
+/// several (`accounts_max`), Pipes' plural list is read once for all of
+/// them, and an account a disconnect fences is not theirs.
+/// `accounts`, when asked for, gets each one's accounts as Pipes describes
+/// them (`keys::PipesAccount`: id, label and the scopes each was granted;
+/// several oldest first), from the same answers. (One function, not a
+/// second beside it: each is instantiated once per caller's future, and
+/// the cell's Wasm has a budget.)
 pub async fn connection_states(
     env: &Env,
     cfg: &Config,
     user: impl std::future::Future<Output = CellResult<Option<String>>>,
-    mut accounts: Option<&mut BTreeMap<String, PipesAccount>>,
+    mut accounts: Option<&mut BTreeMap<String, Vec<PipesAccount>>>,
 ) -> CellResult<BTreeMap<String, ProviderState>> {
-    let connections: Vec<&str> = cfg.providers.providers().iter().filter(|p| p.kind == Kind::Connection).map(|p| p.name.as_str()).collect();
+    let connections: Vec<&fragment_core::catalog::Provider> = cfg.providers.providers().iter().filter(|p| p.kind == Kind::Connection).collect();
     let mut states = BTreeMap::new();
     if connections.is_empty() {
         return Ok(states);
@@ -98,23 +109,48 @@ pub async fn connection_states(
     let api = &cfg.workos()?.api;
     let fenced = match &user {
         Some(u) => fenced_at(env, cfg, u).await?,
-        None => vec![],
+        None => Default::default(),
+    };
+    let plural = match &user {
+        Some(u) if connections.iter().any(|p| p.several()) => Some(crate::keys::pipes_accounts(env, api, u).await?),
+        _ => None,
     };
     // at most `catalog::PROVIDERS_MAX` providers, one question each
-    for provider in connections {
-        let account = match &user {
+    for p in connections {
+        let provider = p.name.as_str();
+        let held = match (&user, &plural) {
+            (None, _) => vec![],
             // disconnected, and no connect known to have imported since:
             // whatever Pipes holds (an import landed late) is not theirs
-            Some(_) if fenced.iter().any(|f| f == provider) => PipesAccount { state: ProviderState::NotConnected, label: None, scopes: None },
-            Some(u) => crate::keys::pipes_state(env, api, provider, u).await?,
-            None => PipesAccount { state: ProviderState::NotConnected, label: None, scopes: None },
+            (Some(_), _) if fenced.providers.iter().any(|f| f == provider) => vec![],
+            (Some(_), Some(list)) if p.several() => {
+                let theirs = accounts::listed(list, provider).map_err(|e| CellError::new(ErrorCode::UpstreamFailed, e))?;
+                let here: Vec<&str> = fenced.accounts.iter().filter(|(f, _)| f == provider).map(|(_, i)| i.as_str()).collect();
+                accounts::unfenced(theirs, &here)
+            }
+            (Some(u), _) => Some(crate::keys::pipes_state(env, api, provider, u).await?).filter(|a| a.state != ProviderState::NotConnected).into_iter().collect(),
         };
-        states.insert(provider.to_string(), account.state);
+        states.insert(provider.to_string(), accounts::state_of(&held));
         if let Some(accounts) = accounts.as_deref_mut() {
-            accounts.insert(provider.to_string(), account);
+            accounts.insert(provider.to_string(), held);
         }
     }
     Ok(states)
+}
+
+/// What a person's computer holds of their accounts (`connection_states`'
+/// `accounts`) to choose one for a swap: each of a connection's that takes
+/// several, in order (computer.rs `connection_token`).
+pub fn held_of(cfg: &Config, listed: &BTreeMap<String, Vec<PipesAccount>>) -> BTreeMap<String, Vec<Held>> {
+    listed.iter().filter(|(p, _)| cfg.providers.get(p).is_some_and(|p| p.several())).map(|(p, l)| (p.clone(), accounts::held(l))).collect()
+}
+
+/// `provider`'s accounts of the person signed in as `who`, as their list
+/// names them (`connection_states`).
+async fn accounts_of(env: &Env, cfg: &Config, who: &str, provider: &str) -> CellResult<Vec<PipesAccount>> {
+    let mut listed = BTreeMap::new();
+    connection_states(env, cfg, workos_user(env, cfg, who), Some(&mut listed)).await?;
+    Ok(listed.remove(provider).unwrap_or_default())
 }
 
 pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, method: Method, rest: &[&str], body: &[u8]) -> CellResult<Response> {
@@ -128,11 +164,12 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
     let computer = fragment_core::computer::default_computer_of(who);
     match (method.clone(), rest) {
         (Method::Get, []) => {
-            let mut accounts = BTreeMap::new();
-            let states = connection_states(env, cfg, workos_user(env, cfg, who), Some(&mut accounts)).await?;
+            let mut listed = BTreeMap::new();
+            let states = connection_states(env, cfg, workos_user(env, cfg, who), Some(&mut listed)).await?;
             // the person's computer keeps them, for its guest's next read; one
             // not made yet has nothing to tell, and so no own key either
-            let own: Vec<String> = match crate::computer::ask(env, &computer, "computer/own-keys", &json!({ "connections": states })).await {
+            let told = json!({ "connections": states, "accounts": held_of(cfg, &listed) });
+            let own: Vec<String> = match crate::computer::ask(env, &computer, "computer/own-keys", &told).await {
                 Ok(v) => serde_json::from_value(v["providers"].clone()).map_err(|e| CellError::host(format!("the computer's own keys: {e}")))?,
                 Err(e) if e.code == ErrorCode::NotFound => vec![],
                 Err(e) => return Err(e),
@@ -141,8 +178,9 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                 .providers
                 .providers()
                 .iter()
-                .map(|p| (p, accounts.get(&p.name)))
-                .map(|(p, account)| ProviderView {
+                .map(|p| (p, listed.get(&p.name).map(Vec::as_slice).unwrap_or_default()))
+                .map(|(p, held)| (p, held, accounts::default_of(held)))
+                .map(|(p, held, account)| ProviderView {
                     provider: p.name.clone(),
                     kind: p.kind,
                     state: match p.kind {
@@ -156,11 +194,17 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                     price: p.price.map(|pr| ProviderPrice { micros: pr.micros, per: pr.per }),
                     sign_in: p.oauth.as_ref().map(|o| ProviderSignIn { manage: o.manage.clone() }),
                     models: p.models.as_ref().map(|m| m.offer.iter().map(|o| ProviderModel { id: o.id.clone(), name: o.name.clone() }).collect()),
+                    // the default account's, of several
                     account: account.and_then(|a| a.label.clone()),
                     granted: account.and_then(|a| a.scopes.clone()),
-                    // what its row asks for that the person did not allow
-                    missing: p.connection_oauth.as_ref().zip(account.and_then(|a| a.scopes.as_deref())).map(|(o, granted)| fragment_core::connection_signin::missing(&o.scopes, granted)),
+                    missing: account.and_then(|a| missing(p.connection_oauth.as_ref(), a)),
                     note: p.note.clone(),
+                    accounts: p.several().then(|| {
+                        held.iter()
+                            .filter_map(|a| Some(ConnectionAccount { id: a.id.clone()?, account: a.label.clone(), state: a.state, granted: a.scopes.clone(), missing: missing(p.connection_oauth.as_ref(), a) }))
+                            .collect()
+                    }),
+                    accounts_max: p.several().then(|| p.accounts_max()),
                 })
                 .collect();
             json_response(&Providers { providers })
@@ -186,7 +230,25 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
             reachable(cfg, &o.authorize)?;
             reachable(cfg, &o.exchange)?;
             let session = crate::auth::platform_session_token(req, url)?.ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "sign in before connecting"))?;
-            let begun = crate::ask_registry(env, &crate::registry::calls::BeginConnection { session, provider: provider.to_string() }).await?;
+            let asked: Value = if body.iter().all(u8::is_ascii_whitespace) { Value::Null } else { serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))? };
+            let intent = Intent::asked(&asked).map_err(CellError::invalid)?;
+            if intent != Intent::Connect {
+                if !p.several() {
+                    return Err(CellError::invalid(format!("{provider} connects one account here: connect it with no body")));
+                }
+                // said before the provider's page: the callback checks again
+                let theirs = accounts_of(env, cfg, who, provider).await?;
+                match &intent {
+                    Intent::Add if theirs.len() >= usize::from(p.accounts_max()) => {
+                        return Err(CellError::invalid(format!("you have {} {provider} accounts connected, the most this platform connects: disconnect one to add another", theirs.len())));
+                    }
+                    Intent::Reconnect(id) if !theirs.iter().any(|a| a.id.as_deref() == Some(id.as_str())) => {
+                        return Err(CellError::new(ErrorCode::NotFound, format!("no {provider} account {id:?} of yours: GET /api/connections lists them")));
+                    }
+                    _ => {}
+                }
+            }
+            let begun = crate::ask_registry(env, &crate::registry::calls::BeginConnection { session, provider: provider.to_string(), intent }).await?;
             if !roundtrip::valid_state(&begun.state) || !own_signin::valid_token(&begun.challenge) { return Err(CellError::host("invalid connection challenge")); }
             let to = fragment_core::connection_signin::authorize_url(o, &callback_url(cfg, provider), &begun.challenge, &begun.state);
             let mut resp = json_response(&json!({ "provider": provider, "url": to }))?;
@@ -200,18 +262,40 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                 Kind::Own => return Err(CellError::invalid(format!("{provider} is no connection to disconnect: your own key is removed with DELETE /api/connections/{provider}/key"))),
                 Kind::Operator => return Err(CellError::invalid(format!("{provider} is no connection to disconnect: it is the platform's key, not yours"))),
             }
+            // which of several accounts: the one named, or the one there is
+            let named = crate::auth::query(url, "account");
+            if named.is_some() && !p.several() {
+                return Err(CellError::invalid(format!("{provider} connects one account here: disconnect it with no account named")));
+            }
+            // of several: the one going, and how many they have there
+            let one = match p.several() {
+                true => {
+                    let theirs = accounts_of(env, cfg, who, provider).await?;
+                    let count = theirs.len();
+                    Some((one_of(theirs, named.as_deref(), provider)?, count))
+                }
+                false => None,
+            };
             // first, no connect begun before this one connects it after:
             // the registry ends those pending and cancels those exchanging
-            // (429 while one imports), and names the person's WorkOS user
+            // (429 while one imports), and names the person's WorkOS user;
+            // of several, it fences that account alone for good
             let issuer = crate::keys::workos(env, cfg).await?.issuer();
-            let fence = crate::registry::calls::FenceConnection { identity: who.into(), issuer, provider: provider.to_string() };
-            let user = crate::ask_registry(env, &fence).await?.subject;
-            let revoked = match &user {
-                Some(u) => disconnect(env, cfg, provider, p.connection_oauth.as_ref(), u).await?,
-                None => false,
+            let lasting = match &one {
+                Some((gone, theirs)) => accounts::lasting(gone.as_ref(), *theirs),
+                None => accounts::Lasting::Provider,
             };
-            disconnected_told(env, cfg, &computer, provider, user).await?;
-            json_response(&json!({ "provider": provider, "state": ProviderState::NotConnected, "revoked": revoked }))
+            let fence = crate::registry::calls::FenceConnection { identity: who.into(), issuer, provider: provider.to_string(), lasting };
+            let user = crate::ask_registry(env, &fence).await?.subject;
+            let id = one.as_ref().and_then(|(a, _)| a.as_ref()).and_then(|a| a.id.clone());
+            let revoked = match (&user, &one) {
+                // of several, none there: nothing to revoke or delete
+                (Some(_), Some((None, _))) | (None, _) => false,
+                (Some(u), _) => disconnect(env, cfg, provider, p.connection_oauth.as_ref(), u, id.as_deref()).await?,
+            };
+            let states = disconnected_told(env, cfg, &computer, provider, user).await?;
+            let state = states.get(*provider).copied().unwrap_or(ProviderState::NotConnected);
+            json_response(&json!({ "provider": provider, "account": id, "state": state, "revoked": revoked }))
         }
         (Method::Put | Method::Delete, [provider, "key"]) => {
             if provider_of(provider)?.kind != Kind::Own {
@@ -247,20 +331,44 @@ fn reachable(cfg: &Config, url: &str) -> CellResult<()> {
     Err(CellError::new(ErrorCode::HostFailed, format!("{url} is a local fleet's, and this one's egress may not reach local addresses")))
 }
 
+/// What `account`'s row asks for that the person did not allow it (none
+/// said where Pipes names no scopes, or the row asks for none).
+fn missing(o: Option<&ConnectionOAuth>, account: &PipesAccount) -> Option<Vec<String>> {
+    o.zip(account.scopes.as_deref()).map(|(o, granted)| fragment_core::connection_signin::missing(&o.scopes, granted))
+}
+
 /// Where the provider sends the person's browser back.
 fn callback_url(cfg: &Config, provider: &str) -> String {
     format!("{}/api/connections/{provider}/callback", cfg.platform())
 }
 
-/// `user`'s connection to `provider` taken away: its grant revoked at the
-/// provider first, while Pipes still holds a token for it (`o.revoke`; a
-/// failure there is logged and the account goes anyway: the person asked
-/// for their agents to lose it), then its account deleted at Pipes, which
-/// ends every swap of it. Answers whether the provider confirmed the revoke.
-async fn disconnect(env: &Env, cfg: &Config, provider: &str, o: Option<&ConnectionOAuth>, user: &str) -> CellResult<bool> {
+/// The one of a person's several accounts at `provider` a disconnect
+/// takes away: the one `named` (its id), or, naming none, the one they
+/// have (with several, they name it; with none, none).
+fn one_of(theirs: Vec<PipesAccount>, named: Option<&str>, provider: &str) -> CellResult<Option<PipesAccount>> {
+    match named {
+        Some(id) => match theirs.into_iter().find(|a| a.id.as_deref() == Some(id)) {
+            Some(a) => Ok(Some(a)),
+            None => Err(CellError::new(ErrorCode::NotFound, format!("no {provider} account {id:?} of yours: GET /api/connections lists them"))),
+        },
+        None if theirs.len() > 1 => {
+            let named: Vec<String> = theirs.iter().map(|a| format!("{} ({})", a.id.as_deref().unwrap_or_default(), a.label.as_deref().unwrap_or("no name"))).collect();
+            Err(CellError::invalid(format!("you have {} {provider} accounts connected: name the one to disconnect, ?account=<id> (yours: {})", theirs.len(), named.join(", "))))
+        }
+        None => Ok(theirs.into_iter().next()),
+    }
+}
+
+/// `user`'s connection to `provider` taken away (of several, the account
+/// `account` names): its grant revoked at the provider first, while Pipes
+/// still holds a token for it (`o.revoke`; a failure there is logged and
+/// the account goes anyway: the person asked for their agents to lose it),
+/// then its account deleted at Pipes, which ends every swap of it. Answers
+/// whether the provider confirmed the revoke.
+async fn disconnect(env: &Env, cfg: &Config, provider: &str, o: Option<&ConnectionOAuth>, user: &str, account: Option<&str>) -> CellResult<bool> {
     let api = &cfg.workos()?.api;
     let revoked = match o.and_then(|o| o.revoke.as_deref()) {
-        Some(revoke) => match revoke_grant(env, cfg, api, provider, user, revoke).await {
+        Some(revoke) => match revoke_grant(env, cfg, api, provider, user, account, revoke).await {
             Ok(r) => r,
             Err(e) => {
                 console_error!("{}", json!({ "connection-disconnect": provider, "not-revoked": e.message }));
@@ -269,16 +377,17 @@ async fn disconnect(env: &Env, cfg: &Config, provider: &str, o: Option<&Connecti
         },
         None => false,
     };
-    crate::keys::pipes_delete(env, api, provider, user).await?;
+    crate::keys::pipes_delete(env, api, provider, user, account).await?;
     Ok(revoked)
 }
 
-/// The grant behind `user`'s account at `provider`, revoked with an access
-/// token Pipes mints for it (one Pipes refuses, the account inactive or
-/// gone, has no grant left to revoke here).
-async fn revoke_grant(env: &Env, cfg: &Config, api: &str, provider: &str, user: &str, revoke: &str) -> CellResult<bool> {
+/// The grant behind `user`'s account at `provider` (of several, the one
+/// `account` names), revoked with an access token Pipes mints for it (one
+/// Pipes refuses, the account inactive or gone, has no grant left to
+/// revoke here).
+async fn revoke_grant(env: &Env, cfg: &Config, api: &str, provider: &str, user: &str, account: Option<&str>, revoke: &str) -> CellResult<bool> {
     reachable(cfg, revoke)?;
-    let (status, answer) = crate::keys::pipes_token(env, api, provider, user).await?;
+    let (status, answer) = crate::keys::pipes_token(env, api, provider, user, account).await?;
     let Some(token) = (status == 200 && answer["active"] == true).then(|| answer["access_token"]["access_token"].as_str()).flatten().filter(|t| !t.is_empty()) else {
         return Ok(false);
     };
@@ -291,11 +400,13 @@ async fn revoke_grant(env: &Env, cfg: &Config, api: &str, provider: &str, user: 
 /// `connection_token`), rather than once its states age out. A computer
 /// not made yet has no guest. One not told is the disconnect's failure,
 /// which the person asks again (each step of it may be asked twice).
-async fn disconnected_told(env: &Env, cfg: &Config, computer: &str, provider: &str, user: Option<String>) -> CellResult<()> {
-    let states = connection_states(env, cfg, std::future::ready(Ok(user)), None).await?;
-    match crate::computer::ask(env, computer, "computer/own-keys", &json!({ "connections": states })).await {
-        Ok(_) => Ok(()),
-        Err(e) if e.code == ErrorCode::NotFound => Ok(()),
+/// Answers the states it told.
+async fn disconnected_told(env: &Env, cfg: &Config, computer: &str, provider: &str, user: Option<String>) -> CellResult<BTreeMap<String, ProviderState>> {
+    let mut listed = BTreeMap::new();
+    let states = connection_states(env, cfg, std::future::ready(Ok(user)), Some(&mut listed)).await?;
+    match crate::computer::ask(env, computer, "computer/own-keys", &json!({ "connections": states, "accounts": held_of(cfg, &listed) })).await {
+        Ok(_) => Ok(states),
+        Err(e) if e.code == ErrorCode::NotFound => Ok(states),
         Err(e) => {
             console_error!("{}", json!({ "connection-disconnect": provider, "computer-not-told": e.message }));
             Err(CellError::new(e.code, format!("{provider} is disconnected, but your computer could not be told yet: disconnect again ({})", e.message)))
@@ -345,12 +456,28 @@ enum Unfinished {
     /// A connection's provider granted nothing its row asks for beyond
     /// signing in: the person unticked everything else.
     NoScopes,
+    /// Another account, refused by Pipes: it connects one account a person
+    /// for now (404 `multiple_connections_unavailable`). Nothing imported.
+    OneAccount,
+    /// Another account, past the row's `accounts_max` or Pipes' limit.
+    /// Nothing imported.
+    AccountLimit,
     /// The provider failed, or answered no key.
     NoKey,
 }
 
 impl Unfinished {
-    const ALL: [Unfinished; 7] = [Unfinished::NotBegunHere, Unfinished::SignedOut, Unfinished::Declined, Unfinished::NotUnderWay, Unfinished::CodeRefused, Unfinished::NoScopes, Unfinished::NoKey];
+    const ALL: [Unfinished; 9] = [
+        Unfinished::NotBegunHere,
+        Unfinished::SignedOut,
+        Unfinished::Declined,
+        Unfinished::NotUnderWay,
+        Unfinished::CodeRefused,
+        Unfinished::NoScopes,
+        Unfinished::OneAccount,
+        Unfinished::AccountLimit,
+        Unfinished::NoKey,
+    ];
 
     /// Its word in the clean URL.
     fn word(self) -> &'static str {
@@ -361,6 +488,8 @@ impl Unfinished {
             Unfinished::NotUnderWay => "not-under-way",
             Unfinished::CodeRefused => "code-refused",
             Unfinished::NoScopes => "no-scopes",
+            Unfinished::OneAccount => "one-account",
+            Unfinished::AccountLimit => "account-limit",
             Unfinished::NoKey => "no-key",
         }
     }
@@ -369,17 +498,30 @@ impl Unfinished {
         Unfinished::ALL.into_iter().find(|u| u.word() == word)
     }
 
-    fn message(self) -> &'static str {
-        match self {
+    /// What its page says, of `provider` (its name for people: `named`).
+    fn message(self, provider: &str) -> String {
+        let says = match self {
             Unfinished::NotBegunHere => "This sign-in did not begin in this browser, or began too long ago, or another began since: connect again from settings.",
             Unfinished::SignedOut => "You are signed out here: sign in, then connect again from settings.",
             Unfinished::Declined => "The provider sent no key back (declined, or it failed): connect again from settings if you meant to.",
             Unfinished::NotUnderWay => "This sign-in is not one under way for you (finished already, or expired): connect again from settings.",
             Unfinished::CodeRefused => "The provider refused the sign-in's code (expired, or used): connect again from settings.",
             Unfinished::NoScopes => "You allowed nothing your agents could use, only who you are, so nothing was connected: connect again from settings and leave at least one permission ticked.",
+            Unfinished::OneAccount => {
+                return format!("This platform can connect one {} account for now, and you have one connected, so nothing was added. To use another, disconnect the one you have in settings, then connect again.", named(provider));
+            }
+            Unfinished::AccountLimit => return format!("You have connected as many {} accounts as this platform allows, so nothing was added: disconnect one in settings to add another.", named(provider)),
             Unfinished::NoKey => "The provider gave no key back: connect again from settings.",
-        }
+        };
+        says.to_string()
     }
+}
+
+/// A provider's name for people, as settings writes it: its first letter
+/// upper case (`google` is Google).
+fn named(provider: &str) -> String {
+    let mut chars = provider.chars();
+    chars.next().map(|c| c.to_ascii_uppercase().to_string() + chars.as_str()).unwrap_or_default()
 }
 
 /// `GET /api/connections/{provider}/callback?code=&state=` on the
@@ -406,8 +548,8 @@ pub(crate) async fn callback(req: &Request, env: &Env, url: &Url, provider: &str
     };
     // the clean page a refusal is sent to: its word, and nothing else
     if let Some(word) = crate::auth::query(url, "refused") {
-        let why = Unfinished::parse(&word).map_or("This sign-in did not finish: connect again from settings.", Unfinished::message);
-        return page(400, "Not connected", why);
+        let why = Unfinished::parse(&word).map_or_else(|| "This sign-in did not finish: connect again from settings.".to_string(), |u| u.message(provider));
+        return page(400, "Not connected", &why);
     }
     let finished = if trip == Trip::Connection { finish_connection(req, env, url, provider).await? } else { finish(req, env, cfg, url, provider, p.oauth.as_ref().expect("checked above")).await? };
     let spent = (finished != Err(Unfinished::NotBegunHere)).then(|| crate::auth::trip_spent(trip, url));
@@ -436,6 +578,8 @@ async fn finish_connection(req: &Request, env: &Env, url: &Url, provider: &str) 
         Ok(ConnectionFinished::Declined) => Err(Unfinished::Declined),
         Ok(ConnectionFinished::CodeRefused) => Err(Unfinished::CodeRefused),
         Ok(ConnectionFinished::NoScopes) => Err(Unfinished::NoScopes),
+        Ok(ConnectionFinished::OneAccount) => Err(Unfinished::OneAccount),
+        Ok(ConnectionFinished::AccountLimit) => Err(Unfinished::AccountLimit),
         Ok(ConnectionFinished::Failed) => Err(Unfinished::NoKey),
         Err(e) if e.code == ErrorCode::Unauthenticated => Err(Unfinished::SignedOut),
         // Do not leave a code in the URL on network/import failures. The

@@ -2712,8 +2712,10 @@ const money = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style
 // 5 s old. One attempt at a time: each start replaces the browser's one
 // binding cookie. The section reads again when the person comes back to it
 // (`focus`), never by watching `w.closed`: the shell's COOP has that read
-// true once the window is at the provider, still open.
-function connectButton(p, label, said) {
+// true once the window is at the provider, still open. `body`, where the
+// person connects several accounts: `{add: true}` for another, `{account}`
+// for one of theirs again.
+function connectButton(p, label, said, body = {}) {
   const go = el("button", "quiet", label);
   go.type = "button";
   go.onclick = async () => {
@@ -2725,7 +2727,7 @@ function connectButton(p, label, said) {
     go.disabled = true;
     said.textContent = "";
     try {
-      const { url } = await api("POST", `/api/connections/${encodeURIComponent(p.provider)}/authorize`, {});
+      const { url } = await api("POST", `/api/connections/${encodeURIComponent(p.provider)}/authorize`, body);
       w.location = url;
       addEventListener("focus", () => reopenSettings().catch(() => {}), { once: true });
     } catch (e) {
@@ -2745,16 +2747,18 @@ const unremoved = new Map();
 // Disconnect: the account goes from Pipes, so no agent's call gets its token
 // again, and its grant is revoked at the provider where the platform can;
 // when it could not, settings says where the person removes it themselves.
-function disconnectButton(p, said) {
+// Of several accounts, the one `account` is.
+function disconnectButton(p, said, account = null) {
   const off = el("button", "quiet", "Disconnect");
   off.type = "button";
   off.dataset.action = "disconnect";
+  const which = account ? `?account=${encodeURIComponent(account.id)}` : "";
   off.onclick = async () => {
     off.disabled = true;
     said.textContent = "";
     let revoked;
     try {
-      ({ revoked } = await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}`));
+      ({ revoked } = await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}${which}`));
     } catch (e) {
       said.textContent = e.message;
       off.disabled = false;
@@ -2764,6 +2768,66 @@ function disconnectButton(p, said) {
     await reopenSettings(revoked ? null : [`${name} is disconnected`, `Your agents can no longer use it. ${name} may still list this platform's access to your account: remove it in your ${name} account's security settings.`]).catch(() => {});
   };
   return off;
+}
+// What the person left unticked when they connected an account, in words.
+const notAllowed = (missing) => el("span", "provider-detail provider-missing", `Not allowed: ${[...new Set(missing.map(scopeName))].join(", ")}`);
+// A connection that takes several accounts: each of the person's, oldest
+// first, with its label and state, what it was not allowed with a
+// Reconnect to add (that account), and its own Disconnect.
+function accountsList(p) {
+  const list = el("div", "provider-accounts");
+  for (const a of p.accounts) {
+    const item = el("div", "provider-account-row");
+    item.dataset.accountId = a.id;
+    item.dataset.state = a.state;
+    const head = el("div", "provider-head");
+    const who = el("div", "provider-identity");
+    who.append(el("span", "provider-account", a.account ?? `A ${providerName(p.provider)} account`), el("span", `provider-state ${a.state}`, PROVIDER_STATE[a.state] ?? a.state));
+    const actions = el("div", "settings-actions");
+    const said = el("span", "muted provider-detail provider-said");
+    const details = [];
+    if (a.state !== "connected") actions.append(connectButton(p, "Connect again", said, { account: a.id }));
+    if (a.state === "connected" && a.missing?.length) {
+      const again = connectButton(p, "Reconnect to add", said, { account: a.id });
+      again.dataset.action = "reconnect";
+      actions.append(again);
+      details.push(notAllowed(a.missing));
+    }
+    actions.append(disconnectButton(p, said, a));
+    head.append(who, actions);
+    item.append(head, ...details, said);
+    list.append(item);
+  }
+  return list;
+}
+// Which of the person's connected accounts an agent uses there, the
+// default (the oldest) first: shown only with two or more to choose from.
+function accountPick(p, a, connected) {
+  const pick = el("select", "provider-account-pick");
+  pick.dataset.agent = a.fragment;
+  pick.setAttribute("aria-label", `${titleOf(a.fragment)}'s ${providerName(p.provider)} account`);
+  for (const c of connected) {
+    const o = el("option", "", c.account ?? `A ${providerName(p.provider)} account`);
+    o.value = c.id;
+    pick.append(o);
+  }
+  const mine = a.accounts?.[p.provider];
+  pick.value = connected.some((c) => c.id === mine) ? mine : connected[0].id;
+  pick.onchange = async () => {
+    const visit = visits;
+    pick.disabled = true;
+    // the default is no pick: the agent follows it
+    const account = pick.value === connected[0].id ? null : pick.value;
+    let refused = null;
+    try {
+      computerIs(await api("PUT", `/api/computers/${seg(state.computer.computer)}/agents/${seg(a.fragment)}/accounts/${encodeURIComponent(p.provider)}`, { account }));
+      state.agents = new Map((state.computer?.agents ?? []).map((x) => [x.identity, x]));
+    } catch (e) {
+      refused = e;
+    }
+    await reopenSettings(refused && visit === visits ? ["That was not changed", refused.message] : null);
+  };
+  return pick;
 }
 function connectionsSection(linked, uses) {
   const s = section("Connections");
@@ -2789,7 +2853,9 @@ function connectionsSection(linked, uses) {
     const st = el("span", `provider-state ${p.state}`, stateName);
     identity.append(st);
     // which account a connection is: the person's sign-in here may be another
-    if (p.account) {
+    // (of several, each is named in its own row)
+    const several = Array.isArray(p.accounts);
+    if (p.account && !several) {
       const account = el("span", "provider-account", p.account);
       account.dataset.account = p.account;
       identity.append(account);
@@ -2818,19 +2884,27 @@ function connectionsSection(linked, uses) {
       }
       await reopenSettings();
     };
-    if (p.kind === "connection" && p.state !== "connected") {
+    if (p.kind === "connection" && p.state !== "connected" && !(several && p.accounts.length)) {
       actions.append(connectButton(p, p.state === "needs_reauthorization" ? "Connect again" : "Connect", said));
+      details.push(said);
+    }
+    // of several, another while the platform takes more; each account is
+    // reconnected and disconnected in its own row
+    if (several && p.accounts.length && p.accounts.length < (p.accountsMax ?? 1)) {
+      const add = connectButton(p, `Add another ${providerName(p.provider)} account`, said, { add: true });
+      add.dataset.action = "add-account";
+      actions.append(add);
       details.push(said);
     }
     // what the person left unticked when they connected it: a reconnect
     // asks for it again (the provider keeps what they allowed before)
-    if (p.kind === "connection" && p.state === "connected" && p.missing?.length) {
+    if (!several && p.kind === "connection" && p.state === "connected" && p.missing?.length) {
       const again = connectButton(p, "Reconnect to add", said);
       again.dataset.action = "reconnect";
       actions.append(again);
-      details.push(el("span", "provider-detail provider-missing", `Not allowed: ${[...new Set(p.missing.map(scopeName))].join(", ")}`), said);
+      details.push(notAllowed(p.missing), said);
     }
-    if (p.kind === "connection" && p.state !== "not_connected") {
+    if (!several && p.kind === "connection" && p.state !== "not_connected") {
       actions.append(disconnectButton(p, said));
       if (!details.includes(said)) details.push(said);
     }
@@ -2892,7 +2966,10 @@ function connectionsSection(linked, uses) {
     }
     if (actions.childElementCount) head.append(actions);
     row.append(...details);
-    // which agents may use it: all by default; one narrowed to a list uses those
+    if (several && p.accounts.length) row.append(accountsList(p));
+    // which agents may use it: all by default; one narrowed to a list uses
+    // those; of two or more connected accounts, which each uses
+    const connected = several ? p.accounts.filter((a) => a.state === "connected") : [];
     if (agents.length) {
       const who = el("div", "provider-agents");
       who.append(el("span", "settings-key", "Agents"));
@@ -2925,6 +3002,7 @@ function connectionsSection(linked, uses) {
           await reopenSettings(refused && unchanged && visit === visits ? ["That was not changed", refused.message] : null);
         };
         who.append(chip);
+        if (allowed && connected.length >= 2) who.append(accountPick(p, a, connected));
       }
       row.append(who);
     }

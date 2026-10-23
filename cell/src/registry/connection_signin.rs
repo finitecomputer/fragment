@@ -1,6 +1,6 @@
 //! A connection becomes usable at Pipes only after the initiating browser,
 //! live platform session, provider and one-use pending state are verified.
-use fragment_core::{catalog::{ConnectionOAuth, Kind}, connection_signin::{self, Account}, own_signin, roundtrip};
+use fragment_core::{catalog::{ConnectionOAuth, Kind}, connection_accounts::{self as accounts, Import, Imported, Intent, Lasting}, connection_signin::{self, Account}, own_signin, roundtrip};
 use fragment_proto::{ErrorCode, IdentityKind};
 use serde::Deserialize;
 use worker::SqlStorageValue;
@@ -15,6 +15,8 @@ struct Pending {
     config: String,
     sealed: String,
     expires_at: i64,
+    intent: String,
+    account: Option<String>,
 }
 
 impl RegistryCell {
@@ -25,6 +27,9 @@ impl RegistryCell {
 
     pub(super) async fn begin_connection(&self, b: BeginConnection) -> CellResult<ConnectionBegun> {
         let o = self.connection_oauth(&b.provider)?;
+        if b.intent != Intent::Connect && !self.cfg.providers.get(&b.provider).is_some_and(|p| p.several()) {
+            return Err(CellError::invalid(format!("{} connects one account here", b.provider)));
+        }
         if !keys::bound(&self.env, &fragment_core::secrets_store::connection_secret(&b.provider)) {
             return Err(CellError::host("the connection's OAuth client secret is not bound"));
         }
@@ -48,8 +53,9 @@ impl RegistryCell {
             || self.count("SELECT COUNT(*) AS n FROM connection_signins", vec![])? >= self.cfg.signins_pending_max {
             return Err(CellError::new(ErrorCode::RateLimited, "too many connection authorizations under way; finish one or wait ten minutes"));
         }
-        self.exec("INSERT INTO connection_signins (state, session, provider, issuer, subject, config, sealed, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            vec![sha(&state).into(), live.hash.into(), b.provider.into(), issuer.into(), subject.into(), sha(&serde_json::to_string(o).expect("OAuth config serializes")).into(), sealed.into(), (now + roundtrip::TTL_S * 1000).into()])?;
+        let (intent, account) = b.intent.columns();
+        self.exec("INSERT INTO connection_signins (state, session, provider, issuer, subject, config, sealed, expires_at, intent, account) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            vec![sha(&state).into(), live.hash.into(), b.provider.as_str().into(), issuer.into(), subject.into(), sha(&serde_json::to_string(o).expect("OAuth config serializes")).into(), sealed.into(), (now + roundtrip::TTL_S * 1000).into(), intent.into(), account.map_or(SqlStorageValue::Null, |a| a.into())])?;
         Ok(ConnectionBegun { state, challenge: own_signin::challenge(&verifier) })
     }
 
@@ -103,6 +109,23 @@ impl RegistryCell {
         if subject.as_deref() != Some(&pending.subject) || pending.expires_at <= js::now_ms() { return Ok(NotUnderWay); }
         let api = &self.cfg.workos()?.api;
         let label = connection_signin::account_label(&answer, &o.client_id);
+        // of several accounts, which import: another, one connected before
+        // (the same identifier is never a second), or the first
+        let Some(intent) = Intent::of_columns(&pending.intent, pending.account.as_deref()) else { return Ok(NotUnderWay) };
+        let several = self.cfg.providers.get(&b.provider).filter(|p| p.several()).map(|p| p.accounts_max());
+        let identifier = several.and_then(|_| connection_signin::account_identifier(&answer, &o.client_id));
+        let import = match several {
+            Some(max) => {
+                let listed = accounts::listed(&keys::pipes_accounts(&self.env, api, &pending.subject).await?, &b.provider).map_err(|e| CellError::new(ErrorCode::UpstreamFailed, e))?;
+                match accounts::import_of(&intent, &listed, identifier.as_deref(), max) {
+                    Ok(import) => Some(import),
+                    Err(accounts::Full) => return Ok(AccountLimit),
+                }
+            }
+            // begun as another account, and the row takes one now
+            None if intent != Intent::Connect => return Ok(NotUnderWay),
+            None => None,
+        };
         // the last check before the import, in its turn: a disconnect that
         // fenced the account while the code was exchanged cancels it (its
         // tokens are dropped, never revoked: `Finishing`), and one from
@@ -111,10 +134,20 @@ impl RegistryCell {
         // An import that fails, or whose outcome is unknown (a timeout, a
         // 5xx), leaves a disconnect's lasting fence standing: it may yet
         // land at Pipes, and is never taken for a connection.
-        if !keys::pipes_import(&self.env, api, &b.provider, &pending.subject, tokens, label.as_deref()).await? { return Ok(Failed); }
+        match keys::pipes_import(&self.env, api, &b.provider, &pending.subject, tokens, label.as_deref(), import.as_ref().map(|i: &Import| (i, identifier.as_deref()))).await? {
+            Imported::Done => {}
+            Imported::Full => return Ok(AccountLimit),
+            Imported::Unavailable => return Ok(OneAccount),
+            Imported::Conflict | Imported::Failed => return Ok(Failed),
+        }
         // known to have imported, in the turn it answered and before it is
-        // no longer under way, so no disconnect comes between
-        self.exec(connection_signin::UNFENCE, vec![pending.issuer.as_str().into(), pending.subject.as_str().into(), b.provider.as_str().into()])?;
+        // no longer under way, so no disconnect comes between: the fence of
+        // the provider goes, and of several, that account's
+        let row = || -> Vec<SqlStorageValue> { vec![pending.issuer.as_str().into(), pending.subject.as_str().into(), b.provider.as_str().into()] };
+        self.exec(connection_signin::UNFENCE, row())?;
+        if let (Some(_), Some(identifier)) = (&import, &identifier) {
+            self.exec(connection_signin::UNFENCE_ACCOUNT, [row(), vec![identifier.as_str().into()]].concat())?;
+        }
         Ok(Connected)
     }
 
@@ -129,8 +162,13 @@ impl RegistryCell {
     /// until a connect is known to import again, so an import whose outcome
     /// was unknown, landing at Pipes after this disconnect deleted the
     /// account, is never read or swapped as a connection, even across a
-    /// restart. Answers the person's WorkOS user (none: no account, and
-    /// nothing under way, since a connect begins only with one).
+    /// restart. Of several accounts, only the one disconnected stays fenced
+    /// so (`connection_signin::FENCE_ACCOUNT`), by its identifier, and the
+    /// person's others there stay connected (one that names none, nothing,
+    /// while others are there: `connection_accounts::lasting`); what is
+    /// pending or exchanging is ended at the whole provider, as with one. Answers the person's
+    /// WorkOS user (none: no account, and nothing under way, since a
+    /// connect begins only with one).
     pub(super) fn fence_connection(&self, b: FenceConnection) -> CellResult<SubjectAnswer> {
         let answer = self.subject_of(SubjectOf { identity: b.identity, issuer: b.issuer.clone() })?;
         let Some(subject) = answer.subject.clone() else { return Ok(answer) };
@@ -140,7 +178,15 @@ impl RegistryCell {
         })?;
         let row = || -> Vec<SqlStorageValue> { vec![account.issuer.as_str().into(), account.subject.as_str().into(), account.provider.as_str().into()] };
         self.exec(connection_signin::FENCE_PENDING, row())?;
-        self.exec(connection_signin::FENCE, [row(), vec![SqlStorageValue::Integer(js::now_ms())]].concat())?;
+        let now = SqlStorageValue::Integer(js::now_ms());
+        match &b.lasting {
+            Lasting::Account(identifier) => {
+                self.exec(connection_signin::FENCE_ACCOUNT, [row(), vec![identifier.as_str().into(), now]].concat())?;
+                self.exec(connection_signin::TRIM_ACCOUNT_FENCES, row())?;
+            }
+            Lasting::Provider => self.exec(connection_signin::FENCE, [row(), vec![now]].concat())?,
+            Lasting::Nothing => {}
+        }
         Ok(answer)
     }
 
@@ -150,7 +196,13 @@ impl RegistryCell {
         struct Row {
             provider: String,
         }
-        let rows = self.rows::<Row>(connection_signin::FENCED, vec![b.issuer.into(), b.subject.into()])?;
-        Ok(FencedProviders { providers: rows.into_iter().map(|r| r.provider).collect() })
+        #[derive(Deserialize)]
+        struct One {
+            provider: String,
+            identifier: String,
+        }
+        let rows = self.rows::<Row>(connection_signin::FENCED, vec![b.issuer.as_str().into(), b.subject.as_str().into()])?;
+        let ones = self.rows::<One>(connection_signin::FENCED_ACCOUNTS, vec![b.issuer.into(), b.subject.into()])?;
+        Ok(FencedProviders { providers: rows.into_iter().map(|r| r.provider).collect(), accounts: ones.into_iter().map(|o| (o.provider, o.identifier)).collect() })
     }
 }

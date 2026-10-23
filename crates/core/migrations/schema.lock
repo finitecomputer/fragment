@@ -11,10 +11,12 @@ step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
 step Registry 3 trial_hold_attempts 07e123e05a049abe
 step Registry 4 connection_fences ac8ad73c1302c4be
+step Registry 5 connection_accounts 1cc582a35fd6058a
 step Principal 1 baseline 28b4d4bf3f8cdb71
 step Principal 2 listed 09e5aab70c4f7f61
 step Ledger 1 baseline 6d5c6ebad64a53b2
 step Computer 1 baseline 0f429c07654198e6
+step Computer 2 agent_accounts 55b329a8b0da4bbd
 
 Fragment table blobs: CREATE TABLE blobs ( sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL, mime TEXT)
 Fragment table charges: CREATE TABLE charges ( ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, held INTEGER NOT NULL, at INTEGER NOT NULL)
@@ -83,8 +85,9 @@ Registry index cli_codes_created: CREATE INDEX cli_codes_created ON cli_codes (c
 Registry index cli_codes_key: CREATE INDEX cli_codes_key ON cli_codes (key)
 Registry table cli_misses: CREATE TABLE cli_misses ( identity TEXT PRIMARY KEY, misses INTEGER NOT NULL, since INTEGER NOT NULL)
 Registry index cli_misses_since: CREATE INDEX cli_misses_since ON cli_misses (since)
+Registry table connection_account_fences: CREATE TABLE connection_account_fences ( issuer TEXT NOT NULL, subject TEXT NOT NULL, provider TEXT NOT NULL, identifier TEXT NOT NULL, fenced_at INTEGER NOT NULL, PRIMARY KEY (issuer, subject, provider, identifier))
 Registry table connection_fences: CREATE TABLE connection_fences ( issuer TEXT NOT NULL, subject TEXT NOT NULL, provider TEXT NOT NULL, fenced_at INTEGER NOT NULL, PRIMARY KEY (issuer, subject, provider))
-Registry table connection_signins: CREATE TABLE connection_signins ( state TEXT PRIMARY KEY, session TEXT NOT NULL, provider TEXT NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL, config TEXT NOT NULL, sealed TEXT NOT NULL, expires_at INTEGER NOT NULL)
+Registry table connection_signins: CREATE TABLE connection_signins ( state TEXT PRIMARY KEY, session TEXT NOT NULL, provider TEXT NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL, config TEXT NOT NULL, sealed TEXT NOT NULL, expires_at INTEGER NOT NULL, intent TEXT NOT NULL DEFAULT 'connect', account TEXT)
 Registry index connection_signins_expires: CREATE INDEX connection_signins_expires ON connection_signins (expires_at)
 Registry index connection_signins_session: CREATE INDEX connection_signins_session ON connection_signins (session)
 Registry table consents: CREATE TABLE consents ( identity TEXT NOT NULL, fragment TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (identity, fragment))
@@ -162,6 +165,7 @@ Ledger table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
 Ledger table spend: CREATE TABLE spend (month INTEGER NOT NULL, fragment TEXT NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, fragment))
 Ledger table wiped: CREATE TABLE wiped (at INTEGER NOT NULL)
 
+Computer table agent_accounts: CREATE TABLE agent_accounts (agent TEXT NOT NULL, provider TEXT NOT NULL, account TEXT NOT NULL, PRIMARY KEY (agent, provider))
 Computer table agents: CREATE TABLE agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL, connections TEXT NOT NULL DEFAULT 'null')
 Computer table awake: CREATE TABLE awake (from_ms INTEGER PRIMARY KEY, to_ms INTEGER NOT NULL)
 Computer table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)

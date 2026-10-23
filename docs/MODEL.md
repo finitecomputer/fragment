@@ -40,9 +40,12 @@ the wire contract in full.
 
 Connection authorization's pending state lives in the Registry's
 `connection_signins`: a state hash, session hash, provider, issuer/subject,
-configuration hash, sealed verifier and expiry. A browser cookie proves the
+configuration hash, sealed verifier and expiry, and what the connect is for
+(an account, another of several, or one again). A browser cookie proves the
 round trip; a one-use transaction is consumed before the provider exchange.
-Completed connection credentials live only in WorkOS Pipes. See
+Completed connection credentials live only in WorkOS Pipes, one account a
+person a provider, or several where its catalog row says so (`accounts_max`):
+which of them each agent uses is its computer's (`agent_accounts`). See
 [browser-bound Pipes connections](pipes-browser-binding.md).
 
 | Part | Cloudflare primitive | Holds |

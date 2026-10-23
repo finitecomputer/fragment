@@ -57,7 +57,8 @@ use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
 use fragment_core::own_signin;
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
-use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
+use fragment_core::connection_accounts::{Held, Unchosen};
+use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
 use fragment_proto::{ErrorCode, IdentityKind};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -336,6 +337,10 @@ pub struct ComputerCell {
     /// guest's view lists, and what a swap may use: a token is asked of
     /// Pipes for each swap of a connection these say is connected.
     states: RefCell<Option<(BTreeMap<String, ProviderState>, i64)>>,
+    /// Believed with them: the owner's accounts at each connection that
+    /// takes several (its row's `accounts_max`), in their list's order,
+    /// which a swap chooses its agent's from (`connection_accounts::chosen`).
+    accounts: RefCell<BTreeMap<String, Vec<Held>>>,
     /// How many times the owner's reads (and disconnects) told it their
     /// states (`computer/own-keys`): a read of its own begun before one
     /// answers older states, and does not draw over them.
@@ -369,6 +374,7 @@ impl DurableObject for ComputerCell {
             env,
             adopted: std::cell::Cell::new(false),
             states: RefCell::default(),
+            accounts: RefCell::default(),
             states_told: std::cell::Cell::new(0),
             wiped: std::cell::Cell::new(wiped),
             heard_ms: std::cell::Cell::new(None),
@@ -487,6 +493,16 @@ struct SetConnections {
     connections: Option<Vec<String>>,
 }
 
+/// `computer/account`'s body: which of its owner's accounts at `provider`
+/// (a connection that takes several) the agent `fragment` uses, by its id
+/// (one the owner's list named: the router checked), or `None`, the default.
+#[derive(Deserialize)]
+struct SetAccount {
+    fragment: String,
+    provider: String,
+    account: Option<String>,
+}
+
 /// What an agent may have swapped in, as `agents.connections` keeps it.
 fn stored_connections(text: &str, fragment: &str) -> CellResult<Option<Vec<String>>> {
     serde_json::from_str(text).map_err(|e| CellError::host(format!("{fragment}'s stored connections {text:?}: {e}")))
@@ -560,6 +576,9 @@ struct SignedInAsk {
 struct OwnKeysAsk {
     #[serde(default)]
     connections: Option<BTreeMap<String, ProviderState>>,
+    /// With them, the accounts at each connection that takes several.
+    #[serde(default)]
+    accounts: Option<BTreeMap<String, Vec<Held>>>,
 }
 
 /// `computer/joined`'s body: the agent `identity` was added to `fragment`,
@@ -1504,6 +1523,14 @@ impl ComputerCell {
         assert!(rows.len() as u64 <= AGENTS_MAX, "a computer runs at most AGENTS_MAX agents");
         let mut agents = Vec::with_capacity(rows.len());
         let own = self.own_key_names()?;
+        // at most an agent's row a provider, for each agent
+        let mut picks: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        for r in self.rows("SELECT agent, provider, account FROM agent_accounts", vec![])? {
+            let (agent, provider, account) = (r["agent"].as_str(), r["provider"].as_str(), r["account"].as_str());
+            if let (Some(agent), Some(provider), Some(account)) = (agent, provider, account) {
+                picks.entry(agent.to_string()).or_default().insert(provider.to_string(), account.to_string());
+            }
+        }
         for r in rows {
             let fragment = r["fragment"].as_str().unwrap_or_default().to_string();
             let name = fragment_proto::split_fragment_name(&fragment).map(|(label, _)| label.to_string()).unwrap_or_default();
@@ -1513,6 +1540,7 @@ impl ComputerCell {
                 identity: r["identity"].as_str().unwrap_or_default().to_string(),
                 owner: r["owner"].as_str().unwrap_or_default().to_string(),
                 model_providers: self.cfg.providers.model_providers(&own, connections.as_deref()),
+                accounts: picks.remove(&fragment).unwrap_or_default(),
                 fragment,
                 name,
                 connections,
@@ -1577,7 +1605,8 @@ impl ComputerCell {
             }
         }
         let told = self.states_told.get();
-        let (states, until) = match crate::connections::connection_states(&self.env, self.cfg, self.workos_user(owner), None).await {
+        let mut listed = BTreeMap::new();
+        let (states, until) = match crate::connections::connection_states(&self.env, self.cfg, self.workos_user(owner), Some(&mut listed)).await {
             Ok(s) => (s, now + STATES_TTL_MS),
             Err(e) => {
                 console_error!("{}", json!({ "computer": "connection-states", "error": e.message }));
@@ -1591,6 +1620,7 @@ impl ComputerCell {
             }
         }
         *self.states.borrow_mut() = Some((states.clone(), until));
+        *self.accounts.borrow_mut() = crate::connections::held_of(self.cfg, &listed);
         states
     }
 
@@ -1617,6 +1647,26 @@ impl ComputerCell {
         if let Some((states, _)) = self.states.borrow_mut().as_mut() {
             states.insert(provider.to_string(), state);
         }
+    }
+
+    /// One of several accounts' state, as a swap just learned it: the
+    /// connection's is connected while another of them is.
+    fn note_account(&self, provider: &str, id: &str, state: ProviderState) {
+        let mut accounts = self.accounts.borrow_mut();
+        let Some(held) = accounts.get_mut(provider) else { return };
+        for a in held.iter_mut().filter(|a| a.id == id) {
+            a.state = state;
+        }
+        let connected = held.iter().any(|a| a.state == ProviderState::Connected);
+        drop(accounts);
+        self.note_state(provider, if connected { ProviderState::Connected } else { state });
+    }
+
+    /// The account `agent` uses at `provider`, as its owner picked it (none:
+    /// the default).
+    fn pick(&self, agent: &str, provider: &str) -> CellResult<Option<String>> {
+        let rows = self.rows("SELECT account FROM agent_accounts WHERE agent = ? AND provider = ?", vec![agent.into(), provider.into()])?;
+        Ok(rows.first().and_then(|r| r["account"].as_str()).map(str::to_string))
     }
 
     /// The providers the owner gave an own key for.
@@ -2127,6 +2177,9 @@ impl ComputerCell {
                     None => self.rows("DELETE FROM agents WHERE fragment = ? RETURNING fragment", vec![b.fragment.as_str().into()])?,
                 };
                 assert!(gone.len() <= 1, "a computer runs a fragment once");
+                if !gone.is_empty() {
+                    self.exec("DELETE FROM agent_accounts WHERE agent = ?", vec![b.fragment.as_str().into()])?;
+                }
                 let view = self.view()?;
                 if !gone.is_empty() {
                     // its owner's pages read its agents again (an agent
@@ -2153,6 +2206,28 @@ impl ComputerCell {
                 self.exec("UPDATE agents SET connections = ? WHERE fragment = ?", vec![text.into(), b.fragment.as_str().into()])?;
                 // its owner's other pages read it again (the agent's page:
                 // which model it runs)
+                self.tell_owner().await;
+                json_response(&self.view()?)
+            }
+            "computer/account" => {
+                let b: SetAccount = body_json(&mut req).await?;
+                if self.cfg.providers.get(&b.provider).is_none_or(|p| p.kind != Kind::Connection || !p.several()) {
+                    return Err(CellError::invalid(format!("{:?} is no connection here that takes several accounts", b.provider)));
+                }
+                if b.account.as_deref().is_some_and(|a| !fragment_core::connection_accounts::valid_account_id(a)) {
+                    return Err(CellError::invalid("an account is its id, as GET /api/connections lists it"));
+                }
+                if self.rows("SELECT fragment FROM agents WHERE fragment = ?", vec![b.fragment.as_str().into()])?.is_empty() {
+                    return Err(CellError::new(ErrorCode::NotFound, format!("{} does not run on this computer", b.fragment)));
+                }
+                match &b.account {
+                    Some(account) => self.exec(
+                        "INSERT INTO agent_accounts (agent, provider, account) VALUES (?, ?, ?) ON CONFLICT (agent, provider) DO UPDATE SET account = excluded.account",
+                        vec![b.fragment.as_str().into(), b.provider.as_str().into(), account.as_str().into()],
+                    )?,
+                    None => self.exec("DELETE FROM agent_accounts WHERE agent = ? AND provider = ?", vec![b.fragment.as_str().into(), b.provider.as_str().into()])?,
+                }
+                // its owner's other pages read it again
                 self.tell_owner().await;
                 json_response(&self.view()?)
             }
@@ -2213,6 +2288,7 @@ impl ComputerCell {
                 // the owner just read their connections: believed as fresh
                 if let Some(states) = b.connections {
                     *self.states.borrow_mut() = Some((states, js::now_ms() + STATES_TTL_MS));
+                    *self.accounts.borrow_mut() = b.accounts.unwrap_or_default();
                     self.states_told.set(self.states_told.get() + 1);
                 }
                 json_response(&json!({ "providers": self.own_key_names()? }))
@@ -2338,7 +2414,7 @@ impl ComputerCell {
                 ));
             }
             let secret = match provider.kind {
-                Kind::Connection => self.connection_token(&owner, &provider.name).await?,
+                Kind::Connection => self.connection_token(&owner, &provider.name, agent).await?,
                 // its call is gated on its owner's standing, and charged after (`egress_swap`)
                 Kind::Operator => crate::keys::operator_key(&self.env, &provider.name).await?,
                 Kind::Own => self.own_key(&provider.name).await?.ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("give your own {} key first (PUT /api/connections/{}/key)", provider.name, provider.name)))?,
@@ -2375,8 +2451,11 @@ impl ComputerCell {
     /// `owner` signed in as, asked for each swap (Pipes holds and refreshes
     /// it), so a connection disconnected or revoked stops at the next
     /// request. What Pipes answers is the connection's state too, as the
-    /// guest's view lists it (`note_state`).
-    async fn connection_token(&self, owner: &str, provider: &str) -> CellResult<String> {
+    /// guest's view lists it (`note_state`). Where the owner connects
+    /// several accounts there, it is the token of the one `agent` uses: its
+    /// pick, else the default (`connection_accounts::chosen`), named to
+    /// Pipes by its id; only an account the owner's list named is ever named.
+    async fn connection_token(&self, owner: &str, provider: &str, agent: &str) -> CellResult<String> {
         // only one its states say is connected, as the guest's view lists
         // them: one its owner disconnected stays refused, whatever Pipes
         // may hold for it since (an import landed late: registry/
@@ -2386,8 +2465,19 @@ impl ComputerCell {
             Some(ProviderState::NeedsReauthorization) => return Err(CellError::new(ErrorCode::NotConnected, format!("connect {provider} again: its account needs authorizing again"))),
             _ => return Err(CellError::new(ErrorCode::NotConnected, format!("connect {provider} first: no account is connected"))),
         }
+        let account = match self.cfg.providers.get(provider).is_some_and(|p| p.several()) {
+            true => {
+                let held = self.accounts.borrow().get(provider).cloned().unwrap_or_default();
+                match fragment_core::connection_accounts::chosen(self.pick(agent, provider)?.as_deref(), &held) {
+                    Ok(id) => Some(id.to_string()),
+                    Err(Unchosen::NeedsReauthorization) => return Err(CellError::new(ErrorCode::NotConnected, format!("connect {provider} again: the account {agent} uses needs authorizing again"))),
+                    Err(Unchosen::NotConnected) => return Err(CellError::new(ErrorCode::NotConnected, format!("connect {provider} first: no account is connected"))),
+                }
+            }
+            false => None,
+        };
         let user = self.workos_user(owner).await?.ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("{owner} has no WorkOS account to connect {provider} with")))?;
-        let (status, answer) = crate::keys::pipes_token(&self.env, &self.cfg.workos()?.api, provider, &user).await?;
+        let (status, answer) = crate::keys::pipes_token(&self.env, &self.cfg.workos()?.api, provider, &user, account.as_deref()).await?;
         if status != 200 {
             let why = answer["message"].as_str().unwrap_or("no reason given");
             return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS refused {provider}'s token ({status}): {why}")));
@@ -2398,11 +2488,17 @@ impl ComputerCell {
                 Some("needs_reauthorization") => (ProviderState::NeedsReauthorization, format!("connect {provider} again: its account needs authorizing again")),
                 _ => (ProviderState::NotConnected, format!("connect {provider} first: no account is connected")),
             };
-            self.note_state(provider, state);
+            match &account {
+                Some(id) => self.note_account(provider, id, state),
+                None => self.note_state(provider, state),
+            }
             return Err(CellError::new(ErrorCode::NotConnected, why));
         }
         let token = answer["access_token"]["access_token"].as_str().filter(|t| !t.is_empty()).ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "WorkOS answered no token"))?;
-        self.note_state(provider, ProviderState::Connected);
+        match &account {
+            Some(id) => self.note_account(provider, id, ProviderState::Connected),
+            None => self.note_state(provider, ProviderState::Connected),
+        }
         Ok(token.to_string())
     }
 
@@ -2608,6 +2704,29 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             }
             let set = json!({ "fragment": fragment, "connections": b.connections });
             json_response(&view_of(ask(env, id, "computer/connections", &set).await?)?)
+        }
+        (Method::Put, [id, "agents", fragment, "accounts", provider]) => {
+            owned(env, who, id).await?;
+            let v: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            // a body that forgot the field is not a reset to the default
+            if v.get("account").is_none() {
+                return Err(CellError::invalid("name an account: its id, as GET /api/connections lists it, or null for the default"));
+            }
+            let b: AgentAccount = serde_json::from_value(v).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let cfg = Config::from_env(env);
+            if cfg.providers.get(provider).is_none_or(|p| p.kind != Kind::Connection || !p.several()) {
+                return Err(CellError::invalid(format!("{provider} is no connection here that takes several accounts")));
+            }
+            if let Some(account) = &b.account {
+                // one of the owner's accounts there, as their list names it
+                let mut listed = BTreeMap::new();
+                crate::connections::connection_states(env, cfg, crate::connections::workos_user(env, cfg, who), Some(&mut listed)).await?;
+                if !listed.get(*provider).is_some_and(|l| l.iter().any(|a| a.id.as_deref() == Some(account.as_str()))) {
+                    return Err(CellError::new(ErrorCode::NotFound, format!("no {provider} account {account:?} of yours: GET /api/connections lists them")));
+                }
+            }
+            let set = json!({ "fragment": fragment, "provider": provider, "account": b.account });
+            json_response(&view_of(ask(env, id, "computer/account", &set).await?)?)
         }
         (Method::Get, [id, "uses"]) => {
             owned(env, who, id).await?;
