@@ -653,6 +653,22 @@ binary links: run), one local SMP server. It drives the bridge's
   forwarded, by its id.
 - **The person deleting the agent in their app** reaches the core as
   `contactDeletedByContact`, and the link lets go.
+- **Voice, both ways** (`voice_against_the_real_core`, with a local XFTP
+  server). SimpleX's apps record a voice message as MPEG-4 AAC (`.m4a`,
+  16 kHz, mono, 32 kbps, at most 300 s: `AudioRecPlay.swift`,
+  `RecAndPlay.android.kt`), so at most about 1.2 MB.
+  - Inbound: the item (`msgContent.type: "voice"`, its `duration`, a
+    `file`) reached the agent's core in about 200 ms, and the link
+    forwarded it as `kind: "voice"`. Its file, 82 KB or 612 KB, both
+    over XFTP, was received whole: `rcvFileDescrReady`, then
+    `/freceive <fileId>`, then `rcvFileComplete`, in 65–154 ms. A bot
+    must be made with `--create-bot-allow-files`.
+  - The core's `--temp-folder` must be on the files folder's device: a
+    received file is renamed from one into the other, and with `/tmp` on
+    the container's overlay and the files under `/data` it failed
+    ("Invalid cross-device link"). A computer has the same split.
+  - Outbound: an `.m4a` sent as a voice message (`filePath` and
+    `msgContent.type: "voice"`) reached the person whole in 136–226 ms.
 
 ## What it changes in decision 32
 

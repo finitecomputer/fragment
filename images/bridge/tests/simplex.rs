@@ -1,5 +1,6 @@
-//! The SimpleX lab: a local SMP server and simplex-chat v7.0.3 clients in
-//! Docker (`tests/simplex/lab.Dockerfile`), each driven over its bot API,
+//! The SimpleX lab: a local SMP server (and, for files, an XFTP server) and
+//! simplex-chat v7.0.3 clients in Docker (`tests/simplex/lab.Dockerfile`),
+//! each driven over its bot API,
 //! with the bridge's `simplex` module (its wire and its link's rules) on the
 //! agent's side, against the real core.
 //!
@@ -31,6 +32,9 @@ const LAB_IMAGE: &str = "fragment-simplex-lab:7.0.3";
 /// The SMP server's name on the lab's network: a domain, as its image's
 /// entrypoint wants one with a dot.
 const SMP_HOST: &str = "smp.lab.test";
+/// The XFTP server (files past what goes inline), pinned the same way.
+const XFTP_IMAGE: &str = "simplexchat/xftp-server:v7.0.1@sha256:69a7f95746bb3c094ac36154ee8e7a8f552b5d9231587b88e6699d089003d26b";
+const XFTP_HOST: &str = "xftp.lab.test";
 
 fn docker(args: &[&str]) -> Result<String, String> {
     let out = Command::new("docker").args(args).output().map_err(|e| format!("docker: {e}"))?;
@@ -51,11 +55,19 @@ struct Lab {
     prefix: String,
     dir: PathBuf,
     server: String,
+    /// `xftp://…`, for a lab that carries files.
+    xftp: Option<String>,
     clients: Vec<String>,
 }
 
 impl Lab {
     fn up(name: &str) -> Lab {
+        Lab::up_with(name, false)
+    }
+
+    /// `files`: with an XFTP server too, every client given it, a files
+    /// folder (`/data/files`), and a bot that allows files.
+    fn up_with(name: &str, files: bool) -> Lab {
         let context = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/simplex");
         if std::env::var("FRAGMENT_DOCKER_SKIP_BUILD").is_err() {
             docker(&["build", "--platform", "linux/amd64", "-q", "-f", &context.join("lab.Dockerfile").to_string_lossy(), "-t", LAB_IMAGE, &context.to_string_lossy()]).expect("the lab's image builds");
@@ -78,7 +90,21 @@ impl Lab {
             assert!(t0.elapsed() < Duration::from_secs(90), "the SMP server is not serving after 90 s: {}", logs(&smp));
             std::thread::sleep(Duration::from_millis(250));
         };
-        Lab { prefix, dir, server: format!("smp://{fingerprint}@{SMP_HOST}"), clients: vec![] }
+        let xftp = files.then(|| {
+            let ctr = format!("{prefix}-xftp");
+            docker(&["run", "-d", "--name", &ctr, "--network", &net, "--network-alias", XFTP_HOST, "-e", &format!("ADDR={XFTP_HOST}"), "-e", "QUOTA=1gb", "-e", "PASS=", "--tmpfs", "/srv/xftp:rw,size=256m", XFTP_IMAGE]).expect("the XFTP server starts");
+            let t0 = Instant::now();
+            loop {
+                if let Ok(fp) = docker(&["exec", &ctr, "cat", "/etc/opt/simplex-xftp/fingerprint"]) {
+                    if !fp.is_empty() && logs(&ctr).contains("Listening on port") {
+                        break format!("xftp://{fp}@{XFTP_HOST}");
+                    }
+                }
+                assert!(t0.elapsed() < Duration::from_secs(90), "the XFTP server is not serving after 90 s: {}", logs(&ctr));
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        });
+        Lab { prefix, dir, server: format!("smp://{fingerprint}@{SMP_HOST}"), xftp, clients: vec![] }
     }
 
     fn container(&self, name: &str) -> String {
@@ -99,11 +125,23 @@ impl Lab {
         let _ = docker(&["rm", "-f", &ctr]);
         let vol = format!("{}:/data", data.display());
         let who = if bot { "--create-bot-display-name" } else { "--user-display-name" };
-        docker(&[
-            "run", "-d", "--name", &ctr, "--network", &format!("{}-net", self.prefix), "--user", &uid_gid(), "-e", "HOME=/data", "-e", "LAB_API_PORT=5226", "-p", "127.0.0.1::5226", "-v", &vol,
+        let (net, ids) = (format!("{}-net", self.prefix), uid_gid());
+        let mut args = vec![
+            "run", "-d", "--name", &ctr, "--network", &net, "--user", &ids, "-e", "HOME=/data", "-e", "LAB_API_PORT=5226", "-p", "127.0.0.1::5226", "-v", &vol,
             LAB_IMAGE, "-d", "/data/sx", "-s", &self.server, "-p", "5225", who, name, "-y",
-        ])
-        .expect("the client starts");
+        ];
+        if let Some(xftp) = &self.xftp {
+            std::fs::create_dir_all(data.join("files")).expect("its files folder");
+            std::fs::create_dir_all(data.join("tmp")).expect("its temp folder");
+            // its temp folder on the files' device: a received file is renamed
+            // from one into the other ("Invalid cross-device link" otherwise,
+            // as /tmp and /data are on a computer too)
+            args.extend(["--xftp-server", xftp.as_str(), "--files-folder", "/data/files", "--temp-folder", "/data/tmp"]);
+            if bot {
+                args.push("--create-bot-allow-files");
+            }
+        }
+        docker(&args).expect("the client starts");
         if !self.clients.iter().any(|c| c == name) {
             self.clients.push(name.into());
         }
@@ -149,6 +187,7 @@ impl Drop for Lab {
             let _ = docker(&["rm", "-f", &ctr]);
         }
         let _ = docker(&["rm", "-f", &self.container("smp")]);
+        let _ = docker(&["rm", "-f", &self.container("xftp")]);
         let _ = docker(&["network", "rm", &format!("{}-net", self.prefix)]);
     }
 }
@@ -267,11 +306,13 @@ struct Agent {
     link: Link,
     forwarded: Vec<Inbound>,
     told: Vec<Notice>,
+    /// Every event the core said, as it said it.
+    seen: Vec<Value>,
 }
 
 impl Agent {
     fn new(api: Api) -> Agent {
-        Agent { api, link: Link::default(), forwarded: vec![], told: vec![] }
+        Agent { api, link: Link::default(), forwarded: vec![], told: vec![], seen: vec![] }
     }
 
     /// The link's rules on `input`, and everything they ask, until nothing
@@ -315,6 +356,7 @@ impl Agent {
                 self.api.drain(Duration::from_millis(200)).await;
             }
             while let Some(resp) = self.api.events.pop_front() {
+                self.seen.push(resp.clone());
                 let frame = wire::parse(&json!({ "resp": resp }).to_string()).unwrap_or_else(|e| panic!("an event of the core's reads: {e}: {resp}"));
                 let actions = self.link.apply(Input::Said(&frame.resp));
                 self.run(actions).await;
@@ -481,4 +523,98 @@ async fn the_link_against_the_real_core() {
     agent.apply(Input::Unlink).await;
     assert_eq!(agent.link.phase, Phase::Off);
     println!("frames in {}", lab.dir.display());
+}
+
+/// A voice message as SimpleX's apps record one (both record MPEG-4 AAC,
+/// 16 kHz, mono, 32 kbps: `AudioRecPlay.swift`, `RecAndPlay.android.kt`),
+/// `secs` long, made by the host's ffmpeg into `to`.
+fn voice_file(to: &Path, secs: u32, noise: bool) {
+    let src = if noise { format!("anoisesrc=d={secs}:c=pink:a=0.3") } else { format!("sine=frequency=440:duration={secs}") };
+    let out = Command::new("ffmpeg").args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", &src, "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "32k"]).arg(to).output().expect("the host has ffmpeg");
+    assert!(out.status.success(), "ffmpeg: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+fn sha256_of(path: &Path) -> String {
+    let out = Command::new("sha256sum").arg(path).output().expect("sha256sum runs");
+    String::from_utf8_lossy(&out.stdout).split_whitespace().next().unwrap_or("").to_string()
+}
+
+/// The voice message `text`'s sender sent with file `name`: its file's id,
+/// protocol and status as the receiving core said them (`seen`, newest last).
+fn voice_item<'a>(seen: impl Iterator<Item = &'a Value>, name: &str) -> Option<(i64, String, String)> {
+    seen.filter(|e| tag(e) == "newChatItems").flat_map(|e| e["chatItems"].as_array().cloned().unwrap_or_default()).find_map(|ci| {
+        let item = &ci["chatItem"];
+        let file = &item["file"];
+        (item["content"]["msgContent"]["type"] == "voice" && file["fileName"] == name).then(|| (file["fileId"].as_i64().expect("its file id"), file["fileProtocol"].as_str().unwrap_or("?").to_string(), file["fileStatus"]["type"].as_str().unwrap_or("?").to_string()))
+    })
+}
+
+/// Receives file `id` at a core whose events go to `events`: `/freceive`,
+/// then its `rcvFileComplete`, within `within`; how long it took.
+async fn freceive(api: &mut Api, id: i64, within: Duration) -> Duration {
+    let t0 = Instant::now();
+    let r = api.cmd(&format!("/freceive {id}")).await;
+    assert!(!tag(&r).contains("rror"), "/freceive {id}: {r}");
+    api.wait(within, |e| tag(e) == "rcvFileComplete" && e["chatItem"]["chatItem"]["file"]["fileId"] == id).await;
+    t0.elapsed()
+}
+
+/// Goal: voice both ways against the real core, through the link: a
+/// person's voice message reaches the agent as the link's `voice` forward
+/// and its file arrives whole, inline (under 255 KB) and over XFTP (past
+/// it); the agent's voice reply reaches the person whole. Needs the host's
+/// ffmpeg.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker and ffmpeg; run by hand"]
+async fn voice_against_the_real_core() {
+    let mut lab = Lab::up_with("voice", true);
+    let mut agent = Agent::new(lab.start("agent", true).await);
+    let mut person = lab.start("person", false).await;
+    agent.apply(Input::Want).await;
+    let Phase::Inviting { link, .. } = agent.link.phase.clone() else { panic!("an invitation") };
+    person.cmd(&format!("/connect {link}")).await;
+    agent.until(Duration::from_secs(90), |a| a.link.contact().is_some()).await;
+    let at_agent = agent.link.contact().expect("linked");
+    let at_person = person.wait(Duration::from_secs(90), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the agent, at the person's");
+
+    for (name, secs, noise) in [("short.m4a", 20, false), ("long.m4a", 150, true)] {
+        let file = lab.db_dir("person").join("files").join(name);
+        voice_file(&file, secs, noise);
+        let bytes = std::fs::metadata(&file).expect("made").len();
+        let body = json!([{ "filePath": format!("/data/files/{name}"), "msgContent": { "type": "voice", "text": "", "duration": secs } }]);
+        let r = person.cmd(&format!("/_send @{at_person} json {body}")).await;
+        assert_eq!(tag(&r), "newChatItems", "the person's voice message: {r}");
+        let t0 = Instant::now();
+        agent.until(Duration::from_secs(60), |a| a.forwarded.iter().any(|i| i.kind == "voice") && voice_item(a.seen.iter(), name).is_some()).await;
+        let voice = agent.forwarded.iter().rev().find(|i| i.kind == "voice").expect("forwarded").clone();
+        let (id, protocol, status) = voice_item(agent.seen.iter(), name).expect("its file");
+        println!("{name}: {bytes} bytes, {secs} s; the item in {} ms, its file {protocol} {status}, forwarded as {:?} {:?}", t0.elapsed().as_millis(), voice.kind, voice.text);
+        agent.forwarded.retain(|i| i.kind != "voice");
+        person.drain(Duration::from_secs(5)).await;
+        let theirs: Vec<String> = person.events.drain(..).map(|e| tag(&e)).filter(|t| t.contains("ile") || t.contains("rror")).collect();
+        println!("  the sender's file events: {theirs:?}");
+        // an XFTP file is received once its description is ready
+        if protocol == "xftp" {
+            let ready = |e: &Value| tag(e) == "rcvFileDescrReady" && e["chatItem"]["chatItem"]["file"]["fileId"] == id;
+            if !agent.seen.iter().any(ready) {
+                agent.api.wait(Duration::from_secs(60), ready).await;
+            }
+        }
+        let took = freceive(&mut agent.api, id, Duration::from_secs(120)).await;
+        let got = lab.db_dir("agent").join("files").join(name);
+        assert_eq!(sha256_of(&got), sha256_of(&file), "{name} arrives whole");
+        println!("  received whole in {} ms", took.as_millis());
+    }
+
+    // the agent's voice reply (a speech route's audio, made AAC as the apps make it)
+    let reply = lab.db_dir("agent").join("files").join("reply.m4a");
+    voice_file(&reply, 30, false);
+    let body = json!([{ "filePath": "/data/files/reply.m4a", "msgContent": { "type": "voice", "text": "", "duration": 30 } }]);
+    let r = agent.api.cmd(&format!("/_send @{at_agent} json {body}")).await;
+    assert_eq!(tag(&r), "newChatItems", "the agent's voice reply: {r}");
+    let item = person.wait(Duration::from_secs(60), |e| tag(e) == "newChatItems" && voice_item(std::iter::once(e), "reply.m4a").is_some()).await;
+    let (id, protocol, _) = voice_item(std::iter::once(&item), "reply.m4a").expect("its file");
+    let took = freceive(&mut person, id, Duration::from_secs(120)).await;
+    assert_eq!(sha256_of(&lab.db_dir("person").join("files").join("reply.m4a")), sha256_of(&reply), "the reply arrives whole");
+    println!("the agent's voice reply ({protocol}) received whole in {} ms", took.as_millis());
 }
