@@ -942,7 +942,7 @@ impl ComputerCell {
             return Ok(Some(Event::Exited { generation }));
         }
         let id = self.must(MetaKey::Id)?;
-        self.call("arm", &[g, id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts()]).await?;
+        self.call("arm", &[g, id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts(), self.platform_hosts()]).await?;
         // armed, its node answered: an earlier isolate's word that it was
         // silent is stale (found 39)
         if self.meta(MetaKey::NodeNote)?.is_some() {
@@ -1099,6 +1099,11 @@ impl ComputerCell {
     /// The hosts the swap intercepts: every provider's in the catalog.
     fn swap_hosts(&self) -> JsValue {
         js::to_js(&json!(self.cfg.providers.hosts()))
+    }
+
+    /// Where the platform's own hosts are intercepted (`egress_platform`).
+    fn platform_hosts(&self) -> JsValue {
+        js::to_js(&json!(fragment_core::computer::platform_intercepts(&self.cfg.platform_url, &self.cfg.host_suffix)))
     }
 
     /// The environment every image may rely on (docs/computers.md).
@@ -1262,7 +1267,7 @@ impl ComputerCell {
         }
         let started_ms = js::now_ms();
         self.call("start", &[g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size)]).await?;
-        let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts()]).await?;
+        let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts(), self.platform_hosts()]).await?;
         if armed.as_bool() != Some(true) {
             return Err(CellError::host(format!("start {generation} was superseded before it was armed")).into());
         }
@@ -2954,7 +2959,8 @@ impl PairedNodes {
 }
 
 /// Every request a computer's guest sends to `api.fragment.internal`,
-/// `model.fragment.internal`, or a host the swap catches (entry.mjs's
+/// `model.fragment.internal`, a host the swap catches, or one of the
+/// platform's own (entry.mjs's
 /// `ComputerEgress`, whose props name the computer and the route). A class with a static method, as
 /// `InternalRoute` is: worker-build exports classes by name.
 #[wasm_bindgen(wasm_bindgen = worker::wasm_bindgen)]
@@ -2970,6 +2976,7 @@ impl ComputerEgress {
             "api" => egress_api(req, &env, &ctx, &computer).await,
             "model" => egress_model(req, &env, &ctx, &computer).await,
             "swap" => egress_swap(req, &env, &ctx, &computer).await,
+            "platform" => egress_platform(req, &env, &ctx, &computer).await,
             r => Err(CellError::new(ErrorCode::NotFound, format!("no egress route {r}"))),
         };
         // one line per refusal (lesson 14): the guest's requests never reach
@@ -3244,6 +3251,48 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         console_log!("{}", json!({ "egress": "swap", "computer": computer, "host": host, "method": method.as_ref(), "credentials": names, "status": status }));
     }
     sent
+}
+
+/// Headers only an edge sets, never a guest: the scheme is the URL's, and
+/// the address a limit counts by (`cf-connecting-ip`) the computer's.
+const EDGE_HEADERS: [&str; 4] = ["x-forwarded-proto", "x-forwarded-host", "x-forwarded-for", "forwarded"];
+
+/// A guest's request to one of the platform's own hosts (its origin, and
+/// every name under the fragments' suffix:
+/// `fragment_core::computer::platform_intercepts`), which the router
+/// answers as it answers the same request from the internet: as whoever
+/// the guest's own cookies or signature name, or as no one. The intercept
+/// adds no one, neither its owner nor an agent (an agent's requests are
+/// `egress_api`'s, which its fragment signs), so a computer reaches nothing
+/// there a browser could not. It sets what an edge sets, and only that:
+/// the scheme and port the guest dialed, the platform's (its port on
+/// HTTPS, 80 on HTTP: a node names the host alone), and the address a
+/// limit counts the request by, the computer's id. A name under the suffix
+/// that is no host of this deployment's (another branch's, on a zone it
+/// shares) is the router's to answer, as no one's: these intercepts reach
+/// the platform and nothing past it, with the internet on or off.
+async fn egress_platform(req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
+    let platform = Url::parse(&Config::from_env(env).platform_url).map_err(|e| CellError::host(format!("FRAGMENT_PLATFORM_URL: {e}")))?;
+    let mut url = req.url()?;
+    let port = if platform.scheme() == "https" { platform.port() } else { None };
+    let dialed = url.set_scheme(platform.scheme()).is_ok() && url.set_port(port).is_ok();
+    assert!(dialed, "http and https are special schemes with ports");
+    let headers = Headers::new();
+    for (name, value) in req.headers().entries() {
+        let socket = matches!(name.as_str(), "upgrade" | "connection");
+        let hop = HOP_HEADERS.contains(&name.as_str()) && !socket;
+        if !hop && !EDGE_HEADERS.contains(&name.as_str()) && !name.starts_with("cf-") {
+            headers.append(&name, &value)?;
+        }
+    }
+    headers.set("cf-connecting-ip", computer)?;
+    let method = req.method();
+    let mut init = RequestInit::new();
+    if !matches!(method, Method::Get | Method::Head) {
+        init.with_body(req.inner().body().map(JsValue::from));
+    }
+    init.with_method(method).with_headers(headers);
+    crate::route(Request::new_with_init(url.as_str(), &init)?, env, ctx).await
 }
 
 /// The fragment a guest's `/f/<fragment>/…` or `/api/f/<fragment>/…` path names.
