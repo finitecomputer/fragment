@@ -36,7 +36,7 @@ default agent. A fragment on it names it and holds nothing else:
 
 ## The managed set
 
-Twelve skills. Six are Fragment platform contracts:
+Thirteen skills. Six are Fragment platform contracts:
 
 | Skill | Why it is ours |
 |---|---|
@@ -58,6 +58,13 @@ And six are integrations Paul retains:
 | trading-agent-finite | Multi-source market analysis and charts; public reads are keyless |
 | polymarket-finite | Deterministic public-data helper; no trading or key required |
 
+`design-finite` is Austin's design direction, critique and polish workflow,
+added after a fresh-agent comparison on local and preview (2026-10-23).
+It covers sites, product UI, charts, games and imagery, with twelve reference
+guides and three self-contained chart examples. `apps-finite` points to it for
+art direction and keeps the Fragment build, publish and sharing contract.
+Image generation follows `image-generation-finite` and its platform limits.
+
 The 2026-10-08 audit, amended by Paul on 2026-10-09, removed 29 generic copies from the Finite skills
 snapshot imported on 2026-10-03. It also removed apps' generic design and
 game references, retaining the four platform references. The inventory,
@@ -68,8 +75,9 @@ Our Hermes image exposes its own pinned bundled skills to every profile,
 read-only, with the agent's own skills and managed overrides winning by
 name (docs/computers.md, Skills and the CLI). The image also installs the
 PDF and Office helpers' pinned Python dependencies. Generic PDF, OCR,
-Office, research, code and design workflows belong to Hermes and its hub;
-they are not maintained as `-finite` forks here. Optional skills are
+Office, research and code workflows belong to Hermes and its hub;
+they are not maintained as `-finite` forks here. Hermes' design skills stay
+available alongside the managed `design-finite` workflow. Optional skills are
 available for explicit installation through Hermes' hub, not enabled in
 all profiles merely because the image contains them.
 
