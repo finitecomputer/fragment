@@ -1204,11 +1204,11 @@ async fn boot_main() {
         }
     };
     // What the boot runs: the agents read at its start, then as they change;
-    // and the route's models' ids, as the deployment names them
+    // and the route's models' ids and their patience, as the deployment names them
     let mut agents = computer.agents.clone();
     let mut credential_env = computer.credential_env.clone();
-    let mut route = hermes::Route::new(&model, computer.models.as_ref());
-    ev!("boot.model_ids", { "given": computer.models.is_some(), "ids": route.ids });
+    let mut route = hermes::Route::new(&model, computer.models.as_ref(), computer.model_patience);
+    ev!("boot.model_ids", { "given": computer.models.is_some(), "ids": route.ids, "patience": route.patience });
     // The previous start's leftovers, ended off the boot's path (its Hermes
     // Python takes about half a second), beside the profiles' writes, which
     // touch no database; waited for before the gateway starts.
@@ -1371,11 +1371,13 @@ async fn boot_main() {
                                 write_profile(&api, a, &home, ids, &route, &credential_env).await;
                             }
                         }
-                        // the deployment's models changed (a release): every
-                        // profile names them, which Hermes reads at its next turn
-                        if c.models.is_some() && c.models != Some(route.ids.clone()) {
-                            route = hermes::Route::new(&model, c.models.as_ref());
-                            ev!("profile.model_ids", { "ids": route.ids });
+                        // the deployment's models or their patience changed (a
+                        // release): every profile names them, which Hermes reads
+                        // at its next turn; a view naming no ids keeps the route's
+                        let named = c.models.clone().unwrap_or_else(|| route.ids.clone());
+                        if named != route.ids || c.model_patience != route.patience {
+                            (route.ids, route.patience) = (named, c.model_patience);
+                            ev!("profile.model_ids", { "ids": route.ids, "patience": route.patience });
                             for a in agents.iter().filter(|a| c.agents.iter().any(|n| n.fragment == a.fragment)) {
                                 let title = read_title(&api, a).await;
                                 write_config(&api, a, &hermes::profile_dir(&home, &a.fragment), ids, &route, &credential_env, high_on, &title).await;
