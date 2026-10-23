@@ -2955,7 +2955,11 @@ selected nor held, its taps immediate; what people write and read stays
 selectable. Added to a home screen it opens standalone (the manifest; the
 `apple-mobile-web-app-*` tags), its bars the page's own colour, light or
 dark, and its edges keep clear of the status bar, the home indicator and
-a notch (`env(safe-area-inset-*)`).
+a notch (`env(safe-area-inset-*)`): the home indicator only while no
+keyboard is up, as one covers the screen's bottom edge (the visual
+viewport shorter than the layout viewport, whose bottom Safari may pan
+into view above the keyboard), so the composer sits just above the
+keyboard, not an inset's height above it.
 
 ### Search (decision 9; docs/cloudflare-v1.md, lesson 12)
 

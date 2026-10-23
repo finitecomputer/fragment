@@ -432,16 +432,21 @@ Reload", the link to its own page, in its own frame when framed: its
 HTML holds the line, its CSS shows it after the delay, and drawing the
 page takes it away.
 
-**On a phone, an app's page.** The page never scrolls, bounces or
-zooms, framed or on its own: its html and body are pinned
+**On a phone, an app's page.** The page never scrolls, bounces or zooms,
+framed or on its own: its html and body are pinned
 (`overscroll-behavior: none`) and the messages scroll, holding their own
 overscroll. It is as tall as the visual viewport, from where it is (its
-`resize` and `scroll`), so the composer sits just above a phone's keyboard
-(Safari shrinks and pans only that viewport); framed, the shell does the
-same for the frame. Its fields are 16px or more on a phone's width (no
-zoom as one takes focus), its buttons neither selected nor held; a table's
-cells keep their words whole, and a wide table or a long line of code
-scrolls in its own box, never the page.
+`resize` and `scroll`), so the composer sits just above a phone's
+keyboard (Safari shrinks and pans only that viewport); framed, the shell
+does the same for the frame. It keeps clear of the home indicator
+(`env(safe-area-inset-bottom)`) only on its own with no keyboard up:
+framed, the shell keeps the frame off that edge, and a keyboard covers
+it. Its composer is one line (Paul, 2026-10-22): the field between
+attach and voice and the bell and send, growing as its text wraps, up to
+six lines, a quote and files above it. Its fields are 16px or more on a
+phone's width (no zoom as one takes focus), its buttons neither selected
+nor held; a table's cells keep their words whole, and a wide table or a
+long line of code scrolls in its own box, never the page.
 
 **A phone's return is a newline** (Paul, 2026-10-14). On a touch screen
 with no finer pointer beside it (`(pointer: coarse) and (not (any-pointer:

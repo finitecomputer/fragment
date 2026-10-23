@@ -316,13 +316,18 @@ mobileChat.addEventListener("change", () => { for (const f of document.querySele
 // viewport and Safari pans it, leaving the layout viewport be (it ignores
 // `interactive-widget`), so the body follows it: a chat's composer, the
 // launcher's input and a window's fields sit just above the keyboard, and
-// the page itself never scrolls under it. ----
+// the page itself never scrolls under it. While a keyboard is up, what is
+// visible is shorter than the layout viewport: the screen's bottom edge is
+// under the keyboard, though Safari may pan the layout viewport's bottom
+// into view above it, and nothing keeps clear of that edge's inset (the
+// home indicator's; shell.css, data-keyboard). ----
 const visible = window.visualViewport;
 function fitViewport() {
   if (!visible) return;
-  const root = document.documentElement.style;
-  root.setProperty("--viewport-height", `${Math.round(visible.height)}px`);
-  root.setProperty("--viewport-top", `${Math.round(visible.offsetTop)}px`);
+  const root = document.documentElement;
+  root.style.setProperty("--viewport-height", `${Math.round(visible.height)}px`);
+  root.style.setProperty("--viewport-top", `${Math.round(visible.offsetTop)}px`);
+  root.toggleAttribute("data-keyboard", visible.height * visible.scale < root.clientHeight - 1);
 }
 visible?.addEventListener("resize", fitViewport);
 visible?.addEventListener("scroll", fitViewport);
