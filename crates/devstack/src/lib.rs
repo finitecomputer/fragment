@@ -710,17 +710,112 @@ pub fn state_dir(project: &Path) -> PathBuf {
 
 /// The nodes this process started in process groups of their own and has
 /// not dropped, which a terminal's Ctrl-C does not reach (it signals the
-/// terminal's group), and whether the process is ending (`kill_nodes`).
+/// terminal's group), the other processes it started and stops itself
+/// (`spawn`), and whether the process is ending (`kill_nodes`,
+/// `stop_children`).
 struct Live {
     ending: bool,
     groups: Vec<u32>,
+    children: Vec<u32>,
 }
 
 /// Nodes one process runs at once (the e2e runs one; `xtask dev` none in
 /// a group of its own).
 const LIVE_NODES_MAX: usize = 8;
+/// Processes one process runs at once through `spawn` (the e2e: OpenBao,
+/// two sandcastle nodes and their engine doubles, a person's own node, a
+/// Chrome or two).
+const LIVE_CHILDREN_MAX: usize = 16;
+/// How long `stop_children` waits for them all, as their owners' stops
+/// wait (sandcastle's NODE_STOP_TIMEOUT); past it each is killed.
+const CHILDREN_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
-static LIVE: Mutex<Live> = Mutex::new(Live { ending: false, groups: Vec::new() });
+static LIVE: Mutex<Live> = Mutex::new(Live { ending: false, groups: Vec::new(), children: Vec::new() });
+
+/// A process this one started with `spawn` and stops itself (OpenBao, a
+/// sandcastle node, its engine double, the e2e's Chrome): listed while it
+/// is held, so that a termination signal, after which no owner's stop
+/// runs, stops it too (`stop_children`). Its owner stops it as before;
+/// dropping it forgets it.
+pub struct Started(Child);
+
+impl std::ops::Deref for Started {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Started {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        let pid = self.0.id();
+        LIVE.lock().unwrap_or_else(PoisonError::into_inner).children.retain(|c| *c != pid);
+    }
+}
+
+/// Spawns `cmd`, listed as this process's (`Started`) until it is dropped;
+/// refused once the process is ending, when nothing would stop it.
+pub fn spawn(cmd: &mut Command) -> std::io::Result<Started> {
+    // held across the spawn: `stop_children` either finds the child or has
+    // already refused it
+    let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
+    if live.ending {
+        return Err(std::io::Error::other("this process is ending (a signal): nothing more starts"));
+    }
+    assert!(live.children.len() < LIVE_CHILDREN_MAX, "a process runs at most {LIVE_CHILDREN_MAX} children at once");
+    let child = cmd.spawn()?;
+    live.children.push(child.id());
+    Ok(Started(child))
+}
+
+/// Whether `pid`, a child of this process, still runs: neither exited nor
+/// reaped. Its exit is left for its owner to reap (`WNOWAIT`).
+fn child_runs(pid: u32) -> bool {
+    // SAFETY: a zeroed siginfo_t is a valid out-parameter; WNOWAIT reaps nothing
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let found = unsafe { libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
+    // SAFETY: waitid filled it in, or left it zeroed (no exit yet)
+    found == 0 && unsafe { info.si_pid() } == 0
+}
+
+/// Stops every process `spawn` started that is still held, as its owner
+/// would: SIGTERM, its exit awaited, SIGKILL past CHILDREN_STOP_TIMEOUT.
+/// Nothing starts after. For a termination signal (`signals::on_termination`):
+/// the process exits next, and its owners' stops never run.
+pub fn stop_children() {
+    let pids = {
+        let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
+        live.ending = true;
+        live.children.clone()
+    };
+    let signal = |pid: u32, signal: libc::c_int| {
+        if let Ok(pid) = libc::pid_t::try_from(pid) {
+            // SAFETY: kill(2) to a child of this process that still runs
+            unsafe { libc::kill(pid, signal) };
+        }
+    };
+    for &pid in &pids {
+        if child_runs(pid) {
+            signal(pid, libc::SIGTERM);
+        }
+    }
+    let t0 = Instant::now();
+    // bounded by CHILDREN_STOP_TIMEOUT, polled every 50 ms
+    while pids.iter().any(|&p| child_runs(p)) && t0.elapsed() < CHILDREN_STOP_TIMEOUT {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    for &pid in &pids {
+        if child_runs(pid) {
+            signal(pid, libc::SIGKILL);
+        }
+    }
+}
 
 /// SIGKILLs every node this process started in a group of its own and
 /// still runs, and refuses to start another: the process is ending (a
@@ -932,5 +1027,33 @@ mod tests {
         assert_eq!(v["url"], "http://a//b");
         assert_eq!(v["q"], "say \"//\"");
         assert!(read_config(&cell_dir()).expect("cell/wrangler.jsonc parses")["durable_objects"].is_object());
+    }
+
+    /// Goal: a termination's `stop_children` ends each process `spawn`
+    /// started and still held, by SIGTERM, leaving its exit for its owner
+    /// to reap; one dropped is forgotten; nothing starts after. Method: this
+    /// test run again as a child, since the ending is the whole process's.
+    #[test]
+    fn a_termination_stops_the_children_spawn_started() {
+        const CHILD: &str = "FRAGMENT_DEVSTACK_CHILDREN_TEST";
+        if std::env::var_os(CHILD).is_some() {
+            let mut held = spawn(Command::new("sleep").arg("600")).expect("a child");
+            let mut done = spawn(&mut Command::new("true")).expect("another");
+            done.wait().expect("it exits");
+            drop(done);
+            assert_eq!(LIVE.lock().expect("the list").children, vec![held.id()], "a dropped child is forgotten");
+            stop_children();
+            let status = held.try_wait().expect("its owner reaps it").expect("it exited");
+            assert_eq!(std::os::unix::process::ExitStatusExt::signal(&status), Some(libc::SIGTERM));
+            assert!(spawn(&mut Command::new("true")).is_err(), "nothing starts once the process is ending");
+            return;
+        }
+        let out = Command::new(std::env::current_exe().expect("the test binary"))
+            .args(["--exact", "tests::a_termination_stops_the_children_spawn_started", "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .expect("the child runs");
+        let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && said.contains("1 passed"), "{said}");
     }
 }

@@ -527,8 +527,9 @@ impl Suite {
         self.nodes.iter_mut().find(|n| n.id == id).with_context(|| format!("no node {id}"))?.up()
     }
 
-    /// The containers running on node `id`'s engine that started at or
-    /// after `since_ms` (devstack's `sandcastle::now_ms`), by name.
+    /// The containers running on node `id`'s engine that the run's nodes
+    /// started at or after `since_ms` (devstack's `sandcastle::now_ms`), by
+    /// name.
     pub fn node_running_since(&self, id: &str, since_ms: u64) -> Result<Vec<String>> {
         self.nodes.iter().find(|n| n.id == id).with_context(|| format!("no node {id}"))?.running_since(since_ms)
     }
@@ -551,6 +552,7 @@ impl Suite {
             platform: self.platform(),
             capacity: 1,
             log_dir: self.scratch.clone(),
+            run: self.run.clone(),
         };
         devstack::sandcastle::SandcastleNode::start_to_pair(tools, &spec)
     }
@@ -1314,16 +1316,39 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let codestore = codestore(hidden, &scratch)?;
     println!("code store: {}", codestore.said);
     let project = devstack::stage_project(&scratch.join("cell"))?;
-    // Ctrl-C (or SIGTERM, SIGHUP) mid-run: the node runs in a process group
-    // of its own, which the terminal's signal does not reach, so the run
-    // kills it, then removes the containers it left
+    // where computers run: the runtime's containers, or sandcastle nodes
+    // (docs/self-host.md, seam 2): two in front of sandcastle's Docker engine
+    // double, or one in front of this machine's real engine
+    let sandcastle = match std::env::var("FRAGMENT_E2E_NODES").as_deref() {
+        Err(_) => None,
+        Ok("two") if rehearse.is_none() => Some((devstack::sandcastle::Tools::locate(false)?, None)),
+        Ok("real") if rehearse.is_none() => {
+            let dir = std::env::var_os("SANDCASTLE_ENGINE_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/var/lib/sandcastle"));
+            Some((devstack::sandcastle::Tools::locate(true)?, Some(dir)))
+        }
+        Ok("two" | "real") => bail!("FRAGMENT_E2E_NODES is a local run's: a rehearsal keeps a preview's rules"),
+        Ok(other) => bail!("FRAGMENT_E2E_NODES is two (one node that listens, one that dials in) or real (one node in front of the machine's engine), not {other}"),
+    };
+    // Ctrl-C (or SIGTERM, SIGHUP) mid-run, as a run's end: the node runs in
+    // a process group of its own, which the terminal's signal does not
+    // reach, so the run kills it, then removes the containers it left, stops
+    // the rest it started (OpenBao, the sandcastle nodes, whose engine
+    // doubles remove theirs, Chrome), and destroys its containers on a real
+    // engine (those its node labelled with the run's name)
     let leftovers = project.clone();
+    let real_engine = sandcastle.as_ref().and_then(|(_, dir)| dir.as_ref()).map(|dir| (dir.join("engine.sock"), run.clone()));
     devstack::signals::on_termination(move |signal| {
-        println!("\nsignal {signal}: the run stops its node and removes its containers");
+        println!("\nsignal {signal}: the run stops what it started and removes its containers");
         devstack::kill_nodes();
         match devstack::containers::remove(&leftovers) {
             Ok(r) => println!("      (removed {} containers of this run)", r.containers),
             Err(e) => println!("      could not remove this run's containers: {e:#}"),
+        }
+        devstack::stop_children();
+        if let Some((sock, run)) = &real_engine {
+            if let Err(e) = devstack::sandcastle::destroy_run(sock, run) {
+                println!("      could not destroy this run's containers on the real engine: {e:#}");
+            }
         }
     })?;
     if only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION)) {
@@ -1353,19 +1378,6 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         (Some("vars"), Some(_)) | (None, None) => None,
         (Some(_), None) => bail!("FRAGMENT_E2E_SECRETS is celld's (FRAGMENT_E2E_RUNTIME=celld): wrangler dev keeps the secrets in its own store"),
         (Some(other), Some(_)) => bail!("FRAGMENT_E2E_SECRETS is openbao or vars, not {other}"),
-    };
-    // where computers run: the runtime's containers, or sandcastle nodes
-    // (docs/self-host.md, seam 2): two in front of sandcastle's Docker engine
-    // double, or one in front of this machine's real engine
-    let sandcastle = match std::env::var("FRAGMENT_E2E_NODES").as_deref() {
-        Err(_) => None,
-        Ok("two") if rehearse.is_none() => Some((devstack::sandcastle::Tools::locate(false)?, None)),
-        Ok("real") if rehearse.is_none() => {
-            let dir = std::env::var_os("SANDCASTLE_ENGINE_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/var/lib/sandcastle"));
-            Some((devstack::sandcastle::Tools::locate(true)?, Some(dir)))
-        }
-        Ok("two" | "real") => bail!("FRAGMENT_E2E_NODES is a local run's: a rehearsal keeps a preview's rules"),
-        Ok(other) => bail!("FRAGMENT_E2E_NODES is two (one node that listens, one that dials in) or real (one node in front of the machine's engine), not {other}"),
     };
     let nodes = sandcastle.is_some();
     // a local run's people sign in through the WorkOS fake, and pay the fake
@@ -1542,6 +1554,7 @@ fn start_nodes(s: &mut Suite, tools: &devstack::sandcastle::Tools, real: Option<
             platform,
             capacity: devstack::sandcastle::real_engine_vms(dir)?,
             log_dir: s.scratch.clone(),
+            run: s.run.clone(),
         };
         s.nodes.push(devstack::sandcastle::SandcastleNode::start(tools, &spec)?);
         println!("nodes: box at {}, in front of the real engine in {}, its images {} loaded (ready in {:.1?})", s.nodes[0].url().unwrap_or_default(), dir.display(), s.node_images, t0.elapsed());
@@ -1558,6 +1571,7 @@ fn start_nodes(s: &mut Suite, tools: &devstack::sandcastle::Tools, real: Option<
             platform: platform.clone(),
             capacity: NODE_CAPACITY,
             log_dir: s.scratch.clone(),
+            run: s.run.clone(),
         };
         s.nodes.push(devstack::sandcastle::SandcastleNode::start(tools, &spec)?);
     }

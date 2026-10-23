@@ -1329,7 +1329,9 @@ FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=../celld/target/release/celld cargo xtask e
 FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… FRAGMENT_E2E_NODES=two SANDCASTLE_DIR=../sandcastle-node \
   cargo xtask e2e --only computers,chat,shell-ui,placement,pairing,restart
 # one node in front of this machine's engine (SANDCASTLE_ENGINE_DIR, default
-# /var/lib/sandcastle; one such run at a time: it destroys what it started there)
+# /var/lib/sandcastle): each container its node starts carries the run's
+# label (fragment-run, sandcastle's node `labels`), and the run destroys those
+# alone at its end or on a signal; other nodes' containers there stay
 FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… FRAGMENT_E2E_NODES=real SANDCASTLE_DIR=../sandcastle-node \
   cargo xtask e2e --only computers,chat,hermes
 # the stub and Hermes built and loaded into the engine, named by digest

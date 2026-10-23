@@ -7,7 +7,7 @@ use std::cell::Cell;
 use std::net::TcpStream;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -26,7 +26,7 @@ const RELOAD_LOAD: Duration = Duration::from_secs(30);
 const RELOADS_MAX: u32 = 2;
 
 pub struct Browser {
-    child: Child,
+    child: fragment_devstack::Started,
     ws: WebSocket<MaybeTlsStream<TcpStream>>,
     next: u64,
     /// The browser context pages open in (`None`: Chrome's default one).
@@ -190,7 +190,7 @@ impl Browser {
     /// One Chrome, up: its process, its DevTools socket's URL, and its
     /// profile, whose `chrome.log` keeps what it said (a start that fails
     /// says why).
-    fn start(bin: &Path, scratch: &Path, args: &[&str], preferences: Option<&Value>) -> Result<(Child, String, PathBuf)> {
+    fn start(bin: &Path, scratch: &Path, args: &[&str], preferences: Option<&Value>) -> Result<(fragment_devstack::Started, String, PathBuf)> {
         let port = fragment_devstack::free_port()?;
         let profile = scratch.join(format!("chrome-{port}"));
         std::fs::create_dir_all(profile.join("Default"))?;
@@ -198,8 +198,8 @@ impl Browser {
             std::fs::write(profile.join("Default/Preferences"), p.to_string())?;
         }
         let log = std::fs::File::create(profile.join("chrome.log"))?;
-        let mut child = Command::new(bin)
-            .args(args)
+        let mut cmd = Command::new(bin);
+        cmd.args(args)
             .args([
                 "--headless=new",
                 &format!("--remote-debugging-port={port}"),
@@ -222,9 +222,9 @@ impl Browser {
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(log)
-            .spawn()
-            .context("start Chrome")?;
+            .stderr(log);
+        // listed as this process's, so a termination signal stops it too
+        let mut child = fragment_devstack::spawn(&mut cmd).context("start Chrome")?;
         let t0 = Instant::now();
         let said = || std::fs::read_to_string(profile.join("chrome.log")).unwrap_or_default().lines().rev().take(5).collect::<Vec<_>>().join(" | ");
         loop {
