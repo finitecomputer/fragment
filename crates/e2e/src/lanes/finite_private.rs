@@ -30,14 +30,16 @@
 //! runs there too, falling back the same, a tool loop among its steps.
 //!
 //! Then the private tier (deploy/example.jsonc's third alternative), on a
-//! node of its own shape: its tiers on Finite Private and its fallback on
-//! Tinfoil's DeepSeek V4.1 Flash, a model only the config names, on a key
-//! of its own and at the list price its slot names. What it proves: a call
-//! Finite Private fails before answering is made once more on Tinfoil with
-//! Tinfoil's key (never Finite Private's), streamed or not, a job's step
-//! too, and charged at that price, its cached tokens at theirs; the route's
-//! `fallback` runs there; and Tinfoil's key refused is the call's failure,
-//! charged nothing and logged aloud.
+//! node of its own shape: its tiers and `vision` on Finite Private and its
+//! fallback on Tinfoil's DeepSeek V4.1 Flash, a model only the config
+//! names, on a key of its own, at the list price its slot names, saying it
+//! reads images. What it proves: a call Finite Private fails before
+//! answering is made once more on Tinfoil with Tinfoil's key (never Finite
+//! Private's), streamed or not, a job's step too, and charged at that
+//! price, its cached tokens at theirs; a `vision` call runs on Finite
+//! Private and falls back the same, its image sent on as it came; the
+//! route's `fallback` runs there; and Tinfoil's key refused is the call's
+//! failure, charged nothing and logged aloud.
 
 use std::time::Duration;
 
@@ -188,7 +190,33 @@ fn tier_checks(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let r = api.signed(&hand, "GET", "/api/models/v1/models", None)?;
     let listed: Vec<&str> = r.body["data"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str()).collect();
-    s.ok("the route lists the tier's ids, each once, and nothing of their prices", r.status == 200 && listed == [PRIVATE, TINFOIL, FLASH] && !r.text.contains("price"), &r);
+    s.ok("the route lists the tier's ids, each once, and nothing of their prices", r.status == 200 && listed == [PRIVATE, TINFOIL] && !r.text.contains("price"), &r);
+
+    // ---- `vision` on Finite Private, falling back to Tinfoil's, which reads images
+    let png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    let look = json!({ "model": "vision", "messages": [{ "role": "user", "content": [{ "type": "text", "text": "what is this?" }, { "type": "image_url", "image_url": { "url": png } }] }] });
+    let image_of = |c: &fragment_fakes::workers_ai::AiCall| c.body["messages"][0]["content"][1]["image_url"]["url"].as_str() == Some(png);
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    s.ai.set_usage(&[Used { prompt: 900, cached: 0, completion: 40 }]);
+    let r = api.signed(&hand, "POST", ROUTE, Some(&look))?;
+    let call = s.ai.calls().get(calls).cloned();
+    let settled = s.eventually(wait, || settled_as(before, PRIVATE, charge(&tokens(PRIVATE, 900, 40))));
+    s.ok(
+        "`vision` runs on Finite Private with its key, the image sent as it came, charged at its price",
+        r.status == 200 && tried(s, calls) == [(Face::OpenAi, PRIVATE.to_string())] && call.is_some_and(|c| image_of(&c) && c.authorization.as_deref() == Some(private_key.as_str())) && settled,
+        json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "answer": r.body }),
+    );
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    s.ai.fail_next(&[503]);
+    s.ai.set_usage(&[Used { prompt: 900, cached: 0, completion: 40 }]);
+    let r = api.signed(&hand, "POST", ROUTE, Some(&look))?;
+    let made = s.ai.calls()[calls..].to_vec();
+    let settled = s.eventually(wait, || settled_as(before, TINFOIL, charge(&tokens(TINFOIL, 900, 40))));
+    s.ok(
+        "a `vision` call Finite Private answers 503 is made once more on Tinfoil's DeepSeek V4.1 Flash, whose slot says it reads images: the same image, Tinfoil's key, charged at its price",
+        r.status == 200 && tried(s, calls) == fell() && made.iter().all(image_of) && made.get(1).is_some_and(|c| c.authorization.as_deref() == Some(tinfoil_key.as_str())) && settled,
+        json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "entries": aig().len() - before }),
+    );
 
     // ---- Tinfoil's key refused: the call's failure, charged nothing, said aloud
     let (calls, before, alarms) = (s.ai.calls().len(), aig().len(), logged(s, "model.platform-key"));

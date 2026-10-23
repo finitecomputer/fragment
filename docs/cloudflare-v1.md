@@ -1250,7 +1250,11 @@ Private stays possible by config.
     `https://inference.tinfoil.sh/v1`, on its own key) runs as the
     fallback by config alone (deploy/example.jsonc's third alternative,
     the private tier), and a fallback's own key refused is logged aloud
-    as the tiers' is.
+    as the tiers' is. A slot may say its model reads images (`images:
+    true`), and a `vision` call falls back to a fallback that says so
+    (the private tier's `vision` on Finite Private, Tinfoil's DeepSeek
+    V4.1 Flash, which reads images, behind it): decision 23's "`vision`
+    and transcriptions do not" holds for a fallback that says nothing.
 
     **Going live** (Paul's): finite-mono issues the key; `cargo xtask
     secret set fragment-finite-private-key --config <production's
