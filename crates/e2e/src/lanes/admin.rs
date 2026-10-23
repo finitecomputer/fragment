@@ -218,7 +218,7 @@ pub fn admin(s: &mut Suite, api: &Api) -> Result<()> {
 /// The admin's page (`/admin`) in Chrome, with an operator's own session:
 /// a person who holds a key the deployment lists (decision 59). It lists
 /// people and comps a seat, makes a trial code, shows the orgs, billing's
-/// health and the log; to anyone else `/admin` is a 404, and nothing of it.
+/// health, who used what and the log; to anyone else `/admin` is a 404, and nothing of it.
 pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("admin-page", &[Need::Chrome, Need::Deployment]) {
         return Ok(());
@@ -256,6 +256,9 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
     b.click(&page, "#tabs button[data-tab=health]")?;
     let health = b.until(&page, "document.querySelectorAll('#health-facts dt').length >= 8", wait);
     s.ok("it shows billing's health", health, "");
+    b.click(&page, "#tabs button[data-tab=usage]")?;
+    let usage = b.until(&page, "/^\\d+ (person|people) used something/.test(document.getElementById('status').textContent) && document.getElementById('usage').hidden === false", wait);
+    s.ok("its Usage tab reads who used what this month (docs/self-host.md, seam 10)", usage, b.eval(&page, "document.getElementById('status').textContent")?);
     b.click(&page, "#tabs button[data-tab=log]")?;
     let log = b.until(&page, &format!("[...document.querySelectorAll('#log-rows tr')].some(r => r.textContent.includes('comp') && r.textContent.includes({email:?}))"), wait);
     s.ok("its log holds the comp, by this operator", log, "");
