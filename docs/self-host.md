@@ -1476,4 +1476,4 @@ CELLD_BIN=… SANDCASTLE_NODE_BIN=~/.local/opt/sandcastle/bin/sandcastle-node ca
 
   The lane's budget is 6.72 MB.
 - **Found 46 (above):** a sleep's two 100 ms polls (master's), about
-  210 ms of every sleep and restart: worth a small master PR?
+  210 ms of every sleep and restart: filed as #552, not urgent.
