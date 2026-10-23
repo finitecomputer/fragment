@@ -46,7 +46,7 @@ pub fn platform_frame(dest: &str, mode: &str, site: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Framed {
     /// A live frame session the platform's mint made: the person, in a
-    /// frame of the platform's page.
+    /// frame of the platform's page (or of their page's own there).
     Session,
     /// The fragment's own page framing it (`same-origin`), as whoever its
     /// cookies there name.
@@ -60,10 +60,17 @@ pub enum Framed {
 /// the pages that may show it.
 ///
 /// - A frame session's answer shows only in the platform's page, the one
-///   its mint was for: before the Public Suffix List lists the fragments'
-///   domain, every fragment shares the frame cookie's partition, so
-///   another fragment framing this one (in the shell, or anywhere) sends
-///   it too, and only this header keeps the answer out of that frame.
+///   its mint was for, and in this origin's own frames there (a chat's
+///   PDF in a frame of the chat's page: Paul, 2026-10-23, whose PDF showed
+///   the browser's refused frame): before the Public Suffix List lists
+///   the fragments' domain, every fragment shares the frame cookie's
+///   partition, so another fragment framing this one (in the shell, or
+///   anywhere) sends it too, and only this header keeps the answer out of
+///   that frame. Every ancestor must be named, so `'self'` lets no other
+///   page in (another fragment's frame is an ancestor of anything inside
+///   it), and a page of this origin, which acts as the person in its frame
+///   already (its fetches carry the cookie), gains nothing by framing its
+///   own.
 /// - The fragment's own page framing itself keeps to this origin's pages.
 /// - A stranger's answer may show in this origin's pages and the
 ///   platform's (the shell shows a public fragment to someone signed out).
@@ -71,9 +78,8 @@ pub enum Framed {
 pub fn ancestors(framed: Framed, platform: &str) -> String {
     assert!(is_origin(platform), "the platform is named by its origin: {platform:?}");
     let named = match framed {
-        Framed::Session => platform.to_string(),
+        Framed::Session | Framed::Stranger => format!("'self' {platform}"),
         Framed::OwnPage => "'self'".to_string(),
-        Framed::Stranger => format!("'self' {platform}"),
     };
     assert!(!named.contains(';') && !named.contains(','), "one directive's sources");
     named
@@ -138,12 +144,13 @@ mod tests {
     }
 
     /// Goal: a frame's answer names the platform's exact origin or this
-    /// origin's own pages, and a signed-in one the platform alone. Method:
-    /// each case for the platform on fragment.club and on a dev node.
+    /// origin's own pages, never another's, and one framed by this origin's
+    /// own page those alone. Method: each case for the platform on
+    /// fragment.club and on a dev node.
     #[test]
     fn frame_ancestors() {
         for platform in ["https://fragment.club", "http://127.0.0.1:8790"] {
-            assert_eq!(ancestors(Framed::Session, platform), platform);
+            assert_eq!(ancestors(Framed::Session, platform), format!("'self' {platform}"));
             assert_eq!(ancestors(Framed::OwnPage, platform), "'self'");
             assert_eq!(ancestors(Framed::Stranger, platform), format!("'self' {platform}"));
         }

@@ -71,6 +71,13 @@ fn framed_by_platform(r: &Reply) -> bool {
     csp.split(';').map(str::trim).filter(|d| d.starts_with("frame-ancestors")).eq(["frame-ancestors 'self'"]) && r.header("x-frame-options") == "SAMEORIGIN"
 }
 
+/// The shell's share sheet is open and has sized its frame: the sheet's own
+/// script told the shell its height, so its buttons are wired too. Its
+/// frame's DOM comes before that: the script waits on the platform's
+/// stylesheet, which the page links ahead of its content (share.rs
+/// `platform_html`), and a Done clicked meanwhile does nothing.
+const SHEET_SIZED: &str = "document.getElementById('sheet').open && !!document.querySelector('#sheet iframe')?.style.height";
+
 /// Whether a page severs a window that opened it.
 fn unopened(r: &Reply) -> bool {
     r.header("cross-origin-opener-policy") == "same-origin"
@@ -772,7 +779,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.click(&home, share)?;
     }
     let inside = |chrome: &mut Browser| chrome.eval_in_frame(&home, "/share/", "document.body?.innerText ?? ''").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
-    let shown = windowed && chrome.until(&home, "document.getElementById('sheet').open", wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
+    let shown = windowed && chrome.until(&home, SHEET_SIZED, wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
     chrome.screenshot(&home, &s.scratch.join("share-dialog.png"))?;
     let done = shown && chrome.eval_in_frame(&home, "/share/", "(document.querySelector('button[data-done]').click(), true)").is_ok();
     let closed = done && chrome.until(&home, &format!("!document.getElementById('sheet').open && !document.querySelector('#sheet iframe') && !!document.querySelector({row:?})"), wait);
@@ -780,6 +787,68 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         "the shell opens an app's share sheet in a dialog (a frame on its own origin), and its Done closes it (the shell reads the list again)",
         shown && closed,
         format!("listed {listed} windowed {windowed} shown {shown} done {done}: {}", inside(&mut chrome)),
+    );
+
+    // ---- at a short window and a tall one: the dialog is as tall as the
+    // sheet says, all of it in view when it fits and scrolling when it does
+    // not, and its Done, clicked where it is drawn, closes it
+    let (mut all, mut seen) = (true, vec![]);
+    for (height, fits) in [(700, false), (1440, true)] {
+        chrome.viewport(&home, 1280, height, false)?;
+        // (two frames for the desktop to lay itself out at the new size)
+        chrome.eval(&home, "new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))")?;
+        let ready = chrome.until(&home, &format!("innerHeight === {height} && {}", settled(share)), wait);
+        if ready {
+            chrome.click(&home, share)?;
+        }
+        let sized = ready && chrome.until(&home, SHEET_SIZED, wait);
+        // the sheet's own height, and the frame and dialog the shell gave it
+        let mut laid = Value::Null;
+        let fitted = sized
+            && s.eventually(wait, || {
+                let own = chrome.eval_in_frame(&home, "/share/", "document.body.offsetHeight").ok().and_then(|v| v.as_f64());
+                laid = chrome
+                    .eval(
+                        &home,
+                        "(() => { const d = document.getElementById('sheet'), r = d.getBoundingClientRect(); \
+                         return { frame: d.querySelector('iframe').getBoundingClientRect().height, dialog: r.height, inView: r.top >= 0 && r.bottom <= innerHeight, scrolls: d.scrollHeight > d.clientHeight }; })()",
+                    )
+                    .unwrap_or_default();
+                laid["own"] = json!(own);
+                own.is_some()
+                    && laid["frame"].as_f64() == own
+                    && laid["inView"] == json!(true)
+                    && laid["scrolls"] == json!(!fits)
+                    && (!fits || laid["dialog"].as_f64() == own)
+            });
+        chrome.screenshot(&home, &s.scratch.join(format!("share-dialog-{height}.png")))?;
+        // Done where it is drawn: the dialog scrolled to it, and the point
+        // the frame's place in the page plus the button's in the frame,
+        // the button what is there
+        chrome.eval(&home, "(() => { const d = document.getElementById('sheet'); d.scrollTop = d.scrollHeight; return true; })()")?;
+        let frame = chrome.eval(&home, "(() => { const r = document.querySelector('#sheet iframe')?.getBoundingClientRect(); return r ? [r.left, r.top] : []; })()")?;
+        let done = chrome
+            .eval_in_frame(&home, "/share/", "(() => { const r = document.querySelector('button[data-done]').getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2; return document.elementFromPoint(x, y)?.closest('button[data-done]') ? [x, y] : []; })()")
+            .unwrap_or_default();
+        let at = match (frame.as_array().map(Vec::as_slice), done.as_array().map(Vec::as_slice)) {
+            (Some([fx, fy]), Some([x, y])) => fx.as_f64().zip(fy.as_f64()).zip(x.as_f64().zip(y.as_f64())).map(|((fx, fy), (x, y))| (fx + x, fy + y)),
+            _ => None,
+        };
+        if let Some(at) = at {
+            chrome.click_at(&home, at)?;
+        }
+        let closed = at.is_some() && chrome.until(&home, "!document.getElementById('sheet').open && !document.querySelector('#sheet iframe')", wait);
+        seen.push(format!("{height}: sized {sized} {laid} Done at {at:?} closed {closed}"));
+        all &= sized && fitted && closed;
+        if !all {
+            break;
+        }
+    }
+    chrome.viewport(&home, 1280, 800, false)?;
+    s.ok(
+        "at a short window and a tall one the dialog is as tall as the sheet says, in view (scrolling only when the sheet does not fit), and its Done, clicked where it is drawn, closes it",
+        all,
+        seen.join("; "),
     );
 
     // ---- settings' Sharing: who has access to what of the owner's, by
@@ -805,7 +874,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and by person: what each of them can open of the owner's", by_person, chrome.eval(&home, "document.getElementById('settings-access').innerText")?);
     chrome.click(&home, "#settings-access button[data-by=fragment]")?;
     chrome.click(&home, &format!("#settings-access .access-name[data-share={chat:?}]"))?;
-    let opened = chrome.until(&home, "document.getElementById('sheet').open", wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
+    let opened = chrome.until(&home, SHEET_SIZED, wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
     let _ = chrome.eval_in_frame(&home, "/share/", "(document.querySelector('button[data-done]').click(), true)");
     let closed = opened && chrome.until(&home, "!document.getElementById('sheet').open && !!document.querySelector('#settings-access')", wait);
     s.ok("a fragment's title there opens its share sheet, and closing it draws the section again", opened && closed, inside(&mut chrome));
@@ -889,7 +958,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.eval(&theirs, "([...document.querySelectorAll('#menu button')].find(b => b.textContent === 'People…').click(), true)")?;
     }
     let inside = |chrome: &mut Browser| chrome.eval_in_frame(&theirs, "/share/", "document.body?.innerText ?? ''").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
-    let shown = offered && chrome.until(&theirs, "document.getElementById('sheet').open", wait) && s.eventually(wait, || inside(&mut chrome).contains("Who has access to"));
+    let shown = offered && chrome.until(&theirs, SHEET_SIZED, wait) && s.eventually(wait, || inside(&mut chrome).contains("Who has access to"));
     chrome.screenshot(&theirs, &s.scratch.join("share-people-member.png"))?;
     let text = inside(&mut chrome);
     s.ok(
