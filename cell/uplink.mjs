@@ -558,13 +558,16 @@ export class Uplink {
     console.log(JSON.stringify({ uplink: "revoked" }));
   }
 
-  // The newest open uplink, if any.
-  #socket() {
+  // The newest open uplink, if any, but `gone` (its dial's nonce): an
+  // uplink whose close is being heard may still read as open (celld), and
+  // a call asked again on it would wait on it for good (docs/self-host.md,
+  // found 39).
+  #socket(gone = null) {
     let best = null;
     let at = -1;
     for (const ws of this.#ctx.getWebSockets(TAG)) {
       const a = ws.deserializeAttachment();
-      if (a && a.at > at && ws.readyState === 1) [best, at] = [ws, a.at];
+      if (a && a.nonce !== gone && a.at > at && ws.readyState === 1) [best, at] = [ws, a.at];
     }
     return best;
   }
@@ -609,12 +612,12 @@ export class Uplink {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  // The uplink, or one that dials within `ms`.
-  async #connected(ms) {
-    const ws = this.#socket();
+  // The uplink, or one that dials within `ms`; never `gone` (a nonce).
+  async #connected(ms, gone = null) {
+    const ws = this.#socket(gone);
     if (ws) return ws;
     await Promise.race([new Promise((r) => this.#waiters.push(r)), sleep(ms)]);
-    return this.#socket();
+    return this.#socket(gone);
   }
 
   async #call(request) {
@@ -651,11 +654,12 @@ export class Uplink {
     );
   }
 
-  // Asks `x` again on the node's next uplink (it dropped before the node
-  // answered), or fails it when none comes within AGAIN_WAIT_MS.
-  async #askAgain(x, why) {
+  // Asks `x` again on the node's next uplink (`gone`, the nonce of the one
+  // it was on, dropped before the node answered), or fails it when none
+  // comes within AGAIN_WAIT_MS.
+  async #askAgain(x, why, gone) {
     x.ws = null;
-    const ws = await this.#connected(AGAIN_WAIT_MS);
+    const ws = await this.#connected(AGAIN_WAIT_MS, gone);
     if (x.done) return;
     if (!ws) return x.end(new Error(`${why}, and the node did not dial again within ${AGAIN_WAIT_MS / 1000} s`));
     x.ws = ws;
@@ -670,9 +674,10 @@ export class Uplink {
   // Every stream on `ws` fails, its connection gone; but one the node had
   // not answered, and that is safe to ask again, waits for the next.
   #lost(ws, why) {
+    const gone = ws.deserializeAttachment()?.nonce ?? null;
     for (const x of [...this.#streams.values()]) {
       if (x.ws !== ws) continue;
-      if (x.again && x.status === null) this.#askAgain(x, why);
+      if (x.again && x.status === null) this.#askAgain(x, why, gone);
       else x.end(new Error(why));
     }
   }

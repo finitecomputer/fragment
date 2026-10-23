@@ -375,13 +375,24 @@ class ContainerHost {
     return ref === undefined ? null : typeof ref === "string" ? ref : JSON.stringify(ref);
   }
 
+  // What a container's watch says of its node (node.mjs `monitor`): why it
+  // has been silent too long, or null once it answers again, reported as
+  // `computer/node` for start `generation` (docs/self-host.md, found 39).
+  #said(generation) {
+    return (down) =>
+      this.#report("computer/node", { generation, down }).catch((e) => {
+        console.log(JSON.stringify({ computer: this.#ctx.id.toString(), generation, down, unreported: String((e && e.message) || e) }));
+      });
+  }
+
   // A new isolate finds the container of start `generation` (lesson 6):
-  // when it runs, this isolate takes it, watching its exit again. Answers
-  // whether it runs.
+  // when it runs, this isolate takes it, watching its exit again; so it
+  // does when its node does not answer, since silence is no exit (found
+  // 39): the watch learns what became of it. Answers whether it took it.
   async adopt(generation) {
-    if (!(await this.running())) return false;
+    if (!(await this.running()) && !this.#node?.presume()) return false;
     this.#generation = generation;
-    this.#c.monitor().then(
+    this.#c.monitor(this.#said(generation)).then(
       () => this.#report("computer/exited", { generation }),
       (e) => this.#report("computer/exited", { generation, why: String((e && e.message) || e) }),
     );
@@ -401,7 +412,7 @@ class ContainerHost {
     else if (this.#c.images && this.#c.images[image]) opts.image = this.#c.images[image];
     else if (this.#node) throw new Error(`its node ${this.#node.node} has no ${image} image for its architecture (FRAGMENT_NODES' images)`);
     this.#c.start(opts);
-    this.#c.monitor().then(
+    this.#c.monitor(this.#said(generation)).then(
       () => this.#report("computer/exited", { generation }),
       // a start that failed is reported as that, by the start (computer.rs)
       (e) => e?.startFailed || this.#report("computer/exited", { generation, why: String((e && e.message) || e) }),
