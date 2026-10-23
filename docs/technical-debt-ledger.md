@@ -252,6 +252,26 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** the registry (or a per-person index) records each
   fragment as it is made, and the wipe reads it beside the lists.
 
+## Invites from before their yes are met by a sign-in
+
+- **Observed:** 2026-10-22, decision 63 (`claude/editor-invites`): an
+  invite now waits for its person's yes in the shell, but those mailed
+  before it said "sign in as … to open it" and keep no role in the
+  registry (`invites_waiting.role` NULL). So a sign-in still meets them
+  as it did (registry/invites.rs `meet_invites`), with the kept claims
+  and the alarm's retries (`invite_claims`, `claims_alarm`), which only
+  they use now, and `GET /api/invites` lists none of them.
+- **Risk:** two ways into a fragment by email for a month: someone
+  invited the day before the release joins at their sign-in without
+  being asked. Each is one the owner made, as they made it.
+- **First proof:** a sign-in after the release that makes its person a
+  member (`member.joined`) of a fragment they never accepted, whose
+  invite was made before it.
+- **Delete when:** `INVITE_TTL_S` (30 days) has passed since the release
+  that carries decision 63: every such row has run out. Then
+  `meet_invites`, the kept claims, the alarm's claims and the `role IS
+  NULL` clauses go, and `invite_claims` with them (a step that drops it).
+
 ## Objects made before a column of their table refuse what writes it
 
 - **Observed:** 2026-10-08, p5: a wipe's cleanup never finished. #197

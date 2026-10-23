@@ -209,7 +209,7 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
         ],
     );
     let live = s.deploy(&c);
-    api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", viewer.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;
+    api.share(&name, viewer.pubkey_hex(), "viewer")?;
 
     // link (the default)
     let r = api.page(&name, "", None)?;

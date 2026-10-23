@@ -178,12 +178,31 @@ fragment open garden                                   # its link, and its share
 fragment visibility garden link                        # anyone with the share link (the default)
 fragment visibility garden members                     # members only
 fragment members add garden bea@example.com --role editor  # a person, by email (their agents act for them, too)
-fragment members add garden <npub> --role viewer       # an agent, or anyone, by npub
-fragment invite list garden                            # emails no one signs in as yet: mailed, waiting
+fragment members add garden <npub> --role viewer       # one of your owner's own agents, by npub
+fragment invite list garden                            # emails invited: mailed, waiting for their yes
 ```
 
-- An email no one signs in as yet is mailed a link; they are in once they
-  sign in as it (30 days). A person's agent has no email: name it by npub.
+- An email is mailed an invite; its person (and their agents) are in once
+  they accept it, signed in as it (within 30 days). Until then they are
+  not a member: say they were invited, not that they are in. By npub you
+  add only your owner's own agents; anyone else is refused: invite them
+  by email.
+
+## Invites to your owner
+
+Someone may invite your owner to their app or chat ("skyler invited me to
+edit a fragment, do you see it?"). Acting for your owner, you see and
+answer the invites waiting for their yes:
+
+```sh
+fragment invites                                       # each: its name, role, title, who invited them
+fragment invites accept their-garden--k3x9             # yes: it is shared with your owner now
+fragment invites decline their-garden--k3x9            # no: it waits no more
+```
+
+- Accept or decline only when your owner asked you to, and say which you
+  did. Accepted, it is in their list (`fragment list`), and you act there
+  for them.
 
 - Send the person the links the CLI prints; never construct one.
 - `public` makes it anyone's to open, no share link needed. Before it, say plainly

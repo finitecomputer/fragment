@@ -30,6 +30,12 @@ fn by(env: &Env, req: &Request, url: &Url, bytes: &[u8]) -> CellResult<By> {
     if acting_for(url)?.is_some() {
         return Err(CellError::invalid(crate::FOR_HONORED));
     }
+    signed_by(env, req, url, bytes)
+}
+
+/// Who signs, a `for` aside: the caller's to read (the invites', which an
+/// agent answers for its owner: share.rs `invites`).
+pub(crate) fn signed_by(env: &Env, req: &Request, url: &Url, bytes: &[u8]) -> CellResult<By> {
     Ok(match caller(env, req, url, Payload::Read(bytes))? {
         Caller::Key(k) => By::Key(k),
         Caller::Session(t) => By::Session(t),

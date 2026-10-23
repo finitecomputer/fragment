@@ -1667,7 +1667,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let before = all_joined(api);
     s.ok("adding it again is no new join: nothing is posted twice", r.status == 200 && told(api, &owner, &agent_name, &next_name).len() == 1, json!(told(api, &owner, &agent_name, &next_name)));
     let stranger_id = api.identity(&stranger)?;
-    let r = api.signed(&owner, "PUT", &format!("/api/f/{next_name}/members/{stranger_id}"), Some(&json!({ "role": "viewer" })))?;
+    let r = api.share(&next_name, &stranger_id, "viewer")?;
     s.ok("a person added is no agent's join: nothing is posted", r.status == 200 && all_joined(api) == before, json!(all_joined(api)));
     let r = api.signed(&owner, "POST", &format!("/api/f/{next_name}/channels/chat"), Some(&json!({ "id": "n1", "body": { "text": "hello in the new chat" } })))?;
     let answered = s.eventually(wake, || agent_replies(&records(api, &owner, &next_name, "chat"), &identity).len() == 1);

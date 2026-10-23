@@ -168,7 +168,7 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
     // Bob, a viewer of it for a moment
     let (bob, _) = person(api)?;
     let bob_id = api.identity(&bob)?;
-    let r = api.signed(&paul, "PUT", &format!("/api/f/{agent}/members/{bob_id}"), Some(&json!({ "role": "viewer" })))?;
+    let r = api.share(&agent, &bob_id, "viewer")?;
     anyhow::ensure!(r.status == 200, "Bob, a viewer: {r}");
     let access = api.signed(&paul, "GET", "/api/access", None)?;
     let member = access.body["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == agent.as_str()).and_then(|f| f["members"].as_array()?.iter().find(|m| m["principal"] == agent_id.as_str()).cloned());

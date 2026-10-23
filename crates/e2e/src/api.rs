@@ -746,6 +746,16 @@ impl Api {
         self.signed(keys, "GET", &format!("/api/f/{name}/status"), None)
     }
 
+    /// `who` (an npub, a key, or a person's email) made a member of `name`
+    /// at `role`, as its owner would, by a test lever (the fragment's
+    /// `member`): `PUT members` adds only the owner's own agents, and
+    /// anyone else joins by their yes to an invite (decision 63), which a
+    /// setup need not mail and accept. Answers the member, as `PUT
+    /// members` does.
+    pub fn share(&self, name: &str, who: &str, role: &str) -> Result<Reply> {
+        self.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "member", "who": who, "role": role })))
+    }
+
     pub fn op(&self, keys: &Keys, name: &str, op: &str, id: &str, input: Value) -> Result<Reply> {
         self.signed(keys, "POST", &format!("/api/f/{name}/ops/{op}"), Some(&json!({ "id": id, "input": input })))
     }

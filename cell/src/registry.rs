@@ -47,7 +47,7 @@ pub(crate) const PROFILES_MAX: usize = 64;
 pub(crate) mod admin;
 pub(crate) mod billing;
 pub(crate) mod calls;
-mod invites;
+pub(crate) mod invites;
 pub(crate) mod offers;
 pub(crate) mod orgs;
 pub(crate) mod seats;
@@ -56,7 +56,7 @@ mod signin;
 mod connection_signin;
 pub(crate) mod wipe;
 use calls::{
-    Active, AddKey, AgentForgotten, ApproveKey, Begin, By, Call, CheckKey, CliBegin, CliCodeOf, EndSession, Exchange, ForgetAgent, Hold, InviteEmail, Logout, Lookup, Mint, Picture, PictureOf, Profile, ProfileAgent, Profiles,
+    Active, AddKey, AgentForgotten, ApproveKey, Begin, By, Call, CheckKey, CliBegin, CliCodeOf, EndSession, Exchange, ForgetAgent, Hold, Logout, Lookup, Mint, Picture, PictureOf, Profile, Profiles,
     ProfilesAnswer, Redeem, RegisterAgent, Resolve, RevokeKey, Session, SetPicture, SubjectOf, TestHook, View, WipeBegin, WipeBilling, WipeLook, WipeStep,
     DownFor, TEST_DOWN_FOR_MAX, TEST_HOLD_MAX_MS,
 };
@@ -425,7 +425,7 @@ impl RegistryCell {
     /// from an agent fragment, its name and fragment). An id the registry
     /// does not hold (an anonymous visitor's) is left out.
     fn profiles(&self, b: Profiles) -> CellResult<ProfilesAnswer> {
-        if b.ids.len() > PROFILES_MAX || b.emails_of.len() > PROFILES_MAX || b.agents_of.len() > PROFILES_MAX {
+        if b.ids.len() > PROFILES_MAX || b.emails_of.len() > PROFILES_MAX {
             return Err(CellError::invalid(format!("at most {PROFILES_MAX} identities at once")));
         }
         let mut profiles = BTreeMap::new();
@@ -445,31 +445,9 @@ impl RegistryCell {
             };
             // an agent's name is its fragment's label (docs/computers.md)
             let name = fragment.as_deref().and_then(fragment_proto::split_fragment_name).map(|(label, _)| label.to_string());
-            // a person's agents, asked: at most AGENTS_PER_OWNER_MAX
-            let agents = match who.kind {
-                IdentityKind::Person if b.agents_of.contains(&id) => self.agents_of(&id)?,
-                _ => vec![],
-            };
-            profiles.insert(id, Profile { kind: who.kind, email, picture, name, fragment, title: None, agents });
+            profiles.insert(id, Profile { kind: who.kind, email, picture, name, fragment, title: None });
         }
         Ok(ProfilesAnswer { profiles })
-    }
-
-    /// A person's agents, the first made first, each by its agent
-    /// fragment's label when it was made from one.
-    fn agents_of(&self, person: &str) -> CellResult<Vec<ProfileAgent>> {
-        let rows = self.rows::<IdRow>(
-            "SELECT id FROM identities WHERE owner = ? AND kind = 'agent' ORDER BY created_at, id LIMIT ?",
-            vec![person.into(), SqlStorageValue::Integer(limits::AGENTS_PER_OWNER_MAX as i64)],
-        )?;
-        assert!(rows.len() as u64 <= limits::AGENTS_PER_OWNER_MAX, "a person owns a bounded number of agents");
-        rows.into_iter()
-            .map(|r| {
-                let fragment = self.agent_fragment(&r.id)?;
-                let name = fragment.as_deref().and_then(fragment_proto::split_fragment_name).map(|(label, _)| label.to_string());
-                Ok(ProfileAgent { id: r.id, name, fragment, title: None })
-            })
-            .collect()
     }
 
     /// The agent fragment an agent was made from, if it was.
@@ -788,6 +766,10 @@ impl RegistryCell {
             TestHook::E2ePeople(page) => Ok(json!(self.e2e_people(page.after.as_deref())?)),
             TestHook::E2eIs(identity) => Ok(json!({ "e2e": self.is_e2e(&identity)? })),
             TestHook::Schema => crate::schema::view(self.state.storage().sql(), &fragment_core::migrate::REGISTRY),
+            TestHook::InvitesBefore(email) => {
+                let made = self.rows::<Value>("UPDATE invites_waiting SET role = NULL, title = NULL, sharer = NULL WHERE email = ? RETURNING fragment", vec![email.into()])?;
+                Ok(json!({ "before": made.len() }))
+            }
         }
     }
 
@@ -829,6 +811,9 @@ impl RegistryCell {
         if let Some(answer) = self.offers_route(&path, &bytes).await {
             return answer;
         }
+        if let Some(answer) = self.invites_route(&path, &bytes).await {
+            return answer;
+        }
         if let Some(answer) = self.trials_route(&path, &bytes) {
             return answer;
         }
@@ -842,7 +827,6 @@ impl RegistryCell {
             calls::ConnectionFences::PATH => reply::<calls::ConnectionFences>(self.connection_fences(body(&bytes)?)),
             Resolve::PATH => reply::<Resolve>(self.key_holder(&body::<Resolve>(&bytes)?.key)),
             Lookup::PATH => reply::<Lookup>(self.lookup(body(&bytes)?)),
-            InviteEmail::PATH => reply::<InviteEmail>(self.invite(body(&bytes)?).await),
             RegisterAgent::PATH => reply::<RegisterAgent>(self.register_agent(body(&bytes)?)),
             ForgetAgent::PATH => reply::<ForgetAgent>(self.forget_agent(body(&bytes)?)),
             Hold::PATH => reply::<Hold>(self.hold(body(&bytes)?)),

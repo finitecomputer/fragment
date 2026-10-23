@@ -243,11 +243,12 @@ pub struct AgentMode {
 pub const AGENT_HEADER: &str = "x-fragment-agent";
 
 /// Whether the platform honors `for` on `path`: a fragment's routes
-/// (`/api/f/…`, and its own at `/f/…`) and the fragment list; it refuses it
-/// on every other route (cell/src/lib.rs `signer`).
+/// (`/api/f/…`, and its own at `/f/…`), the fragment list, and the invites
+/// waiting (`/api/invites…`, an agent's for its owner); it refuses it on
+/// every other route (cell/src/lib.rs `signer`).
 pub fn honors_for(path: &str) -> bool {
     let p = path.split('?').next().unwrap_or(path);
-    p.starts_with("/api/f/") || p.starts_with("/f/") || p == "/api/fragments"
+    p.starts_with("/api/f/") || p.starts_with("/f/") || p == "/api/fragments" || p == "/api/invites" || p.starts_with("/api/invites/")
 }
 
 impl From<Identity> for Signer {
@@ -808,11 +809,11 @@ mod tests {
     }
 
     #[test]
-    fn for_is_named_on_a_fragments_routes_and_the_list_only() {
-        for yes in ["/api/f/x--k3x9.paul/status", "/api/f/x--k3x9.paul/ops/add", "/f/x.paul/__live", "/api/fragments", "/api/fragments?x=1"] {
+    fn for_is_named_on_a_fragments_routes_the_list_and_the_invites_only() {
+        for yes in ["/api/f/x--k3x9.paul/status", "/api/f/x--k3x9.paul/ops/add", "/f/x.paul/__live", "/api/fragments", "/api/fragments?x=1", "/api/invites", "/api/invites/x--k3x9/accept"] {
             assert!(honors_for(yes), "{yes}");
         }
-        for no in ["/api/identities/me", "/api/ledger", "/api/search?q=a", "/api/fragments/x.paul/archived", "/api/computers", "/api/fx"] {
+        for no in ["/api/identities/me", "/api/ledger", "/api/search?q=a", "/api/fragments/x.paul/archived", "/api/computers", "/api/fx", "/api/invitesx"] {
             assert!(!honors_for(no), "{no}");
         }
     }

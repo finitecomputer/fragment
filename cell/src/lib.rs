@@ -572,7 +572,7 @@ async fn picture(env: &Env, identity: &str) -> CellResult<Response> {
     }
     let none = || CellError::new(ErrorCode::NotFound, format!("{identity} has no picture"));
     let Some(picture) = ask_registry(env, &calls::PictureOf { identity: identity.to_string() }).await? else {
-        let named = ask_registry(env, &calls::Profiles { ids: vec![identity.to_string()], emails_of: vec![], agents_of: vec![] }).await?;
+        let named = ask_registry(env, &calls::Profiles { ids: vec![identity.to_string()], emails_of: vec![] }).await?;
         let agent = named.profiles.get(identity).filter(|p| p.kind == IdentityKind::Agent);
         let fragment = agent.and_then(|p| p.fragment.clone()).ok_or_else(none)?;
         return routed::fetch_object(env, "FRAGMENT", &fragment, "computer/picture").await;
@@ -799,7 +799,7 @@ async fn identities(mut req: Request, env: &Env, ctx: &Context, url: &Url, rest:
 /// A fragment named in an API path: its name in full (`todo--k3x9`). A
 /// bare label names nothing here: the CLI finds one among the caller's
 /// fragments (`GET /api/fragments`).
-fn named_fragment(name: &str) -> CellResult<String> {
+pub(crate) fn named_fragment(name: &str) -> CellResult<String> {
     check_name(name)?;
     Ok(name.to_string())
 }
@@ -1151,6 +1151,11 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         (Method::Get, ["api", "access"]) => {
             let who = signer(env, &req, &url, &[]).await?;
             json_answer(&share::access(env, &url, &who).await?)
+        }
+        // the invites waiting on the signer's emails, theirs to answer (share.rs)
+        (_, ["api", "invites", rest @ ..]) => {
+            let rest = rest.to_vec();
+            share::invites(req, env, &url, &rest).await
         }
         (Method::Get, ["api", "fragments"]) => {
             let principal = signer_for(env, &req, &url, &[]).await?;

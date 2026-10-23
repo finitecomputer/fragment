@@ -112,7 +112,7 @@ registry's are no route (404); a local fleet's reach everything.
 | `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?}` pulls a lever on that computer (docs/computers.md): `kill` → `{computer, killed}` sends SIGKILL to the guest's PID 1 (from outside its PID namespace), so its container exits as a crash does and its real exit is reported (`killed`: the start it was); one not running (asleep, or won't wake) is 400. `saves` → what its Computer DO keeps of its saves: `saves` (newest first, at most three: `{number, id, generation, atMs, held, records, unusable}`, each with its `DirectoryBackup` records), `numbered` (the last save's number), `snapshot` (`{id, image, save}`, the cache of a save for one image, or `null`), `restored` (what its last start that came up restored, as the view has it), `rollbacks`, `ended` (`{generation, by, saved}`: how the last life ended, until the next start that comes up reads it), `starting` (`{generation, from}`: the start under way), `running` (`{generation, image}`: the image's reference the last start that came up runs), `generation` (its lifecycle's last start), `saving` (the save under way, by its step: `{step: hold \| save \| stop, since_ms, …}`, or `null`), `unsavedSince` (since when a sleep's save has kept failing, or `null`: the bound counts from it), `freeSince` (since when its awake time is free, the start of the try whose save failed first, or `null`), `keepalives` (the guest's keepalives it counts open: its turns running), `failSaves` (the lever's failures still to come) and `hangBackups` (the lever's bound on its backups, or 0). `fail-saves` with `times` (0 to 100) → `{computer, failSaves}`: its next that many saves fail before they start (a sleep's included, which then keeps its container); 0 fails none more. `hang-backups` with `ms` (0 to 480000) → `{computer, hangBackups}`: a sick container's backups (r4, r6): its awake container's `sandbox-shim` swapped for one that never answers, and its saves' backups bounded by `ms` in place of their 8 minutes, so each fails at it (`no answer within <ms> ms`); 0 puts its shim back and the bound. One not awake is 400 (0 aside). `alive-check` with `ms` (1 to 45000) and `freeze` → `{computer, aliveCheck}`: its next start waits `ms` for its guest to read its view, as a start from a snapshot does (local workerd takes none); with `freeze` its guest's PID 1 is stopped (SIGSTOP) once its container is up, so it never does: the start came up dead, and the same wake starts it again from its save (#362). `always-on` with `on` → `{computer, alwaysOn, view}`: its owner's plan made always-on, or not (decision 25: the plan itself does not reach a computer yet). `expire-sign-ins` → `{computer, expiredSignIns}`: every own-key sign-in under way (Connections) is past its time, as ten minutes would leave it. `schema` answers the steps its schema holds, as the list's `schema` does (on a computer no one made too). Another op, or one without its argument, is 400; a computer no one made is 404 |
 | `POST /api/test/mail` | a local fleet's only (a preview's mail is real): `{to, subject, text}` → `{messageId}`, one message as the platform sends it (Mail, below), to the mail fake |
 | `POST /api/test/export` | `{identity, op, steps?}` (on a preview, an e2e person's): a lever on that person's export (Export, below). `pace` with `steps` lets their build take at most that many more steps (a copy's piece, a page of records, a fragment's facts…), then wait, a second at a time, until it is let go (`steps: null`): a build held part way, as a crash or a restart finds one. `piece` with `steps` (1024 to 8 MiB, or `null`) holds an entry of unknown size that many bytes at a time before putting it aside, so a small export puts its entries aside in many pieces, as a large one does. `cap` with `steps` (bytes, or `null`) makes their archive's limit that many bytes, so a small export meets it → `{pace}`, `{piece}` or `{cap}` |
-| `POST /api/test/registry` | a local fleet's only: `{down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls, skewed}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), and how many it refused for their release (not among `calls`), `{skewFor: {path, times, deployed?}}` makes it answer the next `times` calls (at most 100; 0 answers them again) to one of its inner paths (`/login/exchange`: a sign-in's callback) as a registry of another release would, each refused unread (503 `deploying`) by the check every call into an object meets, as a deploy going out does (docs/MODEL.md, Calls between releases), and with `deployed` (a deploy's seconds, as `FRAGMENT_DEPLOYED_AT`) as one deployed then: before the caller's release (0), it restarts at the first refusal, as an object a deploy replaced does, its hooks and counts gone with it (so the router's next ask is answered); after it, it refuses and stays, `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, `{downFor: {path, times}}` makes it answer 503 to the next `times` calls (at most 100; 0 answers them again) to one of its inner paths (`/orgs/sync`: a computer's making asking for its seat's push), as `{down}` does, the rest answered, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it), and `"schema"` answers the steps its schema holds, as the list's `schema` does, on a registry that refuses its schema too |
+| `POST /api/test/registry` | a local fleet's only: `{down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls, skewed}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), and how many it refused for their release (not among `calls`), `{skewFor: {path, times, deployed?}}` makes it answer the next `times` calls (at most 100; 0 answers them again) to one of its inner paths (`/login/exchange`: a sign-in's callback) as a registry of another release would, each refused unread (503 `deploying`) by the check every call into an object meets, as a deploy going out does (docs/MODEL.md, Calls between releases), and with `deployed` (a deploy's seconds, as `FRAGMENT_DEPLOYED_AT`) as one deployed then: before the caller's release (0), it restarts at the first refusal, as an object a deploy replaced does, its hooks and counts gone with it (so the router's next ask is answered); after it, it refuses and stays, `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, `{downFor: {path, times}}` makes it answer 503 to the next `times` calls (at most 100; 0 answers them again) to one of its inner paths (`/orgs/sync`: a computer's making asking for its seat's push), as `{down}` does, the rest answered, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it), `"schema"` answers the steps its schema holds, as the list's `schema` does, on a registry that refuses its schema too, and `{invitesBefore: email}` makes every invite waiting on that email one mailed before invites waited for a yes (decision 63: its role, title and sharer forgotten), which a sign-in as it still meets, answering `{before}`, how many |
 
 One hook is no route: on a local fleet with a test secret, a request
 whose `fragment_e2e_release` cookie names a release's id is answered as
@@ -661,8 +661,9 @@ sealed at rest later is read as its owner reads it):
   whose membership, and its owner from its `status`; never copied);
 - each fragment kept: `status`, `members` (each named as its owner's
   share sheet names them, through the registry's profiles: a person by
-  their email, with their agents, since a share is a person's and their
-  agents'; an agent by its name and its owner's email), `invites`,
+  their email, never their agents, though a share is a person's and their
+  agents' (decision 63); an agent member by its name and its owner's
+  email), `invites`,
   `secrets` (names), `schedules` (its scheduled records: its meta's
   `schedules`, absent when it has none), `channels` and each channel's
   records (pages of 100
@@ -1015,14 +1016,14 @@ The share sheet is the platform's page, never a fragment's: a
 fragment's page is its author's code (or an agent's), and sharing
 grants. It acts through the fragment's own routes (members, invites,
 visibility, rotate; below) as the person signed in on the platform, so
-the fragment decides who may do what. There is no page to accept an
-invite on: an invite waits on an email, and a sign-in that verifies the
-email meets it (Invites by email, below).
+the fragment decides who may do what. An invite waits on an email for
+its person's yes, which they give in the shell, signed in with that
+email (Invites by email, below).
 
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /share/<name>` | the share sheet, a card laid out as a document's share dialog, titled with the fragment's title: who is in (emails and pictures, from the registry's profiles: a member sees the members' emails, decision 48; an agent by its title, and whose agent it is, by their email: its owner reads what it reads) and their roles, to any member (anyone else, a 403 page); for the owner ("Share …"), adding people by email with a role (Invites by email, below), the invites waiting (each email, its role, the days it waits; Revoke), each member's role (Viewer and Editor buttons, theirs pressed) and Remove (a chat's own agent has neither: it keeps its place), each person's own agents named under them (their share is theirs too), and who can open it ("General access": three buttons, Restricted `members`, Anyone with the link `link`, Public `public`, each saying what it means, the current one pressed); for a member who is not its owner ("Who has access to …"), the same read-only, and Leave. Every choice is a button (no `<select>`, which an arrow key changes as it passes over it) and is sent as it is pressed; Remove, New link and Leave ask a second click. Copy link (the share link while it is `link`, else its address: a public one opens for anyone without its token) and Done (in a dialog, closes it, as Escape does; in a window of its own, closes that, or goes to `/settings`); then, quieter, while it is `link`, a new share link. Signed out: → sign in first, and back. It reads nothing from its URL |
-| `POST /share/<name>` | the sheet's form: `form` (the page's token), `action`, and its fields: `invite` (`email`, `role`: `POST invites`; the sheet says whether they are in now, were mailed, or were mailed again; an email someone in it signs in as already, the owner's own included, changes nothing and says so: their role changes in the list), `role` (`member`, `role`: `viewer` or `editor`), `remove` (`member`), `uninvite` (`email`), `visibility` (`visibility`), `rotate` (the share link only; the inbox's token is the CLI's: the sheet, saying so), `leave` (a member's own, `DELETE members/me`: a page saying they left, whose Done closes the dialog). Done: → 303 back to the sheet; refused by the fragment (a member who is not the owner: 403; the owner leaving: 400; a day's mails spent: 429): the sheet, saying why, with the refusal's status |
+| `GET /share/<name>` | the share sheet, a card laid out as a document's share dialog, titled with the fragment's title: who is in (emails and pictures, from the registry's profiles: a member sees the members' emails, decision 48; an agent by its title, and whose agent it is, by their email: its owner reads what it reads) and their roles, to any member (anyone else, a 403 page); for the owner ("Share …"), adding people by email with a role (Invites by email, below), the invites waiting (each email, its role, the days it waits; Revoke), each member's role (Viewer and Editor buttons, theirs pressed) and Remove (a chat's own agent has neither: it keeps its place), never a person's own agents (their share is theirs too, unnamed: decision 63), and who can open it ("General access": three buttons, Restricted `members`, Anyone with the link `link`, Public `public`, each saying what it means, the current one pressed); for a member who is not its owner ("Who has access to …"), the same read-only, and Leave. Every choice is a button (no `<select>`, which an arrow key changes as it passes over it) and is sent as it is pressed; Remove, New link and Leave ask a second click. Copy link (the share link while it is `link`, else its address: a public one opens for anyone without its token) and Done (in a dialog, closes it, as Escape does; in a window of its own, closes that, or goes to `/settings`); then, quieter, while it is `link`, a new share link. Signed out: → sign in first, and back. It reads nothing from its URL |
+| `POST /share/<name>` | the sheet's form: `form` (the page's token), `action`, and its fields: `invite` (`email`, `role`: `POST invites`; the sheet says they were mailed, or mailed again, and are in once they accept it; an email someone in it signs in as already, the owner's own included, changes nothing and says so: their role changes in the list), `role` (`member`, `role`: `viewer` or `editor`), `remove` (`member`), `uninvite` (`email`), `visibility` (`visibility`), `rotate` (the share link only; the inbox's token is the CLI's: the sheet, saying so), `leave` (a member's own, `DELETE members/me`: a page saying they left, whose Done closes the dialog). Done: → 303 back to the sheet; refused by the fragment (a member who is not the owner: 403; the owner leaving: 400; a day's mails spent: 429): the sheet, saying why, with the refusal's status |
 
 The sheet cannot be driven by a fragment's page. Every POST's `Origin`
 must be the platform's (403 otherwise), and every POST carries `form`,
@@ -1044,39 +1045,49 @@ URL to the platform (`Referrer-Policy: same-origin`).
 
 ### Invites by email
 
-Sharing is by email (docs/cloudflare-v1.md, decision 48). The owner (or
-their agent for them) names an email and a role, viewer or editor
-(`POST /api/f/<name>/invites`; the sheet's Add, `fragment members add
-<name> <email>`):
+Sharing is by email (docs/cloudflare-v1.md, decision 48), and an invite
+waits for its person's yes (decision 63; Paul, 2026-10-22: an invite
+"shouldn't auto add to their app list"). The owner (or their agent for
+them) names an email and a role, viewer or editor (`POST
+/api/f/<name>/invites`; the sheet's Add, `fragment members add <name>
+<email>`):
 
-- The person who signs in as that email (its verified holder) is a
-  member at once, as `PUT members` makes one: `{member}`. Their agents
-  come with them: a share is the person's and their agents' (Paul,
-  2026-10-13), each agent acting for them with at most its cap (R17).
 - Someone in it already is not invited again: 400 `invalid_request`,
   saying they are in and as what (the owner's own email: that they own
   it). An invite adds; a role changes only with `PUT members` (the
   sheet's list, `fragment members role`).
-- When no one does yet, the invite waits on the email for 30 days
-  (`INVITE_TTL_S`) in the fragment, and the registry keeps it against the
-  email and mails it a link to the fragment's address: `{invited}`. Their
-  first sign-in that verifies the email (a WorkOS sign-in, or an e2e
-  person's) makes them a member at the
-  role it said, added by the invite's maker, and a stronger role they hold
-  is kept (the invite is spent either way). A claim the fragment cannot
-  take then (it is unreachable, or at `MEMBERS_MAX`) keeps the invite
-  waiting, and the registry's alarm tries it again for whoever holds the
-  email, backing off (2 s, doubling to ten minutes), 12 tries in all;
-  past them their next sign-in tries again. The link signs them in and
-  lands them there. A forwarded mail
-  admits no one else: only a sign-in as the email meets the invite.
-  Signing in never makes a share; it meets one addressed to its email.
+- Anyone else's invite waits on the email for 30 days (`INVITE_TTL_S`) in
+  the fragment, and the registry keeps it against the email and mails it
+  a link to the platform's own page (never the fragment's): `{invited}`,
+  whether someone signs in as the email already or not yet. `{member}`
+  (`Shared::Member`) is what an invite to someone who signed in already
+  answered before decision 63; no invite answers it now, and clients
+  still read both.
+- Whoever signs in as the email (its verified holder: a WorkOS sign-in,
+  or an e2e person's) sees it in the shell's sidebar (`GET /api/invites`,
+  below) and accepts it, which makes them a member at the role it said,
+  added by the invite's maker (a stronger role they hold is kept; the
+  invite is spent either way), or declines it, which takes it back as a
+  revoke does (`invite.declined`). Their agents come with them: a share
+  is the person's and their agents' (Paul, 2026-10-13), each agent acting
+  for them with at most its cap (R17). An accept the fragment cannot take
+  (at `MEMBERS_MAX`, or unreachable) keeps the invite, and says why. A
+  forwarded mail admits no one else: only someone signed in as the email
+  answers the invite. Signing in never makes a share, nor meets one.
+- An invite mailed before decision 63 said "sign in to open it": a
+  sign-in that verifies its email still meets it, as it did then (a claim
+  the fragment cannot take is tried again by the registry's alarm,
+  backing off from 2 s, doubling to ten minutes, 12 tries in all, then at
+  their next sign-in), until the last such runs out, 30 days after the
+  release (docs/technical-debt-ledger.md, "Invites from before their
+  yes"). It is listed nowhere.
 - An invite that runs out waits no more: the fragment's alarm drops it at
   its expiry, and its owner's list counts it no more (`sharing.invites`,
-  the shell's "invite waits"), as when it is met or revoked.
+  the shell's "invite waits"), as when it is met, declined or revoked.
 - Inviting the same email again renews the invite (its role, 30 days
   more) and mails it again. Revoking it (`DELETE invites/<email>`) takes
-  it back; a mailed link then opens nothing for them.
+  it back: its person sees it no more, and a mailed link then shows them
+  nothing to accept.
 - A fragment holds at most `INVITES_MAX` (100) invites waiting, and an
   email at most `INVITES_PER_EMAIL_MAX` (100) across the fleet (429 past
   it). A person can have at most `INVITE_MAILS_DAILY_MAX` (50) mailed a
@@ -1084,11 +1095,46 @@ their agent for them) names an email and a role, viewer or editor
   service does not send takes the invite back and says why.
 - No event names the email (a `link` fragment's viewers read its
   events): `invite.created` and `invite.revoked` say a role and who made
-  them, and `member.joined` names the npub that met it.
+  them, `invite.declined` names no one, and `member.joined` names the
+  npub that accepted it.
 - An e2e person's address (`<name>@e2e.test`) on a preview is mailed
-  nowhere (Mail, below): its sign-in meets the invite as a person's would.
+  nowhere (Mail, below): its person answers the invite as a person would.
 
-Agents have no email: they are added by npub (`PUT members`).
+A person's own answers (share.rs `invites`; the registry's, invites.rs),
+each with their session (the shell) or a key of theirs; or their own
+agent's, for them (Paul, 2026-10-22: "It can already publish for you and
+edit your own stuff! Why shouldn't it be able to handle 'skyler invited
+me to edit a fragment, do you see it?'"), signed by the agent with `for`
+its owner (`fragment invites`, below), and not held below them: the
+invites are its owner's, and its yes makes its owner a member. Any other
+agent is 403 (as itself, for anyone else, held); a person naming `for`
+is 400:
+
+| method & path | body → answer |
+| --- | --- |
+| `GET /api/invites` | → `{invites: [{fragment, role, title, from, email, expiresAt}]}` (proto's `InvitesWaiting`): the invites waiting on the emails they sign in with, the soonest to run out first, at most `INVITES_PER_EMAIL_MAX`; `title` is what the invite called the fragment as it was sent (its title, or its label), `from` the email of whoever shared it (an agent's invite, its owner's; null when no one signs in as them now), `email` the one it waits on |
+| `POST /api/invites/{fragment}/accept` | `{}` or no body (anything else is 400) → `{fragment, role}` (`InviteAccepted`): their yes; they are a member at `role` now, the fragment in their list before it answers. 404 (`reason: gone`) when none waits on an email of theirs there (taken back, answered, run out, or the fragment deleted: one the registry still held is forgotten); the fragment's refusal (full: 400) keeps it |
+| `POST /api/invites/{fragment}/decline` | the same → `{ok, declined}`: their no; it waits no more, there or here. 404 (`reason: gone`) when none waits |
+
+The CLI's `fragment invites` lists them, and `fragment invites accept|decline
+<name>` answers one (a name in full, or the label of one waiting); an
+agent's CLI names `for` its owner on these routes as on a fragment's.
+
+Their open pages are told when the invites waiting on their emails change
+(one made, renewed or revoked): `{type: "invited"}` on `GET
+/api/fragments/watch`, naming nothing, on which a page reads `GET
+/api/invites` again.
+
+Adding someone directly (`PUT members`, by npub, key or email) works
+only within one person (decision 63; Paul: "I shouldn't be able to add
+someone to something and then it just shows up for them. That's weird:
+it means I could spam people that don't know me with fragments"): the
+owner, or their agent for them, adds the owner's own agents. Anyone
+else, a person or someone else's agent, is 403, saying to invite them
+(or its owner) by email instead; their agents come with the person who
+accepts. A role change of someone in already is no add: it stays the
+owner's. (The e2e's setups share by a lever: `/api/test/fragment
+{op: "member"}`.)
 
 ### Who has access to what
 
@@ -1104,8 +1150,8 @@ for its members and invites as the person, its first
 `members` is everyone in it but its owner (at most `ACCESS_MEMBERS_MAX`,
 50; `more` counts the rest), each `{principal, role, kind, email?,
 name?, title?, owner?, ownerEmail?, agents?}` (a person by their email,
-with their own agents, `agents: [{principal, name?, title?}]`, who reach
-what they do; an agent by its label, `name`, its title, `title` (its
+never their own agents, who reach what they do unnamed: `agents` is
+never sent now, decision 63; an agent member by its label, `name`, its title, `title` (its
 agent fragment's, for at most 64 agents a view: Identities, "An agent's
 name and picture"), and its owner's email: its owner reads what it
 reads), and `invites` the invites waiting, as `GET
@@ -1128,14 +1174,14 @@ title opening its share sheet.
 | `GET /api/search?q=` | any signer | → `{fragments: [ListedFragment], messages: [{fragment, channel, seq, at, snippet}]}` (`SearchAnswer`): the signer's fragments whose title or label hold every word of `q`, then the messages that do, newest first, from fragments they hold a role on now, archived ones included (The shell, Search, below). `q` once, at most 256 bytes and 8 words (400 past either, or without it). Not honored for `for` |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, kind, title?, picture?, agents?, preview?, previewAt?, unread?, sharing?, archived?, listed?}]}` (`archived: true` on the ones the signer archived); `picture`, an agent fragment's only: where its picture is served (Identities, "An agent's name and picture"), as its last install said; `agents`: its agent members, the first added (a chat's lead) first, at most 16 (`LISTED_AGENTS_MAX`), as the fragment last sent them (an agent's joining or leaving sends every row; a row sent before rows named them has none until it is sent again); `preview`, a chat's only: the first line with words of its newest message the signer's search holds (Search, below), at most 160 bytes, none when it holds none; `previewAt`, with `preview`: when that message was said (ms since the epoch, as a record's `at`); `unread`, a chat's only: its messages the signer's search holds after the last they marked seen (`PUT …/seen`, above; all of them before any mark), at most 100 (`LISTED_UNREAD_MAX`), left out at 0; a search entry names no author, so a message of the signer's own counts until they mark it; `sharing` on the signer's own fragments only: `{visibility, members, guests, invites}` (guests: members who are neither the owner nor an agent of theirs; invites: those waiting on an email, as of that change, absent in a row sent before they were counted; an invite met, revoked, or run out is such a change, the last sent by the fragment's alarm at its expiry), as the fragment last sent it with a change to its members, invites or visibility (who they are: `GET /api/access`, below); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) and `owned: true` on those that identity owns, with none of that identity's `listed`; `listed`: what its members are doing, each member's newest record of a kind one of its channels lists that the signer's role there may read, the newest first, at most 16 (Listed records, below), left out when there are none |
 | `GET /api/access` | a person (not an agent) | → who may open each fragment they own, by email (Sharing, "Who has access to what") |
-| `GET /api/fragments/watch` | any signer; the shell with its session (below) | a WebSocket, upgraded; anything else is 400. It answers `{type: "hello"}`, then `{type: "changed"}` each time the signer's list changes: a fragment made, shared with them, changed (its title, kind, agents, sharing, their role), left or deleted, their archiving, and a chat's message new to their search (its preview) (principal.rs, Watching). A frame names nothing: the page reads `GET /api/fragments` again with its own credential, so a socket that outlives its session learns only that something changed. The platform session counts only on the platform's host with the platform's exact `Origin` (a browser names its page on every upgrade; a fragment's page, one site with the platform, is refused like no one: 401). A list holds `LIST_WATCHERS_MAX` (16) at once; one more is 429. It reads nothing from the client. Not honored for `for` |
+| `GET /api/fragments/watch` | any signer; the shell with its session (below) | a WebSocket, upgraded; anything else is 400. It answers `{type: "hello"}`, then `{type: "changed"}` each time the signer's list changes: a fragment made, shared with them, changed (its title, kind, agents, sharing, their role), left or deleted, their archiving, and a chat's message new to their search (its preview) (principal.rs, Watching); and `{type: "invited"}` each time the invites waiting on their emails change (one made, renewed or revoked: `GET /api/invites`, Invites by email). A frame names nothing: the page reads `GET /api/fragments` again with its own credential, so a socket that outlives its session learns only that something changed. The platform session counts only on the platform's host with the platform's exact `Origin` (a browser names its page on every upgrade; a fragment's page, one site with the platform, is refused like no one: 401). A list holds `LIST_WATCHERS_MAX` (16) at once; one more is 429. It reads nothing from the client. Not honored for `for` |
 | `DELETE /api/f/{name}` | the owner (never an agent) | → `{ok, deleted}` once the fragment is gone: from then it is 404 to everyone, its owner's list no longer has it, and its name can be made again. Its other members' lists, the app's database and the blobs go after, by the fragment's alarm (seconds; each part retried, backing off, until done: one that fails ten tries in a row, or is refused, is held and tried daily, its last error kept, as the `ended` lever shows), so a delete answers as soon at `MEMBERS_MAX` members as at one: it tells at most one round of lists itself (32 at once). An agent fragment's agent leaves its computer with them (`computer/unassign`, that agent alone: its owner's agents, a chat's @ roster and Settings run it no more, nor does its guest, and it is counted in the computer's cap no more; its owner's list is told) and the registry names it by the fragment no more (Identities, "An agent's name and picture"; its identity stays, its key held by no one); a computer gone (its owner's wipe) is done. A fragment made again meanwhile under the name is untouched by the old one's cleanup: a new agent of its own, assigned again, keeps its place, and its lists' rows show its own face (none until it has one: an app, untitled), never the ended life's. The repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, kind, title?, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, id, operations: {<op>: {kind, role, input?, ephemeral?, description?}}, error}, viewToken (its owner, or their agent sharing for them), inboxToken (editor), urls: {canonical, platform}, blobMinBytes, page}`; `kind` and `title` are what it is and its title as its members' lists show them (an app, and no title, until it says); `viewToken` is the share link's token, its owner's to give, as the share sheet has it: a member asks them (2026-10-13); `code.sha` is the live commit installed and `code.id` the code that runs (`app:<hash>` of its `app.mjs` and `applib/`, or a blessed template's `blessed:<template>@<release>`); `code.operations` are the installed manifest's, each as it declared them (Apps, below; `input`, `ephemeral` and `description` absent when it gave none); `urls.platform` is the platform's own origin, for links a person opens (a client in a computer calls an internal host); `page` is `{live, at, errors: [{kind, text, source}], dropped}`, what the page reported as its preview card's shot loaded it (Cards, below), absent before the first |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
-| `PUT /api/f/{name}/members/{id\|npub\|email}` | owner, or their agent for them | `{role: viewer\|editor}` (any other field is 400) → the member: added, or their role changed (the one call that changes a role); a key names the identity holding it, an email the person who signs in as it (404 when no one registered it, or signs in as it: `POST invites` mails them). A person's share is theirs and their agents' (Paul, 2026-10-13: "all the pubkeys under the umbrella of this email"): each of their agents acts there for them with at most its cap (R17); an agent added by its npub is that agent alone. A chat's own agent (its lead, the first agent added) is never set below `editor` (400, saying why): its replies and steps post there. A new member that is an agent running on a computer is announced to it: `joined` on its agent fragment's `tasks`, and a wake (Computers, below) |
+| `PUT /api/f/{name}/members/{id\|npub\|email}` | owner, or their agent for them | `{role: viewer\|editor}` (any other field is 400) → the member: added, or their role changed (the one call that changes a role); a key names the identity holding it, an email the person who signs in as it (404 when no one registered it, or signs in as it: `POST invites` mails them). A new member this way is one of the owner's own agents alone: anyone else is 403, saying to invite them by email (decision 63; Invites by email, above). A person's share is theirs and their agents' (Paul, 2026-10-13: "all the pubkeys under the umbrella of this email"): each of their agents acts there for them with at most its cap (R17); an agent added by its npub is that agent alone. A chat's own agent (its lead, the first agent added) is never set below `editor` (400, saying why): its replies and steps post there. A new member that is an agent running on a computer is announced to it: `joined` on its agent fragment's `tasks`, and a wake (Computers, below) |
 | `DELETE /api/f/{name}/members/{id\|npub\|email\|me}` | owner, or their agent for them; or the member | → `{ok, removed}`; closes that member's change feeds (and its owner's, when an agent's membership was their only view). A chat's own agent (its lead, the first agent added) is removed by no one else (400, saying why): it may leave itself (`me`, as its owner's wipe has it do) |
-| `POST /api/f/{name}/invites` | owner, or their agent for them | `{email, role}` → `{member: Member}` (someone signs in as it: a member now) or `{invited: {email, role, expiresAt, createdBy}}` (no one does yet: it waits on the email, mailed); Invites by email, above. Someone in it already, the owner included, is 400, saying so (a role changes with `PUT members`); a role they cannot grant is refused as `PUT members` refuses it |
+| `POST /api/f/{name}/invites` | owner, or their agent for them | `{email, role}` → `{invited: {email, role, expiresAt, createdBy}}`: it waits on the email for its person's yes, mailed, whether someone signs in as it yet or not (`{member: Member}`, a member at once, was the answer for someone who did before decision 63; none is now); Invites by email, above. Someone in it already, the owner included, is 400, saying so (a role changes with `PUT members`); a role they cannot grant is refused as `PUT members` refuses it |
 | `GET /api/f/{name}/invites` | owner, or their agent for them | → `{invites: [{email, role, expiresAt, createdBy}]}`: the invites waiting, oldest first |
 | `DELETE /api/f/{name}/invites/{email}` | owner, or their agent for them | → `{ok, revoked}`; 404 when none waits on it |
 | `PUT /api/f/{name}/visibility` | owner, or their agent for them | `{visibility}` → `{ok, visibility}`. Leaving `members` (for `link` or `public`) makes a new share link: one that stopped working when it was restricted stays dead (the event's `newLink`) |
@@ -2626,8 +2672,8 @@ if it has drawn nothing 9 s after the page came, one of its files or its
 first answers never having come (shell.css shows it then; the script
 takes it away as it first draws the shell). A new person's first run
 never goes through settings
-(docs/billing.md, "The shell"): a guest with nothing shared with them
-lands on the welcome, the seat and a trial code
+(docs/billing.md, "The shell"): a guest with nothing shared with them,
+and no invite waiting, lands on the welcome, the seat and a trial code
 (cell/shell/billing.js `seatOffer`), which a mailed trial's
 `/welcome?trial=<code>` fills in, then Stripe's Checkout, whose return
 (`/welcome?checkout=<id>`, or `canceled`) comes back to it: applied
@@ -2698,7 +2744,14 @@ Its sidebar is the person's list, one read (Skyler, 2026-10-12; Paul,
 2026-10-13): their **one agent** above (their first, the one the first
 run makes: the first their computer took, as its view lists its agents in
 the order it took them; a menu of New chat, Rename, its profile and its
-screen), saying what it is doing (below), then their chats (kind `chat`) as
+screen), saying what it is doing (below), then the **invites** waiting on
+their emails, each its title, who invited them and to edit or view it,
+with Accept and Decline (decision 63; `GET /api/invites`, read as the
+page starts, as its list's socket opens and on its `invited`; Invites by
+email): accepted, it is in their list and opens, a chat in the middle,
+else in a window; declined, it goes; one gone meanwhile says so (a
+phone shows the sidebar over the page when an invite waits and nothing
+is open; a guest's note says to accept it there). Then their chats (kind `chat`) as
 one flat list, newest first (by the row's `previewAt`; one with nothing
 said yet above them all), less the ones they archived (`PUT
 /api/fragments/{name}/archived`, above). Its apps (kind `app` or `brain`)

@@ -29,12 +29,14 @@
 //! leaving, sends every row again (`reindex`). A person's search cursor
 //! (search.rs) follows their row: made with a role, gone without one.
 //!
-//! An invite waits on an email no one signs in as yet (decision 48): the
-//! registry keeps it against the email and mails them, and their first
-//! sign-in as it makes them a member here (`claim_invite`). A forwarded
-//! mail admits no one else: only a sign-in that verified the email meets
-//! it. There are no bearer invites: an unguessable link is `link`
-//! visibility.
+//! An invite waits on an email (decisions 48 and 63): the registry keeps
+//! it against the email and mails them, and whoever signs in as it
+//! accepts it, which makes them a member here (`claim_invite`), or
+//! declines it (`decline_invite`): an invite makes no one a member without
+//! their yes (`PUT members` adds an identity at once: the API's, by its
+//! key, an agent's above all). A forwarded mail admits no one else: only
+//! someone signed in with the verified email answers it. There are no
+//! bearer invites: an unguessable link is `link` visibility.
 
 use fragment_core::access;
 use fragment_core::ended::Failure;
@@ -50,7 +52,8 @@ use worker::*;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 use crate::js;
-use crate::registry::calls::{ClaimInvite, InviteEmail, Invited};
+use crate::registry::calls::{ClaimInvite, InviteEmail};
+use crate::registry::invites::ForgetInvite;
 
 /// Index changes one flush sends at most, all at once (and a delete, of
 /// its ended life's: ended.rs). Sent one at a time, a fragment of
@@ -59,8 +62,8 @@ use crate::registry::calls::{ClaimInvite, InviteEmail, Invited};
 /// on the spot.
 pub(crate) const INDEX_FLUSH_MAX: i64 = 32;
 
-/// Marks the registry's `invites/claim`, a sign-in meeting the invite
-/// waiting on its email; the router never sets it.
+/// Marks the registry's `invites/claim` and `invites/decline`, a person's
+/// yes or no to the invite waiting on their email; the router never sets it.
 pub(crate) const CLAIM_HEADER: &str = "x-fragment-invite-claim";
 
 /// Why a chat's own agent (`chat_agent`) keeps its place: the chat is its
@@ -410,7 +413,7 @@ impl FragmentCell {
     /// address on the platform's origin, which a fragment's page loads from
     /// its own.
     pub(crate) async fn people(&self, ids: Vec<String>, emails_of: Vec<String>) -> CellResult<crate::registry::calls::ProfilesAnswer> {
-        let mut answer = crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids, emails_of, agents_of: vec![] }).await?;
+        let mut answer = crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids, emails_of }).await?;
         crate::share::name_agents(&self.env, &mut answer.profiles).await;
         let platform = self.cfg.platform();
         // bounded: the registry answers at most 64 profiles
@@ -491,15 +494,35 @@ impl FragmentCell {
             return Err(refusal(false, why));
         }
         let target = self.named(who).await?;
-        json_response(&self.put_member(&actor, &target, body).await?)
+        json_response(&self.put_member(&actor, &target, body, false).await?)
+    }
+
+    /// A test hook (`ops::test_fragment`'s `member`): `who` made a member,
+    /// or their role changed, as its owner would, with no one's yes, so the
+    /// e2e shares with people without mailing each an invite to accept.
+    pub(crate) async fn lever_member(&self, who: &str, role: Role) -> CellResult<Member> {
+        let owner = self.must(MetaKey::Owner)?;
+        let actor = Actor { role: Some(Role::Owner), by: owner, for_owner: None };
+        let target = self.named(who).await?;
+        self.put_member(&actor, &target, SetRole { role }, true).await
     }
 
     /// `target` made a member at `body`'s role, or their role changed, by
-    /// `actor`, the owner or their agent sharing for them.
-    async fn put_member(&self, actor: &Actor, target: &Identity, body: SetRole) -> CellResult<Member> {
+    /// `actor`, the owner or their agent sharing for them. A new member
+    /// this way is one of its owner's own agents (decision 63: "I shouldn't
+    /// be able to add someone to something and then it just shows up for
+    /// them"): anyone else joins by their own yes to an invite, but for a
+    /// test's `lever`.
+    async fn put_member(&self, actor: &Actor, target: &Identity, body: SetRole, lever: bool) -> CellResult<Member> {
         let current = self.member_role(&target.id)?;
         if let Some(why) = access::refuse_set_role(actor.role, current, body.role) {
             return Err(refusal(true, why));
+        }
+        if current.is_none() && !lever && target.owner.as_deref() != Some(self.must(MetaKey::Owner)?.as_str()) {
+            return Err(CellError::new(ErrorCode::Forbidden, match target.kind {
+                IdentityKind::Person => "a person joins by their own yes: invite them by email instead (the share sheet's Add, `fragment members add <name> <email>`), and they are in once they accept it",
+                IdentityKind::Agent => "someone else's agent joins with its owner: invite its owner by email instead (the share sheet's Add, `fragment members add <name> <email>`); once they accept, their agents act there for them",
+            }));
         }
         if current.is_some() && body.role < Role::Editor && self.chat_agent()?.as_deref() == Some(target.id.as_str()) {
             return Err(refusal(true, CHAT_AGENT_STAYS_EDITOR));
@@ -638,14 +661,15 @@ impl FragmentCell {
         Ok(face.and_then(|f| f["title"].as_str().map(str::to_string)).filter(|t| !t.is_empty()))
     }
 
-    /// Shares it with whoever signs in as `body.email` (decision 48). The
-    /// person who holds that email is a member at once. When no one does
-    /// yet, the invite waits on the email here, and the registry keeps it
-    /// against the email, mails them, and makes them a member at their
-    /// first sign-in as it (`claim_invite`). It is written before the
-    /// registry is asked, so a sign-in meanwhile meets it, and taken back
-    /// when the registry refuses (a day's mails spent, a mail not sent).
-    /// No event names the email: a link's viewers read the events.
+    /// Shares it with whoever signs in as `body.email` (decisions 48 and
+    /// 63): the invite waits on the email here, and the registry keeps it
+    /// against the email and mails them, for their yes, which makes them a
+    /// member (`claim_invite`), whether they sign in as it already or not
+    /// yet. Someone in it already is not invited (a role changes with `PUT
+    /// members`). It is written before the registry is asked, so a yes
+    /// meanwhile meets it, and taken back when the registry refuses (a
+    /// day's mails spent, a mail not sent). No event names the email: a
+    /// link's viewers read the events.
     pub(crate) async fn create_invite(&self, caller: &Caller, body: CreateInvite) -> CellResult<Response> {
         let actor = self.require_owner(caller)?;
         if !matches!(body.role, Role::Viewer | Role::Editor) {
@@ -656,6 +680,16 @@ impl FragmentCell {
             return Err(CellError::invalid(format!("{email:?} is not an email")));
         }
         let name = self.name()?;
+        // an invite adds someone; it never changes a member's role
+        match self.named(&email).await {
+            Ok(person) => {
+                if let Some(role) = self.member_role(&person.id)? {
+                    return Err(CellError::invalid(already_in(&email, role)));
+                }
+            }
+            Err(e) if e.code == ErrorCode::NotFound => {}
+            Err(e) => return Err(e),
+        }
         self.drop_spent_invites().await?;
         let before = self.rows("SELECT email, role, expires_at, created_by, created_at FROM invites WHERE email = ?", vec![email.as_str().into()])?;
         if before.is_empty() && self.count("SELECT COUNT(*) AS n FROM invites")? >= limits::INVITES_MAX as u64 {
@@ -682,10 +716,8 @@ impl FragmentCell {
             expires_at,
         };
         let answer = crate::ask_registry(&self.env, &asked).await;
-        // what this call wrote, unless a sign-in met it meanwhile
-        let mine = || self.exec("DELETE FROM invites WHERE email = ? AND created_at = ?", vec![email.as_str().into(), SqlStorageValue::Integer(now)]);
         match answer {
-            Ok(Invited::Mailed) => {
+            Ok(()) => {
                 // the owner's list counts the invites waiting
                 self.sharing_changed()?;
                 self.event(
@@ -697,17 +729,9 @@ impl FragmentCell {
                 let invite = Invite { email, role: body.role, expires_at, created_by: actor.by.clone() };
                 json_response(&Shared::Invited(invite))
             }
-            Ok(Invited::Holder(person)) => {
-                mine()?;
-                // an invite adds someone; it never changes a member's role
-                if let Some(role) = self.member_role(&person.id)? {
-                    return Err(CellError::invalid(already_in(&email, role)));
-                }
-                let member = self.put_member(&actor, &person, SetRole { role: body.role }).await?;
-                json_response(&Shared::Member(member))
-            }
             Err(e) => {
-                mine()?;
+                // what this call wrote, unless a yes met it meanwhile
+                self.exec("DELETE FROM invites WHERE email = ? AND created_at = ?", vec![email.as_str().into(), SqlStorageValue::Integer(now)])?;
                 if let Some(was) = before.first() {
                     let field = |k: &str| was[k].as_str().unwrap_or_default().to_string();
                     let int = |k: &str| was[k].as_i64().unwrap_or_default();
@@ -737,15 +761,52 @@ impl FragmentCell {
         self.sharing_changed()?;
         self.event("invite.revoked", &format!("an invite was revoked{}", actor.said()), actor.noted(json!({})));
         self.flush_index().await;
+        // and its person sees it no more: a registry that does not hear it
+        // keeps showing it to them until it runs out, or they answer it
+        // (their yes then finds none waiting here, and says it is gone)
+        let forget = ForgetInvite { email: Some(email.clone()), fragment: self.name()? };
+        if let Err(e) = crate::ask_registry(&self.env, &forget).await {
+            console_error!("{}: its revoked invite was not forgotten by the registry ({:?}): {}", forget.fragment, e.code, e.message);
+        }
         json_response(&json!({ "ok": true, "revoked": email }))
     }
 
-    /// The invite waiting on `email`, met by `identity`, a person who just
-    /// signed in as it (the registry's `ClaimInvite`): a member at the role
-    /// it said, added by its maker, and a stronger role they hold kept;
-    /// either way it is spent, and its owner's list counts it no more.
-    /// 404 when none waits (revoked, expired, or met already), and the
-    /// registry forgets it. A full fragment keeps it for their next sign-in.
+    /// An ended life's invites waiting go from their people's sidebars with
+    /// it (the registry's, told at its end: delete or wipe). Best effort: a
+    /// registry that does not hear it shows them until they run out or are
+    /// answered (a yes then finds no fragment, says it is gone, and forgets it).
+    pub(crate) async fn forget_invites(&self, name: &str) {
+        let forget = ForgetInvite { email: None, fragment: name.to_string() };
+        if let Err(e) = crate::ask_registry(&self.env, &forget).await {
+            console_error!("{name}: its ended life's invites were not forgotten by the registry ({:?}): {}", e.code, e.message);
+        }
+    }
+
+    /// The invite waiting on `email`, declined by the person who signs in
+    /// as it (the registry's `AnswerInvite`, a no): it waits no more, and its
+    /// owner's list counts it no more. 404 when none waits. Its event
+    /// names no one: they are not in it.
+    pub(crate) async fn decline_invite(&self, claim: &ClaimInvite) -> CellResult<Value> {
+        self.name()?;
+        assert!(npub::is_identity(&claim.identity), "the registry names a person by their npub");
+        self.drop_spent_invites().await?;
+        let gone = self.rows("DELETE FROM invites WHERE email = ? RETURNING role", vec![claim.email.as_str().into()])?;
+        if gone.is_empty() {
+            return Err(CellError::new(ErrorCode::NotFound, "no invite waits on that email"));
+        }
+        self.sharing_changed()?;
+        self.event("invite.declined", "an invite was declined", json!({}));
+        self.flush_index().await;
+        Ok(json!({ "ok": true }))
+    }
+
+    /// The invite waiting on `email`, met by `identity`, a person who signs
+    /// in as it and accepted it (the registry's `AnswerInvite`, a yes; or, for an
+    /// invite from before invites waited for a yes, just signed in as it):
+    /// a member at the role it said, added by its maker, and a stronger
+    /// role they hold kept; either way it is spent, and its owner's list
+    /// counts it no more. 404 when none waits (revoked, expired, or met
+    /// already), and the registry forgets it. A full fragment keeps it.
     pub(crate) async fn claim_invite(&self, claim: &ClaimInvite) -> CellResult<Value> {
         self.name()?;
         assert!(npub::is_identity(&claim.identity), "the registry names a person by their npub");

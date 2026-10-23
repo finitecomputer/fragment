@@ -138,7 +138,7 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     ship(s, &app, TODO_APP, TODO_JSON);
     let installed = s.eventually(Duration::from_secs(30), || api.op(&paul, &app_name, "count", "q", json!({})).is_ok_and(|r| r.status == 200));
     let row = api.op(&paul, &app_name, "add_todo", "x1", json!({ "text": "export me, a row" }))?;
-    let member = api.signed(&paul, "PUT", &format!("/api/f/{app_name}/members/{bob_id}"), Some(&json!({ "role": "viewer" })))?;
+    let member = api.share(&app_name, &bob_id, "viewer")?;
     let invitee = format!("export-invitee-{}@example.com", &Keys::generate().pubkey_hex()[..8]);
     let invited = api.signed(&paul, "POST", &format!("/api/f/{app_name}/invites"), Some(&json!({ "email": invitee, "role": "editor" })))?;
     let secret = api.signed(&paul, "PUT", &format!("/api/f/{app_name}/secrets/API_KEY"), Some(&json!({ "value": SECRET, "hosts": ["api.example.com"] })))?;
@@ -152,7 +152,7 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     // someone else's fragment, shared with them
     let bobs = s.named(api, &bob, "export-bobs")?;
     s.create(api, &bob, &bobs)?;
-    let shared = api.signed(&bob, "PUT", &format!("/api/f/{bobs}/members/{paul_id}"), Some(&json!({ "role": "editor" })))?;
+    let shared = api.share(&bobs, &paul_id, "editor")?;
     anyhow::ensure!(shared.status == 200, "sharing bob's fragment: {shared}");
 
     // a computer running their agent, in a chat on the template
@@ -307,11 +307,12 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     let meta = json_at(&files, &frag(&app_name, "meta.json"));
     let bob_row = meta["members"].as_array().into_iter().flatten().find(|m| m["principal"] == bob_id.as_str()).cloned().unwrap_or(Value::Null);
     s.ok(
-        "an app's meta: its owner, its member (their email, and their agents: a share is a person's and their agents'), the invite waiting, its secret's name, whether its links are",
+        "an app's meta: its owner, its member (their email; their agents never named: decision 63), the invite waiting, its secret's name, whether its links are",
         meta["owner"] == paul_id.as_str()
             && bob_row["role"] == "viewer"
             && bob_row["email"] == Api::email_of(&bob).as_str()
-            && bob_row["agents"].as_array().is_some_and(|a| a.iter().any(|x| x["principal"] == bob_agent_id.as_str()))
+            && bob_row.get("agents").is_none()
+            && !meta.to_string().contains(&bob_agent_id)
             && !bob_row.as_object().is_some_and(|o| o.contains_key("peopleOnly"))
             && meta["invites"][0]["email"] == invitee.as_str()
             && meta["secrets"] == json!(["API_KEY"])
@@ -372,8 +373,8 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     let agent_row = chat_meta["members"].as_array().into_iter().flatten().find(|m| m["principal"] == agent_id.as_str()).cloned().unwrap_or(Value::Null);
     let owner_row = chat_meta["members"].as_array().into_iter().flatten().find(|m| m["principal"] == paul_id.as_str()).cloned().unwrap_or(Value::Null);
     s.ok(
-        "a chat's meta: made members only, its agent named with its owner's email, its person with their agents",
-        chat_meta["visibility"] == "members" && chat_meta["shareLink"] == false && agent_row["kind"] == "agent" && agent_row["ownerEmail"] == email.as_str() && owner_row["agents"].as_array().is_some_and(|a| a.iter().any(|x| x["principal"] == agent_id.as_str())),
+        "a chat's meta: made members only, its agent named with its owner's email, its person by their email alone (a person's agents are never named under them: decision 63)",
+        chat_meta["visibility"] == "members" && chat_meta["shareLink"] == false && agent_row["kind"] == "agent" && agent_row["ownerEmail"] == email.as_str() && owner_row["email"] == email.as_str() && owner_row.get("agents").is_none(),
         &chat_meta["members"],
     );
     s.ok("the file a record attaches, by its hash", files.get(&frag(&chat_name, &format!("blobs/{pic_sha}"))).map(Vec::as_slice) == Some(PICTURE), "");
