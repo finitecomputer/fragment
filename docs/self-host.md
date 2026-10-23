@@ -139,7 +139,8 @@ image | containerSnapshot})`, the instance its custom size (2 vCPU, 6 GiB,
 piped stdin and stdout; `signal(n)`; `destroy(reason)`;
 `getTcpPort(port).fetch` (HTTP and WebSocket); `snapshotContainer({name})`;
 `interceptOutboundHttp(s)` (the api and model hosts, the platform's own
-hosts by a glob, `*.<zone>`: seam 9, found 40; the swap's hosts, and
+hosts by a glob, `*.<zone>`: seam 9, found 40, and on a plain-HTTP
+platform's port `*.<zone>:<port>` too, a node's own form; the swap's hosts, and
 `DirectoryBackup`'s gateway, set again by each save: a binding replaced,
 never a new intercept); and `setInactivityTimeout`, nothing on a node (the
 Computer's own sleep stops it). Snapshots, master's cache of the save, are
@@ -831,11 +832,29 @@ intranet runs it, every part the stack's child:
   with the forwarder alone, Hermes' browser loaded the app and its list,
   over HTTP, and sat on "connecting…", its socket refused). The
   forwarder holds the platform's port on the guest's loopback (8790 on
-  dev), so an agent's own server cannot take that port there. Left: a
-  client that asks DNS for a `.localhost` name (glibc's, so Python's and
-  Node's) gets the intercept's address on the platform's port, which
-  nothing catches; it reaches the app at its name on port 80 alone
-  (below, open questions).
+  dev), so an agent's own server cannot take that port there. A client
+  that asks DNS instead is the next bullet's.
+- **A client that asks DNS, on a `.localhost` stack** (found 40's last
+  part, done 2026-10-23, as Paul chose: sandcastle's intercepts, not
+  `libnss-myhostname` in the Hermes image). glibc asks DNS for a
+  `.localhost` name (so Python and Node do), and the engine answers an
+  intercepted name with an address of the egress's own; the client dials
+  it on the platform's port (8790 on dev), never the guest's loopback, so
+  the forwarder never sees it, and an HTTP intercept took a name on 80
+  alone (as Cloudflare's do): the connection went on to the name's real
+  host, which is no public address, and failed. Now sandcastle's HTTP
+  intercepts take a name with a port (`name:port`, `*.glob:port`;
+  sandcastle `node-http-port`, its docs/node.md, Intercepts), beyond
+  Cloudflare's, and on a node the cell catches the platform's hosts on the
+  platform's port as well as on 80, where the forwarder dials
+  (`platform_intercepts`' `on_node`; docs/computers.md, "The platform's
+  hosts"). Cloudflare's path is unchanged: a deployment without nodes is
+  sent the same intercepts as before. `egress_platform` gives the router
+  the platform's scheme and port whichever port caught it. **The engine
+  must come first:** an engine older than that branch refuses the port's
+  target (400, "not a host, address, ip:port, or range"), and with it
+  every start on a `.localhost` stack's nodes; the Docker double takes it
+  (a glob on another HTTP port, unresolved, as on 80).
 - **With the internet off** (Paul's lockdown, 2026-10-22: later, not
   built): the platform's hosts reach the platform and nothing past it, so
   the design holds with `enableInternet: false`. A test fleet's lever,
@@ -937,6 +956,41 @@ local fleet's model names):
   reaches workerd's egress too.
 - **`cargo xtask check`** (`FRAGMENT_SCHEMA_BASE=d8e0f86b`): 848 passed, 0
   failed; `images/`: 262 passed, clippy clean.
+
+**Evidence for a client that asks DNS, 2026-10-23** (branch
+`selfhost-http-port`, on `selfhost` 07895358; sandcastle `node-http-port`,
+on `node` 57cd969; celld unchanged; every run on celld):
+
+- **Before** (the new check alone, the cell unchanged; the real engine,
+  computers): 208 passed, **1 failed**, 1 skipped: busybox's `nslookup`
+  got 198.18.0.3 for the app's name, the egress's own, and `wget` on the
+  platform's port said "error getting response".
+- **The real engine after: not run yet.** This box's engine
+  (`~/.local/opt/sandcastle/bin`, Paul's) is older than
+  `node-http-port`. Asked a start naming `*.fragment.localhost:8790` it
+  answers 400, "not a host, address, ip:port, or range" (refused before
+  anything starts). With the cell's change it refuses every computer's
+  intercepts: the computers lane, stopped after 11 passed and 2 failed,
+  had each wake end `start_failed`, "arm: the node box: PUT
+  …/intercepts: 400 not a host, address, ip:port, or range:
+  *.fragment.localhost:41715". The computers and hermes lanes on the
+  real engine wait for the engine built from that branch.
+- **Two nodes on the Docker double** (computers): 199 passed, 0 failed,
+  11 skipped (the 10 before, and the new check: the double's DNS is
+  Docker's). Every start there sent the port's glob, which the double
+  takes.
+- **wrangler, local Docker** (computers, master's path): 207 passed, 0
+  failed, 3 skipped (the hosted lane's 2, and the new check: Cloudflare's
+  containers take an HTTP host on 80 alone, and are sent the intercepts
+  they were).
+- **`cargo xtask check`** (`FRAGMENT_SCHEMA_BASE=d8e0f86b`): 848 passed, 0
+  failed.
+- **Sandcastle** (`node-http-port`): `cargo test`, 158 passed, 0 failed,
+  2 ignored; among them the proxy's: a name looked up and dialed on its
+  port reaches the handler, on 80 the intercept on 80, on another port
+  nothing. The double's Docker test (ignored by default, run with the
+  stub) passes, its intercepts check brought up to the double's globs.
+  Clippy clean.
 
 ### 10. Money: who used what, in units (done)
 
@@ -1470,7 +1524,9 @@ FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… FRAGMENT_E2E_NODES=two SANDCASTLE_DIR=.
 # one node in front of this machine's engine (SANDCASTLE_ENGINE_DIR, default
 # /var/lib/sandcastle): each container its node starts carries the run's
 # label (fragment-run, sandcastle's node `labels`), and the run destroys those
-# alone at its end or on a signal; other nodes' containers there stay
+# alone at its end or on a signal; other nodes' containers there stay. The
+# engine is sandcastle's node-http-port or later: an older one refuses the
+# platform's port intercept on a .localhost stack, and so every start there
 FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=… FRAGMENT_E2E_NODES=real SANDCASTLE_DIR=../sandcastle-node \
   cargo xtask e2e --only computers,chat,hermes
 # an app an agent made, opened in Chrome (lanes/agent_app.rs): agent-app alone, its
@@ -1536,12 +1592,3 @@ CELLD_BIN=… SANDCASTLE_NODE_BIN=~/.local/opt/sandcastle/bin/sandcastle-node ca
   The lane's budget is 6.72 MB.
 - **Found 46 (above):** a sleep's two 100 ms polls (master's), about
   210 ms of every sleep and restart: filed as #552, not urgent.
-- **Found 40 on `.localhost`: a client that asks DNS** (glibc's: Python's,
-  Node's) for an app's name gets the intercept's address on the platform's
-  port, which no intercept catches (HTTP's take port 80 alone), so it
-  reaches the app only at its name on port 80. Chrome and curl, which
-  Hermes opens apps with, work. Two ways, if it matters: `libnss-myhostname`
-  in the Hermes image's base (every `.localhost` name to loopback, where
-  the forwarder takes it; the base's 1.4 GB pulled again), or sandcastle's
-  HTTP intercepts taking a name with a port (beyond Cloudflare's), set on
-  nodes for the platform's port.

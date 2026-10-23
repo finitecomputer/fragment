@@ -894,9 +894,13 @@ caught on the way out and answered by the platform itself, never the
 network: its origin's host (`FRAGMENT_PLATFORM_URL`) and every name under
 the fragments' suffix (`*.<suffix>`: fragments, computers' origins), on
 the platform's scheme, and on HTTPS its port
-(`fragment_core::computer::platform_intercepts`; HTTP intercepts take a
-name on port 80 alone). So it works wherever the computer runs: on
-Cloudflare through the platform rather than the internet, and on a
+(`fragment_core::computer::platform_intercepts`). On HTTP they are caught
+on port 80, as Cloudflare's HTTP intercepts take a name, and on a
+sandcastle node also on the platform's own port when its origin names
+one (a node's HTTP intercepts take a name with a port, beyond
+Cloudflare's: sandcastle's docs/node.md, Intercepts); Cloudflare's
+containers are never sent one. So it works wherever the computer runs:
+on Cloudflare through the platform rather than the internet, and on a
 self-hosted network whose platform is on an address a computer may not
 reach (docs/self-host.md, found 40), with the internet on or off.
 
@@ -911,8 +915,11 @@ platform's scheme and port, under its zone) is plain HTTP under
 on port 80 through the guest's resolver, where the intercept catches it,
 and passes the bytes both ways as they are, a WebSocket's included
 (images/bridge `loopback.rs`). Any other host there is refused (421). A
-client that asks DNS for a `.localhost` name instead (glibc's: Python's,
-Node's) reaches the app at its name on port 80 alone.
+client that asks DNS for the name instead (glibc's: Python's, Node's)
+gets the egress's own address for it and dials it on the platform's
+port, never the guest's loopback: on a node, the intercept on that port
+catches it (above). On Cloudflare's containers (wrangler's, locally) it
+reaches the app at its name on port 80 alone.
 
 - **Whose request it is.** The router answers it as it answers the same
   request from the internet: as whoever the guest's own cookies or
@@ -926,8 +933,8 @@ Node's) reaches the app at its name on port 80 alone.
   browser is that person there, as on any browser.
 - **What it sets**, as an edge sets it and never as the guest says: the
   platform's scheme and port, as the guest's browser has the page (a node
-  names the host alone, and on HTTP it was caught on 80), so an app's
-  socket from its own page passes the router's `Origin` check; and the
+  names the host alone, and on HTTP it may have been caught on 80), so an
+  app's socket from its own page passes the router's `Origin` check; and the
   address a limit counts the request by, the computer's id
   (`CF-Connecting-IP`). The guest's own forwarding headers go nowhere.
 - **A name under the suffix that is no host of this deployment's**
