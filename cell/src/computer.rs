@@ -50,7 +50,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{
-    alive, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Socket, Step, Wake, ALIVE_MS, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS,
 };
 use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
@@ -940,12 +940,17 @@ impl ComputerCell {
     /// A new isolate's first look (lesson 6): a container its lifecycle says
     /// is running is taken over (watched again, its intercepts and idle
     /// stop armed again, never destroyed: `/data` may be unsaved), or, gone,
-    /// reported as exited.
+    /// reported as exited; or, gone in a sleep's stop (lost with the isolate
+    /// before this one, which would have reported its end), as asleep.
     async fn adopt(&self) -> CellResult<Option<Event>> {
-        let Some(generation) = self.lifecycle()?.running() else { return Ok(None) };
+        let life = self.lifecycle()?;
+        let Some(generation) = life.running() else { return Ok(None) };
         let g = JsValue::from_f64(generation as f64);
         if self.call("adopt", std::slice::from_ref(&g)).await?.as_bool() != Some(true) {
-            return Ok(Some(Event::Exited { generation }));
+            return Ok(Some(match life.saving() {
+                Some(Saving::Stop { .. }) => Event::Asleep { generation },
+                _ => Event::Exited { generation },
+            }));
         }
         let id = self.must(MetaKey::Id)?;
         self.call("arm", &[g, id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts(), self.platform_hosts()]).await?;
