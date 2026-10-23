@@ -1722,12 +1722,6 @@ const clock = (ms) => {
   const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   return today ? time : `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
 };
-const span = (ms) => {
-  const m = Math.max(1, Math.round(ms / 60_000));
-  if (m < 60) return `${m} minute${m === 1 ? "" : "s"}`;
-  const h = Math.round(m / 60);
-  return h < 48 ? `${h} hour${h === 1 ? "" : "s"}` : `${Math.round(h / 24)} days`;
-};
 // why a computer won't start, in plain words (the platform's own words
 // stay beside them, for whoever helps)
 function wontStart(why) {
@@ -1737,12 +1731,6 @@ function wontStart(why) {
   if (/restore|archive|backup/i.test(why)) return "Its save couldn't be restored.";
   return "It couldn't start.";
 }
-const LOST = {
-  crash: "Your computer stopped unexpectedly",
-  unsaved: "Your computer was stopped because it couldn't save",
-  restart: "Your restart couldn't save first",
-  unusable: "Your computer's newest save couldn't be restored",
-};
 // a restart the person asked for in this page, and of which start: a
 // computer that still won't start after one says where to get help
 let restarted = 0;
@@ -1785,10 +1773,13 @@ function noticeRow(n) {
     say("Your computer can't save right now", `It hasn't saved since ${clock(n.since)}, so what its agents did after that isn't kept yet. It keeps trying.${stop} Restarting tries to save first.`, n.why);
     restart("Restart now");
   } else if (n.kind === "went_back") {
-    const back = n.save && n.savedAt
-      ? `${n.pending ? "It goes back" : "It went back"} to its save of ${clock(n.savedAt)}${n.endedAt ? `, ${span(n.endedAt - n.savedAt)} before it stopped` : ""}.`
-      : `${n.pending ? "It starts again" : "It started again"} with nothing kept from before.`;
-    say(LOST[n.cause] ?? "Your computer went back to an older save", `${back} Work on the computer after that is gone; your chats keep everything that was said.`);
+    // told only when something was done on it after that save (a stop
+    // that lost nothing tells nothing), so it says what went, calmly
+    const since = n.save && n.savedAt ? clock(n.savedAt) : null;
+    const back = n.pending
+      ? (since ? `When it starts again, changes on it since ${since} won't be there.` : "Nothing on it was saved yet, so it will start fresh.")
+      : (since ? `Changes on it since ${since} weren't kept.` : "Nothing on it was saved yet, so it started fresh.");
+    say(n.pending ? "Your computer stopped" : "Your computer restarted", `${back} Your chats are all here.`);
     const ok = el("button", null, "OK");
     ok.type = "button";
     ok.dataset.action = "seen";

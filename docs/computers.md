@@ -144,10 +144,10 @@ the bridge), what its person saw before 2026-10-08, and what they see now:
 | **Its owner's sleep**, saved (the shell's update is one) | `POST …/sleep` | the same | the same |
 | **A sleep whose save fails** | any sleep; it is kept awake (I5) and tried again after 1, 2, 4, 8, 15 minutes | Settings' `why`, read only when Settings was opened after it / nothing; its owner charged for the time it was kept | an `unsaved` notice at once, over every chat and Settings, pushed to open pages: since when its work is in no save, the save a stop goes back to, the time the bound stops it, and Restart; the time it is kept, from its failing try's start to the bound, is free |
 | **Awake saves that keep failing** (a turn's end, every 15 minutes busy) | tried again after a growing pause, unbounded while awake | nothing anywhere: no `why` for an awake save | the `unsaved` notice once two fail in a row (no stop time: none is due until it would sleep) |
-| **The bound runs out**: put to sleep unsaved | the sleep tried at `unsaved_since + unsaved_max_ms` (exactly: the last try is the bound's), only when nothing holds it | Settings' `why` ("slept unsaved"), which then stayed for good (only a save of the same life cleared it) / nothing | a `went_back` notice (pending) while it is asleep: what it will go back to; the `why` goes at the next save that works |
-| **A crash**: the container stops on its own (out of memory, a host restart, the runtime's idle stop, or dying while its sleep held or saved it) | `Exited`; it starts again at once while anything wants it, else at its next wake | nothing (`restored` and `rollbacks` were in the API only) / a turn it cut ends quietly as "lost when the computer restarted"; the agent's next turn there is told what was cut (docs/bridge.md) | a `went_back` notice: stopped unexpectedly, back to its save of `HH:MM`, how much before it stopped; the chat and the agent as before |
+| **The bound runs out**: put to sleep unsaved | the sleep tried at `unsaved_since + unsaved_max_ms` (exactly: the last try is the bound's), only when nothing holds it | Settings' `why` ("slept unsaved"), which then stayed for good (only a save of the same life cleared it) / nothing | a `went_back` notice (pending) while it is asleep: since when changes on it won't be there; the `why` goes at the next save that works; nothing when nothing was done on it since that save |
+| **A crash**: the container stops on its own (out of memory, a host restart, the runtime's idle stop, or dying while its sleep held or saved it) | `Exited`; it starts again at once while anything wants it, else at its next wake | nothing (`restored` and `rollbacks` were in the API only) / a turn it cut ends quietly as "lost when the computer restarted"; the agent's next turn there is told what was cut (docs/bridge.md) | a `went_back` notice, only when something was done on it since the save it went back to (below): "Your computer restarted. Changes on it since `HH:MM` weren't kept. Your chats are all here."; the chat and the agent as before |
 | **A wake past an unusable save** (its archive gone, or the image's check failed) | `RestoreFailed`, the save before it at once | nothing | a `went_back` notice: the newest save could not be restored |
-| **Its owner's restart** | `POST …/restart` | (no restart) | saved first: nothing to tell; its save failing, a `went_back` notice for the restart |
+| **Its owner's restart** | `POST …/restart` | (no restart) | saved first: nothing to tell; its save failing, a `went_back` notice for the restart, when something was done on it since its last save |
 | **A wake whose snapshot will not start** | the image and the same save, in the same wake | nothing | nothing: nothing is lost |
 | **A wake from a snapshot that comes up dead** (#362: started, then no exec answered and its guest never read its view) | unheard 45 s after its start; the image and the same save, in the same wake | it was awake and answered no one: messages unanswered, and its sleep's save hung for good (r4, r6) | nothing: nothing is lost, its wake 45 s slower |
 | **A sleep whose backups never answer** (a sick container's) | its save fails at its bound (8 minutes), as one that fails | it stayed `sleeping`, held, answering no one, and owed as awake, for good; its owner's sleep never answered (r4, r6) | as a sleep whose save fails: kept, the `unsaved` notice, tried again, and the bound ends it |
@@ -174,7 +174,19 @@ whoever reads it:
   went back to an older save (`crash`, `unsaved`, `restart`, `unusable`),
   or will as it next starts (`pending`). Told until its owner says they
   saw it (`POST …/notices/seen {life}`), whatever starts come after; the
-  newest loss only.
+  newest loss only. None for a loss that lost nothing (Paul, 2026-10-23:
+  "if the user had no activity between last good save and stop I don't
+  know if we even need the notice at all"): nothing was done on that life
+  after the save it goes back to (its newest save that worked, or, with
+  none, the one it came up from). Done means what the Computer DO hears:
+  its guest's keepalive or a port tab opened or closed, or a record or a
+  join woke it, after that save's hold began (`Ended::quiet`). A socket
+  that only stays open across the save is not: the DO can count a
+  keepalive open that its guest let go of (on the preview, 2026-10-23, one
+  whose close was lost across a deploy stayed counted open for 14 hours,
+  so the computer took a busy save every 15 minutes all night and never
+  slept), and a turn really running at a stop is ended as lost in its own
+  chat. Its guest still reads such a start as a rollback (`restored`).
 - `update {version}`: it is awake on another version than its next start
   runs (`version`, the view's `latest`; the view's `version` is the one it
   runs), and no turn runs (no keepalive open). Told until a restart or a
@@ -722,7 +734,9 @@ docs/durable-computers.md. A computer keeps its newest three saves of
   included), or its start fell back to a save older than that life's
   newest, so what that life did since some save is in none. A start from
   the save its life's sleep took is none. Its owner is told of the newest
-  until they say they saw it (`went_back`: "What its owner is told").
+  until they say they saw it, when something was done on the life it
+  lost after the save it went back to (`went_back`: "What its owner is
+  told").
   Nothing's correctness depends on the guest reading either.
 
 ### Bounds
@@ -2347,7 +2361,9 @@ for a host) and finds the same `HOME`, `~` and modes.
   sleep's first, with the stop at the bound itself, later while a record
   holds it, never while in use or always on; a start that went back told
   with its cause and save, pending while asleep, once until seen, a seen
-  older one hiding only itself, across a restart of the DO; won't wake
+  older one hiding only itself, across a restart of the DO, and none for
+  one that lost nothing (nothing done since its save; a keepalive only
+  counted open across it), an unseen older one still told; won't wake
   told until a restart; an update told while awake on another version
   than its next start runs, between turns, never asleep or starting,
   taken by a restart or a sleep and a wake, put off for that version only,
@@ -2398,14 +2414,16 @@ for a host) and finds the same `HOME`, `~` and modes.
   its stop time, a restart asked twice (its save failing too) going back
   once and saying so until seen, the unsaved stop at the time it said and
   the wake after told once, a restart of a sleeping computer, one
-  refused at zero credit, and no awake time on its owner's ledger in
-  either free window. Its image pin, which is what a deploy that changed
+  refused at zero credit, no awake time on its owner's ledger in
+  either free window, and a restart with nothing done since the save its
+  life came up from going back and telling nothing. Its image pin, which is what a deploy that changed
   the image is to a computer: the update told awake, not while a turn
   waits on its card, again when it ends, put off by Later (again the
   same; another version, or none, refused), taken by a restart (the next
   build served), and not told asleep. The `shell-ui` lane sees the same in
-  Chrome: the warning on Settings with no reload, its Restart, the notice
-  of what it went back to and its OK (gone after a reload), Settings'
+  Chrome: the warning on Settings with no reload, its Restart (after its
+  agent answered a message no save keeps), the notice of since when
+  changes weren't kept and its OK (gone after a reload), Settings'
   Restart computer, and an update: shown with no reload, Settings' version
   and the latest, its Restart taking it, its Later holding after a
   reload. On a preview, the hosted `agent-restart` section (by name)

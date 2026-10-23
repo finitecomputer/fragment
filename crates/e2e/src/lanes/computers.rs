@@ -490,7 +490,7 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
 /// The recovery checks (docs/computers.md, "What its owner is told"), each
 /// skipped off the stub and the fakes (the lever fails saves, and the
 /// node's bound is short: `crate::UNSAVED_MAX_MS`).
-const RECOVERY_CHECKS: [&str; 11] = [
+const RECOVERY_CHECKS: [&str; 12] = [
     "a sleep whose save fails tells its owner at once: since when its work is in no save, the save a stop goes back to, and when the bound stops it",
     "no one else restarts it",
     "its owner's restart, its save failing too: it starts again at once, from its last save",
@@ -502,6 +502,7 @@ const RECOVERY_CHECKS: [&str; 11] = [
     "and its agent is told, once, what it no longer remembers of the chat: the turn the stop lost, from the journal",
     "asleep, its owner's restart starts it, fresh from its save",
     "the time it was kept for failed saves is free (Paul, 2026-10-08): nothing is charged from the start of a sleep's try whose save failed to its bound, or to the restart that ended it; the time before and after is",
+    "a restart whose save fails, with nothing done since the save it came up from: it goes back to that save and tells its owner nothing, since nothing was lost (Paul, 2026-10-23); a notice of it is refused",
 ];
 
 /// What its owner is told, and the way back to working (rung 4 of
@@ -556,7 +557,10 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
     );
     let r = api.signed(stranger, "POST", &path("/restart"), Some(&json!({ "generation": g })))?;
     s.ok(RECOVERY_CHECKS[1], r.status == 404, &r);
-    // its owner restarts it: the restart's own save fails, so it goes back
+    // its owner restarts it: the restart's own save fails, so it goes back,
+    // and its last turn (the crash checks' last, ended seconds before its
+    // sleep, well within the 30 s before its end is saved) is in no save:
+    // told
     let restart = || api.signed(c.owner, "POST", &path("/restart"), Some(&json!({ "generation": g })));
     let restarted_at = crate::api::now_ms();
     let r = restart()?;
@@ -684,6 +688,34 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
             && woke.body["restored"]["rollback"] == false
             && woke.body["notices"].as_array().is_none_or(|l| l.is_empty()),
         format!("{r} / {woke}"),
+    );
+    // a life on which nothing is done: its owner's sleep saves it once its
+    // guest settled (a start after a rollback first ends what its save left
+    // open, holding its keepalive a moment: work, until a save keeps it),
+    // and its wake comes up from that save; its restart's save fails, so it
+    // goes back to that save, and lost nothing
+    std::thread::sleep(QUEUE_DRAIN);
+    s.eventually(Duration::from_secs(15), || lever(api, c.id, "saves").is_ok_and(|r| r.body["keepalives"] == 0));
+    let slept = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let kept = newest_save(api, c.id);
+    let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    let life = woke.body["generation"].as_u64().unwrap_or(0);
+    let failing = lever_with(api, c.id, json!({ "op": "fail-saves", "times": 100 }))?;
+    let quiet = api.signed(c.owner, "POST", &path("/restart"), Some(&json!({ "generation": life })))?;
+    let never_told = api.signed(c.owner, "POST", &path("/notices/seen"), Some(&json!({ "life": life })))?;
+    lever_with(api, c.id, json!({ "op": "fail-saves", "times": 0 }))?;
+    s.ok(
+        RECOVERY_CHECKS[11],
+        slept.body["phase"] == "asleep"
+            && woke.body["restored"]["save"] == kept["id"]
+            && failing.status == 200
+            && quiet.status == 200
+            && quiet.body["generation"].as_u64() == Some(life + 1)
+            && quiet.body["restored"]["rollback"] == true
+            && quiet.body["restored"]["save"] == kept["id"]
+            && notice(&quiet.body, "went_back").is_null()
+            && never_told.status == 400,
+        format!("{woke} / {quiet} / {never_told}"),
     );
     Ok(3)
 }

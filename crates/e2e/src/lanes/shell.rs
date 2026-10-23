@@ -1257,7 +1257,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     reasoning_ui(s, api, &mut b, &page, &session, &shots)?;
     models_ui(s, api, &mut b, &page, &session, &chat, &shots)?;
     left_and_back_ui(s, api, &mut b, &page, &session, &chat)?;
-    computer_ui(s, api, &mut b, &page, &session, &shots)?;
+    computer_ui(s, api, &mut b, &page, &session, &chat, &shots)?;
     update_ui(s, api, &mut b, &page, &session, &shots)?;
     b.color_scheme(&page, "dark")?;
     let _ = b.screenshot(&page, &shots.join("desktop-settings-dark.png"));
@@ -2402,18 +2402,35 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
 /// (docs/computers.md, "What its owner is told"), as they see it on
 /// settings: a sleep whose save fails (the lever's) shows at once, with no
 /// reload (the computer tells the page's list socket); its Restart restarts
-/// it once, the restart's own save failing too, and the notice then says
-/// what it went back to; OK tells it no more, here or after a reload; and
-/// settings' Restart computer asks once more, then restarts it, saved.
-fn computer_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
+/// it once, the restart's own save failing too, and the notice then says,
+/// calmly, since when changes on it were not kept (its agent answered a
+/// message after its last save); OK tells it no more, here or after a
+/// reload; and settings' Restart computer asks once more, then restarts
+/// it, saved.
+fn computer_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, chat: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let computers = shell(api, session, "GET", "/api/computers", None, &[])?;
     let id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
     let view = || shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
     let shown = |kind: &str| format!("document.querySelector('#computer-notices:not([hidden]) .computer-notice[data-kind={kind}]')");
-    // its saves fail; its owner's sleep keeps it awake, and tells them
+    // its saves fail, and its agent answers a message: work no save keeps
+    // (a stop that lost nothing would tell nothing)
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     let failing = super::computers::lever_with(api, &id, json!({ "op": "fail-saves", "times": 50 }))?;
+    let said = "one more thing before the restart";
+    let posted = shell(api, session, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": "computer-ui-work", "body": { "text": said } })), &[])?;
+    let after = posted.body["record"]["seq"].as_i64().unwrap_or(0);
+    let echoed = || {
+        shell(api, session, "GET", &format!("/api/f/{chat}/channels/chat?after={after}&limit=1000"), None, &[])
+            .ok()
+            .and_then(|r| r.body["records"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .any(|r| r["body"]["text"].as_str().is_some_and(|t| t.starts_with("echo:") && t.contains(said)))
+    };
+    let answered = s.eventually(std::time::Duration::from_secs(60), echoed);
+    s.eventually(std::time::Duration::from_secs(15), || super::computers::lever(api, &id, "saves").is_ok_and(|r| r.body["keepalives"] == 0));
+    // its owner's sleep keeps it awake, and tells them
     let r = shell(api, session, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})), &[])?;
     let generation = r.body["generation"].as_u64().unwrap_or(0);
     let warned = b.until(page, &format!("{n}?.innerText.includes(\"can't save\") && !!{n}.querySelector('button[data-action=restart]')", n = shown("unsaved")), wait);
@@ -2421,18 +2438,20 @@ fn computer_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: 
     let _ = b.screenshot(page, &shots.join("computer-unsaved.png"));
     s.ok(
         "a sleep whose save fails is shown at once, with no reload: since when its work is unsaved, when it stops, and Restart",
-        failing.status == 200 && r.body["phase"] == "awake" && warned && said.as_str().is_some_and(|t| t.contains("hasn't saved since") && t.contains("If it still can't by")),
+        failing.status == 200 && answered && r.body["phase"] == "awake" && warned && said.as_str().is_some_and(|t| t.contains("hasn't saved since") && t.contains("If it still can't by")),
         &said,
     );
     // Restart, in the notice: its save fails too, so it goes back, and says so
     b.eval(page, &format!("({}.querySelector('button[data-action=restart]').click(), true)", shown("unsaved")))?;
-    let back = b.until(page, &format!("{n}?.innerText.includes(\"Your restart couldn't save first\") && !!{n}.querySelector('button[data-action=seen]')", n = shown("went_back")), std::time::Duration::from_secs(90));
+    let back = b.until(page, &format!("{n}?.innerText.includes('Your computer restarted') && !!{n}.querySelector('button[data-action=seen]')", n = shown("went_back")), std::time::Duration::from_secs(90));
     let v = view();
     let said = b.eval(page, "document.getElementById('computer-notices').innerText")?;
     let _ = b.screenshot(page, &shots.join("computer-went-back.png"));
     s.ok(
-        "Restart in the notice restarts it once, back to its last save, and the notice says which save, with an OK",
-        back && v["generation"].as_u64() == Some(generation + 1) && v["restored"]["rollback"] == true && said.as_str().is_some_and(|t| t.contains("It went back to its save of")),
+        "Restart in the notice restarts it once, back to its last save, and the notice says, calmly, since when changes on it weren't kept, with an OK",
+        back && v["generation"].as_u64() == Some(generation + 1)
+            && v["restored"]["rollback"] == true
+            && said.as_str().is_some_and(|t| t.contains("Changes on it since") && t.contains("weren't kept") && t.contains("Your chats are all here") && !t.contains("unexpectedly")),
         json!({ "said": said, "view": v }),
     );
     super::computers::lever_with(api, &id, json!({ "op": "fail-saves", "times": 0 }))?;
