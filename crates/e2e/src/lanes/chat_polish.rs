@@ -8,6 +8,53 @@ use crate::browser::Browser;
 use crate::Suite;
 use fragment_nip98::Keys;
 
+/// The PDF the media message attaches.
+const PREVIEW_PDF: &[u8] = include_bytes!("../../fixtures/chat-preview.pdf");
+
+/// The chat with its PDF in the platform's page, framed as the shell frames
+/// it: through the platform's mint (`/auth/frame`), signed in by the
+/// frame's own partitioned cookie, with no cookie of the chat's origin
+/// (a person who never opened the chat in a tab of its own: Paul,
+/// 2026-10-23, whose Download failed, "file wasn't available on site",
+/// while opening the file in a tab worked). Valid: its Download, pressed
+/// there, saves the PDF byte for byte.
+fn in_the_platforms_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, name: &str) -> Result<()> {
+    let page = chrome.open(&format!("{}/settings", api.base))?;
+    chrome.viewport(&page, 1280, 860, false)?;
+    let loaded = format!("location.origin === {} && document.readyState === 'complete'", super::js(&api.base));
+    anyhow::ensure!(super::shows(chrome, &page, &loaded), "the platform's page loads");
+    let src = format!("{}/auth/frame?name={name}&return=/", api.base);
+    let frame = format!(
+        "(() => {{ const f = document.createElement('iframe'); f.src = {}; f.allow = 'clipboard-write; microphone'; \
+         f.style.cssText = 'position: fixed; inset: 0; width: 100%; height: 100%; border: 0; z-index: 2147483647; background: #fff'; \
+         document.body.append(f); return true; }})()",
+        super::js(&src)
+    );
+    chrome.eval(&page, &frame)?;
+    let ready = "document.getElementById('say')?.dataset.ready === '1' && !!document.querySelector('.attachment-download[aria-label=\"Download preview.pdf\"]')";
+    let wait = Duration::from_secs(30);
+    if !s.eventually(wait, || chrome.eval_in_frame(&page, name, ready).ok() == Some(Value::Bool(true))) {
+        let seen = chrome.eval_in_frame(&page, name, "location.href + ' ' + (document.body?.innerText ?? '').slice(0, 300)").unwrap_or_default();
+        anyhow::bail!("the chat in the platform's frame is ready: {seen}");
+    }
+
+    // its Download, as a person presses it (the frame fills the page)
+    let downloads = s.dir("chat-files-downloads");
+    chrome.allow_downloads(&downloads)?;
+    let at = chrome.eval_in_frame(
+        &page,
+        name,
+        "(() => { const a = document.querySelector('.attachment-download[aria-label=\"Download preview.pdf\"]'); a.scrollIntoView({ block: 'nearest' }); const r = a.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })()",
+    )?;
+    let (Some(x), Some(y)) = (at[0].as_f64(), at[1].as_f64()) else { anyhow::bail!("no Download to press: {at}") };
+    chrome.click_at(&page, (x, y))?;
+    let saved = s.eventually(wait, || std::fs::read(downloads.join("preview.pdf")).ok().as_deref() == Some(PREVIEW_PDF));
+    let there: Vec<String> = std::fs::read_dir(&downloads).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    s.ok("in the platform's frame, as the shell shows a chat, a file's Download saves it byte for byte, signed in by the frame's cookie alone", saved, json!({ "saved": there }));
+    chrome.close(page)?;
+    Ok(())
+}
+
 pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrome: &mut Browser, label: &str) -> Result<()> {
     let name = s.named(api, owner, "chat-polish")?;
     let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
@@ -19,7 +66,7 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     let mut attachments = vec![];
     for (filename, mime, bytes) in [
         ("clip.mp4", "video/mp4", include_bytes!("../../fixtures/chat-video.mp4").as_slice()),
-        ("preview.pdf", "application/pdf", include_bytes!("../../fixtures/chat-preview.pdf").as_slice()),
+        ("preview.pdf", "application/pdf", PREVIEW_PDF),
     ] {
         use sha2::{Digest, Sha256};
         let sha = hex::encode(Sha256::digest(bytes));
@@ -33,6 +80,8 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     let posted = api.signed(owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": "media", "body": { "text": "Video and PDF", "attachments": attachments } })))?;
     anyhow::ensure!(posted.status == 200, "posting media: {posted}");
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
+    // (before any page of the chat's own: its origin has no cookie yet)
+    in_the_platforms_frame(s, api, chrome, &name)?;
     let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
     super::fit(chrome, &page, 1280, 860, false)?;
     s.ok("a video attachment is a labelled inline player with loaded metadata", super::shows(chrome, &page, "!!document.querySelector('.attachment-video video[controls][aria-label=\"clip.mp4\"]') && document.querySelector('video').readyState >= 1"), "");
