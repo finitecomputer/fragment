@@ -592,7 +592,8 @@ export class NodeContainer {
     // exec before its guest is up (409 "still starting"), which an immediate
     // sleep's hold met once a start's intercepts took one call
     const path = `/v1/containers/${this.#name}/start?wait=ready`;
-    const begin = () => this.#json("POST", path, body, START_MS);
+    // BENCH: the engine's own breakdown of the start
+    const begin = () => this.#json("POST", path, body, START_MS).then((r) => (console.log(JSON.stringify({ bench: "startTimings", node: this.#node.id, snapshot: !!body.containerSnapshot, timings: r?.timings ?? null })), r));
     this.#known = true;
     this.#starting = this.#call("GET", "/v1/health", undefined, [], HEALTH_MS)
       .then(begin)
