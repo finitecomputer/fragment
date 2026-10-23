@@ -249,9 +249,9 @@ pub fn connections(s: &mut Suite, api: &Api) -> Result<()> {
     });
     let (off, came_back) = (off?, came_back?);
     let revoked_now = s.workos.revoked();
-    s.ok("a callback exchanging its code as its account is disconnected imports nothing after: the account stays disconnected, and the grant that exchange made is revoked too",
+    s.ok("a callback exchanging its code as its account is disconnected imports nothing after, and revokes nothing: only the disconnect's own token was revoked",
         exchanging && off.status == 200 && refused(&came_back, "not-under-way") && !s.workos.holds(fenced, PROVIDER) && listed(&api, &c, PROVIDER)? == "not_connected"
-            && revoked_now.len() == revoked + 2 && revoked_now.last().is_some_and(|t| t.starts_with("mock_access")),
+            && revoked_now.len() == revoked + 1 && revoked_now.last().is_some_and(|t| t.starts_with("pipes_")),
         format!("exchanging {exchanging}; disconnect {off}; callback {came_back}"));
 
     let r = connect("fence-c-again")?;
@@ -282,6 +282,43 @@ pub fn connections(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a disconnect while a callback imports is refused (429) and changes nothing; that callback connects, and the disconnect asked again takes it away",
         importing && early.status == 429 && came_back.status == 200 && off.status == 200 && !s.workos.holds(fenced, PROVIDER),
         format!("importing {importing}; early {early}; callback {came_back}; again {off}"));
+
+    // an import whose outcome is unknown (Pipes answered 504) that lands
+    // after a disconnect: the disconnect still holds
+    let (late, cookie, _) = pending(&api, &c, "late-c")?;
+    s.workos.defer_next_import();
+    let r = back(&api, &late, Some(&c), Some(&cookie))?;
+    let off = shell(&api, &c, "DELETE", &path)?;
+    let landed = s.workos.land_deferred_import();
+    let listed_c = row(&api, &c, PROVIDER)?;
+    s.ok("an import whose outcome was unknown, landing at Pipes after a disconnect, is not taken for a connection: read as not connected, its account named nowhere",
+        refused(&r, "no-key") && off.status == 200 && landed && s.workos.holds(fenced, PROVIDER) && listed_c["state"] == "not_connected" && listed_c.get("account").is_none(),
+        format!("callback {r}; disconnect {off}; landed {landed}; listed {listed_c}"));
+    let r = connect("after-late-c")?;
+    let listed_c = row(&api, &c, PROVIDER)?;
+    s.ok("a connect known to import after it lifts the fence: connected, as that account", r.status == 200 && listed_c["state"] == "connected" && listed_c["account"] == "after-late-c@oauth.test", &listed_c);
+
+    // a callback a disconnect cancelled never revokes: the provider's
+    // revocation ends the account's whole grant, a newer connect's with it
+    let (old, cookie, _) = pending(&api, &c, "shared-c")?;
+    let code = reqwest::Url::parse(&old)?.query_pairs().find(|(k, _)| k == "code").context("the old callback's code")?.1.into_owned();
+    let held_old = || Gate::ExchangeOf(code.clone());
+    let revoked = s.workos.revoked().len();
+    s.workos.pause(held_old());
+    let (held, off, newer, came_back) = std::thread::scope(|scope| {
+        let callback = scope.spawn(|| back(&api, &old, Some(&c), Some(&cookie)));
+        let held = s.eventually(wait, || s.workos.paused(held_old()) == 1);
+        s.workos.fail_next_revoke();
+        let off = shell(&api, &c, "DELETE", &path);
+        let newer = connect("shared-c");
+        s.workos.resume(held_old());
+        (held, off, newer, callback.join().expect("callback thread"))
+    });
+    let (off, newer, came_back) = (off?, newer?, came_back?);
+    let listed_c = row(&api, &c, PROVIDER)?;
+    s.ok("a callback cancelled by a disconnect revokes nothing, so a newer connect of the same provider account made meanwhile stays connected",
+        held && off.status == 200 && off.body["revoked"] == false && newer.status == 200 && refused(&came_back, "not-under-way") && s.workos.revoked().len() == revoked && listed_c["state"] == "connected",
+        format!("held {held}; disconnect {off}; newer {newer}; old callback {came_back}; listed {listed_c}"));
 
     let capped = api.sign_in("connection-cap@e2e.test")?;
     let counts = s.workos.connection_counts();

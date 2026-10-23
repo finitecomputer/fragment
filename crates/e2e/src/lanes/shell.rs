@@ -2854,8 +2854,12 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     s.ok("Disconnect takes a connection away at Pipes; settings shows it not connected, and, unrevoked, says where its access is removed at the provider", off && !s.workos.holds(email, crate::SWAP_CONNECTION), &said);
     let notes = b.eval(page, NOTES)?;
     s.ok("not connected, Google's row still shows its note under its name, and still no other row shows one", notes == json!([[crate::SWAP_CONNECTION, crate::SWAP_CONNECTION_NOTE, true, true]]), &notes);
-    // connected again for the checks after, the computer told by a read
+    // connected again for the checks after, the computer told by a read: its
+    // disconnect's fence lifted as a connect known to import lifts it (the
+    // row has no `connection_oauth` here: the registry's lever)
     s.workos.connect(email, crate::SWAP_CONNECTION, true);
+    let hook = api.unsigned("POST", "/api/test/registry", Some(&json!({ "signins": { "unfenceConnection": { "email": email, "provider": crate::SWAP_CONNECTION } } })))?;
+    anyhow::ensure!(hook.status == 200, "lift the fence: {hook}");
     shell(api, session, "GET", "/api/connections", None, &[])?;
     partial_grant_ui(s, api, b, page, session, email)
 }

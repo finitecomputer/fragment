@@ -588,6 +588,10 @@ pub(crate) enum SigninsHook {
     ExpireSession(String),
     /// Expire just this local test's connection attempt (its nonce).
     ExpireConnection(String),
+    /// Lift the fence of the account an email signed in with, at a
+    /// provider, as a connect known to import does (a test connects a row
+    /// with no `connection_oauth` through the WorkOS fake, never a callback).
+    UnfenceConnection { email: String, provider: String },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -677,6 +681,25 @@ pub(crate) struct FenceConnection {
 impl Call for FenceConnection {
     const PATH: &'static str = "/connection/fence";
     type Answer = SubjectAnswer;
+}
+
+/// `POST /connection/fenced`: the providers a WorkOS user's account stands
+/// fenced at (`fragment_core::connection_signin::FENCE`), which no read or
+/// swap takes Pipes' word for until a connect is known to import again.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ConnectionFences {
+    pub issuer: String,
+    pub subject: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct FencedProviders {
+    pub providers: Vec<String>,
+}
+
+impl Call for ConnectionFences {
+    const PATH: &'static str = "/connection/fenced";
+    type Answer = FencedProviders;
 }
 
 /// `POST /login/begin`: a sign-in starts.

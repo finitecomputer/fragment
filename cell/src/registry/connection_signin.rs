@@ -5,7 +5,7 @@ use fragment_proto::{ErrorCode, IdentityKind};
 use serde::Deserialize;
 use worker::SqlStorageValue;
 
-use super::{RegistryCell, calls::{BeginConnection, ConnectionBegun, ConnectionFinished, FenceConnection, FinishConnectionIn, SubjectAnswer, SubjectOf}, signin::{fresh_token, sha}};
+use super::{RegistryCell, calls::{BeginConnection, ConnectionBegun, ConnectionFences, ConnectionFinished, FenceConnection, FencedProviders, FinishConnectionIn, SubjectAnswer, SubjectOf}, signin::{fresh_token, sha}};
 use crate::{error::{CellError, CellResult}, js, keys};
 
 #[derive(Deserialize)]
@@ -104,18 +104,18 @@ impl RegistryCell {
         let api = &self.cfg.workos()?.api;
         let label = connection_signin::account_label(&answer, &o.client_id);
         // the last check before the import, in its turn: a disconnect that
-        // fenced the account while the code was exchanged cancels it, and
-        // one from here on is refused until this answers
-        if !self.finishing.borrow_mut().may_import(id) {
-            // the grant it was given goes too, where the row says how
-            if let Some(revoke) = o.revoke.as_deref().filter(|r| r.starts_with("https://") || self.cfg.egress_local) {
-                if !keys::connection_revoke(revoke, &tokens.revoke_form()).await.unwrap_or(false) {
-                    worker::console_error!("{}", serde_json::json!({ "connection-fenced": b.provider, "not-revoked": true }));
-                }
-            }
-            return Ok(NotUnderWay);
-        }
-        if keys::pipes_import(&self.env, api, &b.provider, &pending.subject, tokens, label.as_deref()).await? { Ok(Connected) } else { Ok(Failed) }
+        // fenced the account while the code was exchanged cancels it (its
+        // tokens are dropped, never revoked: `Finishing`), and one from
+        // here on is refused until this answers
+        if !self.finishing.borrow_mut().may_import(id) { return Ok(NotUnderWay); }
+        // An import that fails, or whose outcome is unknown (a timeout, a
+        // 5xx), leaves a disconnect's lasting fence standing: it may yet
+        // land at Pipes, and is never taken for a connection.
+        if !keys::pipes_import(&self.env, api, &b.provider, &pending.subject, tokens, label.as_deref()).await? { return Ok(Failed); }
+        // known to have imported, in the turn it answered and before it is
+        // no longer under way, so no disconnect comes between
+        self.exec(connection_signin::UNFENCE, vec![pending.issuer.as_str().into(), pending.subject.as_str().into(), b.provider.as_str().into()])?;
+        Ok(Connected)
     }
 
     /// A disconnect's fence (`calls::FenceConnection`), in one turn, before
@@ -125,7 +125,11 @@ impl RegistryCell {
     /// disconnect connects the account after it. A callback importing now
     /// refuses it (429) and nothing is ended: what it sent Pipes cannot be
     /// called back, and the disconnect, asked again once it answered, then
-    /// deletes it. Answers the person's WorkOS user (none: no account, and
+    /// deletes it. And the account stays fenced (`connection_signin::FENCE`)
+    /// until a connect is known to import again, so an import whose outcome
+    /// was unknown, landing at Pipes after this disconnect deleted the
+    /// account, is never read or swapped as a connection, even across a
+    /// restart. Answers the person's WorkOS user (none: no account, and
     /// nothing under way, since a connect begins only with one).
     pub(super) fn fence_connection(&self, b: FenceConnection) -> CellResult<SubjectAnswer> {
         let answer = self.subject_of(SubjectOf { identity: b.identity, issuer: b.issuer.clone() })?;
@@ -134,7 +138,19 @@ impl RegistryCell {
         self.finishing.borrow_mut().fence(&account).map_err(|connection_signin::Importing| {
             CellError::new(ErrorCode::RateLimited, format!("a connect of your {} account is finishing now: disconnect again in a moment", account.provider))
         })?;
-        self.exec(connection_signin::FENCE_PENDING, vec![account.issuer.as_str().into(), account.subject.as_str().into(), account.provider.as_str().into()])?;
+        let row = || -> Vec<SqlStorageValue> { vec![account.issuer.as_str().into(), account.subject.as_str().into(), account.provider.as_str().into()] };
+        self.exec(connection_signin::FENCE_PENDING, row())?;
+        self.exec(connection_signin::FENCE, [row(), vec![SqlStorageValue::Integer(js::now_ms())]].concat())?;
         Ok(answer)
+    }
+
+    /// The providers an account stands fenced at (`calls::ConnectionFences`).
+    pub(super) fn connection_fences(&self, b: ConnectionFences) -> CellResult<FencedProviders> {
+        #[derive(Deserialize)]
+        struct Row {
+            provider: String,
+        }
+        let rows = self.rows::<Row>(connection_signin::FENCED, vec![b.issuer.into(), b.subject.into()])?;
+        Ok(FencedProviders { providers: rows.into_iter().map(|r| r.provider).collect() })
     }
 }
