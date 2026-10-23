@@ -577,20 +577,24 @@ fn alive(pid: u32) -> bool {
 
 /// Appends the interception CA to the system bundle once it appears, never
 /// rebuilding the store (S3b: `update-ca-certificates` is 0.7 s), and never
-/// twice (a snapshot carries the last boot's bundle).
+/// twice (a snapshot carries the last boot's bundle); and names it in the
+/// browser's policy (`hermes::CHROMIUM_CA_POLICY`), written each boot, as
+/// a container's CA is its own.
 fn trust_ca() {
     std::thread::spawn(|| {
         let t = Instant::now();
         // bounded by CA_WAIT_MS
         while t.elapsed() < Duration::from_millis(CA_WAIT_MS) {
             if let Ok(pem) = std::fs::read_to_string(CA) {
+                let policy = Path::new(hermes::CHROMIUM_CA_POLICY);
+                let browser = hermes::chromium_ca_policy(&pem).is_some_and(|p| policy.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) && std::fs::write(policy, p).is_ok());
                 let bundle = std::fs::read_to_string(CA_BUNDLE).unwrap_or_default();
                 if !bundle.contains(pem.trim()) {
                     use std::io::Write;
                     let appended = std::fs::OpenOptions::new().append(true).open(CA_BUNDLE).and_then(|mut f| writeln!(f, "\n{}", pem.trim()));
-                    ev!("boot.ca", { "appended": appended.is_ok(), "ms": t.elapsed().as_millis() as u64 });
+                    ev!("boot.ca", { "appended": appended.is_ok(), "browser": browser, "ms": t.elapsed().as_millis() as u64 });
                 } else {
-                    ev!("boot.ca", { "appended": false, "already": true });
+                    ev!("boot.ca", { "appended": false, "already": true, "browser": browser });
                 }
                 return;
             }
