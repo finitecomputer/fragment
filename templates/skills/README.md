@@ -58,12 +58,12 @@ And six are integrations Paul retains:
 | trading-agent-finite | Multi-source market analysis and charts; public reads are keyless |
 | polymarket-finite | Deterministic public-data helper; no trading or key required |
 
-`design-finite` is Austin's design direction, critique and polish workflow,
-added after a fresh-agent comparison on local and preview (2026-10-23).
-It covers sites, product UI, charts, games and imagery, with twelve reference
-guides and three self-contained chart examples. `apps-finite` points to it for
-art direction and keeps the Fragment build, publish and sharing contract.
-Image generation follows `image-generation-finite` and its platform limits.
+`design-finite` distills Austin's design workflow into guidance on direction,
+hierarchy, composition and review, with short references for charts and games.
+It follows the project's visual system and checks contrast for readable text,
+including placeholders. `apps-finite` points to it for art direction and keeps
+the Fragment build, publish and sharing contract. Image generation follows
+`image-generation-finite` and its platform limits.
 
 The 2026-10-08 audit, amended by Paul on 2026-10-09, removed 29 generic copies from the Finite skills
 snapshot imported on 2026-10-03. It also removed apps' generic design and
