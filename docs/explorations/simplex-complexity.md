@@ -27,6 +27,68 @@ The stack, in merge order:
 5. `claude/simplex-e2e`: the real Hermes image end to end in the Docker
    lane.
 
+## The audit, in short
+
+**What touches every computer, not only SimpleX users** (the aim is that
+each is inert without a link):
+
+- **Every Hermes computer's image:** an 18.8 MB compressed layer (the
+  core), pulled once at the round that adds it. Its process does not run
+  without a link on an always-on computer.
+- **Every Hermes computer's bridge:**
+  - an idle manager task (a 100 ms look at the hold file);
+  - the hold's answer waiting on `cores_quiet`, which is always true with
+    no core;
+  - the screen port answering `/simplex/…`;
+  - the engine checking each record an agent posts itself against a set
+    that is empty without links;
+  - each post carrying a `relay` flag, false without SimpleX.
+- **Every Hermes computer's hermes-boot:** its hold copy passes
+  `/data/simplex` over, a path that exists only with SimpleX.
+- **Every chat page and every person's Settings** (platform assets, a
+  platform release): the "via SimpleX" rendering, and a SimpleX section
+  that says what it needs.
+- **Not touched:** the cell's Rust (wasm cost 0), the platform's wire to
+  computers (the bridge reads three fields the platform already sends),
+  registry state, billing, and the stub image's behavior.
+
+**How "computers without SimpleX behave exactly as today" is held:**
+
+- nothing of it runs unless the image names the core;
+- no core runs unless the computer is always on and the agent is linked;
+- `state.json` is byte-identical without a SimpleX turn (unit-tested);
+- a relayed record from anyone but a linked agent, for its owner, is what
+  it was before (unit-tested);
+- the bridge's whole integration suite, the Docker lane and CI's four e2e
+  shards pass on the stack's first two parts.
+
+**The risks Paul should weigh:**
+
+1. **Security**: anything in the container can reach the link routes and
+   post relayed records. A prompt-injected agent could link a stranger as
+   "the owner", a lasting channel, and the chat could show a message the
+   owner did not send. That is the same boundary as root in the container,
+   but newly visible. Closing it needs the platform: a signed header on
+   proxied port requests, or the platform posting relayed records.
+2. **A rollback past the linking itself** leaves the person's app talking
+   to a contact that no longer exists. Their messages go unanswered until
+   the owner links again. Linking asks for a save at once to keep the
+   window to seconds.
+3. **An upgrade of the core** migrates its databases forward, so an image
+   rolled back after one may not open them. Check it in that round's
+   canary.
+4. **No cap on cores**: one per linked agent, about 30–35 MB each.
+5. **Voice in carries no transcript text** (Hermes transcribes the
+   attachment), so search does not find what a voice note said.
+6. **Two things are not proven in a browser**: the shell's section and
+   pane, and the chat page's "via SimpleX".
+
+**Decisions taken by default, Paul's to overturn:** SimpleX's preset
+servers; only replies to SimpleX messages go back; the privacy line
+"encrypted between your SimpleX app and your computer"; voice in as an
+attachment. Outbound voice waits for the platform's text-to-speech route
+(not Edge's).
+
 ## 1. The link's core (#523)
 
 | What, where | Why | To remove it | If it misbehaves | Every computer? |
@@ -82,3 +144,11 @@ The stack, in merge order:
 | **Third party: the `qrcode` crate** 0.14.1 (its SVG renderer alone, no transitive dependencies), in `images/` | Finite-mono's agentd draws its SimpleX QR with the same crate | As above | A bug draws a code that does not scan; the page also offers Open in SimpleX and Copy link | Built into every image's bridge |
 | **The shell**: Settings › SimpleX (`simplexSection`), a row per agent with Set up, which opens the link page in a pane (`openSimplex`, a port ticket as a screen's) | Paul: the QR flow, as finite-mono's | Delete both | The section shows for every person with a seat. Not always on, it says SimpleX needs the always-on plan and offers nothing. **Not proven in a browser**: the shell-ui e2e lane has no SimpleX case, since its stub image carries no core | **Every person's Settings**: a shell asset, in a platform release, not an image round |
 | **Tests**: `the_link_pages_code_links`, by hand, 53 s; unit tests of the page's routes and its code | | | | No |
+
+## 5. The real Hermes image, end to end (`claude/simplex-e2e`)
+
+| What, where | Why | To remove it | If it misbehaves | Every computer? |
+|---|---|---|---|---|
+| **A Docker-lane case**, `simplex_on_the_hermes_image` (`images/bridge/tests/docker.rs`), run by CI's `docker` job with every other `--ignored` case of docker.rs | Paul: "work well across restarts and updates", on the image computers run. It covers: linked from the screen port; a SimpleX message answered by Hermes as its owner; a voice note transcribed through the route; the hold; a restart; a wake from an older save healed | Delete the case | **New CI cost**: the job now also pulls the pinned SMP and XFTP server images, builds the lab's client image (Debian slim plus the 79.5 MB core, from GitHub releases), and runs the case alongside the rest. Its network: Docker Hub and GitHub, as the Hermes image's own build already needs | CI only |
+| **The lab's harness, shared** (`tests/support/simplex.rs`), and `Container::run_with` in docker.rs (more `docker run` arguments: the lab's network) | One lab for the by-hand tests and the Docker lane | Inline it back | None at run time: tests only | No |
+| **A file's type by its name first** (`run::media_type`), then by its message's kind | A voice note sent as a `.wav` is `audio/wav`, not the `audio/mp4` the apps' own recordings are | | None | No |
