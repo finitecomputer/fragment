@@ -160,6 +160,17 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
             && r.text.contains("General access"),
         &r,
     );
+    // whoever the owner lets in can talk to their agent in it: the sheet
+    // says to trust them, by the invite, and only where it applies (Paul,
+    // 2026-10-23)
+    let warning = fragment_core::access::TRUST_WARNING;
+    let plain = make(&s.name("plain"), "blank")?;
+    let without = with_session(api, "GET", &format!("/share/{plain}"), &owner_session)?;
+    s.ok(
+        "beside its invite, the sheet of a fragment the owner's agent is in says to trust whoever they invite; one with no agent of theirs in it does not",
+        r.text.contains(&format!("<p class=\"hint trust\">{warning}</p>")) && without.status == 200 && without.text.contains("name=\"email\"") && !without.text.contains(warning),
+        &without,
+    );
     s.ok(
         "only the platform's own pages may frame it (`frame-ancestors 'self'` alone: every fragment is another origin), and it severs a window that opened it",
         framed_by_platform(&r) && unopened(&r),
