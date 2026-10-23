@@ -24,15 +24,15 @@ fn token(s: &str, max: usize) -> bool {
 }
 
 pub fn check(o: &ConnectionOAuth) -> Result<(), String> {
-    catalog::row_url(&o.authorize, true)?;
-    catalog::row_url(&o.exchange, true)?;
+    catalog::row_url(&o.authorize, catalog::Plain::Fake)?;
+    catalog::row_url(&o.exchange, catalog::Plain::Fake)?;
     let a = url::Url::parse(&o.authorize).expect("checked");
     let e = url::Url::parse(&o.exchange).expect("checked");
     if a.query_pairs().any(|(k, _)| RESERVED.contains(&k.as_ref())) || e.query().is_some() {
         return Err("OAuth endpoints must not supply protocol parameters; exchange has no query".into());
     }
     if let Some(r) = &o.revoke {
-        catalog::row_url(r, true)?;
+        catalog::row_url(r, catalog::Plain::Fake)?;
         if url::Url::parse(r).expect("checked").query().is_some() {
             return Err("the revocation endpoint has no query: the token is its form's".into());
         }
