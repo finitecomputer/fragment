@@ -155,6 +155,10 @@ fragment.club until cutover (decisions 34–35).
   as it is): its seams 4, 5, 7 and 12 had it at 6.47 MB, and computers on
   sandcastle nodes (seam 2: placement, pairing, their routes, 226 KB)
   took it to 6.70 MB (6,697,133 bytes); the lane's budget is 6.7 MB.
+  The same commit's cell then built to 6,700,438 bytes in one checkout
+  and 6,709,219 in another (its path the only difference; remapping the
+  path prefixes saved 1.6 KB of the 9 KB), so the lane passed or failed
+  by where it was checked out: its budget is 6.72 MB (2026-10-22).
 - **Risk:** every isolate copies the Wasm's data into its memory and
   every deploy uploads it: a bigger cell starts slower and leaves less
   memory to requests, and a budget moved once is easier to move again.

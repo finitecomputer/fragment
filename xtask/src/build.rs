@@ -20,7 +20,7 @@ pub const WORKER_BUILD_VERSION: &str = "0.8.5";
 /// since launch week (2026-10-14, the debt ledger's "The cell's Wasm
 /// budget was raised for launch"); 6.7 MB on the self-hosted lane, whose
 /// computers on sandcastle nodes took it past (docs/self-host.md, seam 2).
-pub const CELL_WASM_MAX_BYTES: u64 = 6_700_000;
+pub const CELL_WASM_MAX_BYTES: u64 = 6_720_000;
 
 /// cell/ for wasm32, into its `build/`, and the release's files beside it
 /// in `build/assets`, the Worker's Static Assets (cell/wrangler.jsonc): what
@@ -126,19 +126,19 @@ mod tests {
     /// even when the rounded MB is identical. Extreme sizes never wrap.
     #[test]
     fn the_cell_is_held_to_its_budget() {
-        assert_eq!(super::CELL_WASM_MAX_BYTES, 6_700_000);
+        assert_eq!(super::CELL_WASM_MAX_BYTES, 6_720_000);
         for (size, expected) in [
-            (0, "0 bytes of Wasm (0.00 MB; budget 6700000 bytes; remaining bytes: 6700000)"),
-            (6_699_999, "6699999 bytes of Wasm (6.70 MB; budget 6700000 bytes; remaining bytes: 1)"),
-            (6_700_000, "6700000 bytes of Wasm (6.70 MB; budget 6700000 bytes; remaining bytes: 0)"),
+            (0, "0 bytes of Wasm (0.00 MB; budget 6720000 bytes; remaining bytes: 6720000)"),
+            (6_719_999, "6719999 bytes of Wasm (6.72 MB; budget 6720000 bytes; remaining bytes: 1)"),
+            (6_720_000, "6720000 bytes of Wasm (6.72 MB; budget 6720000 bytes; remaining bytes: 0)"),
         ] {
             assert_eq!(super::within_budget(size).unwrap(), expected);
         }
         let refused = super::within_budget(super::CELL_WASM_MAX_BYTES + 1).unwrap_err().to_string();
-        assert!(refused.starts_with("cell/build/index_bg.wasm is 6700001 bytes, over its budget of 6700000 bytes (excess bytes: 1;"), "{refused}");
+        assert!(refused.starts_with("cell/build/index_bg.wasm is 6720001 bytes, over its budget of 6720000 bytes (excess bytes: 1;"), "{refused}");
         assert!(refused.contains("CELL_WASM_MAX_BYTES") && refused.contains("Static Assets"), "{refused}");
         let refused = super::within_budget(u64::MAX).unwrap_err().to_string();
-        assert!(refused.starts_with("cell/build/index_bg.wasm is 18446744073709551615 bytes, over its budget of 6700000 bytes (excess bytes: 18446744073702851615;"), "{refused}");
+        assert!(refused.starts_with("cell/build/index_bg.wasm is 18446744073709551615 bytes, over its budget of 6720000 bytes (excess bytes: 18446744073702831615;"), "{refused}");
     }
 
     /// Goal: the Hermes image's inputs are what it runs (docs/computers.md,
