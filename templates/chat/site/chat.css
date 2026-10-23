@@ -71,6 +71,11 @@ html { -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%;
 .still-loading { position: fixed; inset: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0 8px; margin: 0; padding: 24px; font: 14px/1.5 var(--font-sans); color: var(--text-secondary); visibility: hidden; animation: still-loading 0s 9s forwards; }
 .still-loading a { color: var(--accent-blue); }
 @keyframes still-loading { to { visibility: visible; } }
+/* the screen's bottom edge's inset (the home indicator's), which only the
+   page on its own with no keyboard up sits on (chat.js `fitViewport`):
+   framed, the shell keeps its frame off that edge */
+:root { --inset-bottom: env(safe-area-inset-bottom, 0px); }
+:root:is([data-framed], [data-keyboard]) { --inset-bottom: 0px; }
 .fragment-chat { top: var(--viewport-top, 0px); bottom: auto; height: var(--viewport-height, 100%); display: flex; flex-direction: column; overflow: hidden;
   font: 14px/1.5 var(--font-sans); font-feature-settings: "ss01", "cv11", "kern"; -webkit-font-smoothing: antialiased; }
 /* no weight of their own: a component's rule below sets its color and size */
@@ -412,9 +417,21 @@ details.tools[open] summary .chev { transform: rotate(90deg); }
 /* The shell supplies its viewport mode: a narrow desktop panel is not a phone. */
 @media (max-width: 760px) {
   :root:not([data-mobile="false"]), :root:not([data-mobile="false"]) body { touch-action: pan-x pan-y; }
-  :root:not([data-mobile="false"]) .composer-wrap { width: calc(100% - 24px); padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
-  :root:not([data-mobile="false"]) .composer { border-radius: 24px; padding: 14px; }
-  :root:not([data-mobile="false"]) .composer textarea { font-size: 16px; }
+  :root:not([data-mobile="false"]) .composer-wrap { width: calc(100% - 24px); padding-bottom: calc(8px + var(--inset-bottom)); }
+  /* one line (Paul, 2026-10-22: "make the input one line high on mobile"):
+     the field between attach and voice and the bell and send, growing as its
+     text wraps, up to six lines (its placeholder stays on one, cut short);
+     a quote and files on lines above it, a note on one below, and, when
+     the row would leave the field under 6em, the buttons after it that do
+     not fit on a line below, at its end */
+  :root:not([data-mobile="false"]) .composer { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: flex-end; gap: 6px; padding: 6px; border-radius: 23px; }
+  :root:not([data-mobile="false"]) .composer-actions { display: contents; }
+  :root:not([data-mobile="false"]) .composer :is(.quoting, .attachments) { flex: 1 0 100%; }
+  :root:not([data-mobile="false"]) .composer textarea { order: 1; flex: 1 1 6em; width: auto; font-size: 16px; min-height: 32px; max-height: calc(6lh + 8px); padding: 4px; }
+  :root:not([data-mobile="false"]) .composer textarea::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  :root:not([data-mobile="false"]) .composer .recording { min-height: 32px; }
+  :root:not([data-mobile="false"]) .composer :is(#notify, .steer, .send) { order: 2; }
+  :root:not([data-mobile="false"]) .composer-actions .note { order: 3; flex: 1 0 100%; }
   /* no zoom as a field takes focus: Safari zooms in on text under 16px */
   :root:not([data-mobile="false"]) :is(input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="range"]), textarea, select) { font-size: 16px !important; }
 }
