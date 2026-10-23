@@ -1112,9 +1112,12 @@ impl ComputerCell {
         js::to_js(&json!(self.cfg.providers.hosts()))
     }
 
-    /// Where the platform's own hosts are intercepted (`egress_platform`).
+    /// Where the platform's own hosts are intercepted (`egress_platform`):
+    /// on a deployment with nodes, every computer is on a sandcastle node,
+    /// whose HTTP intercepts take a name with a port; Cloudflare's never.
     fn platform_hosts(&self) -> JsValue {
-        js::to_js(&json!(fragment_core::computer::platform_intercepts(&self.cfg.platform_url, &self.cfg.host_suffix)))
+        let on_node = self.cfg.nodes.is_some();
+        js::to_js(&json!(fragment_core::computer::platform_intercepts(&self.cfg.platform_url, &self.cfg.host_suffix, on_node)))
     }
 
     /// The environment every image may rely on (docs/computers.md).
@@ -3293,10 +3296,11 @@ const EDGE_HEADERS: [&str; 4] = ["x-forwarded-proto", "x-forwarded-host", "x-for
 /// `egress_api`'s, which its fragment signs), so a computer reaches nothing
 /// there a browser could not. It sets what an edge sets, and only that:
 /// the scheme and port of the platform's origin, as the guest's browser
-/// has the page (a node names the host alone, and an HTTP intercept caught
-/// it on 80: on a `.localhost` platform the guest's browser dialed the
-/// platform's port, on its loopback, and the bridge's forwarder brought it
-/// here: images/bridge `loopback`), so the app's origin is the one its
+/// has the page (a node names the host alone, and an HTTP intercept may
+/// have caught it on 80: on a `.localhost` platform the guest's browser
+/// dialed the platform's port, on its loopback, and the bridge's forwarder
+/// brought it here: images/bridge `loopback`; a client that asked DNS was
+/// caught on the platform's port, on a node), so the app's origin is the one its
 /// page names, its socket's `Origin` included; and the address a limit
 /// counts the request by, the computer's id. A name under the suffix that
 /// is no host of this deployment's (another branch's, on a zone it shares)

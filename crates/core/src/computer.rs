@@ -1852,21 +1852,26 @@ pub struct PlatformIntercepts {
     pub https: bool,
     /// The targets: the platform's origin's host, unless a name under the
     /// suffix covers it, and `*.<suffix>`, with the platform's port on
-    /// HTTPS when it is not 443.
+    /// HTTPS when it is not 443; on HTTP on 80, and on a node each again
+    /// with the platform's port when its origin names one.
     pub hosts: Vec<String>,
 }
 
 /// Where a computer's intercepts catch the platform's own hosts: its
 /// origin's (`FRAGMENT_PLATFORM_URL`) and every name under the fragments'
 /// suffix (fragments', computers' and no one's, which the router answers),
-/// on the platform's scheme. HTTPS takes a name with a port; HTTP takes a
-/// name on port 80 alone (Cloudflare's intercepts, and sandcastle's), so an
-/// http platform on another port (dev, the e2e: `.localhost`) is caught
-/// where its hosts are dialed on 80, which the bridge's loopback forwarder
-/// does for the guest's browser and curl (images/bridge `loopback`). An
-/// address is never a target: a loopback platform is the guest's own
-/// loopback, and a guest's own server there is its own.
-pub fn platform_intercepts(platform_url: &str, suffix: &str) -> PlatformIntercepts {
+/// on the platform's scheme. HTTPS takes a name with a port. HTTP takes a
+/// name on port 80 alone on Cloudflare's containers, so an http platform
+/// on another port (dev, the e2e: `.localhost`) is caught there where its
+/// hosts are dialed on 80, which the bridge's loopback forwarder does for
+/// the guest's browser and curl (images/bridge `loopback`). On a sandcastle
+/// node (`on_node`), whose HTTP intercepts take a name with a port beyond
+/// Cloudflare's, they are caught on the platform's port too, where a
+/// client that asks DNS for the name (glibc's: Python, Node) dials it.
+/// Cloudflare's containers are never sent such a target. An address is
+/// never a target: a loopback platform is the guest's own loopback, and a
+/// guest's own server there is its own.
+pub fn platform_intercepts(platform_url: &str, suffix: &str, on_node: bool) -> PlatformIntercepts {
     let url = url::Url::parse(platform_url).expect("FRAGMENT_PLATFORM_URL is an origin (checked as the isolate starts)");
     let https = url.scheme() == "https";
     let port = match (https, url.port()) {
@@ -1880,6 +1885,10 @@ pub fn platform_intercepts(platform_url: &str, suffix: &str) -> PlatformIntercep
         }
     }
     hosts.push(format!("*.{suffix}{port}"));
+    if let (false, Some(p), true) = (https, url.port(), on_node) {
+        let on_port: Vec<String> = hosts.iter().map(|h| format!("{h}:{p}")).collect();
+        hosts.extend(on_port);
+    }
     PlatformIntercepts { https, hosts }
 }
 
@@ -1983,24 +1992,38 @@ mod tests {
 
     // Goal: each deployment's shape catches its platform's hosts on its own
     // scheme and port, the apex once, a host under the suffix by the glob,
-    // and never an address.
+    // and never an address; on a node, a plain-HTTP platform's port too,
+    // and on Cloudflare's containers never a name with an HTTP port.
     #[test]
     fn the_platforms_hosts_are_caught_on_its_scheme_and_port() {
-        let caught = platform_intercepts;
         let on = |https: bool, hosts: &[&str]| PlatformIntercepts { https, hosts: hosts.iter().map(|h| h.to_string()).collect() };
-        // production: the platform apart from the fragments' zone
-        assert_eq!(caught("https://finite.chat", "finite.place"), on(true, &["finite.chat", "*.finite.place"]));
-        // a branch: the platform under the zone, which the glob covers
-        assert_eq!(caught("https://claude-x.finite.place", "finite.place"), on(true, &["*.finite.place"]));
-        // the LAN: the platform the zone's apex, which no glob covers
-        assert_eq!(caught("https://fragment.home.arpa", "fragment.home.arpa"), on(true, &["fragment.home.arpa", "*.fragment.home.arpa"]));
-        // on a port of its own (the LAN rehearsed on high ports)
-        assert_eq!(caught("https://fragment.home.arpa:9543", "fragment.home.arpa"), on(true, &["fragment.home.arpa:9543", "*.fragment.home.arpa:9543"]));
-        // dev and the e2e: http on an address, never caught; names on 80
-        assert_eq!(caught("http://127.0.0.1:8790", "fragment.localhost"), on(false, &["*.fragment.localhost"]));
-        assert_eq!(caught("http://[::1]:8790", "fragment.localhost"), on(false, &["*.fragment.localhost"]));
-        assert_eq!(caught("http://fragment.localhost:41234", "fragment.boats"), on(false, &["fragment.localhost", "*.fragment.boats"]));
-        assert_eq!(serde_json::to_value(caught("https://finite.chat", "finite.place")).unwrap(), json!({ "https": true, "hosts": ["finite.chat", "*.finite.place"] }));
+        for node in [false, true] {
+            let caught = |url: &str, suffix: &str| platform_intercepts(url, suffix, node);
+            // production: the platform apart from the fragments' zone
+            assert_eq!(caught("https://finite.chat", "finite.place"), on(true, &["finite.chat", "*.finite.place"]));
+            // a branch: the platform under the zone, which the glob covers
+            assert_eq!(caught("https://claude-x.finite.place", "finite.place"), on(true, &["*.finite.place"]));
+            // the LAN: the platform the zone's apex, which no glob covers
+            assert_eq!(caught("https://fragment.home.arpa", "fragment.home.arpa"), on(true, &["fragment.home.arpa", "*.fragment.home.arpa"]));
+            // on a port of its own (the LAN rehearsed on high ports)
+            assert_eq!(caught("https://fragment.home.arpa:9543", "fragment.home.arpa"), on(true, &["fragment.home.arpa:9543", "*.fragment.home.arpa:9543"]));
+            // plain HTTP on 80, which names no port: on 80 alone, anywhere
+            assert_eq!(caught("http://fragment.lan", "fragment.lan"), on(false, &["fragment.lan", "*.fragment.lan"]));
+            assert_eq!(caught("http://fragment.lan:80", "fragment.lan"), on(false, &["fragment.lan", "*.fragment.lan"]));
+        }
+        // dev and the e2e: http on an address, never caught; names on 80, and
+        // on a node on the platform's port too
+        let cloudflare = |url: &str, suffix: &str| platform_intercepts(url, suffix, false);
+        let node = |url: &str, suffix: &str| platform_intercepts(url, suffix, true);
+        assert_eq!(cloudflare("http://127.0.0.1:8790", "fragment.localhost"), on(false, &["*.fragment.localhost"]));
+        assert_eq!(cloudflare("http://[::1]:8790", "fragment.localhost"), on(false, &["*.fragment.localhost"]));
+        assert_eq!(cloudflare("http://fragment.localhost:41234", "fragment.boats"), on(false, &["fragment.localhost", "*.fragment.boats"]));
+        assert_eq!(node("http://127.0.0.1:8790", "fragment.localhost"), on(false, &["*.fragment.localhost", "*.fragment.localhost:8790"]));
+        assert_eq!(node("http://[::1]:8790", "fragment.localhost"), on(false, &["*.fragment.localhost", "*.fragment.localhost:8790"]));
+        assert_eq!(node("http://fragment.localhost:41234", "fragment.boats"), on(false, &["fragment.localhost", "*.fragment.boats", "fragment.localhost:41234", "*.fragment.boats:41234"]));
+        assert_eq!(node("http://x.fragment.localhost:8790", "fragment.localhost"), on(false, &["*.fragment.localhost", "*.fragment.localhost:8790"]));
+        assert_eq!(serde_json::to_value(cloudflare("https://finite.chat", "finite.place")).unwrap(), json!({ "https": true, "hosts": ["finite.chat", "*.finite.place"] }));
+        assert_eq!(serde_json::to_value(node("http://127.0.0.1:8790", "fragment.localhost")).unwrap(), json!({ "https": false, "hosts": ["*.fragment.localhost", "*.fragment.localhost:8790"] }));
     }
 
     #[test]
