@@ -71,13 +71,37 @@ pub struct ComputerAgent {
 
 /// The model route's models' ids by the route's names
 /// (`fragment_core::models::Models::ids_by_name`): what a call may name
-/// each slot by besides its name.
+/// each slot by besides its name; and each slot's stale patience, where
+/// the deployment names one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelIds {
     pub cheap: String,
     pub medium: String,
     pub fallback: String,
     pub vision: String,
+    #[serde(default, skip_serializing_if = "StaleTimeouts::is_none")]
+    pub stale_timeout_s: StaleTimeouts,
+}
+
+/// How long an agent's call to a slot's model may stream nothing before
+/// its runtime gives up on it, in seconds, where the deployment's
+/// `models.<slot>.stale_timeout_s` names it
+/// (`fragment_core::models::STALE_TIMEOUT_S_MAX` at most); none, the
+/// runtime's own. Vision's calls keep the runtime's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaleTimeouts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cheap: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub medium: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<u32>,
+}
+
+impl StaleTimeouts {
+    pub fn is_none(&self) -> bool {
+        *self == StaleTimeouts::default()
+    }
 }
 
 /// What a provider's credential is (docs/computers.md, "Connections and

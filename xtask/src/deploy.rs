@@ -93,7 +93,9 @@ struct Deployment {
     /// calls about an image), each `{"provider": "workers_ai", "model":
     /// <catalog id>}` or `{"provider": "openai", "base_url", "key": <its
     /// secret's name in the store>, "model", "body"?: <the API's own fields
-    /// every call carries>}`. Each slot unnamed is on Workers AI as before
+    /// every call carries>}`; a tier's or the fallback's may name
+    /// `"stale_timeout_s"`, how long an agent's call to it may stream
+    /// nothing (docs/computers.md, Models). Each slot unnamed is on Workers AI as before
     /// (`fragment_core::models::Models::defaults`). A slot, provider, URL,
     /// model or body the cell would refuse is refused before a deploy, as
     /// is an OpenAI-compatible API without a key, and slots past a Workers

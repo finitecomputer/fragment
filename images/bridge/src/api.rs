@@ -96,13 +96,30 @@ pub struct Computer {
 }
 
 /// The model route's models' ids, by its names: what a call may name each
-/// slot by besides its name.
+/// slot by besides its name; and each slot's stale patience, where the
+/// deployment names one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelIds {
     pub cheap: String,
     pub medium: String,
     pub fallback: String,
     pub vision: String,
+    #[serde(default)]
+    pub stale_timeout_s: StaleTimeouts,
+}
+
+/// How long an agent's call to a slot's model may stream nothing before
+/// its runtime gives up on it, in seconds (an hour at most, the platform's
+/// bound), where the deployment's `models.<slot>.stale_timeout_s` names it;
+/// none, the runtime's own.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaleTimeouts {
+    #[serde(default)]
+    pub cheap: Option<u32>,
+    #[serde(default)]
+    pub medium: Option<u32>,
+    #[serde(default)]
+    pub fallback: Option<u32>,
 }
 
 /// A model's id, at most (`anthropic/claude-sonnet-5.5`; the platform's
