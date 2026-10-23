@@ -181,8 +181,8 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
         (Method::Post, ["computer"]) => {
             /// `{computer, op, times?, on?, ms?, freeze?, argv?}`: a lever on
             /// that computer (computer.rs, `lever`): `times` is `fail-saves`',
-            /// `on` is `always-on`'s, `ms` is `hang-backups`' and
-            /// `alive-check`'s, `freeze` is `alive-check`'s, `argv` is `exec`'s.
+            /// `on` is `always-on`'s and `offline`'s, `ms` is `hang-backups`'
+            /// and `alive-check`'s, `freeze` is `alive-check`'s, `argv` is `exec`'s.
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct TestComputer {

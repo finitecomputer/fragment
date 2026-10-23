@@ -263,6 +263,10 @@ enum MetaKey {
     /// The test lever's check of its next start (`alive-check`): `{ms,
     /// freeze}`, taken by that start.
     AliveCheck,
+    /// The test lever's internet off for its starts (`offline`), until set
+    /// back: a lockdown rehearsed (docs/self-host.md, found 40). Nothing
+    /// else starts a computer so.
+    Offline,
     /// The owner's WorkOS user, once the registry named it
     /// (`workos_user`): `{owner, issuer, subject}`.
     WorkosUser,
@@ -298,6 +302,7 @@ impl MetaKey {
             MetaKey::FailSaves => "fail_saves",
             MetaKey::HangBackups => "hang_backups",
             MetaKey::AliveCheck => "alive_check",
+            MetaKey::Offline => "offline",
             MetaKey::WorkosUser => "workos_user",
             MetaKey::Images => "images",
             MetaKey::Node => "node",
@@ -617,8 +622,9 @@ struct NodeSaid {
 }
 
 /// `computer/test`'s body (a test fleet's: `POST /api/test/computer`):
-/// `times` is `fail-saves`', `on` is `always-on`'s, `ms` is `hang-backups`'
-/// and `alive-check`'s, `freeze` is `alive-check`'s, `argv` is `exec`'s.
+/// `times` is `fail-saves`', `on` is `always-on`'s and `offline`'s, `ms`
+/// is `hang-backups`' and `alive-check`'s, `freeze` is `alive-check`'s,
+/// `argv` is `exec`'s.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TestLever {
@@ -1265,8 +1271,9 @@ impl ComputerCell {
         if self.wiped.get() {
             return Err(wiped_computer().into());
         }
+        let internet = JsValue::from_bool(self.meta(MetaKey::Offline)?.is_none());
         let started_ms = js::now_ms();
-        self.call("start", &[g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size)]).await?;
+        self.call("start", &[g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size), internet]).await?;
         let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts(), self.platform_hosts()]).await?;
         if armed.as_bool() != Some(true) {
             return Err(CellError::host(format!("start {generation} was superseded before it was armed")).into());
@@ -2001,8 +2008,9 @@ impl ComputerCell {
     /// `ms` for its guest to read its view, as a start from a snapshot does,
     /// with `freeze` its guest stopped so it never does (#362); `always-on
     /// {on}` is its owner's plan changing (the plan itself does not reach a
-    /// computer yet); `expire-sign-ins` puts every own-key sign-in under way
-    /// past its time.
+    /// computer yet); `offline {on}` starts it with the internet off from
+    /// its next start; `expire-sign-ins` puts every own-key sign-in under
+    /// way past its time.
     async fn lever(&self, b: &TestLever) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "only a test fleet pulls a computer's levers");
         if b.op == "schema" {
@@ -2049,6 +2057,17 @@ impl ComputerCell {
                 self.set_meta(MetaKey::AliveCheck, &json!({ "ms": ms, "freeze": freeze }).to_string())?;
                 console_log!("{}", json!({ "computer": id, "lever": "alive-check", "ms": ms, "freeze": freeze }));
                 Ok(json!({ "computer": id, "aliveCheck": { "ms": ms, "freeze": freeze } }))
+            }
+            "offline" => {
+                // its starts from now on run with the internet off, until
+                // set back: what reaches it then is its intercepts alone
+                let on = b.on.ok_or_else(|| CellError::invalid("offline names on: true or false"))?;
+                match on {
+                    true => self.set_meta(MetaKey::Offline, "1")?,
+                    false => self.delete_meta(MetaKey::Offline)?,
+                }
+                console_log!("{}", json!({ "computer": id, "lever": "offline", "on": on }));
+                Ok(json!({ "computer": id, "offline": on }))
             }
             "expire-sign-ins" => {
                 // every own-key sign-in under way is past its time, as ten
