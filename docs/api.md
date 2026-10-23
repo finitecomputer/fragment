@@ -892,9 +892,13 @@ Every navigation's answer carries `Vary: Sec-Fetch-Dest`. A frame's
 navigation is answered `Cache-Control: private, no-cache` and a
 `Content-Security-Policy: frame-ancestors` naming who may show it:
 
-- signed in by a frame session: `<platform>`, the platform's exact
-  origin, the page its mint was for (a frame session made for any other
-  page is no one's);
+- signed in by a frame session: `'self' <platform>`, the platform's
+  exact origin, the page its mint was for (a frame session made for any
+  other page is no one's), and the fragment's own pages within it (a
+  chat's PDF in a frame of the chat's page). A browser holds every
+  ancestor to the list, so no other page shows it: a frame of this
+  origin's inside another fragment's frame has that fragment among its
+  ancestors;
 - from the fragment's own page (`same-origin`), as whoever its cookies
   name: `'self'`;
 - any other frame, whose answer is a stranger's (no cookie of the
@@ -902,8 +906,8 @@ navigation is answered `Cache-Control: private, no-cache` and a
   public fragment to someone signed out, and no other page may lay it
   under a click.
 
-A fragment shows signed in only in the platform's page, and in another
-fragment's page not at all. A signed request (the CLI's, an agent's)
+A fragment shows signed in only in the platform's page (and in its own
+frames there), and in another fragment's page not at all. A signed request (the CLI's, an agent's)
 carries no cookies and is unchanged.
 
 These rules do not wait for the Public Suffix List. Listing

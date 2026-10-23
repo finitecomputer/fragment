@@ -1917,6 +1917,17 @@ the file dialog on its desktop with `computer_use`. The `fragment`
 skill's first page says the same (`computer.md`, "Files your owner sends
 you").
 
+And every agent is told, after that, how it sends one (`hermes::SENDING`;
+2026-10-23: asked for a PDF in the chat, Paul's agent named a path on
+its computer, then emailed it): a line of its reply that is `MEDIA:` and
+the file's absolute path, outside code and quotes (Hermes delivers no
+other tag), puts the file in the chat as the reply's attachment (the
+bridge uploads it: docs/bridge.md), and a file asked for in the chat is
+attached there rather than emailed or named by its path. Hermes tells
+every platform it knows the same (its `_MEDIA_NATIVE` hint), but has no
+hint for `relay`. The `fragment` skill's first page says it too
+(`computer.md`, "Files you send").
+
 ### Its name, in our Hermes image
 
 An agent's name is its agent fragment's title (docs/api.md, "An agent's
@@ -2142,8 +2153,8 @@ and how a runtime finds them, is the image's.
   platform skill by the platform skill leaving the view. An agent's profile has
   its own, the managed set, which is what the shell's Skills section
   lists, the platform skill, and Hermes' pinned bundled skills. The managed
-  release has thirteen workflows: apps, git, brains, connected Google,
-  image steps and model tiers, plus Cashu, Nostr CLI, X API, direct music,
+  release has fourteen workflows: apps, git, brains, connected Google,
+  image steps, model tiers and a chat's attachments, plus Cashu, Nostr CLI, X API, direct music,
   market analysis and Polymarket, and the upstream `gws-docs` command guide
   alongside connected Google (templates/skills/README.md). Generic skills
   come from Hermes; optional ones remain in its hub. At build, the image

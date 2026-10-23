@@ -36,7 +36,7 @@ default agent. A fragment on it names it and holds nothing else:
 
 ## The managed set
 
-Thirteen skills. Six are Fragment platform contracts:
+Fourteen skills. Seven are Fragment platform contracts:
 
 | Skill | Why it is ours |
 |---|---|
@@ -46,6 +46,7 @@ Thirteen skills. Six are Fragment platform contracts:
 | google-workspace-finite | Connected Google access through per-agent placeholders; gws, no local OAuth |
 | image-generation-finite | Metered Workers AI images through a fragment job |
 | model-council-finite | Fragment model tiers through the computer's model intercept |
+| chat-attachments-finite | A file sent in a Fragment chat as an attachment (`MEDIA:` in a reply), not by email or a path |
 
 And six are integrations Paul retains:
 
@@ -58,7 +59,7 @@ And six are integrations Paul retains:
 | trading-agent-finite | Multi-source market analysis and charts; public reads are keyless |
 | polymarket-finite | Deterministic public-data helper; no trading or key required |
 
-The thirteenth is `gws-docs`, Google Workspace CLI's Docs command guide,
+The fourteenth is `gws-docs`, Google Workspace CLI's Docs command guide,
 pinned to v0.22.5 like the image's CLI (source and Apache-2.0 license in
 the skill). It covers Docs method and schema discovery;
 `google-workspace-finite` owns connected-account authentication. Its two
