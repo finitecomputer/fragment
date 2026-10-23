@@ -98,10 +98,18 @@ impl LocalPaths {
     /// Refuses a Wasm that names a source under any of these paths: one the
     /// flags missed (a new kind of dependency, a crate that bakes in its own
     /// directory) fails the build here, before its size moves with the
-    /// checkout's.
+    /// checkout's. A path that already reads as its remap (a cargo home at
+    /// `/cargo`, a Docker image's) is what the flags write, not a leak.
     fn named_in(&self, wasm: &[u8]) -> Result<()> {
-        let (repo, home) = (&self.repo, &self.cargo_home);
-        for path in [format!("{repo}/crates/"), format!("{repo}/cell/"), format!("{home}/registry/"), format!("{home}/git/"), format!("{}/lib/", self.sysroot)] {
+        let (repo, home, sysroot) = (&self.repo, &self.cargo_home, &self.sysroot);
+        let mut paths = vec![format!("{repo}/crates/"), format!("{repo}/cell/")];
+        if home != "/cargo" {
+            paths.extend([format!("{home}/registry/"), format!("{home}/git/")]);
+        }
+        if sysroot != "/rustc/sysroot" {
+            paths.push(format!("{sysroot}/lib/"));
+        }
+        for path in paths {
             if wasm.windows(path.len()).any(|w| w == path.as_bytes()) {
                 bail!("cell/build/index_bg.wasm names {path}…: its build remaps that path (xtask/src/build.rs, LocalPaths::remapped), and something wrote it in unmapped");
             }
@@ -251,6 +259,11 @@ mod tests {
             let refused = local.named_in(named).unwrap_err().to_string();
             assert!(refused.contains("LocalPaths::remapped"), "{refused}");
         }
+        // a cargo home at /cargo already reads as its remap: allowed, while
+        // the repo's paths are still refused
+        let docker = super::LocalPaths { cargo_home: "/cargo".into(), ..local };
+        assert!(docker.named_in(b"/cargo/registry/src/x /cargo/git/checkouts/x").is_ok());
+        assert!(docker.named_in(b"/w t/fragment/crates/core/src/oidc.rs").is_err());
     }
 
     /// Goal: the Hermes image's inputs are what it runs (docs/computers.md,
