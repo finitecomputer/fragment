@@ -15,9 +15,11 @@ const PREVIEW_PDF: &[u8] = include_bytes!("../../fixtures/chat-preview.pdf");
 /// it: through the platform's mint (`/auth/frame`), signed in by the
 /// frame's own partitioned cookie, with no cookie of the chat's origin
 /// (a person who never opened the chat in a tab of its own: Paul,
-/// 2026-10-23, whose Download failed, "file wasn't available on site",
-/// while opening the file in a tab worked). Valid: its Download, pressed
-/// there, saves the PDF byte for byte.
+/// 2026-10-23, whose PDF showed the browser's refused frame, and whose
+/// Download failed, "file wasn't available on site", while opening the
+/// file in a tab worked). Valid: the attachment's view shows the PDF, in
+/// a frame of the chat's own; its Download, pressed there, saves the PDF
+/// byte for byte.
 fn in_the_platforms_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, name: &str) -> Result<()> {
     let page = chrome.open(&format!("{}/settings", api.base))?;
     chrome.viewport(&page, 1280, 860, false)?;
@@ -37,6 +39,14 @@ fn in_the_platforms_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, name: 
         let seen = chrome.eval_in_frame(&page, name, "location.href + ' ' + (document.body?.innerText ?? '').slice(0, 300)").unwrap_or_default();
         anyhow::bail!("the chat in the platform's frame is ready: {seen}");
     }
+
+    // its view: the PDF in a frame of the chat's own (a refused frame is
+    // the browser's error page, of no origin the chat may read)
+    let pdf = "(() => { const f = document.querySelector('.attachment-pdf[title=\"preview.pdf\"]'); if (!f) return 'none'; const d = f.contentDocument; return d ? d.contentType : 'refused'; })()";
+    let shown = s.eventually(wait, || chrome.eval_in_frame(&page, name, &format!("{pdf} === 'application/pdf'")).ok() == Some(Value::Bool(true)));
+    let seen = chrome.eval_in_frame(&page, name, pdf)?;
+    chrome.screenshot(&page, &s.dir("chat-files").join("pdf-in-the-platforms-frame.png"))?;
+    s.ok("in the platform's frame, as the shell shows a chat, a PDF attachment's view shows the PDF", shown, &seen);
 
     // its Download, as a person presses it (the frame fills the page)
     let downloads = s.dir("chat-files-downloads");
