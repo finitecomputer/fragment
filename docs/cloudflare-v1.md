@@ -1396,13 +1396,15 @@ Paul:
       what they do, capped as agents are (R17: never above editor, never
       owner, its own membership never shares). A hold now caps it there as
       itself too (`standing`: a hold caps an agent in someone else's
-      fragment, never its own memberships, decision 36). What this opens:
-      someone else's chat now has their agents in it, and a Hermes agent
-      acts `for` its owner whoever asks it, so whoever speaks in a shared
-      chat can ask a guest's agent to act on the guest's own things (as
-      before for any agent in a shared chat; now any accepted invite to a
-      chat brings one). Closing it is the bridge's: acting `for` each
-      turn's asker, not always its owner (open, for Paul).
+      fragment, never its own memberships, decision 36). Whoever is in a
+      chat talks to the agents in it, and a Hermes agent acts `for` its
+      owner whoever asks it: this is the design (Paul, 2026-10-23: "Yes,
+      I am aware, this is the design. The solution is a warning when
+      inviting someone to your chat ... Not making everything way more
+      complicated"). Inviting someone where an agent takes part warns its
+      inviter: "Make sure you trust this person. They'll be able to talk to
+      your agent until you remove them." (the share sheet, `fragment
+      members add`, the apps skill).
     - Storage: no new column (an agent row names its owner already: in
       with its person when its owner is a member who is not the fragment's
       owner); a rollback reads the rows as agent members, as before.
