@@ -3,6 +3,7 @@
 //! boot, built ahead beside the Rust so its build finds every layer cached.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
@@ -28,10 +29,14 @@ pub fn cell() -> Result<()> {
     worker_build_installed()?;
     let t0 = Instant::now();
     let dir = devstack::cell_dir();
-    run(Command::new("worker-build").arg("--release").current_dir(&dir))?;
+    let local = LocalPaths::here(&dir)?;
+    let given = (std::env::var("CARGO_ENCODED_RUSTFLAGS").ok(), std::env::var("RUSTFLAGS").ok());
+    let flags = encoded_rustflags(given, &local.remapped());
+    run(Command::new("worker-build").arg("--release").env("CARGO_ENCODED_RUSTFLAGS", flags).current_dir(&dir))?;
     let wasm = dir.join("build/index_bg.wasm");
-    let size = std::fs::metadata(&wasm).with_context(|| format!("{} after worker-build", wasm.display()))?.len();
-    let wasm_budget = within_budget(size)?;
+    let bytes = std::fs::read(&wasm).with_context(|| format!("{} after worker-build", wasm.display()))?;
+    local.named_in(&bytes)?;
+    let wasm_budget = within_budget(bytes.len() as u64)?;
     let (files, bytes) = fragment_templates::write_assets(&dir.join("build/assets")).context("writing the release's files into cell/build/assets")?;
     println!(
         "built the cell for wasm32 in {:.1?}: {wasm_budget}, and {files} files of the release, {:.2} MB, in its Static Assets",
@@ -39,6 +44,92 @@ pub fn cell() -> Result<()> {
         bytes as f64 / 1e6
     );
     Ok(())
+}
+
+/// This machine's paths a build would write into the cell's Wasm (a
+/// panic's location names its file): the repo, cargo's home (the
+/// registry's sources and git checkouts), and the toolchain's sysroot.
+struct LocalPaths {
+    repo: String,
+    cargo_home: String,
+    sysroot: String,
+}
+
+impl LocalPaths {
+    /// The paths the cell's build in `cell` reads from: its toolchain is
+    /// the one `rustc` names there (`RUSTC`, else rustup's choice).
+    fn here(cell: &Path) -> Result<LocalPaths> {
+        let utf8 = |p: PathBuf, what: &str| p.into_os_string().into_string().map_err(|p| anyhow::anyhow!("{what} {p:?} is not UTF-8: the cell's build cannot remap it"));
+        let cargo_home = match std::env::var_os("CARGO_HOME") {
+            Some(home) => PathBuf::from(home),
+            None => PathBuf::from(std::env::var_os("HOME").context("neither CARGO_HOME nor HOME is set")?).join(".cargo"),
+        };
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let out = Command::new(&rustc).args(["--print", "sysroot"]).current_dir(cell).output().context("rustc --print sysroot")?;
+        anyhow::ensure!(out.status.success(), "rustc --print sysroot: {}", String::from_utf8_lossy(&out.stderr));
+        let sysroot = String::from_utf8(out.stdout).context("rustc's sysroot is not UTF-8")?.trim().to_string();
+        let repo = cell.parent().context("cell/ is in the repo")?.to_path_buf();
+        Ok(LocalPaths { repo: utf8(repo, "the repo")?, cargo_home: utf8(cargo_home, "CARGO_HOME")?, sysroot })
+    }
+
+    /// The flags that keep these paths out of the Wasm: a panic's location
+    /// reads relative to the repo (`crates/core/src/…`; the cell's own,
+    /// which cargo names relative to cell/, `src/…`, as `cell/src/…`), a
+    /// dependency's under `/cargo` (`/cargo/registry/src/…`, `/cargo/git/checkouts/…`)
+    /// and the toolchain's under `/rustc/sysroot`, so the Wasm's size, and
+    /// its headroom under `CELL_WASM_MAX_BYTES`, are the same wherever the
+    /// repo is checked out, on any machine. Only what the object holds is
+    /// remapped (`--remap-path-scope=object`): the compiler's messages keep
+    /// the paths an editor opens. rustc takes the last prefix that matches,
+    /// so the repo's comes first, and a cargo home inside it is still
+    /// cargo's. What still moves with the checkout is a few bytes: cargo
+    /// hashes a path dependency outside cell/'s workspace (crates/*) by its
+    /// absolute path, which reorders a few of the Wasm's imports.
+    fn remapped(&self) -> Vec<String> {
+        vec![
+            format!("--remap-path-prefix={}=", self.repo),
+            "--remap-path-prefix=src=cell/src".into(),
+            format!("--remap-path-prefix={}=/cargo", self.cargo_home),
+            format!("--remap-path-prefix={}=/rustc/sysroot", self.sysroot),
+            "--remap-path-scope=object".into(),
+        ]
+    }
+
+    /// Refuses a Wasm that names a source under any of these paths: one the
+    /// flags missed (a new kind of dependency, a crate that bakes in its own
+    /// directory) fails the build here, before its size moves with the
+    /// checkout's. A path that already reads as its remap (a cargo home at
+    /// `/cargo`, a Docker image's) is what the flags write, not a leak.
+    fn named_in(&self, wasm: &[u8]) -> Result<()> {
+        let (repo, home, sysroot) = (&self.repo, &self.cargo_home, &self.sysroot);
+        let mut paths = vec![format!("{repo}/crates/"), format!("{repo}/cell/")];
+        if home != "/cargo" {
+            paths.extend([format!("{home}/registry/"), format!("{home}/git/")]);
+        }
+        if sysroot != "/rustc/sysroot" {
+            paths.push(format!("{sysroot}/lib/"));
+        }
+        for path in paths {
+            if wasm.windows(path.len()).any(|w| w == path.as_bytes()) {
+                bail!("cell/build/index_bg.wasm names {path}…: its build remaps that path (xtask/src/build.rs, LocalPaths::remapped), and something wrote it in unmapped");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `CARGO_ENCODED_RUSTFLAGS` for the cell's build: the flags the
+/// environment gives (`given`: its `CARGO_ENCODED_RUSTFLAGS`, else its
+/// `RUSTFLAGS`, as cargo reads them), then `ours`. Set, it is all cargo
+/// reads: no config file's `rustflags` (the repo has none).
+fn encoded_rustflags(given: (Option<String>, Option<String>), ours: &[String]) -> String {
+    let given: Vec<String> = match given {
+        (Some(encoded), _) => encoded.split('\x1f').filter(|f| !f.is_empty()).map(String::from).collect(),
+        (None, Some(plain)) => plain.split_whitespace().map(String::from).collect(),
+        (None, None) => vec![],
+    };
+    assert!(ours.iter().all(|f| !f.contains('\x1f')), "a flag holds no separator");
+    given.into_iter().chain(ours.iter().cloned()).collect::<Vec<_>>().join("\x1f")
 }
 
 /// The checked size and exact headroom within `CELL_WASM_MAX_BYTES`, or
@@ -138,6 +229,41 @@ mod tests {
         assert!(refused.contains("CELL_WASM_MAX_BYTES") && refused.contains("Static Assets"), "{refused}");
         let refused = super::within_budget(u64::MAX).unwrap_err().to_string();
         assert!(refused.starts_with("cell/build/index_bg.wasm is 18446744073709551615 bytes, over its budget of 6500000 bytes (excess bytes: 18446744073703051615;"), "{refused}");
+    }
+
+    /// Goal: the cell's Wasm holds no path of the machine that built it.
+    /// Method: the flags for a checkout's paths, in rustc's order (the last
+    /// match wins), after the flags the environment gives, as cargo reads
+    /// them; and a Wasm naming a path refused, one without allowed.
+    #[test]
+    fn the_cell_names_no_local_path() {
+        let local = super::LocalPaths { repo: "/w t/fragment".into(), cargo_home: "/home/me/.cargo".into(), sysroot: "/home/me/.rustup/toolchains/stable".into() };
+        let ours = local.remapped();
+        assert_eq!(
+            ours,
+            [
+                "--remap-path-prefix=/w t/fragment=",
+                "--remap-path-prefix=src=cell/src",
+                "--remap-path-prefix=/home/me/.cargo=/cargo",
+                "--remap-path-prefix=/home/me/.rustup/toolchains/stable=/rustc/sysroot",
+                "--remap-path-scope=object"
+            ]
+        );
+        let encoded = |given| super::encoded_rustflags(given, &ours[..1]);
+        assert_eq!(encoded((None, None)), "--remap-path-prefix=/w t/fragment=", "a path with a space stays one flag");
+        assert_eq!(encoded((None, Some(" -C  target-cpu=mvp ".into()))), "-C\x1ftarget-cpu=mvp\x1f--remap-path-prefix=/w t/fragment=");
+        assert_eq!(encoded((Some("-Cdebuginfo=0".into()), Some("ignored".into()))), "-Cdebuginfo=0\x1f--remap-path-prefix=/w t/fragment=", "cargo reads the encoded flags first");
+        assert_eq!(encoded((Some(String::new()), None)), "--remap-path-prefix=/w t/fragment=");
+        assert!(local.named_in(b"\0asm panicked at crates/core/src/oidc.rs:7:5 /cargo/registry/src/x /w t/fragment").is_ok());
+        for named in [&b"at /w t/fragment/crates/core/src/oidc.rs"[..], b"/w t/fragment/cell/src/lib.rs", b"/home/me/.cargo/registry/src/x", b"/home/me/.cargo/git/checkouts/x", b"/home/me/.rustup/toolchains/stable/lib/rustlib"] {
+            let refused = local.named_in(named).unwrap_err().to_string();
+            assert!(refused.contains("LocalPaths::remapped"), "{refused}");
+        }
+        // a cargo home at /cargo already reads as its remap: allowed, while
+        // the repo's paths are still refused
+        let docker = super::LocalPaths { cargo_home: "/cargo".into(), ..local };
+        assert!(docker.named_in(b"/cargo/registry/src/x /cargo/git/checkouts/x").is_ok());
+        assert!(docker.named_in(b"/w t/fragment/crates/core/src/oidc.rs").is_err());
     }
 
     /// Goal: the Hermes image's inputs are what it runs (docs/computers.md,
