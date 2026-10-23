@@ -200,8 +200,7 @@ fn dev(args: &[String]) -> Result<()> {
         ai_url: Some(ai.url.clone()),
         ai_gateway: None,
         models: None,
-        model_key_slots: vec![],
-        model_key_value: None,
+        model_keys: vec![],
         // the mail fake, which prints each message (dev never sends real mail)
         mail_url: Some(mailer.url.clone()),
         mail_from: Some(DEV_MAIL_FROM.into()),

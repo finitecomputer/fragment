@@ -281,6 +281,28 @@ runs there (`models.cheap.key`, `models.medium.key`), bound as
   for Finite Private's slot and OpenRouter's), which only the model fake
   takes.
 
+## Tinfoil's key (Paul, 2026-10-22)
+
+The private tier (deploy/example.jsonc's third alternative) runs its
+fallback on Tinfoil's DeepSeek V4.1 Flash, on the platform's own Tinfoil
+account and one key of it (`tk_…`): the store secret
+`fragment-tinfoil-api-key`, which its config names for that slot
+(`models.fallback.key`), bound as `MODEL_KEY_FALLBACK`.
+
+- **Setting it** is Paul's: make the key in the Tinfoil account's
+  dashboard (a key's own spend cap, `max_cost`, as a backstop), then
+  `cargo xtask secret set fragment-tinfoil-api-key --config <the
+  deployment's config>`, which prompts for it (or reads standard input,
+  or `--from-file`, once).
+- **Its use**, refusal and rotation are as Finite Private's above: read
+  by `keys.rs` as a call leaves for `<base_url>/chat/completions`, its
+  bearer token there and nowhere else. It is the fallback's, so a call
+  it refuses (401, or the account's balance spent, 402) has no try left:
+  its refusal is the call's, and it is logged aloud as
+  `model.platform-key`.
+- **The e2e's** private tier binds a test value of its own beside
+  Finite Private's, which the model fake takes for Tinfoil's model alone.
+
 ## The test secret (previews and the local e2e)
 
 The hosted e2e (`cargo xtask e2e --hosted`, crates/e2e/src/hosted.rs)

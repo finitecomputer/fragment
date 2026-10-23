@@ -65,6 +65,11 @@ enum Shape {
     /// one key a test value), the fallback and vision on Workers AI's
     /// GLM-5.3 Flash.
     FinitePrivate,
+    /// As `Plain`, its model route shaped as the private tier
+    /// (`private_tier_models`): its tiers on Finite Private, its fallback
+    /// Tinfoil's DeepSeek V4.1 Flash on a key of its own, priced by its
+    /// slot (each the model fake's OpenAI-compatible face).
+    PrivateTier,
     /// As `Plain`, with no Stripe (no `stripe` in its config): billing
     /// off, as finite.chat launched, every seat an operator's comp.
     SellsNothing,
@@ -77,6 +82,27 @@ enum Shape {
 /// Finite Private's key on a node shaped as Finite's (`Shape::FinitePrivate`):
 /// a test value, in `fpk_live_`'s shape, which the model fake asks for.
 pub const FINITE_PRIVATE_KEY: &str = "fpk_live_e2e0c0ffee";
+
+/// Tinfoil's key on a node shaped as the private tier (`Shape::PrivateTier`):
+/// a test value, which the model fake asks for of Tinfoil's model alone.
+pub const TINFOIL_KEY: &str = "tk_e2e0c0ffee";
+
+/// `FRAGMENT_MODELS` on a node shaped as the private tier
+/// (deploy/example.jsonc's third alternative), less its keys, each API's
+/// base URL the model fake's: `cheap` and `medium` on Finite Private,
+/// `fallback` on Tinfoil's DeepSeek V4.1 Flash at the list price its slot
+/// names (`tinfoil_price`), `vision` on Workers AI as before.
+pub fn private_tier_models(fake: &str) -> Value {
+    let private = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::FINITE_PRIVATE_FLASH });
+    let tinfoil = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::TINFOIL_FLASH, "price": tinfoil_price() });
+    json!({ "cheap": private, "medium": private, "fallback": tinfoil })
+}
+
+/// The `price` of Tinfoil's slot on a node shaped as the private tier: its
+/// list on 2026-10-22, dollars a million tokens.
+pub fn tinfoil_price() -> Value {
+    json!({ "input": 0.65, "cached_input": 0.13, "output": 1.45 })
+}
 
 /// `FRAGMENT_MODELS` on a node shaped as Finite's: deploy/example.jsonc's
 /// two alternatives at once, less their keys, each API's base URL the model
@@ -533,6 +559,15 @@ impl Suite {
         started
     }
 
+    /// Starts the node with its model route shaped as the private tier
+    /// (`Shape::PrivateTier`): its tiers on Finite Private, Tinfoil behind them.
+    pub fn start_as_private_tier(&mut self) -> Result<Api> {
+        self.shape = Shape::PrivateTier;
+        let started = self.start(false);
+        self.shape = Shape::Plain;
+        started
+    }
+
     /// Starts the node with no Stripe (`Shape::SellsNothing`): billing off.
     pub fn start_selling_nothing(&mut self) -> Result<Api> {
         self.shape = Shape::SellsNothing;
@@ -586,12 +621,24 @@ impl Suite {
             // OpenAI-compatible face as Finite Private (lanes/upstream.rs)
             ai_url: Some(self.ai.node().url.clone()),
             ai_gateway: None,
-            models: matches!(self.shape, Shape::FinitePrivate).then(|| finite_private_models(&self.ai.node().url).to_string()),
-            model_key_slots: match self.shape {
-                Shape::FinitePrivate => vec!["cheap".into(), "medium".into()],
-                _ => vec![],
+            models: match self.shape {
+                Shape::FinitePrivate => Some(finite_private_models(&self.ai.node().url).to_string()),
+                Shape::PrivateTier => Some(private_tier_models(&self.ai.node().url).to_string()),
+                _ => None,
             },
-            model_key_value: matches!(self.shape, Shape::FinitePrivate).then(|| FINITE_PRIVATE_KEY.to_string()),
+            model_keys: {
+                let key = |slot: &str, name: &str, value: &str| devstack::ModelKey { slot: slot.into(), name: name.into(), value: value.into() };
+                match self.shape {
+                    // one key for both tiers, as deploy/example.jsonc names it
+                    Shape::FinitePrivate => vec![key("cheap", "fragment-openrouter-key", FINITE_PRIVATE_KEY), key("medium", "fragment-openrouter-key", FINITE_PRIVATE_KEY)],
+                    Shape::PrivateTier => vec![
+                        key("cheap", "fragment-finite-private-key", FINITE_PRIVATE_KEY),
+                        key("medium", "fragment-finite-private-key", FINITE_PRIVATE_KEY),
+                        key("fallback", "fragment-tinfoil-api-key", TINFOIL_KEY),
+                    ],
+                    _ => vec![],
+                }
+            },
             mail_url: Some(self.mail.node().url.clone()),
             mail_from: Some(MAIL_FROM.into()),
             default_plan: Some(DEFAULT_PLAN.into()),
@@ -610,7 +657,7 @@ impl Suite {
             }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
-                Shape::Plain | Shape::FinitePrivate | Shape::SellsNothing | Shape::OneKeyMore => format!("http://127.0.0.1:{}", self.port),
+                Shape::Plain | Shape::FinitePrivate | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore => format!("http://127.0.0.1:{}", self.port),
             },
             operators: Some(
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
@@ -658,7 +705,7 @@ impl Suite {
     fn suffix(&self) -> &'static str {
         match self.shape {
             Shape::TwoSites => BOATS,
-            Shape::Plain | Shape::FinitePrivate | Shape::SellsNothing | Shape::OneKeyMore => SUFFIX,
+            Shape::Plain | Shape::FinitePrivate | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore => SUFFIX,
         }
     }
 

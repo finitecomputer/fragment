@@ -2017,6 +2017,15 @@ mod tests {
         let big = row(json!({ "body": { "x": "a".repeat(2500) } }))["cheap"].clone();
         refused(json!({ "cheap": big, "medium": big }), "past a Workers variable's 5000: shorten the slots' bodies");
         assert_eq!(with(row(json!({ "body": { "provider": { "zdr": true } } }))), "", "a body within its bounds");
+        // a model off OpenRouter at the list price its slot names (the private tier's fallback, Tinfoil's)
+        let listed = json!({ "input": 0.65, "cached_input": 0.13, "output": 1.45 });
+        let tinfoil = |price: Value| json!({ "fallback": { "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "key": "fragment-tinfoil-api-key", "model": "deepseek-v4-1-flash", "price": price } });
+        assert_eq!(with(tinfoil(listed.clone())), "", "an id the book has no row for, at the price its slot names");
+        refused(tinfoil(json!({ "input": 0.65 })), "models.fallback: price.output is the dollars a million tokens its API lists, from 0 to 1000, not nothing");
+        refused(tinfoil(json!({ "input": -1, "output": 1.45 })), "models.fallback: price.input is the dollars a million tokens its API lists, from 0 to 1000, not -1");
+        let mut priced_twice = openrouter(json!({ "prompt": 0.15, "completion": 0.5 }));
+        priced_twice["cheap"]["price"] = listed.clone();
+        refused(priced_twice, "models.cheap: a model on OpenRouter is priced at its ceiling (body.provider.max_price), not a price of its own");
         // a slot alone: rendered as named, the rest the cell's
         let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
         let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
@@ -2025,6 +2034,13 @@ mod tests {
         let n = names(&d, Some("p5")).unwrap();
         let vars = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"].clone();
         assert_eq!(vars["FRAGMENT_MODELS"], json!({ "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } }).to_string());
+        // Tinfoil's, its price in the cell's variable and its key bound for its slot alone
+        v["models"] = tinfoil(listed.clone());
+        let d = load(&config_file("models-tinfoil", &v)).unwrap();
+        let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
+        let models: Value = serde_json::from_str(cell["vars"]["FRAGMENT_MODELS"].as_str().unwrap()).unwrap();
+        assert_eq!(models, json!({ "fallback": { "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "model": "deepseek-v4-1-flash", "price": listed } }), "no key in the cell's variable, the price in it");
+        assert_eq!(bound(&d).unwrap().model_keys, [("fallback".to_string(), "fragment-tinfoil-api-key".to_string())]);
         // the fields it replaced
         for (field, now) in [("vision_model", "models.vision"), ("fallback_model", "models.fallback")] {
             let mut v = v.clone();
