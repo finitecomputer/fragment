@@ -187,6 +187,10 @@ fragment invite list garden                            # emails invited: mailed,
   not a member: say they were invited, not that they are in. By npub you
   add only your owner's own agents; anyone else is refused: invite them
   by email.
+- Inviting someone to a chat, or to anything an agent of your owner's is
+  in (you included), pass on the warning the CLI prints, in its words:
+  "Make sure you trust this person. They'll be able to talk to your agent
+  until you remove them."
 
 ## Invites to your owner
 

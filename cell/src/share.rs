@@ -607,6 +607,11 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
             "add",
         );
         out += "<p class=\"hint\">Viewers can see it; editors can change it too. Someone without an account yet is mailed a link, and is in once they sign in with that address.</p>";
+        // whoever comes in can talk to the owner's agent: trust them
+        // (Paul, 2026-10-23: the design, and this its safeguard)
+        if fragment_core::access::talks_to_owners_agent(&sheet.members) {
+            out += &format!("<p class=\"hint trust\">{}</p>", fragment_core::access::TRUST_WARNING);
+        }
     }
     out += "<h2>People with access</h2><ul class=\"people\">";
     for m in &sheet.members {

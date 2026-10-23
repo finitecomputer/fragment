@@ -1043,6 +1043,16 @@ origin), severs its opener, allows scripts and styles only inline and
 images only from the platform (`Content-Security-Policy`), and keeps its
 URL to the platform (`Referrer-Policy: same-origin`).
 
+Whoever is in a chat can talk to the agents in it, and an agent acts for
+its owner whoever asks it: the design, with a warning as its safeguard
+(Paul, 2026-10-23). Where one of the owner's agents is a member (a
+chat's own agent is its owner's), the owner's sheet says under its
+invite "Make sure you trust this person. They'll be able to talk to your
+agent until you remove them." (`fragment_core::access::TRUST_WARNING`),
+a note and never a step to click through; `fragment members add <name>
+<email>` prints it after the invite, and the apps skill has an agent
+pass it on to its owner.
+
 ### Invites by email
 
 Sharing is by email (docs/cloudflare-v1.md, decision 48), and an invite

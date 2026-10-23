@@ -39,7 +39,7 @@
 //! whomever it acts for. What an agent shares is recorded as the agent's,
 //! for its owner, so its owner sees it did.
 
-use fragment_proto::{Role, Visibility};
+use fragment_proto::{IdentityKind, Member, Role, Visibility};
 
 /// What a caller brings to a fragment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -75,6 +75,22 @@ pub const AGENT_ROLE_MAX: Role = Role::Editor;
 // an agent's role never reaches the role sharing needs: only the lent
 // authority shares, and only where `agent_shares` lends it
 const _: () = assert!((AGENT_ROLE_MAX as u8) < (Role::Owner as u8));
+
+/// What its owner is told as they invite someone to a chat, or to a
+/// fragment an agent of theirs is in: whoever is in can talk to that
+/// agent, which acts for its owner whoever asks it. Paul, 2026-10-23: "this
+/// is the design. The solution is a warning when inviting someone to your
+/// chat". The share sheet shows it by the invite, the CLI prints it after
+/// one, and the apps skill has an agent pass it on.
+pub const TRUST_WARNING: &str = "Make sure you trust this person. They'll be able to talk to your agent until you remove them.";
+
+/// Whether whoever a fragment's owner lets in can talk to an agent of
+/// theirs: one is a member (a chat's own agent is its owner's). Where it
+/// is, inviting someone warns (`TRUST_WARNING`).
+pub fn talks_to_owners_agent(members: &[Member]) -> bool {
+    let Some(owner) = members.iter().find(|m| m.role == Role::Owner) else { return false };
+    members.iter().any(|m| m.kind == Some(IdentityKind::Agent) && m.owner.as_deref() == Some(owner.principal.as_str()))
+}
 
 /// Whether the caller reads or acts: an owner's view through their agent
 /// counts only for reading.
@@ -320,6 +336,29 @@ mod tests {
         assert_eq!(access_agents(listed(), Some(&entity), true), vec!["npub1mine".to_string()], "read: the guest's agent goes, the owner's stays");
         assert_eq!(access_agents(listed(), None, true), Vec::<String>::new(), "unread, past the bound or failed, with others possible: none named");
         assert_eq!(access_agents(vec!["npub1mine".to_string()], None, false), vec!["npub1mine".to_string()], "no one else in it: its agents are its owner's");
+    }
+
+    /// Goal: inviting warns where the invitee can talk to the owner's
+    /// agent, and only there (Paul, 2026-10-23). Method: an app of a
+    /// person's alone; with someone else's agent in it; with the owner's
+    /// agent in it (a chat's lead is one).
+    #[test]
+    fn inviting_warns_where_the_owners_agent_is_in() {
+        let m = |principal: &str, role: Role, owner: Option<&str>| Member {
+            principal: principal.into(),
+            role,
+            added_by: "npub1paul".into(),
+            added_at: 0,
+            kind: Some(if owner.is_some() { IdentityKind::Agent } else { IdentityKind::Person }),
+            owner: owner.map(str::to_string),
+        };
+        let alone = vec![m("npub1paul", Owner, None), m("npub1bea", Editor, None)];
+        assert!(!talks_to_owners_agent(&alone), "no agent in it: nothing to warn of");
+        let theirs = [alone.clone(), vec![m("npub1beasagent", Editor, Some("npub1bea"))]].concat();
+        assert!(!talks_to_owners_agent(&theirs), "someone else's agent is not the owner's");
+        let mine = [alone, vec![m("npub1paulsagent", Editor, Some("npub1paul"))]].concat();
+        assert!(talks_to_owners_agent(&mine), "the owner's agent is in: whoever comes in can talk to it");
+        assert!(!talks_to_owners_agent(&[]), "no members read: no owner to warn");
     }
 
     fn st(member: Option<Role>, link: bool, signed: bool) -> Standing {

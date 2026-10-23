@@ -956,6 +956,26 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let out = s.cli(api, &home, &["members", "add", &name, &invited, "--people-only", "--json"]);
     s.ok("--people-only is no flag now: a share is a person's and their agents'", out.status.code() == Some(2), String::from_utf8_lossy(&out.stderr));
+    // inviting someone to a chat its owner's agent is in tells the owner
+    // to trust them (Paul, 2026-10-23); before the agent is in, nothing
+    let me = s.cli_keys(&home).ok_or_else(|| anyhow::anyhow!("the CLI's key"))?;
+    let chat = s.named(api, &me, "cli-trust")?;
+    let made = api.create_with(&me, json!({ "name": chat, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "the CLI's person's chat: {made}");
+    let invite = || {
+        let email = format!("t-{}@e2e.test", &Keys::generate().pubkey_hex()[..12]);
+        String::from_utf8_lossy(&s.cli(api, &home, &["members", "add", &chat, &email]).stdout).into_owned()
+    };
+    let before = invite();
+    let (_, agent) = super::delegation::agent_of(api, &me)?;
+    s.cli_json(api, &home, &["members", "add", &chat, &agent, "--role", "editor", "--json"])?;
+    let after = invite();
+    let warning = fragment_core::access::TRUST_WARNING;
+    s.ok(
+        "fragment members add <email> on a chat its owner's agent is in says to trust whoever they invite; with no agent of theirs in it, it does not",
+        before.starts_with("invited ") && !before.contains(warning) && after.starts_with("invited ") && after.contains(warning),
+        json!([before, after]),
+    );
     // `fragment open` names a share link only where one opens it (this
     // chat is public: its address is its link)
     let public = s.cli_json(api, &home, &["open", &name, "--json"])?;
