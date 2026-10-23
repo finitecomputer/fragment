@@ -164,9 +164,9 @@ jobs:
       # The e2e's builds, our own crates' with them: xtask (target/debug),
       # the CLI and the suite (target/release), and the cell's wasm32 builds
       # (cell/target), as the newest master commit that saved them left
-      # them (below), with the tree they were built from (target/built-tree:
-      # `git ls-tree -r -t`, sorted). After this rust-cache's, which may
-      # clean the target directories as it restores.
+      # them (below), with the record of the tree they were built from
+      # (target/built-tree). After this rust-cache's, which may clean the
+      # target directories as it restores.
       - id: builds
         uses: actions/cache/restore@v4
         with:
@@ -177,28 +177,17 @@ jobs:
             cell/target
           key: e2e-builds-${{ runner.os }}-${{ steps.rust.outputs.cachekey }}-${{ github.sha }}
           restore-keys: e2e-builds-${{ runner.os }}-${{ steps.rust.outputs.cachekey }}-
-      # Cargo rebuilds a crate of ours whose sources are newer than its last
-      # build, and every file of a checkout is. So each file and directory
-      # this tree holds as the builds' did (its mode, object and path all
-      # the same) is given an old mtime (2000-01-01), and a crate made only
-      # of those is taken as built. One that changed or is new keeps its
-      # checkout's, newer than every build, and its crate and those that
-      # depend on it are rebuilt; so does a directory whose object moved (a
-      # file in it added, removed or changed), as a build script watching
-      # it (crates/templates/build.rs) needs. Content decides, never a
-      # commit's date, which can be older than builds that lack its change.
-      # The record goes once read: only a build that succeeded saves one.
+      # The checkout's mtimes, before any cargo build (xtask/src/stamp.rs,
+      # which says how, compiled alone for it): every file and directory
+      # now, newer than any build restored, then each the record holds as
+      # the checkout does at the time since which it has, so cargo takes as
+      # built what was built from this very content, and nothing else
+      # (another feature set's build, kept from an older tree). The record
+      # goes into the state directory with this build's start, for the
+      # record saved below: only a build that succeeded saves one.
       - run: |
-          if [ -f target/built-tree ]; then
-            git diff --quiet HEAD -- || { echo "::error::the checkout is not HEAD's tree"; exit 1; }
-            git ls-tree -r -t -z HEAD | LC_ALL=C sort -z > "$RUNNER_TEMP/tree"
-            LC_ALL=C comm -z -12 target/built-tree "$RUNNER_TEMP/tree" | cut -z -f2- > "$RUNNER_TEMP/same"
-            xargs -0 -r touch -h -d @946684800 -- < "$RUNNER_TEMP/same"
-            echo "$(tr -cd '\0' < "$RUNNER_TEMP/same" | wc -c) of $(tr -cd '\0' < "$RUNNER_TEMP/tree" | wc -c) files and directories as the builds' tree held them"
-            rm target/built-tree
-          else
-            echo "no builds' tree: every crate of ours builds"
-          fi
+          rustc --edition 2021 -O -o "$RUNNER_TEMP/stamp" xtask/src/stamp.rs
+          "$RUNNER_TEMP/stamp" restore target/built-tree "$RUNNER_TEMP/stamp-state"
       # no setup-node: xtask fetches the pinned Node into target/tools
       # (crates/devstack/src/node_release.rs, checked by its SHA-256) and
       # runs its own npm ci; the runner's node is never used. A new pin is
@@ -257,7 +246,7 @@ jobs:
       # too: its build was green), unless this commit's are kept already
       # (a re-run)
       - if: matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.builds.outputs.cache-hit != 'true'
-        run: git ls-tree -r -t -z HEAD | LC_ALL=C sort -z > target/built-tree
+        run: '"$RUNNER_TEMP/stamp" record target/built-tree "$RUNNER_TEMP/stamp-state"'
       - if: matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.builds.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
@@ -407,16 +396,8 @@ jobs:
           restore-keys: e2e-builds-${{ runner.os }}-${{ steps.rust.outputs.cachekey }}-
       # as e2e-shard's
       - run: |
-          if [ -f target/built-tree ]; then
-            git diff --quiet HEAD -- || { echo "::error::the checkout is not HEAD's tree"; exit 1; }
-            git ls-tree -r -t -z HEAD | LC_ALL=C sort -z > "$RUNNER_TEMP/tree"
-            LC_ALL=C comm -z -12 target/built-tree "$RUNNER_TEMP/tree" | cut -z -f2- > "$RUNNER_TEMP/same"
-            xargs -0 -r touch -h -d @946684800 -- < "$RUNNER_TEMP/same"
-            echo "$(tr -cd '\0' < "$RUNNER_TEMP/same" | wc -c) of $(tr -cd '\0' < "$RUNNER_TEMP/tree" | wc -c) files and directories as the builds' tree held them"
-            rm target/built-tree
-          else
-            echo "no builds' tree: every crate of ours builds"
-          fi
+          rustc --edition 2021 -O -o "$RUNNER_TEMP/stamp" xtask/src/stamp.rs
+          "$RUNNER_TEMP/stamp" restore target/built-tree "$RUNNER_TEMP/stamp-state"
       - uses: actions/cache/restore@v4
         with:
           path: target/tools

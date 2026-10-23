@@ -327,8 +327,9 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   named in the workflow): `check`'s Rust dependencies and the e2e's
   tools through `Swatinem/rust-cache`; the e2e's builds, our own crates'
   with them, through `actions/cache`, one entry per master commit with
-  the tree it was built from (a checkout's unchanged files take an old
-  mtime, so cargo rebuilds only the crates a change touched; `prune`
+  a record of the tree it was built from, from which `xtask/src/stamp.rs`
+  (compiled alone, before any cargo build) sets a checkout's mtimes so
+  cargo rebuilds only what was not built from its very content; `prune`
   deletes the older entries); the stub image's layers through BuildKit's
   Actions cache, built before the e2e's build so it and the node's boot
   find them; the pinned Node's and the JavaScript caches through
