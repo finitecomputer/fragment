@@ -41,6 +41,7 @@ mod migrations;
 mod notes;
 mod orgs;
 mod pairing;
+mod perf;
 mod placement;
 mod plane;
 mod posts;
@@ -144,6 +145,7 @@ const LANES: &[Lane] = &[
     checkout::checkout,
     sync::folder_sync,
     migrations::migrations,
+    perf::perf,
     restart::restart,
 ];
 
@@ -163,7 +165,7 @@ const LANES: &[Lane] = &[
 /// fragment's deploy (after `effects`) up to it, so its first cron minute
 /// passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [
-    &["shell", "computers", "export", "hermes", "agent-smoke", "agent-ask", "agent-app", "agent-restart", "bot-mode", "checkout"],
+    &["shell", "computers", "export", "hermes", "perf", "agent-smoke", "agent-ask", "agent-app", "agent-restart", "bot-mode", "checkout"],
     &["finite-private", "chat", "shell-ui", "placement", "pairing", "wipe", "sync", "migrations", "restart", "connections"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[

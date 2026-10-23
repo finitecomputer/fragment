@@ -371,6 +371,7 @@ class NodeProcess {
     const finish = (outcome) => {
       if (finished) return;
       finished = outcome;
+      finished.at = Date.now();
       gone = true;
       try { ws.close(1000, "exited"); } catch {}
       setTimeout(answer, CLOSE_WAIT_MS);
@@ -378,6 +379,8 @@ class NodeProcess {
     const answer = () => {
       if (!finished || finished.answered) return;
       finished.answered = true;
+      // BENCH (selfhost-perf-bench): an exec's phases
+      if (opts.bench) console.log(JSON.stringify({ bench: "exec", cmd: String(spec.cmd).slice(0, 40), wsMs: opts.bench.ws - opts.bench.t0, exitMs: (finished.at || Date.now()) - opts.bench.t0, answerMs: Date.now() - opts.bench.t0, closedBy: finished.closed ? "close" : "timer" }));
       if (finished.error) settle.reject(finished.error);
       else settle.resolve(finished.code);
     };
@@ -407,7 +410,10 @@ class NodeProcess {
     });
     const closed = () => {
       gone = true;
-      if (finished) return answer();
+      if (finished) {
+        finished.closed = true;
+        return answer();
+      }
       const e = new Error("exec: the node's socket closed before the process exited");
       end(e);
       finished = { error: e };
@@ -549,7 +555,10 @@ export class NodeContainer {
     const sent = this.#node.fetch(path, { method, headers, body: body === undefined ? undefined : bytes }).catch((e) => {
       throw e instanceof NodeDown || e instanceof NodeRevoked ? e : new NodeDown(node, String((e && e.message) || e));
     });
+    const t0 = Date.now();
     const resp = await (ms ? within(node, ms, sent) : sent);
+    // BENCH (selfhost-perf-bench): each call to the node
+    if (!path.endsWith("/wait")) console.log(JSON.stringify({ bench: "node", node, m: method, path: path.replace(/[0-9a-f]{64}/, "<c>"), status: resp.status, ms: Date.now() - t0 }));
     if (!resp.ok && !allowed.includes(resp.status)) {
       const e = await resp.json().catch(() => ({}));
       if (resp.status === 410 && e.error === "node_revoked") throw new NodeRevoked(node);
@@ -751,6 +760,7 @@ export class NodeContainer {
 
   async exec(cmd, opts = {}) {
     await this.#started();
+    const bench = { t0: Date.now() };
     const path = `/v1/containers/${this.#name}/exec`;
     const headers = { [AUTH]: await signed(this.#node, "GET", path, await sha256Hex(new Uint8Array())), upgrade: "websocket" };
     const node = this.#node.id;
@@ -761,6 +771,7 @@ export class NodeContainer {
     const ws = resp.webSocket;
     if (!ws) throw new Error(`the node ${node}: exec: ${resp.status} ${await resp.text()}`);
     ws.accept();
+    bench.ws = Date.now();
     const stdin = opts.stdin !== undefined && opts.stdin !== "ignore";
     const spec = {
       cmd,
@@ -771,7 +782,7 @@ export class NodeContainer {
     };
     if (opts.cwd) spec.cwd = opts.cwd;
     if (opts.user) spec.user = opts.user;
-    const process = new NodeProcess(ws, spec, opts);
+    const process = new NodeProcess(ws, spec, { ...opts, bench });
     ws.send(JSON.stringify(spec));
     return process;
   }
@@ -823,6 +834,7 @@ export async function nodeEgress(request, node, nodeContainer, rearm) {
     console.log(JSON.stringify({ nodeEgress: "refused", node: node?.id ?? null, container, intercept, host, path, status, error }));
     return Response.json({ error }, { status });
   };
+  const t0 = Date.now();
   const body = await request.arrayBuffer();
   if (!node || !node.key || !nodeContainer) return refuse(404, "this computer is not on a node");
   if (container !== nodeContainer.name) return refuse(403, "another computer's intercept");
@@ -830,6 +842,7 @@ export async function nodeEgress(request, node, nodeContainer, rearm) {
   const e = { method: request.method, container, intercept, scheme, host, path };
   const bodyHash = await sha256Hex(body);
   if (!(await verified(node, h.get(AUTH), (t) => egressString(e, t, bodyHash)))) return refuse(401, "a bad signature");
+  const tVerified = Date.now();
   if (!/^\d{1,3}$/.test(intercept)) return refuse(400, "an intercept's index");
   const index = Number(intercept);
   let fetcher = nodeContainer.binding(index);
@@ -843,5 +856,7 @@ export async function nodeEgress(request, node, nodeContainer, rearm) {
   const method = request.method;
   const hasBody = method !== "GET" && method !== "HEAD";
   // a redirect is the guest's to follow, as the runtime's own intercepts hand it back
-  return fetcher.fetch(new Request(`${scheme}://${host}${path}`, { method, headers, body: hasBody ? body : undefined, redirect: "manual" }));
+  const answered = await fetcher.fetch(new Request(`${scheme}://${host}${path}`, { method, headers, body: hasBody ? body : undefined, redirect: "manual" }));
+  console.log(JSON.stringify({ bench: "nodeEgress", host, path, verifyMs: tVerified - t0, handlerMs: Date.now() - tVerified }));
+  return answered;
 }

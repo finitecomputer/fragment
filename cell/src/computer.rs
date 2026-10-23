@@ -642,6 +642,9 @@ struct TestLever {
     /// `exec`'s: the command run in its container.
     #[serde(default)]
     argv: Option<Vec<String>>,
+    /// BENCH: `bench-exec`'s script.
+    #[serde(default)]
+    script: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -755,7 +758,13 @@ impl ComputerCell {
     }
 
     async fn call(&self, method: &str, args: &[JsValue]) -> CellResult<JsValue> {
-        js::invoke(&self.host()?, method, args).await
+        // BENCH (selfhost-perf-bench): each host call's time, on test fleets
+        let t0 = js::now_ms();
+        let r = js::invoke(&self.host()?, method, args).await;
+        if self.cfg.test_hooks && !matches!(method, "running" | "imageRef" | "images") {
+            console_log!("{}", json!({ "bench": "host", "computer": self.meta(MetaKey::Id).ok().flatten(), "m": method, "ms": js::now_ms() - t0, "ok": r.is_ok() }));
+        }
+        r
     }
 
     /// Places a computer that runs on sandcastle nodes at its first start
@@ -921,8 +930,13 @@ impl ComputerCell {
             }
             self.alarm_at(step.alarm_ms).await?;
             refused = refused.or(step.refused.clone());
+            let t0 = js::now_ms();
+            let actions = json!(step.actions);
             for next in self.perform(step).await? {
                 queue.push(next);
+            }
+            if self.cfg.test_hooks {
+                console_log!("{}", json!({ "bench": "step", "computer": self.meta(MetaKey::Id)?, "event": logged, "actions": actions, "ms": js::now_ms() - t0 }));
             }
         }
         Ok(refused)
@@ -2114,6 +2128,24 @@ impl ComputerCell {
                 console_log!("{}", json!({ "computer": id, "lever": "kill", "generation": generation }));
                 Ok(json!({ "computer": id, "killed": generation }))
             }
+            // BENCH (selfhost-perf-bench): `times` execs of `sh -c script`
+            // (`true` by default) in the awake container, each timed here
+            "bench-exec" => {
+                let Phase::Awake { generation, .. } = self.lifecycle()?.phase else {
+                    return Err(CellError::invalid("it is not awake: wake it first"));
+                };
+                let g = JsValue::from_f64(generation as f64);
+                let script = b.script.clone().unwrap_or_else(|| "true".into());
+                let mut ms = vec![];
+                let mut last = Value::Null;
+                for _ in 0..b.times.unwrap_or(10).min(200) {
+                    let t0 = js::now_ms();
+                    let argv = js::to_js(&json!(["sh", "-c", script]));
+                    last = js::from_js(&self.call("exec", &[g.clone(), argv, JsValue::from_f64(120_000.0)]).await?).map_err(CellError::host)?;
+                    ms.push(js::now_ms() - t0);
+                }
+                Ok(json!({ "computer": id, "ms": ms, "last": last }))
+            }
             "saves" => {
                 let life = self.lifecycle()?;
                 let mut v = serde_json::to_value(self.saves()?).map_err(|e| CellError::host(e.to_string()))?;
@@ -2996,6 +3028,7 @@ impl ComputerEgress {
         let req = Request::from(request);
         let ctx = Context::new(ctx);
         let (method, path) = (req.method().to_string(), req.path());
+        let t0 = js::now_ms();
         let answered = match route.as_str() {
             "api" => egress_api(req, &env, &ctx, &computer).await,
             "model" => egress_model(req, &env, &ctx, &computer).await,
@@ -3003,6 +3036,9 @@ impl ComputerEgress {
             "platform" => egress_platform(req, &env, &ctx, &computer).await,
             r => Err(CellError::new(ErrorCode::NotFound, format!("no egress route {r}"))),
         };
+        if Config::from_env(&env).test_hooks {
+            console_log!("{}", json!({ "bench": "egress", "computer": computer, "route": route, "method": method, "path": path, "ms": js::now_ms() - t0 }));
+        }
         // one line per refusal (lesson 14): the guest's requests never reach
         // wrangler's request log, being answered in-process
         if let Err(e) = &answered {
