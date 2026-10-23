@@ -864,6 +864,9 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         drawn && text.contains(&title) && text.contains("Anyone with the link") && text.contains(&member_name) && text.contains("Viewer") && text.contains(&waiting),
         text,
     );
+    // At this width Settings has a sticky nav. A nearest-edge scroll can
+    // put the view buttons behind it; center them before the real clicks.
+    chrome.eval(&home, "document.querySelector('#settings-access button[data-by=person]').scrollIntoView({block:'center'})")?;
     chrome.click(&home, "#settings-access button[data-by=person]")?;
     let by_person = chrome.until(
         &home,
@@ -872,6 +875,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     );
     chrome.screenshot(&home, &s.scratch.join("share-settings-by-person.png"))?;
     s.ok("and by person: what each of them can open of the owner's", by_person, chrome.eval(&home, "document.getElementById('settings-access').innerText")?);
+    chrome.eval(&home, "document.querySelector('#settings-access button[data-by=fragment]').scrollIntoView({block:'center'})")?;
     chrome.click(&home, "#settings-access button[data-by=fragment]")?;
     chrome.click(&home, &format!("#settings-access .access-name[data-share={chat:?}]"))?;
     let opened = chrome.until(&home, SHEET_SIZED, wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
