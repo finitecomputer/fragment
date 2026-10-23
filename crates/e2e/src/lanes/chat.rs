@@ -685,7 +685,10 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.eval(&page, "({ by: [...document.querySelectorAll('.msg.agent .who')].pop()?.textContent, head: document.getElementById('head-label').textContent })")?,
     );
 
-    // away from the chat (its page closed), a reply reaches each of its people once
+    // away from the chat (its page closed), a reply reaches each of its people once:
+    // the rename's reply's push run ended first, while its page was open (a
+    // trigger's run comes later on celld, whose Workflows are cells of their own)
+    runs_ended(s);
     chrome.close(page)?;
     let member_push = s.name("chat-member-push");
     let anyone = s.name("chat-anyone-push");

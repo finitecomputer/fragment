@@ -240,9 +240,9 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
                 code.code
             );
             let mail = crate::mail::Mail { to: send.email.trim().to_ascii_lowercase(), subject: format!("Try {PRODUCT}"), text };
-            crate::mail::send(env, cfg, &mail).await?;
+            let sent = crate::mail::send(env, cfg, &mail).await?.is_some();
             ask_registry(env, &admin::Note { by, action: "trial-send".into(), target: code.id.clone(), detail: format!("to {}", mail.to) }).await?;
-            json_answer(&serde_json::json!({ "sent": true, "to": mail.to }))
+            json_answer(&serde_json::json!({ "sent": sent, "to": mail.to }))
         }
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/admin/{}", m.as_ref(), rest.join("/")))),
     }
@@ -316,7 +316,7 @@ async fn mail_offer(env: &Env, cfg: &Config, added: &Added) -> bool {
     };
     let mail = crate::mail::Mail { to: m.email.clone(), subject, text };
     match crate::mail::send(env, cfg, &mail).await {
-        Ok(_) => true,
+        Ok(sent) => sent.is_some(),
         Err(e) => {
             console_error!("{}", serde_json::json!({ "offer-mail": m.id, "failed": e.message }));
             false
@@ -339,7 +339,7 @@ async fn mail_comp(env: &Env, cfg: &Config, comped: &Comped) -> bool {
     let text = format!("You have {kind} on {PRODUCT}, in {}.\n\n{held}: {}/\n", comped.org.name, cfg.platform());
     let mail = crate::mail::Mail { to: comped.seat.email.clone(), subject: format!("You have a seat on {PRODUCT}"), text };
     match crate::mail::send(env, cfg, &mail).await {
-        Ok(_) => true,
+        Ok(sent) => sent.is_some(),
         Err(e) => {
             console_error!("{}", serde_json::json!({ "comp-mail": comped.seat.id, "failed": e.message }));
             false

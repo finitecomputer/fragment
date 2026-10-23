@@ -676,16 +676,31 @@ impl Call for FenceConnection {
     type Answer = SubjectAnswer;
 }
 
-/// `POST /login/begin`: a sign-in starts.
+/// `POST /login/begin`: a sign-in starts; an OpenID Connect one (`oidc`)
+/// with a PKCE verifier and a nonce, which the registry keeps with it
+/// (docs/self-host.md, seam 4).
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Begin {
     pub return_to: String,
+    #[serde(default)]
+    pub oidc: bool,
 }
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Began {
     pub state: String,
+    /// An OpenID Connect sign-in's: what its authorization request carries.
+    #[serde(default)]
+    pub oidc: Option<OidcBegan>,
+}
+
+/// The verifier's S256 challenge (the verifier stays in the registry,
+/// sealed), and the nonce the id_token must carry back.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct OidcBegan {
+    pub challenge: String,
+    pub nonce: String,
 }
 
 impl Call for Begin {
@@ -744,6 +759,40 @@ pub(crate) enum Exchanged {
 
 impl Call for Exchange {
     const PATH: &'static str = "/login/exchange";
+    type Answer = Exchanged;
+}
+
+/// `POST /login/oidc`: an OpenID Connect provider's code, exchanged with
+/// the sign-in's verifier and the client's secret (KEYS), its id_token
+/// verified, and the sign-in finished (docs/self-host.md, seam 4). A
+/// finished round trip, made only from the `Bound` of the browser that
+/// began it (`of`), as `Exchange` is: its fields are private and it is not
+/// `Deserialize` (the Registry decodes its body as an `OidcExchangeIn`).
+#[derive(Serialize)]
+pub(crate) struct OidcExchange {
+    state: String,
+    code: String,
+}
+
+impl OidcExchange {
+    /// The exchange of a sign-in's (or a switch's) code, coming back to
+    /// the browser that began it: the only way to make one.
+    pub(crate) fn of(bound: crate::auth::Bound, code: String) -> OidcExchange {
+        use fragment_core::roundtrip::Trip;
+        assert!(matches!(bound.trip(), Trip::SignIn | Trip::Switch), "a provider's code finishes a sign-in or a switch");
+        OidcExchange { state: bound.state().to_string(), code }
+    }
+}
+
+/// `OidcExchange`'s body as the Registry decodes it.
+#[derive(Deserialize)]
+pub(in crate::registry) struct OidcExchangeIn {
+    pub(in crate::registry) state: String,
+    pub(in crate::registry) code: String,
+}
+
+impl Call for OidcExchange {
+    const PATH: &'static str = "/login/oidc";
     type Answer = Exchanged;
 }
 
@@ -807,6 +856,10 @@ pub(crate) struct Logout {
 pub(crate) struct LoggedOut {
     /// WorkOS's session, to end there too.
     pub workos_sid: Option<String>,
+    /// An OpenID Connect sign-in's id_token: the hint its provider's logout
+    /// takes (RP-Initiated Logout 1.0).
+    #[serde(default)]
+    pub id_token: Option<String>,
 }
 
 impl Call for Logout {
@@ -969,4 +1022,183 @@ pub(crate) struct KeyAdded {
 impl Call for ApproveKey {
     const PATH: &'static str = "/cli/add";
     type Answer = KeyAdded;
+}
+
+// ---- people's own nodes (bring your own computer, experimental: nodes.rs) ----
+
+/// `POST /nodes/pair/begin`: a node asks to be paired (unsigned: the router
+/// read its body; the registry refuses it where BYOC is off).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PairBegin {
+    pub name: String,
+    pub arch: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PairBegun {
+    pub user_code: String,
+    pub device_code: String,
+    pub expires_at: i64,
+    pub interval_s: u32,
+}
+
+impl Call for PairBegin {
+    const PATH: &'static str = "/nodes/pair/begin";
+    type Answer = PairBegun;
+}
+
+/// `POST /nodes/pair/show`: the pairing a person's code names, for its
+/// page, their platform session checked in the same turn (a wrong code is
+/// counted against them).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PairShow {
+    pub token: String,
+    pub code: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PairShown {
+    pub user_code: String,
+    pub name: String,
+    pub arch: String,
+    pub expires_at: i64,
+}
+
+impl Call for PairShow {
+    const PATH: &'static str = "/nodes/pair/show";
+    type Answer = PairShown;
+}
+
+/// `POST /nodes/pair/approve`: the person approves the pairing their code
+/// names (the router checked the form came from the platform's own page),
+/// and, when they say so (`prefer`), chooses the node for their new
+/// computers in the same step: a person with no computer yet gets their
+/// first one there (the shell starts it as they pick a username, before
+/// settings could be reached).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PairApprove {
+    pub token: String,
+    pub code: String,
+    #[serde(default)]
+    pub prefer: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PairApproved {
+    pub node: String,
+    pub name: String,
+}
+
+impl Call for PairApprove {
+    const PATH: &'static str = "/nodes/pair/approve";
+    type Answer = PairApproved;
+}
+
+/// `POST /nodes/pair/poll`: a node's poll, by its device code.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PairPoll {
+    pub device_code: String,
+}
+
+impl Call for PairPoll {
+    const PATH: &'static str = "/nodes/pair/poll";
+    type Answer = fragment_proto::nodes::PairPolled;
+}
+
+/// One of a person's own nodes.
+#[derive(Serialize, Deserialize, Clone)]
+pub(crate) struct OwnNode {
+    pub id: String,
+    pub name: String,
+    pub arch: String,
+    pub paired_at: i64,
+    pub revoked_at: Option<i64>,
+}
+
+/// A person's own nodes, the node they chose, and whether BYOC is on.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct OwnNodesAnswer {
+    pub byoc: bool,
+    pub nodes: Vec<OwnNode>,
+    pub prefer: Option<String>,
+}
+
+/// `POST /nodes/own`: a person's own nodes (`owner`: resolved by the router).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct OwnNodes {
+    pub owner: String,
+}
+
+impl Call for OwnNodes {
+    const PATH: &'static str = "/nodes/own";
+    type Answer = OwnNodesAnswer;
+}
+
+/// A person's node as the platform's own code needs it: its secret while it
+/// is live (`None` once revoked). Never an API's answer.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PairedRecord {
+    pub id: String,
+    pub owner: String,
+    pub name: String,
+    pub arch: String,
+    pub revoked: bool,
+    pub secret: Option<String>,
+}
+
+/// `POST /nodes/node`: one person's node by id (the uplink's dial, a
+/// computer's container on it), or none.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PairedNode {
+    pub id: String,
+}
+
+impl Call for PairedNode {
+    const PATH: &'static str = "/nodes/node";
+    type Answer = Option<PairedRecord>;
+}
+
+/// `POST /nodes/revoke`: its owner revokes a node of theirs.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct RevokeNode {
+    pub owner: String,
+    pub id: String,
+}
+
+impl Call for RevokeNode {
+    const PATH: &'static str = "/nodes/revoke";
+    type Answer = OwnNodesAnswer;
+}
+
+/// `POST /nodes/prefer`: where a person's new computers run (`None`: the
+/// deployment's rule).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PreferNode {
+    pub owner: String,
+    pub node: Option<String>,
+}
+
+impl Call for PreferNode {
+    const PATH: &'static str = "/nodes/prefer";
+    type Answer = OwnNodesAnswer;
+}
+
+/// `POST /nodes/choice`: what placing a person's new computer needs.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ChoiceOf {
+    pub owner: String,
+}
+
+/// The node they chose (`None`: the deployment's rule); its record when it
+/// is theirs and still usable; why not, when it is theirs and is not.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ChoiceAnswer {
+    pub prefer: Option<String>,
+    pub own: Option<PairedRecord>,
+    pub gone: Option<String>,
+}
+
+impl Call for ChoiceOf {
+    const PATH: &'static str = "/nodes/choice";
+    type Answer = ChoiceAnswer;
 }

@@ -22,7 +22,8 @@
 //! column is never defaulted, and a row naming an identity that is not
 //! there is a host fault, not a 404.
 //!
-//! People come from sign-in, and browsers hold sessions: `signin.rs`.
+//! People come from sign-in, and browsers hold sessions: `signin.rs`, and
+//! an OpenID Connect provider's exchange, `oidc_signin.rs`.
 //! An operator's wipe of a person is recorded here, locks them while it
 //! runs, and ends with their rows: `wipe.rs`.
 
@@ -48,15 +49,17 @@ pub(crate) mod admin;
 pub(crate) mod billing;
 pub(crate) mod calls;
 mod invites;
+mod nodes;
 pub(crate) mod offers;
 pub(crate) mod orgs;
 pub(crate) mod seats;
 pub(crate) mod trials;
 mod signin;
+mod oidc_signin;
 mod connection_signin;
 pub(crate) mod wipe;
 use calls::{
-    Active, AddKey, AgentForgotten, ApproveKey, Begin, By, Call, CheckKey, CliBegin, CliCodeOf, EndSession, Exchange, ForgetAgent, Hold, InviteEmail, Logout, Lookup, Mint, Picture, PictureOf, Profile, ProfileAgent, Profiles,
+    Active, AddKey, AgentForgotten, ApproveKey, Begin, By, Call, CheckKey, CliBegin, CliCodeOf, EndSession, Exchange, ForgetAgent, Hold, InviteEmail, Logout, Lookup, Mint, OidcExchange, Picture, PictureOf, Profile, ProfileAgent, Profiles,
     ProfilesAnswer, Redeem, RegisterAgent, Resolve, RevokeKey, Session, SetPicture, SubjectOf, TestHook, View, WipeBegin, WipeBilling, WipeLook, WipeStep,
     DownFor, TEST_DOWN_FOR_MAX, TEST_HOLD_MAX_MS,
 };
@@ -855,9 +858,10 @@ impl RegistryCell {
             SetPicture::PATH => reply::<SetPicture>(self.set_picture(body(&bytes)?)),
             Begin::PATH => reply::<Begin>(self.begin(body(&bytes)?).await),
             Exchange::PATH => reply::<Exchange>(self.exchange(body(&bytes)?).await),
+            OidcExchange::PATH => reply::<OidcExchange>(self.oidc_exchange(body(&bytes)?).await),
             Session::PATH => reply::<Session>(self.session(body(&bytes)?)),
             EndSession::PATH => reply::<EndSession>(self.end_site_session(body(&bytes)?)),
-            Logout::PATH => reply::<Logout>(self.logout(body(&bytes)?)),
+            Logout::PATH => reply::<Logout>(self.logout(body(&bytes)?).await),
             Mint::PATH => reply::<Mint>(self.mint(body(&bytes)?).await),
             Redeem::PATH => reply::<Redeem>(self.redeem(body(&bytes)?)),
             CliBegin::PATH => reply::<CliBegin>(self.cli_begin(body(&bytes)?).await),
@@ -867,6 +871,15 @@ impl RegistryCell {
             WipeBegin::PATH => reply::<WipeBegin>(self.wipe_begin(body(&bytes)?)),
             WipeStep::PATH => reply::<WipeStep>(self.wipe_step(body(&bytes)?)),
             WipeBilling::PATH => reply::<WipeBilling>(self.wipe_billing(body(&bytes)?).await),
+            calls::PairBegin::PATH => reply::<calls::PairBegin>(self.pair_begin(body(&bytes)?)),
+            calls::PairShow::PATH => reply::<calls::PairShow>(self.pair_show(body(&bytes)?)),
+            calls::PairApprove::PATH => reply::<calls::PairApprove>(self.pair_approve(body(&bytes)?).await),
+            calls::PairPoll::PATH => reply::<calls::PairPoll>(self.pair_poll(body(&bytes)?).await),
+            calls::OwnNodes::PATH => reply::<calls::OwnNodes>(self.own_nodes_of(body(&bytes)?)),
+            calls::PairedNode::PATH => reply::<calls::PairedNode>(self.paired_node(body(&bytes)?).await),
+            calls::RevokeNode::PATH => reply::<calls::RevokeNode>(self.revoke_node(body(&bytes)?)),
+            calls::PreferNode::PATH => reply::<calls::PreferNode>(self.prefer_node(body(&bytes)?)),
+            calls::ChoiceOf::PATH => reply::<calls::ChoiceOf>(self.choice_of(body(&bytes)?).await),
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),
         }
     }

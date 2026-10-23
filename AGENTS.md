@@ -103,7 +103,7 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   a fresh `wrangler dev` node (workerd) and the in-process fakes, which
   stand only at vendor boundaries (sections, in order:
   auth, create, lockdown, keys, members, identities, signin, levers, secrets,
-  delegation, files, deploy, templates, share, faces, isolation, frames, ops, public,
+  delegation, files, deploy, codestore, templates, share, faces, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
   brain, doc, push, ai, ledger, transcribe, finite-private, orgs, billing,
@@ -157,6 +157,9 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   died. The run's client never reuses a connection idle 4 s: workerd
   closes one idle 5 s, and a request written onto it as it closes is
   lost (`POOL_IDLE`, `crates/e2e/src/api.rs`).
+  `FRAGMENT_E2E_RUNTIME=celld` (with `CELLD_BIN`) runs the node on
+  `celld dev` instead, the self-hosted lane's runtime (docs/self-host.md,
+  seam 1): no computers there, each check it cannot make a skip saying why.
 - `cargo xtask e2e --shard <k>/4`: one of the four shards CI runs, each
   on its own runner with its own build and node (`SHARDS` in
   `crates/e2e/src/lanes/mod.rs`: every section in exactly one, a host
@@ -233,6 +236,12 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   `FRAGMENT_NODE_LOGS=1` adds wrangler's debug logs). Point the CLI at it with
   `FRAGMENT_HOST=http://127.0.0.1:8790` and run `fragment login` once. Dev fleets let jobs
   fetch local addresses (`FRAGMENT_EGRESS_LOCAL=allow`).
+  `--runtime celld` runs the stack on `celld dev` (`CELLD_BIN`;
+  docs/self-host.md, seam 1). `FRAGMENT_MODELS_FILE` puts the model
+  route's slots where a deployment's `models` says (a self-hosted model's,
+  say), its key in the file `FRAGMENT_MODEL_KEY_FILE` names.
+  `--lan` serves the stack on celld to the home network as an intranet
+  (crates/lan, xtask/src/lan.rs; docs/self-host-lan.md, the guide).
 - `cargo xtask try <todo|inbox|notes|doc> [name]` (with `cargo xtask dev` running):
   creates and deploys a fragment from a template under
   `target/devstack/try/` (never in the repo) and prints the link to open,
@@ -307,7 +316,8 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   `embed`, for the CLI and xtask),
   `crates/fakes` (code.storage, Workers AI, WorkOS, Email Sending, a push service),
 
-  `crates/devstack`, `crates/e2e`.
+  `crates/devstack`, `crates/e2e`, `crates/lan` (the LAN mode's CA, DNS,
+  front door and Dex).
 - `images/` (the computer images: the bridge, the stub, our Hermes image;
   docs/bridge.md) is its own workspace: `cargo test --workspace` and
   `cargo clippy --workspace --all-targets -- -D warnings` there (CI:

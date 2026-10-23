@@ -197,18 +197,26 @@ fn answers_as_pin(node: &Path) -> Result<(bool, String), io::Error> {
     for var in VARS_CLEARED {
         cmd.env_remove(var);
     }
+    let out = output_of_fresh(&mut cmd)?;
+    let answer = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok((out.status.success() && answer == format!("v{NODE_VERSION}"), answer))
+}
+
+/// `cmd`'s output, its program one just written: run again a few times,
+/// briefly, on ETXTBSY alone (`answers_as_pin` says why). Every pinned
+/// tool's first run is one (the Node, OpenBao's `bao`, the card browser).
+pub(crate) fn output_of_fresh(cmd: &mut Command) -> Result<std::process::Output, io::Error> {
     let mut tried = 1;
-    let out = loop {
+    // bounded: BUSY_TRIES runs
+    loop {
         match cmd.output() {
             Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tried < BUSY_TRIES => {
                 std::thread::sleep(BUSY_PAUSE * tried);
                 tried += 1;
             }
-            done => break done?,
+            done => return done,
         }
-    };
-    let answer = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    Ok((out.status.success() && answer == format!("v{NODE_VERSION}"), answer))
+    }
 }
 
 /// The pin's directory as a Node, once it answers as the pin.
@@ -229,22 +237,44 @@ fn installed(home: &Path) -> Result<Node, NodeError> {
 /// An exclusive hold on `tools` for fetching and installing (`xtask dev`
 /// and an e2e may start at once); the OS releases it when the holder exits.
 fn lock(tools: &Path) -> Result<fs::File, NodeError> {
-    fs::create_dir_all(tools).map_err(io_error(format!("create {}", tools.display())))?;
+    lock_tools(tools, "Node").map_err(|(what, source)| NodeError::Io { what, source })
+}
+
+/// The hold `lock` takes, for whatever is set up in `tools` (`setting_up`
+/// names it while another run holds it); an error says what failed.
+pub(crate) fn lock_tools(tools: &Path, setting_up: &str) -> Result<fs::File, (String, io::Error)> {
+    fs::create_dir_all(tools).map_err(|e| (format!("create {}", tools.display()), e))?;
     let path = tools.join(".lock");
-    let file = fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path).map_err(io_error(format!("open {}", path.display())))?;
+    let file = fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path).map_err(|e| (format!("open {}", path.display()), e))?;
     match file.try_lock() {
         Ok(()) => {}
         Err(fs::TryLockError::WouldBlock) => {
-            eprintln!("waiting for another run setting up Node in {}", tools.display());
-            file.lock().map_err(io_error(format!("lock {}", path.display())))?;
+            eprintln!("waiting for another run setting up {setting_up} in {}", tools.display());
+            file.lock().map_err(|e| (format!("lock {}", path.display()), e))?;
         }
-        Err(fs::TryLockError::Error(e)) => return Err(io_error(format!("lock {}", path.display()))(e)),
+        Err(fs::TryLockError::Error(e)) => return Err((format!("lock {}", path.display()), e)),
     }
     Ok(file)
 }
 
 fn download(url: &str) -> Result<Vec<u8>, NodeError> {
-    let failed = |detail: String| NodeError::Fetch { url: url.to_string(), detail };
+    match fetch_capped(url, TARBALL_BYTES_MAX) {
+        Ok(bytes) => Ok(bytes),
+        Err(Fetched::TooLarge) => Err(NodeError::TooLarge { url: url.to_string() }),
+        Err(Fetched::Failed(detail)) => Err(NodeError::Fetch { url: url.to_string(), detail }),
+    }
+}
+
+/// Why `fetch_capped` has no bytes.
+pub(crate) enum Fetched {
+    Failed(String),
+    /// More than its cap: refused unread past it.
+    TooLarge,
+}
+
+/// `url`'s body, whole, when it is at most `max` bytes.
+pub(crate) fn fetch_capped(url: &str, max: u64) -> Result<Vec<u8>, Fetched> {
+    let failed = |detail: String| Fetched::Failed(detail);
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(FETCH_CONNECT_TIMEOUT)
         .timeout(FETCH_TIMEOUT)
@@ -255,14 +285,14 @@ fn download(url: &str) -> Result<Vec<u8>, NodeError> {
         return Err(failed(response.status().to_string()));
     }
     let mut bytes = Vec::new();
-    response.take(TARBALL_BYTES_MAX + 1).read_to_end(&mut bytes).map_err(|e| failed(e.to_string()))?;
-    if bytes.len() as u64 > TARBALL_BYTES_MAX {
-        return Err(NodeError::TooLarge { url: url.to_string() });
+    response.take(max + 1).read_to_end(&mut bytes).map_err(|e| failed(e.to_string()))?;
+    if bytes.len() as u64 > max {
+        return Err(Fetched::TooLarge);
     }
     Ok(bytes)
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -308,7 +338,7 @@ fn remove_dir_if_present(dir: &Path) -> Result<(), NodeError> {
 }
 
 /// Whether a tarball entry's path lies inside its one directory, `top`.
-fn inside(path: &Path, top: &str) -> bool {
+pub(crate) fn inside(path: &Path, top: &str) -> bool {
     let mut components = path.components();
     let first_is_top = matches!(components.next(), Some(Component::Normal(first)) if first == top);
     if first_is_top {

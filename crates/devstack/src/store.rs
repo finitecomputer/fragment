@@ -406,6 +406,10 @@ pub struct Bound {
     pub codestorage_key: String,
     /// WorkOS's client id and API key: sign-in (a local fleet may run without).
     pub workos: Option<(String, String)>,
+    /// The OpenID Connect client's secret sign-in authenticates with, where
+    /// a provider signs people in and its client has one (docs/self-host.md,
+    /// seam 4).
+    pub oidc_client_secret: Option<String>,
     /// Stripe's restricted key and the deployment's webhook signing secret:
     /// seats sold (docs/billing.md; without them, seats are comped only).
     /// A branch deployment whose deploy makes its endpoint binds no store
@@ -435,6 +439,7 @@ impl Bound {
             host_secret_previous: None,
             codestorage_key: "fragment-codestorage-private-key".into(),
             workos: workos.then(|| ("fragment-workos-client-id".into(), "fragment-workos-api-key".into())),
+            oidc_client_secret: None,
             stripe: stripe.then(|| ("fragment-stripe-key".into(), Some("fragment-stripe-webhook-secret".into()))),
             operator_keys: operator_keys.iter().map(|p| (p.to_string(), format!("fragment-{p}-api-key"))).collect(),
             connection_secrets: vec![],
@@ -452,6 +457,9 @@ impl Bound {
         if let Some((client, key)) = &self.workos {
             bound.push((bindings::WORKOS_CLIENT.to_string(), client.as_str()));
             bound.push((bindings::WORKOS_KEY.to_string(), key.as_str()));
+        }
+        if let Some(name) = &self.oidc_client_secret {
+            bound.push((bindings::OIDC_CLIENT_SECRET.to_string(), name.as_str()));
         }
         if let Some((key, webhook)) = &self.stripe {
             bound.push((bindings::STRIPE_KEY.to_string(), key.as_str()));

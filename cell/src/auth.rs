@@ -1,6 +1,10 @@
 //! Sign-in at the router (phase 4 slice B; the registry's half is
 //! `registry/signin.rs`). WorkOS AuthKit authenticates people on the
 //! platform origin; the platform holds no key for them, only sessions.
+//! Where an OpenID Connect provider is configured (`Config::oidc`:
+//! docs/self-host.md, seam 4), it does in WorkOS's place: `/auth/login`,
+//! `/auth/switch`, `/auth/callback` and the provider's leg of
+//! `/auth/logout` are oidc.rs's, on the same round trips and sessions.
 //!
 //! Platform origin (`/`, `/settings` and `/welcome` are the shell's page: shell.rs):
 //!
@@ -88,7 +92,7 @@ pub const SESSION_COOKIE: &str = "fragment_session";
 pub const SITE_COOKIE: &str = "fragment_site";
 /// A frame's session cookie: partitioned, for the page that framed it.
 pub const FRAME_COOKIE: &str = "fragment_frame";
-const LOGIN_HINT_MAX: usize = 320;
+pub(crate) const LOGIN_HINT_MAX: usize = 320;
 const INVITATION_TOKEN_MAX: usize = 256;
 /// `/cli`'s forms: a form token and a code, or what a person typed.
 const CLI_FORM_MAX_BYTES: usize = 1024;
@@ -204,7 +208,7 @@ pub(crate) fn esc(s: &str) -> String {
 
 /// Where a browser that signed in goes back to: the path it brought, on
 /// `base`'s origin and never another (`site::return_url`).
-fn back_to(base: &str, raw: Option<&str>) -> CellResult<String> {
+pub(crate) fn back_to(base: &str, raw: Option<&str>) -> CellResult<String> {
     let base = Url::parse(base).map_err(|e| CellError::host(format!("{base}: {e}")))?;
     Ok(site::return_url(&base, raw).into())
 }
@@ -318,7 +322,7 @@ fn workos_logout(api: &str, sid: &str, platform: &str) -> String {
 
 // Commit a page before leaving: Chromium applies the shell's
 // form-action 'self' to a POST's HTTP redirects.
-fn leave_form(to: &str, title: &str, cookies: &[String]) -> CellResult<Response> {
+pub(crate) fn leave_form(to: &str, title: &str, cookies: &[String]) -> CellResult<Response> {
     let mut resp = page(200, title, &format!("<p><a href=\"{}\">Continue</a></p>", esc(to)))?;
     resp.headers_mut().set("refresh", &format!("0; url={to}"))?;
     resp.headers_mut().set("referrer-policy", "no-referrer")?;
@@ -332,10 +336,13 @@ fn leave_form(to: &str, title: &str, cookies: &[String]) -> CellResult<Response>
 /// `trip`'s: a sign-in's, or a switch's.
 async fn begin(env: &Env, cfg: &Config, url: &Url, trip: Trip) -> CellResult<Response> {
     assert!(matches!(trip, Trip::SignIn | Trip::Switch), "a sign-in is begun as one, or as a switch");
+    if let Some(o) = cfg.oidc() {
+        return crate::oidc::begin(env, cfg, o, url, trip).await;
+    }
     let workos = crate::keys::workos(env, cfg).await?;
     let platform = cfg.platform();
     let return_to = site::return_path(query(url, "return").as_deref());
-    let began = ask_registry(env, &calls::Begin { return_to }).await?;
+    let began = ask_registry(env, &calls::Begin { return_to, oidc: false }).await?;
     let state = began.state;
     let mut to = format!(
         "{}/user_management/authorize?client_id={}&redirect_uri={}&response_type=code&provider=authkit&state={state}",
@@ -363,6 +370,9 @@ async fn begin(env: &Env, cfg: &Config, url: &Url, trip: Trip) -> CellResult<Res
 }
 
 async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
+    if let Some(o) = cfg.oidc() {
+        return crate::oidc::callback(req, env, cfg, o, url).await;
+    }
     let workos = crate::keys::workos(env, cfg).await?;
     if let Some(error) = query(url, "error") {
         let why = query(url, "error_description").unwrap_or_default();
@@ -409,12 +419,16 @@ pub async fn platform(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, 
                 same_origin(&req, &platform)?;
                 let clear = set_cookie(SESSION_COOKIE, "", "/", 0, secure(url));
                 let Some(token) = cookie_of(&req, SESSION_COOKIE, secure(url), "/")? else { return redirect("/", &[clear]) };
-                let sid = match ask_registry(env, &calls::Logout { token }).await {
-                    Ok(out) => out.workos_sid,
+                let out = match ask_registry(env, &calls::Logout { token }).await {
+                    Ok(out) => Some(out),
                     Err(e) if e.code == ErrorCode::Unauthenticated => None,
                     Err(e) => return Err(e),
                 };
-                match (sid, cfg.workos()) {
+                // a session ended here, then the provider's: an OpenID Connect one's (oidc.rs), or WorkOS's
+                if let (Some(out), Some(o)) = (&out, cfg.oidc()) {
+                    return crate::oidc::logout(cfg, o, out.id_token.as_deref(), clear).await;
+                }
+                match (out.and_then(|out| out.workos_sid), cfg.workos()) {
                     (Some(sid), Ok(w)) => leave_form(&workos_logout(&w.api, &sid, &platform), "Signing out", &[clear]),
                     _ => redirect("/", &[clear]),
                 }

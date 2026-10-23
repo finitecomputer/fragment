@@ -20,7 +20,7 @@ fn bytes_of(n: usize, seed: u8) -> Vec<u8> {
 }
 
 pub fn blobs(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("blobs", &[crate::Need::Fakes]) {
+    if !s.section("blobs", &[crate::Need::Fakes, crate::Need::StoreFake]) {
         return Ok(());
     }
     let home = s.dir("blobs-home");

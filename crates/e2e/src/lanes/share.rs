@@ -84,7 +84,7 @@ fn headers(r: &Reply) -> String {
 }
 
 /// A form a sharing page posts, from `origin`, with `session`'s cookie.
-fn post(api: &Api, path: &str, session: &str, origin: &str, fields: &[(&str, &str)]) -> Result<Reply> {
+pub(super) fn post(api: &Api, path: &str, session: &str, origin: &str, fields: &[(&str, &str)]) -> Result<Reply> {
     let body = fields.iter().map(|(k, v)| format!("{k}={}", url_enc(v))).collect::<Vec<_>>().join("&");
     api.call(Call {
         method: "POST",
@@ -98,7 +98,7 @@ fn post(api: &Api, path: &str, session: &str, origin: &str, fields: &[(&str, &st
 }
 
 /// A page's form token once its buttons have armed.
-fn armed(api: &Api, path: &str, session: &str) -> Result<String> {
+pub(super) fn armed(api: &Api, path: &str, session: &str) -> Result<String> {
     let r = with_session(api, "GET", path, session)?;
     anyhow::ensure!(r.status == 200, "GET {path}: {r}");
     std::thread::sleep(Duration::from_millis(form::DELAY_MS as u64 + 100));

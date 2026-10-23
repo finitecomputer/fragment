@@ -201,7 +201,7 @@ pub(super) fn logged(s: &Suite, event: &str) -> usize {
 }
 
 pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("ledger", &[crate::Need::Fakes, crate::Need::Deployment, crate::Need::Levers]) {
+    if !s.section("ledger", &[crate::Need::Fakes, crate::Need::StoreFake, crate::Need::Deployment, crate::Need::Levers]) {
         return Ok(());
     }
     let wait = Duration::from_secs(40);
@@ -926,19 +926,35 @@ fn vision(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let shrunk = png_url(fragment_core::models::IMAGE_DATA_URL_MAX_BYTES);
     let r = api.signed(hand, "POST", route, Some(&look(&shrunk)))?;
     let sent = s.ai.calls().get(calls).map(|c| c.body["messages"][0]["content"][1]["image_url"]["url"].as_str().map_or(0, str::len));
+    // its charge, the second of this section's (the refused calls between
+    // charge nothing), lands after its answer: on celld's meter queue a
+    // second or more later (docs/self-host.md, found 38), so the count the
+    // over-cap call is held to below waits for it
+    let charged_too = s.eventually(wait, || aig().len() == before + 2);
     s.ok(
-        &format!("a call carrying Hermes' shrunk screenshot ({} bytes of image) fits the route and reaches the model whole", shrunk.len()),
-        r.status == 200 && sent == Some(shrunk.len()),
-        json!({ "status": r.status, "sent": sent, "message": r.message() }),
+        &format!("a call carrying Hermes' shrunk screenshot ({} bytes of image) fits the route, reaches the model whole, and is charged", shrunk.len()),
+        r.status == 200 && sent == Some(shrunk.len()) && charged_too,
+        json!({ "status": r.status, "sent": sent, "message": r.message(), "entries": aig().len() - before }),
     );
     let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let over = png_url(fragment_core::models::MODEL_BODY_MAX_BYTES + 1024);
-    let r = api.signed(hand, "POST", route, Some(&look(&over)))?;
-    s.ok(
-        "one past the route's cap is refused, 413, nothing charged or sent",
-        r.status == 413 && s.ai.calls().len() == calls && aig().len() == before,
-        json!({ "status": r.status, "message": r.message(), "calls": s.ai.calls().len() - calls }),
-    );
+    let sent = api.signed(hand, "POST", route, Some(&look(&over)));
+    let untouched = s.ai.calls().len() == calls && aig().len() == before;
+    match sent {
+        Ok(r) => s.ok(
+            "one past the route's cap is refused, 413, nothing charged or sent",
+            r.status == 413 && untouched,
+            json!({ "status": r.status, "message": r.message(), "calls": s.ai.calls().len() - calls }),
+        ),
+        // celld answers the 413 from the declared length at once and closes
+        // the connection on the body it never read, so this client's upload
+        // breaks before it reads the answer (docs/self-host.md, found 31)
+        Err(e) if s.on_celld() => {
+            s.skip("one past the route's cap is refused, 413", "celld closes the connection under the upload it refused, so this client never reads its 413 (docs/self-host.md, found 31)");
+            s.ok("one past the route's cap is charged nothing and sent nowhere", untouched, format!("{e:#}"));
+        }
+        Err(e) => return Err(e),
+    }
     Ok(())
 }
 
@@ -1082,6 +1098,9 @@ fn transcription(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         r.status == 200 && r.text == "hello from a voice memo" && asked == Some(json!("de")) && r.headers.get("content-type").is_some_and(|t| t.to_str().unwrap_or("").starts_with("text/plain")),
         json!({ "status": r.status, "answer": r.text, "language": asked }),
     );
+    // its charge lands before the refusals are counted: a ledger's queue
+    // may take longer than `quiet`'s second to deliver it (celld's does)
+    s.eventually(wait, || aig().len() == before + 2);
     let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let over = vec![0u8; fragment_core::transcribe::AUDIO_MAX_BYTES + 1];
     let r = transcription_call(api, hand, &[("model", "whisper")], &over)?;

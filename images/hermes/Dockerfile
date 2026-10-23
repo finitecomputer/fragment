@@ -91,10 +91,11 @@ COPY templates/todo templates/todo
 COPY crates/devstack/Cargo.toml crates/devstack/Cargo.toml
 COPY crates/e2e/Cargo.toml crates/e2e/Cargo.toml
 COPY crates/fakes/Cargo.toml crates/fakes/Cargo.toml
+COPY crates/lan/Cargo.toml crates/lan/Cargo.toml
 COPY xtask/Cargo.toml xtask/Cargo.toml
 RUN --mount=type=cache,id=cli-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cli-target,target=/src/target \
-    for m in crates/devstack crates/e2e crates/fakes xtask; do mkdir -p "$m/src" && : > "$m/src/lib.rs"; done \
+    for m in crates/devstack crates/e2e crates/fakes crates/lan xtask; do mkdir -p "$m/src" && : > "$m/src/lib.rs"; done \
  && find cli crates templates -type f -exec touch {} + \
  && cargo build --release --locked -p fragment-cli \
  && mkdir -p /out && cp target/release/fragment /out/

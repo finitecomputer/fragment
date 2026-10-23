@@ -17,7 +17,7 @@ const FILES_APP: &[u8] = include_bytes!("../../fixtures/files.mjs");
 const FILES_JSON: &[u8] = include_bytes!("../../fixtures/files.json");
 
 pub fn appfiles(s: &mut Suite, api: &crate::api::Api) -> Result<()> {
-    if !s.section("appfiles", &[crate::Need::Fakes, crate::Need::Levers]) {
+    if !s.section("appfiles", &[crate::Need::Fakes, crate::Need::StoreFake, crate::Need::Levers]) {
         return Ok(());
     }
     let owner = api.person()?;

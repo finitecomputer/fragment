@@ -14,6 +14,7 @@ mod chat;
 mod author;
 mod billing;
 mod checkout;
+mod codestore;
 mod computers;
 mod control;
 mod credentials;
@@ -37,6 +38,8 @@ mod members;
 mod migrations;
 mod notes;
 mod orgs;
+mod pairing;
+mod placement;
 mod plane;
 mod posts;
 mod restart;
@@ -75,6 +78,7 @@ const LANES: &[Lane] = &[
     delegation::delegation,
     plane::files,
     plane::deploy,
+    codestore::codestore,
     templates::templates,
     share::share,
     faces::faces,
@@ -126,6 +130,8 @@ const LANES: &[Lane] = &[
     export::export,
     chat::chat,
     shell::shell_ui,
+    placement::placement,
+    pairing::pairing,
     wipe::wipe,
     hermes::hermes,
     agent_smoke::agent_smoke,
@@ -155,10 +161,10 @@ const LANES: &[Lane] = &[
 /// passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [
     &["shell", "computers", "export", "hermes", "agent-smoke", "agent-ask", "agent-restart", "bot-mode", "checkout"],
-    &["finite-private", "chat", "shell-ui", "wipe", "sync", "migrations", "restart", "connections"],
+    &["finite-private", "chat", "shell-ui", "placement", "pairing", "wipe", "sync", "migrations", "restart", "connections"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
-        "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "faces", "isolation", "frames",
+        "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "codestore", "templates", "share", "faces", "isolation", "frames",
         "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "doc", "push", "ai", "ledger", "transcribe", "orgs", "billing", "billing-page", "trials", "admin", "admin-page",
     ],
 ];

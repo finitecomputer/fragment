@@ -196,7 +196,7 @@ fn mail(s: &mut Suite, api: &Api) -> Result<()> {
 /// email through WorkOS (the fake) is refused: an e2e person is under an
 /// issuer of their own, and an email names one person (decision 45).
 fn not_a_workos_person(s: &mut Suite, api: &Api, email: &str) -> Result<()> {
-    let r = api.workos_callback(email)?;
+    let r = api.provider_callback(email)?;
     s.ok(
         "the same email through WorkOS reaches no one: it is the e2e person's, and an email names one person (409, on a page)",
         r.status == 409 && r.header("content-type").starts_with("text/html") && String::from_utf8_lossy(&r.bytes).contains("another account"),

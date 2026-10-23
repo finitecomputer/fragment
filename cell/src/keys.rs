@@ -1,8 +1,9 @@
 //! The deployment's keys, held in its Cloudflare Secrets Store and bound to
 //! the platform Worker by name (docs/secrets.md; the bindings' names are
 //! `fragment_core::secrets_store`'s): the host secret that seals values at
-//! rest, the code.storage org key, WorkOS's client id and API key, Stripe's,
-//! the keys of the models the route runs on OpenAI-compatible APIs (Finite
+//! rest, the code.storage org key, WorkOS's client id and API key, an
+//! OpenID Connect client's secret (`oidc_token`), Stripe's, the keys of
+//! the models the route runs on OpenAI-compatible APIs (Finite
 //! Private's), and the operator's keys a computer's swap sends; and what is
 //! derived from the
 //! host secret: the key placeholders' tags are made with (`tag_keys`).
@@ -255,6 +256,36 @@ pub async fn workos_authenticate(env: &Env, api: &str, client_id: &str, code: &s
         o.remove("refresh_token");
     }
     Ok((status, answer))
+}
+
+/// An OpenID Connect provider's code exchanged (RFC 6749 4.1.3, with
+/// PKCE's verifier), the client authenticated with its secret (bound as
+/// `OIDC_CLIENT_SECRET`; a public client has none, and proves itself by
+/// PKCE alone) as the deployment or the provider says
+/// (`Provider::client_auth`): (status, the answer's bytes, at most
+/// `oidc::METADATA_MAX_BYTES`). The answer holds tokens: it is read for its
+/// id_token, never logged, and no redirect is followed.
+pub async fn oidc_token(env: &Env, provider: &fragment_core::oidc::Provider, cfg: &crate::config::OidcConfig, code: &str, redirect_uri: &str, verifier: &str) -> CellResult<(u16, Vec<u8>)> {
+    use fragment_core::oidc;
+    let secret = secret(env, store::OIDC_CLIENT_SECRET).await?;
+    let auth = provider.client_auth(cfg.auth, secret.is_some()).map_err(|e| CellError::host(e.to_string()))?;
+    let request = oidc::token_request(auth, &cfg.client_id, secret.as_deref(), code, redirect_uri, verifier);
+    let headers = Headers::new();
+    headers.set("content-type", "application/x-www-form-urlencoded")?;
+    headers.set("accept", "application/json")?;
+    if let Some(a) = &request.authorization {
+        headers.set("authorization", a)?;
+    }
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post).with_headers(headers).with_redirect(worker::RequestRedirect::Manual).with_body(Some(request.body.into()));
+    let req = Request::new_with_init(&provider.token_endpoint, &init)?;
+    let a = crate::cs::fetch_all(req, VENDOR_TIMEOUT, oidc::METADATA_MAX_BYTES)
+        .await
+        .map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the sign-in provider's token endpoint did not answer: {}", e.message)))?;
+    if a.cut {
+        return Err(CellError::new(ErrorCode::UpstreamFailed, format!("the sign-in provider's token answer is over {} bytes", oidc::METADATA_MAX_BYTES)));
+    }
+    Ok((a.status, a.body))
 }
 
 /// A WorkOS Pipes access token for `user`'s account at `provider`

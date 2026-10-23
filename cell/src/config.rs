@@ -2,8 +2,8 @@
 //! rendered `vars` at deploy), built once per isolate (`CONFIG`). Nothing about a fleet is a constant in code
 //! (docs/cloudflare-v1.md, decision 4): the hostname suffix and the code.storage org
 //! arrive here. The fleet's secrets do not: the host secret, the
-//! code.storage key, and WorkOS's client id and API key are Secrets Store
-//! bindings, read only by keys.rs.
+//! code.storage key, WorkOS's client id and API key, and an OpenID Connect
+//! client's secret are Secrets Store bindings, read only by keys.rs.
 
 use std::sync::OnceLock;
 
@@ -29,6 +29,47 @@ pub struct CodeStorageConfig {
 pub struct WorkOsConfig {
     /// `WORKOS_API_URL` (default https://api.workos.com; dev and the e2e: the fake).
     pub api: String,
+}
+
+/// Sign-in with any OpenID Connect provider (docs/self-host.md, seam 4):
+/// Dex, Keycloak, Authentik, ADFS, Okta, Entra. Configured by
+/// `FRAGMENT_OIDC_ISSUER`, it signs people in in WorkOS's place (WorkOS,
+/// bound beside it, serves Pipes' connections alone). A sign-in is
+/// `(issuer URL, sub)`. Its client secret, when it has one, is bound as
+/// `secrets_store::OIDC_CLIENT_SECRET`, read only by keys.rs.
+pub struct OidcConfig {
+    /// `FRAGMENT_OIDC_ISSUER`: the provider's issuer, exactly as its
+    /// id_tokens' `iss` says it (its metadata is at
+    /// `<issuer>/.well-known/openid-configuration`).
+    pub issuer: String,
+    /// `FRAGMENT_OIDC_CLIENT_ID`.
+    pub client_id: String,
+    /// `FRAGMENT_OIDC_SCOPES` (default `openid email profile`).
+    pub scopes: String,
+    /// `FRAGMENT_OIDC_CLAIMS`: which claim is the email, and whether the
+    /// provider vouches for it (`fragment_core::oidc::ClaimMap`).
+    pub claims: fragment_core::oidc::ClaimMap,
+    /// `FRAGMENT_OIDC_AUTH`: how the client authenticates at the token
+    /// endpoint (default: with a secret, the first of `client_secret_basic`
+    /// and `client_secret_post` the provider lists; without, `none`).
+    pub auth: Option<fragment_core::oidc::ClientAuth>,
+}
+
+/// `FRAGMENT_OIDC_*`, checked as the isolate starts: a deployment that
+/// names an issuer and gets the rest wrong is refused at its first request.
+fn oidc(env: &Env) -> Option<OidcConfig> {
+    use fragment_core::oidc;
+    let issuer = var(env, "FRAGMENT_OIDC_ISSUER")?;
+    let fail = |e: oidc::OidcError| -> ! { panic!("{e}") };
+    oidc::check_issuer(&issuer).unwrap_or_else(|e| fail(e));
+    let client_id = var(env, "FRAGMENT_OIDC_CLIENT_ID").unwrap_or_else(|| panic!("FRAGMENT_OIDC_ISSUER needs FRAGMENT_OIDC_CLIENT_ID"));
+    Some(OidcConfig {
+        issuer,
+        client_id,
+        scopes: oidc::scopes(var(env, "FRAGMENT_OIDC_SCOPES").as_deref()).unwrap_or_else(|e| fail(e)),
+        claims: oidc::ClaimMap::parse(var(env, "FRAGMENT_OIDC_CLAIMS").as_deref()).unwrap_or_else(|e| fail(e)),
+        auth: var(env, "FRAGMENT_OIDC_AUTH").map(|a| oidc::ClientAuth::parse(&a).unwrap_or_else(|e| fail(e))),
+    })
 }
 
 /// Stripe (docs/billing.md): configured when its key is bound
@@ -60,6 +101,11 @@ pub struct Config {
     /// name in wrangler.jsonc's `containers` images). Unset, the deployment
     /// makes no computers.
     pub computer_image: Option<String>,
+    /// `FRAGMENT_NODES`: the sandcastle nodes computers are placed on, and
+    /// their images by architecture (`fragment_core::placement`;
+    /// docs/self-host.md, seam 2), with `FRAGMENT_BYOC`. Unset, computers
+    /// run in the runtime's own containers (`ctx.container`).
+    pub nodes: Option<fragment_core::placement::Nodes>,
     /// `FRAGMENT_COMPUTER_SNAPSHOTS=off`: computers sleep without a
     /// container snapshot and wake from their image and backup (local
     /// workerd takes no snapshots).
@@ -106,7 +152,13 @@ pub struct Config {
     /// `<url>/send` (the binding's input) instead: a fake at the vendor
     /// boundary, which never sends it.
     pub mail_url: Option<String>,
+    /// `FRAGMENT_BROWSER_URL`: where preview cards are shot when it is not
+    /// the `BROWSER` binding (docs/self-host.md, seam 7): a service
+    /// answering the binding's routes (`/v1/devtools/browser…`) under this
+    /// base, without a trailing slash. Set, it wins over the binding.
+    pub browser_url: Option<String>,
     workos: Option<WorkOsConfig>,
+    oidc: Option<OidcConfig>,
     stripe: Option<StripeConfig>,
     /// `FRAGMENT_PLATFORM_URL` (required): the platform's own origin, where
     /// sign-in and the platform session live (e.g. https://finite.chat).
@@ -195,6 +247,24 @@ fn var(env: &Env, name: &str) -> Option<String> {
 
 /// The provider catalog (`FRAGMENT_PROVIDERS`): a deployment whose is
 /// malformed is refused at its first request (the deploy checks it first).
+/// The nodes computers are placed on (`FRAGMENT_NODES`), and whether its
+/// people may pair their own (`FRAGMENT_BYOC`, `placement::Byoc`): a
+/// deployment whose list is malformed, or that pairs people's nodes with
+/// no list (whose images they run), is refused at its first request.
+fn nodes(env: &Env, computer_image: Option<&str>) -> Option<fragment_core::placement::Nodes> {
+    use fragment_core::placement::{Byoc, Nodes};
+    let byoc = Byoc::parse(var(env, "FRAGMENT_BYOC").as_deref()).unwrap_or_else(|e| panic!("{e}"));
+    let Some(list) = var(env, "FRAGMENT_NODES") else {
+        assert!(byoc == Byoc::Off, "FRAGMENT_BYOC=on needs FRAGMENT_NODES: its images, by architecture, are what a person's own node runs (docs/self-host.md, seam 2)");
+        return None;
+    };
+    let nodes = Nodes::parse(&list, byoc).unwrap_or_else(|e| panic!("FRAGMENT_NODES: {e}"));
+    if let Some(image) = computer_image {
+        assert!(nodes.image_names().any(|n| n == image), "FRAGMENT_COMPUTER_IMAGE {image:?} is none of FRAGMENT_NODES' images");
+    }
+    Some(nodes)
+}
+
 fn providers(env: &Env) -> fragment_core::catalog::Catalog {
     var(env, "FRAGMENT_PROVIDERS").map(|v| fragment_core::catalog::Catalog::parse(&v).unwrap_or_else(|e| panic!("FRAGMENT_PROVIDERS: {e}"))).unwrap_or_default()
 }
@@ -317,6 +387,7 @@ impl Config {
             host_suffix,
             host_label_suffix,
             computer_image: var(env, "FRAGMENT_COMPUTER_IMAGE"),
+            nodes: nodes(env, var(env, "FRAGMENT_COMPUTER_IMAGE").as_deref()),
             computer_snapshots: var(env, "FRAGMENT_COMPUTER_SNAPSHOTS").as_deref() != Some("off"),
             computer_unsaved_max_ms: var(env, "FRAGMENT_COMPUTER_UNSAVED_MAX_MS")
                 .map(|v| v.parse::<i64>().ok().filter(|ms| *ms >= 0).unwrap_or_else(|| panic!("FRAGMENT_COMPUTER_UNSAVED_MAX_MS is a whole number of ms, not {v:?}")))
@@ -333,6 +404,7 @@ impl Config {
             workos: crate::keys::bound(env, fragment_core::secrets_store::WORKOS_CLIENT).then(|| WorkOsConfig {
                 api: var(env, "WORKOS_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.workos.com".into()),
             }),
+            oidc: oidc(env),
             stripe: crate::keys::bound(env, fragment_core::secrets_store::STRIPE_KEY).then(|| StripeConfig {
                 api: var(env, "STRIPE_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.stripe.com".into()),
                 portal: var(env, "FRAGMENT_STRIPE_PORTAL").filter(|p| !p.is_empty()),
@@ -352,6 +424,9 @@ impl Config {
                 fragment_core::mail::Sender::parse(&f.to_string()).unwrap_or_else(|e| panic!("FRAGMENT_MAIL_FROM: {e}"))
             }),
             mail_url: var(env, "FRAGMENT_MAIL_URL").map(|u| u.trim_end_matches('/').to_string()),
+            browser_url: var(env, "FRAGMENT_BROWSER_URL").map(|u| u.trim_end_matches('/').to_string()).inspect(|u| {
+                assert!(u.starts_with("http://") || u.starts_with("https://"), "FRAGMENT_BROWSER_URL is an http(s) URL, not {u:?}");
+            }),
             operators: var(env, "FRAGMENT_OPERATORS").map(|l| fragment_core::npub::parse_list(&l)),
             signins_pending_max: var(env, "FRAGMENT_SIGNINS_PENDING_MAX")
                 .and_then(|s| s.parse::<u64>().ok())
@@ -407,6 +482,12 @@ impl Config {
         self.workos
             .as_ref()
             .ok_or_else(|| CellError::new(ErrorCode::HostFailed, format!("sign-in is not configured on this fleet (no {} binding)", fragment_core::secrets_store::WORKOS_CLIENT)))
+    }
+
+    /// The OpenID Connect provider that signs people in, when one is
+    /// configured (`FRAGMENT_OIDC_ISSUER`): it does in WorkOS's place.
+    pub fn oidc(&self) -> Option<&OidcConfig> {
+        self.oidc.as_ref()
     }
 
     /// The platform's origin (`FRAGMENT_PLATFORM_URL`).

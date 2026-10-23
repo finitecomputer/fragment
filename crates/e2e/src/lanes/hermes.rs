@@ -80,12 +80,11 @@ fn said_count(text: &str) -> Option<u32> {
 pub fn stage_images(project: &Path) -> Result<()> {
     let config = project.join("wrangler.jsonc");
     let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&config)?)?;
-    // the Hermes image builds from the repo's root: it carries the fragment CLI
-    let root = fragment_devstack::repo_root();
-    let dockerfile = root.join("images/hermes/Dockerfile");
+    // the Hermes image builds from the repo's root: it carries the fragment
+    // CLI (devstack's `sandcastle::hermes_image`, as `node-images` builds it)
     let images = v["containers"][0]["images"].as_object_mut().context("the staged config's container has images")?;
-    images.insert("hermes".into(), json!({ "dockerfile": dockerfile, "build_context": root }));
-    images.insert("hermes-next".into(), json!({ "dockerfile": dockerfile, "build_context": root, "build_vars": { "IMAGE_VERSION": "2" } }));
+    images.insert("hermes".into(), fragment_devstack::sandcastle::hermes_image(None));
+    images.insert("hermes-next".into(), fragment_devstack::sandcastle::hermes_image(Some("2")));
     std::fs::write(&config, serde_json::to_string_pretty(&v)?)?;
     Ok(())
 }
@@ -302,11 +301,21 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         !calls.is_empty() && calls.iter().all(|c| c.model.contains("flash") && c.metadata["agent_id"].is_string()),
         json!(calls.iter().map(|c| json!({ "model": c.model, "metadata": c.metadata })).collect::<Vec<_>>()),
     );
-    let aig = super::ledger::entries(api, &owner_id, "aig:");
-    s.ok("and each is charged on its owner's ledger", !aig.is_empty() && aig.iter().all(|e| super::ledger::charged(e).is_some()), json!(aig));
+    // a meter batch reaches the ledger later on celld than under local
+    // workerd (docs/self-host.md, found 38): waited for
+    let mut aig = vec![];
+    let charged = s.eventually(Duration::from_secs(20), || {
+        aig = super::ledger::entries(api, &owner_id, "aig:");
+        !aig.is_empty() && aig.iter().all(|e| super::ledger::charged(e).is_some())
+    });
+    s.ok("and each is charged on its owner's ledger", charged, json!(aig));
 
     // a tool step, then the answer that names it
-    let r = say(2, "run: echo tool-ran")?;
+    // Hermes' gateway looks for tool progress every 0.3 s while its turn
+    // runs, so a turn over sooner shows no step (on a sandcastle node,
+    // against the scripted model, a turn can take 0.1 s: docs/self-host.md,
+    // found 24): the command takes a second, as a real one does
+    let r = say(2, "run: sleep 1 && echo tool-ran")?;
     let tooled = turn_for(&r);
     s.eventually(TURN, || ended(&tooled).is_some());
     let steps: Vec<Value> = work_of(&records(api, &owner, &chat_name, "work"), &tooled).into_iter().filter(|r| r["body"]["kind"] == "turn.step").collect();

@@ -16,4 +16,8 @@ fragment-devstack = { path = "../crates/devstack" }
 # the release's files, written into the cell's Static Assets at each build (build.rs)
 fragment-templates = { path = "../crates/templates", features = ["embed"] }
 fragment-fakes = { path = "../crates/fakes" }
+# the LAN mode: its CA, Dex and the front door (lan.rs); libc, for the
+# box's node dying with xtask
+fragment-lan = { path = "../crates/lan" }
+libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }

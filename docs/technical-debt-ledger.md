@@ -151,6 +151,14 @@ fragment.club until cutover (decisions 34–35).
   non-generic (`ask_registry` and the Stripe client parse their answer in
   the one generic step, so a call type no longer copies a whole async
   round trip): 6.34 MB with #367's 134 KB.
+- **2026-10-22, the self-hosted lane** (`selfhost-port`, never master's
+  as it is): its seams 4, 5, 7 and 12 had it at 6.47 MB, and computers on
+  sandcastle nodes (seam 2: placement, pairing, their routes, 226 KB)
+  took it to 6.70 MB (6,697,133 bytes); the lane's budget is 6.7 MB.
+  Then 6.8 MB: the same tree built 448 bytes over from
+  `~/dev/finite/fragment-selfhost`, a longer path than the checkout that
+  measured it, as the Wasm's panic locations carry the path. Remapping the
+  path prefix in the build (in flight as a master PR) takes that away.
 - **Risk:** every isolate copies the Wasm's data into its memory and
   every deploy uploads it: a bigger cell starts slower and leaves less
   memory to requests, and a budget moved once is easier to move again.
@@ -794,6 +802,32 @@ fragment.club until cutover (decisions 34–35).
   on durable storage (git on disk or in the bucket), with the fake's
   rules as its conformance suite, and the e2e passes against it as well
   as against the fake.
+
+## No mail without Email Sending
+
+- **Observed:** 2026-10-22, re-porting the self-hosted lane onto master
+  (docs/self-host.md, seam 1). The platform's mail (invites, a key added,
+  an org's seat, an export ready, a trial code) goes through Cloudflare
+  Email Sending's binding (`EMAIL`, `cell/src/mail.rs`), or in dev and the
+  e2e to the mail fake (`FRAGMENT_MAIL_URL`). celld has no Email Sending:
+  its deploy refuses `send_email`, and a self-hosted deployment has no
+  fake.
+- **Shortcut:** with neither, `mail::send` sends nothing and logs one
+  warning per message (`mail.unsent`: "email not sent: this runtime has no
+  mailer, not yet implemented"), and answers no message id, never an
+  error, so the flow around it goes on: an invite still waits on its
+  email and a sign-in as it meets it; a key is still added. An org's
+  `mailed` and a trial's `sent` say false. Paul, 2026-10-22: not solved in
+  this pass.
+- **Risk:** no one hears of what was meant for them: an invitee learns of
+  an invite only from the sharer, and the share sheet still says "we
+  mailed them a link".
+- **First proof:** the restart section on celld (`FRAGMENT_E2E_RUNTIME=
+  celld`): a node with no mailer, an invite to someone new, their first
+  sign-in, and the warnings in the node's log.
+- **Delete when:** a self-hosted deployment names a mailer of its own
+  (SMTP, or a company's relay, behind the same `send`), or the share sheet
+  and its kin say plainly that nothing was mailed.
 
 ## Channel drafts' refusals have no e2e
 

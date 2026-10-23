@@ -7,7 +7,9 @@
 //!   request shoots nothing.
 //! - **Its alarm** takes the shot, after the rest of its work: it asks
 //!   whether the live is shot at all (an app or a brain, not members-only,
-//!   an owner who pays), then takes it with the `BROWSER` binding: a
+//!   an owner who pays), then takes it with the `BROWSER` binding, or the
+//!   service `FRAGMENT_BROWSER_URL` names, which answers the binding's
+//!   routes (docs/self-host.md, seam 7; `Renderer`): a
 //!   Browser Rendering session driven over CDP, the page opened as a
 //!   visitor without an account sees it (a link fragment's with its share
 //!   link, set as the origin's cookie, never in the URL the page reads),
@@ -107,9 +109,9 @@ impl FragmentCell {
             // a deploy came meanwhile: the next look decides
             return Ok(());
         }
-        let page = match page {
-            Ok(page) if self.test_countdown(MetaKey::TestFailCards, "a card's shot").is_err() => card::Visit { url: TEST_UNREACHABLE.to_string(), ..page },
-            Ok(page) => page,
+        let (renderer, page) = match page {
+            Ok((renderer, page)) if self.test_countdown(MetaKey::TestFailCards, "a card's shot").is_err() => (renderer, card::Visit { url: TEST_UNREACHABLE.to_string(), ..page }),
+            Ok(shot) => shot,
             Err(skip) => {
                 cards.skip();
                 self.keep_cards(&cards)?;
@@ -130,7 +132,7 @@ impl FragmentCell {
         // the life it is billed to and kept in: a delete meanwhile ends it
         let (life, meter) = (self.must(MetaKey::CreatedAt)?, card::meter_ref(&self.meter_key()?, &shot));
         let t0 = js::now_ms();
-        let (closed, image, heard) = take(&self.env, &page).await;
+        let (closed, image, heard) = take(&self.env, renderer, &page).await;
         // no session acquired: nothing to bill
         let ms = closed.map_or(0, |closed| card::billed_ms(u64::try_from(js::now_ms() - t0).unwrap_or(0), closed));
         if self.meta(MetaKey::CreatedAt)?.as_deref() != Some(life.as_str()) {
@@ -172,12 +174,12 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// The page a shot of this fragment opens now, or why it gets none: its
-    /// kind and visibility (`card::visitor`), its own origin, and its
-    /// owner's ledger, asked as a create is (a guest makes nothing; past the
-    /// overdraft, nothing new is made). A ledger that does not answer
-    /// refuses none, as for writes.
-    async fn card_page(&self) -> CellResult<Result<card::Visit, Skip>> {
+    /// The page a shot of this fragment opens now, and the browser it is
+    /// shot with, or why it gets none: its kind and visibility
+    /// (`card::visitor`), its own origin, and its owner's ledger, asked as a
+    /// create is (a guest makes nothing; past the overdraft, nothing new is
+    /// made). A ledger that does not answer refuses none, as for writes.
+    async fn card_page(&self) -> CellResult<Result<(Renderer, card::Visit), Skip>> {
         let kind = self
             .meta(MetaKey::Face)?
             .and_then(|f| serde_json::from_str::<Value>(&f).ok())
@@ -194,7 +196,10 @@ impl FragmentCell {
             Err(e) if matches!(e.refused, Some(Refused::GuestCreates | Refused::GuestPayer | Refused::ReadOnly { .. })) => return Ok(Err(Skip::OwnerPays)),
             Err(e) => console_error!("{}", json!({ "event": "card.standing-unknown", "message": e.message })),
         }
-        Ok(Ok(card::visit(&origin, visitor, &self.must(MetaKey::ViewToken)?)))
+        // a runtime with neither Browser Rendering nor a renderer (celld,
+        // without FRAGMENT_BROWSER_URL) shoots nothing: said once
+        let Some(renderer) = Renderer::of(&self.env) else { return Ok(Err(Skip::NoBrowser)) };
+        Ok(Ok((renderer, card::visit(&origin, visitor, &self.must(MetaKey::ViewToken)?))))
     }
 
     /// A live given up, said once in the fragment's event log.
@@ -235,22 +240,71 @@ impl Failure {
     }
 }
 
+/// Where a shot's browser is. The routes and the CDP are the same either
+/// way; only who answers them differs.
+#[derive(Clone, Copy)]
+enum Renderer {
+    /// The `BROWSER` binding: Browser Rendering (Cloudflare, `wrangler dev`).
+    Binding,
+    /// `FRAGMENT_BROWSER_URL`: a service answering the binding's routes
+    /// under this base (a self-hosted deployment's renderer:
+    /// docs/self-host.md, seam 7), reached with `fetch`. It wins over the
+    /// binding.
+    Url(&'static str),
+}
+
+impl Renderer {
+    /// This deployment's, or `None`: it shoots no cards.
+    fn of(env: &Env) -> Option<Renderer> {
+        match crate::config::Config::from_env(env).browser_url.as_deref() {
+            Some(base) => Some(Renderer::Url(base)),
+            None if js::has_binding(env.as_ref(), "BROWSER") => Some(Renderer::Binding),
+            None => None,
+        }
+    }
+
+    /// What a failure names it.
+    fn name(self) -> &'static str {
+        match self {
+            Renderer::Binding => "Browser Rendering",
+            Renderer::Url(_) => "the renderer",
+        }
+    }
+
+    /// One of the binding's routes, as a request to this renderer.
+    fn request(self, path: &str, init: &RequestInit) -> Result<Request, Failure> {
+        assert!(path.starts_with("/v1/devtools/browser"), "a renderer answers the binding's routes alone");
+        let url = match self {
+            Renderer::Binding => format!("{BROWSER_HOST}{path}"),
+            Renderer::Url(base) => format!("{base}{path}"),
+        };
+        Request::new_with_init(&url, init).map_err(|e| Failure::retry(e.to_string()))
+    }
+
+    async fn fetch(self, env: &Env, req: Request) -> CellResult<Response> {
+        match self {
+            Renderer::Binding => js::browser_fetch(env.as_ref(), req).await,
+            Renderer::Url(_) => Ok(Fetch::Request(req).send().await?),
+        }
+    }
+}
+
 /// One shot: a Browser Rendering session (`POST /v1/devtools/browser`),
 /// CDP over its WebSocket (`GET /v1/devtools/browser/{id}`), then the
 /// session closed (`DELETE`), as `@cloudflare/puppeteer` speaks to the
 /// binding. Answers whether a session was acquired and then closed
 /// (`None`: none was), the image or why there is none, and what the page
 /// reported (`None` unless it was opened).
-async fn take(env: &Env, page: &card::Visit) -> (Option<bool>, Result<Vec<u8>, Failure>, Option<Heard>) {
+async fn take(env: &Env, renderer: Renderer, page: &card::Visit) -> (Option<bool>, Result<Vec<u8>, Failure>, Option<Heard>) {
     let deadline = js::now_ms() + card::SHOT_TIMEOUT_MS as i64;
-    let session = match within(deadline, acquire(env)).await {
+    let session = match within(deadline, acquire(env, renderer)).await {
         Some(Ok(s)) => s,
         Some(Err(f)) => return (None, Err(f), None),
         // a session may have been made that no one will close: billed as one
-        None => return (Some(false), Err(Failure::retry("Browser Rendering gave no session in time")), None),
+        None => return (Some(false), Err(Failure::retry(format!("{} gave no session in time", renderer.name()))), None),
     };
-    let (image, heard) = within(deadline, drive(env, &session, page, deadline)).await.unwrap_or_else(|| (Err(Failure::retry("the shot did not finish in time")), None));
-    let closed = within(js::now_ms() + RELEASE_TIMEOUT_MS, release(env, &session)).await.unwrap_or(false);
+    let (image, heard) = within(deadline, drive(env, renderer, &session, page, deadline)).await.unwrap_or_else(|| (Err(Failure::retry("the shot did not finish in time")), None));
+    let closed = within(js::now_ms() + RELEASE_TIMEOUT_MS, release(env, renderer, &session)).await.unwrap_or(false);
     (Some(closed), image, heard)
 }
 
@@ -268,32 +322,31 @@ async fn within<T>(until: i64, f: impl std::future::Future<Output = T>) -> Optio
     }
 }
 
-async fn acquire(env: &Env) -> Result<String, Failure> {
+async fn acquire(env: &Env, renderer: Renderer) -> Result<String, Failure> {
     let mut init = RequestInit::new();
     init.with_method(Method::Post);
-    let url = format!("{BROWSER_HOST}/v1/devtools/browser?keep_alive={}", card::KEEP_ALIVE_MS);
-    let req = Request::new_with_init(&url, &init).map_err(|e| Failure::retry(e.to_string()))?;
-    let mut resp = js::browser_fetch(env.as_ref(), req).await.map_err(|e| Failure::retry(format!("no browser: {}", e.message)))?;
+    let req = renderer.request(&format!("/v1/devtools/browser?keep_alive={}", card::KEEP_ALIVE_MS), &init)?;
+    let mut resp = renderer.fetch(env, req).await.map_err(|e| Failure::retry(format!("no browser: {}", e.message)))?;
     let status = resp.status_code();
     let text = resp.text().await.unwrap_or_default();
     if status != 200 {
         // a 429 or 5xx passes; anything else is the binding's say, tried again all the same
-        return Err(Failure::retry(format!("Browser Rendering answered {status} to a new session")));
+        return Err(Failure::retry(format!("{} answered {status} to a new session", renderer.name())));
     }
     let id = serde_json::from_str::<Value>(&text).ok().and_then(|v| v["sessionId"].as_str().map(str::to_string)).unwrap_or_default();
     if id.is_empty() || id.len() > SESSION_ID_MAX || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
-        return Err(Failure::retry("Browser Rendering named no session"));
+        return Err(Failure::retry(format!("{} named no session", renderer.name())));
     }
     Ok(id)
 }
 
 /// Closes the session: whether it is known closed (else it is billed to
 /// its inactivity timeout).
-async fn release(env: &Env, session: &str) -> bool {
+async fn release(env: &Env, renderer: Renderer, session: &str) -> bool {
     let mut init = RequestInit::new();
     init.with_method(Method::Delete);
-    let Ok(req) = Request::new_with_init(&format!("{BROWSER_HOST}/v1/devtools/browser/{session}"), &init) else { return false };
-    match js::browser_fetch(env.as_ref(), req).await {
+    let Ok(req) = renderer.request(&format!("/v1/devtools/browser/{session}"), &init) else { return false };
+    match renderer.fetch(env, req).await {
         Ok(resp) => (200..300).contains(&resp.status_code()),
         Err(_) => false,
     }
@@ -303,8 +356,8 @@ async fn release(env: &Env, session: &str) -> bool {
 /// waited for (at most `LOAD_TIMEOUT_MS`), `SETTLE_MS` more, then a JPEG
 /// at each of `QUALITIES` until one fits; and what the page reported
 /// meanwhile, once it was opened.
-async fn drive(env: &Env, session: &str, page: &card::Visit, deadline: i64) -> (Result<Vec<u8>, Failure>, Option<Heard>) {
-    let ws = match socket(env, session).await {
+async fn drive(env: &Env, renderer: Renderer, session: &str, page: &card::Visit, deadline: i64) -> (Result<Vec<u8>, Failure>, Option<Heard>) {
+    let ws = match socket(env, renderer, session).await {
         Ok(ws) => ws,
         Err(f) => return (Err(f), None),
     };
@@ -322,15 +375,15 @@ async fn drive(env: &Env, session: &str, page: &card::Visit, deadline: i64) -> (
 }
 
 /// The session's CDP socket, accepted.
-async fn socket(env: &Env, session: &str) -> Result<WebSocket, Failure> {
+async fn socket(env: &Env, renderer: Renderer, session: &str) -> Result<WebSocket, Failure> {
     let headers = Headers::new();
     headers.set("upgrade", "websocket").map_err(|e| Failure::retry(e.to_string()))?;
     let mut init = RequestInit::new();
     init.with_headers(headers);
-    let req = Request::new_with_init(&format!("{BROWSER_HOST}/v1/devtools/browser/{session}"), &init).map_err(|e| Failure::retry(e.to_string()))?;
-    let resp = js::browser_fetch(env.as_ref(), req).await.map_err(|e| Failure::retry(format!("no CDP socket: {}", e.message)))?;
+    let req = renderer.request(&format!("/v1/devtools/browser/{session}"), &init)?;
+    let resp = renderer.fetch(env, req).await.map_err(|e| Failure::retry(format!("no CDP socket: {}", e.message)))?;
     let status = resp.status_code();
-    let ws = resp.websocket().ok_or_else(|| Failure::retry(format!("Browser Rendering answered {status}, not a CDP socket")))?;
+    let ws = resp.websocket().ok_or_else(|| Failure::retry(format!("{} answered {status}, not a CDP socket", renderer.name())))?;
     ws.accept().map_err(|e| Failure::retry(e.to_string()))?;
     Ok(ws)
 }

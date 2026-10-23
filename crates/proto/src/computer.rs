@@ -242,8 +242,25 @@ pub struct AgentConnections {
 pub struct ComputerView {
     pub computer: String,
     pub owner: String,
-    /// The pinned image's name (the deployment's `containers` config).
+    /// The pinned image's name (the deployment's `containers` config, or
+    /// `FRAGMENT_NODES`' images).
     pub image: String,
+    /// The sandcastle node it is placed on, for its life (docs/self-host.md,
+    /// seam 2): absent where computers run in the runtime's own containers,
+    /// and before a computer's first start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    /// How its node was chosen, once it is placed: as its owner chose, by
+    /// the deployment's rule, or the rule because the node they chose
+    /// could not take it, and why (docs/self-host.md, seam 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placed: Option<String>,
+    /// This month's use of its owner's own hardware, in points
+    /// (`fragment_core::price::points`): present while it is placed on a
+    /// node its owner paired, whose awake time is tracked here and never
+    /// charged (docs/self-host.md, seam 10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_hardware_points: Option<i64>,
     /// The version of the image it runs now (`fragment_core::computer::
     /// version_of`): its running start's; none while it runs nothing
     /// (asleep, starting, won't wake).

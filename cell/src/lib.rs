@@ -56,6 +56,8 @@ mod mail;
 mod members;
 mod meter;
 mod models;
+mod nodes;
+mod oidc;
 mod ops;
 mod orgs;
 mod plane;
@@ -1132,6 +1134,8 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let segs = segments.clone();
             share::route(req, env, cfg, &url, &segs).await
         }
+        // a person's own nodes: the page they approve one at (nodes.rs)
+        (_, ["nodes", "pair"]) => nodes::page(req, env, cfg, &url).await,
         (Method::Get | Method::Head, ["llms.txt"]) => assets::agent_doc(&req, env, cfg, LLMS_TXT).await,
         (Method::Get | Method::Head, ["llms-full.txt"]) => assets::agent_doc(&req, env, cfg, LLMS_FULL_TXT).await,
         // its release in `DEPLOY_HEADER`, as every answer here names it (`platform_origin`)
@@ -1249,6 +1253,10 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let who = signer(env, &req, &url, &body).await?;
             let rest = rest.to_vec();
             connections::route(&req, env, &url, &who, method, &rest, &body).await
+        }
+        (_, ["api", "nodes", rest @ ..]) => {
+            let rest = rest.to_vec();
+            nodes::api(req, env, cfg, &url, &rest).await
         }
         (method, ["api", "computers", rest @ ..]) => {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;

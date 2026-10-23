@@ -1,10 +1,13 @@
 //! State survives a graceful restart and a crash of the node (a sleeping
 //! job, sealed secrets and keys, sessions, and a channel's sequence
-//! included). The graceful restart comes back with one operator key's row
+//! included; on a run with sandcastle nodes, a computer's placement, awake
+//! through the restart). The graceful restart comes back with one operator key's row
 //! more in its configuration, and the crash's without it again, as an
 //! operator adds a row and then rolls it back: each time, a ledger made
 //! before charges with the book its release configured, no version raised
-//! (#451; it keeps none of its own: decision 62).
+//! (#451; it keeps none of its own: decision 62). Where the cell's secrets
+//! are OpenBao's (celld: docs/self-host.md, seam 12), OpenBao itself stops
+//! and starts under a node.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -30,6 +33,34 @@ const LEDGER_APP: &[u8] = include_bytes!("../../fixtures/ledger.mjs");
 const LEDGER_JSON: &[u8] = include_bytes!("../../fixtures/ledger.json");
 const SECRET: &str = "sk-e2e-restart-5b2e07";
 const MEMBER_EMAIL: &str = "restart-member@e2e.test";
+
+/// A node that dials in is back once it dials again: after a run's many
+/// restarts its backoff nears its ceiling (a minute, and jitter), and a
+/// dial may wait out its own bound (sandcastle's docs/node.md, The uplink).
+const NODE_BACK: Duration = Duration::from_secs(180);
+
+/// Its owner's wake of a computer placed on a node, again while its node is
+/// not back (each such answer `node_down`, typed): the last answer.
+fn woken(s: &Suite, api: &Api, who: &Keys, id: &str) -> crate::api::Reply {
+    let wake = || api.signed(who, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
+    let mut last = None;
+    s.eventually(NODE_BACK, || {
+        let r = wake();
+        let done = r.as_ref().is_ok_and(|r| r.status == 200 && r.body["phase"] == "awake");
+        if let Ok(r) = r {
+            last = Some(r);
+        }
+        done
+    });
+    last.unwrap_or_else(|| wake().unwrap_or_else(|e| panic!("a wake: {e:#}")))
+}
+
+/// The checks of a computer placed on a sandcastle node, across the restarts.
+const PLACED: [&str; 3] = [
+    "after a restart a computer on a sandcastle node is still placed there, and awake: its new object finds its container on the node, and puts it to sleep",
+    "woken after the restart, it wakes on the node it was placed on",
+    "after a crash it is still placed on its node, and wakes there",
+];
 
 fn count(api: &Api, keys: &Keys, name: &str) -> i64 {
     api.op(keys, name, "count", "q", json!({})).ok().and_then(|r| r.body["result"]["n"].as_i64()).unwrap_or(-1)
@@ -168,15 +199,22 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         "access setup: {access_before}"
     );
     // an agent's name and picture (faces.rs): its fragment's, in its own
-    // storage and its git, shown from its face
-    let (face_owner, face_session) = super::templates::person(&api)?;
-    let (faced, face_id) = super::faces::agent_of(s, &api, &face_owner, "restart-face", "Juniper")?;
-    let faced = faced["name"].as_str().unwrap_or("").to_string();
-    let face_png = super::faces::orange();
-    let (w, d) = super::faces::set_face(&api, &face_owner, &faced, Some("Frank"), Some(Some(&face_png)), None)?;
-    let face_path = super::faces::picture_path(&face_id, &face_png);
-    let shown = s.eventually(Duration::from_secs(30), || super::faces::row(&api, &face_owner, &faced)["picture"] == face_path.as_str());
-    anyhow::ensure!(w.status == 200 && d.is_some_and(|d| d.status == 200) && shown, "face setup: {w}");
+    // storage and its git, shown from its face. An agent's identity is its
+    // computer's to give: none on celld without nodes (seam 2)
+    let face = match s.has_computers() {
+        false => None,
+        true => {
+            let (face_owner, face_session) = super::templates::person(&api)?;
+            let (faced, face_id) = super::faces::agent_of(s, &api, &face_owner, "restart-face", "Juniper")?;
+            let faced = faced["name"].as_str().unwrap_or("").to_string();
+            let face_png = super::faces::orange();
+            let (w, d) = super::faces::set_face(&api, &face_owner, &faced, Some("Frank"), Some(Some(&face_png)), None)?;
+            let face_path = super::faces::picture_path(&face_id, &face_png);
+            let shown = s.eventually(Duration::from_secs(30), || super::faces::row(&api, &face_owner, &faced)["picture"] == face_path.as_str());
+            anyhow::ensure!(w.status == 200 && d.is_some_and(|d| d.status == 200) && shown, "face setup: {w}");
+            Some((face_owner, face_session, faced, face_png, face_path))
+        }
+    };
     // a tool loop held after the call it bought (a tool call), its next
     // call refused for good (ai_tools.rs)
     let tooled = ai_tools::tools_fragment(s, &api, &owner, "restart-tools")?;
@@ -191,16 +229,57 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     // computer's rows, and the browser's cookie
     let pending_key = Keys::generate();
     let pending_code = api.cli_begin(&pending_key)?.body["code"].as_str().unwrap_or("").to_string();
-    let connector = api.person()?;
-    let connector_session = api.sign_in(&Api::email_of(&connector))?;
-    let made = api.signed(&connector, "POST", "/api/computers", Some(&json!({})))?;
-    let asked = super::credentials::shell_authorize(&api, &connector_session)?;
-    let bound = super::credentials::own_key_cookie(&asked);
-    let back = super::credentials::sent_back(&api, asked.body["url"].as_str().unwrap_or_default())?;
-    anyhow::ensure!(made.status == 200 && asked.status == 200 && !pending_code.is_empty() && !bound.is_empty() && back.contains("code="), "pending sign-ins setup: {made} {asked} {back}");
+    anyhow::ensure!(!pending_code.is_empty(), "pending CLI code setup");
+    // and a sign-in begun and answered by its provider, its callback not yet
+    // followed (an OpenID Connect one keeps its verifier and nonce in the
+    // registry; its provider's metadata and keys are fetched again after)
+    let signing_in = api.unsigned("GET", "/auth/login?return=/after-restart&login_hint=restart-pending@e2e.test", None)?;
+    let signing_in_cookie = signing_in.cookies().into_iter().find(|c| c.starts_with("fragment_login=")).unwrap_or_default();
+    let signing_in_back = api.external(&signing_in.header("location"))?;
+    anyhow::ensure!(signing_in.status == 302 && signing_in_back.status == 302 && !signing_in_cookie.is_empty(), "a pending sign-in: {signing_in} / {signing_in_back}");
+    // an own key's sign-in finishes at its person's computer: none on celld without nodes (seam 2)
+    let own_key = match s.has_computers() {
+        false => None,
+        true => {
+            let connector = api.person()?;
+            let connector_session = api.sign_in(&Api::email_of(&connector))?;
+            let made = api.signed(&connector, "POST", "/api/computers", Some(&json!({})))?;
+            let asked = super::credentials::shell_authorize(&api, &connector_session)?;
+            let bound = super::credentials::own_key_cookie(&asked);
+            let back = super::credentials::sent_back(&api, asked.body["url"].as_str().unwrap_or_default())?;
+            anyhow::ensure!(made.status == 200 && asked.status == 200 && !bound.is_empty() && back.contains("code="), "pending sign-ins setup: {made} {asked} {back}");
+            Some((connector, connector_session, bound, back))
+        }
+    };
+    // a computer placed on a sandcastle node, awake as the platform stops
+    // (docs/self-host.md, seam 2): its container is the node's
+    let placed = match s.has_nodes() {
+        true => {
+            let who = api.person()?;
+            let r = api.signed(&who, "POST", "/api/computers", Some(&json!({})))?;
+            let id = r.body["computer"].as_str().unwrap_or("").to_string();
+            let r = api.signed(&who, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
+            let node = r.body["node"].as_str().unwrap_or("").to_string();
+            anyhow::ensure!(r.status == 200 && r.body["phase"] == "awake" && !node.is_empty(), "a computer on a node: {r}");
+            Some((who, id, node))
+        }
+        false => {
+            for label in PLACED {
+                s.skip(label, "it needs sandcastle nodes, and the run started none (FRAGMENT_E2E_NODES)");
+            }
+            None
+        }
+    };
 
     s.stop()?;
     let api = s.start_with_a_key_more()?;
+    if let Some((who, id, node)) = &placed {
+        let v = api.signed(who, "GET", &format!("/api/computers/{id}"), None)?;
+        let r = api.signed(who, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+        s.ok(PLACED[0], v.body["node"] == node.as_str() && v.body["phase"] == "awake" && r.status == 200 && r.body["phase"] == "asleep", format!("{v} / {r}"));
+        let r = woken(s, &api, who, id);
+        s.ok(PLACED[1], r.status == 200 && r.body["phase"] == "awake" && r.body["node"] == node.as_str(), &r);
+    }
     let (book, shown) = book_of(&api, &owner)?;
     s.ok(
         "after a restart whose configuration adds an operator key's row, its version as it was, a ledger made before charges with that book: the key at its row's price",
@@ -216,6 +295,17 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         kept.body["schedules"] == json!([scheduled.body["schedule"]]) && lever.body["records"] == 1 && fired && kept_talk(&api)[0]["principal"] == paid_npub.as_str(),
         json!({ "kept": kept.body, "lever": lever.body, "talk": kept_talk(&api) }),
     );
+    let r = api.call(crate::api::Call { method: "GET", url: signing_in_back.header("location"), cookie: Some(signing_in_cookie), ..crate::api::Call::default() })?;
+    let signed = r.cookies().into_iter().find_map(|c| c.strip_prefix("fragment_session=").filter(|v| !v.is_empty()).map(str::to_string));
+    let shown = match &signed {
+        Some(session) => who(&api, session)?,
+        None => Value::Null,
+    };
+    s.ok(
+        "after a restart a sign-in begun before it finishes, as the person it began for, back where it began",
+        r.status == 302 && r.header("location").ends_with("/after-restart") && shown["email"] == "restart-pending@e2e.test",
+        format!("{r} / {shown}"),
+    );
     let typed = api.type_code(&member_session, &pending_code)?;
     let pressed = api.add_code(&member_session, &pending_code)?;
     let theirs = api.signed(&pending_key, "GET", "/api/identities/me", None)?;
@@ -224,22 +314,33 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         typed.status == 200 && pressed.status == 200 && theirs.status == 200 && theirs.body["email"] == MEMBER_EMAIL,
         json!({ "typed": typed.status, "added": pressed.status, "me": theirs.body }),
     );
-    let page = super::credentials::came_back(&api, &back, &[&bound, &format!("fragment_session={connector_session}")])?;
-    let state = api.signed(&connector, "GET", "/api/connections", None)?;
-    let connected = state.body["providers"].as_array().is_some_and(|l| l.iter().any(|p| p["provider"] == crate::SWAP_ROUTER && p["state"] == "set"));
-    s.ok(
-        "after a restart an own key's sign-in begun before it finishes, in the browser that began it, signed in: connected",
-        page.status == 200 && page.text.contains("is connected") && connected,
-        json!({ "page": page.to_string(), "connections": state.body }),
-    );
-    let face_row = super::faces::row(&api, &face_owner, &faced);
-    let face_got = super::faces::fetched(&api, &face_path)?;
-    let face_sheet = super::signin::with_session(&api, "GET", &format!("/share/{faced}"), &face_session)?;
-    s.ok(
-        "after a restart an agent keeps its name and picture: its owner's list, its picture's address, and the share sheet show them",
-        face_row["title"] == "Frank" && face_row["picture"] == face_path.as_str() && face_got.status == 200 && face_got.bytes == face_png && face_sheet.text.contains("Frank") && face_sheet.text.contains(&face_path),
-        json!({ "row": face_row, "picture": face_got.status, "sheet": face_sheet.status }),
-    );
+    match own_key {
+        Some((connector, connector_session, bound, back)) => {
+            let page = super::credentials::came_back(&api, &back, &[&bound, &format!("fragment_session={connector_session}")])?;
+            let state = api.signed(&connector, "GET", "/api/connections", None)?;
+            let connected = state.body["providers"].as_array().is_some_and(|l| l.iter().any(|p| p["provider"] == crate::SWAP_ROUTER && p["state"] == "set"));
+            s.ok(
+                "after a restart an own key's sign-in begun before it finishes, in the browser that began it, signed in: connected",
+                page.status == 200 && page.text.contains("is connected") && connected,
+                json!({ "page": page.to_string(), "connections": state.body }),
+            );
+        }
+        None => s.skip("after a restart an own key's sign-in begun before it finishes, in the browser that began it, signed in: connected", "it needs a computer (an own key's sign-in finishes at its person's), and celld runs none without sandcastle nodes (FRAGMENT_E2E_NODES; docs/self-host.md, seam 2)"),
+    }
+    const FACE: &str = "after a restart an agent keeps its name and picture: its owner's list, its picture's address, and the share sheet show them";
+    match face {
+        Some((face_owner, face_session, faced, face_png, face_path)) => {
+            let face_row = super::faces::row(&api, &face_owner, &faced);
+            let face_got = super::faces::fetched(&api, &face_path)?;
+            let face_sheet = super::signin::with_session(&api, "GET", &format!("/share/{faced}"), &face_session)?;
+            s.ok(
+                FACE,
+                face_row["title"] == "Frank" && face_row["picture"] == face_path.as_str() && face_got.status == 200 && face_got.bytes == face_png && face_sheet.text.contains("Frank") && face_sheet.text.contains(&face_path),
+                json!({ "row": face_row, "picture": face_got.status, "sheet": face_sheet.status }),
+            );
+        }
+        None => s.skip(FACE, "an agent's identity is its computer's to give, and celld runs none without sandcastle nodes (FRAGMENT_E2E_NODES; docs/self-host.md, seam 2)"),
+    }
     let access_after = access_row(&api);
     s.ok(
         "after a restart the access view answers as it did: who is in, by email, and the invite waiting",
@@ -356,8 +457,21 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.ok("a mutation before the crash", r.status == 200, &r);
     // Local workerd's Workflows keep a sleep as a timer in the process
     // (miniflare's engine: no alarm behind it), so one sleeping through a
-    // crash of `wrangler dev` never wakes; Cloudflare's do.
-    s.skip("a job sleeping through a crash wakes and finishes, once", "local Workflows do not outlive their process");
+    // crash of `wrangler dev` never wakes; Cloudflare's do, and celld's
+    // (each instance a cell, its sleep an alarm: docs/self-host.md, seam 1).
+    let nap = match s.durable_workflows() {
+        true => {
+            let (jobs, _) = jobs::jobs_fragment(s, &api, &owner, "restart-jobs", |_| {})?;
+            let r = api.op(&owner, &jobs, "nap", "through-the-crash", json!({ "ms": 4000 }))?;
+            let started = jobs::started(&r);
+            std::thread::sleep(Duration::from_millis(1000));
+            Some((jobs, started))
+        }
+        false => {
+            s.skip("a job sleeping through a crash wakes and finishes, once", "local Workflows do not outlive their process");
+            None
+        }
+    };
     // a delete whose cleanup the crash cuts short (cell ended.rs): the
     // fragment's alarm finishes it after
     let ended = s.named(&api, &owner, "restart-ended")?;
@@ -375,6 +489,17 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let calls_before_crash = s.ai.calls().iter().filter(|c| c.model == fragment_core::decide::Model::ClefFlash.id()).count();
     s.crash()?;
     let api = s.start(false)?;
+    if let Some((who, id, node)) = &placed {
+        // awake as the platform crashed: its new object adopts the container, or starts it again, there
+        let r = woken(s, &api, who, id);
+        s.ok(PLACED[2], r.status == 200 && r.body["phase"] == "awake" && r.body["node"] == node.as_str(), &r);
+        api.signed(who, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+    }
+    if let Some((jobs, started)) = nap {
+        let woke = jobs::settle(&api, &owner, &jobs, started, &["succeeded", "held"], Duration::from_secs(60));
+        let naps = jobs::records(&api, &owner, &jobs, "feed").iter().filter(|r| r["kind"] == "nap").count();
+        s.ok("a job sleeping through a crash wakes and finishes, once", woke["status"] == "succeeded" && naps == 1, format!("{woke} ({naps} nap records)"));
+    }
     let (book, shown) = book_of(&api, &owner)?;
     s.ok(
         "after a crash back on the configuration from before the key's row (a rollback), the ledger charges with that book again",
@@ -399,5 +524,99 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.ok(&format!("after a crash a delete's cleanup it cut short finishes ({lists_left} lists were left to tell)"), lists_left > 0 && cleaned, last);
     let r = api.signed(&member, "GET", "/api/fragments", None)?;
     s.ok("and the deleted fragment has left its member's list", r.status == 200 && !r.text.contains(&format!("\"{ended}\"")), &r);
+    no_mailer(s)?;
+    openbao_restart(s)
+}
+
+/// The checks of OpenBao behind the cell's secrets, across its stop and
+/// start (docs/self-host.md, seam 12).
+const OPENBAO: [&str; 2] = [
+    "with OpenBao down, a sign-in fails at once, naming OpenBao: the cell's read of its sign-in's secrets is an error, never a hang",
+    "OpenBao started again unseals itself from its key file, initialised once, and the next sign-in reads its secrets: the cell not restarted",
+];
+
+/// OpenBao down, then up, under a node started fresh: no isolate holds the
+/// secrets a sign-in reads (WorkOS's client id as it begins; an OpenID
+/// Connect client's secret at its callback).
+fn openbao_restart(s: &mut Suite) -> Result<()> {
+    if !s.has_openbao() {
+        for label in OPENBAO {
+            s.skip(label, "the run's secrets are not OpenBao's (FRAGMENT_E2E_SECRETS=vars, or wrangler's own store)");
+        }
+        return Ok(());
+    }
+    s.stop()?;
+    let api = s.start(false)?;
+    s.openbao_down()?;
+    let t0 = std::time::Instant::now();
+    let login = api.unsigned("GET", "/auth/login?return=/&login_hint=openbao-down%40e2e.test", None)?;
+    let r = match login.status {
+        302 => api.provider_callback("openbao-down@e2e.test")?,
+        _ => login,
+    };
+    let took = t0.elapsed();
+    s.ok(OPENBAO[0], r.status >= 500 && r.text.contains("OpenBao") && r.text.contains("is not answering") && took < Duration::from_secs(10), format!("{r} in {took:?}"));
+    let up = s.openbao_up()?;
+    let r = api.provider_callback("openbao-up@e2e.test")?;
+    let signed = r.cookies().into_iter().any(|c| c.starts_with("fragment_session=") && c.len() > "fragment_session=".len() + 1);
+    let once = s.openbao_initialisations()?;
+    s.ok(OPENBAO[1], r.status == 302 && signed && once == 1, format!("{r} (OpenBao up again in {up:?}, initialised {once} time(s))"));
+    Ok(())
+}
+
+/// What a node with no mailer says of each mail it does not send
+/// (cell/src/mail.rs).
+const NO_MAILER: &str = "email not sent: this runtime has no mailer, not yet implemented";
+
+/// A runtime with no mailer (celld has no Email Sending, and a self-hosted
+/// deployment no mail fake: docs/technical-debt-ledger.md, "No mail without
+/// Email Sending"): an invite still waits on its email, a sign-in as it
+/// meets it, and each mail the platform would have sent (the invite, the
+/// key's) is said in the node's log, never an error. Then the node as the
+/// lanes expect it again.
+fn no_mailer(s: &mut Suite) -> Result<()> {
+    const CHECKS: [&str; 3] = [
+        "with no mailer, an invite to someone new still waits on their email, and their first sign-in as it makes them a member",
+        "and each mail it would have sent (the invite, the sign-in's key) is said in the node's log, not sent",
+        "the share sheet says no mail goes, and names the fragment's address to send by hand, never that it mailed one",
+    ];
+    if !s.on_celld() {
+        for c in CHECKS {
+            s.skip(c, "wrangler dev binds Email Sending (its local stand-in): a mailer is always there");
+        }
+        return Ok(());
+    }
+    s.stop()?;
+    let api = s.start_without_mail()?;
+    // a person with a CLI key and a browser's session (the sheet's)
+    let (owner, owner_session) = super::templates::person(&api)?;
+    let name = s.named(&api, &owner, "no-mailer")?;
+    s.create(&api, &owner, &name)?;
+    let newcomer = Keys::generate();
+    // not an e2e person's address, which the cell never mails (its test hooks)
+    let email = format!("newcomer-{}@example.com", &newcomer.pubkey_hex()[..12]);
+    let invited = api.signed(&owner, "POST", &format!("/api/f/{name}/invites"), Some(&json!({ "email": email, "role": "viewer" })))?;
+    let session = api.sign_in(&email)?;
+    api.approve(&session, &newcomer)?;
+    let r = api.signed(&newcomer, "GET", "/api/fragments", None)?;
+    let role = r.body["fragments"].as_array().and_then(|a| a.iter().find(|f| f["name"] == name.as_str())).and_then(|f| f["role"].as_str().map(str::to_string));
+    s.ok(CHECKS[0], invited.status == 200 && invited.body["invited"]["email"] == email.as_str() && role.as_deref() == Some("viewer"), format!("{invited} | {r}"));
+    let said = s.eventually(Duration::from_secs(10), || s.node_log().is_some_and(|l| l.matches(NO_MAILER).count() >= 2));
+    let log = s.node_log().unwrap_or_default();
+    s.ok(CHECKS[1], said, log.lines().filter(|l| l.contains("mail")).collect::<Vec<_>>().join("\n"));
+    // the owner's sheet, as a browser sends its form (docs/self-host-lan.md, step 6)
+    let sheet = format!("/share/{name}");
+    let form = super::share::armed(&api, &sheet, &owner_session)?;
+    let other = format!("another-{}@example.com", &newcomer.pubkey_hex()[..12]);
+    let r = super::share::post(&api, &sheet, &owner_session, &api.base, &[("form", &form), ("action", "invite"), ("email", &other), ("role", "viewer")])?;
+    let host = api.site_url(&name, "");
+    let host = host.trim_end_matches('/');
+    s.ok(
+        CHECKS[2],
+        r.status == 200 && r.text.contains("This deployment sends no mail") && r.text.contains(host) && !r.text.contains("we mailed") && !r.text.contains("is mailed a link"),
+        &r,
+    );
+    s.stop()?;
+    s.start(false)?;
     Ok(())
 }

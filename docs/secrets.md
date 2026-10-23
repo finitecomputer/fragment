@@ -68,6 +68,9 @@ name fixed in code (`fragment_core::secrets_store`) and reads no value:
   until the vendor revokes it; the host secret rotates by name). A
   binding whose secret the store lacks is an error where it is read
   (`HostFailed`); there is no fallback to a Worker secret or a variable.
+  On celld, which has no Secrets Store, the cell's stand-ins take the
+  bindings' places, the same face (`get()`), named by `FRAGMENT_SECRETS`
+  (cell/secrets.mjs; docs/self-host.md, seam 12).
 - **Before a deploy.** It lists the store (read-only) before it builds or
   makes anything, and refuses when a secret the config names is not
   there, naming each, the field naming it, and the `cargo xtask secret

@@ -166,7 +166,7 @@ fn watch_answered(api: &Api, name: &str, query: &str) -> Result<(tungstenite::We
 }
 
 pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("site", &[crate::Need::Fakes, crate::Need::Deployment, crate::Need::Levers]) {
+    if !s.section("site", &[crate::Need::Fakes, crate::Need::StoreFake, crate::Need::Deployment, crate::Need::Levers]) {
         return Ok(());
     }
     let owner = api.person()?;
