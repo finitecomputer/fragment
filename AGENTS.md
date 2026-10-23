@@ -333,9 +333,16 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   stood, so this holds when master has not moved since (Paul,
   2026-10-23). Its caches restore on
   every run and save only from master's pushes (each one's contents are
-  named in the workflow): Rust's through
-  `Swatinem/rust-cache`, the pinned Node's and the JavaScript caches
-  through `actions/cache`. A push's run is never cancelled by a newer
+  named in the workflow): `check`'s Rust dependencies and the e2e's
+  tools through `Swatinem/rust-cache`; the e2e's builds, our own crates'
+  with them, through `actions/cache`, one entry per master commit with
+  a record of the tree it was built from, from which `xtask/src/stamp.rs`
+  (compiled alone, before any cargo build) sets a checkout's mtimes so
+  cargo rebuilds only what was not built from its very content; `prune`
+  deletes the older entries); the stub image's layers through BuildKit's
+  Actions cache, built before the e2e's build so it and the node's boot
+  find them; the pinned Node's and the JavaScript caches through
+  `actions/cache`. A push's run is never cancelled by a newer
   one, which waits (a pull request's is). `images.yml` runs `images/`'s
   `check` on every change there, and `docker`, the Docker lane above
   (both images built, then every `--ignored` test of docker.rs on them,

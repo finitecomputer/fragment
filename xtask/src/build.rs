@@ -215,8 +215,10 @@ fn worker_build_installed() -> Result<()> {
 /// `constructBuildCommand`: `docker build --load --platform linux/amd64
 /// --provenance=false [--build-arg …] -f - <context>`, the Dockerfile on
 /// stdin), so the boot's build finds every layer cached. A cold build of
-/// the stub compiles its bridge in Docker: on a CI runner, minutes that now
-/// pass beside the Rust and Wasm builds instead of after them.
+/// the stub compiles its bridge in Docker: minutes that pass beside the
+/// Rust and Wasm builds instead of after them. CI builds the stub just
+/// before, from its layers in the Actions cache unless the bridge changed
+/// (ci.yml, e2e-shard), so there every step here is cached.
 pub fn images() -> Result<()> {
     let cell = devstack::cell_dir();
     let mut config = devstack::read_config(&cell)?;
