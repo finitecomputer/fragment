@@ -21,7 +21,10 @@
   <link rel="icon" href="/__shell/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/__shell/apple-touch-icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Funnel+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+  <!-- Funnel Sans is the release's own (platform-pages.css, with the
+       onboarding design's tokens and card); JetBrains Mono, Google's -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="/__shell/platform-pages.css">
   <link rel="stylesheet" href="/__shell/shell.css">
 </head>
 <body>
@@ -95,12 +98,24 @@
     </section>
   </div>
 
-  <!-- first run: sign in, the welcome (a seat), then the first agent (decision 10) -->
+  <!-- first run: sign in, the welcome (a seat), then the first agent
+       (decision 10), as the platform's pages are (platform-pages.css:
+       Skyler's onboarding design, 2026-10-22): Finite's logo, one card,
+       and Finite's footer, its year shell.js's (firstRun) -->
   <main class="first-run" id="first-run" hidden>
     <div class="wallpaper" aria-hidden="true"></div>
     <div class="first-run-content">
-      <img class="first-run-logo" src="/__shell/finite-logo.svg" alt="Finite" width="88" height="88">
+      <div class="platform-brand"><img class="first-run-logo" src="/__shell/finite-logo.svg" alt="Finite" width="44" height="46"></div>
       <div class="first-run-card" id="first-run-card"></div>
+      <footer class="page-footer">
+        <span><span id="first-run-year"></span> © Finite Computer LLC</span>
+        <nav aria-label="Finite">
+          <a href="/about" target="_blank" rel="noopener">About</a>
+          <a href="mailto:support@finite.computer">Contact</a>
+          <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>
+          <a href="/terms" target="_blank" rel="noopener">Terms</a>
+        </nav>
+      </footer>
     </div>
   </main>
 

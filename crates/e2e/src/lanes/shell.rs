@@ -68,15 +68,23 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
             && header("content-type").starts_with("text/html")
             && r.text.contains(&format!("<title>{title}</title>"))
             && r.text.contains(&format!("<h1>{h1}</h1>"))
+            && r.text.contains("/__shell/platform-pages.css")
             && r.text.contains("/__shell/legal.css")
             && !r.text.contains("<script")
             && header("content-security-policy").contains("frame-ancestors 'none'")
+            && header("content-security-policy").contains("font-src 'self'")
     });
-    let css = api.unsigned("GET", "/__shell/legal.css", None)?;
+    // their stylesheets, their paper's edge, and the type they and the shell
+    // share (platform-pages.css), the release's own
+    let published = ["legal.css", "platform-pages.css", "funnel-sans-400.ttf", "funnel-sans-500.ttf", "funnel-sans-600.ttf", "funnel-sans-700.ttf", "paper-edge.svg"]
+        .iter()
+        .map(|f| api.unsigned("GET", &format!("/__shell/{f}"), None).map(|r| (r.status, r.headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string())))
+        .collect::<Result<Vec<_>>>()?;
+    let typed = published.iter().zip(["text/css", "text/css", "font/ttf", "font/ttf", "font/ttf", "font/ttf", "image/svg+xml"]).all(|((status, got), want)| *status == 200 && got.starts_with(want));
     s.ok(
-        "Finite's about page (/about), privacy policy (/privacy) and terms (/terms) answer anyone, signed out: static pages with their titles, their stylesheet published, never framed",
-        shown && css.status == 200 && css.headers.get("content-type").is_some_and(|v| v.as_bytes().starts_with(b"text/css")),
-        json!(legal.iter().map(|(r, title, _)| json!({ "title": title, "status": r.status, "head": r.text.chars().take(300).collect::<String>() })).collect::<Vec<_>>()),
+        "Finite's about page (/about), privacy policy (/privacy) and terms (/terms) answer anyone, signed out: static pages with their titles, in the release's own type (their CSP allows its fonts), their stylesheets and paper published, never framed",
+        shown && typed,
+        json!({ "pages": legal.iter().map(|(r, title, _)| json!({ "title": title, "status": r.status, "head": r.text.chars().take(300).collect::<String>() })).collect::<Vec<_>>(), "published": published }),
     );
 
     let email = format!("shell-{}@e2e.test", crate::api::now_s());
@@ -847,14 +855,17 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         other == json!({ "href": "/auth/login?screen_hint=sign-in&return=%2Fsettings", "says": "Sign In" }),
         &other,
     );
-    // under them, About, Privacy and Terms, small and muted, each in a tab of its own
+    // under the card, Finite's footer: who makes it, this year, and About,
+    // Contact, Privacy Policy and Terms, the pages each in a tab of its own
     let links = b.eval(
         &page,
-        "(() => { const p = document.querySelector('#first-run-card .splash-actions + p.legal-links'); return p && { muted: p.classList.contains('muted'), text: p.textContent, links: [...p.querySelectorAll('a')].map((a) => [a.textContent, a.getAttribute('href'), a.target]) }; })()",
+        "(() => { const f = document.querySelector('#first-run .page-footer'); return f && { shown: f.getClientRects().length > 0, made: f.querySelector(':scope > span')?.textContent, links: [...f.querySelectorAll('nav a')].map((a) => [a.textContent, a.getAttribute('href'), a.target]) }; })()",
     )?;
+    let year = b.eval(&page, "String(new Date().getFullYear())")?;
     s.ok(
-        "and under Sign In, About · Privacy · Terms, muted, pointing at /about, /privacy and /terms",
-        links == json!({ "muted": true, "text": "About · Privacy · Terms", "links": [["About", "/about", "_blank"], ["Privacy", "/privacy", "_blank"], ["Terms", "/terms", "_blank"]] }),
+        "and under the card, Finite's footer: this year's \"© Finite Computer LLC\", and About, Contact, Privacy Policy and Terms, pointing at /about, its mail, /privacy and /terms",
+        links
+            == json!({ "shown": true, "made": format!("{} © Finite Computer LLC", year.as_str().unwrap_or("")), "links": [["About", "/about", "_blank"], ["Contact", "mailto:support@finite.computer", ""], ["Privacy Policy", "/privacy", "_blank"], ["Terms", "/terms", "_blank"]] }),
         &links,
     );
     let logo = b.eval(
@@ -865,6 +876,17 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         "above it, Finite's logo, drawn: one of the shell's published files",
         logo == json!({ "src": "/__shell/finite-logo.svg", "drawn": true, "status": 200, "type": "image/svg+xml" }),
         &logo,
+    );
+    // its type is the release's own Funnel Sans (platform-pages.css), loaded under
+    // the shell's CSP: the card's title (500) and its words (400)
+    let faces = b.eval(
+        &page,
+        "document.fonts.ready.then(() => [...document.fonts].filter((f) => f.family.replace(/\"/g, '') === 'Funnel Sans' && f.status === 'loaded').map((f) => f.weight).sort())",
+    )?;
+    s.ok(
+        "drawn in the release's own Funnel Sans, loaded under the shell's CSP: the card's title and its words",
+        faces.as_array().is_some_and(|w| w.contains(&json!("400")) && w.contains(&json!("500"))),
+        &faces,
     );
     // evidence for a person: the signed-out page, on a desktop and a phone,
     // in its own fonts

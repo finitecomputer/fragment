@@ -629,12 +629,17 @@ settings page)").
 - **Who sees it:** a guest with nothing shared with them and no invite
   waiting (an invitee lands at home, the invite in the sidebar to
   accept: docs/api.md, Invites by email), who lands
-  there from `/`. It holds a line of what this is, the one seat ($200 a
-  month, always on, its time not metered, $100 of credit included each
-  month) and a trial-code field, then Checkout, a line on what more
-  credit costs once they hold a seat ($25 a pack, kept until spent), and
-  who is signed in, with Use another account and Sign out: one card on
-  the landscape, as the launcher's panel is (Skyler's look).
+  there from `/`. It holds a line of what this is, the one seat on a
+  ticket ($200 / month, always on: their own agent, an always-on
+  computer, apps to build and share, $100 of usage credit a month, and
+  "Secure Stripe checkout"), whose Continue opens Checkout, then "Start
+  a trial", a step of its own on the same card (a trial code, its
+  Continue to Checkout, Back), a line on what more credit costs once
+  they hold a seat ($25 a pack, kept until spent), and who is signed
+  in, with Use another account and Sign out: one glass card on the
+  landscape, Finite's footer under it (Skyler's onboarding design,
+  2026-10-22; cell/shell/platform-pages.css). The seat is a ticket and its
+  action a button, so that pressing it reads as going to pay (#471).
 - **Who is signed in** is said wherever someone is told they have no
   seat (the welcome, an invitee's home, Billing's guest state; shell.js
   `noSeatSaid`): "You're signed in as **<email>**. This account has no
@@ -648,9 +653,10 @@ settings page)").
   was broken.
 - **What comes back to it:** Checkout's return
   (`?checkout=<session>`), its Back (`?checkout=canceled`, said), and a
-  mailed trial's link (`?trial=<code>`, filled in). Signed out, sign-in
-  comes back to it with its query. A refusal (a code that is none, a
-  full one) is said under the seats.
+  mailed trial's link (`?trial=<code>`, which opens on the trial's
+  step, filled in). Signed out, sign-in comes back to it with its query.
+  A refusal (a code that is none, a full one) is said in the step that
+  asked, above its Continue.
 - **A paid return** sets up the seat, then goes on to the first run, at
   `/`, in its chat:
   - *Setting up your seat,* on the welcome's card: the Checkout applied

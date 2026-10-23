@@ -1,14 +1,19 @@
 /* Standalone platform sheets, from finite-onboarding (1).html.
-   Equal outer rows keep the card centered without clipping tall content. */
+   Equal outer rows keep the card centered without clipping tall content.
+   The shell's first run (#first-run: its splash, welcome and a seat's step)
+   shares its type, tokens, grid and card; the shell loads this file too. */
 @font-face{font-family:"Funnel Sans";font-style:normal;font-weight:400;font-display:swap;src:url("funnel-sans-400.ttf") format("truetype")}
 @font-face{font-family:"Funnel Sans";font-style:normal;font-weight:500;font-display:swap;src:url("funnel-sans-500.ttf") format("truetype")}
 @font-face{font-family:"Funnel Sans";font-style:normal;font-weight:600;font-display:swap;src:url("funnel-sans-600.ttf") format("truetype")}
-.platform-page{--fg:#20251f;--muted:#646e63;--bg:#f5f6f1;--line:rgba(43,59,40,.17);--line-strong:rgba(43,59,40,.24);--surface:#fff;--soft:rgba(120,145,95,.09);--accent:#466437;background:#f5f6f1 url("platform-landscape.jpg") center/cover fixed no-repeat}
-.platform-page body{max-width:none;width:100%;margin:0;padding:0 24px;display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(110px,1fr) auto minmax(110px,1fr);justify-items:center;background:transparent;font:400 16px/1.5 "Funnel Sans",sans-serif}
+@font-face{font-family:"Funnel Sans";font-style:normal;font-weight:700;font-display:swap;src:url("funnel-sans-700.ttf") format("truetype")}
+/* Its tokens are the root's, so the shell's first run has them too: the shell's own are other names. */
+:root{--fg:#20251f;--muted:#646e63;--bg:#f5f6f1;--line:rgba(43,59,40,.17);--line-strong:rgba(43,59,40,.24);--surface:#fff;--soft:rgba(120,145,95,.09);--accent:#466437}
+.platform-page{background:#f5f6f1 url("platform-landscape.jpg") center/cover fixed no-repeat}
+.platform-page body,.first-run-content{max-width:none;width:100%;margin:0;padding:0 24px;display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(110px,1fr) auto minmax(110px,1fr);justify-items:center;background:transparent;font:400 16px/1.5 "Funnel Sans",sans-serif}
 .platform-brand{grid-row:1;align-self:end;margin:32px 0;line-height:0}
 .platform-brand img{display:block;width:43.56px;height:45.98px;object-fit:contain;filter:brightness(0)}
-.platform-page main{position:relative;--edge-light:0;box-sizing:border-box;grid-row:2;align-self:center;width:100%;max-width:410px;margin:0;padding:30px 32px;border:0;border-radius:18px;text-align:center;background:linear-gradient(150deg,rgba(255,255,255,.26),rgba(255,255,255,.08)),rgba(255,255,255,.84);box-shadow:0 12px 36px rgba(26,45,32,.08);-webkit-backdrop-filter:blur(24px) saturate(1.08);backdrop-filter:blur(24px) saturate(1.08);overflow-wrap:anywhere}
-.platform-page h1{font-size:30px;font-weight:500;line-height:1.2;letter-spacing:-1px;margin:0}
+.platform-page main,.first-run-card{position:relative;--edge-light:0;box-sizing:border-box;grid-row:2;align-self:center;width:100%;max-width:410px;margin:0;padding:30px 32px;border:0;border-radius:18px;text-align:center;background:linear-gradient(150deg,rgba(255,255,255,.26),rgba(255,255,255,.08)),rgba(255,255,255,.84);box-shadow:0 12px 36px rgba(26,45,32,.08);-webkit-backdrop-filter:blur(24px) saturate(1.08);backdrop-filter:blur(24px) saturate(1.08);overflow-wrap:anywhere}
+.platform-page h1,.first-run-card h1{font-size:30px;font-weight:500;line-height:1.2;letter-spacing:-1px;margin:0}
 .platform-page main>p{font-size:16px;line-height:1.5;color:var(--muted);margin:0}
 .platform-page main>h1+p{line-height:1.4}
 .platform-page button{font-size:14px;font-weight:500;line-height:1.5;min-height:44px;padding:12px 15px;border:1px solid var(--line);border-radius:999px;white-space:normal}
@@ -16,18 +21,19 @@
 .platform-page main>p>a:only-child{box-sizing:border-box;display:block;width:100%;padding:12px 15px;border:1px solid var(--line);border-radius:999px;background:var(--fg);color:var(--bg);font-size:14px;font-weight:500;text-decoration:none}
 .platform-page main>p>a.secondary{background:transparent;color:var(--fg)}
 .platform-page main>p:last-child{margin-bottom:0}
-.platform-page input,.platform-page textarea{box-sizing:border-box;font:400 14px/1.5 "Funnel Sans",sans-serif;padding:12px;border:1px solid var(--line);border-radius:7px;background:rgba(255,255,255,.45)}
-.platform-page label{font-size:12px}
-.platform-page :focus-visible{outline:3px solid #779a53;outline-offset:3px}
+.platform-page input,.platform-page textarea,.first-run-card input{box-sizing:border-box;font:400 14px/1.5 "Funnel Sans",sans-serif;padding:12px;border:1px solid var(--line);border-radius:7px;background:rgba(255,255,255,.45)}
+.platform-page label,.first-run-card label{font-size:12px}
+.platform-page :focus-visible,.first-run-card :focus-visible{outline:3px solid #779a53;outline-offset:3px}
 .platform-page .people,.platform-page .options,.platform-page .more{text-align:left;font-size:14px}
 .platform-page code{font-size:14px}
 @media(prefers-color-scheme:dark){
- .platform-page{--fg:#f1f3e9;--muted:#bec8bb;--bg:#141c1b;--line:rgba(222,236,216,.18);--line-strong:rgba(222,236,216,.28);--surface:#26312e;--soft:rgba(255,255,255,.06);--accent:#afc58e;background-color:#141c1b;background-image:url("platform-landscape-dark.jpg")}
- .platform-page main{background:linear-gradient(150deg,rgba(255,255,255,.065),rgba(255,255,255,.01)),rgba(25,34,34,.72);box-shadow:0 18px 44px rgba(0,0,0,.18);-webkit-backdrop-filter:blur(24px) saturate(1.15);backdrop-filter:blur(24px) saturate(1.15)}
+ :root{--fg:#f1f3e9;--muted:#bec8bb;--bg:#141c1b;--line:rgba(222,236,216,.18);--line-strong:rgba(222,236,216,.28);--surface:#26312e;--soft:rgba(255,255,255,.06);--accent:#afc58e}
+ .platform-page{background-color:#141c1b;background-image:url("platform-landscape-dark.jpg")}
+ .platform-page main,.first-run-card{background:linear-gradient(150deg,rgba(255,255,255,.065),rgba(255,255,255,.01)),rgba(25,34,34,.72);box-shadow:0 18px 44px rgba(0,0,0,.18);-webkit-backdrop-filter:blur(24px) saturate(1.15);backdrop-filter:blur(24px) saturate(1.15)}
  .platform-brand img{filter:brightness(0) invert(1)}
- .platform-page input,.platform-page textarea{background:#ffffff08}
+ .platform-page input,.platform-page textarea,.first-run-card input{background:#ffffff08}
 }
-@media(max-width:600px){.platform-page body{padding-inline:16px}.platform-page main{padding:28px 22px}}
+@media(max-width:600px){.platform-page body,.first-run-content{padding-inline:16px}.platform-page main,.first-run-card{padding:28px 22px}}
 /* A dialog supplies its own positioning and surface; do not add wallpaper
    or viewport-sized rows inside an iframe that measures its own height. */
 .platform-page.framed{background:var(--surface)}
@@ -39,7 +45,42 @@
 .platform-page main>:where(h1,p,form)+p{margin-top:16px}
 .platform-page main>form,.platform-page main>p:has(>a:only-child){margin-top:24px}
 .platform-page main>form+p{margin-top:20px}
-.platform-page main::before,.platform-page main::after{content:'';position:absolute;inset:-1px;border-radius:inherit;padding:1px;pointer-events:none;background:radial-gradient(180px circle at var(--edge-x,50%) var(--edge-y,50%),rgba(255,255,255,.85),rgba(255,255,255,.25) 45%,transparent 100%);-webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);-webkit-mask-composite:xor;mask-composite:exclude;opacity:var(--edge-light);transition:opacity 160ms ease-out}
-.platform-page main::after{filter:blur(2px);opacity:calc(var(--edge-light) * .35)}
+.platform-page main::before,.platform-page main::after,.first-run-card::before,.first-run-card::after{content:'';position:absolute;inset:-1px;border-radius:inherit;padding:1px;pointer-events:none;background:radial-gradient(180px circle at var(--edge-x,50%) var(--edge-y,50%),rgba(255,255,255,.85),rgba(255,255,255,.25) 45%,transparent 100%);-webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);-webkit-mask-composite:xor;mask-composite:exclude;opacity:var(--edge-light);transition:opacity 160ms ease-out}
+.platform-page main::after,.first-run-card::after{filter:blur(2px);opacity:calc(var(--edge-light) * .35)}
 .platform-page.framed main::before,.platform-page.framed main::after{display:none}
-@media(prefers-reduced-motion:reduce){.platform-page main::before,.platform-page main::after{transition:none}}
+@media(prefers-reduced-motion:reduce){.platform-page main::before,.platform-page main::after,.first-run-card::before,.first-run-card::after{transition:none}}
+
+/* The design's inner ticket: a card's own facts (a price, what a seat
+   gives, a notice), on the card's surface, its pearl foil drifting and
+   brighter under a pointer (none of it moving with reduced motion). */
+.ticket{position:relative;isolation:isolate;overflow:hidden;margin:24px 0;padding:20px;border-radius:14px;background:var(--surface);color:var(--fg);box-shadow:0 5px 18px rgba(40,55,50,.055);font-size:14px;line-height:1.5}
+.ticket>*{position:relative;z-index:1}
+.ticket::before{content:'';position:absolute;z-index:0;inset:-70%;pointer-events:none;opacity:.65;background:linear-gradient(120deg,transparent 22%,rgba(115,225,209,.18) 34%,rgba(164,180,248,.22) 43%,rgba(242,169,214,.19) 51%,rgba(248,222,152,.22) 60%,transparent 74%);background-size:180% 180%;animation:ticket-foil 14s ease-in-out infinite alternate;transition:opacity .7s ease}
+.ticket::after{content:'';position:absolute;z-index:0;inset:0;pointer-events:none;opacity:.12;background:radial-gradient(ellipse at 50% 30%,rgba(255,255,255,.5),transparent 62%);transition:opacity .6s ease}
+@media(hover:hover) and (pointer:fine){.ticket:hover::before{opacity:1}.ticket:hover::after{opacity:.7}}
+.ticket:focus-within::before{opacity:1}
+@keyframes ticket-foil{from{background-position:15% 25%}to{background-position:85% 75%}}
+/* a plan's ticket: its price and kind, then what it gives, a tick each */
+.ticket-plan{text-align:left}
+.ticket-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 18px}
+.price{font-size:24px;font-weight:500;line-height:1.2;letter-spacing:-.5px;white-space:nowrap}
+.price span{font-size:14px;letter-spacing:0;color:var(--muted)}
+.pill{padding:3px 8px;border:1px solid var(--line);border-radius:20px;font-size:12px;line-height:1.5;white-space:nowrap}
+.checks{margin:0;padding:0;list-style:none;font-size:14px}
+.checks li{display:flex;align-items:center;gap:12px;margin-top:9px}
+.checks li::before{content:'✓';flex:none;color:var(--accent)}
+.checks li.lock::before{content:none}
+.checks li.lock svg{flex:none;width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:1.7}
+/* The page's footer: who makes Finite, and its pages, white over the landscape. */
+.page-footer{box-sizing:border-box;grid-row:3;align-self:end;display:flex;align-items:center;justify-content:space-between;gap:8px 20px;width:100%;padding:24px 0;color:#fff;font-size:14px;line-height:1.5;text-shadow:0 1px 3px rgba(0,0,0,.35)}
+.page-footer nav{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:4px 18px;margin-left:auto}
+.page-footer a{color:inherit;text-decoration:none}
+.page-footer a:hover{text-decoration:underline;text-underline-offset:3px}
+.page-footer a:focus-visible{outline:2px solid currentColor;outline-offset:4px;border-radius:2px}
+@media(prefers-color-scheme:dark){
+ .ticket{box-shadow:0 5px 22px rgba(0,0,0,.16)}
+ .ticket::before{opacity:.42}
+ .ticket::after{background:radial-gradient(ellipse at 50% 30%,rgba(179,223,212,.16),transparent 62%)}
+}
+@media(max-width:600px){.page-footer{flex-direction:column;justify-content:center;gap:10px}.page-footer nav{margin-left:0;justify-content:center}.page-footer>:first-child{order:1}}
+@media(prefers-reduced-motion:reduce){.ticket::before{animation:none;transition:none}.ticket::after{transition:none}}

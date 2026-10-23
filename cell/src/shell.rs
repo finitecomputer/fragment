@@ -57,7 +57,7 @@ pub async fn page(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
     h.set(
         "content-security-policy",
         &format!(
-            "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; frame-src {}; manifest-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
+            "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; frame-src {}; manifest-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
             frame_src(cfg, url)
         ),
     )?;
@@ -100,15 +100,15 @@ pub async fn admin_page(req: &Request, env: &Env, cfg: &Config, url: &Url) -> Ce
 
 /// `GET /about`, `GET /privacy` and `GET /terms`: Finite's about page,
 /// privacy policy and terms (cell/shell/about.html, privacy.html,
-/// terms.html, with `legal.css`), for anyone, signed in or not: the pages
-/// the landing, the welcome and Settings link, and the deployment names to
-/// WorkOS and Stripe. Static: no script, no form, never
-/// framed. Revalidated by their hash (`no-cache`), a 304 answered before
-/// any read.
+/// terms.html, with `platform-pages.css`, its fonts, and `legal.css`), for
+/// anyone, signed in or not: the pages the first run's footer and Settings
+/// link, and the deployment names to WorkOS and Stripe. Static: no script,
+/// no form, never framed. Revalidated by their hash (`no-cache`), a 304
+/// answered before any read.
 pub async fn legal_page(req: &Request, env: &Env, name: &str) -> CellResult<Response> {
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;
-    h.set("content-security-policy", "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")?;
+    h.set("content-security-policy", "default-src 'none'; style-src 'self'; img-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")?;
     h.set("x-frame-options", "DENY")?;
     h.set("cross-origin-opener-policy", "same-origin")?;
     h.set("referrer-policy", "strict-origin-when-cross-origin")?;
