@@ -40,12 +40,25 @@ function routed(request, env, rust) {
 // deployment's secrets are stand-ins of the store's bindings there, and the
 // Rust reads them as it reads the store's (docs/self-host.md, seam 12).
 // Where it has one (Cloudflare, wrangler dev), the env is as it came.
+
+// BENCH (selfhost-perf-bench): each request's time in the router and in each
+// object (a WebSocket's upgrade answers at once)
+async function benched(where, request, f) {
+  const t0 = Date.now();
+  try {
+    return await f();
+  } finally {
+    const u = new URL(request.url);
+    console.log(JSON.stringify({ bench: "req", where, m: request.method, path: u.pathname.replace(/[0-9a-f]{24,}/g, "<id>").slice(0, 80), ms: Date.now() - t0 }));
+  }
+}
+
 export default class extends rs.default {
   constructor(ctx, env) {
     super(ctx, withSecrets(env));
   }
   fetch(request) {
-    return routed(request, this.env, () => super.fetch(request));
+    return benched("router", request, () => routed(request, this.env, () => super.fetch(request)));
   }
 }
 
@@ -55,7 +68,7 @@ export class Fragment extends DurableObject {
     super(ctx, env);
     this.rs = new rs.FragmentCell(ctx, env);
   }
-  fetch(request) { return this.rs.fetch(request); }
+  fetch(request) { return benched("Fragment", request, () => this.rs.fetch(request)); }
   alarm(info) { return this.rs.alarm(info); }
   webSocketMessage(ws, message) { return this.rs.webSocketMessage(ws, message); }
   webSocketClose(ws, code, reason, clean) { return this.rs.webSocketClose(ws, code, reason, clean); }
@@ -68,7 +81,7 @@ export class Principal extends DurableObject {
     super(ctx, env);
     this.rs = new rs.PrincipalCell(ctx, env);
   }
-  fetch(request) { return this.rs.fetch(request); }
+  fetch(request) { return benched("Principal", request, () => this.rs.fetch(request)); }
   alarm(info) { return this.rs.alarm(info); }
 }
 
@@ -78,7 +91,7 @@ export class Ledger extends DurableObject {
     super(ctx, env);
     this.rs = new rs.LedgerCell(ctx, env);
   }
-  fetch(request) { return this.rs.fetch(request); }
+  fetch(request) { return benched("Ledger", request, () => this.rs.fetch(request)); }
   alarm(info) { return this.rs.alarm(info); }
 }
 
@@ -88,7 +101,7 @@ export class Registry extends DurableObject {
     super(ctx, env);
     this.rs = new rs.RegistryCell(ctx, env);
   }
-  fetch(request) { return this.rs.fetch(request); }
+  fetch(request) { return benched("Registry", request, () => this.rs.fetch(request)); }
   alarm(info) { return this.rs.alarm(info); }
 }
 
@@ -672,7 +685,7 @@ export class Computer extends DurableObject {
   }
   fetch(request) {
     if (new URL(request.url).pathname === "/__node/egress") return this.ctx.computerHost.nodeEgress(request);
-    return this.rs.fetch(request);
+    return benched("Computer", request, () => this.rs.fetch(request));
   }
   alarm(info) { return this.rs.alarm(info); }
   webSocketMessage(ws, message) { return this.rs.webSocketMessage(ws, message); }
