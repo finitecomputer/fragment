@@ -217,6 +217,24 @@ fn tier_checks(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && tried(s, calls) == fell() && made.iter().all(image_of) && made.get(1).is_some_and(|c| c.authorization.as_deref() == Some(tinfoil_key.as_str())) && settled,
         json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "entries": aig().len() - before }),
     );
+    // a photo past Finite Private's 2 MiB (its limiter's 413), within the route's 6 MiB: Tinfoil's to answer
+    let photo = {
+        use base64::Engine;
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.resize(2 * 1024 * 1024, 7);
+        format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes))
+    };
+    let big = json!({ "model": "vision", "messages": [{ "role": "user", "content": [{ "type": "text", "text": "what is this?" }, { "type": "image_url", "image_url": { "url": photo } }] }] });
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    s.ai.set_usage(&[Used { prompt: 2_000, cached: 0, completion: 40 }]);
+    let r = api.signed(&hand, "POST", ROUTE, Some(&big))?;
+    let made = s.ai.calls()[calls..].to_vec();
+    let settled = s.eventually(wait, || settled_as(before, TINFOIL, charge(&tokens(TINFOIL, 2_000, 40))));
+    s.ok(
+        "a `vision` call past Finite Private's 2 MiB (its 413) and within the route's 6 MiB falls back to Tinfoil, which answers it, charged once at its price",
+        r.status == 200 && tried(s, calls) == fell() && made.get(1).is_some_and(|c| c.body["messages"] == big["messages"]) && settled,
+        json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "answer": r.text.chars().take(300).collect::<String>() }),
+    );
 
     // ---- Tinfoil's key refused: the call's failure, charged nothing, said aloud
     let (calls, before, alarms) = (s.ai.calls().len(), aig().len(), logged(s, "model.platform-key"));

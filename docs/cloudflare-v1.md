@@ -1245,6 +1245,9 @@ Private stays possible by config.
     (the private tier's `vision` on Finite Private, Tinfoil's DeepSeek
     V4.1 Flash, which reads images, behind it): decision 23's "`vision`
     and transcriptions do not" holds for a fallback that says nothing.
+    And (c) is reversed, a decision for Paul: an OpenAI-compatible API's
+    413 under the route's own 6 MiB falls back, so a screenshot or a
+    photo past Finite Private's 2 MiB is answered by the fallback.
 
     **Going live** (Paul's): finite-mono issues the key; `cargo xtask
     secret set fragment-finite-private-key --config <production's

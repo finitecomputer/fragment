@@ -37,7 +37,8 @@
 //!
 //! A call that its model fails before answering anything (it is not
 //! reached, or it answers 429 or a 5xx; on an OpenAI-compatible API, whose
-//! key is the platform's, also 401, 402, 403 or 404) is made once more, the
+//! key is the platform's, also 401, 402, 403 or 404, and 413, its own cap
+//! below the route's) is made once more, the
 //! same, on the deployment's fallback model (`Tries`, `falls_back`; Paul,
 //! 2026-10-08: "we def need fallback models"): a tier's call always, a
 //! `vision` call only when the fallback's slot says its model reads images
@@ -143,9 +144,9 @@ pub const IMAGE_DATA_URL_MAX_BYTES: usize = 5 * 1024 * 1024;
 /// the rest of it (Hermes' prompt about a screenshot carries the screen's
 /// element list), so the call Hermes retries after a 413 fits. GLM's
 /// million-token window is about 4 MB of text; an agent's window sends a
-/// few hundred KiB. Finite Private's limiter takes at most 2 MiB a request
-/// (its 413 past that is the call's): a text tier's call there is that
-/// size at most, and `vision` stays on Workers AI (decision 61).
+/// few hundred KiB. Finite Private's limiter takes at most 2 MiB a request:
+/// its 413 past that falls back (`falls_back`), to a fallback that may take
+/// more (Tinfoil's, behind the private tier's `vision`).
 pub const MODEL_BODY_MAX_BYTES: usize = IMAGE_DATA_URL_MAX_BYTES + 1024 * 1024;
 const _: () = assert!(MODEL_BODY_MAX_BYTES > IMAGE_DATA_URL_MAX_BYTES && MODEL_BODY_MAX_BYTES < 8 * 1024 * 1024, "the cap fits Hermes' shrunk image, and stays near it");
 /// The most one call may write, reasoning included: a job's text step may
@@ -906,13 +907,21 @@ fn route_name(name: &str) -> Option<Named> {
 /// key refused (401) or denied (403), its account out of credit (402), or
 /// no endpoint left by its slot's routing (OpenRouter's 404): a call is
 /// not the caller's to fail for the platform's account (decision 61, as
-/// decided 2026-10-15). A refusal of the request itself (400 and any other
-/// 4xx) would be the fallback's too, and a 200 has begun the answer, which
-/// is final.
+/// decided 2026-10-15). And its own cap on a request's size, below the
+/// route's (`TOO_LARGE`: Finite Private's limiter's 2 MiB, under the
+/// route's `MODEL_BODY_MAX_BYTES`): the route took the call, so its size is
+/// the vendor's limit, not the caller's fault (a decision for Paul,
+/// 2026-10-22; decision 61's (c) passed it through). A refusal of the
+/// request itself (400 and any other 4xx) would be the fallback's too, and
+/// a 200 has begun the answer, which is final.
 pub fn falls_back(upstream: &Upstream, status: u16) -> bool {
-    let platforms = matches!(upstream, Upstream::Openai { .. }) && PLATFORM_KEY_REFUSALS.contains(&status);
+    let platforms = matches!(upstream, Upstream::Openai { .. }) && (PLATFORM_KEY_REFUSALS.contains(&status) || status == TOO_LARGE);
     status == 429 || (500..=599).contains(&status) || platforms
 }
+
+/// An OpenAI-compatible API's refusal of a request past its own size cap
+/// (`falls_back`).
+pub const TOO_LARGE: u16 = 413;
 
 /// The statuses an OpenAI-compatible API answers about the platform's own
 /// key and account there (`falls_back`): refused, out of credit, denied,
@@ -2226,10 +2235,11 @@ mod tests {
     /// Goal: what falls back is the vendor failing before it answered
     /// anything: its rate limit (429) or its own failure (5xx), and, on an
     /// OpenAI-compatible API, the platform's own key and account there
-    /// (401, 402, 403, 404), each of which a 401 and a 402 also say aloud.
-    /// A refusal of the request (400, any other 4xx) would be the
-    /// fallback's too, and an answer that began (2xx) is final. Method:
-    /// every class of status, on each kind of upstream.
+    /// (401, 402, 403, 404), each of which a 401 and a 402 also say aloud,
+    /// and its own size cap below the route's (413: Finite Private's
+    /// limiter's 2 MiB). A refusal of the request (400, any other 4xx)
+    /// would be the fallback's too, and an answer that began (2xx) is
+    /// final. Method: every class of status, on each kind of upstream.
     #[test]
     fn a_rate_limit_or_a_failure_falls_back() {
         let routed = openrouter().cheap;
@@ -2238,13 +2248,13 @@ mod tests {
             for status in [429, 500, 502, 503, 504, 520, 599] {
                 assert!(falls_back(upstream, status), "{status}");
             }
-            for status in [100, 200, 204, 301, 400, 408, 413, 422, 428, 430, 499, 600, 0] {
+            for status in [100, 200, 204, 301, 400, 408, 422, 428, 430, 499, 600, 0] {
                 assert!(!falls_back(upstream, status), "{status}");
             }
         }
-        for status in PLATFORM_KEY_REFUSALS {
-            assert!(falls_back(&routed, status), "the platform's key or account: {status}");
-            assert!(!falls_back(&flash, status), "Workers AI's binding has no key of ours: {status}");
+        for status in PLATFORM_KEY_REFUSALS.into_iter().chain([TOO_LARGE]) {
+            assert!(falls_back(&routed, status), "the platform's key, account or cap: {status}");
+            assert!(!falls_back(&flash, status), "Workers AI's binding has no key of ours, and its cap is the route's: {status}");
         }
         assert_eq!(PLATFORM_KEY_REFUSALS, [401, 402, 403, 404]);
         assert!(key_alarm(&routed, 401).is_some_and(|w| w.contains("refused")) && key_alarm(&routed, 402).is_some_and(|w| w.contains("out of credit")));
@@ -2296,8 +2306,8 @@ mod tests {
                 assert_eq!(t.after(Tried::Answered(400)), None);
                 assert_eq!(t.after(Tried::Answered(502)), None, "the tries are over");
                 assert_eq!(t.model(), cheap);
-                // the platform's key refused, or its credit spent: the call's on Workers AI, a fallback on an OpenAI-compatible API
-                for status in [401, 402, 403, 404] {
+                // the platform's key refused, its credit spent, or its own size cap: the call's on Workers AI, a fallback on an OpenAI-compatible API
+                for status in [401, 402, 403, 404, TOO_LARGE] {
                     let mut t = Tries::new(cheap, Some(fallback));
                     let on_openai = matches!(cheap.upstream, Upstream::Openai { .. });
                     assert_eq!(t.after(Tried::Answered(status)), on_openai.then_some(fallback), "{status}");

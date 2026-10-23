@@ -1052,8 +1052,9 @@ expires within 30 days. The container application is the deployment's
     Finite's alternatives keep `vision` on Workers AI but the private
     tier's, which puts it there with Tinfoil's behind it. It reports no
     cached tokens.
-  - **Its refusals.** Past 2 MiB, 413; a model it does not serve, 400;
-    each the call's. A key missing, unknown or revoked, 401 (the
+  - **Its refusals.** A model it does not serve, 400: the call's. Past 2
+    MiB, 413 (the route takes 6 MiB: the limiter's cap is the platform's,
+    not the caller's); a key missing, unknown or revoked, 401 (the
     platform's key: logged aloud); its key's window spent, 429;
     finite.computer (which admits each call) not answering, 503; its model
     failing, 502: each falls back to Workers AI. Its own

@@ -1834,8 +1834,9 @@ Workers AI's GLM-5.3 Flash. Each is a model the price book prices.
 A tier's call whose model fails before answering anything (not reached,
 429, or a 5xx; on an OpenAI-compatible API, where the key is the
 platform's, also 401, 402, 403 or 404: its key refused, its credit spent,
-or no endpoint left by its routing, none of them the caller's to fail
-for) is made once more, the same, on the deployment's fallback model,
+or no endpoint left by its routing, and 413, its own size cap below the
+route's, none of them the caller's to fail for) is made once more, the
+same, on the deployment's fallback model,
 and its answer is the call's: charged from its usage at its prices,
 once; a 401 or 402 is also logged aloud (`model.platform-key`). An
 answer that began is final; a refusal of the request (400, another 4xx)

@@ -144,7 +144,9 @@ pub const TINFOIL_FLASH: &str = "deepseek-v4-1-flash";
 /// OpenRouter's, and Tinfoil's DeepSeek V4.1 Flash.
 pub const OPENAI_MODELS: [&str; 3] = [fragment_core::models::FINITE_PRIVATE_FLASH, fragment_core::models::OPENROUTER_FLASH, TINFOIL_FLASH];
 /// The largest request the OpenAI-compatible face takes: Finite Private's
-/// limiter's (axum's default body limit, 2 MiB).
+/// limiter's (axum's default body limit, 2 MiB), for every model it serves
+/// but Tinfoil's, whose cap no doc of Tinfoil's names (none here: the
+/// route's own bounds it).
 pub const OPENAI_BODY_MAX_BYTES: usize = 2 * 1024 * 1024;
 /// Its path.
 pub const OPENAI_PATH: &str = "/v1/chat/completions";
@@ -837,7 +839,7 @@ fn openai_answer(s: &mut State, req: &Request) -> Response {
     let model = body["model"].as_str().unwrap_or_default().to_string();
     let authorization = req.header("authorization").map(str::to_string);
     s.calls.push(AiCall { face: Face::OpenAi, model: model.clone(), body: body.clone(), metadata: Value::Null, affinity: req.header("x-session-affinity").map(str::to_string), authorization: authorization.clone() });
-    if req.body.len() > OPENAI_BODY_MAX_BYTES {
+    if req.body.len() > OPENAI_BODY_MAX_BYTES && model != TINFOIL_FLASH {
         return limiter_error(413, "invalid_request_error", "payload_too_large", "length limit exceeded");
     }
     let presented = authorization.as_deref().and_then(|a| a.strip_prefix("Bearer ")).map(str::trim);
