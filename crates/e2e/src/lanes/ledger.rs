@@ -1095,7 +1095,31 @@ fn transcription(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     );
     s.ai.fail_next(&[400]);
     let r = transcription_call(api, hand, &[("model", "whisper")], &memo)?;
-    s.ok("Whisper's refusal is passed through, and nothing is charged", r.status == 400 && aig().len() == before, json!({ "status": r.status, "entries": aig() }));
+    s.ok(
+        "Whisper's refusal is passed through, sent once, and nothing is charged",
+        r.status == 400 && s.ai.calls().len() == calls + 1 && aig().len() == before,
+        json!({ "status": r.status, "calls": s.ai.calls().len() - calls, "entries": aig() }),
+    );
+    // Workers AI short of capacity a moment: asked once more, the memo is heard, and charged once
+    let heard_n = || aig().iter().filter(|e| charged(e) == Some(heard)).count();
+    let (calls, before, was) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"), heard_n());
+    s.ai.fail_next(&[429]);
+    let r = transcription_call(api, hand, &[("model", "whisper"), ("response_format", "json")], &memo)?;
+    let settled = s.eventually(wait, || aig().len() == before + 1 && heard_n() == was + 1);
+    s.ok(
+        "a transcription Workers AI refuses for capacity (429) is asked once more, heard, and charged once",
+        r.status == 200 && r.body == json!({ "text": "hello from a voice memo" }) && s.ai.calls().len() == calls + 2 && settled,
+        json!({ "status": r.status, "answer": r.text, "calls": s.ai.calls().len() - calls, "entries": aig() }),
+    );
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
+    s.ai.fail_next(&[503, 429]);
+    let r = transcription_call(api, hand, &[("model", "whisper")], &memo)?;
+    let after = r.headers.get("retry-after").and_then(|v| v.to_str().ok()).map(str::to_string);
+    s.ok(
+        "refused twice, the second refusal is passed on with a retry-after, and nothing is charged",
+        r.status == 429 && after.as_deref() == Some("5") && s.ai.calls().len() == calls + 2 && aig().len() == before,
+        json!({ "status": r.status, "retry_after": after, "calls": s.ai.calls().len() - calls, "entries": aig() }),
+    );
     let r = transcription_call(api, &owner, &[("model", "whisper")], &memo)?;
     s.ok("a person does not call it (an agent does, for whom its owner pays)", r.status == 403, &r);
     Ok(())
