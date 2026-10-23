@@ -218,6 +218,12 @@ pub const VISION_MODEL: &str = "vision";
 /// The model route's name for transcription
 /// (`fragment_core::transcribe::WHISPER`): Hermes' speech-to-text names it.
 pub const TRANSCRIBE_MODEL: &str = "whisper";
+/// The model route's name for speech (`fragment_core::speech::SPEECH`:
+/// OpenAI's tts-1 through the AI Gateway): Hermes' text-to-speech names it.
+pub const SPEECH_MODEL: &str = "speech";
+/// The voice an agent speaks in: one of tts-1's, each of which speaks any
+/// language (`fragment_core::speech::VOICES`).
+pub const SPEECH_VOICE: &str = "alloy";
 /// The model route's name for the deployment's fallback model
 /// (`fragment_core::models::FALLBACK`): a tier agent's `fallback_providers`
 /// names its id (`ModelIds::fallback`), or this name when the platform names
@@ -542,9 +548,19 @@ pub fn profile_config(agent: &Agent, name: &str, main: &MainModel, reasoning: Re
     if offered("FAL_KEY") {
         y.push_str("image_gen:\n  provider: \"fal\"\n  model: \"fal-ai/flux-2/klein/9b\"\n");
     }
-    if offered("ELEVENLABS_API_KEY") {
-        y.push_str("tts:\n  provider: \"elevenlabs\"\n");
-    }
+    // Its voice (Paul, 2026-10-22: speech over AI Gateway in place of the
+    // ElevenLabs key): Hermes' text_to_speech, and its /voice replies, on
+    // the route's `speech` (OpenAI's tts-1 through the gateway), OpenAI's
+    // speech shape through the intercept, metered to the agent's owner per
+    // character. Its key names the agent, as its ears' does. ElevenLabs'
+    // key, when offered, stays the music skill's.
+    y.push_str(&format!(
+        "tts:\n  provider: \"openai\"\n  openai:\n    base_url: {}\n    api_key: {}\n    model: {}\n    voice: {}\n",
+        q(&format!("{base}/v1")),
+        q(&format!("agent:{}", agent.fragment)),
+        q(SPEECH_MODEL),
+        q(SPEECH_VOICE)
+    ));
     // XAI_API_KEY enables Hermes' separate x_search, not a web backend.
     // Its browser: Hermes' built-in browser tools (browser_navigate, …),
     // driving the image's own Chromium, headed, on the agent's desktop, so
@@ -1230,6 +1246,11 @@ mod tests {
         for (tier, config) in [("medium", &p), ("high", &h)] {
             assert!(config.contains(ears), "the {tier} tier's voice memos go to the route's whisper, its key naming the agent, no language forced: {config}");
         }
+        let voice = "tts:\n  provider: \"openai\"\n  openai:\n    base_url: \"http://model.fragment.internal/v1\"\n    api_key: \"agent:juniper--k3x9\"\n    model: \"speech\"\n    voice: \"alloy\"\n";
+        for (tier, config) in [("medium", &p), ("high", &h)] {
+            assert!(config.contains(voice), "the {tier} tier speaks through the route's speech, its key naming the agent: {config}");
+            assert!(!config.contains("elevenlabs"), "never ElevenLabs': {config}");
+        }
         assert!(!m.contains("api_key") && !m.contains("openai"), "the overlay names no agent, so a call outside a profile names none either: {m}");
         // a text tier's stall: Hermes' own stale detector, one retry, then the route's `fallback` as the agent
         let fallback = "fallback_providers:\n  - provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"@cf/zai-org/glm-5.3-flash\"\n    api_key: \"agent:juniper--k3x9\"\n";
@@ -1452,7 +1473,6 @@ mod tests {
         for (provider, env, selection) in [
             ("firecrawl", "FIRECRAWL_API_KEY", "web:\n  backend: \"firecrawl\"\n  search_backend: \"firecrawl\"\n  extract_backend: \"firecrawl\"\n"),
             ("fal", "FAL_KEY", "image_gen:\n  provider: \"fal\"\n  model: \"fal-ai/flux-2/klein/9b\"\n"),
-            ("elevenlabs", "ELEVENLABS_API_KEY", "tts:\n  provider: \"elevenlabs\"\n"),
             ("browser-use", "BROWSER_USE_API_KEY", "  cloud_provider: \"local\"\n"),
             ("perplexity", "PERPLEXITY_API_KEY", "web:\n  search_backend: \"perplexity\"\n"),
         ] {
@@ -1471,8 +1491,10 @@ mod tests {
         for (provider, env) in [("perplexity", "PERPLEXITY_API_KEY"), ("firecrawl", "FIRECRAWL_API_KEY"), ("xai", "XAI_API_KEY")] {
             a.credentials.push(credential(provider, &[env], &format!("fck_{provider}_{}", "a".repeat(32))));
         }
+        a.credentials.push(credential("elevenlabs", &["ELEVENLABS_API_KEY"], &format!("fck_elevenlabs_{}", "a".repeat(32))));
         let config = profile_config(&a, "Juniper", &Tier::Cheap.into(), DEFAULT_REASONING, &route("http://m"), &[], Path::new("/c.sh"));
         assert!(config.contains("  search_backend: \"firecrawl\"\n"), "Firecrawl wins over Perplexity");
+        assert!(config.contains("tts:\n  provider: \"openai\"\n") && !config.contains("provider: \"elevenlabs\""), "ElevenLabs' key offered, the voice is still the route's: {config}");
         assert!(!config.contains("\"xai\""), "X search is a separate native tool, never a web backend");
         assert!(profile_env(&a).contains("XAI_API_KEY=fck_xai_"));
         assert!(profile_env(&a).contains("PERPLEXITY_API_KEY=fck_perplexity_"));
@@ -1513,6 +1535,7 @@ mod tests {
         assert!(!p.contains("context_length"), "its provider says its context: {p}");
         assert!(p.contains("    base_url: \"http://model.fragment.internal/v1\"\n    model: \"vision\"\n"), "its eyes stay the route's: {p}");
         assert!(p.contains("    model: \"whisper\"\n"), "its ears too: {p}");
+        assert!(p.contains("    model: \"speech\"\n"), "and its voice: {p}");
     }
 
     /// Valid: each credential's placeholder is in its environment

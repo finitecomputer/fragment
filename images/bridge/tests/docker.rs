@@ -2413,9 +2413,12 @@ async fn tool_profiles_select_offered_operator_keys() {
     let (fake, _model, _chat, c) = hermes_running().await;
     let config = || c.exec_out(&["cat", "/data/hermes/profiles/juniper--k3x9/config.yaml"]);
     let absent = config();
-    for selection in ["web:", "image_gen:", "tts:", "cloud_provider:"] {
+    for selection in ["web:", "image_gen:", "cloud_provider:"] {
         assert!(!absent.contains(selection), "no offered provider: {absent}");
     }
+    // its voice is the route's whatever is offered (ElevenLabs' key stays the music skill's)
+    let voice = "tts:\n  provider: \"openai\"\n  openai:\n    base_url: \"http://model.fragment.internal:";
+    assert!(absent.contains(voice) && absent.contains("    model: \"speech\"\n"), "its voice is the route's speech: {absent}");
     let credentials: Vec<serde_json::Value> = [
         ("firecrawl", "FIRECRAWL_API_KEY"), ("fal", "FAL_KEY"),
         ("elevenlabs", "ELEVENLABS_API_KEY"), ("browser-use", "BROWSER_USE_API_KEY"),
@@ -2443,7 +2446,7 @@ from pm.extras import available
 cfg = load_config()
 assert cfg['web']['backend'] == cfg['web']['search_backend'] == cfg['web']['extract_backend'] == 'firecrawl'
 assert cfg['image_gen']['provider'] == 'fal' and cfg['image_gen']['model'] == 'fal-ai/flux-2/klein/9b'
-assert cfg['tts']['provider'] == 'elevenlabs'
+assert cfg['tts']['provider'] == 'openai' and cfg['tts']['openai']['model'] == 'speech', cfg['tts']
 assert cfg['browser']['cloud_provider'] == 'local' and cfg['browser']['backend'] == 'off'
 assert all(available(e) for e in ('edge-tts', 'firecrawl', 'fal', 'tts-premium'))
 import fal_client, httpx
@@ -2683,6 +2686,36 @@ async fn a_voice_memo_is_transcribed_through_the_route() {
     assert_eq!(replies.len(), 1, "one reply, no transcript echoed as a message of its own: {replies:?}");
     assert!(!replies[0]["text"].as_str().unwrap_or("").contains('🎙'), "{replies:?}");
     assert_eq!(c.exec_out(&["sh", "-c", "find /data -iname '*faster_whisper*' -o -iname 'ctranslate2*' | head -3"]).trim(), "", "no local Whisper installed for it");
+}
+
+/// Goal (Paul, 2026-10-22: speech over AI Gateway in place of the
+/// ElevenLabs key): an agent's `text_to_speech` speaks through the
+/// platform's speech route, as the agent (its key), with the route's model
+/// `speech` and the image's voice, and its audio reaches the chat as an
+/// attachment of its reply. Method: real Hermes asked to speak (the scripted
+/// model's `speak:`), its call to the route and the reply's attachment.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn an_agent_speaks_through_the_route() {
+    let (fake, model, chat, c) = hermes_running().await;
+    let said = "Hello! Hola, que tal?";
+    let calls_before = model.calls.lock().unwrap().len();
+    let attached = |w: &support::fake::World, turn: &str| w.bodies(&chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn && r.get("attachments").is_some());
+    let turn = asked(&fake, &chat, &c, &format!("speak: {said}"), |w, turn| attached(w, turn).is_some()).await;
+    let calls: Vec<support::model::Call> = model.calls.lock().unwrap()[calls_before..].to_vec();
+    let spoken: Vec<&support::model::Call> = calls.iter().filter(|c| c.path.ends_with("/audio/speech")).collect();
+    eprintln!("speech: {:?}", spoken.iter().map(|c| (&c.body, &c.authorization)).collect::<Vec<_>>());
+    assert_eq!(spoken.len(), 1, "one call to the route's speech: {:?}", calls.iter().map(|c| &c.path).collect::<Vec<_>>());
+    let s = spoken[0];
+    assert_eq!(s.authorization.as_deref(), Some("Bearer agent:juniper--k3x9"), "its key names its agent");
+    assert_eq!((s.body["model"].clone(), s.body["voice"].clone(), s.body["input"].clone()), (json!("speech"), json!("alloy"), json!(said)), "the route's speech, the image's voice, the text: {}", s.body);
+    fake.with(|w| {
+        let reply = attached(w, &turn).unwrap();
+        let file = &reply["attachments"][0];
+        let sent = w.fragments[&chat].blobs.get(file["sha256"].as_str().unwrap_or("")).map(|(_, b)| b.clone());
+        assert_eq!(sent.as_deref(), Some(&[support::model::SPOKEN, said.as_bytes()].concat()[..]), "the route's audio is the reply's attachment: {reply}");
+        assert!(file["type"].as_str().is_some_and(|t| t.starts_with("audio/")), "an audio attachment, which the chat plays: {reply}");
+    });
 }
 
 // ---- Hermes' Bot Mode (images/hermes/boot/src/bots.rs, images/hermes/botmode.py) ----
