@@ -58,16 +58,19 @@ const TRANSCRIBE_ROUTE: &str = "/api/models/v1/audio/transcriptions";
 /// `MEMO_TYPES`, WebM first; docs/chat-records.md, "A voice memo"):
 /// Chrome's and Firefox's (and Safari's since 18.4) WebM/Opus with no
 /// duration in its header, an older Safari's fragmented MP4/AAC, and
-/// Ogg/Opus, the recorder's next choice and other apps' voice notes. Each
-/// is 2 s of a quiet 440 Hz tone, made with FFmpeg 9 (`-f
-/// lavfi -i sine=frequency=440:duration=2:sample_rate=48000 -af
-/// volume=-30dB -ac 1 -b:a 32k`, then `-c:a libopus -f webm -live 1`, `-c:a
-/// aac -movflags frag_keyframe+empty_moov+default_base_moof -f mp4`, and
-/// `-c:a libopus -f ogg`).
-const BROWSER_MEMOS: [(&str, &[u8]); 3] = [
+/// Ogg/Opus, the recorder's next choice and other apps' voice notes; and a
+/// messenger's (SimpleX's: MP4/AAC as Android's and iOS's recorders write
+/// it, at 16 kHz, its index after its samples). Each is 2 s of a quiet
+/// 440 Hz tone, made with FFmpeg 9 (`-f lavfi -i
+/// sine=frequency=440:duration=2:sample_rate=48000 -af volume=-30dB -ac 1
+/// -b:a 32k`, then `-c:a libopus -f webm -live 1`, `-c:a aac -movflags
+/// frag_keyframe+empty_moov+default_base_moof -f mp4`, and `-c:a libopus
+/// -f ogg`; SimpleX's at `sample_rate=16000`, `-c:a aac -f mp4`).
+const BROWSER_MEMOS: [(&str, &[u8]); 4] = [
     ("WebM/Opus (Chrome, Firefox, Safari 18.4+)", include_bytes!("../../fixtures/memo-chrome.webm")),
     ("MP4/AAC (an older Safari)", include_bytes!("../../fixtures/memo-safari.m4a")),
     ("Ogg/Opus", include_bytes!("../../fixtures/memo-opus.ogg")),
+    ("MP4/AAC (SimpleX's voice message)", include_bytes!("../../fixtures/memo-simplex.m4a")),
 ];
 /// Its decisions (fragment_core::decide).
 const DECIDE_ROUTE: &str = "/api/models/v1/decide";
@@ -1202,8 +1205,9 @@ fn meters(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
 /// reads it: it prints that answer's shape (the route's
 /// `x-fragment-answer-shape`: its keys, and its `usage`) and the settle,
 /// pass or fail; and that Whisper reads each browser's own recording
-/// (`BROWSER_MEMOS`: WebM/Opus, MP4/AAC, Ogg/Opus), which the route sends
-/// on as it came, printing what it heard. Four paid calls.
+/// (`BROWSER_MEMOS`: WebM/Opus, MP4/AAC fragmented and plain, Ogg/Opus),
+/// which the route sends on as it came, printing what it heard. Five paid
+/// calls.
 pub fn transcribe_lane(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("transcribe", &[crate::Need::Models, crate::Need::Levers]) {
         return Ok(());

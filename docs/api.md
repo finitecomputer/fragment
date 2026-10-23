@@ -1987,8 +1987,10 @@ memo is one the agent transcribes itself, through this route):
 - **The browsers' own recordings.** The route sends the audio on as it
   came, whatever its container: the chat's voice memo reaches Whisper as
   the browser recorded it, WebM/Opus (Chrome, Firefox, Safari 18.4+),
-  MP4/AAC (an older Safari) or Ogg/Opus. The `transcribe` section sends
-  one of each, so a hosted run proves that Whisper reads them.
+  MP4/AAC (an older Safari) or Ogg/Opus, and a messenger's voice message
+  as its app recorded it (SimpleX's is MP4/AAC). The `transcribe`
+  section sends one of each, so a hosted run proves that Whisper reads
+  them.
 - **What Workers AI answers.** Read on the e2e preview, 2026-10-08: the
   catalog's schema unwrapped (`text`, `transcription_info`, `segments`,
   `vtt`, `word_count`), plus a `usage` the schema does not name. The
