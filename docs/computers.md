@@ -895,11 +895,24 @@ network: its origin's host (`FRAGMENT_PLATFORM_URL`) and every name under
 the fragments' suffix (`*.<suffix>`: fragments, computers' origins), on
 the platform's scheme, and on HTTPS its port
 (`fragment_core::computer::platform_intercepts`; HTTP intercepts take a
-name on port 80 alone, so dev's and the e2e's `http://…:<port>` hosts are
-caught at port 80). So it works wherever the computer runs: on
+name on port 80 alone). So it works wherever the computer runs: on
 Cloudflare through the platform rather than the internet, and on a
 self-hosted network whose platform is on an address a computer may not
 reach (docs/self-host.md, found 40), with the internet on or off.
+
+**On a `.localhost` platform** (dev's and the e2e's: an app at
+`http://<app>.fragment.localhost:8790/`), Chrome and curl take the name for
+the machine's own loopback without asking DNS (RFC 6761), so in a
+computer the request never left the guest. The bridge listens there, on
+the guest's loopback at the platform's port (127.0.0.1, and ::1 where the
+guest has it), when its view's `origin` (the computer's own: the
+platform's scheme and port, under its zone) is plain HTTP under
+`.localhost`. It reads each connection's `Host`, dials a name in the zone
+on port 80 through the guest's resolver, where the intercept catches it,
+and passes the bytes both ways as they are, a WebSocket's included
+(images/bridge `loopback.rs`). Any other host there is refused (421). A
+client that asks DNS for a `.localhost` name instead (glibc's: Python's,
+Node's) reaches the app at its name on port 80 alone.
 
 - **Whose request it is.** The router answers it as it answers the same
   request from the internet: as whoever the guest's own cookies or
@@ -912,7 +925,9 @@ reach (docs/self-host.md, found 40), with the internet on or off.
   alone opens to no one, and a person who signs in from the computer's
   browser is that person there, as on any browser.
 - **What it sets**, as an edge sets it and never as the guest says: the
-  scheme and port it dialed (a node names the host alone), and the
+  platform's scheme and port, as the guest's browser has the page (a node
+  names the host alone, and on HTTP it was caught on 80), so an app's
+  socket from its own page passes the router's `Origin` check; and the
   address a limit counts the request by, the computer's id
   (`CF-Connecting-IP`). The guest's own forwarding headers go nowhere.
 - **A name under the suffix that is no host of this deployment's**

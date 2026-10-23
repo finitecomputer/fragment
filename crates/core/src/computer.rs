@@ -1861,10 +1861,11 @@ pub struct PlatformIntercepts {
 /// suffix (fragments', computers' and no one's, which the router answers),
 /// on the platform's scheme. HTTPS takes a name with a port; HTTP takes a
 /// name on port 80 alone (Cloudflare's intercepts, and sandcastle's), so an
-/// http platform on another port (dev, the e2e) is caught only where its
-/// hosts are named with none. An address is never a target: a loopback
-/// platform is the guest's own loopback, and a guest's own server there
-/// is its own.
+/// http platform on another port (dev, the e2e: `.localhost`) is caught
+/// where its hosts are dialed on 80, which the bridge's loopback forwarder
+/// does for the guest's browser and curl (images/bridge `loopback`). An
+/// address is never a target: a loopback platform is the guest's own
+/// loopback, and a guest's own server there is its own.
 pub fn platform_intercepts(platform_url: &str, suffix: &str) -> PlatformIntercepts {
     let url = url::Url::parse(platform_url).expect("FRAGMENT_PLATFORM_URL is an origin (checked as the isolate starts)");
     let https = url.scheme() == "https";

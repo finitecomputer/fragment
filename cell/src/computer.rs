@@ -3292,17 +3292,20 @@ const EDGE_HEADERS: [&str; 4] = ["x-forwarded-proto", "x-forwarded-host", "x-for
 /// adds no one, neither its owner nor an agent (an agent's requests are
 /// `egress_api`'s, which its fragment signs), so a computer reaches nothing
 /// there a browser could not. It sets what an edge sets, and only that:
-/// the scheme and port the guest dialed, the platform's (its port on
-/// HTTPS, 80 on HTTP: a node names the host alone), and the address a
-/// limit counts the request by, the computer's id. A name under the suffix
-/// that is no host of this deployment's (another branch's, on a zone it
-/// shares) is the router's to answer, as no one's: these intercepts reach
-/// the platform and nothing past it, with the internet on or off.
+/// the scheme and port of the platform's origin, as the guest's browser
+/// has the page (a node names the host alone, and an HTTP intercept caught
+/// it on 80: on a `.localhost` platform the guest's browser dialed the
+/// platform's port, on its loopback, and the bridge's forwarder brought it
+/// here: images/bridge `loopback`), so the app's origin is the one its
+/// page names, its socket's `Origin` included; and the address a limit
+/// counts the request by, the computer's id. A name under the suffix that
+/// is no host of this deployment's (another branch's, on a zone it shares)
+/// is the router's to answer, as no one's: these intercepts reach the
+/// platform and nothing past it, with the internet on or off.
 async fn egress_platform(req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
     let platform = Url::parse(&Config::from_env(env).platform_url).map_err(|e| CellError::host(format!("FRAGMENT_PLATFORM_URL: {e}")))?;
     let mut url = req.url()?;
-    let port = if platform.scheme() == "https" { platform.port() } else { None };
-    let dialed = url.set_scheme(platform.scheme()).is_ok() && url.set_port(port).is_ok();
+    let dialed = url.set_scheme(platform.scheme()).is_ok() && url.set_port(platform.port()).is_ok();
     assert!(dialed, "http and https are special schemes with ports");
     let headers = Headers::new();
     for (name, value) in req.headers().entries() {
