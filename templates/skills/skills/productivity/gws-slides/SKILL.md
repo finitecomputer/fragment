@@ -52,14 +52,10 @@ After editing, read back the changed slides and inspect their rendering
 with `presentations.pages.getThumbnail` or the browser before delivering
 the presentation link.
 
-`SERVICE_DISABLED` or `accessNotConfigured` means the deployment's Google
-Cloud project needs the Slides API enabled;
-report that to the platform operator instead of asking the owner to reconnect.
-
 ## Source
 
 Adapted from Google Workspace CLI's [gws-slides v0.22.5](https://github.com/googleworkspace/cli/blob/705fb0ecac6f4249679958f6325b809b63fdde17/skills/gws-slides/SKILL.md), matching the image's pinned CLI. Apache-2.0; see [LICENSE](LICENSE).
 Fragment changes: authentication points to `google-workspace-finite`, schema
-discovery is reused, and batching, readback, connection-error guidance,
-license metadata and this source notice are added.
+discovery is reused, and batching, readback, license metadata and this
+source notice are added.
 
