@@ -420,6 +420,16 @@ drives it.
   nothing, so it runs no core at all, and its link page says why. A seat
   that lapses turns always-on off: the cores stop, and the computer sleeps
   when idle, its links kept for when it is on again.
+- **The link page**, `GET /simplex/?agent=` on the screen port (in the
+  bridge, `src/simplex/page.html`, so every image serves the same one),
+  is what the shell opens from Settings' SimpleX, in a pane through a port
+  ticket as a screen is, telling it the agent's name (`{fragment:
+  "simplex", agent, name}`). It shows the one-time invitation as a QR code
+  the bridge draws (`GET /simplex/qr.svg?agent=`: the server's short link
+  when it made one, which SimpleX's apps open, else the full link), with
+  Open in SimpleX and Copy link; then whom it is linked to, and Unlink. Its
+  words are for someone who has never heard of SimpleX, and it says
+  plainly: encrypted between your SimpleX app and your computer.
 - **Linking** is a one-time invitation the core makes when the owner asks
   (`POST /simplex/link?agent=`, on the screen port, which only its owner
   reaches); the contact that connects through it is the owner's, and the
