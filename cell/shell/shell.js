@@ -2065,9 +2065,6 @@ async function openSettings(push = true, failed = null) {
             ? [line("Latest version", c.latest), el("p", "muted", `Restart to get the latest version.${c.alwaysOn ? "" : " It also updates by itself the next time your computer sleeps."}`)]
             : []),
           ...(c.node ? [line("Runs on", nodeName(nodes, c.node))] : []),
-          // on a machine of theirs: never charged, its use counted in points
-          // (a point is $0.001 at list: crates/core/src/price.rs `points`)
-          ...(c.ownHardwarePoints != null ? [line("Its use", `${c.ownHardwarePoints.toLocaleString()} ${c.ownHardwarePoints === 1 ? "point" : "points"} this month, not charged: it runs on your own machine`)] : []),
           ...(c.why ? [el("p", "settings-warning", c.why)] : []),
         ]
       : // never read: a failed read is not "none" (shown again once one answers: `load`)
@@ -2195,7 +2192,7 @@ function nodesSection(nodes) {
     if (n.why && n.state === "down") row.append(el("p", "muted", n.why));
     if (n.computers.length) row.append(el("p", "muted", "Your computer runs here."));
     if (n.kind === "own" && n.state !== "revoked") {
-      row.append(el("p", "muted", "What runs here is counted in points, not charged."));
+      row.append(el("p", "muted", "What runs here is never charged: its hours show in your usage."));
       const revoke = el("button", "quiet", "Revoke");
       revoke.type = "button";
       revoke.onclick = async () => {
@@ -2217,7 +2214,7 @@ function nodesSection(nodes) {
     s.append(
       say("Bring a machine of yours: start sandcastle on it, then run this there and approve the code it shows here:"),
       el("pre", "command", `sandcastle-node pair ${location.origin} --config /etc/sandcastle-node/node.json \\\n  --engine /var/lib/sandcastle/engine.sock --ports /var/lib/sandcastle/ports.sock \\\n  --egress /run/sandcastle-node/egress.sock`),
-      say("It takes the machine's name, which none of yours may share: `--name` gives it another. It runs only the computers you choose for it, here, and what runs there is counted in points, not charged."),
+      say("It takes the machine's name, which none of yours may share: `--name` gives it another. It runs only the computers you choose for it, here, and what runs there is never charged."),
     );
   } else {
     s.append(el("p", "muted", "This platform's machines are its operator's: it pairs none of yours."));

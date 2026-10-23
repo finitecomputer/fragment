@@ -278,10 +278,6 @@ enum MetaKey {
     /// How its node was chosen: as its owner chose, by the deployment's
     /// rule, or by the rule because their choice could not take it.
     Placed,
-    /// Its awake time on its owner's own node, at list price, in the month
-    /// it was counted (`{month, list}`): tracked in points, never charged
-    /// (docs/self-host.md, seam 10).
-    OwnHardware,
 }
 
 impl MetaKey {
@@ -303,7 +299,6 @@ impl MetaKey {
             MetaKey::Node => "node",
             MetaKey::NodeNote => "node_note",
             MetaKey::Placed => "placed",
-            MetaKey::OwnHardware => "own_hardware",
         }
     }
 }
@@ -792,19 +787,15 @@ impl ComputerCell {
         Err(CellError::new(ErrorCode::NoNode, format!("no node can take it: {} filled as it was placed", ranked.order.join(", "))))
     }
 
-    /// The node this computer runs on, when it is one its owner paired
-    /// (own hardware: docs/self-host.md, seams 2 and 10). Its node is its
-    /// own for life, so every interval it was awake ran there.
-    fn own_node(&self) -> CellResult<Option<String>> {
-        Ok(self.meta(MetaKey::Node)?.filter(|n| pairing::is_paired_id(n)))
-    }
-
-    /// Its awake time on its owner's own node: `(month, list micros)`.
-    fn own_hardware(&self) -> CellResult<(Month, i64)> {
-        let Some(text) = self.meta(MetaKey::OwnHardware)? else { return Ok((Month::of(js::now_ms()), 0)) };
-        let v: Value = serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored own hardware: {e}")))?;
-        let month = v["month"].as_u64().and_then(|m| u32::try_from(m).ok()).ok_or_else(|| CellError::host("the stored own hardware names no month"))?;
-        Ok((Month(month), v["list"].as_i64().unwrap_or(0)))
+    /// The instance its awake time is metered on: its owner's own hardware
+    /// when it runs on a node they paired (docs/self-host.md, seams 2 and
+    /// 10), which the book prices at nothing, else the deployment's. Its
+    /// node is its own for life, so every interval it was awake ran there.
+    fn instance(&self) -> CellResult<&'static str> {
+        Ok(match self.meta(MetaKey::Node)?.filter(|n| pairing::is_paired_id(n)) {
+            Some(_) => fragment_core::price::OWN_HARDWARE,
+            None => fragment_core::price::INSTANCE,
+        })
     }
 
     /// Applies `first` and every event its actions report back, each
@@ -1054,29 +1045,13 @@ impl ComputerCell {
         let intervals: Vec<(i64, i64)> = rows.iter().filter_map(|r| Some((r["from_ms"].as_i64()?, r["to_ms"].as_i64()?))).collect();
         let Some((first, _)) = intervals.first().copied() else { return Ok(()) };
         let last = intervals.last().map_or(first, |(from, _)| *from);
-        if self.own_node()?.is_some() {
-            // its owner's own hardware: never charged, so never the ledger's;
-            // its list price counted here, in the month it is counted, and
-            // shown in points (docs/self-host.md, seam 10). Read and written
-            // with no await between.
-            let ms: i64 = intervals.iter().map(|(from, to)| (to - from).max(0)).sum();
-            let listed = self.cfg.book.price(&Usage::Awake { instance: fragment_core::price::INSTANCE.into(), ms: ms as u64 }).map(|p| p.list).unwrap_or_else(|e| {
-                // a book without the instance prices it at nothing: logged, as any gap is
-                console_error!("{}", json!({ "computer": id, "own_hardware": "unpriced", "error": format!("{e:?}") }));
-                0
-            });
-            let now = Month::of(js::now_ms());
-            let (month, list) = self.own_hardware()?;
-            let list = if month == now { list + listed } else { listed };
-            self.set_meta(MetaKey::OwnHardware, &json!({ "month": now.0, "list": list }).to_string())?;
-            return self.exec("DELETE FROM awake WHERE from_ms >= ? AND from_ms <= ?", vec![first.into(), last.into()]);
-        }
+        let instance = self.instance()?;
         let meter_rows = intervals
             .iter()
             .filter(|(from, to)| to > from)
             .map(|(from, to)| MeterRow {
                 reference: format!("awake:{id}:{from}"),
-                usage: Usage::Awake { instance: fragment_core::price::INSTANCE.into(), ms: (to - from) as u64 },
+                usage: Usage::Awake { instance: instance.into(), ms: (to - from) as u64 },
                 fragment: None,
                 agent: None,
                 computer: Some(id.clone()),
@@ -1866,21 +1841,12 @@ impl ComputerCell {
             },
         };
         let images = self.images()?;
-        // on its owner's own node: this month's use there, in points
-        let own_hardware_points = match self.own_node()? {
-            Some(_) => {
-                let (month, list) = self.own_hardware()?;
-                Some(if month == Month::of(js::now_ms()) { fragment_core::price::points(list.max(0)) } else { 0 })
-            }
-            None => None,
-        };
         Ok(ComputerView {
             computer: id,
             owner: self.must(MetaKey::Owner)?,
             image: self.must(MetaKey::Image)?,
             node: self.meta(MetaKey::Node)?,
             placed: self.meta(MetaKey::Placed)?,
-            own_hardware_points,
             version: version_running(&life, &saves),
             latest: images.latest(),
             phase,
