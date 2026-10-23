@@ -268,12 +268,15 @@ pub async fn pipes_token(env: &Env, api: &str, provider: &str, user: &str) -> Ce
     post_json(&format!("{api}/data-integrations/{provider}/token"), Method::Post, Some(&key), Some(&json!({ "user_id": user })), "WorkOS").await
 }
 
-/// A connected account as Pipes describes it, with no token: its state, and
+/// A connected account as Pipes describes it, with no token: its state,
 /// the account it is, as its person knows it (its `account_display_name`,
-/// set when it was connected: `connection_signin::account_label`).
+/// set when it was connected: `connection_signin::account_label`), and the
+/// scopes it holds (its `scopes`, the grant the person allowed:
+/// `connection_signin::pipes_scopes`; None when it names none).
 pub struct PipesAccount {
     pub state: fragment_proto::computer::ProviderState,
     pub label: Option<String>,
+    pub scopes: Option<Vec<String>>,
 }
 
 /// A connection's state, without a token (WorkOS Pipes' connected account,
@@ -296,7 +299,8 @@ pub async fn pipes_state(env: &Env, api: &str, provider: &str, user: &str) -> Ce
         (s, _) => return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS did not say whether {provider} is connected ({s}): {}", answer["message"].as_str().unwrap_or("no reason given")))),
     };
     let label = answer["account_display_name"].as_str().filter(|l| state != ProviderState::NotConnected && fragment_core::connection_signin::label_ok(l)).map(str::to_string);
-    Ok(PipesAccount { state, label })
+    let scopes = (state != ProviderState::NotConnected).then(|| fragment_core::connection_signin::pipes_scopes(&answer)).flatten();
+    Ok(PipesAccount { state, label, scopes })
 }
 
 /// Standard OAuth code exchange. Called only by the Registry after consuming
@@ -323,8 +327,10 @@ async fn confidential_request(url: &str, method: Method, content_type: &str, bea
 }
 
 /// The documented Pipes import API, after Fragment has validated and spent
-/// the transaction. A known 409 permits update; an uncertain outcome is
-/// never retried. Refresh stays at WorkOS, using the same OAuth client.
+/// the transaction. A known 409 permits update, with the same body: a
+/// reconnect's grant (its scopes, its label) replaces the earlier one's. An
+/// uncertain outcome is never retried. Refresh stays at WorkOS, using the
+/// same OAuth client.
 pub(super) async fn pipes_import(env: &Env, api: &str, provider: &str, user: &str, tokens: fragment_core::connection_signin::Tokens, account: Option<&str>) -> CellResult<bool> {
     assert!(fragment_core::catalog::valid_name(provider));
     if user.is_empty() || !user.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') { return Err(CellError::host("invalid WorkOS user id")); }

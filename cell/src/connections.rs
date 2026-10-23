@@ -70,15 +70,15 @@ pub async fn workos_user(env: &Env, cfg: &Config, who: &str) -> CellResult<Optio
 /// Each connection's state for a person (as Pipes says, with no token),
 /// whose WorkOS user `user` finds (`workos_user`, or the one their computer
 /// keeps), asked only when the catalog has a connection.
-/// `labels`, when asked for, gets each connected one's account as its
-/// person knows it (`keys::PipesAccount`'s label), from the same answers.
-/// (One function, not a second beside it: each is instantiated once per
-/// caller's future, and the cell's Wasm has a budget.)
+/// `accounts`, when asked for, gets each one's account as Pipes describes
+/// it (`keys::PipesAccount`: its label and the scopes it was granted),
+/// from the same answers. (One function, not a second beside it: each is
+/// instantiated once per caller's future, and the cell's Wasm has a budget.)
 pub async fn connection_states(
     env: &Env,
     cfg: &Config,
     user: impl std::future::Future<Output = CellResult<Option<String>>>,
-    mut labels: Option<&mut BTreeMap<String, String>>,
+    mut accounts: Option<&mut BTreeMap<String, PipesAccount>>,
 ) -> CellResult<BTreeMap<String, ProviderState>> {
     let connections: Vec<&str> = cfg.providers.providers().iter().filter(|p| p.kind == Kind::Connection).map(|p| p.name.as_str()).collect();
     let mut states = BTreeMap::new();
@@ -91,12 +91,12 @@ pub async fn connection_states(
     for provider in connections {
         let account = match &user {
             Some(u) => crate::keys::pipes_state(env, api, provider, u).await?,
-            None => PipesAccount { state: ProviderState::NotConnected, label: None },
+            None => PipesAccount { state: ProviderState::NotConnected, label: None, scopes: None },
         };
-        if let (Some(labels), Some(label)) = (labels.as_deref_mut(), account.label) {
-            labels.insert(provider.to_string(), label);
-        }
         states.insert(provider.to_string(), account.state);
+        if let Some(accounts) = accounts.as_deref_mut() {
+            accounts.insert(provider.to_string(), account);
+        }
     }
     Ok(states)
 }
@@ -112,8 +112,8 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
     let computer = fragment_core::computer::default_computer_of(who);
     match (method.clone(), rest) {
         (Method::Get, []) => {
-            let mut labels = BTreeMap::new();
-            let states = connection_states(env, cfg, workos_user(env, cfg, who), Some(&mut labels)).await?;
+            let mut accounts = BTreeMap::new();
+            let states = connection_states(env, cfg, workos_user(env, cfg, who), Some(&mut accounts)).await?;
             // the person's computer keeps them, for its guest's next read; one
             // not made yet has nothing to tell, and so no own key either
             let own: Vec<String> = match crate::computer::ask(env, &computer, "computer/own-keys", &json!({ "connections": states })).await {
@@ -125,7 +125,8 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                 .providers
                 .providers()
                 .iter()
-                .map(|p| ProviderView {
+                .map(|p| (p, accounts.get(&p.name)))
+                .map(|(p, account)| ProviderView {
                     provider: p.name.clone(),
                     kind: p.kind,
                     state: match p.kind {
@@ -139,7 +140,10 @@ pub(crate) async fn route(req: &Request, env: &Env, url: &Url, signed: &Signed, 
                     price: p.price.map(|pr| ProviderPrice { micros: pr.micros, per: pr.per }),
                     sign_in: p.oauth.as_ref().map(|o| ProviderSignIn { manage: o.manage.clone() }),
                     models: p.models.as_ref().map(|m| m.offer.iter().map(|o| ProviderModel { id: o.id.clone(), name: o.name.clone() }).collect()),
-                    account: labels.get(&p.name).cloned(),
+                    account: account.and_then(|a| a.label.clone()),
+                    granted: account.and_then(|a| a.scopes.clone()),
+                    // what its row asks for that the person did not allow
+                    missing: p.connection_oauth.as_ref().zip(account.and_then(|a| a.scopes.as_deref())).map(|(o, granted)| fragment_core::connection_signin::missing(&o.scopes, granted)),
                     note: p.note.clone(),
                 })
                 .collect();
@@ -320,12 +324,15 @@ enum Unfinished {
     NotUnderWay,
     /// The provider refused the code (a 4xx): expired, or spent.
     CodeRefused,
+    /// A connection's provider granted nothing its row asks for beyond
+    /// signing in: the person unticked everything else.
+    NoScopes,
     /// The provider failed, or answered no key.
     NoKey,
 }
 
 impl Unfinished {
-    const ALL: [Unfinished; 6] = [Unfinished::NotBegunHere, Unfinished::SignedOut, Unfinished::Declined, Unfinished::NotUnderWay, Unfinished::CodeRefused, Unfinished::NoKey];
+    const ALL: [Unfinished; 7] = [Unfinished::NotBegunHere, Unfinished::SignedOut, Unfinished::Declined, Unfinished::NotUnderWay, Unfinished::CodeRefused, Unfinished::NoScopes, Unfinished::NoKey];
 
     /// Its word in the clean URL.
     fn word(self) -> &'static str {
@@ -335,6 +342,7 @@ impl Unfinished {
             Unfinished::Declined => "declined",
             Unfinished::NotUnderWay => "not-under-way",
             Unfinished::CodeRefused => "code-refused",
+            Unfinished::NoScopes => "no-scopes",
             Unfinished::NoKey => "no-key",
         }
     }
@@ -350,6 +358,7 @@ impl Unfinished {
             Unfinished::Declined => "The provider sent no key back (declined, or it failed): connect again from settings if you meant to.",
             Unfinished::NotUnderWay => "This sign-in is not one under way for you (finished already, or expired): connect again from settings.",
             Unfinished::CodeRefused => "The provider refused the sign-in's code (expired, or used): connect again from settings.",
+            Unfinished::NoScopes => "You allowed nothing your agents could use, only who you are, so nothing was connected: connect again from settings and leave at least one permission ticked.",
             Unfinished::NoKey => "The provider gave no key back: connect again from settings.",
         }
     }
@@ -408,6 +417,7 @@ async fn finish_connection(req: &Request, env: &Env, url: &Url, provider: &str) 
         Ok(ConnectionFinished::NotUnderWay) => Err(Unfinished::NotUnderWay),
         Ok(ConnectionFinished::Declined) => Err(Unfinished::Declined),
         Ok(ConnectionFinished::CodeRefused) => Err(Unfinished::CodeRefused),
+        Ok(ConnectionFinished::NoScopes) => Err(Unfinished::NoScopes),
         Ok(ConnectionFinished::Failed) => Err(Unfinished::NoKey),
         Err(e) if e.code == ErrorCode::Unauthenticated => Err(Unfinished::SignedOut),
         // Do not leave a code in the URL on network/import failures. The

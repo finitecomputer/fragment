@@ -649,8 +649,11 @@ pub(in crate::registry) struct FinishConnectionIn {
     pub code: Option<String>,
 }
 
+/// How a callback's attempt ended. `NoScopes`: the provider granted
+/// nothing its row asks for beyond signing in (`connection_signin::
+/// Refused::NoScopes`), and nothing was imported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum ConnectionFinished { Connected, NotUnderWay, Declined, CodeRefused, Failed }
+pub(crate) enum ConnectionFinished { Connected, NotUnderWay, Declined, CodeRefused, NoScopes, Failed }
 
 impl Call for FinishConnection {
     const PATH: &'static str = "/connection/finish";

@@ -1,7 +1,7 @@
 ---
 name: google-workspace-finite
 description: Gmail, Calendar, Drive, Contacts, Sheets, and Docs through the person's connected Google account, with `gws` (Google's Workspace CLI, in your computer's image) or the bundled helper. No OAuth setup, no keys on the computer.
-version: 2.2.0
+version: 2.3.0
 author: Nous Research (rewritten for fragment)
 license: MIT
 metadata:
@@ -45,8 +45,8 @@ $GAPI check
   has no credentials, exit 2). Ask them to connect it in the shell's
   Settings, under Connections, then check again: your computer is given it
   within seconds.
-- `forbidden`: your owner narrowed your connections and left Google out, or
-  Google refused the scope. Say which, and stop.
+- `forbidden`: your owner narrowed your connections and left Google out. Say
+  so, and stop.
 
 The deployment's Google connection (`google`) is swapped for the hosts
 `gmail.googleapis.com`, `www.googleapis.com` (Drive, Calendar),
@@ -54,7 +54,21 @@ The deployment's Google connection (`google`) is swapped for the hosts
 only. An API on any other host (Tasks, Chat, Slides, Forms, Apps Script,
 and the `gws workflow` helpers that use them) gets the placeholder itself,
 which Google refuses (401): do not use those. The scopes the connection
-grants are in `references/google-workspace-scopes.json`.
+asks for are in `references/google-workspace-scopes.json`.
+
+## Not allowed
+
+Your owner may have allowed only part of Google when they connected it:
+Google's consent screen lets them untick Gmail, Drive, Sheets and the rest
+one by one, and the connection holds what they left ticked. A call outside
+it is refused by Google with a 403: the helper's `insufficient_scope`, or,
+from `gws` or `curl`, `insufficient authentication scopes`,
+`ACCESS_TOKEN_SCOPE_INSUFFICIENT` or `insufficientPermissions`. Tell your
+owner, in plain words, that they didn't allow that part of Google (say
+which: Gmail, Drive, Sheets, Docs, Calendar or Contacts) when connecting
+it, and that they can add it in Settings → Connections → Reconnect to add.
+Do not retry the call until they say they have; go on with what they did
+allow.
 
 ## gws
 
@@ -86,7 +100,7 @@ gws people people connections list --params '{"resourceName": "people/me", "pers
 ## References
 
 - `references/gmail-search-syntax.md`: Gmail search operators (is:unread, from:, newer_than:, etc.)
-- `references/google-workspace-scopes.json`: the scopes the connection grants
+- `references/google-workspace-scopes.json`: the scopes the connection asks for
 
 The helper reads Docs only; `gws docs +write` appends to one. Neither uses
 Apps Script.
@@ -218,5 +232,6 @@ hint}`, and exit 1. `gws` answers Google's JSON, and its errors on stderr.
 |---------|-----|
 | `not_connected`, or `gws` exits 2 | Your owner connects Google in Settings → Connections |
 | `401` from a Google API | That API's host is not one the connection is swapped for: it is not offered |
-| `forbidden` | Your owner left Google off this agent's connections, or the scope is missing |
+| `forbidden` | Your owner left Google off this agent's connections |
+| `insufficient_scope`, or a 403 `insufficient authentication scopes` | Your owner didn't allow that part of Google when connecting it: they add it in Settings → Connections → Reconnect to add (above, "Not allowed") |
 | `HttpError 403: Access Not Configured` | That API is not enabled for the deployment's Google client: tell the person, and stop |

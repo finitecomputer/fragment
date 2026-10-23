@@ -88,7 +88,14 @@ impl RegistryCell {
         let callback = format!("{}/api/connections/{}/callback", self.cfg.platform(), b.provider);
         let (status, answer) = keys::connection_exchange(&self.env, &b.provider, o, &callback, &code, verifier).await?;
         if (400..500).contains(&status) { return Ok(CodeRefused); }
-        let Some(tokens) = (status == 200).then(|| connection_signin::tokens(&answer, &o.scopes)).flatten() else { return Ok(Failed) };
+        if status != 200 { return Ok(Failed); }
+        // a partial grant is imported as granted; one of signing in alone
+        // gives the person's agents nothing, and is said so
+        let tokens = match connection_signin::tokens(&answer, &o.scopes) {
+            Ok(tokens) => tokens,
+            Err(connection_signin::Refused::NoScopes) => return Ok(NoScopes),
+            Err(connection_signin::Refused::Invalid) => return Ok(Failed),
+        };
         // Logout/wipe or subject/config change while the vendor answered is a
         // refusal too. The consumed attempt is never restored on any failure.
         let live = self.live_session(&b.session, None, false)?;

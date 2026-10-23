@@ -2857,6 +2857,54 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     // connected again for the checks after, the computer told by a read
     s.workos.connect(email, crate::SWAP_CONNECTION, true);
     shell(api, session, "GET", "/api/connections", None, &[])?;
+    partial_grant_ui(s, api, b, page, session, email)
+}
+
+/// A connection the person allowed only part of (Google's granular
+/// consent: they unticked a box): its row says what they did not allow,
+/// in words, with a Reconnect to add it, which goes through the provider's
+/// page again; connected with all of it, the row says nothing is missing.
+/// It is disconnected again for the checks after.
+fn partial_grant_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, email: &str) -> Result<()> {
+    const PARTIAL: &str = "e2e-oauth";
+    let wait = std::time::Duration::from_secs(30);
+    let row = format!("#settings-connections [data-provider={PARTIAL:?}]");
+    s.workos.connect(email, PARTIAL, true);
+    s.workos.grant(email, PARTIAL, &["mail.read", "openid"]);
+    b.reload(page)?;
+    let shown = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'connected' && !!document.querySelector('{row} .provider-missing')"), wait);
+    let said = b.eval(page, &format!("[document.querySelector('{row} .provider-missing')?.textContent ?? null, document.querySelector('{row} [data-action=reconnect]')?.textContent ?? null, document.querySelectorAll('#settings-connections .provider-missing').length]"))?;
+    s.ok(
+        "a connection the person allowed only part of says in its row what they did not allow, with a Reconnect to add it; no other row says any is missing",
+        shown && said == json!(["Not allowed: files.read", "Reconnect to add", 1]),
+        &said,
+    );
+    let windows = b.pages()?.len();
+    b.click(page, &format!("{row} [data-action=reconnect]"))?;
+    let callback = format!("/api/connections/{PARTIAL}/callback");
+    let mut popup = None;
+    let came_back = s.eventually(wait, || {
+        popup = b.pages().ok().filter(|l| l.len() > windows).and_then(|l| l.into_iter().find(|(_, url)| url.contains(&callback)).map(|(id, _)| id));
+        popup.is_some()
+    });
+    let connected = match &popup {
+        Some(id) => {
+            let p = b.attach(id)?;
+            let connected = b.until(&p, "document.body?.innerText.includes('is connected')", wait);
+            b.close(p)?;
+            connected
+        }
+        None => false,
+    };
+    b.reload(page)?;
+    let whole = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'connected' && !!document.querySelector('{row} [data-action=disconnect]') && !document.querySelector('{row} .provider-missing') && !document.querySelector('{row} [data-action=reconnect]')"), wait);
+    s.ok(
+        "Reconnect to add goes through the provider's page again, and connected with all of it the row says nothing is missing and offers no reconnect",
+        came_back && connected && whole && s.workos.scopes(email, PARTIAL) == ["mail.read", "files.read", "openid"],
+        json!({ "cameBack": came_back, "connected": connected, "whole": whole, "scopes": s.workos.scopes(email, PARTIAL) }),
+    );
+    let off = shell(api, session, "DELETE", &format!("/api/connections/{PARTIAL}"), None, &[])?;
+    anyhow::ensure!(off.status == 200, "disconnect {PARTIAL} after its checks: {off}");
     Ok(())
 }
 

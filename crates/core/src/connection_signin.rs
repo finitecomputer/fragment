@@ -62,8 +62,25 @@ pub fn revoke_form(token: &str) -> String {
     url::form_urlencoded::Serializer::new(String::new()).append_pair("token", token).finish()
 }
 
+/// The scopes that only sign a person in: OpenID Connect's `openid`,
+/// `email` and `profile`, and Google's long names for the last two.
+/// Google grants them beside whatever else the person allows (its granular
+/// consent offers no box for them), so a grant of these alone lets an
+/// agent do nothing (`tokens` refuses it), and none is ever missing.
+pub const IDENTITY_SCOPES: [&str; 5] = ["openid", "email", "profile", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"];
+
+fn identity(scope: &str) -> bool {
+    IDENTITY_SCOPES.contains(&scope)
+}
+
+/// A grant's scopes, held as a grant may hold them: 1 to `SCOPES_MAX`
+/// bounded tokens.
+fn bounded(scopes: Vec<String>) -> Option<Vec<String>> {
+    ((1..=SCOPES_MAX).contains(&scopes.len()) && scopes.iter().all(|s| token(s, SCOPE_MAX_BYTES))).then_some(scopes)
+}
+
 /// Tokens are deliberately not Debug. Errors contain no vendor response.
-/// A refresh token is required: never import a short-lived or partial grant.
+/// A refresh token is required: never import a short-lived grant.
 pub struct Tokens {
     access: String,
     refresh: String,
@@ -71,23 +88,52 @@ pub struct Tokens {
     scopes: Vec<String>,
 }
 
-pub fn tokens(answer: &Value, requested: &[String]) -> Option<Tokens> {
-    let access = answer["access_token"].as_str().filter(|s| token(s, TOKEN_MAX_BYTES))?;
-    let refresh = answer["refresh_token"].as_str().filter(|s| token(s, TOKEN_MAX_BYTES))?;
-    if !answer["token_type"].as_str()?.eq_ignore_ascii_case("bearer") { return None; }
-    let expires_in = answer["expires_in"].as_u64().filter(|s| (1..=86_400).contains(s))? as u32;
-    // RFC 6749: omitted scope means the requested scope. An explicit partial
-    // grant is refused; do not report scopes the provider did not grant.
+/// Why a token endpoint's answer is not imported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refused {
+    /// No bounded bearer grant with a refresh token.
+    Invalid,
+    /// A grant of nothing the row asks for beyond signing in: the person
+    /// left every other box unticked.
+    NoScopes,
+}
+
+pub fn tokens(answer: &Value, requested: &[String]) -> Result<Tokens, Refused> {
+    use Refused::Invalid;
+    let access = answer["access_token"].as_str().filter(|s| token(s, TOKEN_MAX_BYTES)).ok_or(Invalid)?;
+    let refresh = answer["refresh_token"].as_str().filter(|s| token(s, TOKEN_MAX_BYTES)).ok_or(Invalid)?;
+    if !answer["token_type"].as_str().ok_or(Invalid)?.eq_ignore_ascii_case("bearer") { return Err(Invalid); }
+    let expires_in = answer["expires_in"].as_u64().filter(|s| (1..=86_400).contains(s)).ok_or(Invalid)? as u32;
+    // RFC 6749: omitted scope means the requested scope. A partial grant is
+    // kept: the person may untick what they will not allow (Google's
+    // granular consent), and Pipes holds exactly what the provider granted.
     let scopes = match answer.get("scope") {
         None => requested.to_vec(),
         Some(s) => {
-            let s = s.as_str().filter(|s| s.len() <= SCOPES_MAX * (SCOPE_MAX_BYTES + 1))?;
-            let granted: Vec<String> = s.split(' ').map(str::to_string).collect();
-            if granted.len() > SCOPES_MAX || granted.iter().any(|s| !token(s, SCOPE_MAX_BYTES)) || requested.iter().any(|s| !granted.contains(s)) { return None; }
-            granted
+            let s = s.as_str().filter(|s| s.len() <= SCOPES_MAX * (SCOPE_MAX_BYTES + 1)).ok_or(Invalid)?;
+            bounded(s.split(' ').map(str::to_string).collect()).ok_or(Invalid)?
         }
     };
-    Some(Tokens { access: access.into(), refresh: refresh.into(), expires_in, scopes })
+    if requested.iter().any(|s| !identity(s)) && !scopes.iter().any(|s| !identity(s) && requested.contains(s)) {
+        return Err(Refused::NoScopes);
+    }
+    Ok(Tokens { access: access.into(), refresh: refresh.into(), expires_in, scopes })
+}
+
+/// What a connection's row asks for that its grant lacks, in the row's
+/// order: each requested scope not granted, never a sign-in one. Settings
+/// names them, and offers a reconnect to add them.
+pub fn missing(requested: &[String], granted: &[String]) -> Vec<String> {
+    requested.iter().filter(|s| !identity(s) && !granted.contains(s)).cloned().collect()
+}
+
+/// The scopes a connected account holds, as Pipes says of it (its
+/// `scopes`, which the import set: `Tokens::import_body`), held to what a
+/// grant may hold. None: it names none, or an unbounded list, so nothing
+/// is said to be missing.
+pub fn pipes_scopes(account: &Value) -> Option<Vec<String>> {
+    let scopes = account["scopes"].as_array()?.iter().map(|s| s.as_str().map(str::to_string)).collect::<Option<Vec<_>>>()?;
+    bounded(scopes)
 }
 
 impl Tokens {
@@ -420,41 +466,86 @@ mod tests {
         assert_eq!(form["grant_type"], "authorization_code");
     }
 
+    const EMAIL: &str = "https://www.googleapis.com/auth/userinfo.email";
+
+    fn requested() -> Vec<String> {
+        ["mail.read", "files.read", "openid", EMAIL].map(String::from).to_vec()
+    }
+
+    fn granting(scope: &str) -> Value {
+        json!({ "access_token": "mock-access", "refresh_token": "mock-refresh", "expires_in": 3600, "token_type": "Bearer", "scope": scope })
+    }
+
     #[test]
-    fn only_complete_bounded_grants_can_be_imported() {
-        let requested = config().scopes;
-        let good = json!({ "access_token": "mock-access", "refresh_token": "mock-refresh", "expires_in": 3600, "token_type": "Bearer", "scope": "mail.read files.read" });
+    fn bounded_grants_are_imported_with_exactly_the_scopes_granted() {
+        let requested = requested();
+        let good = granting(&requested.join(" "));
         let got = tokens(&good, &requested).expect("complete grant");
         let body = got.import_body("2026-10-20T20:00:00Z", None);
         assert_eq!(body["state"], "connected");
         assert_eq!(body["scopes"], json!(requested));
         assert!(body.get("account_display_name").is_some_and(Value::is_null), "an update clears an earlier account's label");
         assert_eq!(got.import_body("2026-10-20T20:00:00Z", Some("me@example.com"))["account_display_name"], "me@example.com");
+        let scopes = |scope: &str| tokens(&granting(scope), &requested).map(|t| t.import_body("2026-10-20T20:00:00Z", None)["scopes"].clone());
+        assert_eq!(scopes("openid mail.read"), Ok(json!(["openid", "mail.read"])), "a partial grant, recorded as the provider answered it");
+        assert_eq!(scopes("files.read"), Ok(json!(["files.read"])), "with no sign-in scope at all");
         for field in ["access_token", "refresh_token", "expires_in", "token_type"] {
             let mut bad = good.clone();
             bad.as_object_mut().unwrap().remove(field);
-            assert!(tokens(&bad, &requested).is_none(), "missing {field}");
+            assert_eq!(tokens(&bad, &requested).err(), Some(Refused::Invalid), "missing {field}");
         }
-        for (field, value) in [("scope", json!("mail.read")), ("scope", json!(null)), ("expires_in", json!(0)), ("expires_in", json!(86401)), ("access_token", json!("x".repeat(TOKEN_MAX_BYTES + 1))), ("token_type", json!("MAC"))] {
+        let too_long = format!("mail.read {}", "s".repeat(SCOPE_MAX_BYTES + 1));
+        let too_many = vec!["mail.read"; SCOPES_MAX + 1].join(" ");
+        for (field, value) in [("scope", json!(null)), ("scope", json!("")), ("scope", json!("mail.read  files.read")), ("scope", json!(too_long)), ("scope", json!(too_many)), ("expires_in", json!(0)), ("expires_in", json!(86401)), ("access_token", json!("x".repeat(TOKEN_MAX_BYTES + 1))), ("token_type", json!("MAC"))] {
             let mut bad = good.clone();
             bad[field] = value;
-            assert!(tokens(&bad, &requested).is_none(), "invalid {field}");
+            assert_eq!(tokens(&bad, &requested).err(), Some(Refused::Invalid), "invalid {field}");
         }
         let mut omitted = good;
         omitted.as_object_mut().unwrap().remove("scope");
-        assert!(tokens(&omitted, &requested).is_some(), "RFC 6749 omitted scope is unchanged");
+        assert_eq!(tokens(&omitted, &requested).map(|t| t.import_body("2026-10-20T20:00:00Z", None)["scopes"].clone()), Ok(json!(requested)), "RFC 6749: an omitted scope is the one requested");
     }
 
-    /// Google's row asks it to show its account chooser, then its consent
-    /// (docs/pipes-browser-binding.md): the authorize URL's own query goes to
-    /// Google as written, its space still one `prompt` of two values.
+    #[test]
+    fn a_grant_of_signing_in_alone_is_refused_as_no_scopes() {
+        let requested = requested();
+        for scope in ["openid", "openid https://www.googleapis.com/auth/userinfo.email", "openid email profile https://www.googleapis.com/auth/userinfo.profile", "calendar openid"] {
+            assert_eq!(tokens(&granting(scope), &requested).err(), Some(Refused::NoScopes), "{scope}");
+        }
+        let signing_in: Vec<String> = ["openid", "email"].map(String::from).to_vec();
+        assert!(tokens(&granting("openid"), &signing_in).is_ok(), "a row that asks for signing in alone takes any grant of it");
+        assert_eq!(tokens(&granting("openid  email"), &signing_in).err(), Some(Refused::Invalid), "and still only a bounded one");
+    }
+
+    #[test]
+    fn what_a_grant_lacks_is_what_its_row_asks_for_beyond_signing_in() {
+        let requested = requested();
+        let of = |granted: &[&str]| missing(&requested, &granted.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(of(&["openid", "mail.read"]), ["files.read"]);
+        assert_eq!(of(&["mail.read", "files.read"]), Vec::<String>::new(), "sign-in's scopes are never missing");
+        assert_eq!(of(&["openid"]), ["mail.read", "files.read"], "in the row's order");
+        assert_eq!(of(&["calendar", "files.read", "mail.read", EMAIL, "openid"]), Vec::<String>::new());
+        // what Pipes holds of a connected account, read back as a grant is
+        assert_eq!(pipes_scopes(&json!({ "scopes": ["openid", "mail.read"] })), Some(vec!["openid".to_string(), "mail.read".to_string()]));
+        let too_many = vec!["mail.read"; SCOPES_MAX + 1];
+        for account in [json!({}), json!({ "scopes": [] }), json!({ "scopes": null }), json!({ "scopes": "mail.read" }), json!({ "scopes": ["mail.read", 7] }), json!({ "scopes": ["mail read"] }), json!({ "scopes": [""] }), json!({ "scopes": ["s".repeat(SCOPE_MAX_BYTES + 1)] }), json!({ "scopes": too_many })] {
+            assert_eq!(pipes_scopes(&account), None, "{account}");
+        }
+    }
+
+    /// Google's row asks it to show its account chooser, then its consent,
+    /// and to keep what the person granted before, so a reconnect asks only
+    /// for the rest (docs/pipes-browser-binding.md): the authorize URL's own
+    /// query goes to Google as written, its space still one `prompt` of two
+    /// values.
     #[test]
     fn a_fixed_prompt_of_two_values_reaches_the_provider_whole() {
         let mut o = config();
-        o.authorize = "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=select_account%20consent".into();
+        o.authorize = "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&include_granted_scopes=true&prompt=select_account%20consent".into();
         assert!(check(&o).is_ok());
         let u = url::Url::parse(&authorize_url(&o, "https://platform.example/api/connections/google/callback", "challenge", "state")).unwrap();
         let prompts: Vec<String> = u.query_pairs().filter(|(k, _)| k == "prompt").map(|(_, v)| v.into_owned()).collect();
         assert_eq!(prompts, ["select_account consent"]);
+        assert_eq!(u.query_pairs().filter(|(k, v)| k == "include_granted_scopes" && v == "true").count(), 1);
     }
 }

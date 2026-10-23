@@ -2687,6 +2687,23 @@ const PROVIDER_STATE = {
 // a provider's name for people: google-places is Google Places, xai xAI
 const PROVIDER_NAMES = { xai: "xAI", elevenlabs: "ElevenLabs", openrouter: "OpenRouter" };
 const providerName = (p) => PROVIDER_NAMES[p] ?? p.replace(/(^|-)([a-z])/g, (_, d, l) => `${d ? " " : ""}${l.toUpperCase()}`);
+// a connection's scope for people, by its last path segment (Google's
+// https://www.googleapis.com/auth/<name>), else that segment itself; the
+// list never names a sign-in scope as missing
+const SCOPE_NAMES = {
+  "gmail.readonly": "Gmail (read)",
+  "gmail.modify": "Gmail (manage)",
+  "gmail.send": "Gmail (send)",
+  drive: "Drive",
+  spreadsheets: "Sheets",
+  documents: "Docs",
+  calendar: "Calendar",
+  "contacts.readonly": "Contacts",
+};
+const scopeName = (scope) => {
+  const last = scope.split("/").pop();
+  return SCOPE_NAMES[last] ?? last;
+};
 // micro-dollars, to a hundredth of a cent under a dollar (a call is often less than a cent)
 const money = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: micros < 1_000_000 ? 4 : 2 });
 // Connect: a window opened by the press itself, before any await, and only
@@ -2804,6 +2821,14 @@ function connectionsSection(linked, uses) {
     if (p.kind === "connection" && p.state !== "connected") {
       actions.append(connectButton(p, p.state === "needs_reauthorization" ? "Connect again" : "Connect", said));
       details.push(said);
+    }
+    // what the person left unticked when they connected it: a reconnect
+    // asks for it again (the provider keeps what they allowed before)
+    if (p.kind === "connection" && p.state === "connected" && p.missing?.length) {
+      const again = connectButton(p, "Reconnect to add", said);
+      again.dataset.action = "reconnect";
+      actions.append(again);
+      details.push(el("span", "provider-detail provider-missing", `Not allowed: ${[...new Set(p.missing.map(scopeName))].join(", ")}`), said);
     }
     if (p.kind === "connection" && p.state !== "not_connected") {
       actions.append(disconnectButton(p, said));

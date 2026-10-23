@@ -19,16 +19,21 @@ the initiating browser's cookie. The Registry requires the *same live session*,
 provider and unexpired transaction and atomically consumes it **before** any
 external exchange. Another browser, person or session cannot consume it. The
 provider exchanges its one-time code with the saved PKCE verifier and client
-credentials. Fragment requires a complete bearer grant (access token, refresh
-token, bounded expiry and all requested scopes), rechecks the live session and
+credentials. Fragment requires a bounded bearer grant (access token, refresh
+token, bounded expiry, at most 32 bounded scopes) of at least one requested
+scope beyond signing in (Partial grants, below), rechecks the live session and
 WorkOS subject, then imports it into that subject's Pipes account. Tokens are
 never returned to the browser or stored by Fragment; WorkOS stores and refreshes
 them. No response-body diagnostics, redirects or automatic network retries are
 used on the credential-bearing requests.
 
 The documented import is `POST /user_management/users/:user_id/connected_accounts/:slug`.
-Only an explicit 409 permits a `PUT` update of that same user's existing account.
-An uncertain result consumes the attempt; reconnect rather than replaying it.
+Only an explicit 409 permits a `PUT` update of that same user's existing account,
+with the same body, so a reconnect's grant (its `scopes`, its label) replaces
+the earlier one's. An uncertain result consumes the attempt; reconnect rather
+than replaying it. The import's `scopes` are the grant's exactly: the token
+endpoint's `scope` as it answered, or, when it answers none, the scopes
+requested (RFC 6749 5.1).
 The import names the account as its person knows it: when the token endpoint
 answers an OpenID Connect `id_token` beside the grant (the row asks for `openid`
 and the provider's email scope: Google's `https://www.googleapis.com/auth/userinfo.email`),
@@ -42,6 +47,33 @@ access.
 This deliberately supports confidential clients using `client_secret_post`,
 authorization code, S256, and a space-delimited scope response. Other provider
 protocols require an explicit implementation, not an unbound fallback.
+
+## Partial grants
+
+Fragment asks for its row's whole scope list and is fine with whatever the
+person leaves out (Paul, issue #445): Google's consent screen lets them untick
+each permission (granular consent), and a grant of some of them connects with
+those. Only a grant of nothing the row asks for beyond signing in is refused:
+`openid`, `email`, `profile` and Google's
+`https://www.googleapis.com/auth/userinfo.email` and `…/userinfo.profile`
+(`fragment_core::connection_signin::IDENTITY_SCOPES`), which Google grants
+beside anything else and which let an agent do nothing. Such a callback imports
+nothing and comes back `?refused=no-scopes`, a page that says to leave at least
+one permission ticked. A row that asks for signing in alone takes any grant of
+it.
+
+`GET /api/connections` reads the grant back from Pipes (the connected
+account's `scopes`, read with no token minted): each connection's `granted`,
+and its `missing`, what its row asks for beyond signing in that the grant
+lacks. Settings names what is missing in words ("Not allowed: Sheets, Drive")
+with a **Reconnect to add**, the same Connect flow. Google's row asks for
+`include_granted_scopes=true`, so Google keeps what the person allowed before
+and its consent asks only for the rest; the grant it answers names them all,
+and the update records it. Pipes refreshes the grant; what it holds is what
+the list says. An agent's call outside the grant gets Google's own 403
+(insufficient scope), which the Google skill explains to the person: add it in
+Settings, under Connections. A connected account Pipes names no scopes for has
+none said to be missing.
 
 ## Disconnecting
 
@@ -102,8 +134,10 @@ connect.
 The local `connections` e2e lane uses two users and separate browser cookie
 sets. It verifies copied URLs, missing/wrong-kind cookies, another user's and
 another same-user session, replay, expiry, superseded starts, PKCE code
-substitution, restart and reauthorization against real workerd and local
-provider/Pipes fakes. Protocol tests reject malformed/partial grants and
+substitution, restart, reauthorization, and partial grants (one kept as
+granted and listed with what it lacks, one of signing in alone refused, and a
+reconnect that adds the rest) against real workerd and local provider/Pipes
+fakes. Protocol tests reject malformed grants, grants of signing in alone and
 configuration overriding binding parameters. Local tests establish our ordering
 and attribution, not the live vendor configuration or refresh behavior.
 
@@ -148,10 +182,12 @@ none of these secret values were read or printed here.
 2. Bind that client's secret through Cloudflare Secrets Store as
    `CONNECTION_SECRET_GOOGLE`. In the deployment provider row, `key` is its
    **store name**, never the value. Add `connection_oauth` with `client_id`,
-   `authorize: https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=select_account%20consent`
+   `authorize: https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&include_granted_scopes=true&prompt=select_account%20consent`
    (`select_account`: Google's account chooser, even in a browser signed in to
    one Google account, so a person picks which account to connect; `consent`:
-   the refresh token Pipes needs, every time),
+   the refresh token Pipes needs, every time; `include_granted_scopes`: what
+   the person allowed before is kept, so a reconnect asks only for the rest:
+   Partial grants, above),
    `exchange: https://oauth2.googleapis.com/token`, and the reviewed compatibility
    scopes. Endpoint/client/scope settings are public configuration; secrets are
    read only by `cell/src/keys.rs`. For Disconnect, add `revoke:
