@@ -106,7 +106,7 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   delegation, files, deploy, templates, share, faces, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
-  brain, doc, push, ai, ledger, transcribe, finite-private, orgs, billing,
+  brain, doc, push, ai, ledger, transcribe, speech, finite-private, orgs, billing,
   billing-page, trials, admin, admin-page, shell, computers, chat,
   shell-ui, wipe, hermes, agent-smoke, sync, migrations, restart;
   `crates/e2e/src/lanes/mod.rs`). `finite-private` starts its own node

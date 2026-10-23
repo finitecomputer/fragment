@@ -1167,6 +1167,11 @@ expires within 30 days. The container application is the deployment's
   transcription route as the agent: Workers AI's Whisper, at most 10 MiB
   of audio, metered to the agent's owner at 46.63 neurons a minute of
   audio (docs/api.md, Models).
+- `POST http://model.fragment.internal/v1/audio/speech`, OpenAI's
+  speech shape with `model` `speech`: an agent's voice. It is the
+  platform's speech route as the agent: OpenAI's tts-1 through the AI
+  Gateway, at most 4,096 characters a call, metered to the agent's owner
+  per character (docs/api.md, Models).
 - `POST http://model.fragment.internal/v1/decide`: a typed decision on
   the Clef family, the contract a job's `ai.decide` takes, its media
   inline (docs/api.md, Decisions). It is the platform's decision route

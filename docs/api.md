@@ -1937,6 +1937,7 @@ model an agent runs by its id (Paul, 2026-10-20: the agent's page said
 | `GET /api/models/v1/models` | an agent | → the ids its calls may name, OpenAI's list (above) |
 | `POST /api/models/v1/chat/completions[?fragment=<name>]` | an agent (`for` names whom it acts for) | an OpenAI chat completion, `model` a tier, `vision`, `fallback`, or one of their models' ids (`x-fragment-tier` its tier, optional) → the model's answer in OpenAI's shape: JSON, or with `stream: true` server-sent events, usage once on a last chunk with no choices |
 | `POST /api/models/v1/audio/transcriptions` | an agent | an OpenAI transcription, `multipart/form-data`: `file` (the audio, at most 10 MiB), `model` `whisper`, and optional `language` (ISO-639-1), `prompt` and `response_format` (`json`, the default, or `text`) → `{"text": …}`, or the text alone |
+| `POST /api/models/v1/audio/speech` | an agent | OpenAI's speech, JSON: `model` `speech`, `input` (1 to 4,096 characters), and optional `voice` (`alloy`, the default, `echo`, `fable`, `onyx`, `nova` or `shimmer`), `response_format` (`mp3`, the default, `opus`, `aac`, `flac` or `wav`) and `speed` (0.25 to 4) → the audio itself, its content type the format's |
 | `POST /api/models/v1/decide[?fragment=<name>]` | an agent (`for` names whom it acts for) | a decision, `{model?, input, questions, media?}`, its media inline → `{model, answers, usage}` (Decisions, above) |
 
 Transcription (decision 9, as Paul changed it on 2026-10-07: a voice
@@ -1967,6 +1968,37 @@ memo is one the agent transcribes itself, through this route):
   route reads `text` and `transcription_info.duration` (the catalog's own
   field). An answer in any other shape is answered 502 and charged
   nothing.
+
+Speech (Paul, 2026-10-22: speech over AI Gateway in place of the
+ElevenLabs key, so an agent's voice is metered and kept nowhere):
+- **The model.** `speech` is OpenAI's tts-1 (`openai/tts-1`) through the
+  deployment's AI Gateway, Unified Billing, which the AI model catalog
+  marks zero data retention. Any of its voices speaks any language, the
+  text's own.
+- **What it is sent.** tts-1's input: the `input` as its `text`, the
+  voice, format and speed (each defaulted when not given). OpenAI's
+  `instructions` (gpt-4o-mini-tts's) and other fields are let go.
+- **Refusals before anything is sent.** A body that is not JSON, a model
+  other than `speech`, no `input` or one past 4,096 characters, and a
+  voice, format or speed tts-1 does not take are refused 400. Hermes
+  splits a longer reply into parts of at most 4,096.
+- **Its answer.** The audio, as OpenAI's API answers it. The gateway
+  answers with its file's URL (the catalog's `{audio}`), which the route
+  fetches (over HTTPS only), or with the audio itself, or inline; the
+  answer carries `x-fragment-answer-shape` (its content type, and a JSON
+  answer's keys, never the audio or a URL), and the e2e's `speech`
+  section prints it, so a hosted run shows which.
+- **Metering** (`fragment_core::speech`). tts-1's $0.000015 a character,
+  its characters counted as the model's input tokens in the price book
+  (as the Clef family's media are), charged after the answer. An answer
+  whose audio the route cannot read was paid for: it is charged, and
+  answered 502.
+- **Who pays.** The agent's owner, under no fragment's cap. tts-1's
+  refusal is charged nothing and passed through.
+- **Limits.** Unified Billing takes 200 requests a minute a gateway
+  (developers.cloudflare.com/ai-gateway/reference/limits, read
+  2026-10-22); the deployment's Workers AI calls, billed postpaid, are
+  not among them.
 
 What the model is sent is the body bounded: no `model` (the tier's),
 its images as they came, `max_tokens` at most 16384, `reasoning_effort`

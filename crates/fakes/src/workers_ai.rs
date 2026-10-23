@@ -112,6 +112,11 @@ use crate::http::{Handler, Request, Response, Server};
 pub use fragment_core::media::IMAGE_MODEL;
 /// The transcription model's (fragment_core::transcribe::TRANSCRIBE_MODEL).
 pub use fragment_core::transcribe::TRANSCRIBE_MODEL;
+/// The speech model's (fragment_core::speech::SPEECH_MODEL).
+pub use fragment_core::speech::SPEECH_MODEL;
+/// What the speech model's audio says, before the text it spoke: a fake
+/// MP3's ID3 tag, so a test reads the text back from the audio.
+pub const SPOKEN: &[u8] = b"ID3 spoken: ";
 /// The decision models (the Clef family): a typed-decision vendor
 /// boundary, never proof of a real model's accuracy.
 pub use fragment_core::decide::Model as DecisionModel;
@@ -253,6 +258,8 @@ struct State {
     down: Vec<String>,
     /// The key the OpenAI-compatible face lets in (`accept_key`).
     key: Option<String>,
+    /// The speech model's files, served at `/speech/<n>`.
+    spoken: Vec<Vec<u8>>,
 }
 
 /// Workers AI's answer when it cannot reach a model (as the binding passed
@@ -674,6 +681,27 @@ fn transcription_answer(input: &Value, log_id: &str) -> Response {
     Response::json(200, &answer).with_header("cf-aig-log-id", log_id)
 }
 
+/// The speech model's answer to `input`, as its catalog's schemas say:
+/// every field it requires and no other, `{audio: <its file's URL>}` (the
+/// REST API's wrapping, `{state, result}`, around it), the file served
+/// here. Its audio is `SPOKEN` and the text it spoke.
+fn speech_answer(s: &mut State, input: &Value, host: &str, log_id: &str) -> Response {
+    let fields: Vec<&str> = input.as_object().map(|o| o.keys().map(String::as_str).collect()).unwrap_or_default();
+    if let Some(other) = fields.iter().find(|f| !["text", "voice", "response_format", "speed"].contains(f)) {
+        return problem(400, &format!("'/{other}' is not allowed"));
+    }
+    let voices = fragment_core::speech::VOICES;
+    let (Some(text), Some(voice), Some(format), Some(speed)) = (input["text"].as_str(), input["voice"].as_str(), input["response_format"].as_str(), input["speed"].as_f64()) else {
+        return problem(400, "text, voice, response_format and speed are required");
+    };
+    if text.chars().count() > fragment_core::speech::INPUT_MAX_CHARS || !voices.contains(&voice) || !["mp3", "opus", "wav", "aac", "flac"].contains(&format) || !(0.25..=4.0).contains(&speed) {
+        return problem(400, "the input is out of the schema");
+    }
+    s.spoken.push([SPOKEN, text.as_bytes()].concat());
+    let url = format!("http://{host}/speech/{}", s.spoken.len() - 1);
+    Response::json(200, &json!({ "state": "Completed", "result": { "audio": url } })).with_header("cf-aig-log-id", log_id)
+}
+
 /// The image model's answer to `input`, as the binding answers it raw.
 fn image_answer(input: &Value, log_id: &str) -> Response {
     let Some(prompt) = input["prompt"].as_str() else { return problem(400, "Type mismatch of '/prompt', 'undefined' not in 'string'") };
@@ -776,6 +804,12 @@ fn answer(s: &mut State, req: &Request) -> Response {
     if req.path == OPENAI_PATH {
         return openai_answer(s, req);
     }
+    if let Some(n) = req.path.strip_prefix("/speech/") {
+        return match n.parse::<usize>().ok().and_then(|n| s.spoken.get(n)) {
+            Some(audio) => Response { status: 200, headers: vec![("content-type".into(), "audio/mpeg".into())], body: audio.clone(), unanswered: false, upgrade: None },
+            None => problem(404, "no such file"),
+        };
+    }
     let Some(model) = req.path.strip_prefix("/run/").map(crate::http::decode) else { return problem(404, "no such route") };
     if req.method != "POST" {
         return problem(405, "the binding runs a model with a POST");
@@ -795,6 +829,9 @@ fn answer(s: &mut State, req: &Request) -> Response {
     let log_id = format!("01FAKE{:020}", s.answers);
     if model == IMAGE_MODEL {
         return image_answer(&body, &log_id);
+    }
+    if model == SPEECH_MODEL {
+        return speech_answer(s, &body, req.header("host").unwrap_or("127.0.0.1"), &log_id);
     }
     if model == TRANSCRIBE_MODEL {
         return transcription_answer(&body, &log_id);
@@ -1216,6 +1253,29 @@ mod tests {
         assert!((256 * 1024..fragment_core::blob::BLOB_MIN_BYTES).contains(&image_bytes("a mid mural").len()));
         assert_eq!(fragment_core::media::jpeg_size(&image_bytes("a png")), None);
         assert_eq!(image_answer(&json!({ "steps": 4 }), "01FAKE").status, 400, "no prompt");
+    }
+
+    /// Goal: the speech model answers as its catalog's schemas say, its
+    /// file's URL, the file served here and read by the core's own reader;
+    /// out of its schema, a 400. Method: an answer, its file, and inputs
+    /// the schema refuses.
+    #[test]
+    fn speech_is_a_file_its_answer_names() {
+        let mut s = State::default();
+        let input = json!({ "text": "hello", "voice": "nova", "response_format": "mp3", "speed": 1.0 });
+        let r = speech_answer(&mut s, &input, "127.0.0.1:9", "01FAKE");
+        let answer: Value = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!(fragment_core::speech::audio_of(&answer), Some(fragment_core::speech::Audio::At("http://127.0.0.1:9/speech/0".into())));
+        let file = answer_of(&mut s, "/speech/0");
+        assert_eq!((file.status, file.body), (200, [SPOKEN, b"hello"].concat()));
+        assert_eq!(answer_of(&mut s, "/speech/1").status, 404);
+        for bad in [json!({ "text": "hi" }), json!({ "text": "hi", "voice": "coral", "response_format": "mp3", "speed": 1.0 }), json!({ "input": "hi", "text": "hi", "voice": "nova", "response_format": "mp3", "speed": 1.0 })] {
+            assert_eq!(speech_answer(&mut s, &bad, "127.0.0.1:9", "01FAKE").status, 400, "{bad}");
+        }
+    }
+
+    fn answer_of(s: &mut State, path: &str) -> Response {
+        answer(s, &Request::new("GET", path, &[], b""))
     }
 
     /// A 1×1 PNG, as a data URL.

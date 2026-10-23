@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use fragment_core::price::{PriceBook, Usage};
-use fragment_fakes::workers_ai::{image_bytes, spoken_wav, Used, IMAGE_MODEL, TRANSCRIBE_MODEL};
+use fragment_fakes::workers_ai::{image_bytes, spoken_wav, Used, IMAGE_MODEL, SPEECH_MODEL, SPOKEN, TRANSCRIBE_MODEL};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
@@ -54,6 +54,11 @@ const MODEL_ROUTE: &str = "/api/models/v1/chat/completions";
 const MODELS_ROUTE: &str = "/api/models/v1/models";
 /// Its transcriptions (decision 9).
 const TRANSCRIBE_ROUTE: &str = "/api/models/v1/audio/transcriptions";
+/// Its speech (fragment_core::speech).
+const SPEECH_ROUTE: &str = "/api/models/v1/audio/speech";
+/// What an agent asks to have spoken: three languages' words, so a hosted
+/// run is heard speaking each.
+const SPOKEN_TEXT: &str = "Hello! Hola, ¿qué tal? Grüß dich.";
 /// Its decisions (fragment_core::decide).
 const DECIDE_ROUTE: &str = "/api/models/v1/decide";
 const GLM: &str = "@cf/zai-org/glm-5.3";
@@ -675,6 +680,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     by_id(s, api, &hand, &owner, &owner_id, wait)?;
     vision(s, api, wait)?;
     transcription(s, api, wait)?;
+    speech(s, api, wait)?;
     decisions_route(s, api, wait)?;
     let r = api.signed(&owner, "POST", route, Some(&chat(false)))?;
     s.ok("a person does not call the model route (an agent does, for whom its owner pays)", r.status == 403, &r);
@@ -1101,6 +1107,69 @@ fn transcription(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     Ok(())
 }
 
+/// The model route's speech (Paul, 2026-10-22: speech over AI Gateway in
+/// place of ElevenLabs): OpenAI's shape, `model` `speech`, on tts-1 (the
+/// fake answers with its file's URL, as the catalog says), answered with the
+/// audio itself and charged after it per character on the agent's owner's
+/// ledger; refused before anything is sent when it is no speech the route
+/// takes; the model's refusal passed through and charged nothing; never a
+/// person's. Its payer is a person of its own.
+fn speech(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
+    let owner = api.person()?;
+    let owner_id = api.identity(&owner)?;
+    let hand = &Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(hand, "POST", reg, &owner) })))?;
+    anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
+    let owner_id = owner_id.as_str();
+    let aig = || entries(api, owner_id, "aig:");
+    let chars = SPOKEN_TEXT.chars().count() as u64;
+    let spoken = charge(&fragment_core::speech::usage_of(chars));
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
+    let r = api.signed(hand, "POST", SPEECH_ROUTE, Some(&json!({ "model": "speech", "input": SPOKEN_TEXT, "voice": "nova", "response_format": "mp3", "instructions": "warmly" })))?;
+    let call = s.ai.calls().get(calls).cloned();
+    let sent = call.as_ref().is_some_and(|c| c.model == SPEECH_MODEL && c.body == json!({ "text": SPOKEN_TEXT, "voice": "nova", "response_format": "mp3", "speed": 1.0 }) && c.authorization.is_none());
+    let settled = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| charged(e) == Some(spoken)));
+    let kind = r.headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    s.ok(
+        "speech is OpenAI's shape on tts-1 (what it has no input for let go), answered with the audio its file holds, and charged per character it spoke",
+        r.status == 200 && kind == "audio/mpeg" && r.bytes == [SPOKEN, SPOKEN_TEXT.as_bytes()].concat() && sent && settled,
+        json!({ "status": r.status, "type": kind, "sent": call.map(|c| c.body), "entries": aig() }),
+    );
+    let r = api.signed(hand, "POST", SPEECH_ROUTE, Some(&json!({ "model": "speech", "input": "Ciao!", "response_format": "opus" })))?;
+    let asked = s.ai.calls().last().map(|c| c.body.clone());
+    s.ok(
+        "no voice is tts-1's default; opus is answered as Ogg",
+        r.status == 200 && r.headers.get("content-type").is_some_and(|t| t == "audio/ogg") && asked.as_ref().is_some_and(|b| b["voice"] == "alloy" && b["response_format"] == "opus"),
+        json!({ "status": r.status, "sent": asked }),
+    );
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
+    let refused = [
+        (json!({ "model": "tts-1", "input": "hi" }), "speech"),
+        (json!({ "model": "speech", "input": "" }), "input"),
+        (json!({ "model": "speech", "input": "a".repeat(fragment_core::speech::INPUT_MAX_CHARS + 1) }), "4096"),
+        (json!({ "model": "speech", "input": "hi", "voice": "coral" }), "alloy"),
+        (json!({ "model": "speech", "input": "hi", "response_format": "pcm" }), "mp3"),
+    ];
+    let mut answers = vec![];
+    for (body, says) in &refused {
+        let r = api.signed(hand, "POST", SPEECH_ROUTE, Some(body))?;
+        let message = r.message().to_string();
+        answers.push((r.status == 400 && message.contains(says), message));
+    }
+    s.ok(
+        "a model other than `speech`, no input or too much, a voice or a format tts-1 has not: refused, saying why, nothing sent or charged",
+        answers.iter().all(|(ok, _)| *ok) && s.ai.calls().len() == calls && aig().len() == before,
+        json!(answers.iter().map(|(_, m)| m).collect::<Vec<_>>()),
+    );
+    s.ai.fail_next(&[400]);
+    let r = api.signed(hand, "POST", SPEECH_ROUTE, Some(&json!({ "model": "speech", "input": "hi" })))?;
+    s.ok("tts-1's refusal is passed through, and nothing is charged", r.status == 400 && s.ai.calls().len() == calls + 1 && aig().len() == before, json!({ "status": r.status, "entries": aig() }));
+    let r = api.signed(&owner, "POST", SPEECH_ROUTE, Some(&json!({ "model": "speech", "input": "hi" })))?;
+    s.ok("a person does not call it (an agent does, for whom its owner pays)", r.status == 403, &r);
+    Ok(())
+}
+
 /// A fragment's meters reach its owner's ledger through the queue, each
 /// row once by its reference, a resent batch answered as before. Its owner
 /// is a person of its own, so nothing else bills their ledger meanwhile.
@@ -1174,6 +1243,45 @@ fn meters(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         json!({ "before": before, "after": after, "new": new }),
     );
     let _ = c;
+    Ok(())
+}
+
+/// The model route's speech on the deployment's own tts-1 through AI
+/// Gateway, a section of its own so it runs alone on a preview (`--only
+/// speech`): an agent of a person's asks for a sentence in three languages'
+/// words, and is answered with the audio, charged after it per character.
+/// Hosted, it is the proof of how the gateway answers: it prints that
+/// answer's shape (the route's `x-fragment-answer-shape`: the content type,
+/// and a JSON answer's keys, never its audio or a URL), the audio's size,
+/// and the charge, pass or fail. One paid call.
+pub fn speech_lane(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("speech", &[crate::Need::Models, crate::Need::Levers]) {
+        return Ok(());
+    }
+    let owner = api.person_paying(1)?;
+    let owner_id = api.identity(&owner)?;
+    let hand = &Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(hand, "POST", reg, &owner) })))?;
+    anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
+    let r = api.signed(hand, "POST", SPEECH_ROUTE, Some(&json!({ "model": "speech", "input": SPOKEN_TEXT, "voice": "nova", "response_format": "mp3" })))?;
+    let shape = r.headers.get("x-fragment-answer-shape").and_then(|v| v.to_str().ok()).unwrap_or("(none)").to_string();
+    let kind = r.headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    println!("      (spoken: {} {kind}, {} bytes; the gateway's answer: {shape}{})", r.status, r.bytes.len(), if r.status == 200 { String::new() } else { format!("; {}", r.text.chars().take(300).collect::<String>()) });
+    let chars = SPOKEN_TEXT.chars().count() as u64;
+    let per_character = |e: &Value| charged(e).is_some() && usage(e)["kind"] == "tokens" && usage(e)["model"] == SPEECH_MODEL && usage(e)["input"] == chars;
+    if r.status == 200 {
+        s.eventually(Duration::from_secs(60), || !entries(api, &owner_id, "aig:").is_empty());
+    }
+    let aig = entries(api, &owner_id, "aig:");
+    for e in &aig {
+        println!("      (its charge: usage {} charge {:?})", usage(e), charged(e));
+    }
+    s.ok(
+        "the model route speaks on the deployment's tts-1, answered with the audio as OpenAI's API answers, and charged per character it spoke",
+        r.status == 200 && kind == "audio/mpeg" && !r.bytes.is_empty() && aig.len() == 1 && aig.iter().all(per_character),
+        json!({ "status": r.status, "type": kind, "bytes": r.bytes.len(), "shape": shape, "entries": aig }),
+    );
     Ok(())
 }
 

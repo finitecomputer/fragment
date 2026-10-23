@@ -1538,3 +1538,21 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** Cloudflare fixes #362 and a canary round shows no
   `snapshot: "dead"` across its snapshot wakes; or snapshots go
   (`FRAGMENT_COMPUTER_SNAPSHOTS=off`), when the wait goes with them.
+
+## Speech reads three answer shapes until a hosted run shows the gateway's
+
+- **Observed:** 2026-10-22, the speech route (`speech_route`,
+  cell/src/models.rs). The AI model catalog's tts-1 page documents
+  `{audio: <its file's URL>}`; the binding's raw answer
+  (`returnRawResponse`, which the route's transport always asks for) is
+  undocumented for a third-party model.
+- **Shortcut:** the route reads the audio itself (an `audio/*` answer),
+  or JSON naming it by an HTTPS URL, which it fetches, or inline (a
+  `data:` URI): `fragment_core::speech::audio_of`.
+- **Risk:** an answer in a fourth shape is a 502 for every call, each
+  charged; where the gateway keeps a file it names, and for how long, is
+  unread (zero data retention is the catalog's mark for OpenAI).
+- **First proof:** the hosted `speech` section's printed shape
+  (`x-fragment-answer-shape`).
+- **Delete when:** a hosted run shows the shape the gateway answers;
+  the route reads that one alone.
