@@ -909,7 +909,7 @@ pub async fn stop_cores(grace: Duration) {
 /// starts a core of its own: a process whose command line names `cfg.bin`
 /// and a `-d` under `cfg.dir`. Bounded: two seconds for each to end.
 pub async fn kill_strays(cfg: &Config) {
-    let (bin, dir) = (cfg.bin.to_string_lossy().to_string(), cfg.dir.to_string_lossy().to_string());
+    let bin = cfg.bin.to_string_lossy().to_string();
     let me = std::process::id();
     let mut strays: Vec<u32> = vec![];
     for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
@@ -917,7 +917,8 @@ pub async fn kill_strays(cfg: &Config) {
         let Ok(raw) = std::fs::read(e.path().join("cmdline")) else { continue };
         let args: Vec<String> = raw.split(|b| *b == 0).map(|a| String::from_utf8_lossy(a).to_string()).collect();
         let names_bin = args.contains(&bin);
-        let in_dir = args.windows(2).any(|w| w[0] == "-d" && w[1].starts_with(&dir));
+        // under it by path components: a sibling that shares its prefix (`simplex-other`) is not
+        let in_dir = args.windows(2).any(|w| w[0] == "-d" && Path::new(&w[1]).starts_with(&cfg.dir));
         if names_bin && in_dir {
             strays.push(pid);
         }
@@ -1169,7 +1170,8 @@ mod tests {
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("runnable");
         let dir = root.join("data");
         let spawn = |d: String| {
-            let mut child = tokio::process::Command::new(&bin).args(["-d", &d]).spawn().expect("it runs");
+            // by `sh`, never exec'ing the file just written (another test's fork may hold it open: ETXTBSY)
+            let mut child = tokio::process::Command::new("sh").arg(&bin).args(["-d", &d]).spawn().expect("it runs");
             let pid = child.id().expect("a pid");
             // reaped as the container's init would
             tokio::spawn(async move {
@@ -1179,13 +1181,17 @@ mod tests {
         };
         let stray = spawn(dir.join("juniper--k3x9/sx").to_string_lossy().to_string());
         let other = spawn("/elsewhere/sx".into());
+        // a sibling directory sharing its prefix is no part of it
+        let sibling = spawn(root.join("data-other/juniper--k3x9/sx").to_string_lossy().to_string());
         tokio::time::sleep(Duration::from_millis(200)).await;
         kill_strays(&Config { bin: bin.clone(), dir, smp: None, xftp: None }).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
         // SAFETY: signal 0 only asks whether the pid exists
         assert_eq!(unsafe { libc::kill(stray as i32, 0) }, -1, "the stray core is gone");
-        assert_eq!(unsafe { libc::kill(other as i32, 0) }, 0, "another's left alone");
-        unsafe { libc::kill(other as i32, libc::SIGKILL) };
+        for (pid, what) in [(other, "another directory's"), (sibling, "a prefix sibling's")] {
+            assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 0, "{what} left alone");
+            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
