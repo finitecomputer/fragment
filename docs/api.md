@@ -2989,10 +2989,24 @@ Enter (or the first row, "Start a new chat with <agent>") makes a new
 chat with it as **New chat** does and posts the words whole as its first
 message (`POST /api/f/{chat}/channels/chat`, the person's), with an id
 kept until it is sent, so trying again after an answer that was lost is
-the same record; the launcher says "Starting your chat…" until the
-platform answers, and opens the chat on its record. A request for an app
-is a message like any other: the agent makes it. A guest's launcher only
-finds.
+the same record. Enter goes straight to the chat: the launcher closes at
+once and the middle column is the new chat's while it is made; its page
+loads (`?sent=1`: docs/chat-records.md, "The launcher's chat") as its
+message is posted. A message not sent opens the launcher again on its
+words, saying why. The launcher wakes the person's computer as it opens
+(as focusing a chat does), so it is starting while they type. Before
+their agent runs (its first run, or their computer not read yet), Enter
+(the first row, "Say it in <chat>") opens their first chat (the first
+run's, else their agent's own) with the words in its composer, to send
+there, as the dock's prompts do (`compose`, above). The input grows with
+a long prompt (to 200 px, then scrolls); Shift+Enter is a new line.
+Files dropped on it or pasted into it (for a person whose agent runs; at
+most 8, 25 MiB each, as chips under the words, each removable) go with
+the words, or alone, as the first message's attachments: each uploaded
+to the new chat once it is made (`PUT /api/f/{chat}/blobs/{sha256}`, a
+dropped connection tried again), then the record names them
+(docs/chat-records.md, Attachments). A request for an app is a message
+like any other: the agent makes it. A guest's launcher only finds.
 
 **The first run, in its chat.** The person's first agent is made with
 its chat (decision 10), once they hold a seat (one bought on the welcome
