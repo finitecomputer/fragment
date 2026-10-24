@@ -75,43 +75,6 @@ const DAY_MS: i64 = 24 * 3600 * 1000;
 /// fewer): past it, an agent shows by its label.
 pub(crate) const FACES_MAX: usize = 64;
 
-/// The shell's look (cell/fragment.css: its warm greys, its one blue,
-/// pill buttons), as a card: the page's, or, in the shell's dialog
-/// (`framed`), the dialog's whole.
-const SHEET_STYLE: &str = ":root{color-scheme:light dark;--bg:light-dark(#f7f6f3,#212121);--fg:light-dark(#171717,#ececec);--muted:light-dark(#66615b,#a6a19d);--line:light-dark(rgba(20,20,20,.105),rgba(255,255,255,.085));--line-strong:light-dark(rgba(20,20,20,.18),rgba(255,255,255,.16));--surface:light-dark(#fffdfa,#2b2b2a);--soft:light-dark(#f0eee9,#262625);--accent:light-dark(#315fbd,#8ab4ff);--danger:light-dark(#81112f,#f3b3b3);--open:light-dark(#167a52,#39d98a)}
-body{box-sizing:border-box;margin:0 auto;padding:16px;max-width:34rem;min-height:100vh;min-height:100dvh;display:flex;flex-direction:column;background:var(--bg);color:var(--fg);font:15px/1.5 \"Funnel Sans\",ui-sans-serif,system-ui,-apple-system,sans-serif;-webkit-font-smoothing:antialiased}
-main{flex:none;margin-block:auto;background:var(--surface);border-radius:14px;padding:20px 24px;box-shadow:0 1px 2px #0000001a,0 8px 28px #0000001a}
-h1{font-size:1.25rem;font-weight:600;margin:0 0 .9em;overflow-wrap:anywhere}h2{font-size:.8125rem;font-weight:600;color:var(--muted);margin:1.4em 0 .4em}
-a{color:var(--accent)}code{background:var(--soft);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}pre code{display:block;padding:.6em .8em;white-space:pre-wrap;word-break:break-all}form{margin:0}
-ul.people{list-style:none;padding:0;margin:0}.people li{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:6px 0;min-height:40px;border-top:1px solid var(--line)}.people li:first-child{border-top:0}
-.av{width:32px;height:32px;border-radius:50%;object-fit:cover;background:var(--soft);display:inline-grid;place-items:center;font-size:14px;font-weight:600;flex:none}
-.who{flex:1 1 10rem;min-width:0;overflow-wrap:anywhere}.who small{display:block;color:var(--muted);font-size:.8125rem}
-.role,.hint{color:var(--muted);font-size:.875rem}.hint{margin:.4em 0}.controls{display:flex;align-items:center;gap:6px;margin-left:auto}
-input{font:inherit;color:inherit;min-width:0;padding:.45em .75em;border:1px solid var(--line-strong);border-radius:10px;background:var(--surface)}
-button{font:inherit;display:inline-flex;align-items:center;justify-content:center;gap:.4em;min-height:2.1rem;padding:0 1rem;border:0;border-radius:999px;background:var(--fg);color:var(--bg);font-weight:600;cursor:pointer;white-space:nowrap;flex:none}
-button:disabled{opacity:.45;cursor:default}:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-button.quiet{background:none;color:inherit;border:1px solid var(--line-strong);font-weight:500}button.text{background:none;color:var(--accent);padding:0 .5rem;font-weight:500}
-button.text.away{color:var(--muted)}button[data-sure]{color:var(--danger)!important;border-color:var(--danger)}
-.seg{display:inline-flex;padding:2px;border:1px solid var(--line-strong);border-radius:999px;flex:none}
-.seg button,.seg label span{min-height:1.8rem;padding:0 .75rem;border-radius:999px;background:none;color:var(--muted);font-size:.875rem;font-weight:500;display:inline-flex;align-items:center;cursor:pointer}
-.seg button[aria-pressed=true],.seg input:checked+span{background:var(--fg);color:var(--bg)}.seg button[aria-pressed=true]{cursor:default}
-.seg label{display:inline-flex;position:relative}.seg input{position:absolute;opacity:0;width:1px;height:1px;margin:0}.seg input:focus-visible+span{outline:2px solid var(--accent)}
-.add{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.add input[type=email]{flex:1 1 9rem}
-.options{display:grid;gap:4px}.option{width:100%;justify-content:flex-start;gap:12px;padding:6px 10px;white-space:normal;border:1px solid var(--line);border-radius:12px;background:none;color:inherit;font-weight:400;text-align:left}
-.option[aria-pressed=true]{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 9%,transparent);cursor:default}.option:disabled{opacity:.6}
-.option .say{flex:1}.option b{display:block;font-weight:600}.option small{display:block;color:var(--muted);font-size:.8125rem;line-height:1.35}.option .tick{flex:none;color:var(--accent);visibility:hidden}.option[aria-pressed=true] .tick{visibility:visible}
-.icon{width:32px;height:32px;border-radius:50%;background:var(--soft);display:grid;place-items:center;flex:none}.icon.open{color:var(--open)}
-.icon svg,.tick svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
-.static{display:flex;gap:12px;align-items:center}.static b{display:block}
-.more{margin-top:1.2em;padding-top:.2em;border-top:1px solid var(--line)}.more .row{display:flex;gap:12px;align-items:center;justify-content:space-between}
-footer{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin-top:1.4em}footer .leave{margin-right:auto}
-.flash{padding:4px 14px;border-radius:10px;background:var(--soft);margin-bottom:1em}.flash.error{background:color-mix(in srgb,var(--danger) 18%,transparent)}
-.framed body{max-width:none;min-height:0;display:block;padding:0;background:var(--surface)}.framed main{box-shadow:none;border-radius:0}
-@media (max-width:420px){body{padding:8px}main{padding:16px}}
-html{-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%;text-size-adjust:100%}body{overscroll-behavior:none}
-button,.seg,.option{-webkit-user-select:none;user-select:none;touch-action:manipulation}
-@media (max-width:760px){input:not([type=radio]):not([type=checkbox]):not([type=hidden]){font-size:16px}}";
-
 /// Arms the page's buttons `DELAY_MS` after it shows (again each time it
 /// is shown), copies a link, asks a second click of a button that takes
 /// access away (`data-confirm`), and closes the sheet (Done; framed,
@@ -170,11 +133,12 @@ fn script() -> String {
     SCRIPT.replace("DELAY_MS", &form::DELAY_MS.to_string())
 }
 
-/// A sharing page's CSP: scripts and styles inline, images from the
-/// platform, and who may frame it (`ancestors`).
+/// A sharing page's CSP: its stylesheets, fonts, images and script file
+/// from the platform, its own small scripts inline, and who may frame it
+/// (`ancestors`).
 fn policy(forms_here: bool, ancestors: &str) -> String {
     let forms = if forms_here { " form-action 'self';" } else { "" };
-    format!("default-src 'none'; img-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'unsafe-inline';{forms} base-uri 'none'; frame-ancestors {ancestors}")
+    format!("default-src 'none'; img-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self' 'unsafe-inline';{forms} base-uri 'none'; frame-ancestors {ancestors}")
 }
 
 /// One of sharing's pages: the platform's look, its protections, and
@@ -199,16 +163,28 @@ fn page(status: u16, html: String, forms_here: bool) -> CellResult<Response> {
     Ok(Response::ok(html)?.with_status(status).with_headers(h))
 }
 
-/// Shared markup only: callers keep their own framing, navigation and
-/// script policies. Plain notices need none of the sharing controls.
-pub(crate) fn sheet_html(title: &str, body: &str) -> String {
+/// A page's skeleton: its `<html>`'s attributes, its title, what goes
+/// before its card (`head`: its stylesheets, and on the platform's pages
+/// the logo), and its card's body under its heading. The pages' look is in
+/// files (cell/shell/sheet.css, platform-pages.css); this frame is filled
+/// per request, escaped as it goes, so it stays a string here rather than
+/// a file read from the assets on every page.
+fn skeleton(attrs: &str, title: &str, head: &str, body: &str) -> String {
     format!(
-        r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{t}</title>
-<style>{sheet}</style>
-<main><h1>{t}</h1>{body}</main>"#,
+        r#"<!doctype html><html lang="en"{attrs}><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{t}</title>
+{head}<main><h1>{t}</h1>{body}</main>"#,
         t = esc(title),
-        sheet = SHEET_STYLE,
     )
+}
+
+/// A plain notice in the base look, its stylesheet `sheet` from the
+/// page's own origin: `shell::versioned("sheet.css")` on the platform's,
+/// `shell::fragment_sheet()` on a fragment's, which so loads nothing from
+/// the platform's (auth.rs `html`). Callers keep their own framing,
+/// navigation and script policies (a CSP of theirs allows `style-src
+/// 'self'`).
+pub(crate) fn sheet_html(sheet: &str, title: &str, body: &str) -> String {
+    skeleton("", title, &format!("<link rel=\"stylesheet\" href=\"{sheet}\">"), body)
 }
 
 /// Framed (the shell's dialog), a page is drawn as the dialog's from its
@@ -216,19 +192,22 @@ pub(crate) fn sheet_html(title: &str, body: &str) -> String {
 /// before its stylesheet is read: the landscape is never fetched.
 const FRAMED: &str = "<script>if(parent!==window)document.documentElement.classList.add(\"framed\")</script>";
 
-/// Platform-origin pages can load the onboarding assets from the release:
-/// the stylesheet by its version, kept by the browser (shell.rs
-/// `versioned`), and the logo only where it shows (lazy: a framed page
-/// hides it). Fragment-origin notices retain the self-contained sheet above.
+/// A page on the platform's origin, in the onboarding's look: the base
+/// sheet and platform-pages.css over it, and the pointer-following rim's
+/// script (platform-pages.js, a module: it waits for the page, and nothing
+/// waits for it), each linked by its version and kept by the browser
+/// (shell.rs `versioned`); the logo only where it shows (lazy: a framed
+/// page hides it).
 pub(crate) fn platform_html(title: &str, body: &str) -> String {
+    use crate::shell::versioned;
     let head = format!(
-        "{FRAMED}<link rel=\"stylesheet\" href=\"{}\"><div class=\"platform-brand\"><img src=\"/__shell/finite-logo.svg\" alt=\"Finite\" width=\"44\" height=\"46\" loading=\"lazy\"></div><main>",
-        crate::shell::versioned("platform-pages.css")
+        "{FRAMED}<link rel=\"stylesheet\" href=\"{}\"><link rel=\"stylesheet\" href=\"{}\"><script type=\"module\" src=\"{}\"></script>\
+         <div class=\"platform-brand\"><img src=\"/__shell/finite-logo.svg\" alt=\"Finite\" width=\"44\" height=\"46\" loading=\"lazy\"></div>",
+        versioned("sheet.css"),
+        versioned("platform-pages.css"),
+        versioned("platform-pages.js"),
     );
-    sheet_html(title, body).replacen("<html lang=\"en\">", "<html lang=\"en\" class=\"platform-page\">", 1).replacen("<main>", &head, 1)
-        + "<script>"
-        + include_str!("../shell/platform-pages.js")
-        + "</script>"
+    skeleton(" class=\"platform-page\"", title, &head, body)
 }
 
 /// The share sheet itself: a sharing page only the platform's own pages

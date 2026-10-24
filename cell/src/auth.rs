@@ -239,8 +239,9 @@ pub(crate) fn unopened(h: &Headers) -> worker::Result<()> {
     h.set("cross-origin-opener-policy", "same-origin")
 }
 
+/// A notice on a fragment's own origin, its look from that origin.
 fn html(title: &str, body: &str) -> String {
-    share::sheet_html(title, body)
+    share::sheet_html(&crate::shell::fragment_sheet(), title, body)
 }
 
 pub(crate) fn page(status: u16, title: &str, body: &str) -> CellResult<Response> {
@@ -739,9 +740,10 @@ fn frame_note(platform: &str, name: &str, back: &str, why: Unsigned) -> CellResu
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;
     h.set("cache-control", "no-store")?;
-    h.set("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'")?;
+    // its look from this origin, the platform's (share.rs `sheet_html`), its script inline
+    h.set("content-security-policy", "default-src 'none'; style-src 'self'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'")?;
     h.set("x-frame-options", "SAMEORIGIN")?;
-    Ok(Response::ok(html(&title, &body))?.with_headers(h))
+    Ok(Response::ok(share::sheet_html(&crate::shell::versioned("sheet.css"), &title, &body))?.with_headers(h))
 }
 
 /// "Continue to X as you?": a fragment that is not the person's, nor

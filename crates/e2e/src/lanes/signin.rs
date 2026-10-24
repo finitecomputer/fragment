@@ -1067,6 +1067,28 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let r = signout(api, &g, &format!("fragment_site={newest}"))?;
     s.ok("signing out again is no error", r.status == 303, &r);
 
+    // the platform's notices on a fragment's origin (its sign-out page
+    // here) link their look from that origin, kept by its version, the
+    // same bytes as the platform's: nothing from the platform's origin
+    let page = api.call(Call { method: "GET", url: api.site_url(&g, "__signout"), ..Call::default() })?;
+    let href = page.text.split("href=\"").find_map(|h| h.split('"').next().filter(|u| u.starts_with("/__sheet.css?v="))).unwrap_or("").to_string();
+    let theirs = api.call(Call { method: "GET", url: api.site_url(&g, href.trim_start_matches('/')), ..Call::default() })?;
+    let platform_sheet = api.unsigned("GET", "/__shell/sheet.css", None)?;
+    s.ok(
+        "a notice on a fragment's origin links its stylesheet from that origin, by its version (immutable there, the platform's own bytes), and nothing from the platform's",
+        page.status == 200
+            && !href.is_empty()
+            && !page.text.contains("/__shell/")
+            && !page.text.contains(&api.base)
+            && !page.text.contains("<style")
+            && theirs.status == 200
+            && theirs.header("content-type").starts_with("text/css")
+            && theirs.header("cache-control") == "public, max-age=31536000, immutable"
+            && platform_sheet.status == 200
+            && theirs.text == platform_sheet.text,
+        json!([href, page.status, theirs.status, theirs.header("cache-control"), platform_sheet.status]),
+    );
+
     // the registry down: the browser is signed out all the same
     let kept = site_cookie(api, &member_session, &g)?;
     api.unsigned("POST", "/api/test/registry", Some(&json!({ "down": true })))?;

@@ -193,19 +193,23 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         framed_by_platform(&r) && unopened(&r),
         headers(&r),
     );
-    // its stylesheet by its version, which a browser keeps: opening the
-    // sheet again waits on no round trip for it (shell.rs `versioned`)
-    let css = r.text.split("href=\"").find_map(|h| h.split('"').next().filter(|u| u.starts_with("/__shell/platform-pages.css?v="))).unwrap_or("").to_string();
-    let kept = api.unsigned("GET", &css, None)?;
+    // its look and its script are the release's files, linked by their
+    // versions, which a browser keeps: opening the sheet again waits on no
+    // round trip for them (shell.rs `versioned`); none is inline
+    let linked = |prefix: &str| r.text.split(['"', '\'']).find(|u| u.starts_with(prefix)).unwrap_or("").to_string();
+    let files = [linked("/__shell/sheet.css?v="), linked("/__shell/platform-pages.css?v="), linked("/__shell/platform-pages.js?v=")];
+    let kept = files.iter().map(|f| api.unsigned("GET", f, None)).collect::<Result<Vec<_>>>()?;
     let other = api.unsigned("GET", "/__shell/platform-pages.css?v=0000", None)?;
     let named = api.unsigned("GET", "/__shell/platform-pages.css", None)?;
     s.ok(
-        "the sheet links its stylesheet by its version, which is kept for good (immutable); by another version, or by name alone, it is revalidated",
-        !css.is_empty()
-            && kept.status == 200
-            && kept.header("cache-control") == "public, max-age=31536000, immutable"
+        "the sheet links its stylesheets and its script (a module) by their versions, each kept for good (immutable), and holds no style of its own; by another version, or by name alone, a file is revalidated",
+        files.iter().all(|f| !f.is_empty())
+            && r.text.contains(&format!("<script type=\"module\" src=\"{}\">", files[2]))
+            && !r.text.contains("<style")
+            && r.header("content-security-policy").contains("script-src 'self' 'unsafe-inline'")
+            && kept.iter().all(|k| k.status == 200 && k.header("cache-control") == "public, max-age=31536000, immutable")
             && [&other, &named].iter().all(|r| r.status == 200 && r.header("cache-control") == "no-cache"),
-        json!([css, kept.header("cache-control"), other.header("cache-control"), named.header("cache-control")]),
+        json!([files, kept.iter().map(|k| k.header("cache-control")).collect::<Vec<_>>(), other.header("cache-control"), named.header("cache-control")]),
     );
     s.ok(
         "every choice on it is a button, none a select (which an arrow key changes in passing), and they come disabled: they arm a moment after the page shows",
