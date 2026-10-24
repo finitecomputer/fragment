@@ -1943,6 +1943,33 @@ function legalLinks() {
   });
   return p;
 }
+// The release this page is (`release.mine`, its commit linked on GitHub,
+// the repo being public), when it was deployed, and the version its
+// computer runs, small and muted at the end of Settings: what whoever
+// looks is looking at (Paul, 2026-10-24). None on an unfilled page.
+const COMMIT = /^[0-9a-f]{7,40}$/;
+function releaseLine(c) {
+  if (!release.mine) return [];
+  const p = el("p", "muted settings-release");
+  p.dataset.release = release.mine;
+  let id = release.mine;
+  if (COMMIT.test(id)) {
+    id = el("a", null, release.mine);
+    id.href = `https://github.com/finitecomputer/fragment/commit/${release.mine}`;
+    id.target = "_blank";
+    id.rel = "noopener";
+  }
+  p.append("Release ", id);
+  if (DEPLOYED) {
+    const at = new Date(DEPLOYED * 1000);
+    const t = el("time", null, at.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }));
+    t.dateTime = at.toISOString();
+    p.append(" · ", t);
+  }
+  const v = c?.version ?? c?.latest;
+  if (v) p.append(` · Computer ${v}`);
+  return [p];
+}
 // a sentence whose `quoted` parts are code
 function say(text) {
   const p = el("p");
@@ -2092,7 +2119,7 @@ async function openSettings(push = true, failed = null) {
   // reads its export again while one builds
   if (state.guest) {
     returnSaid(back);
-    renderSettingsPage(page, [...billing, account, dataSection()]);
+    renderSettingsPage(page, [...billing, account, dataSection(), ...releaseLine(null)]);
     return tell();
   }
   const standing = ledger?.standing?.standing;
@@ -2166,7 +2193,7 @@ async function openSettings(push = true, failed = null) {
   const skills = await skillsSection();
   if (lost()) return;
   returnSaid(back);
-  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, buildSection(), dataSection()]);
+  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, buildSection(), dataSection(), ...releaseLine(c)]);
   renderAgentFaces();
   tell();
 }
@@ -3785,6 +3812,9 @@ const tab = {
 tab.drop("shell.unsent.v1");
 tab.drop("shell.windows.v1");
 const RELEASE = document.querySelector('meta[name="fragment-release"]')?.content ?? "";
+// when it was deployed, seconds (its other meta; none: empty, or unfilled)
+const DEPLOYED_META = document.querySelector('meta[name="fragment-release-deployed"]')?.content ?? "";
+const DEPLOYED = /^\d{1,12}$/.test(DEPLOYED_META) ? Number(DEPLOYED_META) : null;
 // mine: the release this page is (none, an unfilled page: it never reloads);
 // next: the release it waits to reload for
 const release = { mine: RELEASE_ID.test(RELEASE) ? RELEASE : null, next: null, lookedAt: 0, reloading: false };

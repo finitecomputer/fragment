@@ -768,16 +768,21 @@ fn release_assets(s: &mut Suite, api: &Api, session: &str, agent: &str) -> Resul
     // the release that answers: every answer of the platform's host names
     // it, and the page's meta, which the shell's script compares with them
     let release = api.unsigned("HEAD", "/healthz", None)?.header("x-fragment-deploy");
-    let filled = fragment_templates::shell_page(std::str::from_utf8(index.bytes)?, &release);
+    // and when it was deployed (`FRAGMENT_DEPLOYED_AT`: the node's start
+    // here, the deploy's second hosted), which Settings shows beside it
+    let deployed = page.text.split_once(r#"<meta name="fragment-release-deployed" content=""#).and_then(|(_, rest)| rest.split_once('"')).map(|(v, _)| v.to_string());
+    let at = deployed.as_deref().and_then(fragment_core::release::deployed);
+    let filled = fragment_templates::shell_page(std::str::from_utf8(index.bytes)?, &release, at);
     s.ok(
-        "the shell's page is the release's, its meta naming the release that answered, under the platform's policy",
+        "the shell's page is the release's, its metas naming the release that answered and when it was deployed, under the platform's policy",
         page.status == 200
             && page.text == filled
             && page.text.contains(&format!(r#"<meta name="fragment-release" content="{release}">"#))
+            && at.is_some_and(|t| t > 0 && t as i64 <= crate::api::now_s() + 60)
             && page.header("content-security-policy").contains("frame-ancestors 'none'")
             && page.header("x-frame-options") == "DENY"
             && page.header("cache-control") == "no-store",
-        format!("{} {} bytes (the release's filled: {}), release {release}; {}", page.status, page.bytes.len(), page.text == filled, page.header("content-security-policy")),
+        format!("{} {} bytes (the release's filled: {}), release {release}, deployed {deployed:?}; {}", page.status, page.bytes.len(), page.text == filled, page.header("content-security-policy")),
     );
     let me = shell(api, session, "GET", "/api/identities/me", None, &[])?;
     let refused = shell(api, session, "GET", "/api/identities/me", None, &[("x-fragment-shell", String::new())])?;
@@ -1205,6 +1210,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         legal == json!({ "last": true, "links": [["Privacy", "/privacy", "_blank"], ["Terms", "/terms", "_blank"]], "text": "Privacy · Terms" }),
         &legal,
     );
+    release_line_ui(s, api, &mut b, &page)?;
     // a prompt for Claude Code or Codex naming this platform's own llms.txt,
     // copied whole; the CLI's install folded below it
     let prompt = format!("Read {}/llms.txt and help me build: ", api.base);
@@ -1479,6 +1485,69 @@ const COPY_SEEN: &str = "(() => { const p = document.getElementById('build-promp
 /// their links (text, href, target) and words.
 const LEGAL_LINKS_IN_ACCOUNT: &str = "(() => { const s = [...document.querySelectorAll('#settings-page .settings-section')].find((s) => s.querySelector(':scope > h2')?.textContent === 'Account'); \
     const p = s?.querySelector('.legal-links'); return { last: !!p && s.lastElementChild === p, links: [...(p?.querySelectorAll('a') ?? [])].map((a) => [a.textContent, a.getAttribute('href'), a.target]), text: p?.textContent ?? null }; })()";
+
+/// Settings' last line (shell.js `releaseLine`): the release it names, its
+/// words, its link (href, target), its time (seconds, from `datetime`) and
+/// the page's deployed meta, whether it ends Settings, and the Computer
+/// section's Version.
+const RELEASE_LINE: &str = "(() => { const p = document.querySelector('#settings-page .settings-release'); const a = p?.querySelector('a'); const t = p?.querySelector('time'); \
+    const v = [...document.querySelectorAll('#settings-page .settings-line')].find((l) => l.querySelector('.settings-key')?.textContent === 'Version'); \
+    return p && { release: p.dataset.release, text: p.textContent, link: a && [a.textContent, a.getAttribute('href'), a.target], at: t && Date.parse(t.dateTime) / 1000, said: t?.textContent ?? null, \
+      meta: document.querySelector('meta[name=fragment-release-deployed]')?.content ?? null, last: p.parentElement.lastElementChild === p, version: v?.querySelector('.settings-value')?.textContent ?? null }; })()";
+
+/// Settings end with the release this page is, as the node reports it
+/// (`x-fragment-deploy`), when it was deployed and the version its
+/// computer runs (shell.js `releaseLine`), small and muted. Valid: the
+/// node's own release (`dev` here, no commit: no link) and its time;
+/// a commit's id (the release cookie naming one, as a deploy would) links
+/// to that commit on GitHub, in a tab of its own. The browser goes back to
+/// the node's own release, settings loaded, whatever happened.
+fn release_line_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let own = api.unsigned("HEAD", "/healthz", None)?.header("x-fragment-deploy");
+    let checked = release_line_steps(s, api, b, page, &own, wait);
+    b.set_cookie(&format!("{}/", api.base), RELEASE_COOKIE, "")?;
+    b.reload(page)?;
+    let back = b.until(page, &format!("document.querySelector('#settings-page .settings-release')?.dataset.release === {}", js(&own)), wait);
+    anyhow::ensure!(back, "settings, back on the node's own release ({own}): {}", b.eval(page, RELEASE_LINE)?);
+    checked
+}
+
+fn release_line_steps(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, own: &str, wait: std::time::Duration) -> Result<()> {
+    let shown = |b: &mut Browser, id: &str| -> Result<Value> {
+        b.until(page, &format!("document.querySelector('#settings-page .settings-release')?.dataset.release === {}", js(id)), wait);
+        b.eval(page, RELEASE_LINE)
+    };
+    let line = shown(b, own)?;
+    let is_commit = (7..=40).contains(&own.len()) && own.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c));
+    let link = if is_commit { json!([own, format!("https://github.com/finitecomputer/fragment/commit/{own}"), "_blank"]) } else { Value::Null };
+    let version = line["version"].as_str().unwrap_or("");
+    let said = line["said"].as_str().unwrap_or("");
+    s.ok(
+        "Settings end with the release the node reports, when it was deployed, and the version its computer runs: one small line, its commit (none here) a link",
+        line["release"] == own
+            && line["link"] == link
+            && line["last"] == true
+            && line["meta"].as_str().and_then(|m| m.parse::<f64>().ok()).is_some_and(|m| line["at"].as_f64() == Some(m))
+            && !said.is_empty()
+            && !version.is_empty()
+            && line["text"] == format!("Release {own} · {said} · Computer {version}").as_str(),
+        &line,
+    );
+    // a deploy's commit, to this browser: its id links to it
+    let commit = "0377c876abcd";
+    b.set_cookie(&format!("{}/", api.base), RELEASE_COOKIE, commit)?;
+    b.reload(page)?;
+    let line = shown(b, commit)?;
+    s.ok(
+        "a release that is a commit links to it on GitHub, in a tab of its own",
+        line["release"] == commit
+            && line["link"] == json!([commit, format!("https://github.com/finitecomputer/fragment/commit/{commit}"), "_blank"])
+            && line["text"].as_str().is_some_and(|t| t.starts_with(&format!("Release {commit} · "))),
+        &line,
+    );
+    Ok(())
+}
 
 /// The chat's composer, ready for the person: its page has its hello.
 const COMPOSER_READY: &str = "(() => { const t = document.getElementById('text'); return !!t && !t.disabled && document.getElementById('say')?.dataset.ready === '1'; })()";
