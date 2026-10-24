@@ -66,9 +66,9 @@ enum Shape {
     /// GLM-5.3 Flash.
     FinitePrivate,
     /// As `Plain`, its model route shaped as the private tier
-    /// (`private_tier_models`): its tiers on Finite Private, its fallback
-    /// Tinfoil's DeepSeek V4.1 Flash on a key of its own, priced by its
-    /// slot (each the model fake's OpenAI-compatible face).
+    /// (`private_tier_models`): its tiers and vision on Finite Private, its
+    /// fallback Tinfoil's DeepSeek V4.1 Flash on a key of its own, priced by
+    /// its slot, reading images (each the model fake's OpenAI-compatible face).
     PrivateTier,
     /// As `Plain`, with no Stripe (no `stripe` in its config): billing
     /// off, as finite.chat launched, every seat an operator's comp.
@@ -89,13 +89,13 @@ pub const TINFOIL_KEY: &str = "tk_e2e0c0ffee";
 
 /// `FRAGMENT_MODELS` on a node shaped as the private tier
 /// (deploy/example.jsonc's third alternative), less its keys, each API's
-/// base URL the model fake's: `cheap` and `medium` on Finite Private,
-/// `fallback` on Tinfoil's DeepSeek V4.1 Flash at the list price its slot
-/// names (`tinfoil_price`), `vision` on Workers AI as before.
+/// base URL the model fake's: `cheap`, `medium` and `vision` on Finite
+/// Private, `fallback` on Tinfoil's DeepSeek V4.1 Flash at the list price
+/// its slot names (`tinfoil_price`), saying it reads images.
 pub fn private_tier_models(fake: &str) -> Value {
     let private = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::FINITE_PRIVATE_FLASH });
-    let tinfoil = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::TINFOIL_FLASH, "price": tinfoil_price() });
-    json!({ "cheap": private, "medium": private, "fallback": tinfoil })
+    let tinfoil = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::TINFOIL_FLASH, "price": tinfoil_price(), "images": true });
+    json!({ "cheap": private, "medium": private, "fallback": tinfoil, "vision": private })
 }
 
 /// The `price` of Tinfoil's slot on a node shaped as the private tier: its
@@ -642,6 +642,7 @@ impl Suite {
                         key("cheap", "fragment-finite-private-key", FINITE_PRIVATE_KEY),
                         key("medium", "fragment-finite-private-key", FINITE_PRIVATE_KEY),
                         key("fallback", "fragment-tinfoil-api-key", TINFOIL_KEY),
+                        key("vision", "fragment-finite-private-key", FINITE_PRIVATE_KEY),
                     ],
                     _ => vec![],
                 }

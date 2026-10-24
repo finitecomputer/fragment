@@ -1082,9 +1082,12 @@ expires within 30 days. The container application is the deployment's
     `glm47` tool-call parser, streamed tool calls included) and GLM's
     reasoning (`reasoning_effort`; the limiter fills in `high` only when
     none is sent, and the route always sends one). Images: finite.computer
-    declares it vision-capable, but nothing tests it and its limiter takes
-    at most 2 MiB a request, so `vision` stays on Workers AI. It reports
-    no cached tokens.
+    declares it vision-capable (finite-agentd's Hermes sends it images
+    natively), but no call of ours has qualified them and its limiter
+    takes at most 2 MiB a request (a screenshot's call is up to 6 MiB), so
+    Finite's alternatives keep `vision` on Workers AI but the private
+    tier's, which puts it there with Tinfoil's behind it. It reports no
+    cached tokens.
   - **Its refusals.** Past 2 MiB, 413; a model it does not serve, 400;
     each the call's. A key missing, unknown or revoked, 401 (the
     platform's key: logged aloud); its key's window spent, 429;
@@ -1094,6 +1097,12 @@ expires within 30 days. The container application is the deployment's
   - **Its limit** is its key's grant's: weighted tokens in a 5-hour
     window, no rate in calls, shared by every call the deployment makes
     (cloudflare-v1.md, decision 61, sizes it).
+
+  **A slot's `images`.** Either kind of slot may say `"images": true`:
+  its model reads images. Only the fallback's is read, for now: a
+  `vision` call falls back to the fallback when it says so, and has no
+  fallback otherwise (an image sent to a model that reads none is its
+  refusal). A slot that says nothing reads none.
 
   **A slot's `price`.** A slot on an OpenAI-compatible API that is not
   OpenRouter may name its model's list price there, dollars a million
@@ -1161,7 +1170,9 @@ expires within 30 days. The container application is the deployment's
   model's id, since a deployment may run vision on a tier's model (every
   preview: GLM-5.3 Flash), and an id a tier runs names the tier's slot,
   whose call falls back to the fallback model, which may read no images
-  (DeepSeek V4 Flash); `vision` has no fallback. Hermes describes each
+  (DeepSeek V4 Flash). `vision` falls back only when the fallback's slot
+  says its model reads images (`"images": true`: the private tier's,
+  Tinfoil's DeepSeek V4.1 Flash), on the tiers' rule. Hermes describes each
   `computer_use` screenshot with it and hands the main model the words
   (named outright, Hermes routes every capture so: its
   `tools/computer_use/vision_routing.py`), and an image a person attaches

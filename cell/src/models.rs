@@ -30,8 +30,9 @@
 //! `model.fallback`, and charged as the fallback's.
 //! Not a race: the fallback is called only after the model failed. An
 //! answer that began is final, and the fallback's failure is passed
-//! through as any. `vision` has none (the default fallback, DeepSeek, reads
-//! no images), nor a transcription.
+//! through as any. `vision` has one only when the fallback's slot says its
+//! model reads images (`images: true`: `Models::vision_fallback`; the
+//! default fallback, DeepSeek, reads none), and a transcription none.
 //!
 //! Where a model runs is the deployment's (`FRAGMENT_MODELS`, config.rs;
 //! decision 61), on one of two kinds of upstream, one input:
@@ -261,11 +262,12 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     let bounded = bounds::bound(model, call.body, call.stream).map_err(refused)?;
     let mut charge = gate(env, call.payer, call.agent, call.fragment.as_ref(), bounded.model.id(), call.named.as_str()).await?;
     let meta = Metadata { user_id: opaque(call.payer), agent_id: call.agent.map(opaque) };
-    // a tier's call falls back; `vision`'s model reads images the fallback
-    // may not, and `fallback` is the fallback already
+    // a tier's call falls back; a `vision` call only to a fallback whose
+    // slot says it reads images; `fallback` is the fallback already
     let fallback = match call.named {
         Named::Tier(_) => Some(cfg.models.fallback()),
-        Named::Vision | Named::Fallback => None,
+        Named::Vision => cfg.models.vision_fallback(),
+        Named::Fallback => None,
     };
     let (answer, model, calls) = tried(env, cfg, &bounded, fallback, &meta).await;
     charge.model = model.id();
