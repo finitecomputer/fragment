@@ -4311,7 +4311,8 @@ fn unread_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
 /// titles it (48 characters at most) and the agent answers there. Nothing
 /// typed starts nothing. New chat, from the agent's menu, opens an empty
 /// chat with it; asked again before anything is said there, that one, not
-/// another. The agent's own chat keeps its label (`fragment ask`, after,
+/// another; so does the New chat row below the agent, in the sidebar
+/// (screenshots light and dark). The agent's own chat keeps its label (`fragment ask`, after,
 /// finds it).
 fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, reader_chat: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
@@ -4385,6 +4386,23 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
         "New chat, from their agent's menu, opens an empty chat with it; asked again before anything is said there, it opens that one, not another",
         picked && blank && empty && again && open_chat(b, page) == third && made.len() == before.len() + 2,
         json!({ "chats": made }),
+    );
+    // New chat, the row below their agent: the menu's, one click from the top
+    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}"))))?;
+    b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
+    let row_shown = b.eval(page, "(() => { const r = document.getElementById('sidebar-start-chat'); const top = document.getElementById('primary-agent').getBoundingClientRect(); const at = r.getBoundingClientRect(); return !r.hidden && at.height > 0 && at.top >= top.bottom && r.textContent === 'New chat'; })()")?;
+    for scheme in ["light", "dark"] {
+        b.color_scheme(page, scheme)?;
+        let _ = b.screenshot(page, &shots.join(format!("desktop-new-chat-row-{scheme}.png")));
+    }
+    b.color_scheme(page, "light")?;
+    b.click(page, "#sidebar-start-chat")?;
+    let row_opened = b.until(page, "document.getElementById('chat-title').textContent === 'New chat'", wait);
+    let made = chats_with(&own_chat);
+    s.ok(
+        "New chat, the row below their agent, does as its menu's: from the Reader's chat it opens that empty chat again, not another",
+        row_shown == true && row_opened && open_chat(b, page) == third && made.len() == before.len() + 2,
+        json!({ "shown": row_shown, "chats": made }),
     );
     let own = own_named(api, me.session, &own_chat)?;
     s.ok("the agent's own chat keeps its label, apart from the new ones", label_of(&own) == own_chat && label_of(&fresh) == format!("{own_chat}-2"), json!([own, fresh]));

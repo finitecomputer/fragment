@@ -2852,7 +2852,8 @@ its member list, as its row names them (`agents`), never its name; the
 launcher's results stack their avatars, each in its identity's colour
 (the chat page's FNV-1a choice), and its ⋯ offers each one's profile and
 screen. The open chat's ⋯ renames it, invites people, and archives it.
-**New chat** (the agent's menu in the sidebar, and the launcher) starts
+**New chat** (the agent's menu in the sidebar, the row below the agent
+there, for a seat once its agent is made, and the launcher) starts
 another chat with the person's agent: a chat fragment on
 the `chat` template labelled `<agent's label>-chat-<n>`, titled "New
 chat", the agent added as an editor (which wakes its computer). Its
