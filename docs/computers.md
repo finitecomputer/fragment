@@ -547,7 +547,10 @@ group is pinned to `hermes-canary`.
    with production's `PREVIEW_REGISTRY_TOKEN` and push credentials for
    production's with its own token, copies the image registry to
    registry, and refuses a copy whose manifest is not the source's
-   digest; its summary names
+   digest, then waits until Cloudflare has prepared it on production's
+   network (a copy is prepared only when asked: round 11's was still
+   pending 50 minutes on, at its deploy; xtask/src/prepare.rs); its
+   summary names
    `registry.cloudflare.com/<account>/fragment-computer-hermes@sha256:…`,
    the same digest, and the line
    `"hermes": { "image": "…" }`, which becomes stable's in
