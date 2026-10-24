@@ -97,14 +97,33 @@ pub struct Link {
     /// back to it. A rollback takes it back with the database.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub delivered: i64,
-    /// A start's catch-up read so far, oldest first: forwarded when it ends.
+    /// A start's catch-up, under way: in no file, and in no comparison.
     #[serde(skip)]
-    pub scan: Vec<wire::Item>,
+    pub scan: Scan,
 }
 
 fn is_zero(n: &i64) -> bool {
     *n == 0
 }
+
+/// A start's catch-up, under way: what it read so far, oldest first
+/// (forwarded when it ends), and whether it runs (what was delivered stays
+/// put until it ends: a live message's post must not move it past older
+/// ones the catch-up has not forwarded yet). Transient: equal to any other,
+/// so a link's state compares by what its file holds.
+#[derive(Debug, Clone, Default)]
+pub struct Scan {
+    pub items: Vec<wire::Item>,
+    pub running: bool,
+}
+
+impl PartialEq for Scan {
+    fn eq(&self, _: &Scan) -> bool {
+        true
+    }
+}
+
+impl Eq for Scan {}
 
 /// What reaches the link.
 #[derive(Debug, Clone, Copy)]
@@ -217,7 +236,8 @@ impl Link {
                         // a sync the last life asked: asked again, refused if done
                         out.push(Action::Ask(Cmd::Sync { contact, force: false }));
                     }
-                    self.scan.clear();
+                    self.scan.items.clear();
+                    self.scan.running = true;
                     out.push(Action::Ask(Cmd::Chat { contact, count: CATCHUP_ITEMS, before: None }));
                 }
             },
@@ -233,7 +253,7 @@ impl Link {
                     // and it is asked again (`Resync`)
                     Cmd::Sync { contact, force: true } if self.linked_to(*contact) && self.syncing => out.push(Action::Tell(Notice::Failed { what })),
                     // the catch-up's next page, gone (its anchor deleted): what it read goes
-                    Cmd::Chat { contact, .. } if self.linked_to(*contact) => self.finish_scan(&mut out),
+                    Cmd::Chat { contact, .. } if self.linked_to(*contact) => self.finish_scan(false, &mut out),
                     // not needed (in step), or not possible: what waits goes
                     Cmd::Sync { contact, .. } if self.linked_to(*contact) && self.syncing => {
                         self.syncing = false;
@@ -251,7 +271,7 @@ impl Link {
                 }
             }
             Input::Delivered(item) => {
-                if self.contact().is_some() {
+                if self.contact().is_some() && !self.scan.running {
                     self.delivered = self.delivered.max(item);
                 }
             }
@@ -324,23 +344,31 @@ impl Link {
         self.items(&others, out);
         let oldest = mine.iter().map(|i| i.id).filter(|id| *id > 0).min();
         let mut scan = mine;
-        scan.append(&mut self.scan);
-        self.scan = scan;
+        scan.append(&mut self.scan.items);
+        self.scan.items = scan;
+        let more = items.len() >= usize::from(CATCHUP_ITEMS) && oldest.is_some_and(|o| o > self.delivered);
         match oldest {
-            Some(oldest) if items.len() >= usize::from(CATCHUP_ITEMS) && oldest > self.delivered && self.scan.len() < SCAN_MAX => {
+            Some(oldest) if more && self.scan.items.len() < SCAN_MAX => {
                 out.push(Action::Ask(Cmd::Chat { contact, count: CATCHUP_ITEMS, before: Some(oldest) }));
             }
-            _ => self.finish_scan(out),
+            // older ones remain past the bound: it ends short of what was delivered
+            _ => self.finish_scan(!more, out),
         }
     }
 
     /// The catch-up's end: what it read after what was delivered,
-    /// forwarded oldest first.
-    fn finish_scan(&mut self, out: &mut Vec<Action>) {
-        let mut scan = std::mem::take(&mut self.scan);
+    /// forwarded oldest first. One that ended short of it (past `SCAN_MAX`,
+    /// or its next page's anchor gone) tells the owner a message may not
+    /// have arrived: what came before it in that gap is not carried.
+    fn finish_scan(&mut self, reached: bool, out: &mut Vec<Action>) {
+        let mut scan = std::mem::take(&mut self.scan.items);
+        self.scan.running = false;
         scan.retain(|i| i.id > self.delivered);
         scan.sort_by_key(|i| i.id);
         self.items(&scan, out);
+        if !reached {
+            out.push(Action::Tell(Notice::MaybeLost));
+        }
     }
 
     /// Chat items read (new ones, or a catch-up's): the owner's messages
@@ -401,7 +429,8 @@ impl Link {
         self.syncing = false;
         self.outbox.clear();
         self.delivered = 0;
-        self.scan.clear();
+        self.scan.items.clear();
+        self.scan.running = false;
     }
 
     fn linked_to(&self, contact: ContactId) -> bool {
@@ -565,6 +594,11 @@ mod tests {
         link.apply(Input::Started { rollback: false });
         let got = link.apply(Input::Said(&page(20..=51)));
         assert_eq!(forwarded(&got), (44..=51).filter(|id| id % 3 != 0).collect::<Vec<_>>(), "no older page: it reached what was delivered");
+        // a live message's post while a catch-up runs moves nothing (older ones are not forwarded yet)
+        link.apply(Input::Started { rollback: false });
+        link.apply(Input::Delivered(60));
+        assert_eq!(link.delivered, 43, "held while the catch-up runs");
+        link.apply(Input::Said(&page(20..=51)));
         // 52 read live, never confirmed (a crash before its post, or refused): read again
         let live = link.apply(Input::Said(&Resp::Items(vec![item(52, true)])));
         assert_eq!(forwarded(&live), vec![52]);
@@ -575,7 +609,8 @@ mod tests {
         link.apply(Input::Said(&page(100..=131)));
         let gone = link.apply(Input::Failed { cmd: &Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: Some(100) }, what: "errorStore chatItemNotFound" });
         assert_eq!(forwarded(&gone).first(), Some(&100));
-        assert!(link.scan.is_empty());
+        assert_eq!(gone.last(), Some(&Action::Tell(Notice::MaybeLost)), "short of what was delivered: the owner is told");
+        assert!(link.scan.items.is_empty());
         // bounded: past SCAN_MAX it asks no older page
         link.apply(Input::Started { rollback: false });
         let mut asked = 0;
@@ -583,6 +618,7 @@ mod tests {
         loop {
             let got = link.apply(Input::Said(&page(top - 31..=top)));
             if !got.iter().any(|a| matches!(a, Action::Ask(Cmd::Chat { .. }))) {
+                assert_eq!(got.last(), Some(&Action::Tell(Notice::MaybeLost)), "past the bound: the owner is told");
                 break;
             }
             asked += 1;
