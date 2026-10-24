@@ -83,6 +83,21 @@ enum Shape {
 /// a test value, in `fpk_live_`'s shape, which the model fake asks for.
 pub const FINITE_PRIVATE_KEY: &str = "fpk_live_e2e0c0ffee";
 
+/// The labels a plain node gives its tiers (`plain_models`): the routes its
+/// Settings offers.
+pub const RECOMMENDED_LABEL: &str = "Recommended";
+pub const STANDARD_LABEL: &str = "Standard";
+
+/// `FRAGMENT_MODELS` on a plain node: every slot on Workers AI as unnamed
+/// (`fragment_core::models::Models::defaults`), each tier labelled, so its
+/// Settings offers two routes (Paul, 2026-10-24).
+pub fn plain_models() -> Value {
+    json!({
+        "cheap": { "provider": "workers_ai", "model": fragment_core::models::CHEAP_MODEL, "label": RECOMMENDED_LABEL },
+        "medium": { "provider": "workers_ai", "model": fragment_core::models::MEDIUM_MODEL, "label": STANDARD_LABEL }
+    })
+}
+
 /// Tinfoil's key on a node shaped as the private tier (`Shape::PrivateTier`):
 /// a test value, which the model fake asks for of Tinfoil's model alone.
 pub const TINFOIL_KEY: &str = "tk_e2e0c0ffee";
@@ -632,7 +647,7 @@ impl Suite {
             models: match self.shape {
                 Shape::FinitePrivate => Some(finite_private_models(&self.ai.node().url).to_string()),
                 Shape::PrivateTier => Some(private_tier_models(&self.ai.node().url).to_string()),
-                _ => None,
+                Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore => Some(plain_models().to_string()),
             },
             model_keys: {
                 let key = |slot: &str, name: &str, value: &str| devstack::ModelKey { slot: slot.into(), name: name.into(), value: value.into() };

@@ -3393,11 +3393,11 @@ fn reasoning_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let pick_of = format!("document.querySelector('[data-reasoning-for={lead:?}]')");
     let options = b.eval(page, &format!("[...({pick_of}?.options ?? [])].map((o) => [o.value, o.textContent])"))?;
     let shown = b.eval(page, &format!("{pick_of}?.value ?? null"))?;
-    let every = b.eval(page, "document.querySelectorAll('.agent-setting').length > 0 && document.querySelectorAll('.agent-setting').length === document.querySelectorAll('.agent-setting [data-reasoning-for]').length && document.querySelectorAll('[data-model-for]').length === 0")?;
+    let every = b.eval(page, "document.querySelectorAll('.agent-setting').length > 0 && document.querySelectorAll('.agent-setting').length === document.querySelectorAll('.agent-setting [data-reasoning-for]').length && document.querySelectorAll('.agent-setting').length === document.querySelectorAll('.agent-setting [data-model-for]').length")?;
     let agent_json = || shell(api, session, "GET", &format!("/api/f/{lead}/file?path=agent.json"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
     let before = agent_json();
     s.ok(
-        "every agent offers how hard it thinks, with no provider connected too: Default (High), Low and High, the default shown while its agent.json names none",
+        "every agent offers how hard it thinks, with no provider connected too: Default (High), Low and High, the default shown while its agent.json names none (and its route, the deployment labelling two)",
         read && !lead.is_empty() && options == json!([["", "Default (High)"], ["low", "Low"], ["high", "High"]]) && shown == "" && every == true && before["tier"] == "cheap" && before.get("reasoning").is_none(),
         json!({ "options": options, "shown": shown, "every": every, "agentJson": before }),
     );
@@ -3476,8 +3476,8 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let offered = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'not_set' && !!document.querySelector('{row} [data-action=sign-in]')"), wait);
     let pasted = b.eval(page, &format!("!!document.querySelector('{row} input')"))?;
     s.ok(
-        "an own key with a sign-in is connected from its row with a press, never pasted: no key field, and no agent offers its models yet",
-        offered && pasted == false && b.eval(page, "document.querySelectorAll('[data-model-for]').length")? == 0,
+        "an own key with a sign-in is connected from its row with a press, never pasted: no key field, and no agent offers its models yet (only the deployment's routes)",
+        offered && pasted == false && b.eval(page, "[...document.querySelectorAll('[data-model-for] option')].every((o) => o.value.startsWith('route:'))")? == true,
         b.eval(page, &format!("document.querySelector('{row}')?.innerText"))?,
     );
     // its window opens in the press itself, before the authorize call (one
@@ -3535,8 +3535,8 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         came_back && said.0 && set && s.openrouter.keys().len() == keys_before + 1 && manage == "https://openrouter.ai/settings/keys",
         json!({ "popup": said.1, "manage": manage }),
     );
-    // each agent offers the provider's models beside its tier's, by the
-    // tier's name and its model's id, as their computer's view names it
+    // each agent offers the provider's models after the deployment's routes,
+    // each by its label and its model's id, as their computer's view names them
     let lead = b.eval(page, "document.querySelector('[data-model-for]')?.dataset.modelFor ?? ''")?.as_str().unwrap_or("").to_string();
     let read = b.until(page, &format!("document.querySelector('[data-model-for={lead:?}]')?.dataset.read === '1'"), wait);
     let options = b.eval(page, &format!("[...(document.querySelector('[data-model-for={lead:?}]')?.options ?? [])].map((o) => [o.value, o.textContent])"))?;
@@ -3547,14 +3547,18 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let runs_on = |v: &Value| v["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).map(|a| a["modelProviders"].clone()).unwrap_or(Value::Null);
     let connected = view();
     let cheap = connected["models"]["cheap"].as_str().unwrap_or("").to_string();
+    let medium = connected["models"]["medium"].as_str().unwrap_or("").to_string();
     let vendor = b.eval(page, "document.getElementById('settings-page').innerText.includes('Workers AI') || [...document.querySelectorAll('[data-model-for] option')].some((o) => o.textContent.includes('Workers AI'))")?;
+    let labels = [crate::RECOMMENDED_LABEL, crate::STANDARD_LABEL];
     s.ok(
-        "then each agent offers the provider's models, after its tier's, which it runs on now, named by its tier and its model's id as their computer's view names it (Cheap (<id>), never \"cheap\") and no vendor: no Workers AI anywhere in settings; the view names it among the providers whose models the agent may run",
+        "then each agent offers the deployment's routes, each by its label and its model's id as their computer's view names it (the one it runs on now picked), then the provider's models, and no vendor: no Workers AI anywhere in settings; the view names each route and the providers whose models the agent may run",
         read && !lead.is_empty()
             && before["tier"] == "cheap"
             && !cheap.is_empty() && cheap != "cheap"
             && ["medium", "fallback", "vision"].iter().all(|n| connected["models"][n].as_str().is_some_and(|id| !id.is_empty()))
-            && options.first().is_some_and(|o| o[0] == "" && o[1] == format!("Cheap ({cheap})").as_str())
+            && connected["models"]["routes"]["cheap"]["label"] == labels[0] && connected["models"]["routes"]["medium"]["label"] == labels[1]
+            && options.first().is_some_and(|o| o[0] == "route:cheap" && o[1] == format!("{} · {cheap}", labels[0]).as_str())
+            && options.get(1).is_some_and(|o| o[0] == "route:medium" && o[1] == format!("{} · {medium}", labels[1]).as_str())
             && options.iter().any(|o| o[0] == "openrouter anthropic/claude-sonnet-5.5" && o[1] == "Claude Sonnet 5.5")
             && vendor == false
             && runs_on(&connected) == json!([crate::SWAP_ROUTER]),
@@ -3599,9 +3603,19 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     b.until(page, &format!("location.pathname === '/settings' && !!document.querySelector('[data-model-for={lead:?}]')"), wait);
     b.reload(page)?;
     let shown = b.until(page, &format!("document.querySelector('[data-model-for={lead:?}]')?.dataset.read === '1' && document.querySelector('[data-model-for={lead:?}]').value === 'openrouter anthropic/claude-sonnet-5.5'"), wait);
-    let back = pick(b, "")?;
+    let back = pick(b, "route:cheap")?;
     let gone = agent_json();
-    s.ok("settings shows it again as picked; its tier again takes the model away, its tier kept", shown && back && gone.get("model").is_none() && gone["tier"] == before["tier"], &gone);
+    s.ok("settings shows it again as picked; its route again takes the model away, its tier kept", shown && back && gone.get("model").is_none() && gone["tier"] == before["tier"], &gone);
+    // the other route: the agent's tier, and back (Paul, 2026-10-24: Standard is one pick away)
+    let standard = pick(b, "route:medium")?;
+    let on_standard = agent_json();
+    let private = pick(b, "route:cheap")?;
+    let on_private = agent_json();
+    s.ok(
+        "picked, the other route is the agent's tier (medium), no model of its own; picked back, the first again",
+        standard && on_standard["tier"] == "medium" && on_standard.get("model").is_none() && private && on_private["tier"] == "cheap",
+        json!({ "standard": on_standard, "private": on_private }),
+    );
     // a Disconnect that does not go through (#439): settings reload, its row
     // still connected, saying so, with Disconnect to try again
     let said = format!("document.querySelector('{row} .provider-said')");
@@ -3619,10 +3633,10 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     );
     // disconnected: the key goes, and no agent offers its models
     b.click(page, &format!("{row} [data-action=disconnect]"))?;
-    let off = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'not_set' && !{said}?.textContent && document.querySelectorAll('[data-model-for]').length === 0"), wait);
+    let off = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'not_set' && !{said}?.textContent && [...document.querySelectorAll('[data-model-for] option')].every((o) => o.value.startsWith('route:'))"), wait);
     let left = runs_on(&view());
     s.ok(
-        "pressed again, Disconnect takes the key away, the failure no longer said, and no agent offers its models, nor may run them",
+        "pressed again, Disconnect takes the key away, the failure no longer said, and no agent offers its models (only the routes), nor may run them",
         off && left.is_null(),
         json!({ "row": b.eval(page, &format!("document.querySelector('{row}')?.innerText"))?, "modelProviders": left }),
     );
