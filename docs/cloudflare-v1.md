@@ -1433,10 +1433,11 @@ Paul:
       owner whoever asks it: this is the design (Paul, 2026-10-23: "Yes,
       I am aware, this is the design. The solution is a warning when
       inviting someone to your chat ... Not making everything way more
-      complicated"). Inviting someone where an agent takes part warns its
-      inviter: "Make sure you trust this person. They'll be able to talk to
-      your agent until you remove them." (the share sheet, `fragment
-      members add`, the apps skill).
+      complicated"). Inviting someone to a chat an agent of the
+      inviter's is in warns them: "People in this chat can talk to your
+      agent." (the share sheet, `fragment members add`, the apps skill;
+      Paul, 2026-10-24: only on a chat, as agents hear only chats, and
+      short).
     - Storage: no new column (an agent row names its owner already: in
       with its person when its owner is a member who is not the fragment's
       owner); a rollback reads the rows as agent members, as before.

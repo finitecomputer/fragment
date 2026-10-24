@@ -1049,13 +1049,20 @@ URL to the platform (`Referrer-Policy: same-origin`).
 
 Whoever is in a chat can talk to the agents in it, and an agent acts for
 its owner whoever asks it: the design, with a warning as its safeguard
-(Paul, 2026-10-23). Where one of the owner's agents is a member (a
-chat's own agent is its owner's), the owner's sheet says under its
-invite "Make sure you trust this person. They'll be able to talk to your
-agent until you remove them." (`fragment_core::access::TRUST_WARNING`),
-a note and never a step to click through; `fragment members add <name>
-<email>` prints it after the invite, and the apps skill has an agent
-pass it on to its owner.
+(Paul, 2026-10-23). On a chat one of the owner's agents is in (a chat's
+own agent is its owner's), the owner's sheet says under its invite
+"People in this chat can talk to your agent."
+(`fragment_core::access::TRUST_WARNING`), a note and never a step to
+click through; an app or a doc never does, as agents hear only chats
+(Paul, 2026-10-24). `fragment members add <name> <email>` prints it
+after the invite, on the same rule, and the apps skill has an agent pass
+it on to its owner.
+
+The sheet links the platform's stylesheet by its version
+(`/__shell/platform-pages.css?v=<hash>`), which the platform answers
+`immutable`; asked for by name alone, or by a version the release does
+not hold, it is revalidated as the shell's other files are. Opening the
+sheet again so waits on no stylesheet round trip.
 
 ### Invites by email
 
