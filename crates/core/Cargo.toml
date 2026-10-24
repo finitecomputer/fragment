@@ -21,6 +21,10 @@ aes-gcm = { version = "0.10", default-features = false, features = ["aes", "allo
 # No `std`: it enables rand_core's getrandom, which does not build for the
 # cell. ECDSA signing is deterministic (RFC 6979) and needs no randomness.
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "ecdh", "pem", "pkcs8"] }
+# An icon's alpha (`icon::alpha_of`): the cell reads each cutout Images
+# makes, to check it is one object and to crop around it. Images answers
+# PNGs; no smaller decoder reads all of theirs (indexed, 16-bit).
+png = "0.18"
 # The host's side of `migrate` (`migrate::host`: a real SQLite, the schema
 # lock), for xtask; never the cell's.
 rusqlite = { version = "0.40", default-features = false, features = ["bundled", "hooks"], optional = true }

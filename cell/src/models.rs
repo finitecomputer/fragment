@@ -418,6 +418,26 @@ pub(crate) async fn run(env: &Env, model: &str, input: &Value, payer: &str, agen
     Ok((status, bytes, log_id))
 }
 
+/// One call of a Workers AI model whose input is a multipart form, its
+/// `fields` (an icon's drawing: crate::icon), unmetered and read whole,
+/// with the neurons Workers AI said it cost (`cf-ai-neurons`). Through
+/// the binding without the gateway (`js::ai_run_form`); in dev and the
+/// e2e, the fields as JSON to the fake, as `run` sends its input.
+pub(crate) async fn run_form(env: &Env, model: &str, fields: &Value, payer: &str) -> CellResult<(u16, Vec<u8>, Option<String>)> {
+    let cfg = Config::from_env(env);
+    let mut resp = match &cfg.ai_url {
+        Some(_) => workers_ai(env, cfg, model, fields, &Metadata { user_id: opaque(payer), agent_id: None }).await?,
+        None => {
+            let fields = fields.as_object().ok_or_else(|| CellError::host("a form's fields are an object"))?;
+            js::ai_run_form(env.as_ref(), model, fields).await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {}", e.message)))?
+        }
+    };
+    let status = resp.status_code();
+    let neurons = resp.headers().get("cf-ai-neurons")?;
+    let bytes = read_whole(&mut resp).await?;
+    Ok((status, bytes, neurons))
+}
+
 /// The client's branch of a streamed answer, in OpenAI's shape
 /// (`fragment_core::models::Stream`).
 struct Normalized {

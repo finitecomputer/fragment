@@ -494,6 +494,16 @@ the batch, so a guest's fragments are billed nothing.
   the session's 10 s inactivity timeout), to the fragment's owner. A
   stale shot and a failed one are billed too: their browser time was
   spent. A guest's or a read-only owner's deploys are not shot.
+- **Icons** (docs/api.md, Icons): a making's calls, each a row in the
+  fragment's outbox as it answers
+  (`icon:<fragment>@<incarnation>:<started>:<call>`), to its owner: the
+  subject (`tokens`, GLM-5.3 Flash), each drawing (`neurons`, FLUX.2
+  [klein] 4B, what Workers AI said it cost, 104.2 when it says none: its
+  pricing page's 26.05 a 512×512 output tile, four times, as it said in
+  the spike), each check (`tokens`, Clef-flash), and each Images
+  transformation (`images`: a cutout, a fit, a flattening; an upload
+  fitted). A drawing refused after its call was bought. The owner's ledger
+  is asked first, as for a job's AI step.
 - **Images** (the deploy path): `images` rows to the fragment's owner,
   when a transformation is made.
 - **An export** (a person's list, export.rs; docs/api.md, Export): one

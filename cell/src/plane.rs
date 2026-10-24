@@ -471,7 +471,8 @@ impl FragmentCell {
             }
             None => {
                 self.del_meta(MetaKey::Picture)?;
-                None
+                // any other fragment's picture is its icon (icon.rs)
+                self.icon_shown(manifest.kind())?
             }
         };
         self.face_is(manifest.kind(), manifest.title(), shown.as_deref())?;

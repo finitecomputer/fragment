@@ -69,7 +69,7 @@ fn hello() -> Value {
 }
 
 /// What the default book charges for `usage`.
-fn charge(usage: &Usage) -> i64 {
+pub(super) fn charge(usage: &Usage) -> i64 {
     PriceBook::defaults().price(usage).expect("the book prices the tiers' models").charge
 }
 
@@ -139,7 +139,7 @@ fn totals(api: &Api, identity: &str) -> Value {
     api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": identity, "op": "totals" }))).map(|r| r.body).unwrap_or(Value::Null)
 }
 
-fn lever(api: &Api, fragment: &str, op: &str, extra: Value) -> Result<Reply> {
+pub(super) fn lever(api: &Api, fragment: &str, op: &str, extra: Value) -> Result<Reply> {
     let mut body = json!({ "fragment": fragment, "op": op });
     if let (Some(b), Some(e)) = (body.as_object_mut(), extra.as_object()) {
         b.extend(e.clone());
