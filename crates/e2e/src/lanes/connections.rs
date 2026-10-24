@@ -5,6 +5,8 @@ use fragment_nip98::Keys;
 use serde_json::json;
 use crate::{Suite, Need, api::{Api, Call, Reply}};
 
+mod several;
+
 const PROVIDER: &str = "e2e-oauth";
 
 fn begin(api: &Api, session: &str, provider: &str) -> Result<Reply> {
@@ -324,5 +326,5 @@ pub fn connections(s: &mut Suite, api: &Api) -> Result<()> {
     let counts = s.workos.connection_counts();
     let statuses: Vec<u16> = (0..=fragment_core::connection_signin::PENDING_PER_SESSION_MAX).map(|_| begin(&api, &capped, PROVIDER).map(|r| r.status)).collect::<Result<_>>()?;
     s.ok("pending attempts are bounded without exchanging or importing", statuses[..8] == [200; 8] && statuses[8] == 429 && s.workos.connection_counts() == counts, format!("{statuses:?}"));
-    Ok(())
+    several::several(s, &api)
 }

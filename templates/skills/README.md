@@ -36,7 +36,7 @@ default agent. A fragment on it names it and holds nothing else:
 
 ## The managed set
 
-Fourteen skills. Seven are Fragment platform contracts:
+Sixteen skills. Seven are Fragment platform contracts:
 
 | Skill | Why it is ours |
 |---|---|
@@ -65,6 +65,18 @@ It follows the project's visual system and checks contrast for readable text,
 including placeholders. `apps-finite` points to it for art direction and keeps
 the Fragment build, publish and sharing contract. Image generation follows
 `image-generation-finite` and its platform limits.
+
+`gws-docs` is Google Workspace CLI's Docs command guide,
+pinned to v0.22.5 like the image's CLI (source and Apache-2.0 license in
+the skill). It covers Docs method and schema discovery;
+`google-workspace-finite` owns connected-account authentication. Its two
+upstream sibling-skill links are adapted to the existing connection
+skill and CLI help, so it needs no local OAuth setup or additional skills.
+
+`gws-slides` complements the shared Google connection with Slides guidance
+from Google Workspace CLI v0.22.5, adapted to `google-workspace-finite`
+authentication. The deployment allows `slides.googleapis.com` and enables
+the Slides API on its OAuth client's Cloud project.
 
 The 2026-10-08 audit, amended by Paul on 2026-10-09, removed 29 generic copies from the Finite skills
 snapshot imported on 2026-10-03. It also removed apps' generic design and

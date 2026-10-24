@@ -365,11 +365,17 @@ impl RegistryCell {
             SigninsHook::ExpireConnection(state) => {
                 self.exec("UPDATE connection_signins SET expires_at = ? WHERE state = ?", vec![SqlStorageValue::Integer(js::now_ms()), sha(&state).into()])?;
             }
+            SigninsHook::ExpireConnectionIn { state, ms } => {
+                self.exec("UPDATE connection_signins SET expires_at = ? WHERE state = ?", vec![SqlStorageValue::Integer(js::now_ms() + ms.clamp(0, 600_000)), sha(&state).into()])?;
+            }
+            SigninsHook::ForgetUncertainImports => self.deciding.borrow_mut().forget_uncertain(),
             SigninsHook::UnfenceConnection { email, provider } => {
-                self.exec(
-                    "DELETE FROM connection_fences WHERE provider = ? AND (issuer, subject) IN (SELECT issuer, subject FROM subjects WHERE email = ?)",
-                    vec![provider.as_str().into(), email.as_str().into()],
-                )?;
+                for table in ["connection_fences", "connection_account_fences"] {
+                    self.exec(
+                        &format!("DELETE FROM {table} WHERE provider = ? AND (issuer, subject) IN (SELECT issuer, subject FROM subjects WHERE email = ?)"),
+                        vec![provider.as_str().into(), email.as_str().into()],
+                    )?;
+                }
             }
         }
         self.signin_counts()

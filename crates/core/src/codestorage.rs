@@ -112,6 +112,22 @@ pub fn default_api(org: &str) -> String {
     format!("https://api.{org}.code.storage")
 }
 
+/// The host a computer's guest reaches code.storage at through its egress,
+/// when code.storage is at a loopback address: a local fleet's fake, on
+/// the machine the guest's container runs on, which the container's own
+/// loopback is not (cell/src/computer.rs, `egress_codestorage`).
+pub const GUEST_HOST: &str = "codestorage.fragment.internal";
+
+/// The code.storage API a computer's guest is told to call, for the
+/// fleet's `api`: `http://GUEST_HOST`, through its egress, when `api` is at
+/// a loopback address; `None` when the guest reaches `api` itself, as on
+/// every deployment (docs/technical-debt-ledger.md, "An agent's sync and
+/// deploy reach code.storage directly").
+pub fn guest_api(api: &str) -> Option<String> {
+    let url = url::Url::parse(api).ok()?;
+    crate::catalog::is_loopback(url.host_str()?).then(|| format!("http://{GUEST_HOST}"))
+}
+
 pub fn is_sha(s: &str) -> bool {
     s.len() == 40 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
@@ -386,6 +402,20 @@ pub fn nothing_to_commit(body: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// A local fleet's code.storage, at a loopback address, is reached
+    /// through the egress; a deployment's, and anything that only looks
+    /// local, directly.
+    #[test]
+    fn a_guest_reaches_only_a_loopback_code_storage_through_its_egress() {
+        let through = format!("http://{}", super::GUEST_HOST);
+        for local in ["http://127.0.0.1:8792", "http://localhost:8792", "http://[::1]:8792", "http://127.0.0.1:8792/"] {
+            assert_eq!(super::guest_api(local).as_deref(), Some(through.as_str()), "{local}");
+        }
+        for direct in ["https://api.finite.code.storage", "http://127.0.0.1.example.com:8792", "http://localhost.example.com", "not a url", ""] {
+            assert_eq!(super::guest_api(direct), None, "{direct}");
+        }
+    }
+
     use super::*;
     use p256::ecdsa::signature::Verifier;
     use p256::ecdsa::VerifyingKey;

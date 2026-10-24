@@ -212,7 +212,7 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   another run's fragment made beside it, then the whole one's, which
   spares it for its age. Running it against a preview spends test cents:
   Paul's or the coordinating session's to run.
-- `cargo xtask dev [--clean]`: the dev stack in the foreground under
+- `cargo xtask dev [--clean] [--real-agent [--models <config>]]`: the dev stack in the foreground under
   `wrangler dev`: the cell on :8790 with fragments at
   `http://<name>.fragment.localhost:8790/`, which rebuilds
   when `cell/src` or `crates/` change, the model route and AI steps on
@@ -232,7 +232,19 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   `target/devstack/node-8790-<boot>.log` (printed at start;
   `FRAGMENT_NODE_LOGS=1` adds wrangler's debug logs). Point the CLI at it with
   `FRAGMENT_HOST=http://127.0.0.1:8790` and run `fragment login` once. Dev fleets let jobs
-  fetch local addresses (`FRAGMENT_EGRESS_LOCAL=allow`).
+  fetch local addresses (`FRAGMENT_EGRESS_LOCAL=allow`). `--real-agent`
+  runs new computers on our Hermes image, built from the tree (its first
+  build takes a while), and the text tiers on real models: a deployment
+  config's `models` (deploy/example.jsonc's, or `--models <config>`'s: a
+  copy of the preview's runs the preview's), checked as a deploy checks
+  them, whose OpenAI-compatible slots call with the one key in the file
+  `FRAGMENT_DEV_MODEL_KEY_FILE` names; its Workers AI slots stay on the
+  fake (xtask/src/dev_agent.rs). The node lists an operator key of its
+  own (`target/devstack/operator-key`, made on first run), so `fragment
+  operator wipe <email> --yes --key-file target/devstack/operator-key`
+  wipes a person there; signed in again, they are a new person, whose
+  first run makes a fresh agent: a fresh agent's test, as on a preview
+  with an operator key its config lists.
 - `cargo xtask try <todo|inbox|notes|doc> [name]` (with `cargo xtask dev` running):
   creates and deploys a fragment from a template under
   `target/devstack/try/` (never in the repo) and prints the link to open,

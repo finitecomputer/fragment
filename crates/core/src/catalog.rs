@@ -54,6 +54,9 @@ pub const MODEL_NAME_MAX_BYTES: usize = 64;
 /// A provider's note for people, at most, in characters (a post's length:
 /// a line or two under its name).
 pub const NOTE_MAX_CHARS: usize = 280;
+/// The most accounts a person connects at one provider: Pipes' own limit
+/// (it answers 409 `connected_account_limit_reached` past it).
+pub const ACCOUNTS_MAX: u8 = 25;
 
 /// What a provider's credential is (decisions 22 and 37): a `connection`
 /// (WorkOS Pipes, a short-lived token acting as the person), an `operator`
@@ -222,6 +225,13 @@ pub struct Provider {
     /// to an unbound Pipes authorization URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_oauth: Option<ConnectionOAuth>,
+    /// How many accounts a person may connect at it, 1 to `ACCOUNTS_MAX`
+    /// (absent: 1): a connection with `connection_oauth` only. Above 1 it
+    /// reads and writes Pipes' several connections (`several`;
+    /// docs/pipes-browser-binding.md, Several accounts); at 1 every call
+    /// is the compatibility connection's, as before the field was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounts_max: Option<u8>,
     /// An own key's models, which a person may pick for their agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Models>,
@@ -229,6 +239,21 @@ pub struct Provider {
     /// their state: plain text, one line (`check_note`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+}
+
+impl Provider {
+    /// How many accounts a person may connect at it (`accounts_max`; 1
+    /// when the row names none).
+    pub fn accounts_max(&self) -> u8 {
+        self.accounts_max.unwrap_or(1)
+    }
+
+    /// Whether a person may connect several accounts at it: Pipes' plural
+    /// calls, each naming its connected account. Otherwise every call is
+    /// the compatibility connection's.
+    pub fn several(&self) -> bool {
+        self.accounts_max() > 1
+    }
 }
 
 /// Why a catalog is refused (the deploy checks it first; a node with a
@@ -264,6 +289,9 @@ pub enum CatalogError {
     /// A note that is blank, over `NOTE_MAX_CHARS`, or more than one line
     /// of plain text.
     Note { provider: String, why: String },
+    /// `accounts_max` out of 1 to `ACCOUNTS_MAX`, or on a row that is no
+    /// connection with `connection_oauth`.
+    Accounts { provider: String, why: String },
 }
 
 impl std::fmt::Display for CatalogError {
@@ -282,6 +310,7 @@ impl std::fmt::Display for CatalogError {
             CatalogError::OAuth { provider, why } => write!(f, "{provider}'s oauth: {why}"),
             CatalogError::Models { provider, why } => write!(f, "{provider}'s models: {why}"),
             CatalogError::Note { provider, why } => write!(f, "{provider}'s note: {why}"),
+            CatalogError::Accounts { provider, why } => write!(f, "{provider}'s accounts_max: {why}"),
         }
     }
 }
@@ -553,6 +582,14 @@ impl Catalog {
             if let Some(n) = &p.note {
                 check_note(n).map_err(|why| CatalogError::Note { provider: provider.clone(), why })?;
             }
+            if let Some(n) = p.accounts_max {
+                if !(1..=ACCOUNTS_MAX).contains(&n) {
+                    return Err(CatalogError::Accounts { provider, why: format!("1 to {ACCOUNTS_MAX} (Pipes' limit), not {n}") });
+                }
+                if p.kind != Kind::Connection || p.connection_oauth.is_none() {
+                    return Err(CatalogError::Accounts { provider, why: "only a connection with connection_oauth connects several accounts: they are imported by its callback".into() });
+                }
+            }
         }
         Ok(Catalog { providers: rows })
     }
@@ -725,6 +762,40 @@ mod tests {
         let mut key = router();
         key["note"] = json!("Your OpenRouter credit pays.");
         assert!(parse(json!([key])).is_ok(), "an own key's too");
+    }
+
+    /// Several accounts: a connection whose callback imports them (its
+    /// `connection_oauth`) may name 1 to Pipes' 25; absent, it is 1, and the
+    /// row hashes and reads back as before the field was.
+    #[test]
+    fn several_accounts_are_a_browser_bound_connections_up_to_pipes_limit() {
+        let oauth = json!({ "authorize": "https://accounts.example/authorize", "exchange": "https://accounts.example/token", "client_id": "client", "scopes": ["mail.read"] });
+        let with = |accounts: serde_json::Value, oauth: Option<&serde_json::Value>| {
+            let mut g = google();
+            g["accounts_max"] = accounts;
+            if let Some(o) = oauth {
+                g["connection_oauth"] = o.clone();
+            }
+            parse(json!([g]))
+        };
+        for n in [1, 2, 25] {
+            let c = with(json!(n), Some(&oauth)).unwrap();
+            let p = c.get("google").unwrap();
+            assert_eq!((p.accounts_max(), p.several()), (n, n > 1), "{n}");
+            assert_eq!(Catalog::parse(&serde_json::to_string(c.providers()).unwrap()).unwrap(), c, "the wire form reads back");
+        }
+        let plain = parse(json!([google()])).unwrap();
+        let p = plain.get("google").unwrap();
+        assert_eq!((p.accounts_max(), p.several()), (1, false), "absent is one account");
+        assert!(!serde_json::to_string(p).unwrap().contains("accounts_max"), "a row without it writes as before");
+        for n in [json!(0), json!(26), json!(-1), json!("2"), json!(2.5)] {
+            let r = with(n.clone(), Some(&oauth));
+            assert!(matches!(r, Err(CatalogError::Accounts { .. }) | Err(CatalogError::Shape(_))), "{n}: {r:?}");
+        }
+        assert!(matches!(with(json!(2), None), Err(CatalogError::Accounts { .. })), "a connection Pipes' own page connects has no callback to import several");
+        let mut key = router();
+        key["accounts_max"] = json!(2);
+        assert!(matches!(parse(json!([key])), Err(CatalogError::Accounts { .. })), "an own key is one key");
     }
 
     /// An own key connected through its provider's sign-in, with models: OpenRouter's row.

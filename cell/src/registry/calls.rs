@@ -568,10 +568,16 @@ pub(crate) enum SigninsHook {
     ExpireSession(String),
     /// Expire just this local test's connection attempt (its nonce).
     ExpireConnection(String),
+    /// This local test's connection attempt (its nonce) expires `ms` from
+    /// now: a callback taking it before then finds it past its time later.
+    ExpireConnectionIn { state: String, ms: i64 },
     /// Lift the fence of the account an email signed in with, at a
     /// provider, as a connect known to import does (a test connects a row
     /// with no `connection_oauth` through the WorkOS fake, never a callback).
     UnfenceConnection { email: String, provider: String },
+    /// Every connect import whose outcome was unknown is let go, as its
+    /// while running out (`connection_accounts::Deciding`).
+    ForgetUncertainImports,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -592,10 +598,14 @@ impl Call for TestHook {
 
 // ------------------------------------------------------------- sign-in
 
+/// `POST /connection/begin`: a connect of `provider` from this session,
+/// for what its body asked (`connection_accounts::Intent`: another of
+/// several accounts, or one again), which its pending row keeps.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct BeginConnection {
     pub session: String,
     pub provider: String,
+    pub intent: fragment_core::connection_accounts::Intent,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -635,9 +645,14 @@ pub(in crate::registry) struct FinishConnectionIn {
 
 /// How a callback's attempt ended. `NoScopes`: the provider granted
 /// nothing its row asks for beyond signing in (`connection_signin::
-/// Refused::NoScopes`), and nothing was imported.
+/// Refused::NoScopes`), and nothing was imported. `OneAccount` and
+/// `AccountLimit`: another of several accounts, refused (Pipes connects one
+/// a person for now; the row's `accounts_max`, or Pipes' limit, reached),
+/// and nothing was imported. `Finishing`: of several accounts, an earlier
+/// connect of theirs there may still land (its outcome unknown), or
+/// another decided too long, and nothing was imported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum ConnectionFinished { Connected, NotUnderWay, Declined, CodeRefused, NoScopes, Failed }
+pub(crate) enum ConnectionFinished { Connected, NotUnderWay, Declined, CodeRefused, NoScopes, OneAccount, AccountLimit, Finishing, Failed }
 
 impl Call for FinishConnection {
     const PATH: &'static str = "/connection/finish";
@@ -651,11 +666,39 @@ impl Call for FinishConnection {
 /// after it. 429 while a callback imports into it (nothing ended: the
 /// disconnect is asked again). Answers their WorkOS user, whose account the
 /// disconnect then deletes (none: no account, and nothing was under way).
+/// `lasting` is what stays fenced after (`connection_accounts::lasting`):
+/// the provider whole, as with one account, or of several, the one the
+/// disconnect takes away, or nothing. `account`, of several, is the Pipes
+/// id it takes away, recorded whatever stays fenced
+/// (`connection_signin::DISCONNECTING`).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct FenceConnection {
     pub identity: String,
     pub issuer: String,
     pub provider: String,
+    pub lasting: fragment_core::connection_accounts::Lasting,
+    pub account: Option<String>,
+}
+
+/// `POST /connection/disconnected`: whether a person disconnected their
+/// account `account` (its Pipes id) at `provider`, as a disconnect of it
+/// asked again, once Pipes deleted it, asks: only theirs is ever found.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Disconnected {
+    pub identity: String,
+    pub issuer: String,
+    pub provider: String,
+    pub account: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct WasDisconnected {
+    pub disconnected: bool,
+}
+
+impl Call for Disconnected {
+    const PATH: &'static str = "/connection/disconnected";
+    type Answer = WasDisconnected;
 }
 
 impl Call for FenceConnection {
@@ -672,9 +715,19 @@ pub(crate) struct ConnectionFences {
     pub subject: String,
 }
 
-#[derive(Serialize, Deserialize)]
+/// The providers fenced whole, and each account fenced alone, at most
+/// `connection_signin::ACCOUNT_FENCES_MAX` a provider.
+#[derive(Default, Serialize, Deserialize)]
 pub(crate) struct FencedProviders {
     pub providers: Vec<String>,
+    pub accounts: Vec<FencedAccount>,
+}
+
+/// One account a disconnect fenced: its provider, and its identifier.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct FencedAccount {
+    pub provider: String,
+    pub identifier: String,
 }
 
 impl Call for ConnectionFences {

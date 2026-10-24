@@ -99,6 +99,18 @@ cargo xtask dev            # the cell on :8790 under wrangler dev, the code.stor
 cargo xtask try todo       # in another terminal: todo | inbox | notes
 ```
 
+To try a real agent locally, run its computers on our Hermes image and
+its text on real models (deploy/example.jsonc's, or `--models <config>`'s),
+paid by the key in a file of yours:
+
+```
+FRAGMENT_DEV_MODEL_KEY_FILE=~/.config/fragment/secrets/openrouter-dev-key cargo xtask dev --real-agent
+```
+
+Sign in at http://127.0.0.1:8790/ with any email; your first run makes a
+fresh agent. To start from zero again, wipe that person (the command dev
+prints) and sign in with the same email.
+
 `try` creates and deploys a fragment from a template under
 `target/devstack/try/`, and prints the link to open and a `fragment`
 alias pointed at the dev stack. Fragments are served at

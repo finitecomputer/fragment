@@ -548,13 +548,16 @@ iframe[data-blocked] { display: none; }
 .provider-state { font-size: 13px; color: var(--text-secondary); }
 .provider-account { font-size: 12.5px; color: var(--text-secondary); overflow-wrap: anywhere; }
 .provider-state.connected, .provider-state.set, .provider-state.offered { color: var(--success); }
-.provider-state.needs_reauthorization { color: var(--danger-text); }
+.provider-state.needs_reauthorization, .provider-state.disconnecting { color: var(--danger-text); }
 .provider-agents, .provider-uses { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; font-size: 13px; }
 .provider-agents { justify-content: flex-end; }
 .provider-agents .settings-key { margin-right: auto; }
 .provider .settings-key { flex: 0 0 auto; min-width: 80px; font-size: 13px; }
 .provider .use { color: var(--text-secondary); }
 .provider .use + .use::before { content: "·"; margin-right: 8px; color: var(--text-tertiary); }
+.provider-accounts { display: flex; flex-direction: column; gap: 8px; padding-left: 12px; border-left: 2px solid var(--border-strong); }
+.provider-account-row { display: flex; flex-direction: column; gap: 4px; }
+.provider-account-pick { height: 26px; max-width: 220px; padding: 0 6px; border: 1px solid var(--border-strong); border-radius: 8px; background: none; color: var(--text-primary); font: inherit; font-size: 12.5px; }
 .provider-key { display: flex; gap: 8px; flex-wrap: wrap; }
 .provider-key input { height: 30px; min-width: 0; width: 220px; max-width: 100%; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: none; color: var(--text-primary); font: inherit; font-size: 13px; }
 /* settings' agents: an agent's model, when a provider that offers models is connected (shell.js modelPicker) */

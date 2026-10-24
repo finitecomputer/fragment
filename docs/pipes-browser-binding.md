@@ -129,6 +129,103 @@ connect begun after the fence is a new one and may connect. A disconnect that
 cannot tell the person's computer fails, and is asked again (every step of it
 may be asked twice). A wipe deletes the person's fences with their sign-ins.
 
+## Several accounts
+
+A person may connect several accounts at one connection (a personal and a work
+Google account, issue #446), where the deployment's row says so:
+`accounts_max`, 1 to 25 (Pipes' own limit), on a `connection` with
+`connection_oauth` only (its callback imports them). Absent, it is 1, and
+every call is as above: Pipes' compatibility connection, no account named. A
+release that does not know the field refuses the catalog, so a deployment's
+config gains it only once a release that knows it is deployed, as `revoke` did.
+
+Above 1, Fragment uses Pipes' several connections
+([multiple connections](https://workos.com/docs/pipes/multiple-connections);
+the shapes as workos-node's `src/pipes/pipes.ts` sends them):
+
+- `GET /api/connections` reads Pipes' plural list once for every such row
+  (`GET /user_management/users/:user_id/data_providers?supports_multiple_connections=true`,
+  each provider's `connected_accounts`). Each row lists the person's accounts,
+  oldest first (Pipes' `created_at`, then id), each with its id, label, state,
+  `granted` and `missing`. The default account, which an agent that picked none
+  uses, is the oldest connected one; the row's own `state`, `account`,
+  `granted` and `missing` are its (connected while any account is), so a
+  reader of one account reads it as before. There is no per-person default.
+- `POST …/authorize` takes `{add: true}` for another account, or `{account:
+  "<id>"}` for one of the person's again (its Connect again, or Reconnect to
+  add). An add past `accounts_max`, or an account not theirs, is refused before
+  the provider's page. The pending attempt keeps what it was for (the
+  Registry's `connection_signins.intent` and `account`, its step 5).
+- The callback reads the person's accounts there before it imports, and the
+  ID token's `sub` (read where its `email` is, under the same `aud` check)
+  becomes the account's `account_identifier`. Pipes tells no duplicate apart,
+  so Fragment does: a grant of an account already listed (the same
+  identifier) reauthorizes that account, whatever was asked, never a second.
+  Otherwise a person's first account is imported as with one (the
+  compatibility connection: no intent, and a 409 updates it), a reconnect of
+  an account listed updates it (`PUT` with `connected_account_id` and
+  `connection_intent=reauthorize` in the query) unless the grant is plainly
+  another account's (both name identifiers, and they differ), and anything
+  else is added (`POST` with `connection_intent: "add"` in the body). An add
+  at `accounts_max` imports nothing (`?refused=account-limit`), nor one Pipes
+  refuses at its limit (409 `connected_account_limit_reached`, the same word);
+  while WorkOS has not enabled additional connections, Pipes answers an add for
+  a person who has an account 404 `multiple_connections_unavailable`, which
+  imports nothing and is said in plain words (`?refused=one-account`). An
+  uncertain outcome is never retried, as above.
+- One callback at a time decides at a person's accounts at a provider: it
+  holds its turn from its read of the list to its import's answer (the
+  Registry's memory, beside the callbacks under way), and another finishing
+  meanwhile, its code spent already, waits for it (up to 95 s), then reads
+  the list the first left, so the same provider account twice is one account,
+  and two into the last place are one and `account-limit`. An import whose
+  outcome is unknown keeps its turn a minute more: a connect there meanwhile
+  imports nothing (`?refused=finishing`, connect again in a minute), since a
+  list read then could lack it. Its session, its person's sign-in and its
+  ten minutes are checked again once it has its turn and the list, so a
+  callback that waited past a logout or its time imports nothing. An account imported before
+  this release names no identifier, so a grant of it again is not told apart
+  from another; a reconnect names one, which it keeps if Pipes keeps what a
+  `PUT` names (WorkOS' SDK sends no identifier on an update: unverified).
+- `DELETE …?account=<id>` disconnects that account: its grant revoked with a
+  token Pipes mints for it (`connected_account_id` in the token's body), then
+  it alone deleted (`?connected_account_id=` on Pipes' `DELETE`); the person's
+  other accounts stay connected. With several and none named it is refused
+  (400, naming them); with one, it is that one. Each step may be asked again,
+  as with one: an account the person disconnected that Pipes holds still (its
+  delete failed, or an import landed after) is listed with `disconnecting`,
+  not connected and used by no agent, and settings offers Disconnect again;
+  one Pipes deleted already is known as theirs by their own record of the
+  disconnect (`connection_disconnects`, by its id, whatever its fence, an
+  account with no identifier too; their newest 64 a provider), so a
+  disconnect that failed telling their computer finishes when asked again.
+  An id neither names is 404: never another person's.
+- The fence stays per provider for what is under way: a disconnect of one
+  account ends every attempt at the provider still pending and cancels every
+  callback exchanging (coarser, and safe). The lasting fence is the account's
+  alone (`connection_account_fences`, the Registry's step 5), by its
+  identifier: an import of it whose outcome was unknown, landing after the
+  disconnect, is not taken for the person's, and their other accounts are
+  read as before. A connect of that identifier known to have imported lifts
+  it. An account that names no identifier cannot be told from the person's
+  others, so its disconnect leaves no lasting fence while they have others
+  there; the last of theirs, or a disconnect with none there, fences the
+  provider whole, as with one (`fragment_core::connection_accounts::lasting`).
+
+Each agent uses one account a provider: the person picks it in Settings
+(`PUT /api/computers/:id/agents/:fragment/accounts/:provider {account}`, one
+of theirs as their list names it, or `null` for the default), and their
+computer keeps it (its `agent_accounts`, the Computer's step 2). A swap names
+that account to Pipes (`connected_account_id` with the plural opt-in), only one
+the person's list named: the agent's pick while it is listed (one that needs
+authorizing again is refused, never swapped for another account), else the
+default; a pick whose account is gone falls back to the default and stays
+until it is next written. Settings offers the choice with two accounts or
+more, or a pick saved: Default first, then each account, its state said where
+it is not connected, and the saved pick as it is stored, never another in its
+place, so a pick the swap refuses can be seen and changed. The placeholder is the same: it names the agent,
+never an account.
+
 ## Evidence and scope
 
 - [Google's web-server OAuth flow](https://developers.google.com/identity/protocols/oauth2/web-server)
@@ -151,8 +248,11 @@ sets. It verifies copied URLs, missing/wrong-kind cookies, another user's and
 another same-user session, replay, expiry, superseded starts, PKCE code
 substitution, restart, reauthorization, and partial grants (one kept as
 granted and listed with what it lacks, one of signing in alone refused, and a
-reconnect that adds the rest) against real workerd and local provider/Pipes
-fakes. Protocol tests reject malformed grants, grants of signing in alone and
+reconnect that adds the rest), and several accounts (a first, another with its
+own scopes, the same one again reauthorized, Pipes' two refusals and the row's,
+one disconnected while the others stay, its fence against a late import, and a
+swap using the account its agent picked) against real workerd and local
+provider/Pipes fakes. Protocol tests reject malformed grants, grants of signing in alone and
 configuration overriding binding parameters. Local tests establish our ordering
 and attribution, not the live vendor configuration or refresh behavior.
 

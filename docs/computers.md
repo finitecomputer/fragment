@@ -826,6 +826,14 @@ expires within 30 days. The container application is the deployment's
 - `http://api.fragment.internal/<path>` is the platform's API
   (`docs/api.md`), and `http://api.fragment.internal/f/<fragment>/<path>`
   is a fragment's own routes (`__live` sockets included), as on its host.
+- On a local fleet, whose code.storage is the dev stack's fake at the
+  machine's loopback (which a container's loopback is not), a storage
+  token minted through the egress (`GET …/storage-token`, as `fragment
+  sync` and `deploy` ask it) names `http://codestorage.fragment.internal`
+  as its `api`, which the egress sends on to the fake as it came, the
+  guest's token with it. On a deployment the guest reaches code.storage
+  itself (docs/technical-debt-ledger.md, "An agent's sync and deploy
+  reach code.storage directly").
 - `x-fragment-agent: <agent fragment name>` says which of its agents the
   request acts as. The intercept refuses an agent not assigned to this
   computer, then signs the request (NIP-98) as that agent's identity.
@@ -1240,6 +1248,19 @@ signing in connects with those (pipes-browser-binding.md, Partial grants).
 Settings names what is missing, with a Reconnect to add it; an agent's call
 outside the grant gets the provider's own 403, which the Google skill explains
 to the person.
+
+Where a row takes several accounts (`accounts_max` above 1;
+pipes-browser-binding.md, Several accounts), a person connects a personal and a
+work Google account side by side, and each agent uses one of them: the one its
+owner picked for it in Settings, which its computer keeps (`agent_accounts`),
+else the default, the oldest connected. The computer holds the owner's accounts
+there in their list's order, believed with the states (each read of the
+person's connections and each disconnect tells it them), and a swap asks Pipes
+for the chosen account's token by its id, never one the owner's list did not
+name. A pick whose account needs authorizing again is refused (`connect … again`),
+never swapped for another account; one whose account is gone falls back to the
+default. The placeholder names the agent, as with one account, so the image
+needs nothing new.
 
 Paul, 2026-10-04 (decisions 22, 37 and 44): every credential a guest uses
 is a per-agent placeholder in the environment variable its provider's own
@@ -2153,9 +2174,10 @@ and how a runtime finds them, is the image's.
   platform skill by the platform skill leaving the view. An agent's profile has
   its own, the managed set, which is what the shell's Skills section
   lists, the platform skill, and Hermes' pinned bundled skills. The managed
-  release has fourteen workflows: apps, git, brains, connected Google,
+  release has sixteen workflows: apps, git, brains, connected Google,
   image steps, model tiers and a chat's attachments, plus Cashu, Nostr CLI, X API, direct music,
-  market analysis, Polymarket and design (templates/skills/README.md). Generic skills
+  market analysis, Polymarket and design, and the upstream `gws-docs` and
+  `gws-slides` command guides alongside connected Google (templates/skills/README.md). Generic skills
   come from Hermes; optional ones remain in its hub. At build, the image
   moves Hermes' bundled tree to `/opt/fragment/bundled-skills`, so stage2
   and the gateway sync nothing into a saved profile. The boot copies each

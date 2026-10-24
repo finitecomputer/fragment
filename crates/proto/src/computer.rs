@@ -67,6 +67,11 @@ pub struct ComputerAgent {
     /// agent may use now, its placeholder in its environment variables.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credentials: Vec<AgentCredential>,
+    /// Which of its owner's accounts it uses at each connection that takes
+    /// several (`PUT …/agents/{fragment}/accounts/{provider}`): provider →
+    /// the account's id. None named: the default, the oldest connected.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub accounts: std::collections::BTreeMap<String, String>,
 }
 
 /// The model route's models' ids by the route's names
@@ -186,6 +191,38 @@ pub struct ProviderView {
     /// settings shows under its name, connected or not: plain text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// A connection the person may connect several accounts at (its row's
+    /// `accounts_max` above 1): each of theirs, oldest first, the default
+    /// the oldest connected one, whose `account`, `granted` and `missing`
+    /// the fields above are (and `state` connected while any is). None
+    /// where a person connects one account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounts: Option<Vec<ConnectionAccount>>,
+    /// How many accounts they may connect there (its row's `accounts_max`),
+    /// beside `accounts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounts_max: Option<u8>,
+}
+
+/// One of a person's accounts at a connection that takes several: its
+/// Pipes id (what an agent's pick, a reconnect and a disconnect name), its
+/// label, state and scopes as `ProviderView`'s are a single account's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionAccount {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    pub state: ProviderState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granted: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing: Option<Vec<String>>,
+    /// One they disconnected that Pipes holds still (its disconnect did not
+    /// finish, or an import landed after it): not connected, used by no
+    /// agent; settings offers to disconnect it again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disconnecting: bool,
 }
 
 /// An own key's sign-in, as its person sees it.
@@ -244,6 +281,15 @@ pub struct ComputerUses {
 #[serde(rename_all = "camelCase")]
 pub struct AgentConnections {
     pub connections: Option<Vec<String>>,
+}
+
+/// `PUT /api/computers/{id}/agents/{fragment}/accounts/{provider}`: which
+/// of its owner's accounts there the agent uses, by its id (one of theirs,
+/// as `GET /api/connections` lists it), or `null` for the default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentAccount {
+    pub account: Option<String>,
 }
 
 /// `GET /api/computers/{id}` (its owner), `POST /api/computers` (made, or
@@ -565,7 +611,7 @@ mod tests {
         assert_eq!(all.connections, None);
         let narrowed: AgentConnections = serde_json::from_str(r#"{"connections":["github"]}"#).unwrap();
         assert_eq!(narrowed.connections, Some(vec!["github".to_string()]));
-        let agent = ComputerAgent { fragment: "juniper.paul".into(), identity: "id:a".into(), name: "juniper".into(), owner: "id:p".into(), connections: None, model_providers: vec![], credentials: vec![] };
+        let agent = ComputerAgent { fragment: "juniper.paul".into(), identity: "id:a".into(), name: "juniper".into(), owner: "id:p".into(), connections: None, model_providers: vec![], credentials: vec![], accounts: Default::default() };
         let v = serde_json::to_value(&agent).unwrap();
         assert_eq!(v["connections"], serde_json::Value::Null, "the default is named, as null");
         assert!(v.get("credentials").is_none(), "the owner's view names no placeholder");
