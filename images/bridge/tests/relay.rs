@@ -863,6 +863,45 @@ async fn later_parts_wait_for_a_replys_image() {
     bridge.stop().await;
 }
 
+/// Goal (Alex's re-review of #584: the place the awaited words go in a
+/// turn's queue did not move when a fetched file was put before it, so the
+/// second call's words landed before the first call's step, sealing the
+/// first words without their file and not interim): two narrated calls,
+/// each's progress before its words' `send`, the first's words with a PNG
+/// served 1.5 s late, which comes in while the second's words are awaited
+/// (`pause:2400`, within `STEP_HOLD_MS`), or, the control, after they came
+/// (`pause:100`). Either way: the first words with their file, interim,
+/// its step, the second words, interim, its step, the answer, the end.
+#[tokio::test]
+async fn a_file_fetched_while_words_are_awaited_keeps_the_order() {
+    let (fake, bridge, _hermes, _dir) = setup("relay-picture-overlap", &["juniper"]).await;
+    let (cdn, _stop) = provider().await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let url = format!("http://{cdn}/slower/cat.png");
+    let on = |w: &World, channel: &str, turn: &str| -> Vec<Value> { w.records(&chat, channel).into_iter().filter(|r| r["body"]["turn"] == turn).collect() };
+    for pause in [2_400, 100] {
+        let said = fake.say(&chat, &person("paul"), json!({ "text": format!("narrate twice late words-picture:{url} pause:{pause}") }));
+        let turn = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+        fake.until(WAIT, "the turn's end", |w| !work_of(w, &chat, &turn, "turn.end").is_empty()).await;
+        fake.with(|w| {
+            let mut all: Vec<Value> = on(w, "chat", &turn).into_iter().chain(on(w, "work", &turn)).collect();
+            all.sort_by_key(|r| r["at"].as_i64());
+            let seen: Vec<String> = all
+                .iter()
+                .map(|r| match r["body"]["kind"].as_str() {
+                    Some(kind) => format!("{kind} {}", r["body"]["args"].as_str().unwrap_or("")).trim_end().to_string(),
+                    None => format!("reply {} {} {}", r["body"]["text"].as_str().unwrap_or(""), r["body"]["attachments"][0]["name"].as_str().unwrap_or("-"), if r["body"]["interim"] == true { "interim" } else { "said" }),
+                })
+                .collect();
+            let answer = format!("reply echo: [paul] narrate twice late words-picture:{url} pause:{pause} - said");
+            let want = vec!["turn.start".to_string(), format!("reply {} cat.png interim", support::hermes::NARRATION), "turn.step `echo 1`".into(), format!("reply {} - interim", support::hermes::SECOND_NARRATION), "turn.step `echo 2`".into(), answer, "turn.end".into()];
+            assert_eq!(seen, want, "pause {pause}");
+        });
+    }
+    bridge.stop().await;
+}
+
 /// Goal (Alex's review of #584: narration spent the replies a turn may post,
 /// and the answer was dropped): a turn that narrates more tool calls than
 /// `REPLIES_PER_TURN_MAX` posts every call's words, and then its answer,

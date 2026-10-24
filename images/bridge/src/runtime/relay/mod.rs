@@ -1007,10 +1007,15 @@ impl Loop {
         if let (Some(text), Ok(file)) = (shown, file) {
             let files = [Event::Reply { turn: turn.to_string(), part, text }, Event::Attachment { turn: turn.to_string(), part, file }];
             match f.queue.iter().rposition(|e| part_of(e) == Some(part)) {
-                // its reply still waits in the queue: just after it
+                // its reply still waits in the queue: just after it (words
+                // awaited at or past there keep their place behind it)
                 Some(at) => {
                     for (i, e) in files.into_iter().enumerate() {
-                        f.queue.insert(at + 1 + i, e);
+                        let here = at + 1 + i;
+                        f.queue.insert(here, e);
+                        if let Some(w) = f.words_at.as_mut().filter(|w| **w >= here) {
+                            *w += 1;
+                        }
                     }
                 }
                 // its reply went out, and all that came after it waits: now

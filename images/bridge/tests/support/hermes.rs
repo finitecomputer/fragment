@@ -31,7 +31,8 @@
 //!   and the tool's progress after it (`late`: before it; `stalled`: before
 //!   it by longer than the bridge holds a step); `long`, words past 300
 //!   characters; `many`, `NARRATED_CALLS` calls each with its words;
-//!   `words-picture:<url>`, words that end with that image; `only`, the
+//!   `words-picture:<url>`, words that end with that image; `twice`, two
+//!   calls (`pause:<ms>`: the second's send that late); `only`, the
 //!   answer beside a housekeeping call, and nothing after;
 //! - `notice` sends Hermes' inactivity warning (`⚠️ I seem to be stuck …`)
 //!   before its reply, a send answering nothing, and its self-improvement
@@ -205,6 +206,9 @@ type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>;
 
 /// What a `narrate` turn says beside its tool call.
 pub const NARRATION: &str = "Let me check that.";
+
+/// What a `narrate twice` turn says beside its second tool call.
+pub const SECOND_NARRATION: &str = "Now the second part.";
 
 /// How many tool calls a `narrate many` turn makes, each with its words:
 /// past the replies a turn may post (`REPLIES_PER_TURN_MAX`, 64).
@@ -445,9 +449,12 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
         // `long`: words well past a step's old 300 characters. `only`: the
         // answer said beside a housekeeping call, which Hermes sends once.
         // `many`: `NARRATED_CALLS` tool calls, each with its words.
-        // `words-picture:<url>`: the words end with that image (a model
-        // showing what its tool made, then working on).
-        let rounds = if text.contains("many") { NARRATED_CALLS } else { 1 };
+        // `words-picture:<url>`: the (first call's) words end with that
+        // image (a model showing what its tool made, then working on).
+        // `twice`: two calls, the second's words `SECOND_NARRATION`;
+        // `pause:<ms>`: the second's `send` that long after its progress.
+        let rounds = if text.contains("many") { NARRATED_CALLS } else if text.contains("twice") { 2 } else { 1 };
+        let pause = text.split_whitespace().find_map(|w| w.strip_prefix("pause:")).and_then(|ms| ms.parse::<u64>().ok());
         for round in 1..=rounds {
             let words = if text.contains("only") {
                 reply.clone()
@@ -455,10 +462,12 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
                 long_narration()
             } else if text.contains("many") {
                 format!("Checking part {round}.")
+            } else if round == 2 {
+                SECOND_NARRATION.to_string()
             } else {
                 NARRATION.to_string()
             };
-            let words = match text.split_whitespace().find_map(|w| w.strip_prefix("words-picture:")) {
+            let words = match text.split_whitespace().find_map(|w| w.strip_prefix("words-picture:")).filter(|_| round == 1) {
                 Some(url) => format!("{words}\n\n![a cat]({url})"),
                 None => words,
             };
@@ -472,6 +481,9 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
                 gw.act(progress).await;
                 if text.contains("stalled") {
                     tokio::time::sleep(Duration::from_millis(fragment_bridge::limits::STEP_HOLD_MS + 700)).await;
+                }
+                if let Some(ms) = pause.filter(|_| round == 2) {
+                    tokio::time::sleep(Duration::from_millis(ms)).await;
                 }
                 gw.act(said).await;
             } else {
