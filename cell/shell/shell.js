@@ -661,6 +661,10 @@ function renderChats() {
     agentRows.push(row);
   }
   patch($("primary-agent"), agentRows);
+  // another chat with it, one click from the top (its menu's New chat too)
+  const startChat = $("sidebar-start-chat");
+  startChat.hidden = !primary?.identity || state.guest;
+  startChat.onclick = () => newChat(primary.identity);
   // the launcher: a guest's searches; a seat's also starts a chat
   const launcherLabel = state.guest ? "Search chats and apps" : "Search or start a new chat";
   for (const id of ["sidebar-new-chat", "new-chat"]) {
