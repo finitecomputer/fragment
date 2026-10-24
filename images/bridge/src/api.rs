@@ -162,6 +162,28 @@ pub struct FragmentEntry {
     pub title: String,
 }
 
+/// A fragment name's label: `todo` of `todo--k3x9` (decision 47).
+pub fn label(name: &str) -> &str {
+    name.rsplit_once("--").map_or(name, |(label, _)| label)
+}
+
+/// An agent's Bot Chat: its own chat with its owner, the chat fragment the
+/// shell makes with it (cell/shell/shell.js, `makeAgent`: labelled
+/// `<label>-chat` beside the agent's `<label>`), which `fragment ask` finds
+/// as a person's direct chat with it too (cli/src/ask.rs, `direct_label`),
+/// and SimpleX carries its owner's messages into (simplex/run.rs). A
+/// chat's name has a random suffix of its own, so it is found, never
+/// derived: in the agent's list for its owner (`fragments`), the chat its
+/// owner owns with that label. None until there is one: an agent made some
+/// other way has no Bot Chat (Hermes then makes one of its own for a
+/// teammate's message, `chat -c "Bot Chat" --create-if-missing`), and one
+/// whose chat is made after it is assigned has it at a later look
+/// (hermes-boot's main.rs, `find_bot_chats`).
+pub fn bot_chat(agent_fragment: &str, fragments: &[FragmentEntry]) -> Option<String> {
+    let want = format!("{}-chat", label(agent_fragment));
+    fragments.iter().find(|f| f.kind == "chat" && f.owned && label(&f.name) == want).map(|f| f.name.clone())
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChannelInfo {
     pub name: String,

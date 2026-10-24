@@ -149,6 +149,42 @@ it, and a new draft may follow (the next part).
   `to` names it, and only at most 3 hops deep (`HOPS_MAX`), so two agents
   stop handing off.
 
+**A relayed message** (SimpleX; docs/bridge.md, "SimpleX"): its owner's
+words, said in their SimpleX app, posted by the agent on its own chat with
+them (its Bot Chat):
+
+```json
+{ "text": "…", "to": ["npub1<agent>"], "relayed": { "via": "simplex", "for": "npub1<owner>" },
+  "attachments": [ATTACHMENT] }
+```
+
+- Posted by the agent, with the id `sx:<32 hex of SHA-256 of "<agent
+  fragment>|<its sender's id for it>">` (SimpleX's `itemSharedMsgId`,
+  which its sender's app gave it), so a message the agent's core reads
+  again (a catch-up, a rollback) is one record. The record's principal is
+  the agent's: it says what it relays, never as its owner.
+- `relayed.via` is `simplex`, the only way; `relayed.for` is the agent's
+  owner. A voice message (or a photo, a file) is its attachment (a voice
+  message is `audio/mp4`, as SimpleX's apps record one), its text none or
+  its caption; one that could not be carried says so in its text.
+- **The agent's own bridge honors it**, and nothing else does: while that
+  agent's SimpleX link is bound, a record the agent itself posted with a
+  `relayed` for its owner is its owner's message to it, asked as its owner
+  (by their name; their Stop stops it; it answers a question asked of
+  them). Its turn is marked so (`via`), and **what it says goes back to
+  the owner's SimpleX app** once posted: its replies but the interim ones
+  (the words before a tool call stay in the chat, as its push leaves them
+  out), files noted, and a card's question with its choices (their next
+  SimpleX message answers a card that takes words). Only a SimpleX
+  message's turn does. A
+  `relayed` from anyone else (a person, another agent), for anyone else,
+  by another way, or while unlinked, is what the record would be without
+  it: the agent's own words starting nothing, a person's message, a
+  hand-off.
+- The page shows it as its owner's, saying "via SimpleX", once the chat's
+  members say its poster is that person's agent; until then, or from any
+  other poster, as its poster's.
+
 **The hop is the answering bridge's to count**, never the poster's to
 say (images/bridge, `engine.rs` `hop_of`). `hop` in a body only ever
 raises it. For an agent of the answering bridge's own computer (a

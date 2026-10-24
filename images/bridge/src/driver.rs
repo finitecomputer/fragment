@@ -294,8 +294,12 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
         crate::simplex::run::kill_strays(sc).await;
     }
     tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), answer, claims_in_flight.clone(), quiet.clone(), stop.clone()));
-    // SimpleX, when the image names its core: told of the computer at each read
-    let simplex = cfg.simplex.clone().map(|sc| crate::simplex::run::start(sc, api.clone(), quiet.clone(), cfg.hold.clone(), stop.clone()));
+    // SimpleX, when the image names its core: told of the computer at each
+    // read; it says which agents' links are bound (`relaying`), whose
+    // relayed records alone the engine honors. The sender lives as long as
+    // the bridge, so the engine's watch of it never ends on its own.
+    let (relaying_tx, mut relaying_rx) = watch::channel(std::collections::BTreeSet::<String>::new());
+    let simplex = cfg.simplex.clone().map(|sc| crate::simplex::run::start(sc, api.clone(), quiet.clone(), cfg.hold.clone(), relaying_tx.clone(), stop.clone()));
     if let Some(h) = &simplex {
         let _ = simplex_page.handle.set(h.clone());
     }
@@ -348,7 +352,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     }
     crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtime": name, "boot": engine.state().boot + 1, "life": life });
 
-    let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight });
+    let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight, simplex: simplex.clone() });
     let runtime_lane = RuntimeLane::spawn(api.clone(), cmd_tx, cfg.media_dir.clone());
     tokio::spawn(keepalive(api.clone(), keep_rx, cfg.keepalive_ping, stop.clone()));
     let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), discovering: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()) };
@@ -360,7 +364,12 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
         }
         for e in step.effects {
             match e {
-                Effect::Post { agent, fragment, channel, id, body, files } => lanes.push(&fragment, Job::Post { agent, channel, id, body, files }),
+                Effect::Post { agent, fragment, channel, id, body, files } => {
+                    // what a turn its owner asked over SimpleX says goes back there, once posted
+                    let asked_there = |turn: &str| engine.state().turns.get(turn).is_some_and(|t| t.via.as_deref() == Some(records::VIA_SIMPLEX));
+                    let relay = simplex.as_ref().and(for_simplex(channel, &id, &body, files.len())).filter(|(turn, _)| asked_there(turn)).map(|(_, text)| text);
+                    lanes.push(&fragment, Job::Post { agent, channel, id, body, files, relay })
+                }
                 Effect::Claim { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Claim { agent, turn, id, body }),
                 Effect::Owed { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Owed { agent, turn, id, body }),
                 Effect::Draft { agent, fragment, turn, text } => lanes.push(&fragment, Job::Draft { agent, turn, text }),
@@ -385,6 +394,14 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
 
     let s = engine.step(Input::Agents(computer.agents.clone()), crate::log::now_ms());
     act(&engine, s)?;
+    // the agents whose SimpleX link is bound, as their files say, before any
+    // record: a relayed record a cut life posted and never ran is honored
+    if let Some(sc) = &cfg.simplex {
+        let linked: std::collections::BTreeSet<String> = crate::simplex::run::linked_on_disk(&sc.dir, &computer.agents).into_iter().collect();
+        relaying_tx.send_replace(linked.clone());
+        let s = engine.step(Input::Relaying(linked), crate::log::now_ms());
+        act(&engine, s)?;
+    }
     let s = engine.recover(crate::log::now_ms());
     act(&engine, s)?;
     for a in &computer.agents {
@@ -419,6 +436,16 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                     }
                 };
                 if let Err(e) = act(&engine, step) {
+                    break Err(e);
+                }
+            }
+            r = relaying_rx.changed() => {
+                if r.is_err() {
+                    break Ok(());
+                }
+                let linked = relaying_rx.borrow_and_update().clone();
+                let s = engine.step(Input::Relaying(linked), crate::log::now_ms());
+                if let Err(e) = act(&engine, s) {
                     break Err(e);
                 }
             }
@@ -888,9 +915,62 @@ async fn ensure_wake(api: &Api, agent: &Agent, fragment: &str, channel: &str) ->
 
 // ---- lanes: each fragment's posts, claims and drafts, in order ----
 
+/// The turn a reply's post id names (`rp:<turn>:<n>`).
+fn reply_turn(id: &str) -> Option<&str> {
+    id.strip_prefix("rp:")?.rsplit_once(':').map(|(turn, _)| turn)
+}
+
+/// What of a record a turn posts goes to its owner's SimpleX app, when
+/// that turn was asked there (the caller's to say), and the turn it is of:
+/// a reply, its files noted, unless it is interim (the model's words
+/// before a tool call stay in the chat, as its push leaves them out:
+/// docs/chat-records.md, "Push"; a turn may narrate 200 of them, each a
+/// notification on the phone); and a card's question, its choices named,
+/// since a card shows only in the chat. Nothing else.
+fn for_simplex(channel: &str, id: &str, body: &Value, files: usize) -> Option<(String, String)> {
+    let text = body["text"].as_str().unwrap_or("");
+    match channel {
+        records::CHAT if body["interim"] != true => {
+            let said = with_files_noted(text, files);
+            reply_turn(id).filter(|_| !said.trim().is_empty()).map(|turn| (turn.to_string(), said))
+        }
+        records::WORK if body["kind"] == "turn.prompt" => {
+            let options = body["options"].as_array()?;
+            let words = options.iter().any(|o| o["words"] == true);
+            let labels: Vec<&str> = options.iter().filter(|o| o["words"] != true).filter_map(|o| o["label"].as_str()).collect();
+            // the owner's next message answers a card that takes words (engine.rs `told`)
+            let how = match (words, labels.is_empty()) {
+                (true, true) => String::new(),
+                (true, false) => format!("\n\n(Answer with one of: {}, or in your own words.)", labels.join(", ")),
+                (false, _) => "\n\n(This one needs a button: answer it in our chat.)".to_string(),
+            };
+            Some((body["turn"].as_str()?.to_string(), format!("{text}{how}")))
+        }
+        _ => None,
+    }
+}
+
+/// What the owner's SimpleX app is told of a reply's files, which go only
+/// to the chat.
+fn with_files_noted(text: &str, files: usize) -> String {
+    match files {
+        0 => text.to_string(),
+        n => {
+            let note = if n == 1 { "(I sent a file, in our chat.)".to_string() } else { format!("(I sent {n} files, in our chat.)") };
+            if text.trim().is_empty() {
+                note
+            } else {
+                format!("{text}\n\n{note}")
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Job {
-    Post { agent: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile> },
+    /// `relay`: what of it goes to the owner's SimpleX app once posted, for
+    /// a turn asked there (`for_simplex`).
+    Post { agent: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile>, relay: Option<String> },
     /// A turn's `turn.start` on `work`, whose answer the engine waits for.
     Claim { agent: String, turn: String, id: String, body: Value },
     /// One of a turn's last records on `work`: the engine hears when the
@@ -913,6 +993,8 @@ struct Claims {
     inbox: mpsc::Sender<Msg>,
     hold: PathBuf,
     in_flight: Arc<AtomicUsize>,
+    /// Where a SimpleX turn's posted reply goes (none without SimpleX).
+    simplex: Option<crate::simplex::run::Handle>,
 }
 
 /// One claim's try in flight, counted while it lives.
@@ -1018,14 +1100,18 @@ async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut s
                     Err(e) => crate::ev!("draft.failed", { "fragment": fragment, "turn": turn, "error": e.to_string() }),
                 }
             }
-            Job::Post { agent, channel, id, body, files } => {
-                post(&api, &fragment, &agent, channel, &id, body, &files, stop.clone()).await;
+            Job::Post { agent, channel, id, body, files, relay } => {
+                // what goes back over SimpleX goes only once it is on the chat
+                let sent = post(&api, &fragment, &agent, channel, &id, body, &files, stop.clone()).await;
+                if let (Some(text), Sent::Posted, Some(sx)) = (relay, sent, claims.simplex.as_ref()) {
+                    sx.reply(&agent, &text);
+                }
             }
             Job::Owed { agent, turn, id, body } => {
                 // Done (answered, or given up after its tries) unless the
                 // bridge is stopping: then the turn keeps owing it, and the
                 // next life posts it again.
-                if post(&api, &fragment, &agent, records::WORK, &id, body, &[], stop.clone()).await {
+                if post(&api, &fragment, &agent, records::WORK, &id, body, &[], stop.clone()).await.ended() {
                     let _ = claims.inbox.send(Msg::Input(Input::Posted { turn, id })).await;
                 }
             }
@@ -1087,12 +1173,28 @@ async fn claim(api: &Api, fragment: &str, agent: &str, id: &str, body: &Value, c
     unreachable!("the last try returns")
 }
 
+/// How a post ended: on the chat (this try's, or an earlier life's under
+/// its id), refused for good (out of tries, or no longer the agent's to
+/// post in), or not ended, the bridge stopping first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Sent {
+    Posted,
+    Refused,
+    Stopped,
+}
+
+impl Sent {
+    /// Done with, either way: what a turn's owed records wait for.
+    pub(crate) fn ended(self) -> bool {
+        self != Sent::Stopped
+    }
+}
+
 /// A post, tried until the platform answers it, or `POST_TRIES_MAX` times
 /// on a transport error, 429 or 5xx (a jittered backoff between: lesson 5),
-/// or refused at once: true when done so, false when the bridge stopped
-/// first.
+/// or refused at once.
 #[allow(clippy::too_many_arguments)]
-async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, mut body: Value, files: &[LocalFile], stop: watch::Receiver<bool>) -> bool {
+pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, mut body: Value, files: &[LocalFile], stop: watch::Receiver<bool>) -> Sent {
     let mut backoff = Backoff::default();
     for attempt in 1..=limits::POST_TRIES_MAX {
         let uploaded = upload(api, fragment, agent, files).await;
@@ -1108,12 +1210,12 @@ async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, m
         match result {
             Ok(posted) => {
                 crate::ev!("posted", { "fragment": fragment, "channel": channel, "id": id, "replayed": posted.replayed, "attempt": attempt });
-                return true;
+                return Sent::Posted;
             }
             Err(e) if e.retryable() && attempt < limits::POST_TRIES_MAX => {
                 crate::ev!("post.retry", { "fragment": fragment, "id": id, "attempt": attempt, "error": e.to_string() });
                 if !backoff.wait(stop.clone()).await {
-                    return false;
+                    return Sent::Stopped;
                 }
             }
             Err(e) if e.status() == Some(409) => {
@@ -1121,13 +1223,13 @@ async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, m
                 // turn that life ended, or the records of one it claimed
                 // (one life per turn). Never retried.
                 crate::ev!("post.taken", { "fragment": fragment, "channel": channel, "id": id });
-                return true;
+                return Sent::Posted;
             }
             Err(e) => {
                 // Out of tries, or a 403/404: it is no longer the agent's to
                 // post in.
                 crate::ev!("post.failed", { "fragment": fragment, "channel": channel, "id": id, "error": e.to_string() });
-                return true;
+                return Sent::Refused;
             }
         }
     }
@@ -1244,7 +1346,15 @@ async fn quote_of(api: &Api, ts: &TurnStart, seq: u64) -> Option<Quote> {
         return None;
     }
     let id = records::turn_id(&ts.agent.fragment, &ts.fragment, records::CHAT, seq);
-    Some(Quote { id, text: records::cut_bytes(&text, limits::QUOTE_TEXT_MAX_BYTES), own: r.principal == ts.agent.identity })
+    Some(Quote { id, text: records::cut_bytes(&text, limits::QUOTE_TEXT_MAX_BYTES), own: own_words(&r.principal, &r.body, &ts.agent) })
+}
+
+/// Whether a record `principal` posted is `agent`'s own words (a quote of
+/// it is `reply_to.is_own`): what it posted, but for a message it relays
+/// from its owner (docs/chat-records.md, "A relayed message"), which are
+/// its owner's.
+fn own_words(principal: &str, body: &Value, agent: &crate::runtime::Agent) -> bool {
+    principal == agent.identity && records::relayed(body).is_none_or(|r| r.for_ != agent.owner)
 }
 
 /// A message's attachments, from the chat's blobs to scratch files.
@@ -1502,5 +1612,67 @@ pub(crate) async fn keepalive(api: Api, mut hold: watch::Receiver<bool>, every: 
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Goal (SimpleX, after #584's mid-turn replies): of what a turn asked
+    /// over SimpleX posts, its owner's app gets every reply that is not
+    /// interim (its answer, an open question), files noted, and a card's
+    /// question with its choices; the model's words before a tool call
+    /// stay in the chat, as the chat's push leaves them out.
+    #[test]
+    fn what_goes_back_over_simplex() {
+        let reply = |interim: bool| records::reply("It'll be sunny.", "t1", &[], 0, interim);
+        assert_eq!(for_simplex(records::CHAT, "rp:t1:2", &reply(false), 0), Some(("t1".into(), "It'll be sunny.".into())));
+        assert_eq!(for_simplex(records::CHAT, "rp:t1:1", &reply(true), 0), None, "interim: the chat's alone");
+        assert_eq!(for_simplex(records::CHAT, "rp:t1:2", &records::reply("", "t1", &[], 0, false), 1), Some(("t1".into(), "(I sent a file, in our chat.)".into())));
+        assert_eq!(for_simplex(records::CHAT, "rp:t1:2", &records::reply(" ", "t1", &[], 0, false), 0), None, "nothing said");
+        let option = |id: &str, label: &str, words: bool| records::PromptOption { id: id.into(), label: label.into(), style: None, words };
+        let card = records::turn_prompt("t1", "c-1", "What should I plant?", &[option("c0", "Basil", false), option("c1", "Mint", false), option("other", "Something else", true)], "npub1paul", 1);
+        assert_eq!(for_simplex(records::WORK, "wk:t1:p:c-1", &card, 0), Some(("t1".into(), "What should I plant?\n\n(Answer with one of: Basil, Mint, or in your own words.)".into())));
+        let buttons = records::turn_prompt("t1", "p-1", "Run it?", &[option("once", "Allow once", false)], "npub1paul", 1);
+        assert!(for_simplex(records::WORK, "wk:t1:p:p-1", &buttons, 0).is_some_and(|(_, t)| t.ends_with("answer it in our chat.)")));
+        assert_eq!(for_simplex(records::WORK, "wk:t1:start", &json!({ "kind": "turn.start", "turn": "t1" }), 0), None, "a turn's work records stay");
+    }
+
+    /// Goal (Alex's review of #548): a post says how it ended, so what goes
+    /// back over SimpleX, and an inbound file's deletion, wait for one on
+    /// the chat: a refusal (403, 404) is no post; another life's under the
+    /// same id (409) is.
+    #[tokio::test]
+    async fn a_post_says_how_it_ended() {
+        for (status, want) in [(200u16, Sent::Posted), (409, Sent::Posted), (403, Sent::Refused), (404, Sent::Refused)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a port");
+            let addr = listener.local_addr().expect("its address");
+            let (_stop_tx, stop) = watch::channel(false);
+            let answer = move |_req: hyper::Request<hyper::body::Incoming>, _peer: std::net::SocketAddr| async move {
+                let code = hyper::StatusCode::from_u16(status).expect("a status");
+                if status == 200 { crate::net::json_answer(code, &json!({ "record": { "seq": 1 }, "replayed": false })) } else { crate::net::refusal(code, "refused", "as asked") }
+            };
+            tokio::spawn(crate::net::serve(listener, answer, stop.clone()));
+            let api = Api::new(&format!("http://{addr}")).expect("an address");
+            let sent = post(&api, "chat--a1b2", "juniper--k3x9", records::CHAT, "sx:1", json!({ "text": "hi" }), &[], stop).await;
+            assert_eq!(sent, want, "{status}");
+            assert!(sent.ended());
+        }
+    }
+
+    /// Goal (Alex's review of #548): a message its agent relays from its
+    /// owner, quoted, is its owner's words to the runtime, not the agent's
+    /// own; anything else the agent posted is its own.
+    #[test]
+    fn a_relayed_message_quoted_is_its_owners() {
+        let agent = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![] };
+        let relayed = records::relayed_message("hi from my phone", &agent.identity, &agent.owner, records::VIA_SIMPLEX, &[]);
+        assert!(!own_words("npub1juniper", &relayed, &agent), "its owner's, relayed");
+        assert!(own_words("npub1juniper", &json!({ "text": "a reply", "turn": "t1" }), &agent));
+        assert!(!own_words("npub1paul", &json!({ "text": "hi" }), &agent));
+        let for_someone_else = records::relayed_message("x", &agent.identity, "npub1skyler", records::VIA_SIMPLEX, &[]);
+        assert!(own_words("npub1juniper", &for_someone_else, &agent), "a relay for anyone else is no owner's");
     }
 }

@@ -641,7 +641,13 @@ export function mount(root) {
   const waiting = (t) => [...t.prompts.values()].some((p) => !t.closed.has(p.prompt) && !expired(p));
   // a turn waiting on its asker's words (`turn.asked`): until they say
   // something to the chat after it, or the turn goes on or ends
-  const waitsOnWords = (t) => running(t) && !!t.asked && !state.chat.some((m) => m.principal === t.asked.asks && !m.turn && m.at >= t.asked.at);
+  // A relayed message (docs/chat-records.md): its owner's words, said over
+  // SimpleX, posted by their agent. It is theirs, "via SimpleX", once the
+  // members say its poster is that person's agent; until then, or from any
+  // other poster, it is the poster's own.
+  const relayedOwner = (m) => (m.relayed && state.members.some((x) => x.principal === m.relayed.by && x.kind === "agent" && x.owner === m.relayed.for) ? m.relayed.for : null);
+  const speaker = (m) => relayedOwner(m) ?? m.principal;
+  const waitsOnWords = (t) => running(t) && !!t.asked && !state.chat.some((m) => speaker(m) === t.asked.asks && !m.turn && m.at >= t.asked.at);
   // a card that takes words (an option answered in words): its asker's
   // message in the chat while it is open answers it as that option, as if
   // typed on the card (docs/chat-records.md, "A person's message")
@@ -649,7 +655,7 @@ export function mount(root) {
   const cardFor = (t, principal) => running(t) && [...t.prompts.values()].some((p) => takesWords(p) && p.asks === principal && !t.closed.has(p.prompt) && !expired(p));
   // whether message `m` answered one of turn `t`'s cards: by its asker, said
   // after the card and before its close
-  const answeredCard = (t, m) => [...t.prompts.values()].some((p) => takesWords(p) && p.asks === m.principal && p.at <= m.at && t.closed.get(p.prompt)?.outcome === "answered" && t.closed.get(p.prompt).at >= m.at);
+  const answeredCard = (t, m) => [...t.prompts.values()].some((p) => takesWords(p) && p.asks === speaker(m) && p.at <= m.at && t.closed.get(p.prompt)?.outcome === "answered" && t.closed.get(p.prompt).at >= m.at);
 
   function onChat(record, historical = false) {
     if (state.seen.has(record.seq)) return;
@@ -698,7 +704,10 @@ export function mount(root) {
     if (body.kind !== undefined && body.kind !== "message") return;
     const turn = typeof body.turn === "string" ? body.turn : null;
     const replyTo = Number.isInteger(body.reply_to) && body.reply_to > 0 ? body.reply_to : null;
-    state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: sentIds.get(record.seq) ?? null });
+    // a message an agent relays from its owner's SimpleX app (shown as theirs: `speaker`)
+    const r = body.relayed;
+    const relayed = !turn && r && typeof r === "object" && r.via === "simplex" && typeof r.for === "string" && r.for.startsWith("npub1") ? { for: r.for, by: record.principal } : null;
+    state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: sentIds.get(record.seq) ?? null, relayed });
     if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
     latestSeq = Math.max(latestSeq, record.seq);
     if (turn) {
@@ -1110,13 +1119,16 @@ export function mount(root) {
     } else if (setup) $("note").textContent = "";
   }
 
-  function messageNode(m) {
+  function messageNode(entry) {
+    // a relayed message shows as its owner's, saying how they sent it
+    const owner = relayedOwner(entry);
+    const m = owner ? { ...entry, principal: owner, via: "SimpleX" } : entry;
     const w = who(m.principal);
     const mine = m.principal === state.me?.principal;
     const key = `m:${m.seq}`;
     const quoted = m.replyTo ? (state.chat.find((x) => x.seq === m.replyTo) ?? null) : null;
     const waits = !w.agent && queued(m);
-    const sig = [w.name, w.agent, mine, w.picture ?? "", w.color ?? "", canPost(), waits, quoted ? `${quoted.seq}:${who(quoted.principal).name}` : m.replyTo ?? "", m.error ?? "", m.retrying ?? false, m.sending ?? false, m.post ?? ""].join("|");
+    const sig = [w.name, w.agent, mine, w.picture ?? "", w.color ?? "", canPost(), waits, quoted ? `${quoted.seq}:${who(speaker(quoted)).name}` : m.replyTo ?? "", m.error ?? "", m.retrying ?? false, m.sending ?? false, m.post ?? "", m.via ?? ""].join("|");
     return [key, cached(key, sig, () => (w.agent ? agentMessage(m, w) : userMessage(m, w, mine, quoted, waits)))];
   }
 
@@ -1164,7 +1176,7 @@ export function mount(root) {
       q.disabled = true;
       return q;
     }
-    q.append(el("span", "quote-who", who(quoted.principal).name), quoteText(el("span", "quote-text"), quoted));
+    q.append(el("span", "quote-who", who(speaker(quoted)).name), quoteText(el("span", "quote-text"), quoted));
     q.onclick = () => $("messages").querySelector(`[data-seq="${quoted.seq}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
     return q;
   }
@@ -1217,6 +1229,8 @@ export function mount(root) {
       label.append("Queued");
       actions.append(label);
     }
+    // said elsewhere (its owner's SimpleX app), and relayed here
+    if (m.via) actions.append(el("span", "via", `via ${m.via}`));
     // sent once the platform has its record: until then it says so, no time
     actions.append(m.sending ? el("span", "time", "Sending…") : el("span", "time", time(m.at)));
     wrap.append(actions);
