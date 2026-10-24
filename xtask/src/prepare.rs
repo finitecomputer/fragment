@@ -129,32 +129,40 @@ pub(crate) fn until_ready(api: &mut impl Preparer, clock: &mut impl Clock, image
     assert!(images.len() <= IMAGES_MAX, "at most {IMAGES_MAX} images, not {}", images.len());
     assert!(limit > Duration::ZERO, "a wait has a limit");
     let start = clock.now();
+    // one deadline for the whole wait, its asks' own time included: no ask
+    // starts at it, no answer that comes back past it is taken, and no
+    // pause runs over it
+    let deadline = start + limit;
     let mut done: Vec<&str> = Vec::with_capacity(images.len());
     for &image in images {
         if done.contains(&image) {
             continue;
         }
         let mut said = clock.now();
-        // bounded: each pass sleeps POLL, and the limit ends the loop
+        // why the API answered nothing about it, or `None`: pending
+        let mut unanswered: Option<String> = None;
+        // bounded: each pass pauses, and the deadline ends the loop
         loop {
-            let waited = clock.now() - start;
-            // why the API answered nothing about it, or `None`: pending
-            let unanswered = match api.ask(image) {
-                Ok(Preparation::Ready) => {
-                    println!("image: {image} is ready on Cloudflare's network (asked for {})", minutes(waited));
-                    break;
-                }
-                Ok(Preparation::Failed(why)) => bail!("image: Cloudflare cannot prepare {image}: {why}"),
-                Ok(Preparation::Pending) => None,
-                Err(AskError::Refused(why)) => bail!("image: could not ask Cloudflare about {image}: {why}"),
-                Err(AskError::Transient(why)) => Some(why),
-            };
-            if waited >= limit {
+            if clock.now() >= deadline {
+                let waited = minutes(clock.now() - start);
                 match unanswered {
-                    Some(why) => bail!("image: Cloudflare's API answered nothing about {image} for {} (the limit), the last ask: {why}", minutes(waited)),
-                    None => bail!("image: {image} is still being prepared on Cloudflare's network after {} (the limit)", minutes(waited)),
+                    Some(why) => bail!("image: Cloudflare's API answered nothing about {image} for {waited} (the limit), the last ask: {why}"),
+                    None => bail!("image: {image} is still being prepared on Cloudflare's network after {waited} (the limit)"),
                 }
             }
+            let answer = api.ask(image);
+            unanswered = match answer {
+                Ok(Preparation::Failed(why)) => bail!("image: Cloudflare cannot prepare {image}: {why}"),
+                Err(AskError::Refused(why)) => bail!("image: could not ask Cloudflare about {image}: {why}"),
+                _ if clock.now() > deadline => bail!("image: Cloudflare answered about {image} only after {} (the limit): not taken", minutes(clock.now() - start)),
+                Ok(Preparation::Ready) => {
+                    println!("image: {image} is ready on Cloudflare's network (asked for {})", minutes(clock.now() - start));
+                    break;
+                }
+                Ok(Preparation::Pending) => None,
+                Err(AskError::Transient(why)) => Some(why),
+            };
+            let waited = clock.now() - start;
             if clock.now() - said >= SAY_EVERY {
                 said = clock.now();
                 match &unanswered {
@@ -162,7 +170,7 @@ pub(crate) fn until_ready(api: &mut impl Preparer, clock: &mut impl Clock, image
                     None => println!("image: {image} is being prepared on Cloudflare's network (waited {} of {})", minutes(waited), minutes(limit)),
                 }
             }
-            clock.sleep(POLL);
+            clock.sleep(POLL.min(deadline - clock.now()));
         }
         done.push(image);
     }
@@ -178,27 +186,34 @@ fn minutes(d: Duration) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::collections::{BTreeMap, VecDeque};
+    use std::rc::Rc;
 
-    /// A clock that moves only when it sleeps.
-    #[derive(Default)]
-    pub(crate) struct Fake(pub Duration);
+    /// A clock that moves only when it sleeps, or when a scripted ask that
+    /// shares it takes its time.
+    #[derive(Default, Clone)]
+    pub(crate) struct Fake(pub Rc<Cell<Duration>>);
 
     impl Clock for Fake {
         fn now(&self) -> Duration {
-            self.0
+            self.0.get()
         }
         fn sleep(&mut self, pause: Duration) {
-            self.0 += pause;
+            self.0.set(self.0.get() + pause);
         }
     }
 
     /// Cloudflare, scripted: each image's answers in turn, its last kept
-    /// once the script runs out; and every ask made.
+    /// once the script runs out, each one taking `takes` on `clock`; and
+    /// every ask made, with when it started.
     #[derive(Default)]
     pub(crate) struct Scripted {
         pub answers: BTreeMap<String, VecDeque<Result<Preparation, AskError>>>,
         pub asked: Vec<String>,
+        pub started: Vec<Duration>,
+        pub takes: Duration,
+        pub clock: Fake,
     }
 
     impl Scripted {
@@ -212,6 +227,8 @@ pub(crate) mod tests {
     impl Preparer for Scripted {
         fn ask(&mut self, image: &str) -> Result<Preparation, AskError> {
             self.asked.push(image.to_string());
+            self.started.push(self.clock.now());
+            self.clock.sleep(self.takes);
             let q = self.answers.get_mut(image).unwrap_or_else(|| panic!("no answers scripted for {image}"));
             if q.len() > 1 { q.pop_front().expect("one at least") } else { q.front().cloned().expect("one at least") }
         }
@@ -224,7 +241,7 @@ pub(crate) mod tests {
     fn an_image_ready_at_once_is_asked_once() {
         let (mut api, mut clock) = (Scripted::with(STABLE, vec![Ok(Preparation::Ready)]), Fake::default());
         until_ready(&mut api, &mut clock, &[STABLE], DEPLOY_LIMIT).unwrap();
-        assert_eq!((api.asked.len(), clock.0), (1, Duration::ZERO));
+        assert_eq!((api.asked.len(), clock.now()), (1, Duration::ZERO));
     }
 
     #[test]
@@ -232,7 +249,7 @@ pub(crate) mod tests {
         let mut api = Scripted::with(CANARY, vec![Ok(Preparation::Pending), Ok(Preparation::Pending), Ok(Preparation::Pending), Ok(Preparation::Ready)]);
         let mut clock = Fake::default();
         until_ready(&mut api, &mut clock, &[CANARY], DEPLOY_LIMIT).unwrap();
-        assert_eq!((api.asked.len(), clock.0), (4, 3 * POLL));
+        assert_eq!((api.asked.len(), clock.now()), (4, 3 * POLL));
     }
 
     #[test]
@@ -242,8 +259,51 @@ pub(crate) mod tests {
         let mut clock = Fake::default();
         let e = until_ready(&mut api, &mut clock, &[CANARY], DEPLOY_LIMIT).unwrap_err().to_string();
         assert!(e.contains("still being prepared") && e.contains(CANARY) && e.contains("20m00s"), "{e}");
-        assert_eq!(clock.0, DEPLOY_LIMIT, "it waits the limit and no longer");
-        assert_eq!(api.asked.len() as u128, DEPLOY_LIMIT.as_millis() / POLL.as_millis() + 1, "an ask each POLL, bounded");
+        assert_eq!(clock.now(), DEPLOY_LIMIT, "it waits the limit and no longer");
+        assert_eq!(api.asked.len() as u128, DEPLOY_LIMIT.as_millis() / POLL.as_millis(), "an ask each POLL, none at the deadline");
+    }
+
+    #[test]
+    fn the_limit_holds_across_slow_asks_and_every_image() {
+        // review of #602: 239 pending answers at once (19m55s of pauses),
+        // then answers that each take 29 s, for two images: the ready one
+        // comes back past the deadline and is not taken, and no ask starts
+        // after it
+        let clock = Fake::default();
+        let mut api = Scripted::with(STABLE, vec![Ok(Preparation::Pending); 239].into_iter().chain([Ok(Preparation::Ready)]).collect());
+        api.answers.insert(CANARY.into(), vec![Ok(Preparation::Ready)].into());
+        api.clock = clock.clone();
+        let slow = Duration::from_secs(29);
+        let e = until_ready(&mut SlowAfter { inner: &mut api, after: 239, slow }, &mut clock.clone(), &[STABLE, CANARY], DEPLOY_LIMIT).unwrap_err().to_string();
+        assert!(e.contains("only after") && e.contains(STABLE), "{e}");
+        assert!(api.started.iter().all(|t| *t < DEPLOY_LIMIT), "no ask starts at or after the deadline: {:?}", api.started.last());
+        assert!(!api.asked.contains(&CANARY.to_string()), "nor for the next image");
+        assert!(clock.now() < DEPLOY_LIMIT + slow + POLL, "it ends with the ask that crossed it: {:?}", clock.now());
+
+        // slow pending answers: the pause before the next ask is cut to what
+        // is left, and the wait ends at the deadline
+        let clock = Fake::default();
+        let mut api = Scripted::with(STABLE, vec![Ok(Preparation::Pending)]);
+        api.clock = clock.clone();
+        api.takes = Duration::from_secs(3);
+        let e = until_ready(&mut api, &mut clock.clone(), &[STABLE], DEPLOY_LIMIT).unwrap_err().to_string();
+        assert!(e.contains("still being prepared") || e.contains("only after"), "{e}");
+        assert!(api.started.iter().all(|t| *t < DEPLOY_LIMIT));
+        assert!(clock.now() <= DEPLOY_LIMIT + api.takes, "{:?}", clock.now());
+    }
+
+    /// A preparer whose asks after the first `after` take `slow` each.
+    struct SlowAfter<'a> {
+        inner: &'a mut Scripted,
+        after: usize,
+        slow: Duration,
+    }
+
+    impl Preparer for SlowAfter<'_> {
+        fn ask(&mut self, image: &str) -> Result<Preparation, AskError> {
+            self.inner.takes = if self.inner.asked.len() >= self.after { self.slow } else { Duration::ZERO };
+            self.inner.ask(image)
+        }
     }
 
     #[test]
@@ -291,7 +351,7 @@ pub(crate) mod tests {
         let mut clock = Fake::default();
         let e = until_ready(&mut api, &mut clock, &[STABLE, CANARY], DEPLOY_LIMIT).unwrap_err().to_string();
         assert!(e.contains(CANARY), "{e}");
-        assert_eq!(clock.0, DEPLOY_LIMIT);
+        assert_eq!(clock.now(), DEPLOY_LIMIT);
     }
 
     #[test]
