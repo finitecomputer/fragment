@@ -1980,6 +1980,12 @@ memo is one the agent transcribes itself, through this route):
 - **Who pays.** The payer is the agent's owner, under no fragment's cap.
 - **What is kept.** Only the usage, on the ledger. Whisper's refusal is
   charged nothing and passed through, as a chat call's is.
+- **Short of capacity.** Workers AI's speech recognition takes 720 calls
+  a minute an account, and answers 429 when short of capacity. A first
+  try that answers 429, 408 or a 5xx, or never answers, within 15 s is
+  made once more after a second (`transcribe::again`), and the second's
+  answer is final; a failed try is charged nothing. A 429 passed on
+  carries `retry-after: 5`, which an OpenAI SDK's own retry waits for.
 - **Its answer's shape.** An answer carries `x-fragment-answer-shape`:
   the model's own answer's top-level keys, and its `usage` when that is
   a small object of numbers and short strings (`{"keys": […], "usage":
