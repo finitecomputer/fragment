@@ -44,6 +44,7 @@
 //!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside
 //!   POST   /deliver/report                the delivery consumer (deliveries.rs); never routed from outside
 //!   GET    /api/card                      viewer: the preview card's JPEG (card.rs)
+//!   POST   /api/card  PUT /api/card       editor: a shot again; an upload as the card (card.rs)
 //!   POST   /meter/acked  /meter/whose     the ledger queue's consumer, and the model route (meter.rs); never routed from outside
 //!   POST   /test/keys  /test/fragment     the router's `/api/test/*`, on fleets with test hooks only (ops.rs)
 
@@ -974,6 +975,11 @@ impl FragmentCell {
                 self.deploy_api(&caller, body).await
             }
             (Method::Get, ["api", "card"]) => self.card_api(&caller, &req).await,
+            (Method::Post, ["api", "card"]) => self.again_card(&caller).await,
+            (Method::Put, ["api", "card"]) => {
+                let bytes = req.bytes().await?;
+                self.upload_card(&caller, bytes).await
+            }
             (Method::Get, ["api", "file"]) => self.file(&caller, &query("path").unwrap_or_default()).await,
             (Method::Get, ["api", "events"]) => self.events(&caller, query("since").and_then(|s| s.parse().ok()).unwrap_or(0), query("tail")),
             (Method::Get, ["api", "channels"]) => self.channels(&caller),

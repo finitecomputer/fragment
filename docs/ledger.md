@@ -488,12 +488,15 @@ acknowledged within five minutes is sent again. A guest's ledger refuses
 the batch, so a guest's fragments are billed nothing.
 
 - **Preview cards** (decision 31; docs/api.md, Cards): each try at a
-  deploy's card is a `browser` row in the fragment's outbox
+  deploy's card, or at one an editor asked for again, is a `browser` row
+  in the fragment's outbox
   (`card:<fragment>@<incarnation>:<live, 12 hex>:<wanted at>:<try>`),
   its session's time from acquire to close (a close that was lost adds
   the session's 10 s inactivity timeout), to the fragment's owner. A
   stale shot and a failed one are billed too: their browser time was
-  spent. A guest's or a read-only owner's deploys are not shot.
+  spent. A guest's or a read-only owner's deploys are not shot, and an
+  ask for a shot again is refused (402). An uploaded card is a blob,
+  stored as any is.
 - **Images** (the deploy path): `images` rows to the fragment's owner,
   when a transformation is made.
 - **An export** (a person's list, export.rs; docs/api.md, Export): one

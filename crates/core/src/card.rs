@@ -22,6 +22,12 @@
 //!   tried again after a wait that doubles, at most `ATTEMPTS_MAX` tries
 //!   in all, and then given up quietly: the card before stays, and
 //!   nothing else changes;
+//! - an editor's two asks (docs/api.md, Cards): a shot of the live again
+//!   (`Cards::again`), at most one ask each `AGAIN_EVERY_MS`, joining a
+//!   shot already wanted; and an image of their own as the card
+//!   (`Cards::upload`), held to what a shot is held to, which shots leave
+//!   (they still load the page, for its report) until a shot is asked for
+//!   again;
 //! - what the page reported as it loaded (`Heard`): its uncaught
 //!   exceptions, console errors, failed loads and security refusals, the
 //!   first `ERRORS_MAX` kept (the rest counted), each cut to
@@ -58,6 +64,11 @@ pub const SETTLE_MS: u64 = 1_000;
 /// (`keep_alive`): a session whose close was lost ends this long after its
 /// last use, and is billed for it (`billed_ms`).
 pub const KEEP_ALIVE_MS: u64 = 10_000;
+/// A shot asked for again (`Cards::again`) is asked at most once this
+/// often per fragment: each is a browser session from the account's few,
+/// which every fragment's deploys share, billed to its owner. A deploy's
+/// shot is not counted: it comes with the deploy.
+pub const AGAIN_EVERY_MS: i64 = 60_000;
 
 /// A shot keeps the first this many errors the page reports, and counts
 /// the rest.
@@ -84,7 +95,7 @@ pub enum Visitor {
     LinkHolder,
 }
 
-/// Why a live gets no card.
+/// Why a live is not shot (a deploy's, or one asked for again).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Skip {
@@ -101,19 +112,29 @@ impl Skip {
     pub fn message(self) -> &'static str {
         match self {
             Skip::NotAnApp => "a chat or an agent is not an app: it has no card",
-            Skip::MembersOnly => "a members-only fragment has no card: a visitor without an account sees only its refusal",
+            Skip::MembersOnly => "a members-only fragment's page is not shot: a visitor without an account sees only its refusal (an uploaded card is its members' all the same)",
             Skip::OwnerPays => "its owner's ledger takes no shot now (a guest pays for nothing; past the overdraft, nothing new is made)",
         }
     }
 }
 
+/// Whether a fragment of `kind` has a card at all: an app or a brain,
+/// which the shell's Apps list shows. An upload asks only this: it needs
+/// no visitor, so a members-only app takes one.
+pub fn is_app(kind: FragmentKind) -> Result<(), Skip> {
+    match kind {
+        FragmentKind::Chat | FragmentKind::Agent | FragmentKind::Skills => Err(Skip::NotAnApp),
+        FragmentKind::App | FragmentKind::Brain => Ok(()),
+    }
+}
+
 /// Whether a fragment of `kind` and `visibility` is shot, and as whom.
 pub fn visitor(kind: FragmentKind, visibility: Visibility) -> Result<Visitor, Skip> {
-    match (kind, visibility) {
-        (FragmentKind::Chat | FragmentKind::Agent | FragmentKind::Skills, _) => Err(Skip::NotAnApp),
-        (_, Visibility::Members) => Err(Skip::MembersOnly),
-        (FragmentKind::App | FragmentKind::Brain, Visibility::Public) => Ok(Visitor::Anyone),
-        (FragmentKind::App | FragmentKind::Brain, Visibility::Link) => Ok(Visitor::LinkHolder),
+    is_app(kind)?;
+    match visibility {
+        Visibility::Members => Err(Skip::MembersOnly),
+        Visibility::Public => Ok(Visitor::Anyone),
+        Visibility::Link => Ok(Visitor::LinkHolder),
     }
 }
 
@@ -140,7 +161,7 @@ pub fn visit(origin: &str, visitor: Visitor, view_token: &str) -> Visit {
     }
 }
 
-/// Why a shot's bytes are no card.
+/// Why an image (a shot's, or an upload's) is no card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageFault {
@@ -153,15 +174,17 @@ pub enum ImageFault {
 impl ImageFault {
     pub fn message(self) -> String {
         match self {
-            ImageFault::Empty => "the shot is empty".into(),
-            ImageFault::TooLarge { size } => format!("the shot is {size} bytes, over the {BYTES_MAX} a card holds"),
-            ImageFault::NotJpeg => "the shot is no JPEG".into(),
-            ImageFault::Size { width, height } => format!("the shot is {width}×{height}, not {WIDTH}×{HEIGHT}"),
+            ImageFault::Empty => "the image is empty".into(),
+            ImageFault::TooLarge { size } => format!("the image is {size} bytes, over the {BYTES_MAX} a card holds"),
+            ImageFault::NotJpeg => "the image is no JPEG: a card is one".into(),
+            ImageFault::Size { width, height } => format!("the image is {width}×{height}, not the card's {WIDTH}×{HEIGHT}"),
         }
     }
 }
 
-/// Whether `bytes` are a card: a JPEG of the viewport's size, within the cap.
+/// Whether `bytes` are a card: a JPEG of the viewport's size, within the
+/// cap. An upload is held to it too, so every card is one shape, which the
+/// shell lays out without asking.
 pub fn check_image(bytes: &[u8]) -> Result<(), ImageFault> {
     if bytes.is_empty() {
         return Err(ImageFault::Empty);
@@ -344,7 +367,10 @@ impl Pace {
 
 /// A fragment's card and its schedule, kept whole (cell/src/card.rs keeps
 /// it as one JSON value). Keys it does not know are ignored: the `flight`
-/// a cell before the alarm took its own shots kept is one.
+/// a cell before the alarm took its own shots kept is one, and so are
+/// `keep_upload` and `asked_at` to the release before them, which reads
+/// the rest, an upload as a card (`Card` and `Wanted` refuse keys they do
+/// not know: new facts go here, never there).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cards {
     /// The card kept now.
@@ -354,6 +380,14 @@ pub struct Cards {
     /// What the page reported to the last try that ended its live's tries
     /// having opened it.
     pub page: Option<PageReport>,
+    /// The card is an editor's upload, which shots leave (`upload`): they
+    /// still open the page, for its report. Asking for a shot again
+    /// (`again`) lets the next shot replace it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_upload: bool,
+    /// When a shot was last asked for again (`again`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,11 +396,19 @@ pub struct Card {
     /// The image's blob (its SHA-256).
     pub blob: String,
     pub size: u64,
-    /// The live commit it shows.
+    /// The live commit it shows; empty for an upload, which shows none.
     pub live: String,
-    /// The try that took it.
+    /// The try that took it; 0 for an upload, which no try took.
     pub attempt: u32,
     pub at_ms: i64,
+}
+
+impl Card {
+    /// Whether an editor uploaded it (`Cards::upload`) rather than a shot
+    /// took it.
+    pub fn uploaded(&self) -> bool {
+        self.attempt == 0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -396,8 +438,23 @@ pub struct Shot {
 pub enum Fault {
     /// A live that is no commit id.
     Live,
-    /// A shot whose blob is no SHA-256, or whose size is none.
+    /// A shot or an upload whose blob is no SHA-256, or whose size is none
+    /// or over `BYTES_MAX`.
     Blob,
+    /// A shot asked for again within `AGAIN_EVERY_MS` of the last ask; the
+    /// next may be asked in `wait_ms`.
+    TooSoon { wait_ms: i64 },
+}
+
+/// A shot asked for again (`Cards::again`): of which live, and its tries'
+/// `since`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Asked {
+    pub live: String,
+    pub since: i64,
+    /// A shot of that live was wanted already (a deploy's, or an ask's):
+    /// the ask is that one, and costs no other.
+    pub joined: bool,
 }
 
 /// What the schedule asks for now.
@@ -426,6 +483,9 @@ pub enum Outcome {
 pub enum Verdict {
     /// The shot is the card now.
     Kept,
+    /// The card is an editor's upload, which shots leave: the shot ends
+    /// its live's tries (what it heard is the page's report) and is no card.
+    LeftUpload,
     /// The schedule moved on while the shot was out (a newer live, or the
     /// card's own live again): dropped.
     Stale,
@@ -507,6 +567,11 @@ impl Cards {
         }
         let w = self.wanted.as_mut().expect("a current shot has its live wanted");
         Ok(match outcome {
+            Outcome::Image { .. } if self.keep_upload => {
+                assert!(self.card.as_ref().is_some_and(Card::uploaded), "an upload kept is the card");
+                self.wanted = None;
+                Verdict::LeftUpload
+            }
             Outcome::Image { blob, size } => {
                 self.card = Some(Card { blob, size, live: shot.live.clone(), attempt: shot.attempt, at_ms: now });
                 self.wanted = None;
@@ -526,15 +591,59 @@ impl Cards {
 
     /// What a try that opened the page heard, once it has landed: the
     /// page's report when the try ended its live's tries (`Kept`,
-    /// `GaveUp`); a retry's and a stale try's are dropped. Answers the
-    /// report it made.
+    /// `LeftUpload`, `GaveUp`); a retry's and a stale try's are dropped.
+    /// Answers the report it made.
     pub fn report(&mut self, verdict: &Verdict, live: &str, heard: Heard, now: i64) -> Option<&PageReport> {
         assert!(valid_live(live), "a shot names a commit");
-        if !matches!(verdict, Verdict::Kept | Verdict::GaveUp { .. }) {
+        if !matches!(verdict, Verdict::Kept | Verdict::LeftUpload | Verdict::GaveUp { .. }) {
             return None;
         }
         self.page = Some(PageReport { live: live.to_string(), at: now, errors: heard.errors, dropped: heard.dropped });
         self.page.as_ref()
+    }
+
+    /// An editor asks for a shot of `live` (live as it is now) again: a
+    /// card that looks wrong (shot as the page loaded, or of data since
+    /// changed), or an upload they want a shot in place of. The next shot
+    /// replaces the card, an upload too. A shot of `live` already wanted
+    /// is the one (`joined`); else one is wanted now, from its first try,
+    /// at most one ask each `AGAIN_EVERY_MS` (`TooSoon`, changing nothing).
+    /// The cell asks first whether the fragment is shot at all
+    /// (`visitor`, the owner's ledger).
+    pub fn again(&mut self, live: &str, now: i64) -> Result<Asked, Fault> {
+        if !valid_live(live) {
+            return Err(Fault::Live);
+        }
+        if let Some(w) = self.wanted.as_ref().filter(|w| w.live == live) {
+            let asked = Asked { live: w.live.clone(), since: w.since, joined: true };
+            self.keep_upload = false;
+            return Ok(asked);
+        }
+        // an ask a clock that went back puts in the future refuses none
+        if let Some(wait_ms) = self.asked_at.map(|at| at + AGAIN_EVERY_MS - now).filter(|w| (1..=AGAIN_EVERY_MS).contains(w)) {
+            return Err(Fault::TooSoon { wait_ms });
+        }
+        self.wanted = Some(Wanted { live: live.to_string(), since: now, failures: 0, next_at: now });
+        self.keep_upload = false;
+        self.asked_at = Some(now);
+        Ok(Asked { live: live.to_string(), since: now, joined: false })
+    }
+
+    /// An editor's image is the card: checked (`check_image`) and stored as
+    /// this blob. Shots leave it (`LeftUpload`), a deploy's and one out now
+    /// alike, until a shot is asked for again (`again`) or another image is
+    /// uploaded. Answers whether it changed anything: the same image again
+    /// does not.
+    pub fn upload(&mut self, blob: &str, size: u64, now: i64) -> Result<bool, Fault> {
+        if !crate::blob::valid_sha(blob) || size == 0 || size > BYTES_MAX as u64 {
+            return Err(Fault::Blob);
+        }
+        if self.keep_upload && self.card.as_ref().is_some_and(|c| c.blob == blob) {
+            return Ok(false);
+        }
+        self.card = Some(Card { blob: blob.to_string(), size, live: String::new(), attempt: 0, at_ms: now });
+        self.keep_upload = true;
+        Ok(true)
     }
 }
 
@@ -764,18 +873,199 @@ mod tests {
         assert_eq!((c.next(T0, PACE), c.due(T0)), (Next::Idle, None));
     }
 
+    /// A deploy of `live` shot and kept at `now`.
+    fn shot_card(c: &mut Cards, live: &str, n: u8, now: i64) {
+        c.want(live, now).unwrap();
+        let s = shoot(c, now);
+        assert_eq!(c.landed(&s, image(n), now, PACE), Ok(Verdict::Kept));
+    }
+
+    /// Goal: an editor's ask shoots the live the card shows again, as a
+    /// shot of its own (its tries, its meter reference), which replaces
+    /// the card; at most one ask a minute, a refused one changing nothing.
+    /// Method: a deploy's card, an ask, its shot; asks within the minute
+    /// and after it.
+    #[test]
+    fn asking_again_shoots_the_live_again() {
+        let mut c = Cards::default();
+        shot_card(&mut c, A, 1, T0);
+        assert_eq!(c.want(A, T0 + 1), Ok(false), "a deploy of the live the card shows wants nothing");
+        let t = T0 + 5_000;
+        assert_eq!(c.again(A, t), Ok(Asked { live: A.into(), since: t, joined: false }));
+        assert_eq!((c.due_at(), c.asked_at), (Some(t), Some(t)));
+        let s = shoot(&mut c, t);
+        assert_eq!(s, Shot { live: A.into(), since: t, attempt: 1 });
+        assert_ne!(meter_ref("k", &s), meter_ref("k", &Shot { live: A.into(), since: T0, attempt: 1 }), "billed as a shot of its own");
+        assert_eq!(c.landed(&s, image(2), t + 2_000, PACE), Ok(Verdict::Kept));
+        assert_eq!(c.card, Some(Card { blob: blob(2), size: 40_000, live: A.into(), attempt: 1, at_ms: t + 2_000 }));
+        // within the minute: refused, saying how long is left, nothing changed
+        let before = c.clone();
+        assert_eq!(c.again(A, t + 2_000), Err(Fault::TooSoon { wait_ms: AGAIN_EVERY_MS - 2_000 }));
+        assert_eq!(c.again(A, t + AGAIN_EVERY_MS - 1), Err(Fault::TooSoon { wait_ms: 1 }));
+        assert_eq!(c, before);
+        // a minute on, again; and a deploy is never held to the minute
+        assert_eq!(c.again(A, t + AGAIN_EVERY_MS).map(|a| a.joined), Ok(false));
+        assert_eq!(c.want(B, t + AGAIN_EVERY_MS + 1), Ok(true), "a deploy meanwhile is the newest: it is shot");
+        assert_eq!(c.wanted.as_ref().map(|w| w.live.as_str()), Some(B));
+        // a deploy's card, then an ask at once: not held to the minute either
+        let mut d = Cards::default();
+        shot_card(&mut d, A, 1, T0);
+        assert_eq!(d.again(A, T0 + 1).map(|a| a.joined), Ok(false));
+    }
+
+    /// Goal: an ask while a shot of the live is wanted (a deploy's, or an
+    /// ask's, waiting or out) is that shot: no other is begun, the minute
+    /// is not counted, and asking again changes nothing (a replay).
+    /// Method: ask while a deploy's shot waits, while it is out, and twice.
+    #[test]
+    fn asking_again_joins_a_shot_wanted() {
+        let mut c = Cards::default();
+        c.want(A, T0).unwrap();
+        let before = c.clone();
+        assert_eq!(c.again(A, T0 + 1), Ok(Asked { live: A.into(), since: T0, joined: true }));
+        assert_eq!(c.again(A, T0 + 2), Ok(Asked { live: A.into(), since: T0, joined: true }));
+        assert_eq!(c, before, "joining changes nothing, nor counts toward the minute");
+        let s = shoot(&mut c, T0 + 3);
+        let out = c.clone();
+        assert_eq!(c.again(A, T0 + 4).map(|a| (a.since, a.joined)), Ok((T0, true)), "the shot out is the one");
+        assert_eq!(c, out);
+        assert_eq!(c.landed(&s, image(1), T0 + 5, PACE), Ok(Verdict::Kept), "it lands as the deploy's");
+        // an ask's shot, asked for again before it lands: the same
+        let t = T0 + 10;
+        let first = c.again(A, t).unwrap();
+        assert_eq!(c.again(A, t + 1), Ok(Asked { joined: true, ..first }));
+    }
+
+    /// Goal: an upload is the card at once, and stays: a deploy is still
+    /// shot (its report is the page's) and its shot leaves it, as does a
+    /// shot out when it came; another upload replaces it; asking for a
+    /// shot again lets the next shot replace it, the one asked for or a
+    /// deploy's out then. Method: each in turn.
+    #[test]
+    fn an_upload_is_the_card_until_a_shot_is_asked_for_again() {
+        let mut c = Cards::default();
+        assert_eq!(c.upload(&blob(9), 30_000, T0), Ok(true), "a fragment with no card yet takes one");
+        assert_eq!(c.card, Some(Card { blob: blob(9), size: 30_000, live: String::new(), attempt: 0, at_ms: T0 }));
+        assert!(c.keep_upload && c.card.as_ref().is_some_and(Card::uploaded));
+        // a deploy is shot, for its report, and leaves the upload
+        assert_eq!(c.want(A, T0 + 1), Ok(true));
+        let s = shoot(&mut c, T0 + 1);
+        let v = c.landed(&s, image(1), T0 + 2, PACE).unwrap();
+        assert_eq!(v, Verdict::LeftUpload);
+        assert_eq!(c.report(&v, A, Heard::default(), T0 + 2).map(|p| p.live.as_str()), Some(A), "its report is the page's");
+        assert_eq!((c.card.as_ref().map(|k| k.blob.clone()), c.wanted.clone()), (Some(blob(9)), None));
+        // an upload while a deploy's shot is out: the shot lands and leaves it
+        c.want(B, T0 + 3).unwrap();
+        let s = shoot(&mut c, T0 + 3);
+        assert_eq!(c.upload(&blob(8), 20_000, T0 + 4), Ok(true));
+        assert_eq!(c.landed(&s, image(2), T0 + 5, PACE), Ok(Verdict::LeftUpload));
+        assert_eq!(c.card.as_ref().map(|k| (k.blob.clone(), k.attempt)), Some((blob(8), 0)));
+        // asked for again: its shot replaces the upload
+        let asked = c.again(B, T0 + 6).unwrap();
+        assert!(!asked.joined && !c.keep_upload);
+        assert_eq!(c.card.as_ref().map(|k| k.blob.clone()), Some(blob(8)), "the upload serves until the shot lands");
+        let s = shoot(&mut c, T0 + 6);
+        assert_eq!(c.landed(&s, image(3), T0 + 7, PACE), Ok(Verdict::Kept));
+        assert_eq!(c.card, Some(Card { blob: blob(3), size: 40_000, live: B.into(), attempt: 1, at_ms: T0 + 7 }));
+        // and the next deploy's replaces that, as before any upload
+        shot_card(&mut c, C, 4, T0 + 8);
+        assert_eq!(c.card.as_ref().map(|k| k.live.as_str()), Some(C));
+        // an ask while a deploy's shot is out over an upload joins it: that shot replaces it
+        c.upload(&blob(7), 10_000, T0 + 9).unwrap();
+        c.want(A, T0 + 10).unwrap();
+        let s = shoot(&mut c, T0 + 10);
+        assert_eq!(c.again(A, T0 + 11).map(|a| a.joined), Ok(true));
+        assert_eq!(c.landed(&s, image(5), T0 + 12, PACE), Ok(Verdict::Kept));
+        assert_eq!(c.card.as_ref().map(|k| (k.blob.clone(), k.live.as_str())), Some((blob(5), A)));
+        // an ask whose shot is given up leaves the upload, which the next deploy's shot replaces
+        c.upload(&blob(6), 10_000, T0 + 13).unwrap();
+        let t = T0 + 20 + AGAIN_EVERY_MS;
+        c.again(A, t).unwrap();
+        let s = shoot(&mut c, t);
+        assert_eq!(c.landed(&s, Outcome::Failed { retry: false }, t, PACE), Ok(Verdict::GaveUp { failures: 1 }));
+        assert_eq!(c.card.as_ref().map(|k| k.blob.clone()), Some(blob(6)));
+        shot_card(&mut c, B, 2, t + 1);
+        assert_eq!(c.card.as_ref().map(|k| k.live.as_str()), Some(B));
+    }
+
+    /// Goal: what an ask or an upload refuses, it refuses typed and
+    /// unchanged, and the same upload again changes nothing (a replay).
+    /// Method: lives and blobs that are none; an ask the clock puts in the
+    /// future; an upload twice.
+    #[test]
+    fn asks_and_uploads_refuse_what_is_none() {
+        let mut c = Cards::default();
+        shot_card(&mut c, A, 1, T0);
+        let before = c.clone();
+        for bad in ["", "abc", "g".repeat(40).as_str()] {
+            assert_eq!(c.again(bad, T0), Err(Fault::Live), "{bad:?}");
+        }
+        for (b, size) in [("x".to_string(), 1), (blob(2), 0), (blob(2), BYTES_MAX as u64 + 1)] {
+            assert_eq!(c.upload(&b, size, T0), Err(Fault::Blob), "{b} {size}");
+        }
+        assert_eq!(c, before, "a refusal changes nothing");
+        assert_eq!(c.upload(&blob(2), BYTES_MAX as u64, T0 + 1), Ok(true), "exactly the cap is a card");
+        let kept = c.clone();
+        assert_eq!(c.upload(&blob(2), BYTES_MAX as u64, T0 + 2), Ok(false), "the same image again");
+        assert_eq!(c, kept);
+        // an ask the clock puts in the future (it went back) refuses none
+        c.asked_at = Some(T0 + 10 * AGAIN_EVERY_MS);
+        assert_eq!(c.again(A, T0 + 3).map(|a| a.joined), Ok(false));
+    }
+
+    /// Goal: an upload and an ask survive a restart, and the state reads
+    /// both ways across the release that added them: a state from before
+    /// reads as no upload kept and no ask; this one's reads in the release
+    /// before (its `Card` and `Wanted` refuse keys they do not know), its
+    /// upload as a card. Method: round-trips through JSON, and through the
+    /// shape the release before kept.
+    #[test]
+    fn an_upload_and_an_ask_survive_a_restart_and_a_rollback() {
+        /// The schedule as the release before this one read it.
+        #[derive(Deserialize)]
+        struct Before {
+            card: Option<Card>,
+            wanted: Option<Wanted>,
+            #[allow(dead_code)]
+            page: Option<PageReport>,
+        }
+        let mut c = Cards::default();
+        c.upload(&blob(9), 30_000, T0).unwrap();
+        c.want(A, T0 + 1).unwrap();
+        let s = shoot(&mut c, T0 + 1);
+        let text = serde_json::to_string(&c).unwrap();
+        let mut back: Cards = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, c);
+        assert_eq!(back.landed(&s, image(1), T0 + 2, PACE), Ok(Verdict::LeftUpload), "the upload is kept after the restart");
+        let before: Before = serde_json::from_str(&text).unwrap();
+        assert_eq!((before.card.map(|k| (k.blob, k.attempt)), before.wanted.map(|w| w.live)), (Some((blob(9), 0)), Some(A.to_string())));
+        let t = T0 + 5;
+        back.again(A, t).unwrap();
+        let text = serde_json::to_string(&back).unwrap();
+        let mut again: Cards = serde_json::from_str(&text).unwrap();
+        assert_eq!(again, back);
+        assert_eq!(again.again(A, t + 1).map(|a| a.joined), Ok(true), "the ask's shot is still the one");
+        assert!(serde_json::from_str::<Before>(&text).is_ok());
+        // a state from before reads as no upload kept and no ask, and one with neither writes as it did
+        let old: Cards = serde_json::from_value(serde_json::json!({ "card": { "blob": blob(1), "size": 40_000, "live": A, "attempt": 1, "at_ms": T0 }, "wanted": null, "page": null })).unwrap();
+        assert_eq!((old.keep_upload, old.asked_at), (false, None));
+        assert_eq!(serde_json::to_value(&old).unwrap().as_object().map(|o| o.len()), Some(3));
+    }
+
     /// Goal: chats and agents are not shot, members-only fragments are not
     /// shot, and the others are shot as their visitors see them.
     #[test]
     fn who_is_shot_and_as_whom() {
         use FragmentKind::*;
         use Visibility::*;
-        for kind in [Chat, Agent] {
+        for kind in [Chat, Agent, Skills] {
+            assert_eq!(is_app(kind), Err(Skip::NotAnApp));
             for v in [Public, Link, Members] {
                 assert_eq!(visitor(kind, v), Err(Skip::NotAnApp));
             }
         }
         for kind in [App, Brain] {
+            assert_eq!(is_app(kind), Ok(()), "an app takes an upload, members-only or not");
             assert_eq!(visitor(kind, Public), Ok(Visitor::Anyone));
             assert_eq!(visitor(kind, Link), Ok(Visitor::LinkHolder));
             assert_eq!(visitor(kind, Members), Err(Skip::MembersOnly));

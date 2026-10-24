@@ -435,7 +435,8 @@ fn preview_cards(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let lever = |name: &str, times: u64| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "fail-cards", "times": times })));
 
     // a members-only fragment's page is a refusal to a visitor: it has no card
-    let name = s.named(api, owner, "site-members")?;
+    let members = s.named(api, owner, "site-members")?;
+    let name = members.clone();
     let c = s.create(api, owner, &name)?;
     api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
     s.commit(&c, &[("site/index.html", Some(page))]);
@@ -480,7 +481,120 @@ fn preview_cards(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     );
     let site = api.page(&name, &format!("?view={view}"), None)?;
     s.ok("and the fragment serves its page all the same", site.status == 200 && site.text.contains("a card"), &site);
+    card_asks(s, api, owner, &members)?;
     page_errors(s, api, owner, page)
+}
+
+/// A JPEG header of `w` × `h` (SOI, SOF0, EOI): what `card::check_image`
+/// reads, and no picture.
+fn jpeg_header(w: u16, h: u16) -> Vec<u8> {
+    let mut b = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08];
+    b.extend(h.to_be_bytes());
+    b.extend(w.to_be_bytes());
+    b.extend([0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01, 0xFF, 0xD9]);
+    b
+}
+
+/// An editor's asks of a card (docs/api.md, Cards): an image of their own,
+/// which a deploy's shot leaves, and a shot asked for again, which
+/// replaces it; each refused where it must be, saying why. `members` is
+/// a members-only fragment's name, deployed.
+fn card_asks(s: &mut Suite, api: &Api, owner: &Keys, members: &str) -> Result<()> {
+    let page: &[u8] = b"<!doctype html><title>asks</title><h1 style=\"font:64px system-ui\">asked</h1>";
+    let (viewer, editor) = (api.person()?, api.person()?);
+    let name = s.named(api, owner, "site-asks")?;
+    let c = s.create(api, owner, &name)?;
+    api.share(&name, viewer.pubkey_hex(), "viewer")?;
+    api.share(&name, editor.pubkey_hex(), "editor")?;
+    let ask = |keys: &Keys, name: &str| api.signed(keys, "POST", &format!("/api/f/{name}/card"), None);
+    let put = |keys: &Keys, name: &str, body: Vec<u8>| {
+        api.call(Call { method: "PUT", url: format!("{}/api/f/{name}/card", api.base), body: Some(body), content_type: Some("image/jpeg"), keys: Some(keys), ..Call::default() })
+    };
+    let get = |keys: &Keys, name: &str| api.signed(keys, "GET", &format!("/api/f/{name}/card"), None);
+    let r = ask(&editor, &name)?;
+    s.ok("a shot asked for again with nothing deployed is refused, 400, saying so", r.status == 400 && r.message().contains("nothing is deployed"), &r);
+    s.commit(&c, &[("site/index.html", Some(page))]);
+    let first = s.deploy(&c);
+    let shot = card_showing(s, api, owner, &name, &first);
+    s.ok("(the fragment asked of has its deploy's card)", shot.as_ref().is_some_and(is_card), card_detail(&shot));
+    let shot = shot.map(|r| r.bytes).unwrap_or_default();
+
+    // an upload: a real card's JPEG made other bytes by a comment segment after its start
+    let mut mine = vec![0xFF, 0xD8, 0xFF, 0xFE, 0x00, 0x0C];
+    mine.extend_from_slice(b"e2e upload");
+    mine.extend_from_slice(shot.get(2..).unwrap_or_default());
+    let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&mine));
+    let before = cards(api, &name);
+    let r = put(&viewer, &name, mine.clone())?;
+    s.ok("a viewer may not upload a card (403)", r.status == 403, &r);
+    let r = put(owner, &name, b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec())?;
+    s.ok("an upload that is no JPEG is refused, 400, saying so", r.status == 400 && r.message().contains("no JPEG"), &r);
+    let r = put(owner, &name, jpeg_header(640, 400))?;
+    s.ok("one of another size is refused, 400, naming both", r.status == 400 && r.message().contains("640×400") && r.message().contains("1280×800"), &r);
+    let mut big = mine.clone();
+    big.resize(fragment_core::card::BYTES_MAX + 1, 0);
+    let r = put(owner, &name, big)?;
+    s.ok("one over 512 KiB is refused, 413", r.status == 413 && r.message().contains("over the 524288"), &r);
+    let r = put(owner, &name, vec![])?;
+    s.ok("an empty one is refused, 400", r.status == 400 && r.message().contains("empty"), &r);
+    let after = cards(api, &name);
+    s.ok("and a refused upload changes nothing", after["cards"] == before["cards"], json!({ "before": before, "after": after }));
+    let r = put(&editor, &name, mine.clone())?;
+    s.ok("an editor uploads a card: a JPEG of 1280×800, its blob named", r.status == 200 && r.body["blob"] == sha.as_str() && r.body["size"] == mine.len(), &r);
+    let r = get(&viewer, &name)?;
+    let kept = cards(api, &name);
+    s.ok(
+        "it is the card at once, for its members: its bytes, tagged by them, naming no live (it shows no commit)",
+        is_card(&r) && r.bytes == mine && r.header("etag") == format!("\"{sha}\"") && r.headers.get("x-fragment-ref").is_none() && kept["cards"]["keep_upload"] == true && kept["cards"]["card"]["attempt"] == 0,
+        json!({ "card": card_detail(&Some(r)), "cards": kept }),
+    );
+    let r = put(&editor, &name, mine.clone())?;
+    let uploaded = event_kinds(api, owner, &name).iter().filter(|k| *k == "card.uploaded").count();
+    s.ok("the same image again changes nothing: one card.uploaded event", r.status == 200 && uploaded == 1 && cards(api, &name)["cards"] == kept["cards"], json!({ "uploaded": uploaded }));
+
+    // a deploy is still shot, for the page's report, and leaves the upload
+    s.commit(&c, &[("site/index.html", Some(b"<!doctype html><title>asks</title><h1>asked again</h1>"))]);
+    let second = s.deploy(&c);
+    let reported = s.eventually(CARD_WAIT, || {
+        api.signed(owner, "GET", &format!("/api/f/{name}/status"), None).is_ok_and(|r| r.body["page"]["live"] == second.as_str())
+    });
+    let r = get(owner, &name)?;
+    s.ok(
+        "a later deploy is shot all the same (its page report says so), and its shot leaves the uploaded card",
+        reported && r.header("etag") == format!("\"{sha}\"") && cards(api, &name)["cards"]["keep_upload"] == true,
+        json!({ "reported": reported, "card": card_detail(&Some(r)), "cards": cards(api, &name) }),
+    );
+
+    // a shot asked for again replaces it
+    let r = ask(&viewer, &name)?;
+    s.ok("a viewer may not ask for a shot again (403)", r.status == 403, &r);
+    let asked = ask(&editor, &name)?;
+    s.ok("an editor asks for a shot of the live again", asked.status == 200 && asked.body["live"] == second.as_str() && asked.body["joined"] == false, &asked);
+    let r = ask(&editor, &name)?;
+    s.ok("asked again while that shot is wanted, the ask is that shot", r.status == 200 && r.body["joined"] == true && r.body["since"] == asked.body["since"], &r);
+    let card = card_showing(s, api, owner, &name, &second);
+    let kept = cards(api, &name);
+    s.ok(
+        "its shot replaces the uploaded card: a shot of the live, as a deploy's",
+        card.as_ref().is_some_and(|r| is_card(r) && r.header("etag") != format!("\"{sha}\""))
+            && kept["cards"]["keep_upload"].is_null()
+            && kept["cards"]["card"]["attempt"].as_u64().is_some_and(|a| a >= 1),
+        json!({ "card": card_detail(&card), "cards": kept }),
+    );
+    let r = ask(&editor, &name)?;
+    s.ok("another ask within the minute is refused, 429, saying how long is left", r.status == 429 && r.message().contains("ask in"), &r);
+
+    // a members-only app is not shot, but takes an upload
+    let r = ask(owner, members)?;
+    s.ok("a shot asked for again of a members-only fragment is refused, 400, saying why", r.status == 400 && r.message().contains("members-only"), &r);
+    let r = put(owner, members, mine.clone())?;
+    let card = get(owner, members)?;
+    s.ok(
+        "a members-only app takes an uploaded card all the same",
+        r.status == 200 && is_card(&card) && card.bytes == mine,
+        json!({ "put": r.body, "card": card_detail(&Some(card)) }),
+    );
+    Ok(())
 }
 
 /// What a page reports as its card's shot loads it: on status and in
