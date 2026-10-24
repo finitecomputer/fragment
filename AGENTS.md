@@ -83,9 +83,21 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   files, the agent docs) into `cell/build/assets`, each named by its
   SHA-256: the Worker's Static Assets, which the cell reads by the index
   it carries (cell/src/assets.rs; docs/api.md, The release's files), a
-  deploy uploads, and the e2e's staged copy holds. `wrangler dev`'s
-  rebuild runs it too. A file the cell serves belongs there, not in an
-  `include_bytes!`.
+  deploy uploads, and the e2e's staged copy holds. A file the cell
+  serves belongs there, not in an `include_bytes!`. `cargo xtask build
+  --dev` is `cargo xtask dev`'s build (its first, and `wrangler dev`'s
+  rebuild, cell/wrangler.jsonc): the same source, flags and files, in
+  cell/Cargo.toml's `devstack` profile (the release's without fat LTO
+  into one codegen unit, incremental) and without wasm-opt, so a change
+  to a file of the release (the shell's, a template's) rebuilds in
+  seconds, a Rust change in about half a minute; its Wasm, about 7.7 MB,
+  is held to no budget. Each build marks `cell/build/built` with its
+  profile and its Wasm's SHA-256 (crates/devstack/src/built.rs), and a
+  deploy and the e2e's staging refuse any build but the release's,
+  finished. A build holds `cell/build.lock` alone from its start to its
+  mark; the e2e's staging (while it copies) and a deploy (through every
+  wrangler try) hold it shared, so a rebuild waits for them, and they
+  for it.
 - `cargo xtask check`: every first-party JavaScript file (`.js`, `.mjs`,
   `.cjs` git tracks or would add, less the vendored ones) through `node
   --check` on the pinned Node, each as a module or a classic script as
@@ -214,8 +226,10 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   Paul's or the coordinating session's to run.
 - `cargo xtask dev [--clean] [--real-agent [--models <config>]]`: the dev stack in the foreground under
   `wrangler dev`: the cell on :8790 with fragments at
-  `http://<name>.fragment.localhost:8790/`, which rebuilds
-  when `cell/src` or `crates/` change, the model route and AI steps on
+  `http://<name>.fragment.localhost:8790/`, which rebuilds (`build
+  --dev`, above: seconds for the shell's and the templates' files)
+  when `cell/src`, `cell/shell`, `crates/`, `templates/` or `cli/`
+  change, the model route and AI steps on
   the Workers AI fake on :8796 (echoes, and draws placeholder JPEGs for
   image steps; dev never calls a real model), which spend their payer's
   ledger (dev people are seats, with the month's included credit), the

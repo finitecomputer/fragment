@@ -1,6 +1,9 @@
 //! `cargo xtask <command>`: the repo's tooling, in Rust.
 //!
-//!   build            build cell/ for wasm32 (worker-build 0.8.5: build.rs)
+//!   build [--dev]    build cell/ for wasm32 (worker-build 0.8.5: build.rs);
+//!                    --dev is `dev`'s build (cell/wrangler.jsonc's rebuild):
+//!                    no fat LTO and no wasm-opt, so a change to a file of the
+//!                    release rebuilds in seconds; deploys and the e2e refuse it
 //!   dev [--clean] [--real-agent [--models <config>]]
 //!                    build, then run the stack in the foreground under
 //!                    `wrangler dev`: the cell on :8790 (fragments at
@@ -142,9 +145,18 @@ fn run(cmd: &mut Command) -> Result<()> {
     Ok(())
 }
 
-/// cell/ for wasm32 (build.rs).
+/// cell/ for wasm32, the release's (build.rs).
 fn build() -> Result<()> {
     build::cell()
+}
+
+/// `cargo xtask build [--dev]`.
+fn build_cmd(args: &[String]) -> Result<()> {
+    match args {
+        [] => build(),
+        [dev] if dev == "--dev" => build::cell_as(build::Profile::Dev),
+        _ => bail!("build takes --dev alone, not {args:?}"),
+    }
 }
 
 /// What `cargo xtask dev` is asked for: `--clean`, `--real-agent`, and
@@ -179,7 +191,8 @@ fn dev(args: &[String]) -> Result<()> {
     // the pinned Node and node_modules first: one that cannot be had stops
     // the run before a build
     let tools = devstack::Tools::locate()?;
-    build()?;
+    // dev's build, as wrangler's rebuild makes it (cell/wrangler.jsonc)
+    build::cell_as(build::Profile::Dev)?;
     let clean = args.clean;
     let state = devstack::repo_root().join("target/devstack/codestorage.json");
     if clean {
@@ -545,7 +558,7 @@ fn skill_installs_release(skill: &str, workflow: &str, copies: &[(&str, String)]
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("build") => build(),
+        Some("build") => build_cmd(&args[1..]),
         Some("dev") => dev(&args[1..]),
         Some("try") => try_template(&args[1..]),
         Some("e2e") => e2e(&args[1..]),
@@ -556,7 +569,7 @@ fn main() -> Result<()> {
         Some("teardown") => deploy::teardown(&args[1..]),
         Some("stripe") => deploy::stripe(&args[1..]),
         Some("image") => image::image(&args[1..]),
-        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build [--dev] | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
     }
 }
 

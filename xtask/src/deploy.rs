@@ -1013,7 +1013,14 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         }
         true => None,
     };
+    // the release's build, finished, as wrangler reads it: never one a
+    // `cargo xtask dev` rebuilt meanwhile, and none rebuilds it until every
+    // try has read it (devstack's built.rs)
+    let build = devstack::cell_dir().join("build");
+    let reading = devstack::built::reading(&build)?;
+    devstack::built::release(&build)?;
     deploy_with_retries(&mut deploy_cell)?;
+    drop(reading);
     drop(test_secrets);
     println!("deployed {deploy_id}:");
     println!("  the platform  {platform_url}/  (sign-in redirect: {platform_url}/auth/callback)");
