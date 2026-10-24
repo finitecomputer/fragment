@@ -1,13 +1,15 @@
 //! `cargo xtask <command>`: the repo's tooling, in Rust.
 //!
 //!   build            build cell/ for wasm32 (worker-build 0.8.5: build.rs)
-//!   dev [--clean]    build, then run the stack in the foreground under
+//!   dev [--clean] [--real-agent [--models <config>]]
+//!                    build, then run the stack in the foreground under
 //!                    `wrangler dev`: the cell on :8790 (fragments at
 //!                    <name>.fragment.localhost:8790), the
 //!                    code.storage fake on :8792, and the Workers AI fake on :8796
 //!                    behind the model route (its calls spend their payer's
 //!                    ledger; new people are seats with the month's included
-//!                    credit)
+//!                    credit); --real-agent runs computers on our Hermes image
+//!                    and text on real models (xtask/src/dev_agent.rs)
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -86,6 +88,7 @@ use fragment_devstack as devstack;
 
 mod build;
 mod deploy;
+mod dev_agent;
 mod dns;
 mod eval_sinks;
 mod guards;
@@ -144,12 +147,40 @@ fn build() -> Result<()> {
     build::cell()
 }
 
+/// What `cargo xtask dev` is asked for: `--clean`, `--real-agent`, and
+/// `--models <config>` with it.
+struct DevArgs {
+    clean: bool,
+    real_agent: bool,
+    models: Option<std::path::PathBuf>,
+}
+
+fn dev_args(args: &[String]) -> Result<DevArgs> {
+    let mut out = DevArgs { clean: false, real_agent: false, models: None };
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--clean" => out.clean = true,
+            "--real-agent" => out.real_agent = true,
+            "--models" => out.models = Some(it.next().context("--models names a deployment's config")?.into()),
+            other => bail!("dev takes --clean, --real-agent and --models <config>, not {other:?}"),
+        }
+    }
+    if out.models.is_some() && !out.real_agent {
+        bail!("--models picks --real-agent's models: name --real-agent too");
+    }
+    Ok(out)
+}
+
 fn dev(args: &[String]) -> Result<()> {
+    let args = dev_args(args)?;
+    // its models and key are read before anything builds
+    let real = args.real_agent.then(|| dev_agent::RealAgent::read(args.models.as_deref())).transpose()?;
     // the pinned Node and node_modules first: one that cannot be had stops
     // the run before a build
     let tools = devstack::Tools::locate()?;
     build()?;
-    let clean = args.iter().any(|a| a == "--clean");
+    let clean = args.clean;
     let state = devstack::repo_root().join("target/devstack/codestorage.json");
     if clean {
         let _ = std::fs::remove_file(&state);
@@ -179,6 +210,12 @@ fn dev(args: &[String]) -> Result<()> {
             (devstack::WorkOsVars { client_id: DEV_WORKOS_CLIENT.into(), api_key: DEV_WORKOS_KEY.into(), api_url: Some(fake.url.clone()) }, Some(fake))
         }
     };
+    // an operator key no person holds, the dev node's own, so a person is
+    // wiped here as on a deployment (`fragment operator wipe`), and signs in
+    // again as a new one: a fresh agent's first run
+    let operator_file = devstack::repo_root().join("target/devstack/operator-key");
+    let operator = devstack::dev_secret("operator-key", || fragment_nip98::Keys::generate().secret_hex())?;
+    let operator = fragment_nip98::Keys::from_secret_hex(operator.trim()).with_context(|| format!("{} holds an operator key (64 hex)", operator_file.display()))?;
     let ai = fragment_fakes::workers_ai::WorkersAi::start(DEV_AI_PORT)?;
     let mailer = fragment_fakes::mail::Mailer::start(DEV_MAIL_PORT, true)?;
     let stripe = fragment_fakes::stripe::Stripe::start(DEV_STRIPE_PORT, DEV_STRIPE_KEY)?;
@@ -199,13 +236,13 @@ fn dev(args: &[String]) -> Result<()> {
         egress_local: true,
         job_retry_delay_s: 2,
         blob_grace_s: None,
-        // text and images: the Workers AI fake (dev never calls a real model),
-        // every tier on it
+        // text and images: the Workers AI fake, every tier on it, unless
+        // --real-agent puts the text tiers on real models
         ai_url: Some(ai.url.clone()),
         ai_gateway: None,
-        models: None,
-        model_key_slots: vec![],
-        model_key_value: None,
+        models: real.as_ref().map(|r| r.models.clone()),
+        model_key_slots: real.as_ref().map(|r| r.slots.clone()).unwrap_or_default(),
+        model_key_value: real.as_ref().map(|r| r.key.clone()),
         // the mail fake, which prints each message (dev never sends real mail)
         mail_url: Some(mailer.url.clone()),
         mail_from: Some(DEV_MAIL_FROM.into()),
@@ -222,11 +259,15 @@ fn dev(args: &[String]) -> Result<()> {
         }),
         // the CLI's host: sign-in and approvals happen where it points
         platform_url: format!("http://127.0.0.1:{DEV_PORT}"),
-        operators: None,
+        operators: Some(fragment_core::npub::encode(operator.pubkey_hex())),
         signins_pending_max: None,
         cli_begins_per_ip_minute: None,
         test_secret: None,
-        computer_image: Some("stub".into()),
+        computer_image: Some(if real.is_some() { dev_agent::RealAgent::IMAGE } else { "stub" }.into()),
+        images: match &real {
+            Some(_) => vec![(dev_agent::RealAgent::IMAGE.into(), devstack::hermes_image())],
+            None => vec![],
+        },
         computer_snapshots: false,
         computer_unsaved_max_ms: None,
         providers: None,
@@ -250,11 +291,18 @@ fn dev(args: &[String]) -> Result<()> {
     println!("  node log:     {}", node.log.display());
     println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");
     println!("  code.storage: {} (the fake)", fake.url);
-    println!("  models:       {} (the Workers AI fake: echoes, never a real model)", ai.url);
+    match &real {
+        Some(r) => {
+            println!("  models:       {} on real models, {}'s (paid by {}'s key); the rest on the Workers AI fake at {}", r.slots.join(", "), r.from.display(), dev_agent::KEY_FILE_ENV, ai.url);
+            println!("  computers:    our Hermes image, built from the tree (its first build takes a while)");
+        }
+        None => println!("  models:       {} (the Workers AI fake: echoes, never a real model; --real-agent for real ones)", ai.url),
+    }
     println!("  seats:        {} (the Stripe fake: its Checkout is a Pay button)", stripe.url);
 
     println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
     println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");
+    println!("  wipe someone: fragment --host http://127.0.0.1:{DEV_PORT} operator wipe <email> --yes --key-file {}", operator_file.display());
     // Ctrl-C stops the node, and xtask outlives it to remove the containers
     // it left (wrangler's teardown removes its computers, not their sidecars)
     devstack::signals::outlive_interrupt()?;
@@ -511,6 +559,21 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// `cargo xtask dev`'s flags: each alone and together; an unknown one,
+    /// `--models` without its config, and `--models` without `--real-agent`
+    /// are refused before anything builds.
+    #[test]
+    fn dev_takes_its_flags_and_refuses_others() {
+        let args = |a: &[&str]| super::dev_args(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let none = args(&[]).unwrap();
+        assert!(!none.clean && !none.real_agent && none.models.is_none());
+        let all = args(&["--real-agent", "--clean", "--models", "preview.jsonc"]).unwrap();
+        assert!(all.clean && all.real_agent && all.models.as_deref() == Some(std::path::Path::new("preview.jsonc")));
+        for bad in [&["--hermes"][..], &["--real-agent", "--models"], &["--models", "preview.jsonc"]] {
+            assert!(args(bad).is_err(), "{bad:?}");
+        }
+    }
+
     /// Git's markers, the diff3 base's included, are caught at a line's
     /// start; text that only mentions one, or a longer rule, is not.
     #[test]
