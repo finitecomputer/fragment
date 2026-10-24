@@ -4,6 +4,7 @@
 //! fragment's own origin exactly as a person's browser would.
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::net::TcpStream;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
@@ -24,6 +25,9 @@ const CHROME_START_WAIT: Duration = Duration::from_secs(30);
 /// all (`reload`), and how many reloads it is given.
 const RELOAD_LOAD: Duration = Duration::from_secs(30);
 const RELOADS_MAX: u32 = 2;
+/// A watched page keeps at most this many of its events; past it, they are
+/// counted (`Watched::dropped`). A small app's page says a few hundred.
+pub const WATCHED_EVENTS_MAX: usize = 20_000;
 
 pub struct Browser {
     child: Child,
@@ -36,6 +40,29 @@ pub struct Browser {
     /// Chrome's own state for this launch, removed when it stops: never
     /// evidence, and tens of megabytes once a page has loaded.
     profile: PathBuf,
+    /// The events of each watched page (`open_watched`), by its session.
+    watched: HashMap<String, Watched>,
+}
+
+/// What a watched page's target said as it loaded and ran (its `Runtime`,
+/// `Log` and `Network` events, as Chrome sent them, in order).
+#[derive(Debug, Clone, Default)]
+pub struct Watched {
+    pub events: Vec<Value>,
+    /// Events past `WATCHED_EVENTS_MAX`, counted and not kept.
+    pub dropped: u64,
+}
+
+impl Watched {
+    /// One more of its events: kept while it holds fewer than
+    /// `WATCHED_EVENTS_MAX`, counted past it (the first ones kept, so what
+    /// it did after them is unread: `dropped` says so).
+    pub fn keep(&mut self, event: Value) {
+        match self.events.len() < WATCHED_EVENTS_MAX {
+            true => self.events.push(event),
+            false => self.dropped += 1,
+        }
+    }
 }
 
 /// One Chrome for a whole run, started when a lane first asks for it.
@@ -184,7 +211,7 @@ impl Browser {
         if let MaybeTlsStream::Plain(s) = ws.get_ref() {
             s.set_read_timeout(Some(Duration::from_secs(30)))?;
         }
-        Ok(Some(Browser { child, ws, next: 0, context: None, others: vec![], profile }))
+        Ok(Some(Browser { child, ws, next: 0, context: None, others: vec![], profile, watched: HashMap::new() }))
     }
 
     /// One Chrome, up: its process, its DevTools socket's URL, and its
@@ -259,6 +286,8 @@ impl Browser {
     /// Disposes of the context, and any more the lease made, closing their pages.
     fn end_context(&mut self) -> Result<()> {
         let id = self.context.take().expect("a browser context to end");
+        // its pages close with it
+        self.watched.clear();
         for other in std::mem::take(&mut self.others) {
             self.send("Target.disposeBrowserContext", json!({ "browserContextId": other }), None)?;
         }
@@ -276,7 +305,8 @@ impl Browser {
         Ok(BrowserContext(id))
     }
 
-    /// Sends one command and waits for its answer (events are skipped).
+    /// Sends one command and waits for its answer (events are skipped, but
+    /// a watched page's, which are kept).
     fn send(&mut self, method: &str, params: Value, session: Option<&str>) -> Result<Value> {
         self.next += 1;
         let id = self.next;
@@ -294,7 +324,52 @@ impl Browser {
                 }
                 return Ok(v["result"].clone());
             }
+            self.keep(v);
         }
+    }
+
+    /// An event of a watched page's, kept (bounded).
+    fn keep(&mut self, event: Value) {
+        if !event["method"].is_string() {
+            return;
+        }
+        if let Some(w) = event["sessionId"].as_str().and_then(|s| self.watched.get_mut(s)) {
+            w.keep(event);
+        }
+    }
+
+    /// Opens `url` in a page whose events are kept from before its first
+    /// document: its uncaught exceptions and console (`Runtime`), what the
+    /// browser logged (`Log`), and its requests and sockets, their frames
+    /// included (`Network`), as a preview card's shot hears a page and more.
+    pub fn open_watched(&mut self, url: &str) -> Result<Page> {
+        let page = self.open("about:blank")?;
+        self.watched.insert(page.session.clone(), Watched::default());
+        for domain in ["Runtime", "Log", "Network"] {
+            self.send(&format!("{domain}.enable"), json!({}), Some(&page.session))?;
+        }
+        self.send("Page.navigate", json!({ "url": url }), Some(&page.session))?;
+        Ok(page)
+    }
+
+    /// What a watched page has said so far: every event Chrome sent before
+    /// a command asked now answers.
+    pub fn watched(&mut self, page: &Page) -> Result<Watched> {
+        anyhow::ensure!(self.watched.contains_key(&page.session), "the page was opened watched");
+        self.send("Runtime.evaluate", json!({ "expression": "0" }), Some(&page.session))?;
+        Ok(self.watched.get(&page.session).cloned().unwrap_or_default())
+    }
+
+    /// The body of a response a watched page had (its request's id, from its
+    /// `Network` events), as text; while the page is open.
+    pub fn response_body(&mut self, page: &Page, request: &str) -> Result<String> {
+        use base64::Engine;
+        let r = self.send("Network.getResponseBody", json!({ "requestId": request }), Some(&page.session))?;
+        let body = r["body"].as_str().unwrap_or_default();
+        Ok(match r["base64Encoded"].as_bool() {
+            Some(true) => String::from_utf8_lossy(&base64::engine::general_purpose::STANDARD.decode(body)?).into_owned(),
+            _ => body.to_string(),
+        })
     }
 
     pub fn open(&mut self, url: &str) -> Result<Page> {
@@ -351,6 +426,7 @@ impl Browser {
     }
 
     pub fn close(&mut self, page: Page) -> Result<()> {
+        self.watched.remove(&page.session);
         self.send("Target.closeTarget", json!({ "targetId": page.target }), None)?;
         Ok(())
     }
