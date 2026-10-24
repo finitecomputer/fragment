@@ -67,8 +67,13 @@
     if (!r.ok) throw new Error(body.message || `${r.status}`);
     return body;
   }
+  // each change of the link moves this on: a poll begun before it is
+  // obsolete, success or failure, and changes nothing it shows
+  let epoch = 0;
   async function act(path, confirmWith) {
     if (confirmWith && !window.confirm(confirmWith)) return;
+    epoch++;
+    clearTimeout(timer);
     busy = true;
     render();
     try {
@@ -81,11 +86,16 @@
     schedule();
   }
   async function refresh() {
+    const at = epoch;
+    if (busy) return schedule();
+    let got;
     try {
-      view = await ask("GET", "state");
+      got = await ask("GET", "state");
     } catch (e) {
-      view = { error: e.message };
+      got = { error: e.message };
     }
+    if (at !== epoch || busy) return;
+    view = got;
     render();
     schedule();
   }
@@ -122,9 +132,16 @@
         main.append(a, el("p", "private", PRIVATE), ...why());
         break;
       }
-      case "asking":
+      case "asking": {
         main.append(el("h1", null, `Message ${name} from SimpleX`), el("p", "muted", "Making your link…"), ...why());
+        // stuck (SimpleX would not start, or stopped too often): its way on
+        if (view.why) {
+          const a = el("div", "actions");
+          a.append(button("Try again", "primary", () => act("link")), button("Cancel", null, () => act("unlink")));
+          main.append(a);
+        }
         break;
+      }
       case "inviting": {
         main.append(el("h1", null, `Link SimpleX to ${name}`));
         const steps = el("ol");

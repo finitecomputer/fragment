@@ -122,5 +122,8 @@ mod tests {
         }
         assert!(!PAGE.contains("fetch(\"/"), "no absolute path: it runs under /p/6080/");
         assert!(PAGE.contains("encrypted between your SimpleX app and your computer"));
+        // Alex's review: a stuck link has its way on, and a poll begun before a change shows nothing
+        assert!(PAGE.contains("button(\"Try again\", \"primary\", () => act(\"link\"))"));
+        assert!(PAGE.contains("if (at !== epoch || busy) return;"));
     }
 }
