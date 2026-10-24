@@ -597,8 +597,12 @@ state is persisted as a chat record. It posts:
   is pressed again, or Send, or 5 minutes pass, then sends the clip as
   the message's audio file with whatever was typed (the x lets it go).
   The mic is enabled for editors alone, as uploads are; while it records,
-  a quiet clock shows beside it, and a microphone the browser refused, or
-  a recorder that failed, says so in the page's banner.
+  a quiet clock shows beside it. Before the browser's own prompt, a card
+  above the composer says what the mic is for and asks only on Continue
+  (shown once in a browser that cannot say whether it would ask:
+  `localStorage`); a microphone the browser refused shows a card saying
+  where to allow it again (the browser's settings), with Okay; a recorder
+  that failed says so in the page's banner.
 
 Its person's presence on the fragment is `{typing, looking}`: `typing`
 while they write, and `looking` while the chat is on screen

@@ -547,6 +547,10 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let bubbles = |chrome: &mut Browser| chrome.eval(&page, "document.querySelectorAll('.msg.user.mine').length").ok().and_then(|v| v.as_u64()).unwrap_or(0);
     let before = bubbles(&mut chrome);
     chrome.click(&page, "#record")?;
+    // the first press says what the mic is for, and asks the browser only on Continue
+    let card = "(() => { const c = document.getElementById('mic-card'); return !c.hidden && c.dataset.kind === 'ask' && !document.getElementById('record').classList.contains('on'); })()";
+    s.ok("the first press shows the microphone's card, asking nothing of the browser yet", shows(&mut chrome, &page, card), "");
+    chrome.click(&page, "#mic-card-go")?;
     let recording = format!("{mic}.classList.contains('on') && !document.getElementById('recording').hidden && !document.getElementById('discard').hidden");
     let on = shows(&mut chrome, &page, &recording);
     std::thread::sleep(Duration::from_millis(800));

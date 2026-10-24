@@ -230,10 +230,18 @@ function show(spec) {
 function frameOf(src, title, name = null) {
   const frame = el("iframe");
   frame.setAttribute("aria-label", title);
-  frame.src = src;
   frame.allow = "clipboard-write; microphone";
-  if (name) frame.dataset.fragment = name;
   frame.dataset.src = src;
+  if (name) {
+    // A bare `microphone` is the src's origin's, the mint's on this page's;
+    // the page lands at the fragment's own, which the browser would refuse
+    // without asking. So it names that origin before the frame navigates
+    // (a policy is read as a navigation starts), and loads regardless.
+    frame.dataset.fragment = name;
+    originOf(name)
+      .then((origin) => { frame.allow = `clipboard-write; microphone ${origin}`; }, () => {})
+      .finally(() => { if (!frame.hasAttribute("src")) frame.src = src; });
+  } else frame.src = src;
   frame.addEventListener("load", () => theme(frame));
   return frame;
 }
