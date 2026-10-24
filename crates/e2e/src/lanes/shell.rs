@@ -1164,6 +1164,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = b.screenshot(&page, &shots.join("desktop-app-card.png"));
     b.eval(&page, &format!("({icon}?.dispatchEvent(new PointerEvent('pointerleave')), true)"))?;
     let _ = b.screenshot(&page, &shots.join("desktop-app.png"));
+    icon_ui(s, &mut b, &page, &groceries, &shots)?;
     compose_elsewhere_ui(s, api, &mut b, &page, &session, &asked_in, &groceries)?;
     open_beside_ui(s, api, &mut b, &page, &me, &groceries, &shots)?;
     sidebar_live(s, api, &mut b, &page, &session, &shots)?;
@@ -4400,6 +4401,48 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
 /// path, signed in as its row's window is; a link to anything else gets
 /// none, and a page that asks the shell to open a URL that is no
 /// fragment's opens nothing.
+/// An app's icon as its owner makes one in the shell (docs/api.md, Icons;
+/// the Workers AI fake draws them): its window's More, Icon…, Make icons,
+/// four to pick from; one picked is the dock's icon, the object on
+/// nothing (no tile), read with the shell's session as a blob URL; Remove,
+/// and its glyph is back. The app's window is open.
+fn icon_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(60);
+    let dock = format!("document.querySelector({})", js(&format!("#apps [data-key=\"app:{app}\"]")));
+    let item = "[...document.querySelectorAll('#menu [role=menuitem]')].find((b) => b.textContent === 'Icon…')";
+    b.eval(page, "([...document.querySelectorAll('#stack .pane button[aria-label=More]')].pop()?.click(), true)")?;
+    let offered = b.until(page, &format!("!!{item}"), wait);
+    b.eval(page, &format!("({item}?.click(), true)"))?;
+    let sheet = b.until(page, "!!document.querySelector('dialog.icon-sheet[open]')", wait);
+    b.eval(page, "(document.querySelector('dialog.icon-sheet .icon-make button[type=submit]')?.click(), true)")?;
+    let picks = "[...document.querySelectorAll('dialog.icon-sheet .icon-pick img')]";
+    let four = b.until(page, &format!("{picks}.length === 4 && {picks}.every((i) => i.complete && i.naturalWidth === 256 && i.naturalHeight === 256)"), wait);
+    s.ok(
+        "an app's owner opens its window's More, Icon…, and makes icons: four to pick from, each 256×256",
+        offered && sheet && four,
+        b.eval(page, "document.querySelector('dialog.icon-sheet')?.innerText ?? null")?,
+    );
+    let _ = b.screenshot(page, &shots.join("icon-sheet.png"));
+    b.eval(page, "(document.querySelector('dialog.icon-sheet .icon-pick')?.click(), true)")?;
+    let shown = b.until(
+        page,
+        &format!("(() => {{ const d = {dock}; const i = d?.querySelector('.dock-art .app-picture img'); return !!i && i.src.startsWith('blob:') && i.complete && i.naturalWidth === 256 && !d.querySelector('.app-icon'); }})()"),
+        wait,
+    );
+    s.ok(
+        "one picked is the app's icon in the dock with no reload: the object on nothing, no tile, read as a blob URL",
+        shown,
+        b.eval(page, &format!("{dock}?.querySelector('.dock-art')?.outerHTML.slice(0, 300) ?? null"))?,
+    );
+    let _ = b.screenshot(page, &shots.join("icon-docked.png"));
+    b.eval(page, "([...document.querySelectorAll('dialog.icon-sheet .icon-actions button')].find((b) => b.textContent === 'Remove')?.click(), true)")?;
+    let back = b.until(page, &format!("!!{dock}?.querySelector('.dock-art .app-icon') && !{dock}?.querySelector('.app-picture')"), wait);
+    b.eval(page, "(document.querySelector('dialog.icon-sheet')?.close(), true)")?;
+    let closed = b.until(page, "!document.querySelector('dialog.icon-sheet')", wait);
+    s.ok("removed, its glyph is back in the dock; Done closes the sheet", back && closed, b.eval(page, &format!("{dock}?.querySelector('.dock-art')?.outerHTML.slice(0, 300) ?? null"))?);
+    Ok(())
+}
+
 fn open_beside_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, app: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let agent_wait = std::time::Duration::from_secs(120);
