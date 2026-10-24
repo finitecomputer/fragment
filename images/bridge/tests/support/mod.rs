@@ -23,6 +23,7 @@ pub mod fake;
 pub mod hermes;
 pub mod model;
 pub mod rfb;
+pub mod simplex;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -21,7 +21,7 @@ file is the newer word, and decision 18 points here.
 | The model's context and the agent's working files | `/data`, as of its newest save | the snapshot, a cache of that save for one image |
 | Which save is current, and what a wake restored | the Computer DO | |
 | Usage | the ledger | |
-| A messenger's encryption state (Signal, SimpleX) | its connector's Durable Object (F, below; not built) | nothing |
+| A messenger's encryption state (Signal, SimpleX) | SimpleX's: its core's databases in `/data`, as of the newest save, taken whole under the hold (the core stopped); a start that went back in time heals it with a forced sync (docs/bridge.md, "SimpleX"). The end state is still F, below (a connector's Durable Object; not built) | nothing |
 
 ## Built (2026-10-05)
 

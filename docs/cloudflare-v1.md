@@ -636,12 +636,16 @@ speaking Cloudflare's APIs) returns once this product works.
     is dropped. Finite Chat is out of scope.
     Status, 2026-10-22 (Paul: "simplex … for the $200 tier (requires
     always on agent). Needs to work well across restarts and updates";
-    branch `claude/simplex`, a draft): the link's core, built and proven
-    against simplex-chat v7.0.3 in a lab but run by nothing yet
-    (`images/bridge/src/simplex`). Whether Hermes' adapter or the bridge
-    carries the messages is the draft's question for Paul: the lab found
-    a rollback the core cannot see (docs/explorations/simplex-connector.md,
-    "The lab, 2026-10-22").
+    then "go ahead and build SimpleX with the bridge"): built as a
+    stack of drafts, not merged. The bridge, not Hermes' adapter, drives
+    `simplex-chat` (one core per linked agent, only while always on), and
+    SimpleX is another door into the agent's own chat with its owner
+    (docs/bridge.md, "SimpleX"; docs/chat-records.md, "A relayed
+    message"). The lab found a rollback the core cannot see, cured by a
+    forced sync at a rollback's start (docs/explorations/simplex-connector.md,
+    "The lab, 2026-10-22"). What it adds to the platform is
+    docs/explorations/simplex-complexity.md. Its image change ships only
+    through an image round.
 
 ### The cut
 

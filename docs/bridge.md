@@ -466,6 +466,17 @@ drives it.
 - **What a core prints is not logged**: it echoes the commands it is sent,
   message text among them.
 
+Proven by the Docker lane's `simplex_on_the_hermes_image` (the real image,
+a lab of a local SMP and XFTP server and the person's simplex-chat on a
+network it joins): linked from the screen port; a message a turn of
+Hermes' asked as its owner, answered on SimpleX (1.2 s); a voice note
+transcribed through the route and answered (0.4 s); a hold that stops the
+core first, its copies naming none of the core's databases; a restart; and
+a wake from a save older than the life before it, healed, the person told
+(1.0 s after the gate). By hand, `tests/simplex.rs` holds the rest against
+the real core: the link's rules, voice both ways, the lifecycle, messages
+through the chat, and the page's code.
+
 ## Hermes' Relay, as the bridge speaks it
 
 Hermes v0.21.7 (tag `v0.21.7`, 2026-10-12; read first from v0.21.5,

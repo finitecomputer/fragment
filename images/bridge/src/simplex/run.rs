@@ -205,24 +205,29 @@ struct Post {
     note: Option<String>,
 }
 
-/// What a file a message carries is, by the message's kind and its name.
+/// What a file a message carries is: by its name's extension when it is
+/// one of these, else by the message's kind.
 pub fn media_type(kind: &str, name: &str) -> &'static str {
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
-    match (kind, ext.as_str()) {
-        // SimpleX's apps record a voice message as MPEG-4 AAC
-        ("voice", _) | (_, "m4a") => "audio/mp4",
-        (_, "jpg" | "jpeg") => "image/jpeg",
-        ("image", _) => "image/jpeg",
-        (_, "png") => "image/png",
-        (_, "gif") => "image/gif",
-        (_, "webp") => "image/webp",
-        ("video", _) | (_, "mp4") => "video/mp4",
-        (_, "mp3") => "audio/mpeg",
-        (_, "ogg" | "opus") => "audio/ogg",
-        (_, "wav") => "audio/wav",
-        (_, "pdf") => "application/pdf",
-        (_, "txt" | "md") => "text/plain",
-        _ => "application/octet-stream",
+    match ext.as_str() {
+        "m4a" => "audio/mp4",
+        "mp3" => "audio/mpeg",
+        "ogg" | "opus" => "audio/ogg",
+        "wav" => "audio/wav",
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "mp4" => "video/mp4",
+        "pdf" => "application/pdf",
+        "txt" | "md" => "text/plain",
+        _ => match kind {
+            // SimpleX's apps record a voice message as MPEG-4 AAC, a photo as a JPEG
+            "voice" => "audio/mp4",
+            "image" => "image/jpeg",
+            "video" => "video/mp4",
+            _ => "application/octet-stream",
+        },
     }
 }
 
@@ -1291,6 +1296,7 @@ mod tests {
     fn files_are_what_they_are() {
         assert_eq!(media_type("voice", "voice_2026.m4a"), "audio/mp4");
         assert_eq!(media_type("voice", "noext"), "audio/mp4");
+        assert_eq!(media_type("voice", "memo.wav"), "audio/wav", "its name first");
         assert_eq!(media_type("image", "IMG_1.JPG"), "image/jpeg");
         assert_eq!(media_type("file", "report.pdf"), "application/pdf");
         assert_eq!(media_type("file", "x"), "application/octet-stream");
