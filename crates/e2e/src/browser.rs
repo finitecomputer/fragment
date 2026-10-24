@@ -27,7 +27,7 @@ const RELOAD_LOAD: Duration = Duration::from_secs(30);
 const RELOADS_MAX: u32 = 2;
 /// A watched page keeps at most this many of its events; past it, they are
 /// counted (`Watched::dropped`). A small app's page says a few hundred.
-const WATCHED_EVENTS_MAX: usize = 20_000;
+pub const WATCHED_EVENTS_MAX: usize = 20_000;
 
 pub struct Browser {
     child: Child,
@@ -51,6 +51,18 @@ pub struct Watched {
     pub events: Vec<Value>,
     /// Events past `WATCHED_EVENTS_MAX`, counted and not kept.
     pub dropped: u64,
+}
+
+impl Watched {
+    /// One more of its events: kept while it holds fewer than
+    /// `WATCHED_EVENTS_MAX`, counted past it (the first ones kept, so what
+    /// it did after them is unread: `dropped` says so).
+    pub fn keep(&mut self, event: Value) {
+        match self.events.len() < WATCHED_EVENTS_MAX {
+            true => self.events.push(event),
+            false => self.dropped += 1,
+        }
+    }
 }
 
 /// One Chrome for a whole run, started when a lane first asks for it.
@@ -321,10 +333,8 @@ impl Browser {
         if !event["method"].is_string() {
             return;
         }
-        let Some(w) = event["sessionId"].as_str().and_then(|s| self.watched.get_mut(s)) else { return };
-        match w.events.len() < WATCHED_EVENTS_MAX {
-            true => w.events.push(event),
-            false => w.dropped += 1,
+        if let Some(w) = event["sessionId"].as_str().and_then(|s| self.watched.get_mut(s)) {
+            w.keep(event);
         }
     }
 
