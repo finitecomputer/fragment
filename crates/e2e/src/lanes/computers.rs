@@ -1287,8 +1287,12 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     } else {
         say(2, "tool please")?;
         let stepped = s.eventually(wake, || records(api, &owner, &chat_name, "work").iter().any(|r| r["body"]["kind"] == "turn.step"));
-        s.ok("a tool step is a record on work", stepped && s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == 2), "");
-        replies_so_far = 2;
+        // its words before the call are a reply of their own, then its answer
+        let answered = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == 3);
+        let said: Vec<Value> = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().skip(1).collect();
+        let words = said.first().is_some_and(|r| r["body"]["text"] == "Let me look." && r["body"]["interim"] == true) && said.get(1).is_some_and(|r| echoed(r, "tool please") && r["body"].get("interim").is_none());
+        s.ok("a tool step is a record on work, the agent's words before it a reply of their own (interim), then its answer", stepped && answered && words, json!(said));
+        replies_so_far = 3;
 
         // a page sees the reply's draft live, then the reply that replaces it
         let mut page = Socket::open(api, &chat_name, "__live", Some(&owner), None)?;

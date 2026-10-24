@@ -441,21 +441,22 @@ impl Category {
     }
 }
 
-/// One step of a turn (a tool call), numbered from 1.
+/// One step of a turn (a tool call), numbered from 1. The model's words
+/// before the call are no part of it: they are a reply of their own,
+/// posted before it (docs/chat-records.md; an older bridge's step kept
+/// them as its `text`, which pages still read).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Step {
     pub tool: String,
     pub args: String,
     pub ok: bool,
     pub excerpt: String,
-    /// The model's text before the call, if any.
-    pub text: String,
     pub category: Category,
 }
 
 pub fn turn_step(turn: &str, n: u32, s: &Step) -> Value {
     assert!(n >= 1, "steps number from 1");
-    let mut body = json!({
+    json!({
         "kind": "turn.step",
         "turn": turn,
         "step": n,
@@ -464,12 +465,7 @@ pub fn turn_step(turn: &str, n: u32, s: &Step) -> Value {
         "args": cut_or_empty(&s.args, limits::STEP_ARGS_MAX_CHARS),
         "ok": s.ok,
         "excerpt": cut_or_empty(&s.excerpt, limits::STEP_EXCERPT_MAX_CHARS),
-    });
-    let text = cut_or_empty(&s.text, limits::STEP_EXCERPT_MAX_CHARS);
-    if !text.is_empty() {
-        body["text"] = json!(text);
-    }
-    body
+    })
 }
 
 /// A turn asking `asks` something to answer in words: their next message
@@ -614,12 +610,18 @@ pub fn menu_id(life: &str) -> String {
 }
 
 /// An agent's reply on `chat`: its text and turn; `to` and `hop` when it
-/// hands off to another agent. Attachments are added by whoever uploads them.
-pub fn reply(text: &str, turn: &str, to: &[String], hop: u32) -> Value {
+/// hands off to another agent; `interim` when its turn went on working
+/// after it (its words before a tool call: docs/chat-records.md), which
+/// the chat's push leaves out. Attachments are added by whoever uploads
+/// them.
+pub fn reply(text: &str, turn: &str, to: &[String], hop: u32, interim: bool) -> Value {
     let mut body = json!({ "text": cut_bytes(text, limits::REPLY_TEXT_MAX_BYTES), "turn": turn });
     if !to.is_empty() {
         body["to"] = json!(to);
         body["hop"] = json!(hop);
+    }
+    if interim {
+        body["interim"] = json!(true);
     }
     body
 }
@@ -771,8 +773,13 @@ mod tests {
         let c = Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 4 };
         let life = "0123456789abcdef0123456789abcdef";
         assert_eq!(turn_start("t", "npub1p", "npub1a", &c, life), json!({ "kind": "turn.start", "turn": "t", "asker": "npub1p", "agent": "npub1a", "cause": { "fragment": "talk--k3x9", "channel": "chat", "seq": 4 }, "life": life }));
-        let s = Step { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), text: String::new(), category: Category::Shell };
-        assert_eq!(turn_step("t", 1, &s), json!({ "kind": "turn.step", "turn": "t", "step": 1, "tool": "terminal", "category": "shell", "args": "ls", "ok": true, "excerpt": "" }));
+        let s = Step { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), category: Category::Shell };
+        assert_eq!(turn_step("t", 1, &s), json!({ "kind": "turn.step", "turn": "t", "step": 1, "tool": "terminal", "category": "shell", "args": "ls", "ok": true, "excerpt": "" }), "no words: they are a reply");
+        assert_eq!(reply("Let me look.", "t", &[], 1, false), json!({ "text": "Let me look.", "turn": "t" }));
+        assert_eq!(reply("Let me look.", "t", &[], 1, true), json!({ "text": "Let me look.", "turn": "t", "interim": true }));
+        assert_eq!(reply("@rowan yours", "t", &["npub1r".into()], 2, true), json!({ "text": "@rowan yours", "turn": "t", "to": ["npub1r"], "hop": 2, "interim": true }));
+        let long = "w".repeat(limits::REPLY_TEXT_MAX_BYTES + 9);
+        assert_eq!(reply(&long, "t", &[], 1, true)["text"].as_str().map(str::len), Some(limits::REPLY_TEXT_MAX_BYTES), "a reply's own bound, never a step's 300");
         assert_eq!(turn_asked("t", "npub1p"), json!({ "kind": "turn.asked", "turn": "t", "asks": "npub1p" }));
         assert_eq!(turn_notice("t", NoticeCategory::Memory, " Memory updated "), json!({ "kind": "turn.notice", "turn": "t", "category": "memory", "text": "Memory updated" }));
         assert_eq!(turn_notice("t", NoticeCategory::Warning, &"x".repeat(400))["text"].as_str().map(|t| t.chars().count()), Some(limits::NOTICE_TEXT_MAX_CHARS));
@@ -786,8 +793,8 @@ mod tests {
         let once = PromptOption { id: "once".into(), label: "Allow once".into(), style: None, words: false };
         assert_eq!(turn_prompt("t", "p", "Which?", &[once, other], "npub1p", 9)["options"], json!([{ "id": "once", "label": "Allow once" }, { "id": "other", "label": "Other", "words": true }]));
         assert_eq!(turn_prompt_closed("t", "p", Closed::Expired, None)["outcome"], "expired");
-        assert_eq!(reply("hi", "t", &[], 0), json!({ "text": "hi", "turn": "t" }));
-        assert_eq!(reply("hi @b", "t", &["npub1b".to_string()], 1), json!({ "text": "hi @b", "turn": "t", "to": ["npub1b"], "hop": 1 }));
+        assert_eq!(reply("hi", "t", &[], 0, false), json!({ "text": "hi", "turn": "t" }));
+        assert_eq!(reply("hi @b", "t", &["npub1b".to_string()], 1, false), json!({ "text": "hi @b", "turn": "t", "to": ["npub1b"], "hop": 1 }));
     }
 
     #[test]

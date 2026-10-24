@@ -85,8 +85,15 @@ pub const PROMPT_TEXT_MAX_CHARS: usize = 2000;
 /// agent's steps: crates/core/src/work.rs).
 pub const STEP_TOOL_MAX_CHARS: usize = 140;
 pub const STEP_ARGS_MAX_CHARS: usize = 140;
-/// A step's result excerpt, and the model's text before it, at most.
+/// A step's result excerpt, at most. (The model's words before it are a
+/// reply of their own, held to a reply's bound.)
 pub const STEP_EXCERPT_MAX_CHARS: usize = 300;
+/// A step that reaches the relay while the model's words before it still
+/// stream waits at most this long for them, so they post first: Hermes'
+/// stream consumer ends the draft segment with its `send` as the tool
+/// starts, and the tool's progress, polled every 0.3 s, can come just
+/// before that `send`. Past it, the step posts, and the words after it.
+pub const STEP_HOLD_MS: u64 = 3_000;
 /// A failed turn's error, at most.
 pub const ERROR_MAX_CHARS: usize = 300;
 

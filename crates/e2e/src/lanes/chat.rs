@@ -721,6 +721,27 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         by_hand["status"] == "succeeded" && by_hand["output"]["pushed"] == 0 && s.push.received(&owner_push).len() == 1,
         &by_hand,
     );
+    // its words before a tool call, said while it works, are a reply that
+    // is not pushed (`interim`); its answer is
+    let said = "tool please, while I am away";
+    let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": "away-2", "body": { "text": said } })))?;
+    anyhow::ensure!(r.status == 200, "posting a tool turn while away: {r}");
+    let answered = s.eventually(TURN, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|x| x["body"]["text"].as_str().is_some_and(|t| t.contains(said))));
+    // every reply's run done (and the one by hand), the interim one's too
+    let settled = s.eventually(TURN, || {
+        let runs = notify_runs(api, &owner, &chat_name);
+        runs.len() == agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() + 1 && runs.iter().all(|r| r["status"] == "succeeded")
+    });
+    std::thread::sleep(super::computers::QUEUE_DRAIN);
+    let replies = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity);
+    let interim = replies.iter().filter(|x| x["body"]["interim"] == true).count();
+    let bodies = |to: &str| s.push.received(to).iter().map(|p| p["body"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
+    let (to_owner, to_member) = (bodies(&owner_push), bodies(&member_push));
+    s.ok(
+        "away, the agent's words before a tool call (an interim reply) are not pushed; its answer is, once to each of the chat's people",
+        answered && settled && interim >= 1 && to_owner.len() == 2 && to_owner[1].contains(said) && to_member == to_owner,
+        json!({ "owner": to_owner, "member": to_member, "interim": interim }),
+    );
     // (a tab of its own, in front: after the push checks, which ask whether
     // the owner's page is on screen)
     held_socket(s, api, &mut chrome, &owner, &chat_name)?;

@@ -420,8 +420,13 @@ fragment.club until cutover (decisions 34–35).
   (`"from": "agent"`), so each agent reply is a triggered run, and an
   operation's triggers pause themselves after 120 triggered runs in an
   hour (`limits::TRIGGERED_RUNS_PER_HOUR`). Nothing unpauses a chat's.
+  Since 2026-10-24 an agent's words before each tool call are a reply of
+  their own (`interim`, docs/chat-records.md): the job pushes none of
+  them, but each is a triggered run, so a chatty agent's turns count many.
 - **Risk:** a chat whose agents reply more than about twice a minute for
-  an hour stops pushing, for good, until someone runs `fragment unpause`.
+  an hour stops pushing, for good, until someone runs `fragment unpause`;
+  an agent that narrates every tool call of a long task gets there in a
+  few turns.
 - **First proof:** an `op.auto-paused` event for `notify_reply` on a
   chat.
 - **Delete when:** a trigger's breaker counts runs that fail or loop

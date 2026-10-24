@@ -1293,7 +1293,12 @@ impl Engine {
                 }
             }
             Event::Step { turn, step } => {
-                self.seal(&turn);
+                // the words before a tool call are a reply, posted before
+                // its step; the turn works on after them, so they are
+                // interim (its push leaves them out), unless the call only
+                // updates its memory: an answer said beside housekeeping is
+                // the turn's answer (Hermes sends nothing after it)
+                self.seal(&turn, step.category != records::Category::Memory);
                 let t = self.state.turns.get_mut(&turn).expect("checked");
                 t.steps = t.steps.saturating_add(1);
                 self.dirty = true;
@@ -1307,7 +1312,7 @@ impl Engine {
                 // the question shows before the answer it waits for, and the
                 // chat is told whose answer it waits for (`turn.asked`, once
                 // a question: the part asking it is in its id)
-                self.seal(&turn);
+                self.seal(&turn, false);
                 let t = self.state.turns.get_mut(&turn).expect("checked");
                 if !t.asking {
                     t.asking = true;
@@ -1326,7 +1331,7 @@ impl Engine {
                 self.dirty = true;
                 let turn = records::said_turn_id(&agent, &self.life, self.state.said);
                 crate::ev!("said", { "agent": agent, "fragment": fragment, "turn": turn });
-                self.post(&agent, &fragment, records::CHAT, records::reply_id(&turn, 1), records::reply(&text, &turn, &[], 0), Vec::new());
+                self.post(&agent, &fragment, records::CHAT, records::reply_id(&turn, 1), records::reply(&text, &turn, &[], 0, false), Vec::new());
             }
             Event::Notice { agent, fragment, category, text } => self.notice(&agent, &fragment, category, &text),
         }
@@ -1374,7 +1379,7 @@ impl Engine {
             return;
         }
         if t.open.as_ref().is_some_and(|o| o.part != part) {
-            self.seal(id);
+            self.seal(id, false);
         }
         let t = self.state.turns.get_mut(id).expect("checked");
         let open = t.open.get_or_insert_with(|| OpenReply { part, ..OpenReply::default() });
@@ -1395,8 +1400,9 @@ impl Engine {
         }
     }
 
-    /// Posts the turn's open reply, if it says anything.
-    fn seal(&mut self, id: &str) {
+    /// Posts the turn's open reply, if it says anything: `interim` when
+    /// the turn works on after it (a tool call follows its words).
+    fn seal(&mut self, id: &str, interim: bool) {
         let view = self.views.get(&self.state.turns[id].fragment).cloned().unwrap_or_default();
         let t = self.state.turns.get_mut(id).expect("sealing a held turn");
         let Some(open) = t.open.take() else { return };
@@ -1411,8 +1417,8 @@ impl Engine {
         // A reply that names another agent of the chat hands off to it.
         let words = records::mentions(&open.text);
         let to: Vec<String> = self.agents.iter().filter(|a| a.fragment != agent && view.agents.contains(&a.identity) && words.iter().any(|w| answers_to(a, w))).map(|a| a.identity.clone()).collect();
-        let body = records::reply(&open.text, id, &to, hop + 1);
-        crate::ev!("reply.posted", { "turn": id, "n": n, "files": open.files.len(), "to": to.len() });
+        let body = records::reply(&open.text, id, &to, hop + 1, interim);
+        crate::ev!("reply.posted", { "turn": id, "n": n, "files": open.files.len(), "to": to.len(), "interim": interim });
         self.post(&agent, &fragment, records::CHAT, records::reply_id(id, n), body, open.files);
         self.draft(&agent, &fragment, id, None);
     }
@@ -1435,7 +1441,7 @@ impl Engine {
             self.out.push(Effect::Runtime(Command::Answer { turn: id.to_string(), prompt, option: None, seq: 0, by: String::new(), words: None, attached: None }));
             return;
         }
-        self.seal(id);
+        self.seal(id, false);
         // A runtime's own lifetime is held within bounds; the operator's
         // setting is theirs (tests run it short).
         let ttl = match ttl_ms {
@@ -1459,7 +1465,7 @@ impl Engine {
     /// `unanswered`, its end (owed: kept with the turn until answered), and
     /// its chat's next turn.
     fn end(&mut self, id: &str, outcome: Outcome, unanswered: Closed) {
-        self.seal(id);
+        self.seal(id, false);
         let t = self.state.turns.get_mut(id).expect("ending a held turn");
         assert!(t.active(), "a turn's run ends once: {id} is {:?}", t.phase);
         let prompts = std::mem::take(&mut t.prompts);

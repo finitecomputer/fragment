@@ -4,8 +4,9 @@
 //! turn is a pure function of its message:
 //!
 //! - default: two drafts, then the reply `echo: [<asker>] <text>`;
-//! - `tool`: a step (`search`, a `web` one: the message's first 40
-//!   characters its args, ok, an excerpt) before the reply;
+//! - `tool`: its words before a tool call (`Let me look.`), a reply of
+//!   their own, then a step (`search`, a `web` one: the message's first 40
+//!   characters its args, ok, an excerpt), then the reply;
 //! - `approve` or `risky`: a step, then a prompt (`once`, `deny`) the
 //!   owner answers; the reply says `(approved)`, `(denied)`, or
 //!   `(not approved)` once it expired;
@@ -662,12 +663,16 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
             Err(e) => format!("fetch failed: {e}"),
         };
     }
+    let mut part = 1;
     if text.contains("tool") {
-        let step = Step { tool: "search".into(), args: ts.text.chars().take(40).collect(), ok: true, excerpt: "3 results".into(), text: "Let me look.".into(), category: Category::Web };
+        // its words before the call, a reply of their own, then the step
+        emit(Event::Reply { turn: id.clone(), part, text: "Let me look.".into() }).await;
+        part += 1;
+        let step = Step { tool: "search".into(), args: ts.text.chars().take(40).collect(), ok: true, excerpt: "3 results".into(), category: Category::Web };
         emit(Event::Step { turn: id.clone(), step }).await;
     }
     if text.contains("approve") || text.contains("risky") {
-        emit(Event::Step { turn: id.clone(), step: Step { tool: "terminal".into(), args: "rm -rf ./scratch".into(), ok: true, excerpt: String::new(), text: String::new(), category: Category::Shell } }).await;
+        emit(Event::Step { turn: id.clone(), step: Step { tool: "terminal".into(), args: "rm -rf ./scratch".into(), ok: true, excerpt: String::new(), category: Category::Shell } }).await;
         let options = vec![
             PromptOption { id: "once".into(), label: "Allow once".into(), style: Some("primary".into()), words: false },
             PromptOption { id: "deny".into(), label: "Deny".into(), style: Some("danger".into()), words: false },
@@ -685,7 +690,6 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         };
         reply = format!("{reply} ({said})");
     }
-    let mut part = 1;
     if text.split_whitespace().any(|w| w == "choose") {
         let options = [("c0", "Basil", false), ("c1", "Mint", false), ("other", "Something else", true)].map(|(id, label, words)| PromptOption { id: id.into(), label: label.into(), style: None, words });
         let prompt = format!("c-{}", &id[..12]);
