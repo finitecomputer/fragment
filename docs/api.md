@@ -1043,19 +1043,33 @@ cannot confirm in it. It sends no CORS headers (a fragment's page cannot
 read it, so it never holds a form's token), refuses every frame but its
 own on the platform's origin (the shell's dialog: `frame-ancestors
 'self'`, `X-Frame-Options: SAMEORIGIN`; every fragment is another
-origin), severs its opener, allows scripts and styles only inline and
-images only from the platform (`Content-Security-Policy`), and keeps its
-URL to the platform (`Referrer-Policy: same-origin`).
+origin), severs its opener, allows scripts and styles only inline or
+from the platform and images only from the platform
+(`Content-Security-Policy`), and keeps its URL to the platform
+(`Referrer-Policy: same-origin`). Its look is the release's files, linked
+by their versions: `sheet.css` (the cell's pages' base look),
+`platform-pages.css` over it, and `platform-pages.js` (a module: the
+card's pointer-following rim, off in the shell's dialog). The notices a
+fragment's own origin answers (a refusal, its sign-out, a blocked
+sign-in) link `sheet.css` from that origin, as `/__sheet.css?v=<hash>`,
+and so load nothing from the platform's.
 
 Whoever is in a chat can talk to the agents in it, and an agent acts for
 its owner whoever asks it: the design, with a warning as its safeguard
-(Paul, 2026-10-23). Where one of the owner's agents is a member (a
-chat's own agent is its owner's), the owner's sheet says under its
-invite "Make sure you trust this person. They'll be able to talk to your
-agent until you remove them." (`fragment_core::access::TRUST_WARNING`),
-a note and never a step to click through; `fragment members add <name>
-<email>` prints it after the invite, and the apps skill has an agent
-pass it on to its owner.
+(Paul, 2026-10-23). On a chat one of the owner's agents is in (a chat's
+own agent is its owner's), the owner's sheet says under its invite
+"People in this chat can talk to your agent."
+(`fragment_core::access::TRUST_WARNING`), a note and never a step to
+click through; an app or a doc never does, as agents hear only chats
+(Paul, 2026-10-24). `fragment members add <name> <email>` prints it
+after the invite, on the same rule, and the apps skill has an agent pass
+it on to its owner.
+
+The sheet links the platform's stylesheets by their versions
+(`/__shell/platform-pages.css?v=<hash>`), which the platform answers
+`immutable`; asked for by name alone, or by a version the release does
+not hold, they are revalidated as the shell's other files are. Opening the
+sheet again so waits on no stylesheet round trip.
 
 ### Invites by email
 
@@ -1909,8 +1923,11 @@ once; a 401 or 402 is also logged aloud (`model.platform-key`). An
 answer that began is final; a refusal of the request (400, another 4xx)
 is the call's; when the fallback fails too, its failure is the call's,
 charged nothing, after two tries in all.
-`vision` and transcriptions have no fallback. A job's text step falls
-back the same, and its output's `model` names the model that answered.
+`vision` falls back so only when the fallback's slot says its model
+reads images (`"images": true` in the deployment's `models`; the
+default fallback, DeepSeek V4 Flash, reads none), and transcriptions
+never. A job's text step falls back the same, and its output's `model`
+names the model that answered.
 
 `fallback` names the deployment's fallback model itself: a runtime's own
 switch when its model stalls, streaming nothing (our Hermes image's

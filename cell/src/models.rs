@@ -30,8 +30,9 @@
 //! `model.fallback`, and charged as the fallback's.
 //! Not a race: the fallback is called only after the model failed. An
 //! answer that began is final, and the fallback's failure is passed
-//! through as any. `vision` has none (the default fallback, DeepSeek, reads
-//! no images), nor a transcription.
+//! through as any. `vision` has one only when the fallback's slot says its
+//! model reads images (`images: true`: `Models::vision_fallback`; the
+//! default fallback, DeepSeek, reads none), and a transcription none.
 //!
 //! Where a model runs is the deployment's (`FRAGMENT_MODELS`, config.rs;
 //! decision 61), on one of two kinds of upstream, one input:
@@ -261,11 +262,12 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     let bounded = bounds::bound(model, call.body, call.stream).map_err(refused)?;
     let mut charge = gate(env, call.payer, call.agent, call.fragment.as_ref(), bounded.model.id(), call.named.as_str()).await?;
     let meta = Metadata { user_id: opaque(call.payer), agent_id: call.agent.map(opaque) };
-    // a tier's call falls back; `vision`'s model reads images the fallback
-    // may not, and `fallback` is the fallback already
+    // a tier's call falls back; a `vision` call only to a fallback whose
+    // slot says it reads images; `fallback` is the fallback already
     let fallback = match call.named {
         Named::Tier(_) => Some(cfg.models.fallback()),
-        Named::Vision | Named::Fallback => None,
+        Named::Vision => cfg.models.vision_fallback(),
+        Named::Fallback => None,
     };
     let (answer, model, calls) = tried(env, cfg, &bounded, fallback, &meta).await;
     charge.model = model.id();
@@ -388,16 +390,18 @@ async fn tried(env: &Env, cfg: &Config, bounded: &Bounded<'static>, fallback: Op
         calls += 1;
         let answer = transport(env, cfg, model, &bounded.input, meta).await;
         let status = answer.as_ref().ok().map(Response::status_code);
+        // the platform's own key refused or its credit spent, on any try (a
+        // fallback's own key too): every call to it falls back, or fails
+        // where it has none, until someone fixes it
+        if let Some(alarm) = status.and_then(|s| bounds::key_alarm(model.upstream, s)) {
+            console_error!("{}", json!({ "event": "model.platform-key", "model": model.id(), "status": status, "alarm": alarm }));
+        }
         let Some(next) = tries.after(status.map_or(Tried::Unreached, Tried::Answered)) else { return (answer, model, calls) };
         // what the vendor said (its error, never the request's words)
         let why = match answer {
             Ok(mut failed) => bounded_text(&mut failed).await.chars().take(300).collect::<String>(),
             Err(e) => e.message,
         };
-        // the platform's own key refused or its credit spent: every call falls back until someone fixes it
-        if let Some(alarm) = status.and_then(|s| bounds::key_alarm(model.upstream, s)) {
-            console_error!("{}", json!({ "event": "model.platform-key", "model": model.id(), "status": status, "alarm": alarm, "why": why }));
-        }
         console_log!("{}", json!({ "event": "model.fallback", "from": model.id(), "to": next.id(), "status": status, "ms": js::now_ms() - t0, "why": why }));
     }
 }
@@ -467,7 +471,7 @@ struct Metadata {
 async fn transport(env: &Env, cfg: &Config, model: Model<'_>, input: &Value, meta: &Metadata) -> CellResult<Response> {
     match model.upstream {
         Upstream::WorkersAi { model } => workers_ai(env, cfg, model, input, meta).await,
-        Upstream::Openai { base_url, model: id, body } => openai(env, model.named, base_url, &bounds::openai_request(input, id, body.as_ref())).await,
+        Upstream::Openai { base_url, model: id, body, .. } => openai(env, model.named, base_url, &bounds::openai_request(input, id, body.as_ref())).await,
     }
 }
 

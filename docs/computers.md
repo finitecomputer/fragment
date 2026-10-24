@@ -1082,9 +1082,12 @@ expires within 30 days. The container application is the deployment's
     `glm47` tool-call parser, streamed tool calls included) and GLM's
     reasoning (`reasoning_effort`; the limiter fills in `high` only when
     none is sent, and the route always sends one). Images: finite.computer
-    declares it vision-capable, but nothing tests it and its limiter takes
-    at most 2 MiB a request, so `vision` stays on Workers AI. It reports
-    no cached tokens.
+    declares it vision-capable (finite-agentd's Hermes sends it images
+    natively), but no call of ours has qualified them and its limiter
+    takes at most 2 MiB a request (a screenshot's call is up to 6 MiB), so
+    Finite's alternatives keep `vision` on Workers AI but the private
+    tier's, which puts it there with Tinfoil's behind it. It reports no
+    cached tokens.
   - **Its refusals.** Past 2 MiB, 413; a model it does not serve, 400;
     each the call's. A key missing, unknown or revoked, 401 (the
     platform's key: logged aloud); its key's window spent, 429;
@@ -1094,6 +1097,71 @@ expires within 30 days. The container application is the deployment's
   - **Its limit** is its key's grant's: weighted tokens in a 5-hour
     window, no rate in calls, shared by every call the deployment makes
     (cloudflare-v1.md, decision 61, sizes it).
+
+  **A slot's `images`.** Either kind of slot may say `"images": true`:
+  its model reads images. Only the fallback's is read, for now: a
+  `vision` call falls back to the fallback when it says so, and has no
+  fallback otherwise (an image sent to a model that reads none is its
+  refusal). A slot that says nothing reads none.
+
+  **A slot's `private`** (Paul, 2026-10-22: "When a user has private
+  selected, it's not appropriate to fall back to a non-private model").
+  Either kind of slot may say `"private": true`: its model is
+  confidential inference that keeps nothing (Finite Private's, Tinfoil's;
+  never Workers AI or OpenRouter, which the deploy and the cell refuse to
+  see marked). The promise is per route, the tier an agent runs on: a
+  private tier is a private route, every slot its agents' calls reach is
+  private, and a config that breaks that is refused, naming the slot
+  (`Models::reached`): the tier itself, `vision` (Hermes sends it every
+  image, whatever the tier) and `fallback` (the route's on a failure,
+  Hermes' own on a stall). A slot marked private promises nothing to the
+  agents of a tier that is not: theirs is their route. What a private
+  tier's agent reaches, read from Hermes v0.21.7 (`agent/
+  auxiliary_client.py`, `hermes_cli/config_defaults.py`):
+  - **Private:** its turns, its failures and stalls (`fallback`), its
+    screenshots and attachments (`auxiliary.vision`: `vision`, then
+    `fallback`, and when both fail, Hermes' recovery to the main model,
+    `_try_main_agent_model_fallback`: the private tier itself), and
+    Hermes' other model tasks (compression, titles, memory review, the
+    skills hub, MCP, approvals, the curator, the goal judge and the
+    rest), each `provider: auto`, which inherits the main model, then
+    the main `fallback_providers` on a failure. Hermes' discovery chain
+    (OpenRouter, Nous, any API key in the environment) runs only when no
+    main provider is selected (`_discovery_chain_allowed`), and ours is
+    always `custom`. Delegated subagents inherit the parent's provider
+    and fallbacks.
+  - **Not private yet:** voice notes' transcription (`whisper`: Workers
+    AI's Whisper), decisions (`/v1/decide`: the Clef family on Workers
+    AI), Hermes' speech (ElevenLabs when the catalog offers it, else
+    Hermes' default, Microsoft Edge's online voices), and the tools that
+    send a query to a vendor (web search on Firecrawl or Perplexity,
+    xAI's `x_search`, FAL's images). An agent on its owner's own model
+    (Settings) has left private by that pick; its images stay on the
+    platform's `vision`.
+
+  **A slot's `price`.** A slot on an OpenAI-compatible API that is not
+  OpenRouter may name its model's list price there, dollars a million
+  tokens as its vendor lists them: `{"input": <$>, "cached_input"?: <$>,
+  "output": <$>}` (cached input at `input` when unnamed, a cache write
+  at `input`). The ledger charges that list, with the book's fee and
+  margin as on any model (docs/ledger.md, "A slot's own price"), so a
+  model the book does not price runs priced from the config alone. A
+  slot on OpenRouter names its ceiling instead (`max_price`, above); one
+  naming both, or a price that is not 0 to 1,000 dollars, is refused.
+
+  Tinfoil (tinfoil.sh; the private tier's fallback, deploy/example.jsonc's
+  third alternative) is confidential inference on open models:
+  `https://inference.tinfoil.sh/v1`, OpenAI's chat completions, one key
+  of the platform's Tinfoil account (`fragment-tinfoil-api-key`). Its
+  DeepSeek V4.1 Flash, `deepseek-v4-1-flash` (`GET /v1/models`, read
+  2026-10-22: 1,048,576 tokens of context, tools, reasoning, image input,
+  marked experimental), lists at $0.65 in, $0.13 cached, $1.45 out a
+  million tokens, and its slot names that price. Its router maps
+  `reasoning_effort` `low` and `high` onto the model's own `low` and
+  `xhigh`. Its refusals are OpenAI's: a key refused, 401; the account's
+  balance spent, 402; a key's own cap, or the account's rate, 429. A
+  fallback's refusal is the call's (there is no third try), and a 401 or
+  402 there is logged aloud as any platform key's (`model.platform-key`).
 - A call that answers nothing (no first byte, a stream that stalls) is
   the runtime's own to give up on. Our Hermes image's text-tier profiles
   (cheap and medium) use Hermes' own mechanism (Paul, 2026-10-09: a
@@ -1137,7 +1205,9 @@ expires within 30 days. The container application is the deployment's
   model's id, since a deployment may run vision on a tier's model (every
   preview: GLM-5.3 Flash), and an id a tier runs names the tier's slot,
   whose call falls back to the fallback model, which may read no images
-  (DeepSeek V4 Flash); `vision` has no fallback. Hermes describes each
+  (DeepSeek V4 Flash). `vision` falls back only when the fallback's slot
+  says its model reads images (`"images": true`: the private tier's,
+  Tinfoil's DeepSeek V4.1 Flash), on the tiers' rule. Hermes describes each
   `computer_use` screenshot with it and hands the main model the words
   (named outright, Hermes routes every capture so: its
   `tools/computer_use/vision_routing.py`), and an image a person attaches

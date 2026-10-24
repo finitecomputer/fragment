@@ -241,8 +241,11 @@ fn dev(args: &[String]) -> Result<()> {
         ai_url: Some(ai.url.clone()),
         ai_gateway: None,
         models: real.as_ref().map(|r| r.models.clone()),
-        model_key_slots: real.as_ref().map(|r| r.slots.clone()).unwrap_or_default(),
-        model_key_value: real.as_ref().map(|r| r.key.clone()),
+        // its slots on an OpenAI-compatible API, each on the one key dev binds
+        model_keys: real
+            .as_ref()
+            .map(|r| r.slots.iter().map(|slot| devstack::ModelKey { slot: slot.clone(), name: devstack::store::MODEL_KEY.into(), value: r.key.clone() }).collect())
+            .unwrap_or_default(),
         // the mail fake, which prints each message (dev never sends real mail)
         mail_url: Some(mailer.url.clone()),
         mail_from: Some(DEV_MAIL_FROM.into()),

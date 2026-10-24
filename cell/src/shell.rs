@@ -18,9 +18,57 @@ use worker::*;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 
-/// A file's validator: its bytes' hash (a release changes them).
+/// A file's version: its bytes' hash, its first 20 hex digits (a release
+/// changes them).
+fn version(f: &File) -> &'static str {
+    &f.sha256[..20]
+}
+
+/// A file's validator: its version.
 fn etag(f: &File) -> String {
-    format!("\"s-{}\"", &f.sha256[..20])
+    format!("\"s-{}\"", version(f))
+}
+
+/// How long a browser keeps a file asked for by its version: for good, as
+/// the version names its bytes.
+const PINNED: &str = "public, max-age=31536000, immutable";
+
+/// One of the files the shell publishes, by its name: a page links only
+/// those.
+fn published(name: &str) -> &'static File {
+    fragment_templates::shell_published(name).unwrap_or_else(|| panic!("the shell publishes {name}")).0
+}
+
+/// `/__shell/<name>?v=<version>`: one of the shell's files as a page links
+/// it to be kept (`asset`: a browser asks for it once, not on every page;
+/// a release that changes it links another version). The platform's pages
+/// link their stylesheets and script so: the share sheet, framed by the
+/// shell each time it opens, waited a round trip on its stylesheet every
+/// time (share.rs `platform_html`).
+pub(crate) fn versioned(name: &str) -> String {
+    format!("/__shell/{name}?v={}", version(published(name)))
+}
+
+/// The pages' base stylesheet on a fragment's own origin, where the
+/// platform's notices there link it (share.rs `sheet_html`): they load
+/// nothing from the platform's origin.
+const FRAGMENT_SHEET: &str = "__sheet.css";
+
+/// Whether a path on a fragment's origin is the base stylesheet's.
+pub(crate) fn is_fragment_sheet(rest: &str) -> bool {
+    rest == FRAGMENT_SHEET
+}
+
+/// `/__sheet.css?v=<version>`, as a fragment's origin serves `sheet.css`
+/// (`fragment_sheet_asset`), linked by its version as `versioned` links.
+pub(crate) fn fragment_sheet() -> String {
+    format!("/{FRAGMENT_SHEET}?v={}", version(published("sheet.css")))
+}
+
+/// `GET /__sheet.css` on a fragment's origin: the shell's `sheet.css`,
+/// kept or revalidated as `asset` keeps it.
+pub async fn fragment_sheet_asset(req: &Request, env: &Env) -> CellResult<Response> {
+    asset(req, env, "sheet.css").await?.ok_or_else(|| CellError::host("the shell publishes sheet.css"))
 }
 
 fn not_modified(req: &Request, tag: &str) -> Result<bool> {
@@ -112,25 +160,29 @@ pub async fn legal_page(req: &Request, env: &Env, name: &str) -> CellResult<Resp
     h.set("x-frame-options", "DENY")?;
     h.set("cross-origin-opener-policy", "same-origin")?;
     h.set("referrer-policy", "strict-origin-when-cross-origin")?;
-    revalidated(req, env, page_file(name), h).await
+    revalidated(req, env, page_file(name), h, "no-cache").await
 }
 
 /// `GET /__shell/<file>`: one of the files it publishes
-/// (`fragment_templates::shell_published`), or `None`.
+/// (`fragment_templates::shell_published`), or `None`. Asked for by its
+/// version (`?v=`, `versioned`), it is kept for good; by its name alone, or
+/// by a version this release does not hold (a page of the last one's), it
+/// is revalidated each time.
 pub async fn asset(req: &Request, env: &Env, name: &str) -> CellResult<Option<Response>> {
     let Some((f, mime)) = fragment_templates::shell_published(name) else { return Ok(None) };
     let h = Headers::new();
     h.set("content-type", mime)?;
     h.set("x-content-type-options", "nosniff")?;
-    Ok(Some(revalidated(req, env, f, h).await?))
+    let pinned = req.url()?.query_pairs().any(|(k, v)| k == "v" && v == version(f));
+    Ok(Some(revalidated(req, env, f, h, if pinned { PINNED } else { "no-cache" }).await?))
 }
 
-/// A file of the release, answered with `h`: revalidated each time by its
-/// hash (a release changes it under the same name), a 304 and a HEAD
-/// answered from the index, before any read.
-async fn revalidated(req: &Request, env: &Env, f: &File, h: Headers) -> CellResult<Response> {
+/// A file of the release, answered with `h` and `cache`: revalidated by
+/// its hash (a release changes it under the same name) unless `cache` keeps
+/// it, a 304 and a HEAD answered from the index, before any read.
+async fn revalidated(req: &Request, env: &Env, f: &File, h: Headers, cache: &str) -> CellResult<Response> {
     let tag = etag(f);
-    h.set("cache-control", "no-cache")?;
+    h.set("cache-control", cache)?;
     h.set("etag", &tag)?;
     if not_modified(req, &tag)? {
         return Ok(Response::empty()?.with_status(304).with_headers(h));

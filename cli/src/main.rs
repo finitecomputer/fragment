@@ -1956,8 +1956,17 @@ fn run(cli: Cli) -> Result<()> {
                 let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer or editor, not {role:?}")))?;
                 let v: Member = match auth::member_of(&who)? {
                     auth::Member::Email(email) => {
-                        // read before the invite, so a failed read invites no one
-                        let members: MemberList = c.call_as(c.get(&format!("/api/f/{name}/members"))?)?;
+                        // read before the invite, so a failed read invites no one:
+                        // whether they can talk to the owner's agent there (a chat
+                        // it is in; Paul, 2026-10-23 and 10-24)
+                        let st: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
+                        let warns = match st.kind {
+                            fragment_proto::FragmentKind::Chat => {
+                                let members: MemberList = c.call_as(c.get(&format!("/api/f/{name}/members"))?)?;
+                                fragment_core::access::talks_to_owners_agent(st.kind, &members.members)
+                            }
+                            _ => false,
+                        };
                         let body = fragment_proto::CreateInvite { email: email.clone(), role };
                         match c.call_as::<Shared>(c.post_json(&format!("/api/f/{name}/invites"), &body)?)? {
                             Shared::Member(m) => m,
@@ -1966,8 +1975,7 @@ fn run(cli: Cli) -> Result<()> {
                                 let expires_s = u64::try_from(i.expires_at / 1000).unwrap_or(0);
                                 println!("invited {email} as {} on {name}: they were mailed a link, and are in once they accept it, signed in as {email}", i.role.as_str());
                                 println!("  it waits until {}; `fragment invite revoke {name} {email}` takes it back", chrono_like(expires_s));
-                                // they can talk to the owner's agent there (Paul, 2026-10-23)
-                                if fragment_core::access::talks_to_owners_agent(&members.members) {
+                                if warns {
                                     println!("  {}", fragment_core::access::TRUST_WARNING);
                                 }
                                 return Ok(());

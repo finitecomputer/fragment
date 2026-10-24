@@ -1242,6 +1242,29 @@ Private stays possible by config.
     6. Nothing of fbfc's users reaches them: no user id, no header but
        the key; the route sends OpenAI's chat completion and nothing else.
 
+    *Status (2026-10-22, Paul: "For the $200 tier we are going to offer
+    finite private, on by default … Fallback should be tinfoil's
+    deepseek flash"):* a slot off OpenRouter may name its model's list
+    price (`price`; docs/ledger.md, "A slot's own price"), so Tinfoil's
+    DeepSeek V4.1 Flash (`deepseek-v4-1-flash` at
+    `https://inference.tinfoil.sh/v1`, on its own key) runs as the
+    fallback by config alone (deploy/example.jsonc's third alternative,
+    the private tier), and a fallback's own key refused is logged aloud
+    as the tiers' is. A slot may say its model reads images (`images:
+    true`), and a `vision` call falls back to a fallback that says so
+    (the private tier's `vision` on Finite Private, Tinfoil's DeepSeek
+    V4.1 Flash, which reads images, behind it): decision 23's "`vision`
+    and transcriptions do not" holds for a fallback that says nothing.
+    Paul, 2026-10-22: "When a user has private selected, it's not
+    appropriate to fall back to a non-private model" (Tinfoil counts as
+    private). A slot may say `"private": true` (never one on Workers AI
+    or OpenRouter), and a private tier is a private route: every slot its
+    agents reach (the tier, `vision`, the fallback; Hermes' recovery of a
+    failed vision call goes to the tier itself) must be private, or the
+    deploy is refused
+    (docs/computers.md, "A slot's `private`", which lists what is not
+    private yet: transcription, decisions, speech, vendors' tools).
+
     **Going live** (Paul's): finite-mono issues the key; `cargo xtask
     secret set fragment-finite-private-key --config <production's
     config>` (it prompts); add example.jsonc's `models` to that config
@@ -1410,10 +1433,11 @@ Paul:
       owner whoever asks it: this is the design (Paul, 2026-10-23: "Yes,
       I am aware, this is the design. The solution is a warning when
       inviting someone to your chat ... Not making everything way more
-      complicated"). Inviting someone where an agent takes part warns its
-      inviter: "Make sure you trust this person. They'll be able to talk to
-      your agent until you remove them." (the share sheet, `fragment
-      members add`, the apps skill).
+      complicated"). Inviting someone to a chat an agent of the
+      inviter's is in warns them: "People in this chat can talk to your
+      agent." (the share sheet, `fragment members add`, the apps skill;
+      Paul, 2026-10-24: only on a chat, as agents hear only chats, and
+      short).
     - Storage: no new column (an agent row names its owner already: in
       with its person when its owner is a member who is not the fragment's
       owner); a rollback reads the rows as agent members, as before.
