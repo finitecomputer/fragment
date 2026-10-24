@@ -382,10 +382,16 @@ struct Slot {
     files: BTreeMap<FileId, Inbound>,
     /// Its poster: its messages, posted in order on its chat.
     poster: Option<mpsc::Sender<Post>>,
-    /// A message of this life was not posted (refused, or past its poster's
+    /// A message of this life was not posted (refused, or dropped past a
     /// bound): nothing more is acknowledged, so the next start reads back
     /// to before it and carries it then.
     gap: bool,
+    /// The messages forwarded and not yet acknowledged, by item: receiving
+    /// their file, queued, or being posted. What was delivered never moves
+    /// past the oldest of them.
+    outstanding: std::collections::BTreeSet<i64>,
+    /// The newest message acknowledged as posted.
+    acked: i64,
 }
 
 impl Slot {
@@ -539,6 +545,8 @@ impl Manager {
                 files: BTreeMap::new(),
                 poster: None,
                 gap: false,
+                outstanding: Default::default(),
+                acked: 0,
             });
             self.look_up_title(a.clone());
         }
@@ -898,7 +906,7 @@ impl Manager {
         }
         if s.files.len() >= FILES_MAX && !s.files.contains_key(&file.id) {
             crate::ev!("simplex.files_bounded", { "agent": f, "max": FILES_MAX });
-            return;
+            return self.dropped(f, inbound.item);
         }
         s.files.insert(file.id, inbound);
         // its description may not be ready yet: then FileReady asks again
@@ -911,15 +919,25 @@ impl Manager {
     /// never past one this life did not post (`gap`).
     fn delivered(&mut self, f: &str, item: i64, ok: bool) {
         let Some(s) = self.slots.get_mut(f) else { return };
+        s.outstanding.remove(&item);
         if !ok {
             s.gap = true;
         }
         if s.gap || item <= 0 {
             return;
         }
-        let waiting = s.files.values().map(|i| i.item).filter(|i| *i > 0).min();
-        let upto = waiting.map_or(item, |w| item.min(w - 1));
+        s.acked = s.acked.max(item);
+        let upto = s.outstanding.first().map_or(s.acked, |oldest| s.acked.min(oldest - 1));
         self.apply(f, Input::Delivered(upto));
+    }
+
+    /// A message forwarded that will not be posted this life (dropped past
+    /// a bound): what was delivered moves no more (`gap`).
+    fn dropped(&mut self, f: &str, item: i64) {
+        if let Some(s) = self.slots.get_mut(f) {
+            s.outstanding.remove(&item);
+            s.gap = true;
+        }
     }
 
     fn post(&mut self, f: &str, p: Post) {
@@ -930,10 +948,11 @@ impl Manager {
             s.poster = Some(tx);
         }
         let tx = s.poster.as_ref().expect("its poster");
-        if tx.try_send(p).is_err() {
+        if let Err(e) = tx.try_send(p) {
             // the next start's catch-up reads it again (by the same id)
             crate::ev!("simplex.posts_bounded", { "agent": f, "max": POSTS_MAX });
-            s.gap = true;
+            let item = e.into_inner().inbound.item;
+            self.dropped(f, item);
         }
     }
 
@@ -1020,6 +1039,9 @@ impl Manager {
             }
             Action::Forward(i) => {
                 crate::ev!("simplex.forward", { "agent": f, "kind": i.kind, "bytes": i.text.len(), "file": i.file.is_some() });
+                if i.item > 0 {
+                    s.outstanding.insert(i.item);
+                }
                 self.forward(f, i);
             }
             Action::Tell(n) => {
@@ -1314,6 +1336,8 @@ mod tests {
             files: BTreeMap::new(),
             poster: None,
             gap: false,
+            outstanding: Default::default(),
+            acked: 0,
         };
         let v = s.view(true);
         assert_eq!((v.phase, v.link.as_deref(), v.running, v.why.as_deref()), ("inviting", Some("simplex:/invitation#/x"), false, None));
@@ -1391,6 +1415,8 @@ mod tests {
             files: BTreeMap::new(),
             poster: None,
             gap: false,
+            outstanding: Default::default(),
+            acked: 0,
         };
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
         let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(false)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeSet::new()).0, stop: watch::channel(false).1 };
@@ -1474,6 +1500,8 @@ mod tests {
             files: BTreeMap::new(),
             poster: None,
             gap: false,
+            outstanding: Default::default(),
+            acked: 0,
         };
         slot.up = true;
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
@@ -1517,23 +1545,41 @@ mod tests {
             files: BTreeMap::new(),
             poster: None,
             gap: false,
+            outstanding: Default::default(),
+            acked: 0,
         };
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
         let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(true)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeSet::new()).0, stop: watch::channel(false).1 };
         let f = "juniper--k3x9";
         let delivered = |m: &Manager| m.slots[f].saved.link.delivered;
+        let forwarded = |m: &mut Manager, item: i64| {
+            m.slots.get_mut(f).expect("its slot").outstanding.insert(item);
+        };
+        forwarded(&mut m, 10);
         m.delivered(f, 10, true);
         assert_eq!(delivered(&m), 10);
-        // 12 waits for its voice note: a later post moves the mark to just before it
-        let voice = Inbound { id: "v".into(), kind: "voice".into(), text: String::new(), at: String::new(), item: 12, file: None };
-        m.slots.get_mut(f).expect("its slot").files.insert(7, voice);
+        // 12 forwarded (its voice note receiving, then queued once whole), 15
+        // after it posted first: the mark stops just before 12, whatever
+        // state 12 is in, until 12's own post
+        forwarded(&mut m, 12);
+        forwarded(&mut m, 15);
         m.delivered(f, 15, true);
-        assert_eq!(delivered(&m), 11);
-        m.slots.get_mut(f).expect("its slot").files.clear();
-        // 20 refused: nothing more moves it this life
+        assert_eq!(delivered(&m), 11, "12 still outstanding");
+        m.delivered(f, 12, true);
+        assert_eq!(delivered(&m), 15, "12 posted: on to the newest acknowledged");
+        // 18 dropped past a bound (its files' or its poster's): nothing more moves it
+        forwarded(&mut m, 18);
+        m.dropped(f, 18);
+        forwarded(&mut m, 19);
+        m.delivered(f, 19, true);
+        assert_eq!(delivered(&m), 15, "the next start reads back to before the dropped one");
+        // a refusal does the same, in a life of its own
+        m.slots.get_mut(f).expect("its slot").gap = false;
+        forwarded(&mut m, 20);
         m.delivered(f, 20, false);
+        forwarded(&mut m, 21);
         m.delivered(f, 21, true);
-        assert_eq!(delivered(&m), 11, "the next start reads back to before the refused one");
+        assert_eq!(delivered(&m), 15, "the next start reads back to before the refused one");
         let _ = std::fs::remove_dir_all(m.slots[f].dir.clone());
     }
 }
