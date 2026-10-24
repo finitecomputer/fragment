@@ -716,3 +716,6 @@ iframe[data-blocked] { display: none; }
    first run's footer is platform-pages.css's .page-footer) */
 .legal-links, .settings-section > p.legal-links { font-size: 12.5px; }
 .legal-links a { color: inherit; }
+/* the release and the computer's version, under Settings' last section (shell.js releaseLine) */
+.settings-release { margin: 28px 2px 0; font-size: 12.5px; }
+.settings-release a { color: inherit; }
