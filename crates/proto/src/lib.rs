@@ -826,6 +826,15 @@ pub enum FragmentKind {
     /// A person's managed skills (decision 17: the blessed `skills`
     /// template), which their agents' computers install.
     Skills,
+    /// A kind this build does not know: one a newer platform's list,
+    /// status or access view names (#587's), read as this so that one new
+    /// kind breaks no shipped CLI or pinned image. It is only ever read:
+    /// `parse` never answers it, so no `fragment.json` names it (the cell
+    /// refuses its install, as any kind it does not know), and it is
+    /// written only as `other`, a name no kind may take, never as a kind
+    /// it is not. Last: serde's `other` must be.
+    #[serde(other)]
+    Other,
 }
 
 impl FragmentKind {
@@ -836,9 +845,12 @@ impl FragmentKind {
             FragmentKind::Agent => "agent",
             FragmentKind::Brain => "brain",
             FragmentKind::Skills => "skills",
+            FragmentKind::Other => "other",
         }
     }
 
+    /// A kind this build knows, as a `fragment.json` names it; never
+    /// `Other`, which no manifest may name.
     pub fn parse(s: &str) -> Option<FragmentKind> {
         match s {
             "app" => Some(FragmentKind::App),
@@ -2391,6 +2403,7 @@ mod tests {
         );
         // a row not archived leaves the flag out, and reads back so
         let read: ListedFragment = serde_json::from_value(serde_json::json!({ "name": "notes-k3x9", "role": "viewer" })).unwrap();
+        assert_eq!(read.kind, FragmentKind::App, "a row that names no kind is an app's");
         assert!(!read.archived && read.unread == 0);
         // a row on the person's dock leaves the choice out, and one without
         // it (from before it, or an older platform) reads back on it; one
@@ -2434,6 +2447,44 @@ mod tests {
         assert_eq!(value(&runs), serde_json::json!({ "runs": [], "counts": { "held": 2 }, "paused": ["digest"] }));
         let page = ChannelPage { channel: "chat".into(), records: vec![], next: 7 };
         assert_eq!(value(&page), serde_json::json!({ "channel": "chat", "records": [], "next": 7 }));
+    }
+
+    /// Goal: a list from a newer platform, one of whose fragments is of a
+    /// kind this build does not know (#587's), reads whole, so one new
+    /// kind breaks no shipped client; the kinds it knows read and write as
+    /// themselves; and the fallback is never a kind. Method: each known
+    /// kind through serde and `as_str`/`parse`, both ways; a list, a search
+    /// answer and an access view naming `site`; `Other` written, read
+    /// back, and parsed as a manifest's kind.
+    #[test]
+    fn a_kind_this_build_does_not_know_reads_as_other() {
+        use FragmentKind::*;
+        for kind in [App, Chat, Agent, Brain, Skills] {
+            let wire = serde_json::to_value(kind).unwrap();
+            assert_eq!(wire, Value::String(kind.as_str().into()), "{kind:?} is written as its name");
+            assert_eq!(serde_json::from_value::<FragmentKind>(wire).unwrap(), kind, "{kind:?} reads back as itself");
+            assert_eq!(FragmentKind::parse(kind.as_str()), Some(kind), "a manifest may name {kind:?}");
+        }
+        let rows = serde_json::json!([
+            { "name": "home--k3x9", "role": "owner", "kind": "site", "title": "Home", "archived": true },
+            { "name": "todo--m4pq", "role": "editor", "kind": "chat" },
+        ]);
+        let list: FragmentList = serde_json::from_value(serde_json::json!({ "fragments": rows })).unwrap();
+        let read: Vec<_> = list.fragments.iter().map(|f| (f.name.as_str(), f.kind, f.title.as_deref(), f.archived)).collect();
+        assert_eq!(read, [("home--k3x9", Other, Some("Home"), true), ("todo--m4pq", Chat, None, false)], "the row of a kind it does not know keeps the rest of itself");
+        let found: SearchAnswer = serde_json::from_value(serde_json::json!({ "fragments": rows, "messages": [] })).unwrap();
+        assert_eq!(found.fragments.iter().map(|f| f.kind).collect::<Vec<_>>(), [Other, Chat]);
+        let access: Access = serde_json::from_value(serde_json::json!({ "fragments": [{ "name": "home--k3x9", "kind": "site" }] })).unwrap();
+        assert_eq!(access.fragments[0].kind, Other);
+        // the fallback is written as `other` alone, reads back as itself,
+        // and no manifest may name it, nor a kind this build does not know
+        assert_eq!(serde_json::to_value(Other).unwrap(), serde_json::json!("other"));
+        assert_eq!(serde_json::from_value::<FragmentKind>(serde_json::json!("other")).unwrap(), Other);
+        assert_eq!([FragmentKind::parse("other"), FragmentKind::parse("site"), FragmentKind::parse("App")], [None; 3]);
+        // a kind that is no string is still refused
+        for bad in [serde_json::json!(7), serde_json::json!(true), serde_json::json!(null)] {
+            assert!(serde_json::from_value::<FragmentKind>(bad.clone()).is_err(), "{bad} is no kind");
+        }
     }
 
     /// A rotation answers in the contract's camelCase, like every answer.
