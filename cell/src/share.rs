@@ -51,7 +51,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::{form, npub};
 use fragment_proto::{
-    limits, Access, AccessMember, AccessRow, ErrorBody, ErrorCode, IdentityKind, Invite, InviteAccepted, InviteList, ListedFragment, Member, MemberList, Role, Shared, Visibility,
+    limits, Access, AccessMember, AccessRow, ErrorBody, ErrorCode, FragmentKind, IdentityKind, Invite, InviteAccepted, InviteList, ListedFragment, Member, MemberList, Role, Shared, Visibility,
 };
 use futures_util::future::{join, join_all};
 use serde_json::{json, Value};
@@ -155,7 +155,6 @@ const SCRIPT: &str = r#"<script>(() => {
   const framed = parent !== window;
   const tell = (share) => parent.postMessage({ share, height: document.body.offsetHeight }, location.origin);
   if (framed) {
-    document.documentElement.classList.add("framed");
     tell("shown");
     new ResizeObserver(() => tell("resized")).observe(document.body);
     addEventListener("keydown", (e) => { if (e.key === "Escape") tell("done"); });
@@ -183,7 +182,12 @@ fn policy(forms_here: bool, ancestors: &str) -> String {
 /// join page's redirects on to the fragment's, which `form-action` would
 /// refuse).
 pub(crate) fn sheet_page(status: u16, title: &str, body: &str, forms_here: bool) -> CellResult<Response> {
-    let html = format!("{}{}", platform_html(title, body), script());
+    page(status, platform_html(title, body), forms_here)
+}
+
+/// A sharing page's answer: `html`, armed, with sharing's protections.
+fn page(status: u16, html: String, forms_here: bool) -> CellResult<Response> {
+    let html = html + &script();
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;
     h.set("cache-control", "no-store")?;
@@ -207,12 +211,21 @@ pub(crate) fn sheet_html(title: &str, body: &str) -> String {
     )
 }
 
-/// Platform-origin pages can load the onboarding assets from the release.
-/// Fragment-origin notices retain the self-contained sheet above.
+/// Framed (the shell's dialog), a page is drawn as the dialog's from its
+/// first frame (platform-pages.css `.framed`: no landscape, logo or glass),
+/// before its stylesheet is read: the landscape is never fetched.
+const FRAMED: &str = "<script>if(parent!==window)document.documentElement.classList.add(\"framed\")</script>";
+
+/// Platform-origin pages can load the onboarding assets from the release:
+/// the stylesheet by its version, kept by the browser (shell.rs
+/// `versioned`), and the logo only where it shows (lazy: a framed page
+/// hides it). Fragment-origin notices retain the self-contained sheet above.
 pub(crate) fn platform_html(title: &str, body: &str) -> String {
-    sheet_html(title, body)
-        .replacen("<html lang=\"en\">", "<html lang=\"en\" class=\"platform-page\">", 1)
-        .replacen("<main>", "<link rel=\"stylesheet\" href=\"/__shell/platform-pages.css\"><div class=\"platform-brand\"><img src=\"/__shell/finite-logo.svg\" alt=\"Finite\" width=\"44\" height=\"46\"></div><main>", 1)
+    let head = format!(
+        "{FRAMED}<link rel=\"stylesheet\" href=\"{}\"><div class=\"platform-brand\"><img src=\"/__shell/finite-logo.svg\" alt=\"Finite\" width=\"44\" height=\"46\" loading=\"lazy\"></div><main>",
+        crate::shell::versioned("platform-pages.css")
+    );
+    sheet_html(title, body).replacen("<html lang=\"en\">", "<html lang=\"en\" class=\"platform-page\">", 1).replacen("<main>", &head, 1)
         + "<script>"
         + include_str!("../shell/platform-pages.js")
         + "</script>"
@@ -223,7 +236,8 @@ pub(crate) fn platform_html(title: &str, body: &str) -> String {
 /// `share`). `'self'` is the platform's origin alone; every fragment is on
 /// another (docs/api.md, Sign-in).
 fn sheet_framable(status: u16, title: &str, body: &str) -> CellResult<Response> {
-    let mut resp = sheet_page(status, title, body, true)?;
+    // `share`: the sheet's own compact look (platform-pages.css `main.share`)
+    let mut resp = page(status, platform_html(title, body).replacen("<main>", "<main class=\"share\">", 1), true)?;
     let h = resp.headers_mut();
     h.set("content-security-policy", &policy(true, "'self'"))?;
     h.set("x-frame-options", "SAMEORIGIN")?;
@@ -426,6 +440,8 @@ struct Sheet {
     /// The invites waiting: the owner's only.
     invites: Vec<Invite>,
     visibility: Visibility,
+    /// What it is: inviting someone to a chat warns (`talks_to_owners_agent`).
+    kind: FragmentKind,
     /// Its title, else its label.
     title: String,
     /// A chat's own agent, its lead (the first agent in it): it stays an
@@ -469,15 +485,11 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
     let members: MemberList = decoded(members?, "the members")?;
     let status = status?;
     let role = members.members.iter().find(|m| m.principal == who.id).map(|m| m.role);
-    let invites = if role == Some(Role::Owner) {
-        decoded::<InviteList>(ask(env, url, name, who, Method::Get, "/api/invites", None).await?, "the invites")?.invites
-    } else {
-        vec![]
-    };
     let visibility: Visibility = decoded(status["visibility"].clone(), "the status's visibility")?;
+    let kind: FragmentKind = decoded(status["kind"].clone(), "the status's kind")?;
     let title = status["title"].as_str().filter(|t| !t.is_empty()).unwrap_or(label(name)).to_string();
-    let chat_agent = match status["kind"].as_str() {
-        Some("chat") => members.members.iter().find(|m| m.kind == Some(IdentityKind::Agent)).map(|m| m.principal.clone()),
+    let chat_agent = match kind {
+        FragmentKind::Chat => members.members.iter().find(|m| m.kind == Some(IdentityKind::Agent)).map(|m| m.principal.clone()),
         _ => None,
     };
     let canonical = cfg.canonical(url, name);
@@ -490,8 +502,16 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
     let all = members.members;
     let with_agents: Vec<String> = all.iter().filter(|m| with_their_person(m, &all)).filter_map(|m| m.owner.clone()).collect();
     let members: Vec<Member> = all.iter().filter(|m| !with_their_person(m, &all)).cloned().collect();
-    // an agent by its title and picture, as the shell shows it
-    let profiles = profiles(env, named_ids(&members)).await;
+    // an agent by its title and picture, as the shell shows it, read
+    // beside the owner's invites (the sheet waits on both, not one by one)
+    let invites = async {
+        match role {
+            Some(Role::Owner) => decoded::<InviteList>(ask(env, url, name, who, Method::Get, "/api/invites", None).await?, "the invites").map(|l| l.invites),
+            _ => Ok(vec![]),
+        }
+    };
+    let (invites, profiles) = join(invites, profiles(env, named_ids(&members))).await;
+    let invites = invites?;
     Ok(Sheet {
         me: who.id.clone(),
         role,
@@ -499,6 +519,7 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
         with_agents,
         invites,
         visibility,
+        kind,
         title,
         chat_agent,
         link,
@@ -534,17 +555,17 @@ fn general(v: Visibility) -> (&'static str, &'static str, &'static str) {
         Visibility::Members => (
             "<rect x=\"5\" y=\"11\" width=\"14\" height=\"10\" rx=\"2\"/><path d=\"M8 11V7a4 4 0 0 1 8 0v4\"/>",
             "Restricted",
-            "Only the people with access can open it.",
+            "Only people with access can open it.",
         ),
         Visibility::Link => (
             "<path d=\"M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1\"/><path d=\"M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1\"/>",
             "Anyone with the link",
-            "Anyone who has its share link can open it as a viewer, signed in or not.",
+            "Anyone with the link can view it.",
         ),
         Visibility::Public => (
             "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18\"/>",
             "Public",
-            "Anyone can open it as a viewer, no link needed.",
+            "Anyone can view it, no link needed.",
         ),
     }
 }
@@ -569,21 +590,20 @@ fn role_buttons(sheet: &Sheet, m: &Member, who: &str) -> String {
 
 fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     let mut out = String::new();
-    let days = fragment_proto::limits::INVITE_TTL_S / 86400;
     match flash {
         Some(Flash::Invited { who, role, again: false }) => out += &format!(
-            "<div class=\"flash\"><p>Invited <b>{w}</b> as {r}: we mailed them a link. They are in once they accept it, signed in as {w} (within {days} days).</p></div>",
+            "<div class=\"flash\"><p>Invited <b>{w}</b> as {r}: we mailed them a link.</p></div>",
             w = esc(&who),
             r = role_phrase(role),
         ),
         Some(Flash::Invited { who, role, again: true }) => out += &format!(
-            "<div class=\"flash\"><p>Invited <b>{w}</b> again, as {r}: we mailed them a new link, and the invite waits {days} more days.</p></div>",
+            "<div class=\"flash\"><p>Invited <b>{w}</b> again, as {r}: we mailed them a new link.</p></div>",
             w = esc(&who),
             r = role_phrase(role),
         ),
         Some(Flash::Already { who, role: Role::Owner }) => out += &format!("<div class=\"flash\"><p><b>{}</b> is you: you own it.</p></div>", esc(&who)),
         Some(Flash::Already { who, role }) => out += &format!(
-            "<div class=\"flash\"><p><b>{}</b> is in already, as {}. Their role changes in the list below.</p></div>",
+            "<div class=\"flash\"><p><b>{}</b> is in already, as {}.</p></div>",
             esc(&who),
             role_phrase(role)
         ),
@@ -606,10 +626,10 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
             ),
             "add",
         );
-        out += "<p class=\"hint\">Viewers can see it; editors can change it too. Someone without an account yet is mailed a link, and is in once they sign in with that address.</p>";
-        // whoever comes in can talk to the owner's agent: trust them
-        // (Paul, 2026-10-23: the design, and this its safeguard)
-        if fragment_core::access::talks_to_owners_agent(&sheet.members) {
+        // whoever comes into a chat can talk to the owner's agent in it
+        // (Paul, 2026-10-23: the design, and this its safeguard; 10-24:
+        // only on a chat, one short line, and no other paragraph here)
+        if fragment_core::access::talks_to_owners_agent(sheet.kind, &sheet.members) {
             out += &format!("<p class=\"hint trust\">{}</p>", fragment_core::access::TRUST_WARNING);
         }
     }
@@ -670,7 +690,7 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     // the share link: its owner's, while it is what opens it
     let shared = sheet.link.as_deref().filter(|_| sheet.visibility == Visibility::Link);
     if sheet.owner() && shared.is_some() {
-        out += "<section class=\"more\"><h2>Share link</h2><div class=\"row\"><p class=\"hint\">Copy link copies it. A new link stops the old one working.</p>";
+        out += "<section class=\"more\"><h2>Share link</h2><div class=\"row\"><p class=\"hint\">A new link turns off the old one.</p>";
         out += &action_form(sheet, "rotate", "<button class=\"quiet\" data-confirm=\"Make a new one?\" data-arm disabled>New link</button>", "");
         out += "</div></section>";
     }

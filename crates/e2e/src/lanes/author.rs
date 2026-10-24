@@ -957,24 +957,35 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     let out = s.cli(api, &home, &["members", "add", &name, &invited, "--people-only", "--json"]);
     s.ok("--people-only is no flag now: a share is a person's and their agents'", out.status.code() == Some(2), String::from_utf8_lossy(&out.stderr));
     // inviting someone to a chat its owner's agent is in tells the owner
-    // to trust them (Paul, 2026-10-23); before the agent is in, nothing
+    // they can talk to it (Paul, 2026-10-23); before the agent is in,
+    // nothing, nor on an app it is in: no agent hears one (10-24)
     let me = s.cli_keys(&home).ok_or_else(|| anyhow::anyhow!("the CLI's key"))?;
     let chat = s.named(api, &me, "cli-trust")?;
     let made = api.create_with(&me, json!({ "name": chat, "template": "chat" }))?;
     anyhow::ensure!(made.status == 200, "the CLI's person's chat: {made}");
-    let invite = || {
+    let app = s.named(api, &me, "cli-trust-app")?;
+    let made = api.create_with(&me, json!({ "name": app, "template": "blank" }))?;
+    anyhow::ensure!(made.status == 200, "the CLI's person's app: {made}");
+    let invite = |to: &str| {
         let email = format!("t-{}@e2e.test", &Keys::generate().pubkey_hex()[..12]);
-        String::from_utf8_lossy(&s.cli(api, &home, &["members", "add", &chat, &email]).stdout).into_owned()
+        String::from_utf8_lossy(&s.cli(api, &home, &["members", "add", to, &email]).stdout).into_owned()
     };
-    let before = invite();
+    let before = invite(&chat);
     let (_, agent) = super::delegation::agent_of(api, &me)?;
     s.cli_json(api, &home, &["members", "add", &chat, &agent, "--role", "editor", "--json"])?;
-    let after = invite();
+    s.cli_json(api, &home, &["members", "add", &app, &agent, "--role", "editor", "--json"])?;
+    let after = invite(&chat);
+    let in_app = invite(&app);
     let warning = fragment_core::access::TRUST_WARNING;
     s.ok(
-        "fragment members add <email> on a chat its owner's agent is in says to trust whoever they invite; with no agent of theirs in it, it does not",
-        before.starts_with("invited ") && !before.contains(warning) && after.starts_with("invited ") && after.contains(warning),
-        json!([before, after]),
+        "fragment members add <email> on a chat its owner's agent is in says people in it can talk to their agent; on that chat before the agent is in, and on an app it is in, it does not",
+        before.starts_with("invited ")
+            && !before.contains(warning)
+            && after.starts_with("invited ")
+            && after.contains(warning)
+            && in_app.starts_with("invited ")
+            && !in_app.contains(warning),
+        json!([before, after, in_app]),
     );
     // `fragment open` names a share link only where one opens it (this
     // chat is public: its address is its link)

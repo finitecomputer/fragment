@@ -75,7 +75,8 @@ fn framed_by_platform(r: &Reply) -> bool {
 /// script told the shell its height, so its buttons are wired too. Its
 /// frame's DOM comes before that: the script waits on the platform's
 /// stylesheet, which the page links ahead of its content (share.rs
-/// `platform_html`), and a Done clicked meanwhile does nothing.
+/// `platform_html`; kept once read, shell.rs `versioned`, but a first open
+/// fetches it), and a Done clicked meanwhile does nothing.
 const SHEET_SIZED: &str = "document.getElementById('sheet').open && !!document.querySelector('#sheet iframe')?.style.height";
 
 /// Whether a page severs a window that opened it.
@@ -167,21 +168,44 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
             && r.text.contains("General access"),
         &r,
     );
-    // whoever the owner lets in can talk to their agent in it: the sheet
-    // says to trust them, by the invite, and only where it applies (Paul,
-    // 2026-10-23)
+    // whoever the owner lets into a chat can talk to their agent in it: the
+    // sheet says so by the invite, on a chat their agent is in and nowhere
+    // else (Paul, 2026-10-23 and 10-24): not on an app it is in (no agent
+    // hears one: this list), nor an app or a chat without it
     let warning = fragment_core::access::TRUST_WARNING;
     let plain = make(&s.name("plain"), "blank")?;
     let without = with_session(api, "GET", &format!("/share/{plain}"), &owner_session)?;
+    let talk = make(&s.name("talk"), "chat")?;
+    let bare = with_session(api, "GET", &format!("/share/{talk}"), &owner_session)?;
+    let joined = api.signed(&owner, "PUT", &format!("/api/f/{talk}/members/{agent}"), Some(&json!({ "role": "editor" })))?;
+    let warned = with_session(api, "GET", &format!("/share/{talk}"), &owner_session)?;
+    let invites = |r: &Reply| r.status == 200 && r.text.contains("name=\"email\"");
     s.ok(
-        "beside its invite, the sheet of a fragment the owner's agent is in says to trust whoever they invite; one with no agent of theirs in it does not",
-        r.text.contains(&format!("<p class=\"hint trust\">{warning}</p>")) && without.status == 200 && without.text.contains("name=\"email\"") && !without.text.contains(warning),
-        &without,
+        "beside its invite, the sheet of a chat the owner's agent is in says people in it can talk to their agent; an app it is in, an app without it, and a chat without it do not",
+        joined.status == 200
+            && invites(&warned)
+            && warned.text.contains(&format!("<p class=\"hint trust\">{warning}</p>"))
+            && [&r, &without, &bare].iter().all(|r| invites(r) && !r.text.contains(warning)),
+        json!([joined.status, warned.status, bare.status, without.status]),
     );
     s.ok(
         "only the platform's own pages may frame it (`frame-ancestors 'self'` alone: every fragment is another origin), and it severs a window that opened it",
         framed_by_platform(&r) && unopened(&r),
         headers(&r),
+    );
+    // its stylesheet by its version, which a browser keeps: opening the
+    // sheet again waits on no round trip for it (shell.rs `versioned`)
+    let css = r.text.split("href=\"").find_map(|h| h.split('"').next().filter(|u| u.starts_with("/__shell/platform-pages.css?v="))).unwrap_or("").to_string();
+    let kept = api.unsigned("GET", &css, None)?;
+    let other = api.unsigned("GET", "/__shell/platform-pages.css?v=0000", None)?;
+    let named = api.unsigned("GET", "/__shell/platform-pages.css", None)?;
+    s.ok(
+        "the sheet links its stylesheet by its version, which is kept for good (immutable); by another version, or by name alone, it is revalidated",
+        !css.is_empty()
+            && kept.status == 200
+            && kept.header("cache-control") == "public, max-age=31536000, immutable"
+            && [&other, &named].iter().all(|r| r.status == 200 && r.header("cache-control") == "no-cache"),
+        json!([css, kept.header("cache-control"), other.header("cache-control"), named.header("cache-control")]),
     );
     s.ok(
         "every choice on it is a button, none a select (which an arrow key changes in passing), and they come disabled: they arm a moment after the page shows",
