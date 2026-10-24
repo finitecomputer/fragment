@@ -58,7 +58,11 @@ impl Lab {
     /// folder (`/data/files`), and a bot that allows files.
     pub fn up_with(name: &str, files: bool) -> Lab {
         let context = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/simplex");
-        if std::env::var("FRAGMENT_DOCKER_SKIP_BUILD").is_err() {
+        // built unless it is here already and the run says it built its
+        // images (CI's Docker lane builds the two computer images ahead,
+        // never this one: a fresh runner has none)
+        let have = docker(&["image", "inspect", "--format", "{{.Id}}", LAB_IMAGE]).is_ok();
+        if !have || std::env::var("FRAGMENT_DOCKER_SKIP_BUILD").is_err() {
             docker(&["build", "--platform", "linux/amd64", "-q", "-f", &context.join("lab.Dockerfile").to_string_lossy(), "-t", LAB_IMAGE, &context.to_string_lossy()]).expect("the lab's image builds");
         }
         let prefix = format!("sxlab-{name}-{}", std::process::id());
