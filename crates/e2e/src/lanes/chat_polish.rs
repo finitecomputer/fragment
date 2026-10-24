@@ -622,3 +622,74 @@ pub(super) fn record_shapes(s: &mut Suite, api: &Api, owner: &Keys, session: &st
     chrome.close(page)?;
     Ok(())
 }
+
+/// Alex's review of #580: a finished card said how long its turn worked up
+/// to the next thing the chat showed (an idle end shows nothing of its
+/// own), so a turn's "Worked for 3s" became "Worked for 1h 0m" once
+/// someone spoke an hour later. Goal: a finished card's time runs from its
+/// turn's start (a later card's, its first step) to its own turn's next
+/// record, else its end, whatever comes after: a person's message, another
+/// agent's turn, a reload. Both shapes: steps, then an idle end; an answer,
+/// a housekeeping (memory) step, then an idle end. Method: a quiet chat's
+/// agents post them, each end seconds after its last step, and the owner's
+/// message and another agent's turn seconds after each end; the heads read
+/// the times the records give, live and after a reload.
+pub(super) fn finished_card_times(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut Browser) -> Result<()> {
+    let name = s.named(api, owner, "card-times")?;
+    let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "making the card-times chat: {made}");
+    s.owned(&made.body, owner);
+    let (hand, agent) = quiet_agent(api, owner, &name)?;
+    let (other, other_id) = quiet_agent(api, owner, &name)?;
+    let me = api.identity(owner)?;
+    // a record posted, and the time the platform gave it
+    let post = |by: &Keys, channel: &str, id: &str, body: Value| -> Result<i64> {
+        let r = api.signed(by, "POST", &format!("/api/f/{name}/channels/{channel}"), Some(&json!({ "id": id, "body": body })))?;
+        anyhow::ensure!(r.status == 200, "posting {id} on {channel}: {r}");
+        r.body["record"]["at"].as_i64().ok_or_else(|| anyhow::anyhow!("{id}: no time in {r}"))
+    };
+    let pause = |ms: u64| std::thread::sleep(Duration::from_millis(ms));
+    let step = |turn: &str, n: u32, category: &str, tool: &str, args: &str| json!({ "kind": "turn.step", "turn": turn, "step": n, "category": category, "tool": tool, "args": args, "ok": true });
+    // the head's words for a time, as the page says it (`took`)
+    let took = |ms: i64| {
+        let s = ((ms as f64) / 1000.0).round().max(1.0) as i64;
+        if s < 60 { format!("{s}s") } else { format!("{}m {:02}s", s / 60, s % 60) }
+    };
+    let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
+    super::fit(chrome, &page, 1000, 1100, false)?;
+    // steps, then an idle end
+    let start1 = post(&hand, "work", "a-start", json!({ "kind": "turn.start", "turn": "t1", "asker": me, "agent": agent }))?;
+    post(&hand, "work", "a-1", step("t1", 1, "shell", "terminal", "ls"))?;
+    pause(1_000);
+    post(&hand, "work", "a-2", step("t1", 2, "shell", "terminal", "cargo check"))?;
+    pause(1_500);
+    let end1 = post(&hand, "work", "a-end", json!({ "kind": "turn.end", "turn": "t1", "outcome": "idle" }))?;
+    pause(3_000);
+    post(owner, "chat", "later-1", json!({ "text": "Thanks!" }))?;
+    // an answer, a housekeeping step, then an idle end
+    let start2 = post(&hand, "work", "b-start", json!({ "kind": "turn.start", "turn": "t2", "asker": me, "agent": agent }))?;
+    post(&hand, "chat", "rp:t2:1", json!({ "text": "Noted: you like tomatoes.", "turn": "t2" }))?;
+    post(&hand, "work", "b-1", step("t2", 1, "memory", "memory", "tomatoes"))?;
+    pause(1_500);
+    let end2 = post(&hand, "work", "b-end", json!({ "kind": "turn.end", "turn": "t2", "outcome": "idle" }))?;
+    pause(3_000);
+    // later: the owner speaks, and another agent works
+    post(owner, "chat", "later-2", json!({ "text": "And one more thing." }))?;
+    post(&other, "work", "c-start", json!({ "kind": "turn.start", "turn": "t3", "asker": me, "agent": other_id }))?;
+    post(&other, "work", "c-1", step("t3", 1, "web", "web_search", "tomato varieties"))?;
+    post(&other, "work", "c-end", json!({ "kind": "turn.end", "turn": "t3", "outcome": "idle" }))?;
+    let want = json!([format!("Worked for {}· 2 steps", took(end1 - start1)), format!("Worked for {}· 1 step", took(end2 - start2))]);
+    let heads = "[...document.querySelectorAll('details.tools summary')].slice(0, 2).map((h) => h.textContent)";
+    let three = "document.querySelectorAll('details.tools').length === 3 && [...document.querySelectorAll('.bubble')].some((b) => b.textContent === 'And one more thing.')";
+    let live = super::shows(chrome, &page, three) && chrome.eval(&page, heads)? == want;
+    let seen = chrome.eval(&page, heads)?;
+    chrome.reload(&page)?;
+    let reloaded = super::shows(chrome, &page, three) && chrome.eval(&page, heads)? == want;
+    s.ok(
+        "a finished card says how long its own turn worked, to its own end (steps then an idle end; an answer, a memory step, an idle end), not to what comes after: a later message, another agent's turn, a reload",
+        live && reloaded,
+        json!({ "want": want, "live": seen, "reloaded": chrome.eval(&page, heads)? }),
+    );
+    chrome.close(page)?;
+    Ok(())
+}

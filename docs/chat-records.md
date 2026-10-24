@@ -506,7 +506,10 @@ alone (each its category's icon, which names its verb, and its arguments;
 while it works, the card's head says how long it has worked and how many
 steps, and only its last three steps show under it, each older one
 fainter; once done, it folds to one line: how long it worked, how many
-steps, and an icon for each kind of work); a step's `text` (an older
+steps, and an icon for each kind of work; how long runs from its turn's
+start, or a later card's first step, to its own turn's next record, else
+the turn's end, never to anything else the chat shows after it); a
+step's `text` (an older
 bridge's record of the model's words before the call) as the agent's
 reply just before its step, whole as recorded and never in the card
 (Paul, 2026-10-24: everything the agent says is a reply in the chat;

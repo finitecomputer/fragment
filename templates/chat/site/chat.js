@@ -847,12 +847,8 @@ export function mount(root) {
         prev.steps.push(it.s);
         continue;
       }
-      if (prev?.type === "steps") {
-        // a running card's head says its turn works: no working line under it
-        if (it.type === "working" && prev.t === it.t) continue;
-        // a card's work ends where the next record begins
-        if (it.type !== "draft" && it.type !== "working" && it.type !== "asked") prev.until ??= it.at;
-      }
+      // a running card's head says its turn works: no working line under it
+      if (prev?.type === "steps" && it.type === "working" && prev.t === it.t) continue;
       out.push(it.type === "step" ? { type: "steps", t: it.t, steps: [it.s] } : it);
     }
     return out;
@@ -887,7 +883,7 @@ export function mount(root) {
       case "message":
         return messageNode(it.m);
       case "steps":
-        return stepsNode(it.t, it.steps, it.until ?? null);
+        return stepsNode(it.t, it.steps);
       case "said":
         return saidNode(it.t, it.s, it.text);
       case "prompt":
@@ -1319,10 +1315,28 @@ export function mount(root) {
   setInterval(() => {
     for (const n of $("messages").querySelectorAll(".tools [data-since]")) n.textContent = `Working for ${took(Date.now() - Number(n.dataset.since))}`;
   }, 1000);
-  function stepsNode(t, steps, until) {
+  // Where a card's work ends: the first record of its own turn after its
+  // last step (a reply, a card, a notice, its next step), else the turn's
+  // end; never anything else in the chat (a later message, another
+  // agent's turn), which says nothing of how long this turn worked. Null
+  // while its turn runs with nothing after it.
+  function cardEnd(t, steps) {
+    const last = steps[steps.length - 1];
+    let end = t.end?.at ?? null;
+    const sooner = (at) => {
+      if (end === null || at < end) end = at;
+    };
+    // `work`'s records are ordered by time, then seq; a reply on `chat`, by time
+    const after = (x) => x.at > last.at || (x.at === last.at && x.n > last.n);
+    for (const x of [...t.steps.values(), ...t.prompts.values(), ...t.notices.values()]) if (after(x)) sooner(x.at);
+    for (const m of state.chat) if (m.turn === t.id && m.principal === t.agent && m.at > last.at) sooner(m.at);
+    return end;
+  }
+  function stepsNode(t, steps) {
     const key = `s:${t.key}:${steps[0].step}`;
     const live = running(t) && steps[steps.length - 1].n === t.lastN;
     const agent = profiles.get(t.agent)?.fragment ?? null;
+    const until = live ? null : cardEnd(t, steps);
     const sig = JSON.stringify([steps, live, agent, until]);
     const before = nodes.get(key)?.node;
     return [
@@ -1347,7 +1361,7 @@ export function mount(root) {
             i.append(icon(name));
             kinds.append(i);
           }
-          summary.append(kinds, el("span", null, `Worked for ${took((until ?? t.end?.at ?? t.lastAt) - from)}`));
+          summary.append(kinds, el("span", null, `Worked for ${took((until ?? t.lastAt) - from)}`));
         }
         summary.append(el("span", null, `· ${plural(steps.length, "step")}`), icon("chevron", "chev"));
         // the step it is on now: the last of a card its turn works in, unless
