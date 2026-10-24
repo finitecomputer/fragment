@@ -407,7 +407,7 @@ impl FragmentCell {
     }
 
     /// What it is, as its live `fragment.json` last said (an app until it
-    /// has; `Unknown` for a kind a newer release stored, read after a
+    /// has; `Other` for a kind a newer release stored, read after a
     /// rollback).
     pub(crate) fn kind(&self) -> CellResult<FragmentKind> {
         let face: Option<Value> = self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str(&f).ok());
@@ -1186,7 +1186,7 @@ fn secret_hosts(given: &[String]) -> CellResult<Vec<String>> {
 /// is a manifest's, which names only kinds this release knows: the
 /// fallback a newer platform's kind reads as is never stored as one.
 pub(crate) fn face(kind: FragmentKind, title: Option<&str>, picture: Option<&str>) -> String {
-    assert_ne!(kind, FragmentKind::Unknown, "a face's kind is its manifest's, one this release knows");
+    assert_ne!(kind, FragmentKind::Other, "a face's kind is its manifest's, one this release knows");
     let mut face = json!({ "kind": kind, "title": title });
     if let Some(p) = picture {
         face["picture"] = json!(p);

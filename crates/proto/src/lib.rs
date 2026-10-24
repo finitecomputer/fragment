@@ -831,10 +831,10 @@ pub enum FragmentKind {
     /// kind breaks no shipped CLI or pinned image. It is only ever read:
     /// `parse` never answers it, so no `fragment.json` names it (the cell
     /// refuses its install, as any kind it does not know), and it is
-    /// written only as `unknown`, a name no kind may take, never as a kind
+    /// written only as `other`, a name no kind may take, never as a kind
     /// it is not. Last: serde's `other` must be.
     #[serde(other)]
-    Unknown,
+    Other,
 }
 
 impl FragmentKind {
@@ -845,12 +845,12 @@ impl FragmentKind {
             FragmentKind::Agent => "agent",
             FragmentKind::Brain => "brain",
             FragmentKind::Skills => "skills",
-            FragmentKind::Unknown => "unknown",
+            FragmentKind::Other => "other",
         }
     }
 
     /// A kind this build knows, as a `fragment.json` names it; never
-    /// `Unknown`, which no manifest may name.
+    /// `Other`, which no manifest may name.
     pub fn parse(s: &str) -> Option<FragmentKind> {
         match s {
             "app" => Some(FragmentKind::App),
@@ -2411,10 +2411,10 @@ mod tests {
     /// kind breaks no shipped client; the kinds it knows read and write as
     /// themselves; and the fallback is never a kind. Method: each known
     /// kind through serde and `as_str`/`parse`, both ways; a list, a search
-    /// answer and an access view naming `site`; `Unknown` written, read
+    /// answer and an access view naming `site`; `Other` written, read
     /// back, and parsed as a manifest's kind.
     #[test]
-    fn a_kind_this_build_does_not_know_reads_as_unknown() {
+    fn a_kind_this_build_does_not_know_reads_as_other() {
         use FragmentKind::*;
         for kind in [App, Chat, Agent, Brain, Skills] {
             let wire = serde_json::to_value(kind).unwrap();
@@ -2428,16 +2428,16 @@ mod tests {
         ]);
         let list: FragmentList = serde_json::from_value(serde_json::json!({ "fragments": rows })).unwrap();
         let read: Vec<_> = list.fragments.iter().map(|f| (f.name.as_str(), f.kind, f.title.as_deref(), f.archived)).collect();
-        assert_eq!(read, [("home--k3x9", Unknown, Some("Home"), true), ("todo--m4pq", Chat, None, false)], "the row of a kind it does not know keeps the rest of itself");
+        assert_eq!(read, [("home--k3x9", Other, Some("Home"), true), ("todo--m4pq", Chat, None, false)], "the row of a kind it does not know keeps the rest of itself");
         let found: SearchAnswer = serde_json::from_value(serde_json::json!({ "fragments": rows, "messages": [] })).unwrap();
-        assert_eq!(found.fragments.iter().map(|f| f.kind).collect::<Vec<_>>(), [Unknown, Chat]);
+        assert_eq!(found.fragments.iter().map(|f| f.kind).collect::<Vec<_>>(), [Other, Chat]);
         let access: Access = serde_json::from_value(serde_json::json!({ "fragments": [{ "name": "home--k3x9", "kind": "site" }] })).unwrap();
-        assert_eq!(access.fragments[0].kind, Unknown);
-        // the fallback is written as `unknown` alone, reads back as itself,
+        assert_eq!(access.fragments[0].kind, Other);
+        // the fallback is written as `other` alone, reads back as itself,
         // and no manifest may name it, nor a kind this build does not know
-        assert_eq!(serde_json::to_value(Unknown).unwrap(), serde_json::json!("unknown"));
-        assert_eq!(serde_json::from_value::<FragmentKind>(serde_json::json!("unknown")).unwrap(), Unknown);
-        assert_eq!([FragmentKind::parse("unknown"), FragmentKind::parse("site"), FragmentKind::parse("App")], [None; 3]);
+        assert_eq!(serde_json::to_value(Other).unwrap(), serde_json::json!("other"));
+        assert_eq!(serde_json::from_value::<FragmentKind>(serde_json::json!("other")).unwrap(), Other);
+        assert_eq!([FragmentKind::parse("other"), FragmentKind::parse("site"), FragmentKind::parse("App")], [None; 3]);
         // a kind that is no string is still refused
         for bad in [serde_json::json!(7), serde_json::json!(true), serde_json::json!(null)] {
             assert!(serde_json::from_value::<FragmentKind>(bad.clone()).is_err(), "{bad} is no kind");
