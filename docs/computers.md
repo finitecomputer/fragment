@@ -1222,11 +1222,14 @@ expires within 30 days. The container application is the deployment's
   says its model reads images (`"images": true`: the private tier's,
   Tinfoil's DeepSeek V4.1 Flash), on the tiers' rule. Hermes describes each
   `computer_use` screenshot with it and hands the main model the words
-  (named outright, Hermes routes every capture so: its
-  `tools/computer_use/vision_routing.py`), and an image a person attaches
-  too. Before, a capture went to the agent's own tier's model, which on
-  the medium tier reads no images. DeepSeek Flash's vision build is only
-  on DeepSeek's own API (decision 23, its status).
+  (named outright, Hermes routes every capture so: v0.21.7's
+  `tools/computer_use/tool.py`, `_should_route_through_aux_vision`), and
+  an image a person attaches too. Before, a capture went to the agent's
+  own tier's model, which on the medium tier reads no images. DeepSeek
+  Flash's vision build was only on DeepSeek's own API (decision 23, its
+  status); OpenRouter now serves DeepSeek V4.1 Flash with image input.
+  What the main model sees of an image, and what it would take to let a
+  model that reads images see them itself: docs/multimodal.md.
 - **Its speech-to-text** goes to `whisper`, whatever the agent's tier.
   - **Config.** Each profile has `stt: {provider: openai, language: "",
     openai: {base_url: <route>/v1, api_key: "agent:<name>", model:
