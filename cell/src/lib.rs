@@ -110,8 +110,9 @@ const PASSED_HEADERS: [&str; 9] =
 /// Durable Object accepts the upgrade the client asked for.
 const WEBSOCKET_HEADERS: [&str; 4] = ["sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions"];
 
-/// `PUT /api/fragments/{name}/archived`'s body, `{archived}`, is a few bytes.
-const ARCHIVED_BODY_MAX_BYTES: usize = 1024;
+/// `PUT /api/fragments/{name}/archived`'s body, `{archived}`, and
+/// `…/dock`'s, `{dock}`, are a few bytes.
+const OWN_VIEW_BODY_MAX_BYTES: usize = 1024;
 /// `PUT /api/fragments/{name}/seen` takes no body: what is read of one, to
 /// refuse it.
 const SEEN_BODY_MAX_BYTES: usize = 1024;
@@ -623,10 +624,10 @@ async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<Fragmen
         .filter_map(|f| {
             let cap = access::Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied() };
             // the asker's own view (their search's preview and unread, their
-            // archiving) stays theirs, as do the listed records their role
-            // reads: the agent's capped role may read less
+            // archiving and their dock) stays theirs, as do the listed
+            // records their role reads: the agent's capped role may read less
             let owned = f.role == Role::Owner;
-            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, owned, listed: vec![], ..f })
+            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, dock: true, owned, listed: vec![], ..f })
         })
         .collect();
     Ok(FragmentList { fragments })
@@ -1179,7 +1180,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         // the signer's own view of a fragment of theirs (principal.rs): it
         // changes nothing of the fragment's, nor anyone else's list
         (Method::Put, ["api", "fragments", name, "archived"]) => {
-            let body = read_body(&mut req, ARCHIVED_BODY_MAX_BYTES).await?;
+            let body = read_body(&mut req, OWN_VIEW_BODY_MAX_BYTES).await?;
             let set: fragment_proto::SetArchived = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let who = signer(env, &req, &url, &body).await?;
             let name = named_fragment(name)?;
@@ -1187,6 +1188,19 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let mut init = RequestInit::new();
             init.with_method(Method::Put).with_body(Some(inner.into()));
             let put = Request::new_with_init("https://principal.internal/archived", &init)?;
+            crate::routed::send(env, "PRINCIPAL", &who.identity.id, put).await
+        }
+        // whether the signer's dock shows a fragment of theirs (principal.rs):
+        // their own view again, as archiving is
+        (Method::Put, ["api", "fragments", name, "dock"]) => {
+            let body = read_body(&mut req, OWN_VIEW_BODY_MAX_BYTES).await?;
+            let set: fragment_proto::SetDock = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let who = signer(env, &req, &url, &body).await?;
+            let name = named_fragment(name)?;
+            let inner = json!({ "fragment": name, "dock": set.dock }).to_string();
+            let mut init = RequestInit::new();
+            init.with_method(Method::Put).with_body(Some(inner.into()));
+            let put = Request::new_with_init("https://principal.internal/dock", &init)?;
             crate::routed::send(env, "PRINCIPAL", &who.identity.id, put).await
         }
         // the signer has seen a chat's messages (principal.rs): their own

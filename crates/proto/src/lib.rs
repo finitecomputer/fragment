@@ -1095,6 +1095,13 @@ pub struct ListedFragment {
     /// shell's sidebar leaves it out; search still finds it).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,
+    /// On the signer's dock: their own choice, not the fragment's (`PUT
+    /// /api/fragments/{name}/dock`), true until they take it off (the
+    /// shell's dock shows apps and brains, less these and the archived).
+    /// Left out while true, so a row from before the choice, or from an
+    /// older platform, reads as on it.
+    #[serde(default = "on_the_dock", skip_serializing_if = "is_on_the_dock")]
+    pub dock: bool,
     /// An agent's list `for` someone: whether that someone owns it (beside
     /// the role the agent acts with there), as no name says any more.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1119,6 +1126,30 @@ pub struct SetArchived {
 pub struct Archived {
     pub name: String,
     pub archived: bool,
+}
+
+/// `PUT /api/fragments/{name}/dock`: the signer's own choice of whether
+/// their dock shows a fragment they hold a role on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetDock {
+    pub dock: bool,
+}
+
+/// Its answer: the fragment, and whether it is on their dock now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Docked {
+    pub name: String,
+    pub dock: bool,
+}
+
+/// A row's `dock` when it names none: on it.
+fn on_the_dock() -> bool {
+    true
+}
+
+/// A row on the dock leaves `dock` out.
+fn is_on_the_dock(dock: &bool) -> bool {
+    *dock
 }
 
 /// `PUT /api/fragments/{name}/seen`'s answer: the signer has seen the
@@ -2348,11 +2379,11 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, owned: false, listed: vec![] }] };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, dock: true, owned: false, listed: vec![] }] };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes-k3x9", "role": "owner", "kind": "app" }] }));
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1, invites: Some(2) };
         let listed = FragmentList {
-            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
+            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, dock: true, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
         };
         assert_eq!(
             value(&listed),
@@ -2361,6 +2392,18 @@ mod tests {
         // a row not archived leaves the flag out, and reads back so
         let read: ListedFragment = serde_json::from_value(serde_json::json!({ "name": "notes-k3x9", "role": "viewer" })).unwrap();
         assert!(!read.archived && read.unread == 0);
+        // a row on the person's dock leaves the choice out, and one without
+        // it (from before it, or an older platform) reads back on it; one
+        // taken off says so, and reads back so (#587)
+        assert!(read.dock);
+        let off = ListedFragment { dock: false, ..read.clone() };
+        assert_eq!(value(&off), serde_json::json!({ "name": "notes-k3x9", "role": "viewer", "kind": "app", "dock": false }));
+        assert_eq!(serde_json::from_value::<ListedFragment>(value(&off)).unwrap(), off);
+        assert_eq!(value(&SetDock { dock: false }), serde_json::json!({ "dock": false }));
+        assert_eq!(value(&Docked { name: "notes-k3x9".into(), dock: true }), serde_json::json!({ "name": "notes-k3x9", "dock": true }));
+        for refused in [serde_json::json!({}), serde_json::json!({ "dock": "no" }), serde_json::json!({ "dock": null })] {
+            assert!(serde_json::from_value::<SetDock>(refused.clone()).is_err(), "{refused}");
+        }
         // a row's sharing sent before invites were counted reads back
         // without them: someone else may be invited, so the access view asks
         let old: Sharing = serde_json::from_value(serde_json::json!({ "visibility": "link", "members": 2, "guests": 0 })).unwrap();
