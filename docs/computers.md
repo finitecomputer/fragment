@@ -1139,6 +1139,19 @@ expires within 30 days. The container application is the deployment's
     (Settings) has left private by that pick; its images stay on the
     platform's `vision`.
 
+  **A tier's `label`: the routes Settings offers** (Paul, 2026-10-24:
+  Private the default for the $200 seat, Standard one pick away, beside
+  an owner's own models). A tier slot may name `"label"`, 1 to 40
+  characters (`"Private (recommended)"`, `"Standard"`): Settings offers
+  each labelled tier, by its label and its model's id, as a route an
+  agent runs on, and picked it is the agent's `agent.json` `tier` (its
+  own model gone), which its Hermes reads within seconds. A deployment
+  that labels none offers the agent's tier by its name, as before. New
+  agents start on `cheap`, so the cheap tier is the default route (the
+  private tier's, Private). The computer's view carries each tier's route
+  (`models.routes`: its label, whether it is private, its fallback's and
+  vision model's ids).
+
   **A slot's `price`.** A slot on an OpenAI-compatible API that is not
   OpenRouter may name its model's list price there, dollars a million
   tokens as its vendor lists them: `{"input": <$>, "cached_input"?: <$>,

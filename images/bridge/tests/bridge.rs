@@ -116,7 +116,11 @@ async fn streaming_drafts_then_the_final() {
     bridge.stop().await;
 }
 
-/// Goal: a tool call is a step on `work`, before the reply.
+/// Goal (Paul, 2026-10-24: everything the agent says is a reply in the
+/// chat): a tool call is a step on `work`; the words the agent said before
+/// it are a reply of their own, posted before the step and marked
+/// `interim` (its turn worked on after them), never the step's; the turn's
+/// answer is a reply after it.
 #[tokio::test]
 async fn tool_steps() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
@@ -131,10 +135,15 @@ async fn tool_steps() {
         let steps = w.bodies(&chat, "work", "turn.step");
         assert_eq!(steps.len(), 1);
         assert_eq!((steps[0]["tool"].as_str(), steps[0]["step"].as_u64(), steps[0]["ok"].as_bool(), steps[0]["turn"].as_str()), (Some("search"), Some(1), Some(true), Some(turn.as_str())));
-        assert_eq!(steps[0]["text"], "Let me look.");
+        assert!(steps[0].get("text").is_none(), "the words are no part of the step: {}", steps[0]);
         assert_eq!((&steps[0]["category"], &steps[0]["args"]), (&json!("web"), &json!("use a tool")), "what it does, and its preview");
         let ids: Vec<String> = w.records(&chat, "work").iter().map(|r| r["body"]["kind"].as_str().unwrap_or("").to_string()).collect();
         assert_eq!(ids, vec!["turn.start", "commands", "turn.step", "turn.end"]);
+        let replies: Vec<Value> = w.records(&chat, "chat").into_iter().filter(|r| r["body"]["turn"] == turn).collect();
+        let bodies: Vec<Value> = replies.iter().map(|r| r["body"].clone()).collect();
+        assert_eq!(bodies, vec![json!({ "text": "Let me look.", "turn": turn, "interim": true }), json!({ "text": "echo: [paul] use a tool", "turn": turn })], "its words, then its answer");
+        let step_at = w.records(&chat, "work").into_iter().find(|r| r["body"]["kind"] == "turn.step").and_then(|r| r["at"].as_i64());
+        assert!(replies[0]["at"].as_i64() < step_at && step_at < replies[1]["at"].as_i64(), "the words, the step, then the answer: {replies:?} {step_at:?}");
     });
     bridge.stop().await;
 }

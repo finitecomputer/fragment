@@ -1264,6 +1264,13 @@ Private stays possible by config.
     deploy is refused
     (docs/computers.md, "A slot's `private`", which lists what is not
     private yet: transcription, decisions, speech, vendors' tools).
+    Paul, 2026-10-24, on the routes a person picks: "We want to make it
+    the default for our $200 a month users. But they should also be able
+    to disable it in Settings to be routed to our OpenRouter key /
+    Cloudflare AI ... Fallbacks are GOOD." A tier slot's `label` names a
+    route Settings offers ("Private (recommended)" on the cheap tier,
+    every agent's default; "Standard" on the medium tier), picked per
+    agent as its `tier`.
 
     **Going live** (Paul's): finite-mono issues the key; `cargo xtask
     secret set fragment-finite-private-key --config <production's

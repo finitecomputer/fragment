@@ -114,6 +114,8 @@ const chats = () => state.fragments.filter((f) => f.kind === "chat");
 const apps = () => state.fragments.filter((f) => f.kind === "app" || f.kind === "brain");
 // the sidebar's: what the person has not archived (search still finds the rest)
 const shown = (list) => list.filter((f) => !f.archived);
+// the dock's: their apps shown, less those they took off it (`dock: false`)
+const docked = () => shown(apps()).filter((f) => f.dock !== false);
 // a frame of one of the person's fragments, signed in there by the platform
 // A path segment: the API's ids keep their ":" (`computer:…`) as
 // sent, since the router matches segments as they are, not decoded.
@@ -230,12 +232,34 @@ function show(spec) {
 function frameOf(src, title, name = null) {
   const frame = el("iframe");
   frame.setAttribute("aria-label", title);
-  frame.src = src;
   frame.allow = "clipboard-write; microphone";
-  if (name) frame.dataset.fragment = name;
   frame.dataset.src = src;
+  if (name) {
+    // A bare `microphone` is the src's origin's, the mint's on this page's;
+    // the page lands at the fragment's own, which the browser would refuse
+    // without asking. So it names that origin before the frame navigates
+    // (a policy is read as a navigation starts), and loads regardless:
+    // until then a navigation asked of it waits (`go`), the last one kept.
+    frame.dataset.fragment = name;
+    unready.set(frame, src);
+    originOf(name)
+      .then((origin) => { frame.allow = `clipboard-write; microphone ${origin}`; }, () => {})
+      .finally(() => {
+        const next = unready.get(frame);
+        unready.delete(frame);
+        frame.src = next;
+      });
+  } else frame.src = src;
   frame.addEventListener("load", () => theme(frame));
   return frame;
+}
+// a fragment's frame whose policy does not name its origin yet -> the
+// navigation it makes once it does (frameOf)
+const unready = new WeakMap();
+// A frame sent to `src`: at once, or, its origin not known yet, once it is.
+function go(frame, src) {
+  if (unready.has(frame)) unready.set(frame, src);
+  else frame.src = src;
 }
 
 // A frame that could not sign in says so, and how on (the mint's note,
@@ -275,7 +299,7 @@ addEventListener("focus", () => {
     blockedNote(frame)?.remove();
     greeted.delete(frame);
     busyFrames.delete(frame);
-    frame.src = frame.dataset.src;
+    go(frame, frame.dataset.src);
   }
 });
 // The frames follow this page's light or dark (they may not see its media).
@@ -485,6 +509,132 @@ $("add-agent-form").onsubmit = (e) => {
   addDialog.close();
 };
 $("add-agent-cancel").onclick = () => addDialog.close();
+
+// ---- a chat's alerts (docs/api.md, The shell, "A chat's alerts are the
+// shell's"; docs/chat-records.md, Push). A browser lets no cross-origin
+// frame ask for notifications, so the shell asks, on this origin, for the
+// chats it frames, and holds their subscriptions: one registration of its
+// alerts worker (alerts-sw.js) a chat, its scope /__shell/alerts/<chat>/,
+// subscribed with that chat's own VAPID key, which its page hands over.
+// The page stores the subscription on its fragment as its person
+// (`__push-sub`), as in a tab of its own, so whose alerts are on stays
+// each chat's, and only that chat's fragment can push to it. Only a frame
+// of one of the person's chats on the release's chat template asks, from
+// its fragment's own origin. The scope names its person too: the worker
+// shows nothing once another, or no one, is signed in here, and lets itself
+// go (alerts-sw.js), whatever ended the session ----
+const ALERTS_WORKER = "/__shell/alerts-sw.js";
+const ALERTS_SCOPE = "/__shell/alerts/";
+const alertsScope = (name) => new URL(`${ALERTS_SCOPE}${encodeURIComponent(state.me.id)}/${encodeURIComponent(name)}/`, location.origin).href;
+// the person leaving (signing out, or in as another): no alerts are
+// turned on from then, and one made as they left lets go at once
+let alertsEnded = false;
+const alertable = () => "serviceWorker" in navigator && typeof PushManager !== "undefined" && typeof Notification !== "undefined";
+const b64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+// a P-256 public key, uncompressed (65 bytes): a VAPID key
+function vapidKey(s) {
+  try {
+    const key = Uint8Array.from(atob(s.replaceAll("-", "+").replaceAll("_", "/")), (c) => c.charCodeAt(0));
+    return key.length === 65 && key[0] === 4 ? key : null;
+  } catch {
+    return null;
+  }
+}
+// a chat's registration (none when its alerts are off)
+async function alertsOf(name) {
+  const reg = await navigator.serviceWorker.getRegistration(alertsScope(name));
+  return reg?.scope === alertsScope(name) ? reg : null;
+}
+// a registration's worker, once it may hold a subscription
+function activated(reg) {
+  const w = reg.installing ?? reg.waiting;
+  if (!w) return Promise.resolve(reg);
+  return new Promise((resolve, reject) => {
+    w.addEventListener("statechange", () => {
+      if (w.state === "activated") resolve(reg);
+      else if (w.state === "redundant") reject(new Error("the alerts worker did not start"));
+    });
+  });
+}
+async function alertsOn(name, key) {
+  // the press in the frame is this page's too: the browser asks once
+  if (Notification.permission === "default") await Notification.requestPermission();
+  if (Notification.permission !== "granted") return { state: Notification.permission === "denied" ? "denied" : "off" };
+  const reg = await activated(await navigator.serviceWorker.register(ALERTS_WORKER, { scope: alertsScope(name) }));
+  const sub = (await reg.pushManager.getSubscription()) ?? (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }));
+  if (alertsEnded) {
+    await alertsOff(name);
+    return { state: "failed", error: "signed out" };
+  }
+  return { state: "on", subscription: { endpoint: sub.endpoint, p256dh: b64u(sub.getKey("p256dh")), auth: b64u(sub.getKey("auth")) } };
+}
+async function alertsOff(name) {
+  const reg = await alertsOf(name);
+  const sub = await reg?.pushManager.getSubscription();
+  await sub?.unsubscribe();
+  await reg?.unregister();
+  return { state: "off", ...(sub ? { endpoint: sub.endpoint } : {}) };
+}
+addEventListener("message", async (event) => {
+  const d = event.data;
+  if (!["alerts?", "alerts"].includes(d?.fragment) || typeof d.nonce !== "string" || d.nonce.length > 64 || alertsEnded) return;
+  const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === event.source);
+  const name = frame?.dataset.fragment;
+  if (!name || byName(name)?.kind !== "chat") return;
+  let status;
+  try {
+    status = await api("GET", `/api/f/${seg(name)}/status`);
+  } catch {
+    return;
+  }
+  const origin = new URL(status.urls.canonical).origin;
+  if (event.origin !== origin || frame.contentWindow !== event.source) return;
+  // alerts are turned on for the release's chat alone, whose page is the
+  // platform's own code (decision 40): a fork's is its author's, which
+  // could push anything in this origin's name (the worker, too, shows
+  // nothing of a chat that left it). Read and turned off, any chat's: one
+  // that left the release may let go of what it had
+  const blessed = String(status.code?.id ?? "").startsWith("blessed:chat@");
+  const answer = (a) => event.source.postMessage({ fragment: "alerts", nonce: d.nonce, ...a }, origin);
+  if (!alertable()) return answer({ state: "unsupported" });
+  try {
+    if (d.fragment === "alerts?") {
+      if (Notification.permission === "denied") return answer({ state: "denied" });
+      const on = Notification.permission === "granted" && !!(await (await alertsOf(name))?.pushManager.getSubscription());
+      return answer({ state: on ? "on" : "off" });
+    }
+    const key = d.on === true && typeof d.key === "string" ? vapidKey(d.key) : null;
+    if (key) return answer(blessed ? await alertsOn(name, key) : { state: "failed", error: "only the release's chat turns alerts on" });
+    if (d.on === false) return answer(await alertsOff(name));
+  } catch (e) {
+    const denied = e?.name === "NotAllowedError" || e?.name === "PermissionDeniedError";
+    return answer(denied ? { state: "denied" } : { state: "failed", error: String(e?.message ?? e) });
+  }
+});
+// every chat's alerts this browser holds, let go (signing out: the next
+// person in it gets none of the last one's)
+async function dropAlerts() {
+  if (!alertable()) return;
+  const regs = await navigator.serviceWorker.getRegistrations().catch(() => []);
+  await Promise.all(
+    regs
+      .filter((r) => new URL(r.scope).pathname.startsWith(ALERTS_SCOPE))
+      .map(async (r) => {
+        await (await r.pushManager.getSubscription().catch(() => null))?.unsubscribe().catch(() => {});
+        await r.unregister().catch(() => {});
+      }),
+  );
+}
+// an alert clicked: its chat, here (alerts-sw.js; one opened for it comes
+// with `?chat=`, at the page's start)
+navigator.serviceWorker?.addEventListener("message", (event) => {
+  const d = event.data;
+  if (d?.fragment === "open-chat" && typeof d.name === "string" && byName(d.name)?.kind === "chat") {
+    openChat(d.name);
+    leaveSidebar();
+  }
+});
+navigator.serviceWorker?.startMessages();
 
 // ---- sharing: the platform's own sheet, framed (it is this origin's) ----
 function badges(f) {
@@ -775,6 +925,10 @@ function renderChats() {
     agentRows.push(row);
   }
   patch($("primary-agent"), agentRows);
+  // another chat with it, one click from the top (its menu's New chat too)
+  const startChat = $("sidebar-start-chat");
+  startChat.hidden = !primary?.identity || state.guest;
+  startChat.onclick = () => newChat(primary.identity);
   // the launcher: a guest's searches; a seat's also starts a chat
   const launcherLabel = state.guest ? "Search chats and apps" : "Search or start a new chat";
   for (const id of ["sidebar-new-chat", "new-chat"]) {
@@ -1029,7 +1183,7 @@ const cardsLoad = { wait: 0, timer: null, at: 0 };
 async function loadCards(only = null) {
   clearTimeout(cardsLoad.timer);
   cardsLoad.at = Date.now();
-  const listed = shown(apps()).map((f) => f.name);
+  const listed = docked().map((f) => f.name);
   for (const [name, card] of cards) if (!listed.includes(name)) { URL.revokeObjectURL(card.url); cards.delete(name); }
   const asked = listed.filter((name) => !only || only.has(name) || !cards.has(name));
   const got = await Promise.all(asked.map((name) => loadCard(name).catch(() => "same")));
@@ -1056,12 +1210,13 @@ function showPeek(row, name) {
   peek.style.top = `${Math.max(8, r.top - peek.offsetHeight - 12)}px`;
 }
 const hidePeek = () => { peek.hidden = true; };
-// The desktop's dock: the person's apps (their list's, less the archived),
-// each its icon and title, one shared with them saying their role there;
-// then, for a seat, Add (how to ask for one: `showPrompts`).
+// The desktop's dock: the person's apps (their list's, less the archived
+// and those they took off it), each its icon and title, one shared with
+// them saying their role there; then, for a seat, Add (how to ask for one:
+// `showPrompts`).
 function renderApps() {
   hidePeek();
-  const rows = shown(apps()).map((f) => {
+  const rows = docked().map((f) => {
     const key = `app:${f.name}`;
     const title = titleOf(f.name);
     const row = el("button", `dock-app${viewer.keys.includes(key) ? " open" : ""}`);
@@ -1119,7 +1274,7 @@ function renderDesktopEmpty(empty) {
 function openApp(name, path = "/") {
   const f = byName(name);
   const shown = document.querySelector(`#stack .pane[data-key="${CSS.escape(`app:${name}`)}"] iframe`);
-  if (shown && path !== "/") shown.src = framed(name, path);
+  if (shown && path !== "/") go(shown, framed(name, path));
   const frame = frameOf(framed(name, path), titleOf(name), name);
   const status = el("span", "pane-sharing");
   if (f) status.append(...badges(f));
@@ -1131,7 +1286,7 @@ function openApp(name, path = "/") {
     actions: [
       ...(f && own(f) ? [{ icon: "share", title: "Share…", onClick: () => share(name) }] : []),
       { icon: "folder", title: "Files", onClick: () => show({ key: `tree:${name}`, title: titleOf(name), subtitle: "files", icon: paneIcon("folder"), body: frameOf(framed(name, "/__files"), `${titleOf(name)} files`, name) }) },
-      { icon: "reload", title: "Reload", onClick: () => { frame.src = framed(name, path); } },
+      { icon: "reload", title: "Reload", onClick: () => go(frame, framed(name, path)) },
       { icon: "external", title: "Open in a new tab", onClick: () => window.open(`/auth/fragment?name=${encodeURIComponent(name)}&return=${encodeURIComponent(path)}`, "_blank", "noopener") },
       {
         icon: "more", title: "More", onClick: (e) => openMenu(e.currentTarget, [
@@ -1943,6 +2098,33 @@ function legalLinks() {
   });
   return p;
 }
+// The release this page is (`release.mine`, its commit linked on GitHub,
+// the repo being public), when it was deployed, and the version its
+// computer runs, small and muted at the end of Settings: what whoever
+// looks is looking at (Paul, 2026-10-24). None on an unfilled page.
+const COMMIT = /^[0-9a-f]{7,40}$/;
+function releaseLine(c) {
+  if (!release.mine) return [];
+  const p = el("p", "muted settings-release");
+  p.dataset.release = release.mine;
+  let id = release.mine;
+  if (COMMIT.test(id)) {
+    id = el("a", null, release.mine);
+    id.href = `https://github.com/finitecomputer/fragment/commit/${release.mine}`;
+    id.target = "_blank";
+    id.rel = "noopener";
+  }
+  p.append("Release ", id);
+  if (DEPLOYED) {
+    const at = new Date(DEPLOYED * 1000);
+    const t = el("time", null, at.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }));
+    t.dateTime = at.toISOString();
+    p.append(" · ", t);
+  }
+  const v = c?.version ?? c?.latest;
+  if (v) p.append(` · Computer ${v}`);
+  return [p];
+}
 // a sentence whose `quoted` parts are code
 function say(text) {
   const p = el("p");
@@ -2092,7 +2274,7 @@ async function openSettings(push = true, failed = null) {
   // reads its export again while one builds
   if (state.guest) {
     returnSaid(back);
-    renderSettingsPage(page, [...billing, account, dataSection()]);
+    renderSettingsPage(page, [...billing, account, dataSection(), ...releaseLine(null)]);
     return tell();
   }
   const standing = ledger?.standing?.standing;
@@ -2166,7 +2348,7 @@ async function openSettings(push = true, failed = null) {
   const skills = await skillsSection();
   if (lost()) return;
   returnSaid(back);
-  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, buildSection(), dataSection()]);
+  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, buildSection(), dataSection(), ...releaseLine(c)]);
   renderAgentFaces();
   tell();
 }
@@ -2609,7 +2791,12 @@ function agentSettings(a, row, modeled) {
     await api("POST", `/api/f/${seg(a.fragment)}/files`, { message, files: [{ path: "agent.json", text: JSON.stringify(next, null, 2) + "\n" }] });
     await api("POST", `/api/f/${seg(a.fragment)}/deploy`, {});
   }));
-  const picks = [...(modeled.length ? [modelPicker(a, modeled, read, write, said)] : []), reasoningPicker(a, read, write, said)];
+  // the model pick: when there may be a choice, a route the deployment
+  // names (Private, Standard) or a model of a provider the person
+  // connected; whether there is one, with a single route, is the agent's
+  // own tier's to say (`modelPicker`, once agent.json is read)
+  const choice = modeled.length > 0 || routesOffered().length > 0;
+  const picks = [...(choice ? [modelPicker(a, modeled, read, write, said)] : []), reasoningPicker(a, read, write, said)];
   box.append(row, ...picks, said);
   return box;
 }
@@ -2643,22 +2830,36 @@ function modelOption(value, text) {
 
 // ---- an agent's model: its agent.json's `model` ({provider, id}), a model
 // of a provider the person connected, or none: its `tier`'s (`medium`, else
-// the default: `high` is off, decision 23), shown by the tier's name and its
-// model's id, as their computer's view names it (the deployment's `models`).
+// the default: `high` is off, decision 23), as their computer's view names
+// it (the deployment's `models`). A tier the deployment labels is a route
+// a person picks (Paul, 2026-10-24: "Private (recommended)", "Standard"):
+// each labelled tier is offered by its label and its model's id, and
+// picked, it is the agent's `tier`, its own model gone. None labelled, the
+// agent's own tier is shown by its name and its model's id, as before.
 // Vision and voice notes stay on the platform's own models.
 const TIER = { cheap: "Cheap", medium: "Medium" };
+const tierOf = (tier) => (tier === "medium" ? "medium" : DEFAULT_AGENT_TIER);
+const routesOffered = () => {
+  const routes = state.computer?.models?.routes;
+  return routes ? ["cheap", "medium"].filter((t) => routes[t]?.label) : [];
+};
 const tierName = (tier) => {
-  const t = tier === "medium" ? "medium" : DEFAULT_AGENT_TIER;
+  const t = tierOf(tier);
   const id = state.computer?.models?.[t];
+  const label = state.computer?.models?.routes?.[t]?.label;
+  if (label) return id ? `${label} · ${id}` : label;
   return id ? `${TIER[t]} (${id})` : TIER[t];
 };
+// a route's value: no provider's name has a colon (a model's is `provider id`)
+const routeValue = (tier) => `route:${tierOf(tier)}`;
 const modelValue = (provider, id) => `${provider} ${id}`;
 function modelPicker(a, modeled, read, write, said) {
   const pick = el("select", "agent-model");
   pick.dataset.modelFor = a.fragment;
   pick.setAttribute("aria-label", `${titleOf(a.fragment)}'s model`);
+  const offered = routesOffered();
   const tiered = modelOption("", tierName());
-  pick.append(tiered);
+  pick.append(...(offered.length ? offered.map((t) => modelOption(routeValue(t), tierName(t))) : [tiered]));
   for (const p of modeled) {
     const group = el("optgroup");
     group.label = `${providerName(p.provider)} (your account)`;
@@ -2669,20 +2870,25 @@ function modelPicker(a, modeled, read, write, said) {
   read
     .then((j) => {
       tiered.textContent = tierName(j?.tier);
-      const v = j?.model?.provider && j?.model?.id ? modelValue(j.model.provider, j.model.id) : "";
-      // one named by hand, not offered here, is shown as it is
-      if (v && ![...pick.options].some((o) => o.value === v)) pick.append(modelOption(v, j.model.id));
+      const own = j?.model?.provider && j?.model?.id ? modelValue(j.model.provider, j.model.id) : "";
+      const v = own || (offered.length ? routeValue(j?.tier) : "");
+      // one named by hand, or a tier no route names, is shown as it is
+      if (v && ![...pick.options].some((o) => o.value === v)) pick.append(modelOption(v, own ? j.model.id : tierName(j?.tier)));
       pick.value = v;
       pick.dataset.was = v;
+      // a single route that is the agent's own tier, and no provider: no choice, no pick
+      pick.parentElement.hidden = modeled.length === 0 && pick.options.length < 2;
     })
     .finally(() => { pick.disabled = false; pick.dataset.read = "1"; });
   pick.onchange = () => {
     const value = pick.value;
-    const [provider, id] = value ? value.split(" ") : [];
+    const route = value.startsWith("route:") ? tierOf(value.slice(6)) : null;
+    const [provider, id] = value && !route ? value.split(" ") : [];
     savePick(pick, value, said, write((next) => {
+      if (route) next.tier = route;
       if (provider) next.model = { provider, id };
       else delete next.model;
-      return `its model: ${provider ? id : next.tier}`;
+      return route ? `its route: ${state.computer?.models?.routes?.[route]?.label ?? route}` : `its model: ${provider ? id : next.tier}`;
     }));
   };
   return settingLabel("Model", pick);
@@ -3761,6 +3967,9 @@ const tab = {
 tab.drop("shell.unsent.v1");
 tab.drop("shell.windows.v1");
 const RELEASE = document.querySelector('meta[name="fragment-release"]')?.content ?? "";
+// when it was deployed, seconds (its other meta; none: empty, or unfilled)
+const DEPLOYED_META = document.querySelector('meta[name="fragment-release-deployed"]')?.content ?? "";
+const DEPLOYED = /^\d{1,12}$/.test(DEPLOYED_META) ? Number(DEPLOYED_META) : null;
 // mine: the release this page is (none, an unfilled page: it never reloads);
 // next: the release it waits to reload for
 const release = { mine: RELEASE_ID.test(RELEASE) ? RELEASE : null, next: null, lookedAt: 0, reloading: false };
@@ -3881,19 +4090,21 @@ function reopenWindows(settings) {
 }
 
 // Signing out, or in with another account, ends the tab's person: what was
-// kept for them goes first, its windows here and each chat page's draft
+// kept for them goes first, its windows here, each chat page's draft
 // (`{fragment: "forget-draft"}`, answered `draft-forgotten`, waited for at
-// most FORGET_WAIT_MS), then the form goes. A draft of theirs a page not
-// open here keeps is never shown to anyone else (its page gives a draft
-// back only to its own person) and goes when someone else opens it.
+// most FORGET_WAIT_MS) and their chats' alerts (`dropAlerts`, as long),
+// then the form goes. A draft of theirs a page not open here keeps is
+// never shown to anyone else (its page gives a draft back only to its own
+// person) and goes when someone else opens it.
 document.addEventListener("submit", (e) => {
   const form = e.target;
   if (!(form instanceof HTMLFormElement) || !/^\/auth\/(logout|switch)(\?|$)/.test(form.getAttribute("action") ?? "")) return;
   tab.drop(WINDOWS_KEY);
   const frames = [...state.frames.values()].filter((f) => f.isConnected && greeted.has(f));
-  if (!frames.length) return;
   e.preventDefault();
-  forgetDrafts(frames).then(() => HTMLFormElement.prototype.submit.call(form));
+  alertsEnded = true;
+  const dropped = Promise.race([dropAlerts(), new Promise((done) => setTimeout(done, FORGET_WAIT_MS))]);
+  Promise.all([frames.length ? forgetDrafts(frames) : null, dropped]).then(() => HTMLFormElement.prototype.submit.call(form));
 }, true);
 function forgetDrafts(frames) {
   return new Promise((done) => {
@@ -3998,6 +4209,12 @@ function guestHome(offer) {
   notice("You're a guest", [`You see and edit what people share with you, once you accept their invite in the sidebar. ${seatGives(offer)}`, noSeatSaid()], [...(offer ? [seat] : []), switchForm("/", "allow")]);
 }
 
+// a chat's alert clicked with no shell open (alerts-sw.js): that chat
+const alerted = location.pathname === "/" ? new URLSearchParams(location.search).get("chat") : null;
+if (alerted) {
+  state.current = alerted;
+  history.replaceState(null, "", "/");
+}
 start().catch((e) => {
   showLayout();
   notice("This page did not load", e.message);

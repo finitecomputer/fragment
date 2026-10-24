@@ -387,6 +387,36 @@ pub struct Models {
     /// appropriate to fall back to a non-private model"). A slot marked
     /// private promises nothing to the agents of a tier that is not.
     pub private: [bool; 4],
+    /// What Settings names each tier's route (a tier slot's `"label"`), in
+    /// `Tier::Cheap`, `Tier::Medium` order: the routes a person picks among
+    /// for an agent ("Private (recommended)", "Standard"). A tier with none
+    /// is offered by its tier's name, and only when no tier has one, as
+    /// before (`labels_of`).
+    pub labels: [Option<String>; 2],
+}
+
+/// A label's most characters: a menu entry's words.
+pub const LABEL_MAX_CHARS: usize = 40;
+
+/// Each tier slot's `label`, taken off the slots of a deployment's
+/// `models` (`Models::labels`): 1 to `LABEL_MAX_CHARS` characters of plain
+/// text. Refused, saying why: one on `fallback` or `vision` (a label names
+/// a route a person picks, which is a tier), one that is no such text.
+fn labels_of(models: &mut Value) -> Result<[Option<String>; 2], String> {
+    let mut labels = [None, None];
+    let Some(slots) = models.as_object_mut() else { return Ok(labels) };
+    for slot in SLOTS {
+        let Some(label) = slots.get_mut(slot).and_then(Value::as_object_mut).and_then(|o| o.remove("label")) else { continue };
+        let at = match Tier::parse(slot) {
+            Some(Tier::Cheap) => 0,
+            Some(Tier::Medium) => 1,
+            _ => return Err(format!("models.{slot}: a label names a route people pick, and those are the tiers (cheap, medium)")),
+        };
+        let text = label.as_str().map(str::trim).filter(|t| (1..=LABEL_MAX_CHARS).contains(&t.chars().count()) && !t.chars().any(char::is_control));
+        let Some(text) = text else { return Err(format!("models.{slot}: label is 1 to {LABEL_MAX_CHARS} characters of plain text, not {label}")) };
+        labels[at] = Some(text.to_string());
+    }
+    Ok(labels)
 }
 
 /// A slot's flag `key` (`images`, `private`), taken off each slot of a
@@ -442,7 +472,7 @@ impl Models {
     /// Every slot on Workers AI: GLM-5.3 Flash cheap, GLM-5.3 medium,
     /// DeepSeek V4 Flash the fallback, GLM-5.3 Flash vision.
     pub fn defaults() -> Models {
-        Models { cheap: workers_ai(CHEAP_MODEL), medium: workers_ai(MEDIUM_MODEL), fallback: workers_ai(FALLBACK_MODEL_DEFAULT), vision: workers_ai(VISION_MODEL_DEFAULT), images: [false; 4], private: [false; 4] }
+        Models { cheap: workers_ai(CHEAP_MODEL), medium: workers_ai(MEDIUM_MODEL), fallback: workers_ai(FALLBACK_MODEL_DEFAULT), vision: workers_ai(VISION_MODEL_DEFAULT), images: [false; 4], private: [false; 4], labels: [None, None] }
     }
 
     /// A deployment's models: `named` (`FRAGMENT_MODELS`: an object of the
@@ -466,6 +496,7 @@ impl Models {
             let mut v: Value = serde_json::from_str(text).map_err(|e| format!("models: {e}"))?;
             models.images = flags_of(&mut v, "images", "its model reads images")?;
             models.private = flags_of(&mut v, "private", "its model is private: confidential inference that keeps nothing")?;
+            models.labels = labels_of(&mut v)?;
             let n: Slots = serde_json::from_str(&v.to_string()).map_err(|e| format!("models: {e}"))?;
             for (slot, upstream) in [(&mut models.cheap, n.cheap), (&mut models.medium, n.medium), (&mut models.fallback, n.fallback), (&mut models.vision, n.vision)] {
                 if let Some(u) = upstream {
@@ -532,11 +563,16 @@ impl Models {
         json!({ "object": "list", "data": data })
     }
 
-    /// Each slot's model id by its name, as a computer's guest reads them in
-    /// its view (`GET /api/computer`'s `models`).
+    /// Each slot's model id by its name, and each tier's route (its label,
+    /// whether it is private, its fallback's and vision model's ids), as a
+    /// computer's guest and its owner's Settings read them in its view
+    /// (`GET /api/computer`'s and `GET /api/computers`' `models`).
     pub fn ids_by_name(&self) -> fragment_proto::computer::ModelIds {
+        use fragment_proto::computer::{ModelIds, TierRoute, TierRoutes};
         let id = |u: &Upstream| u.model().to_string();
-        fragment_proto::computer::ModelIds { cheap: id(&self.cheap), medium: id(&self.medium), fallback: id(&self.fallback), vision: id(&self.vision) }
+        let route = |tier: Tier, label: &Option<String>| TierRoute { label: label.clone(), private: self.slot_private(tier.as_str()), fallback: id(&self.fallback), vision: id(&self.vision) };
+        let routes = TierRoutes { cheap: route(Tier::Cheap, &self.labels[0]), medium: route(Tier::Medium, &self.labels[1]) };
+        ModelIds { cheap: id(&self.cheap), medium: id(&self.medium), fallback: id(&self.fallback), vision: id(&self.vision), routes: Some(routes) }
     }
 
     /// What a call naming `model` runs, as the route reads its body's
@@ -1506,8 +1542,18 @@ mod tests {
         );
         let text = listed.to_string();
         assert!(["openrouter.ai", "zdr", "cheap", "fallback", "vision", "workers_ai"].iter().all(|w| !text.contains(w)), "ids alone: {text}");
-        assert_eq!(serde_json::to_value(routed.ids_by_name()).unwrap(), json!({ "cheap": OPENROUTER_FLASH, "medium": OPENROUTER_FLASH, "fallback": GLM_FLASH, "vision": GLM_FLASH }));
-        assert_eq!(serde_json::to_value(d.ids_by_name()).unwrap(), json!({ "cheap": GLM_FLASH, "medium": MEDIUM_MODEL, "fallback": DEEPSEEK_FLASH, "vision": GLM_FLASH }));
+        let route = |fallback: &str, vision: &str| json!({ "private": false, "fallback": fallback, "vision": vision });
+        assert_eq!(
+            serde_json::to_value(routed.ids_by_name()).unwrap(),
+            json!({ "cheap": OPENROUTER_FLASH, "medium": OPENROUTER_FLASH, "fallback": GLM_FLASH, "vision": GLM_FLASH, "routes": { "cheap": route(GLM_FLASH, GLM_FLASH), "medium": route(GLM_FLASH, GLM_FLASH) } })
+        );
+        assert_eq!(
+            serde_json::to_value(d.ids_by_name()).unwrap(),
+            json!({ "cheap": GLM_FLASH, "medium": MEDIUM_MODEL, "fallback": DEEPSEEK_FLASH, "vision": GLM_FLASH, "routes": { "cheap": route(DEEPSEEK_FLASH, GLM_FLASH), "medium": route(DEEPSEEK_FLASH, GLM_FLASH) } })
+        );
+        // a reader of the view before its routes (a pinned image's) reads it still
+        let before: fragment_proto::computer::ModelIds = serde_json::from_value(json!({ "cheap": GLM_FLASH, "medium": MEDIUM_MODEL, "fallback": DEEPSEEK_FLASH, "vision": GLM_FLASH })).unwrap();
+        assert_eq!(before.routes, None);
     }
 
     /// Goal: a deployment's `models` name where each of the route's names
@@ -1529,7 +1575,7 @@ mod tests {
         assert!(d.slots().iter().all(|(_, u)| matches!(u, Upstream::WorkersAi { .. })));
         let finite = finite();
         let private = openai("https://finite-private.finite.containers.tinfoil.dev/v1", FINITE_PRIVATE_FLASH);
-        assert_eq!(finite, Models { cheap: private.clone(), medium: private.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH), images: [false; 4], private: [false; 4] });
+        assert_eq!(finite, Models { cheap: private.clone(), medium: private.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH), images: [false; 4], private: [false; 4], labels: [None, None] });
         assert_eq!(finite.route(Named::Tier(Tier::Cheap)).unwrap(), Model { named: Named::Tier(Tier::Cheap), upstream: &private });
         assert_eq!(finite.route(Named::Tier(Tier::Medium)).unwrap().id(), "glm-5-3-flash");
         assert_eq!(finite.route(Named::Tier(Tier::High)), Err(Refusal::HighOff), "high stays off wherever the tiers run");
@@ -1541,7 +1587,7 @@ mod tests {
         assert_eq!(serde_json::to_value(workers_ai(GLM_FLASH)).unwrap(), json!({ "provider": "workers_ai", "model": GLM_FLASH }));
         // OpenRouter's (Finite's since 2026-10-15): its tiers routed by their body, the rest on Workers AI
         let routed = Upstream::Openai { base_url: "https://openrouter.ai/api/v1".into(), model: OPENROUTER_FLASH.into(), body: routing().as_object().cloned(), price: None };
-        assert_eq!(openrouter(), Models { cheap: routed.clone(), medium: routed.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH), images: [false; 4], private: [false; 4] });
+        assert_eq!(openrouter(), Models { cheap: routed.clone(), medium: routed.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH), images: [false; 4], private: [false; 4], labels: [None, None] });
         assert_eq!(serde_json::to_value(&routed).unwrap(), json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": "z-ai/glm-5.3-flash", "body": routing() }));
         let empty = Models::parse(Some(&json!({ "cheap": { "provider": "openai", "base_url": "https://a.example/v1", "model": FINITE_PRIVATE_FLASH, "body": {} } }).to_string()), &book, false).unwrap();
         assert_eq!(empty.cheap, Upstream::Openai { base_url: "https://a.example/v1".into(), model: FINITE_PRIVATE_FLASH.into(), body: Some(Map::new()), price: None }, "an empty body adds nothing");
@@ -1905,6 +1951,47 @@ mod tests {
             slot["private"] = bad.clone();
             refused(json!({ "cheap": slot }), &format!("models.cheap: private is true (its model is private: confidential inference that keeps nothing) or false, not {bad}"));
         }
+    }
+
+    /// Goal: the routes Settings offers are the deployment's (Paul,
+    /// 2026-10-24: "Private (recommended)" and "Standard"): a tier slot's
+    /// `label` names its route, carried in the computer's view with whether
+    /// it is private and its fallback's and vision model's ids; where the
+    /// slot runs is as before. Invalid: a label on `fallback` or `vision`
+    /// (no one picks those), an empty, overlong, multi-line or non-text one.
+    #[test]
+    fn a_tiers_label_names_the_route_settings_offers() {
+        let book = PriceBook::defaults();
+        let parse = |models: Value| Models::parse(Some(&models.to_string()), &book, false);
+        let private = json!({ "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1", "model": FINITE_PRIVATE_FLASH, "private": true });
+        let mut labelled = private.clone();
+        labelled["label"] = json!("  Private (recommended) ");
+        let standard = json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": OPENROUTER_FLASH, "body": routing(), "label": "Standard" });
+        let mut fallback = tinfoil(json!({ "input": 0.65, "cached_input": 0.13, "output": 1.45 }));
+        fallback["private"] = json!(true);
+        let routes = parse(json!({ "cheap": labelled, "medium": standard, "fallback": fallback, "vision": private })).unwrap();
+        assert_eq!(routes.labels, [Some("Private (recommended)".to_string()), Some("Standard".to_string())], "trimmed");
+        let bare = json!({ "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1", "model": FINITE_PRIVATE_FLASH });
+        assert_eq!(routes.cheap, parse(json!({ "cheap": bare })).unwrap().cheap, "where it runs is as before: the label is the slot's");
+        let view = serde_json::to_value(routes.ids_by_name()).unwrap();
+        assert_eq!(view["routes"]["cheap"], json!({ "label": "Private (recommended)", "private": true, "fallback": "deepseek-v4-1-flash", "vision": FINITE_PRIVATE_FLASH }));
+        assert_eq!(view["routes"]["medium"], json!({ "label": "Standard", "private": false, "fallback": "deepseek-v4-1-flash", "vision": FINITE_PRIVATE_FLASH }));
+        assert_eq!(DEFAULTS.labels, [None, None], "unnamed, none: Settings offers the tiers by their names, as before");
+        assert!(serde_json::to_value(DEFAULTS.ids_by_name()).unwrap()["routes"]["cheap"].get("label").is_none());
+        // refused, saying why
+        let refused = |models: Value, says: &str| {
+            let e = parse(models.clone()).unwrap_err();
+            assert_eq!(e, says, "{models}");
+        };
+        let flash = |label: Value| json!({ "provider": "workers_ai", "model": GLM_FLASH, "label": label });
+        for slot in ["fallback", "vision"] {
+            refused(json!({ slot: flash(json!("Backup")) }), &format!("models.{slot}: a label names a route people pick, and those are the tiers (cheap, medium)"));
+        }
+        let long = "x".repeat(LABEL_MAX_CHARS + 1);
+        for bad in [json!(""), json!("   "), json!(long), json!("two\nlines"), json!(7), json!(null)] {
+            refused(json!({ "cheap": flash(bad.clone()) }), &format!("models.cheap: label is 1 to {LABEL_MAX_CHARS} characters of plain text, not {bad}"));
+        }
+        assert!(parse(json!({ "cheap": flash(json!("x".repeat(LABEL_MAX_CHARS))) })).is_ok(), "{LABEL_MAX_CHARS} at most");
     }
 
     /// Goal: one rule names the agent a guest's model call is for, chat and

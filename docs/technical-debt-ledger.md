@@ -371,7 +371,11 @@ fragment.club until cutover (decisions 34–35).
   old runtime's (checked once by hand). `fragment.push.register` and
   `__sw.js` run only in a real browser with a real push service. The
   chat's push (docs/chat-records.md, Push) is the same: its chat lane
-  subscribes the push fake by `__push-sub`, as the page's bell would.
+  subscribes the push fake by `__push-sub`, as the page's bell would, and
+  the shell's alerts (docs/api.md, The shell) subscribe through a fake of
+  the browser's `PushManager` that hands over the push fake's
+  subscription, and `alerts-sw.js` takes pushes DevTools delivers; its
+  click is not driven.
 - **Risk:** a page's subscribe or the service worker's display breaks
   unnoticed.
 - **First proof:** subscribing from a phone or desktop browser to a
@@ -379,23 +383,21 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** a manual check on a hosted fleet (phase 3) is recorded,
   or a browser test can run with a local push service.
 
-## A chat the shell frames is "looked at" while the shell is, and asks for notifications in a tab
+## A chat the shell frames is "looked at" while the shell is
 
 - **Observed:** 2026-10-03, the chat's push (docs/chat-records.md, Push).
   A chat's page says it is `looking` while its document is visible, so a
   chat open in a tab of the shell that is not shown (its frame is still
-  in a visible page) keeps its person from being pushed. And a browser
-  does not let a cross-origin frame ask for notifications, so the bell of
-  a chat the shell frames opens the chat in a tab of its own, where it may
-  ask.
+  in a visible page) keeps its person from being pushed. (Its other half,
+  the bell of a chat the shell frames sending its person to a tab of the
+  chat's own to ask for notifications, went 2026-10-24: the shell holds a
+  chat's alerts, docs/api.md, The shell.)
 - **Risk:** a person with the shell open on another chat misses a
-  reply's push; turning notifications on from the shell takes a detour.
+  reply's push.
 - **First proof:** a person who keeps the shell open says a reply came
   without a notification.
 - **Delete when:** the shell tells each frame whether it is shown (a
-  message the chat's page reads, beside its theme), and asks for
-  notifications on the platform's origin for the fragments it frames, or
-  browsers let a frame ask.
+  message the chat's page reads, beside its theme).
 
 ## A chat's unread count counts its person's own messages
 
@@ -420,8 +422,13 @@ fragment.club until cutover (decisions 34–35).
   (`"from": "agent"`), so each agent reply is a triggered run, and an
   operation's triggers pause themselves after 120 triggered runs in an
   hour (`limits::TRIGGERED_RUNS_PER_HOUR`). Nothing unpauses a chat's.
+  Since 2026-10-24 an agent's words before each tool call are a reply of
+  their own (`interim`, docs/chat-records.md): the job pushes none of
+  them, but each is a triggered run, so a chatty agent's turns count many.
 - **Risk:** a chat whose agents reply more than about twice a minute for
-  an hour stops pushing, for good, until someone runs `fragment unpause`.
+  an hour stops pushing, for good, until someone runs `fragment unpause`;
+  an agent that narrates every tool call of a long task gets there in a
+  few turns.
 - **First proof:** an `op.auto-paused` event for `notify_reply` on a
   chat.
 - **Delete when:** a trigger's breaker counts runs that fail or loop

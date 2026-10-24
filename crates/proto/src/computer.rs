@@ -83,6 +83,32 @@ pub struct ModelIds {
     pub medium: String,
     pub fallback: String,
     pub vision: String,
+    /// Each tier's route, as Settings offers it (2026-10-24; add-only: a
+    /// reader that does not know it offers the tiers by their names, and
+    /// an agent's runtime names `fallback` and `vision` as before).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routes: Option<TierRoutes>,
+}
+
+/// The two tiers' routes (`ModelIds::routes`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TierRoutes {
+    pub cheap: TierRoute,
+    pub medium: TierRoute,
+}
+
+/// A tier's route: what Settings names it (the deployment's `label` for
+/// it; none, it is offered by its tier's name alone, as before), whether
+/// it is private (every model its agents reach is), and the ids of its
+/// fallback and its vision model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TierRoute {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub private: bool,
+    pub fallback: String,
+    pub vision: String,
 }
 
 /// What a provider's credential is (docs/computers.md, "Connections and
