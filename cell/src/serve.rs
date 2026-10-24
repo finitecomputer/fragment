@@ -511,6 +511,14 @@ impl FragmentCell {
             }
         }
         let Some(row) = found else {
+            // what a browser asks of a page that names no icon of its own:
+            // the fragment's icon (icon.rs), when it has one and its live
+            // no favicon.ico
+            if path == "favicon.ico" {
+                if let Some(resp) = self.favicon(req, public).await? {
+                    return Ok(resp);
+                }
+            }
             if !path.starts_with("__") {
                 return self.app_fetch(req, caller, facts, path, url, link, anon).await;
             }
