@@ -90,6 +90,7 @@ use anyhow::{bail, Context, Result};
 use fragment_devstack as devstack;
 
 mod build;
+mod cloudflare;
 mod deploy;
 mod dev_agent;
 mod dns;

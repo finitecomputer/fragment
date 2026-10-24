@@ -985,7 +985,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     // (prepare.rs)
     let pinned = pinned_images(&d);
     if !pinned.is_empty() {
-        let mut api = crate::prepare::Api::from_env(&d.account_id)?;
+        let mut api = crate::cloudflare::Api::from_env(&d.account_id)?;
         crate::prepare::until_ready(&mut api, &mut crate::prepare::Wall::new(), &pinned, crate::prepare::DEPLOY_LIMIT)
             .context("deploy: refused before anything was built or changed; deploy again once the image is ready")?;
     }
