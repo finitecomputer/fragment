@@ -1249,6 +1249,19 @@ Settings names what is missing, with a Reconnect to add it; an agent's call
 outside the grant gets the provider's own 403, which the Google skill explains
 to the person.
 
+Where a row takes several accounts (`accounts_max` above 1;
+pipes-browser-binding.md, Several accounts), a person connects a personal and a
+work Google account side by side, and each agent uses one of them: the one its
+owner picked for it in Settings, which its computer keeps (`agent_accounts`),
+else the default, the oldest connected. The computer holds the owner's accounts
+there in their list's order, believed with the states (each read of the
+person's connections and each disconnect tells it them), and a swap asks Pipes
+for the chosen account's token by its id, never one the owner's list did not
+name. A pick whose account needs authorizing again is refused (`connect … again`),
+never swapped for another account; one whose account is gone falls back to the
+default. The placeholder names the agent, as with one account, so the image
+needs nothing new.
+
 Paul, 2026-10-04 (decisions 22, 37 and 44): every credential a guest uses
 is a per-agent placeholder in the environment variable its provider's own
 SDK reads, so any SDK or CLI works unmodified, with no header of ours. The

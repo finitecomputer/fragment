@@ -20,6 +20,7 @@
 use std::cell::RefCell;
 
 use fragment_core::codestorage::{Claims, OrgKey};
+use fragment_core::connection_accounts::{imported, Import, Imported};
 use fragment_core::seal::{self, SealError};
 use fragment_core::secrets_store::{self as store, Cache};
 use fragment_proto::ErrorCode;
@@ -261,22 +262,40 @@ pub async fn workos_authenticate(env: &Env, api: &str, client_id: &str, code: &s
 /// (`POST /data-integrations/{provider}/token`): (status, WorkOS's answer,
 /// `{active, access_token: {access_token, expires_at, …}}` or `{active:
 /// false, error}`). Asked only to swap a token in, or to revoke the grant
-/// behind one at a disconnect: it may refresh one.
-pub async fn pipes_token(env: &Env, api: &str, provider: &str, user: &str) -> CellResult<(u16, Value)> {
+/// behind one at a disconnect: it may refresh one. `account` names one of
+/// several (its id, with the plural opt-in, in the body as WorkOS' SDK
+/// sends them); None is the compatibility connection's, as with one.
+pub async fn pipes_token(env: &Env, api: &str, provider: &str, user: &str, account: Option<&str>) -> CellResult<(u16, Value)> {
     assert!(fragment_core::catalog::valid_name(provider), "a provider is checked before WorkOS is asked");
     let key = required(env, store::WORKOS_KEY).await?;
-    post_json(&format!("{api}/data-integrations/{provider}/token"), Method::Post, Some(&key), Some(&json!({ "user_id": user })), "WorkOS").await
+    let body = match account {
+        Some(id) => {
+            assert!(fragment_core::connection_accounts::valid_account_id(id), "an account Pipes listed");
+            json!({ "user_id": user, "connected_account_id": id, "supports_multiple_connections": true })
+        }
+        None => json!({ "user_id": user }),
+    };
+    post_json(&format!("{api}/data-integrations/{provider}/token"), Method::Post, Some(&key), Some(&body), "WorkOS").await
 }
 
-/// A connected account as Pipes describes it, with no token: its state,
-/// the account it is, as its person knows it (its `account_display_name`,
-/// set when it was connected: `connection_signin::account_label`), and the
-/// scopes it holds (its `scopes`, the grant the person allowed:
-/// `connection_signin::pipes_scopes`; None when it names none).
-pub struct PipesAccount {
-    pub state: fragment_proto::computer::ProviderState,
-    pub label: Option<String>,
-    pub scopes: Option<Vec<String>>,
+/// A connected account as Pipes describes it, with no token
+/// (`fragment_core::connection_accounts::PipesAccount`).
+pub use fragment_core::connection_accounts::PipesAccount;
+
+/// Every account `user` holds at each provider, with no token (WorkOS
+/// Pipes' plural list, `GET /user_management/users/{user}/data_providers?
+/// supports_multiple_connections=true`): its answer, which
+/// `connection_accounts::listed` reads for each provider.
+pub async fn pipes_accounts(env: &Env, api: &str, user: &str) -> CellResult<Value> {
+    if user.is_empty() || !user.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return Err(CellError::host(format!("a WorkOS user id that is no token: {user:?}")));
+    }
+    let key = required(env, store::WORKOS_KEY).await?;
+    let (status, answer) = post_json(&format!("{api}/user_management/users/{user}/data_providers?supports_multiple_connections=true"), Method::Get, Some(&key), None, "WorkOS").await?;
+    if status != 200 {
+        return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS did not list the connected accounts ({status}): {}", answer["message"].as_str().unwrap_or("no reason given"))));
+    }
+    Ok(answer)
 }
 
 /// A connection's state, without a token (WorkOS Pipes' connected account,
@@ -284,7 +303,6 @@ pub struct PipesAccount {
 /// what Pipes says of `user`'s account at `provider`, never minting or
 /// refreshing a token. 404 is no account.
 pub async fn pipes_state(env: &Env, api: &str, provider: &str, user: &str) -> CellResult<PipesAccount> {
-    use fragment_proto::computer::ProviderState;
     assert!(fragment_core::catalog::valid_name(provider), "a provider is checked before WorkOS is asked");
     // it goes in a path: a user id is WorkOS' token (`user_01…`), nothing else
     if user.is_empty() || !user.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
@@ -292,15 +310,11 @@ pub async fn pipes_state(env: &Env, api: &str, provider: &str, user: &str) -> Ce
     }
     let key = required(env, store::WORKOS_KEY).await?;
     let (status, answer) = post_json(&format!("{api}/user_management/users/{user}/connected_accounts/{provider}"), Method::Get, Some(&key), None, "WorkOS").await?;
-    let state = match (status, answer["state"].as_str()) {
-        (200, Some("connected")) => ProviderState::Connected,
-        (200, Some("needs_reauthorization")) => ProviderState::NeedsReauthorization,
-        (200, _) | (404, _) => ProviderState::NotConnected,
-        (s, _) => return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS did not say whether {provider} is connected ({s}): {}", answer["message"].as_str().unwrap_or("no reason given")))),
-    };
-    let label = answer["account_display_name"].as_str().filter(|l| state != ProviderState::NotConnected && fragment_core::connection_signin::label_ok(l)).map(str::to_string);
-    let scopes = (state != ProviderState::NotConnected).then(|| fragment_core::connection_signin::pipes_scopes(&answer)).flatten();
-    Ok(PipesAccount { state, label, scopes })
+    match status {
+        200 => Ok(fragment_core::connection_accounts::described(&answer)),
+        404 => Ok(PipesAccount::none()),
+        s => Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS did not say whether {provider} is connected ({s}): {}", answer["message"].as_str().unwrap_or("no reason given")))),
+    }
 }
 
 /// Standard OAuth code exchange. Called only by the Registry after consuming
@@ -327,31 +341,65 @@ async fn confidential_request(url: &str, method: Method, content_type: &str, bea
 }
 
 /// The documented Pipes import API, after Fragment has validated and spent
-/// the transaction. A known 409 permits update, with the same body: a
-/// reconnect's grant (its scopes, its label) replaces the earlier one's. An
-/// uncertain outcome is never retried. Refresh stays at WorkOS, using the
-/// same OAuth client.
-pub(super) async fn pipes_import(env: &Env, api: &str, provider: &str, user: &str, tokens: fragment_core::connection_signin::Tokens, account: Option<&str>) -> CellResult<bool> {
+/// the transaction. A known 409 of the compatibility connection permits
+/// update, with the same body: a reconnect's grant (its scopes, its label)
+/// replaces the earlier one's. Where a person connects several accounts
+/// (`several`: the import the callback chose, and the grant's identifier,
+/// `connection_accounts::import_of`), another is added (`connection_intent:
+/// "add"`), and one connected before is updated by its id
+/// (`connected_account_id` and `connection_intent=reauthorize` in the
+/// query, as WorkOS' SDK sends them); Pipes' refusals of an addition are
+/// told apart (`connection_accounts::imported`). An uncertain outcome is
+/// never retried. Refresh stays at WorkOS, using the same OAuth client.
+pub(super) async fn pipes_import(env: &Env, api: &str, provider: &str, user: &str, tokens: fragment_core::connection_signin::Tokens, account: Option<&str>, several: Option<(&Import, Option<&str>)>) -> CellResult<Imported> {
     assert!(fragment_core::catalog::valid_name(provider));
     if user.is_empty() || !user.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') { return Err(CellError::host("invalid WorkOS user id")); }
     let key = required(env, store::WORKOS_KEY).await?;
     let expires_at = fragment_core::export::rfc3339(js::now_ms() + i64::from(tokens.expires_in) * 1000);
-    let body = tokens.import_body(&expires_at, account).to_string();
+    let mut body = tokens.import_body(&expires_at, account);
+    let import = match several {
+        Some((import, identifier)) => {
+            body = fragment_core::connection_accounts::import_body(body, import, identifier);
+            import
+        }
+        None => &Import::Compatibility,
+    };
+    let body = body.to_string();
     let url = format!("{api}/user_management/users/{user}/connected_accounts/{provider}");
-    let (status, _) = confidential_request(&url, Method::Post, "application/json", Some(&key), &body).await?;
-    let status = if status == 409 { confidential_request(&url, Method::Put, "application/json", Some(&key), &body).await?.0 } else { status };
-    Ok(matches!(status, 200 | 201))
+    let (status, answer) = match import {
+        Import::Reauthorize(id) => confidential_request(&format!("{url}?{}", fragment_core::connection_accounts::reauthorize_query(id)), Method::Put, "application/json", Some(&key), &body).await?,
+        Import::Compatibility | Import::Add => confidential_request(&url, Method::Post, "application/json", Some(&key), &body).await?,
+    };
+    Ok(match (import, imported(status, &answer)) {
+        (Import::Compatibility, Imported::Conflict) => match imported(confidential_request(&url, Method::Put, "application/json", Some(&key), &body).await?.0, &Value::Null) {
+            i @ (Imported::Done | Imported::Refused | Imported::Failed) => i,
+            _ => Imported::Refused,
+        },
+        // a refusal only an addition is answered
+        (Import::Add, i @ (Imported::Full | Imported::Unavailable)) => i,
+        (_, i @ (Imported::Done | Imported::Refused | Imported::Failed)) => i,
+        (_, Imported::Conflict | Imported::Full | Imported::Unavailable) => Imported::Refused,
+    })
 }
 
 /// `user`'s account at `provider` deleted at Pipes (`DELETE
 /// /user_management/users/{user}/connected_accounts/{provider}`, 204):
 /// its tokens go, and no swap gets one again. 404 is no account, which is
 /// what was asked for. The grant at the provider stays (`connection_revoke`).
-pub async fn pipes_delete(env: &Env, api: &str, provider: &str, user: &str) -> CellResult<()> {
+/// `account` names one of several (its id, in the query); None is the
+/// compatibility connection, as with one.
+pub async fn pipes_delete(env: &Env, api: &str, provider: &str, user: &str, account: Option<&str>) -> CellResult<()> {
     assert!(fragment_core::catalog::valid_name(provider), "a provider is checked before WorkOS is asked");
     if user.is_empty() || !user.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') { return Err(CellError::host("invalid WorkOS user id")); }
     let key = required(env, store::WORKOS_KEY).await?;
-    let (status, answer) = post_json(&format!("{api}/user_management/users/{user}/connected_accounts/{provider}"), Method::Delete, Some(&key), None, "WorkOS").await?;
+    let one = match account {
+        Some(id) => {
+            assert!(fragment_core::connection_accounts::valid_account_id(id), "an account Pipes listed");
+            format!("?connected_account_id={id}&supports_multiple_connections=true")
+        }
+        None => String::new(),
+    };
+    let (status, answer) = post_json(&format!("{api}/user_management/users/{user}/connected_accounts/{provider}{one}"), Method::Delete, Some(&key), None, "WorkOS").await?;
     match status {
         200 | 204 | 404 => Ok(()),
         s => Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS did not disconnect {provider} ({s}): {}", answer["message"].as_str().unwrap_or("no reason given")))),

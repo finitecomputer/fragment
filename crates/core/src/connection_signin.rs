@@ -12,7 +12,7 @@ pub const TOKEN_MAX_BYTES: usize = 8192;
 pub const PENDING_PER_SESSION_MAX: u64 = 8;
 /// One synchronous SQLite statement: a mismatched callback consumes nothing;
 /// the winner consumes the transaction before the caller awaits any vendor.
-pub const TAKE_PENDING: &str = "DELETE FROM connection_signins WHERE state = ? AND session = ? AND provider = ? AND expires_at > ? RETURNING issuer, subject, config, sealed, expires_at";
+pub const TAKE_PENDING: &str = "DELETE FROM connection_signins WHERE state = ? AND session = ? AND provider = ? AND expires_at > ? RETURNING issuer, subject, config, sealed, expires_at, intent, account";
 /// A disconnect's end of every attempt at its account still pending, each
 /// session's: (issuer, subject, provider). No index has the subject: it
 /// reads at most the fleet's pending sign-ins (`signins_pending_max`).
@@ -27,6 +27,41 @@ pub const FENCE: &str = "INSERT INTO connection_fences (issuer, subject, provide
 pub const UNFENCE: &str = "DELETE FROM connection_fences WHERE issuer = ? AND subject = ? AND provider = ?";
 /// The providers a person's account is fenced at: (issuer, subject).
 pub const FENCED: &str = "SELECT provider FROM connection_fences WHERE issuer = ? AND subject = ?";
+/// Where a person connects several accounts at a provider, a disconnect
+/// of one of them fences that account alone (issuer, subject, provider,
+/// identifier, when), by its identifier (`connection_accounts::lasting`:
+/// one that names none is not fenced so), so an import of it whose outcome was
+/// unknown that lands after is not taken for a connection, and their other
+/// accounts there stay connected. A connect of that identifier known to
+/// have imported lifts it (`UNFENCE_ACCOUNT`), as does a wipe.
+pub const FENCE_ACCOUNT: &str = "INSERT INTO connection_account_fences (issuer, subject, provider, identifier, fenced_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (issuer, subject, provider, identifier) DO UPDATE SET fenced_at = excluded.fenced_at";
+/// The most fences of one person's accounts at a provider kept: the
+/// newest (`TRIM_ACCOUNT_FENCES`), far more accounts than Pipes connects.
+pub const ACCOUNT_FENCES_MAX: u64 = 64;
+/// Keeps a person's newest `ACCOUNT_FENCES_MAX` account fences at a
+/// provider: (issuer, subject, provider).
+pub const TRIM_ACCOUNT_FENCES: &str = "DELETE FROM connection_account_fences WHERE issuer = ?1 AND subject = ?2 AND provider = ?3 AND identifier NOT IN (SELECT identifier FROM connection_account_fences WHERE issuer = ?1 AND subject = ?2 AND provider = ?3 ORDER BY fenced_at DESC LIMIT 64)";
+/// A connect of an account known to have imported: that identifier's fence
+/// goes (issuer, subject, provider, identifier).
+pub const UNFENCE_ACCOUNT: &str = "DELETE FROM connection_account_fences WHERE issuer = ? AND subject = ? AND provider = ? AND identifier = ?";
+/// The accounts a person stands fenced at: (issuer, subject) → (provider,
+/// identifier).
+pub const FENCED_ACCOUNTS: &str = "SELECT provider, identifier FROM connection_account_fences WHERE issuer = ? AND subject = ?";
+/// A disconnect of one of several accounts, recorded by the account's
+/// Pipes id before anything goes (issuer, subject, provider, account,
+/// when), whatever its fence (`connection_accounts::lasting`): asked again
+/// once Pipes deleted the account, it is known for the person's own
+/// (`DISCONNECTED`), and finishes. Kept, the newest `DISCONNECTS_MAX`, so
+/// it may be asked as often as wanted.
+pub const DISCONNECTING: &str = "INSERT INTO connection_disconnects (issuer, subject, provider, account, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (issuer, subject, provider, account) DO UPDATE SET at = excluded.at";
+/// The most disconnects of a person's accounts at a provider kept.
+pub const DISCONNECTS_MAX: u64 = 64;
+/// Keeps a person's newest `DISCONNECTS_MAX` disconnects at a provider:
+/// (issuer, subject, provider).
+pub const TRIM_DISCONNECTS: &str = "DELETE FROM connection_disconnects WHERE issuer = ?1 AND subject = ?2 AND provider = ?3 AND account NOT IN (SELECT account FROM connection_disconnects WHERE issuer = ?1 AND subject = ?2 AND provider = ?3 ORDER BY at DESC LIMIT 64)";
+/// Whether a person disconnected an account at a provider: (issuer,
+/// subject, provider, account).
+pub const DISCONNECTED: &str = "SELECT COUNT(*) AS n FROM connection_disconnects WHERE issuer = ? AND subject = ? AND provider = ? AND account = ?";
 const RESERVED: &[&str] = &["client_id", "redirect_uri", "response_type", "scope", "state", "code_challenge", "code_challenge_method", "code", "code_verifier", "client_secret"];
 
 fn token(s: &str, max: usize) -> bool {
@@ -272,16 +307,34 @@ pub fn label_ok(label: &str) -> bool {
 /// person, never trusted for access. None: no ID token, or no verified
 /// email in it.
 pub fn account_label(answer: &Value, client_id: &str) -> Option<String> {
+    let claims = id_claims(answer, client_id)?;
+    // some providers send the boolean as a string
+    if claims["email_verified"] == false || claims["email_verified"] == "false" {
+        return None;
+    }
+    claims["email"].as_str().filter(|e| label_ok(e)).map(str::to_string)
+}
+
+/// The provider account a grant is for, as the provider tells its
+/// accounts apart: the `sub` of the same ID token (`account_label`'s, for
+/// this client), the account's for good (an email may change). Where a
+/// person connects several accounts it is the Pipes account's
+/// `account_identifier`, so a grant of one already connected reauthorizes
+/// it (`connection_accounts::import_of`). None: no ID token, or no `sub`.
+pub fn account_identifier(answer: &Value, client_id: &str) -> Option<String> {
+    id_claims(answer, client_id)?["sub"].as_str().filter(|s| crate::connection_accounts::identifier_ok(s)).map(str::to_string)
+}
+
+/// The claims of the ID token beside a grant, when it names this client
+/// as its audience (OpenID Connect Core 3.1.3.7, step 6: straight from
+/// the token endpoint over TLS, so its signature is not checked).
+fn id_claims(answer: &Value, client_id: &str) -> Option<Value> {
     use base64::Engine;
     let id_token = answer["id_token"].as_str().filter(|t| t.len() <= TOKEN_MAX_BYTES)?;
     let payload = id_token.split('.').nth(1)?;
     let claims: Value = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok()?).ok()?;
     let ours = claims["aud"] == client_id || claims["aud"].as_array().is_some_and(|a| a.iter().any(|x| x == client_id));
-    // some providers send the boolean as a string
-    if !ours || claims["email_verified"] == false || claims["email_verified"] == "false" {
-        return None;
-    }
-    claims["email"].as_str().filter(|e| label_ok(e)).map(str::to_string)
+    ours.then_some(claims)
 }
 
 #[cfg(test)]
@@ -320,6 +373,20 @@ mod tests {
     }
 
     #[test]
+    fn an_account_identifier_is_the_sub_of_an_id_token_for_this_client() {
+        let of = |claims: Value| account_identifier(&id_token(claims), "client");
+        assert_eq!(of(json!({ "aud": "client", "sub": "110248495921238986420", "email": "me@example.com" })).as_deref(), Some("110248495921238986420"));
+        assert_eq!(of(json!({ "aud": ["other", "client"], "sub": "1102" })).as_deref(), Some("1102"), "an audience list naming this client");
+        assert_eq!(of(json!({ "aud": "client", "sub": "1102", "email_verified": false })).as_deref(), Some("1102"), "an unverified email does not change whose account it is");
+        assert!(of(json!({ "aud": "another-client", "sub": "1102" })).is_none(), "another client's token");
+        assert!(of(json!({ "aud": "client" })).is_none(), "no sub");
+        for bad in [json!(""), json!("a b"), json!(7), json!("x".repeat(256))] {
+            assert!(of(json!({ "aud": "client", "sub": bad })).is_none(), "{bad}");
+        }
+        assert!(account_identifier(&json!({}), "client").is_none(), "no ID token");
+    }
+
+    #[test]
     fn a_revocation_endpoint_is_checked_as_the_others_and_absent_from_the_config_hash() {
         let mut o = config();
         let without = serde_json::to_string(&o).unwrap();
@@ -338,9 +405,11 @@ mod tests {
     fn the_durable_transaction_is_session_provider_bound_and_spent_once() {
         use rusqlite::{Connection, params};
         let db = Connection::open_in_memory().unwrap();
-        db.execute_batch(crate::migrate::REGISTRY.steps[1].sql).unwrap();
+        for step in crate::migrate::REGISTRY.steps {
+            db.execute_batch(step.sql).unwrap();
+        }
         for (state, session, provider, expiry) in [("a", "session-a", "mail", 100), ("b", "session-b", "drive", 100), ("old", "session-a", "mail", 50)] {
-            db.execute("INSERT INTO connection_signins VALUES (?, ?, ?, 'issuer', 'user', 'config', 'sealed', ?)", params![state, session, provider, expiry]).unwrap();
+            db.execute("INSERT INTO connection_signins (state, session, provider, issuer, subject, config, sealed, expires_at) VALUES (?, ?, ?, 'issuer', 'user', 'config', 'sealed', ?)", params![state, session, provider, expiry]).unwrap();
         }
         let take = |state: &str, session: &str, provider: &str, now: i64| {
             let mut q = db.prepare(TAKE_PENDING).unwrap();
@@ -360,7 +429,9 @@ mod tests {
     fn a_disconnect_ends_every_pending_attempt_at_its_account_and_no_other() {
         use rusqlite::{Connection, params};
         let db = Connection::open_in_memory().unwrap();
-        db.execute_batch(crate::migrate::REGISTRY.steps[1].sql).unwrap();
+        for step in crate::migrate::REGISTRY.steps {
+            db.execute_batch(step.sql).unwrap();
+        }
         for (state, session, issuer, subject, provider) in [
             ("a1", "session-a", "issuer", "user-a", "mail"),
             ("a2", "another-session-a", "issuer", "user-a", "mail"),
@@ -368,7 +439,7 @@ mod tests {
             ("b", "session-b", "issuer", "user-b", "mail"),
             ("a-elsewhere", "session-a", "another-issuer", "user-a", "mail"),
         ] {
-            db.execute("INSERT INTO connection_signins VALUES (?, ?, ?, ?, ?, 'config', 'sealed', 100)", params![state, session, provider, issuer, subject]).unwrap();
+            db.execute("INSERT INTO connection_signins (state, session, provider, issuer, subject, config, sealed, expires_at) VALUES (?, ?, ?, ?, ?, 'config', 'sealed', 100)", params![state, session, provider, issuer, subject]).unwrap();
         }
         let fence = |issuer: &str, subject: &str, provider: &str| db.execute(FENCE_PENDING, params![issuer, subject, provider]).unwrap();
         let take = |state: &str, session: &str, provider: &str| db.prepare(TAKE_PENDING).unwrap().query(params![state, session, provider, 50]).unwrap().next().unwrap().is_some();
@@ -402,6 +473,58 @@ mod tests {
         assert_eq!(db.execute(UNFENCE, params!["issuer", "user-a", "mail"]).unwrap(), 1, "a known import lifts its provider's fence");
         assert_eq!(fenced("issuer", "user-a"), ["drive"], "and no other provider's");
         assert_eq!(db.execute(UNFENCE, params!["issuer", "user-a", "mail"]).unwrap(), 0);
+    }
+
+    #[test]
+    fn an_accounts_fence_stands_for_its_identifier_alone_until_it_imports() {
+        use rusqlite::{Connection, params};
+        let db = Connection::open_in_memory().unwrap();
+        for step in crate::migrate::REGISTRY.steps {
+            db.execute_batch(step.sql).unwrap();
+        }
+        let fenced = |subject: &str| -> Vec<(String, String)> {
+            let mut q = db.prepare(FENCED_ACCOUNTS).unwrap();
+            let mut l: Vec<(String, String)> = q.query_map(params!["issuer", subject], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect();
+            l.sort();
+            l
+        };
+        let pair = |p: &str, i: &str| (p.to_string(), i.to_string());
+        db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "mail", "sub-1", 10]).unwrap();
+        db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "mail", "sub-1", 20]).unwrap();
+        db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "mail", "sub-2", 30]).unwrap();
+        db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "drive", "sub-1", 40]).unwrap();
+        assert_eq!(fenced("user-a"), [pair("drive", "sub-1"), pair("mail", "sub-1"), pair("mail", "sub-2")], "one fence an identifier and provider");
+        assert!(fenced("user-b").is_empty(), "another person's accounts are not fenced");
+        assert_eq!(db.execute(UNFENCE_ACCOUNT, params!["issuer", "user-a", "mail", "sub-1"]).unwrap(), 1, "a known import of that account lifts its fence");
+        assert_eq!(fenced("user-a"), [pair("drive", "sub-1"), pair("mail", "sub-2")], "and no other's");
+        for i in 0..ACCOUNT_FENCES_MAX + 3 {
+            db.execute(FENCE_ACCOUNT, params!["issuer", "user-a", "mail", format!("many-{i}"), 100 + i as i64]).unwrap();
+            db.execute(TRIM_ACCOUNT_FENCES, params!["issuer", "user-a", "mail"]).unwrap();
+        }
+        let mail: Vec<String> = fenced("user-a").into_iter().filter(|(p, _)| p == "mail").map(|(_, i)| i).collect();
+        assert_eq!(mail.len() as u64, ACCOUNT_FENCES_MAX, "the newest are kept");
+        assert!(!mail.contains(&"many-0".to_string()) && mail.contains(&format!("many-{}", ACCOUNT_FENCES_MAX + 2)));
+        assert_eq!(fenced("user-a").iter().filter(|(p, _)| p == "drive").count(), 1, "another provider's are not trimmed");
+        assert!(TRIM_ACCOUNT_FENCES.ends_with(&format!("LIMIT {ACCOUNT_FENCES_MAX})")), "the trim keeps ACCOUNT_FENCES_MAX");
+        // every disconnect of one of several, by its id, its fence or none:
+        // the person's own, at that provider, the newest kept
+        let disconnected = |subject: &str, provider: &str, account: &str| db.query_row(DISCONNECTED, params!["issuer", subject, provider, account], |r| r.get::<_, i64>(0)).unwrap() == 1;
+        db.execute(DISCONNECTING, params!["issuer", "user-a", "mail", "data_installation_1", 10]).unwrap();
+        db.execute(DISCONNECTING, params!["issuer", "user-a", "mail", "data_installation_1", 20]).unwrap();
+        assert!(disconnected("user-a", "mail", "data_installation_1"), "asked twice, one record");
+        assert!(!disconnected("user-b", "mail", "data_installation_1") && !disconnected("user-a", "drive", "data_installation_1"), "never another person's, nor at another provider");
+        for i in 0..DISCONNECTS_MAX + 2 {
+            db.execute(DISCONNECTING, params!["issuer", "user-a", "mail", format!("data_installation_d{i}"), 100 + i as i64]).unwrap();
+            db.execute(TRIM_DISCONNECTS, params!["issuer", "user-a", "mail"]).unwrap();
+        }
+        let kept: i64 = db.query_row("SELECT COUNT(*) FROM connection_disconnects WHERE provider = 'mail'", [], |r| r.get(0)).unwrap();
+        assert_eq!(kept as u64, DISCONNECTS_MAX, "the newest are kept");
+        assert!(!disconnected("user-a", "mail", "data_installation_1") && disconnected("user-a", "mail", &format!("data_installation_d{}", DISCONNECTS_MAX + 1)));
+        assert!(TRIM_DISCONNECTS.ends_with(&format!("LIMIT {DISCONNECTS_MAX})")), "the trim keeps DISCONNECTS_MAX");
+        // a pending row from before several accounts is a connect
+        db.execute("INSERT INTO connection_signins (state, session, provider, issuer, subject, config, sealed, expires_at) VALUES ('s', 'session', 'mail', 'issuer', 'user-a', 'config', 'sealed', 100)", []).unwrap();
+        let taken: (String, Option<String>) = db.query_row(TAKE_PENDING, params!["s", "session", "mail", 50], |r| Ok((r.get(5)?, r.get(6)?))).unwrap();
+        assert_eq!(taken, ("connect".to_string(), None));
     }
 
     fn account(subject: &str, provider: &str) -> Account {

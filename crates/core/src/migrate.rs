@@ -126,6 +126,7 @@ pub const REGISTRY: Class = Class {
         step!("trial_hold_attempts", "registry/0003_trial_hold_attempts.sql"),
         step!("connection_fences", "registry/0004_connection_fences.sql"),
         step!("invites_answered", "registry/0005_invites_answered.sql"),
+        step!("connection_accounts", "registry/0006_connection_accounts.sql"),
     ],
     variants: &[],
     kept: &[],
@@ -140,7 +141,7 @@ pub const PRINCIPAL: Class = Class {
 
 pub const LEDGER: Class = Class { name: "Ledger", steps: &[step!("baseline", "ledger/0001_baseline.sql")], variants: &[], kept: &["wiped"] };
 
-pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql")], variants: &[], kept: &["wiped"] };
+pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql"), step!("agent_accounts", "computer/0002_agent_accounts.sql")], variants: &[], kept: &["wiped"] };
 
 /// Every platform class, as the lock lists them.
 pub const CLASSES: [&Class; 5] = [&FRAGMENT, &REGISTRY, &PRINCIPAL, &LEDGER, &COMPUTER];
@@ -664,7 +665,7 @@ mod tests {
         assert_eq!(registry.count("SELECT COUNT(*) FROM identities WHERE id = 'npub1a' AND fenced = 0"), 1);
 
         let computer = Lite::new();
-        migrated(&computer, &COMPUTER, 1).expect("a computer");
+        migrated(&computer, &Class { steps: &COMPUTER.steps[..1], ..COMPUTER }, 1).expect("a computer at its baseline");
         computer.exec("INSERT INTO agents (fragment, identity, owner, added_at) VALUES ('f', 'npub1a', 'npub1o', 1)").expect("an agent");
         let fenced = Class { steps: COMPUTER_FENCED, ..COMPUTER };
         assert_eq!(migrated(&computer, &fenced, 2), Ok(Ran::Migrated { from: 1, version: 2 }));

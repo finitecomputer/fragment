@@ -35,6 +35,7 @@ pub mod multipart;
 pub mod names;
 pub mod npub;
 pub mod own_signin;
+pub mod connection_accounts;
 pub mod connection_signin;
 pub mod org;
 pub mod price;
