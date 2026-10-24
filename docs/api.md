@@ -2933,37 +2933,43 @@ should not take a tab of its own). A browser lets no cross-origin frame
 ask for notifications, so a chat's bell, framed, asks the shell, which
 asks on the platform's origin and holds the subscription. A frame of one
 of the person's chats (a row of `kind: "chat"`, theirs or shared with
-them) that runs the release's chat (its status's `code.id` is
-`blessed:chat@…`: a fork's page is its author's code, which could push
-anything in the platform's name) may ask, from its fragment's own
-origin, `{fragment: "alerts?",
+them) may ask, from its fragment's own origin, `{fragment: "alerts?",
 nonce}` (what this browser holds for it), `{fragment: "alerts", nonce,
 on: true, key}` (`key` its fragment's VAPID key, `__push-key`'s) or
 `{fragment: "alerts", nonce, on: false}` (a nonce of at most 64
 characters); the shell answers that frame, at that origin, `{fragment:
 "alerts", nonce, state, subscription?, endpoint?, error?}`, `state` one
 of `on`, `off`, `denied` (this browser refuses the platform's
-notifications), `unsupported` and `failed`. On asks the browser first
-when it has not been asked (the press in the frame is the gesture), then
+notifications), `unsupported` and `failed`. On is the release's chat's
+alone (its status's `code.id` is `blessed:chat@…`): a fork's page is its
+author's code, which could push anything in the platform's name; any
+chat may read and turn off what it had. On asks the browser first when it
+has not been asked (the press in the frame is the gesture), then
 registers the shell's alerts worker (`/__shell/alerts-sw.js`, push only)
 at a scope of that person's and chat's own
-(`/__shell/alerts/<person>/<chat>/`) and subscribes
-it with the key, answering `subscription: {endpoint, p256dh, auth}`; the
-page stores it on its fragment as its person (`__push-sub`, tagged with
-their identity), as `fragment.push.register` does in a tab of its own,
-and asks the shell to let it go if that is refused. Off unsubscribes and
-unregisters it, answering the `endpoint` the page drops (`__push-unsub`).
-So whose alerts are on stays each chat's own subscriptions, and only the
-chat's fragment, whose key it is, can push to one (Deliveries: web push,
-above). The worker shows a push with the chat as its tag (one
-notification a chat, its latest) only while its person is the one signed
-in to this browser (`GET /api/identities/me`, as the shell asks it): with
-no one signed in (401), or another, it shows nothing and lets itself go,
-and the push service then tells the chat its subscription is gone
-(410), however the session ended (the shell's Sign out or Use another
-account, the sign-out page, a session that ran out), in every tab. The
-shell's Sign out and Use another account also let every registration of
-the worker go first (waited for at most a second), and turn none on after
+(`/__shell/alerts/<person>/<chat>/`) and subscribes it with the key,
+answering `subscription: {endpoint, p256dh, auth}`; the page stores it on
+its fragment as its person (`__push-sub`, tagged with their identity), as
+`fragment.push.register` does in a tab of its own, and asks the shell to
+let it go if that is refused. Off unsubscribes and unregisters it,
+answering the `endpoint` the page drops (`__push-unsub`). So whose alerts
+are on stays each chat's own subscriptions, and only the chat's fragment,
+whose key it is, can push to one (Deliveries: web push, above).
+
+On each push the worker asks the platform, as the shell does, who is
+signed in (`GET /api/identities/me`) and what the chat runs (`GET
+/api/f/{chat}/status`). While its person is signed in and the chat runs
+the release's chat, it shows the push with the chat as its tag (one
+notification a chat, its latest). Once no one is signed in (401), another
+person is, the person may no longer see the chat (403, 404), or it runs
+other code, it shows nothing and lets itself go, and the push service
+then tells the chat its subscription is gone (410): however the session
+ended (the shell's Sign out or Use another account, the sign-out page, a
+session that ran out), in every tab. While the platform cannot say (an
+error, offline) it shows only that something came in a chat, "Finite:
+Something new in one of your chats", and keeps the alerts. The shell's
+Sign out and Use another account also let every registration of the
+worker go first (waited for at most a second), and turn none on after
 (one made as the person left lets go at once). A click opens the chat in
 the shell: a shell already open is told `{fragment: "open-chat", name}`
 by the worker (never by a page), else one opens at `/?chat=<chat>`. A

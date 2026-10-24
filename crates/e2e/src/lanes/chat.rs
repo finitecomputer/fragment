@@ -1020,7 +1020,25 @@ fn alerts_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys,
         shown && seen == json!([{ "title": "Juniper", "body": "a reply", "tag": chat }]),
         &seen,
     );
-    chrome.eval(&shell, &format!("navigator.serviceWorker.getRegistration({}).then((r) => r.getNotifications()).then((l) => (l.forEach((n) => n.close()), true))", js(&scope)))?;
+    let closing = format!("navigator.serviceWorker.getRegistration({}).then((r) => r.getNotifications()).then((l) => (l.forEach((n) => n.close()), true))", js(&scope));
+    chrome.eval(&shell, &closing)?;
+    // the platform unable to say who is signed in (its answer refused to
+    // the worker): only that something came, and the alerts stay
+    let worker = chrome.worker("/__shell/alerts-sw.js")?;
+    chrome.block(&worker, &["*/api/identities/me*"])?;
+    chrome.deliver_push(&shell, &platform, &registration, &push)?;
+    let unsure = json!([{ "title": "Finite", "body": "Something new in one of your chats", "tag": chat }]);
+    let kept_back = s.eventually(wait, || chrome.eval(&shell, &notified).ok().as_ref() == Some(&unsure));
+    let seen = chrome.eval(&shell, &notified)?;
+    let stays = chrome.eval(&shell, &held)?["scope"] == scope.as_str();
+    chrome.block(&worker, &[])?;
+    chrome.detach(worker)?;
+    chrome.eval(&shell, &closing)?;
+    s.ok(
+        "the platform unable to say who is signed in, a push shows only that something came in a chat, its title and words kept back, and the alerts stay",
+        kept_back && stays,
+        json!({ "seen": seen, "stays": stays }),
+    );
     chrome.detach(frame)?;
     chrome.close(shell)?;
 
@@ -1091,6 +1109,43 @@ fn alerts_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys,
         "on again, and its person gone from the browser (signed out, or another signed in), a push shows nothing and the worker lets itself go",
         left.len() == 2 && left.iter().all(|l| l["on"] == true && l["letGo"] == true),
         json!(left),
+    );
+
+    // a chat that leaves the release's code (Alex's review): its alerts
+    // on, then code of its own deployed in the release's place (its
+    // manifest naming no template): a push shows nothing, and the worker
+    // lets itself go
+    let forked = s.named(api, owner, "chat-alerts-fork")?;
+    let made = api.create_with(owner, json!({ "name": forked, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "making the chat that leaves the release: {made}");
+    s.owned(&made.body, owner);
+    let fork_scope = format!("{platform}/__shell/alerts/{}/{forked}/", api.identity(owner)?);
+    let fork_gone = format!("navigator.serviceWorker.getRegistration({}).then((r) => !r || r.scope !== {})", js(&fork_scope), js(&fork_scope));
+    let mut on = false;
+    if let Some((shell, frame)) = framing_shell(s, api, chrome, &forked, &fake)? {
+        let read = chrome.until(&frame, &format!("!{bell}.hidden && {bell}.dataset.state === 'off'"), wait);
+        if read {
+            chrome.eval(&frame, &format!("({bell}.click(), true)"))?;
+        }
+        on = read && chrome.until(&frame, &format!("{bell}.dataset.state === 'on'"), wait);
+        chrome.detach(frame)?;
+        chrome.close(shell)?;
+    }
+    s.commit(&made.body, &[("fragment.json", Some(br#"{ "kind": "chat" }"#.as_slice())), ("app.mjs", Some(b"export class App {}\n".as_slice()))]);
+    s.deploy(&made.body);
+    let own = s.eventually(wait, || api.status(owner, &forked).ok().and_then(|r| r.body["code"]["id"].as_str().map(|id| id.starts_with("app:"))).unwrap_or(false));
+    let mut let_go = false;
+    if on && own {
+        let quiet = chrome.open(&format!("{platform}/about"))?;
+        let registration = chrome.registration_id(&quiet, &fork_scope)?;
+        chrome.deliver_push(&quiet, &platform, &registration, &push)?;
+        let_go = chrome.until(&quiet, &fork_gone, wait);
+        chrome.close(quiet)?;
+    }
+    s.ok(
+        "a chat that leaves the release's code (its own deployed in the release's place), a push to the alerts it had shows nothing, and the worker lets itself go",
+        on && own && let_go,
+        json!({ "on": on, "own": own, "letGo": let_go }),
     );
     Ok(())
 }

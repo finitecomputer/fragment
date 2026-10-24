@@ -563,11 +563,14 @@ addEventListener("message", async (event) => {
   } catch {
     return;
   }
-  // the release's chat alone, whose page is the platform's own code
-  // (decision 40): a fork's is its author's, which could push anything in
-  // this origin's name
   const origin = new URL(status.urls.canonical).origin;
-  if (event.origin !== origin || frame.contentWindow !== event.source || !String(status.code?.id ?? "").startsWith("blessed:chat@")) return;
+  if (event.origin !== origin || frame.contentWindow !== event.source) return;
+  // alerts are turned on for the release's chat alone, whose page is the
+  // platform's own code (decision 40): a fork's is its author's, which
+  // could push anything in this origin's name (the worker, too, shows
+  // nothing of a chat that left it). Read and turned off, any chat's: one
+  // that left the release may let go of what it had
+  const blessed = String(status.code?.id ?? "").startsWith("blessed:chat@");
   const answer = (a) => event.source.postMessage({ fragment: "alerts", nonce: d.nonce, ...a }, origin);
   if (!alertable()) return answer({ state: "unsupported" });
   try {
@@ -577,7 +580,7 @@ addEventListener("message", async (event) => {
       return answer({ state: on ? "on" : "off" });
     }
     const key = d.on === true && typeof d.key === "string" ? vapidKey(d.key) : null;
-    if (key) return answer(await alertsOn(name, key));
+    if (key) return answer(blessed ? await alertsOn(name, key) : { state: "failed", error: "only the release's chat turns alerts on" });
     if (d.on === false) return answer(await alertsOff(name));
   } catch (e) {
     const denied = e?.name === "NotAllowedError" || e?.name === "PermissionDeniedError";

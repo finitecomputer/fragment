@@ -7,18 +7,25 @@
    never the push's word. */
 const [person, chat] = new URL(self.registration.scope).pathname.split("/").filter(Boolean).slice(2).map(decodeURIComponent);
 
-// Whether its person is the one signed in to this browser now: signing
-// out (any way: the shell's form, the sign-out page, a session that ended)
-// or another person signing in ends what it shows. A platform that cannot
-// say (offline, an error) leaves it be: the push came.
-async function theirs() {
+// What may be shown of a push now, as the platform answers this browser
+// (as the shell asks it): "yes" while its person is the one signed in and
+// the chat still runs the release's chat; "no" once no one is (401),
+// another is, the person may no longer see the chat (403, 404), or it
+// runs other code (a fork's, its author's); "unknown" while the platform
+// cannot say (offline, an error), when only that something came is shown.
+async function shown() {
+  const ask = (path) => fetch(path, { headers: { "x-fragment-shell": "1" }, credentials: "same-origin", cache: "no-store" });
   try {
-    const r = await fetch("/api/identities/me", { headers: { "x-fragment-shell": "1" }, credentials: "same-origin", cache: "no-store" });
-    if (r.status === 401 || r.status === 403) return false;
-    if (!r.ok) return true;
-    return (await r.json()).id === person;
+    const [me, status] = await Promise.all([ask("/api/identities/me"), ask(`/api/f/${encodeURIComponent(chat)}/status`)]);
+    if ([401, 403].includes(me.status) || [401, 403, 404].includes(status.status)) return "no";
+    if (!me.ok || !status.ok) return "unknown";
+    const [who, s] = await Promise.all([me.json(), status.json()]);
+    if (who.id !== person) return "no";
+    const code = s && s.code && s.code.id;
+    if (typeof code !== "string") return "unknown";
+    return code.startsWith("blessed:chat@") ? "yes" : "no";
   } catch (e) {
-    return true;
+    return "unknown";
   }
 }
 
@@ -30,22 +37,26 @@ self.addEventListener("push", (event) => {
   if (!p || typeof p !== "object") p = {};
   event.waitUntil(
     (async () => {
-      if (!(await theirs())) {
-        // no longer its person's browser: it lets itself go, and the push
-        // service then tells the chat its subscription is gone (410)
+      const may = await shown();
+      if (may === "no") {
+        // no longer its person's alerts here: it lets itself go, and the
+        // push service then tells the chat its subscription is gone (410)
         const sub = await self.registration.pushManager.getSubscription().catch(() => null);
         await sub?.unsubscribe().catch(() => {});
         await self.registration.unregister().catch(() => {});
         return;
       }
-      const title = (typeof p.title === "string" && p.title) || "Finite";
-      const opts = {
-        body: typeof p.body === "string" ? p.body : "",
-        // one notification a chat: its latest reply
-        tag: chat,
-        // who it is from: an agent's picture, an address on the web
-        icon: typeof p.icon === "string" && /^https?:\/\//.test(p.icon) ? p.icon : undefined,
-      };
+      // one notification a chat: its latest reply
+      const opts =
+        may === "yes"
+          ? {
+              body: typeof p.body === "string" ? p.body : "",
+              tag: chat,
+              // who it is from: an agent's picture, an address on the web
+              icon: typeof p.icon === "string" && /^https?:\/\//.test(p.icon) ? p.icon : undefined,
+            }
+          : { body: "Something new in one of your chats", tag: chat };
+      const title = may === "yes" && typeof p.title === "string" && p.title ? p.title : "Finite";
       await self.registration.showNotification(title, opts).catch(() => {});
     })(),
   );

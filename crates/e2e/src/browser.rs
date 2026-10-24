@@ -479,6 +479,21 @@ impl Browser {
         found.with_context(|| format!("no service worker registration at {scope}"))
     }
 
+    /// A running service worker of this lease's contexts whose script's URL
+    /// contains `url_part`, attached (as `frame` attaches a frame), so its
+    /// own requests can be refused (`block`).
+    pub fn worker(&mut self, url_part: &str) -> Result<Page> {
+        let v = self.send("Target.getTargets", json!({}), None)?;
+        let target = v["targetInfos"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|t| t["type"] == "service_worker" && t["url"].as_str().is_some_and(|u| u.contains(url_part)))
+            .and_then(|t| t["targetId"].as_str().map(str::to_string))
+            .with_context(|| format!("no running service worker at {url_part}"))?;
+        self.attach(&target)
+    }
+
     /// A push message delivered to the registration DevTools knows as
     /// `registration` (`registration_id`), as a push service would deliver
     /// one: its worker's `push` event, with `data`.
