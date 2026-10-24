@@ -365,8 +365,9 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
         for e in step.effects {
             match e {
                 Effect::Post { agent, fragment, channel, id, body, files } => {
-                    // a reply of a turn its owner asked over SimpleX goes back there, once posted
-                    let relay = simplex.is_some() && channel == records::CHAT && reply_turn(&id).is_some_and(|t| engine.state().turns.get(t).is_some_and(|t| t.via.as_deref() == Some(records::VIA_SIMPLEX)));
+                    // what a turn its owner asked over SimpleX says goes back there, once posted
+                    let asked_there = |turn: &str| engine.state().turns.get(turn).is_some_and(|t| t.via.as_deref() == Some(records::VIA_SIMPLEX));
+                    let relay = simplex.as_ref().and(for_simplex(channel, &id, &body, files.len())).filter(|(turn, _)| asked_there(turn)).map(|(_, text)| text);
                     lanes.push(&fragment, Job::Post { agent, channel, id, body, files, relay })
                 }
                 Effect::Claim { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Claim { agent, turn, id, body }),
@@ -919,6 +920,36 @@ fn reply_turn(id: &str) -> Option<&str> {
     id.strip_prefix("rp:")?.rsplit_once(':').map(|(turn, _)| turn)
 }
 
+/// What of a record a turn posts goes to its owner's SimpleX app, when
+/// that turn was asked there (the caller's to say), and the turn it is of:
+/// a reply, its files noted, unless it is interim (the model's words
+/// before a tool call stay in the chat, as its push leaves them out:
+/// docs/chat-records.md, "Push"; a turn may narrate 200 of them, each a
+/// notification on the phone); and a card's question, its choices named,
+/// since a card shows only in the chat. Nothing else.
+fn for_simplex(channel: &str, id: &str, body: &Value, files: usize) -> Option<(String, String)> {
+    let text = body["text"].as_str().unwrap_or("");
+    match channel {
+        records::CHAT if body["interim"] != true => {
+            let said = with_files_noted(text, files);
+            reply_turn(id).filter(|_| !said.trim().is_empty()).map(|turn| (turn.to_string(), said))
+        }
+        records::WORK if body["kind"] == "turn.prompt" => {
+            let options = body["options"].as_array()?;
+            let words = options.iter().any(|o| o["words"] == true);
+            let labels: Vec<&str> = options.iter().filter(|o| o["words"] != true).filter_map(|o| o["label"].as_str()).collect();
+            // the owner's next message answers a card that takes words (engine.rs `told`)
+            let how = match (words, labels.is_empty()) {
+                (true, true) => String::new(),
+                (true, false) => format!("\n\n(Answer with one of: {}, or in your own words.)", labels.join(", ")),
+                (false, _) => "\n\n(This one needs a button: answer it in our chat.)".to_string(),
+            };
+            Some((body["turn"].as_str()?.to_string(), format!("{text}{how}")))
+        }
+        _ => None,
+    }
+}
+
 /// What the owner's SimpleX app is told of a reply's files, which go only
 /// to the chat.
 fn with_files_noted(text: &str, files: usize) -> String {
@@ -937,8 +968,9 @@ fn with_files_noted(text: &str, files: usize) -> String {
 
 #[derive(Debug, Clone)]
 enum Job {
-    /// `relay`: a reply of a turn asked over SimpleX, sent there once posted.
-    Post { agent: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile>, relay: bool },
+    /// `relay`: what of it goes to the owner's SimpleX app once posted, for
+    /// a turn asked there (`for_simplex`).
+    Post { agent: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile>, relay: Option<String> },
     /// A turn's `turn.start` on `work`, whose answer the engine waits for.
     Claim { agent: String, turn: String, id: String, body: Value },
     /// One of a turn's last records on `work`: the engine hears when the
@@ -1069,10 +1101,9 @@ async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut s
                 }
             }
             Job::Post { agent, channel, id, body, files, relay } => {
-                let text = body["text"].as_str().unwrap_or("").to_string();
                 let done = post(&api, &fragment, &agent, channel, &id, body, &files, stop.clone()).await;
-                if let (true, true, Some(sx)) = (relay, done, claims.simplex.as_ref()) {
-                    sx.reply(&agent, &with_files_noted(&text, files.len()));
+                if let (Some(text), true, Some(sx)) = (relay, done, claims.simplex.as_ref()) {
+                    sx.reply(&agent, &text);
                 }
             }
             Job::Owed { agent, turn, id, body } => {
@@ -1556,5 +1587,31 @@ pub(crate) async fn keepalive(api: Api, mut hold: watch::Receiver<bool>, every: 
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Goal (SimpleX, after #584's mid-turn replies): of what a turn asked
+    /// over SimpleX posts, its owner's app gets every reply that is not
+    /// interim (its answer, an open question), files noted, and a card's
+    /// question with its choices; the model's words before a tool call
+    /// stay in the chat, as the chat's push leaves them out.
+    #[test]
+    fn what_goes_back_over_simplex() {
+        let reply = |interim: bool| records::reply("It'll be sunny.", "t1", &[], 0, interim);
+        assert_eq!(for_simplex(records::CHAT, "rp:t1:2", &reply(false), 0), Some(("t1".into(), "It'll be sunny.".into())));
+        assert_eq!(for_simplex(records::CHAT, "rp:t1:1", &reply(true), 0), None, "interim: the chat's alone");
+        assert_eq!(for_simplex(records::CHAT, "rp:t1:2", &records::reply("", "t1", &[], 0, false), 1), Some(("t1".into(), "(I sent a file, in our chat.)".into())));
+        assert_eq!(for_simplex(records::CHAT, "rp:t1:2", &records::reply(" ", "t1", &[], 0, false), 0), None, "nothing said");
+        let option = |id: &str, label: &str, words: bool| records::PromptOption { id: id.into(), label: label.into(), style: None, words };
+        let card = records::turn_prompt("t1", "c-1", "What should I plant?", &[option("c0", "Basil", false), option("c1", "Mint", false), option("other", "Something else", true)], "npub1paul", 1);
+        assert_eq!(for_simplex(records::WORK, "wk:t1:p:c-1", &card, 0), Some(("t1".into(), "What should I plant?\n\n(Answer with one of: Basil, Mint, or in your own words.)".into())));
+        let buttons = records::turn_prompt("t1", "p-1", "Run it?", &[option("once", "Allow once", false)], "npub1paul", 1);
+        assert!(for_simplex(records::WORK, "wk:t1:p:p-1", &buttons, 0).is_some_and(|(_, t)| t.ends_with("answer it in our chat.)")));
+        assert_eq!(for_simplex(records::WORK, "wk:t1:start", &json!({ "kind": "turn.start", "turn": "t1" }), 0), None, "a turn's work records stay");
     }
 }

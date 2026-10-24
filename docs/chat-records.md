@@ -171,8 +171,12 @@ them (its Bot Chat):
   agent's SimpleX link is bound, a record the agent itself posted with a
   `relayed` for its owner is its owner's message to it, asked as its owner
   (by their name; their Stop stops it; it answers a question asked of
-  them). Its turn is marked so (`via`), and **its replies go back to the
-  owner's SimpleX app** once posted: only replies to SimpleX messages do. A
+  them). Its turn is marked so (`via`), and **what it says goes back to
+  the owner's SimpleX app** once posted: its replies but the interim ones
+  (the words before a tool call stay in the chat, as its push leaves them
+  out), files noted, and a card's question with its choices (their next
+  SimpleX message answers a card that takes words). Only a SimpleX
+  message's turn does. A
   `relayed` from anyone else (a person, another agent), for anyone else,
   by another way, or while unlinked, is what the record would be without
   it: the agent's own words starting nothing, a person's message, a
