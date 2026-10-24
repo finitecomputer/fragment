@@ -381,9 +381,11 @@ pub struct Models {
     /// Which slots say their model is private (a slot's `"private": true`:
     /// confidential inference that keeps nothing, Finite Private's or
     /// Tinfoil's; never Workers AI or OpenRouter), in `SLOTS`' order, read
-    /// off as `images` is. A private slot's calls reach only private models
-    /// (`private_closed`; Paul, 2026-10-22: "When a user has private
-    /// selected, it's not appropriate to fall back to a non-private model").
+    /// off as `images` is. A private tier is a private route: every slot
+    /// its agents' calls reach is private (`reached`, `private_closed`;
+    /// Paul, 2026-10-22: "When a user has private selected, it's not
+    /// appropriate to fall back to a non-private model"). A slot marked
+    /// private promises nothing to the agents of a tier that is not.
     pub private: [bool; 4],
 }
 
@@ -404,26 +406,24 @@ fn flags_of(models: &mut Value, key: &str, means: &str) -> Result<[bool; 4], Str
     Ok(flags)
 }
 
-/// Whether a private slot's calls reach only private models (`Models::
-/// private`): a private tier's images go to `vision` (Hermes' auxiliary
-/// vision, whatever the tier), and every private slot's failures and stalls
-/// to `fallback` (the route's fallback, and Hermes' own switch), so each
-/// of those is private too; and no slot on Workers AI or OpenRouter is
-/// private. Refused, naming the slot to change.
+/// Whether each private tier is a private route (`Models::private`): every
+/// slot its agents' calls reach (`Models::reached`) is private; and no slot
+/// on Workers AI or OpenRouter is marked private. Refused, naming the slot
+/// to change and why the tier's agents reach it.
 fn private_closed(models: &Models) -> Result<(), String> {
-    assert_eq!(SLOTS, ["cheap", "medium", FALLBACK, VISION], "the flags are in SLOTS' order");
     for ((slot, upstream), private) in models.slots().into_iter().zip(models.private) {
         let open = matches!(upstream, Upstream::WorkersAi { .. }) || matches!(upstream, Upstream::Openai { base_url, .. } if on_openrouter(base_url));
         if private && open {
             return Err(format!("models.{slot}: Workers AI and OpenRouter are not private: only a confidential API (Finite Private's, Tinfoil's) is marked private"));
         }
     }
-    let [cheap, medium, fallback, vision] = models.private;
-    if (cheap || medium) && !vision {
-        return Err("models.vision: a private tier's images go to vision, so mark a private vision model there (\"private\": true)".into());
-    }
-    if (cheap || medium || vision) && !fallback {
-        return Err("models.fallback: a private slot's calls fall back to it (the route's on a failure, Hermes' on a stall), so mark a private fallback there (\"private\": true)".into());
+    for tier in [Tier::Cheap, Tier::Medium] {
+        if !models.slot_private(tier.as_str()) {
+            continue;
+        }
+        if let Some((slot, why)) = models.reached(tier).into_iter().find(|(slot, _)| !models.slot_private(slot)) {
+            return Err(format!("models.{slot}: models.{} is private, and its agents' {why} reach {slot}, so mark a private model there (\"private\": true)", tier.as_str()));
+        }
     }
     Ok(())
 }
@@ -459,7 +459,7 @@ impl Models {
     /// slots name at two places (`same_place`) or at two ceilings: a call
     /// names a model by its id (`named`), so an id is one model, and one
     /// row of the book (`priced`), wherever slots name it; and a private
-    /// slot whose calls could reach a model that is not (`private_closed`).
+    /// tier whose agents could reach a slot that is not (`private_closed`).
     pub fn parse(named: Option<&str>, book: &PriceBook, loopback: bool) -> Result<Models, String> {
         let mut models = Models::defaults();
         if let Some(text) = named {
@@ -577,6 +577,29 @@ impl Models {
     /// The deployment's fallback model (`Tries`).
     pub fn fallback(&self) -> Model<'_> {
         Model { named: Named::Fallback, upstream: &self.fallback }
+    }
+
+    /// Whether the slot named `slot` (one of `SLOTS`) says its model is private.
+    pub fn slot_private(&self, slot: &str) -> bool {
+        let at = SLOTS.iter().position(|s| *s == slot).expect("a slot is one of the route's");
+        self.private[at]
+    }
+
+    /// The slots an agent on `tier` can reach, and why, as Hermes v0.21.7
+    /// and the route send its calls: its tier (its turns; and Hermes'
+    /// recovery of an auxiliary call to the main model, a vision call's
+    /// included, after that call and its fallback fail:
+    /// `agent/auxiliary_client.py`, `_try_main_agent_model_fallback`), the
+    /// fallback (the route's on a failure, Hermes' own switch on a stall,
+    /// an auxiliary call's `fallback_providers`) and `vision` (Hermes'
+    /// auxiliary vision, whatever the tier, which falls back to the
+    /// fallback). A private tier's are all private (`private_closed`); the
+    /// high tier, off, reaches none.
+    pub fn reached(&self, tier: Tier) -> Vec<(&'static str, &'static str)> {
+        match tier {
+            Tier::Cheap | Tier::Medium => vec![(tier.as_str(), "turns and recovered calls"), (FALLBACK, "failures and stalls"), (VISION, "images")],
+            Tier::High => vec![],
+        }
     }
 
     /// A `vision` call's fallback: the deployment's fallback model when its
@@ -1844,13 +1867,35 @@ mod tests {
         assert_eq!(DEFAULTS.private, [false; 4]);
         assert!(parse(json!({ "fallback": mark(seeing.clone()) })).is_ok(), "a private fallback behind tiers that are not");
         assert_eq!(openrouter().private, [false; 4], "today's configs say nothing, and parse as before");
-        // refused, saying which slot to change
-        let vision_open = "models.vision: a private tier's images go to vision, so mark a private vision model there (\"private\": true)";
-        let fallback_open = "models.fallback: a private slot's calls fall back to it (the route's on a failure, Hermes' on a stall), so mark a private fallback there (\"private\": true)";
-        refused(json!({ "cheap": mark(private.clone()), "fallback": mark(seeing.clone()) }), vision_open);
-        refused(json!({ "medium": mark(private.clone()), "fallback": mark(seeing.clone()), "vision": private.clone() }), vision_open);
-        refused(json!({ "cheap": mark(private.clone()), "medium": mark(private.clone()), "fallback": seeing.clone(), "vision": mark(private.clone()) }), fallback_open);
-        refused(json!({ "vision": mark(private.clone()) }), fallback_open);
+        // a private tier's agents reach only private slots: their turns, failures, stalls, images, and
+        // Hermes' recovery of a failed vision call to their main model, which is the tier itself
+        for t in [Tier::Cheap, Tier::Medium] {
+            assert_eq!(tier.reached(t).iter().map(|(slot, _)| *slot).collect::<Vec<_>>(), [t.as_str(), super::FALLBACK, VISION]);
+            assert!(tier.reached(t).iter().all(|(slot, _)| tier.slot_private(slot)), "{t:?}");
+        }
+        // a private tier beside one that is not (Private and Standard): each route its own
+        let routed_slot = || json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": OPENROUTER_FLASH, "body": routing() });
+        let mixed = parse(json!({ "cheap": mark(private.clone()), "medium": routed_slot(), "fallback": mark(seeing.clone()), "vision": mark(private.clone()) })).unwrap();
+        assert_eq!(mixed.private, [true, false, true, true]);
+        assert!(mixed.reached(Tier::Cheap).iter().all(|(slot, _)| mixed.slot_private(slot)), "Private's chain is private");
+        assert!(!mixed.slot_private("medium"), "Standard's agents recover to Standard: theirs, and promised nothing");
+        // a private vision and fallback behind tiers that are not (#540's review): parsed, and no route
+        // is private, so nothing is promised: a vision call whose fallback fails too may be recovered by
+        // Hermes to the agent's own main model, a Workers AI tier, which is that agent's route
+        let behind = parse(json!({ "fallback": mark(seeing.clone()), "vision": mark(private.clone()) })).unwrap();
+        assert_eq!(behind.private, [false, false, true, true]);
+        let recovered: Vec<&str> = behind.reached(Tier::Cheap).iter().map(|(slot, _)| *slot).collect();
+        assert_eq!(recovered, ["cheap", super::FALLBACK, VISION]);
+        assert!(!behind.slot_private("cheap") && !behind.slot_private("medium"), "no private route: its agents chose none");
+        let mut tries = Tries::new(behind.route(Named::Vision).unwrap(), behind.vision_fallback());
+        assert_eq!(tries.after(Tried::Answered(429)).map(|m| m.id()), Some("deepseek-v4-1-flash"), "vision's 429: its fallback");
+        assert_eq!(tries.after(Tried::Answered(429)), None, "the fallback's 429 too: the call's, for Hermes to recover to the main model");
+        // refused, saying which slot to change and why the private tier reaches it
+        let open = |tier: &str, slot: &str, why: &str| format!("models.{slot}: models.{tier} is private, and its agents' {why} reach {slot}, so mark a private model there (\"private\": true)");
+        refused(json!({ "cheap": mark(private.clone()), "fallback": mark(seeing.clone()) }), &open("cheap", VISION, "images"));
+        refused(json!({ "medium": mark(private.clone()), "fallback": mark(seeing.clone()), "vision": private.clone() }), &open("medium", VISION, "images"));
+        refused(json!({ "cheap": mark(private.clone()), "medium": mark(private.clone()), "fallback": seeing.clone(), "vision": mark(private.clone()) }), &open("cheap", super::FALLBACK, "failures and stalls"));
+        refused(json!({ "medium": mark(private.clone()), "vision": mark(private.clone()) }), &open("medium", super::FALLBACK, "failures and stalls"));
         let not_private = |slot: &str| format!("models.{slot}: Workers AI and OpenRouter are not private: only a confidential API (Finite Private's, Tinfoil's) is marked private");
         refused(json!({ "cheap": mark(private.clone()), "fallback": mark(flash.clone()), "vision": mark(private.clone()) }), &not_private("fallback"));
         let routed = json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": OPENROUTER_FLASH, "body": routing() });

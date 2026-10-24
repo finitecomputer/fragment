@@ -2052,7 +2052,7 @@ mod tests {
         let mut private = row(json!({ "private": true }));
         private["vision"] = private["cheap"].clone();
         private["fallback"] = json!({ "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" });
-        refused(private.clone(), "models.fallback: a private slot's calls fall back to it");
+        refused(private.clone(), "models.fallback: models.cheap is private, and its agents' failures and stalls reach fallback");
         private["fallback"] = tinfoil(listed.clone())["fallback"].clone();
         private["fallback"]["private"] = json!(true);
         assert_eq!(with(private), "", "the private tier: every slot its calls reach private");

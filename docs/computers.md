@@ -1109,15 +1109,19 @@ expires within 30 days. The container application is the deployment's
   Either kind of slot may say `"private": true`: its model is
   confidential inference that keeps nothing (Finite Private's, Tinfoil's;
   never Workers AI or OpenRouter, which the deploy and the cell refuse to
-  see marked). A private slot's calls reach only private models, and a
-  config that breaks that is refused, naming the slot: a private tier's
-  `vision` (Hermes sends it every image, whatever the tier) and every
-  private slot's `fallback` (the route's on a failure, Hermes' own on a
-  stall) are private too. What a private tier's agent reaches, read from
-  Hermes v0.21.7 (`agent/auxiliary_client.py`, `hermes_cli/
-  config_defaults.py`):
+  see marked). The promise is per route, the tier an agent runs on: a
+  private tier is a private route, every slot its agents' calls reach is
+  private, and a config that breaks that is refused, naming the slot
+  (`Models::reached`): the tier itself, `vision` (Hermes sends it every
+  image, whatever the tier) and `fallback` (the route's on a failure,
+  Hermes' own on a stall). A slot marked private promises nothing to the
+  agents of a tier that is not: theirs is their route. What a private
+  tier's agent reaches, read from Hermes v0.21.7 (`agent/
+  auxiliary_client.py`, `hermes_cli/config_defaults.py`):
   - **Private:** its turns, its failures and stalls (`fallback`), its
-    screenshots and attachments (`auxiliary.vision`: `vision`), and
+    screenshots and attachments (`auxiliary.vision`: `vision`, then
+    `fallback`, and when both fail, Hermes' recovery to the main model,
+    `_try_main_agent_model_fallback`: the private tier itself), and
     Hermes' other model tasks (compression, titles, memory review, the
     skills hub, MCP, approvals, the curator, the goal judge and the
     rest), each `provider: auto`, which inherits the main model, then

@@ -1258,8 +1258,10 @@ Private stays possible by config.
     Paul, 2026-10-22: "When a user has private selected, it's not
     appropriate to fall back to a non-private model" (Tinfoil counts as
     private). A slot may say `"private": true` (never one on Workers AI
-    or OpenRouter), and a private tier's `vision` and every private
-    slot's fallback must be private too, or the deploy is refused
+    or OpenRouter), and a private tier is a private route: every slot its
+    agents reach (the tier, `vision`, the fallback; Hermes' recovery of a
+    failed vision call goes to the tier itself) must be private, or the
+    deploy is refused
     (docs/computers.md, "A slot's `private`", which lists what is not
     private yet: transcription, decisions, speech, vendors' tools).
 
