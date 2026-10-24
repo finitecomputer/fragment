@@ -105,6 +105,29 @@ pub struct Link {
     /// A start's catch-up, under way: in no file, and in no comparison.
     #[serde(skip)]
     pub scan: Scan,
+    /// What an unlink still has the core let go (the contact, told, or an
+    /// unused invitation): asked again at each start until it is done, so
+    /// an unlink while the core cannot run (under a hold, not always on)
+    /// is finished when it next does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<Cleanup>,
+}
+
+/// What an unlink has the core let go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Cleanup {
+    Contact(ContactId),
+    Conn(ConnId),
+}
+
+impl Cleanup {
+    fn cmd(self) -> Cmd {
+        match self {
+            Cleanup::Contact(contact) => Cmd::Delete { contact, notify: true },
+            Cleanup::Conn(conn) => Cmd::DeleteConn { conn },
+        }
+    }
 }
 
 fn is_zero(n: &i64) -> bool {
@@ -219,38 +242,46 @@ impl Link {
             Input::Unlink => match std::mem::take(&mut self.phase) {
                 Phase::Linked { contact, .. } => {
                     self.let_go();
+                    self.cleanup = Some(Cleanup::Contact(contact));
                     out.extend([Action::Ask(Cmd::Delete { contact, notify: true }), Action::Tell(Notice::Unlinked { by_them: false }), Action::Save]);
                 }
-                Phase::Inviting { conn, .. } => out.extend([Action::Ask(Cmd::DeleteConn { conn }), Action::Save]),
+                Phase::Inviting { conn, .. } => {
+                    self.cleanup = Some(Cleanup::Conn(conn));
+                    out.extend([Action::Ask(Cmd::DeleteConn { conn }), Action::Save]);
+                }
                 // its answer, when it comes, is an invitation no one wants
                 Phase::Asking | Phase::Off => {}
             },
-            Input::Started { rollback } => match &self.phase {
-                Phase::Off => {}
-                // the answer died with the last life
-                Phase::Asking => out.push(Action::Ask(Cmd::Invite)),
-                // the lost life may have spent it: a new one to show
-                Phase::Inviting { conn, .. } if rollback => {
-                    out.extend([Action::Ask(Cmd::DeleteConn { conn: *conn }), Action::Ask(Cmd::Invite)]);
-                    self.phase = Phase::Asking;
-                }
-                Phase::Inviting { .. } => {}
-                Phase::Linked { contact, .. } => {
-                    let contact = *contact;
-                    if rollback {
-                        self.syncing = true;
-                        self.forced = true;
-                        out.extend([Action::Ask(Cmd::Sync { contact, force: true }), Action::Tell(Notice::MaybeLost)]);
-                    } else if self.syncing {
-                        // a sync the last life asked: asked again (forced again
-                        // if it was), refused if done
-                        out.push(Action::Ask(Cmd::Sync { contact, force: self.forced }));
+            Input::Started { rollback } => {
+                // an unlink the last life could not finish, first
+                out.extend(self.cleanup.map(|c| Action::Ask(c.cmd())));
+                match &self.phase {
+                    Phase::Off => {}
+                    // the answer died with the last life
+                    Phase::Asking => out.push(Action::Ask(Cmd::Invite)),
+                    // the lost life may have spent it: a new one to show
+                    Phase::Inviting { conn, .. } if rollback => {
+                        out.extend([Action::Ask(Cmd::DeleteConn { conn: *conn }), Action::Ask(Cmd::Invite)]);
+                        self.phase = Phase::Asking;
                     }
-                    self.scan.items.clear();
-                    self.scan.running = true;
-                    out.push(Action::Ask(Cmd::Chat { contact, count: CATCHUP_ITEMS, before: None }));
+                    Phase::Inviting { .. } => {}
+                    Phase::Linked { contact, .. } => {
+                        let contact = *contact;
+                        if rollback {
+                            self.syncing = true;
+                            self.forced = true;
+                            out.extend([Action::Ask(Cmd::Sync { contact, force: true }), Action::Tell(Notice::MaybeLost)]);
+                        } else if self.syncing {
+                            // a sync the last life asked: asked again (forced again
+                            // if it was), refused if done
+                            out.push(Action::Ask(Cmd::Sync { contact, force: self.forced }));
+                        }
+                        self.scan.items.clear();
+                        self.scan.running = true;
+                        out.push(Action::Ask(Cmd::Chat { contact, count: CATCHUP_ITEMS, before: None }));
+                    }
                 }
-            },
+            }
             Input::Said(resp) => self.said(resp, &mut out),
             Input::Failed { cmd, what } => {
                 let what = wire::cut(what, 300).to_string();
@@ -264,6 +295,9 @@ impl Link {
                     Cmd::Sync { contact, force: true } if self.linked_to(*contact) && self.syncing => out.push(Action::Tell(Notice::Failed { what })),
                     // the catch-up's next page, gone (its anchor deleted): what it read goes
                     Cmd::Chat { contact, .. } if self.linked_to(*contact) => self.finish_scan(false, &mut out),
+                    // gone already, or not the core's to let go: not asked again
+                    Cmd::Delete { contact, .. } if self.cleanup == Some(Cleanup::Contact(*contact)) => self.cleanup = None,
+                    Cmd::DeleteConn { conn } if self.cleanup == Some(Cleanup::Conn(*conn)) => self.cleanup = None,
                     // not needed (in step), or not possible: what waits goes
                     Cmd::Sync { contact, .. } if self.linked_to(*contact) && self.syncing => {
                         self.syncing = false;
@@ -342,6 +376,15 @@ impl Link {
                 self.phase = Phase::Off;
                 self.let_go();
                 out.extend([Action::Tell(Notice::Unlinked { by_them: *by_them }), Action::Save]);
+            }
+            // an unlink's let-go, done
+            Resp::Deleted { contact, .. } if self.cleanup == Some(Cleanup::Contact(*contact)) => {
+                self.cleanup = None;
+                out.push(Action::Save);
+            }
+            Resp::ConnDeleted { conn } if self.cleanup == Some(Cleanup::Conn(*conn)) => {
+                self.cleanup = None;
+                out.push(Action::Save);
             }
             // a file's own events are the bridge's to act on (it receives the
             // file a forwarded message carries), never the link's
@@ -768,7 +811,9 @@ mod tests {
         let mut link = linked();
         assert_eq!(link.apply(Input::Unlink), vec![Action::Ask(Cmd::Delete { contact: 3, notify: true }), Action::Tell(Notice::Unlinked { by_them: false }), Action::Save]);
         assert_eq!(link.phase, Phase::Off);
-        assert!(link.apply(Input::Said(&Resp::Deleted { contact: 3, by_them: false })).is_empty(), "our own delete's answer");
+        assert_eq!(link.cleanup, Some(Cleanup::Contact(3)), "its let-go waits for the core's answer");
+        assert_eq!(link.apply(Input::Said(&Resp::Deleted { contact: 3, by_them: false })), vec![Action::Save], "our own delete's answer: done");
+        assert_eq!(link.cleanup, None);
         let mut link = linked();
         link.apply(Input::Started { rollback: true });
         link.apply(Input::Reply("held"));
@@ -777,12 +822,32 @@ mod tests {
         let mut inviting = Link::default();
         invited(&mut inviting);
         assert_eq!(inviting.apply(Input::Unlink), vec![Action::Ask(Cmd::DeleteConn { conn: 1 }), Action::Save]);
+        assert_eq!(inviting.apply(Input::Said(&Resp::ConnDeleted { conn: 1 })), vec![Action::Save]);
+        assert_eq!(inviting.cleanup, None);
         let mut asking = Link::default();
         asking.apply(Input::Want);
         assert!(asking.apply(Input::Unlink).is_empty());
         let late = Resp::Invitation { conn: 2, link: "simplex:/invitation#/late".into(), short: None };
         assert_eq!(asking.apply(Input::Said(&late)), vec![Action::Ask(Cmd::DeleteConn { conn: 2 })], "its answer, withdrawn");
         assert!(Link::default().apply(Input::Unlink).is_empty());
+    }
+
+    /// Goal (Alex's review of #546): an unlink while the core cannot run
+    /// (under a hold, not always on), whose delete was never sent, is
+    /// finished at the core's next start, from its file; a relink meanwhile
+    /// does not lose it; a delete the core refuses (gone already) is not
+    /// asked again.
+    #[test]
+    fn an_unlink_is_finished_when_the_core_next_runs() {
+        let mut link = linked();
+        link.apply(Input::Unlink);
+        let mut back = Link::from_json(&link.to_json()).expect("it reads back");
+        assert_eq!(back.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::Delete { contact: 3, notify: true })]);
+        back.apply(Input::Want);
+        assert_eq!(back.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::Delete { contact: 3, notify: true }), Action::Ask(Cmd::Invite)], "asked again beside a new link");
+        back.apply(Input::Failed { cmd: &Cmd::Delete { contact: 3, notify: true }, what: "errorStore contactNotFound" });
+        assert_eq!(back.cleanup, None);
+        assert_eq!(back.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::Invite)]);
     }
 
     /// Goal: a failed invitation goes back to off and says why; a failed

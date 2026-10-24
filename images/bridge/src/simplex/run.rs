@@ -126,6 +126,8 @@ pub enum Msg {
     Frame { agent: String, epoch: u64, text: String },
     /// A core's process ended (`why`: its code and last words).
     Exited { agent: String, epoch: u64, why: String },
+    /// A core's bot API closed while its process may live on.
+    Lost { agent: String, epoch: u64 },
 }
 
 /// How the rest of the bridge reaches the manager.
@@ -406,6 +408,7 @@ impl Manager {
             Msg::Up { agent, epoch } => self.up(&agent, epoch),
             Msg::Frame { agent, epoch, text } => self.frame(&agent, epoch, &text),
             Msg::Exited { agent, epoch, why } => self.exited(&agent, epoch, &why),
+            Msg::Lost { agent, epoch } => self.lost(&agent, epoch).await,
         }
     }
 
@@ -494,7 +497,8 @@ impl Manager {
         let names: Vec<String> = self.slots.keys().cloned().collect();
         for f in names {
             let s = &self.slots[&f];
-            let want = !self.held && always_on && s.saved.link.phase != Phase::Off && s.broken.is_none();
+            // linked, or with an unlink's let-go still to do
+            let want = !self.held && always_on && (s.saved.link.phase != Phase::Off || s.saved.link.cleanup.is_some()) && s.broken.is_none();
             match (want, s.core.is_some()) {
                 (true, false) if s.retry_at.is_none_or(|t| now >= t) => self.start_core(&f),
                 (false, true) => {
@@ -566,6 +570,7 @@ impl Manager {
         let epoch = s.epoch;
         let (writer, writes) = mpsc::channel::<String>(WRITER_MAX);
         let (ended, exited) = watch::channel(false);
+        CORES.lock().expect("not poisoned").insert(pid);
         s.core = Some(Core { pid, writer, exited, planned: false });
         crate::ev!("simplex.core_started", { "agent": f, "epoch": epoch, "pid": pid });
         // its end, with its last words
@@ -587,6 +592,8 @@ impl Manager {
                 }
             }
             let status = child.wait().await;
+            // reaped: no signal reaches its pid from here on
+            CORES.lock().expect("not poisoned").remove(&pid);
             let _ = ended.send(true);
             let last = String::from_utf8_lossy(&tail).lines().rev().find(|l| !l.trim().is_empty() && !l.contains("received command")).unwrap_or("").to_string();
             let why = format!("{}{}", status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string()), if last.is_empty() { String::new() } else { format!(": {}", wire::cut(&last, 200)) });
@@ -619,7 +626,8 @@ impl Manager {
             loop {
                 tokio::select! {
                     w = writes.recv() => match w {
-                        Some(frame) => if sink.send(Message::text(frame)).await.is_err() { return },
+                        Some(frame) => if sink.send(Message::text(frame)).await.is_err() { break },
+                        // its manager let it go (a planned stop)
                         None => return,
                     },
                     m = stream.next() => match m {
@@ -633,11 +641,27 @@ impl Manager {
                             }
                         }
                         Some(Ok(_)) => {}
-                        Some(Err(_)) | None => return,
+                        Some(Err(_)) | None => break,
                     },
                 }
             }
+            // closed under it: its process may live on, unheard
+            let _ = tx.send(Msg::Lost { agent, epoch }).await;
         });
+    }
+
+    /// A core whose bot API closed: its process stopped (if it lives on)
+    /// and counted as an exit of its own, so it is started again within
+    /// the bound as one that crashed is. One that ended anyway is its
+    /// `Exited`'s.
+    async fn lost(&mut self, f: &str, epoch: u64) {
+        let Some(s) = self.slots.get_mut(f).filter(|s| s.epoch == epoch) else { return };
+        let Some(core) = s.core.take_if(|c| !c.planned && !*c.exited.borrow()) else { return };
+        crate::ev!("simplex.api_lost", { "agent": f, "epoch": epoch });
+        s.up = false;
+        s.pending.clear();
+        stop_process(f, core).await;
+        self.count_exit(f, "its bot API closed");
     }
 
     async fn stop_core(&mut self, f: &str) {
@@ -713,6 +737,13 @@ impl Manager {
         s.core = None;
         s.up = false;
         s.pending.clear();
+        self.count_exit(f, why);
+    }
+
+    /// An exit the bridge did not ask for: tried again after a while,
+    /// doubling, until `EXITS_MAX` in the window.
+    fn count_exit(&mut self, f: &str, why: &str) {
+        let Some(s) = self.slots.get_mut(f) else { return };
         let now = Instant::now();
         s.exits.push_back(now);
         while s.exits.front().is_some_and(|t| now.duration_since(*t) > Duration::from_millis(EXITS_WINDOW_MS)) {
@@ -789,6 +820,47 @@ impl Manager {
                 crate::ev!("simplex.save_asked", { "agent": f });
             }
         }
+    }
+}
+
+/// Every core's process the bridge runs, by pid, from its spawn until it is
+/// reaped: what the bridge stops before it exits (`stop_cores`), so no core
+/// outlives it (a bridge started again would run a second core on the same
+/// databases, outside its hold).
+static CORES: std::sync::Mutex<std::collections::BTreeSet<u32>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+fn cores_alive() -> Vec<u32> {
+    CORES.lock().expect("not poisoned").iter().copied().collect()
+}
+
+/// Every core this process runs stopped before the bridge exits (main.rs),
+/// whatever its manager is doing: SIGTERM, `grace` to end, then SIGKILL,
+/// until each is reaped (`grace` and a second more, at most).
+pub async fn stop_cores(grace: Duration) {
+    if cores_alive().is_empty() {
+        return;
+    }
+    let t0 = Instant::now();
+    for pid in cores_alive() {
+        // SAFETY: a signal to a core this process spawned and has not reaped
+        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    }
+    // bounded by `grace`, then a second
+    while !cores_alive().is_empty() && t0.elapsed() < grace {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    kill_cores();
+    while !cores_alive().is_empty() && t0.elapsed() < grace + Duration::from_millis(1_000) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    crate::ev!("simplex.cores_stopped", { "ms": t0.elapsed().as_millis() as u64, "left": cores_alive().len() });
+}
+
+/// SIGKILL to every core still running (the bridge's forced exit).
+pub fn kill_cores() {
+    for pid in cores_alive() {
+        // SAFETY: a signal to a core this process spawned and has not reaped
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
     }
 }
 
@@ -923,5 +995,78 @@ mod tests {
         assert_eq!((v.phase, v.link.as_deref(), v.name.as_deref()), ("linked", None, Some("paul")));
         assert_eq!(v.why.as_deref(), Some("SimpleX stopped 3 times"));
         assert_eq!(serde_json::to_value(&v).expect("a view")["alwaysOn"], true);
+    }
+
+    /// A child as a core is one: registered from its spawn, reaped and
+    /// let go by its own task; `sh -c script`. Its pid, and its end.
+    fn fake_core(script: &str) -> (u32, watch::Receiver<bool>) {
+        let mut child = tokio::process::Command::new("sh").args(["-c", script]).spawn().expect("sh runs");
+        let pid = child.id().expect("a pid");
+        CORES.lock().expect("not poisoned").insert(pid);
+        let (ended, exited) = watch::channel(false);
+        tokio::spawn(async move {
+            let _ = child.wait().await;
+            CORES.lock().expect("not poisoned").remove(&pid);
+            let _ = ended.send(true);
+        });
+        (pid, exited)
+    }
+
+    /// Goal (Alex's review of #546): no core outlives the bridge: one that
+    /// ignores SIGTERM is killed past the grace, and reaped, before
+    /// `stop_cores` returns (main.rs calls it before it exits).
+    #[tokio::test]
+    async fn no_core_outlives_the_bridge() {
+        let (stubborn, ended) = fake_core("trap '' TERM; sleep 30");
+        let (willing, _) = fake_core("sleep 30");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let t0 = Instant::now();
+        stop_cores(Duration::from_millis(300)).await;
+        assert!(t0.elapsed() < Duration::from_millis(1_500), "within the grace and a second: {:?}", t0.elapsed());
+        assert!(*ended.borrow(), "the stubborn one ended");
+        for pid in [stubborn, willing] {
+            assert!(!cores_alive().contains(&pid), "{pid} reaped");
+            // SAFETY: signal 0 only asks whether the pid exists
+            assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1, "{pid} is gone");
+        }
+    }
+
+    /// Goal (Alex's review of #546): a core whose bot API closed while its
+    /// process lives on is stopped and counted as an exit, so it is started
+    /// again within the bound, not left running unheard.
+    #[tokio::test]
+    async fn a_core_whose_api_closed_is_stopped_and_tried_again() {
+        let (pid, exited) = fake_core("sleep 30");
+        let (writer, _writes) = mpsc::channel(1);
+        let (tx, _rx) = mpsc::channel(4);
+        let (pulse, _) = watch::channel(false);
+        let saved = Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() } };
+        let slot = Slot {
+            agent: agent(),
+            dir: PathBuf::from("/nowhere"),
+            saved,
+            title: None,
+            epoch: 4,
+            core: Some(Core { pid, writer, exited: exited.clone(), planned: false }),
+            up: true,
+            corr: 0,
+            pending: BTreeMap::new(),
+            started: true,
+            exits: VecDeque::new(),
+            retry_at: None,
+            broken: None,
+            note: None,
+            draining_since: None,
+        };
+        let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
+        let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(false)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None };
+        m.lost("juniper--k3x9", 3).await;
+        assert!(m.slots["juniper--k3x9"].core.is_some(), "another life's word: nothing");
+        m.lost("juniper--k3x9", 4).await;
+        let s = &m.slots["juniper--k3x9"];
+        assert!(s.core.is_none() && !s.up, "stopped");
+        assert!(*exited.borrow(), "its process ended");
+        assert_eq!(s.exits.len(), 1, "an exit of its own");
+        assert!(s.retry_at.is_some() && s.broken.is_none(), "started again after a while");
     }
 }
