@@ -335,6 +335,7 @@ ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/hermes/.local/bin:/usr/loc
     NODE_COMPILE_CACHE=/tmp/node-compile-cache \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    NODE_USE_SYSTEM_CA=1 \
     S6_CMD_RECEIVE_SIGNALS=1 \
     S6_SERVICES_GRACETIME=1000 \
     S6_KILL_GRACETIME=1000 \
