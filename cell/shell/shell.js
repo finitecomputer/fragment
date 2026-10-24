@@ -1122,8 +1122,13 @@ const agentOfChat = (name) => state.agents.get(chatAgentOf(name))?.fragment ?? n
 // never by its agent: the agent's name is its fragment's alone.
 const agentsOwnChat = (agent) => chats().find((f) => own(f) && labelOf(f.name) === `${labelOf(agent)}-chat`) ?? null;
 
+// Each time the middle column is given a view (a chat, settings): a
+// launch's late answer changes the screen only if none was given since
+// (startFromSearch).
+let views = 0;
 function openChat(name, push = true) {
   if (!byName(name)) return;
+  views++;
   if (push) at("/");
   state.page = null;
   $("layout").classList.remove("settings-view");
@@ -1888,6 +1893,18 @@ async function startFromSearch() {
     for (const frame of state.frames.values()) frame.hidden = true;
     $("chat-title").textContent = UNTITLED;
   }
+  // The middle column is the launch's until the person gives it another
+  // view (a chat, settings, Back): from then on what it does late changes
+  // nothing on screen, and its message is still sent.
+  let view = views;
+  const ours = () => view === views;
+  // A chat's frame let go, to load again: never one whose page holds what
+  // no storage keeps (files chosen, a voice memo: `busyFrames`).
+  const unload = (name) => {
+    if (busyFrames.has(state.frames.get(name))) return;
+    state.frames.get(name)?.remove();
+    state.frames.delete(name);
+  };
   let name = null;
   try {
     const same = pendingLaunch && pendingLaunch.text === text && pendingLaunch.identity === searchIdentity && pendingLaunch.files.length === files.length && pendingLaunch.files.every((f, i) => f === files[i]);
@@ -1895,30 +1912,35 @@ async function startFromSearch() {
     pendingLaunch.chat ||= await newChat(searchIdentity, { quiet: true, open: false });
     if (!pendingLaunch.chat) throw new Error("Another new chat is being made; try again in a moment.");
     name = pendingLaunch.chat;
-    // a blank chat found again loads again so, its start never showing
-    state.frames.get(name)?.remove();
-    state.frames.delete(name);
-    chatFrame(name, "/?sent=1");
-    openChat(name);
-    leaveSidebar();
+    if (ours()) {
+      // a blank chat found again loads again so, its start never showing
+      // (one holding a draft stays as it is)
+      unload(name);
+      chatFrame(name, "/?sent=1");
+      openChat(name);
+      leaveSidebar();
+      view = views;
+    }
     // bounded: at most LAUNCH_FILES_MAX, uploaded together
     const attachments = await Promise.all(files.map((f) => uploadLaunchFile(name, f)));
     await api("POST", `/api/f/${seg(name)}/channels/chat`, { id: pendingLaunch.id, body: { text, ...(attachments.length ? { attachments } : {}) } });
     pendingLaunch = null;
     clearLaunchFiles();
   } catch (e) {
-    // the chat stays, its start shown again, for the same message tried again
-    if (name) {
-      state.frames.get(name)?.remove();
-      state.frames.delete(name);
-    }
-    if (state.current && !state.page) openChat(state.current, false);
+    // the chat stays, its start shown again (unless it holds a draft, or
+    // the person opened it since), for the same message tried again
+    if (name && (ours() || state.current !== name || state.page)) unload(name);
+    if (ours() && state.current && !state.page) openChat(state.current, false);
     await closed;
     launching = false;
     // a connection that dropped is fetch's TypeError, in each browser's words
     const unreached = e instanceof TypeError && /fetch|load failed|network/i.test(e.message);
-    launchError = `Your message wasn't sent. ${unreached ? "Finite couldn't be reached: check your connection and try again." : e.message}`;
-    openSearch(trigger, text);
+    const why = unreached ? "Finite couldn't be reached: check your connection and try again." : e.message;
+    launchError = `Your message wasn't sent. ${why}`;
+    // the launcher again on its words where the person still is; moved
+    // on, a notice, and its next opening has them
+    if (ours()) openSearch(trigger, text);
+    else notice("Your message wasn't sent", why);
   } finally {
     launching = false;
   }
@@ -2388,7 +2410,10 @@ async function openSettings(push = true, failed = null) {
   const tell = () => {
     if (failed && gen === noticeGen) notice(...failed);
   };
-  if (state.page !== "Settings") visits++;
+  if (state.page !== "Settings") {
+    visits++;
+    views++;
+  }
   state.page = "Settings";
   $("layout").classList.add("settings-view");
   $("frames").hidden = true;

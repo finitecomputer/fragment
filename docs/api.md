@@ -2992,8 +2992,13 @@ kept until it is sent, so trying again after an answer that was lost is
 the same record. Enter goes straight to the chat: the launcher closes at
 once and the middle column is the new chat's while it is made; its page
 loads (`?sent=1`: docs/chat-records.md, "The launcher's chat") as its
-message is posted. A message not sent opens the launcher again on its
-words, saying why. The launcher wakes the person's computer as it opens
+message is posted; a page already open that holds what no storage keeps
+(files chosen, a voice memo: its `busy`) is kept as it is. A message not
+sent opens the launcher again on its words, saying why. Once the person
+gives the middle column another view while it is on its way (another
+chat, settings, Back), the launch changes nothing on screen: its message
+is still sent, and one not sent is a notice, its words waiting in the
+launcher's next opening. The launcher wakes the person's computer as it opens
 (as focusing a chat does), so it is starting while they type. Before
 their agent runs (its first run, or their computer not read yet), Enter
 (the first row, "Say it in <chat>") opens their first chat (the first
