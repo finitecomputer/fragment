@@ -248,9 +248,14 @@ pub struct Turn {
     /// When the runtime was last heard about it (or it was handed).
     pub last_ms: u64,
     pub steps: u32,
-    /// Replies posted so far, and the highest part among them.
+    /// Replies posted so far (their ids' numbers), and the highest part
+    /// among them.
     pub replies: u32,
     pub last_part: u32,
+    /// Of those, the interim ones (words before a tool call), which spend
+    /// no part of `REPLIES_PER_TURN_MAX`. A state from before holds none.
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub interim: u32,
     pub prompts: Vec<Prompt>,
     pub stop_requested: bool,
     /// What an ended turn still owes `work`, in the order posted.
@@ -445,6 +450,12 @@ struct EndedTurn {
 
 pub fn cursor_key(agent: &str, fragment: &str, channel: &str) -> String {
     format!("{agent}|{fragment}|{channel}")
+}
+
+/// A count that is nothing, kept out of the state file (so a state with
+/// none reads as an older bridge's did).
+fn u32_is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 fn label(fragment: &str) -> &str {
@@ -877,6 +888,7 @@ impl Engine {
             last_ms: self.now,
             steps: 0,
             replies: 0,
+            interim: 0,
             last_part: 0,
             prompts: Vec::new(),
             stop_requested: false,
@@ -1408,10 +1420,19 @@ impl Engine {
         let Some(open) = t.open.take() else { return };
         t.last_part = t.last_part.max(open.part);
         let empty = open.text.trim().is_empty() && open.files.is_empty();
-        if empty || t.replies >= limits::REPLIES_PER_TURN_MAX {
+        // interim replies have a bound of their own, so narration never
+        // spends what the turn's answer and questions may say
+        let spent = if interim { t.interim >= limits::INTERIM_REPLIES_PER_TURN_MAX } else { t.replies - t.interim >= limits::REPLIES_PER_TURN_MAX };
+        if empty || spent {
+            if spent && !empty {
+                crate::ev!("reply.dropped", { "turn": id, "interim": interim, "why": "a turn posts at most so many" });
+            }
             return;
         }
         t.replies += 1;
+        if interim {
+            t.interim += 1;
+        }
         self.dirty = true;
         let (agent, fragment, n, hop) = (t.agent.clone(), t.fragment.clone(), t.replies, t.hop);
         // A reply that names another agent of the chat hands off to it.
@@ -1577,6 +1598,9 @@ pub fn check(state: &State) -> Result<(), Corrupt> {
         }
         if t.asking && !t.active() {
             return Err(Corrupt(format!("turn {id} is {:?} and asks its asker", t.phase)));
+        }
+        if t.interim > t.replies {
+            return Err(Corrupt(format!("turn {id} posted {} interim replies of {}", t.interim, t.replies)));
         }
         let ended = t.phase == Phase::Ended;
         if ended == t.owed.is_empty() {

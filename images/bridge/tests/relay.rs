@@ -696,6 +696,11 @@ async fn provider() -> (SocketAddr, tokio::sync::watch::Sender<bool>) {
                 tokio::time::sleep(Duration::from_millis(600)).await;
                 answer(StatusCode::OK, "image/png", CAT.to_vec())
             }
+            "/slower/cat.png" => {
+                // past a tool call, the answer and the end that follow it
+                tokio::time::sleep(Duration::from_millis(1_500)).await;
+                answer(StatusCode::OK, "image/png", CAT.to_vec())
+            }
             "/moved.png" => Response::builder().status(StatusCode::FOUND).header("location", "/cat.png").body(http_body_util::Full::new(bytes::Bytes::new())).unwrap(),
             "/page.html" => answer(StatusCode::OK, "text/html", b"<script>alert(1)</script>".to_vec()),
             "/big.png" => answer(StatusCode::OK, "image/png", vec![0; 26 * 1024 * 1024]),
@@ -798,6 +803,88 @@ async fn a_replys_image_link_is_its_file() {
             assert_eq!(work_of(w, &chat, &turn, "turn.end")[0]["outcome"], "idle");
         });
     }
+    bridge.stop().await;
+}
+
+/// Goal (Alex's review of #584: the words before a tool call whose image
+/// was still being fetched lost their file, and the answer after them was
+/// sealed by the step that had waited, `interim`, so it was never pushed):
+/// while a reply's image links are fetched, everything of its turn after
+/// it waits, in order (the step, a later reply, a card, a file, the end),
+/// so the words keep their file and the answer stays the answer. Method:
+/// the words end with a PNG its provider serves 1.5 s late; the tool's
+/// progress, then the answer and the end (or first a card, answered once
+/// it shows, or a file after the answer) all come before it is fetched.
+#[tokio::test]
+async fn later_parts_wait_for_a_replys_image() {
+    let (fake, bridge, _hermes, _dir) = setup("relay-picture-race", &["juniper"]).await;
+    let (cdn, _stop) = provider().await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let url = format!("http://{cdn}/slower/cat.png");
+    let on = |w: &World, channel: &str, turn: &str| -> Vec<Value> { w.records(&chat, channel).into_iter().filter(|r| r["body"]["turn"] == turn).collect() };
+    let at = |r: &Value| r["at"].as_i64().expect("a record's time");
+    let kind = |rs: &[Value], k: &str| rs.iter().find(|r| r["body"]["kind"] == k).cloned();
+    for then in ["", "risky", "media"] {
+        let text = format!("narrate words-picture:{url} {then}").trim_end().to_string();
+        let said = fake.say(&chat, &person("paul"), json!({ "text": text }));
+        let turn = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+        if then == "risky" {
+            fake.until(WAIT, "the card, once the words have their file", |w| kind(&on(w, "work", &turn), "turn.prompt").is_some()).await;
+            let p = fake.with(|w| kind(&on(w, "work", &turn), "turn.prompt").unwrap()["body"]["prompt"].clone());
+            fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": p, "option": "once" }));
+        }
+        fake.until(WAIT, "the turn's end", |w| kind(&on(w, "work", &turn), "turn.end").is_some()).await;
+        fake.with(|w| {
+            let (replies, work) = (on(w, "chat", &turn), on(w, "work", &turn));
+            let step = kind(&work, "turn.step").expect("its step");
+            let end = kind(&work, "turn.end").expect("its end");
+            let words = &replies[0];
+            assert_eq!(words["body"]["text"], support::hermes::NARRATION, "{then:?}: the link gone from the words: {replies:?}");
+            assert_eq!((&words["body"]["attachments"][0]["name"], &words["body"]["interim"]), (&json!("cat.png"), &json!(true)), "{then:?}: the words keep their file: {replies:?}");
+            assert!(at(words) < at(&step), "{then:?}: the words, then the step");
+            let answer = replies.iter().find(|r| r["body"]["text"].as_str().is_some_and(|t| t.starts_with("echo: [paul] narrate"))).expect("the answer");
+            assert!(answer["body"].get("interim").is_none(), "{then:?}: the answer is no interim reply (it is pushed): {answer}");
+            assert!(at(&step) < at(answer) && at(answer) < at(&end), "{then:?}: the step, the answer, the end");
+            match then {
+                "risky" => {
+                    let card = kind(&work, "turn.prompt").expect("its card");
+                    assert!(at(&step) < at(&card) && at(&card) < at(answer), "the card after the step, before the answer");
+                }
+                "media" => {
+                    let file = replies.iter().find(|r| r["body"]["text"] == "a cat" && r["body"]["attachments"].is_array()).expect("the file sent after the answer");
+                    assert!(at(answer) < at(file) && at(file) < at(&end), "the file after the answer");
+                }
+                _ => assert_eq!(replies.len(), 2, "the words and the answer: {replies:?}"),
+            }
+            assert_eq!(end["body"]["outcome"], "idle");
+        });
+    }
+    bridge.stop().await;
+}
+
+/// Goal (Alex's review of #584: narration spent the replies a turn may post,
+/// and the answer was dropped): a turn that narrates more tool calls than
+/// `REPLIES_PER_TURN_MAX` posts every call's words, and then its answer,
+/// whole and not interim. Method: the scripted gateway's `narrate many`.
+#[tokio::test]
+async fn many_narrated_calls_keep_the_answer() {
+    let (fake, bridge, _hermes, _dir) = setup("relay-narrate-many", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "narrate many please" }));
+    let turn = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    fake.until(30_000, "the turn's end", |w| !work_of(w, &chat, &turn, "turn.end").is_empty()).await;
+    fake.with(|w| {
+        let n = support::hermes::NARRATED_CALLS;
+        assert!(n > fragment_bridge::limits::REPLIES_PER_TURN_MAX);
+        let said: Vec<Value> = replies(w, &chat).into_iter().filter(|r| r["turn"] == turn).collect();
+        assert_eq!(said.len(), n as usize + 1, "each call's words, then the answer");
+        assert!(said[..n as usize].iter().enumerate().all(|(i, r)| r["text"] == format!("Checking part {}.", i + 1) && r["interim"] == true));
+        assert_eq!(said[n as usize], json!({ "text": "echo: [paul] narrate many please", "turn": turn }), "the answer, whole and not interim");
+        assert_eq!(work_of(w, &chat, &turn, "turn.step").len(), n as usize);
+        assert_eq!(work_of(w, &chat, &turn, "turn.end")[0]["outcome"], "idle");
+    });
     bridge.stop().await;
 }
 

@@ -59,8 +59,14 @@ pub const DRAFT_INTERVAL_MS: u64 = 250;
 /// Steps one turn posts, at most; the rest are counted, not posted.
 pub const STEPS_PER_TURN_MAX: u32 = 200;
 
-/// Replies one turn posts, at most (a runtime that sends more is looping).
+/// Replies one turn posts, at most (a runtime that sends more is looping),
+/// its interim ones apart: the model's words before a tool call never
+/// spend what its answer and questions may say.
 pub const REPLIES_PER_TURN_MAX: u32 = 64;
+/// Interim replies (the words before a tool call) one turn posts, at most:
+/// one before each step it posts. Past it the words go unposted, its
+/// answer still posts.
+pub const INTERIM_REPLIES_PER_TURN_MAX: u32 = STEPS_PER_TURN_MAX;
 
 /// Notices one turn posts, at most (each a line of the chat's, quietly);
 /// the rest are dropped.
@@ -94,6 +100,11 @@ pub const STEP_EXCERPT_MAX_CHARS: usize = 300;
 /// starts, and the tool's progress, polled every 0.3 s, can come just
 /// before that `send`. Past it, the step posts, and the words after it.
 pub const STEP_HOLD_MS: u64 = 3_000;
+/// A turn's events that wait in the relay behind what is not whole yet (a
+/// reply's image links being fetched, words still streaming), at most:
+/// what Hermes says within those bounds is far fewer; past it they all go,
+/// a file still coming then too late for its reply.
+pub const QUEUED_EVENTS_MAX: usize = 1024;
 /// A failed turn's error, at most.
 pub const ERROR_MAX_CHARS: usize = 300;
 

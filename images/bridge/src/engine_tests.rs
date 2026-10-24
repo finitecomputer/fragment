@@ -263,6 +263,51 @@ fn steps_split_replies() {
     assert_eq!(kinds(&end2), vec!["turn.end"]);
 }
 
+/// Goal (Alex's review of #584: 64 narrated tool calls spent the turn's
+/// replies, and its answer was dropped): the words before a tool call have
+/// a bound of their own (`INTERIM_REPLIES_PER_TURN_MAX`, one a posted
+/// step), so narration never costs the answer. A turn that narrates past
+/// `REPLIES_PER_TURN_MAX`, and past its own bound, still posts its answer,
+/// whole and not interim (so it is pushed), numbered after the words; the
+/// words past their bound go unposted. The answer's own bound still holds
+/// for a turn that replies without end. Restart: the counts are the state's.
+#[test]
+fn narration_never_costs_the_answer() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "fix everything" }), T0)).expect("started").turn;
+    let step = || ToolStep { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), category: crate::records::Category::Shell };
+    let narrated = limits::INTERIM_REPLIES_PER_TURN_MAX + 5;
+    assert!(narrated > limits::REPLIES_PER_TURN_MAX && limits::REPLIES_PER_TURN_MAX >= 64);
+    let mut posted = Vec::new();
+    for part in 1..=narrated {
+        ev(&mut e, Event::Reply { turn: turn.clone(), part, text: format!("Checking part {part}.") }, T0 + 1);
+        let s = ev(&mut e, Event::Step { turn: turn.clone(), step: step() }, T0 + 1);
+        posted.extend(posts(&s).into_iter().filter(|(id, _)| id.starts_with("rp:")));
+    }
+    assert_eq!(posted.len(), limits::INTERIM_REPLIES_PER_TURN_MAX as usize, "the words, up to their own bound, past the replies' 64");
+    assert!(posted.iter().all(|(_, b)| b["interim"] == true));
+    assert_eq!(posted[64], (records::reply_id(&turn, 65), json!({ "text": "Checking part 65.", "turn": turn, "interim": true })), "the 65th words post");
+    // a restart in the middle keeps the counts (the state's)
+    let saved: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
+    assert_eq!(saved.turns[&turn].interim, limits::INTERIM_REPLIES_PER_TURN_MAX);
+    ev(&mut e, Event::Reply { turn: turn.clone(), part: narrated + 1, text: "Final answer: all fixed.".into() }, T0 + 2);
+    let end = ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 3);
+    let n = limits::INTERIM_REPLIES_PER_TURN_MAX + 1;
+    assert_eq!(posts(&end)[0], (records::reply_id(&turn, n), json!({ "text": "Final answer: all fixed.", "turn": turn })), "the answer, whole and not interim");
+    // the answer's own bound: a runtime that replies without end
+    let t2 = started(&said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "talk" }), T0 + 4)).expect("started").turn;
+    let mut said_parts = 0;
+    for part in 1..=limits::REPLIES_PER_TURN_MAX + 3 {
+        let s = ev(&mut e, Event::Reply { turn: t2.clone(), part, text: format!("part {part}") }, T0 + 5);
+        said_parts += posts(&s).len();
+    }
+    let end2 = ev(&mut e, Event::End { turn: t2.clone(), outcome: Outcome::Idle }, T0 + 6);
+    said_parts += posts(&end2).iter().filter(|(id, _)| id.starts_with("rp:")).count();
+    assert_eq!(said_parts, limits::REPLIES_PER_TURN_MAX as usize, "at most so many, interim ones apart");
+}
+
 /// Goal: one turn of an agent runs in a chat at a time, the rest in order;
 /// past the queue's bound a message is told so, not queued: its claim and
 /// its end, both records as every turn has, and nothing run.

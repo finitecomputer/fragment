@@ -30,8 +30,9 @@
 //!   does: drafts, then a send answering the message at the tool boundary,
 //!   and the tool's progress after it (`late`: before it; `stalled`: before
 //!   it by longer than the bridge holds a step); `long`, words past 300
-//!   characters; `only`, the answer beside a housekeeping call, and nothing
-//!   after;
+//!   characters; `many`, `NARRATED_CALLS` calls each with its words;
+//!   `words-picture:<url>`, words that end with that image; `only`, the
+//!   answer beside a housekeeping call, and nothing after;
 //! - `notice` sends Hermes' inactivity warning (`⚠️ I seem to be stuck …`)
 //!   before its reply, a send answering nothing, and its self-improvement
 //!   review's (`💾 Self-improvement review: Memory updated`) after its `✅`,
@@ -204,6 +205,10 @@ type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>;
 
 /// What a `narrate` turn says beside its tool call.
 pub const NARRATION: &str = "Let me check that.";
+
+/// How many tool calls a `narrate many` turn makes, each with its words:
+/// past the replies a turn may post (`REPLIES_PER_TURN_MAX`, 64).
+pub const NARRATED_CALLS: u32 = 70;
 
 /// What a `narrate long` turn says beside its tool call: a mid-turn
 /// answer, well past the 300 characters a step's words once kept.
@@ -439,28 +444,40 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
         // before it by longer than the bridge holds a step for its words.
         // `long`: words well past a step's old 300 characters. `only`: the
         // answer said beside a housekeeping call, which Hermes sends once.
-        let words = if text.contains("only") {
-            reply.clone()
-        } else if text.contains("long") {
-            long_narration()
-        } else {
-            NARRATION.to_string()
-        };
-        let half: String = words.chars().take(words.chars().count() / 2).collect();
-        gw.act(json!({ "op": "draft", "chat_id": chat, "draft_id": 7, "content": half, "final": false, "metadata": { "reply_to_message_id": mid } })).await;
-        gw.act(json!({ "op": "draft", "chat_id": chat, "draft_id": 7, "content": words, "final": false, "metadata": { "reply_to_message_id": mid } })).await;
-        let said = json!({ "op": "send", "chat_id": chat, "content": words, "reply_to": mid, "metadata": { "reply_to_message_id": mid, "notify": true } });
-        let tool = if text.contains("only") { "🧠 memory: \"saved\"" } else { "💻 terminal: `echo hi`" };
-        let progress = json!({ "op": "send", "chat_id": chat, "content": tool, "reply_to": null, "metadata": {} });
-        if text.contains("late") || text.contains("stalled") {
-            gw.act(progress).await;
-            if text.contains("stalled") {
-                tokio::time::sleep(Duration::from_millis(fragment_bridge::limits::STEP_HOLD_MS + 700)).await;
+        // `many`: `NARRATED_CALLS` tool calls, each with its words.
+        // `words-picture:<url>`: the words end with that image (a model
+        // showing what its tool made, then working on).
+        let rounds = if text.contains("many") { NARRATED_CALLS } else { 1 };
+        for round in 1..=rounds {
+            let words = if text.contains("only") {
+                reply.clone()
+            } else if text.contains("long") {
+                long_narration()
+            } else if text.contains("many") {
+                format!("Checking part {round}.")
+            } else {
+                NARRATION.to_string()
+            };
+            let words = match text.split_whitespace().find_map(|w| w.strip_prefix("words-picture:")) {
+                Some(url) => format!("{words}\n\n![a cat]({url})"),
+                None => words,
+            };
+            let half: String = words.chars().take(words.chars().count() / 2).collect();
+            gw.act(json!({ "op": "draft", "chat_id": chat, "draft_id": 7, "content": half, "final": false, "metadata": { "reply_to_message_id": mid } })).await;
+            gw.act(json!({ "op": "draft", "chat_id": chat, "draft_id": 7, "content": words, "final": false, "metadata": { "reply_to_message_id": mid } })).await;
+            let said = json!({ "op": "send", "chat_id": chat, "content": words, "reply_to": mid, "metadata": { "reply_to_message_id": mid, "notify": true } });
+            let tool = if text.contains("only") { "🧠 memory: \"saved\"".to_string() } else { format!("💻 terminal: `echo {round}`") };
+            let progress = json!({ "op": "send", "chat_id": chat, "content": tool, "reply_to": null, "metadata": {} });
+            if text.contains("late") || text.contains("stalled") {
+                gw.act(progress).await;
+                if text.contains("stalled") {
+                    tokio::time::sleep(Duration::from_millis(fragment_bridge::limits::STEP_HOLD_MS + 700)).await;
+                }
+                gw.act(said).await;
+            } else {
+                gw.act(said).await;
+                gw.act(progress).await;
             }
-            gw.act(said).await;
-        } else {
-            gw.act(said).await;
-            gw.act(progress).await;
         }
         if text.contains("only") {
             gw.act(react("👀", true)).await;

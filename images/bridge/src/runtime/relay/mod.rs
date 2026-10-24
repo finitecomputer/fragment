@@ -15,9 +15,12 @@
 //!   ends a draft segment at every tool boundary with such a `send`), and is
 //!   one, whole: the engine posts it before the step that follows (Paul,
 //!   2026-10-24: everything the agent says is a reply in the chat). A step
-//!   that reaches the bridge while those words still stream, or while their
-//!   image links are fetched, waits for them (`Inflight::held`; for the
-//!   words, at most `limits::STEP_HOLD_MS`), so they post before it;
+//!   that reaches the bridge while those words still stream waits for them
+//!   (at most `limits::STEP_HOLD_MS`), so they post before it; and while a
+//!   reply's image links are fetched, everything of its turn after it (its
+//!   steps, a later reply, a card, a file, its end) waits in order, so the
+//!   reply keeps its files and no later part is sealed out of turn
+//!   (`Inflight::queue`);
 //! - an approval is a `prompt` frame; the owner's answer goes back as an
 //!   inbound `prompt_response`, at once, mid-turn;
 //! - a question to answer in words (an open `clarify`, `❓ …`, or the
@@ -183,25 +186,45 @@ struct Inflight {
     /// at every tool boundary with one, so the model's words before a tool
     /// call arrive as a reply, which its tool's progress can come before).
     drafting: bool,
-    /// Steps that came while the words before them were not whole yet (a
-    /// draft segment streaming, or a reply's image links being fetched),
-    /// in order, and since when: let go once they are (`release`), before
-    /// anything else of the turn, or after `limits::STEP_HOLD_MS` while
-    /// only words stream.
-    held: Vec<Step>,
+    /// The turn's events (steps, replies and their files, cards, its end)
+    /// that wait, in the order they came, behind what is not whole yet: a
+    /// reply's image links being fetched (nothing after a reply may seal
+    /// it before its files are on it), or the words a draft segment
+    /// streams after its tool's progress came first (`words_at`: where in
+    /// the queue those words go when their `send` comes, before the steps
+    /// that came meanwhile; `held_at`, since when). Let go in order once
+    /// nothing is awaited (`drain`); the words are waited for at most
+    /// `limits::STEP_HOLD_MS`, the files within the fetch's own bound.
+    queue: VecDeque<Event>,
+    words_at: Option<usize>,
     held_at: Option<tokio::time::Instant>,
+    /// Its end is said (queued behind what waits, or posted): another
+    /// says nothing more.
+    ending: bool,
     /// Messages that are neither a reply nor its progress (a notice,
     /// "Other"'s ask for words): an edit of one changes nothing.
     taken: Vec<String>,
-    /// Its replies' image links being fetched (`picture`), the reply parts
-    /// they are in with their text as it stands, and its end, held while any
-    /// is (an idle end alone: a stop or a failure ends it at once).
+    /// Its replies' image links being fetched (`picture`), and the reply
+    /// parts they are in with their text as it stands.
     pictures: usize,
     pictured: HashMap<u32, String>,
-    pending_end: Option<Outcome>,
 }
 
 impl Inflight {
+    /// Something of the turn is not whole yet, so what comes after it waits.
+    fn waits(&self) -> bool {
+        self.pictures > 0 || self.words_at.is_some()
+    }
+
+    /// The words a draft segment streamed are not waited for any more (a
+    /// question, a card, a file or the end came instead, or their wait is
+    /// out): the steps that waited for them go once nothing else waits.
+    fn stop_waiting_for_words(&mut self) {
+        self.drafting = false;
+        self.words_at = None;
+        self.held_at = None;
+    }
+
     /// A message that is neither a reply nor progress (its edits change
     /// nothing), the oldest let go past `TAKEN_KEPT_MAX`.
     fn take_message(&mut self, id: String) {
@@ -360,6 +383,14 @@ async fn handle(mut req: Request<Incoming>, cfg: RelayConfig, media: Arc<Mutex<M
         };
     }
     net::refusal(StatusCode::NOT_FOUND, "not_found", "the relay answers /relay and /relay/media")
+}
+
+/// The reply part an event is about, if any.
+fn part_of(e: &Event) -> Option<u32> {
+    match e {
+        Event::Reply { part, .. } | Event::Attachment { part, .. } | Event::Retract { part, .. } => Some(*part),
+        _ => None,
+    }
 }
 
 /// A fetched file, kept with the uploads (`up-<n>` in the media directory,
@@ -586,7 +617,7 @@ impl Loop {
         self.next_order += 1;
         let turn = ts.turn.clone();
         let sent = self.send(frame.clone());
-        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), progress: HashMap::new(), next_part: 1, said: false, stopped: false, asking: false, carded: false, worded: false, drafting: false, held: Vec::new(), held_at: None, taken: Vec::new(), pictures: 0, pictured: HashMap::new(), pending_end: None });
+        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), progress: HashMap::new(), next_part: 1, said: false, stopped: false, asking: false, carded: false, worded: false, drafting: false, queue: VecDeque::new(), words_at: None, held_at: None, ending: false, taken: Vec::new(), pictures: 0, pictured: HashMap::new() });
         self.by_chat.insert(chat, turn.clone());
         crate::ev!("relay.inbound", { "turn": turn, "sent": sent });
     }
@@ -766,32 +797,38 @@ impl Loop {
                     f.next_part += 1;
                     f.parts.insert(id.clone(), part);
                     f.asking = true;
-                    f.drafting = false;
-                    self.release(&turn).await;
-                    self.emit(Event::Reply { turn: turn.clone(), part, text: question }).await;
-                    self.emit(Event::Asked { turn }).await;
+                    // no words to wait for: the steps before it go first
+                    f.stop_waiting_for_words();
+                    self.drain(&turn, false).await;
+                    self.out(&turn, Event::Reply { turn: turn.clone(), part, text: question }).await;
+                    self.out(&turn, Event::Asked { turn: turn.clone() }).await;
                 } else if reply {
                     // the model's words, whole (its answer, or what it said
                     // before a tool call): a reply part, which the engine
-                    // posts at the next step, part, card or end; steps that
-                    // came while they streamed follow them, once their image
-                    // links are in hand too
+                    // posts at the next step, part, card or end. Words its
+                    // steps waited for go before them; any other, in order.
                     let part = f.next_part;
                     f.next_part += 1;
                     f.parts.insert(id.clone(), part);
                     f.drafting = false;
-                    // its image links are its files, once fetched
+                    let said = Event::Reply { turn: turn.clone(), part, text: text.clone() };
+                    match f.words_at.take() {
+                        Some(at) => {
+                            f.held_at = None;
+                            let at = at.min(f.queue.len());
+                            f.queue.insert(at, said);
+                        }
+                        None => self.out(&turn, said).await,
+                    }
+                    // its image links are its files, once fetched: what
+                    // comes after it waits for them
                     let links = wire::image_links(&text);
-                    if !links.is_empty() {
+                    if let Some(f) = self.inflight.get_mut(&turn).filter(|_| !links.is_empty()) {
                         f.pictures += links.len();
-                        f.pictured.insert(part, text.clone());
+                        f.pictured.insert(part, text);
                     }
-                    let whole = f.pictures == 0;
-                    self.emit(Event::Reply { turn: turn.clone(), part, text }).await;
                     self.picture(&turn, part, links);
-                    if whole {
-                        self.release(&turn).await;
-                    }
+                    self.drain(&turn, false).await;
                 } else {
                     let steps = wire::new_steps(&content, 0);
                     f.progress.insert(id.clone(), steps.len());
@@ -806,7 +843,7 @@ impl Loop {
                     // the engine takes it while the part is open, and no
                     // later (posted, a reply is whole)
                     let (text, _) = wire::uncursored(&content);
-                    self.emit(Event::Reply { turn, part, text: text.to_string() }).await;
+                    self.out(&turn, Event::Reply { turn: turn.clone(), part, text: text.to_string() }).await;
                 } else if let Some(seen) = f.progress.get(&message_id).copied() {
                     let steps = wire::new_steps(&content, seen);
                     f.progress.insert(message_id, seen + steps.len());
@@ -827,7 +864,7 @@ impl Loop {
                         Some(part)
                     });
                     if let Some(part) = part {
-                        self.emit(Event::Retract { turn, part }).await;
+                        self.out(&turn, Event::Retract { turn: turn.clone(), part }).await;
                     }
                 }
                 ok
@@ -839,12 +876,8 @@ impl Loop {
                     return ok;
                 }
                 let f = self.inflight.get_mut(&turn).expect("held");
-                match f.ended_by(&emoji, remove) {
-                    // done, with its reply's images still coming: it ends
-                    // once they are in hand (`pictured`)
-                    Some(Outcome::Idle) if f.pictures > 0 => f.pending_end = Some(Outcome::Idle),
-                    Some(outcome) => self.end(&turn, outcome).await,
-                    None => {}
+                if let Some(outcome) = f.ended_by(&emoji, remove) {
+                    self.end(&turn, outcome).await;
                 }
                 ok
             }
@@ -862,10 +895,11 @@ impl Loop {
                 let id = self.message_id();
                 let f = self.inflight.get_mut(&turn).expect("by_chat names a held turn");
                 f.carded |= clarify;
-                // the engine posts an open reply before the card, and the
-                // steps before it come first
-                self.release(&turn).await;
-                self.emit(Event::Prompt { turn, prompt: prompt_id, text: content, options, ttl_ms: timeout_s.map(|s| s.saturating_mul(1000)) }).await;
+                // the engine posts an open reply before the card; the steps
+                // before it go first, as soon as a reply's files are in
+                f.stop_waiting_for_words();
+                self.drain(&turn, false).await;
+                self.out(&turn, Event::Prompt { turn: turn.clone(), prompt: prompt_id, text: content, options, ttl_ms: timeout_s.map(|s| s.saturating_mul(1000)) }).await;
                 json!({ "success": true, "message_id": id })
             }
             Action::SendMedia { chat, source_url, caption, filename, .. } => {
@@ -898,13 +932,14 @@ impl Loop {
         let f = self.inflight.get_mut(&turn).expect("held");
         let part = f.next_part;
         f.next_part += 1;
-        // a part of its own: the engine posts the one open before it, and
-        // the steps before it come first
-        self.release(&turn).await;
+        // a part of its own: the engine posts the one open before it; the
+        // steps before it go first, as soon as a reply's files are in
+        f.stop_waiting_for_words();
+        self.drain(&turn, false).await;
         if !caption.trim().is_empty() {
-            self.emit(Event::Reply { turn: turn.clone(), part, text: caption }).await;
+            self.out(&turn, Event::Reply { turn: turn.clone(), part, text: caption }).await;
         }
-        self.emit(Event::Attachment { turn, part, file }).await;
+        self.out(&turn, Event::Attachment { turn: turn.clone(), part, file }).await;
         json!({ "success": true, "message_id": id })
     }
 
@@ -951,8 +986,9 @@ impl Loop {
     }
 
     /// One of a reply's image links, fetched: the reply without it, and the
-    /// file on it; refused, the link stays. The last of a turn's lets go the
-    /// steps that waited for it, and ends the turn if its end came meanwhile.
+    /// file on it, put right after that reply's own events (before whatever
+    /// came after it, which waited); refused, the link stays. The last of a
+    /// turn's lets go what waited for it (its end among them).
     async fn pictured(&mut self, turn: &str, part: u32, link: String, file: Result<LocalFile, String>) {
         // a turn over (stopped, gone quiet) takes no file
         let Some(f) = self.inflight.get_mut(turn) else { return };
@@ -965,19 +1001,27 @@ impl Loop {
             }
             _ => None,
         };
-        let done = (f.pictures == 0).then(|| {
+        if f.pictures == 0 {
             f.pictured.clear();
-            (f.pending_end.take(), !f.drafting)
-        });
+        }
         if let (Some(text), Ok(file)) = (shown, file) {
-            self.emit(Event::Reply { turn: turn.to_string(), part, text }).await;
-            self.emit(Event::Attachment { turn: turn.to_string(), part, file }).await;
+            let files = [Event::Reply { turn: turn.to_string(), part, text }, Event::Attachment { turn: turn.to_string(), part, file }];
+            match f.queue.iter().rposition(|e| part_of(e) == Some(part)) {
+                // its reply still waits in the queue: just after it
+                Some(at) => {
+                    for (i, e) in files.into_iter().enumerate() {
+                        f.queue.insert(at + 1 + i, e);
+                    }
+                }
+                // its reply went out, and all that came after it waits: now
+                None => {
+                    for e in files {
+                        self.emit(e).await;
+                    }
+                }
+            }
         }
-        match done {
-            Some((Some(outcome), _)) => self.end(turn, outcome).await,
-            Some((None, true)) => self.release(turn).await,
-            _ => {}
-        }
+        self.drain(turn, false).await;
     }
 
     /// A file sent by URL, fetched or refused: attached to the chat's turn
@@ -991,53 +1035,65 @@ impl Loop {
 
     /// New lines of a turn's tool progress, each a step, after the model's
     /// words before the call: those are a reply part the engine posts
-    /// before the step. While they are not whole yet (their draft segment
-    /// streams, its `send` still to come, or their image links are being
-    /// fetched) the steps wait, in order (`Inflight::held`), and go once
-    /// they are (`release`).
+    /// before the step. Steps that come while their draft segment still
+    /// streams (its `send` to come) wait for those words, which go before
+    /// them (`Inflight::words_at`); any that come while something before
+    /// them is not whole wait in order (`out`).
     async fn steps(&mut self, turn: &str, steps: Vec<Step>) {
         if steps.is_empty() {
             return;
         }
         let Some(f) = self.inflight.get_mut(turn) else { return };
-        if f.drafting || f.pictures > 0 || !f.held.is_empty() {
-            // bounded: a turn's steps are (the engine posts at most
-            // STEPS_PER_TURN_MAX), and a hold lasts STEP_HOLD_MS at most
-            // for words, a fetch's bound for its image links
-            f.held_at.get_or_insert_with(tokio::time::Instant::now);
-            f.held.extend(steps);
-            crate::ev!("relay.steps_held", { "turn": turn, "held": f.held.len(), "drafting": f.drafting, "pictures": f.pictures });
-            if f.held.len() < usize::try_from(limits::STEPS_PER_TURN_MAX).expect("fits") {
-                return;
-            }
-            // more than a turn posts: nothing is gained by holding them
-            f.drafting = false;
-            self.release(turn).await;
-            return;
+        if f.drafting && f.words_at.is_none() {
+            f.words_at = Some(f.queue.len());
+            f.held_at = Some(tokio::time::Instant::now());
+            crate::ev!("relay.steps_wait", { "turn": turn, "for": "words" });
         }
         for step in steps {
-            self.emit(Event::Step { turn: turn.to_string(), step }).await;
+            self.out(turn, Event::Step { turn: turn.to_string(), step }).await;
         }
     }
 
-    /// The steps a turn holds, in order: the words before them are whole,
-    /// their wait is out, or something else of the turn comes that they
-    /// come before (a question, a card, a file, its end).
-    async fn release(&mut self, turn: &str) {
+    /// An event of the turn, in its order: at once, or, while something
+    /// before it is not whole (`Inflight::waits`) or others wait, behind
+    /// them. Bounded: past `limits::QUEUED_EVENTS_MAX` waiting, all go at
+    /// once (a file still coming is then too late for its reply).
+    async fn out(&mut self, turn: &str, e: Event) {
         let Some(f) = self.inflight.get_mut(turn) else { return };
-        f.held_at = None;
-        let held = std::mem::take(&mut f.held);
-        if held.is_empty() {
+        if !f.waits() && f.queue.is_empty() {
+            self.emit(e).await;
             return;
         }
-        crate::ev!("relay.steps_released", { "turn": turn, "steps": held.len(), "drafting": f.drafting, "pictures": f.pictures });
-        for step in held {
-            self.emit(Event::Step { turn: turn.to_string(), step }).await;
+        f.queue.push_back(e);
+        if f.queue.len() >= limits::QUEUED_EVENTS_MAX {
+            crate::ev!("relay.queue_full", { "turn": turn, "events": f.queue.len() });
+            self.drain(turn, true).await;
         }
     }
 
-    /// When the soonest wait of steps for words alone runs out (a wait on
-    /// image links is the fetch's, which answers within its own bound).
+    /// What waits goes, in order, once nothing is awaited; or at once
+    /// (`force`: an end that is no idle one, a queue past its bound). Its
+    /// end among them lets the turn go.
+    async fn drain(&mut self, turn: &str, force: bool) {
+        let Some(f) = self.inflight.get_mut(turn) else { return };
+        if f.queue.is_empty() || (!force && f.waits()) {
+            return;
+        }
+        if force {
+            f.stop_waiting_for_words();
+        }
+        let waited: Vec<Event> = f.queue.drain(..).collect();
+        crate::ev!("relay.released", { "turn": turn, "events": waited.len(), "force": force });
+        if waited.iter().any(|e| matches!(e, Event::End { .. })) {
+            self.forget(turn);
+        }
+        for e in waited {
+            self.emit(e).await;
+        }
+    }
+
+    /// When the soonest wait for words alone runs out (a wait on image
+    /// links is the fetch's, which answers within its own bound).
     fn hold_due(&self) -> Option<tokio::time::Instant> {
         let wait = std::time::Duration::from_millis(limits::STEP_HOLD_MS);
         self.inflight.values().filter(|f| f.pictures == 0).filter_map(|f| f.held_at).map(|at| at + wait).min()
@@ -1051,18 +1107,30 @@ impl Loop {
         let due: Vec<String> = self.inflight.iter().filter(|(_, f)| f.pictures == 0 && f.held_at.is_some_and(|at| at + wait <= now)).map(|(id, _)| id.clone()).collect();
         for turn in due {
             if let Some(f) = self.inflight.get_mut(&turn) {
-                f.drafting = false;
+                f.stop_waiting_for_words();
             }
             crate::ev!("relay.steps_held_out", { "turn": turn, "ms": limits::STEP_HOLD_MS });
-            self.release(&turn).await;
+            self.drain(&turn, false).await;
         }
     }
 
-    /// The turn's end, after the steps it still holds.
+    /// The turn's end, after all that waits: done with a reply's images
+    /// still coming, once they are in hand; stopped or failed, at once (a
+    /// file still coming is let go).
     async fn end(&mut self, turn: &str, outcome: Outcome) {
-        self.release(turn).await;
-        self.forget(turn);
-        self.emit(Event::End { turn: turn.to_string(), outcome }).await;
+        let Some(f) = self.inflight.get_mut(turn) else { return };
+        let idle = outcome == Outcome::Idle;
+        if f.ending {
+            // its idle end waits for a file; a stop or failure now ends it
+            if !idle {
+                self.drain(turn, true).await;
+            }
+            return;
+        }
+        f.ending = true;
+        f.stop_waiting_for_words();
+        f.queue.push_back(Event::End { turn: turn.to_string(), outcome });
+        self.drain(turn, !idle).await;
     }
 
     /// The chat's turn said something (so its next `✅` is its end).

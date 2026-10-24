@@ -451,19 +451,25 @@ get_chat_info`.
   as it posts. The engine marks it `interim` (the chat's push leaves it
   out: docs/chat-records.md, "Push") unless that step only updates
   memory: Hermes' answer written beside a housekeeping call, which it
-  sends once and says nothing after, is the turn's answer. The tool's
-  progress can reach the bridge before that `send`: a step that comes
-  while a draft segment streams waits for it (`Inflight::held`), at most
-  `STEP_HOLD_MS` (3 s), and one that comes while the open reply's image
-  links are fetched waits for them (within the fetch's own 20 s), so the
-  words post first; anything else of the turn (a question, a card, a
-  file, its end) lets the held steps go before it. A step whose words do
-  not come in time posts, and the words after it, a reply of their own.
-  Until 2026-10-24 the step took the words back as its `text`, at most
-  300 characters, which the page showed folded into the steps (Paul on
-  production: "I can't read it all"). Proven with the scripted gateway
-  in every order (tests/relay.rs, `text_beside_a_tool_call_is_a_reply_of_
-  its_own`) and with the real Hermes (tests/docker.rs,
+  sends once and says nothing after, is the turn's answer. Interim
+  replies have a bound of their own (`INTERIM_REPLIES_PER_TURN_MAX`, one
+  a posted step), apart from `REPLIES_PER_TURN_MAX`, so narration never
+  costs the turn its answer (`narration_never_costs_the_answer`). The
+  tool's progress can reach the bridge before that `send`: a step that
+  comes while a draft segment streams waits for it, at most
+  `STEP_HOLD_MS` (3 s), the words then going before it; a question, a
+  card, a file or the end stops the wait. And while a reply's image links
+  are fetched (within the fetch's own 20 s) everything of its turn after
+  it waits in order (`Inflight::queue`: its steps, a later reply, a card,
+  a file, its end), so the reply keeps its files and the answer after it
+  is never sealed by a step that waited (`later_parts_wait_for_a_replys_
+  image`). A step whose words do not come in time posts, and the words
+  after it, a reply of their own. Until 2026-10-24 the step took the
+  words back as its `text`, at most 300 characters, which the page showed
+  folded into the steps (Paul on production: "I can't read it all").
+  Proven with the scripted gateway in every order (tests/relay.rs,
+  `text_beside_a_tool_call_is_a_reply_of_its_own`, `many_narrated_calls_
+  keep_the_answer`) and with the real Hermes (tests/docker.rs,
   `words_before_a_tool_call_are_a_reply`).
 - An approval is a `prompt` op (`once`, `session`, `always`, `deny`);
   the owner's answer goes back at once as an inbound `prompt_response`.

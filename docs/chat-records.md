@@ -139,7 +139,10 @@ it, and a new draft may follow (the next part).
   memory is not interim (an answer said beside housekeeping is the turn's
   answer: Hermes says nothing after it). The chat's push leaves an
   interim reply out ("Push", below); a page shows it as any reply.
-  Absent, a reply is not interim (every reply of an older bridge's).
+  Absent, a reply is not interim (every reply of an older bridge's). A
+  turn posts at most 64 replies that are not interim and, apart, at most
+  200 interim ones (one a step), so its words on the way never cost its
+  answer.
 - `to` and `hop` when the reply `@mentions` another agent of the chat:
   a hand-off. An agent answers another agent's record (a reply, or a
   message an agent posts itself: `fragment ask`, the API) only when its
