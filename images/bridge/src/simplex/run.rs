@@ -147,6 +147,9 @@ pub enum Msg {
     /// The agent's reply to a message relayed from SimpleX, posted: to
     /// its owner's app.
     Reply { agent: String, text: String },
+    /// A message of its owner's, of this item, is on their chat (`ok`), or
+    /// was refused there (its poster's word).
+    Delivered { agent: String, item: i64, ok: bool },
 }
 
 /// How the rest of the bridge reaches the manager.
@@ -379,6 +382,10 @@ struct Slot {
     files: BTreeMap<FileId, Inbound>,
     /// Its poster: its messages, posted in order on its chat.
     poster: Option<mpsc::Sender<Post>>,
+    /// A message of this life was not posted (refused, or past its poster's
+    /// bound): nothing more is acknowledged, so the next start reads back
+    /// to before it and carries it then.
+    gap: bool,
 }
 
 impl Slot {
@@ -487,6 +494,7 @@ impl Manager {
             Msg::Exited { agent, epoch, why } => self.exited(&agent, epoch, &why),
             Msg::Lost { agent, epoch } => self.lost(&agent, epoch).await,
             Msg::Reply { agent, text } => self.apply(&agent, Input::Reply(&text)),
+            Msg::Delivered { agent, item, ok } => self.delivered(&agent, item, ok),
         }
     }
 
@@ -530,6 +538,7 @@ impl Manager {
                 draining_since: None,
                 files: BTreeMap::new(),
                 poster: None,
+                gap: false,
             });
             self.look_up_title(a.clone());
         }
@@ -897,17 +906,34 @@ impl Manager {
     }
 
     /// Hands a message to the agent's poster, started at its first.
+    /// A message's post, confirmed or refused: the link's delivered mark
+    /// moves to it, short of a message still waiting for its file, and
+    /// never past one this life did not post (`gap`).
+    fn delivered(&mut self, f: &str, item: i64, ok: bool) {
+        let Some(s) = self.slots.get_mut(f) else { return };
+        if !ok {
+            s.gap = true;
+        }
+        if s.gap || item <= 0 {
+            return;
+        }
+        let waiting = s.files.values().map(|i| i.item).filter(|i| *i > 0).min();
+        let upto = waiting.map_or(item, |w| item.min(w - 1));
+        self.apply(f, Input::Delivered(upto));
+    }
+
     fn post(&mut self, f: &str, p: Post) {
         let Some(s) = self.slots.get_mut(f) else { return };
         if s.poster.as_ref().is_none_or(|tx| tx.is_closed()) {
             let (tx, rx) = mpsc::channel(POSTS_MAX);
-            tokio::spawn(poster(self.api.clone(), s.agent.clone(), rx, self.stop.clone()));
+            tokio::spawn(poster(self.api.clone(), s.agent.clone(), rx, self.tx.clone(), self.stop.clone()));
             s.poster = Some(tx);
         }
         let tx = s.poster.as_ref().expect("its poster");
         if tx.try_send(p).is_err() {
             // the next start's catch-up reads it again (by the same id)
             crate::ev!("simplex.posts_bounded", { "agent": f, "max": POSTS_MAX });
+            s.gap = true;
         }
     }
 
@@ -1103,7 +1129,7 @@ pub fn kill_cores() {
 /// One agent's poster: each of its owner's messages, in order, as a
 /// relayed record on its Bot Chat (looked for until found), its file
 /// uploaded first and let go once posted.
-async fn poster(api: Api, agent: Agent, mut rx: mpsc::Receiver<Post>, stop: watch::Receiver<bool>) {
+async fn poster(api: Api, agent: Agent, mut rx: mpsc::Receiver<Post>, manager: mpsc::Sender<Msg>, stop: watch::Receiver<bool>) {
     let mut chat: Option<String> = None;
     // bounded by the bridge's life: one message per pass
     while let Some(p) = rx.recv().await {
@@ -1137,12 +1163,16 @@ async fn poster(api: Api, agent: Agent, mut rx: mpsc::Receiver<Post>, stop: watc
             crate::driver::Sent::Stopped => return,
             // its file kept: the message is read again at the next start's
             // catch-up (by the same id), and carried then if it can be
-            crate::driver::Sent::Refused => crate::ev!("simplex.unposted", { "agent": agent.fragment, "chat": chat, "id": id, "kind": p.inbound.kind, "file": p.file.is_some() }),
+            crate::driver::Sent::Refused => {
+                crate::ev!("simplex.unposted", { "agent": agent.fragment, "chat": chat, "id": id, "kind": p.inbound.kind, "file": p.file.is_some() });
+                let _ = manager.send(Msg::Delivered { agent: agent.fragment.clone(), item: p.inbound.item, ok: false }).await;
+            }
             crate::driver::Sent::Posted => {
                 crate::ev!("simplex.posted", { "agent": agent.fragment, "chat": chat, "id": id, "kind": p.inbound.kind, "file": p.file.is_some() });
                 for f in &files {
                     let _ = tokio::fs::remove_file(&f.path).await;
                 }
+                let _ = manager.send(Msg::Delivered { agent: agent.fragment.clone(), item: p.inbound.item, ok: true }).await;
             }
         }
     }
@@ -1283,6 +1313,7 @@ mod tests {
             draining_since: None,
             files: BTreeMap::new(),
             poster: None,
+            gap: false,
         };
         let v = s.view(true);
         assert_eq!((v.phase, v.link.as_deref(), v.running, v.why.as_deref()), ("inviting", Some("simplex:/invitation#/x"), false, None));
@@ -1359,6 +1390,7 @@ mod tests {
             draining_since: None,
             files: BTreeMap::new(),
             poster: None,
+            gap: false,
         };
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
         let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(false)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeSet::new()).0, stop: watch::channel(false).1 };
@@ -1439,10 +1471,13 @@ mod tests {
             broken: None,
             note: None,
             draining_since: None,
+            files: BTreeMap::new(),
+            poster: None,
+            gap: false,
         };
         slot.up = true;
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
-        let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(true)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None };
+        let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(true)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeSet::new()).0, stop: watch::channel(false).1 };
         m.resync();
         let first = m.slots["juniper--k3x9"].resync_at.expect("its next ask, set");
         m.slots.get_mut("juniper--k3x9").expect("its slot").resync_at = Some(Instant::now() - Duration::from_millis(1));
@@ -1452,5 +1487,53 @@ mod tests {
         m.apply("juniper--k3x9", Input::Said(&Resp::Sync { contact: 3, status: wire::SyncStatus::Ok }));
         m.resync();
         assert_eq!(m.slots["juniper--k3x9"].resync_at, None, "ok: nothing more");
+    }
+
+    /// Goal (Alex's re-review of #548): what a start reads back to moves
+    /// only with posts confirmed on the chat: short of a message still
+    /// waiting for its file, and never past one this life did not post (a
+    /// refusal), so the next start reads that one again and carries it.
+    #[tokio::test]
+    async fn only_a_confirmed_post_moves_what_was_delivered() {
+        let (tx, _rx) = mpsc::channel(4);
+        let (pulse, _) = watch::channel(false);
+        let slot = Slot {
+            agent: agent(),
+            dir: std::env::temp_dir().join(format!("simplex-ack-{}", std::process::id())),
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() } },
+            title: None,
+            epoch: 1,
+            core: None,
+            up: true,
+            corr: 0,
+            pending: BTreeMap::new(),
+            started: true,
+            exits: VecDeque::new(),
+            retry_at: None,
+            resync_at: None,
+            broken: None,
+            note: None,
+            draining_since: None,
+            files: BTreeMap::new(),
+            poster: None,
+            gap: false,
+        };
+        let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
+        let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(true)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeSet::new()).0, stop: watch::channel(false).1 };
+        let f = "juniper--k3x9";
+        let delivered = |m: &Manager| m.slots[f].saved.link.delivered;
+        m.delivered(f, 10, true);
+        assert_eq!(delivered(&m), 10);
+        // 12 waits for its voice note: a later post moves the mark to just before it
+        let voice = Inbound { id: "v".into(), kind: "voice".into(), text: String::new(), at: String::new(), item: 12, file: None };
+        m.slots.get_mut(f).expect("its slot").files.insert(7, voice);
+        m.delivered(f, 15, true);
+        assert_eq!(delivered(&m), 11);
+        m.slots.get_mut(f).expect("its slot").files.clear();
+        // 20 refused: nothing more moves it this life
+        m.delivered(f, 20, false);
+        m.delivered(f, 21, true);
+        assert_eq!(delivered(&m), 11, "the next start reads back to before the refused one");
+        let _ = std::fs::remove_dir_all(m.slots[f].dir.clone());
     }
 }
