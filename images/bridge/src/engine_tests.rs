@@ -17,7 +17,7 @@ const T0: u64 = 1_000_000;
 const LIFE: &str = "0123456789abcdef0123456789abcdef";
 
 fn agent(label: &str) -> Agent {
-    Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.to_string(), owner: "npub1paul".into(), credentials: vec![] }
+    Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.to_string(), owner: "npub1paul".into(), credentials: vec![], key: None }
 }
 
 /// A fresh engine whose runtime can take turns.
@@ -2612,7 +2612,7 @@ fn a_relayed_message_is_its_owners() {
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     relaying(&mut e, &[&a]);
-    let body = records::relayed_message("hi from my phone", &a.identity, "npub1paul", records::VIA_SIMPLEX, &[]);
+    let body = records::relayed_message("hi from my phone", &a, records::VIA_SIMPLEX, &[]);
     let s = said(&mut e, &a, &v, 1, &a.identity, body.clone(), T0);
     let t = started(&s).expect("a turn, handed to the runtime");
     assert_eq!((t.text.as_str(), t.asker.as_str(), t.asker_name.as_str()), ("hi from my phone", "npub1paul", "paul"));
@@ -2635,13 +2635,16 @@ fn a_relayed_record_is_honored_only_from_a_linked_agent_for_its_owner() {
     let (a, b) = (agent("juniper"), agent("maple"));
     let v = view(&[&a, &b]);
     let mut e = engine(&[a.clone(), b.clone()]);
-    let mine = |text: &str| records::relayed_message(text, &a.identity, "npub1paul", records::VIA_SIMPLEX, &[]);
+    let mine = |text: &str| records::relayed_message(text, &a, records::VIA_SIMPLEX, &[]);
     // not linked: the agent's own words, as ever
     assert!(started(&said(&mut e, &a, &v, 1, &a.identity, mine("not linked"), T0)).is_none());
     relaying(&mut e, &[&a]);
     // for someone not its owner
-    let skyler = records::relayed_message("for skyler", &a.identity, "npub1skyler", records::VIA_SIMPLEX, &[]);
+    let skyler = records::relayed_message("for skyler", &Agent { owner: "npub1skyler".into(), ..a.clone() }, records::VIA_SIMPLEX, &[]);
     assert!(started(&said(&mut e, &a, &v, 2, &a.identity, skyler, T0)).is_none());
+    // through another agent's door
+    let maples = records::relayed_message("maple's door", &Agent { fragment: b.fragment.clone(), ..a.clone() }, records::VIA_SIMPLEX, &[]);
+    assert!(started(&said(&mut e, &a, &v, 2, &a.identity, maples, T0)).is_none());
     // by another way than SimpleX
     let mut other = mine("telegram");
     other["relayed"]["via"] = json!("telegram");
@@ -2653,7 +2656,7 @@ fn a_relayed_record_is_honored_only_from_a_linked_agent_for_its_owner() {
     ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, T0 + 1);
     // posted by another agent of the computer: a hand-off at most, never its owner's
     assert!(started(&said(&mut e, &b, &v, 5, &a.identity, mine("juniper's, not maple's"), T0 + 2)).is_none(), "not to maple at all");
-    let from_maple = records::relayed_message("a hand-off", &a.identity, "npub1paul", records::VIA_SIMPLEX, &[]);
+    let from_maple = records::relayed_message("a hand-off", &a, records::VIA_SIMPLEX, &[]);
     let s = said(&mut e, &a, &v, 6, &b.identity, from_maple, T0 + 2);
     let t = started(&s).expect("from maple to juniper: a hand-off");
     assert_eq!(t.asker, b.identity, "asked by maple, never as its owner");

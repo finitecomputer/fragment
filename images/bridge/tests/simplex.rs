@@ -314,6 +314,9 @@ async fn voice_against_the_real_core() {
 struct Computer {
     name: String,
     port: u16,
+    /// The nonce of the link ticket its page was handed last: the session
+    /// its invitation is shown to.
+    session: std::sync::Mutex<String>,
 }
 
 impl Computer {
@@ -330,15 +333,49 @@ impl Computer {
         ])
         .expect("the computer starts");
         let port = docker(&["port", &name, "6080/tcp"]).expect("its port").lines().next().and_then(|l| l.rsplit_once(':')).and_then(|(_, p)| p.parse().ok()).expect("a port");
-        Computer { name, port }
+        Computer { name, port, session: std::sync::Mutex::new(String::new()) }
     }
 
-    /// `method` on its screen port: the status and the JSON answered.
+    /// `method` on its screen port, as its page asks (with its session):
+    /// the status and the JSON answered.
     fn http(&self, method: &str, path: &str) -> (u16, Value) {
-        let out = Command::new("curl").args(["-s", "-X", method, "-w", "\n%{http_code}", &format!("http://127.0.0.1:{}{path}", self.port)]).output().expect("curl runs");
+        self.http_with(method, path, None)
+    }
+
+    /// `http` as another page would ask (the agent's tools, say): no session.
+    fn http_bare(&self, method: &str, path: &str) -> (u16, Value) {
+        self.http_as("", method, path, None)
+    }
+
+    fn http_with(&self, method: &str, path: &str, body: Option<&Value>) -> (u16, Value) {
+        let session = self.session.lock().expect("its session").clone();
+        self.http_as(&session, method, path, body)
+    }
+
+    fn http_as(&self, session: &str, method: &str, path: &str, body: Option<&Value>) -> (u16, Value) {
+        let url = format!("http://127.0.0.1:{}{path}{}", self.port, if session.is_empty() { String::new() } else { format!("&s={session}") });
+        let sent = body.map(Value::to_string).unwrap_or_default();
+        let mut args = vec!["-s", "-X", method, "-w", "\n%{http_code}", url.as_str()];
+        if body.is_some() {
+            args.extend(["-H", "content-type: application/json", "--data-binary", sent.as_str()]);
+        }
+        let out = Command::new("curl").args(&args).output().expect("curl runs");
         let text = String::from_utf8_lossy(&out.stdout).to_string();
         let (body, code) = text.rsplit_once('\n').unwrap_or(("", "0"));
         (code.trim().parse().unwrap_or(0), serde_json::from_str(body).unwrap_or(Value::Null))
+    }
+
+    /// Its owner links juniper from their Settings: with the ticket the
+    /// platform (the fake) signed as the agent's key.
+    fn link(&self, fake: &support::fake::Fake) -> (u16, Value) {
+        let t = fake.ticket("juniper", "link");
+        *self.session.lock().expect("its session") = t["nonce"].as_str().expect("a nonce").to_string();
+        self.http_with("POST", "/simplex/link?agent=juniper--k3x9", Some(&t))
+    }
+
+    /// Its owner unlinks juniper from their Settings.
+    fn unlink(&self, fake: &support::fake::Fake) -> (u16, Value) {
+        self.http_with("POST", "/simplex/unlink?agent=juniper--k3x9", Some(&fake.ticket("juniper", "unlink")))
     }
 
     /// Its SimpleX state, once `done` holds (within `within`).
@@ -430,11 +467,26 @@ async fn the_bridge_runs_a_linked_core() {
     assert_eq!(v["alwaysOn"], true);
     assert_eq!(c.cores(), 0, "nothing linked, no core");
 
-    // linked from its routes
-    let (code, _) = c.http("POST", "/simplex/link?agent=juniper--k3x9");
+    // linked from its routes: only with its owner's ticket (the agent's
+    // tools reach this port too, and hold none)
+    let (code, v) = c.http("POST", "/simplex/link?agent=juniper--k3x9");
+    assert_eq!((code, v["error"].as_str()), (403, Some("forbidden")), "no ticket, no link: {v}");
+    let mut forged = fake.ticket("juniper", "link");
+    forged["sig"] = json!("ab".repeat(64));
+    let (code, _) = c.http_with("POST", "/simplex/link?agent=juniper--k3x9", Some(&forged));
+    assert_eq!(code, 403, "a forged ticket");
+    assert_eq!(c.state_until(Duration::from_secs(5), "still off", |v| v["phase"] == "off").await["phase"], "off");
+    let (code, _) = c.link(&fake);
     assert_eq!(code, 200);
     let v = c.state_until(Duration::from_secs(60), "an invitation", |v| v["phase"] == "inviting").await;
     let link = v["link"].as_str().expect("its link").to_string();
+    let (_, unseen) = c.http_bare("GET", "/simplex/state?agent=juniper--k3x9");
+    assert_eq!((unseen["phase"].as_str(), unseen.get("link"), unseen["hidden"].as_bool()), (Some("inviting"), None, Some(true)), "another page sees no invitation: {unseen}");
+    assert!(fake.with(|w| w.doors.contains_key("juniper--k3x9")), "its door's key, registered with the ticket");
+    assert_eq!(c.exec("stat -c %a /data/simplex/juniper--k3x9/door.key").trim(), "600", "its private half readable by the bridge's user alone");
+    let secret = c.exec("cat /data/simplex/juniper--k3x9/door.key").trim().to_string();
+    assert_eq!(secret.len(), 64);
+    assert!(!c.exec("for e in /proc/[0-9]*/environ; do tr '\\0' '\\n' < $e; done 2>/dev/null").contains(&secret), "in no process's environment");
     assert!(link.starts_with("simplex:/invitation#"));
     let r = person.cmd(&format!("/connect {link}")).await;
     assert_eq!(tag(&r), "sentConfirmation", "{r}");
@@ -523,9 +575,14 @@ async fn the_bridge_runs_a_linked_core() {
     c.state_until(Duration::from_secs(60), "running again", |v| v["running"] == true).await;
     assert!(c.events("simplex.core_up").iter().all(|e| e["rollback"] == false), "the same start's rollback is handled once");
 
-    // unlinked from its routes: its contact let go, at the person's too
-    let (code, v) = c.http("POST", "/simplex/unlink?agent=juniper--k3x9");
+    // unlinked from its routes, by its owner's ticket: its contact let go,
+    // at the person's too, its door closed at the platform and its key gone
+    let (code, _) = c.http("POST", "/simplex/unlink?agent=juniper--k3x9");
+    assert_eq!(code, 403, "no ticket, no unlink");
+    let (code, v) = c.unlink(&fake);
     assert_eq!((code, v["phase"].as_str()), (200, Some("off")));
+    assert!(fake.with(|w| !w.doors.contains_key("juniper--k3x9")), "its door closed at the platform");
+    assert!(c.exec("ls /data/simplex/juniper--k3x9").lines().all(|f| f != "door.key"), "its key gone");
     person.wait(Duration::from_secs(30), |e| tag(e) == "contactDeletedByContact").await;
     c.state_until(Duration::from_secs(30), "its core stopped", |v| v["running"] == false).await;
     // an agent this bridge does not run has no link here
@@ -560,7 +617,7 @@ async fn messages_go_both_ways_through_the_chat() {
     let data = lab.dir.join("computer-data");
     let c = Computer::start(&lab, &fake, &data);
     c.state_until(Duration::from_secs(60), "its state", |v| v["phase"] == "off").await;
-    c.http("POST", "/simplex/link?agent=juniper--k3x9");
+    c.link(&fake);
     let v = c.state_until(Duration::from_secs(60), "an invitation", |v| v["phase"] == "inviting").await;
     person.cmd(&format!("/connect {}", v["link"].as_str().expect("its link"))).await;
     c.state_until(Duration::from_secs(90), "linked", |v| v["phase"] == "linked").await;
@@ -658,9 +715,12 @@ async fn the_link_pages_code_links() {
     assert!(page.contains("<title>SimpleX</title>") && page.contains("Link SimpleX"), "its page");
     let (code, _) = c.http("GET", "/simplex/qr.svg?agent=juniper--k3x9");
     assert_eq!(code, 404, "no code before an invitation");
-    c.http("POST", "/simplex/link?agent=juniper--k3x9");
+    c.link(&fake);
     let v = c.state_until(Duration::from_secs(60), "an invitation", |v| v["phase"] == "inviting").await;
-    let svg = Command::new("curl").args(["-s", &format!("http://127.0.0.1:{}/simplex/qr.svg?agent=juniper--k3x9", c.port)]).output().expect("curl runs").stdout;
+    let (code, _) = c.http_bare("GET", "/simplex/qr.svg?agent=juniper--k3x9");
+    assert_eq!(code, 404, "no code for a page that did not ask for it");
+    let session = c.session.lock().expect("its session").clone();
+    let svg = Command::new("curl").args(["-s", &format!("http://127.0.0.1:{}/simplex/qr.svg?agent=juniper--k3x9&s={session}", c.port)]).output().expect("curl runs").stdout;
     let said = decode_qr(&svg, &lab.dir);
     let short = v["short"].as_str().expect("the lab's server makes a short link");
     assert_eq!(said, short, "its code says its short link");

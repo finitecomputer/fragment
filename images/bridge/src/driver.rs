@@ -1102,7 +1102,7 @@ async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut s
             }
             Job::Post { agent, channel, id, body, files, relay } => {
                 // what goes back over SimpleX goes only once it is on the chat
-                let sent = post(&api, &fragment, &agent, channel, &id, body, &files, stop.clone()).await;
+                let sent = post(&api, &fragment, &agent, channel, &id, body, &files, None, stop.clone()).await;
                 if let (Some(text), Sent::Posted, Some(sx)) = (relay, sent, claims.simplex.as_ref()) {
                     sx.reply(&agent, &text);
                 }
@@ -1111,7 +1111,7 @@ async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut s
                 // Done (answered, or given up after its tries) unless the
                 // bridge is stopping: then the turn keeps owing it, and the
                 // next life posts it again.
-                if post(&api, &fragment, &agent, records::WORK, &id, body, &[], stop.clone()).await.ended() {
+                if post(&api, &fragment, &agent, records::WORK, &id, body, &[], None, stop.clone()).await.ended() {
                     let _ = claims.inbox.send(Msg::Input(Input::Posted { turn, id })).await;
                 }
             }
@@ -1192,9 +1192,10 @@ impl Sent {
 
 /// A post, tried until the platform answers it, or `POST_TRIES_MAX` times
 /// on a transport error, 429 or 5xx (a jittered backoff between: lesson 5),
-/// or refused at once.
+/// or refused at once. A relayed record is signed by its `door` at each
+/// try, its files' refs in it (simplex/door.rs).
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, mut body: Value, files: &[LocalFile], stop: watch::Receiver<bool>) -> Sent {
+pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, mut body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, stop: watch::Receiver<bool>) -> Sent {
     let mut backoff = Backoff::default();
     for attempt in 1..=limits::POST_TRIES_MAX {
         let uploaded = upload(api, fragment, agent, files).await;
@@ -1202,6 +1203,9 @@ pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, 
             Ok(refs) => {
                 if !refs.is_empty() {
                     body["attachments"] = json!(refs);
+                }
+                if let Some(door) = door {
+                    door.seal(&mut body, fragment, channel, id, crate::log::now_ms() as i64);
                 }
                 api.post(agent, fragment, channel, id, &body).await
             }
@@ -1656,7 +1660,7 @@ mod tests {
             };
             tokio::spawn(crate::net::serve(listener, answer, stop.clone()));
             let api = Api::new(&format!("http://{addr}")).expect("an address");
-            let sent = post(&api, "chat--a1b2", "juniper--k3x9", records::CHAT, "sx:1", json!({ "text": "hi" }), &[], stop).await;
+            let sent = post(&api, "chat--a1b2", "juniper--k3x9", records::CHAT, "sx:1", json!({ "text": "hi" }), &[], None, stop).await;
             assert_eq!(sent, want, "{status}");
             assert!(sent.ended());
         }
@@ -1667,12 +1671,12 @@ mod tests {
     /// own; anything else the agent posted is its own.
     #[test]
     fn a_relayed_message_quoted_is_its_owners() {
-        let agent = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![] };
-        let relayed = records::relayed_message("hi from my phone", &agent.identity, &agent.owner, records::VIA_SIMPLEX, &[]);
+        let agent = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None };
+        let relayed = records::relayed_message("hi from my phone", &agent, records::VIA_SIMPLEX, &[]);
         assert!(!own_words("npub1juniper", &relayed, &agent), "its owner's, relayed");
         assert!(own_words("npub1juniper", &json!({ "text": "a reply", "turn": "t1" }), &agent));
         assert!(!own_words("npub1paul", &json!({ "text": "hi" }), &agent));
-        let for_someone_else = records::relayed_message("x", &agent.identity, "npub1skyler", records::VIA_SIMPLEX, &[]);
+        let for_someone_else = records::relayed_message("x", &crate::runtime::Agent { owner: "npub1skyler".into(), ..agent.clone() }, records::VIA_SIMPLEX, &[]);
         assert!(own_words("npub1juniper", &for_someone_else, &agent), "a relay for anyone else is no owner's");
     }
 }

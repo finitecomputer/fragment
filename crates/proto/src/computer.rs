@@ -72,6 +72,11 @@ pub struct ComputerAgent {
     /// the account's id. None named: the default, the oldest connected.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub accounts: std::collections::BTreeMap<String, String>,
+    /// The guest's view only: its identity's key (64 hex), the one its
+    /// fragment signs as, which a door's ticket is checked with
+    /// (fragment_core::door).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 /// The model route's models' ids by the route's names
@@ -637,7 +642,7 @@ mod tests {
         assert_eq!(all.connections, None);
         let narrowed: AgentConnections = serde_json::from_str(r#"{"connections":["github"]}"#).unwrap();
         assert_eq!(narrowed.connections, Some(vec!["github".to_string()]));
-        let agent = ComputerAgent { fragment: "juniper.paul".into(), identity: "id:a".into(), name: "juniper".into(), owner: "id:p".into(), connections: None, model_providers: vec![], credentials: vec![], accounts: Default::default() };
+        let agent = ComputerAgent { fragment: "juniper.paul".into(), identity: "id:a".into(), name: "juniper".into(), owner: "id:p".into(), connections: None, model_providers: vec![], credentials: vec![], accounts: Default::default(), key: None };
         let v = serde_json::to_value(&agent).unwrap();
         assert_eq!(v["connections"], serde_json::Value::Null, "the default is named, as null");
         assert!(v.get("credentials").is_none(), "the owner's view names no placeholder");

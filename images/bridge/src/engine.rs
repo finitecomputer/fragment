@@ -668,7 +668,7 @@ impl Engine {
             // (docs/chat-records.md, "A relayed message"): its owner's
             // message, as theirs, its turn's replies going back the same way
             records::CHAT if self.relaying.contains(&agent.fragment) => {
-                if let Some(r) = records::relayed(&record.body).filter(|r| r.for_ == agent.owner) {
+                if let Some(r) = records::relayed(&record.body).filter(|r| r.for_ == agent.owner && r.agent == agent.fragment) {
                     crate::ev!("relayed", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "via": r.via });
                     let as_owner = Record { principal: agent.owner.clone(), ..record };
                     self.said(&agent, fragment, &as_owner, Some(r.via));

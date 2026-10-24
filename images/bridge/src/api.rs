@@ -364,6 +364,15 @@ impl Api {
         Ok(c)
     }
 
+    /// `POST /api/computer/door {agent, door, nonce, key}`: a link's ticket
+    /// redeemed at the platform, which registers its door's public key for
+    /// `agent` (fragment_core::door). Refused (403) for a ticket that is not
+    /// the link its owner started last, or past its time.
+    pub async fn door(&self, agent: &str, door: &str, nonce: &str, key: &str) -> Result<(), ApiError> {
+        let _: Value = self.json(Method::POST, "/api/computer/door", None, Some(json!({ "agent": name(agent)?, "door": door, "nonce": nonce, "key": key }))).await?;
+        Ok(())
+    }
+
     /// `GET /api/computer/keepalive`, a WebSocket held while busy.
     pub async fn keepalive(&self) -> Result<ClientWs, String> {
         net::connect_ws(&self.base, "/api/computer/keepalive", &[]).await

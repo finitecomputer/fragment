@@ -1408,6 +1408,7 @@ async function openSimplex(agent) {
   try {
     const t = await api("POST", `/api/computers/${seg(state.computer.computer)}/ports/6080/ticket`, { path: `/simplex/?agent=${encodeURIComponent(agent)}` });
     const frame = frameOf(t.url, `${titleOf(agent)} on SimpleX`);
+    frame.dataset.simplex = agent;
     // its page knows the agent by its label: told its name, as a screen is
     frame.addEventListener("load", () => {
       try {
@@ -1419,6 +1420,25 @@ async function openSimplex(agent) {
     notice("SimpleX did not open", e.message);
   }
 }
+// The link page asks for a ticket to link or unlink its agent (`{fragment:
+// "simplex", agent, want}`): only a pane of Settings' onto its computer's
+// port, for its own agent. The platform makes it for the agent's owner
+// alone, signed (an unlink's closes the agent's door at once), and the
+// page hands it to the computer, which takes nothing else (docs/api.md,
+// "An agent's doors").
+addEventListener("message", async (e) => {
+  const m = e.data;
+  if (m?.fragment !== "simplex" || !["link", "unlink"].includes(m.want) || !state.computer) return;
+  const frame = [...document.querySelectorAll("iframe[data-simplex]")].find((f) => f.contentWindow === e.source);
+  if (!frame || frame.dataset.simplex !== m.agent || e.origin !== new URL(frame.dataset.src).origin) return;
+  const reply = { fragment: "simplex", agent: m.agent, for: m.want };
+  try {
+    reply.ticket = await api("POST", `/api/computers/${seg(state.computer.computer)}/agents/${seg(m.agent)}/door`, { door: "simplex", act: m.want });
+  } catch (err) {
+    reply.error = err.message;
+  }
+  frame.contentWindow?.postMessage(reply, e.origin);
+});
 // Settings' SimpleX: each agent's link, on an always-on computer
 function simplexSection() {
   const s = section("SimpleX");

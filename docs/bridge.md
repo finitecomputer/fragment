@@ -425,27 +425,56 @@ drives it.
   is what the shell opens from Settings' SimpleX, in a pane through a port
   ticket as a screen is, telling it the agent's name (`{fragment:
   "simplex", agent, name}`). It shows the one-time invitation as a QR code
-  the bridge draws (`GET /simplex/qr.svg?agent=`: the server's short link
+  the bridge draws (`GET /simplex/qr.svg?agent=&s=`: the server's short link
   when it made one, which SimpleX's apps open, else the full link), with
   Open in SimpleX and Copy link; then whom it is linked to, and Unlink. Its
   words are for someone who has never heard of SimpleX, and it says
   plainly: encrypted between your SimpleX app and your computer.
-- **Linking** is a one-time invitation the core makes when the owner asks
-  (`POST /simplex/link?agent=`, on the screen port, which only its owner
-  reaches); the contact that connects through it is the owner's, and the
-  spent link is refused to anyone after (the SMP server's `AUTH`). Any
-  other contact is deleted, and nothing of theirs is carried. Linked, the
-  core greets the owner's app. `POST /simplex/unlink?agent=` lets the
+- **Only its owner links or unlinks it, from their Settings** (Paul's
+  design of 2026-10-23; docs/api.md, "An agent's doors"; `src/simplex/
+  door.rs`). The agent's tools reach the screen port too, so the page's
+  Link and Unlink ask the platform's page framing it for a ticket
+  (`{fragment: "simplex", agent, want}`), which asks the platform for the
+  agent's owner alone and hands back `{fragment: "simplex", agent, for,
+  ticket}`; the page posts it as the body of `POST /simplex/link?agent=`
+  or `/simplex/unlink?agent=`. The bridge takes one only signed by the
+  agent's key (its view's `key`), for this computer and that agent, within
+  its ten minutes, once (the nonces it took kept in `link.json` until
+  they would have run out); a link's only while unlinked (else 409). With
+  none, or with any other, it is 403 and nothing moves.
+- **A link's door key**: before any invitation exists, the bridge makes a
+  key for the link (`door.key` in the agent's directory: 0600, the
+  directory 0700, in no process's environment) and redeems the ticket with
+  its public half at the platform (`POST /api/computer/door`), which
+  takes only the link ticket the owner made last, once. Every message the
+  link carries to the agent's chat is a relayed record that key signs
+  (`Key::seal`, at each try), and the platform takes no relayed record
+  without its door's signature, so nothing the agent's own key posts
+  speaks for its owner. The unlink's ticket closes the door at the
+  platform as it is made; the bridge forgets the key when the link goes
+  (an unlink, or the contact's own delete). A link with no key (one that
+  went back in time to before its key) tells the owner's app to link
+  again rather than carry what the platform would refuse.
+- **The invitation is shown to the page whose ticket made it** (its
+  nonce, `s`): `state` and `qr.svg` give anyone else no link (`hidden`),
+  and that page's ticket's nonce is held in memory only, so after a
+  restart, or from another window, the page asks for the code again with
+  a new link ticket (the same invitation).
+- **Linking** is a one-time invitation the core makes once its door's
+  key is registered; the contact that connects through it is the owner's,
+  and the spent link is refused to anyone after (the SMP server's
+  `AUTH`). Any other contact is deleted, and nothing of theirs is
+  carried. Linked, the core greets the owner's app. Unlinking lets the
   contact go (told in their app); their own delete in their app lets it go
   here. `GET /simplex/state?agent=` says where it is (`off`, `asking`,
-  `inviting` with its link, `linked` with their name), whether it runs, and
-  why not.
+  `inviting` with its link for the page that asked, `linked` with their
+  name), whether it runs, and why not.
 - **Its state** is `<dir>/<agent>/`: the core's two databases, its files
   and temp folders (one device: a received file is renamed from one into
-  the other), and `link.json` (the link, the agent it is of, the start it
-  last ran in), written whole before what it causes. One of another agent
-  (a fragment's name made again) or that does not read is set aside,
-  renamed, never guessed.
+  the other), `door.key`, and `link.json` (the link, the agent it is of,
+  the start it last ran in, the tickets it took), written whole before
+  what it causes. One of another agent (a fragment's name made again) or
+  that does not read is set aside, renamed, never guessed.
 - **The hold stops every core** before the bridge answers it (`BRIDGE_HELD`
   waits for them), and none starts while it lasts: a save takes the cores'
   databases whole, as they are (`/_start` after `/_stop` crashes v7.0.3, so
@@ -468,14 +497,21 @@ drives it.
 
 Proven by the Docker lane's `simplex_on_the_hermes_image` (the real image,
 a lab of a local SMP and XFTP server and the person's simplex-chat on a
-network it joins): linked from the screen port; a message a turn of
+network it joins): linked from the screen port by its owner's ticket
+alone (none is 403), the invitation hidden from any other page, its door's
+key registered with the ticket; a message a turn of
 Hermes' asked as its owner, answered on SimpleX (1.2 s); a voice note
 transcribed through the route and answered (0.4 s); a hold that stops the
 core first, its copies naming none of the core's databases; a restart; and
 a wake from a save older than the life before it, healed, the person told
 (1.0 s after the gate). By hand, `tests/simplex.rs` holds the rest against
-the real core: the link's rules, voice both ways, the lifecycle, messages
-through the chat, and the page's code.
+the real core: the link's rules, voice both ways, the lifecycle (a forged
+ticket refused, the door key's file 0600 and in no environment, the unlink
+closing the door at the fake platform), messages through the chat, and the
+page's code, which another page cannot fetch. The platform's half (the
+ticket's signature, its one redeeming, refusing a relayed record the
+agent's own key or any other signs, and the unlink closing the door) is
+the `computers` lane's door checks, through the stub's `door` commands.
 
 ## Hermes' Relay, as the bridge speaks it
 

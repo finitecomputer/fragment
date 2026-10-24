@@ -26,6 +26,32 @@ The stack, in merge order:
 4. `claude/simplex-page`: the link page, its QR code, the shell's entry.
 5. `claude/simplex-e2e`: the real Hermes image end to end in the Docker
    lane.
+6. `claude/simplex-door`: securing the link, Paul's design of 2026-10-23:
+   the signed link start and the door key (a platform change).
+
+Rebased on master of 2026-10-24 for shipping (#584's mid-turn replies, #562's keepalive ping, #586/#540's routes, #575, #580): what the rebase changed is in section 2 (the save pulse's ping) and section 3 (replies back: the interim words stay in the chat, a card's question goes to the phone).
+
+Alex's review (2026-10-24), each finding reproduced and fixed in its own layer:
+
+- #523: a start reads back, newest page first, to what its chat confirmed
+  posted (`delivered`, at most 256 items), not only the newest 32, so a
+  message read but never posted is carried at the next start; a reply the
+  core refuses mid-sync waits, never dropped; a forced sync that fails holds
+  replies and is asked again every 30 s until ok.
+- #546: no core outlives the bridge (`stop_cores` before it exits, SIGKILL on
+  the forced exit, a parent-death signal for a bridge killed outright, and
+  any core an older bridge left is killed before a hold is answered); a core
+  whose bot API closed is stopped and started again; an unlink while no core
+  runs is finished at its next start (`cleanup`).
+- #548: "posted" means on the chat (a refused post keeps its file and sends
+  nothing to SimpleX), and the poster acknowledges each confirmed post, which
+  alone moves `delivered`; a relayed message quoted is its owner's.
+- #549: a stuck link offers Try again and Cancel; a poll from before a change
+  shows nothing.
+- #550: the lab's image is built when absent (CI's Docker lane).
+- #560: a ticket is used only once written (else refused); the bound refuses
+  new tickets rather than forget live ones; only the link taken last installs
+  its key.
 
 ## The audit, in short
 
@@ -48,8 +74,15 @@ each is inert without a link):
 - **Every chat page and every person's Settings** (platform assets, a
   platform release): the "via SimpleX" rendering, and a SimpleX section
   that says what it needs.
-- **Not touched:** the cell's Rust (wasm cost 0), the platform's wire to
-  computers (the bridge reads three fields the platform already sends),
+- **The platform (PR 6 alone; PRs 1 to 5 change no cell code):** the
+  door (section 6): one owner route that makes a ticket, one guest route
+  that redeems one, the agent's `key` in the guest view, two `meta` rows
+  on an agent fragment, and one rule on every post: a record whose body
+  has `relayed` is taken only signed by its agent's door. The wire is
+  add-only; storage is two new `meta` keys (no schema step), which an
+  older release ignores. Wasm cost: 19,292 bytes (5,407,371 to 5,426,663 of the 6,500,000 budget, on master of 2026-10-23; 1,073,337 left).
+- **Not touched:** the platform's wire to computers beyond those (the
+  bridge reads three fields the platform already sends, and `key`),
   registry state, billing, and the stub image's behavior.
 
 **How "computers without SimpleX behave exactly as today" is held:**
@@ -64,12 +97,20 @@ each is inert without a link):
 
 **The risks Paul should weigh:**
 
-1. **Security**: anything in the container can reach the link routes and
-   post relayed records. A prompt-injected agent could link a stranger as
-   "the owner", a lasting channel, and the chat could show a message the
-   owner did not send. That is the same boundary as root in the container,
-   but newly visible. Closing it needs the platform: a signed header on
-   proxied port requests, or the platform posting relayed records.
+1. **Security, Paul's chosen design (2026-10-23; section 6)**: once the
+   owner has linked their SimpleX app from their own Settings, what it
+   sends is the owner, with what the shell can do (their questions
+   answered, word-cards included). The threat is the agent forging either
+   end, and two things close it: only the owner's Settings start a link or
+   an unlink (a ticket the platform signs, which the bridge checks and
+   takes once, and the invitation shown only to that page), and only the
+   link's door key makes a record that speaks for the owner (the platform
+   refuses one the agent's own key posts). **What remains:** root in the
+   container can still read the door key's file (and the core's
+   databases), and the agent's tools run as root today, so a
+   prompt-injected agent with a shell could read the key and sign as the
+   door. The real fix, later, is running the agent as a non-root user that
+   cannot read `/data/simplex`.
 2. **A rollback past the linking itself** leaves the person's app talking
    to a contact that no longer exists. Their messages go unanswered until
    the owner links again. Linking asks for a save at once to keep the
@@ -138,9 +179,9 @@ attachment. Outbound voice waits for the platform's text-to-speech route
 | **hermes-boot's hold copy passes `/data/simplex` over** (`held::SIMPLEX`, both of main.rs's walks) | The cores are stopped when the copy runs, so the raw save is exact. A copy as the hermes user could not open a WAL database it cannot write beside | Drop the skip | None: a skip of a path that exists only with SimpleX | **Code path on every Hermes computer**, inert |
 | **New files on `/data`**: `/data/simplex/<agent>/`, holding `sx_chat.db`, `sx_agent.db` (about 1.7 MB once linked), `files/`, `tmp/` and `link.json` | The core's state, and the link's | Delete the directory (an unlink keeps it; a person's wipe deletes it with the computer) | Saved raw, with the core stopped. A rollback takes both back together; the start's forced sync heals the link. A `link.json` that does not read, or is another agent's, is **set aside** (renamed, kept) and the link starts off | No |
 | **The forced resync and its edges** (`link.rs`, `run::rolled_back`) | The core cannot see a rollback; a forced sync at a rollback start heals it (measured: about 0.5 s) | None | (a) A platform that sends no `restored` never forces: a silent break. (b) A pending invitation the lost life spent is made anew, and the owner sees a new QR. (c) **A rollback past the linking itself** turns the link off while the person's app keeps a dead contact: their messages go nowhere, unanswered, until the owner links again. Linking asks for a save at once to shrink that window to seconds. (d) A sync forced when nothing was out of step costs about 0.5 s. (e) A message the person sends during the sync may be lost; they are told it may be | No |
-| **A save asked when a link changes**: a second keepalive socket, held for 3 s | So linking survives a crash right after it | Drop the pulse; the next turn's save covers it within 15 minutes of that turn | One extra keepalive open of 3 s per link or unlink | No |
+| **A save asked when a link changes**: a second keepalive socket, held for 3 s (since #562 a keepalive pings and is opened again when silent; this one pings at the default 15 s, so in its 3 s it rarely does) | So linking survives a crash right after it | Drop the pulse; the next turn's save covers it within 15 minutes of that turn | One extra keepalive open of 3 s per link or unlink | No |
 | **The bridge reads three more fields of its view**: `alwaysOn`, `generation`, `restored` (`api::Computer`) | The tier gate and the rollback flag | Drop them | None: the platform already sends them, and an old one's absence reads as not always on and no rollback | No wire change |
-| **Routes on the image's screen port**: `GET /simplex/state`, `POST /simplex/link`, `POST /simplex/unlink` (`simplex/http.rs`) | How the owner links, from the shell (PR 4 adds the page) | Delete `http.rs` | 404 on an image without SimpleX. **Security, for Paul:** the platform proxies the port to the owner alone, but any process in the container reaches it too, the agent's own terminal included. A prompt-injected agent could link a stranger's SimpleX, who would then speak as the owner, a lasting channel. That is the same trust boundary as root in the container (decisions 43–44: the agent can already open any channel out). Closing it would take a platform-signed header on proxied port requests, a cell change | **Code path on every computer** (the screen server checks the path first); answers 404 unless the image names the core |
+| **Routes on the image's screen port**: `GET /simplex/state`, `POST /simplex/link`, `POST /simplex/unlink` (`simplex/http.rs`) | How the owner links, from the shell (PR 4 adds the page) | Delete `http.rs` | 404 on an image without SimpleX. **Security, for Paul:** the platform proxies the port to the owner alone, but any process in the container reaches it too, the agent's own terminal included. A prompt-injected agent could link a stranger's SimpleX, who would then speak as the owner, a lasting channel. That is the same trust boundary as root in the container (decisions 43–44: the agent can already open any channel out). **Closed by section 6** (only a ticket from the owner's Settings links or unlinks; the invitation is shown to that page alone), but for root in the container | **Code path on every computer** (the screen server checks the path first); answers 404 unless the image names the core |
 | **The tier gate**: a core runs only while the view's `alwaysOn` is true | Paul: SimpleX for the $200 tier, which requires always on | Drop the check | A plan change reaches a computer within 60 s (its view is read every minute). Not always on, the link page says why | No |
 | **A seat lapses** | Billing turns `alwaysOn` off (docs/billing.md) | — | Its cores stop within 60 s, and the computer idles to sleep. Links and identities are kept. Messages wait on the SMP servers, for as long as each keeps them (not checked). Paying again turns always on back on: the cores start and the queued messages arrive | No |
 | **The image**: `simplex-chat` in `images/hermes/Dockerfile`, a layer of its own between the base and ours (79.5 MB, 18.8 MB compressed), and `BRIDGE_SIMPLEX_BIN` from `hermes-boot` | The core | Delete the layer and the env | Every Hermes computer pulls the layer once, at the round that adds it; later rounds share it until its pin moves | **Yes, every Hermes computer's image** (+18.8 MB to pull once) |
@@ -154,7 +195,7 @@ attachment. Outbound voice waits for the platform's text-to-speech route
 |---|---|---|---|---|
 | **A new record shape, forever (add-only)**: the relayed message, `{text, to: [agent], relayed: {via: "simplex", for: owner}, attachments?}`, id `sx:<32 hex>` (docs/chat-records.md, "A relayed message"; `records::relayed`, `relayed_message`, `relayed_id`) | The chat is the one authority for what was said (docs/durable-computers.md), so SimpleX messages live there, posted honestly by the agent | Stop posting it. Records already posted stay, and read as the agent's words | An older bridge reads it as the agent's own words and starts nothing. An older page shows it as the agent's message, its words visible, with no "via SimpleX" | The shape is the wire's, for every reader; only linked agents post it |
 | **The engine's rule** (`engine.rs`, `record`): an agent's own `relayed` record, for its owner, while its link is bound (`Input::Relaying`), is its owner's message, asked as them | So the turn is the owner's: their Stop, their question answered, their name to the runtime | Delete the branch and the input | A relayed record from anyone else, for anyone else, by another way, or while unlinked, is what it was before: unit-tested | **Code path on every computer's engine**: each record an agent posts itself is checked against a set that is empty without links, so behavior is unchanged |
-| **Trust, for Paul**: while linked, anything that can post as the agent (its runtime, the `fragment` CLI in its terminal) can make a turn "asked as its owner" by posting a relayed record | The bridge cannot tell its own posts from its runtime's: both are the agent, in a container its runtime has root in | Gate it on a secret the runtime cannot read (there is none in a container it is root in), or have the platform post it (a cell change) | The agent can already act `for` its owner through the API (docs/api.md), so nothing beyond what it could do already. What changes is what the chat shows: a message from the owner they did not send, labeled "via SimpleX" | No (only while linked) |
+| **Trust, for Paul**: while linked, anything that can post as the agent (its runtime, the `fragment` CLI in its terminal) can make a turn "asked as its owner" by posting a relayed record | The bridge cannot tell its own posts from its runtime's: both are the agent, in a container its runtime has root in | Gate it on a secret the runtime cannot read (there is none in a container it is root in), or have the platform post it (a cell change) | The agent can already act `for` its owner through the API (docs/api.md), so nothing beyond what it could do already. What changes is what the chat shows: a message from the owner they did not send, labeled "via SimpleX". **Closed by section 6**: the platform takes a relayed record only signed by the link's door key, which the agent's own key is not; root in the container can still read that key | No (only while linked) |
 | **`via` on a turn** (`Turn::via`, in `state.json`) | Its replies go back over SimpleX | Drop the field | Written only when set (`skip_serializing_if`), so a computer without SimpleX writes the same `state.json` byte for byte (unit-tested). An older bridge reading a newer state ignores the field | No |
 | **Replies back** (`driver.rs`: `for_simplex`, a post's `relay`, `Handle::reply`): what a SimpleX turn says is sent to the owner's app once its post lands: every reply but the interim ones (#584's words before a tool call, up to 200 a turn, stay in the chat, as its push leaves them out), and a card's question with its choices (a card shows only in the chat; the next SimpleX message answers one that takes words, and one that needs a button says to answer in the chat) | Paul's default: only a SimpleX message's turn speaks there. The interim rule is the rebase's choice (2026-10-24): each SimpleX message buzzes the phone, as a push does | Drop `relay` | At most once, and only once its post is on the chat (`driver::Sent::Posted`; a refused one sends nothing: Alex's review): a crash between its post and its send loses the SimpleX copy, and the chat keeps it. Text only: a reply's files are noted ("I sent a file, in our chat"). A turn whose only words were interim (it ended after a tool call with no answer of its own) sends nothing there, and while a long turn works the phone hears nothing until its answer | Code path on every computer's lanes, inert (`relay` is false without SimpleX) |
 | **Voice in, as an attachment only**: the voice file is the relayed record's `audio/mp4` attachment, its text empty | Hermes already transcribes every attached voice note through the platform's route before its turn (docs/computers.md, "Its speech-to-text"), as for a voice note sent on the web | Add a transcript to the text | **A departure from the default ("attachment plus transcript"), for Paul**: a transcript in the record too would bill the route twice and hand the model the words twice. The shell shows the voice note as it shows one sent on the web, with no words, and search does not find what was said | No |
@@ -181,3 +222,27 @@ attachment. Outbound voice waits for the platform's text-to-speech route
 | **A Docker-lane case**, `simplex_on_the_hermes_image` (`images/bridge/tests/docker.rs`), run by CI's `docker` job with every other `--ignored` case of docker.rs | Paul: "work well across restarts and updates", on the image computers run. It covers: linked from the screen port; a SimpleX message answered by Hermes as its owner; a voice note transcribed through the route; the hold; a restart; a wake from an older save healed | Delete the case | **New CI cost**: the job now also pulls the pinned SMP and XFTP server images, builds the lab's client image (Debian slim plus the 79.5 MB core, from GitHub releases), and runs the case alongside the rest. Its network: Docker Hub and GitHub, as the Hermes image's own build already needs | CI only |
 | **The lab's harness, shared** (`tests/support/simplex.rs`), and `Container::run_with` in docker.rs (more `docker run` arguments: the lab's network) | One lab for the by-hand tests and the Docker lane | Inline it back | None at run time: tests only | No |
 | **A file's type by its name first** (`run::media_type`), then by its message's kind | A voice note sent as a `.wav` is `audio/wav`, not the `audio/mp4` the apps' own recordings are | | None | No |
+
+## 6. Securing the link: the signed link start and the door key (`claude/simplex-door`)
+
+Paul (2026-10-23): "no B and no C". A genuine SimpleX message is the
+owner; the threat is only the agent forging either end. This PR closes the
+two security entries above (section 2's routes on the screen port, and
+section 3's trust note) as far as a container whose agent is root allows.
+
+| What, where | Why | To remove it | If it misbehaves | Every computer? |
+|---|---|---|---|---|
+| **The door, a new platform concept** (`crates/core/src/door.rs`; docs/api.md, "An agent's doors"): a ticket, a door key, a relayed record's signature, each a tagged SHA-256 digest signed with BIP-340 (k256, already in the cell for NIP-98) | A link must start from the owner alone, and only the link may speak for them | Delete the module and its three uses below | A digest that drifted between the cell and the bridge refuses every link and every message (held by shared test vectors in both workspaces) | Code in every release |
+| **An owner route**: `POST /api/computers/{id}/agents/{fragment}/door {door, act}` → a signed ticket (computer.rs; the agent fragment makes it, runs_on.rs `door-ticket`). A link's is kept on the agent fragment as `meta` `door_ticket`; an unlink's deletes `meta` `door`, so the door closes as the owner asks | Paul: "a link can only begin from the owner's Settings" | Delete the route | Anyone else 404; an agent on another computer 403. A link ticket made replaces the one before (only the newest redeems) | No: an owner's call |
+| **A guest route**: `POST /api/computer/door {agent, door, nonce, key}` (computer.rs `egress_api`, runs_on.rs `door-key`): the newest link ticket, once, within 10 minutes, registers the door's public key as `meta` `door` | So only an owner-started link registers a key | Delete the route | 403 for anything else. The agent itself could call it, but holds no ticket: it never sees one (the owner's page hands it to the bridge) unless, as root, it reads the bridge's traffic or memory | Every computer's egress answers it; nothing calls it without a link |
+| **A rule on every post** (channels.rs `door_checked`, and `effects::check_record` for apps): a body with `relayed` is taken only from an agent acting as itself, for its owner, signed by its door within 10 minutes; its agent fragment checks the signature (`door-check`, one call between Durable Objects per such post) | The agent's own key (its tools, the CLI) can no longer speak as its owner | Drop the check (and the engine trusts what it reads again) | **Wire, for Paul:** a body field name is now the platform's. Any app's record with a `relayed` key is refused (403 on a post, 400 for an operation's or job's), which changes what was accepted before. Only the chat template uses it, and only from this stack (not yet merged), so nothing shipped is refused today | **Every post on the platform** pays one key lookup on its body; only relayed posts pay the call |
+| **The agent's key in the guest view** (`agents[].key`, 64 hex; proto's `ComputerAgent.key`) | The public key the bridge checks tickets with | Drop it (the bridge then refuses every link) | Add-only: an older bridge ignores it. A bridge on a platform without it starts no link, saying so | Every guest view carries it |
+| **Storage**: two `meta` keys on agent fragments, `door` (`<door> <key hex>`) and `door_ticket` (`<door> <nonce> <exp>`) | Where the door's state lives | Delete them | No schema step: an older release ignores unknown `meta` keys, so a rollback of the cell keeps working (it would also stop checking relayed posts: the bridge does not check them again) | Agent fragments with a door only |
+| **The bridge: tickets** (`simplex/door.rs`, `run.rs` `take`): link and unlink take a ticket in their body, checked against the agent's `key`, this computer, its time, and the nonces taken (written to `link.json` before anything acts, else refused; at most 64 live, past which a new ticket waits rather than one still holding being forgotten; a link's key installed only by the link ticket taken last, so a registration answered late installs nothing: Alex's review); a link's only while unlinked | Paul: "the bridge refuses `/simplex/link` (and unlink) without a valid one, and rejects replays" | Drop `take` | No ticket, a forged one, another agent's or computer's, a stale one, or one used before: 403, and nothing moves. A disk rollback forgets nonces taken since its save; the platform still takes a link's once | Code on every bridge; only link pages call it |
+| **The bridge: the door key** (`door.key` beside `link.json`, 0600 in a 0700 directory, generated from `/dev/urandom` per link, in no environment): registered before any invitation exists, signing every relayed record at each post try (`driver::post`'s `door`), forgotten when the link goes | Paul: the key "lives in a file only the bridge reads … never in the environment Hermes' tools see" | Drop it (and the platform's rule) | **Residual risk, for Paul: root in the container can read it.** Hermes' tools run as root today, so a prompt-injected agent with a shell could sign as the door. The real fix is running the agent as a non-root user that cannot read `/data/simplex` (later). A disk rollback that restores an older key than the platform holds refuses what the link carries (logged) until the owner links again; a link with no key at all tells the owner's app to link again | No: only linked agents |
+| **The invitation shown to one page** (`View::hidden`, `?s=` the link ticket's nonce): `state` and `qr.svg` give no link to anyone else | Paul: "the QR is shown only in the owner's Settings" (the agent's tools reach the port, and the first to use a one-time invitation is linked) | Drop the session | A page reloaded, or the bridge restarted, while inviting asks for the code again with a new ticket: the same invitation, shown | No |
+| **The page and the shell** (`page.html`, shell.js): Link and Unlink ask the platform's page for a ticket by `postMessage`, which asks the platform and answers only a pane of its own onto that agent's link page | The ticket comes from the owner's session, in their Settings | Drop both | 15 s with no answer: "your Settings didn't answer". **Not proven in a browser** (the shell-ui lane's stub carries no core) | Every person's Settings code (a platform release) |
+| **No "Approve" step**: not built | Paul made it optional, if nearly free: it is not (a second state, a second ticket, a second page action), and the QR is already the owner's alone | — | — | — |
+| **The bridge's new dependency: `k256`** (=0.13.4, BIP-340 only, the cell's own pin), in `images/` | Checking tickets and signing as the door | — | Adds k256's curve arithmetic to every image's bridge (about a dozen crates in the images lock) | Every image's bridge |
+| **Known gaps** | | | (a) An unlink made in Settings whose ticket never reaches the bridge (its pane closed first) closes the door at the platform, while the person's app stays linked; what they send is refused at the platform and logged, until they unlink in their app or the owner links again. (b) Unlinked from the person's side, the bridge forgets its key, but the platform keeps the public half until the owner's next link or unlink (it signs nothing: its private half is gone) | |
+| **Tests**: the platform's half in the `computers` lane (the stub's `door` commands): a stranger is given no ticket; the owner's is signed by the agent fragment's key, for this computer, for 10 minutes; a relayed record with no door's signature, posted with the agent's own key, is refused; one signed by another key, before and after linking, is refused; the bridge's check of the ticket passes and its redeem registers a key; the same ticket again is refused; a record the door's key signs is taken; after the unlink, it is refused. Unit tests: the shared vectors (core and bridge), `take` (unsigned, forged, another act, replay, after a restart, while linked, no key), the session's view, the key's file mode, a sealed record, `effects` refusing an app's relayed record. By hand and in the Docker lane: no ticket 403, a forged one 403, the invitation hidden from another page, the key registered, its file 0600 and in no process's environment, the unlink closing the door | | | | |
