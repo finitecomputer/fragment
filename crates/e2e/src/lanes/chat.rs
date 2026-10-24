@@ -363,11 +363,13 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the agent's reply is under its name", chrome.eval(&page, &format!("[...document.querySelectorAll('.msg.agent .who')].every((w) => w.textContent === {})", js(&capital(&label))))? == true, "");
 
     // a tool step, as a card: what it does (its category's icon, its verb
-    // the icon's name), then its arguments and what came of it
+    // the icon's name), then its arguments and what came of it; the words
+    // the agent said before it are its reply, before the card and not in it
     say(&mut chrome, "tool please")?;
     let step = "[...document.querySelectorAll('details.tools .step[data-category=\"web\"]')].find((s) => s.querySelector('.step-args')?.textContent === 'tool please')";
-    let stepped = shows(&mut chrome, &page, &format!("!!{step} && !{step}.querySelector('.step-verb') && {step}.querySelector('.step-name > svg[role=\"img\"]')?.getAttribute('aria-label') === 'Searching the web' && {step}.textContent.includes('3 results') && {}", replied("tool please")));
-    s.ok("a tool step shows as a card before the reply, saying what it does by its icon (named \"Searching the web\") and its arguments (\"tool please\")", stepped, chrome.eval(&page, "document.getElementById('messages').innerText")?);
+    let words = "[...document.querySelectorAll('.msg.agent .md')].find((m) => m.textContent === 'Let me look.')?.closest('.msg')";
+    let stepped = shows(&mut chrome, &page, &format!("!!{step} && !{step}.querySelector('.step-verb') && ['Searching the web', 'Searched the web'].includes({step}.querySelector('.step-name > svg[role=\"img\"]')?.getAttribute('aria-label')) && {step}.querySelector('.step-result')?.textContent.includes('3 results') && !!{words} && !{words}.closest('details') && !!({words}.compareDocumentPosition({step}) & Node.DOCUMENT_POSITION_FOLLOWING) && !{step}.closest('details').textContent.includes('Let me look.') && {}", replied("tool please")));
+    s.ok("a tool step shows as a card before the reply, saying what it does by its icon (named \"Searched the web\") and its arguments (\"tool please\"), its result kept; the agent's words before it (\"Let me look.\") are its reply before the card, never in it", stepped, chrome.eval(&page, "document.getElementById('messages').innerText")?);
     // every card open, for the screenshots: what each step says
     let open_cards = "(() => { const cards = [...document.querySelectorAll('details.tools')]; cards.forEach((d) => (d.open = true)); cards.at(-1)?.scrollIntoView({ block: 'center' }); return true; })()";
     chrome.eval(&page, open_cards)?;
@@ -729,6 +731,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     polish::check(s, api, &owner, &owner_session, &mut chrome, &label)?;
     polish::working_card(s, api, &owner, &mut chrome, &identity, &agent_name)?;
     polish::record_shapes(s, api, &owner, &owner_session, &mut chrome)?;
+    polish::finished_card_times(s, api, &owner, &mut chrome)?;
 
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;
