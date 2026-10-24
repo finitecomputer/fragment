@@ -31,6 +31,28 @@ The stack, in merge order:
 
 Rebased on master of 2026-10-24 for shipping (#584's mid-turn replies, #562's keepalive ping, #586/#540's routes, #575, #580): what the rebase changed is in section 2 (the save pulse's ping) and section 3 (replies back: the interim words stay in the chat, a card's question goes to the phone).
 
+Alex's review (2026-10-24), each finding reproduced and fixed in its own layer:
+
+- #523: a start reads back, newest page first, to what its chat confirmed
+  posted (`delivered`, at most 256 items), not only the newest 32, so a
+  message read but never posted is carried at the next start; a reply the
+  core refuses mid-sync waits, never dropped; a forced sync that fails holds
+  replies and is asked again every 30 s until ok.
+- #546: no core outlives the bridge (`stop_cores` before it exits, SIGKILL on
+  the forced exit, a parent-death signal for a bridge killed outright, and
+  any core an older bridge left is killed before a hold is answered); a core
+  whose bot API closed is stopped and started again; an unlink while no core
+  runs is finished at its next start (`cleanup`).
+- #548: "posted" means on the chat (a refused post keeps its file and sends
+  nothing to SimpleX), and the poster acknowledges each confirmed post, which
+  alone moves `delivered`; a relayed message quoted is its owner's.
+- #549: a stuck link offers Try again and Cancel; a poll from before a change
+  shows nothing.
+- #550: the lab's image is built when absent (CI's Docker lane).
+- #560: a ticket is used only once written (else refused); the bound refuses
+  new tickets rather than forget live ones; only the link taken last installs
+  its key.
+
 ## The audit, in short
 
 **What touches every computer, not only SimpleX users** (the aim is that
@@ -216,7 +238,7 @@ section 3's trust note) as far as a container whose agent is root allows.
 | **A rule on every post** (channels.rs `door_checked`, and `effects::check_record` for apps): a body with `relayed` is taken only from an agent acting as itself, for its owner, signed by its door within 10 minutes; its agent fragment checks the signature (`door-check`, one call between Durable Objects per such post) | The agent's own key (its tools, the CLI) can no longer speak as its owner | Drop the check (and the engine trusts what it reads again) | **Wire, for Paul:** a body field name is now the platform's. Any app's record with a `relayed` key is refused (403 on a post, 400 for an operation's or job's), which changes what was accepted before. Only the chat template uses it, and only from this stack (not yet merged), so nothing shipped is refused today | **Every post on the platform** pays one key lookup on its body; only relayed posts pay the call |
 | **The agent's key in the guest view** (`agents[].key`, 64 hex; proto's `ComputerAgent.key`) | The public key the bridge checks tickets with | Drop it (the bridge then refuses every link) | Add-only: an older bridge ignores it. A bridge on a platform without it starts no link, saying so | Every guest view carries it |
 | **Storage**: two `meta` keys on agent fragments, `door` (`<door> <key hex>`) and `door_ticket` (`<door> <nonce> <exp>`) | Where the door's state lives | Delete them | No schema step: an older release ignores unknown `meta` keys, so a rollback of the cell keeps working (it would also stop checking relayed posts: the bridge does not check them again) | Agent fragments with a door only |
-| **The bridge: tickets** (`simplex/door.rs`, `run.rs` `take`): link and unlink take a ticket in their body, checked against the agent's `key`, this computer, its time, and the nonces taken (kept in `link.json` until they run out, at most 64); a link's only while unlinked | Paul: "the bridge refuses `/simplex/link` (and unlink) without a valid one, and rejects replays" | Drop `take` | No ticket, a forged one, another agent's or computer's, a stale one, or one used before: 403, and nothing moves. A disk rollback forgets nonces taken since its save; the platform still takes a link's once | Code on every bridge; only link pages call it |
+| **The bridge: tickets** (`simplex/door.rs`, `run.rs` `take`): link and unlink take a ticket in their body, checked against the agent's `key`, this computer, its time, and the nonces taken (written to `link.json` before anything acts, else refused; at most 64 live, past which a new ticket waits rather than one still holding being forgotten; a link's key installed only by the link ticket taken last, so a registration answered late installs nothing: Alex's review); a link's only while unlinked | Paul: "the bridge refuses `/simplex/link` (and unlink) without a valid one, and rejects replays" | Drop `take` | No ticket, a forged one, another agent's or computer's, a stale one, or one used before: 403, and nothing moves. A disk rollback forgets nonces taken since its save; the platform still takes a link's once | Code on every bridge; only link pages call it |
 | **The bridge: the door key** (`door.key` beside `link.json`, 0600 in a 0700 directory, generated from `/dev/urandom` per link, in no environment): registered before any invitation exists, signing every relayed record at each post try (`driver::post`'s `door`), forgotten when the link goes | Paul: the key "lives in a file only the bridge reads … never in the environment Hermes' tools see" | Drop it (and the platform's rule) | **Residual risk, for Paul: root in the container can read it.** Hermes' tools run as root today, so a prompt-injected agent with a shell could sign as the door. The real fix is running the agent as a non-root user that cannot read `/data/simplex` (later). A disk rollback that restores an older key than the platform holds refuses what the link carries (logged) until the owner links again; a link with no key at all tells the owner's app to link again | No: only linked agents |
 | **The invitation shown to one page** (`View::hidden`, `?s=` the link ticket's nonce): `state` and `qr.svg` give no link to anyone else | Paul: "the QR is shown only in the owner's Settings" (the agent's tools reach the port, and the first to use a one-time invitation is linked) | Drop the session | A page reloaded, or the bridge restarted, while inviting asks for the code again with a new ticket: the same invitation, shown | No |
 | **The page and the shell** (`page.html`, shell.js): Link and Unlink ask the platform's page for a ticket by `postMessage`, which asks the platform and answers only a pane of its own onto that agent's link page | The ticket comes from the owner's session, in their Settings | Drop both | 15 s with no answer: "your Settings didn't answer". **Not proven in a browser** (the shell-ui lane's stub carries no core) | Every person's Settings code (a platform release) |

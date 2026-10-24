@@ -463,6 +463,9 @@ struct Slot {
     /// The ticket nonce of the page that asked for its invitation last:
     /// that page alone is shown it.
     session: Option<String>,
+    /// The link ticket taken last, its registration at the platform under
+    /// way: only it installs its key (`want`).
+    linking: Option<String>,
 }
 
 impl Slot {
@@ -595,15 +598,20 @@ impl Manager {
         if act == "link" && matches!(s.saved.link.phase, Phase::Linked { .. }) {
             return Err(Refused::new(409, "it is linked already: unlink it first"));
         }
+        // bounded, and never by forgetting a ticket that still holds
+        if s.saved.used.len() >= USED_MAX {
+            return Err(Refused::new(503, "too many links were started in the last ten minutes: wait a little, then start again"));
+        }
+        // taken once it is written, before anything it starts
         s.saved.used.insert(t.nonce.clone(), t.exp);
-        // bounded: the soonest to run out go first
-        while s.saved.used.len() > USED_MAX {
-            let soonest = s.saved.used.iter().min_by_key(|(_, exp)| **exp).map(|(n, _)| n.clone()).expect("not empty");
-            s.saved.used.remove(&soonest);
-        }
         if let Err(e) = store(&s.dir, &s.saved) {
+            s.saved.used.remove(&t.nonce);
             crate::ev!("simplex.store_failed", { "agent": agent, "error": e.to_string() });
+            return Err(Refused::new(500, format!("SimpleX could not keep that ticket as used: {e}")));
         }
+        // a link's registration is this ticket's alone from here (`want`);
+        // an unlink calls any under way off
+        s.linking = (act == "link").then(|| t.nonce.clone());
         crate::ev!("simplex.ticket", { "agent": agent, "act": act });
         Ok(())
     }
@@ -616,6 +624,12 @@ impl Manager {
         if matches!(s.saved.link.phase, Phase::Linked { .. }) {
             return Err(Refused::new(409, "it is linked already: unlink it first"));
         }
+        // a link started since, or an unlink, made this one stale: its key
+        // is not the one the platform holds now
+        if s.linking.as_deref() != Some(session.as_str()) {
+            return Err(Refused::new(409, "another link or an unlink was started meanwhile: start again from your Settings"));
+        }
+        s.linking = None;
         if let Err(e) = key.store(&s.dir) {
             crate::ev!("simplex.door_unkept", { "agent": agent, "error": e.to_string() });
             return Err(Refused::new(500, format!("SimpleX could not keep its key: {e}")));
@@ -673,6 +687,7 @@ impl Manager {
                 acked: 0,
                 door,
                 session: None,
+                linking: None,
             });
             self.look_up_title(a.clone());
         }
@@ -1480,6 +1495,7 @@ mod tests {
             acked: 0,
             door: None,
             session: None,
+            linking: None,
         }
     }
 
@@ -1578,6 +1594,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Goal (Alex's review of #560): a ticket is used only once it is
+    /// written as used (a write that fails refuses it, and acts on
+    /// nothing); at the bound a new ticket waits rather than a live one
+    /// being forgotten; and a link's key is installed only by the link
+    /// taken last, so a registration answered late (another link, or an
+    /// unlink, started meanwhile) installs nothing.
+    #[test]
+    fn a_ticket_is_kept_used_and_only_the_last_link_installs_its_key() {
+        let root = std::env::temp_dir().join(format!("simplex-take-bound-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let key = agent_key(&root.join("keys"));
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime");
+        let _in = rt.enter();
+        let mut m = manager(&root, &key, Phase::Off);
+        let dir = root.join("juniper--k3x9");
+        // its file cannot be written: refused, nothing taken
+        std::fs::create_dir_all(dir.join("link.json.tmp")).expect("a directory where its file goes");
+        let t = signed("unlink", &"11".repeat(16));
+        assert_eq!(m.take("juniper--k3x9", &t, "unlink").map_err(|r| r.status), Err(500));
+        assert!(m.slots["juniper--k3x9"].saved.used.is_empty(), "not taken");
+        std::fs::remove_dir_all(dir.join("link.json.tmp")).expect("its place back");
+        assert_eq!(m.take("juniper--k3x9", &t, "unlink"), Ok(()));
+        assert_eq!(m.take("juniper--k3x9", &t, "unlink").map_err(|r| r.status), Err(403), "then once only");
+        // the bound: a new ticket waits; none still holding is forgotten
+        let later = crate::log::now_ms() as i64 + 600_000;
+        let s = m.slots.get_mut("juniper--k3x9").expect("its slot");
+        for i in 0..USED_MAX - 1 {
+            s.saved.used.insert(format!("{i:032x}"), later);
+        }
+        assert_eq!(m.take("juniper--k3x9", &signed("unlink", &"12".repeat(16)), "unlink").map_err(|r| r.status), Err(503));
+        assert_eq!(m.take("juniper--k3x9", &t, "unlink").map_err(|r| r.status), Err(403), "the first still refused");
+        m.slots.get_mut("juniper--k3x9").expect("its slot").saved.used.clear();
+        // two links, their registrations answered in the other order: the later one's key alone
+        let (a, b) = (signed("link", &"13".repeat(16)), signed("link", &"14".repeat(16)));
+        assert_eq!(m.take("juniper--k3x9", &a, "link"), Ok(()));
+        assert_eq!(m.take("juniper--k3x9", &b, "link"), Ok(()));
+        let (key_a, key_b) = (Key::generate().expect("a key"), Key::generate().expect("a key"));
+        assert!(rt.block_on(m.want("juniper--k3x9", key_b.clone(), b.nonce.clone())).is_ok());
+        assert_eq!(rt.block_on(m.want("juniper--k3x9", key_a, a.nonce.clone())).map_err(|r| r.status).err(), Some(409), "the earlier answer, late");
+        assert_eq!(Key::load(&dir).map(|k| k.public_hex()), Some(key_b.public_hex()), "the key the platform holds");
+        // an unlink while a link registers calls it off
+        let c = signed("link", &"15".repeat(16));
+        assert_eq!(m.take("juniper--k3x9", &c, "link"), Ok(()));
+        assert_eq!(m.take("juniper--k3x9", &signed("unlink", &"16".repeat(16)), "unlink"), Ok(()));
+        assert_eq!(rt.block_on(m.want("juniper--k3x9", Key::generate().expect("a key"), c.nonce.clone())).map_err(|r| r.status).err(), Some(409));
+        let _ = std::fs::remove_dir_all(&root);
+    }
     /// A child as a core is one: registered from its spawn, reaped and
     /// let go by its own task; `sh -c script`. Its pid, and its end.
     fn fake_core(script: &str) -> (u32, watch::Receiver<bool>) {
@@ -1646,6 +1709,7 @@ mod tests {
             acked: 0,
             door: None,
             session: None,
+            linking: None,
         };
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
         let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(false)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeSet::new()).0, stop: watch::channel(false).1 };
@@ -1733,6 +1797,7 @@ mod tests {
             acked: 0,
             door: None,
             session: None,
+            linking: None,
         };
         slot.up = true;
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
@@ -1780,6 +1845,7 @@ mod tests {
             acked: 0,
             door: None,
             session: None,
+            linking: None,
         };
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
         let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(true)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeSet::new()).0, stop: watch::channel(false).1 };
