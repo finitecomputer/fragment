@@ -56,9 +56,9 @@ pub enum Cmd {
     Delete { contact: ContactId, notify: bool },
     /// A connection that never became a contact (a pending invitation).
     DeleteConn { conn: ConnId },
-    /// The contact's newest `count` items, or with `after`, its first
-    /// `count` after that item (a catch-up's next page).
-    Chat { contact: ContactId, count: u16, after: Option<i64> },
+    /// The contact's newest `count` items, or with `before`, the `count`
+    /// just older than that item (a catch-up's next page back).
+    Chat { contact: ContactId, count: u16, before: Option<i64> },
 }
 
 impl Cmd {
@@ -87,10 +87,10 @@ impl Cmd {
                 assert!(*conn > 0, "a delete names a connection");
                 format!("/_delete :{conn}")
             }
-            Cmd::Chat { contact, count, after } => {
+            Cmd::Chat { contact, count, before } => {
                 assert!(*contact > 0 && *count > 0, "a read names a contact and a count");
-                match after {
-                    Some(item) => format!("/_get chat @{contact} after={item} count={count}"),
+                match before {
+                    Some(item) => format!("/_get chat @{contact} before={item} count={count}"),
                     None => format!("/_get chat @{contact} count={count}"),
                 }
             }
@@ -430,8 +430,8 @@ mod tests {
         assert_eq!(Cmd::Sync { contact: 3, force: true }.line(), "/_sync @3 force=on");
         assert_eq!(Cmd::Delete { contact: 4, notify: false }.line(), "/_delete @4 full notify=off");
         assert_eq!(Cmd::DeleteConn { conn: 2 }.line(), "/_delete :2");
-        assert_eq!(Cmd::Chat { contact: 3, count: 20, after: None }.line(), "/_get chat @3 count=20");
-        assert_eq!(Cmd::Chat { contact: 3, count: 20, after: Some(41) }.line(), "/_get chat @3 after=41 count=20");
+        assert_eq!(Cmd::Chat { contact: 3, count: 20, before: None }.line(), "/_get chat @3 count=20");
+        assert_eq!(Cmd::Chat { contact: 3, count: 20, before: Some(41) }.line(), "/_get chat @3 before=41 count=20");
         // a text is JSON, so nothing in it reads as more of the command
         let line = Cmd::Send { contact: 3, text: "hi\" json [] /_delete @3\nthere".into() }.line();
         let body = line.strip_prefix("/_send @3 json ").expect("its prefix");
