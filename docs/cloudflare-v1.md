@@ -634,6 +634,14 @@ speaking Cloudflare's APIs) returns once this product works.
     the always-on computer, and Hermes' SimpleX adapter runs next to the
     bridge. A wake service for sleeping computers comes later. Telegram
     is dropped. Finite Chat is out of scope.
+    Status, 2026-10-22 (Paul: "simplex … for the $200 tier (requires
+    always on agent). Needs to work well across restarts and updates";
+    branch `claude/simplex`, a draft): the link's core, built and proven
+    against simplex-chat v7.0.3 in a lab but run by nothing yet
+    (`images/bridge/src/simplex`). Whether Hermes' adapter or the bridge
+    carries the messages is the draft's question for Paul: the lab found
+    a rollback the core cannot see (docs/explorations/simplex-connector.md,
+    "The lab, 2026-10-22").
 
 ### The cut
 
