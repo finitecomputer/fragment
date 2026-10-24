@@ -33,6 +33,7 @@ the old one still open, and come back resealed, which the cell stores.
 | An operator key (a wipe's: docs/api.md, Operators) | a file on the operator's machine, its secret's 64 hex (`fragment operator key <file>` makes it, 0600, and prints only its npub); the deployment holds its npub alone (`operators`), never the secret. The hosted e2e's is named on its command line (`--operator-key-file`, below) |
 | A fragment's own nostr key, an agent's nostr key | made in their cell and kept sealed for it; opened only to sign (an agent's NIP-98 headers) |
 | A person's connections (Google, …) | WorkOS Pipes holds and refreshes them; a computer's swap asks Pipes for its short-lived token on each call and holds none (decision 22). A computer's guest holds only placeholders (docs/computers.md) |
+| A connection's OAuth client secret | `CONNECTION_SECRET_<PROVIDER>` in Cloudflare Secrets Store, read only by `cell/src/keys.rs`. The deployment row's `key` names that store secret. It must match the client configured in Pipes; Fragment exchanges codes only after browser/session binding, then imports the grant (docs/pipes-browser-binding.md) |
 | The key computers' placeholders are tagged with | derived from the host secret (HKDF-SHA256, its own salt), never stored or provisioned apart: in the platform Worker alone, never in a container. Rotating the host secret rotates every placeholder (guests read theirs again within seconds; tags under `HOST_SECRET_PREVIOUS` still verify during a rotation) |
 | A browser's sessions (the platform's, and one per fragment origin) | the registry cell, as SHA-256 hashes of random tokens; the tokens live only in HttpOnly cookies |
 
@@ -139,6 +140,55 @@ store secrets:
   webhook endpoint, whose signing secret (Stripe gives it once, as it
   makes the endpoint) is uploaded as the Worker secret
   `FRAGMENT_STRIPE_WEBHOOK` (decision 58). Never printed.
+
+**On CI's deploy** (.github/workflows/ci.yml, `deploy`) the deploying
+machine is a runner, which holds no file of its own. Its GitHub
+environment (`preview` or `production`) holds the secrets
+`CLOUDFLARE_API_TOKEN`, which wrangler deploys with and which the job
+also writes to `~/.config/fragment/secrets/cloudflare-api-token` as the
+DNS token, and the preview's `PREVIEW_TEST_SECRET`, which it writes to
+`~/.config/fragment/secrets/preview-test-secret`, each 0600, for that
+job alone. The config it deploys from is no secret: it holds names and
+paths alone, each secret named by its store name, never a value; it
+names those two paths, and no `stripe.key_file`, which a runner lacks.
+It is the environment's file in the private repo
+finitecomputer/fragment-deploy (`preview.jsonc` or `production.jsonc`,
+at the root of its `main`), kept out of this public repo and its logs,
+and readable and editable by the team, as a GitHub secret, never read
+back, was not. The job checks it out at `main` as it stands then, with
+the environment's secret `DEPLOY_REPO_TOKEN` (a fine-grained token with
+Contents · Read on that repo alone, which the checkout does not keep),
+refuses to go on without the token or the file, and prints the commit
+it deploys from, never the contents. So a change to a config is a
+commit there, which the environment's next deploy takes: the preview's
+at master's next green push, or a re-run of its `deploy` job;
+production's only at a deploy of Paul's, his next move of `production`
+or his re-run of its `deploy` job.
+`CLOUDFLARE_ACCOUNT_ID`, optional but recommended, is a secret only to be
+masked: the runner masks each secret its job names wherever it appears
+in the job's logs, so the account id in wrangler's and xtask's output
+(registry paths, URLs) is `***`. The job runs without it. Paul sets them
+in the repository's settings.
+
+**On the Image workflow** (.github/workflows/image.yml, run by hand:
+`cargo xtask image push|copy`) the job runs in the same environment, for
+its secrets alone: `CLOUDFLARE_API_TOKEN`, which wrangler pushes with
+(its Containers · Edit), and `CLOUDFLARE_ACCOUNT_ID`, required there, as
+it names the registry the image goes to; masked as on the deploy, in the
+run's summary too, which names the reference. A copy into production
+(its promotion, docs/computers.md, "Production") reads two more of
+production's: `PREVIEW_REGISTRY_TOKEN`, a token of the preview's account
+(Account · Containers · Read, as it only pulls; Edit if the API refuses
+Read the pull credentials), which the copy mints its credentials for
+the preview's registry with, and `PREVIEW_ACCOUNT_ID`, that account,
+named as a secret so it is masked as the other account is. Each copy
+mints registry credentials for each side as wrangler mints its own
+(`wrangler containers registries credentials`, 15 minutes, pull for the
+source, push and pull for production's), never printed, and hands them
+to skopeo on its standard input, which keeps each login in a file of its
+own (mode 600, under `target/image-copy`, mode 700), removed as the try
+ends. It reads no deploy config; a push's Docker login, which wrangler
+makes, keeps its registry credentials of 15 minutes on the runner.
 
 ## Placeholders and the operator's keys (Paul, 2026-10-04)
 
@@ -324,7 +374,8 @@ per-person credential:*
 the per-person OpenRouter keys (minted with a management key, their
 limit the month's allowance) are gone. Models are Workers AI through the
 deployment's AI Gateway, called through the AI binding, and each call is
-reserved and settled on its payer's usage ledger (docs/ledger.md), which
-is what stops a person, not a vendor's key limit. No BYOK (Paul,
+gated by its payer's standing and charged on their usage ledger
+(docs/ledger.md), which is what stops a person, not a vendor's key
+limit. No BYOK (Paul,
 2026-10-02).
 

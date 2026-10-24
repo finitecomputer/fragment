@@ -31,6 +31,12 @@ pub const OPERATOR_KEY_PREFIX: &str = "OPERATOR_KEY_";
 /// What the binding of a model's key starts with (`model_key`).
 pub const MODEL_KEY_PREFIX: &str = "MODEL_KEY_";
 
+/// A connection's confidential OAuth client (the same client Pipes uses).
+pub fn connection_secret(provider: &str) -> String {
+    assert!(catalog::valid_name(provider), "a connection provider is checked");
+    format!("CONNECTION_SECRET_{}", provider.to_ascii_uppercase().replace('-', "_"))
+}
+
 /// How long a value read from the store is used before it is read again:
 /// a value changed in the store (`cargo xtask secret set`) reaches every
 /// warm isolate within this, with no deploy.

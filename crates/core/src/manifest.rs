@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 
 use fragment_proto::{
-    limits, valid_channel_name, valid_op_name, valid_template_name, ChannelDecl, FragmentKind, IdentityKind, OpDecl, OpKind, Role,
-    TriggerDecl, TriggerOn, BUILTIN_CHANNELS, RESERVED_OP_NAMES,
+    limits, valid_channel_name, valid_listed_field, valid_listed_kind, valid_op_name, valid_template_name, ChannelDecl, FragmentKind, IdentityKind,
+    ListedDecl, OpDecl, OpKind, Role, TriggerDecl, TriggerOn, BUILTIN_CHANNELS, RESERVED_OP_NAMES,
 };
 use serde_json::Value;
 
@@ -165,13 +165,15 @@ fn operation(name: &str, v: &Value) -> Result<OpDecl, String> {
 }
 
 /// One entry of `channels`: who reads it (default `viewer`), who may post
-/// to it (no one by default), and whether a poster must be signed in.
-/// Whoever may post may read what they posted: a `post` weaker than `read`
-/// is refused.
+/// to it (no one by default), whether a poster must be signed in, which
+/// kind of member posts (`"from": "person" | "agent"`, as a channel
+/// trigger's `from`), and which of its records its members' lists show
+/// (`listed`). Whoever may post may read what they posted: a `post`
+/// weaker than `read` is refused.
 fn channel(name: &str, v: &Value) -> Result<ChannelDecl, String> {
     let obj = v.as_object().ok_or_else(|| format!("channels.{name} must be an object"))?;
-    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "read" | "post" | "signedIn")) {
-        return Err(format!("channels.{name} has an unknown key {k:?} (read, post, signedIn)"));
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "read" | "post" | "signedIn" | "from" | "listed")) {
+        return Err(format!("channels.{name} has an unknown key {k:?} (read, post, signedIn, from, listed)"));
     }
     let role = |key: &str| -> Result<Option<Role>, String> {
         obj.get(key)
@@ -193,7 +195,55 @@ fn channel(name: &str, v: &Value) -> Result<ChannelDecl, String> {
         Some(Value::Bool(true)) => return Err(format!("channels.{name}.signedIn is about who may post: give it a post role")),
         Some(_) => return Err(format!("channels.{name}.signedIn must be true or false")),
     };
-    Ok(ChannelDecl { read, post, signed_in })
+    let from = match obj.get("from") {
+        None => None,
+        Some(Value::String(_)) if post.is_none() => return Err(format!("channels.{name}.from is about who may post: give it a post role")),
+        Some(Value::String(k)) => Some(IdentityKind::parse(k).ok_or_else(|| format!("channels.{name}.from is person or agent, not {k:?}"))?),
+        Some(_) => return Err(format!("channels.{name}.from must be a string")),
+    };
+    let listed = obj.get("listed").map(|l| listed(name, l)).transpose()?;
+    Ok(ChannelDecl { read, post, signed_in, from, listed })
+}
+
+/// A channel's `listed`: `{"kinds": [...], "fields": [...]}`, its kinds 1
+/// to `LISTED_KINDS_MAX` and its fields at most `LISTED_FIELDS_MAX`, each
+/// named once. The platform never reads what a kind means; these bounds
+/// keep what every member's row carries small.
+fn listed(name: &str, v: &Value) -> Result<ListedDecl, String> {
+    let at = format!("channels.{name}.listed");
+    let obj = v.as_object().ok_or_else(|| format!("{at} must be an object: {{\"kinds\": [...], \"fields\": [...]}}"))?;
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "kinds" | "fields")) {
+        return Err(format!("{at} has an unknown key {k:?} (kinds, fields)"));
+    }
+    let names = |key: &str, max: usize, valid: fn(&str) -> bool, shape: &str| -> Result<Vec<String>, String> {
+        let list = match obj.get(key) {
+            None => return Ok(vec![]),
+            Some(Value::Array(list)) => list,
+            Some(_) => return Err(format!("{at}.{key} must be an array of names")),
+        };
+        if list.len() > max {
+            return Err(format!("{at}.{key} names {}: at most {max}", list.len()));
+        }
+        let mut out: Vec<String> = Vec::with_capacity(list.len());
+        for item in list {
+            let Some(text) = item.as_str() else { return Err(format!("{at}.{key} must be an array of names")) };
+            if !valid(text) {
+                return Err(format!("{at}.{key} has {text:?}, which is no {shape}"));
+            }
+            if out.iter().any(|o| o == text) {
+                return Err(format!("{at}.{key} names {text:?} twice"));
+            }
+            out.push(text.to_string());
+        }
+        assert!(out.len() <= max, "a listed's names are within their bound");
+        Ok(out)
+    };
+    let kinds = names("kinds", limits::LISTED_KINDS_MAX, valid_listed_kind, "kind (^[A-Za-z0-9._-]{1,64}$)")?;
+    if kinds.is_empty() {
+        return Err(format!("{at}.kinds names the kinds of record its members' lists show: at least one"));
+    }
+    let fields = names("fields", limits::LISTED_FIELDS_MAX, valid_listed_field, "field (^[A-Za-z][A-Za-z0-9_]{0,31}$, not kind)")?;
+    Ok(ListedDecl { kinds, fields })
 }
 
 /// One entry of `triggers`: `{"cron" | "channel" | "files": …, "run": op}`,
@@ -460,10 +510,10 @@ mod tests {
     #[test]
     fn postable_channels() {
         let m = parse(br#"{"channels":{"chat":{"read":"public","post":"public"},"notes":{"post":"editor"},"desk":{"read":"editor","post":"owner"}}}"#).unwrap();
-        assert_eq!(m.channels["chat"], ChannelDecl { read: Role::Public, post: Some(Role::Public), signed_in: false }, "a post role as loose as read");
-        assert_eq!(m.channels["notes"], ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false }, "read defaults to viewer beside a post role");
+        assert_eq!(m.channels["chat"], ChannelDecl { read: Role::Public, post: Some(Role::Public), signed_in: false, from: None, listed: None }, "a post role as loose as read");
+        assert_eq!(m.channels["notes"], ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: None, listed: None }, "read defaults to viewer beside a post role");
         let control = parse(br#"{"channels":{"control":{"post":"viewer","signedIn":true}}}"#).unwrap().channels["control"].clone();
-        assert_eq!(control, ChannelDecl { read: Role::Viewer, post: Some(Role::Viewer), signed_in: true }, "a post role for signed-in posters only");
+        assert_eq!(control, ChannelDecl { read: Role::Viewer, post: Some(Role::Viewer), signed_in: true, from: None, listed: None }, "a post role for signed-in posters only");
         assert_eq!(m.channels["desk"].post, Some(Role::Owner), "a post role tighter than read");
         for (bad, says) in [
             (&br#"{"channels":{"chat":{"read":"viewer","post":"public"}}}"#[..], "channels.chat.post (public) is looser than its read (viewer)"),
@@ -473,6 +523,73 @@ mod tests {
             (br#"{"channels":{"chat":{"post":true}}}"#, "channels.chat.post must be public"),
             (br#"{"channels":{"chat":{"signedIn":true}}}"#, "channels.chat.signedIn is about who may post: give it a post role"),
             (br#"{"channels":{"chat":{"post":"viewer","signedIn":"yes"}}}"#, "channels.chat.signedIn must be true or false"),
+        ] {
+            let why = parse(bad).expect_err(&String::from_utf8_lossy(bad));
+            assert!(why.contains(says), "{why}");
+        }
+    }
+
+    #[test]
+    fn a_channel_may_name_its_posters_kind() {
+        let m = parse(br#"{"channels":{"work":{"read":"viewer","post":"editor","from":"agent"},"asks":{"post":"viewer","from":"person"},"chat":{"post":"viewer"}}}"#).unwrap();
+        assert_eq!(m.channels["work"], ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(IdentityKind::Agent), listed: None }, "its agent members post");
+        assert_eq!(m.channels["asks"].from, Some(IdentityKind::Person), "its person members post");
+        assert_eq!(m.channels["chat"].from, None, "no from: whoever holds the post role");
+        let wire = serde_json::to_value(&m.channels["work"]).unwrap();
+        assert_eq!(wire, serde_json::json!({ "read": "viewer", "post": "editor", "from": "agent" }));
+        assert_eq!(serde_json::from_value::<ChannelDecl>(wire).unwrap(), m.channels["work"], "it reads back");
+        assert!(!serde_json::to_string(&m.channels["chat"]).unwrap().contains("from"), "a channel without from says nothing of it");
+        for (bad, says) in [
+            (&br#"{"channels":{"work":{"post":"editor","from":"robot"}}}"#[..], "channels.work.from is person or agent, not \"robot\""),
+            (br#"{"channels":{"work":{"post":"editor","from":"Agent"}}}"#, "channels.work.from is person or agent"),
+            (br#"{"channels":{"work":{"post":"editor","from":7}}}"#, "channels.work.from must be a string"),
+            (br#"{"channels":{"work":{"post":"editor","from":["agent"]}}}"#, "channels.work.from must be a string"),
+            (br#"{"channels":{"work":{"from":"agent"}}}"#, "channels.work.from is about who may post: give it a post role"),
+            (br#"{"channels":{"work":{"read":"editor","from":"person"}}}"#, "channels.work.from is about who may post"),
+            (br#"{"channels":{"work":{"post":"editor","form":"agent"}}}"#, "unknown key \"form\" (read, post, signedIn, from, listed)"),
+        ] {
+            let why = parse(bad).expect_err(&String::from_utf8_lossy(bad));
+            assert!(why.contains(says), "{why}");
+        }
+    }
+
+    /// A channel may list its records of some kinds on its members' rows
+    /// (`listed`): valid declarations read back whole; every other shape,
+    /// a name that is none, a repeat, or one past a bound is refused at
+    /// deploy, saying which. Method: `parse`, as an install reads it.
+    #[test]
+    fn a_channel_may_list_its_records() {
+        let m = parse(br#"{"channels":{"work":{"post":"editor","from":"agent","listed":{"kinds":["turn.start","turn.end"],"fields":["asks"]}},"wall":{"listed":{"kinds":["mood"]}}}}"#).unwrap();
+        let work = m.channels["work"].listed.as_ref().expect("work lists");
+        assert_eq!((work.kinds.as_slice(), work.fields.as_slice()), (&["turn.start".to_string(), "turn.end".to_string()][..], &["asks".to_string()][..]));
+        assert_eq!(m.channels["wall"].listed, Some(ListedDecl { kinds: vec!["mood".into()], fields: vec![] }), "fields are optional; a listed channel need take no posts");
+        let wire = serde_json::to_value(&m.channels["work"]).unwrap();
+        assert_eq!(wire["listed"], serde_json::json!({ "kinds": ["turn.start", "turn.end"], "fields": ["asks"] }));
+        let most = format!(
+            r#"{{"channels":{{"c":{{"listed":{{"kinds":{},"fields":{}}}}}}}}}"#,
+            serde_json::json!((0..limits::LISTED_KINDS_MAX).map(|i| format!("k{i}")).collect::<Vec<_>>()),
+            serde_json::json!((0..limits::LISTED_FIELDS_MAX).map(|i| format!("f{i}")).collect::<Vec<_>>())
+        );
+        assert!(parse(most.as_bytes()).is_ok(), "as many kinds and fields as the bounds allow");
+        let kinds_over = format!(r#"{{"channels":{{"c":{{"listed":{{"kinds":{}}}}}}}}}"#, serde_json::json!((0..=limits::LISTED_KINDS_MAX).map(|i| format!("k{i}")).collect::<Vec<_>>()));
+        let fields_over = format!(r#"{{"channels":{{"c":{{"listed":{{"kinds":["k"],"fields":{}}}}}}}}}"#, serde_json::json!((0..=limits::LISTED_FIELDS_MAX).map(|i| format!("f{i}")).collect::<Vec<_>>()));
+        let long_kind = format!(r#"{{"channels":{{"c":{{"listed":{{"kinds":["{}"]}}}}}}}}"#, "k".repeat(65));
+        for (bad, says) in [
+            (&br#"{"channels":{"c":{"listed":true}}}"#[..], "channels.c.listed must be an object"),
+            (br#"{"channels":{"c":{"listed":{}}}}"#, "channels.c.listed.kinds names the kinds of record its members' lists show: at least one"),
+            (br#"{"channels":{"c":{"listed":{"kinds":[]}}}}"#, "at least one"),
+            (br#"{"channels":{"c":{"listed":{"kinds":"turn.start"}}}}"#, "channels.c.listed.kinds must be an array of names"),
+            (br#"{"channels":{"c":{"listed":{"kinds":[7]}}}}"#, "channels.c.listed.kinds must be an array of names"),
+            (br#"{"channels":{"c":{"listed":{"kinds":["turn start"]}}}}"#, "channels.c.listed.kinds has \"turn start\", which is no kind"),
+            (br#"{"channels":{"c":{"listed":{"kinds":["a","a"]}}}}"#, "channels.c.listed.kinds names \"a\" twice"),
+            (kinds_over.as_bytes(), "channels.c.listed.kinds names 9: at most 8"),
+            (long_kind.as_bytes(), "which is no kind"),
+            (br#"{"channels":{"c":{"listed":{"kinds":["a"],"fields":["kind"]}}}}"#, "channels.c.listed.fields has \"kind\", which is no field"),
+            (br#"{"channels":{"c":{"listed":{"kinds":["a"],"fields":["a.b"]}}}}"#, "which is no field"),
+            (br#"{"channels":{"c":{"listed":{"kinds":["a"],"fields":["x","x"]}}}}"#, "channels.c.listed.fields names \"x\" twice"),
+            (br#"{"channels":{"c":{"listed":{"kinds":["a"],"fields":{"x":1}}}}}"#, "channels.c.listed.fields must be an array of names"),
+            (fields_over.as_bytes(), "channels.c.listed.fields names 5: at most 4"),
+            (br#"{"channels":{"c":{"listed":{"kinds":["a"],"field":["x"]}}}}"#, "channels.c.listed has an unknown key \"field\" (kinds, fields)"),
         ] {
             let why = parse(bad).expect_err(&String::from_utf8_lossy(bad));
             assert!(why.contains(says), "{why}");

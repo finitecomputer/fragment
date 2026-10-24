@@ -144,10 +144,10 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     };
     // their memberships elsewhere, and someone else's agent in theirs
     let joined = [
-        api.signed(&bob, "PUT", &format!("/api/f/{shared}/members/{paul_id}"), Some(&json!({ "role": "editor" })))?,
-        api.signed(&bob, "PUT", &format!("/api/f/{shared}/members/{agent_id}"), Some(&json!({ "role": "viewer" })))?,
+        api.share(&shared, &paul_id, "editor")?,
+        api.share(&shared, &agent_id, "viewer")?,
         api.signed(&bob, "PUT", &format!("/api/f/{shared}/members/{bob_agent_id}"), Some(&json!({ "role": "viewer" })))?,
-        api.signed(&paul, "PUT", &format!("/api/f/{app_name}/members/{bob_agent_id}"), Some(&json!({ "role": "viewer" })))?,
+        api.share(&app_name, &bob_agent_id, "viewer")?,
     ];
     s.ok("they and their agent are in someone else's fragment, and that one's agent in their app", joined.iter().all(|r| r.status == 200), json!(joined.iter().map(|r| r.status).collect::<Vec<_>>()));
     let ours = [&agent_name, &chat_name, &app_name];
@@ -160,8 +160,9 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     let owned = names(&f["fragments"]);
     let elsewhere = names(&f["memberships"]);
     s.ok(
-        "the dry run names the person, their agent, fragments, memberships elsewhere, keys, sessions, sign-in, picture, computer and ledger",
+        "the dry run names the person, their agent, fragments, memberships elsewhere, keys, sessions, sign-in, picture, computer and ledger, and (locally) their org of one, which ends with them, nothing of it billed",
         d["identity"] == paul_id.as_str()
+            && org.as_ref().is_none_or(|o| f["orgs"].as_array().map(Vec::len) == Some(1) && f["orgs"][0]["org"] == o.as_str() && f["orgs"][0]["ends"] == true && f["orgs"][0]["cancels"] == false)
             && d["state"] == "live"
             && d["done"] == false
             && ours.iter().all(|n| owned.contains(n))
@@ -361,7 +362,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     // ---- the same sign-in again: a new person
     let session = api.sign_in(&email)?;
     let fresh = Keys::generate();
-    let approved = api.approve_link(&session, &api.approval_link(&fresh, 0))?;
+    let approved = api.approve(&session, &fresh)?;
     let me = api.signed(&fresh, "GET", "/api/identities/me", None)?;
     let fresh_id = me.body["id"].as_str().unwrap_or("").to_string();
     s.ok(

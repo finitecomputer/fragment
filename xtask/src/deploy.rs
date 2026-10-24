@@ -1,6 +1,6 @@
-//! `cargo xtask deploy --config <file> [--branch <name>]` and `cargo xtask
-//! teardown --config <file> --branch <name>` (docs/cloudflare-v1.md,
-//! decisions 4 and 20).
+//! `cargo xtask deploy --config <file> [--branch <name>] [--pinned-only]`
+//! and `cargo xtask teardown --config <file> --branch <name>`
+//! (docs/cloudflare-v1.md, decisions 4 and 20).
 //!
 //! A deployment's configuration is a file outside the repo (JSONC, keys as
 //! in `Deployment`), so anyone deploys their own without a fork. Its
@@ -12,7 +12,9 @@
 //! checked-in config (`cell/wrangler.jsonc`) it renders the Worker's own
 //! wrangler config under `target/deploy/<name>/`, the store secrets bound
 //! by name (`secrets_store_secrets`), makes the bucket and queues it
-//! names, and runs `wrangler deploy`. Only a branch's
+//! names, and runs `wrangler deploy` (up to three times, again only when it
+//! fails in a way it is safe to answer by running it again: `retryable`).
+//! Only a branch's
 //! test secret is still a Worker secret, uploaded from a file of mode 600
 //! that is removed after.
 //!
@@ -30,10 +32,11 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use fragment_devstack as devstack;
@@ -117,8 +120,9 @@ struct Deployment {
     /// the store.
     #[serde(default)]
     providers: Vec<Value>,
-    /// The price book's version: raise it with every change to a key's
-    /// price, or ledgers made before keep the book they have.
+    /// The price book's version, informational (a ledger's status shows
+    /// it): a ledger takes a key's price added or changed at its next call,
+    /// whatever the version (#451).
     price_book_version: Option<u32>,
     /// A branch deployment's test levers (`FRAGMENT_TEST_SECRET`, docs/secrets.md):
     /// the file of a secret of 32 bytes or more, with which the hosted e2e
@@ -182,30 +186,36 @@ struct Pinned {
 }
 
 /// The registry wrangler pushes a deployment's images to.
-const REGISTRY: &str = "registry.cloudflare.com";
+pub(crate) const REGISTRY: &str = "registry.cloudflare.com";
 
 /// Whether `reference` is an image pinned by digest in `account`'s
 /// registry: `registry.cloudflare.com/<account>/<repository>@sha256:` and 64
-/// lowercase hex digits, its repository's components lowercase letters and
-/// digits joined by `.`, `_` or `-` (what wrangler takes). Another
+/// lowercase hex digits, its repository `repository_ok`. Another
 /// account's image (a preview's, at a production deploy) is refused here:
 /// the account deployed to could not run it.
-fn pinned_ok(reference: &str, account: &str) -> bool {
+pub(crate) fn pinned_ok(reference: &str, account: &str) -> bool {
     let Some((repository, hex)) = reference.strip_prefix(REGISTRY).and_then(|r| r.strip_prefix('/')).and_then(|r| r.strip_prefix(account)).and_then(|r| r.strip_prefix('/')).and_then(|r| r.split_once("@sha256:")) else {
         return false;
     };
+    !account.is_empty() && repository_ok(repository) && hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Whether `repository` is one in a registry's account: components of
+/// lowercase letters and digits joined by `.`, `_` or `-`, separated by
+/// `/` (what wrangler takes).
+pub(crate) fn repository_ok(repository: &str) -> bool {
     let component = |c: &str| {
         let alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
         !c.is_empty() && c.bytes().all(|b| alnum(b) || b"._-".contains(&b)) && c.bytes().next().is_some_and(alnum) && c.bytes().last().is_some_and(alnum)
     };
-    !account.is_empty() && repository.split('/').all(component) && hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    repository.split('/').all(component)
 }
 
-/// The deployment's catalog, and the store secret each operator key's
-/// value is in: a row's `key` is the deploy's (it binds it), the rest the
-/// cell's (`FRAGMENT_PROVIDERS`). An operator key names one; no other row
-/// may.
-fn catalog_of(d: &Deployment) -> Result<(fragment_core::catalog::Catalog, Vec<(String, String)>)> {
+/// The deployment's catalog and provider secret names. An operator row's
+/// `key` is its API key; a connection with connection_oauth names its OAuth
+/// client secret. Values never enter FRAGMENT_PROVIDERS.
+type ProviderKeys = Vec<(String, String)>;
+fn catalog_of(d: &Deployment) -> Result<(fragment_core::catalog::Catalog, ProviderKeys)> {
     let mut rows = vec![];
     let mut keys = vec![];
     for row in &d.providers {
@@ -214,6 +224,8 @@ fn catalog_of(d: &Deployment) -> Result<(fragment_core::catalog::Catalog, Vec<(S
         let key = row.as_object_mut().and_then(|o| o.remove("key"));
         match (row["kind"].as_str(), key) {
             (Some("operator"), Some(Value::String(k))) => keys.push((name.clone(), k)),
+            (Some("connection"), Some(Value::String(k))) if row.get("connection_oauth").is_some_and(|o| !o.is_null()) => keys.push((name.clone(), k)),
+            (Some("connection"), None) if row.get("connection_oauth").is_some_and(|o| !o.is_null()) => bail!("providers: connection {name} names its OAuth client secret in key (its store name)"),
             (Some("operator"), _) => bail!("providers: the operator key {name} names its key (its secret's name in the store)"),
             (_, Some(_)) => bail!("providers: {name} is no operator key, so it names no key"),
             (_, None) => {}
@@ -226,15 +238,22 @@ fn catalog_of(d: &Deployment) -> Result<(fragment_core::catalog::Catalog, Vec<(S
 
 /// Each slot of the model route on an OpenAI-compatible API, and its key's
 /// name in the store.
-type SlotKeys = Vec<(String, String)>;
+pub(crate) type SlotKeys = Vec<(String, String)>;
 
-/// The deployment's models (`models`): the cell's (`FRAGMENT_MODELS`, each
+/// The deployment's models (`models`, `models_cell`), when it names them.
+fn models_of(d: &Deployment) -> Result<(Option<Value>, SlotKeys)> {
+    let Some(models) = &d.models else { return Ok((None, vec![])) };
+    let (cell, keys) = models_cell(models)?;
+    Ok((Some(cell), keys))
+}
+
+/// A deployment config's `models`: the cell's (`FRAGMENT_MODELS`, each
 /// slot's upstream less its key) and the store secret each slot on an
 /// OpenAI-compatible API names for its key. Such a slot names one; a
 /// Workers AI slot names none. Checked as the cell checks them
-/// (`fragment_core::models::Models::parse`), on no local address.
-fn models_of(d: &Deployment) -> Result<(Option<Value>, SlotKeys)> {
-    let Some(models) = &d.models else { return Ok((None, vec![])) };
+/// (`fragment_core::models::Models::parse`), on no local address. `cargo
+/// xtask dev --real-agent` reads one too (dev_agent.rs).
+pub(crate) fn models_cell(models: &Value) -> Result<(Value, SlotKeys)> {
     let Some(slots) = models.as_object() else { bail!("models is an object: the slots it names ({}), each where it runs", fragment_core::models::SLOTS.join(", ")) };
     let mut cell = serde_json::Map::new();
     let mut keys = vec![];
@@ -260,7 +279,7 @@ fn models_of(d: &Deployment) -> Result<(Option<Value>, SlotKeys)> {
     if text.len() > WORKER_VAR_MAX_BYTES {
         bail!("models is {} bytes as the cell's FRAGMENT_MODELS, past a Workers variable's {WORKER_VAR_MAX_BYTES}: shorten the slots' bodies", text.len());
     }
-    Ok((Some(cell), keys))
+    Ok((cell, keys))
 }
 
 /// A Workers variable's largest value: 5 KB (developers.cloudflare.com/
@@ -329,7 +348,8 @@ fn bound(d: &Deployment) -> Result<devstack::store::Bound> {
 /// `bound`, for a deploy of `branch` (one that makes its endpoint binds no
 /// store secret for it).
 fn bound_for(d: &Deployment, branch: Option<&str>) -> Result<devstack::store::Bound> {
-    let (_, operator_keys) = catalog_of(d)?;
+    let (catalog, provider_keys) = catalog_of(d)?;
+    let (operator_keys, connection_secrets) = provider_keys.into_iter().partition(|(name, _)| catalog.get(name).is_some_and(|p| p.kind == fragment_core::catalog::Kind::Operator));
     let (_, model_keys) = models_of(d)?;
     Ok(devstack::store::Bound {
         host_secret: d.host_secret.clone(),
@@ -338,6 +358,7 @@ fn bound_for(d: &Deployment, branch: Option<&str>) -> Result<devstack::store::Bo
         workos: Some((d.workos.client_id.clone(), d.workos.api_key.clone())),
         stripe: d.stripe.as_ref().map(|s| (s.key.clone(), (!makes_endpoint(d, branch)).then(|| s.webhook_secret.clone()))),
         operator_keys,
+        connection_secrets,
         model_keys,
     })
 }
@@ -369,6 +390,9 @@ fn named_secrets(b: &devstack::store::Bound) -> Vec<(String, &str)> {
     }
     for (provider, name) in &b.operator_keys {
         named.push((format!("providers: {provider}'s key"), name.as_str()));
+    }
+    for (provider, name) in &b.connection_secrets {
+        named.push((format!("providers: {provider}'s OAuth client secret"), name.as_str()));
     }
     named
 }
@@ -606,22 +630,50 @@ fn checked(d: Deployment) -> Result<Deployment> {
     Ok(d)
 }
 
-fn args(rest: &[String]) -> Result<(PathBuf, Option<String>)> {
-    let usage = || anyhow::anyhow!("usage: cargo xtask deploy|teardown --config <file> [--branch <name>]");
-    let (mut config, mut branch) = (None, None);
+/// A deploy's or a teardown's arguments.
+struct Args {
+    config: PathBuf,
+    branch: Option<String>,
+    /// A deploy's `--pinned-only` (`pinned_only`).
+    pinned_only: bool,
+}
+
+fn args(rest: &[String]) -> Result<Args> {
+    let usage = || anyhow::anyhow!("usage: cargo xtask deploy --config <file> [--branch <name>] [--pinned-only] | teardown --config <file> --branch <name>");
+    let (mut config, mut branch, mut pinned_only) = (None, None, false);
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--config" => config = Some(PathBuf::from(it.next().ok_or_else(usage)?)),
             "--branch" => branch = Some(it.next().ok_or_else(usage)?.clone()),
+            "--pinned-only" => pinned_only = true,
             _ => return Err(usage()),
         }
     }
-    Ok((config.ok_or_else(usage)?, branch))
+    Ok(Args { config: config.ok_or_else(usage)?, branch, pinned_only })
+}
+
+/// `--pinned-only`, CI's deploy (.github/workflows/ci.yml): every computer
+/// image the config names is kept at its digest, so the deploy builds none.
+/// A runner keeps no layer cache: a build there stamps every layer anew,
+/// pushes the whole base (gigabytes) and makes a new digest at every
+/// deploy, which tells each computer pinned to it that an update is ready
+/// (docs/computers.md, "What changes a version"). An image built from the
+/// tree is refused, by name, before anything is read, built or made.
+fn pinned_only(d: &Deployment) -> Result<()> {
+    let built: Vec<&str> = d.computers.iter().flat_map(|c| &c.images).filter(|(_, i)| matches!(i, Image::Built(_))).map(|(name, _)| name.as_str()).collect();
+    if !built.is_empty() {
+        bail!(
+            "--pinned-only builds no image, and this config builds {} from the tree: pin each at a digest this account's registry holds ({REGISTRY}/{}/<repository>@sha256:<64 hex>; docs/computers.md, \"Stable and canary\"), or deploy it without --pinned-only where Docker runs",
+            built.join(", "),
+            d.account_id
+        );
+    }
+    Ok(())
 }
 
 /// wrangler on the pinned Node (`devstack::Tools::wrangler`), for `account`.
-fn wrangler(tools: &devstack::Tools, account: &str) -> Result<Command> {
+pub(crate) fn wrangler(tools: &devstack::Tools, account: &str) -> Result<Command> {
     let mut c = tools.wrangler()?;
     c.env("CLOUDFLARE_ACCOUNT_ID", account).current_dir(devstack::repo_root());
     Ok(c)
@@ -638,12 +690,180 @@ fn ensure(cmd: &mut Command, what: &str) -> Result<()> {
     bail!("{what}: {}", text.trim())
 }
 
-fn git_head() -> Result<String> {
+/// How many times a deploy runs `wrangler deploy` at most: again only after
+/// a failure `retryable` names (the hand deploys' loop was three tries too).
+const DEPLOY_TRIES: u32 = 3;
+/// The pause before each try after the first.
+const DEPLOY_PAUSE: Duration = Duration::from_secs(10);
+/// How much of each of a try's streams is kept to classify its failure:
+/// the end, where wrangler says what failed (an image's build before it
+/// prints a lot).
+const DEPLOY_KEPT_BYTES: usize = 1 << 20;
+
+/// wrangler's message (4.145.0, `wrangler-dist/cli.js`) when the Worker's
+/// version is deployed but its Durable Object-managed Container application
+/// settings are not, and the rest of the deploy (its routes, its crons) is
+/// not done: it says to re-run the same `wrangler deploy` to finish.
+const CONTAINER_APPLY: &str = "Wrangler could not finish applying its Durable Object-managed Container application settings";
+/// Docker's, when an image's push waits too long for the registry's answer
+/// (the hand deploys' 4 GB layer did): pushed again, the layers the
+/// registry has are skipped. Only a deploy that builds an image pushes one.
+const PUSH_TIMEOUT: &str = "timeout awaiting response headers";
+
+/// A failed `wrangler deploy` that is safe to answer by running it again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Retryable {
+    ContainerApply,
+    PushTimeout,
+}
+
+impl Retryable {
+    fn what(self) -> &'static str {
+        match self {
+            Retryable::ContainerApply => "its Container application settings were not applied, which wrangler says to answer by running it again",
+            Retryable::PushTimeout => "an image's push to the registry timed out awaiting its answer",
+        }
+    }
+}
+
+/// Whether a failed `wrangler deploy` that printed `output` is `Retryable`:
+/// wrangler's container-settings message (its words, however its colours
+/// and line breaks fall), or Docker's push timeout on a line that names the
+/// registry. Nothing else is: not a config wrangler refuses, not auth, not
+/// a deploy Cloudflare refuses, not an image that does not build.
+fn retryable(output: &str) -> Option<Retryable> {
+    let plain = without_ansi(output);
+    if plain.split_whitespace().collect::<Vec<_>>().join(" ").contains(CONTAINER_APPLY) {
+        return Some(Retryable::ContainerApply);
+    }
+    if plain.lines().any(|l| l.contains(PUSH_TIMEOUT) && l.contains(&format!("https://{REGISTRY}/"))) {
+        return Some(Retryable::PushTimeout);
+    }
+    None
+}
+
+/// `text` without its terminal escapes (wrangler colours its errors where
+/// it thinks a terminal, or CI, shows them).
+fn without_ansi(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            plain.push(c);
+            continue;
+        }
+        // a CSI sequence (`ESC [`, parameters, one final byte in @..~),
+        // else a two-character one
+        if chars.next() == Some('[') {
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        }
+    }
+    plain
+}
+
+/// Runs `wrangler deploy` (`cmd`) until it succeeds, a failure is not
+/// `retryable`, or it has failed DEPLOY_TRIES times, each try's output
+/// passed through as it comes and each failure said.
+fn deploy_with_retries(cmd: &mut Command) -> Result<()> {
+    let shown = crate::shown(cmd);
+    with_retries(&shown, DEPLOY_PAUSE, || run_teed(cmd).with_context(|| format!("could not start {shown}")))
+}
+
+/// `deploy_with_retries`' loop, `attempt` one try (its status and what it
+/// printed).
+fn with_retries(shown: &str, pause: Duration, mut attempt: impl FnMut() -> Result<(ExitStatus, String)>) -> Result<()> {
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        let (status, output) = attempt()?;
+        if status.success() {
+            return Ok(());
+        }
+        match retryable(&output) {
+            None => bail!("{shown} failed: {status}"),
+            Some(r) if tries >= DEPLOY_TRIES => bail!("{shown} failed {tries} times, the last {status}: {}", r.what()),
+            Some(r) => {
+                eprintln!("deploy: wrangler deploy failed ({status}, try {tries} of {DEPLOY_TRIES}): {}; running it again in {}s", r.what(), pause.as_secs());
+                std::thread::sleep(pause);
+            }
+        }
+    }
+}
+
+/// Runs `cmd` (no stdin) to its end, its output passed through to this
+/// process's as it comes, and returns its status and the last
+/// DEPLOY_KEPT_BYTES of each of its streams.
+fn run_teed(cmd: &mut Command) -> std::io::Result<(ExitStatus, String)> {
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let (out, err) = (child.stdout.take().expect("stdout is piped"), child.stderr.take().expect("stderr is piped"));
+    let out = std::thread::spawn(move || tee(out, std::io::stdout()));
+    let err = std::thread::spawn(move || tee(err, std::io::stderr()));
+    let status = child.wait()?;
+    let mut kept = out.join().expect("the stdout tee does not panic")?;
+    kept.extend(err.join().expect("the stderr tee does not panic")?);
+    Ok((status, String::from_utf8_lossy(&kept).into_owned()))
+}
+
+/// Copies `from` to `to` to its end, keeping the last DEPLOY_KEPT_BYTES
+/// (to twice that, between trims). A write that fails is dropped, never
+/// the read: the child must never block on a pipe no one drains.
+fn tee(mut from: impl Read, mut to: impl Write) -> std::io::Result<Vec<u8>> {
+    let (mut kept, mut buf) = (Vec::new(), [0u8; 8192]);
+    loop {
+        let n = match from.read(&mut buf) {
+            Ok(0) => return Ok(kept),
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        let _ = to.write_all(&buf[..n]).and_then(|()| to.flush());
+        kept.extend_from_slice(&buf[..n]);
+        if kept.len() > 2 * DEPLOY_KEPT_BYTES {
+            kept.drain(..kept.len() - DEPLOY_KEPT_BYTES);
+        }
+    }
+}
+
+/// The release a deploy makes: its id and when it was made.
+struct Release {
+    /// `FRAGMENT_DEPLOY_ID`: its commit, which is also its release, the one
+    /// id every call between its Worker and its objects carries
+    /// (fragment_core::release). A tree with changes not committed is
+    /// marked with the deploy's second as well, so two such deploys of one
+    /// commit are two releases, never one whose calls the other admits.
+    id: String,
+    /// `FRAGMENT_DEPLOYED_AT`: the deploy's second, which every such call
+    /// carries too, so an object of the release before, refusing it,
+    /// restarts onto this one (fragment_core::release `restarts`). A later
+    /// deploy is a later second, a rollback's included.
+    deployed_at: u64,
+}
+
+/// This deploy's release, from the tree's commit and the clock.
+fn this_release() -> Result<Release> {
     let out = Command::new("git").args(["rev-parse", "--short=12", "HEAD"]).current_dir(devstack::repo_root()).output()?;
     anyhow::ensure!(out.status.success(), "git rev-parse HEAD");
     let dirty = Command::new("git").args(["status", "--porcelain"]).current_dir(devstack::repo_root()).output()?;
     let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    Ok(if dirty.stdout.is_empty() { sha } else { format!("{sha}-dirty") })
+    let at_s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    let id = deploy_id(&sha, !dirty.stdout.is_empty(), at_s);
+    anyhow::ensure!(fragment_core::release::valid(&id), "the deploy's id {id:?} is a release's (fragment_core::release::valid)");
+    anyhow::ensure!(fragment_core::release::deployed(&at_s.to_string()) == Some(at_s), "the deploy's second {at_s} is a deploy time (fragment_core::release::deployed)");
+    Ok(Release { id, deployed_at: at_s })
+}
+
+/// A deploy's id from its commit, whether its tree has changes not
+/// committed, and when it is made (seconds): `<sha>`, or `<sha>-dirty-<s>`.
+fn deploy_id(sha: &str, dirty: bool, at_s: u64) -> String {
+    if dirty {
+        format!("{sha}-dirty-{at_s}")
+    } else {
+        sha.to_string()
+    }
 }
 
 /// A file only its owner reads, removed when dropped.
@@ -723,8 +943,11 @@ pub fn stripe(rest: &[String]) -> Result<()> {
 }
 
 pub fn deploy(rest: &[String]) -> Result<()> {
-    let (config, branch) = args(rest)?;
+    let Args { config, branch, pinned_only: pinned } = args(rest)?;
     let d = load(&config)?;
+    if pinned {
+        pinned_only(&d)?;
+    }
     let n = names(&d, branch.as_deref())?;
     // the two local files are read before anything is built or made
     let dns_token = d.dns_token_file.as_deref().map(read_secret).transpose()?;
@@ -739,10 +962,11 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     let store = preflight(&tools, &d, &config, &bound)?;
     println!("secrets: the {} the config names are in the account's Secrets Store {} ({})", named_secrets(&bound).len(), store.name, store.id);
     crate::build()?;
-    let deploy_id = git_head()?;
+    let release = this_release()?;
+    let deploy_id = &release.id;
     let dir = devstack::repo_root().join("target/deploy").join(&n.cell);
     fs::create_dir_all(&dir)?;
-    let cell = worker_config(&d, &n, &store.id, &deploy_id, &devstack::repo_root())?;
+    let cell = worker_config(&d, &n, &store.id, &release, &devstack::repo_root())?;
     let cell_config = dir.join("cell.json");
     fs::write(&cell_config, serde_json::to_string_pretty(&cell)?)?;
     let platform_url = format!("https://{}", n.platform_host);
@@ -789,7 +1013,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         }
         true => None,
     };
-    crate::run(&mut deploy_cell)?;
+    deploy_with_retries(&mut deploy_cell)?;
     drop(test_secrets);
     println!("deployed {deploy_id}:");
     println!("  the platform  {platform_url}/  (sign-in redirect: {platform_url}/auth/callback)");
@@ -804,7 +1028,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
 /// The platform Worker's config, rendered from the deployment's and the
 /// checked-in one (`root`'s `cell/`), its store secrets bound by name in
 /// the store `store_id`. No value of a secret is in it.
-fn worker_config(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, root: &Path) -> Result<Value> {
+fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, root: &Path) -> Result<Value> {
     let bound = bound_for(d, n.label_suffix.as_deref())?;
     let (catalog, _) = catalog_of(d)?;
     let platform_url = format!("https://{}", n.platform_host);
@@ -864,7 +1088,8 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, roo
         }
     }
     let mut vars = json!({
-        "FRAGMENT_DEPLOY_ID": deploy_id,
+        "FRAGMENT_DEPLOY_ID": release.id,
+        "FRAGMENT_DEPLOYED_AT": release.deployed_at.to_string(),
         "FRAGMENT_HOST_SUFFIX": n.suffix,
         "FRAGMENT_PLATFORM_URL": platform_url,
         "CODESTORAGE_ORG": d.codestorage.org,
@@ -998,7 +1223,8 @@ pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
 /// the deployment's own blob grace and left: R2 refuses to delete a bucket
 /// with objects in it. Irreversible: ask before running it.
 pub fn teardown(rest: &[String]) -> Result<()> {
-    let (config, branch) = args(rest)?;
+    let Args { config, branch, pinned_only } = args(rest)?;
+    anyhow::ensure!(!pinned_only, "--pinned-only is a deploy's: a teardown builds nothing");
     let d = load(&config)?;
     anyhow::ensure!(branch.is_some(), "teardown removes a branch deployment: name its --branch");
     let n = names(&d, branch.as_deref())?;
@@ -1021,6 +1247,130 @@ pub fn teardown(rest: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    /// CD's preview deploy's failure (master run 39495348843), as wrangler
+    /// printed it there, colours and all.
+    const CONTAINER_APPLY_CI: &str = "Uploaded fragment-preview (6.41 sec)\n\n\x1b[31m✘ \x1b[41;31m[\x1b[41;97mERROR\x1b[41;31m]\x1b[0m \x1b[1mThe Worker version was deployed, but Wrangler could not finish applying its Durable Object-managed Container application settings. Re-run the same `wrangler deploy` command to retry and finish deployment.\x1b[0m\n\n\n🪵  Logs were written to \"/home/runner/.config/.wrangler/logs/wrangler-2026-10-20_21-14-56_155.log\"\n";
+    /// A hand deploy's image push that timed out (2026-10-07).
+    const PUSH_TIMEOUT_HAND: &str = "edd7ace4: Pushing [=====>    ] 1.2GB/4.1GB\nfailed to do request: Put \"https://registry.cloudflare.com/v2/acct/fragment-claude-smoke-computer-hermes/blobs/uploads/edd7ace4-5361-459f-9b4d-c51822ce7ada?digest=sha256%3A964fade076b4f7bfb29f8230df8d4fe482bf097ede709a00fff82a55c78391f8\": net/http: timeout awaiting response headers\n\n✘ [ERROR] Docker command exited with code: 1\n";
+
+    /// Only what wrangler or the registry says a re-run answers is run
+    /// again: the container settings not applied (in CI's colours, or
+    /// plain and wrapped as a terminal wraps it) and the registry's push
+    /// timeout. A config wrangler refuses, auth, a deploy Cloudflare
+    /// refuses, an image that does not build or a push the registry
+    /// refuses, and a timeout from any host but the registry are not.
+    #[test]
+    fn a_deploy_is_run_again_only_for_a_failure_a_rerun_answers() {
+        assert_eq!(retryable(CONTAINER_APPLY_CI), Some(Retryable::ContainerApply));
+        let wrapped = "✘ [ERROR] The Worker version was deployed, but Wrangler could not finish\n  applying its Durable Object-managed Container application settings.\n  Re-run the same `wrangler deploy` command to retry and finish deployment.\n";
+        assert_eq!(retryable(wrapped), Some(Retryable::ContainerApply));
+        assert_eq!(retryable(PUSH_TIMEOUT_HAND), Some(Retryable::PushTimeout));
+        assert_eq!(retryable(&format!("\x1b[2m{PUSH_TIMEOUT_HAND}\x1b[0m")), Some(Retryable::PushTimeout));
+        for (what, output) in [
+            ("a config wrangler refuses", "✘ [ERROR] Processing target/deploy/fragment-preview/cell.json configuration:\n\n    - \"containers[0]\" should have a string \"image\" field.\n"),
+            ("auth", "✘ [ERROR] A request to the Cloudflare API (/accounts/acct/workers/scripts/fragment-preview) failed.\n\n  Authentication error [code: 10000]\n"),
+            ("a deploy Cloudflare refuses", "✘ [ERROR] A request to the Cloudflare API (/accounts/acct/workers/scripts/fragment-preview/versions) failed.\n\n  Your Worker exceeded the size limit of 10 MiB. [code: 10027]\n"),
+            ("a container application Cloudflare refuses", "✘ [ERROR] Error creating application due to a misconfiguration:\n  the Container application settings are invalid: instance_type standard-9 does not exist\n"),
+            ("an image that does not build", "ERROR: failed to solve: process \"/bin/sh -c cargo build --release\" did not complete successfully: exit code: 101\n✘ [ERROR] Docker command exited with code: 1\n"),
+            ("a push the registry refuses", "unauthorized: authentication required: https://registry.cloudflare.com/v2/acct/fragment-computer-hermes/blobs/uploads/\n✘ [ERROR] Docker command exited with code: 1\n"),
+            ("a base image's pull timing out", "failed to do request: Head \"https://registry-1.docker.io/v2/library/debian/manifests/bookworm\": net/http: timeout awaiting response headers\n✘ [ERROR] Docker command exited with code: 1\n"),
+            ("nothing said", ""),
+        ] {
+            assert_eq!(retryable(output), None, "{what} is not run again");
+        }
+        assert_eq!(without_ansi("\x1b[41;97mERROR\x1b[0m \x1b7ok\x1b[1m"), "ERROR ok");
+    }
+
+    fn exited(code: i32) -> ExitStatus {
+        ExitStatus::from_raw(code << 8)
+    }
+
+    /// A deploy is run again after each failure a re-run answers, up to
+    /// three tries, and never after another: the first such failure ends
+    /// it, as does one that cannot start.
+    #[test]
+    fn a_deploy_tries_three_times_at_most_and_only_again_for_a_rerun() {
+        let tries = |script: Vec<(i32, &'static str)>| {
+            let mut script = script.into_iter();
+            let mut n = 0;
+            let r = with_retries("wrangler deploy", Duration::ZERO, || {
+                n += 1;
+                let (code, output) = script.next().expect("the script has a try for each");
+                Ok((exited(code), output.to_string()))
+            });
+            (n, r.map_err(|e| e.to_string()))
+        };
+        assert_eq!(tries(vec![(0, "")]), (1, Ok(())));
+        assert_eq!(tries(vec![(1, CONTAINER_APPLY_CI), (0, "")]), (2, Ok(())));
+        assert_eq!(tries(vec![(1, PUSH_TIMEOUT_HAND), (1, CONTAINER_APPLY_CI), (0, "")]), (3, Ok(())));
+        let (n, r) = tries(vec![(1, CONTAINER_APPLY_CI); 3]);
+        assert_eq!(n, 3, "three tries at most");
+        assert!(r.as_ref().is_err_and(|e| e.contains("failed 3 times") && e.contains("Container application settings")), "{r:?}");
+        let (n, r) = tries(vec![(1, "✘ [ERROR] Authentication error [code: 10000]")]);
+        assert_eq!((n, r), (1, Err("wrangler deploy failed: exit status: 1".into())), "another failure is not run again");
+        let (n, r) = tries(vec![(1, CONTAINER_APPLY_CI), (1, "✘ [ERROR] Authentication error [code: 10000]")]);
+        assert_eq!((n, r.is_err()), (2, true), "a retry's other failure ends it");
+        let mut n = 0;
+        let r = with_retries("wrangler deploy", Duration::ZERO, || {
+            n += 1;
+            bail!("could not start wrangler deploy")
+        });
+        assert!(r.is_err() && n == 1, "a try that cannot start is not run again");
+    }
+
+    /// A try's output is passed through whole, and only its end is kept
+    /// to classify it, at most twice DEPLOY_KEPT_BYTES.
+    #[test]
+    fn a_tries_output_passes_through_and_its_end_is_kept() {
+        let input: Vec<u8> = (0..3 * DEPLOY_KEPT_BYTES + 12_345).map(|i| (i % 251) as u8).collect();
+        let mut shown = Vec::new();
+        let kept = tee(std::io::Cursor::new(&input), &mut shown).expect("a tee of memory");
+        assert_eq!(shown, input, "everything is passed through");
+        assert!(kept.len() >= DEPLOY_KEPT_BYTES && kept.len() <= 2 * DEPLOY_KEPT_BYTES, "{} kept", kept.len());
+        assert!(input.ends_with(&kept), "the end is kept");
+        let mut shown = Vec::new();
+        assert_eq!(tee(CONTAINER_APPLY_CI.as_bytes(), &mut shown).expect("a tee of memory"), CONTAINER_APPLY_CI.as_bytes());
+        // a child's two streams are both kept, as wrangler's error is on
+        // stderr and Docker's push on either
+        let (status, output) = run_teed(Command::new("/bin/sh").args(["-c", "echo pushed; echo \"$0\" >&2; exit 1", CONTAINER_APPLY])).expect("run /bin/sh");
+        assert_eq!(status.code(), Some(1));
+        assert_eq!(output, format!("pushed\n{CONTAINER_APPLY}\n"));
+        assert_eq!(retryable(&output), Some(Retryable::ContainerApply));
+    }
+
+    /// A deploy's id is its commit, which `/healthz` answers and CD checks;
+    /// an uncommitted tree's is that deploy's alone, so two of one commit
+    /// are two releases. Both are releases' ids.
+    #[test]
+    fn a_deploy_id_names_one_release() {
+        assert_eq!(deploy_id("bc8b87e7a1b2", false, 1_760_918_400), "bc8b87e7a1b2");
+        assert_eq!(deploy_id("bc8b87e7a1b2", false, 1), deploy_id("bc8b87e7a1b2", false, 2), "a commit deployed again is one release");
+        let (a, b) = (deploy_id("bc8b87e7a1b2", true, 1_760_918_400), deploy_id("bc8b87e7a1b2", true, 1_760_918_401));
+        assert_eq!(a, "bc8b87e7a1b2-dirty-1760918400");
+        assert_ne!(a, b, "two uncommitted trees of one commit are two releases");
+        assert!(fragment_core::release::valid(&a) && fragment_core::release::valid(&deploy_id(&"f".repeat(12), true, u64::MAX)));
+    }
+
+    /// The release the rendering tests deploy.
+    fn test_release() -> Release {
+        Release { id: "abc123".into(), deployed_at: 1_792_615_843 }
+    }
+
+    /// The Worker's variables name the release and when it was deployed,
+    /// as the cell reads them (config.rs): what an object of the release
+    /// before restarts onto (fragment_core::release `restarts`).
+    #[test]
+    fn a_deploy_names_its_release_and_its_second() {
+        let n = names(&deployment(None, None), Some("dev")).unwrap();
+        let vars = worker_config(&deployment(None, None), &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"].clone();
+        assert_eq!(vars["FRAGMENT_DEPLOY_ID"], "abc123");
+        assert_eq!(vars["FRAGMENT_DEPLOYED_AT"], "1792615843", "a Worker variable is a string");
+        assert_eq!(vars["FRAGMENT_DEPLOYED_AT"].as_str().and_then(fragment_core::release::deployed), Some(1_792_615_843));
+        let release = this_release().unwrap();
+        assert!(fragment_core::release::valid(&release.id) && release.deployed_at > 1_792_615_843, "this tree's, made now");
+    }
 
     /// A branch config (on the zone finite.place) with neither host, else a
     /// deployment of its own's (no zone).
@@ -1056,6 +1406,26 @@ mod tests {
         let path = dir.join("deploy.jsonc");
         fs::write(&path, body.to_string()).unwrap();
         path
+    }
+
+    #[test]
+    fn a_connection_binds_its_client_secret_without_exposing_it_in_the_catalog() {
+        let mut d = deployment(Some("fragment.club"), Some("fragment.boats"));
+        d.providers.push(serde_json::json!({
+            "name": "google", "kind": "connection", "hosts": ["www.googleapis.com"],
+            "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"],
+            "connection_oauth": { "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent", "exchange": "https://oauth2.googleapis.com/token", "client_id": "mock-client", "scopes": ["scope"] },
+            "key": "fragment-google-oauth-secret"
+        }));
+        let (catalog, _) = catalog_of(&d).unwrap();
+        assert!(!serde_json::to_string(catalog.providers()).unwrap().contains("fragment-google-oauth-secret"));
+        let bound = bound_for(&d, None).unwrap();
+        assert!(bound.operator_keys.is_empty());
+        assert!(bound.cell().contains(&("CONNECTION_SECRET_GOOGLE".into(), "fragment-google-oauth-secret")));
+        d.providers[0].as_object_mut().unwrap().remove("key");
+        assert!(catalog_of(&d).is_err(), "configured OAuth needs its secret binding");
+        d.providers[0].as_object_mut().unwrap().remove("connection_oauth");
+        assert!(catalog_of(&d).is_ok(), "a disabled connection can still read its existing state");
     }
 
     /// The test levers are a preview's: a deployment of its own (production)
@@ -1160,7 +1530,7 @@ mod tests {
 
         assert_eq!(n.platform_host, "dev.finite.place");
         // both routes in the one zone, as the Worker's config renders them
-        let cell = worker_config(&deployment(None, None), &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap();
+        let cell = worker_config(&deployment(None, None), &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
         assert_eq!(cell["routes"], json!([{ "pattern": "dev.finite.place/*", "zone_name": "finite.place" }, { "pattern": "*--dev.finite.place/*", "zone_name": "finite.place" }]));
         // one wildcard in the zone covers the platform and every fragment
         assert_eq!(n.dns, [crate::dns::Wanted { zone: "finite.place".into(), name: "*.finite.place".into() }]);
@@ -1183,7 +1553,7 @@ mod tests {
         let d = deployment(Some("finite.chat"), Some("finite.place"));
         let n = names(&d, None).unwrap();
         assert_eq!((n.platform_host.as_str(), n.suffix.as_str()), ("finite.chat", "finite.place"));
-        let cell = worker_config(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap();
+        let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
         assert_eq!(cell["routes"], json!([{ "pattern": "finite.chat/*", "zone_name": "finite.chat" }, { "pattern": "*.finite.place/*", "zone_name": "finite.place" }]));
         assert_eq!((cell["vars"]["FRAGMENT_PLATFORM_URL"].as_str(), cell["vars"]["FRAGMENT_HOST_SUFFIX"].as_str()), (Some("https://finite.chat"), Some("finite.place")));
         assert!(cell["vars"].get("FRAGMENT_HOST_LABEL_SUFFIX").is_none() && cell["vars"].get("CODESTORAGE_REPO_PREFIX").is_none());
@@ -1238,6 +1608,32 @@ mod tests {
             let conventional = devstack::store::Bound::conventional(true, false, &["x", "firecrawl", "fal", "browser-use", "perplexity", "google-places", "xai", "elevenlabs"], slots);
             assert_eq!(bound(&d).unwrap(), conventional, "{file}: the names dev and the e2e bind");
         }
+    }
+
+    /// A provider's note: the example's (its google row's, commented out)
+    /// loads once uncommented and is kept as written; one over its 280
+    /// characters is refused at load, naming its row.
+    #[test]
+    fn a_provider_note_loads_and_an_over_long_one_is_refused() {
+        let path = devstack::repo_root().join("deploy/example.jsonc");
+        let example = fs::read_to_string(&path).unwrap();
+        let commented = example.lines().find(|l| l.trim_start().starts_with("// \"note\":")).expect("the example's google row has a commented note");
+        let field: Value = serde_json::from_str(&format!("{{{}}}", commented.trim_start().trim_start_matches("// ").trim_end_matches(','))).unwrap();
+        let note = field["note"].as_str().unwrap();
+        let dir = devstack::repo_root().join("target/xtask-tests/provider-note");
+        fs::create_dir_all(&dir).unwrap();
+        let with = |note: &str| {
+            let file = dir.join("deploy.jsonc");
+            fs::write(&file,example.replacen(commented, &format!("\"note\": {},", serde_json::to_string(note).unwrap()), 1)).unwrap();
+            load(&file)
+        };
+        let d = with(note).unwrap();
+        let (catalog, _) = catalog_of(&d).unwrap();
+        assert_eq!(catalog.get("google").unwrap().note.as_deref(), Some(note));
+        assert!(catalog.providers().iter().filter(|p| p.name != "google").all(|p| p.note.is_none()), "the other rows have none");
+        let over = "a".repeat(fragment_core::catalog::NOTE_MAX_CHARS + 1);
+        let refused = with(&over).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(refused.contains("providers: google's note: 1 to 280 characters"), "{refused}");
     }
 
     /// A deployment that sells seats binds Stripe's key and its endpoint's
@@ -1321,7 +1717,7 @@ mod tests {
         v["host_secret_previous"] = json!("fragment-host-secret-old");
         let d = load(&config_file("bindings", &v)).unwrap();
         let n = names(&d, Some("p5")).unwrap();
-        let cell = worker_config(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap();
+        let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
         let bound: Vec<(&str, &str)> = cell["secrets_store_secrets"].as_array().unwrap().iter().map(|b| (b["binding"].as_str().unwrap(), b["secret_name"].as_str().unwrap())).collect();
         assert_eq!(
             bound,
@@ -1360,7 +1756,7 @@ mod tests {
     fn the_deploy_uploads_the_release_files() {
         let own = deployment(Some("fragment.club"), Some("fragment.boats"));
         for (d, branch) in [(&own, None), (&deployment(None, None), Some("p5"))] {
-            let cell = worker_config(d, &names(d, branch).unwrap(), "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap();
+            let cell = worker_config(d, &names(d, branch).unwrap(), "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
             let assets = &cell["assets"];
             assert_eq!(assets["directory"], json!(devstack::repo_root().join("cell/build/assets")), "{branch:?}");
             assert_eq!((&assets["binding"], &assets["run_worker_first"]), (&json!("ASSETS"), &json!(true)), "{branch:?}");
@@ -1431,7 +1827,7 @@ mod tests {
         let built = json!({ "dockerfile": "images/hermes/Dockerfile", "build_context": "." });
         v["computers"]["images"] = json!({ "hermes": { "image": stable }, "hermes-canary": built });
         let d = load(&config_file("pinned-stable", &v)).unwrap();
-        let cell = worker_config(&d, &names(&d, Some("preview")).unwrap(), "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap();
+        let cell = worker_config(&d, &names(&d, Some("preview")).unwrap(), "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
         let images = &cell["containers"][0]["images"];
         assert_eq!(images["hermes"], json!({ "image": stable }), "kept as it is: nothing to build");
         assert_eq!(images["hermes-canary"]["dockerfile"], json!(devstack::repo_root().join("images/hermes/Dockerfile")));
@@ -1462,6 +1858,43 @@ mod tests {
         assert!(!pinned_ok(&stable, ""), "no account");
     }
 
+    /// Goal: CI's deploy (`--pinned-only`) builds no image. Method: the
+    /// deploy itself, on a config whose DNS token's file is not there, so
+    /// that a deploy that gets past its first checks stops at reading it.
+    /// Invalid: a canary built from the tree beside a pinned stable, refused
+    /// naming it before that read (and deployed by hand without the flag);
+    /// the flag on a teardown. Valid: every image at its digest, or no
+    /// computers.
+    #[test]
+    fn a_pinned_only_deploy_refuses_an_image_it_would_build() {
+        let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
+        let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+        let account = v["account_id"].as_str().unwrap().to_string();
+        let stable = json!({ "image": format!("registry.cloudflare.com/{account}/fragment-preview-hermes@sha256:{}", "9f".repeat(32)) });
+        let built = json!({ "dockerfile": "images/hermes/Dockerfile", "build_context": "." });
+        v["dns_token_file"] = json!(devstack::repo_root().join("target/xtask-tests/pinned-only/no-dns-token"));
+        let deploy_with = |v: &Value, test: &str, more: &[&str]| {
+            let path = config_file(test, v);
+            let rest: Vec<String> = [&["--config", path.to_str().unwrap(), "--branch", "preview"][..], more].concat().iter().map(|s| s.to_string()).collect();
+            deploy(&rest).err().map(|e| format!("{e:#}")).unwrap_or_default()
+        };
+        let read_the_token = "read the secret file";
+
+        v["computers"]["images"] = json!({ "hermes": stable, "hermes-canary": built });
+        let refused = deploy_with(&v, "pinned-only-canary-built", &["--pinned-only"]);
+        assert!(refused.contains("--pinned-only builds no image, and this config builds hermes-canary from the tree") && !refused.contains(read_the_token), "{refused}");
+        assert!(deploy_with(&v, "pinned-only-by-hand", &[]).contains(read_the_token), "without the flag it goes on");
+
+        v["computers"]["images"] = json!({ "hermes": stable, "hermes-canary": stable });
+        assert!(deploy_with(&v, "pinned-only-pinned", &["--pinned-only"]).contains(read_the_token), "every image at its digest");
+        v.as_object_mut().unwrap().remove("computers");
+        assert!(deploy_with(&v, "pinned-only-no-computers", &["--pinned-only"]).contains(read_the_token), "no computers, no image");
+
+        let path = config_file("pinned-only-teardown", &v);
+        let refused = teardown(&["--config", path.to_str().unwrap(), "--branch", "preview", "--pinned-only"].map(String::from)).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(refused.contains("--pinned-only is a deploy's"), "{refused}");
+    }
+
     /// The deployment's mail: its `mail_from` is the cell's
     /// `FRAGMENT_MAIL_FROM`, beside the Email Sending binding the cell's
     /// config declares; without one, the cell sends no mail.
@@ -1471,7 +1904,7 @@ mod tests {
         let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
         let rendered = |v: &Value, test: &str| {
             let d = load(&config_file(test, v)).unwrap();
-            worker_config(&d, &names(&d, Some("p5")).unwrap(), "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap()
+            worker_config(&d, &names(&d, Some("p5")).unwrap(), "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()
         };
         v.as_object_mut().unwrap().remove("mail_from");
         let none = rendered(&v, "mail-none");
@@ -1502,7 +1935,7 @@ mod tests {
         let rendered = |file: &str| {
             let d = load(&devstack::repo_root().join(file)).unwrap();
             let n = names(&d, Some("p5")).unwrap();
-            (worker_config(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap(), bound(&d).unwrap())
+            (worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap(), bound(&d).unwrap())
         };
         let (cell, b) = rendered("deploy/example.jsonc");
         let models: Value = serde_json::from_str(cell["vars"]["FRAGMENT_MODELS"].as_str().unwrap()).unwrap();
@@ -1514,7 +1947,7 @@ mod tests {
         assert_eq!(parsed.cheap.model(), fragment_core::models::OPENROUTER_FLASH);
         // the ceiling OpenRouter routes under is the one the price book charges, with OpenRouter's fee
         use fragment_core::price::{BP, CREDITS_FEE_BP_DEFAULT, OPENROUTER_FEE_BP};
-        let row = fragment_core::price::PriceBook::defaults().models.into_iter().find(|m| m.model == fragment_core::models::OPENROUTER_FLASH).unwrap().price;
+        let row = parsed.priced(fragment_core::price::PriceBook::defaults()).models.into_iter().find(|m| m.model == fragment_core::models::OPENROUTER_FLASH).unwrap().price;
         let ceiling = |per_million: &Value| (per_million.as_f64().unwrap() * 1e6).round() as i64 * i64::from(BP + OPENROUTER_FEE_BP) / i64::from(BP + CREDITS_FEE_BP_DEFAULT);
         let max = &routing["provider"]["max_price"];
         assert!(row.input >= ceiling(&max["prompt"]) && row.cached_input >= row.input && row.cache_write >= row.input && row.output >= ceiling(&max["completion"]), "{row:?}");
@@ -1543,8 +1976,10 @@ mod tests {
     /// it. Invalid: an unknown provider, an OpenAI-compatible API without a
     /// key's name (or with one that is no string, or no store name), a key
     /// on a Workers AI slot, a bad base URL, an unknown slot, an unpriced
-    /// model, `models` no object, and `vision_model` or `fallback_model`.
-    /// Valid: a slot alone, rendered with the rest the cell's.
+    /// model (on OpenRouter, one whose slot names no whole ceiling),
+    /// `models` no object, and `vision_model` or `fallback_model`. Valid: a
+    /// slot alone, rendered with the rest the cell's, and any model on
+    /// OpenRouter at its ceiling.
     #[test]
     fn a_deployments_models_out_of_shape_are_refused() {
         let with = |models: Value| {
@@ -1572,6 +2007,14 @@ mod tests {
         refused(row(json!({ "base_url": "http://127.0.0.1:4810/v1" })), "models.cheap: base_url:");
         refused(row(json!({ "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1/" })), "without a query or a trailing /");
         refused(row(json!({ "model": "glm-6" })), "models.cheap: the model \"glm-6\" is not in the price book");
+        // a model on OpenRouter is priced at the ceiling its slot names: any id, none without one
+        let openrouter = |max_price: Value| row(json!({ "base_url": "https://openrouter.ai/api/v1", "key": "fragment-openrouter-key", "model": "deepseek/deepseek-v4.1-flash", "body": { "provider": { "zdr": true, "max_price": max_price } } }));
+        assert_eq!(with(openrouter(json!({ "prompt": 0.15, "completion": 0.5 }))), "", "an id the book has no row for, at its ceiling");
+        refused(row(json!({ "base_url": "https://openrouter.ai/api/v1", "model": "deepseek/deepseek-v4.1-flash", "body": { "provider": { "zdr": true } } })), "models.cheap: a model on OpenRouter is priced at the ceiling its calls route under: name it in body.provider.max_price");
+        refused(openrouter(json!({ "prompt": 0.15 })), "models.cheap: body.provider.max_price.completion is the dollars a million tokens");
+        for base_url in ["https://OPENROUTER.AI/api/v1", "https://openrouter.ai:443/api/v1", "https://eu.openrouter.ai/api/v1"] {
+            refused(row(json!({ "base_url": base_url, "model": "anthropic/claude-opus-5.5" })), "models.cheap: a model on OpenRouter is priced at the ceiling its calls route under");
+        }
         refused(json!({ "high": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } }), "unknown field `high`");
         refused(json!([]), "models is an object");
         // a body: the API's own fields, rendered as named; one the cell refuses, refused here
@@ -1587,7 +2030,7 @@ mod tests {
         v["models"] = json!({ "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } });
         let d = load(&config_file("models-fallback", &v)).unwrap();
         let n = names(&d, Some("p5")).unwrap();
-        let vars = worker_config(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap()["vars"].clone();
+        let vars = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"].clone();
         assert_eq!(vars["FRAGMENT_MODELS"], json!({ "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } }).to_string());
         // the fields it replaced
         for (field, now) in [("vision_model", "models.vision"), ("fallback_model", "models.fallback")] {
@@ -1616,6 +2059,6 @@ mod tests {
         v["support_url"] = json!("mailto:help@example.dev");
         let d = load(&config_file("support-named", &v)).unwrap();
         let n = names(&d, Some("p5")).unwrap();
-        assert_eq!(worker_config(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap()["vars"]["FRAGMENT_SUPPORT_URL"], "mailto:help@example.dev");
+        assert_eq!(worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"]["FRAGMENT_SUPPORT_URL"], "mailto:help@example.dev");
     }
 }

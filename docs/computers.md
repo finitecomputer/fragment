@@ -57,7 +57,16 @@ container starts until someone asks again).
 - **Awake while:** a port tab is open, or the guest holds the keepalive
   socket (below). Traffic from the container does not count (spike S3).
   Twenty minutes after neither holds, it sleeps. A $200 seat's computer
-  never sleeps (decision 25).
+  never sleeps (decision 25). A keepalive counts as long as the runtime
+  holds its socket: before each event the DO closes those it counts that
+  the runtime no longer holds open for the running start
+  (`Lifecycle::keepalives_lost`, `getWebSockets`), never one it holds
+  (#557). A deploy restarts every Durable Object and disconnects every
+  socket, and the guest's close after it reaches no release: on the
+  preview (2026-10-22) one stayed counted open for 14 hours, so its
+  computer never slept, took a busy save every 15 minutes and was
+  metered. Closed so, it is held as any closed one is (the 20 minutes),
+  and the guest opens it again if its turn still runs (below).
 - **Saved** (below, "Saves and what a wake restores"): when its work
   ends (the guest's last keepalive closes, and 30 s pass with none opened
   again), every 15 minutes while a keepalive stays open, and at every
@@ -85,6 +94,16 @@ container starts until someone asks again).
   that fails keeps no container, since its owner asked. Asleep or won't
   wake, a start. Either way the start is fresh: from the image and the
   newest good save, never the snapshot.
+- **A sleep's end is its stop's to report** (`Asleep`): the container's
+  exit, which the stop's SIGTERM causes and the runtime reports as a
+  request of its own (`computer/exited`), changes nothing while that stop
+  is under way. So the start after a sleep (a restart's, a wake asked as
+  it slept) is made by the request performing the stop, and a restart
+  answers with its start up (`awake`), or what stopped it (asleep after a
+  failed start, `won't wake`); `starting` or `sleeping` only when it was
+  asked as a start or a sleep was under way, which then makes it. A new
+  isolate that finds the container of a stop under way gone (its stop
+  lost with the isolate before it) reads that as the sleep's end.
 - **Wake from a snapshot** when it caches the current save for the pinned
   image (`start({containerSnapshot})`; below, "Saves and what a wake
   restores"); otherwise start the image with `RESTORE_PENDING=1`, restore
@@ -134,10 +153,10 @@ the bridge), what its person saw before 2026-10-08, and what they see now:
 | **Its owner's sleep**, saved (the shell's update is one) | `POST …/sleep` | the same | the same |
 | **A sleep whose save fails** | any sleep; it is kept awake (I5) and tried again after 1, 2, 4, 8, 15 minutes | Settings' `why`, read only when Settings was opened after it / nothing; its owner charged for the time it was kept | an `unsaved` notice at once, over every chat and Settings, pushed to open pages: since when its work is in no save, the save a stop goes back to, the time the bound stops it, and Restart; the time it is kept, from its failing try's start to the bound, is free |
 | **Awake saves that keep failing** (a turn's end, every 15 minutes busy) | tried again after a growing pause, unbounded while awake | nothing anywhere: no `why` for an awake save | the `unsaved` notice once two fail in a row (no stop time: none is due until it would sleep) |
-| **The bound runs out**: put to sleep unsaved | the sleep tried at `unsaved_since + unsaved_max_ms` (exactly: the last try is the bound's), only when nothing holds it | Settings' `why` ("slept unsaved"), which then stayed for good (only a save of the same life cleared it) / nothing | a `went_back` notice (pending) while it is asleep: what it will go back to; the `why` goes at the next save that works |
-| **A crash**: the container stops on its own (out of memory, a host restart, the runtime's idle stop, or dying while its sleep held or saved it) | `Exited`; it starts again at once while anything wants it, else at its next wake | nothing (`restored` and `rollbacks` were in the API only) / a turn it cut ends quietly as "lost when the computer restarted"; the agent's next turn there is told what was cut (docs/bridge.md) | a `went_back` notice: stopped unexpectedly, back to its save of `HH:MM`, how much before it stopped; the chat and the agent as before |
+| **The bound runs out**: put to sleep unsaved | the sleep tried at `unsaved_since + unsaved_max_ms` (exactly: the last try is the bound's), only when nothing holds it | Settings' `why` ("slept unsaved"), which then stayed for good (only a save of the same life cleared it) / nothing | a `went_back` notice (pending) while it is asleep: since when changes on it won't be there; the `why` goes at the next save that works; nothing when nothing was done on it since that save |
+| **A crash**: the container stops on its own (out of memory, a host restart, the runtime's idle stop, or dying while its sleep held or saved it) | `Exited`; it starts again at once while anything wants it, else at its next wake | nothing (`restored` and `rollbacks` were in the API only) / a turn it cut ends quietly as "lost when the computer restarted"; the agent's next turn there is told what was cut (docs/bridge.md) | a `went_back` notice, only when something was done on it since the save it went back to (below): "Your computer restarted. Changes on it since `HH:MM` weren't kept. Your chats are all here."; the chat and the agent as before |
 | **A wake past an unusable save** (its archive gone, or the image's check failed) | `RestoreFailed`, the save before it at once | nothing | a `went_back` notice: the newest save could not be restored |
-| **Its owner's restart** | `POST …/restart` | (no restart) | saved first: nothing to tell; its save failing, a `went_back` notice for the restart |
+| **Its owner's restart** | `POST …/restart` | (no restart) | saved first: nothing to tell; its save failing, a `went_back` notice for the restart, when something was done on it since its last save |
 | **A wake whose snapshot will not start** | the image and the same save, in the same wake | nothing | nothing: nothing is lost |
 | **A wake from a snapshot that comes up dead** (#362: started, then no exec answered and its guest never read its view) | unheard 45 s after its start; the image and the same save, in the same wake | it was awake and answered no one: messages unanswered, and its sleep's save hung for good (r4, r6) | nothing: nothing is lost, its wake 45 s slower |
 | **A sleep whose backups never answer** (a sick container's) | its save fails at its bound (8 minutes), as one that fails | it stayed `sleeping`, held, answering no one, and owed as awake, for good; its owner's sleep never answered (r4, r6) | as a sleep whose save fails: kept, the `unsaved` notice, tried again, and the bound ends it |
@@ -164,7 +183,19 @@ whoever reads it:
   went back to an older save (`crash`, `unsaved`, `restart`, `unusable`),
   or will as it next starts (`pending`). Told until its owner says they
   saw it (`POST …/notices/seen {life}`), whatever starts come after; the
-  newest loss only.
+  newest loss only. None for a loss that lost nothing (Paul, 2026-10-23:
+  "if the user had no activity between last good save and stop I don't
+  know if we even need the notice at all"): nothing was done on that life
+  after the save it goes back to (its newest save that worked, or, with
+  none, the one it came up from). Done means what the Computer DO hears:
+  its guest's keepalive or a port tab opened or closed, or a record or a
+  join woke it, after that save's hold began (`Ended::quiet`). A socket
+  that only stays open across the save is not: the DO can count a
+  keepalive open that its guest let go of (on the preview, 2026-10-23, one
+  whose close was lost across a deploy stayed counted open for 14 hours,
+  so the computer took a busy save every 15 minutes all night and never
+  slept), and a turn really running at a stop is ended as lost in its own
+  chat. Its guest still reads such a start as a rollback (`restored`).
 - `update {version}`: it is awake on another version than its next start
   runs (`version`, the view's `latest`; the view's `version` is the one it
   runs), and no turn runs (no keepalive open). Told until a restart or a
@@ -180,7 +211,14 @@ and Settings, in plain words, the times in the person's own clock:
 its agents did after that isn't kept yet. It keeps trying. If it still
 can't by 14:35, it stops and starts again from that save." Its chats keep
 everything said (their records are the chat's own), so a notice says the
-work on the computer after the save is what went.
+work on the computer after the save is what went. A read of the computer
+that fails (a blip, a 5xx) is not "no computer" (#437): the band keeps
+what the last read said, its agents too, and adds "Couldn't refresh your
+computer" with Try again (Settings, which never read it, says it couldn't
+be loaded); failing at the page's start, the first agent is made at once
+only for someone with no chats, and otherwise once a read answers (Try
+again's, or the list socket's) while the person is at home, or as they
+come back to it.
 
 **Not in the chat.** The chat's records are its agents' and people's: the
 platform posts none there (the rule; docs/chat-records.md), and a notice
@@ -313,9 +351,13 @@ config names two images (xtask/src/deploy.rs, `computers.images`):
 "default_image": "hermes",
 "images": {
   "hermes":        { "image": "registry.cloudflare.com/<account_id>/<repository>@sha256:<64 hex>" },
-  "hermes-canary": { "dockerfile": "images/hermes/Dockerfile", "build_context": "." }
+  "hermes-canary": { "image": "registry.cloudflare.com/<account_id>/<repository>@sha256:<64 hex>" }
 }
 ```
+
+(A deploy by hand, where Docker runs, may build the canary from the tree
+instead: `"hermes-canary": { "dockerfile": "images/hermes/Dockerfile",
+"build_context": "." }`.)
 
 - **Stable** is the default, kept at a digest: wrangler builds nothing
   for it, prepares the image the account's registry already holds, and
@@ -323,10 +365,25 @@ config names two images (xtask/src/deploy.rs, `computers.images`):
   it builds anything, a reference that is no digest in its own account's
   registry. It changes only when its line does, so a deploy tells the
   computers on it nothing. New computers start on it.
-- **The canary** is built from the tree at every deploy (on the preview,
-  master's). A computer pinned to it is on the canary: every deploy that
-  changes its image tells it an update is ready, as any deploy that
-  changes an image tells (above).
+- **The canary** is built from the tree by the Image workflow
+  (.github/workflows/image.yml, run by hand: `cargo xtask image push`,
+  xtask/src/image.rs), on a runner, from the branch that deploys the
+  environment (on the preview, master's tree), and pushed to that
+  environment's registry; its run's summary names the digest. A
+  computer pinned to it is on the canary: every deploy that changes its
+  image tells it an update is ready, as any deploy that changes an image
+  tells (above).
+- **CI's deploys build no image** (`--pinned-only`; ci.yml's `deploy`):
+  every image of the config it deploys from (its environment's file in
+  the private repo finitecomputer/fragment-deploy, `preview.jsonc` or
+  `production.jsonc`, read from its `main` at each deploy) is kept at a
+  digest, the canary's too, as a runner, with no layer cache, would make
+  a new digest at every deploy (below). So the canary the Image workflow
+  pushed is pinned there by a commit, at the digest its summary names,
+  and the next deploy takes it; until then, deploys keep the canary
+  where that file has it. A run makes a new digest each time, as its
+  runner keeps no layer cache either: it is run for a change to the
+  image, once a round.
 - **What changes a version** (Paul, 2026-10-14: "changes to the cells, or
   frontend, that don't change the hermes image shouldn't require a hermes
   image rollout"). The image's inputs are what it runs, and no more:
@@ -357,14 +414,17 @@ config names two images (xtask/src/deploy.rs, `computers.images`):
   one record of what a computer runs, so there is no list beside it; the
   group (the finite team, by npub, an email found with `fragment operator
   people --q`) is the operators', outside the repo.
-- **Where a digest comes from.** A deploy names each image's reference as
+- **Where a digest comes from.** The Image workflow's summary names the
+  reference it pushed or copied (`registry.cloudflare.com/<account>/<repository>@sha256:…`)
+  and the config line that pins it; a deploy names each image's reference as
   wrangler prepares it (`hermes-canary is ready to run`, then
-  `registry.cloudflare.com/…@sha256:…`), and an operator's view of a person
+  `registry.cloudflare.com/…@sha256:…`); and an operator's view of a person
   (`fragment operator person <npub>`) names the whole reference their
   computer runs and the one its next start runs (`references.running`,
   `references.next`); the version Settings shows is a digest's first 12
   hex digits.
-- **Promotion**: the canary's digest becomes stable's line, and a deploy.
+- **Promotion**: the canary's digest becomes stable's line, and a deploy
+  (production's: that digest copied into its registry first, below).
   Every computer on stable then runs another version than the one its
   next start runs: asleep, its next wake takes it (from the image and its
   save: the snapshot is of the old image), paying the new image's pull;
@@ -401,21 +461,47 @@ config names two images (xtask/src/deploy.rs, `computers.images`):
   in both), but the rule does not read each release's schema.
 - **Production** keeps its images in its own account's registry, which
   holds none of the preview's digests (the deploy refuses another
-  account's). Its first deploy builds `hermes` from the release commit;
-  its line is then pinned to the digest that deploy names, and its own
-  canary group goes ahead of it as the preview's does.
+  account's). CI deploys it from the `production` branch (in minutes for
+  a commit master's run proved green, ci.yml's `proven`; after the full
+  tests otherwise), its images pinned as the preview's are. **Its
+  promotion is a copy** (Paul, 2026-10-20): the image a round proved on
+  the preview, the very digest its canary computers ran, copied byte for
+  byte into production's registry (`fragment-computer-hermes`) by the
+  Image workflow run from `production` with `environment` production and
+  `from` that reference (`cargo xtask image copy`: skopeo, with
+  `--preserve-digests`, then the copy's manifest held to the source's
+  digest), and that digest then `hermes`'s line in production's config,
+  fragment-deploy's `production.jsonc` (One round, step 8). A run
+  without `from` builds production's tree instead, warning that its
+  digest is not the canary's: with no layer cache, a build is a new
+  image of the same inputs, which no round proved.
 
 ### One round
 
-On the preview (`preview.finite.build`, master deployed continuously),
-with the operators' key (`--key-file`, or `FRAGMENT_OPERATOR_KEY_FILE`)
-and `FRAGMENT_HOST` naming it. Once: stable's line is the digest its
-computers run (`references.running` of one awake on it), the canary's is
-the build, and the canary group is pinned to `hermes-canary`.
+On the preview (`preview.finite.build`, master's, which CI deploys at
+every green push), with the operators' key (`--key-file`, or
+`FRAGMENT_OPERATOR_KEY_FILE`) and `FRAGMENT_HOST` naming it. Once:
+stable's line is the digest its computers run (`references.running` of
+one awake on it), the canary's a digest too, both in the preview's
+config (`preview.jsonc` in the private repo
+finitecomputer/fragment-deploy, which CI's deploy reads from its
+`main`: a commit there, never a secret, pins a digest), and the canary
+group is pinned to `hermes-canary`.
 
-1. **The change lands** on master; its deploy rebuilds the canary. Its
-   version: `fragment operator person <npub> --json | jq -r .computer.latest`
-   for one of the group.
+1. **The change lands** on master, and the Image workflow is run from
+   master (Actions, image, Run workflow: `environment` preview; `tag`
+   empty for the commit's first 12 hex digits, or a name of the round's,
+   `r9-<sha>`). It builds the canary on a runner and pushes it to
+   `fragment-preview-computer-hermes-canary`; its summary names the
+   reference and the line
+   `"hermes-canary": { "image": "registry.cloudflare.com/<account>/…@sha256:…" }`,
+   which replaces the canary's in `preview.jsonc` (the config's
+   `account_id` for `<account>`, masked in the run), committed to
+   fragment-deploy's `main`. The next deploy takes it: master's next
+   green push, or a re-run of the `deploy` job of master's latest ci run
+   (its log names the fragment-deploy commit it deployed from). Its
+   version: `fragment operator person <npub> --json | jq -r
+   .computer.latest` for one of the group.
 2. **The group takes it**: awake, each is told an update is ready and
    presses Restart (the path under test); asleep, its next wake takes it.
    Each checks, on their own computer: an old chat goes on where it was;
@@ -446,11 +532,28 @@ the build, and the canary group is pinned to `hermes-canary`.
 6. **Promote**: the reference a watched canary computer runs
    (`fragment operator person <npub> --json | jq -r .references.running`,
    its first 12 hex digits the version step 1 named) becomes `hermes`'s
-   `image` in the preview's config, the old line kept commented; deploy.
+   `image` in `preview.jsonc`, the old line kept commented, by a commit
+   to fragment-deploy's `main`; the next deploy takes it, as in step 1.
    One computer on stable awake is told; one asleep wakes onto it.
 7. **Or roll back**: `fragment operator pin <npub> hermes` for each of the
    group (a Hermes release is forward only, above); after a promotion,
-   the commented line back, and a deploy.
+   the commented line back by a commit, and a deploy.
+8. **Production takes the proven image**, copied, never rebuilt: the
+   Image workflow run from `production` (Actions, image, Run workflow:
+   branch `production`, `environment` production, `from` the reference
+   step 6 promoted, as step 1's summary wrote it, with `<account>`;
+   `tag` empty for its digest's first 12 hex digits, the version
+   Settings shows). It mints pull credentials for the preview's registry
+   with production's `PREVIEW_REGISTRY_TOKEN` and push credentials for
+   production's with its own token, copies the image registry to
+   registry, and refuses a copy whose manifest is not the source's
+   digest; its summary names
+   `registry.cloudflare.com/<account>/fragment-computer-hermes@sha256:…`,
+   the same digest, and the line
+   `"hermes": { "image": "…" }`, which becomes stable's in
+   fragment-deploy's `production.jsonc` (the old line kept commented),
+   by a commit to its `main`. Production's next deploy, Paul's next push
+   to `production`, takes it.
 
 ## The guest's contract
 
@@ -640,7 +743,9 @@ docs/durable-computers.md. A computer keeps its newest three saves of
   included), or its start fell back to a save older than that life's
   newest, so what that life did since some save is in none. A start from
   the save its life's sleep took is none. Its owner is told of the newest
-  until they say they saw it (`went_back`: "What its owner is told").
+  until they say they saw it, when something was done on the life it
+  lost after the save it went back to (`went_back`: "What its owner is
+  told").
   Nothing's correctness depends on the guest reading either.
 
 ### Bounds
@@ -721,6 +826,14 @@ expires within 30 days. The container application is the deployment's
 - `http://api.fragment.internal/<path>` is the platform's API
   (`docs/api.md`), and `http://api.fragment.internal/f/<fragment>/<path>`
   is a fragment's own routes (`__live` sockets included), as on its host.
+- On a local fleet, whose code.storage is the dev stack's fake at the
+  machine's loopback (which a container's loopback is not), a storage
+  token minted through the egress (`GET …/storage-token`, as `fragment
+  sync` and `deploy` ask it) names `http://codestorage.fragment.internal`
+  as its `api`, which the egress sends on to the fake as it came, the
+  guest's token with it. On a deployment the guest reaches code.storage
+  itself (docs/technical-debt-ledger.md, "An agent's sync and deploy
+  reach code.storage directly").
 - `x-fragment-agent: <agent fragment name>` says which of its agents the
   request acts as. The intercept refuses an agent not assigned to this
   computer, then signs the request (NIP-98) as that agent's identity.
@@ -728,10 +841,12 @@ expires within 30 days. The container application is the deployment's
   them, never above them (decision 36).
 - Without the header only the computer's own routes answer:
   - `GET /api/computer` → `{computer, owner, image, agents: [{fragment,
-    identity, name, owner, connections, credentials: [{provider, kind,
-    env, placeholder, hosts, modelBase?}]}], credentialEnv, models: {cheap,
-    medium, fallback, vision}}`: the agents to run, each one's credentials
-    (below, Connections and operator keys), and the model route's models'
+    identity, name, owner, connections, modelProviders?, credentials:
+    [{provider, kind, env, placeholder, hosts, modelBase?}]}],
+    credentialEnv, models: {cheap, medium, fallback, vision}}`: the agents
+    to run, each one's credentials (below, Connections and operator keys;
+    `modelProviders` names those of them with a `modelBase`, as its owner's
+    view does: "An agent's own model"), and the model route's models'
     ids by its names (below, Models, "A model by its id"). **They
     may change while the computer runs** (its owner assigns or unassigns
     an agent, connects an account, narrows an agent): the guest reads them
@@ -743,7 +858,12 @@ expires within 30 days. The container application is the deployment's
   - `GET /api/computer/keepalive` (a WebSocket): while it is open the
     computer stays awake. Hold it while busy, and while a turn waits on
     its card, until the card is answered or expires (decision 42 as
-    amended; docs/bridge.md, "A card keeps its computer awake").
+    amended; docs/bridge.md, "A card keeps its computer awake"). It
+    answers `{"type":"ping"}` with `{"type":"pong"}`: a deploy can cut
+    the platform's side of it with no close reaching the guest (#557),
+    and the platform then counts it closed, so a guest still busy pings
+    it and opens it again when it goes silent (our bridge: every 15 s,
+    silent after 30).
 - A subscription with `{channel, wake: true}` (in place of `url`), sent
   as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
   computer on each new record (the fragment asks the computer itself just
@@ -766,7 +886,9 @@ expires within 30 days. The container application is the deployment's
 - What a guest follows, by convention (docs/chat-records.md): for each
   agent, `chat` of every fragment it is a member of whose channels
   include a postable `chat` (a chat), and `tasks` of the agent's own
-  fragment (its routines, and `joined` when it is added to a fragment).
+  fragment (its routines, which its scheduled records append as that
+  fragment: docs/api.md, "Scheduled records"; and `joined` when it is
+  added to a fragment).
   The list comes from `GET /api/fragments` and `GET /api/f/{name}/channels`
   as the agent, read again every 5 minutes and on `joined`, and within
   seconds when a read of it fails (the bridge's backoff, docs/bridge.md):
@@ -804,11 +926,13 @@ expires within 30 days. The container application is the deployment's
   model route as that agent (`POST /api/models/v1/chat/completions`,
   signed as the agent: docs/api.md, docs/ledger.md), which allows only
   the tier's model and a capped `max_tokens`, drops the guest's auth
-  headers, reserves the call's worst case on the agent's owner's ledger,
-  calls the model where the deployment runs it, streams its answer back,
-  and settles the final usage at its `[DONE]` (lesson 7; not at the
-  stream's end, which the gateway has held open ~150 s past it), its
-  timing on its `model.settled` line (docs/api.md, Models). A call whose
+  headers, asks the gate whether the agent's owner may spend (their
+  standing as the router heard it within the minute: docs/ledger.md,
+  "The gate"), calls the model where the deployment runs it, streams its
+  answer back, and charges the final usage after it, at its `[DONE]`
+  (lesson 7; not at the stream's end, which the gateway has held open
+  ~150 s past it), its timing on its `model.settled` line (docs/api.md,
+  Models). A call whose
   model fails before
   answering (not reached, 429, or a 5xx; on an OpenAI-compatible API,
   where the key is the platform's, also 401, 402, 403 or 404) is made once
@@ -850,7 +974,7 @@ expires within 30 days. The container application is the deployment's
     as if it named the slot: its key, its `body`, its fallback (a tier's
     falls back; `fallback`'s and `vision`'s do not), its price. An id no
     slot runs is refused, 400, the message listing those it may name;
-    nothing is reserved or sent. The route's names keep naming their slots,
+    nothing is charged or sent. The route's names keep naming their slots,
     whatever tier the caller says.
   - An id is one model: a deployment whose two slots name one id at two
     places (Workers AI and an API, or two APIs) is refused by its deploy
@@ -868,6 +992,12 @@ expires within 30 days. The container application is the deployment's
     (always on) would keep naming the ids it started with. A guest that
     names the route's names (an image from before the ids, the stub's
     `think`) runs on as before.
+  - Its owner reads the same ids in their view of it (`GET
+    /api/computers/{id}`'s `models`; docs/api.md, Computers), so Settings'
+    Agents names a tier by its model's id beside it ("Cheap
+    (z-ai/glm-5.3-flash)"), and the agent's page the model it runs by its
+    id (Paul, 2026-10-20: it said "cheap model"; below, "An agent's own
+    model").
 
   **What an OpenAI-compatible API is sent.** The agent's chat completion
   fields the route, our jobs and Hermes use (`CLIENT_KEYS`: `messages`,
@@ -921,8 +1051,9 @@ expires within 30 days. The container application is the deployment's
     `unknown`, and out).
   - `max_price`: dollars per million tokens, prompt and completion; an
     endpoint dearer than either is out, and a call none fits is refused.
-    The price book charges this ceiling (docs/ledger.md, "OpenRouter's
-    price"): raise it and the book together.
+    The ledger charges this ceiling, read from the slot itself
+    (docs/ledger.md, "OpenRouter's price"), so a slot may name any model
+    OpenRouter serves; one on OpenRouter without it is refused.
 
   On 2026-10-15 GLM-5.3 Flash had 34 endpoints on OpenRouter, each taking
   tools and `reasoning_effort` (`/api/v1/models/z-ai/glm-5.3-flash/endpoints`);
@@ -997,7 +1128,7 @@ expires within 30 days. The container application is the deployment's
   model must be one the price book prices, or the deploy is refused (and
   the cell, at its first request); GLM-5.3 Flash is the cheap tier's own
   row. `vision` is
-  bounded, reserved and settled as a tier's call is, at its model's
+  bounded, gated and charged as a tier's call is, at its model's
   price, to the agent's owner. It is no tier: an agent's `agent.json`,
   a job's step and a manifest name only tiers.
 - Our Hermes image's profiles send their image calls to `vision`
@@ -1036,10 +1167,8 @@ expires within 30 days. The container application is the deployment's
   Hermes shrinks a screenshot (a 1456-pixel long side for a capture) and
   sends it whole; one refused as too large (413) it shrinks to 5 MiB of
   base64 and sends once more (its `_RESIZE_TARGET_BYTES`, which its config
-  does not set), which fits. A call reserves its bytes as input tokens,
-  so a 5 MiB screenshot holds about $1.25 of its payer's credit (at
-  GLM-5.3 Flash's price, the fee and the margin) until it settles at what
-  the model counted; a payer with less is refused it (402).
+  does not set), which fits. A call holds none of its payer's credit: it
+  is charged after its answer at what the model counted (decision 62).
 - `POST http://model.fragment.internal/v1/audio/transcriptions`,
   OpenAI's multipart shape with `model` `whisper`: a voice memo
   transcribed (decision 9, its status). It is the platform's
@@ -1051,8 +1180,8 @@ expires within 30 days. The container application is the deployment's
   inline (docs/api.md, Decisions). It is the platform's decision route
   as the agent (`POST /api/models/v1/decide`): `clef-flash` unless it
   names `clef` or `clef-omni` (which hears audio and watches video),
-  reserved at its model's context window and settled at the input tokens
-  it counted, metered to the agent's owner. A tool the agent builds on
+  charged after its answer at the input tokens it counted, to the
+  agent's owner. A tool the agent builds on
   its computer calls it as it calls a model, with the same base URL and
   credentials (`$FRAGMENT_MODEL/v1/decide`, `x-fragment-agent` or the
   key `agent:<name>`).
@@ -1102,6 +1231,37 @@ expires within 30 days. The container application is the deployment's
 
 ### Connections and operator keys
 
+Connection consent is [browser-bound](pipes-browser-binding.md). A connection
+row's optional `connection_oauth` (`authorize`, `exchange`, `client_id`, `scopes`,
+and optionally `revoke`) enables the platform callback and requires `key` (the
+OAuth client secret's store name) in deployment configuration. Without it,
+starting consent fails closed. Only after a validated one-use callback are tokens
+imported into WorkOS Pipes; the existing computer swap still obtains short-lived
+tokens from Pipes. Settings' Disconnect (`DELETE /api/connections/{provider}`)
+revokes the grant at `revoke` when the row names one, then deletes the account
+at Pipes, and fences it until a connect is known to import again. A computer
+swaps a connection only when its states say it is connected (a fenced one reads
+as not connected whatever Pipes holds), so it asks Pipes for no token for one
+its owner disconnected. A connection holds what its person allowed: Google's
+consent lets them untick each of the row's scopes, and a grant of any beyond
+signing in connects with those (pipes-browser-binding.md, Partial grants).
+Settings names what is missing, with a Reconnect to add it; an agent's call
+outside the grant gets the provider's own 403, which the Google skill explains
+to the person.
+
+Where a row takes several accounts (`accounts_max` above 1;
+pipes-browser-binding.md, Several accounts), a person connects a personal and a
+work Google account side by side, and each agent uses one of them: the one its
+owner picked for it in Settings, which its computer keeps (`agent_accounts`),
+else the default, the oldest connected. The computer holds the owner's accounts
+there in their list's order, believed with the states (each read of the
+person's connections and each disconnect tells it them), and a swap asks Pipes
+for the chosen account's token by its id, never one the owner's list did not
+name. A pick whose account needs authorizing again is refused (`connect … again`),
+never swapped for another account; one whose account is gone falls back to the
+default. The placeholder names the agent, as with one account, so the image
+needs nothing new.
+
 Paul, 2026-10-04 (decisions 22, 37 and 44): every credential a guest uses
 is a per-agent placeholder in the environment variable its provider's own
 SDK reads, so any SDK or CLI works unmodified, with no header of ours. The
@@ -1133,7 +1293,11 @@ the provider's own hosts.
   - an own key's `models`, `{base_url, offer}`: the provider's
     chat-completions base URL (https, on one of its `hosts`, so the swap
     adds the key), and the 1 to 16 models settings offers for an agent,
-    each `{id, name}`.
+    each `{id, name}`;
+  - any row's `note`: what settings' Connections tells people under its
+    name, connected or not (Google still reviewing the platform's app,
+    say): one line of plain text, 1 to 280 characters, refused at load
+    otherwise.
 
   Adding a provider is a catalog row (and, for a connection, the provider
   enabled in the WorkOS environment); nothing in code names one. The
@@ -1141,7 +1305,7 @@ the provider's own hosts.
 
   | Provider | Kind | Hosts | Placement | Environment variable | Price per call (list) |
   |---|---|---|---|---|---|
-  | `google` | connection | `gmail`, `www`, `people`, `sheets`, `docs` `.googleapis.com` | `Authorization: Bearer {}` | `GOOGLE_OAUTH_ACCESS_TOKEN` (Terraform's Google provider reads it; Google's client libraries take a token as given) | none |
+  | `google` | connection | `gmail`, `www`, `people`, `sheets`, `docs`, `slides` `.googleapis.com` | `Authorization: Bearer {}` | `GOOGLE_OAUTH_ACCESS_TOKEN` (Terraform's Google provider reads it; Google's client libraries take a token as given) | none |
   | `firecrawl` | operator | `api.firecrawl.dev` | `Authorization: Bearer {}` | `FIRECRAWL_API_KEY` | $0.01 (10-result search, Hobby PAYG) |
   | `fal` | operator | `queue.fal.run`, `fal.run`, `rest.fal.ai` | `Authorization: Key {}` | `FAL_KEY` | $0.006 (1 MP Klein 9B image) |
   | `browser-use` | operator | `api.browser-use.com` | `X-Browser-Use-API-Key: {}` | `BROWSER_USE_API_KEY` | $0.02/12 (five browser minutes per control call) |
@@ -1188,7 +1352,9 @@ the provider's own hosts.
   - a connection its owner has connected (Pipes says `connected`: the
     connected account's state, read with no token minted, believed for a
     minute; the owner's own read of their connections, and each swap's
-    answer from Pipes, tell the computer at once);
+    answer from Pipes, tell the computer at once), whatever of its scopes
+    they allowed (the view names none: a call outside them is the
+    provider's refusal, not the swap's);
   - an operator key the deployment holds;
   - an own key its owner gave (`PUT /api/connections/{provider}/key`,
     sealed by the computer);
@@ -1219,9 +1385,11 @@ the provider's own hosts.
   - is a connection its owner has not connected, or must authorize again:
     403 `not_connected`; an own key its owner has not given: 403
     `not_connected`;
-  - is an operator key's, and its owner's ledger refuses to hold the
-    call's price: 402 or 403, with the ledger's reason. A ledger that does
-    not answer refuses it too (5xx), since a key is the operator's money.
+  - is an operator key's, and its owner's ledger's gate refuses them (out
+    of credit, or a guest): 402 or 403, with the ledger's reason. The gate
+    is what the router's isolate heard within the minute (docs/ledger.md,
+    "The gate"), and a ledger that does not answer refuses nothing
+    (decision 62).
 
   Otherwise each placeholder's place gets its credential: a header is its
   format around it (`Bearer sk-…`, whatever scheme word the guest wrote), a
@@ -1237,12 +1405,13 @@ the provider's own hosts.
   host with no placeholder goes on as it
   came; a body is sent as it came, read whole (at most 32 MiB); a redirect
   is never followed (the guest follows it, without the credential).
-- **An operator key's call is held first**, as a model call is
-  (docs/ledger.md): its price (the price book's and the margin) is reserved
-  on the agent's owner's ledger (`key:<computer>:…`) before the request
-  goes on. Once the provider answers (anything under 500), the call
-  settles at that price; one it did not answer is released. Then every
-  call is counted as the agent's
+- **An operator key's call is charged after it**, as a model call is
+  (docs/ledger.md): once the provider answers (anything under 500), its
+  price (the price book's and the margin) is charged to the agent's
+  owner's ledger (`key:<computer>:…`, as the agent), on the ledger's queue,
+  never in the answer's way; one it did not answer is charged nothing.
+  Before it goes on, the owner's standing is read through the gate (the
+  refusals above). Then every call is counted as the agent's
   in the computer's `uses`: by month, provider and agent, its calls and
   what they were charged (a connection's and an own key's are counted,
   never charged). Its owner reads them (`GET /api/computers/{id}/uses`,
@@ -1276,22 +1445,32 @@ offered (decision 60 says why, with the vendors' words).
 
 - **Connecting** (`fragment_core::own_signin`, OpenRouter's PKCE key
   exchange; docs/api.md, Connections):
-  1. Settings' Connect calls `POST /api/connections/{provider}/authorize`.
-     The person's computer makes a nonce and a verifier and keeps them for
-     10 minutes, the verifier sealed (at most 8 sign-ins under way; past
-     that, 429). The answer is the provider's page, which the shell opens
-     in a window: the row's `authorize`, with the platform's callback, the
-     verifier's S256 challenge, the state (`<computer's 24 hex>.<nonce>`)
-     and the key's label (`Fragment`).
+  1. Settings' Connect calls `POST /api/connections/{provider}/authorize`
+     with the shell's session (a request signed by a key is refused: the
+     sign-in is bound to a browser). The person's computer makes a nonce
+     and a verifier and keeps them for 10 minutes, the verifier sealed (at
+     most 8 sign-ins under way; past that, 429), and the answer sets the
+     browser's `fragment_own_key` cookie to the nonce. The answer is the
+     provider's page, which the shell opens in a window: the row's
+     `authorize`, with the platform's callback, the verifier's S256
+     challenge, the state (the nonce: it names no computer) and the key's
+     label (`Fragment`).
   2. OpenRouter asks the person and makes a key that is theirs. It sends
      the browser back to `GET /api/connections/{provider}/callback?code=…
      &state=…` on the platform's host.
-  3. The state names the computer and the sign-in it began, once. No
-     session is needed, and the key can reach no one else's computer. A
-     state replayed, expired, made for another provider, or never made is
-     a page that says to connect again, and nothing is exchanged. A
-     person who declined comes back with no code: the sign-in is let go
-     and nothing is set.
+  3. The callback finishes only in the browser that began the sign-in
+     (its cookie holds the state) and signed in to the platform; the
+     computer is that person's own, never one a URL names (audit H3,
+     2026-10-16: the state once named the computer and took no session,
+     so a sign-in an attacker began and sent to someone sealed that
+     person's key into the attacker's computer). Sent to anyone else, it
+     seals nothing anywhere and stays its beginner's to finish. A state
+     replayed, expired, made for another provider, or never made is
+     refused, and nothing is exchanged. A person who declined comes back
+     with no code: the sign-in is let go and nothing is set. Each refusal
+     is a 303 to `…/callback?refused=<word>`, a page that says to connect
+     again at an address that holds no code. A browser holds one own-key
+     sign-in at a time: a second Connect replaces the first's binding.
   4. The platform exchanges the code with the verifier at the row's
      `exchange`. Their computer seals the key as `PUT …/key` does, and the
      page says it is connected. No answer ever holds the key.
@@ -1302,10 +1481,12 @@ offered (decision 60 says why, with the vendors' words).
   as the agent's in the computer's `uses` and charged nothing (no platform
   fee: Paul).
 - **Picking a model.** Settings' Agents section offers each agent the
-  connected provider's models beside "Workers AI" (included in their credit). The pick
+  connected provider's models beside its tier's (included in their credit). The pick
   is written to the agent fragment's `agent.json`: `"model": {"provider":
-  "openrouter", "id": "anthropic/claude-sonnet-5.5"}`, beside its `tier`.
-  "Workers AI" removes `model`. Any model the provider serves may be named
+  "openrouter", "id": "anthropic/claude-sonnet-5.5"}`, beside its `tier`,
+  and put live (`POST …/deploy`, as its name and picture are: its computer
+  reads main, its page live). Its tier's option, named by the tier and its
+  model's id, removes `model`. Any model the provider serves may be named
   by hand; settings offers the catalog's `offer`.
 - **Our Hermes image** reads each agent's `agent.json` again every 10 s
   while awake, and whenever its credentials change. When the agent's
@@ -1323,6 +1504,20 @@ offered (decision 60 says why, with the vendors' words).
   turn and rebuilds the agent on the new model, with nothing restarted.
   Vision (`auxiliary.vision`) and voice notes (`stt`) stay on the route's
   `vision` and `whisper`, metered to the owner as before.
+- **What its owner is shown.** Their view of the computer names, for each
+  agent, the providers whose models it may run now (`modelProviders`:
+  `fragment_core::catalog::Catalog::model_providers`, an own key set whose
+  row offers models, that the agent is not narrowed from: in its guest's
+  view, a credential with a `modelBase`), and the route's models' ids
+  (`models`). The agent's page (the agent template's, framed by their
+  shell, which hands both over with its agents: docs/api.md, The shell)
+  shows the model it runs by that rule: the model `agent.json` names
+  while its provider is one of those, else its tier's model's id (`medium`,
+  else `cheap`). Never `agent.json`'s model alone: one its owner
+  disconnected or narrowed it from is not what runs. Opened outside its
+  owner's shell, the page names no model. What the image itself chose is
+  its own (`profile.model_*`); an image that does not follow this rule
+  is not shown truly, and its reporting what it runs is not built.
 - **Disconnecting** (`DELETE /api/connections/{provider}/key`, settings'
   Disconnect) takes the key from the computer. The agent's next turn is
   its tier's again. The key itself is revoked at OpenRouter
@@ -1369,7 +1564,17 @@ the refusal of an agent the computer does not run, are the image's. The
 page is served at the port's root and reaches its sockets by relative
 URLs, naming the agent again (our images': `websockify?viewer=&agent=`
 and `control?viewer=&agent=`), so it works under the port's prefix
-(`/p/6080/`).
+(`/p/6080/`). Whose screen it is, by name, is the shell's to say: as the
+page loads, and again whenever the agent is renamed while it is open, the
+shell posts it `{fragment: "screen", agent, name}` at the port's own
+origin, `agent` its `?agent=` and `name` the agent's name (its
+fragment's title, as the person's list says it now: docs/api.md, "An
+agent's name and picture"), and titles the screen's window so. A page
+takes it only from the page framing it (`event.source` its parent),
+and only for its own agent. The computer knows an agent by its label
+alone, which is no name (Paul, 2026-10-20: the screen said "Watching
+pulsar-360's screen" of his agent Waffle), so a screen opened in a tab of
+its own names none.
 
 ## Our images
 
@@ -1433,7 +1638,18 @@ settings and state):
   beside the tier, is a model of a provider its owner connected, which it
   runs on while its credentials hold that provider (above, "An agent's
   own model"); the image reads `agent.json` again every 10 s while awake
-  (`HERMES_BOOT_MODEL_MS`, a test's), so a pick is its next turn's.
+  (`HERMES_BOOT_MODEL_MS`, a test's), so a pick is its next turn's. Its
+  `reasoning`, `low` or `high` (Paul, 2026-10-22: "expose the reasoning
+  level in the model picker … high is a good default"), is how hard it
+  thinks, whatever its model: its profile's `agent.reasoning_effort`
+  (`hermes::Reasoning`), which Hermes reads at each turn and sends as each
+  call's `reasoning_effort`. Absent, or any other, it is `high`. Those two
+  are what the model route passes on (`fragment_core::models::EFFORTS`;
+  any other it takes as `low`, as GLM takes `medium` for its dearest,
+  `max`), and left unset Hermes sent its own default, `medium`, which the
+  route took as `low`. Settings' Agents offers it beside the model for
+  every agent: Default (High), Low and High; a pick writes `reasoning` to
+  `agent.json` as the model's pick is written, and the default removes it.
 
   Its work (the seam, above): each agent's is `/data/work/<profile>`.
   Its profile's config makes it the terminal's working directory
@@ -1614,8 +1830,9 @@ settings and state):
   each agent's own tools keep each on its own desktop, and the platform
   skill tells every agent never to touch another's.
 
-  The screen's page names the agent it shows (its `?agent=`, then the
-  name the control socket says) and follows the desktop: a stream that
+  The screen's page shows the agent its `?agent=` names, by the name the
+  shell tells it (Ports, above; "the screen" until then, and in a tab of
+  its own), and follows the desktop: a stream that
   ends (the desktop stopped or restarted, its viewers' streams ending with
   it) is opened again on its own, from 1 s backing off to 10 s, while the
   page's control socket stays open, and the bridge starts the desktop for
@@ -1707,6 +1924,30 @@ its cap. A card, a clarify's or the payment card's, waits as long as the
 bridge's prompt lives (`approvals.timeout` and `agent.clarify_timeout`
 are both `BRIDGE_PROMPT_TTL_MS`'s, an hour; `HERMES_BOOT_CARD_TIMEOUT_S`
 is a test's shorter one).
+
+Beside how to ask, every agent is told on every turn in our chats that a
+file someone attaches is already on its computer (`hermes::FILES`, after
+`hermes::ASKING` in `platform_hints.relay`; 2026-10-22): Hermes' relay
+adapter downloads each attachment before the turn into the profile's
+scratch, which Hermes prunes once a day unused, and the note before the
+message names its path (an image's after `image_url:`); nothing else
+told the agent it was a file it could use. Copied into its work, it is
+kept. Its browser tools have no upload, so to put one on a website it
+clicks the site's upload button with them, then types the path into
+the file dialog on its desktop with `computer_use`. The `fragment`
+skill's first page says the same (`computer.md`, "Files your owner sends
+you").
+
+And every agent is told, after that, how it sends one (`hermes::SENDING`;
+2026-10-23: asked for a PDF in the chat, Paul's agent named a path on
+its computer, then emailed it): a line of its reply that is `MEDIA:` and
+the file's absolute path, outside code and quotes (Hermes delivers no
+other tag), puts the file in the chat as the reply's attachment (the
+bridge uploads it: docs/bridge.md), and a file asked for in the chat is
+attached there rather than emailed or named by its path. Hermes tells
+every platform it knows the same (its `_MEDIA_NATIVE` hint), but has no
+hint for `relay`. The `fragment` skill's first page says it too
+(`computer.md`, "Files you send").
 
 ### Its name, in our Hermes image
 
@@ -1933,9 +2174,10 @@ and how a runtime finds them, is the image's.
   platform skill by the platform skill leaving the view. An agent's profile has
   its own, the managed set, which is what the shell's Skills section
   lists, the platform skill, and Hermes' pinned bundled skills. The managed
-  release has twelve workflows: apps, git, brains, connected Google,
-  image steps and model tiers, plus Cashu, Nostr CLI, X API, direct music,
-  market analysis and Polymarket (templates/skills/README.md). Generic skills
+  release has sixteen workflows: apps, git, brains, connected Google,
+  image steps, model tiers and a chat's attachments, plus Cashu, Nostr CLI, X API, direct music,
+  market analysis, Polymarket and design, and the upstream `gws-docs` and
+  `gws-slides` command guides alongside connected Google (templates/skills/README.md). Generic skills
   come from Hermes; optional ones remain in its hub. At build, the image
   moves Hermes' bundled tree to `/opt/fragment/bundled-skills`, so stage2
   and the gateway sync nothing into a saved profile. The boot copies each
@@ -2002,7 +2244,16 @@ and how a runtime finds them, is the image's.
   upstream links its other tools into `/usr/local/bin` (node, npm,
   python3, rg, ffmpeg), not `hermes`. execute_code's scripts keep the
   gateway's PATH. The Docker lane's `an_agent_runs_hermes_by_name` runs
-  it each way.
+  it each way. Hermes' own scheduler is off (decision 38; its `cronjob`
+  toolset is disabled), so `/usr/local/bin/hermes` refuses `cron` among
+  its words (exit 2), saying to add a schedule on itself instead
+  (`fragment schedule add --routine`: docs/api.md, "Scheduled records"),
+  and passes every other
+  command through; the platform skill's page says the same ("Later, and
+  again"), and its description has an agent load it for anything later or
+  recurring. execute_code's scripts, which reach `/opt/hermes/bin/hermes`
+  by the gateway's PATH, are not refused: the page is what keeps an agent
+  from them.
 - **Its credentials** (Connections and operator keys, above):
   `hermes-boot` writes each agent's placeholders into its profile's `.env`
   under their variables (`PERPLEXITY_API_KEY=fck_perplexity_…`), which
@@ -2124,9 +2375,9 @@ for a host) and finds the same `HOME`, `~` and modes.
   under way then, to its own failure), or to the
   save that works first (Paul, 2026-10-08; "What its owner is told").
 - Model calls bill the agent's owner, through the platform's model
-  route. Each operator key's call is held on the agent's owner's ledger
-  before it is made, and settled once the provider answered, at the key's
-  price and the margin (`key:<computer>:…`; decision 37); a catalog's
+  route. Each operator key's call is charged to the agent's owner's
+  ledger once the provider answered, at the key's price and the margin
+  (`key:<computer>:…`; decisions 37 and 62); a catalog's
   operator key always has a price (its own or
   the price book's list price). A connection's call and an own key's are
   counted, never charged; every call is in the computer's `uses`.
@@ -2157,7 +2408,9 @@ for a host) and finds the same `HOME`, `~` and modes.
   sleep's first, with the stop at the bound itself, later while a record
   holds it, never while in use or always on; a start that went back told
   with its cause and save, pending while asleep, once until seen, a seen
-  older one hiding only itself, across a restart of the DO; won't wake
+  older one hiding only itself, across a restart of the DO, and none for
+  one that lost nothing (nothing done since its save; a keepalive only
+  counted open across it), an unseen older one still told; won't wake
   told until a restart; an update told while awake on another version
   than its next start runs, between turns, never asleep or starting,
   taken by a restart or a sleep and a wake, put off for that version only,
@@ -2203,19 +2456,29 @@ for a host) and finds the same `HOME`, `~` and modes.
   same wake starts it again from the save (#362). A check of
   what ran counts runs (the model fake's calls, the ledger's rows, the
   computer's `uses`), never records, which a second run replays. The
+  A turn's keepalive across a reload of the node's Worker (`Suite::reload`,
+  which restarts every Durable Object and disconnects every socket, as a
+  deploy does) is counted open with none held, and at the computer's next
+  event only those held; nothing stays counted once the turn answers
+  (#557). Its bridge opening it again is the bridge's own test, against
+  its fake API (`a_keepalive_a_deploy_cut_is_opened_again`): after a local
+  reload, workerd destroys every keepalive the computer's egress upgrades
+  at once, which a deploy on Cloudflare does not. The
   e2e's bound is 45 s (`crate::UNSAVED_MAX_MS`), so the `computers`
   lane's recovery checks see it run out: a failed sleep told at once with
   its stop time, a restart asked twice (its save failing too) going back
   once and saying so until seen, the unsaved stop at the time it said and
   the wake after told once, a restart of a sleeping computer, one
-  refused at zero credit, and no awake time on its owner's ledger in
-  either free window. Its image pin, which is what a deploy that changed
+  refused at zero credit, no awake time on its owner's ledger in
+  either free window, and a restart with nothing done since the save its
+  life came up from going back and telling nothing. Its image pin, which is what a deploy that changed
   the image is to a computer: the update told awake, not while a turn
   waits on its card, again when it ends, put off by Later (again the
   same; another version, or none, refused), taken by a restart (the next
   build served), and not told asleep. The `shell-ui` lane sees the same in
-  Chrome: the warning on Settings with no reload, its Restart, the notice
-  of what it went back to and its OK (gone after a reload), Settings'
+  Chrome: the warning on Settings with no reload, its Restart (after its
+  agent answered a message no save keeps), the notice of since when
+  changes weren't kept and its OK (gone after a reload), Settings'
   Restart computer, and an update: shown with no reload, Settings' version
   and the latest, its Restart taking it, its Later holding after a
   reload. On a preview, the hosted `agent-restart` section (by name)
@@ -2248,7 +2511,7 @@ for a host) and finds the same `HOME`, `~` and modes.
   apt and a program into `/usr/local/bin`, offline), its home intact
   after a sleep and a wake; and that agent (on the medium tier) looking
   at its screen: its `computer_use` screenshot goes to the route's
-  `vision` as that agent, settled on its owner's ledger at GLM-5.3
+  `vision` as that agent, charged on its owner's ledger at GLM-5.3
   Flash's price, and its answer is what the vision model saw. The
   Workers AI fake reads images only on a model the catalog marks
   "Vision: Yes" (GLM-5.3 Flash) and answers 400 for one sent to another,
@@ -2293,7 +2556,8 @@ for a host) and finds the same `HOME`, `~` and modes.
   change that raises its window, a foreground click, `rm -rf`, an
   `execute_code` script, and writes to a project's `AGENTS.md` and to
   `~/.ssh/config` each run with no card and no guardian call, and the
-  model's system prompt says how to ask (`hermes::ASKING`).
+  model's system prompt says how to ask (`hermes::ASKING`) and that a
+  file attached in the chat is on its computer (`hermes::FILES`).
 - The platform's side, with the stub: the `computers` lane's ticket that
   lands on `?agent=` and refuses a path off its port, and an agent's
   screen's control socket through the port (refused for an agent not on

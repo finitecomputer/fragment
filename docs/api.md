@@ -2,8 +2,27 @@
 
 The cell (`cell/`, Rust on Cloudflare Workers) answers everything below;
 the CLI and the browser library are its clients. Errors are `{"error":
-"<code>", "message": "..."}` (codes in `crates/proto`). `cargo xtask e2e`
-proves every route. The TypeScript runtime this replaced was deleted
+"<code>", "message": "..."}` (codes in `crates/proto`). Billing's, seats'
+and orgs' refusals add `"reason"`, where one status means several causes
+a person acts on differently (`proto::Reason`: a trial code unknown,
+ended, used or taken, a seat not sold, Stripe refusing, who pays staying
+until their subscription ends, the last admin, an offer gone, the day's
+offers used up, the last paid seat, …); the shell picks its plain words
+by it. It is add-only: absent elsewhere, and a reason a client does not
+know reads as none. A platform object
+that refuses its code's schema (docs/MODEL.md, Schemas) answers every
+call 500 `schema_refused`, its message naming it (its class and id) and
+why: a newer version than its code knows (a rollback), another code's
+step, or tables from before versions that need a reset (the operator's
+call). A fragment's delete and a wipe still end one (the Registry
+aside: docs/MODEL.md, Schemas). While a deploy goes out, any route may
+answer 503 `deploying` ("a deploy is going out; try again in a few
+seconds", naming the two releases): a call between the platform's
+Worker and one of its objects met another release on the other side,
+which refused it before doing anything, and was asked again for about
+two seconds first (docs/MODEL.md, Calls between releases). Nothing it
+asked for was done, so the same request again is safe, whatever it
+does. `cargo xtask e2e` proves every route. The TypeScript runtime this replaced was deleted
 (its contract is in git history, last at `35f5e18`). The desktop and the
 personal agent's chat went at the cut (docs/cloudflare-v1.md, decision
 33; their contract is at the tag `celld-final`); computers came back
@@ -22,7 +41,7 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_HOST_SUFFIX` | fragments are served from `<name>.<suffix>` (any other name under it is 404, never the platform; the suffix's own name is the platform's, or redirects to it: Hosts, below). Every deployment names one: an isolate without it does not start |
 | `FRAGMENT_HOST_LABEL_SUFFIX` | a branch deployment's mark, `--<branch>` (a branch is 1 to 16 of lowercase letters, digits, and single dashes inside, as `cargo xtask deploy` makes them; an isolate with another does not start): its fragments are `<name>--<branch>.<suffix>`, one DNS label beside the other branches' in one zone, and the mark takes from the room its labels have (Names, below) |
 | `CODESTORAGE_REPO_PREFIX` | what this deployment's repos are named with first (a branch's `<branch>--`), so deployments sharing an org never share a repo |
-| `FRAGMENT_POLL_INTERVAL_S` | how often a busy fragment's pass runs (default 300): one whose pins may lag its repo (a storage token was minted for it, or a move failed to follow, in the last day), which polls code.storage for its branches (the backstop for a push no one refreshed), or with a run in flight (checked against its Workflow), an ended run's reservation to give back, or a template or the agent it declares still to land. Any other fragment's pass is daily, and polls nothing: every move the platform makes or is told of (`refresh`) is followed at once |
+| `FRAGMENT_POLL_INTERVAL_S` | how often a busy fragment's pass runs (default 300): one whose pins may lag its repo (a storage token was minted for it, or a move failed to follow, in the last day), which polls code.storage for its branches (the backstop for a push no one refreshed), or with a run in flight (checked against its Workflow), or a template or the agent it declares still to land. Any other fragment's pass is daily, and polls nothing: every move the platform makes or is told of (`refresh`) is followed at once |
 | `FRAGMENT_JOB_RETRY_DELAY_S` | a failed job step's first retry delay, doubling over 4 retries (default 10) |
 | `FRAGMENT_EGRESS_LOCAL` | `allow` lets jobs fetch loopback and private addresses, and takes a connection's http:// consent URL (dev and e2e fakes); never on a shared fleet. It also makes a fleet local for its test levers (Test levers, below) |
 | `FRAGMENT_BLOB_GRACE_S` | how long a blob no branch names is kept before it is deleted (default 7 days) |
@@ -35,11 +54,13 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_COMPUTER_UNSAVED_MAX_MS` | how long a computer whose sleep's save keeps failing stays awake, its container kept, before it sleeps unsaved (the deploy config's `computers.unsaved_max_ms`; default 1800000, thirty minutes; docs/computers.md, "Saves and what a wake restores") |
 | `FRAGMENT_SUPPORT_URL` | where a person whose computer will not start gets help (the deploy config's `support_url`): an `https:` page or a `mailto:` address, at most 512 visible characters, refused at the node's first request otherwise; `GET /api/computers` gives it as `support`, and the shell links it (docs/computers.md, "What its owner is told"). Unset, none |
 | `FRAGMENT_OPERATORS` | identities and keys that grant credit and set plans, seats and overdrafts, and wipe a person (Operators, below); a key listed is an operator's whether or not anyone holds it |
-| `FRAGMENT_DEPLOY_ID` | which deployment this is (default `dev`); `GET /healthz` answers it in `x-fragment-deploy` |
+| `FRAGMENT_DEPLOY_ID` | which deployment this is (default `dev`); every answer of the platform's host names it in `x-fragment-deploy` (`GET /healthz`'s among them, which CD checks), and the shell's page in its meta, so a page left open reloads once the platform under it changed (The shell, "A new release"). `cargo xtask deploy` sets the deploy's commit (`git rev-parse --short=12 HEAD`; a tree with uncommitted changes adds `-dirty-<unix seconds>`, so two such deploys differ). It is the release every call between the Worker and its objects carries, and each object admits only its own (docs/MODEL.md, Calls between releases): 1 to 64 of letters, digits, `.`, `_` and `-`, or the isolate does not start |
+| `FRAGMENT_DEPLOYED_AT` | when the release was deployed, whole seconds since 1970 (default none; dev and the e2e: their node's start). `cargo xtask deploy` sets the deploy's second. Every call between the Worker and its objects carries it beside the release, and an object that refuses a call from a release deployed after its own restarts onto it (docs/MODEL.md, Calls between releases, "An object behind restarts"): 1 to 12 digits, or the isolate does not start |
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake); sign-in is on where the `WORKOS_CLIENT` secret is bound (below), and answers 500 where it is not |
 | `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (required; production's is https://finite.chat, on no fragment's domain, and the CLI's default host). Every push's VAPID token names it as its contact (`sub`, RFC 8292) |
 | `FRAGMENT_SIGNINS_PENDING_MAX` | sign-ins begun and not finished that the registry keeps (default 100000; at least 1): a sign-in is kept through this many later starts, so the oldest is let go only past this many starts in its ten minutes (Sign-in, below) |
-| `FRAGMENT_PROVIDERS` | the provider catalog a computer's swap offers (`fragment_core::catalog`; docs/computers.md, Connections and operator keys): a JSON list of `{name, kind: connection\|operator\|own, hosts, placements, env, price?}`, rendered from the config's `providers`; none by default. A malformed one is refused at the node's first request (the deploy checks it first). An operator key's price is the price book's `keys`; raise `FRAGMENT_PRICE_BOOK_VERSION` with every change to one |
+| `FRAGMENT_CLI_BEGINS_PER_IP_MINUTE` | CLI codes one address may ask for a minute, `POST /cli/begin` (default 30; at least 1): past it, 429 until the next minute. The fleet as a whole hands out at most 5000 a minute (`limits::CLI_BEGINS_PER_MINUTE_MAX`), so in a code's ten minutes a flood from many addresses is refused before it can push out the codes people are typing |
+| `FRAGMENT_PROVIDERS` | the provider catalog a computer's swap offers (`fragment_core::catalog`; docs/computers.md, Connections and operator keys): a JSON list of `{name, kind: connection\|operator\|own, hosts, placements, env, price?}`, rendered from the config's `providers`; none by default. A malformed one is refused at the node's first request (the deploy checks it first). An operator key's price is the price book's `keys`: a row added or a price changed reaches every ledger at its next call (`FRAGMENT_PRICE_BOOK_VERSION`, the book's version, is informational; docs/ledger.md, The price book) |
 
 Secrets Store bindings (docs/secrets.md): each a secret in the account's
 Cloudflare Secrets Store, named by the deployment's config and bound by
@@ -82,16 +103,25 @@ registry's are no route (404); a local fleet's reach everything.
 
 | Route | Body → answer |
 |---|---|
-| `POST /api/test/signin` | `{email, paidCalls?}` → `{session, identity, created, paidCalls}`: an e2e person's platform session (the `fragment_session` cookie's value). `email` is `<name>@e2e.test` (a name of 1-64 of `[a-z0-9._-]`; any other is 400); its person is keyed by it under the issuer `e2e.test`, which no real sign-in has, so they are never anyone WorkOS signs in. The first sign-in makes them (`created`), and each makes them a seat (one ledger command, `e2e-seat`) and caps their paid calls (model calls and AI steps, each a reservation) at `paidCalls` from now, at most 200; a sign-in with no `paidCalls` leaves the cap as it is (a new person's: 0), so a sweep's never stops a run still spending; their ledger refuses the one past it (402 `budget_used_up`). On a branch a day (UTC) makes at most 1000 e2e people and lends them at most 2000 paid calls (429 past either) |
+| `POST /api/test/signin` | `{email, paidCalls?}` → `{session, identity, created, paidCalls}`: an e2e person's platform session (the `fragment_session` cookie's value). `email` is `<name>@e2e.test` (a name of 1-64 of `[a-z0-9._-]`; any other is 400); its person is keyed by it under the issuer `e2e.test`, which no real sign-in has, so they are never anyone WorkOS signs in. The first sign-in makes them (`created`), and each makes them a seat (one ledger command, `e2e-seat`) and caps their paid calls (model calls, operator keys' calls and AI steps: every one its ledger has charged or holds, by its reference) at `paidCalls`, at most 200; a sign-in with no `paidCalls` leaves the cap as it is (a new person's: 0), so a sweep's never stops a run still spending; once they reach it their ledger's gate refuses the next (402 `budget_used_up`), as at zero credit, so the cap is approximate by what starts within the gate's minute (docs/ledger.md, "The gate"). On a branch a day (UTC) makes at most 1000 e2e people and lends them at most 2000 paid calls (429 past either) |
 | `POST /api/test/people` | `{after?}` → `{people: [{identity, email}], next}`: the e2e people by identity, 100 a page (`next`: the identity to ask after, `null` on the last page); the hosted e2e's sweep signs each in again and deletes their fragments of one run (`e2e-<run>-…`), or with `--sweep-all` every `e2e-…` one at least an hour old (crates/e2e/src/hosted/sweep.rs) |
-| `POST /api/test/ledger` | `{identity, op, …}`: a lever on that person's ledger: `clock {offsetMs}` moves its clock, `sweep` runs its sweep now, `entries {prefix}` lists its references under a prefix (at most 500), `totals` answers what moved its balance, `paid-calls {max}` caps its paid calls from now (`{max, used}`), and `legacy-seat {seat, seq}` sets its seat at that order, as an operator's ledger `seat` command did before it went (2026-10-16), answering its status (an order no newer than its own is refused, 400, as the registry's would be) |
+| `POST /api/test/ledger` | `{identity, op, …}`: a lever on that person's ledger: `clock {offsetMs}` moves its clock, `sweep` runs its sweep now, `entries {prefix}` lists its references under a prefix (at most 500), `totals` answers what moved its balance, `book` answers the price book its head holds as of its last call (`{book}`), `paid-calls {max}` caps its paid calls (`{max, used}`: `used` counts every one it has charged or holds), and `legacy-seat {seat, seq}` sets its seat at that order, as an operator's ledger `seat` command did before it went (2026-10-16), answering its status (an order no newer than its own is refused, 400, as the registry's would be), and `schema` answers the steps its schema holds, as the list's `schema` does |
 | `POST /api/test/keys` | `{fragment, op, plaintext\|sealed}`: seals or opens as that fragment |
-| `POST /api/test/list` | `{identity, op}`: a lever on that identity's list (on a preview, an e2e person's or their agent's): `before-searched` makes it a list from before its table named the channels searched (#186), as the lists p5 made before then are: every newer change to it is refused (500) → `{columns}` |
-| `POST /api/test/fragment` | `{fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, `age-outside {ms}` makes the last sign its pins may lag (a storage token minted, a move that failed to follow) `ms` older, `age-invites {ms}` makes every invite waiting run out `ms` sooner and arms its alarm for the soonest (`{aged, invites}`: how many), `fail-after-paid {times}` fails its next paid AI steps just after their call was paid and kept (so the step is tried again), `fail-meter-acks {times}` loses its next meter batches' acknowledgements (so the queue delivers them again), `meter-now {sample?, resend?}` closes every counted minute, takes a storage sample (unless `sample: false`) and sends its outbox's batch now (a waiting one again with `resend`), answering the outbox, `meter` answers the outbox, `forget-standing` forgets what it heard of its owner's standing (meter.rs), `cron-now` makes each of its cron schedules due at once (`{due}`: how many), so a test need not wait for a schedule's minute, `poll-now` makes its next alarm a poll pass (the blob collection's), `fail-cards {times}` makes its next card shots open a page nothing serves (`http://127.0.0.1:9/`, which Chrome refuses), so they fail as an unreachable page does, `cards` answers `{cards, failCardsLeft}`: its card and schedule as kept (`fragment_core::card::Cards`) and the shots the lever still fails, `repo {repo}` makes it name the repo `repo` (`[a-z0-9-]`), as a fragment made before repos were named for their owner does (a wipe deletes what it names), and `ended` answers `{ended: [{incarnation, name, stored, attempts, lists, repos, agents, tries, held, error}], dueAt}`: each life a delete ended whose cleanup is not done (at most 8; `lists`: the members' lists it has still to tell; `stored`: 1 while its app's database or blobs remain; `repos`: 1 while a wipe's end of it has its repo still to delete; `agents`: 1 while an agent fragment's agent has still to leave its computer and the registry's names; `tries`: the most failed tries of a part left; `held`: one failed ten times or was refused, so it is tried daily, and by each wipe call; `error`: the last error of a part left, `part: error`), and when its next pass is due. `ended` alone answers on a name with no fragment (deleted, and not made again) |
-| `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?}` pulls a lever on that computer (docs/computers.md): `kill` → `{computer, killed}` sends SIGKILL to the guest's PID 1 (from outside its PID namespace), so its container exits as a crash does and its real exit is reported (`killed`: the start it was); one not running (asleep, or won't wake) is 400. `saves` → what its Computer DO keeps of its saves: `saves` (newest first, at most three: `{number, id, generation, atMs, held, records, unusable}`, each with its `DirectoryBackup` records), `numbered` (the last save's number), `snapshot` (`{id, image, save}`, the cache of a save for one image, or `null`), `restored` (what its last start that came up restored, as the view has it), `rollbacks`, `ended` (`{generation, by, saved}`: how the last life ended, until the next start that comes up reads it), `starting` (`{generation, from}`: the start under way), `running` (`{generation, image}`: the image's reference the last start that came up runs), `generation` (its lifecycle's last start), `saving` (the save under way, by its step: `{step: hold \| save \| stop, since_ms, …}`, or `null`), `unsavedSince` (since when a sleep's save has kept failing, or `null`: the bound counts from it), `freeSince` (since when its awake time is free, the start of the try whose save failed first, or `null`), `keepalives` (the guest's keepalives it counts open: its turns running), `failSaves` (the lever's failures still to come) and `hangBackups` (the lever's bound on its backups, or 0). `fail-saves` with `times` (0 to 100) → `{computer, failSaves}`: its next that many saves fail before they start (a sleep's included, which then keeps its container); 0 fails none more. `hang-backups` with `ms` (0 to 480000) → `{computer, hangBackups}`: a sick container's backups (r4, r6): its awake container's `sandbox-shim` swapped for one that never answers, and its saves' backups bounded by `ms` in place of their 8 minutes, so each fails at it (`no answer within <ms> ms`); 0 puts its shim back and the bound. One not awake is 400 (0 aside). `alive-check` with `ms` (1 to 45000) and `freeze` → `{computer, aliveCheck}`: its next start waits `ms` for its guest to read its view, as a start from a snapshot does (local workerd takes none); with `freeze` its guest's PID 1 is stopped (SIGSTOP) once its container is up, so it never does: the start came up dead, and the same wake starts it again from its save (#362). `always-on` with `on` → `{computer, alwaysOn, view}`: its owner's plan made always-on, or not (decision 25: the plan itself does not reach a computer yet). Another op, or one without its argument, is 400; a computer no one made is 404 |
+| `POST /api/test/list` | `{identity, op}`: a lever on that identity's list (on a preview, an e2e person's or their agent's): `before-searched` makes it a list from before schema versions and before its table named the channels searched (#186), as the lists p5 made before then are: every newer change to it is refused (500), and its next start refuses it (`schema_refused`, a reset required) → `{columns}`; `schema` → `{class, known, steps: [{version, name, sha, how, at}]}`: the steps its schema holds (`how`: `ran` or `adopted`; none from before versions) and how many its code declares, answered by a list that refuses its schema too |
+| `POST /api/test/fragment` | `{fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `legacy-member-kind {principal}` makes that member's row one from before member rows named their kind (its kind NULL), its schema's levers (cell/src/schema.rs, answered by a fragment that refuses its schema too): `schema` answers its steps as the list's `schema` does, with the columns of its `members` and `runs`, `schema-rerun` runs its migration again as a start does (`{ran}` or `{refused}`), `schema-unversion {shape?}` makes it a fragment from before versions (no `_schema`), as `people-only` one from the days of people-only shares (`members.people_only`) and as `before-code` one from before `runs.code` (#178), answering those columns, and `schema-try {step}` runs its steps and one more of the e2e's (`adds` a column to `members`; `fails` once it has made a table), answering `{ran}` or `{refused}`, and `probeTable` (whether the table `fails` makes is there), `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, `age-outside {ms}` makes the last sign its pins may lag (a storage token minted, a move that failed to follow) `ms` older, `age-invites {ms}` makes every invite waiting run out `ms` sooner and arms its alarm for the soonest (`{aged, invites}`: how many), `fail-after-paid {times}` fails its next paid AI steps just after their call was paid and kept (so the step is tried again), `fail-meter-acks {times}` loses its next meter batches' acknowledgements (so the queue delivers them again), `meter-now {sample?, resend?}` closes every counted minute, takes a storage sample (unless `sample: false`) and sends its outbox's batch now (a waiting one again with `resend`), answering the outbox, `meter` answers the outbox, `receipt-before {run}` makes that run's paid receipts as the release before decision 62 left them (kept, not marked charged, charged under an attempt's reference: docs/ledger.md, AI steps), `forget-standing` makes its isolate's gate forget every answer it heard, its owner's standing among them (docs/ledger.md, "The gate"; locally one isolate runs the router and every object, so it is the whole node's), `cron-now` makes each of its cron schedules, and each of its scheduled records not paused, due at once (`{due, records}`: how many of each), so a test need not wait for a schedule's minute, `poll-now` makes its next alarm a poll pass (the blob collection's), `fail-cards {times}` makes its next card shots open a page nothing serves (`http://127.0.0.1:9/`, which Chrome refuses), so they fail as an unreachable page does, `cards` answers `{cards, failCardsLeft}`: its card and schedule as kept (`fragment_core::card::Cards`) and the shots the lever still fails, `repo {repo}` makes it name the repo `repo` (`[a-z0-9-]`), as a fragment made before repos were named for their owner does (a wipe deletes what it names), and `ended` answers `{ended: [{incarnation, name, stored, attempts, lists, repos, agents, tries, held, error}], dueAt}`: each life a delete ended whose cleanup is not done (at most 8; `lists`: the members' lists it has still to tell; `stored`: 1 while its app's database or blobs remain; `repos`: 1 while a wipe's end of it has its repo still to delete; `agents`: 1 while an agent fragment's agent has still to leave its computer and the registry's names; `tries`: the most failed tries of a part left; `held`: one failed ten times or was refused, so it is tried daily, and by each wipe call; `error`: the last error of a part left, `part: error`), and when its next pass is due. `ended` alone answers on a name with no fragment (deleted, and not made again) |
+| `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?}` pulls a lever on that computer (docs/computers.md): `kill` → `{computer, killed}` sends SIGKILL to the guest's PID 1 (from outside its PID namespace), so its container exits as a crash does and its real exit is reported (`killed`: the start it was); one not running (asleep, or won't wake) is 400. `saves` → what its Computer DO keeps of its saves: `saves` (newest first, at most three: `{number, id, generation, atMs, held, records, unusable}`, each with its `DirectoryBackup` records), `numbered` (the last save's number), `snapshot` (`{id, image, save}`, the cache of a save for one image, or `null`), `restored` (what its last start that came up restored, as the view has it), `rollbacks`, `ended` (`{generation, by, saved}`: how the last life ended, until the next start that comes up reads it), `starting` (`{generation, from}`: the start under way), `running` (`{generation, image}`: the image's reference the last start that came up runs), `generation` (its lifecycle's last start), `saving` (the save under way, by its step: `{step: hold \| save \| stop, since_ms, …}`, or `null`), `unsavedSince` (since when a sleep's save has kept failing, or `null`: the bound counts from it), `freeSince` (since when its awake time is free, the start of the try whose save failed first, or `null`), `keepalives` (the guest's keepalives it counts open: its turns running), `failSaves` (the lever's failures still to come) and `hangBackups` (the lever's bound on its backups, or 0). `fail-saves` with `times` (0 to 100) → `{computer, failSaves}`: its next that many saves fail before they start (a sleep's included, which then keeps its container); 0 fails none more. `hang-backups` with `ms` (0 to 480000) → `{computer, hangBackups}`: a sick container's backups (r4, r6): its awake container's `sandbox-shim` swapped for one that never answers, and its saves' backups bounded by `ms` in place of their 8 minutes, so each fails at it (`no answer within <ms> ms`); 0 puts its shim back and the bound. One not awake is 400 (0 aside). `alive-check` with `ms` (1 to 45000) and `freeze` → `{computer, aliveCheck}`: its next start waits `ms` for its guest to read its view, as a start from a snapshot does (local workerd takes none); with `freeze` its guest's PID 1 is stopped (SIGSTOP) once its container is up, so it never does: the start came up dead, and the same wake starts it again from its save (#362). `always-on` with `on` → `{computer, alwaysOn, view}`: its owner's plan made always-on, or not (decision 25: the plan itself does not reach a computer yet). `expire-sign-ins` → `{computer, expiredSignIns}`: every own-key sign-in under way (Connections) is past its time, as ten minutes would leave it. `schema` answers the steps its schema holds, as the list's `schema` does (on a computer no one made too). Another op, or one without its argument, is 400; a computer no one made is 404 |
 | `POST /api/test/mail` | a local fleet's only (a preview's mail is real): `{to, subject, text}` → `{messageId}`, one message as the platform sends it (Mail, below), to the mail fake |
 | `POST /api/test/export` | `{identity, op, steps?}` (on a preview, an e2e person's): a lever on that person's export (Export, below). `pace` with `steps` lets their build take at most that many more steps (a copy's piece, a page of records, a fragment's facts…), then wait, a second at a time, until it is let go (`steps: null`): a build held part way, as a crash or a restart finds one. `piece` with `steps` (1024 to 8 MiB, or `null`) holds an entry of unknown size that many bytes at a time before putting it aside, so a small export puts its entries aside in many pieces, as a large one does. `cap` with `steps` (bytes, or `null`) makes their archive's limit that many bytes, so a small export meets it → `{pace}`, `{piece}` or `{cap}` |
-| `POST /api/test/registry` | a local fleet's only: `{down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, `{downFor: {path, times}}` makes it answer 503 to the next `times` calls (at most 100; 0 answers them again) to one of its inner paths (`/orgs/sync`: a computer's making asking for its seat's push), as `{down}` does, the rest answered, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it) |
+| `POST /api/test/registry` | a local fleet's only: `{down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls, skewed}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), and how many it refused for their release (not among `calls`), `{skewFor: {path, times, deployed?}}` makes it answer the next `times` calls (at most 100; 0 answers them again) to one of its inner paths (`/login/exchange`: a sign-in's callback) as a registry of another release would, each refused unread (503 `deploying`) by the check every call into an object meets, as a deploy going out does (docs/MODEL.md, Calls between releases), and with `deployed` (a deploy's seconds, as `FRAGMENT_DEPLOYED_AT`) as one deployed then: before the caller's release (0), it restarts at the first refusal, as an object a deploy replaced does, its hooks and counts gone with it (so the router's next ask is answered); after it, it refuses and stays, `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, `{downFor: {path, times}}` makes it answer 503 to the next `times` calls (at most 100; 0 answers them again) to one of its inner paths (`/orgs/sync`: a computer's making asking for its seat's push), as `{down}` does, the rest answered, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it), `"schema"` answers the steps its schema holds, as the list's `schema` does, on a registry that refuses its schema too, and `{invitesBefore: email}` makes every invite waiting on that email one mailed before invites waited for a yes (decision 63: its role, title and sharer forgotten), which a sign-in as it still meets, answering `{before}`, how many |
+
+One hook is no route: on a local fleet with a test secret, a request
+whose `fragment_e2e_release` cookie names a release's id is answered as
+that release (cell/src/levers.rs `answered_release`): the
+`x-fragment-deploy` of every answer of the platform's host, and the
+shell's page's meta, name it, so a browser meets a deploy (The shell,
+"A new release") and no one else's answers change. A cookie naming no
+release is the node's own; calls between the Worker and its objects keep
+its own; a preview's and production's answers are always their own.
 
 A request body is at most what the zone's Cloudflare plan takes (100 MB
 on Free and Pro), below the 256 MiB a blob route allows (debt ledger).
@@ -136,7 +166,7 @@ sender, an outage) 502. Dev and the e2e send to the mail fake instead
 (`FRAGMENT_MAIL_URL`). On a preview, whose mail is real, a message to an
 e2e person (`<name>@e2e.test`, an address with no mailbox) goes nowhere
 rather than bounce. What it sends: invites by email (Sharing), seats
-and trials (Billing). Each names the platform as its shell does
+and trials (Billing), and a key added to a person (Sign-in: the key's ending, the whole key, how it came (a CLI's code typed: where, when and by what it was asked for, and never to type a code someone sent; or by which of their keys, `POST /api/identities/{id}/keys`), and `fragment keys revoke`; sent on every key added, after the answer, and a key is added whatever becomes of its mail). Each names the platform as its shell does
 (`fragment_core::mail::PRODUCT`, Finite.Computer, held to the shell's
 page and web manifest by a test). The sender, its address and any name,
 is the deployment's `mail_from`: a name there should say the same.
@@ -302,7 +332,7 @@ the new key and meant it for this signer.
 | --- | --- | --- |
 | `POST /api/identities` | a person | `{kind: "agent", proof}` → a new agent identity they own, named by the proof's key and holding it; again, the same one; a key someone else holds is 409; an agent owns no agents (403) |
 | `GET /api/identities/{id\|me}` | the identity, or its owner | → `{id, kind, owner?, email?, picture?, createdAt, keys: [{npub, addedAt, addedBy, revokedAt?}], agents: [id], subjects: [{issuer, email, linkedAt}]}` (`email`: a person's latest sign-in's); anyone else 404 |
-| `POST /api/identities/{id\|me}/keys` | a person for themselves; an owner for their agent | `{proof}` → the identity with the key added (at most 64 keys, revoked ones included); a key someone else holds, or a revoked one, is 409 |
+| `POST /api/identities/{id\|me}/keys` | a person for themselves; an owner for their agent | `{proof}` → the identity with the key added (at most 64 keys, revoked ones included), a person mailed of each key added to them (Mail); a key someone else holds, or a revoked one, is 409 |
 | `DELETE /api/identities/{id\|me}/keys/{npub}` | the same | → the identity; the key is 401 from the next request and never comes back; an agent's last active key cannot be revoked (400); a person who signs in may hold none |
 | `GET /api/identities/{id}/keys/{npub}` | the identity, or an agent it owns | → `{active}` (an agent's runtime checks its owner's keys with it) |
 | `PUT /api/identities/{agent}/held` | the agent's owner | `{held: "viewer" \| "editor" \| null}` → the agent: held below its owner (decision 36), it acts with at most that for whomever it acts, wherever its owner's access reaches; its own memberships (its chats, its agent fragment) are not held, so a held agent still answers and records its turns there; `null` lets it go; anyone else 403, `owner` or `public` 400 |
@@ -439,8 +469,8 @@ learns the page is there. Its API decides again on every call.
 | `GET /api/admin/people?q=&after=` | operators | → `AdminPeople {people: [AdminPerson {npub, email, joinedAt, lastSignInAt, org, admin, seat: {id, kind, comped, good}}], next}`: a page of 100 by npub, after `after`; `q`, the start of their email (any case; its wildcards only themselves) |
 | `GET /api/admin/people/{npub}` | the same | → `{person: AdminPerson, ledger: LedgerStatus, computer: ComputerView \| null, references: {running, next} \| null}`: `references` are the whole references of the image its computer runs (`null` while it runs nothing) and of the one its next start runs, `registry.cloudflare.com/<account>/<repository>@sha256:<hex>` on a deployment (the view's `version` and `latest` are their first 12 hex digits), which a promotion copies into the config (docs/computers.md, "Stable and canary") |
 | `PUT /api/admin/people/{npub}/computer/image` | the same | `{image}` → `ComputerView`: their computer pinned to `image`, as its owner's `PUT /api/computers/{id}/image` pins it (a canary, or back to the default): its next start runs it, and awake on another, its owner is told an update is ready. Logged (`pin`, the image its detail). An image the deployment lacks is 400; a person with no computer, 404 |
-| `GET /api/admin/orgs?after=` | the same | → `AdminOrgs {orgs: [AdminOrg {id, name, createdAt, status, customer, subscription, periodEnd, cancelAtEnd, admins, paidSeats, compedSeats, pending}], next}` |
-| `GET /api/admin/health` | the same | → `AdminHealth {orgsPaying, orgsLapsed, seatsPaid, seatsComped, planPushesQueued, quantityPushesQueued, failing: [{queue, target, tries, due}], lastEventAt, oldestCopyAt}` |
+| `GET /api/admin/orgs?after=` | the same | → `AdminOrgs {orgs: [AdminOrg {id, name, createdAt, status, customer, subscription, periodEnd, cancelAtEnd, admins, paidSeats, compedSeats, pending}], next}` (`admins`: those who said yes; `pending`: its offers) |
+| `GET /api/admin/health` | the same | → `AdminHealth {orgsPaying, orgsLapsed, seatsPaid, seatsComped, planPushesQueued, quantityPushesQueued, failing: [{queue, target, tries, due}], lastEventAt, oldestCopyAt}` (`queue`: `plan`, `quantity`, or `cancel`, a subscription whose cancel failed) |
 | `GET /api/admin/log?before=` | the same | → `AdminLog {entries: [{n, at, operator, action, target, detail}], next}`, newest first: each comp, comp's kind and end, trial code made, changed and mailed, computer pinned, and ledger command, written in its own turn; the newest 10,000 kept |
 | `POST /api/admin/trials/{id}/send` | the same | `{email}` → `{sent, to}`: mails the code, its days, and `/welcome?trial=<code>`; an ended code is 400 |
 
@@ -483,8 +513,13 @@ agents' in other people's fragments, `<fragment> (<role>, <identity>)`)
 each `{count, names, more}` (at most 50 names), `computer` `{computer,
 phase, saves, backups, more, snapshot}` (`backups`: the objects under its
 saves' prefix in R2, one page's count), `ledger` whether their ledger
-holds anything, `lists` the rows their and their agents' lists hold. A
-dry run's is what a wipe deletes; a wiped person's, what is left.
+holds anything, `lists` the rows their and their agents' lists hold, and
+`orgs` the orgs its `billing` step settles, each `OrgFound {org, name,
+ends, cancels, lapses}` (`ends`: no one else is in it, or they are its
+last admin; `cancels`: its subscription is canceled at once, as it ends
+or their card pays for it; `lapses`: the emails of the others whose
+seats there end). A dry run's is what a wipe deletes; a wiped person's,
+what is left.
 
 **The steps** (`fragment_core::wipe::STEPS`, run by the router:
 cell/src/wipe.rs), each idempotent and recorded done in the Registry only
@@ -543,6 +578,17 @@ once it is whole:
   and their agents' lists (`Principal`s) emptied the same way: a change
   still on its way from a fragment is taken and kept nowhere.
 - `pictures`: their picture's bytes, unless another identity set the same.
+- `billing` (docs/billing.md, "A wipe"; the security audit's M4): in one
+  registry turn their place in their org goes, and every row of an org
+  that ends with them (no one else in it, or they its last admin: the
+  others' seats end, their plans pushed); then Stripe has what each org
+  asks: the subscription of an org that ends, or that their card pays
+  for, canceled at once (its customer kept; the org's row, its link to
+  it, dropped once the cancel lands), any other's seats' count pushed.
+  Each is recorded as it is queued, so a call cut anywhere (a cancel
+  Stripe failed, a restart) goes on with it; done once none waits. Its
+  `note` says what it did (each org, whose seats end), or what it waits
+  for.
 - `registry`, in one turn: every row naming them or their agents
   (identities, keys, sign-in subjects and emails, picture, agent fragments,
   sessions, consents). The wipe's own row stays: the identity, its times,
@@ -560,8 +606,9 @@ person, signed in with the same account, finds them connected: they go at
 WorkOS); the computer's container snapshot, until Cloudflare expires it
 (30 days, never restored); the history Cloudflare keeps of their jobs'
 Workflow instances, and its Workers logs, for their retention;
-code.storage's soft-deleted repos, until it cleans them; what they wrote
-in other people's fragments; a push their browser subscribed to on a
+code.storage's soft-deleted repos, until it cleans them; their org's
+Stripe customer and its invoices (tax, refunds by hand), its
+subscription canceled; what they wrote in other people's fragments; a push their browser subscribed to on a
 fragment they were not in (a public one), until its push service says it
 is gone; and the wipe's row. A fragment none of their lists names (its
 owner's list never took its create) is not found (the debt ledger).
@@ -614,9 +661,12 @@ sealed at rest later is read as its owner reads it):
   whose membership, and its owner from its `status`; never copied);
 - each fragment kept: `status`, `members` (each named as its owner's
   share sheet names them, through the registry's profiles: a person by
-  their email, with their agents, since a share is a person's and their
-  agents'; an agent by its name and its owner's email), `invites`,
-  `secrets` (names), `channels` and each channel's records (pages of 100
+  their email, never their agents, though a share is a person's and their
+  agents' (decision 63); an agent member by its name and its owner's
+  email), `invites`,
+  `secrets` (names), `schedules` (its scheduled records: its meta's
+  `schedules`, absent when it has none), `channels` and each channel's
+  records (pages of 100
   after its cursor, up to the newest its listing named), `files` and
   `file` at main (its working copy, which the file API reads: an agent's
   memories land there) and each blob by its hash (`blobs/{sha256}`, a
@@ -721,19 +771,46 @@ live in the registry on every request whose answer depends on who is
 asking (Principals and access, above; a 30-day lifetime; tokens are 32
 random bytes, the registry keeps their SHA-256).
 
+Linking a second sign-in to a person (another email) is off until WorkOS
+offers an account picker: AuthKit answers a sign-in begun from a
+signed-in browser from the session it already holds there, so the link
+came back as the same email and linked nothing (Paul, 2026-10-21, in
+production), and ending that session first loses the way back. The
+route that did it, `/auth/link`, went (404, as any path no route
+answers); a person who linked one before keeps it.
+
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /`, `GET /settings`, `GET /welcome` | the shell's page, for anyone (The shell, below): signed out it asks them to sign in (and back to the same address, its query included), or to use another account (`POST /auth/switch`); for a new guest it is the welcome, and for a seat with no chat it makes their first agent; at `/settings` it opens its settings, at `/welcome` the welcome |
-| `GET /auth/login?return=&login_hint=` | → WorkOS's authorize URL (`provider=authkit`, `redirect_uri` `<platform>/auth/callback`, a state); the state is bound to the browser by `fragment_login` (HttpOnly, SameSite=Lax, `Path=/`, ten minutes) |
-| `GET /auth/link?return=` | the same from a signed-in browser: the sign-in that comes back joins this person (409 when it is someone else's) |
-| `GET /auth/callback?code=&state=` | the state must match the browser's cookie (400 otherwise); the code is exchanged server-side; → `fragment_session` (HttpOnly, SameSite=Lax, `Path=/`) and back to `return`; a WorkOS `error` is shown (400); a sign-in already finished or past its ten minutes, or a code WorkOS refuses (a callback sent again), is 400 `invalid_request` |
+| `GET /`, `GET /settings`, `GET /welcome` | the shell's page, for anyone (The shell, below): signed out it offers Sign Up (`/auth/login?screen_hint=sign-up`) and Sign In (`/auth/login?screen_hint=sign-in`), each back to the same address, its query included; for a new guest it is the welcome, and for a seat with no chat it makes their first agent; at `/settings` it opens its settings, at `/welcome` the welcome |
+| `GET /auth/login?return=&login_hint=&screen_hint=` | → WorkOS's authorize URL (`provider=authkit`, `redirect_uri` `<platform>/auth/callback`, a state); optional `screen_hint` selects `sign-up` or `sign-in` (other values are ignored), without changing WorkOS’s registration policy; the state is bound to the browser by `fragment_login` (HttpOnly, SameSite=Lax, `Path=/`, ten minutes) |
+| `GET /auth/callback?code=&state=` | the state must match the browser's cookie (400 otherwise); the code is exchanged server-side; → `fragment_session` (HttpOnly, SameSite=Lax, `Path=/`) and back to `return`; a WorkOS `error` is shown (400); a sign-in already finished or past its ten minutes, or a code WorkOS refuses (a callback sent again), is 400 `invalid_request`; a registry of another release (a deploy going out) refuses the exchange before it reads it, 503 `deploying`, the code not exchanged and the sign-in not spent, so the same callback again signs in |
 | `POST /auth/logout` | ends the session and every fragment session made from it, clears the cookie, and returns a non-cacheable page (200) that navigates to WorkOS's logout (`session_id` from the access token's `sid`, `return_to` `<platform>/`, which must be a Sign-out URI of the environment's application), which ends WorkOS's session too. With no live session or WorkOS session id, redirects home; from another origin, 403 (`GET` shows the button) |
-| `POST /auth/switch?return=` | "Use another account": AuthKit keeps its own session in the browser (a cookie on its own domain, which clearing the platform's site data leaves, and which another application of the environment may have made), and answers a sign-in from it without asking anyone. A switch ends this browser's session here (if any), then signs in as `/auth/login` does, its state bound by `fragment_switch` in `fragment_login`'s stead; where WorkOS answers from a session it already held (the access token's `auth_time`, the last time its person actively authenticated, is before the switch began, or absent), no one is signed in, and the browser goes to WorkOS's logout with that session's `sid` (as `POST /auth/logout`), so the next sign-in asks who is signing in; where someone signed in meanwhile, they are signed in. From another origin, 403 |
+| `POST /auth/switch?return=` | “Use another account”, wherever the shell says who is signed in: AuthKit keeps its own session in the browser (a cookie on its own domain, which clearing the platform's site data leaves, and which another application of the environment may have made), and answers a sign-in from it without asking anyone. A switch ends this browser's session here (if any), then signs in as `/auth/login` does, its state bound by `fragment_switch` in `fragment_login`'s stead; where WorkOS answers from a session it already held (the access token's `auth_time`, the last time its person actively authenticated, is before the switch began, or absent), no one is signed in, and the browser goes to WorkOS's logout with that session's `sid` (as `POST /auth/logout`, back at the platform's root, not `return`: WorkOS's logout returns only to a Sign-out URI of the application), so the next sign-in asks who is signing in; where someone signed in meanwhile, they are signed in, back at `return`. From another origin, 403 |
 | `GET /auth/fragment?name=&return=` | signed in: → `<fragment origin>/__signin?token=<a single-use redemption, 60 s, for that fragment only>` (a session holds at most 16 unspent; past that, the oldest is refused), at once for a fragment of the person's own, one shared with them, or one they said yes to; for any other, first a page asking "Continue to X?" (Asking first, below); signed out: → sign in first |
 | `POST /auth/fragment?name=&return=` | that page's form (`form`, its token): the yes, remembered, then → the fragment's `__signin?token=` (303); another origin, or a missing or stale token, 403 |
 | `GET /auth/frame?name=&return=` | a frame of the platform's own page (the shell's tabs; Frame sessions, below) signs in to the fragment: → its `__signin?token=<a frame redemption>` (`Cache-Control: no-store`, `Referrer-Policy: no-referrer`) where `/auth/fragment` would redeem at once; where it would ask first, or no one is signed in, a note in the frame. Anything but a frame of the platform's own page (by Fetch Metadata) is 403 |
-| `GET /cli?key=<npub>&proof=` | the link `fragment login` prints: `proof` is the key's own NIP-98 event for `POST <platform>/cli/approve`, good for ten minutes (the proof of possession; without it, stale, or by another key: 400). Signed in: a page showing the key's last eight characters, to compare with the terminal, and an Add button; signed out: → sign in first, keeping the link |
-| `POST /cli/approve` | the page's form (`key`, `proof`): the key joins the signed-in person at once; a key someone else holds, or a revoked one, is 409; another origin 403; the CLI waits for `GET /api/identities/me` to answer. People themselves come only from sign-in (`POST /api/identities {kind: "person"}` is 400) |
+| `POST /cli/begin` | `fragment login`'s new key asks for a code, signing this request itself (NIP-98, the usual 60 s window: unsigned or stale is 401; a key someone holds, or a revoked one, is 409) → `{code, url, expiresAt}`: eight letters of RFC 8628's base-20 (consonants only), shown `WDJB-MJHT`, good for ten minutes and once, and `url`, the plain `<platform>/cli`. The registry keeps each code's SHA-256, the fleet's newest `FRAGMENT_SIGNINS_PENDING_MAX` of them, swept as sign-ins are; a key keeps its newest 3 codes (`cli_code::CODES_PER_KEY_MAX`: a `fragment login` run again asks again, and its oldest goes). With each it keeps what asked: the request's time, its city and country (Cloudflare's `request.cf`) and its `User-Agent`, each one bounded line, which the confirming page and the mail show. Past the address's begins this minute (`FRAGMENT_CLI_BEGINS_PER_IP_MINUTE`, counted by `CF-Connecting-IP`) or the fleet's, 429 |
+| `GET /cli` | signed in: a page with one field, for the code, and a button that arms after a moment (a form token, as Sharing's pages); signed out: → sign in first, and back. It reads nothing from its address: no link fills in a code, names a key, or adds one |
+| `POST /cli` | that form (`form`, `code`, typed in any case, its hyphen or spaces left out): "A fragment CLI wants to act as <email>", the key's last eight characters to compare with the terminal, where and when its code was asked for and by what ("Its code was asked 2 minutes ago from Lagos, NG, by fragment-cli/0.14.1 (linux; x86_64)"), "Never type a code someone sent you", and an Add button (its own form token, bound to the code). A code no CLI waits on (mistyped, used, or past its ten minutes) is the page again, saying so (400), and a miss: a person's tenth miss in ten minutes makes the next code they type, right or wrong, 429 until ten minutes after their first. Another origin, or a missing, stale or too-soon token, 403 |
+| `POST /cli/approve` | that button (`form`, `code`): the code spent (every code its key had waiting with it), and the key joins the signed-in person at once; the person is mailed (Mail, below: the key's ending, the whole key, and `fragment keys revoke`). The same code again is a miss (400); a key someone else holds, or a revoked one, is 409; another origin, or another session's token, 403. The CLI waits for `GET /api/identities/me` to answer, then prints the email of whom it acts as. People themselves come only from sign-in (`POST /api/identities {kind: "person"}` is 400) |
+
+Every round trip that leaves the platform and comes back to it (a
+sign-in and a switch at WorkOS; an own key's sign-in at its provider:
+Connections) finishes only in the browser that began it. Its
+state (32 random bytes, as hex) is kept server side (the registry's
+`logins`, the person's computer's `own_signins`) and bound to the browser
+by a cookie of its kind (`fragment_login`, `fragment_switch`,
+`fragment_own_key`: HttpOnly, SameSite=Lax, `Path=/`, ten minutes); its
+callback is refused (400) unless the state it brings is the one that
+cookie holds. A browser holds one round trip of each kind at a time: a
+second begun in it replaces the first's binding, and the first's callback
+is refused. In the cell a callback finishes one only through an
+`auth::Bound`, which only `auth::trip_bound` makes, from the request's
+own cookie (`fragment_core::roundtrip::same_state`); whatever finishes a
+round trip (WorkOS's exchange, `calls::Exchange::of`; an own key's,
+`computer::SignedIn::of`) takes it, and neither is `Deserialize`
+(xtask's `a_round_trip_is_bound_only_by_its_request` holds the cell to
+that).
 
 The logout and switch POSTs leave the shell through a non-cacheable page
 (200) with a `Refresh` header, a Continue link, and `Referrer-Policy:
@@ -757,13 +834,13 @@ SAMEORIGIN`), and `Cross-Origin-Opener-Policy:
 same-origin` (a page that opens one in a window of its own is severed
 from it: its handle reads `closed`, and can neither navigate nor message
 it), and every form here (`/auth/logout`,
-`/auth/fragment`, `/cli/approve`, and Sharing's below) is 403 from another
+`/auth/fragment`, `/cli`, `/cli/approve`, and Sharing's below) is 403 from another
 origin, a fragment's page included. A browser sends `Origin` with every
 POST (`null` from a page that hides its referrer), so a POST without one
 is no browser's.
 
 Over https every session cookie whose path is `/` is named with the
-`__Host-` prefix (`__Host-fragment_session`, `__Host-fragment_login`,
+`__Host-` prefix (`__Host-fragment_session`, `__Host-fragment_login`, `__Host-fragment_switch`, `__Host-fragment_own_key`,
 `__Host-fragment_site`) and read under that name only: a fragment's page
 may set a cookie for all of the suffix's domain, but never a `__Host-`
 one, so none can stand in for the platform's session or another
@@ -815,9 +892,13 @@ Every navigation's answer carries `Vary: Sec-Fetch-Dest`. A frame's
 navigation is answered `Cache-Control: private, no-cache` and a
 `Content-Security-Policy: frame-ancestors` naming who may show it:
 
-- signed in by a frame session: `<platform>`, the platform's exact
-  origin, the page its mint was for (a frame session made for any other
-  page is no one's);
+- signed in by a frame session: `'self' <platform>`, the platform's
+  exact origin, the page its mint was for (a frame session made for any
+  other page is no one's), and the fragment's own pages within it (a
+  chat's PDF in a frame of the chat's page). A browser holds every
+  ancestor to the list, so no other page shows it: a frame of this
+  origin's inside another fragment's frame has that fragment among its
+  ancestors;
 - from the fragment's own page (`same-origin`), as whoever its cookies
   name: `'self'`;
 - any other frame, whose answer is a stranger's (no cookie of the
@@ -825,8 +906,8 @@ navigation is answered `Cache-Control: private, no-cache` and a
   public fragment to someone signed out, and no other page may lay it
   under a click.
 
-A fragment shows signed in only in the platform's page, and in another
-fragment's page not at all. A signed request (the CLI's, an agent's)
+A fragment shows signed in only in the platform's page (and in its own
+frames there), and in another fragment's page not at all. A signed request (the CLI's, an agent's)
 carries no cookies and is unchanged.
 
 These rules do not wait for the Public Suffix List. Listing
@@ -939,14 +1020,14 @@ The share sheet is the platform's page, never a fragment's: a
 fragment's page is its author's code (or an agent's), and sharing
 grants. It acts through the fragment's own routes (members, invites,
 visibility, rotate; below) as the person signed in on the platform, so
-the fragment decides who may do what. There is no page to accept an
-invite on: an invite waits on an email, and a sign-in that verifies the
-email meets it (Invites by email, below).
+the fragment decides who may do what. An invite waits on an email for
+its person's yes, which they give in the shell, signed in with that
+email (Invites by email, below).
 
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /share/<name>` | the share sheet, a card laid out as a document's share dialog, titled with the fragment's title: who is in (emails and pictures, from the registry's profiles: a member sees the members' emails, decision 48; an agent by its title, and whose agent it is, by their email: its owner reads what it reads) and their roles, to any member (anyone else, a 403 page); for the owner ("Share …"), adding people by email with a role (Invites by email, below), the invites waiting (each email, its role, the days it waits; Revoke), each member's role (Viewer and Editor buttons, theirs pressed) and Remove (a chat's own agent has neither: it keeps its place), each person's own agents named under them (their share is theirs too), and who can open it ("General access": three buttons, Restricted `members`, Anyone with the link `link`, Public `public`, each saying what it means, the current one pressed); for a member who is not its owner ("Who has access to …"), the same read-only, and Leave. Every choice is a button (no `<select>`, which an arrow key changes as it passes over it) and is sent as it is pressed; Remove, New link and Leave ask a second click. Copy link (the share link while it is `link`, else its address: a public one opens for anyone without its token) and Done (in a dialog, closes it, as Escape does; in a window of its own, closes that, or goes to `/settings`); then, quieter, while it is `link`, a new share link. Signed out: → sign in first, and back. It reads nothing from its URL |
-| `POST /share/<name>` | the sheet's form: `form` (the page's token), `action`, and its fields: `invite` (`email`, `role`: `POST invites`; the sheet says whether they are in now, were mailed, or were mailed again; an email someone in it signs in as already, the owner's own included, changes nothing and says so: their role changes in the list), `role` (`member`, `role`: `viewer` or `editor`), `remove` (`member`), `uninvite` (`email`), `visibility` (`visibility`), `rotate` (the share link only; the inbox's token is the CLI's: the sheet, saying so), `leave` (a member's own, `DELETE members/me`: a page saying they left, whose Done closes the dialog). Done: → 303 back to the sheet; refused by the fragment (a member who is not the owner: 403; the owner leaving: 400; a day's mails spent: 429): the sheet, saying why, with the refusal's status |
+| `GET /share/<name>` | the share sheet, a card laid out as a document's share dialog, titled with the fragment's title: who is in (emails and pictures, from the registry's profiles: a member sees the members' emails, decision 48; an agent by its title, and whose agent it is, by their email: its owner reads what it reads) and their roles, to any member (anyone else, a 403 page); for the owner ("Share …"), adding people by email with a role (Invites by email, below), the invites waiting (each email, its role, the days it waits; Revoke), each member's role (Viewer and Editor buttons, theirs pressed) and Remove (a chat's own agent has neither: it keeps its place), a person with agents in with them as one entry, "With their agents", never naming one (decisions 63 and 64), and who can open it ("General access": three buttons, Restricted `members`, Anyone with the link `link`, Public `public`, each saying what it means, the current one pressed); for a member who is not its owner ("Who has access to …"), the same read-only, and Leave. Every choice is a button (no `<select>`, which an arrow key changes as it passes over it) and is sent as it is pressed; Remove, New link and Leave ask a second click. Copy link (the share link while it is `link`, else its address: a public one opens for anyone without its token) and Done (in a dialog, closes it, as Escape does; in a window of its own, closes that, or goes to `/settings`); then, quieter, while it is `link`, a new share link. Signed out: → sign in first, and back. It reads nothing from its URL |
+| `POST /share/<name>` | the sheet's form: `form` (the page's token), `action`, and its fields: `invite` (`email`, `role`: `POST invites`; the sheet says they were mailed, or mailed again, and are in once they accept it; an email someone in it signs in as already, the owner's own included, changes nothing and says so: their role changes in the list), `role` (`member`, `role`: `viewer` or `editor`), `remove` (`member`), `uninvite` (`email`), `visibility` (`visibility`), `rotate` (the share link only; the inbox's token is the CLI's: the sheet, saying so), `leave` (a member's own, `DELETE members/me`: a page saying they left, whose Done closes the dialog). Done: → 303 back to the sheet; refused by the fragment (a member who is not the owner: 403; the owner leaving: 400; a day's mails spent: 429): the sheet, saying why, with the refusal's status |
 
 The sheet cannot be driven by a fragment's page. Every POST's `Origin`
 must be the platform's (403 otherwise), and every POST carries `form`,
@@ -966,41 +1047,67 @@ origin), severs its opener, allows scripts and styles only inline and
 images only from the platform (`Content-Security-Policy`), and keeps its
 URL to the platform (`Referrer-Policy: same-origin`).
 
+Whoever is in a chat can talk to the agents in it, and an agent acts for
+its owner whoever asks it: the design, with a warning as its safeguard
+(Paul, 2026-10-23). Where one of the owner's agents is a member (a
+chat's own agent is its owner's), the owner's sheet says under its
+invite "Make sure you trust this person. They'll be able to talk to your
+agent until you remove them." (`fragment_core::access::TRUST_WARNING`),
+a note and never a step to click through; `fragment members add <name>
+<email>` prints it after the invite, and the apps skill has an agent
+pass it on to its owner.
+
 ### Invites by email
 
-Sharing is by email (docs/cloudflare-v1.md, decision 48). The owner (or
-their agent for them) names an email and a role, viewer or editor
-(`POST /api/f/<name>/invites`; the sheet's Add, `fragment members add
-<name> <email>`):
+Sharing is by email (docs/cloudflare-v1.md, decision 48), and an invite
+waits for its person's yes (decision 63; Paul, 2026-10-22: an invite
+"shouldn't auto add to their app list"). The owner (or their agent for
+them) names an email and a role, viewer or editor (`POST
+/api/f/<name>/invites`; the sheet's Add, `fragment members add <name>
+<email>`):
 
-- The person who signs in as that email (its verified holder) is a
-  member at once, as `PUT members` makes one: `{member}`. Their agents
-  come with them: a share is the person's and their agents' (Paul,
-  2026-10-13), each agent acting for them with at most its cap (R17).
 - Someone in it already is not invited again: 400 `invalid_request`,
   saying they are in and as what (the owner's own email: that they own
   it). An invite adds; a role changes only with `PUT members` (the
   sheet's list, `fragment members role`).
-- When no one does yet, the invite waits on the email for 30 days
-  (`INVITE_TTL_S`) in the fragment, and the registry keeps it against the
-  email and mails it a link to the fragment's address: `{invited}`. Their
-  first sign-in that verifies the email (a WorkOS sign-in, an
-  `/auth/link` adding it, or an e2e person's) makes them a member at the
-  role it said, added by the invite's maker, and a stronger role they hold
-  is kept (the invite is spent either way). A claim the fragment cannot
-  take then (it is unreachable, or at `MEMBERS_MAX`) keeps the invite
-  waiting, and the registry's alarm tries it again for whoever holds the
-  email, backing off (2 s, doubling to ten minutes), 12 tries in all;
-  past them their next sign-in tries again. The link signs them in and
-  lands them there. A forwarded mail
-  admits no one else: only a sign-in as the email meets the invite.
-  Signing in never makes a share; it meets one addressed to its email.
+- Anyone else's invite waits on the email for 30 days (`INVITE_TTL_S`) in
+  the fragment, and the registry keeps it against the email and mails it
+  a link to the platform's own page (never the fragment's): `{invited}`,
+  whether someone signs in as the email already or not yet. `{member}`
+  (`Shared::Member`) is what an invite to someone who signed in already
+  answered before decision 63; no invite answers it now, and clients
+  still read both.
+- Whoever signs in as the email (its verified holder: a WorkOS sign-in,
+  or an e2e person's) sees it in the shell's sidebar (`GET /api/invites`,
+  below) and accepts it, which makes them a member at the role it said,
+  added by the invite's maker (a stronger role they hold is kept; the
+  invite is spent either way), or declines it, which takes it back as a
+  revoke does (`invite.declined`). Their agents come in with them
+  (decision 64: "when they accept they add their agent... treat them as
+  one entity"): each a member as itself, at the person's role, capped as
+  agents are (R17), so it acts there as itself, is in a chat's roster
+  after the chat's own agent, its list names the fragment and its
+  computer hears it joined; an agent they make later comes in too (as
+  it is registered, best effort). Their role is their agents' (an
+  agent's own is 400), and removing or leaving, by them or any agent of
+  theirs, takes them all out. An accept the fragment cannot take
+  (at `MEMBERS_MAX`, the whole entity counted, or unreachable) keeps the invite, and says why. A
+  forwarded mail admits no one else: only someone signed in as the email
+  answers the invite. Signing in never makes a share, nor meets one.
+- An invite mailed before decision 63 said "sign in to open it": a
+  sign-in that verifies its email still meets it, as it did then (a claim
+  the fragment cannot take is tried again by the registry's alarm,
+  backing off from 2 s, doubling to ten minutes, 12 tries in all, then at
+  their next sign-in), until the last such runs out, 30 days after the
+  release (docs/technical-debt-ledger.md, "Invites from before their
+  yes"). It is listed nowhere.
 - An invite that runs out waits no more: the fragment's alarm drops it at
   its expiry, and its owner's list counts it no more (`sharing.invites`,
-  the shell's "invite waits"), as when it is met or revoked.
+  the shell's "invite waits"), as when it is met, declined or revoked.
 - Inviting the same email again renews the invite (its role, 30 days
   more) and mails it again. Revoking it (`DELETE invites/<email>`) takes
-  it back; a mailed link then opens nothing for them.
+  it back: its person sees it no more, and a mailed link then shows them
+  nothing to accept.
 - A fragment holds at most `INVITES_MAX` (100) invites waiting, and an
   email at most `INVITES_PER_EMAIL_MAX` (100) across the fleet (429 past
   it). A person can have at most `INVITE_MAILS_DAILY_MAX` (50) mailed a
@@ -1008,11 +1115,46 @@ their agent for them) names an email and a role, viewer or editor
   service does not send takes the invite back and says why.
 - No event names the email (a `link` fragment's viewers read its
   events): `invite.created` and `invite.revoked` say a role and who made
-  them, and `member.joined` names the npub that met it.
+  them, `invite.declined` names no one, and `member.joined` names the
+  npub that accepted it.
 - An e2e person's address (`<name>@e2e.test`) on a preview is mailed
-  nowhere (Mail, below): its sign-in meets the invite as a person's would.
+  nowhere (Mail, below): its person answers the invite as a person would.
 
-Agents have no email: they are added by npub (`PUT members`).
+A person's own answers (share.rs `invites`; the registry's, invites.rs),
+each with their session (the shell) or a key of theirs; or their own
+agent's, for them (Paul, 2026-10-22: "It can already publish for you and
+edit your own stuff! Why shouldn't it be able to handle 'skyler invited
+me to edit a fragment, do you see it?'"), signed by the agent with `for`
+its owner (`fragment invites`, below), and not held below them: the
+invites are its owner's, and its yes makes its owner a member. Any other
+agent is 403 (as itself, for anyone else, held); a person naming `for`
+is 400:
+
+| method & path | body → answer |
+| --- | --- |
+| `GET /api/invites` | → `{invites: [{fragment, role, title, from, email, expiresAt}]}` (proto's `InvitesWaiting`): the invites waiting on the emails they sign in with, the soonest to run out first, at most `INVITES_PER_EMAIL_MAX`; `title` is what the invite called the fragment as it was sent (its title, or its label), `from` the email of whoever shared it (an agent's invite, its owner's; null when no one signs in as them now), `email` the one it waits on |
+| `POST /api/invites/{fragment}/accept` | `{}` or no body (anything else is 400) → `{fragment, role}` (`InviteAccepted`): their yes; they are a member at `role` now, the fragment in their list before it answers. 404 (`reason: gone`) when none waits on an email of theirs there (taken back, answered, run out, or the fragment deleted: one the registry still held is forgotten); the fragment's refusal (full: 400) keeps it |
+| `POST /api/invites/{fragment}/decline` | the same → `{ok, declined}`: their no; it waits no more, there or here. 404 (`reason: gone`) when none waits |
+
+The CLI's `fragment invites` lists them, and `fragment invites accept|decline
+<name>` answers one (a name in full, or the label of one waiting); an
+agent's CLI names `for` its owner on these routes as on a fragment's.
+
+Their open pages are told when the invites waiting on their emails change
+(one made, renewed or revoked): `{type: "invited"}` on `GET
+/api/fragments/watch`, naming nothing, on which a page reads `GET
+/api/invites` again.
+
+Adding someone directly (`PUT members`, by npub, key or email) works
+only within one person (decision 63; Paul: "I shouldn't be able to add
+someone to something and then it just shows up for them. That's weird:
+it means I could spam people that don't know me with fragments"): the
+owner, or their agent for them, adds the owner's own agents. Anyone
+else, a person or someone else's agent, is 403, saying to invite them
+(or its owner) by email instead; their agents come with the person who
+accepts. A role change of someone in already is no add: it stays the
+owner's. (The e2e's setups share by a lever: `/api/test/fragment
+{op: "member"}`.)
 
 ### Who has access to what
 
@@ -1028,8 +1170,8 @@ for its members and invites as the person, its first
 `members` is everyone in it but its owner (at most `ACCESS_MEMBERS_MAX`,
 50; `more` counts the rest), each `{principal, role, kind, email?,
 name?, title?, owner?, ownerEmail?, agents?}` (a person by their email,
-with their own agents, `agents: [{principal, name?, title?}]`, who reach
-what they do; an agent by its label, `name`, its title, `title` (its
+never their own agents, who reach what they do unnamed: `agents` is
+never sent now, decision 63; an agent member by its label, `name`, its title, `title` (its
 agent fragment's, for at most 64 agents a view: Identities, "An agent's
 name and picture"), and its owner's email: its owner reads what it
 reads), and `invites` the invites waiting, as `GET
@@ -1050,16 +1192,16 @@ title opening its share sheet.
 | `PUT /api/fragments/{name}/archived` | any signer, for a fragment they hold a role on | `{archived: bool}` → `{name, archived}`: the signer's own view of it (the shell leaves it out of its sidebar; search still finds it), kept in their list's row and nowhere else, so no one else's list or the fragment changes. The same again answers the same. A bare label names nothing (404: a fragment is named in full); a fragment they hold no role on, or none of that name, is 404; a name that is none, or a body without a boolean `archived`, 400. It goes when they leave the fragment (back in, it is not archived), or the fragment is made again. Not honored for `for` |
 | `PUT /api/fragments/{name}/seen` | any signer, for a fragment they hold a role on | no body → `{name, unread: 0}` (`Seen`): the signer has seen its messages, up to the newest their search holds (Search, below), so their row counts none `unread` until another comes; kept beside their list's row and nowhere else, so no one else's list or the fragment changes. The place never goes back: the same again answers the same and tells no page; a mark that moved it tells the signer's list sockets (`changed`). A bare label names nothing (404, as for archiving); a fragment they hold no role on, or none of that name, is 404; a name that is none, or any body, 400. It goes when they leave the fragment (back in, every message it still logs for them is unread), or the fragment is made again. Not honored for `for` |
 | `GET /api/search?q=` | any signer | → `{fragments: [ListedFragment], messages: [{fragment, channel, seq, at, snippet}]}` (`SearchAnswer`): the signer's fragments whose title or label hold every word of `q`, then the messages that do, newest first, from fragments they hold a role on now, archived ones included (The shell, Search, below). `q` once, at most 256 bytes and 8 words (400 past either, or without it). Not honored for `for` |
-| `GET /api/fragments` | any signer | → `{fragments: [{name, role, kind, title?, picture?, agents?, preview?, previewAt?, unread?, sharing?, archived?}]}` (`archived: true` on the ones the signer archived); `picture`, an agent fragment's only: where its picture is served (Identities, "An agent's name and picture"), as its last install said; `agents`: its agent members, the first added (a chat's lead) first, at most 16 (`LISTED_AGENTS_MAX`), as the fragment last sent them (an agent's joining or leaving sends every row; a row sent before rows named them has none until it is sent again); `preview`, a chat's only: the first line with words of its newest message the signer's search holds (Search, below), at most 160 bytes, none when it holds none; `previewAt`, with `preview`: when that message was said (ms since the epoch, as a record's `at`); `unread`, a chat's only: its messages the signer's search holds after the last they marked seen (`PUT …/seen`, above; all of them before any mark), at most 100 (`LISTED_UNREAD_MAX`), left out at 0; a search entry names no author, so a message of the signer's own counts until they mark it; `sharing` on the signer's own fragments only: `{visibility, members, guests, invites}` (guests: members who are neither the owner nor an agent of theirs; invites: those waiting on an email, as of that change, absent in a row sent before they were counted; an invite met, revoked, or run out is such a change, the last sent by the fragment's alarm at its expiry), as the fragment last sent it with a change to its members, invites or visibility (who they are: `GET /api/access`, below); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) and `owned: true` on those that identity owns |
+| `GET /api/fragments` | any signer | → `{fragments: [{name, role, kind, title?, picture?, agents?, preview?, previewAt?, unread?, sharing?, archived?, listed?}]}` (`archived: true` on the ones the signer archived); `picture`, an agent fragment's only: where its picture is served (Identities, "An agent's name and picture"), as its last install said; `agents`: its agent members, the first added (a chat's lead) first, at most 16 (`LISTED_AGENTS_MAX`), as the fragment last sent them (an agent's joining or leaving sends every row; a row sent before rows named them has none until it is sent again); `preview`, a chat's only: the first line with words of its newest message the signer's search holds (Search, below), at most 160 bytes, none when it holds none; `previewAt`, with `preview`: when that message was said (ms since the epoch, as a record's `at`); `unread`, a chat's only: its messages the signer's search holds after the last they marked seen (`PUT …/seen`, above; all of them before any mark), at most 100 (`LISTED_UNREAD_MAX`), left out at 0; a search entry names no author, so a message of the signer's own counts until they mark it; `sharing` on the signer's own fragments only: `{visibility, members, guests, invites}` (guests: members who are neither the owner nor an agent of theirs; invites: those waiting on an email, as of that change, absent in a row sent before they were counted; an invite met, revoked, or run out is such a change, the last sent by the fragment's alarm at its expiry), as the fragment last sent it with a change to its members, invites or visibility (who they are: `GET /api/access`, below); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) and `owned: true` on those that identity owns, with none of that identity's `listed`; `listed`: what its members are doing, each member's newest record of a kind one of its channels lists that the signer's role there may read, the newest first, at most 16 (Listed records, below), left out when there are none |
 | `GET /api/access` | a person (not an agent) | → who may open each fragment they own, by email (Sharing, "Who has access to what") |
-| `GET /api/fragments/watch` | any signer; the shell with its session (below) | a WebSocket, upgraded; anything else is 400. It answers `{type: "hello"}`, then `{type: "changed"}` each time the signer's list changes: a fragment made, shared with them, changed (its title, kind, agents, sharing, their role), left or deleted, their archiving, and a chat's message new to their search (its preview) (principal.rs, Watching). A frame names nothing: the page reads `GET /api/fragments` again with its own credential, so a socket that outlives its session learns only that something changed. The platform session counts only on the platform's host with the platform's exact `Origin` (a browser names its page on every upgrade; a fragment's page, one site with the platform, is refused like no one: 401). A list holds `LIST_WATCHERS_MAX` (16) at once; one more is 429. It reads nothing from the client. Not honored for `for` |
+| `GET /api/fragments/watch` | any signer; the shell with its session (below) | a WebSocket, upgraded; anything else is 400. It answers `{type: "hello"}`, then `{type: "changed"}` each time the signer's list changes: a fragment made, shared with them, changed (its title, kind, agents, sharing, their role), left or deleted, their archiving, and a chat's message new to their search (its preview) (principal.rs, Watching); and `{type: "invited"}` each time the invites waiting on their emails change (one made, renewed or revoked: `GET /api/invites`, Invites by email). A frame names nothing: the page reads `GET /api/fragments` again with its own credential, so a socket that outlives its session learns only that something changed. The platform session counts only on the platform's host with the platform's exact `Origin` (a browser names its page on every upgrade; a fragment's page, one site with the platform, is refused like no one: 401). A list holds `LIST_WATCHERS_MAX` (16) at once; one more is 429. It reads nothing from the client. Not honored for `for` |
 | `DELETE /api/f/{name}` | the owner (never an agent) | → `{ok, deleted}` once the fragment is gone: from then it is 404 to everyone, its owner's list no longer has it, and its name can be made again. Its other members' lists, the app's database and the blobs go after, by the fragment's alarm (seconds; each part retried, backing off, until done: one that fails ten tries in a row, or is refused, is held and tried daily, its last error kept, as the `ended` lever shows), so a delete answers as soon at `MEMBERS_MAX` members as at one: it tells at most one round of lists itself (32 at once). An agent fragment's agent leaves its computer with them (`computer/unassign`, that agent alone: its owner's agents, a chat's @ roster and Settings run it no more, nor does its guest, and it is counted in the computer's cap no more; its owner's list is told) and the registry names it by the fragment no more (Identities, "An agent's name and picture"; its identity stays, its key held by no one); a computer gone (its owner's wipe) is done. A fragment made again meanwhile under the name is untouched by the old one's cleanup: a new agent of its own, assigned again, keeps its place, and its lists' rows show its own face (none until it has one: an app, untitled), never the ended life's. The repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, kind, title?, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, id, operations: {<op>: {kind, role, input?, ephemeral?, description?}}, error}, viewToken (its owner, or their agent sharing for them), inboxToken (editor), urls: {canonical, platform}, blobMinBytes, page}`; `kind` and `title` are what it is and its title as its members' lists show them (an app, and no title, until it says); `viewToken` is the share link's token, its owner's to give, as the share sheet has it: a member asks them (2026-10-13); `code.sha` is the live commit installed and `code.id` the code that runs (`app:<hash>` of its `app.mjs` and `applib/`, or a blessed template's `blessed:<template>@<release>`); `code.operations` are the installed manifest's, each as it declared them (Apps, below; `input`, `ephemeral` and `description` absent when it gave none); `urls.platform` is the platform's own origin, for links a person opens (a client in a computer calls an internal host); `page` is `{live, at, errors: [{kind, text, source}], dropped}`, what the page reported as its preview card's shot loaded it (Cards, below), absent before the first |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
-| `PUT /api/f/{name}/members/{id\|npub\|email}` | owner, or their agent for them | `{role: viewer\|editor}` (any other field is 400) → the member: added, or their role changed (the one call that changes a role); a key names the identity holding it, an email the person who signs in as it (404 when no one registered it, or signs in as it: `POST invites` mails them). A person's share is theirs and their agents' (Paul, 2026-10-13: "all the pubkeys under the umbrella of this email"): each of their agents acts there for them with at most its cap (R17); an agent added by its npub is that agent alone. A chat's own agent (its lead, the first agent added) is never set below `editor` (400, saying why): its replies and steps post there. A new member that is an agent running on a computer is announced to it: `joined` on its agent fragment's `tasks`, and a wake (Computers, below) |
-| `DELETE /api/f/{name}/members/{id\|npub\|email\|me}` | owner, or their agent for them; or the member | → `{ok, removed}`; closes that member's change feeds (and its owner's, when an agent's membership was their only view). A chat's own agent (its lead, the first agent added) is removed by no one else (400, saying why): it may leave itself (`me`, as its owner's wipe has it do) |
-| `POST /api/f/{name}/invites` | owner, or their agent for them | `{email, role}` → `{member: Member}` (someone signs in as it: a member now) or `{invited: {email, role, expiresAt, createdBy}}` (no one does yet: it waits on the email, mailed); Invites by email, above. Someone in it already, the owner included, is 400, saying so (a role changes with `PUT members`); a role they cannot grant is refused as `PUT members` refuses it |
+| `PUT /api/f/{name}/members/{id\|npub\|email}` | owner, or their agent for them | `{role: viewer\|editor}` (any other field is 400) → the member: added, or their role changed (the one call that changes a role); a key names the identity holding it, an email the person who signs in as it (404 when no one registered it, or signs in as it: `POST invites` mails them). A new member this way is one of the owner's own agents alone: anyone else is 403, saying to invite them by email (decision 63; Invites by email, above). A person's role is the role of their agents in with them, which follows it; such an agent's own is 400 (decision 64). A person's share is theirs and their agents' (Paul, 2026-10-13: "all the pubkeys under the umbrella of this email"): each of their agents acts there for them with at most its cap (R17); an agent added by its npub is that agent alone. A chat's own agent (its lead, the first agent added) is never set below `editor` (400, saying why): its replies and steps post there. A new member that is an agent running on a computer is announced to it: `joined` on its agent fragment's `tasks`, and a wake (Computers, below) |
+| `DELETE /api/f/{name}/members/{id\|npub\|email\|me}` | owner, or their agent for them; or the member | → `{ok, removed}`; closes that member's change feeds (and its owner's, when an agent's membership was their only view). A person who is not the owner goes with every agent of theirs in with them, and such an agent, removed or leaving, takes its person and their other agents with it (decision 64: one entity; `removed` names who was asked). A chat's own agent (its lead, the first agent added) is removed by no one else (400, saying why): it may leave itself (`me`, as its owner's wipe has it do) |
+| `POST /api/f/{name}/invites` | owner, or their agent for them | `{email, role}` → `{invited: {email, role, expiresAt, createdBy}}`: it waits on the email for its person's yes, mailed, whether someone signs in as it yet or not (`{member: Member}`, a member at once, was the answer for someone who did before decision 63; none is now); Invites by email, above. Someone in it already, the owner included, is 400, saying so (a role changes with `PUT members`); a role they cannot grant is refused as `PUT members` refuses it |
 | `GET /api/f/{name}/invites` | owner, or their agent for them | → `{invites: [{email, role, expiresAt, createdBy}]}`: the invites waiting, oldest first |
 | `DELETE /api/f/{name}/invites/{email}` | owner, or their agent for them | → `{ok, revoked}`; 404 when none waits on it |
 | `PUT /api/f/{name}/visibility` | owner, or their agent for them | `{visibility}` → `{ok, visibility}`. Leaving `members` (for `link` or `public`) makes a new share link: one that stopped working when it was restricted stays dead (the event's `newLink`) |
@@ -1067,7 +1209,7 @@ title opening its share sheet.
 | `PUT /api/f/{name}/secrets/{KEY}` | editor | `{value, hosts}` (`PutSecret`: a value of at most 64 KiB, and 1 to 8 hosts it may go to, each as a URL names it, `api.example.com`: no scheme, port, path, or wildcard) → `{ok, name, hosts}`; the value sealed (AES-256-GCM, key HKDF'd from the host secret salted with the fragment's Durable Object, its class and id: `keys::scope`, `fragment_core::seal`; docs/secrets.md), its hosts in place of the ones before. `job.fetch` fills it only toward one of its hosts (on any port), over https (`fragment_core::secrets::may_fill`), in a request that sets no `Host`, `Forwarded`, or `X-Forwarded-Host` header (`ROUTING_HEADERS`). Its hosts change only with its value, so no editor widens where a value goes without holding it. They are its editors' to know: the `secret.set` event (every viewer reads the event log) and a refused fetch's error name no host. A secret set before secrets named hosts fills nowhere until set again |
 | `GET /api/f/{name}/secrets` | editor | → `{secrets: [{name, hosts}]}` (`SecretList`); values never leave |
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor | → `{ok, removed}` |
-| `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt}`: ES256, this repo, `git:read`+`git:write`, 15 minutes |
+| `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt}`: ES256, this repo, `git:read`+`git:write`, 15 minutes. Asked through a computer's egress on a local fleet (its code.storage at a loopback address), `api` is the egress's (docs/computers.md, The fragment API) |
 | `POST /api/f/{name}/refresh` | editor | → `{ok, refs: {main: {pin, moved} \| {absent}, live: ...}}`, once a live that moved is installed (`fragment deploy` asks it). A writer to the repo asks this after its push (the CLI does), and the platform follows its own moves itself: code.storage's push webhooks are not taken. A fragment reads the branches it has no pin for once, on its first request (a name made again keeps its repo); after that a move arrives by this or the poll backstop, and a site with nothing deployed answers 404 without asking code.storage |
 | `POST /api/f/{name}/files` | editor | `{files: [{path, text \| base64} \| {path, delete: true}], message?, key?}` → `{commit}`: one commit to main, as a sync makes (at most 16 files, 400 past that, and 1 MiB of their decoded bytes in a body of at most 2 MiB, 413 past either; paths relative, no `.` or `..`). The same `key` from the same person answers the first commit again. An agent fragment's `avatar.png` that is no picture (400) or past 256 KiB (413) is refused and nothing is committed (Identities, "An agent's name and picture"). A write of what main holds already commits nothing (code.storage makes no empty commit: its 412) and answers main's tip. Main's pin moves at once; live does not |
 | `POST /api/f/{name}/deploy` | editor | `{note?}` → `{live, canonical}`: live to main's tip; `fragment deploy` asks it after its sync, so every deploy is this one (a first deploy makes the branch; later ones fast-forward it, and after a rollback take main's files whole: a restore commit, or one of their merge base and then the merge, since code.storage merges three ways), guarded against a live that moved meanwhile and made under the fragment's plane lock, so neither step's push pins the files live holds between them; the app installs from it at once |
@@ -1083,14 +1225,18 @@ title opening its share sheet.
 | `POST /api/f/{name}/replay` | editor | `{run}` → `{ok, run, attempt}`: a `held` or `blocked` run again, as its next attempt, with its input |
 | `POST /api/f/{name}/pause` | editor | `{op, paused}` → `{ok, op, paused}`: the operation's triggers stop or start; calls are never paused |
 | `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron\|channel\|files, run, paused, nextAt?}], paused}` |
+| `GET /api/f/{name}/schedules` | viewer | → `{schedules: [Schedule]}`, oldest first (Jobs and triggers, "Scheduled records") |
+| `POST /api/f/{name}/schedules` | editor, holding the channel's post role | `{cron, channel, record}` → `{schedule, replayed}`: a scheduled record added, or the same one there answered (`replayed: true`); each bound refused with a typed error saying which; past the owner's overdraft 402 |
+| `PUT /api/f/{name}/schedules/{id}` | editor | `{paused}` → `{schedule}`: paused, or resumed from its next minute after now (past the owner's overdraft, a resume is 402); the same again answers the same |
+| `DELETE /api/f/{name}/schedules/{id}` | editor | → `{ok, removed}`: it fires no more; one that is not there is 404 |
 | `GET /api/f/{name}/database?table=&offset=` | the owner (never an agent: an agent's owner reads as a viewer, and an agent acts at most as an editor) | its app's database, as the platform code in its facet reads it (`__dump`, cell/platform.mjs), for an export (Export, below). With no `table`, `{schema: [{type, name, table, sql}], tables}`: each table's, index's, view's and trigger's statement in the order SQLite made them, a virtual table's shadow tables and the platform's operation ledger (`_fragment_ops`) left out, and the tables whose rows it holds. With one, `{table, offset, rows, next}`: at most 1000 of its rows from `offset`, each a JSON object of its columns (a blob `{"$base64"}`), about 4 MiB of their JSON at most (the first whatever its size), `next` the offset after them or `null` at the end; a table not in the schema is 404. Without app code, 404 `no_code`. It loads the app's code, as a query does (its dynamic worker, metered) |
 | `POST /api/f/{name}/inbox` | the inbox token | token in `x-fragment-inbox-token` or `?t=`; a JSON body `{source?, payload}` (any other JSON, or text, is the payload), at most 64 KiB → `{ok, seq, runs}`. Bad token 403; 1000 pending, 429 |
 | `POST /api/f/{name}/subscriptions` | a member who may read the channel | `{channel, url}` → `{id, channel, url}`: each new record of the channel is POSTed to `url` through the delivery queue as `{type: "record", fragment, channel, record}` (unsigned: the URL is the subscriber's capability; egress-checked; at most 32 a fragment; a 404 or 410 drops it; a removed member's go with it) |
 | `GET /api/f/{name}/subscriptions` | a member (the owner sees all) | → `{subscriptions: [{id, principal, channel, url, createdAt}]}` |
 | `DELETE /api/f/{name}/subscriptions/{id}` | its subscriber, or the owner | → `{ok, removed}` |
-| `GET /api/f/{name}/channels` | viewer | → `{channels: [{name, read, post, signedIn, seq}]}`: `events`, `ops`, `inbox`, and the app's (`post`: who may post, or null; `signedIn`: only people signed in) |
+| `GET /api/f/{name}/channels` | viewer | → `{channels: [{name, read, post, signedIn, from, listed, seq}]}`: `events`, `ops`, `inbox`, and the app's (`post`: who may post, or null; `signedIn`: only people signed in; `from`: only members of that kind, `person` or `agent`, or null; `listed`: `{kinds, fields?}`, what its members' lists show of it, or null) |
 | `GET /api/f/{name}/channels/{channel}?after=\|before=&limit=` | the channel's reader | → `{channel, records: [{channel, seq, at, principal, kind, body}], next}` (at most 1000 a page, always ascending by seq). `after` (default 0) reads forwards; `before` reads the nearest records with seq strictly less than its cursor. Pass `next` as the same cursor for the next page: the last seq forwards, the first seq backwards (the input cursor if empty). Supplying both cursors, a negative or malformed cursor, or a malformed limit is 400. |
-| `POST /api/f/{name}/channels/{channel}` | the channel's `post` role | `{id, body}` → `{record, replayed}` (`Posted`): the platform appends `body` (any JSON, at most 64 KiB of it; 413) as a record of kind `message` naming the poster, with no app code; it reaches sockets, subscriptions, and the channel's triggers as a mutation's record does. The same id and body again answer that record and append nothing (a retry also finishes what the first try left: its deliveries, its triggers' runs); the same id with another body, or on another channel, is 409 (ids are the poster's, kept as long as the record). A channel without a `post` role, and `events`, `ops`, and `inbox`, refuse posts (403); one that says `signedIn` refuses an anonymous poster (401). A poster holding only `public` spends a public call (Serving, `__op`) |
+| `POST /api/f/{name}/channels/{channel}` | the channel's `post` role | `{id, body}` → `{record, replayed}` (`Posted`): the platform appends `body` (any JSON, at most 64 KiB of it; 413) as a record of kind `message` naming the poster, with no app code; it reaches sockets, subscriptions, and the channel's triggers as a mutation's record does. The same id and body again answer that record and append nothing (a retry also finishes what the first try left: its deliveries, its triggers' runs); the same id with another body, or on another channel, is 409 (ids are the poster's, kept as long as the record). A channel without a `post` role, and `events`, `ops`, and `inbox`, refuse posts (403); one that says `signedIn` refuses an anonymous poster (401); one that says `from` refuses every poster but a member of that kind posting as itself (403: a member of the other kind, a non-member, an anonymous visitor, and an agent acting `for` someone), and its drafts the same. A poster holding only `public` spends a public call (Serving, `__op`) |
 | `PUT /api/f/{name}/channels/{channel}/draft` | the channel's `post` role | `{turn, text}` → `{ok}`: a record its poster is writing, its whole text so far (at most 64 KiB), shown to the sockets following the channel at once (a `draft` frame on `__live`) and never stored; `text: null` stops it. The record its poster then writes with the same `turn` replaces it on a page. At most 10 a second across the fragment (429 past that: the poster's next carries the whole text anyway); `turn` is `^[A-Za-z0-9._:-]{1,128}$` |
 
 ## Apps
@@ -1151,10 +1297,28 @@ the code the fragment's own.
   refused at deploy (whoever may post may read). `"signedIn": true`
   (beside a `post` role) takes posts from people signed in only: an
   anonymous visitor holding the role (a link holder is a viewer) is 401
-  `unauthenticated`, and nothing is appended. Such a channel keeps its
+  `unauthenticated`, and nothing is appended. `"from": "person" |
+  "agent"` (beside a `post` role) takes posts from this fragment's
+  members of that kind only, each posting as itself (its member row's
+  kind, the fact a channel trigger's `from` reads): anyone else holding
+  the role (an editor person on an agents' channel, an agent acting
+  `for` someone) is 403 `forbidden`, for drafts too, and nothing is
+  appended; an app publishes nothing there either (a mutation's effect
+  or a job step to such a channel is refused: its record would name
+  whoever called it). A role says what a poster may do, `from` what it is: a
+  chat's `work` says `"from": "agent"`, so no person's record reads as
+  an agent's step (docs/chat-records.md). Such a channel keeps its
   newest 10 000 records (`limits::POSTED_KEPT`; the oldest go, whoever
   appended them, and with them their posts' ids), as `events` and `ops`
-  keep theirs; the number is not declarable yet.
+  keep theirs; the number is not declarable yet. `"listed": {"kinds":
+  [...], "fields": [...]}` puts each member's newest record of those
+  kinds on its members' rows in their lists, with those fields of its
+  body (Listed records, below): a chat's `work` lists its turns' kinds
+  and `asks`, so a list says what its agents are doing. 1 to 8 kinds
+  (`^[A-Za-z0-9._-]{1,64}$`) and at most 4 fields
+  (`^[A-Za-z][A-Za-z0-9_]{0,31}$`, never `kind`), each named once
+  (`limits::LISTED_KINDS_MAX`, `LISTED_FIELDS_MAX`); anything else is
+  refused at deploy, naming the channel.
 - `kind` is `query`, `mutation`, or `job` (below); a job's `role`
   defaults to `editor`.
 - `description` says what the operation does and what it answers, for
@@ -1423,26 +1587,25 @@ pre-authenticated, and a text step on an OpenAI-compatible API
 (OpenRouter, or Finite Private) carries the deployment's key, which the
 platform adds.
 
-Each paid step reserves its worst case on the owner's ledger before its
-call (text: its request's bytes as tokens in and its tier's capped
-`max_tokens` out; an image: a 1024×1024 image's 4 tiles at its steps; a
-decision: its model's context window),
-under the step's reference,
-`step:<fragment>@<incarnation>/run/<run>/attempt/<attempt>/step/<index>`.
-It keeps what the call bought beside the step (by
+Each paid step asks the gate before its call (docs/ledger.md, "The
+gate"; decision 62): the owner's standing, and the fragment's cap when
+someone else's run spends there, as the fragment's isolate heard them
+within the minute; a ledger that does not answer refuses nothing.
+Nothing is held. The step keeps what the call bought beside it (by
 `<fragment>@<incarnation>/run/<run>/step/<index>`, the same in every
-attempt), then settles from the usage the call reported (an image's
-tiles from its JPEG's size, and its steps; a text call that reported no
-usage is charged its reservation, `ai.cost-missing`, never nothing). So:
+attempt) together with its charge: the usage the call reported (an
+image's tiles from its JPEG's size, and its steps) as one row in the
+fragment's meter outbox, `step:<fragment>@<incarnation>/run/<run>/step/<index>`,
+which the ledger charges once by that reference, and its price on the run
+(`costMicros`). A call that reported no usage is charged nothing, said
+aloud (`ai.cost-missing`, `ledger.unknown-usage`). So:
 
 - a step tried again after its call answered reuses what it kept and
-  never calls again: a settle that did not land lands, and an image whose
-  commit failed commits from its kept bytes (bug 2). A replayed run
-  reuses what its earlier attempts paid for, and pays only for the rest;
-- a step that fails for good before its call used anything (a refusal
-  from the model, the high tier) releases its reservation, and so does a
-  step whose retries ran out, and any hold of a run that ended (bug 3,
-  `ai.released`);
+  never calls again: an image whose commit failed commits from its kept
+  bytes (bug 2), and the call is charged once. A replayed run reuses
+  what its earlier attempts paid for, and pays only for the rest;
+- a step that fails for good (a refusal from the model, the high tier,
+  its retries run out) is charged nothing: nothing was held;
 - a step the owner's ledger refuses (no credit, a guest, the fragment's
   cap) fails with the ledger's reason, 402 `budget_used_up` in its words
   (uncaught, the run is held; replay it after a top-up or next month).
@@ -1468,10 +1631,10 @@ The steps:
   in git under 1 MiB (past an app's 256 KiB write limit: bug 1), a blob
   from 1 MiB. `prompt` is 1 to 2048 characters and `steps` 1 to 8 (4
   unless named); any other key (a model, an aspect ratio) is refused. An
-  answer that is no JPEG is refused and charged its reservation
+  answer that is no JPEG is refused and charged nothing, said aloud
   (`ai.image-refused`).
 - `job.ai.video(…)` is refused, saying "video steps are off until they
-  run on Cloudflare" (the debt ledger); nothing is reserved or called.
+  run on Cloudflare" (the debt ledger); nothing is called or charged.
 
 A text model's 429 or 5xx is answered by the fallback model (Models, below),
 sent the same request (its tools too); when the fallback fails too, the
@@ -1660,7 +1823,7 @@ refused:
   ours keeps every request under Clef's 13 MiB body), and all of it at
   most 8 MiB, decoded. No remote URL: Clef takes none.
 
-Everything above is checked before anything is reserved or sent, and a
+Everything above is checked before anything is sent, and a
 refusal says which bound it broke; a job's blobs are sized before any is
 read.
 
@@ -1674,15 +1837,15 @@ distribution (within 0.01). Confidence is the model's estimate, not a
 guarantee: an app owns its review thresholds, and keeps the corrections
 people make.
 
-**The money.** A decision reserves its model's whole context window
-(1,471 micro-dollars on `clef-flash`, 24,773 on `clef`, 15,120 on
-`clef-omni`, at the default book's fee and margin): Clef scores every
-question in one pass over one context, media and questions included,
-and a request past it fails, so no call's input exceeds it. It settles
-at `usage.input_tokens` (media is counted as input tokens) at its
-model's input price; output is never charged. A call that reports no
-usage is charged its reservation (`ai.cost-missing`); one that reports
-more is charged what it reports (docs/ledger.md).
+**The money.** A decision is charged after its answer at
+`usage.input_tokens` (media is counted as input tokens) at its model's
+input price; output is never charged. Clef scores every question in one
+pass over one context, media and questions included, and a request past
+it fails, so no call's input exceeds its model's context window (at most
+1,471 micro-dollars on `clef-flash`, 24,773 on `clef`, 15,120 on
+`clef-omni`, at the default book's fee and margin). A call that reports
+no usage is charged nothing, said aloud (`ai.cost-missing`); one that
+reports more is charged what it reports (docs/ledger.md).
 
 A job sorting a photo or a voice note someone uploaded (the page
 uploads it with `fragment.blob(file)` and calls `sort({sha256, type})`):
@@ -1739,11 +1902,11 @@ A tier's call whose model fails before answering anything (not reached,
 platform's, also 401, 402, 403 or 404: its key refused, its credit spent,
 or no endpoint left by its routing, none of them the caller's to fail
 for) is made once more, the same, on the deployment's fallback model,
-and its answer is the call's: settled from its usage at its prices,
-under the call's one hold; a 401 or 402 is also logged aloud
-(`model.platform-key`). An answer that began is final; a refusal of the
-request (400, another 4xx) is the call's; when the fallback
-fails too, its failure is the call's, released, after two tries in all.
+and its answer is the call's: charged from its usage at its prices,
+once; a 401 or 402 is also logged aloud (`model.platform-key`). An
+answer that began is final; a refusal of the request (400, another 4xx)
+is the call's; when the fallback fails too, its failure is the call's,
+charged nothing, after two tries in all.
 `vision` and transcriptions have no fallback. A job's text step falls
 back the same, and its output's `model` names the model that answered.
 
@@ -1761,13 +1924,17 @@ model by its id"): the slot of the caller's tier when that slot runs it
 refused, 400), else the first slot that does, in the order `cheap`,
 `medium`, `fallback`, `vision`. The call is that slot's, as if it named
 the slot: its model, its key, its `body`, its fallback and its price.
-An id no slot runs is refused, 400, nothing reserved or sent, the message
+An id no slot runs is refused, 400, nothing charged or sent, the message
 listing the ids a call may name, which `GET /api/models/v1/models` lists
 too: OpenAI's list (`{object: "list", data: [{id, object: "model",
 created: 0, owned_by: "fragment"}]}`), each id once, nothing of where each
 runs, and none of the route's names, which are taken all the same. An id
 is one model: a deployment whose two slots name one id at two places is
-refused. A job's step names a tier, never an id.
+refused. A job's step names a tier, never an id. A person reads the ids
+by the route's names in their computer's view (`GET /api/computers/{id}`'s
+`models`, as its guest does), so the agent's page and Settings name the
+model an agent runs by its id (Paul, 2026-10-20: the agent's page said
+"cheap model").
 
 | method & path | who | body → answer |
 | --- | --- | --- |
@@ -1783,17 +1950,16 @@ memo is one the agent transcribes itself, through this route):
 - **What it is sent.** The audio as base64. A `language` or `prompt` it
   was given passes on; with no language, Whisper detects it. OpenAI's
   other fields are let go.
-- **Refusals before anything is reserved.** A form that is not one, a
+- **Refusals before anything is sent.** A form that is not one, a
   model other than `whisper`, and a format other than `json` or `text`
   are refused 400. Audio past 10 MiB is refused 413.
 - **Metering** (`fragment_core::transcribe`). Workers AI's 46.63 neurons
-  a minute of audio. The call reserves its audio's bytes read as 16
-  kbps, and settles at the length Whisper reports. Above the
-  reservation it is charged in full; with no length reported, at the
-  reservation.
+  a minute of audio, charged after the answer at the length Whisper
+  reports; with no length reported, nothing, said aloud
+  (`ledger.unknown-usage`).
 - **Who pays.** The payer is the agent's owner, under no fragment's cap.
 - **What is kept.** Only the usage, on the ledger. Whisper's refusal is
-  released and passed through, as a chat call's is.
+  charged nothing and passed through, as a chat call's is.
 - **Its answer's shape.** An answer carries `x-fragment-answer-shape`:
   the model's own answer's top-level keys, and its `usage` when that is
   a small object of numbers and short strings (`{"keys": […], "usage":
@@ -1803,8 +1969,8 @@ memo is one the agent transcribes itself, through this route):
   catalog's schema unwrapped (`text`, `transcription_info`, `segments`,
   `vtt`, `word_count`), plus a `usage` the schema does not name. The
   route reads `text` and `transcription_info.duration` (the catalog's own
-  field). An answer in any other shape is answered 502 and settled at its
-  reservation.
+  field). An answer in any other shape is answered 502 and charged
+  nothing.
 
 What the model is sent is the body bounded: no `model` (the tier's),
 its images as they came, `max_tokens` at most 16384, `reasoning_effort`
@@ -1813,30 +1979,36 @@ client's headers. The payer is the agent's owner (decision 36); `fragment`, one 
 member of (403 otherwise), is where the turn is: when its owner pays,
 the call counts in its month and is under its cap for anyone but the
 owner (or the owner's agent acting for them); when another person owns
-it, that owner's ledger is asked first whether it is still open
-(decision 26). A request is at most 6 MiB (413 past it, nothing
-reserved): a screenshot Hermes shrinks to 5 MiB of base64 after a 413
-fits. Each call reserves its worst case (the body's bytes as
-tokens in, `max_tokens` out) under a reference of its own (`aig:<hex>`),
-then settles from its last, cumulative usage, input less what was cached
-(Workers AI puts a per-chunk delta on every chunk and the whole call's
-on a line of its own at the end: only that is metered). A call the model
-refuses is released and its answer passed through as it came; one whose
-stream broke before its usage is charged its worst case; a streamed
-call settles at its `[DONE]`, whether or not the client read to its end,
-and not at the stream's end: the gateway has held a stream open ~150 s
-past its `[DONE]`, which left the settle late, or cut with the Worker's
-`waitUntil` (the ledger's sweep then charged its worst case). The client
-reads the stream as it came (OpenAI's clients stop at `[DONE]`). Nothing
-of the request or its answer is kept: only the usage, on the ledger. A
-refusal of the payer's ledger is its own (402 `budget_used_up`, 403 for
-a guest), with its message.
+it, that owner's ledger is asked too whether it is still open
+(decision 26). Both are asked through the gate (docs/ledger.md, "The
+gate"; decision 62): what the router's isolate heard within the minute,
+so a call waits on no ledger in the common case, and a ledger that does
+not answer refuses nothing. A request is at most 6 MiB (413 past it,
+nothing sent): a screenshot Hermes shrinks to 5 MiB of base64 after a
+413 fits. Each call is charged after its answer, never in its way: its
+last, cumulative usage, input less what was cached (Workers AI puts a
+per-chunk delta on every chunk and the whole call's on a line of its
+own at the end: only that is metered), as one meter row under a
+reference of its own (`aig:<hex>`), sent to the payer's ledger on the
+ledger's queue, which asks again until the ledger has it (once by its
+reference). A call the model refuses, or never reached, is charged
+nothing and its answer passed through as it came; one whose stream
+broke before its usage is charged nothing, said aloud
+(`ledger.unknown-usage`); a streamed call is charged at its `[DONE]`,
+whether or not the client read to its end, and not at the stream's end:
+the gateway has held a stream open ~150 s past its `[DONE]`, which left
+a charge at its end late, or cut with the Worker's `waitUntil`. The
+client reads the stream as it came (OpenAI's clients stop at `[DONE]`).
+Nothing of the request or its answer is kept: only the usage, on the
+ledger. A refusal of the payer's ledger is its own (402
+`budget_used_up`, 403 for a guest), with its message.
 
-Each call's settle logs one line, `{"event": "model.settled", ref,
-logId, tier, model, charge, basis, first_ms, ms, calls}` (`wrangler
-tail`): `first_ms` is ms from its first try to the answer's first data
-line (streamed) or its status (read whole), `ms` to its settle, `calls`
-its tries (2 when it fell back), `model` the one that answered. A later
+Each call's charge logs one line, `{"event": "model.settled", ref,
+logId, tier, model, usage, first_ms, ms, calls}` (`wrangler tail`):
+`first_ms` is ms from its first try to the answer's first data line
+(streamed) or its status (read whole), `ms` to its charge, `calls` its
+tries (2 when it fell back), `model` the one that answered, `usage` what
+it reported (null: none, and charged nothing). A later
 latency lane reads these, as it reads a job's text step's `timing`
 (AI, above).
 
@@ -1846,11 +2018,12 @@ since the route reads no fragment's blob store (an agent reads one with
 `GET /api/f/{name}/blobs/{sha256}` and sends its bytes). Its caller,
 payer, `fragment`, 6 MiB body and ledger refusals are the chat route's.
 A body that is no decision (not one, a key unknown, a bound past) is
-400 saying why, nothing reserved or sent. It reserves its model's
-context window under an `aig:<hex>` reference, as an agent's turn, and
-settles at the input tokens the model counted. The model's refusal is
-released and passed through as it came; an answer that does not answer
-what was asked is settled (it was paid for) and answered 502
+400 saying why, nothing charged or sent. It asks the gate as an
+agent's turn and is charged after its answer, under an `aig:<hex>`
+reference, at the input tokens the model counted (none reported:
+nothing, said aloud). The model's refusal is charged nothing and passed
+through as it came; an answer that does not answer what was asked is
+charged (it was paid for) and answered 502
 `upstream_failed`. A computer's guest asks it as `POST /v1/decide` on
 its model intercept (docs/computers.md, Models).
 
@@ -1862,8 +2035,8 @@ phase 4.
 ### Ledger (docs/ledger.md)
 
 Every person has a usage ledger: one `Ledger` Durable Object, named by
-their identity, running `fragment_core::ledger` (plans, credit, holds,
-caps, meters). Money is integer micro-dollars; a month is a UTC calendar
+their identity, running `fragment_core::ledger` (plans, credit, caps,
+meters). Money is integer micro-dollars; a month is a UTC calendar
 month. Plans (decision 25): `guest` (no agents, no AI, billed nothing),
 `seat` ($50 of included credit a month) and `seat_always_on` ($100); a
 new person's is `FRAGMENT_DEFAULT_PLAN`. Included credit expires at the
@@ -1884,9 +2057,9 @@ credit first. What happened is always charged, past zero.
 - **Guests** make no fragments (`POST /api/fragments` is 403): a guest
   pays for nothing. They edit the fragments shared with them, whose
   owners pay (Paul, 2026-10-03). A fragment asks its
-  owner's ledger at most once a minute (`STANDING_CACHE_MS`), so a
-  change reaches it within a minute; a ledger that does not answer
-  refuses no write.
+  owner's ledger through the gate, at most once a minute in each
+  isolate (docs/ledger.md, "The gate"), so a change reaches it within a
+  minute; a ledger that does not answer refuses no write.
 - **Caps** (decision 26): each fragment has a monthly cap on its owner's
   ledger, $5 until the owner sets one. Past it, AI steps and agent turns
   there stop for everyone but its owner and the owner's agents acting
@@ -1901,7 +2074,7 @@ credit first. What happened is always charged, past zero.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `GET /api/ledger` | a person (an agent: its owner's) | → `LedgerStatus` (`crates/proto` `ledger`): `{plan, seat, month, balanceMicros, includedMicros, includedGrantedMicros, purchasedMicros, reservedMicros, availableMicros, overdraftMicros, standing: {standing: ok \| agents_stopped \| read_only, why?: guest \| seat_canceled \| no_credit \| overdrawn}, priceBook, fragments: [{fragment, spentMicros, capMicros}]}` (this month's spend, the largest 50 first) |
+| `GET /api/ledger` | a person (an agent: its owner's) | → `LedgerStatus` (`crates/proto` `ledger`): `{plan, seat, month, balanceMicros, includedMicros, includedGrantedMicros, purchasedMicros, reservedMicros, availableMicros, overdraftMicros, standing: {standing: ok \| agents_stopped \| read_only, why?: guest \| seat_canceled \| no_credit \| overdrawn}, priceBook, fragments: [{fragment, spentMicros, capMicros}]}` (this month's spend, the largest 50 first). `balanceMicros` is negative while the person owes (a paid call is charged after it, so it can pass zero); `reservedMicros` is always 0 since nothing is held before a call (decision 62), kept for the CLIs that read it; `availableMicros` is what may still be charged before their fragments go read-only, the balance plus the overdraft's room (0 once read-only); `priceBook` is the version of the book the answering release charges with (a ledger keeps none: docs/ledger.md, The price book) |
 | `PUT /api/f/{name}/cap` | the fragment's owner (never an agent) | `{id, micros \| null}` → `{fragment, capMicros, default}`: once by `id` (again: the same answer; another body: 409); `null` is the default |
 | `POST /api/ledger/{person}/grant` | the deployment's operators | `GrantCredit {id, micros, by, why}` → `{}`: purchased credit, once by `id`; `by` is the operator who signs; at most $10,000 |
 | `POST /api/ledger/{person}/plan` | the same | `SetPlan {id, plan}` → `{}`: an override; a seat's holder's plan is the registry's to push (Seats and orgs), and its next push wins (the debt ledger) |
@@ -1917,7 +2090,7 @@ here: its one writer is the registry, and an operator comps or ends a
 seat there (`/api/admin/seats`, Seats and orgs); `seat` is 404, saying
 so (it went on 2026-10-16). Test fleets add `POST /api/test/ledger
 {identity, op: clock {offsetMs} | sweep | entries {prefix} | totals |
-paid-calls {max} | legacy-seat {seat, seq}}`.
+book | paid-calls {max} | legacy-seat {seat, seq}}`.
 
 ### Seats and orgs (docs/billing.md)
 
@@ -1929,12 +2102,26 @@ that names a kind to buy (Checkout's, an org admin's seat, a trial code)
 takes `seat_always_on`, its default; `seat` is 400 (not sold). Every seat is in an org, the one
 who pays; a person is in at most one org and holds at most one seat. An
 org's members (`OrgMember`) are its admins, its seats' holders, or both,
-each a person (`person`, an npub) or an email a seat waits on until
-someone signs in with it verified, who then takes it (the oldest offer
-first, if they are in no org yet). A seat is **comped** (an operator's,
-outside Stripe; always good) or **paid** (counted on the org's Stripe
-subscription, good while it is `trialing`, `active` or `past_due`: not
-built yet).
+each a person (`person`, an npub) who said yes, or an **offer** to an
+email (`person` null): nobody joins an org without their own yes
+(docs/billing.md, "The model"; the security audit's H1). Whoever signs
+in with an offer's email, verified, sees it and accepts or declines it;
+signing in attaches nothing. Accepting while in another org moves them
+(alone there, that org ends, its subscription canceled at once), unless
+they are the last admin of an org others are in or offered, or pay for
+one others are in while it bills on (409). A seat is **comped** (an
+operator's, outside Stripe; always good) or **paid** (counted on the
+org's Stripe subscription, offered ones included, good while it is
+`trialing`, `active` or `past_due`). An org is made only by a paid
+Checkout (Billing, below) or an operator's comp. Who pays is the person
+whose Checkout made its subscription (`OrgView`'s `payer`; `MySeat`'s
+`pays`), while it has not ended: no other admin removes them or takes
+their seat (403); only they open its billing (the portal: a default, Paul's
+to reverse); and while its subscription lives (set to end at its period's
+end too) they stay: leaving, stepping down and moving are each 409,
+saying to cancel it first (an operator hands billing on by hand:
+docs/billing.md, "Who pays"). A wipe cancels it, its pending prorations
+deleted, and the org then forgets their customer.
 
 The registry is the one writer of a seat holder's plan and seat. Each
 change to a seat pushes, within seconds (the registry's alarm, tried
@@ -1952,16 +2139,19 @@ fails, and made again, asks again).
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `GET /api/seat` | a person | → `SeatStatus {seat: SeatView? {id, org: {id, name}, kind, comped, good, sleeps, admin}, org: {id, name}?, admin, offered: [{id, org, kind}], guest, offer: {kind, seatMicros, includedMicros, packMicros}}`: their seat, the org they are in, and seats offered to an email of theirs while they are in another org (`MySeat`); `guest`, whether they are a guest (decision 49: they make nothing, and are offered a seat): they hold no seat, and their ledger gives them no plan of its own, its plan `guest` (a new person's on a deployment whose plan is guest, or an operator's) or a seat's plan kept after the seat ended (`canceled`; `fragment_core::org::guest`); and `offer`, what is sold, in micro-dollars: the one seat (`seat_always_on`), its monthly price and the credit it includes each month, and a credit pack's price, core's constants (`fragment_core::stripe::offer`), which every page shows them from |
+| `GET /api/seat` | a person | → `SeatStatus {seat: SeatView? {id, org: {id, name}, kind, comped, good, sleeps, admin}, org: {id, name}?, admin, pays, offered: [OfferedSeat {id, org: {id, name}, kind?, admin, comped, from?, email}], guest, offer: {kind, seatMicros, includedMicros, packMicros}?}`: their seat, the org they are in, and every offer to an email of theirs (`MySeat`; `kind` null: an admin's place alone; `from`, the email of the person who made it: an admin, or an operator signed in as one; null for an operator key no one holds), oldest first; `guest`, whether they are a guest (decision 49: they make nothing, and are offered a seat): they hold no seat, and their ledger gives them no plan of its own, its plan `guest` (a new person's on a deployment whose plan is guest, or an operator's) or a seat's plan kept after the seat ended (`canceled`; `fragment_core::org::guest`); and `offer`, what is sold, in micro-dollars: the one seat (`seat_always_on`), its monthly price and the credit it includes each month, and a credit pack's price, core's constants (`fragment_core::stripe::offer`), which every page shows them from; null on a deployment that sells nothing (no Stripe: billing off, every seat an operator's comp), where no page shows a price or anything to buy |
 | `PUT /api/seat` | a seat's holder | `{sleeps}` → `MySeat`: whether their `seat_always_on` computer may sleep; no seat is 400 |
-| `GET /api/org` | an org's admin | → `OrgView {id, name, createdAt, members: [OrgMember {id, person?, email, admin, seat?, comped, addedAt}]}` (a held seat shows its holder's latest sign-in's email); anyone else is 403 |
-| `POST /api/org/seats` | an org's admin, while the org pays (else 400: buy one first) | `{email, kind?}` → `{seat: OrgMember, created, mailed}`: a paid always-on seat (`kind` only `seat_always_on`), held at once by the email's person (409 when they are in another org, or hold a seat here), else waiting on the email, which is mailed. It bills from now: the org's count is pushed to Stripe within seconds, prorated. The same again is answered again (`created: false`). A paid seat's kind does not change: one is sold |
-| `DELETE /api/org/seats/{id}` | an org's admin | → `OrgMember` as it was: the seat goes (an admin's row stays, seatless), its holder's seat canceled, the count pushed. The org's last paid seat is 400: its subscription is canceled in the portal |
-| `POST /api/org/admins` | the same | `{email}` → `{admin: OrgMember, created}`: an admin too (a seat they hold stays), or waiting on the email; at most 10 |
-| `DELETE /api/org/admins/{id}` | the same | → `OrgMember` as it was: no longer an admin (a row with a seat keeps it; one without goes). The last admin is 400 |
-| `POST /api/admin/seats` | the deployment's operators | `CompSeat {email, kind, org?}` → `Comped {seat: OrgMember, org, created, mailed}`: in `org` when named (404 when none), else in the org the email's person is in, else in a new org of one named by the email, whose seat's holder is its admin. A person who holds a seat already is 409, unless it is this same comp, which answers it again (`created: false`); a person in another org than the one named is 409. A new comp mails the email (`mailed`; a mail that fails leaves the seat made) |
+| `POST /api/seat/offers/{id}/accept` | the person an offer names (an email of theirs; anyone else, or none: 404) | `{}` or no body (anything else is 400) → `MySeat`: the offer is theirs: its seat held, its admin's place taken, in its org; from another org, a move (409 when they are the last admin of an org other people are in; alone there, it ends, its offers withdrawn; its payer is 409 while its subscription lives: they cancel it first); an admin's offer of an org that pays for nothing now is 400 (a comp's stands). One of their own org's (an admin's place) joins their row. Accepted already, the same answer (a replay, a merged one's too) |
+| `POST /api/seat/offers/{id}/decline` | the same | `{}` or no body → `MySeat`: the offer goes (a paid one bills no more). Declined already, or accepted, 404 |
+| `POST /api/seat/leave` | a seat's holder who is no admin | `{}` or no body → `MySeat`: they leave their org, their seat canceled, its count pushed. Who pays is 409 while its subscription lives (cancel it first). An admin is 400 (they step down first); in no org, 400 |
+| `GET /api/org` | an org's admin | → `OrgView {id, name, createdAt, members: [OrgMember {id, person?, email, admin, seat?, comped, addedAt}], payer?}` (a held seat shows its holder's latest sign-in's email; `person` null: an offer; `payer`, who pays); anyone else is 403 |
+| `POST /api/org/seats` | an org's admin, while the org pays (else 400: buy one first) | `{email, kind?}` → `{seat: OrgMember, created, mailed}`: a paid always-on seat (`kind` only `seat_always_on`) offered to the email (an admin's place offered it already gains the seat), mailed with who offered it; one of the org's members has it at once (409 holding a seat here). Refused for a person being wiped (404), an email `OFFERS_PER_EMAIL_MAX` (10) orgs offer something already (400), and past 50 offers mailed by the org that day, UTC (429). It bills from the offer: the org's count is pushed to Stripe within seconds, prorated. The same again is answered again (`created: false`). A paid seat's kind does not change: one is sold |
+| `DELETE /api/org/seats/{id}` | an org's admin | → `OrgMember` as it was: the seat goes, or its offer is withdrawn (an admin's row stays, seatless), its holder's seat canceled, the count pushed. Who pays's own seat is 403 to anyone but them; the org's last paid seat is 400: its subscription is canceled in the portal |
+| `POST /api/org/admins` | the same, while the org pays | `{email}` → `{admin: OrgMember, created, mailed}`: an admin's place offered to the email (a seat offered it already gains it), one of the org's own members' too (an admin's place is theirs only by their yes), mailed, its gates as a seat's; an admin already is answered as they are; at most 10, offered ones included |
+| `DELETE /api/org/admins/{id}` | the same | → `OrgMember` as it was: no longer an admin (a row with a seat keeps it; one without goes), or an admin's place offered withdrawn. The last admin who said yes is 409; who pays is 403 to anyone but themselves, and stepping down themselves is 409 while its subscription lives (they cancel it first) |
+| `POST /api/admin/seats` | the deployment's operators | `CompSeat {email, kind, org?}` → `Comped {seat: OrgMember, org, created, mailed}`: in `org` when named (404 when none), else in the org the email's person is in, else in a new org of one named by the email, whose seat's holder is its admin. A person's comp is theirs at once (operators are trusted); an email no one signs in with is offered it, theirs once they accept it. A person who holds a seat already is 409, unless it is this same comp, which answers it again (`created: false`); a person in another org than the one named is 409. A new comp mails the email (`mailed`; a mail that fails leaves the seat made) |
 | `PATCH /api/admin/seats/{id}` | the same | `{kind}` → `OrgMember`: a comped seat's new kind (a paid one is 400) |
-| `DELETE /api/admin/seats/{id}` | the same | → `OrgMember` as it was: the comp ends; an admin keeps their place, seatless; anyone else's row goes. None is 404 |
+| `DELETE /api/admin/seats/{id}` | the same | → `OrgMember` as it was: the comp ends; an admin keeps their place, seatless; anyone else's row goes, an offer's whole. None is 404 |
 | `GET /api/admin/orgs/{id}` | the same | → `OrgView` |
 | `POST /api/admin/trials` | the same | `NewTrialCode {name, kind?, days (1-30), capacity (1-10,000), expiresAt?, code?}` → `TrialCode {id, code, name, kind, days, capacity, expiresAt, active, revision, createdAt, createdBy, subscribed, open, uses}`: `kind` only `seat_always_on`, the default (`seat` is 400); `code` none, one is made (16 of A-Z less I and O, and 2-9, in fours); a code another has is 409 |
 | `GET /api/admin/trials` | the same | → `{codes: [TrialCode]}`, newest first, their uses counted (`subscribed`: bought; `open`: Checkouts not yet expired) |
@@ -1969,8 +2159,10 @@ fails, and made again, asks again).
 | `PATCH /api/admin/trials/{id}` | the same | `{revision, capacity?, active?, code?, expiresAt?}` → `TrialCode`: when `revision` is still its (else 409); places only grow |
 
 `/api/admin/*` takes an operator's signature, or the shell's session of
-a person the deployment's `operators` names (decision 59). A wipe takes
-the person's rows, and an org it leaves empty.
+a person the deployment's `operators` names (decision 59). A wipe's
+`billing` step takes the person's place in their org, ends an org it
+leaves with no one or no admin, and cancels what they pay for
+(Operators: wiping a person, below).
 
 ### Billing (docs/billing.md, "Stripe" and "Trials")
 
@@ -1978,14 +2170,26 @@ On a deployment that sells seats (its config's `stripe`; else these are
 400, and seats are comped only), a person buys their own through Stripe
 Checkout: a monthly subscription to one always-on seat, $200, at its
 price's lookup key (`fragment_seat_always_on_month`; the only seat sold,
-Paul, 2026-10-15), a card always, Stripe's automatic tax unless the
-deployment turns it off, and promotion codes allowed. Their org is made,
-of one, if they are in none; its admin may buy again once its
-subscription has ended (their lapsed seat becomes the always-on one). A
-subscription with any other item is not fragment's. An org has one Stripe customer and one
-subscription; everything fragment makes carries `fragment_deployment`
-(the platform's origin) in its metadata, and nothing without this
-deployment's is touched (the account is finite-mono's too).
+Paul, 2026-10-15), a card always (a trial's asks none), Stripe's automatic tax unless the
+deployment turns it off, and promotion codes allowed. Nothing is made
+before it is paid: someone in no org buys an org of one, its id minted
+into the session and the org made once paid (its customer the one
+Checkout makes for their `customer_email`); an admin of their org that
+pays for nothing (lapsed, its wiped payer's subscription canceled, or comped and ended) buys again
+in it, for its paid seats (their lapsed seat becomes the always-on one),
+on its own customer when they are its last payer, else on one of their
+own, which the org then keeps. No Checkout names another org's customer
+or another person's. A live subscription whose event names an org the
+registry lacks (its completion lost, no return) has its Checkout looked
+up and applied; with none, it is canceled after an hour's grace. A Checkout
+paid whose buyer can no longer take its seat (they joined another org
+meanwhile, left theirs, are being wiped, or another subscription pays)
+seats no one, and its subscription is canceled at once. A subscription
+with any other item is not fragment's. An org has one Stripe customer
+and one subscription; everything fragment makes carries
+`fragment_deployment` (the platform's origin) in its metadata, and
+nothing without this deployment's is touched (the account is
+finite-mono's too).
 
 An org's paid seats are the registry's, and the subscription's one
 item's quantity a copy of their count, held and pending: each change
@@ -1993,7 +2197,12 @@ queues the org, and the registry's alarm pushes the count read fresh
 (`POST /v1/subscriptions/{id}`, `create_prorations`), so two changes at
 once never leave Stripe a seat short; a subscription fetched with
 another count (changed in Stripe's dashboard) is pushed back to the
-seats'.
+seats'. No paid seat left (a member left, moved or was wiped, an offer
+declined) cancels the subscription at once (`DELETE
+/v1/subscriptions/{id}`, fetched first and only this deployment's, no
+proration, its customer kept), queued and tried again as pushes are; an
+org no one is in or offered is dropped once nothing of it bills, and a
+later event of it is answered and dropped.
 
 The registry writes an org's subscription only as fetched from Stripe:
 by the Checkout's return, by the webhook, and daily by the registry's
@@ -2005,10 +2214,10 @@ and orgs).
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/billing/checkout` | a person (409 holding a good seat, or in an org whose admins give seats) | `{kind?, trialCode?}` → `{url, session}`: Stripe's Checkout of one always-on seat, for 31 minutes. `kind` is `seat_always_on`, the default; `seat` is 400 (not sold). With a trial code (as typed: any case, spaces and dashes aside), Stripe's trial of its days (30 at most), a card taken first, and no promotion code on top. A code that is unknown is 404; ended (off, past its expiry, or of the `seat` no longer sold), 400; full, or redeemed by someone who had a trial or whose org has paid, 409. Nothing is made for a refused one |
+| `POST /api/billing/checkout` | a person (409 holding a good seat, or in an org whose admins give seats) | `{kind?, trialCode?}` → `{url, session}`: Stripe's Checkout of one always-on seat (an org buying again: its paid seats), for 31 minutes; nothing is made until it is paid. `kind` is `seat_always_on`, the default; `seat` is 400 (not sold). With a trial code (as typed: any case, spaces and dashes aside), Stripe's trial of its days (30 at most), no card asked (its end with none on file cancels it: the seat lapses until they pay again), and no promotion code on top. A code that is unknown is 404; ended (off, past its expiry, or of the `seat` no longer sold), 400; full, or redeemed by someone who had a trial or whose org has paid, 409. Nothing is made for a refused one |
 | `POST /api/billing/sessions/{id}` | its buyer (anyone else, or a session Stripe never made: 404) | → `MySeat`: the Checkout's return (a seat's `/welcome?checkout={id}`, a pack's `/settings?pack={id}`; Back from Checkout, `?checkout=canceled` or `?pack=canceled`): a completed one's seat is theirs at once, whatever the webhook's timing; again, it changes nothing |
 | `POST /api/billing/packs` | a seat's holder; an org's admin for a member who holds a seat (`member`: their row's id; 403 otherwise; 400 holding no seat) | `{member?}` → `{url, session}`: a Checkout for a $25 credit pack (decision 55; the one-time price `fragment_credit_pack`). Paid, its webhook or its return grants $25 of purchased credit on the member's ledger, kept until spent, once by its Checkout (`GrantCredit {id: pack:<session>, by: stripe}`). Its return is its buyer's |
-| `POST /api/billing/portal` | an org's admin (403 otherwise; 400 an org that never paid) | → `{url}`: Stripe's portal on the deployment's own configuration (`stripe.portal`): card, invoices, billing address, cancel at period end |
+| `POST /api/billing/portal` | who pays for the asker's org (`MySeat`'s `pays`; anyone else, its other admins included, 403) | → `{url}`: Stripe's portal on the deployment's own configuration (`stripe.portal`): card, invoices, billing address, cancel at period end |
 | `POST /api/stripe/webhook` | Stripe, signed (`Stripe-Signature`, this endpoint's secret, within 300 s; else 401) | an event → `{received, applied}`: `checkout.session.completed` and `customer.subscription.created`, `.updated`, `.deleted` are fetched again and written; any other event, or one not this deployment's, is answered and dropped. A failure is 5xx, and Stripe sends it again |
 
 ### Jobs and triggers
@@ -2109,6 +2318,65 @@ CLI: `fragment runs <name> [<run>] [--status S]`, `fragment triggers
 <op>`, `fragment inbox <name> --payload JSON` (the token from
 `FRAGMENT_INBOX_TOKEN`, else stdin, sent in `x-fragment-inbox-token`).
 
+### Scheduled records
+
+A fragment's editors can schedule records at run time, with no deploy and nothing in its `fragment.json` (Paul, 2026-10-20: "I want to make sure we're making generic fragment logic and not something only hermes can use"). A scheduled record is `{cron, channel, record}`: at each minute `cron` names, in UTC, the fragment appends `record` to `channel`, as itself. Everything already follows records, so a scheduled record does whatever its channel's records do:
+
+- the channel's triggers run their operations from it;
+- the fragment's pages that follow the channel show it live;
+- a computer whose guest follows the channel wakes for it.
+
+An agent's routine is one of these: a `routine` record on its own agent fragment's `tasks` (docs/chat-records.md), which the agent adds to itself as that fragment's editor. In Paul's words (2026-10-20): "for basic crons the agent shouldn't need to build a new fragment, it would just add schedule to itself".
+
+**Storage and firing**
+
+- Scheduled records are the fragment's data. Its supervisor keeps them in `record_schedules`, beside `schedules` (its code's cron triggers), and no install touches them.
+- The same alarm pass fires both kinds (`fire_cron`), and each moves on by one rule: its next minute after both the minute it was due and now. A fire the alarm reaches late is therefore one fire, and the minutes it missed are skipped, as cron skips a missed run.
+- A fire appends under a key made of its schedule and the minute it was due (`fragment_core::schedule::fire_key`), so a pass that fires it again appends nothing twice.
+- Past the owner's overdraft none fires. Each moves on to its next minute, and one `schedules.blocked` event says why; a code trigger's tick in the same pass is a blocked run.
+- If its channel no longer takes the fragment's records (redeclared since), the schedule moves on, and a `schedule.unfired` event says so.
+
+**Who may**
+
+- Viewers list them.
+- Editors add, pause, resume and remove them. That includes the owner, and an agent acting for its owner, which is at most an editor.
+- There is no special case. An agent on a computer is an editor of its own agent fragment (its owner assigned it there), so it schedules on itself through this same rule, as it schedules on any of its owner's apps it may edit.
+- An add and a resume are writes: past the owner's overdraft they are 402.
+
+**Bounds** (`fragment_proto::limits`, checked in `fragment_core::schedule`). Each refusal is a typed error that says which bound, and nothing is kept.
+
+- `cron`: five fields in UTC, read as triggers' are (weekdays 1 = Sunday … 7 = Saturday, or by name: `mon-fri`), kept one space apart. Otherwise `invalid_request`.
+- At most every 15 minutes (`RECORD_SCHEDULE_EVERY_MIN_MINUTES`), measured as its closest two minutes of a day, counting the gap across midnight. Otherwise `invalid_request`. Why 15:
+  - A record wakes the computers that follow its channel (for an agent, a turn, and a computer then awake for 20 idle minutes) and starts its channel's triggers' runs. All of that is the owner's to pay for.
+  - At 15 minutes, one schedule already keeps a computer awake around the clock (about $46 a month at the default size).
+  - Anything that must run more often belongs in an app's cron trigger and its job.
+- `record`: any JSON value, at most 4 KiB as canonical JSON (`RECORD_SCHEDULE_BODY_MAX_BYTES`). Otherwise `too_large`.
+- `channel` must be one the fragment declares, that takes posts (`events`, `ops` and `inbox` take none), and that takes them from whoever holds its post role, not only from members of one kind (`from`). Otherwise `invalid_request`. The caller must also hold that post role, or it is 403 `forbidden`.
+- A fragment keeps at most 32 (`RECORD_SCHEDULES_MAX`); the next is `invalid_request`.
+
+**Other behaviour**
+
+- Adding the same schedule again (the same cron, channel and record, the record compared as canonical JSON) answers the one already there, with `replayed: true`.
+- Paused, a schedule fires nothing and has no `nextAt`. Resumed, it fires from its next minute after now, none it missed.
+- Each change is an event: `schedule.added`, `.paused`, `.resumed`, `.removed`.
+- A person's export carries each fragment's schedules (Export, above).
+
+A `Schedule` is `{id, cron, said, channel, record, createdBy, createdAt, paused, nextAt?, lastAt?}`:
+
+- `said` is its schedule in words (`every hour at :00`, `every Monday to Friday at 09:30 UTC`, or else the cron itself);
+- `nextAt` is when it fires next, and `lastAt` when it last fired (both in ms).
+
+A page reads them at `__schedules` (Serving).
+
+**CLI**
+
+- `fragment schedule add <fragment> --cron "<m h dom mon dow>" --channel <channel> --record '<json>'`.
+- `fragment schedule add [<fragment>] --routine "<what to do>" --chat <chat> --cron "…"`: the CLI's sugar for an agent's routine, the routine record on `tasks`.
+- `fragment schedule list [<fragment>]`.
+- `fragment schedule pause|resume|rm [<fragment>] <id>`.
+
+On an agent's computer, the fragment is the agent's own unless one is named.
+
 ## Serving
 
 `<name>.<suffix>/<path>` (`/f/<name>/<path>` on the platform's host
@@ -2123,12 +2391,14 @@ API answers on the platform's host):
 | `__preview.svg` | the placeholder preview image |
 | `__blob/{sha256}` | one of this fragment's blobs (Blobs, above), `GET` or `HEAD`, viewers and up (on a `public` fragment too: whoever holds only `public` is refused): its bytes as the type its upload declared (ranges answer 206), `Cache-Control: private, max-age=31536000, immutable`, `X-Content-Type-Options: nosniff`, and an `ETag` of the hash; another fragment's hash is 404. `PUT` uploads one from the fragment's own page, as `PUT /api/f/{name}/blobs/{sha256}` does (editors; the body streamed and hashed on the way, bytes that are not what the hash says 400; a declared `content-length`, at most 256 MiB, else 400 or 413) → `{ok, sha, size, stored}` (`stored: false`: it was there); its `content-type` is the type it is served as. As for any write on this host, only the page's own cookies count (`fetched`): another fragment's page uploads as no one (401) |
 | `__members` | viewers and up (the share link too): `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}`, the first added first, as `GET /api/f/{name}/members` answers it (a chat's agents, its lead the first agent added) |
+| `__schedules` | viewers and up (the share link too): `{schedules: [Schedule]}`, as `GET /api/f/{name}/schedules` answers it (Jobs and triggers, "Scheduled records") |
 | `GET __channel/{channel}?after=\|before=&limit=` | the channel's readers: the same page and exclusive cursors as `GET /api/f/{name}/channels/{channel}`, using this origin's session or share link |
 | `POST __op/{op}` | a browser's call: `application/json` `{id, input}`; a signed-in browser (`fragment_site`) calls as its person; an unsigned caller gets an anonymous principal cookie; callers holding only `public` get 60 calls a minute each, 600 per fragment (a page's live views re-run over `__live`, outside this) |
 | `POST __op/channels/{channel}` | a browser's post (`fragment.post`), through the call's door and its checks: `{id, input}` with the record's body as `input` → `{result: record, replayed}`, as `POST /api/f/{name}/channels/{channel}` answers it; a post spends the public budget as a call does (no operation name holds a `/`) |
 | `__signin`, `__signout` | this origin's session (Sign-in, above) |
 | `__fragment.js` | the browser library (below) |
 | `__fragment.css` | the platform's stylesheet (below), for a page that links it |
+| `__markdown.js` | the platform's markdown renderer, a module any page may import: `markdown(text, options)` → a DocumentFragment and `inline(parent, text, options)`, markdown to DOM only, never to markup (HTML in the text is text; nesting stops at 32). Its caller decides where links go (`resolve(target, kind)` → `{href, path?}` or null), which pictures show (`image(src, kind)` → `{src, href?}` or null), how a code block looks (`code(text, lang)`), and whether every newline breaks a line (`breaks`); whatever they answer, links stay http(s), mailto or relative and pictures http(s) or relative. The files viewer, the chat and the notes viewer render with it |
 | `__people?id=…&id=…` | anyone who can see the fragment: `{profiles: {<id>: {kind, email?, picture, name?, fragment?, title?}}}` for up to 64 identities (a person's `email` only for a member, and only when the asker is a member too: decision 48; a picture is an absolute platform URL; an agent made from an agent fragment, a computer's, has that `fragment`, its label as its `name`, which `@mentions` it, and its fragment's `title` and `picture`, which it shows by: Identities, "An agent's name and picture"); an id the registry does not hold is left out |
 | `__files` | the files viewer, the platform's page (`__files.js`, `__files.css`): the content files (live and main) as a tree beside a reader (markdown with `[[wikilinks]]`, other text with line numbers, pictures, downloads), reading each through `__file`, following `__watch` where it may; asked for `application/json`, the list it reads, `{type: "files", count, files: [{path, size}]}` (a path on both is live's). Framed, the reader's bar asks the page around it to open a file as a pane (`postMessage({fragment: "open", url, title})`) |
 | `__live` | WebSocket, anyone who can see the fragment: channel subscriptions from a cursor, presence, change signals, queries (below) |
@@ -2138,9 +2408,29 @@ API answers on the platform's host):
 A site file carries an `ETag` that names its bytes: the last commit that
 changed it, or, for a page given Open Graph tags, a weak tag that also
 names the live commit (its `fragment.json`). `__fragment.js`,
-`__fragment.css`, `__sw.js`, `__files.js`, and `__files.css` carry a
-hash of their bytes. A `GET` or `HEAD` whose `If-None-Match` names the current
+`__fragment.css`, `__sw.js`, `__files.js`, `__files.css`, and
+`__markdown.js` carry a hash of their bytes. A `GET` or `HEAD` whose `If-None-Match` names the current
 tag answers 304 without reading the file.
+
+Every answer on a fragment's origin (a page, a file, the app's, a
+socket's upgrade, a refusal, an error) carries `X-Content-Type-Options:
+nosniff` and `Referrer-Policy: same-origin`, set by the router over any
+the app sends (a page's own `<meta name="referrer">` still governs its
+links). Scriptable media, an answer whose type is `image/svg+xml` or an
+XML type (`application/xml`, `text/xml`, `text/xsl`, any `+xml`), also
+gets `Content-Security-Policy: sandbox`, appended beside any policy of
+the app's: opened directly it runs no script and has an opaque origin,
+while a page's `<img>` of it is unchanged. `__file` is the content plane,
+data and never a page of the fragment's: its HTML is sandboxed the same
+way (its `GET`, its `HEAD`, a blessed template's data); its other types
+are not (a PDF must open in the browser's viewer).
+
+The platform's own host answers the same way (lib.rs `platform_origin`):
+every answer, a page, a redirect, a callback's, the API's JSON or an
+error, carries `X-Content-Type-Options: nosniff`, and `Referrer-Policy:
+same-origin` unless it names its own (sign-in's hand-offs send none; the
+shell's pages say theirs). A computer's origin passes its guest's answers
+as they are: its pages are the image's own.
 
 `__live` and `__watch` are also served in place at `/f/<name>/…` for the
 CLI. A socket has no CORS, and every fragment's origin is one site with
@@ -2244,7 +2534,9 @@ fragment's blobs, its SHA-256 computed in the page, as an editor; answers
 a page may render an error on its message and retry the same id and body),
 `me()` (`{id, principal, role, platform}`, the hello's), `closed(fn)`. The page's
 socket reconnects by itself after a jittered wait (half to one and a
-half times a backoff that doubles from 1 to 30 seconds), except after a
+half times a backoff that doubles from 1 to 30 seconds), and one not open
+within 10 seconds and its backoff is closed and so dialled again (an
+upgrade never answered), except after a
 close the fragment means for good: 4003 (the page's access was revoked)
 or 4004 (the fragment was deleted) ends it, and `closed` handlers get
 `{code, reason}`.
@@ -2368,13 +2660,21 @@ operator's keys, and the person's own keys. Their agents use them through
 the computer's swap, each with a placeholder of its own
 (docs/computers.md, Connections and operator keys).
 
+Connections now use the [browser-bound authorization-code flow](pipes-browser-binding.md):
+the `authorize` route requires the platform session, sets `fragment_connection`,
+and returns the configured provider's URL. Its callback requires that cookie
+and the **same live session** and consumes the Registry transaction before
+exchanging the code and importing tokens into Pipes. `connection_oauth` absent
+means authorization is disabled. Existing own-key behavior below is unchanged.
+
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `GET /api/connections` | a person | → `{providers: [{provider, kind, state, hosts, env, price?, signIn?, models?}]}` (proto's `Providers`): each provider the deployment offers, in its catalog's order. `kind` is `connection`, `operator` or `own`; `state` a connection's `connected`, `needs_reauthorization` or `not_connected` (Pipes' connected account, read with no token minted), an operator key's `offered`, an own key's `set` or `not_set`; `price` an operator key's list price, `{micros, per}` calls; `signIn` an own key connected through its provider's sign-in, `{manage}` (the provider's page where the person revokes it); `models` the models an own key's provider offers for their agents, `[{id, name}]` (an agent's `agent.json` `model: {provider, id}`; docs/computers.md, "An agent's own model"). Reading it tells the person's computer the connections' states, so its guest is given a new connection at its next read |
-| `POST /api/connections/{provider}/authorize` | a person | → `{provider, url}`: for a connection, Pipes' consent, for the person's browser; followed, the account is connected. For an own key with a sign-in (decision 60, `fragment_core::own_signin`), the provider's own page: their computer (made first: 404 without one) begins a sign-in, keeps its nonce and its verifier sealed for 10 minutes (at most 8 under way: 429 past that), and `url` is the row's `authorize` with `callback_url` (`GET …/callback` below), the verifier's S256 `code_challenge`, `code_challenge_method=S256`, `state` (`<computer's 24 hex>.<nonce>`) and `key_label=Fragment`. A provider not offered is 404; an operator key, or an own key with no sign-in, 400 |
-| `GET /api/connections/{provider}/callback?code=&state=` | the person's browser, unsigned, on the platform's host | → an HTML page: back from an own key's provider. The state names the computer and the sign-in it began, once: the code is exchanged with that sign-in's verifier at the row's `exchange` (`{code, code_verifier, code_challenge_method: "S256"}` → `{key}`), and the key is sealed by that computer as `PUT …/key` seals one; the page (200) says it is connected, and holds no key. A state replayed, expired, made for another provider, or never made; no code (the person declined); or a code the provider refuses: a page (400) that says to connect again, nothing set. Another host is 404 |
-| `PUT /api/connections/{provider}/key` | a person | `{key}` → `{provider, state: "set"}`: the person's own key for an `own` provider, 1 to 4096 printable characters with no space, kept sealed by their computer (made first: 404 without one) and swapped in for their agents' placeholders. Any other provider is 400 |
-| `DELETE /api/connections/{provider}/key` | a person | → `{provider, state: "not_set"}`: the key is gone; their agents' guests are given it no more |
+| `GET /api/connections` | a person | → `{providers: [{provider, kind, state, hosts, env, price?, signIn?, models?, account?, granted?, missing?, note?, accounts?, accountsMax?}]}` (proto's `Providers`): each provider the deployment offers, in its catalog's order. `kind` is `connection`, `operator` or `own`; `state` a connection's `connected`, `needs_reauthorization` or `not_connected` (Pipes' connected account, read with no token minted), an operator key's `offered`, an own key's `set` or `not_set`; `price` an operator key's list price, `{micros, per}` calls; `signIn` an own key connected through its provider's sign-in, `{manage}` (the provider's page where the person revokes it); `models` the models an own key's provider offers for their agents, `[{id, name}]` (an agent's `agent.json` `model: {provider, id}`; docs/computers.md, "An agent's own model"); `account` a connection's account as its person knows it (its email), the Pipes account's `account_display_name`, which the callback sets from the email of the ID token the provider answers beside the grant (when the row asks for `openid` and its email scope; absent when there is none; shown, never trusted for access); `granted` the scopes a connection's account holds, the Pipes account's `scopes` (what the person allowed when they connected it, which may be less than its row asks for; absent when Pipes names none); `missing` what its row's `connection_oauth.scopes` ask for beyond signing in that `granted` lacks, in the row's order (`[]` when nothing is; absent with `granted`, or for a row without `connection_oauth`), which settings names with a Reconnect to add ([partial grants](pipes-browser-binding.md#partial-grants)); `note` the catalog row's note, plain text settings shows under the provider's name; `accounts`, a connection whose row takes several (`accounts_max` above 1), each of the person's there, oldest first (`[{id, account?, state, granted?, missing?, disconnecting?}]`, `id` its Pipes id; `disconnecting` one they disconnected that Pipes holds still, not connected, to disconnect again), and `accountsMax` how many they may connect: then `state` is connected while any of them is, and `account`, `granted` and `missing` are the default account's, the oldest connected ([several accounts](pipes-browser-binding.md#several-accounts)); absent where a person connects one. Reading it tells the person's computer the connections' states (and of several, its accounts), so its guest is given a new connection at its next read |
+| `POST /api/connections/{provider}/authorize` | the shell's platform session (signed keys: 403) | `{}`, or where the row takes several accounts `{add: true}` (another: 400 at `accounts_max`) or `{account: "<id>"}` (one of theirs again: 404 if it is not; either is 400 on a row of one account) → `{provider, url}` and a host-only state cookie. A connection's configured OAuth provider returns to Fragment; the Registry keeps its state hash, same-session/provider/issuer binding and sealed S256 verifier for ten minutes (eight per session, bounded fleet total). `connection_oauth` absent: `not_connected`, no vendor call. An own key's existing `oauth` flow uses its Computer (404 without one), `fragment_own_key`, `callback_url`, S256, `state` and `key_label=Fragment`; at most eight pending. A provider not offered is 404; an operator or own key without sign-in is 400 |
+| `GET /api/connections/{provider}/callback?code=&state=` | the initiating browser on the platform host, with the appropriate state cookie and platform session | → HTML with no credentials. For connections, `fragment_connection` plus the **same live session** and matching provider/transaction are required before the one-use code is exchanged and the grant imported into that person's Pipes account, with exactly the scopes it holds: a partial grant connects, one of nothing beyond signing in imports nothing (`no-scopes`). For own keys, `fragment_own_key` and the signed-in person's Computer complete the existing one-use PKCE key exchange and seal the key. Of several accounts, the grant of one already connected (its ID token's `sub`) reauthorizes it, never a second; another is added (`connection_intent: "add"`). Failure redirects 303 to `?refused=<word>` (`elsewhere`, `signed-out`, `declined`, `not-under-way`, `code-refused`, `no-scopes`, `one-account` (Pipes connects one account a person for now), `account-limit` (the row's `accounts_max`, or Pipes', reached), `finishing` (an earlier connect of theirs there may still land: one callback at a time decides there, and waits for another), `no-key`), stripping code/state. A later start replaces that kind's cookie. Another host is 404. See [connection binding and rollout](pipes-browser-binding.md) |
+| `DELETE /api/connections/{provider}[?account=<id>]` | a person | → `{provider, account?, state, revoked}`: a connection disconnected (`state` not connected, or, of several accounts, the provider's with the others: the one named alone goes, its id in `account`; with several and none named, 400 naming them; with one, that one; `?account` on a row of one account is 400; asked again, it finishes what the last left, for an account still at Pipes or one whose disconnect of theirs is recorded, and any other id is 404). First the Registry fences the account: each attempt at it still pending is ended, and each callback still exchanging its code is cancelled (imports nothing, revokes nothing), so no connect begun before the disconnect connects it after; while a callback is importing, the disconnect is refused (429, nothing changed) and is asked again. The account then stays fenced until a connect is known to import again: an import whose outcome was unknown that lands at Pipes later is read as `not_connected` and its swaps are refused. A computer that cannot be told is a failure, asked again. Then, where its row's `connection_oauth` names a `revoke` endpoint (RFC 7009), its grant is revoked there first with an access token Pipes mints for the account (Google revokes the refresh token with it); then the account is deleted at Pipes (`DELETE /user_management/users/{user}/connected_accounts/{provider}`; none is no error), which ends every swap of it, and the person's computer is told at once. `revoked` is whether the provider answered 200; a revocation that fails is logged and the account is deleted anyway. No token is in the answer. Any other kind of provider is 400 |
+| `PUT /api/connections/{provider}/key` | a person | `{key}` → `{provider, state: "set"}`: the person's own key for an `own` provider, 1 to 4096 printable characters with no space, kept sealed by their computer (made first: 404 without one) and swapped in for their agents' placeholders; their open pages are told (their computer's view, its agents' `modelProviders`). Any other provider is 400 |
+| `DELETE /api/connections/{provider}/key` | a person | → `{provider, state: "not_set"}`: the key is gone; their agents' guests are given it no more, and their open pages are told, as for a key set |
 
 ## The shell (phase 5)
 
@@ -2383,9 +2683,23 @@ its files at `/__shell/<file>`, the release's: Serving, The release's
 files): its script reads the path, opening its
 settings at `/settings`, the welcome at `/welcome`, and the person's
 chats at `/`, and puts the view it shows in the address, so a reload
-stays put. A new person's first run never goes through settings
-(docs/billing.md, "The shell"): a guest with nothing shared with them
-lands on the welcome, the seat and a trial code
+stays put. Finite's about page, privacy policy and terms are `/about`,
+`/privacy` and `/terms` (cell/shell/about.html, privacy.html,
+terms.html: static pages, for anyone, signed out too, each a sheet of
+paper on the landscape: `platform-pages.css` and `legal.css`, their CSP
+allowing the release's own fonts), linked from the first run's footer
+(all three, with Contact: index.html) and at the end of Settings'
+Account (privacy and terms). The first run's screens (the landing, the welcome, a seat's
+step) are the platform pages' grid and card (`platform-pages.css`):
+Finite's logo, one glass card, and that footer (Skyler's onboarding
+design, 2026-10-22); the shell's type, Funnel Sans, is the release's own
+(`platform-pages.css`), served from `/__shell/`. Its page says "Still loading… Reload" (a link to itself) only
+if it has drawn nothing 9 s after the page came, one of its files or its
+first answers never having come (shell.css shows it then; the script
+takes it away as it first draws the shell). A new person's first run
+never goes through settings
+(docs/billing.md, "The shell"): a guest with nothing shared with them,
+and no invite waiting, lands on the welcome, the seat and a trial code
 (cell/shell/billing.js `seatOffer`), which a mailed trial's
 `/welcome?trial=<code>` fills in, then Stripe's Checkout, whose return
 (`/welcome?checkout=<id>`, or `canceled`) comes back to it: applied
@@ -2397,14 +2711,18 @@ its `offer` (Seats and orgs). A guest makes nothing (decision 49), so the
 shell offers them nothing to
 make: once something is shared with them, their home is what is shared
 (a chat in the middle, else the first app in its window), beside a note
-of what a guest may do and what a seat gives, whose Get a seat opens the
-welcome, which offers the seat to any guest, one whose seat ended and
+of what a guest may do, what a seat gives, and who is signed in
+(docs/billing.md, "Who is signed in"), whose Get a seat opens the
+welcome and whose Use another account switches; the welcome offers the
+seat to any guest, one whose seat ended and
 who keeps their chats too; their settings are their Billing, their
 account, then Your data. Its
-settings hold the person's account (email, sign-ins, identity id,
-picture, `/auth/link` to add another sign-in, a POST to
-`/auth/logout`), their Billing (cell/shell/billing.js: for a guest, Get
-a seat, to the welcome; a seat's kind,
+settings hold the person's account (who is signed in, their latest
+sign-in's email, beside a POST to `/auth/logout` and one to
+`/auth/switch`, Use another account; their sign-ins when they have
+several, linked before linking went (Sign-in); identity id; picture),
+their Billing (cell/shell/billing.js: for a guest, who is signed in,
+Get a seat, to the welcome, and Use another account; a seat's kind,
 org, trial's end and lapse, "let it sleep" for an always-on seat, this month's
 credit and a credit pack; for an org's admin, its seats and admins to add,
 change and remove, and Stripe's portal, the org shown once someone else
@@ -2452,7 +2770,14 @@ Its sidebar is the person's list, one read (Skyler, 2026-10-12; Paul,
 2026-10-13): their **one agent** above (their first, the one the first
 run makes: the first their computer took, as its view lists its agents in
 the order it took them; a menu of New chat, Rename, its profile and its
-screen), then their chats (kind `chat`) as
+screen), saying what it is doing (below), then the **invites** waiting on
+their emails, each its title, who invited them and to edit or view it,
+with Accept and Decline (decision 63; `GET /api/invites`, read as the
+page starts, as its list's socket opens and on its `invited`; Invites by
+email): accepted, it is in their list and opens, a chat in the middle,
+else in a window; declined, it goes; one gone meanwhile says so (a
+phone shows the sidebar over the page when an invite waits and nothing
+is open; a guest's note says to accept it there). Then their chats (kind `chat`) as
 one flat list, newest first (by the row's `previewAt`; one with nothing
 said yet above them all), less the ones they archived (`PUT
 /api/fragments/{name}/archived`, above). Its apps (kind `app` or `brain`)
@@ -2491,7 +2816,24 @@ with no reload, the open chat and the rows already shown untouched (a
 row the same as before keeps its element). Only the apps whose rows the
 change touched have their card read again. A socket that closes is opened again after a
 jittered wait (1 s, doubling to 30 s), and each opening reads the list
-again, for what changed while it was shut.
+again, for what changed while it was shut; one not open within 10 s and
+that wait is closed, and so opened again.
+**What their agent is doing** is its chats' rows' `listed` (Listed
+records, below: each agent's newest record of a turn's kind on a chat's
+`work`), so it is live on the same socket and reads no chat. The shell
+reads a turn as the chat's page does: `turn.start`, `turn.step` or
+`turn.prompt.closed` is Working, an open card (`turn.prompt`) is Waiting
+for you (its owner answers its cards), a question (`turn.asked`) is
+Waiting for you when it `asks` them and Waiting when it asks someone else,
+and `turn.end` is nothing. The agent's row says the most pressing (for
+you, then waiting, then working), and its menu names up to five chats
+where it is so ("Waiting for you in Garden talk"), each opening it. It
+says nothing while their computer is not awake (its turns stop with it)
+or the page's socket is shut (it would not hear the change), nor of a
+record past the bridge's own bound on a turn that says nothing (15
+minutes working, an hour waiting, each a minute more for the list's own
+lag). A message waiting for its turn has no record yet, so queued is not
+said.
 A chat's row shows its `unread` as a count ("99+" at the list's bound),
 but the open chat's: the chat shown in the middle column, while the page
 is on screen, is marked seen (`PUT /api/fragments/{name}/seen`) as it
@@ -2534,12 +2876,16 @@ a message in it, unless it was renamed first.
 shell made of a fragment its person owns (the open chat, an app's window)
 may `postMessage({fragment: "agents?"})` to it; the shell answers that
 frame, at that fragment's own origin only (its status's canonical URL),
-`{fragment: "agents", agents: [{identity, fragment, name, title, picture?, phase?}]}`: the
+`{fragment: "agents", agents: [{identity, fragment, name, title, picture?, phase?, modelProviders?}], models?}`: the
 agents its person's computer runs, `name` the label that `@mentions`
 each, `title` and `picture` (an absolute address) what each shows by
 (Identities, "An agent's name and picture"), and `phase` that computer's as the platform last said (`asleep`,
 `starting`, `awake`, `sleeping` or `wont_wake`; absent before the shell
-has read it). It sends the list again when any of it changes, its
+has read it); `modelProviders` and `models` are that computer's view's
+(`GET /api/computers/{id}`): the providers whose models each may run now
+(absent when none), and the model route's models' ids by its names, which
+with an agent's `agent.json` say the model it runs (the agent template's
+page shows it so: docs/computers.md, "An agent's own model"). It sends the list again when any of it changes, its
 computer's phase too (the list's socket tells the shell, which reads the
 computer again). The frame may then ask
 `{fragment: "add-agent", identity, nonce}` (a nonce of at most 64
@@ -2623,6 +2969,55 @@ zone). Anything else opens nothing. The chat's page asks so from the
 (`/auth/fragment`) and, in More, Copy link (its canonical URL). On a
 phone the viewer is a sheet from the bottom.
 
+**A new release, under an open page** (Paul, 2026-10-20: after the
+day's deploys one chat would not load in his home screen's app, and did
+in a tab of its own, until the app was quit). A page outlives a deploy:
+a home screen's app or a tab left open runs the shell, and its chats'
+pages, of the release it loaded with while the platform under it moves
+on. So the page names the release that answered it (`<meta
+name="fragment-release">`, filled in as it is served), every answer of
+the platform's host names its own (`x-fragment-deploy`), and the page
+reads that on every answer it reads, and asks for it (`HEAD /healthz`)
+as it is hidden or shown again (`visibilitychange`), comes back from the
+back-forward cache (`pageshow`) or comes online, at most once a minute.
+Once an answer names another release, the page reloads whole, its chats'
+and apps' frames with it, where it was (its path, its open chat, its
+apps' windows, each at the page it opened): while it is hidden (as it
+is hidden, or as it goes: `pagehide`), or at the person's next move (a
+chat or an app opened); never under them on screen. **What is typed is
+the chat page's to keep**: its composer's draft is kept in its own
+origin's storage (`localStorage`) as its person's (`{who, text, at}`,
+`who` its principal), a moment after each change and as the page goes,
+and put back as it loads, so it survives any reload, the shell's for a
+new release, a crash or a quit app alike (a browser that keeps no
+storage for the frame keeps no draft). Only that person gets it back: a
+draft of anyone else's is let go as the page loads, and signing out or
+Use another account first asks each chat's page to let its draft go
+(`{fragment: "forget-draft"}`, answered `{fragment: "draft-forgotten"}`,
+waited for at most a second), then sends the form. **Nothing else is
+lost**: a chat's page tells the shell, as it changes, whether it is busy
+with what no storage keeps (`{fragment: "busy", busy}`: files chosen, a
+voice memo, a message on its way or one that failed (its Retry, a retry
+under way), a quote chosen, a card's answer typed and not sent, or on its
+way), and the shell reloads only while none is, and while none of its
+own dialogs or its menu is open, no words are typed in its own fields,
+no prompt is on its way to a chat and no write of its own is still
+going. Nothing is asked of the pages as it reloads, so nothing can change
+between an answer and the reload. It decides a moment after the page is
+hidden (100 ms) or the person moves (400 ms), in a task of its own, so a
+page's word posted just before is heard first; and a page that says it
+is busy while the reload is under way (its answer slow: a file picked, a
+memo begun, a message failed) stops it (`window.stop()`), the release
+still waited on. What is left: a page that becomes busy once the new
+page has begun to come in is gone with it; that window opens only while
+the page is hidden, or as the person themselves moves. **No loop**: a release is
+reloaded for at most three times, a minute apart (a reload may still
+meet the old release while a deploy goes out), and the release a reload
+left is no reason to reload for ten minutes (a deploy's old side answers
+for a while); what the page waits to reload for is its root's
+`data-release-next`. A fragment's page open in a tab of its own is not
+the shell's, and does not reload so; a chat's keeps its draft there too.
+
 **On a phone it is an app** (Paul, 2026-10-13: "staying strictly in the
 viewport"). The page itself never scrolls, bounces or zooms: its html and
 body are pinned (`overscroll-behavior: none`), and only its real scroll
@@ -2639,7 +3034,11 @@ selected nor held, its taps immediate; what people write and read stays
 selectable. Added to a home screen it opens standalone (the manifest; the
 `apple-mobile-web-app-*` tags), its bars the page's own colour, light or
 dark, and its edges keep clear of the status bar, the home indicator and
-a notch (`env(safe-area-inset-*)`).
+a notch (`env(safe-area-inset-*)`): the home indicator only while no
+keyboard is up, as one covers the screen's bottom edge (the visual
+viewport shorter than the layout viewport, whose bottom Safari may pan
+into view above the keyboard), so the composer sits just above the
+keyboard, not an inset's height above it.
 
 ### Search (decision 9; docs/cloudflare-v1.md, lesson 12)
 
@@ -2692,6 +3091,52 @@ The shell's launcher (The shell, above) shows the chats and apps found,
 then the messages; a message opens its chat (or app). It does not scroll to the message: the
 chat's page has no way to be told one yet.
 
+### Listed records
+
+A channel that declares `listed` (Apps, above) puts what each of a
+fragment's members is doing on its members' rows in their lists
+(`GET /api/fragments`'s `listed`), so a page that shows a person's list
+(the shell's sidebar) follows every fragment's people on the list socket
+it already holds, and polls no fragment. The platform never reads what a
+kind means: a chat's `work` lists its turns, and the shell reads them as
+working or waiting (docs/chat-records.md).
+
+- **What is listed.** A record's kind is its body's `kind`, a string,
+  and only that: a post's record kind is always `message`, and a record
+  an app's mutation or job publishes under a kind of its own
+  (`call.publish(channel, body, kind)`) is listed only when its body
+  names the kind too. One of a kind its channel lists is a listed record, as `{channel, principal, kind, fields?, at}`
+  (`ListedRecord`): its poster, its body's listed fields that are
+  strings, each cut to 128 characters (`LISTED_VALUE_MAX_CHARS`; a field
+  absent or of another type is left out), and when it was posted. Only a
+  member's records are listed, each member's newest of each channel, and
+  a channel keeps its 16 latest posters' (`LISTED_POSTERS_MAX`).
+- **When rows go.** A listed record goes to the lists, from the index
+  outbox that carries each row (Control API, above), when it shows
+  something the one sent did not (another kind, or another field), or
+  the same a minute after the one sent (`LISTED_FRESH_MS`), so its `at`
+  is never more than a minute behind while its poster keeps at it.
+  Back-to-back records that show nothing new send nothing, and a post
+  replayed appends nothing, so it sends nothing. A fragment sends these
+  rows at most once in 3 s (`LISTED_MIN_GAP_MS`): a move within that
+  waits for its end, from the fragment's alarm, and goes with every move
+  till then, so an agent's turn costs its members' lists a few sends, not
+  one a record. The person's open pages are told
+  (`/api/fragments/watch`'s `changed`). A channel keeps its 16 posters
+  seen latest: a record that shows nothing new still counts as seen.
+- **The fence.** Each row is made as it is sent, from what is installed
+  then: only the channels that list now, the kinds and fields they list
+  now, and only those the row's role may read (the channel's one read
+  check, the same that guards its records), so a member who may not read
+  a channel never sees what it lists. A role changed, a member removed,
+  and a deploy that changes a channel's `read` or `listed` (or removes
+  the channel) each send the rows again: the rows that may no longer
+  read it lose it, and a member who leaves takes their own listed
+  records with them. An agent's list read `for` someone carries none of
+  theirs. What is listed no more is dropped from what the fragment keeps,
+  and history is never read back: a kind listed later (a chat installed
+  from a newer template) starts from its next record.
+
 ## Computers (docs/computers.md, phase 4)
 
 A person's computer runs an image (pinned per computer) and the agent
@@ -2703,7 +3148,7 @@ is docs/computers.md; the routes here are its owner's.
 | --- | --- | --- |
 | `POST /api/computers` | a person | → `{computer, owner, image, phase, why?, agents, origin}` (`ComputerView`): their computer, made asleep on the deployment's default image (`FRAGMENT_COMPUTER_IMAGE`); again, the same one (its id is derived from its owner). Made, it asks the registry to push its owner's seat to it (always-on: Seats and orgs); when the registry does not take that ask, the computer is made and the answer is the registry's failure (503 `registry_unavailable`), so its caller makes it again, which asks again |
 | `GET /api/computers` | a person | → `{computers: [ComputerView], support}`: `support` is where a person whose computer will not start gets help (`FRAGMENT_SUPPORT_URL`), or `null` |
-| `GET /api/computers/{id}` | its owner | → `ComputerView`: `phase` is `asleep`, `starting`, `awake`, `sleeping`, or `wont_wake` (its starts kept failing; `why` says why); `restored` is what its last start that came up restored (`{generation, from: snapshot \| backup \| nothing, save?, savedAt?, ageMs?, after?: sleep \| exit, rollback, at}`: the save's id, when it was taken and how old it was then, and how the life before that start ended; absent before its first start), `rollbacks` counts its starts that went back in time (the life before ended by a crash, or by a sleep that slept unsaved, or its start fell back to an older save: docs/computers.md, "Saves and what a wake restores"), and `saves` lists the saves of its `/data` it keeps, newest first (`[{number, id, at, generation, held, unusable?}]`, at most three); `why` also says when its sleep's save failed and it stays awake, or slept unsaved; `generation` is its newest start (what a restart names); `notices` is what its owner is told, the most pressing first (proto's `ComputerNotice`; docs/computers.md, "What its owner is told"): `{kind: "wont_wake", why}`, `{kind: "unsaved", since, save?, failingSince, failures, why, stopsAt?}` (its saves failing: its work in no save since `since`, a stop going back to save `save`, the bound stopping it at `stopsAt` unless a save works or something uses it), `{kind: "went_back", life, cause: crash \| unsaved \| restart \| unusable, endedAt?, pending, save?, savedAt?, at?}` (a start went back to save `save`, or will as it next starts, until its owner says they saw it), `{kind: "update", version}` (awake, with no turn running, on another image than its next start runs: an update is ready, which a restart takes, or its next sleep and wake, until its owner puts that version off); absent when none. `version` is the version of the image it runs (its digest's first 12 hex digits; none while it runs nothing), `latest` the one its next start runs (its pinned image as the deployment has it now). Their open pages are told when it changes (`/api/fragments/watch`'s `changed`); anyone else 404 |
+| `GET /api/computers/{id}` | its owner | → `ComputerView`: `phase` is `asleep`, `starting`, `awake`, `sleeping`, or `wont_wake` (its starts kept failing; `why` says why); `restored` is what its last start that came up restored (`{generation, from: snapshot \| backup \| nothing, save?, savedAt?, ageMs?, after?: sleep \| exit, rollback, at}`: the save's id, when it was taken and how old it was then, and how the life before that start ended; absent before its first start), `rollbacks` counts its starts that went back in time (the life before ended by a crash, or by a sleep that slept unsaved, or its start fell back to an older save: docs/computers.md, "Saves and what a wake restores"), and `saves` lists the saves of its `/data` it keeps, newest first (`[{number, id, at, generation, held, unusable?}]`, at most three); `why` also says when its sleep's save failed and it stays awake, or slept unsaved; `generation` is its newest start (what a restart names); `notices` is what its owner is told, the most pressing first (proto's `ComputerNotice`; docs/computers.md, "What its owner is told"): `{kind: "wont_wake", why}`, `{kind: "unsaved", since, save?, failingSince, failures, why, stopsAt?}` (its saves failing: its work in no save since `since`, a stop going back to save `save`, the bound stopping it at `stopsAt` unless a save works or something uses it), `{kind: "went_back", life, cause: crash \| unsaved \| restart \| unusable, endedAt?, pending, save?, savedAt?, at?}` (a start went back to save `save`, or will as it next starts, until its owner says they saw it; none when nothing was done on the life it lost after that save: docs/computers.md, "What its owner is told"), `{kind: "update", version}` (awake, with no turn running, on another image than its next start runs: an update is ready, which a restart takes, or its next sleep and wake, until its owner puts that version off); absent when none. `version` is the version of the image it runs (its digest's first 12 hex digits; none while it runs nothing), `latest` the one its next start runs (its pinned image as the deployment has it now). `models` is the model route's models' ids by its names (`{cheap, medium, fallback, vision}`, as the guest's view names them: Models, above; not secret, and nothing of where each runs), and each of its `agents` names in `modelProviders` the providers whose models it may run now (an own key its owner set, whose catalog row offers models, that the agent is not narrowed from; absent when none): an agent whose `agent.json` names a model of one of those runs it, any other its tier's model (docs/computers.md, "An agent's own model"), which Settings and the agent's page show by its id. Their open pages are told when it changes (`/api/fragments/watch`'s `changed`); anyone else 404 |
 | `POST /api/computers/{id}/wake` | its owner | → the view once it is awake (a wake also lifts `wont_wake`); 503 `wont_wake` when it would not start |
 | `POST /api/computers/{id}/sleep` | its owner | → the view once it is asleep: the guest held, `/data` saved, the guest signalled, the container gone. When the save fails, the view is awake (its container kept, its `why` saying so), and its sleep is tried again on its own (docs/computers.md); asked again, it tries at once. It answers within the sum of its steps' bounds (docs/computers.md, "Bounds"), 10 minutes 50 s at most: the hold 55 s, the save 9 minutes (its backups 8, a save whose backups never answer failing at it), the stop 55 s; the calls it makes to the platform's own Durable Objects (its owner's ledger, their open pages) aside, and a start in the same call when a wake came as it slept, within that start's own bounds. A sleep under way already answers its view at once (`sleeping`) |
 | `POST /api/computers/{id}/restart` | its owner | `{generation?}` (no body: whatever runs) → the view once it has started again: its way back to working. Running, a sleep that saves if it can and stops whether or not it did (a failed save keeps no container), then a start at once; asleep or `wont_wake`, a start (lifting it). The start is fresh: the image and the newest good save, never a snapshot. `generation` names the start the owner saw: a restart of one already restarted (the same press again, another tab's) restarts nothing and answers the view. Its owner's ledger is asked first, as for a wake: at zero credit 402, a guest 403, and what runs runs on |
@@ -2712,7 +3157,8 @@ is docs/computers.md; the routes here are its owner's.
 | `PUT /api/computers/{id}/image` | its owner | `{image}` → the view: the image it starts from at its next wake (an upgrade, or a rollback), its `/data` restored; awake on another, its owner is told an update is ready (`update`); an image the deployment lacks is 400 |
 | `PUT /api/computers/{id}/agents/{fragment}` | the owner of both | → the view: the agent fragment runs on it. The fragment's own key becomes the agent's identity (registered to its owner), an editor of its own fragment; it signs the guest's requests only while it is assigned here. Assigning it again changes nothing. Nothing restarts: an awake computer's guest reads its agents again while it runs and runs the new one (our Hermes image within seconds; docs/computers.md); a sleeping one's reads it as it starts |
 | `DELETE /api/computers/{id}/agents/{fragment}` | the same | → the view: it signs nothing for the guest from now on; an awake guest stops running it as it reads its agents again. An agent fragment deleted leaves its computer by its delete (`DELETE /api/f/{name}`); asked of one gone, or of one the computer does not run, it answers the view, unchanged: done, not an error |
-| `PUT /api/computers/{id}/agents/{fragment}/connections` | its owner | `{connections: [provider] \| null}` → the view: the providers of the catalog (connections, operator keys, own keys) the agent may have swapped in (decisions 22 and 37), all named at once. `null`, the default, is every one its owner has (decision 44: a person's agents are not fenced from each other); a list narrows the agent to those, and its guest is given the rest no more. A provider the deployment does not offer (`FRAGMENT_PROVIDERS`) is 400, as is a body without `connections` |
+| `PUT /api/computers/{id}/agents/{fragment}/accounts/{provider}` | its owner | `{account: "<id>" \| null}` → the view: which of its owner's accounts at a connection that takes several (`accounts_max`) the agent uses, by its id as `GET /api/connections` lists it (one not theirs: 404), or `null` for the default, the oldest connected; its agents' `accounts` say each pick (`{provider: id}`). A swap names the pick to Pipes while it is listed (one needing authorizing again is refused, never swapped for another), else the default: a pick whose account is gone falls back to it and stays until next written. Another provider is 400, as is a body without `account`. Its owner's open pages are told |
+| `PUT /api/computers/{id}/agents/{fragment}/connections` | its owner | `{connections: [provider] \| null}` → the view: the providers of the catalog (connections, operator keys, own keys) the agent may have swapped in (decisions 22 and 37), all named at once. `null`, the default, is every one its owner has (decision 44: a person's agents are not fenced from each other); a list narrows the agent to those, and its guest is given the rest no more. A provider the deployment does not offer (`FRAGMENT_PROVIDERS`) is 400, as is a body without `connections`. Its owner's open pages are told (the agent's `modelProviders` may change) |
 | `GET /api/computers/{id}/uses` | its owner | → `{computer, month, uses: [{provider, agent, calls, micros}]}` (proto's `ComputerUses`): this month's (UTC, `YYYY-MM`) calls through the computer's swap that a provider answered (under 500), by provider and agent fragment, and what they were charged: an operator key's at the price book's price and the margin (as its owner's ledger charged them), a connection's and an own key's `0` (counted, never charged). Thirteen months are kept |
 | `GET /api/computers/{id}/uses/{YYYY-MM}` | its owner | → the same, for that month; a month that is not one is 400 |
 | `POST /api/computers/{id}/ports/{port}/ticket` | its owner | `{path?}` → `{url, expiresAt}`: a one-time link (two minutes) that signs a browser in to the computer's own origin, `<24 hex>--computer.<suffix>` (`/__ticket`, then `/p/<port><path>`), cross-site from the platform, in a tab of its own or a frame of the platform's page (below); a signed request needs none. `path` is where on the port it lands, `/` by default: a path and query the image reads (an agent's screen: `/?agent=<agent fragment>`, docs/computers.md, Ports), which the platform carries and never reads; it starts with `/`, is at most 512 visible characters, and has no `//`, `#`, `\`, `.` or `..` segment, else 400 |
@@ -2747,6 +3193,19 @@ posts `{kind: "joined", fragment}` on the agent fragment's `tasks`, as
 that fragment, once for the membership, and wakes the computer (Paul,
 2026-10-03; docs/computers.md). The fragment it joined keeps the notice
 until the computer has it (`agent.told`, or `agent.untold` with why).
+
+### An agent's routines (decision 38)
+
+An agent's routines are scheduled records on its own agent fragment's
+`tasks` (Jobs and triggers, "Scheduled records"), which the agent adds to
+itself as that fragment's editor (`fragment schedule add --routine`, which
+its platform skill teaches: docs/computers.md). Each fire appends the
+routine record, which wakes the computer (above), and the bridge runs it
+as a turn in its chat, asked by its owner (docs/chat-records.md). The
+computer keeps none, so no restart, upgrade or sleep of it loses one
+(Paul, 2026-10-20: asked to "check it every hour and ping me if ikea gets
+back", an agent found no scheduler, and the loop it started in its
+container died at the next restart).
 
 A guest's request to a provider's host has its placeholders swapped, in
 a header, the query string or basic auth, as the catalog says

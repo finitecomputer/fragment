@@ -25,6 +25,7 @@ Usage:
   python google_api.py sheets update SHEET_ID RANGE --values '[[...]]'
   python google_api.py sheets append SHEET_ID RANGE --values '[[...]]'
   python google_api.py docs get DOC_ID
+  python google_api.py slides get PRESENTATION_ID
   python google_api.py check
 
 Environment:
@@ -45,11 +46,15 @@ from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
+# who the connected account is: any grant holds its sign-in scopes, so this
+# answers whatever else the person allowed
+USERINFO = "https://www.googleapis.com/oauth2/v3/userinfo"
 CALENDAR = "https://www.googleapis.com/calendar/v3"
 DRIVE = "https://www.googleapis.com/drive/v3"
 PEOPLE = "https://people.googleapis.com/v1"
 SHEETS = "https://sheets.googleapis.com/v4/spreadsheets"
 DOCS = "https://docs.googleapis.com/v1/documents"
+SLIDES = "https://slides.googleapis.com/v1/presentations"
 
 # A search reads at most this many messages' metadata, one request each.
 SEARCH_MAX = 50
@@ -97,6 +102,8 @@ def call(method, url, params=None, body=None):
         elif isinstance(e, dict):
             # Google's: {error: {code, message, status}}
             code, message = e.get("status", ""), e.get("message")
+            if insufficient_scope(exc, e):
+                code = "insufficient_scope"
         else:
             code, message = "", None
         raise GoogleError(exc.code, code or "", message or text[:500] or f"HTTP {exc.code}") from None
@@ -105,6 +112,19 @@ def call(method, url, params=None, body=None):
     if not raw:
         return {}
     return json.loads(raw.decode("utf-8"))
+
+
+def insufficient_scope(exc, error):
+    """Whether Google refused for a scope the connection lacks: the person
+    left it unticked when they connected Google (its 403 says so in
+    WWW-Authenticate and in its reasons)."""
+    if exc.code != 403:
+        return False
+    if 'error="insufficient_scope"' in (exc.headers.get("WWW-Authenticate") or ""):
+        return True
+    reasons = [d.get("reason") for d in error.get("details") or [] if isinstance(d, dict)]
+    reasons += [d.get("reason") for d in error.get("errors") or [] if isinstance(d, dict)]
+    return "ACCESS_TOKEN_SCOPE_INSUFFICIENT" in reasons or "insufficientPermissions" in reasons
 
 
 def out(value):
@@ -240,7 +260,7 @@ def calendar_delete(args):
     print(json.dumps({"status": "deleted", "eventId": args.event_id}))
 
 
-# ---- Drive, Contacts, Sheets, Docs ----
+# ---- Drive, Contacts, Sheets, Docs, Slides ----
 
 
 def drive_search(args):
@@ -283,10 +303,43 @@ def docs_get(args):
     out({"title": doc.get("title", ""), "documentId": doc.get("documentId", ""), "body": "".join(text)})
 
 
+def text_runs(text):
+    return "".join(e.get("textRun", {}).get("content", "") for e in (text or {}).get("textElements", []))
+
+
+def element_text(element):
+    """The text a slide's element holds: a shape's, a table's cells', a
+    group's children's (an image, a line or a video holds none)."""
+    if "shape" in element:
+        return text_runs(element["shape"].get("text"))
+    if "table" in element:
+        return "".join(text_runs(cell.get("text")) for row in element["table"].get("tableRows", []) for cell in row.get("tableCells", []))
+    if "elementGroup" in element:
+        return "".join(element_text(child) for child in element["elementGroup"].get("children", []))
+    return ""
+
+
+def deck_text(deck):
+    """A presentation's text, slide by slide, with each slide's speaker
+    notes (its notes page's speakerNotesObjectId shape, not the slide's
+    thumbnail there)."""
+    slides = []
+    for page in deck.get("slides", []):
+        notes_page = page.get("slideProperties", {}).get("notesPage", {})
+        notes_id = notes_page.get("notesProperties", {}).get("speakerNotesObjectId")
+        notes = "".join(element_text(e) for e in notes_page.get("pageElements", []) if e.get("objectId") == notes_id)
+        slides.append({"objectId": page.get("objectId", ""), "text": "".join(element_text(e) for e in page.get("pageElements", [])), "notes": notes})
+    return {"title": deck.get("title", ""), "presentationId": deck.get("presentationId", ""), "slides": slides}
+
+
+def slides_get(args):
+    out(deck_text(call("GET", f"{SLIDES}/{urllib.parse.quote(args.presentation_id, safe='')}")))
+
+
 def check(args):
     # one cheap read: whether the connection answers for this agent
-    profile = call("GET", f"{GMAIL}/profile")
-    out({"status": "connected", "email": profile.get("emailAddress", "")})
+    me = call("GET", USERINFO)
+    out({"status": "connected", "email": me.get("email", "")})
 
 
 def main():
@@ -381,6 +434,12 @@ def main():
     p.add_argument("doc_id")
     p.set_defaults(func=docs_get)
 
+    slides = sub.add_parser("slides")
+    slides_sub = slides.add_subparsers(dest="action", required=True)
+    p = slides_sub.add_parser("get")
+    p.add_argument("presentation_id")
+    p.set_defaults(func=slides_get)
+
     p = sub.add_parser("check", help="whether the Google connection answers for this agent")
     p.set_defaults(func=check)
 
@@ -390,7 +449,8 @@ def main():
     except GoogleError as e:
         hint = {
             "not_connected": "the person has not connected Google (or must again): ask them to, in the shell's Settings, under Connections",
-            "forbidden": "the person narrowed this agent's connections, or Google refused the scope",
+            "forbidden": "the person narrowed this agent's connections and left Google out",
+            "insufficient_scope": "your owner didn't allow this part of Google when they connected it: they can add it in Settings, Connections, Reconnect to add",
         }.get(e.code, "")
         print(json.dumps({"error": e.code or "google_error", "status": e.status, "message": str(e), "hint": hint}), file=sys.stderr)
         sys.exit(1)

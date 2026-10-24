@@ -20,6 +20,10 @@ use tungstenite::{Message, WebSocket};
 /// take to answer on its DevTools port.
 const CHROME_STARTS_MAX: u32 = 2;
 const CHROME_START_WAIT: Duration = Duration::from_secs(30);
+/// How long a reloaded page has to load its new document, resources and
+/// all (`reload`), and how many reloads it is given.
+const RELOAD_LOAD: Duration = Duration::from_secs(30);
+const RELOADS_MAX: u32 = 2;
 
 pub struct Browser {
     child: Child,
@@ -105,6 +109,28 @@ impl Drop for Lease {
 pub struct Page {
     session: String,
     target: String,
+}
+
+/// For `open_with_script`: the page's first WebSocket whose URL holds
+/// `part`, held as an upgrade never answered is (a dropped connection, a
+/// phone's network changing under it): it stays connecting, never opening
+/// or closing by itself, until the page closes it, which closes it as a
+/// browser's does (code 1006, not clean). `window.__heldSockets` counts
+/// those held, `__heldClosed` those the page closed. Its top window's alone.
+pub fn hold_first_socket(part: &str) -> String {
+    let part = serde_json::to_string(part).expect("a string encodes");
+    format!(
+        "(() => {{ if (window !== window.top) return; const part = {part}; const Real = window.WebSocket; let held = false; \
+         Object.assign(window, {{ __heldSockets: 0, __heldClosed: 0 }}); \
+         class Held extends EventTarget {{ \
+           constructor(url) {{ super(); Object.assign(this, {{ url: String(url), readyState: 0, protocol: '', extensions: '', binaryType: 'blob', bufferedAmount: 0 }}); window.__heldSockets++; }} \
+           send() {{ throw new DOMException('the socket is not open', 'InvalidStateError'); }} \
+           close() {{ if (this.readyState >= 2) return; this.readyState = 3; window.__heldClosed++; \
+             setTimeout(() => {{ const e = new CloseEvent('close', {{ code: 1006, reason: '', wasClean: false }}); this.onclose?.(e); this.dispatchEvent(e); }}, 0); }} \
+         }} \
+         window.WebSocket = new Proxy(Real, {{ construct(target, args) {{ if (!held && String(args[0]).includes(part)) {{ held = true; return new Held(args[0]); }} return new target(...args); }} }}); \
+         }})();"
+    )
 }
 
 /// A second person's browser beside the lease's own: a browser context of
@@ -290,6 +316,22 @@ impl Browser {
         self.open_at(Some(&context.0), url)
     }
 
+    /// A page whose requests to URLs matching `patterns` (`*` any run of
+    /// characters) are refused from its first document, as a resource that
+    /// never comes; `unblock` lets them through again.
+    pub fn open_blocking(&mut self, url: &str, patterns: &[&str]) -> Result<Page> {
+        let page = self.open("about:blank")?;
+        self.send("Network.enable", json!({}), Some(&page.session))?;
+        self.send("Network.setBlockedURLs", json!({ "urls": patterns }), Some(&page.session))?;
+        self.send("Page.navigate", json!({ "url": url }), Some(&page.session))?;
+        Ok(page)
+    }
+
+    pub fn unblock(&mut self, page: &Page) -> Result<()> {
+        self.send("Network.setBlockedURLs", json!({ "urls": [] }), Some(&page.session))?;
+        Ok(())
+    }
+
     fn open_at(&mut self, context: Option<&str>, url: &str) -> Result<Page> {
         let mut params = json!({ "url": url });
         if let Some(context) = context {
@@ -360,8 +402,25 @@ impl Browser {
         Ok(())
     }
 
+    /// Reloads the page and waits until its new document has loaded
+    /// (`readyState` complete; the old one, marked, is not taken for it).
+    /// One still loading after RELOAD_LOAD is reloaded once more, said in
+    /// the run's output: the local node can leave a request of a page's
+    /// unanswered, and a module script that never arrives leaves a page
+    /// whose script never runs (run 39632307934: two of the shell's
+    /// modules never reached the node, and its page stayed blank). A page
+    /// still loading after that is the caller's checks' to find.
     pub fn reload(&mut self, page: &Page) -> Result<()> {
-        self.send("Page.reload", json!({}), Some(&page.session))?;
+        for tried in 1..=RELOADS_MAX {
+            // (a page between documents answers once it has its new one)
+            let _ = self.eval(page, "(window.__e2eBeforeReload = true, true)");
+            self.send("Page.reload", json!({}), Some(&page.session))?;
+            if self.until(page, "!window.__e2eBeforeReload && document.readyState === 'complete'", RELOAD_LOAD) {
+                return Ok(());
+            }
+            let left = self.eval(page, "document.readyState").unwrap_or(Value::Null);
+            println!("      (reload {tried} of {RELOADS_MAX}: the page did not load in {RELOAD_LOAD:.0?}, its document {left})");
+        }
         Ok(())
     }
 
@@ -375,6 +434,15 @@ impl Browser {
     }
 
     /// Changes reachability while keeping the page's origin and identity.
+    /// Every request of the page's own (its frames of other sites aside)
+    /// answered `ms` late, a navigation's too, as a slow phone's are; 0 as
+    /// they come.
+    pub fn latency(&mut self, page: &Page, ms: u64) -> Result<()> {
+        self.send("Network.enable", json!({}), Some(&page.session))?;
+        self.send("Network.emulateNetworkConditions", json!({ "offline": false, "latency": ms, "downloadThroughput": -1, "uploadThroughput": -1 }), Some(&page.session))?;
+        Ok(())
+    }
+
     pub fn offline(&mut self, page: &Page, offline: bool) -> Result<()> {
         self.send("Network.enable", json!({}), Some(&page.session))?;
         self.send("Network.emulateNetworkConditions", json!({ "offline": offline, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1 }), Some(&page.session))?;
@@ -509,8 +577,21 @@ impl Browser {
 
     /// `eval_in_frame` in a frame of another site than the page's: the
     /// first frame target of this lease's contexts whose URL contains
-    /// `url_part`, attached for the evaluation.
-    fn eval_in_isolated_frame(&mut self, url_part: &str, expr: &str) -> Result<Value> {
+    /// `url_part`, attached for the evaluation. Called alone, it reaches
+    /// the frame while its page is between documents (a navigation under
+    /// way, which holds the page's own session back until it commits).
+    pub fn eval_in_isolated_frame(&mut self, url_part: &str, expr: &str) -> Result<Value> {
+        let frame = self.frame(url_part)?;
+        let r = self.eval(&frame, expr).map_err(|e| anyhow::anyhow!("the frame threw: {e:#}"));
+        self.detach(frame)?;
+        r
+    }
+
+    /// The first frame target of this lease's contexts whose URL contains
+    /// `url_part` (a page of another site than its parent's: a process of
+    /// its own), attached until `detach`: driven as a page, its own
+    /// requests (`block`) and its loads its own.
+    pub fn frame(&mut self, url_part: &str) -> Result<Page> {
         let v = self.send("Target.getTargets", json!({}), None)?;
         let context = self.context.clone();
         let ours = |id: &Value| context.as_deref().is_none_or(|c| id == c || self.others.iter().any(|o| id == o.as_str()));
@@ -521,10 +602,21 @@ impl Browser {
             .find(|t| t["type"] == "iframe" && ours(&t["browserContextId"]) && t["url"].as_str().is_some_and(|u| u.contains(url_part)))
             .and_then(|t| t["targetId"].as_str().map(str::to_string))
             .with_context(|| format!("no frame at {url_part}"))?;
-        let frame = self.attach(&target)?;
-        let r = self.eval(&frame, expr).map_err(|e| anyhow::anyhow!("the frame threw: {e:#}"));
+        self.attach(&target)
+    }
+
+    /// The page's (or frame's) requests to URLs matching `patterns` (`*`
+    /// any run of characters) refused from now on, as a resource that
+    /// never comes; none (`&[]`) lets them through again.
+    pub fn block(&mut self, page: &Page, patterns: &[&str]) -> Result<()> {
+        self.send("Network.enable", json!({}), Some(&page.session))?;
+        self.send("Network.setBlockedURLs", json!({ "urls": patterns }), Some(&page.session))?;
+        Ok(())
+    }
+
+    pub fn detach(&mut self, frame: Page) -> Result<()> {
         self.send("Target.detachFromTarget", json!({ "sessionId": frame.session }), None)?;
-        r
+        Ok(())
     }
 
     /// A click at a point, as a hand makes it: a user gesture, so a popup

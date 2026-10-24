@@ -215,7 +215,7 @@ impl FragmentCell {
         let mut init = RequestInit::new();
         init.with_method(Method::Post).with_headers(headers).with_body(Some(body.into()));
         let req = Request::new_with_init("https://principal.internal/search/entries", &init)?;
-        let mut resp = self.env.durable_object("PRINCIPAL")?.get_by_name(principal)?.fetch_with_request(req).await?;
+        let mut resp = crate::routed::send(&self.env, "PRINCIPAL", principal, req).await?;
         if resp.status_code() != 200 {
             let why: Value = resp.json().await.unwrap_or(Value::Null);
             return Err(CellError::host(format!("their list answered {}: {why}", resp.status_code())));

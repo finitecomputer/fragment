@@ -4,7 +4,7 @@
 //! decides who pays a row and asks that person's ledger, which keys on
 //! nothing else (docs/cloudflare-v1.md, decision 36).
 //!
-//! The head (plan, seat, balance, holds, price book) is kept whole as one
+//! The head (plan, seat, balance) is kept whole as one
 //! JSON row, small and bounded; what grows with use (references, batches,
 //! commands, each fragment's spend by month, caps) is in tables, read and
 //! written through `SqlStore`. Each route is one `transactionSync` over
@@ -12,10 +12,28 @@
 //! but the month it rolled to, and a store that failed rolls the whole
 //! route back. Its alarm runs `sweep` at the head's `next_sweep_ms`.
 //!
+//! Nothing is held before a paid call (decision 62): a head or an entry
+//! the releases before kept (holds, reservations) loads, its holds
+//! forgiven uncharged and their entries ended as released in the same
+//! transaction, and a head is written with `holds` empty, so a release
+//! rolled back to one of those reads a ledger with no hold and no held
+//! entry (`fragment_core::ledger`, `retire_holds`). The
+//! `entries.held` column stays (a schema changes only by a new step),
+//! written 0. A batch is priced with this release's configured book
+//! (`Config::book`): every call into a ledger is its own release's, so it
+//! keeps none (decision 62); a head is written with that book too, which
+//! a release rolled back to one that kept its own reads.
+//!
 //! Inner routes (platform code only, through `ask`): each is a POST of a
 //! `Route`'s request (the core's types, or proto's), answered with its
 //! `Route::Answer`; a refusal is `ErrorBody` with the typed `Refused`
 //! beside it, so a caller can tell a read-only owner from a guest.
+//!
+//! **The gate** (`may`; docs/ledger.md, "The gate"): before a spend starts
+//! (a paid call, a write), its payer's ledger is asked whether it may, at
+//! most once a minute in each isolate (`fragment_core::ledger::gate`), and
+//! for at most `GATE_WAIT_MS`. Only a refusal stops it: a ledger that does
+//! not answer lets it start (decision 62).
 //!
 //! **Wiped** (docs/api.md, Operators): a wipe of its person empties it in
 //! one step and leaves one row that says so (`wiped`). From then every
@@ -23,11 +41,12 @@
 //! refusal, not an outage: a meter batch still in the queue is acknowledged
 //! and kept nowhere, so nothing makes the ledger again.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
-use fragment_core::ledger::{self as core, BatchRecord, CommandRecord, Entry, Ledger, Month, Refused, Spend, Store};
+use fragment_core::ledger::gate::Gate;
 use fragment_core::price::PriceBook;
-use fragment_proto::ledger::{GrantCredit, LedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat};
+use fragment_core::ledger::{self as core, BatchRecord, CommandRecord, Entry, Ledger, Month, Refused, Spend, Store};
+use fragment_proto::ledger::{GrantCredit, LedgerStatus, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Why};
 use fragment_proto::ErrorCode;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -39,22 +58,6 @@ use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::js;
 
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS head (id INTEGER PRIMARY KEY CHECK (id = 1), ledger TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS entries (ref TEXT PRIMARY KEY, at_ms INTEGER NOT NULL, held INTEGER NOT NULL, entry TEXT NOT NULL);
-CREATE INDEX IF NOT EXISTS entries_at ON entries (at_ms);
-CREATE TABLE IF NOT EXISTS batches (id TEXT PRIMARY KEY, digest TEXT NOT NULL, answer TEXT NOT NULL, at_ms INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS batches_at ON batches (at_ms);
-CREATE TABLE IF NOT EXISTS commands (id TEXT PRIMARY KEY, command TEXT NOT NULL, at_ms INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS spend (month INTEGER NOT NULL, fragment TEXT NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, fragment));
-CREATE TABLE IF NOT EXISTS caps (fragment TEXT PRIMARY KEY, micros INTEGER NOT NULL);
-";
-
-/// The one row a wiped ledger keeps: when it was wiped. Apart from
-/// `SCHEMA`, whose tables a wipe drops.
-const WIPED_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS wiped (at INTEGER NOT NULL);";
-
 /// The person a ledger call is for; only platform code sets it, and the
 /// ledger keeps the first it is told and refuses another.
 pub const PAYER_HEADER: &str = "x-fragment-payer";
@@ -63,19 +66,21 @@ pub const PAYER_HEADER: &str = "x-fragment-payer";
 const DEFAULT_PLAN_ID: &str = "plan:default";
 /// Test fleets: references a test hook lists at most.
 const TEST_ENTRIES_MAX: i64 = 500;
-/// The meta keys of a capped ledger's paid calls (`TestHook::PaidCalls`).
+/// Test fleets: the longest a slowed ledger waits before each answer
+/// (`TestHook::Slow`).
+const TEST_SLOW_MAX_MS: u64 = 30_000;
+/// The meta key of a capped ledger's paid calls (`TestHook::PaidCalls`).
 const PAID_CALLS_MAX: &str = "test_paid_calls_max";
-const PAID_CALLS_USED: &str = "test_paid_calls_used";
+/// How long a gate waits on a ledger it has no fresh answer from: a few
+/// times a Durable Object call's usual round trip (tens of ms within a
+/// location, a few hundred across the world, and a cold start), so a slow
+/// or far ledger costs a call at most this, once a minute, and one that
+/// does not answer lets the call through (decision 62).
+const GATE_WAIT_MS: u64 = 1_500;
 
-/// The price book the deployment charges with: the core's defaults, and
-/// the operator keys' prices and the book's version from the deployment's
-/// configuration (decision 4: pricing lives there). Each ledger takes it
-/// at its next call when its version is newer (`take_book`).
-pub fn configured_book(cfg: &Config) -> PriceBook {
-    let mut book = PriceBook::defaults();
-    book.keys = cfg.providers.key_prices();
-    book.version = book.version.max(cfg.price_book_version);
-    book
+thread_local! {
+    /// What each person's ledger last answered this isolate's gate (`may`).
+    static GATE: RefCell<Gate> = const { RefCell::new(Gate::new()) };
 }
 
 #[durable_object]
@@ -89,6 +94,11 @@ pub struct LedgerCell {
     armed: Cell<Option<i64>>,
     /// Its person was wiped (`wiped`'s row, read as it starts).
     wiped: Cell<bool>,
+    /// Test fleets: how long it waits before each answer but a lever's
+    /// (`TestHook::Slow`; this activation's alone).
+    slow_ms: Cell<u64>,
+    /// Its schema as it started (schema.rs): ready, or refused.
+    schema: crate::schema::Schema,
 }
 
 impl DurableObject for LedgerCell {
@@ -96,25 +106,27 @@ impl DurableObject for LedgerCell {
         let raw: JsValue = state._inner().into();
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         let sql = state.storage().sql();
-        sql.exec(SCHEMA, None).expect("the Ledger schema applies");
-        sql.exec(WIPED_SCHEMA, None).expect("the wiped row's schema applies");
-        let marks: Vec<Value> = sql.exec("SELECT COUNT(*) AS n FROM wiped", None).and_then(|c| c.to_array()).expect("the wiped row reads");
-        let wiped = marks.first().and_then(|r| r["n"].as_i64()).expect("COUNT answers a row") > 0;
+        let schema = crate::schema::Schema::start(&raw, sql.clone(), &fragment_core::migrate::LEDGER, &state.id().to_string());
+        let wiped = schema.wiped(&sql);
         let cfg = Config::from_env(&env);
-        LedgerCell { state, raw, cfg, armed: Cell::new(None), wiped: Cell::new(wiped) }
+        LedgerCell { state, raw, cfg, armed: Cell::new(None), wiped: Cell::new(wiped), slow_ms: Cell::new(0), schema }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
+        if let Some(refused) = crate::routed::refused(&req, crate::routed::Own::of(self.cfg), &self.raw)? {
+            return Ok(refused);
+        }
         match self.route(req).await {
             Ok(answer) => Response::from_json(&answer),
-            Err(Failed::Refused(why)) => refusal(why),
+            Err(Failed::Refused(why)) => refusal(why, why.message()),
+            Err(Failed::Saying(why, message)) => refusal(why, message),
             Err(Failed::Cell(e)) => e.response(),
         }
     }
 
     async fn alarm(&self) -> Result<Response> {
         // a wiped ledger has nothing to sweep (its alarm went with it)
-        if self.wiped.get() {
+        if self.schema.refused_alarm(&self.state, None).await? || self.wiped.get() {
             return Response::ok("");
         }
         if let Err(e) = self.swept().await {
@@ -129,14 +141,17 @@ impl DurableObject for LedgerCell {
 
 /// A refusal as its caller reads it: the platform's error body, and the
 /// core's typed reason beside it.
-fn refusal(why: Refused) -> Result<Response> {
-    let body = json!({ "error": why.code(), "message": why.message(), "refused": why });
+fn refusal(why: Refused, message: String) -> Result<Response> {
+    let body = json!({ "error": why.code(), "message": message, "refused": why });
     Ok(Response::from_json(&body)?.with_status(why.code().status()))
 }
 
 /// How a route failed: the ledger refused (typed), or the cell did.
 enum Failed {
     Refused(Refused),
+    /// A refusal that says more than its reason's message (a test fleet's
+    /// paid-calls cap).
+    Saying(Refused, String),
     Cell(CellError),
 }
 
@@ -191,15 +206,21 @@ pub struct Status {}
 /// Fleets with levers only (`FRAGMENT_TEST_SECRET`; cell/src/levers.rs):
 /// move this ledger's clock (`clock {offsetMs}`), run its sweep now
 /// (`sweep`), list the references under a prefix (`entries {prefix}`),
-/// read what moved its balance (`totals`), or cap its paid calls from now
-/// (`paid-calls {max?}`, answering `{max, used}`; with no `max` the cap
-/// stays as it is, 0 where there was none: each new reservation, a model
-/// call or an AI step, counts one, and one past `max` is refused as a
-/// ledger at zero refuses it; the hosted e2e's people are capped so), or
+/// read what moved its balance (`totals`), read the price book its head
+/// holds as of its last call (`book`, answering `{book}`), or cap its paid
+/// calls/// (`paid-calls {max?}`, answering `{max, used}`; with no `max` the cap
+/// stays as it is, 0 where there was none: `used` is every model call,
+/// operator key's call and AI step it has charged, by their references,
+/// and once it reaches `max` its gate refuses them as a ledger at zero
+/// does; the hosted e2e's people are capped so), or
 /// set its seat at an order of the lever's (`legacy-seat {seat, seq}`,
 /// answering its status), as an operator's `seat` command did before it
 /// went (2026-10-16): a ledger such a command left ahead of the
-/// registry's order.
+/// registry's order; or make it answer every other route `ms` late
+/// (`slow {ms}`, at most `TEST_SLOW_MAX_MS`, 0 to end it: a slow or far
+/// ledger, which no paid call waits on past the gate's wait), or make the
+/// gate of its isolate (and, through the router's lever, the router's)
+/// forget what it heard (`forget-gate`).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum TestHook {
@@ -207,24 +228,16 @@ pub enum TestHook {
     Clock { offset_ms: i64 },
     Sweep,
     Entries { prefix: String },
+    Book,
     Totals,
     PaidCalls { max: Option<u64> },
     LegacySeat { seat: SeatState, seq: u64 },
-}
-
-impl Route for core::Reserve {
-    const PATH: &'static str = "/reserve";
-    type Answer = core::Reserved;
-}
-
-impl Route for core::Settle {
-    const PATH: &'static str = "/settle";
-    type Answer = core::Settled;
-}
-
-impl Route for core::Release {
-    const PATH: &'static str = "/release";
-    type Answer = core::Released;
+    /// The steps its schema holds (schema.rs `view`).
+    Schema,
+    Slow {
+        ms: u64,
+    },
+    ForgetGate,
 }
 
 impl Route for core::Meter {
@@ -370,18 +383,18 @@ impl Store for SqlStore {
     fn entry(&self, reference: &str) -> Option<Entry> {
         let rows: Vec<Json> = self.rows("SELECT entry AS value FROM entries WHERE ref = ?", vec![reference.into()]);
         let entry = self.read::<Entry>("an entry", &rows.into_iter().next()?.value)?;
-        if let Entry::Reservation { reserve, .. } = &entry {
-            assert_eq!(reserve.reference, reference, "an entry is kept under its own reference");
+        if let Entry::Row { row, .. } = &entry {
+            assert_eq!(row.reference, reference, "an entry is kept under its own reference");
         }
         Some(entry)
     }
 
     fn put_entry(&mut self, reference: &str, entry: Entry) {
-        let held = i64::from(entry.held());
+        // `held` is a column of the releases before decision 62: nothing is held now
         self.exec(
-            "INSERT INTO entries (ref, at_ms, held, entry) VALUES (?, ?, ?, ?)
-             ON CONFLICT (ref) DO UPDATE SET at_ms = excluded.at_ms, held = excluded.held, entry = excluded.entry",
-            vec![reference.into(), SqlStorageValue::Integer(entry.at_ms()), SqlStorageValue::Integer(held), SqlStore::text(&entry).into()],
+            "INSERT INTO entries (ref, at_ms, held, entry) VALUES (?, ?, 0, ?)
+             ON CONFLICT (ref) DO UPDATE SET at_ms = excluded.at_ms, held = 0, entry = excluded.entry",
+            vec![reference.into(), SqlStorageValue::Integer(entry.at_ms()), SqlStore::text(&entry).into()],
         );
     }
 
@@ -462,12 +475,6 @@ impl Store for SqlStore {
 
     fn prune(&mut self, before_ms: i64, before_month: Month) -> u64 {
         let before = SqlStorageValue::Integer(before_ms);
-        // the sweep expired every hold past HOLD_MAX_MS first: one older
-        // than the horizon would be a charge forgotten
-        if self.count("SELECT COUNT(*) AS n FROM entries WHERE at_ms < ? AND held = 1", vec![before.clone()]) != 0 {
-            self.fail("a held reservation is older than what the ledger remembers".into());
-            return 0;
-        }
         let forgotten = self.count(
             "SELECT (SELECT COUNT(*) FROM entries WHERE at_ms < ?) + (SELECT COUNT(*) FROM batches WHERE at_ms < ?) AS n",
             vec![before.clone(), before.clone()],
@@ -486,11 +493,17 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
     let rows: Vec<Json> = store.rows("SELECT ledger AS value FROM head WHERE id = 1", vec![]);
     store.checked()?;
     if let Some(row) = rows.into_iter().next() {
-        let ledger: Ledger = serde_json::from_str(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
+        let mut ledger: Ledger = serde_json::from_str(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
+        // a head of the releases before decision 62: its holds forgiven,
+        // their entries ended, in this transaction with the head's rewrite
+        let retired = ledger.retire_holds(store);
+        if retired > 0 {
+            console_log!("{}", json!({ "event": "ledger.holds-retired", "retired": retired }));
+        }
         ledger.assert_valid();
         return Ok(ledger);
     }
-    let mut ledger = Ledger::new(now_ms, configured_book(cfg));
+    let mut ledger = Ledger::new(now_ms);
     if cfg.default_plan != Plan::Guest {
         let set = SetPlan { id: DEFAULT_PLAN_ID.into(), plan: cfg.default_plan };
         ledger.set_plan(store, &set, now_ms).map_err(|why| CellError::host(format!("a new ledger refused its default plan: {}", why.message())))?;
@@ -498,25 +511,12 @@ fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
     Ok(ledger)
 }
 
-/// The configured book, taken when it is newer than the ledger's (under
-/// its version's id, once). A configuration that changed a book's prices
-/// without a new version is refused as another body, and the ledger keeps
-/// charging with the one it has, saying so.
-fn take_book(ledger: &mut Ledger, store: &mut SqlStore, cfg: &Config, now_ms: i64) {
-    let book = configured_book(cfg);
-    if book.version <= ledger.book().version {
-        return;
-    }
-    let set = core::SetPriceBook { id: format!("book:{}", book.version), book };
-    if let Err(why) = ledger.set_book(store, &set, now_ms) {
-        console_error!("{}", json!({ "event": "ledger.book-refused", "id": set.id, "message": why.message() }));
-    }
-}
-
-fn save(store: &SqlStore, ledger: &Ledger) {
+/// Writes the head back, with the book this release charges with
+/// (`Ledger::written`: for a rollback to a release that kept its own).
+fn save(store: &SqlStore, ledger: &Ledger, book: &PriceBook) {
     store.exec(
         "INSERT INTO head (id, ledger) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET ledger = excluded.ledger",
-        vec![SqlStore::text(ledger).into()],
+        vec![ledger.written(book).into()],
     );
 }
 
@@ -554,9 +554,8 @@ impl LedgerCell {
         js::transaction_sync(&self.raw, move || {
             let mut store = SqlStore::new(sql);
             let mut ledger = head(&mut store, cfg, now)?;
-            take_book(&mut ledger, &mut store, cfg, now);
             let answer = op(&mut ledger, &mut store, now);
-            save(&store, &ledger);
+            save(&store, &ledger, &cfg.book);
             store.checked()?;
             Ok((answer, ledger.next_sweep_ms(now)))
         })
@@ -584,18 +583,17 @@ impl LedgerCell {
     async fn swept(&self) -> CellResult<core::Swept> {
         if self.meta("payer")?.is_none() {
             // a ledger no one has called has nothing to sweep
-            return Ok(core::Swept { expired: Vec::new(), forgotten: 0 });
+            return Ok(core::Swept { forgotten: 0 });
         }
         let (swept, next) = self.transact(|ledger, store, now| Ok(ledger.sweep(store, now)))?;
         let swept = swept.expect("a sweep refuses nothing");
-        if !swept.expired.is_empty() {
-            console_log!("{}", json!({ "event": "ledger.holds-expired", "expired": swept.expired }));
-        }
         self.arm(next).await?;
         Ok(swept)
     }
 
     async fn route(&self, mut req: Request) -> Result<Value, Failed> {
+        // a wipe ends a ledger that refuses its schema too, and a wiped
+        // ledger answers as one, refused or not (schema.rs)
         if let Some(route) = req.path().strip_prefix("/wipe/") {
             // only a wipe's orchestrator sets the header (routed.rs `marker`)
             if req.headers().get(crate::wipe::WIPE_HEADER)?.is_none() {
@@ -606,6 +604,7 @@ impl LedgerCell {
         if self.wiped.get() {
             return Err(Failed::Refused(Refused::Wiped));
         }
+        self.schema.ready()?;
         let payer = req.headers().get(PAYER_HEADER)?.filter(|p| fragment_core::npub::is_identity(p)).ok_or_else(|| CellError::host("a ledger call names its payer"))?;
         match self.meta("payer")? {
             None => self.set_meta("payer", &payer)?,
@@ -616,6 +615,10 @@ impl LedgerCell {
             return Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", req.method().as_ref(), req.path())).into());
         }
         let path = req.path();
+        let slow = self.slow_ms.get();
+        if slow > 0 && path != TestHook::PATH {
+            Delay::from(std::time::Duration::from_millis(slow)).await;
+        }
         let body = req.bytes().await?;
         fn reply<T: Serialize>(answer: T) -> Result<Value, Failed> {
             Ok(serde_json::to_value(answer).expect("the ledger's answers serialize"))
@@ -625,27 +628,16 @@ impl LedgerCell {
             Done {}
         }
         match path.as_str() {
-            <core::Reserve as Route>::PATH => {
-                let r: core::Reserve = decode(&body)?;
-                if self.cfg.test_hooks {
-                    self.paid_call(&r.reference)?;
-                }
-                reply(self.mutate(move |l, s, now| l.reserve(s, &r, now)).await?)
-            }
-            <core::Settle as Route>::PATH => {
-                let r: core::Settle = decode(&body)?;
-                reply(self.mutate(move |l, s, now| l.settle(s, &r, now)).await?)
-            }
-            <core::Release as Route>::PATH => {
-                let r: core::Release = decode(&body)?;
-                reply(self.mutate(move |l, s, now| l.release(s, &r, now)).await?)
-            }
             <core::Meter as Route>::PATH => {
                 let m: core::Meter = decode(&body)?;
-                reply(self.mutate(move |l, s, now| l.meter(s, &m, now)).await?)
+                let book = &self.cfg.book;
+                reply(self.mutate(move |l, s, now| l.meter(s, &m, now, book)).await?)
             }
             MaySpend::PATH => {
                 let q: MaySpend = decode(&body)?;
+                if self.cfg.test_hooks && matches!(q.spend, Spend::AgentTurn | Spend::AiStep) {
+                    self.paid_calls()?;
+                }
                 reply(done(self.mutate(move |l, s, now| l.may_spend(s, q.spend, q.fragment.as_deref(), q.by_owner, now)).await?))
             }
             FragmentOpen::PATH => {
@@ -674,7 +666,8 @@ impl LedgerCell {
             }
             Status::PATH => {
                 let Status {} = decode(&body)?;
-                reply(self.mutate(|l, s, now| Ok(l.status(s, now))).await?)
+                let book = &self.cfg.book;
+                reply(self.mutate(move |l, s, now| Ok(l.status(s, now, book))).await?)
             }
             TestHook::PATH if self.cfg.test_hooks => self.test_hook(decode(&body)?).await,
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}")).into()),
@@ -704,10 +697,7 @@ impl LedgerCell {
                 let had = held()?;
                 // one step, no await: emptied and marked, or neither
                 let sql = self.sql();
-                for table in fragment_core::ddl::tables(SCHEMA) {
-                    sql.exec(&format!("DROP TABLE IF EXISTS {table}"), None)?;
-                }
-                sql.exec(SCHEMA, None)?;
+                crate::schema::remake(sql.clone(), &fragment_core::migrate::LEDGER)?;
                 if !self.wiped.get() {
                     sql.exec("INSERT INTO wiped (at) VALUES (?)", vec![SqlStorageValue::Integer(js::now_ms())])?;
                 }
@@ -721,40 +711,58 @@ impl LedgerCell {
         }
     }
 
+    /// Fleets with levers: a capped ledger's paid calls used, every model
+    /// call, operator key's call and AI step it has charged (an entry under
+    /// `aig:`, `key:` or `step:`, a reservation of the releases before
+    /// among them).
+    fn paid_calls_used(&self) -> CellResult<u64> {
+        let rows: Vec<Value> = self
+            .sql()
+            .exec("SELECT COUNT(*) AS n FROM entries WHERE substr(ref, 1, 4) IN ('aig:', 'key:') OR substr(ref, 1, 5) = 'step:'", None)?
+            .to_array()?;
+        Ok(rows.first().and_then(|r| r["n"].as_u64()).unwrap_or(0))
+    }
+
     /// Fleets with levers: a ledger whose paid calls are capped
-    /// (`TestHook::PaidCalls`) counts each new reservation, and refuses one
-    /// past the cap before anything is held. A retry of one it holds (the
-    /// same reference) is no new call.
-    fn paid_call(&self, reference: &str) -> Result<(), Failed> {
+    /// (`TestHook::PaidCalls`) refuses one more at its gate once it has
+    /// charged `max`, as a ledger at zero refuses it (an isolate trusts the
+    /// gate's answer for up to a minute, so the cap is approximate by what
+    /// starts in that window).
+    fn paid_calls(&self) -> Result<(), Failed> {
         assert!(self.cfg.test_hooks, "only a fleet with levers caps paid calls");
         let Some(max) = self.meta(PAID_CALLS_MAX)?.and_then(|v| v.parse::<u64>().ok()) else { return Ok(()) };
-        let held: Vec<Value> = self.sql().exec("SELECT 1 AS n FROM entries WHERE ref = ? LIMIT 1", vec![reference.into()])?.to_array()?;
-        if !held.is_empty() {
-            return Ok(());
-        }
-        let used = self.meta(PAID_CALLS_USED)?.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        let used = self.paid_calls_used()?;
         if used >= max {
-            return Err(CellError::new(ErrorCode::BudgetUsedUp, format!("this test person's {max} paid calls are used up (the hosted e2e's cap)")).into());
+            let message = format!("this test person's {max} paid calls are used up (the hosted e2e's cap)");
+            return Err(Failed::Saying(Refused::AgentsStopped { why: Why::NoCredit }, message));
         }
-        self.set_meta(PAID_CALLS_USED, &(used + 1).to_string())?;
         Ok(())
     }
 
     async fn test_hook(&self, hook: TestHook) -> Result<Value, Failed> {
         assert!(self.cfg.test_hooks, "test hooks answer on test fleets only");
         match hook {
+            TestHook::Schema => Ok(crate::schema::view(self.sql(), &fragment_core::migrate::LEDGER)?),
+            TestHook::Slow { ms } => {
+                self.slow_ms.set(ms.min(TEST_SLOW_MAX_MS));
+                Ok(json!({ "slowMs": self.slow_ms.get() }))
+            }
+            TestHook::ForgetGate => {
+                forget_gate();
+                Ok(json!({ "forgot": true }))
+            }
             TestHook::PaidCalls { max } => {
                 let max = match max {
                     Some(max) => max,
                     None => self.meta(PAID_CALLS_MAX)?.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0),
                 };
                 self.set_meta(PAID_CALLS_MAX, &max.to_string())?;
-                let used = self.meta(PAID_CALLS_USED)?.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-                Ok(json!({ "max": max, "used": used }))
+                Ok(json!({ "max": max, "used": self.paid_calls_used()? }))
             }
             TestHook::Clock { offset_ms } => {
                 self.set_meta("clock_offset", &offset_ms.to_string())?;
-                let status = self.mutate(|l, s, now| Ok(l.status(s, now))).await?;
+                let book = &self.cfg.book;
+                let status = self.mutate(move |l, s, now| Ok(l.status(s, now, book))).await?;
                 // the alarm follows the clock
                 self.armed.set(None);
                 Ok(json!({ "offsetMs": offset_ms, "month": status.month }))
@@ -779,9 +787,12 @@ impl LedgerCell {
                 Ok(json!({ "entries": entries }))
             }
             TestHook::Totals => Ok(serde_json::to_value(self.mutate(|l, _, _| Ok(l.totals())).await?).expect("totals serialize")),
+            // the book it charges with: its release's (it keeps none)
+            TestHook::Book => Ok(json!({ "book": self.cfg.book })),
             TestHook::LegacySeat { seat, seq } => {
                 let c = SetSeat { id: format!("legacy-seat:{seq}"), seat, seq };
-                let status = self.mutate(move |l, s, now| l.set_seat(s, &c, now).map(|()| l.status(s, now))).await?;
+                let book = &self.cfg.book;
+                let status = self.mutate(move |l, s, now| l.set_seat(s, &c, now).map(|()| l.status(s, now, book))).await?;
                 Ok(serde_json::to_value(status).expect("a status serializes"))
             }
         }
@@ -804,6 +815,12 @@ impl From<LedgerError> for CellError {
     }
 }
 
+impl From<Refused> for LedgerError {
+    fn from(why: Refused) -> LedgerError {
+        LedgerError { code: why.code(), message: why.message(), refused: Some(why) }
+    }
+}
+
 impl From<CellError> for LedgerError {
     fn from(e: CellError) -> LedgerError {
         LedgerError { code: e.code, message: e.message, refused: None }
@@ -821,19 +838,26 @@ impl From<worker::Error> for LedgerError {
 /// stand-in, a host failure (5xx), which a gate may treat as passing (a
 /// write, a wake); a paid call never does (`retried`, then refused).
 pub async fn ask<R: Route>(env: &Env, payer: &str, request: &R) -> Result<R::Answer, LedgerError> {
+    let bytes = asked(env, payer, R::PATH, serde_json::to_string(request).expect("a ledger request serializes")).await?;
+    serde_json::from_slice(&bytes).map_err(|e| CellError::host(format!("the ledger's answer to {}: {e}", R::PATH)).into())
+}
+
+/// `ask`'s round trip, one copy for every route (the cell's Wasm is held
+/// to a budget, and a copy per route type costs it): route `path`'s
+/// answer, as bytes, or its refusal.
+async fn asked(env: &Env, payer: &str, path: &str, body: String) -> Result<Vec<u8>, LedgerError> {
     assert!(fragment_core::npub::is_identity(payer), "a ledger is a person's, named by their identity");
     let headers = Headers::new();
     headers.set(PAYER_HEADER, payer)?;
     headers.set("content-type", "application/json")?;
-    let body = serde_json::to_string(request).expect("a ledger request serializes");
     let mut init = RequestInit::new();
     init.with_method(Method::Post).with_headers(headers).with_body(Some(body.into()));
-    let req = Request::new_with_init(&format!("https://ledger.internal{}", R::PATH), &init)?;
-    let mut resp = env.durable_object("LEDGER")?.get_by_name(payer)?.fetch_with_request(req).await?;
+    let req = Request::new_with_init(&format!("https://ledger.internal{path}"), &init)?;
+    let mut resp = crate::routed::send(env, "LEDGER", payer, req).await?;
     let status = resp.status_code();
     let bytes = resp.bytes().await?;
     if status == 200 {
-        return serde_json::from_slice(&bytes).map_err(|e| CellError::host(format!("the ledger's answer to {}: {e}", R::PATH)).into());
+        return Ok(bytes);
     }
     /// A refusal's body: `ErrorBody` and, from the ledger, its reason.
     #[derive(Deserialize)]
@@ -848,35 +872,46 @@ pub async fn ask<R: Route>(env: &Env, payer: &str, request: &R) -> Result<R::Ans
     }
 }
 
-/// A ledger call is asked this many times while the ledger does not
-/// answer, before a paid call is given up (a reservation) or left held,
-/// for the sweep to charge at its worst case (a settle, a release).
-const TRIES: usize = 3;
-
-/// `ask`, asked again while the ledger does not answer (a host failure);
-/// a refusal answers at once.
-pub async fn retried<R: Route>(env: &Env, payer: &str, request: &R) -> Result<R::Answer, LedgerError> {
-    let mut tries = 0;
-    // bounded: TRIES asks, then the last answer stands
-    loop {
-        tries += 1;
-        match ask(env, payer, request).await {
-            Err(e) if e.refused.is_none() && e.code == ErrorCode::HostFailed && tries < TRIES => continue,
-            answered => return answered,
-        }
-    }
+/// The gate (docs/ledger.md, "The gate"): whether `person`'s ledger lets a
+/// spend start, a `MaySpend` of theirs or a `FragmentOpen` of a fragment
+/// they own. Its answer as this isolate heard it within the minute
+/// (`fragment_core::ledger::gate`), or asked now, once, for at most
+/// `GATE_WAIT_MS`. Only the ledger's refusal stops the spend: one that does
+/// not answer in time, or answers otherwise (an outage, a deploy going
+/// out), lets it start, says so in the log, and is asked again next time
+/// (decision 62: billing never stops an agent).
+pub async fn may<R: Route<Answer = Done>>(env: &Env, person: &str, question: &R) -> Result<(), LedgerError> {
+    gated(env, person, R::PATH, serde_json::to_string(question).expect("a gate's question serializes")).await
 }
 
-/// Holds a paid call's worst case on `payer`'s ledger before the call is
-/// made (docs/ledger.md): its amount. A refusal, or a ledger that does not
-/// answer, holds nothing, and the call is not made. The call then settles
-/// what it used, or is released having used nothing; a settle or release
-/// that does not land leaves it held, and the ledger's sweep charges its
-/// worst case: the money path fails closed.
-pub async fn hold(env: &Env, payer: &str, reserve: &core::Reserve) -> Result<i64, LedgerError> {
-    match retried(env, payer, reserve).await? {
-        core::Reserved::Held { amount } => Ok(amount),
-        // a reference of the call's own was never reserved before
-        other => Err(CellError::host(format!("a fresh call's reservation {} answered {other:?}", reserve.reference)).into()),
+/// `may`, one copy for both questions: route `path` with `body`.
+async fn gated(env: &Env, person: &str, path: &'static str, body: String) -> Result<(), LedgerError> {
+    let key = format!("{person} {path} {body}");
+    let now = js::now_ms();
+    if let Some(answer) = GATE.with(|g| g.borrow().fresh(&key, now)) {
+        return answer.map_err(LedgerError::from);
     }
+    let asked = std::pin::pin!(asked(env, person, path, body));
+    let waited = std::pin::pin!(Delay::from(std::time::Duration::from_millis(GATE_WAIT_MS)));
+    // what the ledger said, and its refusal as it said it (its message)
+    let (heard, said) = match futures_util::future::select(asked, waited).await {
+        // the routes answer `{}` when they allow it
+        futures_util::future::Either::Left((Ok(_), _)) => (Some(Ok(())), None),
+        futures_util::future::Either::Left((Err(e), _)) if e.refused.is_some() => (e.refused.map(Err), Some(e)),
+        futures_util::future::Either::Left((Err(e), _)) => {
+            console_error!("{}", json!({ "event": "ledger.gate-unknown", "path": path, "message": e.message }));
+            (None, None)
+        }
+        futures_util::future::Either::Right(_) => {
+            console_error!("{}", json!({ "event": "ledger.gate-unknown", "path": path, "message": format!("no answer in {GATE_WAIT_MS} ms") }));
+            (None, None)
+        }
+    };
+    GATE.with(|g| g.borrow_mut().heard(&key, heard, now)).map_err(|why| said.unwrap_or_else(|| why.into()))
+}
+
+/// Forgets every answer this isolate's gate heard (a test fleet's
+/// `forget-standing` lever).
+pub fn forget_gate() {
+    GATE.with(|g| g.borrow_mut().forget());
 }

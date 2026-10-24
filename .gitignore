@@ -9,3 +9,5 @@ cell/client/
 cell/target/
 .wrangler/
 cell/wrangler.local.jsonc
+# CI's deploy checks out finitecomputer/fragment-deploy, the configs, here
+/deploy-config/

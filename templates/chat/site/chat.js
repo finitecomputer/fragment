@@ -7,10 +7,12 @@
 //   - `chat`: what is said. People's messages (`{text, to?, attachments?}`,
 //     posted here with an id of their own), agents' replies (`{text, turn,
 //     attachments?}`), Stop (`{kind: "stop", turn}`), and prompt answers
-//     (`{kind: "prompt_response", prompt, option}`, id `pr:<prompt>`).
-//   - `work`: an agent's progress, which only editors (the chat's agents)
-//     post: `turn.start`, `turn.step`, `turn.prompt`, `turn.prompt.closed`,
-//     `turn.end`.
+//     (`{kind: "prompt_response", prompt, option, agent, turn}`: the card's
+//     own agent and turn, so an answer to one agent's card is never another
+//     agent's that reused its prompt id; id `pr:<a hash of the three>`).
+//   - `work`: an agent's progress, which only the chat's agents post
+//     (`"from": "agent"`): `turn.start`, `turn.step`, `turn.prompt`,
+//     `turn.prompt.closed`, `turn.end`.
 //
 // The page follows both (`subscribe`, from near their ends), and the chat's
 // drafts: a turn's draft shows after the turn's last record, and the reply
@@ -35,7 +37,9 @@
 // `{kind: "commands"}` on `work`), for the agent's owner alone; one typed
 // whole is sent as `{kind: "command", command, args, to}`. A message sent
 // while its agent works is marked queued until its turn starts, and its
-// owner may Steer the running turn with it instead (`/steer`). Reply quotes
+// owner may Steer the running turn with it instead (`/steer`); one its
+// card's asker sends while a card that takes words is open answers that
+// card, and waits for nothing (the composer says so). Reply quotes
 // a message (`reply_to`, its seq), shown above the one that quotes it.
 //
 // It speaks only chat records: nothing here knows which runtime an agent
@@ -43,7 +47,7 @@
 
 import * as fragment from "./__fragment.js";
 import { colorOf } from "./agent-color.js";
-import { svg } from "./icons.js";
+import { icon } from "./icons.js";
 import { inline, renderMarkdown } from "./markdown.js";
 import { renderAttachments as renderMessageAttachments } from "./media.js";
 import { share, feedback } from "./response-actions.js";
@@ -51,6 +55,10 @@ import "./tooltips.js";
 
 // A message's text and files (docs/chat-records.md).
 const TEXT_MAX_BYTES = 32 * 1024;
+// The composer's draft in this origin's storage (`saveDraft`): {who, text, at},
+// kept this long after a change.
+const DRAFT_KEY = "fragment.chat.draft.v1";
+const DRAFT_SAVE_MS = 300;
 const ATTACHMENTS_MAX = 8;
 const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
 // The backlog a page reads: the chat's last messages, and enough of `work`
@@ -302,46 +310,41 @@ export function mount(root) {
   // and Safari pans it, leaving the layout viewport be, so the page follows
   // it and the composer sits just above the keyboard; the page itself never
   // scrolls under it. Framed, the frame is the viewport, as tall as the
-  // shell gives it (the shell follows the keyboard the same way).
+  // shell gives it (the shell follows the keyboard the same way). Only the
+  // page on its own, with no keyboard up, sits on the screen's bottom edge
+  // and keeps clear of its inset (the home indicator's; chat.css,
+  // --inset-bottom): framed, the shell keeps its frame off that edge, and a
+  // keyboard up covers it (what is visible is shorter than the layout
+  // viewport, whose bottom Safari may pan into view above the keyboard).
+  document.documentElement.toggleAttribute("data-framed", framed);
   const visible = window.visualViewport;
   const fitViewport = () => {
     if (!visible) return;
-    document.documentElement.style.setProperty("--viewport-height", `${Math.round(visible.height)}px`);
-    document.documentElement.style.setProperty("--viewport-top", `${Math.round(visible.offsetTop)}px`);
+    const html = document.documentElement;
+    html.style.setProperty("--viewport-height", `${Math.round(visible.height)}px`);
+    html.style.setProperty("--viewport-top", `${Math.round(visible.offsetTop)}px`);
+    html.toggleAttribute("data-keyboard", visible.height * visible.scale < html.clientHeight - 1);
   };
   visible?.addEventListener("resize", fitViewport);
   visible?.addEventListener("scroll", fitViewport);
   fitViewport();
-  root.innerHTML = `
-    <header class="chat-head" id="head" hidden><div class="agent-heading"><span class="marks" id="head-marks"></span><span class="label" id="head-label">Chat</span></div></header>
-    <div class="scroll" id="scroll"><div class="history"><button type="button" id="earlier" hidden>Load earlier messages</button><span id="history-error" role="status"></span></div><div class="column" id="messages"></div></div>
-    <div class="latest-wrap"><button type="button" id="latest" hidden>Jump to latest</button></div>
-    <div class="composer-wrap">
-      <div class="banner" id="banner" role="alert" hidden><span id="banner-text"></span><button type="button" id="banner-dismiss">Dismiss</button></div>
-      <div class="here" id="here" hidden></div>
-      <form class="composer" id="say">
-        <div class="mentions" id="mentions" role="listbox" aria-label="Agents" hidden></div>
-        <div class="mentions commands" id="commands" role="listbox" aria-label="Commands" hidden></div>
-        <input id="attachment-picker" type="file" multiple hidden>
-        <div class="quoting" id="quoting" hidden><span class="quote-who" id="quoting-who"></span><span class="quote-text" id="quoting-text"></span><button class="icon-button" id="unquote" type="button" title="Don't reply to it" aria-label="Don't reply to it">${svg("x")}</button></div>
-        <div class="attachments" id="attachments" hidden></div>
-        <textarea id="text" rows="1" aria-label="Message" maxlength="${TEXT_MAX_BYTES}" disabled></textarea>
-        <div class="composer-actions">
-          <button class="icon-button" id="attach" type="button" title="Attach files" aria-label="Attach files" disabled>${svg("plus")}</button>
-          <button class="icon-button" id="record" type="button" title="Record a voice memo" aria-label="Record a voice memo" aria-pressed="false" hidden disabled>${svg("mic")}</button>
-          <button class="icon-button" id="discard" type="button" title="Discard the voice memo" aria-label="Discard the voice memo" hidden>${svg("x")}</button>
-          <span class="recording" id="recording" role="status" hidden><i aria-hidden="true"></i><span id="recording-time">0:00</span></span>
-          <span class="note" id="note"></span>
-          <button class="icon-button" id="notify" type="button" hidden>${svg("bell")}</button>
-          <button class="steer" id="steer" type="button" title="Tell it now, in what it is doing (/steer)" hidden>${svg("navigation")}<span>Steer</span></button>
-          <button class="send stop" id="stop" type="button" title="Stop reply" aria-label="Stop reply" hidden>${svg("stop")}</button>
-          <button class="send" id="send" type="submit" title="Send message (Enter)" aria-label="Send" disabled>${svg("send")}</button>
-        </div>
-      </form>
-    </div>`;
+  // the page's parts, from its <template> (index.html): markup the page
+  // ships, never text it was given; each icon slot gets its icon
+  const page = document.getElementById("chat-page");
+  if (!(page instanceof HTMLTemplateElement)) throw new Error("chat: the page has no #chat-page template");
+  // the page drawn: what was there goes, "Still loading…" (index.html) with it
+  root.replaceChildren(page.content.cloneNode(true));
+  for (const slot of root.querySelectorAll("[data-icon]")) slot.replaceWith(icon(slot.dataset.icon));
   const $ = (id) => root.querySelector(`#${id}`);
   const input = $("text");
+  input.maxLength = TEXT_MAX_BYTES;
   const composer = $("say");
+  // the composer's draft as kept (`saveDraft`), and what the shell was told
+  // of what no storage keeps (`tellBusy`)
+  let draftTimer = 0;
+  let draftsForgotten = false;
+  let busyTold = false;
+  let answersOnTheirWay = 0; // a card's answers posted, not yet answered
   $("head").hidden = framed;
 
   const state = {
@@ -349,11 +352,11 @@ export function mount(root) {
     members: [], // the fragment's members (`__members`), the first added first
     chat: [], // messages, commands and replies, in seq order: { seq, at, n, principal, text, command, turn, to, attachments, replyTo }
     seen: new Set(), // the chat's seqs taken
-    turns: new Map(), // turn -> its records (`turnOf`)
-    drafts: new Map(), // turn -> { principal, text, at }: a reply as it streams
-    answers: new Map(), // prompt -> { option, by }: a prompt_response on `chat`
-    answering: new Map(), // prompt -> the option this page posted, until its card closes
-    typed: new Map(), // prompt -> what is typed in its card's field (an option answered in words)
+    turns: new Map(), // `turnKey(agent, turn)` -> its records (`turnOf`)
+    drafts: new Map(), // `turnKey(poster, turn)` -> { principal, turn, text, at }: a reply as it streams
+    answers: new Map(), // `cardKey` (or a bare prompt id) -> Map(poster -> option): each poster's first prompt_response on `chat`
+    answering: new Map(), // `cardKey` -> the option this page posted, until its card closes
+    typed: new Map(), // `cardKey` -> what is typed in its card's field (an option answered in words)
     stopping: new Set(), // turns this page asked to stop
     pending: null, // { seq, at, n, target }: this page's message no turn has started on yet
     here: [], // the fragment's presence: [{ id, principal, data }]
@@ -401,6 +404,7 @@ export function mount(root) {
       }
     }
     schedule();
+    tellBusy();
   });
   // where the shell that handed the roster is (its answers come from there)
   let rosterOrigin = null;
@@ -503,7 +507,7 @@ export function mount(root) {
   function isAgent(principal) {
     const p = profiles.get(principal);
     if (p && p.kind) return p.kind === "agent";
-    return state.members.some((m) => m.principal === principal && m.kind === "agent") || [...state.turns.values()].some((t) => t.agent === principal) || !!inRoster(principal);
+    return state.members.some((m) => m.principal === principal && m.kind === "agent") || [...state.turns.values()].some((t) => started(t) && t.agent === principal) || !!inRoster(principal);
   }
   /// How a principal shows: `{agent, name, color?, picture?, initial?}`.
   function who(principal) {
@@ -535,7 +539,7 @@ export function mount(root) {
     const here = chatAgents();
     return [...here, ...state.roster.map((r) => r.identity).filter((id) => !here.includes(id))];
   };
-  const lead = () => chatAgents()[0] ?? [...state.turns.values()].find((t) => t.agent)?.agent ?? null;
+  const lead = () => chatAgents()[0] ?? [...state.turns.values()].find(started)?.agent ?? null;
   // this page's person's turn running now, the newest
   const myTurn = () => [...state.turns.values()].filter((t) => running(t) && t.asker && t.asker === state.me?.principal).sort((a, b) => b.startAt - a.startAt)[0] ?? null;
   // an agent's turn running in the chat, whoever asked it
@@ -597,12 +601,22 @@ export function mount(root) {
   }
 
   // ---- records ----
-  function turnOf(id) {
-    if (!state.turns.has(id)) {
-      state.turns.set(id, { id, agent: null, asker: null, cause: null, startAt: null, lastAt: null, lastN: 0, steps: new Map(), prompts: new Map(), closed: new Map(), notices: new Map(), asked: null, end: null });
+  // A turn by its agent and its id: neither an npub nor a turn id holds a space.
+  const turnKey = (agent, id) => `${agent} ${id}`;
+  /// `agent`'s turn `id`. It shows, and counts as the agent's, only once
+  /// that agent's own `turn.start` for it is read (`started`): records that
+  /// come before it (a page of history read backwards) wait in it unshown.
+  function turnOf(agent, id) {
+    const key = turnKey(agent, id);
+    if (!state.turns.has(key)) {
+      state.turns.set(key, { key, id, agent, asker: null, cause: null, startAt: null, lastAt: null, lastN: 0, steps: new Map(), prompts: new Map(), closed: new Map(), notices: new Map(), asked: null, end: null });
     }
-    return state.turns.get(id);
+    return state.turns.get(key);
   }
+  const started = (t) => t.startAt !== null;
+  // A card by its turn and its prompt: prompt ids are each agent's own, so
+  // two agents' cards may share one.
+  const cardKey = (turnKey, prompt) => `${turnKey}:${prompt}`;
   // the turn's latest record, by time then arrival: its draft shows after it
   function touch(t, at, n) {
     if (t.lastAt === null || at > t.lastAt || (at === t.lastAt && n > t.lastN)) {
@@ -617,6 +631,14 @@ export function mount(root) {
   // a turn waiting on its asker's words (`turn.asked`): until they say
   // something to the chat after it, or the turn goes on or ends
   const waitsOnWords = (t) => running(t) && !!t.asked && !state.chat.some((m) => m.principal === t.asked.asks && !m.turn && m.at >= t.asked.at);
+  // a card that takes words (an option answered in words): its asker's
+  // message in the chat while it is open answers it as that option, as if
+  // typed on the card (docs/chat-records.md, "A person's message")
+  const takesWords = (p) => p.options.some((o) => o.words === true);
+  const cardFor = (t, principal) => running(t) && [...t.prompts.values()].some((p) => takesWords(p) && p.asks === principal && !t.closed.has(p.prompt) && !expired(p));
+  // whether message `m` answered one of turn `t`'s cards: by its asker, said
+  // after the card and before its close
+  const answeredCard = (t, m) => [...t.prompts.values()].some((p) => takesWords(p) && p.asks === m.principal && p.at <= m.at && t.closed.get(p.prompt)?.outcome === "answered" && t.closed.get(p.prompt).at >= m.at);
 
   function onChat(record, historical = false) {
     if (state.seen.has(record.seq)) return;
@@ -638,8 +660,17 @@ export function mount(root) {
     if (body === null || typeof body !== "object" || Array.isArray(body)) return;
     const n = record.seq;
     if (body.kind === "prompt_response") {
-      // the first answer wins (the agent closes the card with it)
-      if (typeof body.prompt === "string" && !state.answers.has(body.prompt)) state.answers.set(body.prompt, { option: body.option, by: record.principal });
+      // each poster's first answer, for the card it names (its agent's turn
+      // and prompt; an answer naming none, the API's, is the prompt's); a
+      // card counts only its asker's, so no one else's answer can disable
+      // or answer it here
+      if (typeof body.prompt === "string") {
+        const named = typeof body.agent === "string" && typeof body.turn === "string";
+        const key = named ? cardKey(turnKey(body.agent, body.turn), body.prompt) : body.prompt;
+        if (!state.answers.has(key)) state.answers.set(key, new Map());
+        const by = state.answers.get(key);
+        if (!by.has(record.principal)) by.set(record.principal, body.option);
+      }
       return schedule();
     }
     const to = Array.isArray(body.to) ? body.to.filter((x) => typeof x === "string") : [];
@@ -660,10 +691,10 @@ export function mount(root) {
     if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
     latestSeq = Math.max(latestSeq, record.seq);
     if (turn) {
-      const t = turnOf(turn);
-      if (t.agent === null || t.agent === record.principal) touch(t, record.at, n);
+      // a reply belongs to its poster's turn of that id, never another's
+      touch(turnOf(record.principal, turn), record.at, n);
       // its record replaces the draft as it stood (a later part drafts again)
-      if (state.drafts.get(turn)?.principal === record.principal) state.drafts.delete(turn);
+      state.drafts.delete(turnKey(record.principal, turn));
     }
     if (state.pending && record.seq === state.pending.seq) state.pending.n = n;
     want(record.principal);
@@ -677,12 +708,16 @@ export function mount(root) {
     const b = record.body;
     if (b?.kind === "commands") return onMenu(record, b);
     if (b === null || typeof b !== "object" || typeof b.turn !== "string") return;
-    const field = `${b.turn}:${b.kind}:${b.step ?? b.prompt ?? ""}`;
+    // A turn is its poster's: the platform stamps `record.principal`, and
+    // only the chat's agents post on `work` (`"from": "agent"`). Whatever a
+    // body says of an agent, a record counts toward, and can replace a card
+    // of, only the turn of that id its own poster began (`turn.start`):
+    // one agent's records never touch another's turn.
+    const t = turnOf(record.principal, b.turn);
+    const field = `${t.key}:${b.kind}:${b.step ?? b.prompt ?? ""}`;
     if ((workLatest.get(field) ?? 0) > record.seq) return;
     workLatest.set(field, record.seq);
     const n = record.seq;
-    const t = turnOf(b.turn);
-    t.agent ??= typeof b.agent === "string" ? b.agent : record.principal;
     touch(t, record.at, n);
     // the turn went on past its question: it waits on no one now
     if (t.asked && b.kind !== "turn.asked" && record.seq > t.asked.seq) t.asked = null;
@@ -702,12 +737,13 @@ export function mount(root) {
       t.prompts.set(b.prompt, { ...b, options: Array.isArray(b.options) ? b.options.filter((o) => o && typeof o.id === "string") : [], at: record.at, n });
       expiryTimer();
     } else if (b.kind === "turn.prompt.closed" && typeof b.prompt === "string") {
-      t.closed.set(b.prompt, b);
-      state.answering.delete(b.prompt);
-      state.typed.delete(b.prompt);
+      t.closed.set(b.prompt, { ...b, at: record.at });
+      state.answering.delete(cardKey(t.key, b.prompt));
+      state.typed.delete(cardKey(t.key, b.prompt));
+      tellBusy();
     } else if (b.kind === "turn.end") {
       t.end = { outcome: b.outcome, error: typeof b.error === "string" ? b.error : "", at: record.at, n };
-      state.drafts.delete(b.turn);
+      state.drafts.delete(t.key);
       state.stopping.delete(b.turn);
       if (history.workReady) again(t.agent);
     }
@@ -732,8 +768,9 @@ export function mount(root) {
 
   function onDraft(d) {
     if (typeof d.turn !== "string" || typeof d.principal !== "string") return;
-    if (typeof d.text !== "string") state.drafts.delete(d.turn);
-    else state.drafts.set(d.turn, { principal: d.principal, text: d.text, at: Date.now() });
+    const key = turnKey(d.principal, d.turn);
+    if (typeof d.text !== "string") state.drafts.delete(key);
+    else state.drafts.set(key, { principal: d.principal, turn: d.turn, text: d.text, at: Date.now() });
     want(d.principal);
     schedule();
   }
@@ -759,19 +796,25 @@ export function mount(root) {
     const items = [];
     for (const m of state.chat) items.push({ at: m.at, n: m.n, type: "message", m });
     for (const t of state.turns.values()) {
+      // a turn its agent never began here (no turn.start of its own) shows nothing
+      if (!started(t)) continue;
       for (const s of t.steps.values()) items.push({ at: s.at, n: s.n, type: "step", t, s });
       for (const p of t.prompts.values()) items.push({ at: p.at, n: p.n, type: "prompt", t, p });
       for (const x of t.notices.values()) items.push({ at: x.at, n: x.n, type: "notice", t, x });
       if (t.end && t.end.outcome !== "idle") items.push({ at: t.end.at, n: t.end.n, type: "end", t });
     }
     const now = Date.now();
-    for (const [turn, d] of state.drafts) if (now - d.at > DRAFT_STALE_MS) state.drafts.delete(turn);
-    for (const [turn, d] of state.drafts) {
-      const t = state.turns.get(turn);
-      items.push({ at: t?.lastAt ?? Infinity, n: (t?.lastN ?? 0) + 0.5, type: "draft", turn, d });
+    for (const [key, d] of state.drafts) if (now - d.at > DRAFT_STALE_MS) state.drafts.delete(key);
+    for (const [key, d] of state.drafts) {
+      // a draft shows after the last record of its poster's turn; with no
+      // turn.start of its read (a visitor who may not read `work`), only an
+      // agent's shows (its kind as the platform says it), last
+      const t = state.turns.get(key);
+      if (t && started(t)) items.push({ at: t.lastAt, n: t.lastN + 0.5, type: "draft", key, d });
+      else if (isAgent(d.principal)) items.push({ at: t?.lastAt ?? Infinity, n: (t?.lastN ?? 0) + 0.5, type: "draft", key, d });
     }
     for (const t of state.turns.values()) {
-      if (running(t) && !state.drafts.has(t.id) && !waiting(t)) items.push({ at: t.lastAt, n: t.lastN + 0.5, type: waitsOnWords(t) ? "asked" : "working", t });
+      if (running(t) && !state.drafts.has(t.key) && !waiting(t)) items.push({ at: t.lastAt, n: t.lastN + 0.5, type: waitsOnWords(t) ? "asked" : "working", t });
     }
     if (state.pending) items.push({ at: state.pending.at, n: state.pending.n + 0.5, type: "working", t: null });
     for (const m of state.sending.values()) items.push({ at: m.at, n: m.n, type: "message", m });
@@ -790,12 +833,14 @@ export function mount(root) {
   // ---- rendering: one node per item, made again only when what it shows
   // changed, so a card being clicked is never swapped out under the hand ----
   const nodes = new Map(); // key -> { sig, node }
+  const keyOf = new WeakMap(); // node -> its item's key, so a place survives its node made again
   const fresh = new Set(); // bubbles made since the last fit
   function cached(key, sig, make) {
     const c = nodes.get(key);
     if (c && c.sig === sig) return c.node;
     const node = make();
     nodes.set(key, { sig, node });
+    keyOf.set(node, key);
     return node;
   }
 
@@ -822,11 +867,29 @@ export function mount(root) {
       case "notice":
         return noticeNode(it.t, it.x);
       case "draft":
-        return draftNode(it.turn, it.d);
+        return draftNode(it.key, it.d);
       case "asked":
         return askedNode(it.t);
       default:
         return workingNode(it.t);
+    }
+  }
+
+  // An item the page cannot draw (a record shaped as nothing here expects,
+  // a renderer's fault) is a quiet line in its place, said once to the
+  // console: no one record keeps the rest of the chat from drawing.
+  function drawn(it) {
+    try {
+      return itemNode(it);
+    } catch (err) {
+      const key = `x:${it.type}:${it.m?.seq ?? it.key ?? it.t?.key ?? "pending"}:${it.steps?.[0].step ?? it.p?.prompt ?? it.x?.seq ?? ""}`;
+      if (!nodes.has(key)) console.error("chat: a part of the chat could not be shown", it, err);
+      return [key, cached(key, "", () => {
+        const line = el("div", "msg notice unshown");
+        line.replaceChildren(icon("alert"));
+        line.append(el("span", null, "This part of the chat could not be shown."));
+        return line;
+      })];
     }
   }
 
@@ -840,7 +903,7 @@ export function mount(root) {
       shown.push(node);
     }
     for (const it of timeline()) {
-      const [key, node] = itemNode(it);
+      const [key, node] = drawn(it);
       used.add(key);
       shown.push(node);
     }
@@ -859,8 +922,16 @@ export function mount(root) {
     fresh.clear();
     renderChrome();
     renderHere();
+    // The reader's place is its item, not its node: one made again in this
+    // draw (its poster's name come since, say, while earlier messages load)
+    // is found by its key, so the place holds through the draw that adds
+    // the messages above it.
+    const placed = anchor?.isConnected ? anchor : nodes.get(keyOf.get(anchor))?.node;
     if (stuck) toEnd();
-    else if (anchor?.isConnected) $("scroll").scrollTop += anchor.getBoundingClientRect().top - top;
+    else if (placed?.isConnected) {
+      $("scroll").scrollTop += placed.getBoundingClientRect().top - top;
+      if (history.anchor) history.anchor.node = placed;
+    }
     if (!history.loading) history.anchor = null;
     showLatest();
     animateSentMessages();
@@ -986,8 +1057,9 @@ export function mount(root) {
       const others = mentionable().length > 1;
       // while it works, a message waits its turn (marked queued); its owner may steer it instead
       const steers = mine && menuOf(mine.agent).some((c) => c.name === "steer");
-      // an agent waiting on this person's words: what they type is the answer
-      const askedMe = [...state.turns.values()].find((t) => waitsOnWords(t) && t.asked.asks === state.me?.principal);
+      // an agent waiting on this person's words, or on their card that takes
+      // words: what they type is the answer
+      const askedMe = [...state.turns.values()].find((t) => (waitsOnWords(t) && t.asked.asks === state.me?.principal) || cardFor(t, state.me?.principal));
       input.placeholder = askedMe
         ? `Your answer for ${who(askedMe.agent).name}`
         : mine
@@ -1027,10 +1099,12 @@ export function mount(root) {
     const targets = m.to.length ? m.to : named.length ? named : [lead()];
     return turns.some((t) => {
       if (!running(t) || !targets.includes(t.agent) || t.startAt > m.at) return false;
+      // it answered the turn's card: it waits for nothing
+      if (answeredCard(t, m)) return false;
       if (t.asker !== m.principal) return true;
       // Chat and work have independent sequence cursors. Compare their
       // times so loading older work cannot change whether a reply waits.
-      const said = Math.max(-1, ...state.chat.filter((r) => r.turn === t.id && r.seq < m.seq).map((r) => r.at));
+      const said = Math.max(-1, ...state.chat.filter((r) => r.turn === t.id && r.principal === t.agent && r.seq < m.seq).map((r) => r.at));
       const did = Math.max(-1, ...[...t.steps.values(), ...t.prompts.values()].filter((s) => s.at <= m.at).map((s) => s.at));
       return !(said >= 0 && said > did);
     });
@@ -1042,7 +1116,7 @@ export function mount(root) {
     b.type = "button";
     b.title = "Reply";
     b.setAttribute("aria-label", "Reply");
-    b.innerHTML = svg("reply");
+    b.replaceChildren(icon("reply"));
     b.onclick = () => quote(m);
     return b;
   }
@@ -1106,7 +1180,7 @@ export function mount(root) {
     if (waits) {
       // its agent answers it after the turn it is in now
       const label = el("span", "queued");
-      label.innerHTML = svg("clock");
+      label.replaceChildren(icon("clock"));
       label.append("Queued");
       actions.append(label);
     }
@@ -1143,13 +1217,13 @@ export function mount(root) {
     copy.type = "button";
     copy.title = "Copy";
     copy.setAttribute("aria-label", "Copy reply");
-    copy.innerHTML = svg("copy");
+    copy.replaceChildren(icon("copy"));
     copy.onclick = () => copyText(m.text, copy);
     const shareButton = el("button", "icon-button share");
     shareButton.type = "button";
     shareButton.title = "Share reply";
     shareButton.setAttribute("aria-label", "Share reply");
-    shareButton.innerHTML = svg("share");
+    shareButton.replaceChildren(icon("share"));
     shareButton.onclick = () => feedback(shareButton, () => share({ text: m.text, title: document.title }));
     if (canPost()) actions.append(replyButton(m));
     actions.append(copy, shareButton, el("span", "time", time(m.at)));
@@ -1165,12 +1239,12 @@ export function mount(root) {
   // still opens a tab.
   function openBeside(md) {
     if (!framed) return;
-    for (const a of md.querySelectorAll("a[href]:not(.shot-link)")) {
+    for (const a of md.querySelectorAll("a[href]:not(.md-image-link)")) {
       if (!fragmentPage(a.href)) continue;
       const open = el("button", "open-beside");
       open.type = "button";
       open.title = "Open beside the chat";
-      open.innerHTML = svg("panel");
+      open.replaceChildren(icon("panel"));
       open.append("Open");
       open.onclick = () => window.parent.postMessage({ fragment: "open", url: a.href }, "*");
       a.after(open);
@@ -1179,14 +1253,16 @@ export function mount(root) {
 
   // A turn's steps, one card: open while it works, saying what it does now
   // ("Running: npm test"), folded once done ("Worked through N steps")
-  // unless someone opened it. Each step is its icon, its verb and its
-  // arguments, with a compact status and any useful result.
+  // unless someone opened it. Each step is its icon and its arguments, with
+  // a compact status and any useful result. The icon says the verb (its
+  // accessible name), so the verb shows only where the icon cannot say it:
+  // a step with no arguments, or another tool's, whose wrench names none.
   function stepNote(t, s) {
     const note = el("div", "step-text");
     const body = el("div", "md");
     body.append(renderMarkdown(s.text));
     if (body.textContent.length <= 160) { openBeside(body); note.append(body); return note; }
-    const key = `${t.id}:${s.step}`;
+    const key = `${t.key}:${s.step}`;
     const preview = el("div", "md note-preview");
     preview.append(notePreview(body));
     openBeside(preview);
@@ -1219,7 +1295,7 @@ export function mount(root) {
   });
   stepWidths.observe($("messages"));
   function stepsNode(t, steps) {
-    const key = `s:${t.id}:${steps[0].step}`;
+    const key = `s:${t.key}:${steps[0].step}`;
     const live = running(t) && steps[steps.length - 1].n === t.lastN;
     const agent = profiles.get(t.agent)?.fragment ?? null;
     const sig = JSON.stringify([steps, live, agent]);
@@ -1235,22 +1311,28 @@ export function mount(root) {
           if (d.open) for (const args of d.querySelectorAll(".step-args")) fitStepArgs(args);
         };
         const summary = el("summary");
-        summary.innerHTML = svg(live ? "loader" : "wrench", live ? "spin" : "");
+        summary.replaceChildren(icon(live ? "loader" : "wrench", live ? "spin" : ""));
         const now = stepSays(steps[steps.length - 1]);
         const heading = el("span", "grow", live ? `${now.verb}${now.args ? `: ${shortStepArgs(now.args, agent)}` : ""}` : `Worked through ${plural(steps.length, "step")}`);
         if (live && now.args) heading.title = `${now.verb}: ${now.args}`;
         summary.append(heading);
-        summary.insertAdjacentHTML("beforeend", svg("chevron", "chev"));
+        summary.append(icon("chevron", "chev"));
         d.append(summary);
         for (const s of steps) {
           if (s.text) d.append(stepNote(t, s));
           const step = el("div", `step${s.ok === false ? " error" : ""}`);
           const says = stepSays(s);
-          step.dataset.category = Object.hasOwn(STEP_SAYS, s.category) ? s.category : "other";
+          const known = Object.hasOwn(STEP_SAYS, s.category);
+          step.dataset.category = known ? s.category : "other";
           const name = el("div", "step-name");
-          name.innerHTML = svg(says.icon);
+          const glyph = icon(says.icon);
+          name.replaceChildren(glyph);
           const label = el("div", "step-label");
-          label.append(el("span", "step-verb", says.args ? `${says.verb}:` : says.verb));
+          if (known && says.args) {
+            glyph.removeAttribute("aria-hidden");
+            glyph.setAttribute("role", "img");
+            glyph.setAttribute("aria-label", says.verb);
+          } else label.append(el("span", "step-verb", says.args ? `${says.verb}:` : says.verb));
           if (says.args) {
             const args = el("code", "step-args", shortStepArgs(says.args, agent));
             args.title = says.args;
@@ -1261,7 +1343,7 @@ export function mount(root) {
           const mark = el("span", `step-status ${status}`);
           mark.setAttribute("role", "img");
           mark.setAttribute("aria-label", status);
-          mark.innerHTML = svg(status === "failed" ? "x" : status === "done" ? "check" : "loader", status === "running" ? "spin" : "");
+          mark.replaceChildren(icon(status === "failed" ? "x" : status === "done" ? "check" : "loader", status === "running" ? "spin" : ""));
           name.append(label, mark);
           step.append(name);
           if (s.excerpt) step.append(el("pre", "step-result", s.excerpt));
@@ -1277,9 +1359,11 @@ export function mount(root) {
   // identity it asks may press (docs/chat-records.md, decision 42); once
   // closed, what came of it.
   function promptNode(t, p) {
-    const key = `p:${t.id}:${p.prompt}`;
+    const key = `p:${t.key}:${p.prompt}`;
     const closed = t.closed.get(p.prompt) ?? null;
-    const sent = state.answering.get(p.prompt) ?? state.answers.get(p.prompt)?.option ?? null;
+    // only the card's asker's answer counts here, as only theirs counts to the agent
+    const card = cardKey(t.key, p.prompt);
+    const sent = state.answering.get(card) ?? state.answers.get(card)?.get(p.asks) ?? state.answers.get(p.prompt)?.get(p.asks) ?? null;
     const gone = !closed && (expired(p) || !!t.end);
     const mayAnswer = !!state.me && p.asks === state.me.principal && !closed && !gone;
     const asks = who(p.asks);
@@ -1292,7 +1376,7 @@ export function mount(root) {
         card.dataset.prompt = p.prompt;
         card.dataset.turn = t.id;
         const head = el("div", "prompt-head");
-        head.innerHTML = svg("shield");
+        head.replaceChildren(icon("shield"));
         head.append(closed || gone ? `${who(t.agent).name} asked` : `${who(t.agent).name} asks`);
         card.append(head, inline(el("div", "prompt-text"), typeof p.text === "string" ? p.text : ""));
         const label = (id) => p.options.find((o) => o.id === id)?.label ?? id;
@@ -1306,7 +1390,7 @@ export function mount(root) {
           for (const o of p.options) {
             if (o.words) {
               // answered in words: typed on the card, Enter sends them with it
-              options.append(wordsField(p.prompt, o, !mayAnswer || sent !== null));
+              options.append(wordsField(t, p.prompt, o, !mayAnswer || sent !== null));
               continue;
             }
             const b = el("button", o.style === "primary" || o.style === "danger" ? o.style : "", o.label || o.id);
@@ -1314,7 +1398,7 @@ export function mount(root) {
             b.dataset.option = o.id;
             b.disabled = !mayAnswer || sent !== null;
             if (sent === o.id) b.classList.add("chosen");
-            b.onclick = () => answer(p.prompt, o.id);
+            b.onclick = () => answer(t, p.prompt, o.id);
             options.append(b);
           }
           card.append(options);
@@ -1327,7 +1411,8 @@ export function mount(root) {
   }
   // An option answered in words (a clarify's "Other"): a field on the card,
   // its label the hint; what is typed outlives the card's redraws.
-  function wordsField(prompt, o, disabled) {
+  function wordsField(t, prompt, o, disabled) {
+    const card = cardKey(t.key, prompt);
     const form = el("form", "words");
     const field = el("input");
     field.type = "text";
@@ -1336,37 +1421,38 @@ export function mount(root) {
     field.setAttribute("aria-label", o.label || o.id);
     field.maxLength = TEXT_MAX_BYTES;
     field.enterKeyHint = "send";
-    field.value = state.typed.get(prompt) ?? "";
+    field.value = state.typed.get(card) ?? "";
     field.disabled = disabled;
     const go = el("button", "send");
     go.type = "submit";
     go.title = "Send answer (Enter)";
     go.setAttribute("aria-label", "Send answer");
-    go.innerHTML = svg("send");
+    go.replaceChildren(icon("send"));
     const ready = () => (go.disabled = disabled || !field.value.trim());
     field.oninput = () => {
-      state.typed.set(prompt, field.value);
+      state.typed.set(card, field.value);
+      tellBusy();
       ready();
     };
     ready();
     form.onsubmit = (e) => {
       e.preventDefault();
       const words = cutBytes(field.value.trim(), TEXT_MAX_BYTES);
-      if (words && !disabled) answer(prompt, o.id, words);
+      if (words && !disabled) answer(t, prompt, o.id, words);
     };
     form.append(field, go);
     return form;
   }
-  function outcome(kind, icon, text) {
+  function outcome(kind, glyph, text) {
     const line = el("div", `outcome ${kind}`);
-    line.innerHTML = svg(icon);
+    line.replaceChildren(icon(glyph));
     line.append(text);
     return line;
   }
 
   // How a turn ended when it was not plainly (`idle`): quietly.
   function endNode(t) {
-    const key = `e:${t.id}`;
+    const key = `e:${t.key}`;
     const name = who(t.agent).name;
     const sig = `${t.end.outcome}|${name}`;
     return [
@@ -1376,15 +1462,15 @@ export function mount(root) {
         line.dataset.turn = t.id;
         const said = el("span");
         if (t.end.outcome === "stopped") {
-          line.innerHTML = svg("stopped");
+          line.replaceChildren(icon("stopped"));
           said.textContent = "Stopped.";
         } else if (t.end.outcome === "error") {
-          line.innerHTML = svg("alert");
+          line.replaceChildren(icon("alert"));
           said.append(`${name} could not finish`);
           if (t.end.error) said.append(": ", el("span", "why", t.end.error));
           else said.append(".");
         } else {
-          line.innerHTML = svg("alert");
+          line.replaceChildren(icon("alert"));
           said.textContent = `${name} stopped (${t.end.outcome}).`;
         }
         line.append(said);
@@ -1403,7 +1489,7 @@ export function mount(root) {
         const line = el("div", `msg notice runtime ${x.category}`);
         line.dataset.turn = t.id;
         line.dataset.category = x.category;
-        line.innerHTML = svg(NOTICE_ICON[x.category]);
+        line.replaceChildren(icon(NOTICE_ICON[x.category]));
         line.append(el("span", "said", x.text));
         return line;
       }),
@@ -1411,13 +1497,13 @@ export function mount(root) {
   }
 
   // A reply as it streams: its draft, the cursor at the end of its text.
-  function draftNode(turn, d) {
-    const key = `d:${turn}`;
+  function draftNode(turnKey, d) {
+    const key = `d:${turnKey}`;
     const w = who(d.principal);
     let c = nodes.get(key);
     if (!c || c.sig !== w.name) {
       const node = el("div", "msg agent streaming");
-      node.dataset.turn = turn;
+      node.dataset.turn = d.turn;
       node.append(byline(d.principal, w), el("div", "md"));
       c = { sig: w.name, node, text: null };
       nodes.set(key, c);
@@ -1446,7 +1532,7 @@ export function mount(root) {
       : starting ? `${name} is starting up…`
       : phase === "sleeping" ? `${name}'s computer is going to sleep…`
       : present ? `Waiting for ${name} to start a reply…` : `Waiting for ${name}…`;
-    const key = `w:${t ? t.id : "pending"}`;
+    const key = `w:${t ? t.key : "pending"}`;
     return [
       key,
       cached(key, said, () => {
@@ -1466,14 +1552,14 @@ export function mount(root) {
   function askedNode(t) {
     const asks = t.asked.asks;
     const said = asks === state.me?.principal ? "Waiting for your answer" : `Waiting for ${who(asks).name}'s answer`;
-    const key = `q:${t.id}`;
+    const key = `q:${t.key}`;
     return [
       key,
       cached(key, said, () => {
         const line = el("div", "msg working asked");
         line.dataset.turn = t.id;
         const hint = el("span", "hint");
-        hint.innerHTML = svg("asked");
+        hint.replaceChildren(icon("asked"));
         hint.append(said);
         line.append(hint);
         return line;
@@ -1567,10 +1653,10 @@ export function mount(root) {
       document.execCommand("copy");
       t.remove();
     }
-    button.innerHTML = svg("check");
+    button.replaceChildren(icon("check"));
     button.setAttribute("aria-label", "Copied");
     setTimeout(() => {
-      button.innerHTML = svg("copy");
+      button.replaceChildren(icon("copy"));
       button.setAttribute("aria-label", "Copy");
     }, 1200);
   }
@@ -1671,6 +1757,7 @@ export function mount(root) {
     const steers = !!words && !words.startsWith("/") && !attachments.length && !recording && !!workingOn(target) && menuOf(target).some((c) => c.name === "steer");
     $("steer").hidden = !steers;
     $("steer").disabled = sending;
+    tellBusy();
   }
   // The message the composer quotes, above what is typed.
   function quote(m) {
@@ -1685,6 +1772,8 @@ export function mount(root) {
     $("quoting-who").textContent = q ? `Replying to ${who(q.principal).name}` : "";
     $("quoting-text").replaceChildren();
     if (q) quoteText($("quoting-text"), q.m);
+    // a quote chosen is kept by no storage: the shell is told
+    tellBusy();
   }
   $("unquote").onclick = () => {
     state.replyTo = null;
@@ -1716,10 +1805,87 @@ export function mount(root) {
     const words = input.value.trim();
     if (words) send(`/steer ${words}`);
   };
+  // the field as tall as its lines, measured once Send, Stop and Steer are
+  // as the words have them: on a phone they share its row (chat.css)
   function grow() {
+    refreshSend();
+    fit();
+    draftChanged();
+  }
+  function fit() {
     input.style.height = "auto";
     input.style.height = `${Math.min(Math.max(input.scrollHeight, 27), 220)}px`;
-    refreshSend();
+  }
+  // on a phone its width moves with the buttons beside it (recording's
+  // clock and Discard, Steer as the agent starts and stops), so its lines
+  // are measured again whenever its width changes, not only as it is typed in
+  let fieldWidth = 0;
+  new ResizeObserver(([entry]) => {
+    const width = Math.round(entry.contentRect.width);
+    if (width === fieldWidth) return;
+    fieldWidth = width;
+    fit();
+  }).observe(input);
+  // ---- the composer's draft: kept in this origin's storage as its
+  // person's, a moment after each change and as the page goes, and put
+  // back as it loads, so words typed survive any reload of the page (the
+  // shell's for a new release, a crash, a quit app). Only the person it is
+  // signed in as gets theirs back: a draft of anyone else's is let go, and
+  // the shell asks for it to go as its person signs out (`forget-draft`).
+  // A browser that keeps no storage for this frame keeps no draft. ----
+  function saveDraft() {
+    clearTimeout(draftTimer);
+    const who = state.me?.principal;
+    if (!who || draftsForgotten || !canPost()) return;
+    try {
+      if (input.value.trim()) localStorage.setItem(DRAFT_KEY, JSON.stringify({ who, text: input.value, at: Date.now() }));
+      else localStorage.removeItem(DRAFT_KEY);
+    } catch {}
+  }
+  function draftChanged() {
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(saveDraft, DRAFT_SAVE_MS);
+  }
+  addEventListener("pagehide", saveDraft);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) saveDraft(); });
+  // as the page knows its person: their draft back in an empty composer
+  function restoreDraft(who) {
+    let kept = null;
+    try {
+      kept = JSON.parse(localStorage.getItem(DRAFT_KEY));
+    } catch {}
+    if (!kept) return;
+    if (kept.who !== who || typeof kept.text !== "string" || kept.text.length > TEXT_MAX_BYTES) {
+      try {
+        localStorage.removeItem(DRAFT_KEY);
+      } catch {}
+      return;
+    }
+    if (canPost() && !input.value.trim()) input.value = kept.text;
+  }
+  // its person signing out, or in with another account (the shell asks):
+  // the draft goes, and nothing more is kept from this page
+  function forgetDraft(event) {
+    draftsForgotten = true;
+    clearTimeout(draftTimer);
+    try {
+      localStorage.removeItem(DRAFT_KEY);
+    } catch {}
+    window.parent.postMessage({ fragment: "draft-forgotten" }, event.origin);
+  }
+  // ---- what this page holds that no storage keeps: files chosen, a voice
+  // memo, a message on its way, one that failed (its Retry, and a retry
+  // under way: newer words may be in the composer), a quote chosen, a
+  // card's answer typed and not sent, or on its way. The shell that frames
+  // it is told as it changes (`{fragment: "busy", busy}`), and reloads it
+  // for a new release only while it is not, and stops a reload under way
+  // if it becomes so. ----
+  function tellBusy() {
+    const answerTyped = [...state.typed].some(([card, text]) => text.trim() && !state.answering.has(card));
+    const busy = attachments.length > 0 || !!recording || sending || state.sending.size > 0 || state.failed.size > 0 || !!state.replyTo || answersOnTheirWay > 0 || answerTyped;
+    if (!framed || !state.me || busy === busyTold) return;
+    busyTold = busy;
+    window.parent.postMessage({ fragment: "busy", busy }, state.me.platform);
   }
   function renderAttachments() {
     const list = $("attachments");
@@ -1727,13 +1893,13 @@ export function mount(root) {
     list.replaceChildren(
       ...attachments.map((a) => {
         const chip = el("div", `attachment-chip${a.uploading ? " uploading" : ""}`);
-        chip.innerHTML = svg(a.uploading ? "loader" : "file");
+        chip.replaceChildren(icon(a.uploading ? "loader" : "file"));
         chip.append(el("span", "attachment-name", a.name), el("span", "attachment-size", size(a.size)));
         if (!a.uploading) {
           const remove = el("button", "icon-button attachment-remove");
           remove.type = "button";
           remove.setAttribute("aria-label", `Remove ${a.name}`);
-          remove.innerHTML = svg("x");
+          remove.replaceChildren(icon("x"));
           remove.onclick = () => {
             attachments = attachments.filter((x) => x !== a);
             renderAttachments();
@@ -1796,7 +1962,7 @@ export function mount(root) {
     const mic = $("record");
     if (mic.classList.contains("on") !== on) {
       mic.classList.toggle("on", on);
-      mic.innerHTML = svg(on ? "stop" : "mic");
+      mic.replaceChildren(icon(on ? "stop" : "mic"));
       const label = on ? "Stop and send the voice memo" : "Record a voice memo";
       mic.setAttribute("aria-label", label);
       if (mic.hasAttribute("title")) mic.title = label;
@@ -1913,6 +2079,10 @@ export function mount(root) {
         b.setAttribute("aria-selected", String(i === picking.index));
         b.dataset.agent = a;
         b.append(face(a, who(a)), who(a).name);
+        // someone else's agent shows under its person, in with them
+        // (docs/cloudflare-v1.md, decision 64): "theirs", by their name
+        const whose = state.members.find((m) => m.principal === a)?.owner;
+        if (whose && whose !== state.me?.principal) b.append(el("span", "mention-note", `${who(whose).name}'s agent`));
         if (!here.includes(a)) {
           b.classList.add("outside");
           b.append(el("span", "mention-note", "adds them to this chat"));
@@ -2221,18 +2391,30 @@ export function mount(root) {
 
   // Answering a card: one record, its id the card's, so a second tap is the same.
   // An option answered in words carries them (`text`).
-  async function answer(prompt, option, text) {
-    state.answering.set(prompt, option);
+  // An answer to turn `t`'s card `prompt`, naming the card's agent and turn
+  // (its bridge takes no answer naming another). Its id is the card's own,
+  // a second tap the same record: a hash, as an npub, a turn and a prompt
+  // together pass a post id's 128 characters.
+  async function answer(t, prompt, option, text) {
+    const card = cardKey(t.key, prompt);
+    state.answering.set(card, option);
     schedule();
+    answersOnTheirWay++;
+    tellBusy();
     try {
-      await fragment.post("chat", { kind: "prompt_response", prompt, option, ...(text ? { text } : {}) }, { id: `pr:${prompt}` });
+      const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(card)));
+      const id = `pr:${[...digest.slice(0, 16)].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+      await fragment.post("chat", { kind: "prompt_response", prompt, option, agent: t.agent, turn: t.id, ...(text ? { text } : {}) }, { id });
     } catch (err) {
       // 409: another option was sent first, from another page: the card says which once closed
       if (err.status !== 409) {
-        state.answering.delete(prompt);
+        state.answering.delete(card);
         problem(`Your answer was not sent: ${err.message}`);
       }
       schedule();
+    } finally {
+      answersOnTheirWay--;
+      tellBusy();
     }
   }
 
@@ -2269,8 +2451,8 @@ export function mount(root) {
   function setNotify(to) {
     notifying = to;
     const b = $("notify");
-    const [icon, title] = NOTIFY[to];
-    b.innerHTML = svg(icon, to === "working" ? "spin" : "");
+    const [glyph, title] = NOTIFY[to];
+    b.replaceChildren(icon(glyph, to === "working" ? "spin" : ""));
     b.title = title;
     b.setAttribute("aria-label", title);
     b.classList.toggle("on", to === "on");
@@ -2313,6 +2495,7 @@ export function mount(root) {
       if (typeof d.mobile === "boolean") document.documentElement.dataset.mobile = String(d.mobile);
     }
     else if (d && d.fragment === "compose" && typeof d.text === "string") compose(event, d.text);
+    else if (d && d.fragment === "forget-draft") forgetDraft(event);
     else fromShell(event);
   });
   // asks once: a shell that is its owner's answers (and again on a change)
@@ -2340,6 +2523,8 @@ export function mount(root) {
       try { await earlierWork(); }
       catch (err) { $("history-error").textContent = `Could not load earlier progress: ${err.message}.`; $("earlier").hidden = false; }
     } });
+    // what they had typed here before the page last went (any reload), theirs alone; anyone else's goes
+    restoreDraft(hello.principal);
     const note = $("note");
     note.replaceChildren();
     if (!canPost()) {

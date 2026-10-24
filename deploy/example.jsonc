@@ -6,6 +6,17 @@
 // one, `secret gen <name>` makes a host secret, `secret list` shows them.
 // A deploy checks the store holds every one named here before it changes
 // anything.
+//
+// CI deploys (.github/workflows/ci.yml, `deploy`: master's green push to
+// its preview, production's to production) from a file like this one, its
+// environment's in the private repo finitecomputer/fragment-deploy
+// (`preview.jsonc`, `production.jsonc`, at the root of its main), which
+// holds no secret's value: a change there is a commit, which the
+// environment's next deploy takes. There, `dns_token_file` and
+// `test_secret_file` are the paths the job writes them to, below, and
+// every computer image is pinned by digest (`--pinned-only`): the Image
+// workflow (.github/workflows/image.yml, run by hand) pushes one and
+// names it.
 {
   // Your Cloudflare account (`wrangler whoami`), and a branch deployment's
   // zone: `--branch <b>` deploys at <b>.<zone>, its fragments at
@@ -23,7 +34,9 @@
   // A Cloudflare API token with Zone · DNS · Edit on the zone (or both):
   // with it, a deploy makes the records its routes need when they are
   // missing. Without it, make them by hand. A file: it is the deploying
-  // machine's own, which no Worker reads.
+  // machine's own, which no Worker reads. CI's job writes its environment's
+  // CLOUDFLARE_API_TOKEN to ~/.config/fragment/secrets/cloudflare-api-token:
+  // a config CI deploys from names that.
   // "dns_token_file": "~/.config/fragment/secrets/cloudflare-dns-token",
   // A deployment of its own names its hosts instead of a zone (a `zone`
   // beside them is refused), each a zone's own name on the account: the
@@ -90,8 +103,9 @@
   // stream_options, tools, tool_choice, max_tokens, max_completion_tokens,
   // reasoning_effort). A slot left out is on Workers AI: cheap GLM-5.3
   // Flash, medium GLM-5.3, fallback DeepSeek V4 Flash, vision GLM-5.3 Flash.
-  // Every model is one the price book prices (fragment_core::price), or the
-  // deploy is refused. Leave `models` out (as a preview without a key does)
+  // Every model is one the price book prices (fragment_core::price), or one
+  // on OpenRouter at its slot's ceiling (below), or the deploy is refused.
+  // Leave `models` out (as a preview without a key does)
   // and every tier runs on Workers AI.
   //
   // Finite's own (Paul, 2026-10-15; decision 61): its tiers on GLM-5.3 Flash
@@ -99,9 +113,13 @@
   // provider routing, openrouter.ai/docs/guides/routing/provider-selection):
   // only zero-data-retention endpoints, the fastest first, each taking every
   // parameter the call sends, at fp8 or bf16, at most $0.15 a million
-  // tokens in and $0.50 out (the price book charges that ceiling: raise one
-  // and the other together); Workers AI's GLM-5.3 Flash behind them and for
-  // images.
+  // tokens in and $0.50 out; Workers AI's GLM-5.3 Flash behind them and for
+  // images. Any model id OpenRouter serves works here (say
+  // "deepseek/deepseek-v4.1-flash"): a slot on OpenRouter is priced at its
+  // own `max_price`, every input token at `prompt` and output at
+  // `completion` with OpenRouter's fee (docs/ledger.md, OpenRouter's price),
+  // so trying another model is a change to this file alone. A slot there
+  // without one is refused.
   "models": {
     "cheap": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1",
                "key": "fragment-openrouter-key", "model": "z-ai/glm-5.3-flash",
@@ -173,7 +191,9 @@
   // takes the person's own key instead: pasted in settings, or, with an
   // `oauth` sign-in, made by the provider when the person connects it there
   // (`fragment_core::own_signin`); its `models` are what their agents may
-  // run on, paid by their account at the provider.
+  // run on, paid by their account at the provider. Any row may carry a
+  // `note`, which settings' Connections shows under its name, connected or
+  // not: plain text, one line, at most 280 characters (google's, below).
   "providers": [
     { "name": "x", "kind": "operator", "hosts": ["api.x.com", "api.twitter.com"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
@@ -188,8 +208,23 @@
       "placements": [{ "header": "x-browser-use-api-key" }],
       "env": ["BROWSER_USE_API_KEY"], "key": "fragment-browser-use-api-key" },
     { "name": "google", "kind": "connection",
-      "hosts": ["gmail.googleapis.com", "www.googleapis.com", "people.googleapis.com", "sheets.googleapis.com", "docs.googleapis.com"],
+      "hosts": ["gmail.googleapis.com", "www.googleapis.com", "people.googleapis.com", "sheets.googleapis.com", "docs.googleapis.com", "slides.googleapis.com"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+      // while Google reviews the app's sign-in:
+      // "note": "Google is still reviewing Finite, so Google shows a warning that the app isn't verified when you connect. Your data is handled the same way either way.",
+      // its browser-bound connect, once its OAuth client's secret is in the
+      // store (docs/pipes-browser-binding.md): `include_granted_scopes` keeps
+      // what the person allowed before, so a reconnect asks only for the rest
+      // "key": "<the client secret's store name>",
+      // "connection_oauth": { "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&include_granted_scopes=true&prompt=select_account%20consent",
+      //   "exchange": "https://oauth2.googleapis.com/token", "revoke": "https://oauth2.googleapis.com/revoke",
+      //   "client_id": "<the client's id>", "scopes": <the Google skill's references/google-workspace-scopes.json> },
+      // several Google accounts a person (personal and work), each agent
+      // using the one picked for it in Settings, once WorkOS has enabled
+      // additional connections and a release that knows the field is
+      // deployed (docs/pipes-browser-binding.md, Several accounts): 2 to 25;
+      // absent, one, as before
+      // "accounts_max": 5,
       "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"] },
     { "name": "perplexity", "kind": "operator", "hosts": ["api.perplexity.ai"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
@@ -228,10 +263,11 @@
   // e2e --hosted`; docs/secrets.md): 32 random bytes or more, as text. A
   // --branch deploy only: a deployment of its own is refused. A file, not
   // a store secret: the hosted e2e sends its value, and a store gives none back.
+  // CI's job writes the preview environment's PREVIEW_TEST_SECRET to this path.
   // "test_secret_file": "~/.config/fragment/secrets/preview-test-secret",
   // The book's version is the higher of this and the code's own
   // (fragment_core::price::DEFAULT_BOOK_VERSION, 7 since OpenRouter's
-  // GLM-5.3 Flash was priced): raise it past both with every change to a
-  // key's price, or ledgers keep their book.
+  // GLM-5.3 Flash was priced), and informational: a ledger takes a key's
+  // price added or changed at its next call, whatever the version.
   "price_book_version": 7
 }

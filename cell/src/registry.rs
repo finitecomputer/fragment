@@ -30,10 +30,11 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
 use fragment_core::{blob, npub, registry};
-use fragment_proto::{limits, ErrorCode, Identity, IdentityKind, IdentityView, KeyView, Role};
+use fragment_proto::{limits, ErrorCode, Identity, IdentityKind, IdentityView, KeyView, Reason, Role};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use worker::wasm_bindgen::{JsCast, JsValue};
 use worker::*;
 
 use crate::config::Config;
@@ -46,15 +47,17 @@ pub(crate) const PROFILES_MAX: usize = 64;
 pub(crate) mod admin;
 pub(crate) mod billing;
 pub(crate) mod calls;
-mod invites;
+pub(crate) mod invites;
+pub(crate) mod offers;
 pub(crate) mod orgs;
 pub(crate) mod seats;
 pub(crate) mod trials;
 mod signin;
+mod connection_signin;
 pub(crate) mod wipe;
 use calls::{
-    Active, AddKey, AgentForgotten, ApproveKey, Begin, By, Call, CheckKey, EndSession, Exchange, ForgetAgent, Hold, InviteEmail, Logout, Lookup, Mint, Picture, PictureOf, Profile, ProfileAgent, Profiles,
-    ProfilesAnswer, Redeem, RegisterAgent, Resolve, RevokeKey, Session, SetPicture, SubjectOf, TestHook, View, WipeBegin, WipeLook, WipeStep,
+    Active, AddKey, AgentForgotten, ApproveKey, Begin, By, Call, CheckKey, CliBegin, CliCodeOf, EndSession, Exchange, ForgetAgent, Hold, Logout, Lookup, Mint, Picture, PictureOf, Profile, Profiles,
+    ProfilesAnswer, Redeem, RegisterAgent, Resolve, RevokeKey, Session, SetPicture, SubjectOf, TestHook, View, WipeBegin, WipeBilling, WipeLook, WipeStep,
     DownFor, TEST_DOWN_FOR_MAX, TEST_HOLD_MAX_MS,
 };
 pub use signin::SESSION_TTL_MS;
@@ -62,29 +65,12 @@ pub use signin::SESSION_TTL_MS;
 /// The fleet's one registry cell.
 pub const NAME: &str = "registry";
 
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS identities (
-  id TEXT PRIMARY KEY, kind TEXT NOT NULL, owner TEXT, created_at INTEGER NOT NULL, held TEXT);
-CREATE INDEX IF NOT EXISTS identities_owner ON identities (owner) WHERE owner IS NOT NULL;
-CREATE TABLE IF NOT EXISTS keys (
-  key TEXT PRIMARY KEY, identity TEXT NOT NULL, added_at INTEGER NOT NULL, added_by TEXT NOT NULL, revoked_at INTEGER);
-CREATE INDEX IF NOT EXISTS keys_identity ON keys (identity);
-CREATE TABLE IF NOT EXISTS subjects (
-  issuer TEXT NOT NULL, subject TEXT NOT NULL, identity TEXT NOT NULL, linked_at INTEGER NOT NULL, email TEXT NOT NULL,
-  signed_in_at INTEGER NOT NULL, PRIMARY KEY (issuer, subject));
-CREATE INDEX IF NOT EXISTS subjects_identity ON subjects (identity);
-CREATE INDEX IF NOT EXISTS subjects_email ON subjects (email);
-CREATE TABLE IF NOT EXISTS person_keys (
-  identity TEXT PRIMARY KEY, sealed TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS pictures (
-  identity TEXT PRIMARY KEY, sha TEXT NOT NULL, mime TEXT NOT NULL, set_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS agent_fragments (
-  identity TEXT PRIMARY KEY, fragment TEXT NOT NULL);
-";
-
 #[durable_object]
 pub struct RegistryCell {
     state: State,
+    /// The state as the runtime handed it (what a restart onto a newer
+    /// release ends: `routed::refused`).
+    raw: JsValue,
     env: Env,
     /// The isolate's settings (config.rs: built once per isolate).
     cfg: &'static Config,
@@ -95,31 +81,77 @@ pub struct RegistryCell {
     /// Dev fleets' test hook: the path whose next calls are 503, and how
     /// many more; for this cell's life, as `down` is.
     down_for: RefCell<Option<(String, u32)>>,
+    /// Dev fleets' test hook: the path whose next calls this cell answers as
+    /// one of another release (`calls::SKEWED`), refusing them as a deploy
+    /// going out does, and how many more; for this cell's life, as `down` is.
+    skew_for: RefCell<Option<(String, u32)>>,
+    /// When that stand-in release was deployed (`calls::SkewFor`'s
+    /// `deployed`, its seconds): none by default, as a release from before deploy times.
+    skew_deployed: Cell<Option<u64>>,
     /// The calls answered (or refused) since this cell started, the hooks'
     /// aside: what a test counts a request's Registry round trips by.
     calls: Cell<u64>,
+    /// The calls refused since this cell started for their release
+    /// (`routed::refused`): another's, or the hook's stand-in. Not in `calls`.
+    skewed: Cell<u64>,
     /// Dev fleets' test hook: how long the next call waits before it is
     /// answered (0: it does not), set only by the hook.
     hold_ms: Cell<u32>,
+    /// CLI codes asked for this minute, by each address and in all
+    /// (`POST /cli/begin`: `limits::CLI_BEGINS_PER_MINUTE_MAX`, and the
+    /// fleet's `cli_begins_per_ip_minute`). In memory: a restart forgets
+    /// them, which costs at most a minute's more. Not a Workers rate
+    /// limiting binding for the addresses: the fleet's count must be one
+    /// counter here all the same (the binding counts per location, and
+    /// lags), and the binding's limit and account-wide namespace are fixed
+    /// in its config, which each branch copy, the dev stack and the e2e's
+    /// node would need rendered apart.
+    cli_begins: RefCell<fragment_core::ratelimit::Rate>,
+    /// The connection callbacks under way past their pending row, which a
+    /// disconnect fences (connection_signin.rs). In memory: each runs
+    /// inside this cell and ends with it, so a restart has none.
+    finishing: RefCell<fragment_core::connection_signin::Finishing>,
+    /// Of several accounts at a provider, the callback deciding which
+    /// import to make at each person's (connection_signin.rs `turn`). In
+    /// memory, as `finishing`.
+    deciding: RefCell<fragment_core::connection_accounts::Deciding>,
+    /// Its schema as it started (schema.rs): ready, or refused, which
+    /// refuses every sign-in and key until newer code or a reset.
+    schema: crate::schema::Schema,
 }
 
 impl DurableObject for RegistryCell {
     fn new(state: State, env: Env) -> Self {
-        state.storage().sql().exec(SCHEMA, None).expect("the Registry schema applies");
-        state.storage().sql().exec(signin::SCHEMA, None).expect("the sign-in schema applies");
-        state.storage().sql().exec(wipe::SCHEMA, None).expect("the wipes' schema applies");
-        state.storage().sql().exec(invites::SCHEMA, None).expect("the invites' schema applies");
-        state.storage().sql().exec(orgs::SCHEMA, None).expect("the orgs' schema applies");
-        state.storage().sql().exec(billing::SCHEMA, None).expect("the billing schema applies");
-        state.storage().sql().exec(seats::SCHEMA, None).expect("the seats' schema applies");
-        state.storage().sql().exec(trials::SCHEMA, None).expect("the trials' schema applies");
-        state.storage().sql().exec(admin::SCHEMA, None).expect("the admin log's schema applies");
+        let raw: JsValue = state._inner().into();
+        let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
+        let schema = crate::schema::Schema::start(&raw, state.storage().sql(), &fragment_core::migrate::REGISTRY, &state.id().to_string());
         let cfg = Config::from_env(&env);
         assert!(cfg.signins_pending_max >= 1, "a fresh sign-in always fits under the cap");
-        RegistryCell { state, env, cfg, down: Cell::new(false), down_for: RefCell::new(None), calls: Cell::new(0), hold_ms: Cell::new(0) }
+        let cli_begins = RefCell::new(fragment_core::ratelimit::Rate::new(cfg.cli_begins_per_ip_minute, limits::CLI_BEGINS_PER_MINUTE_MAX));
+        RegistryCell {
+            state,
+            raw,
+            env,
+            cfg,
+            down: Cell::new(false),
+            down_for: RefCell::new(None),
+            skew_for: RefCell::new(None),
+            skew_deployed: Cell::new(None),
+            calls: Cell::new(0),
+            skewed: Cell::new(0),
+            hold_ms: Cell::new(0),
+            cli_begins,
+            finishing: RefCell::default(),
+            deciding: RefCell::default(),
+            schema,
+        }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
+        if let Some(refused) = crate::routed::refused(&req, self.release_for(&req.path()), &self.raw)? {
+            self.skewed.set(self.skewed.get() + 1);
+            return Ok(refused);
+        }
         match self.route(req).await {
             Ok(resp) => Ok(resp),
             Err(e) => e.response(),
@@ -132,6 +164,9 @@ impl DurableObject for RegistryCell {
     /// is logged and arms its next itself; failing that too, the alarm
     /// fails and the node retries it.
     async fn alarm(&self) -> Result<Response> {
+        if self.schema.refused_alarm(&self.state, None).await? {
+            return Response::ok("");
+        }
         if let Err(e) = self.sweep_alarm().await {
             console_error!("the registry's sweep failed ({:?}): {}", e.code, e.message);
             self.sweep_later().await.map_err(|e| Error::RustError(e.message))?;
@@ -144,6 +179,9 @@ impl DurableObject for RegistryCell {
         }
         if let Err(e) = self.quantity_alarm().await {
             console_error!("the registry's pushes of seat counts to Stripe failed ({:?}): {}", e.code, e.message);
+        }
+        if let Err(e) = self.cancel_alarm().await {
+            console_error!("the registry's cancels of subscriptions failed ({:?}): {}", e.code, e.message);
         }
         if let Err(e) = self.sync_alarm().await {
             console_error!("the registry's plan pushes failed ({:?}): {}", e.code, e.message);
@@ -246,7 +284,7 @@ fn check_key(key: &str) -> CellResult<()> {
 }
 
 /// A call's body, decoded once.
-fn body<C: Call>(bytes: &[u8]) -> CellResult<C> {
+fn body<T: DeserializeOwned>(bytes: &[u8]) -> CellResult<T> {
     serde_json::from_slice(bytes).map_err(|e| CellError::invalid(format!("body: {e}")))
 }
 
@@ -258,7 +296,23 @@ fn picture_path(identity: &str, p: &Picture) -> String {
 /// A call's answer: the type its `Call` names, so a route cannot answer
 /// what its askers do not decode.
 fn reply<C: Call>(answer: CellResult<C::Answer>) -> CellResult<Response> {
-    Ok(Response::from_json(&answer?)?)
+    crate::json_answer(&answer?)
+}
+
+/// Whether a call to `path` is one a test hook's `(path, times left)`
+/// takes (`DownFor`, `SkewFor`), counting it; the hook clears itself at 0.
+fn one_more(hook: &RefCell<Option<(String, u32)>>, path: &str) -> bool {
+    let mut hook = hook.borrow_mut();
+    let Some((named, left)) = hook.as_mut() else { return false };
+    if named != path {
+        return false;
+    }
+    assert!(*left > 0, "a hook that takes no more is cleared");
+    *left -= 1;
+    if *left == 0 {
+        *hook = None;
+    }
+    true
 }
 
 impl RegistryCell {
@@ -376,7 +430,7 @@ impl RegistryCell {
     /// from an agent fragment, its name and fragment). An id the registry
     /// does not hold (an anonymous visitor's) is left out.
     fn profiles(&self, b: Profiles) -> CellResult<ProfilesAnswer> {
-        if b.ids.len() > PROFILES_MAX || b.emails_of.len() > PROFILES_MAX || b.agents_of.len() > PROFILES_MAX {
+        if b.ids.len() > PROFILES_MAX || b.emails_of.len() > PROFILES_MAX {
             return Err(CellError::invalid(format!("at most {PROFILES_MAX} identities at once")));
         }
         let mut profiles = BTreeMap::new();
@@ -396,31 +450,9 @@ impl RegistryCell {
             };
             // an agent's name is its fragment's label (docs/computers.md)
             let name = fragment.as_deref().and_then(fragment_proto::split_fragment_name).map(|(label, _)| label.to_string());
-            // a person's agents, asked: at most AGENTS_PER_OWNER_MAX
-            let agents = match who.kind {
-                IdentityKind::Person if b.agents_of.contains(&id) => self.agents_of(&id)?,
-                _ => vec![],
-            };
-            profiles.insert(id, Profile { kind: who.kind, email, picture, name, fragment, title: None, agents });
+            profiles.insert(id, Profile { kind: who.kind, email, picture, name, fragment, title: None });
         }
         Ok(ProfilesAnswer { profiles })
-    }
-
-    /// A person's agents, the first made first, each by its agent
-    /// fragment's label when it was made from one.
-    fn agents_of(&self, person: &str) -> CellResult<Vec<ProfileAgent>> {
-        let rows = self.rows::<IdRow>(
-            "SELECT id FROM identities WHERE owner = ? AND kind = 'agent' ORDER BY created_at, id LIMIT ?",
-            vec![person.into(), SqlStorageValue::Integer(limits::AGENTS_PER_OWNER_MAX as i64)],
-        )?;
-        assert!(rows.len() as u64 <= limits::AGENTS_PER_OWNER_MAX, "a person owns a bounded number of agents");
-        rows.into_iter()
-            .map(|r| {
-                let fragment = self.agent_fragment(&r.id)?;
-                let name = fragment.as_deref().and_then(fragment_proto::split_fragment_name).map(|(label, _)| label.to_string());
-                Ok(ProfileAgent { id: r.id, name, fragment, title: None })
-            })
-            .collect()
     }
 
     /// The agent fragment an agent was made from, if it was.
@@ -689,17 +721,20 @@ impl RegistryCell {
 
     /// Whether a call to `path` is one `TestHook::DownFor` fails, counting it.
     fn down_once(&self, path: &str) -> bool {
-        let mut down_for = self.down_for.borrow_mut();
-        let Some((down, left)) = down_for.as_mut() else { return false };
-        if down != path {
-            return false;
+        one_more(&self.down_for, path)
+    }
+
+    /// The release this cell answers a call to `path` as (`routed::refused`):
+    /// its own, but while `TestHook::SkewFor` names the path, the hook's
+    /// stand-in for another (counting the call), deployed when the hook
+    /// said, so the call is refused as one from another release is, by the
+    /// same check, and restarts this cell when that one would.
+    fn release_for(&self, path: &str) -> crate::routed::Own<'_> {
+        if one_more(&self.skew_for, path) {
+            crate::routed::Own { id: calls::SKEWED, deployed: self.skew_deployed.get() }
+        } else {
+            crate::routed::Own::of(self.cfg)
         }
-        assert!(*left > 0, "a hook that fails no more is cleared");
-        *left -= 1;
-        if *left == 0 {
-            *down_for = None;
-        }
-        true
     }
 
     async fn test_hook(&self, hook: TestHook) -> CellResult<Value> {
@@ -708,7 +743,7 @@ impl RegistryCell {
                 self.down.set(down);
                 Ok(json!({ "down": down }))
             }
-            TestHook::Calls => Ok(json!({ "calls": self.calls.get() })),
+            TestHook::Calls => Ok(json!({ "calls": self.calls.get(), "skewed": self.skewed.get() })),
             TestHook::Hold(ms) => {
                 if ms > TEST_HOLD_MAX_MS {
                     return Err(CellError::invalid(format!("hold at most {TEST_HOLD_MAX_MS} ms")));
@@ -723,10 +758,23 @@ impl RegistryCell {
                 *self.down_for.borrow_mut() = (times > 0).then(|| (path.clone(), times));
                 Ok(json!({ "downFor": { "path": path, "times": times } }))
             }
+            TestHook::SkewFor(calls::SkewFor { path, times, deployed }) => {
+                if times > TEST_DOWN_FOR_MAX || !path.starts_with('/') || path == TestHook::PATH {
+                    return Err(CellError::invalid(format!("skew for a call's path (not /test's), at most {TEST_DOWN_FOR_MAX} times")));
+                }
+                *self.skew_for.borrow_mut() = (times > 0).then(|| (path.clone(), times));
+                self.skew_deployed.set(deployed);
+                Ok(json!({ "skewFor": { "path": path, "times": times, "deployed": deployed } }))
+            }
             TestHook::Signins(hook) => Ok(json!(self.signins_hook(hook).await?)),
             TestHook::E2eSignIn(asked) => Ok(json!(self.e2e_sign_in(&asked.email, asked.paid_calls).await?)),
             TestHook::E2ePeople(page) => Ok(json!(self.e2e_people(page.after.as_deref())?)),
             TestHook::E2eIs(identity) => Ok(json!({ "e2e": self.is_e2e(&identity)? })),
+            TestHook::Schema => crate::schema::view(self.state.storage().sql(), &fragment_core::migrate::REGISTRY),
+            TestHook::InvitesBefore(email) => {
+                let made = self.rows::<Value>("UPDATE invites_waiting SET role = NULL, title = NULL, sharer = NULL WHERE email = ? RETURNING fragment", vec![email.into()])?;
+                Ok(json!({ "before": made.len() }))
+            }
         }
     }
 
@@ -737,8 +785,13 @@ impl RegistryCell {
             if !self.cfg.test_hooks {
                 return Err(CellError::new(ErrorCode::NotFound, "no route /test"));
             }
-            return reply::<TestHook>(self.test_hook(body(&bytes)?).await);
+            let hook: TestHook = body(&bytes)?;
+            if !matches!(hook, TestHook::Schema) {
+                self.schema.ready()?;
+            }
+            return reply::<TestHook>(self.test_hook(hook).await);
         }
+        self.schema.ready()?;
         self.calls.set(self.calls.get() + 1);
         let hold = self.hold_ms.replace(0);
         if hold > 0 {
@@ -760,6 +813,12 @@ impl RegistryCell {
         if let Some(answer) = self.seats_route(&path, &bytes).await {
             return answer;
         }
+        if let Some(answer) = self.offers_route(&path, &bytes).await {
+            return answer;
+        }
+        if let Some(answer) = self.invites_route(&path, &bytes).await {
+            return answer;
+        }
         if let Some(answer) = self.trials_route(&path, &bytes) {
             return answer;
         }
@@ -767,9 +826,13 @@ impl RegistryCell {
             return answer;
         }
         match path.as_str() {
+            calls::BeginConnection::PATH => reply::<calls::BeginConnection>(self.begin_connection(body(&bytes)?).await),
+            calls::FinishConnection::PATH => reply::<calls::FinishConnection>(self.finish_connection(body(&bytes)?).await),
+            calls::FenceConnection::PATH => reply::<calls::FenceConnection>(self.fence_connection(body(&bytes)?)),
+            calls::ConnectionFences::PATH => reply::<calls::ConnectionFences>(self.connection_fences(body(&bytes)?)),
+            calls::Disconnected::PATH => reply::<calls::Disconnected>(self.disconnected(body(&bytes)?)),
             Resolve::PATH => reply::<Resolve>(self.key_holder(&body::<Resolve>(&bytes)?.key)),
             Lookup::PATH => reply::<Lookup>(self.lookup(body(&bytes)?)),
-            InviteEmail::PATH => reply::<InviteEmail>(self.invite(body(&bytes)?).await),
             RegisterAgent::PATH => reply::<RegisterAgent>(self.register_agent(body(&bytes)?)),
             ForgetAgent::PATH => reply::<ForgetAgent>(self.forget_agent(body(&bytes)?)),
             Hold::PATH => reply::<Hold>(self.hold(body(&bytes)?)),
@@ -788,10 +851,13 @@ impl RegistryCell {
             Logout::PATH => reply::<Logout>(self.logout(body(&bytes)?)),
             Mint::PATH => reply::<Mint>(self.mint(body(&bytes)?).await),
             Redeem::PATH => reply::<Redeem>(self.redeem(body(&bytes)?)),
-            ApproveKey::PATH => reply::<ApproveKey>(self.add_by_session(body(&bytes)?)),
+            CliBegin::PATH => reply::<CliBegin>(self.cli_begin(body(&bytes)?).await),
+            CliCodeOf::PATH => reply::<CliCodeOf>(self.cli_code_of(body(&bytes)?).await),
+            ApproveKey::PATH => reply::<ApproveKey>(self.add_by_code(body(&bytes)?).await),
             WipeLook::PATH => reply::<WipeLook>(self.wipe_look(body(&bytes)?)),
             WipeBegin::PATH => reply::<WipeBegin>(self.wipe_begin(body(&bytes)?)),
             WipeStep::PATH => reply::<WipeStep>(self.wipe_step(body(&bytes)?)),
+            WipeBilling::PATH => reply::<WipeBilling>(self.wipe_billing(body(&bytes)?).await),
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),
         }
     }

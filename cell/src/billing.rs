@@ -13,9 +13,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use worker::*;
 
-use crate::config::Config;
+use crate::config::{Config, StripeConfig};
 use crate::error::{CellError, CellResult};
-use crate::registry::billing::{ApplyCheckout, ApplySubscription, CheckoutBegin, CustomerOf, PackBegin, SetCustomer, SubscriptionCopy};
+use crate::registry::billing::{ApplyCheckout, ApplySubscription, CancelOrphan, CheckoutBegin, CheckoutPlan, CustomerOf, PackBegin, SubscriptionCopy};
+use crate::registry::trials::TrialRelease;
+use fragment_core::org::Status;
 use crate::registry::calls::By;
 use crate::registry::orgs::Mine;
 use crate::stripe::Stripe;
@@ -72,29 +74,62 @@ async fn price(stripe: &Stripe) -> CellResult<String> {
     Ok(p.id)
 }
 
+/// Who a Checkout bills: the org's own customer when it buys again, its
+/// address kept current by Stripe's tax; else the buyer's email, for which
+/// Checkout makes a customer, kept as the new org's once paid (the
+/// registry's copy of its subscription). Never another org's, and none is
+/// made before a payment (the audit's H1).
+fn billed(form: Form, customer: Option<&str>, email: &str, tax: bool) -> Form {
+    match customer {
+        Some(c) => {
+            let form = form.push("customer", c);
+            if tax {
+                return form.push("customer_update[address]", "auto");
+            }
+            form
+        }
+        None => form.push("customer_email", email),
+    }
+}
+
 /// `POST /api/billing/checkout {kind?, trialCode?}`: a Checkout for the
-/// asker's own seat (the one sold, `seat_always_on`), in their org (one
-/// made for them if they are in none); with a trial code, Stripe's trial of
-/// its days, a card taken first.
+/// asker's own seat (the one sold, `seat_always_on`): a new org of one,
+/// made once it is paid, or their org that buys again (its paid seats, on
+/// its own customer); with a trial code, Stripe's trial of its days, no
+/// card asked.
 async fn checkout(env: &Env, cfg: &Config, by: By, buy: Buy) -> CellResult<Checkout> {
     let stripe_cfg = cfg.stripe()?;
     let expires_at_s = js::now_ms() / 1000 + CHECKOUT_TTL_S;
     let plan = ask_registry(env, &CheckoutBegin { by, kind: buy.kind, trial: buy.trial_code, until_ms: expires_at_s * 1000 }).await?;
+    let made = session_of(env, cfg, stripe_cfg, &plan, expires_at_s).await;
+    // a Checkout that never was (Stripe refused it, or it failed before a
+    // session the person could open) takes its part out of the trial's held
+    // place at once, rather than in CHECKOUT_TTL_S; the place goes if no
+    // other Checkout of theirs holds it (one made, maybe open on Stripe's
+    // page, or one still under way keeps it)
+    if let (Err(e), Some(attempt)) = (&made, &plan.hold) {
+        if let Err(again) = ask_registry(env, &TrialRelease { person: plan.person.clone(), attempt: attempt.clone() }).await {
+            // its place is held until the Checkout's own expiry, as before
+            console_error!("{}", json!({ "trial_release": attempt, "after": e.message, "failed": again.message }));
+        }
+    }
+    made
+}
+
+/// The Stripe Checkout for `plan` (`checkout`'s), or why not.
+async fn session_of(env: &Env, cfg: &Config, stripe_cfg: &StripeConfig, plan: &CheckoutPlan, expires_at_s: i64) -> CellResult<Checkout> {
     let kind = plan.kind;
     let stripe = crate::stripe::client(env, cfg).await?;
     let deployment = cfg.stripe_deployment();
-    let customer = customer(env, cfg, &stripe, &plan.org, &plan.org_name, &plan.email, plan.customer).await?;
     let price = price(&stripe).await?;
     let platform = cfg.platform();
     // back to the shell's welcome, which applies it and makes their first
     // agent (or, with chats of their own, goes home)
     let mut form = Form::new()
         .push("mode", "subscription")
-        .push("customer", customer)
         .push("client_reference_id", plan.org.clone())
         .push("line_items[0][price]", price)
-        .push("line_items[0][quantity]", "1")
-        .push("payment_method_collection", "always")
+        .push("line_items[0][quantity]", plan.quantity.to_string())
         .push("success_url", format!("{platform}/welcome?checkout={{CHECKOUT_SESSION_ID}}"))
         .push("cancel_url", format!("{platform}/welcome?checkout=canceled"))
         .push("expires_at", expires_at_s.to_string())
@@ -105,39 +140,25 @@ async fn checkout(env: &Env, cfg: &Config, by: By, buy: Buy) -> CellResult<Check
         .push(format!("subscription_data[metadata][{META_DEPLOYMENT}]"), deployment)
         .push(format!("subscription_data[metadata][{META_ORG}]"), plan.org.clone());
     form = match &plan.trial {
-        // a trial: Stripe's days, its card taken now and charged at the end
-        // (none on file at the end cancels it); no discount on top
+        // a trial: Stripe's days and no card asked (Alex, 2026-10-23). A card
+        // added in the portal before the end is charged then; with none, the
+        // end cancels it, and its person pays again at a Checkout of the seat
+        // (Billing's Pay again). No discount on top
         Some(t) => form
+            .push("payment_method_collection", "if_required")
             .push("subscription_data[trial_period_days]", t.days.to_string())
             .push("subscription_data[trial_settings][end_behavior][missing_payment_method]", "cancel")
             .push(format!("metadata[{META_TRIAL}]"), t.id.clone()),
-        None => form.push("allow_promotion_codes", "true"),
+        None => form.push("payment_method_collection", "always").push("allow_promotion_codes", "true"),
     };
     if stripe_cfg.tax {
-        form = form.push("automatic_tax[enabled]", "true").push("customer_update[address]", "auto");
+        form = form.push("automatic_tax[enabled]", "true");
     }
+    form = billed(form, plan.customer.as_deref(), &plan.email, stripe_cfg.tax);
     let attempt = hex::encode(js::random_bytes::<8>());
     let session: CheckoutSession = stripe.post("/v1/checkout/sessions", &form, &format!("fragment-checkout-{}-{attempt}", plan.org)).await?;
     let url = session.url.ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "Stripe made a Checkout with no URL"))?;
     Ok(Checkout { url, session: session.id })
-}
-
-/// An org's Stripe customer: the one it has, or one made for it, once.
-async fn customer(env: &Env, cfg: &Config, stripe: &Stripe, org: &str, name: &str, email: &str, has: Option<String>) -> CellResult<String> {
-    if let Some(c) = has {
-        return Ok(c);
-    }
-    #[derive(Deserialize)]
-    struct Made {
-        id: String,
-    }
-    let form = Form::new()
-        .push("email", email)
-        .push("name", name)
-        .push(format!("metadata[{META_DEPLOYMENT}]"), cfg.stripe_deployment())
-        .push(format!("metadata[{META_ORG}]"), org);
-    let made: Made = stripe.post("/v1/customers", &form, &format!("fragment-customer-{org}")).await?;
-    Ok(ask_registry(env, &SetCustomer { org: org.to_string(), customer: made.id }).await?.customer)
 }
 
 /// `POST /api/billing/packs {member?}`: a Checkout for a $25 credit pack
@@ -146,7 +167,6 @@ async fn pack(env: &Env, cfg: &Config, by: By, member: Option<String>) -> CellRe
     let stripe_cfg = cfg.stripe()?;
     let plan = ask_registry(env, &PackBegin { by, member }).await?;
     let stripe = crate::stripe::client(env, cfg).await?;
-    let customer = customer(env, cfg, &stripe, &plan.org, &plan.org_name, &plan.email, plan.customer).await?;
     let found: List<Price> = stripe.get(&format!("/v1/prices?lookup_keys[]={}&active=true", core_stripe::PACK_LOOKUP_KEY)).await?;
     let price = found.data.into_iter().next().ok_or_else(|| CellError::host(format!("Stripe has no active price {}: run `cargo xtask stripe setup`", core_stripe::PACK_LOOKUP_KEY)))?;
     if price.unit_amount != Some(core_stripe::PACK_CENTS) || price.currency.as_deref() != Some("usd") {
@@ -156,7 +176,6 @@ async fn pack(env: &Env, cfg: &Config, by: By, member: Option<String>) -> CellRe
     let deployment = cfg.stripe_deployment();
     let mut form = Form::new()
         .push("mode", "payment")
-        .push("customer", customer)
         .push("client_reference_id", plan.org.clone())
         .push("line_items[0][price]", price.id)
         .push("line_items[0][quantity]", "1")
@@ -169,8 +188,10 @@ async fn pack(env: &Env, cfg: &Config, by: By, member: Option<String>) -> CellRe
         .push(format!("metadata[{META_BUYER}]"), plan.buyer.clone())
         .push(format!("metadata[{META_PACK}]"), (core_stripe::PACK_CENTS / 100).to_string());
     if stripe_cfg.tax {
-        form = form.push("automatic_tax[enabled]", "true").push("customer_update[address]", "auto");
+        form = form.push("automatic_tax[enabled]", "true");
     }
+    // the org's customer when it has paid; a comped org's pack makes none of its own
+    form = billed(form, plan.customer.as_deref(), &plan.email, stripe_cfg.tax);
     let attempt = hex::encode(js::random_bytes::<8>());
     let session: CheckoutSession = stripe.post("/v1/checkout/sessions", &form, &format!("fragment-pack-{}-{attempt}", plan.org)).await?;
     let url = session.url.ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "Stripe made a Checkout with no URL"))?;
@@ -226,6 +247,23 @@ async fn checked_out(env: &Env, cfg: &Config, stripe: &Stripe, session: &Checkou
     }
     let trial = session.metadata.get(META_TRIAL).cloned();
     Ok(ask_registry(env, &ApplyCheckout { session: session.id.clone(), org, person, kind, subscription: copy, trial }).await?.applied)
+}
+
+/// A live subscription of this deployment's names an org the registry has
+/// no row of: its Checkout's completion never reached the platform (its
+/// webhook lost, its return never made). The Checkout that made it is
+/// looked up and applied as its completion would be; with none to find, it
+/// is canceled after a grace (registry/billing.rs `CancelOrphan`), so no
+/// card pays for an org that is not there.
+async fn orphaned(env: &Env, cfg: &Config, stripe: &Stripe, org: &str, subscription: &str) -> CellResult<bool> {
+    let found: List<CheckoutSession> = stripe.get(&format!("/v1/checkout/sessions?subscription={subscription}&limit=1")).await?;
+    match found.data.into_iter().next() {
+        Some(session) => checked_out(env, cfg, stripe, &session).await,
+        None => {
+            console_log!("{}", json!({ "stripe-orphan": subscription, "org": org }));
+            Ok(ask_registry(env, &CancelOrphan { subscription: subscription.to_string(), org: org.to_string() }).await?.applied)
+        }
+    }
 }
 
 /// `POST /api/billing/sessions/<id>`: the Checkout's return. The buyer
@@ -332,7 +370,12 @@ pub(crate) async fn webhook(mut req: Request, env: &Env, cfg: &Config) -> CellRe
                 (true, Some(org)) => {
                     let stripe = crate::stripe::client(env, cfg).await?;
                     let (_, copy) = fetched(&stripe, &named.id).await?;
-                    ask_registry(env, &ApplySubscription { org: org.clone(), subscription: copy, at: Some(event.created) }).await?.applied
+                    let live = Status::parse(&copy.status).is_some_and(|s| !s.is_ended());
+                    let a = ask_registry(env, &ApplySubscription { org: org.clone(), subscription: copy, at: Some(event.created) }).await?;
+                    match a.orphan && live {
+                        true => orphaned(env, cfg, &stripe, org, &named.id).await?,
+                        false => a.applied,
+                    }
                 }
                 _ => false,
             }

@@ -36,6 +36,7 @@
 //!   GET    /api/runs?status=&op=  /api/runs/<id>   viewer
 //!   POST   /api/replay  POST /api/pause   editor
 //!   GET    /api/triggers                  viewer
+//!   GET /api/schedules   viewer; POST /api/schedules  PUT|DELETE /api/schedules/<id>   editor (schedules.rs)
 //!   POST   /api/inbox                     the inbox token (no signature)
 //!   *      /serve/<path>                  the site, `__files`, `__file`, `__op`, `__watch`
 //!   POST   /job/advance|effect|finish     a run's Workflow (jobs.rs); never routed from outside
@@ -77,100 +78,6 @@ const ALARM_SOON_MS: i64 = 50;
 /// … or than this after it failed.
 const ALARM_RETRY_MS: i64 = 30_000;
 
-/// A life's tables: a delete drops them all and makes them again empty
-/// (ended.rs), keeping only the ended lives' own (`ended::SCHEMA`).
-///
-/// A table here never gains a column: `CREATE TABLE IF NOT EXISTS` adds
-/// none to an object made before it, which then refuses every statement
-/// naming it (docs/technical-debt-ledger.md, "Objects made before a
-/// column…"). A new fact gets a table of its own, as operations'
-/// descriptions did (`code_op_descriptions`, beside `code_ops`).
-pub(crate) const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS members (
-  principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL,
-  kind TEXT, owner TEXT);
-CREATE INDEX IF NOT EXISTS members_owner ON members (owner) WHERE owner IS NOT NULL;
-CREATE TABLE IF NOT EXISTS invites (
-  email TEXT PRIMARY KEY, role TEXT NOT NULL, expires_at INTEGER NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS index_outbox (
-  principal TEXT PRIMARY KEY, role TEXT, version INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS search_log (
-  n INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, text TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS search_outbox (
-  principal TEXT PRIMARY KEY, sent INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER);
-CREATE INDEX IF NOT EXISTS search_outbox_due ON search_outbox (next_at);
-CREATE TABLE IF NOT EXISTS joined_outbox (
-  principal TEXT PRIMARY KEY, owner TEXT NOT NULL, added_at INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS secrets (
-  name TEXT PRIMARY KEY, sealed TEXT NOT NULL, set_by TEXT NOT NULL, set_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS secret_hosts (
-  name TEXT NOT NULL, host TEXT NOT NULL, PRIMARY KEY (name, host));
-CREATE TABLE IF NOT EXISTS records (
-  channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, principal TEXT NOT NULL, kind TEXT NOT NULL,
-  body TEXT NOT NULL, op TEXT, idx INTEGER, outboxed INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (channel, seq));
-CREATE UNIQUE INDEX IF NOT EXISTS records_effect ON records (op, idx) WHERE op IS NOT NULL;
-CREATE TABLE IF NOT EXISTS tree (
-  ref TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL, mode TEXT NOT NULL, last_commit TEXT NOT NULL,
-  PRIMARY KEY (ref, path));
-CREATE TABLE IF NOT EXISTS code (
-  id INTEGER PRIMARY KEY CHECK (id = 1), sha TEXT NOT NULL, loader_id TEXT NOT NULL, source TEXT NOT NULL,
-  cpu_ms INTEGER NOT NULL, installed_at INTEGER NOT NULL,
-  modules TEXT NOT NULL DEFAULT '{}');
-CREATE TABLE IF NOT EXISTS code_ops (op TEXT PRIMARY KEY, kind TEXT NOT NULL, role TEXT NOT NULL, input TEXT, ephemeral INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS code_op_descriptions (op TEXT PRIMARY KEY, description TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS code_channels (channel TEXT PRIMARY KEY, read TEXT NOT NULL, post TEXT, signed_in INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS code_triggers (idx INTEGER PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT NULL, run TEXT NOT NULL, from_kind TEXT);
-CREATE INDEX IF NOT EXISTS code_triggers_on ON code_triggers (kind, target);
-CREATE TABLE IF NOT EXISTS runs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, via TEXT NOT NULL, trigger TEXT, principal TEXT NOT NULL,
-  role TEXT NOT NULL, depth INTEGER NOT NULL, call_id TEXT, input_sha TEXT, input TEXT NOT NULL, status TEXT NOT NULL,
-  attempt INTEGER NOT NULL, output TEXT, error TEXT, created_at INTEGER NOT NULL, launched_at INTEGER, finished_at INTEGER,
-  code TEXT);
-CREATE UNIQUE INDEX IF NOT EXISTS runs_call ON runs (principal, call_id) WHERE call_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS runs_status ON runs (status, op);
-CREATE TABLE IF NOT EXISTS steps (
-  run INTEGER NOT NULL, attempt INTEGER NOT NULL, idx INTEGER NOT NULL, kind TEXT NOT NULL, value TEXT, error TEXT,
-  CHECK ((value IS NULL) <> (error IS NULL)), PRIMARY KEY (run, attempt, idx));
-CREATE TABLE IF NOT EXISTS schedules (idx INTEGER PRIMARY KEY, op TEXT NOT NULL, cron TEXT NOT NULL, next_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS paused_ops (op TEXT PRIMARY KEY, by TEXT NOT NULL, at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS op_breakers (op TEXT PRIMARY KEY, reset_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS file_commits (key TEXT PRIMARY KEY, sha TEXT NOT NULL, at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS own_commits (sha TEXT PRIMARY KEY, depth INTEGER NOT NULL, at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS blobs (
-  sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL, mime TEXT);
-CREATE TABLE IF NOT EXISTS pointers (
-  ref TEXT NOT NULL, path TEXT NOT NULL, sha TEXT NOT NULL, size INTEGER NOT NULL, PRIMARY KEY (ref, path));
-CREATE TABLE IF NOT EXISTS subs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, principal TEXT NOT NULL, channel TEXT NOT NULL, url TEXT NOT NULL,
-  created_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS push_subs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL,
-  who TEXT NOT NULL, principal TEXT NOT NULL, created_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS sent (key TEXT PRIMARY KEY, at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS pending (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT, ledger_id TEXT NOT NULL UNIQUE, op TEXT NOT NULL, principal TEXT NOT NULL,
-  depth INTEGER NOT NULL, tries INTEGER NOT NULL, next_at INTEGER NOT NULL, at INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS pending_due ON pending (next_at);
-CREATE TABLE IF NOT EXISTS delivery_outbox (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL CHECK (kind IN ('record', 'push')),
-  sub INTEGER, channel TEXT, seq INTEGER, who TEXT, body TEXT,
-  after_sub INTEGER NOT NULL DEFAULT 0, upto_sub INTEGER NOT NULL DEFAULT 0,
-  attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS delivery_outbox_due ON delivery_outbox (next_at);
-CREATE INDEX IF NOT EXISTS delivery_outbox_waiting ON delivery_outbox (id) WHERE attempts > 0;
-CREATE TABLE IF NOT EXISTS charges (
-  ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, held INTEGER NOT NULL, at INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS charges_run ON charges (run);
-CREATE TABLE IF NOT EXISTS paid (
-  key TEXT PRIMARY KEY, run INTEGER NOT NULL, result TEXT NOT NULL, usage TEXT, settled INTEGER NOT NULL, at INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS paid_run ON paid (run);
-CREATE TABLE IF NOT EXISTS meter_requests (minute INTEGER PRIMARY KEY, count INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS meter_rows (ref TEXT PRIMARY KEY, row TEXT NOT NULL, batch INTEGER);
-CREATE INDEX IF NOT EXISTS meter_rows_batch ON meter_rows (batch);
-CREATE TABLE IF NOT EXISTS meter_batches (id INTEGER PRIMARY KEY AUTOINCREMENT, sent_at INTEGER);
-";
-
 #[durable_object]
 pub struct FragmentCell {
     pub(crate) state: State,
@@ -193,13 +100,15 @@ pub struct FragmentCell {
     pub(crate) app: js::AppLoader,
     /// What this activation knows of its live sockets (live.rs).
     pub(crate) live: RefCell<crate::live::LiveMemory>,
-    /// What it last heard of its owner's standing (meter.rs `writable`).
-    pub(crate) standing: RefCell<crate::meter::StandingSeen>,
     /// The minute it last set the alarm to close a request count for.
     pub(crate) meter_armed: Cell<i64>,
     /// A record woke an idle search cursor, and the alarm is not armed for
     /// it yet (search.rs `log_search`; `after_answer` arms it).
     pub(crate) search_woke: Cell<bool>,
+    /// A record moved what its members' lists show (listed.rs
+    /// `listed_send`): `after_answer` sends the rows it queued, and arms
+    /// the alarm for a send that waits.
+    pub(crate) listed_moved: Cell<bool>,
     /// What a write leaves for after its answer is asked for, and has not
     /// begun (`later`).
     pub(crate) later_asked: Cell<bool>,
@@ -208,6 +117,8 @@ pub struct FragmentCell {
     pub(crate) launching: futures_util::lock::Mutex<()>,
     /// The code version and UTC day it last noted a dynamic worker for.
     pub(crate) dw_noted: RefCell<Option<(String, i64)>>,
+    /// Its schema as it started (schema.rs): ready, or refused.
+    pub(crate) schema: crate::schema::Schema,
 }
 
 impl DurableObject for FragmentCell {
@@ -215,8 +126,7 @@ impl DurableObject for FragmentCell {
         let raw: JsValue = state._inner().into();
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         let sql = state.storage().sql();
-        sql.exec(SCHEMA, None).expect("the Fragment schema applies");
-        sql.exec(crate::ended::SCHEMA, None).expect("the ended lives' schema applies");
+        let schema = crate::schema::Schema::start(&raw, sql.clone(), &fragment_core::migrate::FRAGMENT, &state.id().to_string());
         let cfg = Config::from_env(&env);
         let rate = fragment_core::ratelimit::Rate::new(limits::PUBLIC_CALLS_PER_MIN, limits::PUBLIC_CALLS_PER_MIN_FRAGMENT);
         let app = crate::ops::app_loader(&raw, env.as_ref(), sql.clone());
@@ -232,16 +142,20 @@ impl DurableObject for FragmentCell {
             settling: RefCell::default(),
             app,
             live: RefCell::default(),
-            standing: RefCell::new(None),
             meter_armed: Cell::new(-1),
             search_woke: Cell::new(false),
+            listed_moved: Cell::new(false),
             later_asked: Cell::new(false),
             launching: futures_util::lock::Mutex::new(()),
             dw_noted: RefCell::new(None),
+            schema,
         }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
+        if let Some(refused) = crate::routed::refused(&req, crate::routed::Own::of(self.cfg), &self.raw)? {
+            return Ok(refused);
+        }
         match self.route(req).await {
             Ok(resp) => Ok(resp),
             Err(e) => e.response(),
@@ -249,6 +163,14 @@ impl DurableObject for FragmentCell {
     }
 
     async fn alarm(&self) -> Result<Response> {
+        if self.schema.refused() {
+            // a delete's cleanup goes on, refused or not: it ends in its
+            // storage's release, which makes the fragment current (ended.rs)
+            self.drain_ended().await;
+            let due = self.ended_due_at().ok().flatten();
+            self.schema.refused_alarm(&self.state, due).await?;
+            return Response::ok("");
+        }
         if let Err(e) = self.on_alarm().await {
             self.event("alarm.failed", &e.message, json!({ "code": e.code }));
             // Whatever is due, a failing alarm tries again no sooner than
@@ -405,6 +327,13 @@ pub(crate) enum MetaKey {
     /// An agent fragment's picture as live's install read it (`<sha256>
     /// <type> <commit>`): what `computer/picture` answers.
     Picture,
+    /// The channels that list records, their kinds, fields and read
+    /// roles, as the rows last carried them (listed.rs `listed_fence`).
+    Listed,
+    /// When a listed record last sent its readers' rows (ms), and the send
+    /// waiting for its gap's end (`<at> <role>`; listed.rs `listed_send`).
+    ListedSentAt,
+    ListedDue,
     /// The channels its people's search holds, as the rows last named
     /// them (search.rs `search_fence`): a JSON array of names.
     Searched,
@@ -481,6 +410,9 @@ impl MetaKey {
             MetaKey::Blessed => "blessed",
             MetaKey::Face => "face",
             MetaKey::Picture => "picture",
+            MetaKey::Listed => "listed",
+            MetaKey::ListedSentAt => "listed_sent_at",
+            MetaKey::ListedDue => "listed_due",
             MetaKey::Searched => "searched",
             MetaKey::CodeError => "code_error",
             MetaKey::BlobsGcAt => "blobs_gc_at",
@@ -603,16 +535,7 @@ pub(crate) async fn ask(env: &Env, name: &str, path: &str, body: &Value) -> Cell
     crate::routed::ask_object(env, "FRAGMENT", name, path, body).await
 }
 
-pub(crate) fn json_response<T: serde::Serialize>(v: &T) -> CellResult<Response> {
-    Ok(Response::from_json(v)?.with_headers(no_store()))
-}
-
-pub(crate) fn no_store() -> Headers {
-    let h = Headers::new();
-    h.set("content-type", "application/json").expect("static header");
-    h.set("cache-control", "no-store").expect("static header");
-    h
-}
+pub(crate) use crate::json_response::json_response;
 
 pub(crate) fn decode_segment(s: &str) -> String {
     url::form_urlencoded::parse(format!("x={}", s.replace('+', "%2B")).as_bytes()).next().map(|(_, v)| v.into_owned()).unwrap_or_default()
@@ -756,9 +679,21 @@ impl FragmentCell {
             vec![principal.into(), principal.into()],
         )?;
         let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
-        let member = row.role.as_deref().and_then(Role::parse);
-        // as itself, a hold limits nothing: it caps an agent acting for
-        // someone (`standing_for`), never its own memberships
+        let mut member = row.role.as_deref().and_then(Role::parse);
+        // as itself, a hold caps an agent in with its person here, a
+        // member who is not the owner (decision 64: the whole entity is
+        // secured; members.rs `entity_of`); never its own memberships, its
+        // owner's chats, its agent fragment, one it holds on its own
+        // (decision 36), where it answers and records its turns
+        if let Some((held, signed)) = caller.signed.as_ref().and_then(|s| Some((s.held?, s))) {
+            let in_with_person = match signed.owner.as_deref() {
+                Some(person) => self.member_role(person)?.is_some_and(|r| r != Role::Owner),
+                None => false,
+            };
+            if in_with_person {
+                member = member.map(|m| m.min(held));
+            }
+        }
         Ok(Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: None, held: None })
     }
 
@@ -851,6 +786,25 @@ impl FragmentCell {
 
     async fn route(&self, mut req: Request) -> CellResult<Response> {
         let path = req.path();
+        if path == "/test/fragment" && self.cfg.test_hooks {
+            let body: Value = body_json(&mut req).await?;
+            // its schema's levers answer on a fragment that refuses its
+            // schema, as does the look at its ended lives' cleanup
+            if let Some(op) = body["op"].as_str().filter(|op| op.starts_with("schema")) {
+                let shape = body["shape"].as_str().or(body["step"].as_str());
+                return json_response(&crate::schema::fragment_lever(&self.raw, self.sql(), &self.state.id().to_string(), op, shape)?);
+            }
+            if body["op"] != "ended" {
+                self.schema.ready()?;
+            }
+            return json_response(&self.test_fragment(&body).await?);
+        }
+        // a fragment that refuses its schema still ends: its owner's
+        // delete and a wipe's end remove everything (schema.rs)
+        let ends = path.starts_with("/wipe/") || (req.method() == Method::Delete && path == "/delete");
+        if !ends {
+            self.schema.ready()?;
+        }
         if path == "/test/keys" && self.cfg.test_hooks {
             // this cell's own sealing: the e2e checks that what one
             // fragment seals another cannot open
@@ -861,10 +815,6 @@ impl FragmentCell {
                 _ => return Err(CellError::invalid("op is seal {plaintext} or open {sealed}")),
             };
             return json_response(&answer);
-        }
-        if path == "/test/fragment" && self.cfg.test_hooks {
-            let body: Value = body_json(&mut req).await?;
-            return json_response(&self.test_fragment(&body).await?);
         }
         if let Some(step) = path.strip_prefix("/job/") {
             // Only this script's Workflow sets the header; the router never passes it.
@@ -919,13 +869,21 @@ impl FragmentCell {
             let body: Value = body_json(&mut req).await?;
             return self.cap_files(&op, &body).await;
         }
-        if path == "/invites/claim" {
-            // Only the registry's sign-in sets the header; the router never passes it.
+        if path == "/invites/claim" || path == "/invites/decline" || path == "/members/agent" {
+            // Only the platform sets the header (a person's yes or no; an
+            // agent of theirs made); the router never passes it.
             if req.headers().get(crate::members::CLAIM_HEADER)?.is_none() {
                 return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
             }
+            if path == "/members/agent" {
+                let body: Value = body_json(&mut req).await?;
+                return json_response(&self.agent_with_person(&body).await?);
+            }
             let claim = body_json(&mut req).await?;
-            return json_response(&self.claim_invite(&claim).await?);
+            return json_response(&match path.as_str() {
+                "/invites/claim" => self.claim_invite(&claim).await?,
+                _ => self.decline_invite(&claim).await?,
+            });
         }
         if let Some(route) = path.strip_prefix("/wipe/") {
             // Only a wipe's orchestrator sets the header; the router never passes it.
@@ -1060,6 +1018,18 @@ impl FragmentCell {
                 self.pause(&caller, body)
             }
             (Method::Get, ["api", "triggers"]) => self.triggers_api(&caller),
+            // its scheduled records (schedules.rs): viewers list, editors change
+            (Method::Get, ["api", "schedules"]) => self.schedules_api(&caller),
+            (Method::Post, ["api", "schedules"]) => {
+                let body = body_json(&mut req).await?;
+                self.add_schedule(&caller, body).await
+            }
+            (Method::Put, ["api", "schedules", id]) => {
+                let body = body_json(&mut req).await?;
+                let id = id.to_string();
+                self.set_schedule(&caller, &id, body).await
+            }
+            (Method::Delete, ["api", "schedules", id]) => self.remove_schedule(&caller, id),
             // its app's database, for its owner (export.rs)
             (Method::Get, ["api", "database"]) => self.database(&caller, query("table"), query("offset")).await,
             (Method::Post, ["api", "subscriptions"]) => {
@@ -1203,6 +1173,7 @@ impl FragmentCell {
         self.require(caller, false, Role::Owner)?;
         let ended = self.end_life()?;
         self.tell_ended(Some(&ended.owner)).await;
+        self.forget_invites(&name).await;
         self.schedule().await?;
         json_response(&json!({ "ok": true, "deleted": name }))
     }
@@ -1275,7 +1246,7 @@ impl FragmentCell {
 
     /// The alarm runs an ended life's cleanup (ended.rs) whether or not a
     /// life was made since; then the life's index, search, joined and
-    /// delivery outboxes, due schedules, queued runs, and the pass: the
+    /// delivery outboxes, due schedules (the code's and its records'), queued runs, and the pass: the
     /// trims, the poll backstop (while the pins may lag), the blob
     /// collection, running runs checked, and the storage sample. The next
     /// pass is a day away, or within the poll interval while the fragment
@@ -1292,6 +1263,10 @@ impl FragmentCell {
         // in this pass's flush (`arm` wakes the alarm at each one's expiry)
         if let Err(e) = self.drop_spent_invites().await {
             self.event("invites.drop-failed", &e.message, json!({ "code": e.code }));
+        }
+        // a listed send that waited for its gap's end queues its rows for this flush
+        if let Err(e) = self.listed_send_due() {
+            self.event("listed.send-failed", &e.message, json!({ "code": e.code }));
         }
         self.flush_index().await;
         self.flush_search().await;
@@ -1320,7 +1295,6 @@ impl FragmentCell {
                 self.event("blobs.collect-failed", &e.message, json!({ "code": e.code }));
             }
             self.reconcile_runs().await;
-            self.release_ended_holds().await;
             if let Err(e) = self.sample_storage(false) {
                 self.event("meter.sample-failed", &e.message, json!({ "code": e.code }));
             }
@@ -1379,6 +1353,17 @@ impl FragmentCell {
             }
         }
         laps.lap("search");
+        // a record that moved what lists show: the rows it queued go now,
+        // not at the alarm's next pass (what this round leaves, and a send
+        // that waits for its gap's end, the alarm sends)
+        let listed = self.listed_moved.replace(false);
+        if listed {
+            self.flush_index().await;
+            if let Err(e) = self.schedule().await {
+                console_error!("{}", json!({ "event": "listed.arm-failed", "code": e.code, "message": e.message }));
+            }
+        }
+        laps.lap("listed");
         // side by side: a wake waits on its computer's start, and a launch
         // waits on no wake
         let t0 = js::now_ms();
@@ -1387,8 +1372,8 @@ impl FragmentCell {
         let ((drained, drain_ms), (launched, launch_ms)) = futures_util::future::join(drain, launch).await;
         laps.took("drain", drain_ms);
         laps.took("launch", launch_ms);
-        if searched || drained.queued + drained.woken + launched > 0 {
-            laps.log("later", json!({ "fragment": self.name().ok(), "queued": drained.queued, "woken": drained.woken, "launched": launched }));
+        if searched || listed || drained.queued + drained.woken + launched > 0 {
+            laps.log("later", json!({ "fragment": self.name().ok(), "listed": listed, "queued": drained.queued, "woken": drained.woken, "launched": launched }));
         }
     }
 
@@ -1413,7 +1398,7 @@ impl FragmentCell {
             self.set_meta(MetaKey::PollAt, &poll_at.to_string())?;
         }
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
-        let due = [outbox, self.search_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, self.card_due_at()?, self.invites_due_at()?, ended, also];
+        let due = [outbox, self.listed_due_at()?, self.search_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, self.card_due_at()?, self.invites_due_at()?, ended, also];
 
         let at = due.into_iter().flatten().fold(poll_at, i64::min).max(js::now_ms() + min_ms);
         self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(at as f64)))).await?;

@@ -50,14 +50,15 @@ use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{
-    alive, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Socket, Step, Wake, ALIVE_MS, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS,
 };
-use fragment_core::ledger::{Meter, MeterRow, Month, Release, Reserve, Settle, Spend};
+use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
 use fragment_core::own_signin;
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
-use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
+use fragment_core::connection_accounts::{Held, Unchosen};
+use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
 use fragment_proto::{ErrorCode, IdentityKind};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -89,27 +90,6 @@ const AGENT_HEADER: &str = "x-fragment-agent";
 const SESSION_COOKIE: &str = "fragment_computer";
 const FRAME_COOKIE: &str = "fragment_computer_frame";
 
-/// `agents.connections` is JSON: `null`, every provider the owner has
-/// (decision 44), or a list that narrows it. An agent's row names it as
-/// it is made (`computer/assign`), so the column's default is never read.
-/// `uses` counts each agent's calls to each provider a month (`Month`'s
-/// index) and what they were charged; `own_keys` holds the owner's own
-/// keys, sealed for this object; `own_signins` the sign-ins to an own key's
-/// provider under way (`fragment_core::own_signin`): each nonce's hash, its
-/// provider, its verifier sealed, until it expires or is finished, once.
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL, connections TEXT NOT NULL DEFAULT 'null');
-CREATE TABLE IF NOT EXISTS awake (from_ms INTEGER PRIMARY KEY, to_ms INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS tickets (hash TEXT PRIMARY KEY, port INTEGER NOT NULL, identity TEXT NOT NULL, expires_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, identity TEXT NOT NULL, expires_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS uses (month INTEGER NOT NULL, provider TEXT NOT NULL, agent TEXT NOT NULL, calls INTEGER NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, provider, agent));
-CREATE TABLE IF NOT EXISTS own_keys (provider TEXT PRIMARY KEY, sealed TEXT NOT NULL, set_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS own_signins (nonce TEXT PRIMARY KEY, provider TEXT NOT NULL, sealed TEXT NOT NULL, expires_at INTEGER NOT NULL);
-";
-/// The one row a wiped computer keeps: when it was wiped. Apart from
-/// `SCHEMA`, whose tables the wipe drops.
-const WIPED_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS wiped (at INTEGER NOT NULL);";
 /// R2 pages (up to 1000 keys each) one `computer/wipe` deletes under its
 /// saves' prefix; the rest are the next call's.
 const WIPE_PAGES_PER_CALL: usize = 10;
@@ -353,9 +333,18 @@ pub struct ComputerCell {
     /// running (lesson 6: `adopt`).
     adopted: std::cell::Cell<bool>,
     /// The owner's connections' states as Pipes last said them, and until
-    /// when they are believed (`STATES_TTL_MS`). In memory only. Only what
-    /// the guest's view lists: a token is asked of Pipes for each swap.
+    /// when they are believed (`STATES_TTL_MS`). In memory only. What the
+    /// guest's view lists, and what a swap may use: a token is asked of
+    /// Pipes for each swap of a connection these say is connected.
     states: RefCell<Option<(BTreeMap<String, ProviderState>, i64)>>,
+    /// Believed with them: the owner's accounts at each connection that
+    /// takes several (its row's `accounts_max`), in their list's order,
+    /// which a swap chooses its agent's from (`connection_accounts::chosen`).
+    accounts: RefCell<BTreeMap<String, Vec<Held>>>,
+    /// How many times the owner's reads (and disconnects) told it their
+    /// states (`computer/own-keys`): a read of its own begun before one
+    /// answers older states, and does not draw over them.
+    states_told: std::cell::Cell<u64>,
     /// Its owner was wiped (`wiped`'s row, read as it starts, or set by
     /// the wipe): no write lands, and it answers as no computer.
     wiped: std::cell::Cell<bool>,
@@ -366,6 +355,8 @@ pub struct ComputerCell {
     /// The start this isolate judged dead and destroys: its exit is that
     /// start's own failure, which it reports (`exit_of`).
     dead: std::cell::Cell<Option<u64>>,
+    /// Its schema as it started (schema.rs): ready, or refused.
+    schema: crate::schema::Schema,
 }
 
 impl DurableObject for ComputerCell {
@@ -373,10 +364,8 @@ impl DurableObject for ComputerCell {
         let raw: JsValue = state._inner().into();
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         let sql = state.storage().sql();
-        sql.exec(SCHEMA, None).expect("the Computer schema applies");
-        sql.exec(WIPED_SCHEMA, None).expect("the wiped row's schema applies");
-        let marks: Vec<Value> = sql.exec("SELECT COUNT(*) AS n FROM wiped", None).and_then(|c| c.to_array()).expect("the wiped row reads");
-        let wiped = marks.first().and_then(|r| r["n"].as_i64()).expect("COUNT answers a row") > 0;
+        let schema = crate::schema::Schema::start(&raw, sql.clone(), &fragment_core::migrate::COMPUTER, &state.id().to_string());
+        let wiped = schema.wiped(&sql);
         let cfg = Config::from_env(&env);
         ComputerCell {
             state,
@@ -385,13 +374,19 @@ impl DurableObject for ComputerCell {
             env,
             adopted: std::cell::Cell::new(false),
             states: RefCell::default(),
+            accounts: RefCell::default(),
+            states_told: std::cell::Cell::new(0),
             wiped: std::cell::Cell::new(wiped),
             heard_ms: std::cell::Cell::new(None),
             dead: std::cell::Cell::new(None),
+            schema,
         }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
+        if let Some(refused) = crate::routed::refused(&req, crate::routed::Own::of(self.cfg), &self.raw)? {
+            return Ok(refused);
+        }
         match self.route(req).await {
             Ok(r) => Ok(r),
             Err(e) => e.response(),
@@ -399,6 +394,9 @@ impl DurableObject for ComputerCell {
     }
 
     async fn alarm(&self) -> Result<Response> {
+        if self.schema.refused_alarm(&self.state, None).await? {
+            return Response::ok("");
+        }
         if !self.wiped.get() && self.meta(MetaKey::Id).ok().flatten().is_some() {
             if let Err(e) = self.drive(Event::Alarm).await {
                 console_error!("{{\"computer\":\"alarm\",\"error\":{}}}", json!(e.message));
@@ -425,6 +423,8 @@ impl DurableObject for ComputerCell {
     }
 
     async fn websocket_error(&self, ws: WebSocket, _error: worker::Error) -> Result<()> {
+        // closed here too, so the keepalives held open count it no more
+        let _ = ws.close(Some(1011), None::<&str>);
         self.keepalive_closed(&ws).await;
         Ok(())
     }
@@ -493,6 +493,16 @@ struct SetConnections {
     fragment: String,
     /// `None`: every provider the owner has (decision 44).
     connections: Option<Vec<String>>,
+}
+
+/// `computer/account`'s body: which of its owner's accounts at `provider`
+/// (a connection that takes several) the agent `fragment` uses, by its id
+/// (one the owner's list named: the router checked), or `None`, the default.
+#[derive(Deserialize)]
+struct SetAccount {
+    fragment: String,
+    provider: String,
+    account: Option<String>,
 }
 
 /// What an agent may have swapped in, as `agents.connections` keeps it.
@@ -568,6 +578,9 @@ struct SignedInAsk {
 struct OwnKeysAsk {
     #[serde(default)]
     connections: Option<BTreeMap<String, ProviderState>>,
+    /// With them, the accounts at each connection that takes several.
+    #[serde(default)]
+    accounts: Option<BTreeMap<String, Vec<Held>>>,
 }
 
 /// `computer/joined`'s body: the agent `identity` was added to `fragment`,
@@ -732,6 +745,13 @@ impl ComputerCell {
     /// wake while a start is under way) applies its own event between, and
     /// the generations keep a late report from changing anything.
     async fn drive(&self, first: Event) -> CellResult<Option<String>> {
+        self.drive_after(Some(first)).await
+    }
+
+    /// `drive`, after closing the keepalives its lifecycle counts that the
+    /// runtime no longer holds open (`keepalives_lost`); with no `first`,
+    /// those alone (a keepalive's close).
+    async fn drive_after(&self, first: Option<Event>) -> CellResult<Option<String>> {
         let told = self.notices()?;
         // a deploy since its last look is news, told as any change is
         self.look_logged().await;
@@ -792,12 +812,18 @@ impl ComputerCell {
         }
     }
 
-    async fn drive_events(&self, first: Event) -> CellResult<Option<String>> {
-        let mut queue = vec![first];
+    async fn drive_events(&self, first: Option<Event>) -> CellResult<Option<String>> {
+        let mut queue: Vec<Event> = first.into_iter().collect();
         if let Some(exited) = self.take_over().await? {
             // the event that brought this isolate up applies after the exit
             queue.push(exited);
         }
+        // before them all, the keepalives it counts that the runtime no
+        // longer holds open close, as their closes would have (#557: a deploy
+        // disconnects every socket, and the guest's close after it reaches no
+        // release); one the runtime holds never does
+        let lost = self.lifecycle()?.keepalives_lost(self.keepalives_held()?);
+        queue.extend((0..lost).map(|_| Event::Closed { socket: Socket::Keepalive }));
         let mut refused = None;
         let rules = self.rules();
         // bounded: each event's actions report at most one event each, and a
@@ -848,15 +874,20 @@ impl ComputerCell {
     /// A new isolate's first look (lesson 6): a container its lifecycle says
     /// is running is taken over (watched again, its intercepts and idle
     /// stop armed again, never destroyed: `/data` may be unsaved), or, gone,
-    /// reported as exited.
+    /// reported as exited; or, gone in a sleep's stop (lost with the isolate
+    /// before this one, which would have reported its end), as asleep.
     async fn adopt(&self) -> CellResult<Option<Event>> {
-        let Some(generation) = self.lifecycle()?.running() else { return Ok(None) };
+        let life = self.lifecycle()?;
+        let Some(generation) = life.running() else { return Ok(None) };
         let g = JsValue::from_f64(generation as f64);
         if self.call("adopt", std::slice::from_ref(&g)).await?.as_bool() != Some(true) {
-            return Ok(Some(Event::Exited { generation }));
+            return Ok(Some(match life.saving() {
+                Some(Saving::Stop { .. }) => Event::Asleep { generation },
+                _ => Event::Exited { generation },
+            }));
         }
         let id = self.must(MetaKey::Id)?;
-        self.call("arm", &[g, id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts()]).await?;
+        self.call("arm", &[g, id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts(), self.codestorage_through_egress()]).await?;
         Ok(None)
     }
 
@@ -994,6 +1025,12 @@ impl ComputerCell {
     /// The hosts the swap intercepts: every provider's in the catalog.
     fn swap_hosts(&self) -> JsValue {
         js::to_js(&json!(self.cfg.providers.hosts()))
+    }
+
+    /// Whether the guest reaches code.storage through its egress
+    /// (`egress_codestorage`): a local fleet's, at a loopback address.
+    fn codestorage_through_egress(&self) -> JsValue {
+        JsValue::from_bool(fragment_core::codestorage::guest_api(&self.cfg.codestorage().api).is_some())
     }
 
     /// The environment every image may rely on (docs/computers.md).
@@ -1138,7 +1175,7 @@ impl ComputerCell {
         }
         let started_ms = js::now_ms();
         self.call("start", &[g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size)]).await?;
-        let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts()]).await?;
+        let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts(), self.codestorage_through_egress()]).await?;
         if armed.as_bool() != Some(true) {
             return Err(CellError::host(format!("start {generation} was superseded before it was armed")).into());
         }
@@ -1506,6 +1543,15 @@ impl ComputerCell {
         let rows = self.rows("SELECT fragment, identity, owner, connections FROM agents ORDER BY added_at", vec![])?;
         assert!(rows.len() as u64 <= AGENTS_MAX, "a computer runs at most AGENTS_MAX agents");
         let mut agents = Vec::with_capacity(rows.len());
+        let own = self.own_key_names()?;
+        // at most an agent's row a provider, for each agent
+        let mut picks: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        for r in self.rows("SELECT agent, provider, account FROM agent_accounts", vec![])? {
+            let (agent, provider, account) = (r["agent"].as_str(), r["provider"].as_str(), r["account"].as_str());
+            if let (Some(agent), Some(provider), Some(account)) = (agent, provider, account) {
+                picks.entry(agent.to_string()).or_default().insert(provider.to_string(), account.to_string());
+            }
+        }
         for r in rows {
             let fragment = r["fragment"].as_str().unwrap_or_default().to_string();
             let name = fragment_proto::split_fragment_name(&fragment).map(|(label, _)| label.to_string()).unwrap_or_default();
@@ -1514,6 +1560,8 @@ impl ComputerCell {
             agents.push(ComputerAgent {
                 identity: r["identity"].as_str().unwrap_or_default().to_string(),
                 owner: r["owner"].as_str().unwrap_or_default().to_string(),
+                model_providers: self.cfg.providers.model_providers(&own, connections.as_deref()),
+                accounts: picks.remove(&fragment).unwrap_or_default(),
                 fragment,
                 name,
                 connections,
@@ -1526,13 +1574,11 @@ impl ComputerCell {
     /// The guest's own view (`GET /api/computer`): its agents, each with
     /// the credentials it may use now (a connection its owner connected, an
     /// operator key the deployment holds, an own key its owner gave; none
-    /// its owner narrowed it from), each a placeholder naming the agent; and
-    /// the model route's models' ids, as the deployment names them now.
+    /// its owner narrowed it from), each a placeholder naming the agent.
     async fn guest_view(&self) -> CellResult<ComputerView> {
         let mut view = self.view()?;
         // what its owner is told is theirs (its guest reads `restored`)
         view.notices = vec![];
-        view.models = Some(self.cfg.models.ids_by_name());
         let catalog = &self.cfg.providers;
         view.credential_env = catalog.env_names();
         if catalog.is_empty() || view.agents.is_empty() {
@@ -1579,14 +1625,23 @@ impl ComputerCell {
                 return states.clone();
             }
         }
-        let (states, until) = match crate::connections::connection_states(&self.env, self.cfg, self.workos_user(owner)).await {
+        let told = self.states_told.get();
+        let mut listed = BTreeMap::new();
+        let (states, until) = match crate::connections::connection_states(&self.env, self.cfg, self.workos_user(owner), Some(&mut listed)).await {
             Ok(s) => (s, now + STATES_TTL_MS),
             Err(e) => {
                 console_error!("{}", json!({ "computer": "connection-states", "error": e.message }));
                 (BTreeMap::new(), now + STATES_RETRY_MS)
             }
         };
+        // told newer ones meanwhile (a disconnect's): those stand
+        if self.states_told.get() != told {
+            if let Some((newer, _)) = self.states.borrow().as_ref() {
+                return newer.clone();
+            }
+        }
         *self.states.borrow_mut() = Some((states.clone(), until));
+        *self.accounts.borrow_mut() = crate::connections::held_of(self.cfg, &listed);
         states
     }
 
@@ -1613,6 +1668,26 @@ impl ComputerCell {
         if let Some((states, _)) = self.states.borrow_mut().as_mut() {
             states.insert(provider.to_string(), state);
         }
+    }
+
+    /// One of several accounts' state, as a swap just learned it: the
+    /// connection's is connected while another of them is.
+    fn note_account(&self, provider: &str, id: &str, state: ProviderState) {
+        let mut accounts = self.accounts.borrow_mut();
+        let Some(held) = accounts.get_mut(provider) else { return };
+        for a in held.iter_mut().filter(|a| a.id == id) {
+            a.state = state;
+        }
+        let connected = held.iter().any(|a| a.state == ProviderState::Connected);
+        drop(accounts);
+        self.note_state(provider, if connected { ProviderState::Connected } else { state });
+    }
+
+    /// The account `agent` uses at `provider`, as its owner picked it (none:
+    /// the default).
+    fn pick(&self, agent: &str, provider: &str) -> CellResult<Option<String>> {
+        let rows = self.rows("SELECT account FROM agent_accounts WHERE agent = ? AND provider = ?", vec![agent.into(), provider.into()])?;
+        Ok(rows.first().and_then(|r| r["account"].as_str()).map(str::to_string))
     }
 
     /// The providers the owner gave an own key for.
@@ -1651,7 +1726,7 @@ impl ComputerCell {
         if pending >= own_signin::SIGNINS_PENDING_MAX as u64 {
             return Err(CellError::new(ErrorCode::RateLimited, format!("{pending} sign-ins are under way: finish one, or wait {} minutes", own_signin::SIGNIN_TTL_MS / 60_000)));
         }
-        let nonce = own_signin::b64url(&js::random_bytes::<{ own_signin::NONCE_BYTES }>());
+        let nonce = own_signin::nonce(&js::random_bytes::<{ own_signin::NONCE_BYTES }>());
         let verifier = own_signin::b64url(&js::random_bytes::<{ own_signin::VERIFIER_BYTES }>());
         let sealed = crate::keys::seal(&self.env, &crate::keys::scope(SEAL_CLASS, &self.state), verifier.as_bytes()).await?;
         self.exec(
@@ -1756,7 +1831,8 @@ impl ComputerCell {
             agents: self.agents()?,
             origin,
             credential_env: vec![],
-            models: None,
+            // not secret: its owner's pages show each agent's model by its id
+            models: Some(self.cfg.models.ids_by_name()),
             restored: saves.restored().cloned(),
             rollbacks: saves.rollbacks(),
             saves: saves.views(),
@@ -1802,11 +1878,7 @@ impl ComputerCell {
         let (objects, more) = js::blob_delete_under(&self.env, &self.backups_prefix(), WIPE_PAGES_PER_CALL).await?;
         if !more {
             // one step, no await: its record emptied, the mark kept
-            let sql = self.sql();
-            for table in fragment_core::ddl::tables(SCHEMA) {
-                sql.exec(&format!("DROP TABLE IF EXISTS {table}"), None)?;
-            }
-            sql.exec(SCHEMA, None)?;
+            crate::schema::remake(self.sql(), &fragment_core::migrate::COMPUTER)?;
             assert!(self.meta(MetaKey::Id)?.is_none() && self.saves()?.every_record().is_empty(), "a wiped computer keeps no record");
         }
         console_log!("{}", json!({ "computer": id, "wipe": if more { "partly" } else { "done" }, "records": records.len(), "objects": objects }));
@@ -1872,9 +1944,13 @@ impl ComputerCell {
     /// `ms` for its guest to read its view, as a start from a snapshot does,
     /// with `freeze` its guest stopped so it never does (#362); `always-on
     /// {on}` is its owner's plan changing (the plan itself does not reach a
-    /// computer yet).
+    /// computer yet); `expire-sign-ins` puts every own-key sign-in under way
+    /// past its time.
     async fn lever(&self, b: &TestLever) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "only a test fleet pulls a computer's levers");
+        if b.op == "schema" {
+            return crate::schema::view(self.sql(), &fragment_core::migrate::COMPUTER);
+        }
         let id = self.must(MetaKey::Id)?;
         match b.op.as_str() {
             "fail-saves" => {
@@ -1917,6 +1993,13 @@ impl ComputerCell {
                 console_log!("{}", json!({ "computer": id, "lever": "alive-check", "ms": ms, "freeze": freeze }));
                 Ok(json!({ "computer": id, "aliveCheck": { "ms": ms, "freeze": freeze } }))
             }
+            "expire-sign-ins" => {
+                // every own-key sign-in under way is past its time, as ten
+                // minutes would leave it: its row stays, refused by its expiry
+                self.exec("UPDATE own_signins SET expires_at = ?", vec![js::now_ms().into()])?;
+                let pending = self.rows("SELECT COUNT(*) AS n FROM own_signins", vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
+                Ok(json!({ "computer": id, "expiredSignIns": pending }))
+            }
             "always-on" => {
                 let on = b.on.ok_or_else(|| CellError::invalid("always-on names on: true or false"))?;
                 self.drive(Event::AlwaysOn { on }).await?;
@@ -1947,6 +2030,8 @@ impl ComputerCell {
                 v["unsavedSince"] = json!(life.unsaved_since_ms());
                 v["freeSince"] = json!(life.free_since_ms());
                 v["keepalives"] = json!(life.keepalives());
+                // the keepalives the runtime holds open, beside those it counts
+                v["keepalivesHeld"] = json!(self.keepalives_held()?);
                 v["failSaves"] = json!(self.meta(MetaKey::FailSaves)?.and_then(|n| n.parse::<u32>().ok()).unwrap_or(0));
                 v["hangBackups"] = json!(self.meta(MetaKey::HangBackups)?.and_then(|n| n.parse::<i64>().ok()).unwrap_or(0));
                 Ok(v)
@@ -1957,9 +2042,15 @@ impl ComputerCell {
 
     async fn route(&self, mut req: Request) -> CellResult<Response> {
         let path = req.path();
-        // a wiped computer answers as none, its wipe's own calls aside
-        if self.wiped.get() && !matches!(path.as_str(), "/computer/wipe" | "/computer/wipe-view") {
+        // a wiped computer answers as none, its wipe's own calls aside;
+        // those end one that refuses its schema too, and the levers' look
+        // at its schema answers on it (schema.rs)
+        let wipe = matches!(path.as_str(), "/computer/wipe" | "/computer/wipe-view");
+        if self.wiped.get() && !wipe {
             return Err(wiped_computer());
+        }
+        if !wipe && path != "/computer/test" {
+            self.schema.ready()?;
         }
         match req.headers().get(KIND_HEADER)?.as_deref() {
             Some("keepalive") => return self.keepalive(&req).await,
@@ -2109,6 +2200,9 @@ impl ComputerCell {
                     None => self.rows("DELETE FROM agents WHERE fragment = ? RETURNING fragment", vec![b.fragment.as_str().into()])?,
                 };
                 assert!(gone.len() <= 1, "a computer runs a fragment once");
+                if !gone.is_empty() {
+                    self.exec("DELETE FROM agent_accounts WHERE agent = ?", vec![b.fragment.as_str().into()])?;
+                }
                 let view = self.view()?;
                 if !gone.is_empty() {
                     // its owner's pages read its agents again (an agent
@@ -2133,6 +2227,31 @@ impl ComputerCell {
                 let text = serde_json::to_string(&b.connections).map_err(|e| CellError::host(e.to_string()))?;
                 assert_eq!(stored_connections(&text, &b.fragment)?, b.connections, "connections read back as they are written");
                 self.exec("UPDATE agents SET connections = ? WHERE fragment = ?", vec![text.into(), b.fragment.as_str().into()])?;
+                // its owner's other pages read it again (the agent's page:
+                // which model it runs)
+                self.tell_owner().await;
+                json_response(&self.view()?)
+            }
+            "computer/account" => {
+                let b: SetAccount = body_json(&mut req).await?;
+                if self.cfg.providers.get(&b.provider).is_none_or(|p| p.kind != Kind::Connection || !p.several()) {
+                    return Err(CellError::invalid(format!("{:?} is no connection here that takes several accounts", b.provider)));
+                }
+                if b.account.as_deref().is_some_and(|a| !fragment_core::connection_accounts::valid_account_id(a)) {
+                    return Err(CellError::invalid("an account is its id, as GET /api/connections lists it"));
+                }
+                if self.rows("SELECT fragment FROM agents WHERE fragment = ?", vec![b.fragment.as_str().into()])?.is_empty() {
+                    return Err(CellError::new(ErrorCode::NotFound, format!("{} does not run on this computer", b.fragment)));
+                }
+                match &b.account {
+                    Some(account) => self.exec(
+                        "INSERT INTO agent_accounts (agent, provider, account) VALUES (?, ?, ?) ON CONFLICT (agent, provider) DO UPDATE SET account = excluded.account",
+                        vec![b.fragment.as_str().into(), b.provider.as_str().into(), account.as_str().into()],
+                    )?,
+                    None => self.exec("DELETE FROM agent_accounts WHERE agent = ? AND provider = ?", vec![b.fragment.as_str().into(), b.provider.as_str().into()])?,
+                }
+                // its owner's other pages read it again
+                self.tell_owner().await;
                 json_response(&self.view()?)
             }
             "computer/credentials" => {
@@ -2172,6 +2291,8 @@ impl ComputerCell {
                     }
                     None => self.exec("DELETE FROM own_keys WHERE provider = ?", vec![b.provider.as_str().into()])?,
                 }
+                // its owner's pages read it again: whose models each agent may run
+                self.tell_owner().await;
                 json_response(&json!({ "providers": self.own_key_names()? }))
             }
             "computer/sign-in" => {
@@ -2190,6 +2311,8 @@ impl ComputerCell {
                 // the owner just read their connections: believed as fresh
                 if let Some(states) = b.connections {
                     *self.states.borrow_mut() = Some((states, js::now_ms() + STATES_TTL_MS));
+                    *self.accounts.borrow_mut() = b.accounts.unwrap_or_default();
+                    self.states_told.set(self.states_told.get() + 1);
                 }
                 json_response(&json!({ "providers": self.own_key_names()? }))
             }
@@ -2243,6 +2366,9 @@ impl ComputerCell {
             }
             "computer/test" if self.cfg.test_hooks => {
                 let b: TestLever = body_json(&mut req).await?;
+                if b.op != "schema" {
+                    self.schema.ready()?;
+                }
                 json_response(&self.lever(&b).await?)
             }
             "computer/tab" => {
@@ -2258,8 +2384,9 @@ impl ComputerCell {
     /// The secrets to swap in for a request's placeholders (`b`, a request
     /// to `b.host`), when their tags name one agent that runs here now and
     /// that agent may use each provider: `{agent, identity, owner, secrets:
-    /// [{provider, tag, secret}]}`, so the egress holds a key's call on the
-    /// agent's owner's ledger and counts each call as the agent's. A tag that names
+    /// [{provider, tag, secret}]}`, so the egress gates a key's call on the
+    /// agent's owner's standing, charges it to them and counts each call as
+    /// the agent's. A tag that names
     /// no agent of this computer (forged, another computer's, or an agent
     /// removed since) is refused. An agent may use every provider its owner
     /// has unless its owner narrowed it to a list (decision 44: a person's
@@ -2310,8 +2437,8 @@ impl ComputerCell {
                 ));
             }
             let secret = match provider.kind {
-                Kind::Connection => self.connection_token(&owner, &provider.name).await?,
-                // its call is held on its owner's ledger before it is made (`hold_keys`)
+                Kind::Connection => self.connection_token(&owner, &provider.name, agent).await?,
+                // its call is gated on its owner's standing, and charged after (`egress_swap`)
                 Kind::Operator => crate::keys::operator_key(&self.env, &provider.name).await?,
                 Kind::Own => self.own_key(&provider.name).await?.ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("give your own {} key first (PUT /api/connections/{}/key)", provider.name, provider.name)))?,
             };
@@ -2347,10 +2474,33 @@ impl ComputerCell {
     /// `owner` signed in as, asked for each swap (Pipes holds and refreshes
     /// it), so a connection disconnected or revoked stops at the next
     /// request. What Pipes answers is the connection's state too, as the
-    /// guest's view lists it (`note_state`).
-    async fn connection_token(&self, owner: &str, provider: &str) -> CellResult<String> {
+    /// guest's view lists it (`note_state`). Where the owner connects
+    /// several accounts there, it is the token of the one `agent` uses: its
+    /// pick, else the default (`connection_accounts::chosen`), named to
+    /// Pipes by its id; only an account the owner's list named is ever named.
+    async fn connection_token(&self, owner: &str, provider: &str, agent: &str) -> CellResult<String> {
+        // only one its states say is connected, as the guest's view lists
+        // them: one its owner disconnected stays refused, whatever Pipes
+        // may hold for it since (an import landed late: registry/
+        // connection_signin.rs `fence_connection`), and no token is asked
+        match self.connection_states(owner).await.get(provider) {
+            Some(ProviderState::Connected) => {}
+            Some(ProviderState::NeedsReauthorization) => return Err(CellError::new(ErrorCode::NotConnected, format!("connect {provider} again: its account needs authorizing again"))),
+            _ => return Err(CellError::new(ErrorCode::NotConnected, format!("connect {provider} first: no account is connected"))),
+        }
+        let account = match self.cfg.providers.get(provider).is_some_and(|p| p.several()) {
+            true => {
+                let held = self.accounts.borrow().get(provider).cloned().unwrap_or_default();
+                match fragment_core::connection_accounts::chosen(self.pick(agent, provider)?.as_deref(), &held) {
+                    Ok(id) => Some(id.to_string()),
+                    Err(Unchosen::NeedsReauthorization) => return Err(CellError::new(ErrorCode::NotConnected, format!("connect {provider} again: the account {agent} uses needs authorizing again"))),
+                    Err(Unchosen::NotConnected) => return Err(CellError::new(ErrorCode::NotConnected, format!("connect {provider} first: no account is connected"))),
+                }
+            }
+            false => None,
+        };
         let user = self.workos_user(owner).await?.ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("{owner} has no WorkOS account to connect {provider} with")))?;
-        let (status, answer) = crate::keys::pipes_token(&self.env, &self.cfg.workos()?.api, provider, &user).await?;
+        let (status, answer) = crate::keys::pipes_token(&self.env, &self.cfg.workos()?.api, provider, &user, account.as_deref()).await?;
         if status != 200 {
             let why = answer["message"].as_str().unwrap_or("no reason given");
             return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS refused {provider}'s token ({status}): {why}")));
@@ -2361,11 +2511,17 @@ impl ComputerCell {
                 Some("needs_reauthorization") => (ProviderState::NeedsReauthorization, format!("connect {provider} again: its account needs authorizing again")),
                 _ => (ProviderState::NotConnected, format!("connect {provider} first: no account is connected")),
             };
-            self.note_state(provider, state);
+            match &account {
+                Some(id) => self.note_account(provider, id, state),
+                None => self.note_state(provider, state),
+            }
             return Err(CellError::new(ErrorCode::NotConnected, why));
         }
         let token = answer["access_token"]["access_token"].as_str().filter(|t| !t.is_empty()).ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "WorkOS answered no token"))?;
-        self.note_state(provider, ProviderState::Connected);
+        match &account {
+            Some(id) => self.note_account(provider, id, ProviderState::Connected),
+            None => self.note_state(provider, ProviderState::Connected),
+        }
         Ok(token.to_string())
     }
 
@@ -2375,15 +2531,28 @@ impl ComputerCell {
         self.exec(&format!("DELETE FROM {table} WHERE hash NOT IN (SELECT hash FROM {table} ORDER BY expires_at DESC LIMIT {max})"), vec![])
     }
 
-    /// A keepalive closed: it counts only if its container is the running one.
+    /// A keepalive closed: it counts only if its container is the running
+    /// one, and as the lifecycle's count coming down to the keepalives still
+    /// open (`drive_after`): one closed already for want of its socket (a
+    /// deploy's, its close late) counts once.
     async fn keepalive_closed(&self, ws: &WebSocket) {
         let current = self.lifecycle().map(|l| format!("g{}", l.generation())).unwrap_or_default();
         if !self.state.get_tags(ws).contains(&current) {
             return;
         }
-        if let Err(e) = self.drive(Event::Closed { socket: Socket::Keepalive }).await {
+        if let Err(e) = self.drive_after(None).await {
             console_error!("{}", json!({ "computer": "keepalive-closed", "error": e.message }));
         }
+    }
+
+    /// The running start's keepalives the runtime holds open: each socket
+    /// accepted for that start (tagged with its generation) and open, so not
+    /// one closing (its close handler closed it first) nor one a deploy
+    /// disconnected (the runtime lists none such).
+    fn keepalives_held(&self) -> CellResult<usize> {
+        let tag = format!("g{}", self.lifecycle()?.generation());
+        let open = |ws: &WebSocket| AsRef::<worker_sys::web_sys::WebSocket>::as_ref(ws).ready_state() == worker_sys::web_sys::WebSocket::OPEN;
+        Ok(self.state.get_websockets_with_tag(&tag).iter().filter(|ws| open(ws)).count())
     }
 
     /// The guest's keepalive: accepted here, so it is the Computer DO's own
@@ -2430,6 +2599,46 @@ impl ComputerCell {
 /// The internal call `path` with `body` on computer `id`.
 pub(crate) async fn ask(env: &Env, id: &str, path: &str, body: &Value) -> CellResult<Value> {
     crate::routed::ask_object(env, "COMPUTER", id, path, body).await
+}
+
+/// `computer/signed-in` as the router asks it: an own-key round trip
+/// coming back to the browser that began it, for its person, whose
+/// computer began it. It is a finished round trip, so only `of` makes one,
+/// from its `Bound`: its fields are private and it is not `Deserialize`
+/// (the computer decodes the same body as a `SignedInAsk`).
+#[derive(serde::Serialize)]
+pub(crate) struct SignedIn {
+    #[serde(skip)]
+    computer: String,
+    provider: String,
+    nonce: String,
+}
+
+impl SignedIn {
+    /// The own-key sign-in `bound` finishes, for `person`, to `provider`:
+    /// asked of the person's own computer, never one a URL names.
+    pub(crate) fn of(bound: crate::auth::Bound, person: &fragment_proto::Identity, provider: &str) -> SignedIn {
+        assert_eq!(bound.trip(), fragment_core::roundtrip::Trip::OwnKey, "an own key's callback finishes an own key's sign-in");
+        assert_eq!(person.kind, fragment_proto::IdentityKind::Person, "an own key's sign-in is a person's");
+        SignedIn { computer: fragment_core::computer::default_computer_of(&person.id), provider: provider.to_string(), nonce: bound.state().to_string() }
+    }
+
+    /// The computer it is asked of.
+    pub(crate) fn computer(&self) -> &str {
+        &self.computer
+    }
+}
+
+/// The sign-in `signed` finishes, taken from its computer (once, and gone
+/// whatever comes of it): its verifier.
+pub(crate) async fn signed_in(env: &Env, signed: &SignedIn) -> CellResult<String> {
+    let body = serde_json::to_value(signed).map_err(|e| CellError::host(format!("a sign-in's body: {e}")))?;
+    let answer = ask(env, &signed.computer, "computer/signed-in", &body).await?;
+    let verifier = answer["verifier"].as_str().unwrap_or_default().to_string();
+    if !own_signin::valid_token(&verifier) {
+        return Err(CellError::host("the computer kept a sign-in with no verifier"));
+    }
+    Ok(verifier)
 }
 
 fn view_of(v: Value) -> CellResult<ComputerView> {
@@ -2514,7 +2723,12 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             let took = crate::fragment::ask(env, fragment, "computer/assign", &json!({ "computer": id, "owner": who })).await?;
             let identity = took["identity"].as_str().ok_or_else(|| CellError::host("the agent fragment named no identity"))?;
             let body = json!({ "fragment": fragment, "identity": identity, "owner": who });
-            json_response(&view_of(ask(env, id, "computer/assign", &body).await?)?)
+            let view = view_of(ask(env, id, "computer/assign", &body).await?)?;
+            // it comes in where its person is (decision 64), once both the
+            // fragment and the computer hold it, so its computer hears each
+            // join; a replay joins nothing twice
+            crate::members::agent_made(env, who, identity).await;
+            json_response(&view)
         }
         (Method::Put, [id, "agents", fragment, "connections"]) => {
             owned(env, who, id).await?;
@@ -2531,6 +2745,29 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             }
             let set = json!({ "fragment": fragment, "connections": b.connections });
             json_response(&view_of(ask(env, id, "computer/connections", &set).await?)?)
+        }
+        (Method::Put, [id, "agents", fragment, "accounts", provider]) => {
+            owned(env, who, id).await?;
+            let v: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            // a body that forgot the field is not a reset to the default
+            if v.get("account").is_none() {
+                return Err(CellError::invalid("name an account: its id, as GET /api/connections lists it, or null for the default"));
+            }
+            let b: AgentAccount = serde_json::from_value(v).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let cfg = Config::from_env(env);
+            if cfg.providers.get(provider).is_none_or(|p| p.kind != Kind::Connection || !p.several()) {
+                return Err(CellError::invalid(format!("{provider} is no connection here that takes several accounts")));
+            }
+            if let Some(account) = &b.account {
+                // one of the owner's accounts there, as their list names it
+                let mut listed = BTreeMap::new();
+                crate::connections::connection_states(env, cfg, crate::connections::workos_user(env, cfg, who), Some(&mut listed)).await?;
+                if !listed.get(*provider).is_some_and(|l| l.iter().any(|a| !a.fenced && a.id.as_deref() == Some(account.as_str()))) {
+                    return Err(CellError::new(ErrorCode::NotFound, format!("no {provider} account {account:?} of yours: GET /api/connections lists them")));
+                }
+            }
+            let set = json!({ "fragment": fragment, "provider": provider, "account": b.account });
+            json_response(&view_of(ask(env, id, "computer/account", &set).await?)?)
         }
         (Method::Get, [id, "uses"]) => {
             owned(env, who, id).await?;
@@ -2678,7 +2915,7 @@ async fn host_answer(req: Request, env: &Env, url: &Url, id: &str, signer: Optio
         init.with_body(req.inner().body().map(JsValue::from));
     }
     let inner = Request::new_with_init(&format!("http://container/{tail}{query}"), &init)?;
-    Ok(env.durable_object("COMPUTER")?.get_by_name(id)?.fetch_with_request(inner).await?)
+    crate::routed::send(env, "COMPUTER", id, inner).await
 }
 
 /// Every request a computer's guest sends to `api.fragment.internal`,
@@ -2698,6 +2935,7 @@ impl ComputerEgress {
             "api" => egress_api(req, &env, &ctx, &computer).await,
             "model" => egress_model(req, &env, &ctx, &computer).await,
             "swap" => egress_swap(req, &env, &ctx, &computer).await,
+            "codestorage" => egress_codestorage(req, &env).await,
             r => Err(CellError::new(ErrorCode::NotFound, format!("no egress route {r}"))),
         };
         // one line per refusal (lesson 14): the guest's requests never reach
@@ -2718,7 +2956,9 @@ impl ComputerEgress {
 /// own routes (`/f/<fragment>/…`), as the agent its `x-fragment-agent`
 /// names: the agent fragment signs it (NIP-98) only when it runs on this
 /// computer, and the router answers it as it would from the internet.
-/// Without the header, only the computer's own routes answer.
+/// Without the header, only the computer's own routes answer. A storage
+/// token names the code.storage the guest can reach: its egress's, on a
+/// local fleet (`egress_codestorage`).
 async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     let url = req.url()?;
@@ -2737,7 +2977,7 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
             let mut init = RequestInit::new();
             init.with_method(Method::Get).with_headers(headers);
             let inner = Request::new_with_init("https://computer.internal/keepalive", &init)?;
-            return Ok(env.durable_object("COMPUTER")?.get_by_name(computer)?.fetch_with_request(inner).await?);
+            return crate::routed::send(env, "COMPUTER", computer, inner).await;
         }
         _ => {}
     }
@@ -2760,6 +3000,11 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
         None => return Err(CellError::new(ErrorCode::NotFound, "the API is /api/… and a fragment's routes /f/<fragment>/…")),
     };
     let method = req.method();
+    // Only the platform's token endpoint: a channel or app route with
+    // this suffix keeps its own body. Decode as the fragment router does.
+    let segments: Vec<&str> = path.split('/').collect();
+    let storage_token = method == Method::Get
+        && matches!(segments.as_slice(), ["", "api", "f", _, endpoint] if crate::fragment::decode_segment(endpoint) == "storage-token");
     let socket = req.headers().get("upgrade")?.is_some_and(|u| u.eq_ignore_ascii_case("websocket"));
     let body = match method {
         Method::Get | Method::Head => vec![],
@@ -2815,7 +3060,49 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
         init.with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
     }
     let out = Request::new_with_init(&target, &init)?;
-    crate::route(out, env, ctx).await
+    let mut answered = crate::route(out, env, ctx).await?;
+    if let Some(api) = fragment_core::codestorage::guest_api(&cfg.codestorage().api).filter(|_| storage_token && answered.status_code() == 200) {
+        let mut token: fragment_proto::StorageToken = answered.json().await?;
+        token.api = api;
+        return json_response(&token);
+    }
+    Ok(answered)
+}
+
+/// The guest's call to code.storage on a local fleet, whose code.storage
+/// is at a loopback address the guest's container cannot reach (the
+/// machine's, not the container's): at `GUEST_HOST`, which a storage token
+/// minted through its egress names (`egress_api`), sent on as it came, its
+/// token with it, to `CODESTORAGE_API_URL`. On a deployment the guest
+/// reaches code.storage itself, and this is 404.
+async fn egress_codestorage(mut req: Request, env: &Env) -> CellResult<Response> {
+    let cfg = Config::from_env(env);
+    if fragment_core::codestorage::guest_api(&cfg.codestorage().api).is_none() {
+        return Err(CellError::new(ErrorCode::NotFound, "code.storage is reached directly here"));
+    }
+    let url = req.url()?;
+    let query = url.query().map(|q| format!("?{q}")).unwrap_or_default();
+    let target = format!("{}{}{query}", cfg.codestorage().api, url.path());
+    let method = req.method();
+    let body = match method {
+        Method::Get | Method::Head => vec![],
+        _ => crate::read_body(&mut req, EGRESS_BODY_MAX_BYTES).await?,
+    };
+    let headers = Headers::new();
+    for k in ["authorization", "content-type", "accept"] {
+        if let Some(v) = req.headers().get(k)? {
+            headers.set(k, &v)?;
+        }
+    }
+    if !body.is_empty() {
+        headers.set("content-length", &body.len().to_string())?;
+    }
+    let mut init = RequestInit::new();
+    init.with_method(method).with_headers(headers);
+    if !body.is_empty() {
+        init.with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
+    }
+    Ok(Fetch::Request(Request::new_with_init(&target, &init)?).send().await?)
 }
 
 /// The guest's model call (docs/computers.md, Models): `POST
@@ -2869,13 +3156,13 @@ const HOP_HEADERS: [&str; 9] = ["connection", "keep-alive", "proxy-authorization
 /// row names, for the agent its tag names, and the request goes on over
 /// HTTPS. A request with no placeholder goes on as it is (decision 43).
 /// A body is sent as it came. The platform's own headers (`x-fragment-…`)
-/// go to no provider. An operator key's call is held on the agent's
-/// owner's ledger before it is made (`hold_keys`, awaited: no hold, no
-/// call). After the answer is handed back, the hold is settled if the
-/// provider answered, or released (`end_holds`), and each call it answered
-/// is counted as the agent's (`computer/used`). Both run in `wait_until`:
-/// a hold that never ends is charged by the ledger's sweep, so deferring
-/// the settle loses nothing.
+/// go to no provider. An operator key's call asks the gate first
+/// (ledger.rs `may`: the agent's owner's standing as this isolate heard
+/// it within the minute; a person out of credit is refused, and a ledger
+/// that does not answer refuses nothing: decision 62). After the answer is
+/// handed back, each operator key's call the provider answered (under
+/// 500) is charged to the owner (`charge_keys`) and counted as the agent's
+/// (`computer/used`), in `wait_until`, never in the answer's way.
 async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     let url = req.url()?;
@@ -2929,26 +3216,39 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         init.with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
     }
     let out = Request::new_with_init(&target, &init)?;
-    // held last, so every hold reaches `end_holds`
-    let holds = match &payer {
-        Some((_, owner, identity)) => hold_keys(env, cfg, computer, owner, identity, &plan).await?,
-        None => vec![],
-    };
+    // the operator's keys among them, and the gate asked for them last
+    let keys: Vec<&Placeholder> = plan.wanted.iter().filter(|p| cfg.providers.get(&p.provider).is_some_and(|row| row.kind == Kind::Operator)).collect();
+    if let (Some((_, owner, _)), Some(first)) = (&payer, keys.first()) {
+        let may = crate::ledger::MaySpend { spend: Spend::AgentTurn, fragment: None, by_owner: true };
+        crate::ledger::may(env, owner, &may).await.map_err(|e| CellError::new(e.code, format!("{}'s call is not made: {}", first.provider, e.message)))?;
+    }
     let sent = Fetch::Request(out).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {e}")));
     let status = sent.as_ref().ok().map(Response::status_code);
     let answered = status.is_some_and(|s| s < 500);
-    // after the answer, never in its way: a hold that does not end is the
-    // ledger's to charge (its sweep), so nothing here goes unaccounted
-    if let Some((agent, owner, _)) = payer {
+    // after the answer, never in its way
+    if let (Some((agent, owner, identity)), true) = (payer, answered) {
+        let book = &cfg.book;
+        let key = |p: &Placeholder| Usage::Key { key: p.provider.clone(), units: 1 };
         // each call the provider answered is the agent's (decision 37), a key's at its price
-        let uses: Vec<Value> = plan.wanted.iter().map(|p| json!({ "provider": p.provider, "micros": holds.iter().find(|h| h.provider == p.provider).map_or(0, |h| h.amount) })).collect();
+        let uses: Vec<Value> = plan
+            .wanted
+            .iter()
+            .map(|p| {
+                let micros = if keys.contains(&p) { book.price(&key(p)).map_or(0, |priced| priced.charge) } else { 0 };
+                json!({ "provider": p.provider, "micros": micros })
+            })
+            .collect();
+        let at = js::now_ms();
+        let rows: Vec<MeterRow> = keys
+            .iter()
+            .map(|p| MeterRow { reference: format!("key:{computer}:{}", js::random_hex::<12>()), usage: key(p), fragment: None, agent: Some(identity.clone()), computer: Some(computer.to_string()), at_ms: at })
+            .collect();
         let (env, computer) = (env.clone(), computer.to_string());
         ctx.wait_until(async move {
-            end_holds(&env, &owner, &holds, answered).await;
-            if !answered {
-                return;
+            if !rows.is_empty() {
+                crate::meter::charge(&env, &owner, rows).await;
             }
-            if let Err(e) = ask(&env, &computer, "computer/used", &json!({ "agent": agent, "at": js::now_ms(), "uses": uses })).await {
+            if let Err(e) = ask(&env, &computer, "computer/used", &json!({ "agent": agent, "at": at, "uses": uses })).await {
                 console_error!("{}", json!({ "egress": "swap", "used": e.message }));
             }
         });
@@ -2959,58 +3259,6 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         console_log!("{}", json!({ "egress": "swap", "computer": computer, "host": host, "method": method.as_ref(), "credentials": names, "status": status }));
     }
     sent
-}
-
-/// An operator key's call held on its owner's ledger (`hold_keys`).
-struct KeyHold {
-    provider: String,
-    reference: String,
-    amount: i64,
-}
-
-/// Holds each operator key's call in `plan` on `owner`'s ledger before it
-/// is made, as the agent `identity`: one call at its price, under
-/// `key:<computer>:<12 hex>`, as a model call holds its worst case
-/// (docs/ledger.md). A key is the operator's money: a ledger that refuses,
-/// or does not answer, refuses the call, and what it held already goes
-/// back.
-async fn hold_keys(env: &Env, cfg: &Config, computer: &str, owner: &str, identity: &str, plan: &Plan) -> CellResult<Vec<KeyHold>> {
-    let mut holds: Vec<KeyHold> = vec![];
-    // bounded: at most swap::PLACEHOLDERS_MAX
-    for p in plan.wanted.iter().filter(|p| cfg.providers.get(&p.provider).is_some_and(|row| row.kind == Kind::Operator)) {
-        let reserve = Reserve {
-            reference: format!("key:{computer}:{}", js::random_hex::<12>()),
-            spend: Spend::AgentTurn,
-            worst: Usage::Key { key: p.provider.clone(), units: 1 },
-            fragment: None,
-            agent: Some(identity.to_string()),
-            capped: false,
-        };
-        match crate::ledger::hold(env, owner, &reserve).await {
-            Ok(amount) => holds.push(KeyHold { provider: p.provider.clone(), reference: reserve.reference, amount }),
-            Err(e) => {
-                end_holds(env, owner, &holds, false).await;
-                return Err(CellError::new(e.code, format!("{}'s call is not made: {}", p.provider, e.message)));
-            }
-        }
-    }
-    Ok(holds)
-}
-
-/// Ends each hold: settled at its one call when its provider answered
-/// (under 500), else released (the call was not made, or not answered).
-/// One that does not land stays held, which the ledger's sweep charges at
-/// its amount.
-async fn end_holds(env: &Env, owner: &str, holds: &[KeyHold], answered: bool) {
-    for h in holds {
-        let ended = match answered {
-            true => crate::ledger::retried(env, owner, &Settle { reference: h.reference.clone(), usage: Some(Usage::Key { key: h.provider.clone(), units: 1 }) }).await.map(|_| ()),
-            false => crate::ledger::retried(env, owner, &Release { reference: h.reference.clone() }).await.map(|_| ()),
-        };
-        if let Err(e) = ended {
-            console_error!("{}", json!({ "egress": "swap", "hold": h.reference, "answered": answered, "error": e.message }));
-        }
-    }
 }
 
 /// The fragment a guest's `/f/<fragment>/…` or `/api/f/<fragment>/…` path names.

@@ -65,6 +65,13 @@ enum Shape {
     /// one key a test value), the fallback and vision on Workers AI's
     /// GLM-5.3 Flash.
     FinitePrivate,
+    /// As `Plain`, with no Stripe (no `stripe` in its config): billing
+    /// off, as finite.chat launched, every seat an operator's comp.
+    SellsNothing,
+    /// As `Plain`, its catalog one operator key longer (`ADDED_KEY`, at a
+    /// price of its own) and nothing else changed: a row an operator adds,
+    /// with no version to raise (#451).
+    OneKeyMore,
 }
 
 /// Finite Private's key on a node shaped as Finite's (`Shape::FinitePrivate`):
@@ -100,6 +107,11 @@ const ENDED_CLEANUP_IN: Duration = Duration::from_secs(120);
 /// The pending sign-ins this fleet keeps: small, so the signin lane fills
 /// the table and proves the oldest goes first in a few hundred requests.
 pub const SIGNINS_PENDING_MAX: u64 = 200;
+/// The local node's CLI codes an address may ask for a minute
+/// (`FRAGMENT_CLI_BEGINS_PER_IP_MINUTE`): above what a section's people ask
+/// for in a minute, from the run's one address, and small enough for the
+/// signin section to pass it from another.
+pub const CLI_BEGINS_PER_IP_MINUTE: u32 = 120;
 /// A new person's plan here: a seat, so each starts the month with its
 /// included credit (production's is `guest`).
 pub const DEFAULT_PLAN: &str = "seat";
@@ -128,6 +140,9 @@ pub const REHEARSAL_BRANCH: &str = "rh";
 pub const SWAP_CONNECTION: &str = "google";
 pub const SWAP_CONNECTION_HOST: &str = "www.googleapis.com";
 pub const SWAP_CONNECTION_ENV: &str = "GOOGLE_OAUTH_ACCESS_TOKEN";
+/// The connection's note (its row's `note`, the only one in the e2e's
+/// catalog), which settings shows under its name.
+pub const SWAP_CONNECTION_NOTE: &str = "Google is still reviewing this app, so Google shows a warning that it isn't verified when you connect.";
 /// The operator keys, each its test value and its environment variable.
 pub const SWAP_KEYS: [(&str, &str, &str); 8] = [
     ("x", "x-bearer-e2e-51a3", "X_API_BEARER_TOKEN"),
@@ -139,6 +154,21 @@ pub const SWAP_KEYS: [(&str, &str, &str); 8] = [
     ("xai", "xai-e2e-0c4d22", "XAI_API_KEY"),
     ("elevenlabs", "sk_e2e_eleven_9e1f", "ELEVENLABS_API_KEY"),
 ];
+/// The operator key a node shaped `Shape::OneKeyMore` adds (its name, its
+/// test value, its environment variable), and its catalog row: $0.02 a
+/// call at list.
+pub const ADDED_KEY: (&str, &str, &str) = ("e2e-added", "e2e-added-key-3f9b", "E2E_ADDED_KEY");
+pub fn added_key_row() -> Value {
+    let (name, _, env) = ADDED_KEY;
+    json!({ "name": name, "kind": "operator", "hosts": ["api.added.test"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [env], "price": { "micros": 20_000, "per": 1 } })
+}
+/// A connection a person connects several accounts at (its row's
+/// `accounts_max`), through the WorkOS fake's stand-in provider as
+/// `e2e-oauth` is, which stays one account a person: both paths run.
+pub const SEVERAL: &str = "e2e-several";
+pub const SEVERAL_MAX: u8 = 3;
+pub const SEVERAL_HOST: &str = "several.test";
+pub const SEVERAL_ENV: &str = "E2E_SEVERAL_TOKEN";
 pub const SWAP_OWN: &str = "e2e-mail";
 pub const SWAP_OWN_HOST: &str = "api.mail.test";
 pub const SWAP_OWN_ENV: &str = "E2E_MAIL_KEY";
@@ -150,8 +180,9 @@ pub const SWAP_ROUTER_HOST: &str = "openrouter.ai";
 pub const SWAP_ROUTER_ENV: &str = "OPENROUTER_API_KEY";
 
 /// The fleet's provider catalog: `deploy/e2e.jsonc`'s, its keys' store
-/// names dropped (the deploy's), and the own key's provider; OpenRouter's
-/// sign-in at `router_oauth` (the fake's) when one is named.
+/// names dropped (the deploy's), Google with its note, and the own key's
+/// provider; OpenRouter's sign-in at `router_oauth` (the fake's) when one
+/// is named.
 pub fn swap_providers(router_oauth: Option<Value>) -> Result<Value> {
     let text = std::fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc"))?;
     let config: Value = serde_json::from_str(&devstack::strip_comments(&text))?;
@@ -160,6 +191,9 @@ pub fn swap_providers(router_oauth: Option<Value>) -> Result<Value> {
         r.as_object_mut().context("a provider is an object")?.remove("key");
         if let (Some(o), true) = (&router_oauth, r["name"] == SWAP_ROUTER) {
             r["oauth"] = o.clone();
+        }
+        if r["name"] == SWAP_CONNECTION {
+            r["note"] = json!(SWAP_CONNECTION_NOTE);
         }
     }
     rows.push(json!({ "name": SWAP_OWN, "kind": "own", "hosts": [SWAP_OWN_HOST], "placements": [{ "basic": "password" }], "env": [SWAP_OWN_ENV] }));
@@ -506,6 +540,23 @@ impl Suite {
         started
     }
 
+    /// Starts the node with no Stripe (`Shape::SellsNothing`): billing off.
+    pub fn start_selling_nothing(&mut self) -> Result<Api> {
+        self.shape = Shape::SellsNothing;
+        let started = self.start(false);
+        self.shape = Shape::Plain;
+        started
+    }
+
+    /// Starts the node with one operator key more in its catalog
+    /// (`Shape::OneKeyMore`).
+    pub fn start_with_a_key_more(&mut self) -> Result<Api> {
+        self.shape = Shape::OneKeyMore;
+        let started = self.start(false);
+        self.shape = Shape::Plain;
+        started
+    }
+
     fn start_shaped(&mut self, shape: Shape) -> Result<Api> {
         self.shape = shape;
         let started = self.start(false);
@@ -557,7 +608,7 @@ impl Suite {
                 api_key: WORKOS_KEY.into(),
                 api_url: Some(self.workos.node().url.clone()),
             }),
-            stripe: Some(devstack::StripeVars {
+            stripe: (self.shape != Shape::SellsNothing).then(|| devstack::StripeVars {
                 key: STRIPE_KEY.into(),
                 webhook_secret: STRIPE_WEBHOOK.into(),
                 api_url: Some(self.stripe.node().url.clone()),
@@ -566,19 +617,30 @@ impl Suite {
             }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
-                Shape::Plain | Shape::FinitePrivate => format!("http://127.0.0.1:{}", self.port),
+                Shape::Plain | Shape::FinitePrivate | Shape::SellsNothing | Shape::OneKeyMore => format!("http://127.0.0.1:{}", self.port),
             },
             operators: Some(
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
             ),
             signins_pending_max: Some(SIGNINS_PENDING_MAX),
+            cli_begins_per_ip_minute: Some(CLI_BEGINS_PER_IP_MINUTE),
             // the levers, as a preview has them: each request carries the secret
             test_secret: Some(self.test_secret.clone()),
             computer_image: Some("stub".into()),
+            images: vec![],
             computer_snapshots: false,
             computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
-            providers: Some(swap_providers(Some(self.openrouter.node().oauth()))?.to_string()),
-            operator_key_values: SWAP_KEYS.iter().map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
+            providers: Some({
+                let mut rows = swap_providers(Some(self.openrouter.node().oauth()))?;
+                rows.as_array_mut().expect("catalog").push(json!({ "name": "e2e-oauth", "kind": "connection", "hosts": ["oauth.test"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["E2E_OAUTH_TOKEN"], "connection_oauth": self.workos.node().connection_oauth() }));
+                rows.as_array_mut().expect("catalog").push(json!({ "name": SEVERAL, "kind": "connection", "hosts": [SEVERAL_HOST], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [SEVERAL_ENV], "connection_oauth": self.workos.node().connection_oauth(), "accounts_max": SEVERAL_MAX }));
+                if self.shape == Shape::OneKeyMore {
+                    rows.as_array_mut().expect("catalog").push(added_key_row());
+                }
+                rows.to_string()
+            }),
+            operator_key_values: SWAP_KEYS.iter().chain((self.shape == Shape::OneKeyMore).then_some(&ADDED_KEY)).map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
+            connection_secret_values: vec![("e2e-oauth".into(), "mock-connection-secret".into()), (SEVERAL.into(), "mock-connection-secret".into())],
             swap_upstream: Some(self.upstream.node().url.clone()),
         };
         // its secrets go to wrangler's local store in the node's own state
@@ -605,7 +667,7 @@ impl Suite {
     fn suffix(&self) -> &'static str {
         match self.shape {
             Shape::TwoSites => BOATS,
-            Shape::Plain | Shape::FinitePrivate => SUFFIX,
+            Shape::Plain | Shape::FinitePrivate | Shape::SellsNothing | Shape::OneKeyMore => SUFFIX,
         }
     }
 
@@ -617,6 +679,26 @@ impl Suite {
     pub fn crash(&mut self) -> Result<()> {
         anyhow::ensure!(!self.hosted_rules, "the hosted lane crashes no node: a section that does declares Need::Node");
         self.node.take().expect("a running node").crash()
+    }
+
+    /// Reloads the node's Worker as a deploy does: a new build of its shim
+    /// (a comment more), which `wrangler dev` runs as a new version, every
+    /// Durable Object starting again; back once wrangler says it is ready.
+    pub fn reload(&mut self) -> Result<()> {
+        anyhow::ensure!(!self.hosted_rules, "the hosted lane reloads no node: a section that does declares Need::Node");
+        let log = self.node.as_ref().context("a running node")?.log.clone();
+        let ready = || std::fs::read_to_string(&log).map(|t| t.matches("Local server updated and ready").count()).unwrap_or(0);
+        let before = ready();
+        let entry = self.project.join("entry.mjs");
+        let mut text = std::fs::read_to_string(&entry)?;
+        text.push_str(&format!("// reloaded at {}\n", api::now_ms()));
+        std::fs::write(&entry, text)?;
+        let t0 = Instant::now();
+        while ready() == before {
+            anyhow::ensure!(t0.elapsed() < Duration::from_secs(90), "the node did not reload within 90 s ({})", log.display());
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        Ok(())
     }
 
     /// Removes the containers the run's nodes left (devstack::containers),
@@ -835,18 +917,21 @@ pub fn cli_email(npub: &str) -> Result<String> {
     Ok(format!("cli-{}@e2e.test", npub.get(5..17).context("an npub is longer than 17 characters")?))
 }
 
-/// A person signs in through the WorkOS fake and approves the key a
-/// pending `fragment login` names (a key already approved has nothing
-/// pending).
+/// A person signs in through the WorkOS fake and types the code a pending
+/// `fragment login` printed, at the page it names (a key already added has
+/// nothing pending).
 fn approve_login(api: &Api, pending: &Value) -> Result<()> {
     if pending["pending"] != true {
         return Ok(());
     }
     let npub = pending["npub"].as_str().context("a pending login names its key")?;
-    let link = pending["approve"].as_str().context("a pending login answers its approval link")?;
+    let code = pending["code"].as_str().context("a pending login answers its code")?;
+    anyhow::ensure!(pending["url"] == format!("{}/cli", api.base), "a pending login names the platform's /cli, plain: {pending}");
     let session = api.sign_in(&cli_email(npub)?)?;
-    let r = api.approve_link(&session, link)?;
-    anyhow::ensure!(r.status == 200, "the approval: {r}");
+    let typed = api.type_code(&session, code)?;
+    anyhow::ensure!(typed.status == 200, "typing the code: {typed}");
+    let added = api.add_code(&session, code)?;
+    anyhow::ensure!(added.status == 200, "adding its key: {added}");
     Ok(())
 }
 
@@ -869,9 +954,19 @@ fn cli_binary() -> Result<PathBuf> {
 }
 
 /// A run's name: distinguishes its fragments from any earlier state, and
-/// (hosted) names the run its sweep removes.
+/// (hosted) names the run its sweep removes; its scratch is
+/// `target/e2e/<run>`. Its clock and a random nonce, so runs started in the
+/// same second still have names of their own.
 fn run_name() -> String {
-    hosted::sweep::run_id(api::now_s())
+    let nonce = u16::from_str_radix(&devstack::random_hex(2), 16).expect("two random bytes are a u16");
+    hosted::sweep::run_id(api::now_s(), nonce)
+}
+
+/// Makes a run's scratch, `dir`: never one another run has made (an id
+/// they share is refused, never trampled).
+fn make_scratch(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir.parent().expect("a run's scratch is in target/e2e"))?;
+    std::fs::create_dir(dir).with_context(|| format!("{}: this run's scratch, made by another run first", dir.display()))
 }
 
 /// A local run's settings beside its sections (hosted.rs `Args`).
@@ -897,7 +992,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let fake = CodeStorage::start(fake::Options { org: ORG.into(), org_key_pem: Some(org_key.clone()), ..Default::default() })?;
     let run = run_name();
     let scratch = root.join("target/e2e").join(&run);
-    std::fs::create_dir_all(&scratch)?;
+    make_scratch(&scratch)?;
     let project = devstack::stage_project(&scratch.join("cell"))?;
     // Ctrl-C (or SIGTERM, SIGHUP) mid-run: the node runs in a process group
     // of its own, which the terminal's signal does not reach, so the run

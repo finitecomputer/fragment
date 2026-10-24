@@ -1,21 +1,82 @@
 //! Rendering and history on a quiet chat, so pagination fixtures start no
 //! agent turns. Uses real channel writes, blobs, and the released page.
 use anyhow::Result;
-use serde_json::json;
+use serde_json::{json, Value};
+use std::time::Duration;
 use crate::api::{Api, Call};
 use crate::browser::Browser;
 use crate::Suite;
 use fragment_nip98::Keys;
 
-pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrome: &mut Browser, agent: &str, label: &str) -> Result<()> {
+/// The PDF the media message attaches.
+const PREVIEW_PDF: &[u8] = include_bytes!("../../fixtures/chat-preview.pdf");
+
+/// The chat with its PDF in the platform's page, framed as the shell frames
+/// it: through the platform's mint (`/auth/frame`), signed in by the
+/// frame's own partitioned cookie, with no cookie of the chat's origin
+/// (a person who never opened the chat in a tab of its own: Paul,
+/// 2026-10-23, whose PDF showed the browser's refused frame, and whose
+/// Download failed, "file wasn't available on site", while opening the
+/// file in a tab worked). Valid: the attachment's view shows the PDF, in
+/// a frame of the chat's own; its Download, pressed there, saves the PDF
+/// byte for byte.
+fn in_the_platforms_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, name: &str) -> Result<()> {
+    let page = chrome.open(&format!("{}/settings", api.base))?;
+    chrome.viewport(&page, 1280, 860, false)?;
+    let loaded = format!("location.origin === {} && document.readyState === 'complete'", super::js(&api.base));
+    anyhow::ensure!(super::shows(chrome, &page, &loaded), "the platform's page loads");
+    let src = format!("{}/auth/frame?name={name}&return=/", api.base);
+    let frame = format!(
+        "(() => {{ const f = document.createElement('iframe'); f.src = {}; f.allow = 'clipboard-write; microphone'; \
+         f.style.cssText = 'position: fixed; inset: 0; width: 100%; height: 100%; border: 0; z-index: 2147483647; background: #fff'; \
+         document.body.append(f); return true; }})()",
+        super::js(&src)
+    );
+    chrome.eval(&page, &frame)?;
+    let ready = "document.getElementById('say')?.dataset.ready === '1' && !!document.querySelector('.attachment-download[aria-label=\"Download preview.pdf\"]')";
+    let wait = Duration::from_secs(30);
+    if !s.eventually(wait, || chrome.eval_in_frame(&page, name, ready).ok() == Some(Value::Bool(true))) {
+        let seen = chrome.eval_in_frame(&page, name, "location.href + ' ' + (document.body?.innerText ?? '').slice(0, 300)").unwrap_or_default();
+        anyhow::bail!("the chat in the platform's frame is ready: {seen}");
+    }
+
+    // its view: the PDF in a frame of the chat's own (a refused frame is
+    // the browser's error page, of no origin the chat may read)
+    let pdf = "(() => { const f = document.querySelector('.attachment-pdf[title=\"preview.pdf\"]'); if (!f) return 'none'; const d = f.contentDocument; return d ? d.contentType : 'refused'; })()";
+    let shown = s.eventually(wait, || chrome.eval_in_frame(&page, name, &format!("{pdf} === 'application/pdf'")).ok() == Some(Value::Bool(true)));
+    let seen = chrome.eval_in_frame(&page, name, pdf)?;
+    chrome.screenshot(&page, &s.dir("chat-files").join("pdf-in-the-platforms-frame.png"))?;
+    s.ok("in the platform's frame, as the shell shows a chat, a PDF attachment's view shows the PDF", shown, &seen);
+
+    // its Download, as a person presses it (the frame fills the page)
+    let downloads = s.dir("chat-files-downloads");
+    chrome.allow_downloads(&downloads)?;
+    let at = chrome.eval_in_frame(
+        &page,
+        name,
+        "(() => { const a = document.querySelector('.attachment-download[aria-label=\"Download preview.pdf\"]'); a.scrollIntoView({ block: 'nearest' }); const r = a.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })()",
+    )?;
+    let (Some(x), Some(y)) = (at[0].as_f64(), at[1].as_f64()) else { anyhow::bail!("no Download to press: {at}") };
+    chrome.click_at(&page, (x, y))?;
+    let saved = s.eventually(wait, || std::fs::read(downloads.join("preview.pdf")).ok().as_deref() == Some(PREVIEW_PDF));
+    let there: Vec<String> = std::fs::read_dir(&downloads).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    s.ok("in the platform's frame, as the shell shows a chat, a file's Download saves it byte for byte, signed in by the frame's cookie alone", saved, json!({ "saved": there }));
+    chrome.close(page)?;
+    Ok(())
+}
+
+pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrome: &mut Browser, label: &str) -> Result<()> {
     let name = s.named(api, owner, "chat-polish")?;
     let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
     anyhow::ensure!(made.status == 200, "making the rendering chat: {made}");
     s.owned(&made.body, owner);
+    // the chat's agent, which runs nowhere: its records are its own
+    let (hand, agent) = quiet_agent(api, owner, &name)?;
+    let agent = agent.as_str();
     let mut attachments = vec![];
     for (filename, mime, bytes) in [
         ("clip.mp4", "video/mp4", include_bytes!("../../fixtures/chat-video.mp4").as_slice()),
-        ("preview.pdf", "application/pdf", include_bytes!("../../fixtures/chat-preview.pdf").as_slice()),
+        ("preview.pdf", "application/pdf", PREVIEW_PDF),
     ] {
         use sha2::{Digest, Sha256};
         let sha = hex::encode(Sha256::digest(bytes));
@@ -29,13 +90,15 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     let posted = api.signed(owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": "media", "body": { "text": "Video and PDF", "attachments": attachments } })))?;
     anyhow::ensure!(posted.status == 200, "posting media: {posted}");
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
+    // (before any page of the chat's own: its origin has no cookie yet)
+    in_the_platforms_frame(s, api, chrome, &name)?;
     let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
-    chrome.viewport(&page, 1280, 860, false)?;
+    super::fit(chrome, &page, 1280, 860, false)?;
     s.ok("a video attachment is a labelled inline player with loaded metadata", super::shows(chrome, &page, "!!document.querySelector('.attachment-video video[controls][aria-label=\"clip.mp4\"]') && document.querySelector('video').readyState >= 1"), "");
     s.ok("a PDF attachment has an inline view and open/download/share actions", super::shows(chrome, &page, "!!document.querySelector('.attachment-pdf[title=\"preview.pdf\"]') && document.querySelectorAll('.attachment-download[download]').length === 2 && document.querySelectorAll('.attachment-share').length === 2"), "");
     let shots = s.dir("chat-polish");
     chrome.screenshot(&page, &shots.join("media-desktop.png"))?;
-    chrome.viewport(&page, 375, 812, true)?;
+    super::fit(chrome, &page, 375, 812, true)?;
     s.ok("video and PDF attachments fit a phone without sideways page scrolling", chrome.eval(&page, "document.documentElement.scrollWidth <= innerWidth && document.getElementById('scroll').scrollWidth === document.getElementById('scroll').clientWidth")? == true, "");
     chrome.screenshot(&page, &shots.join("media-phone.png"))?;
     // More than the initial 400 records, then a fresh page: the browser's
@@ -47,7 +110,7 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
             1 => json!({ "kind": "turn.end", "turn": "old-progress", "agent": agent, "outcome": "stopped" }),
             _ => json!({ "kind": "history.marker", "turn": "work-marker", "agent": agent }),
         };
-        let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": format!("work-history-{i}"), "body": body })))?;
+        let r = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": format!("work-history-{i}"), "body": body })))?;
         anyhow::ensure!(r.status == 200, "posting work history {i}: {r}");
     }
     for i in 0..415 {
@@ -65,14 +128,25 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     let malformed = api.signed(owner, "GET", &format!("/api/f/{name}/channels/chat?before=no"), None)?;
     s.ok("ambiguous and malformed history cursors are refused", bad.status == 400 && malformed.status == 400, format!("{bad} | {malformed}"));
     let page = chrome.open(&api.site_url(&name, ""))?;
-    chrome.viewport(&page, 1280, 860, false)?;
+    super::fit(chrome, &page, 1280, 860, false)?;
     s.ok("the initial backlog is bounded to 400 and offers earlier messages", super::shows(chrome, &page, "document.querySelectorAll('.msg.user').length === 400 && !document.getElementById('earlier').hidden"), "");
     s.ok("a quote outside the initial history has an earlier-message placeholder", chrome.eval(&page, "document.querySelector('.msg[data-seq=\"416\"] .quote')?.disabled === true")? == true, "");
-    chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); s.scrollTop = 100; return true; })()")?;
+    // The reader's place is the anchor's offset from the top of the scroll
+    // box, so the header above it settling (the chat's agent, its name and
+    // picture, read after the page opens) moves no one's place; and the
+    // anchor is taken once that has settled.
+    let settled = super::shows(chrome, &page, "document.getElementById('head-label').textContent !== 'Chat' && [...document.querySelectorAll('#head-marks img')].every((i) => i.complete)");
+    anyhow::ensure!(settled, "the chat's header shows its agent");
+    // The reader's message is found by its seq each time it is measured:
+    // a message is drawn again as a new node when what it shows changes
+    // (its poster's name come, say), and a node held from before is then
+    // off the page, measured at 0 (CI's "moved: 32.5" was that: the scroll
+    // box's top less the message's offset)
+    chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); window.__offset = (n) => n.getBoundingClientRect().top - s.getBoundingClientRect().top; window.__placed = () => window.__offset(document.querySelector('.msg[data-seq=\"' + window.__historySeq + '\"]')); s.scrollTop = 100; return true; })()")?;
     super::shows(chrome, &page, "document.getElementById('scroll').scrollTop === 100");
-    let anchor = chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); const m = [...document.querySelectorAll('.msg')].find(m => m.getBoundingClientRect().bottom > s.getBoundingClientRect().top); window.__historyAnchor = m; window.__historyTop = m.getBoundingClientRect().top; document.getElementById('earlier').click(); return m.dataset.seq; })()")?;
+    let anchor = chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); const m = [...document.querySelectorAll('.msg[data-seq]')].find(m => m.getBoundingClientRect().bottom > s.getBoundingClientRect().top); window.__historySeq = m.dataset.seq; window.__historyTop = window.__offset(m); document.getElementById('earlier').click(); return m.dataset.seq; })()")?;
     let loaded = super::shows(chrome, &page, "document.querySelectorAll('.msg.user').length === 416 && !document.getElementById('earlier').disabled");
-    let position = chrome.eval(&page, "Math.abs(window.__historyAnchor.getBoundingClientRect().top - window.__historyTop)")?;
+    let position = chrome.eval(&page, "Math.abs(window.__placed() - window.__historyTop)")?;
     let ordered = chrome.eval(&page, "(() => { const seqs = [...document.querySelectorAll('.msg[data-seq]')].map(m => Number(m.dataset.seq)); return seqs.every((seq, i) => !i || seq > seqs[i-1]); })()")?;
     s.ok("loading earlier messages preserves the visible message, ascending order, and no duplicates", loaded && position.as_f64().is_some_and(|n| n < 2.0) && ordered == true, json!({ "anchor": anchor, "moved": position, "ordered": ordered }));
     s.ok("loading earlier history fills the quote above its message", super::shows(chrome, &page, "document.querySelector('.msg[data-seq=\"416\"] .quote .quote-text')?.textContent === 'History 000' && !document.querySelector('.msg[data-seq=\"416\"] .quote').disabled"), "");
@@ -84,7 +158,9 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
         let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": format!("new-{i}"), "body": { "text": format!("New message {i}") } })))?;
         anyhow::ensure!(r.status == 200, "posting a new message: {r}");
     }
-    s.ok("new live messages are counted without moving the reader", super::shows(chrome, &page, "document.getElementById('latest').textContent.includes('2 new messages')") && chrome.eval(&page, "Math.abs(window.__historyAnchor.getBoundingClientRect().top - window.__historyTop) < 2")? == true, "");
+    let counted = super::shows(chrome, &page, "document.getElementById('latest').textContent.includes('2 new messages')");
+    let still = chrome.eval(&page, "Math.abs(window.__placed() - window.__historyTop)")?;
+    s.ok("new live messages are counted without moving the reader", counted && still.as_f64().is_some_and(|n| n < 2.0), json!({ "moved": still }));
     let command = api.signed(owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": "new-command", "body": { "kind": "command", "command": "usage", "args": "", "to": [agent] } })))?;
     s.ok("live command messages also count toward jump to latest", command.status == 200 && super::shows(chrome, &page, "document.getElementById('latest').textContent.includes('3 new messages') && !!document.querySelector('.bubble.command .command-name')"), &command);
     chrome.click(&page, "#latest")?;
@@ -101,18 +177,20 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     s.ok("a code block's copy button copies only its literal source", super::shows(chrome, &page, "window.__codeCopied === document.querySelector('pre code').textContent && document.querySelector('.md-code-copy').textContent === 'Copied'"), "");
     let streamed = chrome.eval(&page, "import('./markdown.js').then(m => { const n = document.createElement('div'); n.append(m.renderMarkdown('```js\\n<script>')); const deep = document.createElement('div'); deep.append(m.renderMarkdown('> '.repeat(100) + 'safe')); return n.querySelector('pre code').textContent === '<script>' && !n.querySelector('script') && deep.textContent === '> '.repeat(68) + 'safe'; })")?;
     s.ok("incomplete streamed fences and deeply nested quotes remain safe", streamed == true, "");
-    chrome.viewport(&page, 375, 812, true)?;
+    super::fit(chrome, &page, 375, 812, true)?;
     chrome.eval(&page, "(() => { const t = document.querySelector('.md-table'); t.querySelector('th').textContent = 'wide '.repeat(80); t.querySelector('table').style.width = '900px'; return true; })()")?;
     s.ok("wide tables scroll within the reply on a phone", chrome.eval(&page, "(() => { const t = document.querySelector('.md-table'); t.scrollLeft = 100; return t.scrollLeft > 0 && t.scrollWidth > t.clientWidth && document.documentElement.scrollWidth <= innerWidth; })()")? == true, "");
     chrome.screenshot(&page, &shots.join("markdown-wide-table-phone.png"))?;
     chrome.eval(&page, "(() => { const t = document.querySelector('.md-table'); t.querySelector('th').textContent = 'Language'; t.querySelector('table').style.removeProperty('width'); t.scrollLeft = 0; document.getElementById('scroll').scrollTop = 0; return true; })()")?;
     chrome.screenshot(&page, &shots.join("markdown-phone.png"))?;
-    chrome.viewport(&page, 1280, 860, false)?;
+    super::fit(chrome, &page, 1280, 860, false)?;
     chrome.eval(&page, "(() => { document.getElementById('scroll').scrollTop = 0; return true; })()")?;
     chrome.screenshot(&page, &shots.join("markdown-desktop.png"))?;
     // Reopen to discard only the markdown fixture. A real network outage
     // exercises the library's retries, then the message's own Retry.
     chrome.close(page)?;
+    // (with no page of this chat open beside it: its presence redraws them)
+    place_through_redraw(s, api, chrome, &name)?;
     let page = chrome.open(&api.site_url(&name, ""))?;
     anyhow::ensure!(super::shows(chrome, &page, "document.getElementById('say')?.dataset.ready === '1'"), "the failure page is ready");
     anyhow::ensure!(super::shows(chrome, &page, "[...document.querySelectorAll('.msg.user')].some(m => m.querySelector('.bubble')?.textContent === 'History 414' && !!m.querySelector('.reply'))"), "the quoted message has loaded");
@@ -145,12 +223,12 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     let quote_kept = super::super::jobs::records(api, owner, &name, "chat").iter().any(|r| r["body"]["text"] == "Retry my message" && r["body"]["reply_to"] == quoted_seq);
     s.ok("retry preserves the quoted message's reply_to", quote_kept, &quoted_seq);
 
-    // A completed record fixture names an actual agent as the lead, but
-    // does not join its computer to this quiet chat. The frame receives
-    // the existing shell roster seam, and actual channel work records end
-    // its waiting status; no new platform test levers are needed.
+    // A completed record fixture of the chat's agent, its lead, which no
+    // computer runs, so this chat stays quiet. The frame receives the
+    // existing shell roster seam, and the agent's own work records end its
+    // waiting status; no new platform test levers are needed.
     for body in [json!({ "kind": "turn.start", "turn": "fixture-old", "agent": agent }), json!({ "kind": "turn.end", "turn": "fixture-old", "outcome": "idle" })] {
-        let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": body["kind"], "body": body })))?;
+        let r = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": body["kind"], "body": body })))?;
         anyhow::ensure!(r.status == 200, "posting a completed work fixture: {r}");
     }
     chrome.eval(&page, "(() => { const frame = document.createElement('iframe'); frame.id = 'polish-frame'; frame.src = './'; frame.style = 'width:100%;height:100%;border:0'; document.body.replaceChildren(frame); window.__frame = frame; return true; })()")?;
@@ -180,10 +258,155 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     s.ok("after ninety seconds without a turn the page says a reply has not started", super::shows(chrome, &page, "window.__frame.contentDocument.querySelector('.working')?.textContent.includes('has not started a reply yet')"), "");
     chrome.eval(&page, "(() => { window.__frame.contentWindow.Date.now = window.__now; return true; })()")?;
     let cause = super::super::jobs::records(api, owner, &name, "chat").into_iter().find(|r| r["body"]["text"] == "A slow first reply").unwrap_or_default();
-    let started = api.signed(owner, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": "fixture-new", "body": { "kind": "turn.start", "turn": "fixture-new", "agent": agent, "asker": api.identity(owner)?, "cause": { "channel": "chat", "seq": cause["seq"] } } })))?;
+    let started = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": "fixture-new", "body": { "kind": "turn.start", "turn": "fixture-new", "agent": agent, "asker": api.identity(owner)?, "cause": { "channel": "chat", "seq": cause["seq"] } } })))?;
     anyhow::ensure!(started.status == 200, "starting the fixture turn: {started}");
     s.ok("a turn.start replaces startup or delay status with the agent's working status", super::shows(chrome, &page, "window.__frame.contentDocument.querySelectorAll('.working').length === 1 && window.__frame.contentDocument.querySelector('.working').textContent.includes('is working')"), "");
     println!("      (polish screenshots in {})", shots.display());
+    chrome.close(page)?;
+    forged_turn(s, api, owner, chrome, &name, &hand, agent)
+}
+
+/// The reader's place holds through a draw that makes every message's
+/// node again while the messages above it load: their poster's name come
+/// in that moment (a slow first answer of `__people`, on a cold page),
+/// every message of theirs shows it, as a new node. The place is the
+/// reader's message, found by its key, not the node it had: kept by its
+/// node, a node gone was no place, and the earlier messages pushed the
+/// reader down by their height. Method: the chat's page with its
+/// `__people` held, and its earlier messages' read once asked; Load
+/// earlier pressed, the names let come (the reader's message is a new
+/// node), then the earlier messages. As Safari, which has no scroll
+/// anchoring of its own (`overflow-anchor: none`), so what holds the place
+/// is the page's keeping.
+fn place_through_redraw(s: &mut Suite, api: &Api, chrome: &mut Browser, name: &str) -> Result<()> {
+    let hold = "if (window === window.top) { const real = window.fetch.bind(window); window.__held = { people: [], earlier: [] }; \
+        const hold = (k) => new Promise((r) => window.__held[k].push(r)); \
+        window.fetch = async (url, o) => { const u = String(url); \
+          if (u.includes('__people') && !window.__peopleLet) await hold('people'); \
+          if (window.__holdEarlier && u.includes('__channel/chat') && u.includes('before=')) { window.__holdEarlier = false; await hold('earlier'); } \
+          return real(url, o); }; }";
+    let page = chrome.open_with_script(&api.site_url(name, ""), hold)?;
+    super::fit(chrome, &page, 1280, 860, false)?;
+    let ready = super::shows(chrome, &page, "document.querySelectorAll('.msg.user').length === 400 && !document.getElementById('earlier').hidden && window.__held.people.length > 0");
+    chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); s.style.overflowAnchor = 'none'; s.scrollTop = 100; return true; })()")?;
+    super::shows(chrome, &page, "document.getElementById('scroll').scrollTop === 100");
+    chrome.eval(
+        &page,
+        "(() => { const s = document.getElementById('scroll'); const off = (n) => n.getBoundingClientRect().top - s.getBoundingClientRect().top; \
+         const m = [...document.querySelectorAll('.msg[data-seq]')].find((m) => m.getBoundingClientRect().bottom > s.getBoundingClientRect().top); \
+         window.__placed = () => off(document.querySelector('.msg[data-seq=\"' + m.dataset.seq + '\"]')); window.__top = off(m); window.__node = m; \
+         window.__holdEarlier = true; document.getElementById('earlier').click(); return true; })()",
+    )?;
+    let held = super::shows(chrome, &page, "window.__held.earlier.length === 1");
+    chrome.eval(&page, "(window.__peopleLet = true, window.__held.people.forEach((r) => r()), true)")?;
+    let redrawn = super::shows(chrome, &page, "!window.__node.isConnected && !!document.querySelector('.msg[data-seq=\"' + window.__node.dataset.seq + '\"]')");
+    chrome.eval(&page, "(window.__held.earlier.forEach((r) => r()), true)")?;
+    let loaded = super::shows(chrome, &page, "document.getElementById('earlier').hidden && !document.getElementById('earlier').disabled && document.querySelectorAll('.msg.user').length > 400");
+    let moved = chrome.eval(&page, "Math.abs(window.__placed() - window.__top)")?;
+    s.ok(
+        "the reader's place holds while earlier messages load though every message is drawn again meanwhile (its poster's name come), with no scroll anchoring of the browser's (as Safari)",
+        ready && held && redrawn && loaded && moved.as_f64().is_some_and(|n| n < 2.0),
+        json!({ "ready": ready, "held": held, "redrawn": redrawn, "loaded": loaded, "moved": moved }),
+    );
+    chrome.close(page)?;
+    Ok(())
+}
+
+/// An agent of `owner`'s that runs nowhere (no computer runs it, so no
+/// turn starts in its chat), an editor of chat `name`: a quiet chat's
+/// agent records, posted as itself, since only a chat's agents post on
+/// `work` (`"from": "agent"`).
+fn quiet_agent(api: &Api, owner: &Keys, name: &str) -> Result<(Keys, String)> {
+    let keys = Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&keys, "POST", reg, owner) })))?;
+    anyhow::ensure!(r.status == 200, "registering a quiet agent: {r}");
+    let id = r.body["id"].as_str().unwrap_or("").to_string();
+    let r = api.signed(owner, "PUT", &format!("/api/f/{name}/members/{id}"), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "adding the quiet agent to {name}: {r}");
+    Ok((keys, id))
+}
+
+/// Audit M7: an editor once re-posted an agent's pending approval card
+/// with its own words, and the chat's owner read the forger's text on
+/// the agent's card. Goal: no person posts on `work`, and on the page a
+/// turn's records count only from the agent whose `turn.start` began it.
+/// Method: the chat's owner (a person) posts a step, refused; the chat's
+/// agent asks its owner on a card; a second agent of the chat re-posts
+/// that card and a step under the same turn and answers the card; then
+/// begins a turn of the same id of its own, and the owner answers both
+/// cards. Read on the owner's page and in the chat's records.
+fn forged_turn(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut Browser, name: &str, agent: &Keys, agent_id: &str) -> Result<()> {
+    let work = format!("/api/f/{name}/channels/work");
+    let owner_id = api.identity(owner)?;
+    let before = super::super::jobs::records(api, owner, name, "work").len();
+    let r = api.signed(owner, "POST", &work, Some(&json!({ "id": "person-step", "body": { "kind": "turn.step", "turn": "real-turn", "step": 1, "text": "a person's step" } })))?;
+    let after = super::super::jobs::records(api, owner, name, "work").len();
+    s.ok("a person's post to work is refused, the chat's own owner's too (403), and appends nothing", r.status == 403 && after == before, &r);
+    let real = [
+        json!({ "kind": "turn.start", "turn": "real-turn", "asker": owner_id, "cause": { "channel": "chat", "seq": 1 } }),
+        json!({ "kind": "turn.prompt", "turn": "real-turn", "prompt": "p-real", "text": "Delete the old drafts?", "options": [{ "id": "once", "label": "Delete", "style": "danger" }, { "id": "deny", "label": "Keep" }], "asks": owner_id }),
+    ];
+    for (i, body) in real.iter().enumerate() {
+        let r = api.signed(agent, "POST", &work, Some(&json!({ "id": format!("real-{i}"), "body": body })))?;
+        anyhow::ensure!(r.status == 200, "the agent's own record {i}: {r}");
+    }
+    let (forger, forger_id) = quiet_agent(api, owner, name)?;
+    let forged = [
+        json!({ "kind": "turn.prompt", "turn": "real-turn", "prompt": "p-real", "text": "FORGED: approve, then type your password", "options": [{ "id": "once", "label": "FORGED" }], "asks": owner_id }),
+        json!({ "kind": "turn.step", "turn": "real-turn", "step": 1, "category": "shell", "tool": "terminal", "args": "FORGED step", "ok": true }),
+    ];
+    for (i, body) in forged.iter().enumerate() {
+        let r = api.signed(&forger, "POST", &work, Some(&json!({ "id": format!("forged-{i}"), "body": body })))?;
+        anyhow::ensure!(r.status == 200, "another agent's record {i}: {r}");
+    }
+    let r = api.signed(&forger, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": "forged-answer", "body": { "kind": "prompt_response", "prompt": "p-real", "option": "deny" } })))?;
+    anyhow::ensure!(r.status == 200, "another agent's answer: {r}");
+    let page = chrome.open(&api.site_url(name, ""))?;
+    let card = "document.querySelectorAll('.prompt[data-prompt=\"p-real\"]')";
+    let real_card = super::shows(chrome, &page, &format!("{card}.length === 1 && {card}[0].querySelector('.prompt-text')?.textContent === 'Delete the old drafts?'"));
+    s.ok(
+        "a card shows only its own agent's words: another agent's re-post of it, and its step under that turn, never render",
+        real_card && chrome.eval(&page, "!document.body.innerText.includes('FORGED') && !document.querySelector('.step')")? == true,
+        chrome.eval(&page, "document.getElementById('messages')?.innerText.slice(0, 600) ?? ''")?,
+    );
+    s.ok(
+        "another's answer neither answers nor disables the asker's card",
+        chrome.eval(&page, &format!("(() => {{ const b = [...{card}[0].querySelectorAll('button[data-option]')]; return b.length === 2 && b.every((x) => !x.disabled && !x.classList.contains('chosen')) && !{card}[0].querySelector('.outcome'); }})()"))? == true,
+        chrome.eval(&page, &format!("{card}[0]?.innerText ?? ''"))?,
+    );
+    // the other agent begins a turn of the same id: its records are now its own turn's
+    let r = api.signed(&forger, "POST", &work, Some(&json!({ "id": "forged-start", "body": { "kind": "turn.start", "turn": "real-turn", "asker": owner_id } })))?;
+    anyhow::ensure!(r.status == 200, "another agent's own turn.start: {r}");
+    let two = super::shows(chrome, &page, &format!("{card}.length === 2"));
+    s.ok(
+        "a turn another agent begins with the same id is its own card, beside the real one, which keeps its words",
+        two && chrome.eval(&page, &format!("[...{card}].filter((c) => c.querySelector('.prompt-text').textContent === 'Delete the old drafts?').length === 1 && [...{card}].filter((c) => c.querySelector('.prompt-text').textContent.startsWith('FORGED')).length === 1"))? == true,
+        chrome.eval(&page, "document.getElementById('messages')?.innerText.slice(0, 600) ?? ''")?,
+    );
+    // The owner answers the other agent's card, then the real one: each
+    // answer names its own card's agent and turn (a bridge takes no answer
+    // naming another), and the first leaves the second answerable (its post
+    // id is its card's own, not the prompt's they share).
+    let answers = || -> Vec<Value> {
+        super::super::jobs::records(api, owner, name, "chat").into_iter().filter(|r| r["body"]["kind"] == "prompt_response" && r["principal"] == owner_id.as_str()).map(|r| r["body"].clone()).collect()
+    };
+    let click = |which: &str, option: &str| format!("(() => {{ const c = [...{card}].find((c) => c.querySelector('.prompt-text').textContent.startsWith({which:?})); c.querySelector('button[data-option=\"{option}\"]').click(); return true; }})()");
+    chrome.eval(&page, &click("FORGED", "once"))?;
+    let first = s.eventually(Duration::from_secs(10), || answers().len() == 1);
+    let open = chrome.eval(&page, &format!("[...{card}].find((c) => c.querySelector('.prompt-text').textContent === 'Delete the old drafts?').querySelectorAll('button[data-option]:not([disabled])').length"))?;
+    s.ok(
+        "the owner's answer to the other agent's card names that agent and its turn, and leaves the real card open to answer",
+        first && answers()[0]["agent"] == forger_id.as_str() && answers()[0]["turn"] == "real-turn" && answers()[0]["prompt"] == "p-real" && open == 2,
+        json!({ "answers": answers(), "open": open }),
+    );
+    chrome.eval(&page, &click("Delete the old drafts?", "deny"))?;
+    let second = s.eventually(Duration::from_secs(10), || answers().len() == 2);
+    s.ok(
+        "and their answer to the real card names the real agent: only that agent's card is answered by it",
+        second && answers()[1]["agent"] == agent_id && answers()[1]["turn"] == "real-turn" && answers()[1]["option"] == "deny",
+        json!({ "answers": answers() }),
+    );
     chrome.close(page)?;
     Ok(())
 }
@@ -195,31 +418,43 @@ pub(super) fn working_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut 
     let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
     anyhow::ensure!(made.status == 200, "making the working-card chat: {made}");
     s.owned(&made.body, owner);
+    // The chat's agent posts its records itself (only a chat's agents post
+    // on `work`): its owner adds a key of its for this (an owner manages
+    // its agent's keys), and makes it the chat's. No person's message
+    // comes, so its computer starts no turn here.
+    let hand = Keys::generate();
+    let add = format!("/api/identities/{agent}/keys");
+    let r = api.signed(owner, "POST", &add, Some(&json!({ "proof": api.proof(&hand, "POST", &add, owner) })))?;
+    anyhow::ensure!(r.status == 200, "a key of the agent's for the fixture: {r}");
+    let r = api.signed(owner, "PUT", &format!("/api/f/{name}/members/{agent}"), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "the agent joins the working-card chat: {r}");
     let home = format!("/data/work/{agent_name}/home/");
     let bodies = [
         json!({ "kind": "turn.start", "turn": "working-card", "agent": agent }),
         json!({ "kind": "turn.step", "turn": "working-card", "step": 1, "category": "read", "tool": "read_file", "args": format!("{home}apps-finite/README.md"), "ok": true, "text": "It works **partially.** I’ll check `apps-finite`.\n\n> **Design standards** — keep the card readable.\n\n- Read the files\n- [Check the docs](https://example.com/docs)\n\n<img src=x onerror=\"window.__noteInjected=true\">" }),
         json!({ "kind": "turn.step", "turn": "working-card", "step": 2, "category": "write", "tool": "patch", "args": format!("{home}apps-finite/src/components/chat/working-card/variants/desktop/theme/layout/WorkingCard.tsx"), "ok": true }),
         json!({ "kind": "turn.step", "turn": "working-card", "step": 3, "tool": "terminal", "args": "ls -R /data/hermes/managed-skills/software-development/references/engineering-style.md", "ok": true, "text": "I’ll keep the filename visible and shorten the directories. This sentence is deliberately long enough to make the note fold at a sentence boundary while retaining its markdown and the full explanation when expanded. **The final sentence stays available.**" }),
-        json!({ "kind": "turn.step", "turn": "working-card", "step": 4, "category": "shell", "tool": "terminal", "args": format!("ls /data/work/{agent_name}/apps-finite"), "ok": true, "excerpt": "README.md\nsrc" }),
+        json!({ "kind": "turn.step", "turn": "working-card", "step": 4, "category": "shell", "tool": "terminal", "args": format!("ls /data/work/{agent_name}/apps-finite"), "ok": true, "excerpt": "README.md\nsrc", "text": "Installed cleanly. Now listing the app:" }),
         json!({ "kind": "turn.step", "turn": "working-card", "step": 5, "category": "shell", "tool": "terminal", "args": "cargo test", "ok": false, "excerpt": "error: expected a closing delimiter" }),
         json!({ "kind": "turn.step", "turn": "working-card", "step": 6, "category": "read", "tool": "read_file", "args": "/data/work/another-agent/home/SOUL.md", "ok": true }),
         json!({ "kind": "turn.step", "turn": "working-card", "step": 7, "category": "web", "tool": "web_search", "args": "working card design", "ok": true }),
         json!({ "kind": "turn.step", "turn": "working-card", "step": 8, "category": "shell", "tool": "terminal", "args": "cargo check" }),
     ];
     for (i, body) in bodies.iter().enumerate() {
-        let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": format!("fixture-{i}"), "body": body })))?;
+        let r = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": format!("fixture-{i}"), "body": body })))?;
         anyhow::ensure!(r.status == 200, "posting working-card fixture {i}: {r}");
     }
     let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
-    chrome.viewport(&page, 1000, 1100, false)?;
+    super::fit(chrome, &page, 1000, 1100, false)?;
     anyhow::ensure!(super::shows(chrome, &page, "document.querySelectorAll('details.tools[open] .step').length === 8"), "eight-step working card rendered");
     s.ok("commentary renders bold, code, quotes, lists and safe links with the reply renderer", chrome.eval(&page, "(() => { const n = document.querySelector('.step-text'); return n.querySelector('strong').textContent === 'partially.' && n.querySelector('code').textContent === 'apps-finite' && !!n.querySelector('blockquote strong') && n.querySelectorAll('li').length === 2 && n.querySelector('a').getAttribute('href') === 'https://example.com/docs' && n.querySelector('a').rel === 'noopener noreferrer'; })()")? == true, "");
     s.ok("HTML in commentary is escaped, including after expanding it", chrome.eval(&page, "(() => { const n = document.querySelector('.step-text'); n.querySelector('.note-expand').click(); return !n.querySelector('img,script') && !window.__noteInjected && n.innerText.includes('<img src=x onerror=') && n.querySelector('.note-expand').getAttribute('aria-expanded') === 'true'; })()")? == true, "");
+    s.ok("a step's icon says what it does, its verb the icon's name for assistive technology and not in words beside it", chrome.eval(&page, "(() => { const steps = document.querySelectorAll('.step'); return [[0, 'Reading'], [1, 'Writing'], [6, 'Searching the web']].every(([i, verb]) => { const g = steps[i].querySelector('.step-name > svg'); return !steps[i].querySelector('.step-verb') && g.getAttribute('role') === 'img' && g.getAttribute('aria-label') === verb && !g.hasAttribute('aria-hidden') && !!steps[i].querySelector('.step-label > .step-args:only-child'); }); })()")? == true, chrome.eval(&page, "[...document.querySelectorAll('.step')].slice(0, 2).map((s) => s.querySelector('.step-name').outerHTML)")?);
+    s.ok("every commentary has even room above and below, a short one with no fold too", chrome.eval(&page, "(() => { const notes = [...document.querySelectorAll('details.tools .step-text')]; return notes.length === 3 && !notes[2].querySelector('.note-expand') && notes.every((n) => { const shown = [...n.children].filter((c) => !c.hidden); const r = n.getBoundingClientRect(); const above = shown[0].getBoundingClientRect().top - r.top - n.clientTop; const below = r.bottom - shown.at(-1).getBoundingClientRect().bottom; return above >= 8 && Math.abs(above - below) < 1; }); })()")? == true, chrome.eval(&page, "[...document.querySelectorAll('details.tools .step-text')].map((n) => { const shown = [...n.children].filter((c) => !c.hidden); const r = n.getBoundingClientRect(); return [shown[0].getBoundingClientRect().top - r.top - n.clientTop, r.bottom - shown.at(-1).getBoundingClientRect().bottom]; })")?);
     s.ok("done steps have a check on the tool line and no separate done result", chrome.eval(&page, "(() => { const s = document.querySelector('.step'); const m = s.querySelector('.step-name .step-status.done'); return !!m?.querySelector('svg') && m.getAttribute('aria-label') === 'done' && !s.querySelector('pre') && !s.innerText.includes('done'); })()")? == true, "");
     let full = format!("{home}apps-finite/README.md");
     s.ok("the agent's own home becomes ~/ with the full original path in its title", super::shows(chrome, &page, &format!("document.querySelector('.step-args')?.textContent === '~/apps-finite/README.md' && document.querySelector('.step-args').title === {}", super::js(&full))), &full);
-    s.ok("workspace and managed-skill prefixes shorten, including an older bridge's tool fallback", chrome.eval(&page, "(() => { const steps = document.querySelectorAll('.step'); return steps[2].dataset.category === 'other' && steps[2].querySelector('.step-verb').textContent === 'terminal:' && steps[2].querySelector('.step-args').textContent === 'ls -R skills/software-development/references/engineering-style.md' && !!steps[2].querySelector('.step-status.done') && steps[3].querySelector('.step-args').textContent === 'ls work/apps-finite' && steps[5].querySelector('.step-args').textContent.startsWith('/data/work/another-agent/home/'); })()")? == true, "");
+    s.ok("workspace and managed-skill prefixes shorten, including an older bridge's tool fallback, named in words (its wrench names no tool)", chrome.eval(&page, "(() => { const steps = document.querySelectorAll('.step'); return steps[2].dataset.category === 'other' && steps[2].querySelector('.step-verb').textContent === 'terminal:' && steps[2].querySelector('.step-name > svg').getAttribute('aria-hidden') === 'true' && steps[2].querySelector('.step-args').textContent === 'ls -R skills/software-development/references/engineering-style.md' && !!steps[2].querySelector('.step-status.done') && steps[3].querySelector('.step-args').textContent === 'ls work/apps-finite' && steps[5].querySelector('.step-args').textContent.startsWith('/data/work/another-agent/home/'); })()")? == true, "");
     s.ok("a failed step has a red error mark and its result excerpt", chrome.eval(&page, "(() => { const s = document.querySelector('.step.error'); const m = s.querySelector('.step-status.failed'); return m?.getAttribute('aria-label') === 'failed' && !!m.querySelector('svg') && s.querySelector('.step-result').textContent === 'error: expected a closing delimiter' && getComputedStyle(m.querySelector('svg')).color === getComputedStyle(s.querySelector('.step-result')).color; })()")? == true, "");
     s.ok("a step without its result has a running spinner", chrome.eval(&page, "!!document.querySelector('.step:last-child .step-status.running .spin')")? == true, "");
     s.ok("long commentary folds at a complete sentence and expands its full markdown", chrome.eval(&page, "(() => { const n = document.querySelectorAll('.step-text')[1]; const p = n.querySelector('.note-preview'); const b = n.querySelector('.note-expand'); const folded = p.innerText === 'I’ll keep the filename visible and shorten the directories.' && b.textContent === '…' && b.getAttribute('aria-expanded') === 'false'; b.click(); return folded && p.hidden && n.innerText.includes('The final sentence stays available.') && n.querySelector('.md:not([hidden]) strong')?.textContent === 'The final sentence stays available.'; })()")? == true, "");
@@ -227,18 +462,95 @@ pub(super) fn working_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut 
     chrome.eval(&page, "(() => { document.querySelector('details.tools').scrollIntoView({block:'start'}); return true; })()")?;
     let shots = s.dir("working-card");
     chrome.screenshot(&page, &shots.join("desktop.png"))?;
-    chrome.viewport(&page, 375, 1000, true)?;
+    super::fit(chrome, &page, 375, 1000, true)?;
     s.ok("a narrow step wraps to two lines, shortening directories in the middle while keeping the filename", super::shows(chrome, &page, "(() => { const a = document.querySelectorAll('.step-args')[1]; const h = Number.parseFloat(getComputedStyle(a).lineHeight); return a.textContent.startsWith('~/') && a.textContent.includes('…/') && a.textContent.endsWith('/WorkingCard.tsx') && a.clientHeight > h && a.scrollHeight <= 2*h + 1 && a.title.endsWith('/layout/WorkingCard.tsx'); })()"), chrome.eval(&page, "document.querySelectorAll('.step-args')[1].textContent")?);
     s.ok("the older bridge's path also keeps its filename visible when shortened on a phone", super::shows(chrome, &page, "(() => { const a = document.querySelectorAll('.step-args')[2]; const r = document.createRange(); r.setStart(a.firstChild, a.textContent.length - 20); r.setEnd(a.firstChild, a.textContent.length); return a.textContent.startsWith('ls -R skills/') && a.textContent.includes('…/') && a.textContent.endsWith('/engineering-style.md') && a.title.startsWith('ls -R /data/hermes/managed-skills/') && a.scrollHeight <= 2*Number.parseFloat(getComputedStyle(a).lineHeight)+1 && r.getBoundingClientRect().bottom <= a.getBoundingClientRect().bottom + 1; })()"), "");
     s.ok("the working card fits the phone without horizontal page scrolling", chrome.eval(&page, "document.documentElement.scrollWidth <= innerWidth && document.getElementById('scroll').scrollWidth === document.getElementById('scroll').clientWidth")? == true, "");
     chrome.eval(&page, "(() => { document.querySelector('details.tools').scrollIntoView({block:'start'}); return true; })()")?;
     chrome.screenshot(&page, &shots.join("phone.png"))?;
-    chrome.viewport(&page, 1000, 1100, false)?;
+    super::fit(chrome, &page, 1000, 1100, false)?;
     s.ok("resizing back restores the full shortened path when two lines fit", super::shows(chrome, &page, "document.querySelectorAll('.step-args')[1].textContent === '~/apps-finite/src/components/chat/working-card/variants/desktop/theme/layout/WorkingCard.tsx'"), "");
-    let ended = api.signed(owner, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": "fixture-end", "body": { "kind": "turn.end", "turn": "working-card", "outcome": "idle" } })))?;
+    let ended = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": "fixture-end", "body": { "kind": "turn.end", "turn": "working-card", "outcome": "idle" } })))?;
     anyhow::ensure!(ended.status == 200, "ending working-card fixture: {ended}");
     s.ok("a completed card folds and remembers expanded commentary when opened again", super::shows(chrome, &page, "(() => { const d = document.querySelector('details.tools'); if (d.open || !d.innerText.includes('Worked through 8 steps')) return false; d.open = true; return d.querySelector('.note-expand').getAttribute('aria-expanded') === 'true'; })()"), "");
     println!("      (working-card screenshots in {})", shots.display());
+    chrome.close(page)?;
+    let r = api.signed(owner, "DELETE", &format!("{add}/{}", fragment_core::npub::encode(hand.pubkey_hex())), None)?;
+    anyhow::ensure!(r.status == 200, "the fixture's key revoked: {r}");
+    Ok(())
+}
+
+/// The shapes of a production chat's records (2026-10-20: a chat that did
+/// not load in the shell): prompt answers from before answers named their
+/// card (`{kind: "prompt_response", option, prompt}`, no agent, no turn),
+/// messages whose files' blobs are not here, an owner's `steer`, a step
+/// with long commentary; and an agent's reply whose markdown made the
+/// renderer throw (a row of one cell over a separator with no pipe: `a |`,
+/// then `---`), which kept every redraw of its chat from drawing anything.
+/// Goal: the page draws every one of them, and an item it cannot draw (here
+/// the commentary's fold, in a browser without `Intl.Segmenter`, as Firefox
+/// before 125) is a quiet line in its place, said to the console, the rest
+/// of the chat drawn. Method: a quiet chat's owner and agent post them; the
+/// owner's page read, then read again with `Intl.Segmenter` taken away.
+pub(super) fn record_shapes(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrome: &mut Browser) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    let name = s.named(api, owner, "chat-shapes")?;
+    let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "making the shapes chat: {made}");
+    s.owned(&made.body, owner);
+    let (hand, agent) = quiet_agent(api, owner, &name)?;
+    let me = api.identity(owner)?;
+    let post = |by: &Keys, channel: &str, id: &str, body: Value| -> Result<i64> {
+        let r = api.signed(by, "POST", &format!("/api/f/{name}/channels/{channel}"), Some(&json!({ "id": id, "body": body })))?;
+        anyhow::ensure!(r.status == 200, "posting {id} on {channel}: {r}");
+        Ok(r.body["seq"].as_i64().unwrap_or(0))
+    };
+    // a file named by a hash no blob of the chat's has
+    let missing = |name: &str, kind: &str, size: u64| json!({ "name": name, "sha256": hex::encode(Sha256::digest(name.as_bytes())), "size": size, "type": kind });
+    let asked = post(owner, "chat", "ask", json!({ "text": "My couch broke. How do I get a replacement?" }))?;
+    post(&hand, "work", "start", json!({ "kind": "turn.start", "turn": "t1", "asker": me, "agent": agent, "cause": { "channel": "chat", "seq": asked } }))?;
+    let commentary = "The warranty covers a spring that broke from ordinary sitting, so this should be a free replacement rather than a repair you pay for. I will look up the claim form, then ask you two short questions before I fill it in for you.";
+    post(&hand, "work", "step", json!({ "kind": "turn.step", "turn": "t1", "step": 1, "category": "web", "tool": "web_search", "args": "sofa spring warranty", "ok": true, "excerpt": "", "text": commentary }))?;
+    for (i, prompt) in ["289a31.dcc130a7", "289a31.623765bc"].iter().enumerate() {
+        let options = json!([{ "id": "c0", "label": "Yes", "style": "primary" }, { "id": "c1", "label": "No" }, { "id": "other", "label": "Something else", "words": true }]);
+        post(&hand, "work", &format!("p{i}"), json!({ "kind": "turn.prompt", "turn": "t1", "prompt": prompt, "text": format!("Question {}?", i + 1), "options": options, "asks": me, "expiresAt": 4_102_444_800_000u64 }))?;
+        post(owner, "chat", &format!("answer-{i}"), json!({ "kind": "prompt_response", "option": "c0", "prompt": prompt }))?;
+        post(&hand, "work", &format!("pc{i}"), json!({ "kind": "turn.prompt.closed", "turn": "t1", "prompt": prompt, "outcome": "answered", "option": "c0", "by": me }))?;
+    }
+    post(&hand, "chat", "rp:t1:1", json!({ "text": "Your new address |\n---\nIt is on file now.", "turn": "t1" }))?;
+    post(&hand, "work", "end", json!({ "kind": "turn.end", "turn": "t1", "outcome": "idle" }))?;
+    post(owner, "chat", "photos", json!({ "text": "", "attachments": [missing("IMG_1.jpeg", "image/jpeg", 4_628_527), missing("IMG_2.jpeg", "image/jpeg", 3_153_194)] }))?;
+    post(owner, "chat", "screenshot", json!({ "text": "My address has changed", "attachments": [missing("IMG_3.png", "image/png", 793_981)] }))?;
+    post(owner, "chat", "steer", json!({ "kind": "command", "command": "steer", "args": "Or you could move them to your computer", "to": [agent] }))?;
+    post(&hand, "chat", "last", json!({ "text": "The last word." }))?;
+
+    // each page's uncaught errors, and what it says to the console
+    let probe = "window.__errors = []; addEventListener('error', (e) => window.__errors.push(String(e.message))); window.__said = []; const said = console.error; console.error = (...a) => { window.__said.push(a.map(String).join(' ')); said(...a); };";
+    let rest = "(() => { const md = [...document.querySelectorAll('.msg.agent .md')]; const reply = md.find((m) => m.querySelector('table th')?.textContent === 'Your new address'); return !!reply && reply.textContent.includes('It is on file now.') && md.some((m) => m.textContent === 'The last word.') && [...document.querySelectorAll('.prompt.closed .outcome.answered')].filter((o) => o.textContent.startsWith('Yes')).length === 2 && [...document.querySelectorAll('.message-attachments .attachment-name')].map((a) => a.textContent).join() === 'IMG_1.jpeg,IMG_2.jpeg,IMG_3.png' && [...document.querySelectorAll('.bubble')].some((b) => b.textContent === 'My address has changed') && document.querySelector('.bubble.command .command-name')?.textContent === '/steer'; })()";
+    chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
+    let page = chrome.open_with_script(&api.site_url(&name, "__signin?return=/"), probe)?;
+    super::fit(chrome, &page, 1280, 860, false)?;
+    let drew = super::shows(chrome, &page, rest) && super::shows(chrome, &page, "!!document.querySelector('details.tools .step-text .note-preview')");
+    let seen = chrome.eval(&page, "({ errors: window.__errors, unshown: document.querySelectorAll('.unshown').length, items: [...document.querySelectorAll('#messages > *')].map((n) => n.className) })")?;
+    s.ok(
+        "a chat of production's record shapes draws whole: legacy prompt answers, files with no blobs, a steer, long commentary, and a one-cell table over a rule",
+        drew && seen["errors"] == json!([]) && seen["unshown"] == 0,
+        &seen,
+    );
+    chrome.screenshot(&page, &s.dir("chat-polish").join("record-shapes.png"))?;
+    chrome.close(page)?;
+    let page = chrome.open_with_script(&api.site_url(&name, ""), &format!("delete Intl.Segmenter; {probe}"))?;
+    super::fit(chrome, &page, 1280, 860, false)?;
+    let quiet = "(() => { const n = document.querySelector('#messages > :nth-child(2)'); return !!n?.matches('.msg.notice.unshown') && n.textContent === 'This part of the chat could not be shown.' && !document.querySelector('details.tools'); })()";
+    let drew = super::shows(chrome, &page, rest) && super::shows(chrome, &page, quiet);
+    let seen = chrome.eval(&page, "({ errors: window.__errors, said: window.__said, items: [...document.querySelectorAll('#messages > *')].map((n) => n.className) })")?;
+    let said = seen["said"].as_array().is_some_and(|l| l.iter().any(|x| x.as_str().is_some_and(|x| x.contains("could not be shown"))));
+    s.ok(
+        "an item the page cannot draw (its commentary's fold, with no Intl.Segmenter) is a quiet line in its place, said to the console, and everything after it draws",
+        drew && said && seen["errors"] == json!([]),
+        &seen,
+    );
+    chrome.screenshot(&page, &s.dir("chat-polish").join("record-shapes-unshown.png"))?;
     chrome.close(page)?;
     Ok(())
 }

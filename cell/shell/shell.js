@@ -12,37 +12,14 @@
 import "./tooltips.js";
 import { avatar } from "./agent-identity.js";
 import { colorOf } from "./agent-color.js";
-import { appIcon } from "./app-icons.js";
+import { appIcon, icon } from "./icons.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
 import { createViewer } from "./viewer.js";
-import { LUCIDE_ICON } from "./lucide-icons.js";
-import { billingSections, returning, seatGives, seatOffer } from "./billing.js";
+import { billingSections, returnSaid, returning, seatGives, seatOffer } from "./billing.js";
 
 const $ = (id) => document.getElementById(id);
 // New agents run on the cheap tier: GLM-5.3 Flash, DeepSeek V4 Flash its fallback (Paul, 2026-10-09).
 const DEFAULT_AGENT_TIER = "cheap";
-const ICON = {
-  cornerDownLeft: LUCIDE_ICON.cornerDownLeft,
-  plus: '<path d="M12 5v14M5 12h14"/>',
-  rename: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
-  invite: '<circle cx="9" cy="8" r="3.2"/><path d="M3 19a6 6 0 0 1 12 0M19 8v6M16 11h6"/>',
-  agent: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
-  grid: '<rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/>',
-  reload: LUCIDE_ICON.reload,
-  folder: LUCIDE_ICON.folder,
-  share: LUCIDE_ICON.share,
-  more: '<circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/>',
-  people: '<circle cx="9" cy="8" r="3.2"/><path d="M3 19a6 6 0 0 1 12 0"/><path d="M16 5.2a3.2 3.2 0 0 1 0 5.6M18 19a6 6 0 0 0-2.5-4.9"/>',
-  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
-  lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
-  screen: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
-  archive: '<rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8M10 12h4"/>',
-  // Lucide's external-link, link and square-pen
-  external: '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
-  link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
-  newChat: '<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.4 2.6a1 1 0 0 1 3 3l-9 9a2 2 0 0 1-.85.5l-2.87.84a.5.5 0 0 1-.62-.62l.84-2.87a2 2 0 0 1 .5-.85z"/>',
-};
-const svg = (name) => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON[name]}</svg>`;
 // A new agent's name, when its maker names none (Paul, 2026-10-03): the
 // beige boxes of an alternate 1990s, never a real one's.
 const NAMES = ["XBT-2000", "Starfire 40K", "Turbo Quasar 486", "Novatron DX", "Hyperion 9000", "Cobalt Prism 66", "Megastation LX", "Orbitron 3D", "Datastar Pro", "Pulsar 360", "Zephyr XL", "Titan MX", "Vortex 7", "Nimbus 4K", "Galaxion SE", "Powerframe 99"];
@@ -85,8 +62,10 @@ const promptDeck = { hand: APP_PROMPTS.map((_, i) => i).slice(0, PROMPT_HAND), d
 // makes nothing (decision 49); fragments: their list (name, role, kind,
 // title, agents, preview, sharing, archived: a chat's agents the lead
 // first, and its newest message); computer: theirs, with its agents;
-// agents: by identity
-const state = { me: null, guest: false, fragments: [], computer: null, agents: new Map(), current: store.get(CURRENT, null), frames: new Map(), page: null };
+// agents: by identity; computerFailed: whether the last read of their computer
+// failed (what an earlier one said stays: a failure is not "none");
+// invites: those waiting on their emails, theirs to answer (`GET /api/invites`)
+const state = { me: null, guest: false, fragments: [], invites: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null };
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -97,19 +76,30 @@ function el(tag, cls, text) {
 
 // ---- the API, as this page calls it: the person's platform session ----
 class ApiError extends Error {
-  constructor(status, code, message) {
+  constructor(status, code, message, reason) {
     super(message);
     this.status = status;
     this.code = code;
+    // why, where the platform names it (billing's refusals: docs/api.md)
+    this.reason = reason ?? null;
   }
 }
+// this page's writes still going: a reload for a new release waits for them
+let writing = 0;
 async function api(method, path, body) {
   const headers = { "x-fragment-shell": "1" };
   if (body !== undefined) headers["content-type"] = "application/json";
-  const r = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: "same-origin" });
-  const out = await r.json().catch(() => ({}));
-  if (!r.ok) throw new ApiError(r.status, out.error, out.message || r.statusText);
-  return out;
+  const writes = method !== "GET";
+  if (writes) writing++;
+  try {
+    const r = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: "same-origin" });
+    heard(r);
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok) throw new ApiError(r.status, out.error, out.message || r.statusText, out.reason);
+    return out;
+  } finally {
+    if (writes) writing--;
+  }
 }
 
 const byName = (name) => state.fragments.find((f) => f.name === name);
@@ -178,16 +168,28 @@ function patch(box, rows) {
   while (box.children.length > next.length) box.lastElementChild.remove();
 }
 
+// The notice's generation: each notice shown, and each one taken away (a
+// chat or settings opened, settings loaded again), is a new one. What
+// finishes later says or takes away a notice only under the generation it
+// began under, never over a newer notice or another page (#457 review).
+let noticeGen = 0;
+function hideNotice() {
+  $("notice").hidden = true;
+  return ++noticeGen;
+}
+// `text`: a line, or lines and elements; `action`: one, or several in a row;
+// its generation
 function notice(title, text, action = null) {
   const n = $("notice");
   n.replaceChildren(el("strong", null, title));
-  if (text) n.append(el("span", null, text));
+  if (text) n.append(...[text].flat().map((t) => (typeof t === "string" ? el("span", null, t) : t)));
   if (action) {
-    const row = el("div");
-    row.append(action);
+    const row = el("div", "notice-row");
+    row.append(...[action].flat());
     n.append(row);
   }
   n.hidden = false;
+  return ++noticeGen;
 }
 
 // ---- layout: sidebar | chat | viewer ----
@@ -238,14 +240,15 @@ function frameOf(src, title, name = null) {
 
 // A frame that could not sign in says so, and how on (the mint's note,
 // auth.rs `frame_note`, or a fragment's page whose browser keeps its frame
-// cookie from it): in this page's look, in the frame's place, tried again
-// when the person comes back from the tab it sent them to.
+// cookie from it): in this page's look, in the frame's place (a note
+// before it, the frame hidden), tried again when the person comes back
+// from the tab it sent them to.
 const BLOCKED = {
   consent: (t) => [`Open ${t} to continue`, "It isn't yours, and no one shared it with you: it learns who you are only once you say so, in a tab of its own.", "Open it in a tab", "_blank"],
   cookies: (t) => [`${t} can't sign in here`, "This browser keeps a window's own sign-in from it. Open it in a tab instead.", "Open it in a tab", "_blank"],
   "signed-out": (t) => [`Sign in to see ${t}`, "You're signed out.", "Sign in", "_top"],
 };
-const html = (t) => String(t).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+const blockedNote = (frame) => (frame.previousElementSibling?.classList.contains("frame-note") ? frame.previousElementSibling : null);
 addEventListener("message", (event) => {
   const d = event.data;
   if (d?.fragment !== "signin-blocked" || !Object.hasOwn(BLOCKED, d.why)) return;
@@ -254,24 +257,59 @@ addEventListener("message", (event) => {
   const [title, text, go, target] = BLOCKED[d.why](titleOf(d.name));
   const href = d.why === "signed-out" ? `/auth/login?return=${encodeURIComponent(location.pathname)}` : `/auth/fragment?name=${encodeURIComponent(d.name)}&return=/`;
   frame.dataset.blocked = d.why;
-  frame.srcdoc = `<!doctype html><link rel="stylesheet" href="/__shell/shell.css"><body class="frame-note"><div class="notice"><strong>${html(title)}</strong><span>${html(text)}</span><a class="allow" href="${html(href)}" target="${target}" rel="noopener">${html(go)}</a></div></body>`;
+  // no chat's page is in it: it holds nothing, and is busy with nothing
+  greeted.delete(frame);
+  busyFrames.delete(frame);
+  const allow = el("a", "allow", go);
+  Object.assign(allow, { href, target, rel: "noopener" });
+  const notice = el("div", "notice");
+  notice.append(el("strong", null, title), el("span", null, text), allow);
+  const note = el("div", "frame-note");
+  note.append(notice);
+  blockedNote(frame)?.remove();
+  frame.before(note);
 });
 addEventListener("focus", () => {
   for (const frame of document.querySelectorAll("iframe[data-blocked]")) {
     delete frame.dataset.blocked;
-    frame.removeAttribute("srcdoc");
+    blockedNote(frame)?.remove();
+    greeted.delete(frame);
+    busyFrames.delete(frame);
     frame.src = frame.dataset.src;
   }
 });
 // The frames follow this page's light or dark (they may not see its media).
 const dark = matchMedia("(prefers-color-scheme: dark)");
 const mobileChat = matchMedia("(max-width: 760px)");
+// Load and decode both landscapes once. Hold the current one until its
+// replacement is ready; a failed load keeps it, and a rapid theme reversal
+// never applies an image that is no longer wanted.
+function loadWallpaper(file) {
+  const image = new Image();
+  image.src = `/__shell/${file}`;
+  return image.decode().then(() => image, () => null);
+}
+const wallpapers = {
+  light: loadWallpaper("wallpaper.jpg"),
+  dark: loadWallpaper("wallpaper-dark.jpg"),
+};
+document.documentElement.style.setProperty("--wallpaper-dark-opacity", dark.matches ? "1" : "0");
+async function updateWallpaper() {
+  const mode = dark.matches ? "dark" : "light";
+  const image = await wallpapers[mode];
+  if (image && mode === (dark.matches ? "dark" : "light")) {
+    document.documentElement.style.setProperty("--wallpaper-dark-opacity", mode === "dark" ? "1" : "0");
+  }
+}
 function theme(frame) {
   try {
     frame.contentWindow?.postMessage({ fragment: "theme", mode: dark.matches ? "dark" : "light", mobile: mobileChat.matches }, "*");
   } catch {}
 }
-dark.addEventListener("change", () => { for (const f of document.querySelectorAll("iframe")) theme(f); });
+dark.addEventListener("change", () => {
+  void updateWallpaper();
+  for (const f of document.querySelectorAll("iframe")) theme(f);
+});
 mobileChat.addEventListener("change", () => { for (const f of document.querySelectorAll("iframe")) theme(f); });
 
 // ---- what is visible: the page is as tall as the visual viewport, from
@@ -279,13 +317,18 @@ mobileChat.addEventListener("change", () => { for (const f of document.querySele
 // viewport and Safari pans it, leaving the layout viewport be (it ignores
 // `interactive-widget`), so the body follows it: a chat's composer, the
 // launcher's input and a window's fields sit just above the keyboard, and
-// the page itself never scrolls under it. ----
+// the page itself never scrolls under it. While a keyboard is up, what is
+// visible is shorter than the layout viewport: the screen's bottom edge is
+// under the keyboard, though Safari may pan the layout viewport's bottom
+// into view above it, and nothing keeps clear of that edge's inset (the
+// home indicator's; shell.css, data-keyboard). ----
 const visible = window.visualViewport;
 function fitViewport() {
   if (!visible) return;
-  const root = document.documentElement.style;
-  root.setProperty("--viewport-height", `${Math.round(visible.height)}px`);
-  root.setProperty("--viewport-top", `${Math.round(visible.offsetTop)}px`);
+  const root = document.documentElement;
+  root.style.setProperty("--viewport-height", `${Math.round(visible.height)}px`);
+  root.style.setProperty("--viewport-top", `${Math.round(visible.offsetTop)}px`);
+  root.toggleAttribute("data-keyboard", visible.height * visible.scale < root.clientHeight - 1);
 }
 visible?.addEventListener("resize", fitViewport);
 visible?.addEventListener("scroll", fitViewport);
@@ -295,11 +338,15 @@ fitViewport();
 // A frame of a fragment the person owns may ask for their agents
 // (`{fragment: "agents?"}`); the shell answers it, at that fragment's own
 // origin only (its status's canonical URL), `{fragment: "agents", agents:
-// [{identity, fragment, name, title, picture?, phase?}]}` (`picture` its
-// picture's address, whole, on this platform; `phase` their computer's,
-// as the platform last said: `asleep`, `starting`, `awake`, `sleeping` or
-// `wont_wake`), and again whenever any of it changes: a rename or a new
-// picture reaches the page as it reaches this one.
+// [{identity, fragment, name, title, picture?, phase?, modelProviders?}],
+// models?}` (`picture` its picture's address, whole, on this platform;
+// `phase` their computer's, as the platform last said: `asleep`,
+// `starting`, `awake`, `sleeping` or `wont_wake`; `modelProviders` and
+// `models` as their computer's view says them: the providers whose models
+// each may run now, and the model route's models' ids by its names, which
+// with an agent's `agent.json` say the model it runs), and again whenever
+// any of it changes: a rename or a new picture reaches the page as it
+// reaches this one.
 // It may then ask for one of them in its fragment (`{fragment: "add-agent",
 // identity, nonce}`): the shell asks its person, in its own dialog (never
 // in the frame: a page is code its author or an agent wrote, so it asks
@@ -330,13 +377,16 @@ const roster = () => {
   const phase = state.computer?.phase;
   return [...state.agents.values()].map((a) => {
     const picture = agentFace(a.fragment, a.identity).picture;
-    return { identity: a.identity, fragment: a.fragment, name: a.name || labelOf(a.fragment), title: titleOf(a.fragment), ...(picture ? { picture: new URL(picture, location.origin).href } : {}), ...(phase ? { phase } : {}) };
+    return { identity: a.identity, fragment: a.fragment, name: a.name || labelOf(a.fragment), title: titleOf(a.fragment), ...(picture ? { picture: new URL(picture, location.origin).href } : {}), ...(phase ? { phase } : {}), ...(a.modelProviders?.length ? { modelProviders: a.modelProviders } : {}) };
   });
 };
+// the answer to `name`'s frame
+const rosterFor = (name) => ({ fragment: "agents", agents: roster(), ...(state.computer?.models ? { models: state.computer.models } : {}), setup: setupFor(name) });
 let rosterSent = "";
 function rosterChanged() {
-  const agents = roster();
-  const now = JSON.stringify([agents, setup && setupFor(setup.chat)]);
+  // the first run's chat named too: its steps are the same before it is
+  // named, and a chat already open (`readAgain`) hears them only then
+  const now = JSON.stringify([roster(), state.computer?.models, setup && [setup.chat, setupFor(setup.chat)]]);
   if (now === rosterSent) return;
   rosterSent = now;
   const live = new Set([...document.querySelectorAll("iframe[data-fragment]")].map((f) => f.contentWindow));
@@ -344,7 +394,7 @@ function rosterChanged() {
     if (!live.has(win)) rosterTo.delete(win);
     else {
       const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === win);
-      win.postMessage({ fragment: "agents", agents, setup: setupFor(frame?.dataset.fragment) }, origin);
+      win.postMessage(rosterFor(frame?.dataset.fragment), origin);
     }
   }
 }
@@ -369,7 +419,7 @@ addEventListener("message", async (event) => {
   }
   if (d.fragment === "agents?") {
     rosterTo.set(event.source, origin);
-    event.source.postMessage({ fragment: "agents", agents: roster(), setup: setupFor(name) }, origin);
+    event.source.postMessage(rosterFor(name), origin);
     // a prompt pressed before its chat's page was there (`composeApp`)
     const text = composing.get(name);
     composing.delete(name);
@@ -442,7 +492,7 @@ function badges(f) {
   const { guests = 0, invites = 0, visibility } = f.sharing ?? {};
   if (guests > 0 || invites > 0) {
     const b = el("span", "shared");
-    b.innerHTML = svg("people");
+    b.replaceChildren(icon("people"));
     b.append(String(guests + invites));
     b.title = [
       guests > 0 ? `Shared with ${guests} ${guests === 1 ? "person" : "people"}` : "",
@@ -452,7 +502,7 @@ function badges(f) {
   }
   if (visibility === "public") {
     const b = el("span", "shared");
-    b.innerHTML = svg("globe");
+    b.replaceChildren(icon("globe"));
     b.title = "Anyone can open it";
     out.push(b);
   }
@@ -550,7 +600,7 @@ function openMenu(button, items) {
     const b = el("button");
     b.type = "button";
     b.setAttribute("role", "menuitem");
-    b.innerHTML = svg(it.icon);
+    b.replaceChildren(icon(it.icon));
     b.append(it.text);
     b.onclick = () => { closeMenu(); it.onClick(); };
     return b;
@@ -618,7 +668,8 @@ function renderHeading() {
 }
 // A chat's unread, as its row shows them: none on the open one (it is
 // being seen), and past the count's bound "99+" (the list counts at most
-// UNREAD_MAX: proto's `LISTED_UNREAD_MAX`).
+// UNREAD_MAX: proto's `LISTED_UNREAD_MAX`, held to it by a host test,
+// xtask/src/guards.rs `the_shell_copies_its_limits`).
 const UNREAD_MAX = 100;
 function unreadMark(f) {
   const n = f.name === state.current && !state.page ? 0 : f.unread ?? 0;
@@ -639,6 +690,62 @@ function primaryAgent() {
   const f = state.fragments.find((x) => x.kind === "agent" && own(x));
   return f ? { fragment: f.name, identity: null } : null;
 }
+// What the person's agents are doing, from their chats' rows in the list
+// (docs/api.md, "Listed records"): each agent's newest record of a turn's
+// kind on a chat's `work` (docs/chat-records.md), which the shell reads as
+// the chat's page reads a turn. Started, a step, or a card answered is
+// working; a card open waits for the person (its owner answers its cards);
+// a question waits on whoever it asks (`asks`); an end is nothing. A
+// message waiting for its turn has no record yet, so queued is not said.
+// None while their computer is not awake (its turns stop with it) or this
+// page's list socket is shut (it would not hear the change), and none past
+// the bridge's own bound on a turn that says nothing (15 minutes; a turn
+// waiting on someone waits as long as a card, an hour), each a minute more
+// for the list's own lag. Those three are copies, named as their sources
+// name them (proto's limits; images/bridge/src/limits.rs), each held to its
+// source by a host test (xtask/src/guards.rs, `the_shell_copies_its_limits`).
+// The list's turn kinds are the chat's records (docs/chat-records.md):
+// the shell reads them as the bridge writes them. A listed field's
+// value is any text an agent wrote (up to 128 characters): `asks` is only
+// compared with the person's id here, never shown; what is shown is these
+// words and the chat's title, as text (`el`'s textContent), never markup.
+const DOING_SAYS = { you: "Waiting for you", waiting: "Waiting", working: "Working" };
+const DOING_ORDER = Object.keys(DOING_SAYS);
+const DOING_OF_KIND = { "turn.start": "working", "turn.step": "working", "turn.prompt.closed": "working", "turn.prompt": "you", "turn.asked": "asked" };
+const LISTED_FRESH_MS = 60_000;
+const TURN_IDLE_MS_MAX = 15 * 60_000;
+const PROMPT_TTL_MS_DEFAULT = 60 * 60_000;
+const DOING_QUIET_MS = { working: TURN_IDLE_MS_MAX + LISTED_FRESH_MS, waiting: PROMPT_TTL_MS_DEFAULT + LISTED_FRESH_MS };
+// the chats its menu names, at most
+const DOING_LISTED = 5;
+// the list socket (`watchList`, below): declared here, as the sidebar reads it
+const watching = { on: false, socket: null, wait: 1000, timer: null, settle: null };
+const listLive = () => watching.socket?.readyState === WebSocket.OPEN;
+// The chats where agent `identity` is doing something, the most pressing
+// first (waiting for the person, then on someone, then working), the
+// newest first within each; each with when it stops counting (`until`).
+function doingChats(identity) {
+  if (!identity || !listLive() || state.computer?.phase !== "awake") return [];
+  const now = Date.now();
+  const out = [];
+  for (const f of chats()) {
+    for (const r of f.listed ?? []) {
+      const kind = r.channel === "work" && r.principal === identity ? DOING_OF_KIND[r.kind] : undefined;
+      if (!kind) continue;
+      const doing = kind === "asked" ? (r.fields?.asks === state.me?.id ? "you" : "waiting") : kind;
+      const until = r.at + DOING_QUIET_MS[doing === "working" ? "working" : "waiting"];
+      if (until > now) out.push({ chat: f.name, doing, at: r.at, until });
+    }
+  }
+  return out.sort((x, y) => DOING_ORDER.indexOf(x.doing) - DOING_ORDER.indexOf(y.doing) || y.at - x.at);
+}
+// The sidebar says it again as the first of what it shows stops counting.
+let doingTimer = 0;
+function doingAgain(doing) {
+  clearTimeout(doingTimer);
+  const next = Math.min(...doing.map((x) => x.until));
+  if (Number.isFinite(next)) doingTimer = setTimeout(renderChats, Math.max(1000, next - Date.now()));
+}
 // Newest first: a chat by when its newest message was said (its row's
 // `previewAt`); one with nothing said yet (just made) above them all.
 const newest = (a, b) => (b.previewAt ?? Infinity) - (a.previewAt ?? Infinity) || (a.name < b.name ? -1 : 1);
@@ -646,17 +753,24 @@ function renderChats() {
   const primary = primaryAgent();
   const agentRows = [];
   if (primary) {
+    const doing = doingChats(primary.identity);
+    doingAgain(doing);
+    const says = DOING_SAYS[doing[0]?.doing];
     const row = el("button", "agent-heading sidebar-agent");
     row.id = "sidebar-agent";
     row.type = "button";
     row.dataset.key = primary.fragment;
-    row.setAttribute("aria-label", `${titleOf(primary.fragment)}: your agent's menu`);
+    row.setAttribute("aria-label", `${titleOf(primary.fragment)}${says ? `, ${says.toLowerCase()}` : ""}: your agent's menu`);
     row.setAttribute("aria-haspopup", "menu");
     row.setAttribute("aria-controls", "menu");
     row.setAttribute("aria-expanded", String(!!menuFor && menuFor.button === $("sidebar-agent")));
     const face = el("span", "sidebar-agent-mark");
     face.append(avatar(agentFace(primary.fragment, primary.identity), "small"));
-    row.append(face, el("strong", "title", titleOf(primary.fragment)));
+    // its name, and under it what it is doing, so the name keeps its room
+    const named = el("span", "sidebar-agent-named");
+    named.append(el("strong", "title", titleOf(primary.fragment)));
+    if (says) named.append(el("span", `agent-doing ${doing[0].doing}`, says));
+    row.append(face, named);
     row.onclick = () => openPrimaryMenu(row);
     agentRows.push(row);
   }
@@ -684,12 +798,73 @@ function renderChats() {
   });
   patch($("chats"), rows.length ? rows : [el("div", "empty-row", chats().length ? "Every chat is archived" : state.guest ? "Chats shared with you show here" : "Your chats will appear here")]);
 }
-// The agent's own menu: another chat with it, its name, its profile and
-// its screen. A chat's own (Rename, Invite, Archive) is the chat's ⋯.
+
+// ---- invites: shared by email, and theirs only once they accept (decision 63) ----
+// The invites waiting on the emails the person signs in with, above their
+// chats: what each shares, who shared it, and as what, with Accept and
+// Decline. Read as the page starts, as its list's socket opens, and when
+// the socket says they changed (`invited`: one made, renewed or taken
+// back). Accepted, it is in their list, and opens; declined, it goes.
+const invitesRead = { asked: 0, shown: 0 };
+async function loadInvites() {
+  const mine = ++invitesRead.asked;
+  // failed, what was read before stays: a failure is not "none"
+  const got = await api("GET", "/api/invites").catch(() => null);
+  if (!got || mine < invitesRead.shown) return;
+  invitesRead.shown = mine;
+  state.invites = got.invites ?? [];
+  renderInvites();
+}
+function renderInvites() {
+  const rows = state.invites.map((i) => {
+    const box = el("div", "invite");
+    box.dataset.key = `invite:${i.fragment}`;
+    box.dataset.invite = i.fragment;
+    const may = i.role === "editor" ? "edit" : "view";
+    box.append(el("strong", "invite-title", i.title), el("span", "invite-from", `${i.from ?? "Someone"} invited you to ${may} it`));
+    const actions = el("div", "invite-actions");
+    actions.append(inviteButton(i, "accept", "Accept"), inviteButton(i, "decline", "Decline"));
+    box.append(actions);
+    return box;
+  });
+  patch($("invites"), rows);
+  $("invites").hidden = !rows.length;
+}
+// What it shares opens as its kind does: a chat in the middle, else a window.
+const openShared = (name) => (byName(name)?.kind === "chat" ? openChat(name) : openApp(name));
+function inviteButton(invite, verb, text) {
+  const b = el("button", `invite-${verb}`, text);
+  b.type = "button";
+  b.onclick = async () => {
+    const both = [...b.parentElement.children];
+    for (const x of both) x.disabled = true;
+    try {
+      await api("POST", `/api/invites/${seg(invite.fragment)}/${verb}`, {});
+      await Promise.all([load(), loadInvites()]);
+      if (verb === "accept") { openShared(invite.fragment); leaveSidebar(); }
+    } catch (e) {
+      // gone (taken back, answered in another tab, run out): read again, and
+      // one theirs already (accepted elsewhere) opens
+      await Promise.all([load(), loadInvites()]).catch(() => {});
+      if (e.status === 404 && verb === "accept" && byName(invite.fragment)) return openShared(invite.fragment);
+      const gone = e.status === 404 ? "It isn't open any more: it was taken back, answered, or ran out." : "Try again in a moment.";
+      notice(verb === "accept" ? "The invite wasn't accepted" : "The invite wasn't declined", gone);
+      for (const x of both) x.disabled = false;
+    }
+  };
+  return b;
+}
+// The agent's own menu: where it is doing something (each chat opens),
+// another chat with it, its name, its profile and its screen. A chat's own
+// (Rename, Invite, Archive) is the chat's ⋯. What it is doing is read as
+// it opens, not from when its row was drawn.
 function openPrimaryMenu(trigger) {
   const primary = primaryAgent();
   if (!primary) return;
   openMenu(trigger, [
+    ...doingChats(primary.identity)
+      .slice(0, DOING_LISTED)
+      .map((x) => ({ icon: "agent", text: `${DOING_SAYS[x.doing]} in ${titleOf(x.chat)}`, onClick: () => { openChat(x.chat); leaveSidebar(); } })),
     ...(primary.identity && !state.guest ? [{ icon: "newChat", text: "New chat", onClick: () => newChat(primary.identity) }] : []),
     { icon: "rename", text: "Rename…", onClick: () => rename(primary.fragment) },
     { icon: "agent", text: "Its profile", onClick: () => openApp(primary.fragment) },
@@ -808,7 +983,7 @@ function openChat(name, push = true) {
   $("frames").hidden = false;
   state.current = name;
   store.set(CURRENT, name);
-  $("notice").hidden = true;
+  hideNotice();
   if (!state.frames.has(name)) {
     const frame = frameOf(framed(name, setupFor(name) ? "/?setup=1" : "/"), titleOf(name), name);
     $("frames").append(frame);
@@ -819,12 +994,15 @@ function openChat(name, push = true) {
   renderChats();
   markSeen();
   prewake();
+  navigated();
+  // home: a first run a failed read put off goes on from here too
+  if (firstRunPutOff) resumeFirstRun();
 }
 
 // ---- apps: every other fragment, each a window in the viewer ----
 function paneIcon(name) {
   const i = el("span", "pane-icon");
-  i.innerHTML = svg(name);
+  i.replaceChildren(icon(name));
   return i;
 }
 const iconOf = (name) => appIcon(labelOf(name));
@@ -838,6 +1016,7 @@ async function loadCard(name) {
   const headers = { "x-fragment-shell": "1" };
   if (known) headers["if-none-match"] = known.etag;
   const r = await fetch(`/api/f/${seg(name)}/card`, { headers, credentials: "same-origin" });
+  heard(r);
   if (r.status === 304) return "same";
   if (r.status === 404 && !known) return "none";
   if (!r.ok) return "same";
@@ -910,7 +1089,7 @@ function renderApps() {
     add.dataset.key = "prompts";
     add.title = "Ask for an app";
     const art = el("span", "dock-art");
-    art.innerHTML = svg("plus");
+    art.replaceChildren(icon("plus"));
     add.append(art, el("span", "label", "Add"));
     add.onclick = () => { hidePeek(); showPrompts(); leaveSidebar(); };
     rows.push(add);
@@ -954,12 +1133,12 @@ function openApp(name, path = "/") {
   show({
     key: `app:${name}`, title: titleOf(name), subtitle: !f || own(f) ? undefined : f.role, icon: iconOf(name), body: frame, status,
     actions: [
-      ...(f && own(f) ? [{ icon: ICON.share, title: "Share…", onClick: () => share(name) }] : []),
-      { icon: ICON.folder, title: "Files", onClick: () => show({ key: `tree:${name}`, title: titleOf(name), subtitle: "files", icon: paneIcon("folder"), body: frameOf(framed(name, "/__files"), `${titleOf(name)} files`, name) }) },
-      { icon: ICON.reload, title: "Reload", onClick: () => { frame.src = framed(name, path); } },
-      { icon: ICON.external, title: "Open in a new tab", onClick: () => window.open(`/auth/fragment?name=${encodeURIComponent(name)}&return=${encodeURIComponent(path)}`, "_blank", "noopener") },
+      ...(f && own(f) ? [{ icon: "share", title: "Share…", onClick: () => share(name) }] : []),
+      { icon: "folder", title: "Files", onClick: () => show({ key: `tree:${name}`, title: titleOf(name), subtitle: "files", icon: paneIcon("folder"), body: frameOf(framed(name, "/__files"), `${titleOf(name)} files`, name) }) },
+      { icon: "reload", title: "Reload", onClick: () => { frame.src = framed(name, path); } },
+      { icon: "external", title: "Open in a new tab", onClick: () => window.open(`/auth/fragment?name=${encodeURIComponent(name)}&return=${encodeURIComponent(path)}`, "_blank", "noopener") },
       {
-        icon: ICON.more, title: "More", onClick: (e) => openMenu(e.currentTarget, [
+        icon: "more", title: "More", onClick: (e) => openMenu(e.currentTarget, [
           { icon: "link", text: "Copy link", onClick: () => at.then((u) => navigator.clipboard.writeText(u)).catch((err) => notice("The link was not copied", err.message)) },
           // someone else's: who else is in it, and leaving it
           ...(f && !own(f) ? [shareItem(name)] : []),
@@ -968,6 +1147,7 @@ function openApp(name, path = "/") {
       },
     ],
   });
+  navigated();
 }
 
 // ---- archiving: the person's own view (their list's row), not the fragment's ----
@@ -1047,10 +1227,26 @@ async function openScreen(agent) {
   try {
     const t = await api("POST", `/api/computers/${seg(state.computer.computer)}/ports/6080/ticket`, { path: `/?agent=${encodeURIComponent(agent)}` });
     const frame = frameOf(t.url, `${titleOf(agent)}'s screen`);
+    frame.dataset.screen = agent;
+    frame.addEventListener("load", () => nameScreen(frame));
     show({ key: `screen:${agent}`, title: titleOf(agent), subtitle: "screen", icon: paneIcon("screen"), body: frame, persist: false });
   } catch (e) {
     notice("Its screen did not open", e.message);
   }
+}
+// Whose screen it is, by the agent's name as the person's list says it now
+// (its fragment's title): its window's, and its page's, told at the port's
+// own origin as it loads and again on a rename (`{fragment: "screen",
+// agent, name}`; docs/computers.md, Ports). Its computer knows the agent by
+// its label alone, which is no name.
+function nameScreen(frame) {
+  const agent = frame.dataset.screen;
+  frame.setAttribute("aria-label", `${titleOf(agent)}'s screen`);
+  const title = frame.closest(".pane")?.querySelector(".pane-title");
+  if (title) title.textContent = titleOf(agent);
+  try {
+    frame.contentWindow?.postMessage({ fragment: "screen", agent, name: titleOf(agent) }, new URL(frame.dataset.src).origin);
+  } catch {}
 }
 
 // ---- making the agent: its fragment, its computer, its chat (decision 10, 16) ----
@@ -1308,14 +1504,14 @@ function renderFound(fragments, messages) {
   if (canLaunch()) {
     const action = el("button", "row search-result search-start");
     action.type = "button";
-    const icon = el("span", "search-action-icon");
-    icon.innerHTML = svg("newChat");
+    const mark = el("span", "search-action-icon");
+    mark.append(icon("newChat"));
     const copy = el("span", "agent-copy");
     copy.append(el("span", "label", `Start a new chat with ${titleOf(state.agents.get(searchIdentity).fragment)}`), el("span", "agent-preview", q));
     const enter = el("span", "meta search-enter");
     enter.title = "Enter";
-    enter.innerHTML = svg("cornerDownLeft");
-    action.append(icon, copy, enter);
+    enter.replaceChildren(icon("cornerDownLeft"));
+    action.append(mark, copy, enter);
     action.onclick = startFromSearch;
     results.append(action);
   }
@@ -1515,6 +1711,7 @@ function computerIs(v) {
   if (!v?.computer) return;
   state.computer = v;
   renderComputer();
+  renderChats();
   rosterChanged();
 }
 
@@ -1529,12 +1726,6 @@ const clock = (ms) => {
   const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   return today ? time : `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
 };
-const span = (ms) => {
-  const m = Math.max(1, Math.round(ms / 60_000));
-  if (m < 60) return `${m} minute${m === 1 ? "" : "s"}`;
-  const h = Math.round(m / 60);
-  return h < 48 ? `${h} hour${h === 1 ? "" : "s"}` : `${Math.round(h / 24)} days`;
-};
 // why a computer won't start, in plain words (the platform's own words
 // stay beside them, for whoever helps)
 function wontStart(why) {
@@ -1544,12 +1735,6 @@ function wontStart(why) {
   if (/restore|archive|backup/i.test(why)) return "Its save couldn't be restored.";
   return "It couldn't start.";
 }
-const LOST = {
-  crash: "Your computer stopped unexpectedly",
-  unsaved: "Your computer was stopped because it couldn't save",
-  restart: "Your restart couldn't save first",
-  unusable: "Your computer's newest save couldn't be restored",
-};
 // a restart the person asked for in this page, and of which start: a
 // computer that still won't start after one says where to get help
 let restarted = 0;
@@ -1592,10 +1777,13 @@ function noticeRow(n) {
     say("Your computer can't save right now", `It hasn't saved since ${clock(n.since)}, so what its agents did after that isn't kept yet. It keeps trying.${stop} Restarting tries to save first.`, n.why);
     restart("Restart now");
   } else if (n.kind === "went_back") {
-    const back = n.save && n.savedAt
-      ? `${n.pending ? "It goes back" : "It went back"} to its save of ${clock(n.savedAt)}${n.endedAt ? `, ${span(n.endedAt - n.savedAt)} before it stopped` : ""}.`
-      : `${n.pending ? "It starts again" : "It started again"} with nothing kept from before.`;
-    say(LOST[n.cause] ?? "Your computer went back to an older save", `${back} Work on the computer after that is gone; your chats keep everything that was said.`);
+    // told only when something was done on it after that save (a stop
+    // that lost nothing tells nothing), so it says what went, calmly
+    const since = n.save && n.savedAt ? clock(n.savedAt) : null;
+    const back = n.pending
+      ? (since ? `When it starts again, changes on it since ${since} won't be there.` : "Nothing on it was saved yet, so it will start fresh.")
+      : (since ? `Changes on it since ${since} weren't kept.` : "Nothing on it was saved yet, so it started fresh.");
+    say(n.pending ? "Your computer stopped" : "Your computer restarted", `${back} Your chats are all here.`);
     const ok = el("button", null, "OK");
     ok.type = "button";
     ok.dataset.action = "seen";
@@ -1612,15 +1800,32 @@ function noticeRow(n) {
     later.dataset.action = "later";
     later.onclick = () => updateLater(n.version, later);
     actions.append(later);
+  } else if (n.kind === "refresh") {
+    copy.append(el("strong", null, "Couldn't refresh your computer"));
+    const again = el("button", "primary", "Try again");
+    again.type = "button";
+    again.dataset.action = "refresh";
+    again.onclick = () => readAgain(again);
+    actions.append(again);
   } else return null;
   row.append(copy, actions);
   return row;
 }
+// a read of it that failed (a blip, a 5xx) says so first, over what the
+// last read said, with Try again
 function renderComputer() {
   const box = $("computer-notices");
-  const rows = (state.computer?.notices ?? []).map(noticeRow).filter(Boolean);
+  const rows = [...(state.computerFailed ? [{ kind: "refresh" }] : []), ...(state.computer?.notices ?? [])].map(noticeRow).filter(Boolean);
   box.replaceChildren(...rows);
   box.hidden = !rows.length;
+}
+// Try again: the list and the computer read again (`load`, which goes on
+// with what the failure put off). The list's read failing too, the line
+// stays, to try again.
+async function readAgain(button) {
+  button.disabled = true;
+  await load().catch(() => {});
+  button.disabled = false;
 }
 // Restart: the computer saves if it can, then starts fresh from its newest
 // good save. It names the start the person saw, so pressed twice (or in two
@@ -1635,7 +1840,7 @@ async function restartComputer(button) {
   try {
     restarted = c.generation || 0;
     computerIs(await api("POST", `/api/computers/${seg(c.computer)}/restart`, { generation: c.generation || 0 }));
-    if (state.page === "Settings") await openSettings(false);
+    await reopenSettings();
   } catch (e) {
     button.textContent = label;
     const said = button.parentElement.querySelector(".form-error") ?? el("p", "form-error");
@@ -1727,6 +1932,21 @@ function actionLine(label, ...actions) {
   row.append(key, control);
   return row;
 }
+// Finite's privacy policy and terms (`/privacy`, `/terms`), small and
+// muted, each in a tab of its own, at the end of Settings' Account (the
+// first run's footer, index.html, has About, Contact and these)
+function legalLinks() {
+  const p = el("p", "muted legal-links");
+  const pages = [["/privacy", "Privacy"], ["/terms", "Terms"]];
+  pages.forEach(([href, text], i) => {
+    const a = el("a", null, text);
+    a.href = href;
+    a.target = "_blank";
+    a.rel = "noopener";
+    p.append(...(i ? [" · ", a] : [a]));
+  });
+  return p;
+}
 // a sentence whose `quoted` parts are code
 function say(text) {
   const p = el("p");
@@ -1771,20 +1991,43 @@ function renderSettingsPage(page, sections) {
   };
   page.onscroll();
 }
-async function openSettings(push = true) {
+// Each load of settings is numbered, and only the latest renders, while
+// settings are shown: an older one that answers last (an action's reload, a
+// second press, Back) read older state, and is dropped (#441).
+let settingsLoads = 0;
+// Each visit to settings, from another page (never a reload of them): an
+// action's failure is said only in the visit it was pressed in (#439).
+let visits = 0;
+// `failed`: what the action that asked for this load says once it renders
+// (a failure's notice, [title, text]).
+async function openSettings(push = true, failed = null) {
+  const ticket = ++settingsLoads;
+  const lost = () => ticket !== settingsLoads || state.page !== "Settings";
   if (push) at(SETTINGS);
+  // settings render with no notice: one of the page they came from stays
+  // there, an action that worked takes its earlier failure's away, and
+  // one that failed says so once this load renders, if nothing newer (a
+  // load, a page, a notice) has come since it began
+  const gen = hideNotice();
+  const tell = () => {
+    if (failed && gen === noticeGen) notice(...failed);
+  };
+  if (state.page !== "Settings") visits++;
   state.page = "Settings";
   $("layout").classList.add("settings-view");
   $("frames").hidden = true;
   const page = $("settings-page");
   page.hidden = false;
-  page.replaceChildren(el("p", "muted", "Loading…"));
+  // in the loaded page's own layout, so nothing moves as it loads
+  renderSettingsPage(page, [el("p", "muted settings-loading", "Loading…")]);
   renderHeading();
   renderChats();
   leaveSidebar();
-  // a credit pack's Checkout returning, before the ledger is read
-  const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => openSettings(false) };
+  // a credit pack's Checkout returning, before the ledger is read (its
+  // settlement every load awaits, said by the one that renders)
+  const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => reopenSettings(), noSeatSaid, switchForm, support: state.support };
   const back = await returning(billingHelpers);
+  if (lost()) return;
   const [ledger, mySeat, linked, uses, access] = await Promise.all([
     api("GET", "/api/ledger").catch(() => null),
     api("GET", "/api/seat").catch(() => null),
@@ -1792,15 +2035,25 @@ async function openSettings(push = true) {
     state.computer ? api("GET", `/api/computers/${seg(state.computer.computer)}/uses`).catch(() => null) : null,
     api("GET", "/api/access").catch((e) => ({ error: e.message })),
   ]);
+  if (lost()) return;
   if (mySeat) setGuest(mySeat.guest);
   const emails = (state.me.subjects ?? []).map((x) => x.email).filter(Boolean);
+  // who is signed in (their latest sign-in's email), signing out, and
+  // another account: a seat may wait under another email
+  const signout = el("form");
+  signout.method = "post";
+  signout.action = "/auth/logout";
+  const out = el("button", "quiet", "Sign out");
+  out.type = "submit";
+  signout.append(out);
+  const ways = el("span", "settings-actions");
+  ways.append(signout, switchForm(SETTINGS));
+  const who = line("Signed in as", "", ways);
+  who.classList.add("settings-who", "settings-stack");
+  who.querySelector(".settings-value").append(state.me.email ? el("strong", null, state.me.email) : "—");
   const id = line("Identity", state.me.id);
   id.lastChild.classList.add("mono");
-  const account = section(
-    "Account",
-    line(emails.length > 1 ? "Sign-ins" : "Signed in as", emails.join(", ") || "—"),
-    id,
-  );
+  const account = section("Account", who, id);
   // a picture: PNG, JPEG, WebP or GIF, at most 256 KiB (PUT /api/identities/me/picture)
   const picture = el("label", "quiet picture");
   const shown = el("img");
@@ -1815,31 +2068,37 @@ async function openSettings(push = true) {
   file.onchange = async () => {
     const f = file.files?.[0];
     if (!f) return;
-    const r = await fetch("/api/identities/me/picture", { method: "PUT", headers: { "x-fragment-shell": "1", "content-type": f.type }, body: f, credentials: "same-origin" });
+    writing++;
+    let r;
+    try {
+      r = await fetch("/api/identities/me/picture", { method: "PUT", headers: { "x-fragment-shell": "1", "content-type": f.type }, body: f, credentials: "same-origin" });
+      heard(r);
+    } finally {
+      writing--;
+    }
     if (r.ok) {
       state.me = await api("GET", "/api/identities/me");
-      openSettings(false);
+      reopenSettings();
     } else picture.querySelector("span").textContent = (await r.json().catch(() => ({}))).message || "That picture was not taken";
   };
   account.append(actionLine("Picture", picture));
-  // another sign-in (an email, a provider) that is this person too, and signing out
-  const link = el("a", "quiet", "Add another sign-in");
-  link.href = `/auth/link?return=${encodeURIComponent(SETTINGS)}`;
-  const signout = el("form");
-  signout.method = "post";
-  signout.action = "/auth/logout";
-  const out = el("button", "quiet", "Sign out");
-  out.type = "submit";
-  signout.append(out);
-  account.append(actionLine("Sign-ins", link), actionLine("Session", signout));
+  // their sign-ins, when they linked several before linking went (off
+  // until WorkOS offers an account picker: docs/api.md, Sign-in)
+  if (emails.length > 1) account.append(line("Sign-ins", emails.join(", ")));
+  account.append(legalLinks());
   // the person's seat, credit and org (billing.js), and why agents stop
   const billing = await billingSections(billingHelpers, ledger, mySeat, back);
-  // everything that is theirs, to download (a guest's too: what is shared
-  // with them, named)
-  const data = dataSection();
+  if (lost()) return;
   // a guest has no agents to stop, nor a computer, skills or connections
-  // for them, nor apps to publish: a seat to get comes first, then who they are
-  if (state.guest) return renderSettingsPage(page, [...billing, account, data]);
+  // for them, nor apps to publish: a seat to get comes first, then who they
+  // are, then everything that is theirs, to download (what is shared with
+  // them, named); Your data is built only by a load that renders, as it
+  // reads its export again while one builds
+  if (state.guest) {
+    returnSaid(back);
+    renderSettingsPage(page, [...billing, account, dataSection()]);
+    return tell();
+  }
   const standing = ledger?.standing?.standing;
   if (standing && standing !== "ok") {
     billing[0].append(el("p", "settings-warning", [STOPPED[standing] ?? "Your agents are stopped", WHY[ledger.standing.why]].filter(Boolean).join(": ") + "."));
@@ -1859,7 +2118,8 @@ async function openSettings(push = true) {
             : []),
           ...(c.why ? [el("p", "settings-warning", c.why)] : []),
         ]
-      : [el("p", "muted", "Your computer starts with your first agent.")]),
+      : // never read: a failed read is not "none" (shown again once one answers: `load`)
+        [el("p", "muted", state.computerFailed ? "Couldn't load your computer." : "Your computer starts with your first agent.")]),
   );
   // each agent's own desktop
   const screens = [];
@@ -1904,13 +2164,21 @@ async function openSettings(push = true) {
     const name = el("span", "settings-agent-name");
     name.dataset.agentFace = a.fragment;
     const [actions, said] = faceControls(a);
-    const agentRow = actionLine(name, actions, row);
-    return [modeled.length ? modelPicker(a, agentRow, modeled) : agentRow, said];
+    return [agentSettings(a, actionLine(name, actions, row), modeled), said];
   }) : [el("p", "muted", "None yet.")]));
   const connections = connectionsSection(linked, uses);
   const skills = await skillsSection();
-  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, buildSection(), data]);
+  if (lost()) return;
+  returnSaid(back);
+  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, buildSection(), dataSection()]);
   renderAgentFaces();
+  tell();
+}
+// An action's reload of settings, only while they are shown: an answer that
+// comes once the person has gone to a chat leaves them there, and says
+// nothing there (#439). `failed`: openSettings'.
+async function reopenSettings(failed = null) {
+  if (state.page === "Settings") await openSettings(false, failed);
 }
 
 // Building with a coding agent: one prompt that names this platform's
@@ -1927,14 +2195,36 @@ function buildSection() {
   const copy = el("button", "quiet", "Copy");
   copy.type = "button";
   copy.dataset.action = "copy-prompt";
-  copy.onclick = () =>
-    navigator.clipboard.writeText(prompt.value).then(
-      () => {
-        copy.textContent = "Copied";
-        setTimeout(() => (copy.textContent = "Copy"), 1500);
-      },
-      (err) => notice("The prompt was not copied", err.message),
-    );
+  // a clipboard that refuses (no permission, a webview's, none at all) is
+  // said under the prompt, which is selected to copy by hand; Copy stays
+  // Copy, to try again (#438)
+  const said = el("p", "form-error");
+  said.id = "build-prompt-said";
+  said.setAttribute("role", "status");
+  said.hidden = true;
+  // each press, numbered: one that answers after a newer press changes
+  // nothing (that one says how it went)
+  let presses = 0;
+  copy.onclick = async () => {
+    const mine = ++presses;
+    said.hidden = true;
+    try {
+      await navigator.clipboard.writeText(prompt.value);
+    } catch {
+      if (mine !== presses) return;
+      copy.textContent = "Copy";
+      said.textContent = "Couldn't copy it. The prompt is selected: copy it yourself (Ctrl+C, or ⌘C on a Mac).";
+      said.hidden = false;
+      prompt.focus();
+      prompt.select();
+      return;
+    }
+    if (mine !== presses) return;
+    copy.textContent = "Copied";
+    setTimeout(() => {
+      if (mine === presses) copy.textContent = "Copy";
+    }, 1500);
+  };
   const actions = el("div", "settings-actions");
   actions.append(copy);
   const yourself = el("details", "settings-install");
@@ -1950,6 +2240,7 @@ function buildSection() {
     say("Paste this into your coding agent and finish the sentence: it sets up the `fragment` command line itself, and you approve it here once."),
     prompt,
     actions,
+    said,
     yourself,
   );
 }
@@ -2042,9 +2333,10 @@ function faceControls(a) {
 }
 // Settings' agent rows as the list says now: each one's face and name, and
 // whether it has a picture to change or remove; and the names its other
-// controls carry (each agent's screen, its model).
+// controls carry (each agent's screen, its model), and its open screens.
 function renderAgentFaces() {
   for (const b of document.querySelectorAll("[data-screen-for]")) b.textContent = `Open ${titleOf(b.dataset.screenFor)}'s screen`;
+  for (const f of document.querySelectorAll("iframe[data-screen]")) nameScreen(f);
   for (const pick of document.querySelectorAll("[data-model-for]")) pick.setAttribute("aria-label", `${titleOf(pick.dataset.modelFor)}'s model`);
   for (const name of document.querySelectorAll("[data-agent-face]")) {
     const fragment = name.dataset.agentFace;
@@ -2072,13 +2364,12 @@ let accessBy = "fragment";
 // an identity too long to read whole: its npub's ends
 const shortId = (id) => (id.length > 16 ? `${id.slice(0, 9)}…${id.slice(-4)}` : id);
 // a member as the view names them, and what they are to the person; a
-// person's agents reach what they do (a share is "all the pubkeys under the
-// umbrella of this email": Paul, 2026-10-13)
-// (an agent by its title, its agent fragment's: docs/api.md, "An agent's
-// name and picture")
-const theirAgents = (m) => (m.agents ?? []).map((a) => a.title ?? a.name ?? shortId(a.principal));
+// person's agents reach what they do, never named (decision 63: "I invite
+// Skyler and his agents, not Skyler and his agent Agent123")
+// (an agent member by its title, its agent fragment's: docs/api.md, "An
+// agent's name and picture")
 function accessWho(m) {
-  if (m.kind !== "agent") return { name: m.email ?? shortId(m.principal), about: theirAgents(m).length ? `with their agents ${theirAgents(m).join(", ")}` : "" };
+  if (m.kind !== "agent") return { name: m.email ?? shortId(m.principal), about: "" };
   if (m.owner === state.me.id) {
     const mine = state.agents.get(m.principal);
     return { name: mine ? titleOf(mine.fragment) : m.title ?? m.name ?? shortId(m.principal), about: "your agent" };
@@ -2097,7 +2388,7 @@ function accessHead(row) {
   const general = GENERAL[row.sharing?.visibility];
   const tag = el("span", "access-tag");
   if (general) {
-    tag.innerHTML = svg(general.icon);
+    tag.replaceChildren(icon(general.icon));
     tag.append(general.name);
   }
   head.append(open, el("span", "muted access-kind", row.kind), tag);
@@ -2119,7 +2410,7 @@ function accessByFragment(rows) {
     }
     for (const i of row.invites ?? []) {
       const li = el("li");
-      li.append(el("span", "access-who", i.email), el("span", "muted", `invited as ${(ROLE[i.role] ?? i.role).toLowerCase()}, not signed in yet`));
+      li.append(el("span", "access-who", i.email), el("span", "muted", `invited as ${(ROLE[i.role] ?? i.role).toLowerCase()}, waiting for their yes`));
       people.append(li);
     }
     if (row.more) people.append(el("li", "muted", `and ${row.more} more`));
@@ -2147,35 +2438,28 @@ function accessByFragment(rows) {
 // their owners, and those anyone may open
 function accessByPerson(rows) {
   const people = new Map();
-  const add = (key, name, about, row, role, agents = []) => {
-    if (!people.has(key)) people.set(key, { name, about, rows: [], agents: new Set() });
+  const add = (key, name, about, row, role) => {
+    if (!people.has(key)) people.set(key, { name, about, rows: [] });
     people.get(key).rows.push({ row, role });
-    for (const a of agents) people.get(key).agents.add(a);
   };
   for (const row of rows) {
     for (const m of row.members ?? []) {
       // the person's own agents see all of theirs anyway (decision 44)
       if (m.kind === "agent" && m.owner === state.me.id) continue;
       const who = accessWho(m);
-      add(m.principal, who.name, m.kind === "agent" ? who.about : "", row, ROLE[m.role] ?? m.role, theirAgents(m));
+      add(m.principal, who.name, m.kind === "agent" ? who.about : "", row, ROLE[m.role] ?? m.role);
     }
-    for (const i of row.invites ?? []) add(`invite:${i.email}`, i.email, "invited, not signed in yet", row, ROLE[i.role] ?? i.role);
+    for (const i of row.invites ?? []) add(`invite:${i.email}`, i.email, "invited, waiting for their yes", row, ROLE[i.role] ?? i.role);
   }
   const anyone = rows.filter((r) => r.sharing?.visibility === "public");
   const linked = rows.filter((r) => r.sharing?.visibility === "link");
   const list = el("div", "access-list");
-  const group = (name, about, entries, open = true, agents = []) => {
+  const group = (name, about, entries, open = true) => {
     const item = el("details", "access-person");
     item.open = open;
     const summary = el("summary");
     summary.append(el("span", "access-who", name), el("span", "muted", [about, `${entries.length} ${entries.length === 1 ? "fragment" : "fragments"}`].filter(Boolean).join(" · ")));
     const ul = el("ul", "access-people");
-    // a person's agents, with the same access as them
-    for (const a of agents) {
-      const li = el("li", "access-agent");
-      li.append(el("span", "access-who", a), el("span", "muted", "their agent, the same access"));
-      ul.append(li);
-    }
     for (const { row, role } of entries) {
       const li = el("li");
       const open = el("button", "access-name", byName(row.name) ? titleOf(row.name) : row.title || labelOf(row.name));
@@ -2187,7 +2471,7 @@ function accessByPerson(rows) {
     item.append(summary, ul);
     list.append(item);
   };
-  for (const p of people.values()) group(p.name, p.about, p.rows, true, [...p.agents]);
+  for (const p of people.values()) group(p.name, p.about, p.rows, true);
   if (anyone.length) group("Everyone", "public: no link needed", anyone.map((row) => ({ row, role: "Viewer" })));
   if (linked.length) group("Anyone with the share link", "you hold the links; each sheet copies its own", linked.map((row) => ({ row, role: "Viewer" })), false);
   if (!list.children.length) list.append(el("p", "muted", "No one else can open anything of yours."));
@@ -2268,38 +2552,112 @@ function dataSection() {
     }
     if (refused) rows.push(el("p", "settings-warning", refused));
     shown.replaceChildren(...rows);
-    // while it builds, read it again, as long as this page shows it
+    // while it builds, read it again, as long as settings show this section
     clearTimeout(timer);
     if (v?.state === "building") timer = setTimeout(refresh, 2000);
   };
+  // A read that fails keeps the rows shown, adds one line that says so,
+  // and stops reading: its Try again reads again (never a new export), and
+  // what it reads goes on as any read does (#440).
+  const unread = () => {
+    const again = el("button", "quiet", "Try again");
+    again.type = "button";
+    again.dataset.action = "export-read";
+    again.onclick = () => {
+      again.disabled = true;
+      refresh();
+    };
+    const said = actionLine(el("span", "settings-warning", "Couldn't check your export."), again);
+    said.dataset.unread = "";
+    shown.querySelector("[data-unread]")?.remove();
+    shown.append(said);
+  };
   const refresh = () => {
-    if (!s.isConnected && shown.dataset.state !== "loading") return;
-    api("GET", "/api/export")
-      .then((r) => render(r.export))
-      .catch((e) => shown.replaceChildren(el("p", "settings-warning", `Your export did not load: ${e.message}`)));
+    // only while settings show it (its first read is before it is placed);
+    // settings shown again build it again, which reads again
+    if (shown.dataset.state !== "loading" && (!s.isConnected || state.page !== "Settings")) return;
+    api("GET", "/api/export").then((r) => render(r.export), unread);
   };
   refresh();
   return s;
 }
 
-// ---- an agent's model: its agent.json's `model` ({provider, id}), a model
-// of a provider the person connected, or none: its `tier`'s, shown by the
-// tier's name (which model that is, the deployment's `models` say, and a
-// person's session reads none of it). Its computer reads agent.json again
-// within seconds and runs its next turn on it. Vision and voice notes stay
-// on the platform's own models.
-const TIER = { cheap: "Cheap", medium: "Medium" };
-const tierName = (tier) => TIER[tier ?? DEFAULT_AGENT_TIER] ?? tier;
-const modelValue = (provider, id) => `${provider} ${id}`;
+// ---- an agent's settings in Settings' Agents: its row, then its
+// agent.json's picks, read once for them all. Each pick is written as the
+// others are, one write at a time (each reads what the one before wrote),
+// and put live, as its name and picture are: its computer reads main, its
+// page live (`__file`), and both then say the same. Its computer reads
+// agent.json again within seconds and runs its next turn so. A pick is
+// written only onto agent.json as it is now, read just before (none there,
+// 404, is nothing to keep): a read that fails otherwise writes nothing and
+// says so, so no other setting of the agent (its tier, its model) is lost.
+const agentJson = (agent) => api("GET", `/api/f/${seg(agent)}/file?path=agent.json`);
+const UNREAD_SETTINGS = "Couldn't read this agent's settings, so nothing was changed. Try again.";
+function agentSettings(a, row, modeled) {
+  const box = el("div", "agent-setting");
+  box.dataset.agent = a.fragment;
+  const said = el("span", "muted agent-model-said");
+  // what the picks show: agent.json, none (404: the defaults), or unread (null)
+  const read = agentJson(a.fragment).catch((e) => (e.status === 404 ? {} : null));
+  read.then((j) => { if (j === null) said.textContent = "Couldn't read this agent's settings: reload to see them."; });
+  let last = Promise.resolve();
+  // `change` sets its pick on what agent.json holds now (its tier kept),
+  // and says what changed
+  const write = (change) => (last = last.catch(() => {}).then(async () => {
+    const now = await agentJson(a.fragment).catch((e) => {
+      if (e.status === 404) return {};
+      throw new Error(UNREAD_SETTINGS);
+    });
+    const next = { ...now, tier: now.tier ?? DEFAULT_AGENT_TIER };
+    const message = change(next);
+    await api("POST", `/api/f/${seg(a.fragment)}/files`, { message, files: [{ path: "agent.json", text: JSON.stringify(next, null, 2) + "\n" }] });
+    await api("POST", `/api/f/${seg(a.fragment)}/deploy`, {});
+  }));
+  const picks = [...(modeled.length ? [modelPicker(a, modeled, read, write, said)] : []), reasoningPicker(a, read, write, said)];
+  box.append(row, ...picks, said);
+  return box;
+}
+// a pick (`value`) being written (`written`), said under its agent's
+// settings; one not written shows again what agent.json holds (`was`)
+async function savePick(pick, value, said, written) {
+  pick.disabled = true;
+  said.textContent = "Saving…";
+  try {
+    await written;
+    said.textContent = "Saved: its next message uses it.";
+    pick.dataset.saved = value;
+    pick.dataset.was = value;
+  } catch (e) {
+    said.textContent = e.message;
+    pick.value = pick.dataset.was ?? "";
+  } finally {
+    pick.disabled = false;
+  }
+}
+function settingLabel(key, pick) {
+  const label = el("label", "agent-model-label");
+  label.append(el("span", "settings-key", key), pick);
+  return label;
+}
 function modelOption(value, text) {
   const o = el("option", null, text);
   o.value = value;
   return o;
 }
-const agentJson = (agent) => api("GET", `/api/f/${seg(agent)}/file?path=agent.json`);
-function modelPicker(a, row, modeled) {
-  const box = el("div", "agent-setting");
-  box.dataset.agent = a.fragment;
+
+// ---- an agent's model: its agent.json's `model` ({provider, id}), a model
+// of a provider the person connected, or none: its `tier`'s (`medium`, else
+// the default: `high` is off, decision 23), shown by the tier's name and its
+// model's id, as their computer's view names it (the deployment's `models`).
+// Vision and voice notes stay on the platform's own models.
+const TIER = { cheap: "Cheap", medium: "Medium" };
+const tierName = (tier) => {
+  const t = tier === "medium" ? "medium" : DEFAULT_AGENT_TIER;
+  const id = state.computer?.models?.[t];
+  return id ? `${TIER[t]} (${id})` : TIER[t];
+};
+const modelValue = (provider, id) => `${provider} ${id}`;
+function modelPicker(a, modeled, read, write, said) {
   const pick = el("select", "agent-model");
   pick.dataset.modelFor = a.fragment;
   pick.setAttribute("aria-label", `${titleOf(a.fragment)}'s model`);
@@ -2311,44 +2669,53 @@ function modelPicker(a, row, modeled) {
     for (const m of p.models) group.append(modelOption(modelValue(p.provider, m.id), m.name));
     pick.append(group);
   }
-  const said = el("span", "muted agent-model-said");
   pick.disabled = true;
-  agentJson(a.fragment)
+  read
     .then((j) => {
       tiered.textContent = tierName(j?.tier);
       const v = j?.model?.provider && j?.model?.id ? modelValue(j.model.provider, j.model.id) : "";
       // one named by hand, not offered here, is shown as it is
       if (v && ![...pick.options].some((o) => o.value === v)) pick.append(modelOption(v, j.model.id));
       pick.value = v;
+      pick.dataset.was = v;
     })
-    .catch(() => {})
     .finally(() => { pick.disabled = false; pick.dataset.read = "1"; });
-  pick.onchange = async () => {
-    pick.disabled = true;
-    said.textContent = "Saving…";
-    try {
-      // what agent.json holds now (its tier), the model changed
-      const now = await agentJson(a.fragment).catch(() => ({}));
-      const next = { ...now, tier: now.tier ?? DEFAULT_AGENT_TIER };
-      const [provider, id] = pick.value ? pick.value.split(" ") : [];
+  pick.onchange = () => {
+    const value = pick.value;
+    const [provider, id] = value ? value.split(" ") : [];
+    savePick(pick, value, said, write((next) => {
       if (provider) next.model = { provider, id };
       else delete next.model;
-      await api("POST", `/api/f/${seg(a.fragment)}/files`, {
-        message: `its model: ${provider ? id : next.tier}`,
-        files: [{ path: "agent.json", text: JSON.stringify(next, null, 2) + "\n" }],
-      });
-      said.textContent = "Saved: its next message uses it.";
-      pick.dataset.saved = pick.value;
-    } catch (e) {
-      said.textContent = e.message;
-    } finally {
-      pick.disabled = false;
-    }
+      return `its model: ${provider ? id : next.tier}`;
+    }));
   };
-  const label = el("label", "agent-model-label");
-  label.append(el("span", "settings-key", "Model"), pick);
-  box.append(row, label, said);
-  return box;
+  return settingLabel("Model", pick);
+}
+
+// ---- how hard an agent thinks (Paul, 2026-10-22: "expose the reasoning
+// level in the model picker … high is a good default"): its agent.json's
+// `reasoning`, `low` or `high` (the efforts the platform's model route
+// passes on), or none: the default, high. Its computer runs any other it
+// names at the default too, and so it is shown.
+const REASONING = [["", "Default (High)"], ["low", "Low"], ["high", "High"]];
+function reasoningPicker(a, read, write, said) {
+  const pick = el("select", "agent-model");
+  pick.dataset.reasoningFor = a.fragment;
+  pick.setAttribute("aria-label", `${titleOf(a.fragment)}'s reasoning`);
+  for (const [value, text] of REASONING) pick.append(modelOption(value, text));
+  pick.disabled = true;
+  read
+    .then((j) => { pick.value = pick.dataset.was = REASONING.some(([v]) => v && v === j?.reasoning) ? j.reasoning : ""; })
+    .finally(() => { pick.disabled = false; pick.dataset.read = "1"; });
+  pick.onchange = () => {
+    const value = pick.value;
+    savePick(pick, value, said, write((next) => {
+      if (value) next.reasoning = value;
+      else delete next.reasoning;
+      return `its reasoning: ${value || "the default"}`;
+    }));
+  };
+  return settingLabel("Reasoning", pick);
 }
 
 // ---- connections (decisions 22, 37 and 44): every provider the platform
@@ -2368,8 +2735,169 @@ const PROVIDER_STATE = {
 // a provider's name for people: google-places is Google Places, xai xAI
 const PROVIDER_NAMES = { xai: "xAI", elevenlabs: "ElevenLabs", openrouter: "OpenRouter" };
 const providerName = (p) => PROVIDER_NAMES[p] ?? p.replace(/(^|-)([a-z])/g, (_, d, l) => `${d ? " " : ""}${l.toUpperCase()}`);
+// a connection's scope for people, by its last path segment (Google's
+// https://www.googleapis.com/auth/<name>), else that segment itself; the
+// list never names a sign-in scope as missing
+const SCOPE_NAMES = {
+  "gmail.readonly": "Gmail (read)",
+  "gmail.modify": "Gmail (manage)",
+  "gmail.send": "Gmail (send)",
+  drive: "Drive",
+  spreadsheets: "Sheets",
+  documents: "Docs",
+  calendar: "Calendar",
+  "contacts.readonly": "Contacts",
+};
+const scopeName = (scope) => {
+  const last = scope.split("/").pop();
+  return SCOPE_NAMES[last] ?? last;
+};
 // micro-dollars, to a hundredth of a cent under a dollar (a call is often less than a cent)
 const money = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: micros < 1_000_000 ? 4 : 2 });
+// Connect: a window opened by the press itself, before any await, and only
+// then sent to the provider's page (#442): one opened once the authorize
+// call answers is a popup Safari blocks, as Chrome does once the press is
+// 5 s old. One attempt at a time: each start replaces the browser's one
+// binding cookie. The section reads again when the person comes back to it
+// (`focus`), never by watching `w.closed`: the shell's COOP has that read
+// true once the window is at the provider, still open. `body`, where the
+// person connects several accounts: `{add: true}` for another, `{account}`
+// for one of theirs again.
+function connectButton(p, label, said, body = {}) {
+  const go = el("button", "quiet", label);
+  go.type = "button";
+  go.onclick = async () => {
+    const w = window.open("", "_blank", "popup,width=520,height=720");
+    if (!w) {
+      said.textContent = "Your browser blocked the window. Allow pop-ups for this site, then try again.";
+      return;
+    }
+    go.disabled = true;
+    said.textContent = "";
+    try {
+      const { url } = await api("POST", `/api/connections/${encodeURIComponent(p.provider)}/authorize`, body);
+      w.location = url;
+      addEventListener("focus", () => reopenSettings().catch(() => {}), { once: true });
+    } catch (e) {
+      w.close();
+      said.textContent = e.message;
+    } finally {
+      go.disabled = false;
+    }
+  };
+  return go;
+}
+// The own keys whose last Disconnect or Remove did not go through, each
+// with the visit of settings it was pressed in: said in their row by
+// whichever load of settings renders in that visit, while the row still
+// has the key, until the next press; in another visit, never (#439).
+const unremoved = new Map();
+// Disconnect: the account goes from Pipes, so no agent's call gets its token
+// again, and its grant is revoked at the provider where the platform can;
+// when it could not, settings says where the person removes it themselves.
+// Of several accounts, the one `account` is.
+function disconnectButton(p, said, account = null) {
+  const off = el("button", "quiet", "Disconnect");
+  off.type = "button";
+  off.dataset.action = "disconnect";
+  const which = account ? `?account=${encodeURIComponent(account.id)}` : "";
+  off.onclick = async () => {
+    off.disabled = true;
+    said.textContent = "";
+    let revoked;
+    try {
+      ({ revoked } = await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}${which}`));
+    } catch (e) {
+      said.textContent = e.message;
+      off.disabled = false;
+      return;
+    }
+    const name = providerName(p.provider);
+    await reopenSettings(revoked ? null : [`${name} is disconnected`, `Your agents can no longer use it. ${name} may still list this platform's access to your account: remove it in your ${name} account's security settings.`]).catch(() => {});
+  };
+  return off;
+}
+// What the person left unticked when they connected an account, in words.
+const notAllowed = (missing) => el("span", "provider-detail provider-missing", `Not allowed: ${[...new Set(missing.map(scopeName))].join(", ")}`);
+// An account of several, for people: its label, or the provider's name.
+const accountLabel = (p, a) => a.account ?? `A ${providerName(p.provider)} account`;
+// A connection that takes several accounts: each of the person's, oldest
+// first, with its label and state, what it was not allowed with a
+// Reconnect to add (that account), and its own Disconnect. One whose
+// disconnect did not finish (Pipes holds it still) says so, with
+// Disconnect again, and nothing else.
+function accountsList(p) {
+  const list = el("div", "provider-accounts");
+  for (const a of p.accounts) {
+    const item = el("div", "provider-account-row");
+    item.dataset.accountId = a.id;
+    item.dataset.state = a.disconnecting ? "disconnecting" : a.state;
+    const head = el("div", "provider-head");
+    const who = el("div", "provider-identity");
+    const stateName = a.disconnecting ? "Disconnecting didn't finish" : PROVIDER_STATE[a.state] ?? a.state;
+    who.append(el("span", "provider-account", accountLabel(p, a)), el("span", `provider-state ${a.disconnecting ? "disconnecting" : a.state}`, stateName));
+    const actions = el("div", "settings-actions");
+    const said = el("span", "muted provider-detail provider-said");
+    const details = [];
+    if (a.disconnecting) {
+      const again = disconnectButton(p, said, a);
+      again.textContent = "Disconnect again";
+      actions.append(again);
+      head.append(who, actions);
+      item.append(head, said);
+      list.append(item);
+      continue;
+    }
+    if (a.state !== "connected") actions.append(connectButton(p, "Connect again", said, { account: a.id }));
+    if (a.state === "connected" && a.missing?.length) {
+      const again = connectButton(p, "Reconnect to add", said, { account: a.id });
+      again.dataset.action = "reconnect";
+      actions.append(again);
+      details.push(notAllowed(a.missing));
+    }
+    actions.append(disconnectButton(p, said, a));
+    head.append(who, actions);
+    item.append(head, ...details, said);
+    list.append(item);
+  }
+  return list;
+}
+// Which of the person's accounts an agent uses there: Default (the oldest
+// connected) first, then each of theirs, its state said where it is not
+// connected, and the agent's saved pick as it is stored, gone or not, so
+// a pick the platform refuses (one to reconnect) is never shown as another.
+// Shown with two or more accounts, or a saved pick to change.
+function accountPick(p, a, theirs) {
+  const pick = el("select", "provider-account-pick");
+  pick.dataset.agent = a.fragment;
+  pick.setAttribute("aria-label", `${titleOf(a.fragment)}'s ${providerName(p.provider)} account`);
+  const option = (value, text) => {
+    const o = el("option", "", text);
+    o.value = value;
+    pick.append(o);
+  };
+  const first = theirs.find((c) => c.state === "connected");
+  option("", first ? `Default (${accountLabel(p, first)})` : "Default");
+  for (const c of theirs) option(c.id, c.state === "connected" ? accountLabel(p, c) : `${accountLabel(p, c)} (needs reconnecting)`);
+  const mine = a.accounts?.[p.provider];
+  if (mine && !theirs.some((c) => c.id === mine)) option(mine, "An account no longer connected (the default is used)");
+  pick.value = mine ?? "";
+  pick.onchange = async () => {
+    const visit = visits;
+    pick.disabled = true;
+    // Default is no pick: the agent follows it
+    const account = pick.value || null;
+    let refused = null;
+    try {
+      computerIs(await api("PUT", `/api/computers/${seg(state.computer.computer)}/agents/${seg(a.fragment)}/accounts/${encodeURIComponent(p.provider)}`, { account }));
+      state.agents = new Map((state.computer?.agents ?? []).map((x) => [x.identity, x]));
+    } catch (e) {
+      refused = e;
+    }
+    await reopenSettings(refused && visit === visits ? ["That was not changed", refused.message] : null);
+  };
+  return pick;
+}
 function connectionsSection(linked, uses) {
   const s = section("Connections");
   s.id = "settings-connections";
@@ -2393,58 +2921,78 @@ function connectionsSection(linked, uses) {
     const stateName = p.signIn ? (p.state === "set" ? "Connected" : "Not connected") : PROVIDER_STATE[p.state] ?? p.state;
     const st = el("span", `provider-state ${p.state}`, stateName);
     identity.append(st);
+    // which account a connection is: the person's sign-in here may be another
+    // (of several, each is named in its own row)
+    const several = Array.isArray(p.accounts);
+    if (p.account && !several) {
+      const account = el("span", "provider-account", p.account);
+      account.dataset.account = p.account;
+      identity.append(account);
+    }
     head.append(identity);
     row.append(head);
+    // the deployment's word on it (its catalog row's note), connected or not
+    if (p.note) row.append(el("span", "muted provider-detail provider-note", p.note));
     const actions = el("div", "settings-actions");
     const details = [];
-    if (p.kind === "connection" && p.state !== "connected") {
-      const go = el("button", "quiet", p.state === "needs_reauthorization" ? "Connect again" : "Connect");
-      go.type = "button";
-      go.onclick = async () => {
-        go.disabled = true;
-        try {
-          const { url } = await api("POST", `/api/connections/${encodeURIComponent(p.provider)}/authorize`, {});
-          window.open(url, "_blank", "popup,width=520,height=720");
-          // back from the provider: the section says so
-          addEventListener("focus", () => openSettings(false).catch(() => {}), { once: true });
-        } catch (e) {
-          go.textContent = e.message;
-        } finally {
-          go.disabled = false;
-        }
-      };
-      actions.append(go);
+    // what a Connect press says: a blocked window, or a start refused; and
+    // a Disconnect or Remove that did not go through
+    const said = el("span", "muted provider-detail provider-said");
+    // Disconnect or Remove: settings then reload, and the row they show says
+    // whether the key is still there; one that failed says so in it
+    const removeKey = (button) => async () => {
+      const visit = visits;
+      button.disabled = true;
+      unremoved.delete(p.provider);
+      try {
+        await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}/key`);
+      } catch {
+        // kept only while its visit is the one shown: an older visit's
+        // answer never replaces a newer one's
+        if (visit === visits && state.page === "Settings") unremoved.set(p.provider, visit);
+      }
+      await reopenSettings();
+    };
+    if (p.kind === "connection" && p.state !== "connected" && !(several && p.accounts.some((a) => !a.disconnecting))) {
+      actions.append(connectButton(p, p.state === "needs_reauthorization" ? "Connect again" : "Connect", said));
+      details.push(said);
+    }
+    // of several, another while the platform takes more; each account is
+    // reconnected and disconnected in its own row
+    // theirs to use: none they disconnected (which Pipes may hold still)
+    const theirs = several ? p.accounts.filter((a) => !a.disconnecting) : [];
+    if (several && theirs.length && theirs.length < (p.accountsMax ?? 1)) {
+      const add = connectButton(p, `Add another ${providerName(p.provider)} account`, said, { add: true });
+      add.dataset.action = "add-account";
+      actions.append(add);
+      details.push(said);
+    }
+    // what the person left unticked when they connected it: a reconnect
+    // asks for it again (the provider keeps what they allowed before)
+    if (!several && p.kind === "connection" && p.state === "connected" && p.missing?.length) {
+      const again = connectButton(p, "Reconnect to add", said);
+      again.dataset.action = "reconnect";
+      actions.append(again);
+      details.push(notAllowed(p.missing), said);
+    }
+    if (!several && p.kind === "connection" && p.state !== "not_connected") {
+      actions.append(disconnectButton(p, said));
+      if (!details.includes(said)) details.push(said);
     }
     if (p.kind === "own" && p.signIn) {
       // connected through the provider's own page (never a key pasted here):
       // it makes a key of the person's, which their computer keeps sealed
       if (p.state !== "set") {
-        const go = el("button", "quiet", "Connect");
-        go.type = "button";
+        const go = connectButton(p, "Connect", said);
         go.dataset.action = "sign-in";
-        go.onclick = async () => {
-          go.disabled = true;
-          try {
-            const { url } = await api("POST", `/api/connections/${encodeURIComponent(p.provider)}/authorize`, {});
-            window.open(url, "_blank", "popup,width=520,height=720");
-            addEventListener("focus", () => openSettings(false).catch(() => {}), { once: true });
-          } catch (e) {
-            go.textContent = e.message;
-          } finally {
-            go.disabled = false;
-          }
-        };
         actions.append(go);
+        details.push(said);
         if (p.models?.length) details.push(el("span", "muted provider-detail", `Your ${providerName(p.provider)} account pays for its models; then pick one for an agent under Agents.`));
       } else {
         const off = el("button", "quiet", "Disconnect");
         off.type = "button";
         off.dataset.action = "disconnect";
-        off.onclick = async () => {
-          off.disabled = true;
-          await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}/key`).catch(() => {});
-          await openSettings(false);
-        };
+        off.onclick = removeKey(off);
         const manage = el("a", "quiet", `Revoke the key at ${providerName(p.provider)}`);
         manage.href = p.signIn.manage;
         manage.target = "_blank";
@@ -2465,7 +3013,7 @@ function connectionsSection(linked, uses) {
         save.disabled = true;
         try {
           await api("PUT", `/api/connections/${encodeURIComponent(p.provider)}/key`, { key: input.value });
-          await openSettings(false);
+          await reopenSettings();
         } catch (err) {
           save.textContent = err.message;
           save.disabled = false;
@@ -2475,20 +3023,23 @@ function connectionsSection(linked, uses) {
       if (p.state === "set") {
         const remove = el("button", "quiet", "Remove");
         remove.type = "button";
-        remove.onclick = async () => {
-          remove.disabled = true;
-          await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}/key`).catch(() => {});
-          await openSettings(false);
-        };
+        remove.dataset.action = "remove-key";
+        remove.onclick = removeKey(remove);
         actions.append(remove);
       }
     }
+    if (p.state === "set" && unremoved.get(p.provider) === visits) {
+      said.textContent = "That didn't go through. Try again.";
+      details.push(said);
+    } else unremoved.delete(p.provider);
     if (p.kind === "operator" && p.price) {
       details.push(el("span", "muted provider-detail", `${money(p.price.micros / p.price.per)} a call at list, metered to your credit`));
     }
     if (actions.childElementCount) head.append(actions);
     row.append(...details);
-    // which agents may use it: all by default; one narrowed to a list uses those
+    if (several && p.accounts.length) row.append(accountsList(p));
+    // which agents may use it: all by default; one narrowed to a list uses
+    // those; of two or more accounts, or a pick saved, which each uses
     if (agents.length) {
       const who = el("div", "provider-agents");
       who.append(el("span", "settings-key", "Agents"));
@@ -2500,20 +3051,28 @@ function connectionsSection(linked, uses) {
         chip.setAttribute("aria-pressed", String(allowed));
         chip.title = allowed ? `${titleOf(a.fragment)} may use it: press to take it away` : `${titleOf(a.fragment)} may not use it: press to let it`;
         chip.onclick = async () => {
+          const visit = visits;
           chip.disabled = true;
           const all = offered.map((x) => x.provider);
           const now = a.connections ?? all;
           const next = allowed ? now.filter((x) => x !== p.provider) : [...new Set([...now, p.provider])];
           const list = all.every((x) => next.includes(x)) ? null : next;
+          let refused = null;
           try {
             computerIs(await api("PUT", `/api/computers/${seg(state.computer.computer)}/agents/${seg(a.fragment)}/connections`, { connections: list }));
             state.agents = new Map((state.computer?.agents ?? []).map((x) => [x.identity, x]));
           } catch (e) {
-            notice("That was not changed", e.message);
+            refused = e;
           }
-          await openSettings(false);
+          // a failure is said by the reload, in the visit it was pressed in,
+          // while the agent may use it or not as before (a newer press may
+          // have changed it since)
+          const was = state.agents.get(a.identity) ?? a;
+          const unchanged = (was.connections == null || was.connections.includes(p.provider)) === allowed;
+          await reopenSettings(refused && unchanged && visit === visits ? ["That was not changed", refused.message] : null);
         };
         who.append(chip);
+        if (allowed && several && (theirs.length >= 2 || a.accounts?.[p.provider])) who.append(accountPick(p, a, theirs));
       }
       row.append(who);
     }
@@ -2580,7 +3139,7 @@ async function skillsSection() {
   if (!mine) {
     const add = el("button", "quiet", "Add the managed skills");
     add.type = "button";
-    add.onclick = () => skillsFragment().then(() => openSettings(false)).catch((e) => { add.textContent = e.message; });
+    add.onclick = () => skillsFragment().then(() => reopenSettings()).catch((e) => { add.textContent = e.message; });
     s.append(el("p", "muted", "Your agents have no managed skills yet."), actionLine("Managed skills", add));
   } else {
     const paths = await filesOf(mine.name);
@@ -2617,27 +3176,135 @@ $("settings").onclick = () => openSettings().catch((e) => notice("Settings did n
 
 // ---- first run: sign in, a seat, then the default agent is made
 // (decision 10); it never goes through settings ----
+// Match the chat composer's rim reflection, including its 64px approach
+// and rounded corners, on every first-run card (Skyler's onboarding design,
+// 2026-10-22). Listen once: firstRun replaces only the card's children.
+const splashPointer = matchMedia("(hover: hover) and (pointer: fine)");
+let splashEdgeFrame = 0;
+let splashEdgePointer = null;
+function clearSplashEdge() {
+  cancelAnimationFrame(splashEdgeFrame);
+  splashEdgeFrame = 0;
+  $("first-run-card").style.setProperty("--edge-light", "0");
+}
+$("first-run").addEventListener("pointermove", (event) => {
+  if (!splashPointer.matches || event.pointerType === "touch") return;
+  splashEdgePointer = { x: event.clientX, y: event.clientY };
+  if (splashEdgeFrame) return;
+  splashEdgeFrame = requestAnimationFrame(() => {
+    splashEdgeFrame = 0;
+    const card = $("first-run-card");
+    const rect = card.getBoundingClientRect();
+    const x = splashEdgePointer.x - rect.left;
+    const y = splashEdgePointer.y - rect.top;
+    const radius = parseFloat(getComputedStyle(card).borderRadius);
+    const qx = Math.abs(x - rect.width / 2) - rect.width / 2 + radius;
+    const qy = Math.abs(y - rect.height / 2) - rect.height / 2 + radius;
+    const distance = Math.max(0, Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - radius);
+    const proximity = Math.max(0, 1 - distance / 64);
+    card.style.setProperty("--edge-x", `${x}px`);
+    card.style.setProperty("--edge-y", `${y}px`);
+    card.style.setProperty("--edge-light", String(proximity * proximity));
+  });
+});
+$("first-run").addEventListener("pointerleave", clearSplashEdge);
+$("first-run").addEventListener("scroll", clearSplashEdge, { passive: true });
+addEventListener("blur", clearSplashEdge);
+addEventListener("resize", clearSplashEdge);
+// The two ways the shell is first drawn (its first run's card, here, and
+// its layout, `showLayout`) take away "Still loading…" (index.html), so it
+// is never said beside the shell, and is said while nothing is drawn: its
+// scripts not come, or their first answers.
 function firstRun(...children) {
+  $("still-loading")?.remove();
+  clearSplashEdge();
+  stopCardStep();
   $("layout").hidden = true;
   $("first-run").hidden = false;
-  $("first-run-card").replaceChildren(el("div", "brand", $("brand").textContent), ...children);
+  $("first-run-year").textContent = String(new Date().getFullYear());
+  $("first-run-card").replaceChildren(...children);
 }
-const PITCH = "Agents that work for you, and the apps they make.";
+// One step of the first run's card to another, in place (the welcome's
+// seat and its trial code: billing.js seatOffer): the card's height moves
+// from the one to the other and the new step's parts rise in, as Skyler's
+// design moves them; at once with reduced motion. Focus that was in the
+// card goes to the new step's heading.
+let cardMotion = { run: 0, animations: [] };
+function stopCardStep() {
+  cardMotion.run++;
+  for (const a of cardMotion.animations) a.cancel();
+  cardMotion.animations = [];
+  $("first-run-card").classList.remove("moving");
+}
+async function cardStep(from, to) {
+  const card = $("first-run-card");
+  const before = card.getBoundingClientRect().height;
+  const focused = card.contains(document.activeElement);
+  stopCardStep();
+  const run = cardMotion.run;
+  from.hidden = true;
+  to.hidden = false;
+  const heading = to.querySelector("h1");
+  if (focused && heading) {
+    heading.tabIndex = -1;
+    heading.focus({ preventScroll: true });
+  }
+  if (!before || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const after = card.getBoundingClientRect().height;
+  const ease = "cubic-bezier(.22, 1, .36, 1)";
+  card.classList.add("moving");
+  cardMotion.animations = [
+    card.animate([{ height: `${before}px` }, { height: `${after}px` }], { duration: 520, easing: ease }),
+    ...[...to.children].map((part, i) => part.animate([{ opacity: 0, transform: "translateY(9px)" }, { opacity: 1, transform: "none" }], { duration: 380, delay: 65 + Math.min(i, 8) * 45, easing: ease, fill: "backwards" })),
+  ];
+  await Promise.all(cardMotion.animations.map((a) => a.finished.catch(() => {})));
+  if (run === cardMotion.run) stopCardStep();
+}
+function showLayout() {
+  $("still-loading")?.remove();
+  $("first-run").hidden = true;
+  $("layout").hidden = false;
+}
+const PITCH = "Welcome to Finite";
+const SUBTITLE = "Superintelligent agents for you and your organization";
 function signIn() {
-  // back to this view, with what its address carries (a mailed trial's code)
-  const back = encodeURIComponent(location.pathname + location.search);
-  const go = el("a", "primary", "Sign in");
-  go.href = `/auth/login?return=${back}`;
-  // WorkOS keeps its own sign-in in the browser (clearing this site's data
-  // leaves it), and Sign in comes back as that account without asking: a
-  // switch ends it there, so the next sign-in asks who is signing in
+  // back to this view, with what its address carries (a mailed trial's
+  // code), whichever screen of AuthKit's each opens on. Sign In is a
+  // sign-in, not a switch: one WorkOS answers from a session it holds in
+  // the browser comes back here too, as that account.
+  const back = location.pathname + location.search;
+  const go = el("a", "primary", "Sign Up");
+  go.href = `/auth/login?screen_hint=sign-up&return=${encodeURIComponent(back)}`;
+  const other = el("a", "secondary splash-secondary", "Sign In");
+  other.href = `/auth/login?screen_hint=sign-in&return=${encodeURIComponent(back)}`;
+  firstRun(el("h1", null, PITCH), el("p", null, SUBTITLE), go, other);
+}
+// "Use another account" (`POST /auth/switch`, docs/api.md, Sign-in), back
+// to `back`: WorkOS keeps its own sign-in in the browser (clearing this
+// site's data leaves it), and Sign in comes back as that account without
+// asking. A switch ends this session here, if there is one, and that one
+// there (whose logout comes back to the platform's root, not `back`), so
+// the next sign-in asks who is signing in. A form: the shell's
+// `form-action 'self'` lets the browser leave for WorkOS only from the
+// page its answer is.
+function switchForm(back, cls = "quiet") {
   const other = el("form");
   other.method = "post";
-  other.action = `/auth/switch?return=${back}`;
-  const use = el("button", "quiet", "Use another account");
+  other.action = `/auth/switch?return=${encodeURIComponent(back)}`;
+  const use = el("button", cls, "Use another account");
   use.type = "submit";
   other.append(use);
-  firstRun(el("h1", null, PITCH), el("p", "muted", "Sign in to start."), go, other);
+  return other;
+}
+// Who is signed in, wherever someone is told they have no seat (a guest:
+// `GET /api/seat`): a browser's autofill can sign someone in as an email
+// their seat is not under, a new guest, whose seat waits under the other
+// (2026-10-20, in production). The email is their latest sign-in's.
+function noSeatSaid() {
+  const p = el("p", "no-seat");
+  if (state.me.email) p.append("You're signed in as ", el("strong", null, state.me.email), ". ");
+  p.append("This account has no seat. If your team gave you a seat under another email, use another account.");
+  return p;
 }
 // A new person's welcome (docs/billing.md, "The shell"): what this is, the
 // one seat and a trial code, then Stripe's Checkout, whose return comes
@@ -2671,29 +3338,29 @@ async function welcome() {
   imports.type = "button";
   imports.dataset.slot = "import";
   imports.hidden = true;
+  // who is signed in, and another account (back here, its trial code kept),
+  // under whichever step the card shows
+  const trial = q.get("trial");
   const foot = el("div", "welcome-foot");
-  foot.append(el("span", "muted", `Signed in as ${state.me.email}`));
-  // someone shared something with them first: it is still theirs to open
-  if (state.fragments.length) {
-    const home = el("a", "quiet", "Not now");
+  foot.append(noSeatSaid(), switchForm(trial ? `${WELCOME}?trial=${encodeURIComponent(trial)}` : WELCOME, "text"));
+  // someone shared something with them first, or invited them: it is still
+  // theirs to open, or to answer
+  if (state.fragments.length || state.invites.length) {
+    const home = el("a", "text", "Not now");
     home.href = "/";
     foot.append(home);
   }
   const out = el("form");
   out.method = "post";
   out.action = "/auth/logout";
-  const leave = el("button", "quiet", "Sign out");
+  const leave = el("button", "text", "Sign out");
   leave.type = "submit";
   out.append(leave);
   foot.append(out);
-  firstRun(
-    el("h1", null, PITCH),
-    el("p", "muted", "Your own agent, on a computer of its own: it does what you ask, and makes apps you can share. Take a seat, or start a trial, to begin."),
-    ...(back === "canceled" ? [el("p", null, "Checkout was canceled: nothing was bought.")] : []),
-    ...seatOffer({ api, el }, mine, q.get("trial")),
-    imports,
-    foot,
-  );
+  const canceled = el("div", "ticket");
+  canceled.append(el("p", null, "Checkout was canceled: nothing was bought."));
+  const top = [el("h1", null, PITCH), el("p", null, SUBTITLE), ...(back === "canceled" ? [canceled] : [])];
+  firstRun(...seatOffer({ api, el, step: cardStep }, mine, trial, top), imports, foot);
 }
 // A seat before the first agent. Checkout's return names its session,
 // applied at once (whatever Stripe's webhook's timing; again, it changes
@@ -2704,7 +3371,16 @@ async function welcome() {
 const SEAT_WAIT_MS = 30_000;
 async function seated(session) {
   if (session) {
-    const mine = await api("POST", `/api/billing/sessions/${encodeURIComponent(session)}`, {});
+    // a refusal said plainly, with what to do (Try again retries it; the
+    // platform's words go to the console, for us)
+    const mine = await api("POST", `/api/billing/sessions/${encodeURIComponent(session)}`, {}).catch((e) => {
+      console.warn("A seat's Checkout return was not applied:", e);
+      throw new Error(
+        e.status === 404
+          ? "This payment wasn't found. Choose a seat to start again."
+          : "We couldn't confirm your payment yet. If you were charged, try again in a moment.",
+      );
+    });
     if (!mine.seat?.good) throw new Error("Your payment has not reached us yet: try again in a moment.");
     history.replaceState(null, "", "/");
   }
@@ -2767,10 +3443,16 @@ const unjoined = (f) => own(f) && !f.agents?.length && /-chat$/.test(labelOf(f.n
 // with no agent of theirs in a chat of their own. No chats at all; or only
 // the chat an earlier try made; or their agent not on their computer, or
 // not a member of its own chat (asked of the chat: a row may not name its
-// agents yet).
+// agents yet). With chats, and their computer's read failed, their agents
+// are unknown, not none: the question is put off until a read answers
+// (`resumeFirstRun`).
 async function owesFirstAgent() {
   if (state.guest) return false;
   if (!chats().length) return true;
+  if (state.computerFailed) {
+    firstRunPutOff = true;
+    return false;
+  }
   if (chats().some((f) => own(f) && (f.agents ?? []).some((id) => state.agents.has(id)))) return false;
   const agent = primaryAgent();
   if (!agent) return chats().every(unjoined);
@@ -2779,6 +3461,21 @@ async function owesFirstAgent() {
   if (!id || !itsChat) return true;
   const members = await api("GET", `/api/f/${seg(itsChat.name)}/members`).catch(() => null);
   return !!members && !(members.members ?? []).some((m) => m.principal === id);
+}
+// The first run's question, put off while their computer could not be read
+// (`owesFirstAgent`), is asked again by each read that answers (`load`:
+// Try again's, or the list's socket's) and each arrival home (`openChat`,
+// the one way there), while the person is at home, and after it too (they
+// may have gone to Settings meanwhile: then their way back asks it). Owed,
+// it is made once (`creatingAgent`).
+let firstRunPutOff = false;
+const atHome = () => location.pathname === "/" && !state.page;
+async function resumeFirstRun() {
+  if (!atHome()) return;
+  firstRunPutOff = false;
+  const owed = await owesFirstAgent();
+  if (!atHome()) firstRunPutOff = true;
+  else if (owed) creatingAgent();
 }
 // Each step reuses what an earlier try made, including a create whose
 // response was lost. The chat's frame opens once: a draft in it stays put.
@@ -2850,8 +3547,7 @@ function creatingAgent(seat = null) {
   if (seat) return seatFirst(seat);
   if (setupRun) return setupRun;
   history.replaceState(null, "", "/");
-  $("first-run").hidden = true;
-  $("layout").hidden = false;
+  showLayout();
   // until its chat is made, the middle column says what is being made
   if (!setup?.chat || !state.frames.has(setup.chat)) notice("Making your agent…");
   setupRun = (async () => {
@@ -2891,7 +3587,7 @@ function creatingAgent(seat = null) {
 // why, with Try again and Choose a seat (the welcome's seats again).
 function seatFirst(seat) {
   const step = el("li", "doing", "Setting up your seat");
-  const list = el("ol", "creating-steps");
+  const list = el("ol", "creating-steps ticket");
   list.append(step);
   const error = el("p", "form-error");
   error.hidden = true;
@@ -2899,7 +3595,7 @@ function seatFirst(seat) {
   retry.type = "button";
   retry.hidden = true;
   retry.onclick = () => creatingAgent(seat);
-  const choose = el("button", "quiet", "Choose a seat");
+  const choose = el("button", "text", "Choose a seat");
   choose.type = "button";
   choose.hidden = true;
   choose.onclick = () => {
@@ -2933,14 +3629,19 @@ function seatFirst(seat) {
 const reads = { asked: 0, shown: 0 };
 async function load(changed = false) {
   const mine = ++reads.asked;
-  const [list, computers] = await Promise.all([api("GET", "/api/fragments"), api("GET", "/api/computers").catch(() => ({ computers: [] }))]);
+  const [list, computers] = await Promise.all([api("GET", "/api/fragments"), api("GET", "/api/computers").catch(() => null)]);
   if (mine < reads.shown) return;
   reads.shown = mine;
   const before = new Map(state.fragments.map((f) => [f.name, JSON.stringify(f)]));
   state.fragments = list.fragments ?? [];
-  state.computer = computers.computers?.[0] ?? null;
-  state.support = computers.support ?? null;
-  state.agents = new Map((state.computer?.agents ?? []).map((a) => [a.identity, a]));
+  // failed, it is not "no computer": what was read before stays, and is said to be old
+  const unknown = state.computerFailed && !state.computer;
+  state.computerFailed = !computers;
+  if (computers) {
+    state.computer = computers.computers?.[0] ?? null;
+    state.support = computers.support ?? null;
+    state.agents = new Map((state.computer?.agents ?? []).map((a) => [a.identity, a]));
+  }
   renderChats();
   renderApps();
   renderHeading();
@@ -2949,6 +3650,9 @@ async function load(changed = false) {
   markSeen();
   renderAgentFaces();
   for (const f of chats()) if (own(f) && f.title === UNTITLED && f.preview) titleFromFirst(f.name);
+  // answered, it goes on with what a failure put off, whoever asked
+  if (computers && unknown) reopenSettings().catch(() => {});
+  if (computers && firstRunPutOff) resumeFirstRun();
   const touched = changed ? new Set(state.fragments.filter((f) => before.get(f.name) !== JSON.stringify(f)).map((f) => f.name)) : null;
   cardsLoad.wait = 0;
   loadCards(touched).catch(() => {});
@@ -2962,9 +3666,12 @@ async function load(changed = false) {
 // so a burst is one read, the page reads the list again and patches the
 // sidebar in place. A socket that closes is opened again after a jittered
 // wait (1 s, doubling to 30 s); each opening reads the list again, for
-// what changed while it was shut.
+// what changed while it was shut. One not open within LIST_OPEN_WAIT_MS
+// (and its wait) is closed, and so opened again: an upgrade never answered
+// would otherwise hold the page's one socket for good (the fragment
+// library's OPEN_WAIT_MS, cell/client.mjs, says why ten seconds).
 const LIST_SETTLE_MS = 200;
-const watching = { on: false, socket: null, wait: 1000, timer: null, settle: null };
+const LIST_OPEN_WAIT_MS = 10_000;
 function listChanged() {
   clearTimeout(watching.settle);
   watching.settle = setTimeout(() => load(true).catch(() => {}), LIST_SETTLE_MS);
@@ -2975,17 +3682,26 @@ function watchList() {
   if (watching.socket) return;
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/api/fragments/watch`);
   watching.socket = ws;
+  const opening = setTimeout(() => ws.close(), LIST_OPEN_WAIT_MS + watching.wait);
   ws.onopen = () => {
+    clearTimeout(opening);
     watching.wait = 1000;
     listChanged();
+    loadInvites().catch(() => {});
   };
   ws.onmessage = (e) => {
     try {
-      if (JSON.parse(e.data).type === "changed") listChanged();
+      const type = JSON.parse(e.data).type;
+      if (type === "changed") listChanged();
+      // the invites waiting on their emails (the registry's), and only those
+      else if (type === "invited") loadInvites().catch(() => {});
     } catch {}
   };
   ws.onclose = () => {
+    clearTimeout(opening);
     watching.socket = null;
+    // what the agent is doing goes until the socket is back to hear it
+    renderChats();
     watching.timer = setTimeout(watchList, watching.wait * (0.5 + Math.random()));
     watching.wait = Math.min(watching.wait * 2, 30_000);
   };
@@ -2994,6 +3710,235 @@ function watchList() {
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && watching.on && !watching.socket) watchList();
 });
+
+// ---- a new release: the page reloads itself at a safe moment ----
+// A page outlives a deploy: a home screen's app or a tab left open runs the
+// shell, and its chats' pages, of the release it loaded with while the
+// platform under it moves on (Paul's phone, 2026-10-20: after the day's
+// deploys one chat would not load in the home screen's app, and did in a
+// tab of its own, until the app was quit). So the page names the release
+// that answered it (index.html's meta, `RELEASE`), every answer of the
+// platform names its own (`x-fragment-deploy`), and once one names another
+// the page reloads whole, its chats' and apps' frames with it, where it
+// was (its path, its chat, its apps' windows): while it is hidden, or at
+// the person's next move (a chat or an app opened). Words typed in a chat
+// are its page's to keep (in its own origin's storage, as its person's),
+// so they survive this reload as any other; so the shell reloads only
+// when no chat's page says it is busy with what no storage keeps (files
+// chosen, a voice memo, a message on its way or one that failed, a quote
+// chosen: `{fragment: "busy", busy}`,
+// told as it changes), and none of this page's own dialogs, menu, fields
+// typed in, prompts on their way or writes still going hold it. Nothing
+// is asked at the moment of the reload, so nothing can change between an
+// answer and the reload; it is decided a moment after the page hid or the
+// person moved, so what a page posted just before is heard, and a page
+// busy as the reload is under way stops it (`reloadWhenSafe`, its one
+// window left). Each release is reloaded for at most
+// RELEASE_TRIES times, RELEASE_AGAIN_MS apart (a reload can still meet the
+// old release), and the release a reload left is no reason to reload for
+// RELEASE_LEFT_MS (a deploy's old side answers for a while). The page asks
+// for itself (`HEAD /healthz`) as it is hidden or shown again, comes back
+// from the back-forward cache or comes online, at most once a
+// RELEASE_LOOK_MS; it hears every answer it reads.
+const RELEASE_ID = /^[A-Za-z0-9._-]{1,64}$/;
+const RELEASE_HEADER = "x-fragment-deploy";
+const RELEASE_LOOK_MS = 60_000;
+const RELEASE_LEFT_MS = 10 * 60_000;
+const RELEASE_TRIES = 3;
+const RELEASE_AGAIN_MS = 60_000;
+const WINDOWS_KEPT_MAX = 16;
+// a click that opens a chat from the launcher closes its dialog first
+const NAVIGATED_SETTLE_MS = 400;
+// and the page hidden, a moment for what a chat's page posted just before to be heard
+const RELOAD_SETTLE_MS = 100;
+// signing out waits at most this long for the chats' pages to let their drafts go
+const FORGET_WAIT_MS = 1_000;
+const RELOADED_KEY = "shell.release.v1"; // {from, to, at, tries}: this tab's last reload for a release
+const WINDOWS_KEY = "shell.windows.v2"; // {who, windows: [{name, path}]}: the app windows to open again
+// this tab's own storage, which a reload keeps
+const tab = {
+  get(key, fallback) { try { return JSON.parse(sessionStorage.getItem(key)) ?? fallback; } catch { return fallback; } },
+  set(key, value) { try { sessionStorage.setItem(key, JSON.stringify(value)); return true; } catch { return false; } },
+  drop(key) { try { sessionStorage.removeItem(key); } catch {} },
+};
+// #403's, which kept chats' words here and named no person: let go
+tab.drop("shell.unsent.v1");
+tab.drop("shell.windows.v1");
+const RELEASE = document.querySelector('meta[name="fragment-release"]')?.content ?? "";
+// mine: the release this page is (none, an unfilled page: it never reloads);
+// next: the release it waits to reload for
+const release = { mine: RELEASE_ID.test(RELEASE) ? RELEASE : null, next: null, lookedAt: 0, reloading: false };
+
+// An answer of the platform's, heard: one naming a release to reload for
+// is waited on, and reloaded for at once while the page is hidden.
+function heard(r) {
+  const id = r.headers.get(RELEASE_HEADER);
+  if (!release.mine || !id || id === release.mine || id === release.next || !RELEASE_ID.test(id) || !reloadsFor(id)) return;
+  release.next = id;
+  // what it waits for, for whoever looks (the e2e, a person's devtools)
+  document.documentElement.dataset.releaseNext = id;
+  if (document.hidden) reloadWhenSafe("hidden");
+}
+function lastReload() {
+  const r = tab.get(RELOADED_KEY, null);
+  return r && typeof r.from === "string" && typeof r.to === "string" && Number.isFinite(r.at) && Number.isInteger(r.tries) ? r : null;
+}
+// Whether another release is one to reload for: not the one this tab's
+// last reload left while that deploy may still be going out, nor one it
+// reloaded for and still is not, RELEASE_TRIES times or within
+// RELEASE_AGAIN_MS of the last.
+function reloadsFor(id) {
+  const last = lastReload();
+  if (!last) return true;
+  const since = Date.now() - last.at;
+  if (id === last.from && since < RELEASE_LEFT_MS) return false;
+  return !(id === last.to && (last.tries >= RELEASE_TRIES || since < RELEASE_AGAIN_MS));
+}
+
+// the fields of this page the person typed in
+const TYPED = new Set(["text", "search", "email", "url", "tel", "password", "number"]);
+const typedIn = new Set();
+document.addEventListener("input", (e) => {
+  const f = e.target;
+  if (f instanceof HTMLTextAreaElement || (f instanceof HTMLInputElement && TYPED.has(f.type))) typedIn.add(f);
+}, true);
+// What this page itself holds that a reload would lose.
+function shellHolds() {
+  for (const f of typedIn) if (!f.isConnected) typedIn.delete(f);
+  const typed = [...typedIn].some((f) => f.value.trim() && f.getClientRects().length > 0);
+  return typed || !!document.querySelector("dialog[open]") || !menu.hidden || writing > 0 || composing.size > 0 || !!pendingLaunch || starting;
+}
+
+// The chats' frames whose page said hello (`agents?`, which the chat's
+// page sends as it starts), and those of them that say they are busy with
+// what no storage keeps. A hello is a new page, busy with nothing yet; a
+// frame sent elsewhere (a sign-in it could not make, tried again) is
+// neither. A page in a frame that says so wrongly only holds a reload back.
+const greeted = new WeakSet();
+const busyFrames = new WeakSet();
+const frameOfWindow = (win) => [...state.frames.values()].find((f) => f.contentWindow === win);
+addEventListener("message", (event) => {
+  const d = event.data;
+  if (d?.fragment !== "agents?" && d?.fragment !== "busy") return;
+  const frame = frameOfWindow(event.source);
+  if (!frame) return;
+  if (d.fragment === "agents?") {
+    greeted.add(frame);
+    busyFrames.delete(frame);
+  } else if (d.busy === true) {
+    busyFrames.add(frame);
+    // busy as the reload is under way (a file picked, a memo begun, a
+    // message failed while its answer was slow): the reload is stopped
+    if (release.reloading) stopReload();
+  } else busyFrames.delete(frame);
+});
+const chatsBusy = () => [...state.frames.values()].some((f) => f.isConnected && busyFrames.has(f));
+
+// Reloads for `release.next` if nothing holds it: as the page is hidden
+// (`moment` "hidden"), and as the person opens a chat or an app
+// ("navigated"). Decided in a task of its own a moment later
+// (RELOAD_SETTLE_MS, NAVIGATED_SETTLE_MS), so what a chat's page posted
+// just before is heard first; nothing is asked or awaited. A chat's page
+// that says it is busy as the reload is under way stops it (`stopReload`).
+// What is left: a page that becomes busy once the new page has begun to
+// come in (its answer committed) is gone with it. That window opens only
+// while the page is hidden, or as the person themselves moves in it.
+function reloadWhenSafe(moment) {
+  if (!release.next || release.reloading) return;
+  setTimeout(() => {
+    if ((moment === "hidden" && !document.hidden) || !release.next || release.reloading || chatsBusy() || shellHolds()) return;
+    const last = lastReload();
+    const tries = last?.to === release.next ? last.tries + 1 : 1;
+    if (!tab.set(WINDOWS_KEY, { who: state.me?.id ?? null, windows: openWindows() }) || !tab.set(RELOADED_KEY, { from: release.mine, to: release.next, at: Date.now(), tries })) return;
+    release.reloading = { last };
+    location.reload();
+  }, moment === "navigated" ? NAVIGATED_SETTLE_MS : RELOAD_SETTLE_MS);
+}
+// The reload under way, stopped (`window.stop`), as if it had not begun:
+// the tab's last reload as it was, no windows kept; `release.next` waits
+// on for the next safe moment.
+function stopReload() {
+  const { last } = release.reloading;
+  window.stop();
+  release.reloading = false;
+  if (last) tab.set(RELOADED_KEY, last);
+  else tab.drop(RELOADED_KEY);
+  tab.drop(WINDOWS_KEY);
+}
+// The app windows open, each at the page it opened (`openApp`).
+function openWindows() {
+  return viewer.keys.filter((k) => k.startsWith("app:")).slice(0, WINDOWS_KEPT_MAX).map((key) => {
+    const src = document.querySelector(`#stack .pane[data-key="${CSS.escape(key)}"] iframe`)?.dataset.src ?? "";
+    return { name: key.slice("app:".length), path: new URL(src, location.origin).searchParams.get("return") || "/" };
+  });
+}
+// The windows the reload kept, taken as the page loads (a later reload by
+// hand opens none), and open again once its chat is, for the person who
+// had them open (on settings, which fill the work area, they are let go).
+const keptWindows = tab.get(WINDOWS_KEY, null);
+tab.drop(WINDOWS_KEY);
+function reopenWindows(settings) {
+  if (settings || keptWindows?.who !== state.me?.id || !Array.isArray(keptWindows?.windows)) return;
+  for (const w of keptWindows.windows.slice(0, WINDOWS_KEPT_MAX)) {
+    if (typeof w?.name === "string" && FRAGMENT_NAME.test(w.name) && typeof w.path === "string" && w.path.startsWith("/")) openApp(w.name, w.path);
+  }
+}
+
+// Signing out, or in with another account, ends the tab's person: what was
+// kept for them goes first, its windows here and each chat page's draft
+// (`{fragment: "forget-draft"}`, answered `draft-forgotten`, waited for at
+// most FORGET_WAIT_MS), then the form goes. A draft of theirs a page not
+// open here keeps is never shown to anyone else (its page gives a draft
+// back only to its own person) and goes when someone else opens it.
+document.addEventListener("submit", (e) => {
+  const form = e.target;
+  if (!(form instanceof HTMLFormElement) || !/^\/auth\/(logout|switch)(\?|$)/.test(form.getAttribute("action") ?? "")) return;
+  tab.drop(WINDOWS_KEY);
+  const frames = [...state.frames.values()].filter((f) => f.isConnected && greeted.has(f));
+  if (!frames.length) return;
+  e.preventDefault();
+  forgetDrafts(frames).then(() => HTMLFormElement.prototype.submit.call(form));
+}, true);
+function forgetDrafts(frames) {
+  return new Promise((done) => {
+    const left = new Set(frames.map((f) => f.contentWindow));
+    const timer = setTimeout(() => finish(), FORGET_WAIT_MS);
+    const forgotten = (event) => {
+      if (event.data?.fragment === "draft-forgotten" && left.delete(event.source) && !left.size) finish();
+    };
+    const finish = () => {
+      clearTimeout(timer);
+      removeEventListener("message", forgotten);
+      done();
+    };
+    addEventListener("message", forgotten);
+    for (const f of frames) originOf(f.dataset.fragment).then((origin) => f.contentWindow?.postMessage({ fragment: "forget-draft" }, origin), () => {});
+  });
+}
+
+// the person opened a chat or an app: once the click has settled
+function navigated() {
+  reloadWhenSafe("navigated");
+}
+// Asks the platform which release it is now (`HEAD /healthz`), at most
+// once a RELEASE_LOOK_MS; then, hidden, reloads if it may.
+async function lookForRelease() {
+  if (!release.next && release.mine && Date.now() - release.lookedAt >= RELEASE_LOOK_MS) {
+    release.lookedAt = Date.now();
+    try {
+      heard(await fetch("/healthz", { method: "HEAD", cache: "no-store" }));
+    } catch {
+      // offline (a phone just woken): its coming online asks again
+      release.lookedAt = 0;
+      return;
+    }
+  }
+  if (document.hidden) reloadWhenSafe("hidden");
+}
+document.addEventListener("visibilitychange", () => lookForRelease());
+addEventListener("pagehide", () => reloadWhenSafe("hidden"));
+addEventListener("pageshow", (e) => { if (e.persisted) lookForRelease(); });
+addEventListener("online", () => lookForRelease());
 
 async function start(open) {
   let me;
@@ -3004,26 +3949,30 @@ async function start(open) {
     throw e;
   }
   state.me = me;
-  const [, mine] = await Promise.all([load(), api("GET", "/api/seat").catch(() => null)]);
+  const [, mine] = await Promise.all([load(), api("GET", "/api/seat").catch(() => null), loadInvites()]);
   setGuest(!!mine?.guest);
   watchList();
   if (!open && location.pathname === WELCOME) return welcome();
   // the first agent is made at home; settings open as asked, chats or not;
-  // a guest makes nothing (decision 49): with nothing shared with them,
-  // their home is the welcome; once something is (an invitee's), it is
-  // what is shared with them, and a seat offered. A seat of theirs (not the
-  // deployment's plan) may reach their ledger a moment after it is given:
-  // its first run waits for it (`seatFirst`)
+  // a guest makes nothing (decision 49): with nothing shared with them, nor
+  // an invite waiting, their home is the welcome; once something is (an
+  // invitee's), it is what is shared with them, and a seat offered. A seat
+  // of theirs (not the deployment's plan) may reach their ledger a moment
+  // after it is given: its first run waits for it (`seatFirst`)
   const settings = !open && location.pathname === SETTINGS;
   if (!open && !settings && await owesFirstAgent()) return creatingAgent(mine?.seat ? {} : null);
-  if (!state.fragments.length && !open && !settings && state.guest) return welcome();
-  $("first-run").hidden = true;
-  $("layout").hidden = false;
+  if (!state.fragments.length && !state.invites.length && !open && !settings && state.guest) return welcome();
+  showLayout();
   const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);
   if (settings) await openSettings(false);
   else if (pick) openChat(pick);
   else if (state.guest) guestHome(mine.offer);
   else notice("No chats yet", "Make an agent to start.");
+  // an invite waits, and nothing it shares is open yet: a phone's sidebar,
+  // where it is answered, shows over the page
+  if (!settings && !pick && state.invites.length && layout.narrow) layout.show("left");
+  // after a reload for a new release, its windows where they were
+  reopenWindows(settings);
   prewake();
 }
 
@@ -3037,7 +3986,9 @@ function setGuest(guest) {
   renderHeading();
 }
 // With no chat to show: the first app shared with them in its window, and
-// beside it what a guest may do, and what a seat gives (the welcome's).
+// beside it what a guest may do, what a seat gives (the welcome's; where
+// nothing is sold, that seats are not open, and no Get a seat), and who is
+// signed in, with another account.
 function guestHome(offer) {
   const app = shown(apps())[0];
   if (app) openApp(app.name);
@@ -3048,10 +3999,10 @@ function guestHome(offer) {
     at(WELCOME);
     welcome().catch((err) => notice("This page did not load", err.message));
   };
-  notice("You're a guest", `You see and edit what people share with you: it shows in the sidebar as they share it. ${seatGives(offer)}`, seat);
+  notice("You're a guest", [`You see and edit what people share with you, once you accept their invite in the sidebar. ${seatGives(offer)}`, noSeatSaid()], [...(offer ? [seat] : []), switchForm("/", "allow")]);
 }
 
 start().catch((e) => {
-  $("layout").hidden = false;
+  showLayout();
   notice("This page did not load", e.message);
 });

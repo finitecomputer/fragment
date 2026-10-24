@@ -578,20 +578,12 @@ impl FragmentCell {
             return Ok(json!({ "stop": true }));
         }
         match route {
-            "advance" => {
-                let answer = self.advance(decode(body)?).await?;
-                if answer.get("failed").is_some() || answer.get("done").is_some() {
-                    // the run ended: nothing settles its holds now
-                    self.release_ended_holds().await;
-                }
-                Ok(answer)
-            }
+            "advance" => self.advance(decode(body)?).await,
             "effect" => self.job_effect(decode(body)?).await,
             "finish" => {
                 let call: FinishCall = decode(body)?;
                 if let Some(run) = self.current_run(call.run, call.attempt)? {
                     self.finish_run(&run, Err(call.error))?;
-                    self.release_ended_holds().await;
                 }
                 Ok(json!({ "ok": true }))
             }
@@ -613,10 +605,6 @@ impl FragmentCell {
         if let Some(f) = call.failed {
             if f.index.checked_add(1) != Some(count) {
                 return Err(CellError::invalid(format!("step {} ran out of retries, but the advance is after {count} steps", f.index)));
-            }
-            // a paid step that failed for good gives its reservation back (bug 3)
-            if f.kind.starts_with("ai.") {
-                self.release_step(&run, f.index).await;
             }
             self.keep_step(run_id, attempt, f.index, &StepResult { kind: f.kind, outcome: StepOutcome::Error(clip(&f.error)) })?;
         }
@@ -1130,6 +1118,8 @@ impl FragmentCell {
     /// Rebuilds the cron schedules from newly installed triggers (none,
     /// when the live commit has no app). A schedule that did not change
     /// keeps its next time, so a redeploy neither skips nor repeats a tick.
+    /// The fragment's scheduled records are its data, not its code's, and
+    /// no install touches them (schedules.rs).
     pub(crate) fn sync_schedules(&self, triggers: &[TriggerDecl]) -> CellResult<()> {
         let prior: BTreeMap<(String, String), i64> = self
             .rows("SELECT op, cron, next_at FROM schedules", vec![])?
@@ -1151,14 +1141,23 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// From the alarm: starts the runs whose schedules are due. A schedule
-    /// whose previous run is still going skips this tick; past the owner's
-    /// overdraft, each due tick is a blocked run that says why. The
-    /// standing is read first, and only when a schedule is due; the due
-    /// schedules are read after it, so what fires and what moves them on
-    /// is one turn (a deploy that replaced them meanwhile is seen).
+    /// From the alarm: the cron schedules due, both kinds, in one pass: the
+    /// installed code's triggers start their runs, and the fragment's
+    /// scheduled records append theirs (schedules.rs `fire_records`), each
+    /// moving on by the one rule (`Cron::next_fire`). A trigger whose
+    /// previous run is still going skips this tick; past the owner's
+    /// overdraft, each due tick is a blocked run that says why, and no
+    /// scheduled record appends (one event says so). The standing is read
+    /// first, and only when a schedule is due; the due schedules are read
+    /// after it, so what fires and what moves them on is one turn (a deploy
+    /// that replaced the code's meanwhile is seen).
     pub(crate) async fn fire_cron(&self) -> CellResult<()> {
-        if self.count_of("SELECT COUNT(*) AS n FROM schedules WHERE next_at <= ?", vec![SqlStorageValue::Integer(js::now_ms())])? == 0 {
+        let at = js::now_ms();
+        let due = self.count_of(
+            "SELECT (SELECT COUNT(*) FROM schedules WHERE next_at <= ?) + (SELECT COUNT(*) FROM record_schedules WHERE next_at <= ?) AS n",
+            vec![SqlStorageValue::Integer(at), SqlStorageValue::Integer(at)],
+        )?;
+        if due == 0 {
             return Ok(());
         }
         let read_only = self.read_only().await?;
@@ -1187,18 +1186,21 @@ impl FragmentCell {
                     owner_read_only: read_only,
                 })?;
             }
-            match Cron::parse(expr).ok().and_then(|c| c.next_after(now.max(at))) {
+            match Cron::parse(expr).ok().and_then(|c| c.next_fire(at, now)) {
                 Some(next) => self.exec("UPDATE schedules SET next_at = ? WHERE idx = ?", vec![SqlStorageValue::Integer(next), SqlStorageValue::Integer(idx)])?,
                 None => self.exec("DELETE FROM schedules WHERE idx = ?", vec![SqlStorageValue::Integer(idx)])?,
             }
         }
-        Ok(())
+        self.fire_records(read_only, now).await
     }
 
-    /// When the alarm must next wake for runs: a due schedule, or queued
-    /// runs whose Workflows did not start.
+    /// When the alarm must next wake for runs and records: a due schedule
+    /// of either kind, or queued runs whose Workflows did not start.
     pub(crate) fn runs_due_at(&self) -> CellResult<Option<i64>> {
-        let cron = self.rows("SELECT MIN(next_at) AS at FROM schedules", vec![])?.first().and_then(|r| r["at"].as_i64());
+        let cron = self
+            .rows("SELECT MIN(at) AS at FROM (SELECT MIN(next_at) AS at FROM schedules UNION ALL SELECT MIN(next_at) AS at FROM record_schedules)", vec![])?
+            .first()
+            .and_then(|r| r["at"].as_i64());
         let queued = self.count_of("SELECT COUNT(*) AS n FROM runs WHERE status = 'queued'", vec![])? > 0;
         let retry = queued.then(|| js::now_ms() + QUEUED_RETRY_MS);
         Ok([cron, retry].into_iter().flatten().min())
@@ -1235,7 +1237,7 @@ impl FragmentCell {
             vec![SqlStorageValue::Integer(js::now_ms() - limits::RUN_RETENTION_MS), SqlStorageValue::Integer(limits::RUNS_KEPT)],
         )?;
         // a run's charges and what its steps bought go with it (the ledger keeps the month's usage)
-        self.exec("DELETE FROM charges WHERE run NOT IN (SELECT id FROM runs) AND held = 0", vec![])?;
+        self.exec("DELETE FROM charges WHERE run NOT IN (SELECT id FROM runs)", vec![])?;
         self.exec("DELETE FROM paid WHERE run NOT IN (SELECT id FROM runs)", vec![])
 
     }

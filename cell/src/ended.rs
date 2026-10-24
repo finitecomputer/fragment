@@ -8,11 +8,15 @@
 //! 300 s on the e2e preview (2026-10-06), and the delete then wiped the
 //! outbox that held any it failed to tell.
 //!
-//! The ended life's rows live in tables of their own (`SCHEMA`, here),
-//! which the delete keeps while it drops the life's own and makes them
-//! again empty: the name is free at once, and a life made again meanwhile
-//! is untouched by the old one's cleanup (each list's change names its
-//! incarnation, and a list keeps the newer life's row). Once nothing is
+//! The ended life's rows live in tables of their own: the ended lives
+//! (one row each, until all is cleaned), the lists each has still to
+//! tell, a wipe's repo, and an agent fragment's agent (its `computer` none
+//! once that runs it no more), `migrate::FRAGMENT.kept` (crates/core/
+//! migrations/fragment). The delete keeps them while it drops the life's
+//! own and makes them again empty, as the life's steps made them
+//! (`migrate::remake`): the name is free at once, and a life made again
+//! meanwhile is untouched by the old one's cleanup (each list's change
+//! names its incarnation, and a list keeps the newer life's row). Once nothing is
 //! left to clean, with no life or claim, the object's storage goes whole
 //! (`deleteAll`).
 //!
@@ -67,25 +71,6 @@ use crate::js;
 use crate::members::INDEX_FLUSH_MAX;
 use crate::registry::calls;
 use crate::routed::Signed;
-
-/// The ended lives (one row each, until all is cleaned), the lists each
-/// has still to tell, a wipe's repo, and an agent fragment's agent (its
-/// `computer` none once that runs it no more).
-pub(crate) const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS ended (
-  incarnation INTEGER PRIMARY KEY, name TEXT NOT NULL, npub TEXT NOT NULL, facet TEXT NOT NULL, ended_at INTEGER NOT NULL,
-  stored INTEGER NOT NULL DEFAULT 1, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS ended_index (
-  incarnation INTEGER NOT NULL, principal TEXT NOT NULL, version INTEGER NOT NULL,
-  attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL, PRIMARY KEY (incarnation, principal));
-CREATE INDEX IF NOT EXISTS ended_index_due ON ended_index (next_at);
-CREATE TABLE IF NOT EXISTS ended_repos (
-  incarnation INTEGER PRIMARY KEY, repo TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS ended_agents (
-  incarnation INTEGER PRIMARY KEY, identity TEXT NOT NULL, computer TEXT, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS ended_errors (
-  incarnation INTEGER NOT NULL, part TEXT NOT NULL, error TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (incarnation, part));
-";
 
 /// The parts of an ended life whose last error `ended_errors` keeps.
 const PART_LISTS: &str = "lists";
@@ -241,10 +226,7 @@ impl FragmentCell {
         for ws in self.state.get_websockets() {
             let _ = ws.close(Some(4004), Some("the fragment was deleted"));
         }
-        for table in fragment_core::ddl::tables(crate::fragment::SCHEMA) {
-            self.exec(&format!("DROP TABLE IF EXISTS {table}"), vec![])?;
-        }
-        self.sql().exec(crate::fragment::SCHEMA, None)?;
+        crate::schema::remake(self.sql(), &fragment_core::migrate::FRAGMENT)?;
         assert!(self.meta(MetaKey::CreatedAt)?.is_none(), "an ended life leaves no fragment");
         Ok(Ended { owner })
     }
@@ -524,8 +506,9 @@ impl FragmentCell {
                 return Ok(false);
             }
             self.state.storage().delete_all().await?;
-            self.sql().exec(crate::fragment::SCHEMA, None)?;
-            self.sql().exec(SCHEMA, None)?;
+            // its storage gone whole, `_schema` with it: every step again
+            // (current from now, if it refused its schema: schema.rs)
+            self.schema.made_again(&self.raw, self.sql(), &fragment_core::migrate::FRAGMENT, &self.state.id().to_string())?;
             Ok::<bool, CellError>(true)
         }
         .await;
@@ -632,6 +615,9 @@ impl FragmentCell {
                         let ended = self.end_life_wiped()?;
                         console_log!("{}", json!({ "event": "wipe.fragment-ended", "fragment": name, "owner": owner }));
                         self.tell_ended(Some(&ended.owner)).await;
+                        if let Some(name) = &name {
+                            self.forget_invites(name).await;
+                        }
                         true
                     }
                     (Some(_), Some(_)) => return Err(CellError::new(ErrorCode::Forbidden, format!("{} is someone else's: a wipe ends only its person's", name.unwrap_or_default()))),

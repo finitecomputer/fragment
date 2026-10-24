@@ -12,6 +12,10 @@
 //!   POST /api/test/registry {…}: a lever on the registry (the whole deployment's)
 //!   POST /api/test/mail     {to, subject, text}: one message, as the platform sends it
 //!
+//! And one hook no route takes: on a local fleet, a request's
+//! `fragment_e2e_release` cookie names the release it is answered as
+//! (`answered_release`), so a browser meets a deploy.
+//!
 //! An e2e person signs in by an `@e2e.test` email under the e2e issuer, so
 //! no real sign-in ever reaches them, and is made a seat whose paid calls
 //! (model calls and AI steps) are capped at what the request asks for, at
@@ -40,6 +44,24 @@ use crate::{ask_registry, check_name, json_answer, ledger, no_route, read_body, 
 /// The ledger command that makes an e2e person a seat: one id, so signing
 /// the same person in again sets nothing twice.
 const E2E_SEAT_ID: &str = "e2e-seat";
+
+/// The cookie a request on a local fleet with a test secret names the
+/// release it is answered as in (docs/api.md, Test levers): a browser's,
+/// so one browser meets a deploy and no one else's answers change.
+const RELEASE_COOKIE: &str = "fragment_e2e_release";
+
+/// The release the platform's own host names in its answer to `req`
+/// (`x-fragment-deploy`, the shell's page's meta: docs/api.md, The shell):
+/// its own, `FRAGMENT_DEPLOY_ID`, or on a local fleet with a test secret
+/// the one the request's `RELEASE_COOKIE` names, as a deploy would. Calls
+/// between the Worker and its objects keep its own (`routed`): only what
+/// a browser reads changes. A preview's and production's answers are
+/// their own, whatever a request carries.
+pub(crate) fn answered_release(cfg: &Config, req: &Request) -> String {
+    let cookies = (cfg.test_hooks && !cfg.levers_scoped).then(|| req.headers().get("cookie").ok().flatten()).flatten().unwrap_or_default();
+    let named = fragment_core::site::cookie(&cookies, RELEASE_COOKIE).filter(|id| fragment_core::release::valid(id));
+    named.unwrap_or(&cfg.deploy_id).to_string()
+}
 
 /// `POST /api/test/signin`.
 #[derive(Deserialize)]
@@ -92,6 +114,10 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             if cfg.levers_scoped && !is_e2e(env, &t.identity).await? {
                 return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the ledger levers reach e2e people alone"));
             }
+            if matches!(t.hook, ledger::TestHook::ForgetGate) {
+                // the router's isolate's gate; the ledger forgets its own
+                ledger::forget_gate();
+            }
             json_answer(&ledger::ask(env, &t.identity, &t.hook).await?)
         }
         (Method::Post, ["list"]) => {
@@ -135,7 +161,7 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             }
             let lever = serde_json::json!({ "op": t.op, "steps": t.steps });
             let req = routed::internal_request("test/export", &lever.to_string())?;
-            Ok(env.durable_object("PRINCIPAL")?.get_by_name(&t.identity)?.fetch_with_request(req).await?)
+            crate::routed::send(env, "PRINCIPAL", &t.identity, req).await
         }
         (Method::Post, [hook @ ("keys" | "fragment")]) => {
             /// The fragment a lever's body names (the rest is the fragment's to read).
@@ -150,7 +176,7 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             }
             let body = String::from_utf8(body).map_err(|_| CellError::invalid("body: not UTF-8"))?;
             let inner = routed::internal_request(&format!("test/{hook}"), &body)?;
-            Ok(env.durable_object("FRAGMENT")?.get_by_name(&target.fragment)?.fetch_with_request(inner).await?)
+            crate::routed::send(env, "FRAGMENT", &target.fragment, inner).await
         }
         (Method::Post, ["computer"]) => {
             /// `{computer, op, times?, on?, ms?, freeze?}`: a lever on that

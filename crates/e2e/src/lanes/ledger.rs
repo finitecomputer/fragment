@@ -1,14 +1,16 @@
 //! The usage ledger (phase 3 of docs/cloudflare-v1.md; docs/ledger.md),
 //! end to end on workerd: plans and guests (who make no fragments, and
 //! still edit a seat's), a seat's included credit, operators' commands, AI
-//! steps' reserve, settle and release (bugs 2 and 3), zero credit and the
+//! steps' charges, once whatever retries (bug 2), zero credit and the
 //! overdraft (past it, no new fragments, and cron and triggers start no
 //! runs until a top-up), a fragment's cap, the meters that reach the
-//! ledger through the queue, and the model route, streamed and not. The model is the Workers AI fake behind the model route (a lower
+//! ledger through the queue, and the model route, streamed and not,
+//! charged after its answer, waiting on no ledger in the common case
+//! (decision 62). The model is the Workers AI fake behind the model route (a lower
 //! rung at the vendor boundary, labeled so); a test sets the usage each
 //! answer reports, so every charge is checked against the price book.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use fragment_core::price::{PriceBook, Usage};
@@ -25,7 +27,8 @@ use crate::Suite;
 const LEDGER_APP: &[u8] = include_bytes!("../../fixtures/ledger.mjs");
 const LEDGER_JSON: &[u8] = include_bytes!("../../fixtures/ledger.json");
 /// A fragment whose cron (due next new year, unless a test makes it due)
-/// and file trigger each run a mutation, and a read `landed` asks.
+/// and file trigger each run a mutation, and a read `landed` asks; and a
+/// channel its scheduled record appends to.
 const TRIGGERS_APP: &[u8] = br#"import { DurableObject } from "cloudflare:workers";
 export class App extends DurableObject {
   tick() { return { ok: true }; }
@@ -35,6 +38,7 @@ export class App extends DurableObject {
 "#;
 const TRIGGERS_JSON: &[u8] = br#"{
   "operations": { "tick": { "kind": "mutation" }, "filed": { "kind": "mutation" }, "notes": { "kind": "query", "role": "viewer" } },
+  "channels": { "pings": { "read": "viewer", "post": "editor" } },
   "triggers": [{ "cron": "0 0 1 1 *", "run": "tick" }, { "files": "notes/**", "run": "filed" }]
 }"#;
 /// GLM-5.3 Flash: the cheap tier's model and the route's vision model
@@ -118,15 +122,15 @@ pub(super) fn entries(api: &Api, identity: &str, prefix: &str) -> Vec<Value> {
     }
 }
 
-/// The reservations of one run's steps, every attempt's.
+/// The charges of one run's steps (one a step, whatever attempt made it).
 fn run_steps(api: &Api, identity: &str, name: &str, run: &Value) -> Vec<Value> {
-    let marker = format!("/run/{}/attempt/", run["id"]);
+    let marker = format!("/run/{}/step/", run["id"]);
     entries(api, identity, &format!("step:{name}@")).into_iter().filter(|e| e["ref"].as_str().is_some_and(|r| r.contains(&marker))).collect()
 }
 
 /// What a run's steps were charged on the ledger, together.
 fn run_charged(api: &Api, identity: &str, name: &str, run: &Value) -> i64 {
-    run_steps(api, identity, name, run).iter().filter_map(|e| e["entry"]["end"]["charge"].as_i64()).sum()
+    run_steps(api, identity, name, run).iter().filter_map(charged).sum()
 }
 
 
@@ -148,9 +152,52 @@ fn landed(s: &Suite, api: &Api, keys: &Keys, name: &str, wait: Duration) {
     s.eventually(wait, || api.op(keys, name, "notes", "q", json!({})).is_ok_and(|r| r.status == 200));
 }
 
-/// A reservation's end, as the ledger kept it: `settled` or `released` (none while held).
-pub(super) fn end_of(entry: &Value) -> String {
-    entry["entry"]["end"]["end"].as_str().unwrap_or("held").to_string()
+/// What a row the ledger charged was charged (a paid call's, charged after
+/// its answer); none for any other entry.
+pub(super) fn charged(entry: &Value) -> Option<i64> {
+    if entry["entry"]["entry"] != "row" {
+        return None;
+    }
+    entry["entry"]["charge"].as_i64()
+}
+
+/// The usage a charged row was priced from.
+pub(super) fn usage(entry: &Value) -> &Value {
+    &entry["entry"]["row"]["usage"]
+}
+
+/// How many references are under `prefix` once none has landed for a
+/// second, within 20 s: a paid call is charged just after its answer, so a
+/// count to compare later calls against waits for the rows of calls made
+/// before it.
+pub(super) fn quiet(api: &Api, identity: &str, prefix: &str) -> usize {
+    let t0 = Instant::now();
+    let mut last = entries(api, identity, prefix).len();
+    // bounded: a read a second for 20 s
+    while t0.elapsed() < Duration::from_secs(20) {
+        std::thread::sleep(Duration::from_secs(1));
+        let now = entries(api, identity, prefix).len();
+        if now == last {
+            return now;
+        }
+        last = now;
+    }
+    last
+}
+
+/// Makes the gate forget what it heard (`forget-gate` on `identity`'s
+/// ledger: the router's isolate's gate and the ledger's; locally one
+/// isolate runs them all), so the next paid call asks the ledger.
+pub(super) fn forget_gate(api: &Api, identity: &str) -> Result<()> {
+    let r = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": identity, "op": "forget-gate" })))?;
+    anyhow::ensure!(r.status == 200, "the gate forgets: {r}");
+    Ok(())
+}
+
+/// How many of the node's log lines name `event`: what the cell said aloud.
+pub(super) fn logged(s: &Suite, event: &str) -> usize {
+    let log = s.node.as_ref().map(|n| std::fs::read_to_string(&n.log).unwrap_or_default()).unwrap_or_default();
+    log.matches(&format!("\"event\":\"{event}\"")).count()
 }
 
 pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
@@ -274,14 +321,14 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "cards": super::site::cards(api, &guest_app), "events": super::site::event_kinds(api, &guest, &guest_app), "skipsBefore": skips_before }),
     );
 
-    // ---- an AI step: reserved, then settled from the usage it reported
+    // ---- an AI step: gated, then charged after it from the usage it reported
     let name = s.named(api, &owner, "ledger")?;
     let c = s.create(api, &owner, &name)?;
     ship(s, &c, LEDGER_APP, LEDGER_JSON);
     landed(s, api, &owner, &name, wait);
 
     // a guest editor of a seat's fragment still writes there: its owner pays (decision 26)
-    api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{guest_id}"), Some(&json!({ "role": "editor" })))?;
+    api.share(&name, &guest_id, "editor")?;
     let w = api.op(&guest, &name, "note", "gn-seat", json!({ "text": "a guest edits a seat's fragment" }))?;
     let post = api.signed(&guest, "POST", &format!("/api/f/{name}/channels/talk"), Some(&json!({ "id": "g-talk", "body": { "text": "a guest posts" } })))?;
     s.ok("a guest editor still writes to a seat's fragment, and posts there", w.status == 200 && post.status == 200, format!("{w} | {post}"));
@@ -293,19 +340,21 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.op(&owner, &name, "summarize", "t-1", json!({ "text": "the notes", "tier": "cheap" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
     let paid = charge(&tokens(CHEAP, 800, 200, 500));
-    let after = ledger(api, &owner);
     s.ok(
         "an AI step runs on its tier's model through the model route",
         run["status"] == "succeeded" && run["output"]["text"] == "echo: the notes" && run["output"]["model"] == CHEAP && run["output"]["tier"] == "cheap",
         &run,
     );
+    // its row goes with the fragment's meters, from its outbox, just after the step
+    let billed = s.eventually(wait, || entries(api, &owner_id, &format!("step:{name}@")).iter().any(|e| charged(e) == Some(paid)));
     let step = entries(api, &owner_id, &format!("step:{name}@"));
     s.ok(
-        "it reserved, then settled from its usage (input less what was cached), once",
-        step.len() == 1 && end_of(&step[0]) == "settled" && step[0]["entry"]["end"]["basis"] == "usage" && step[0]["entry"]["end"]["charge"] == paid,
+        "it is charged after its call, from its usage (input less what was cached), once",
+        billed && step.len() == 1 && charged(&step[0]) == Some(paid) && step[0]["entry"]["row"]["fragment"] == name.as_str(),
         json!(step),
     );
     // (the fragment's own meters bill the owner too, a few micro-dollars at a time)
+    let after = ledger(api, &owner);
     s.ok(
         "the owner's balance moved by the charge, nothing is held, and the run shows its cost",
         m(&before, "balanceMicros") - m(&after, "balanceMicros") >= paid && m(&after, "reservedMicros") == 0 && run["costMicros"] == paid && run_charged(api, &owner_id, &name, &run) == paid,
@@ -318,15 +367,14 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{:?}", call.map(|c| c.metadata)),
     );
 
-    // ---- bug 3: a call that fails for good gives its reservation back
+    // ---- a call that fails for good is charged nothing (nothing was held)
     s.ai.fail_next(&[400]);
     let r = api.op(&owner, &name, "summarize", "t-400", json!({ "text": "refused", "tier": "cheap" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
-    let released = entries(api, &owner_id, &format!("step:{name}@")).into_iter().filter(|e| end_of(e) == "released").count();
     let v = ledger(api, &owner);
     s.ok(
-        "a step the model refuses for good is held, and its reservation goes back (bug 3)",
-        run["status"] == "held" && released == 1 && m(&v, "reservedMicros") == 0 && run_charged(api, &owner_id, &name, &run) == 0,
+        "a step the model refuses for good is held, and charged nothing",
+        run["status"] == "held" && m(&v, "reservedMicros") == 0 && run["costMicros"].as_i64().unwrap_or(0) == 0 && run_steps(api, &owner_id, &name, &run).is_empty(),
         json!({ "run": run, "ledger": v }),
     );
     // its model and the fallback both down: every try fails
@@ -334,11 +382,10 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.op(&owner, &name, "summarize", "t-503", json!({ "text": "flaky", "tier": "cheap" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], Duration::from_secs(90));
     s.ai.down(&[]);
-    let released = entries(api, &owner_id, &format!("step:{name}@")).into_iter().filter(|e| end_of(e) == "released").count();
     let v = ledger(api, &owner);
     s.ok(
-        "a step whose retries run out gives its reservation back too (bug 3)",
-        run["status"] == "held" && released == 2 && m(&v, "reservedMicros") == 0 && run_charged(api, &owner_id, &name, &run) == 0,
+        "a step whose retries run out is charged nothing too",
+        run["status"] == "held" && m(&v, "reservedMicros") == 0 && run["costMicros"].as_i64().unwrap_or(0) == 0 && run_steps(api, &owner_id, &name, &run).is_empty(),
         json!({ "run": run, "ledger": v }),
     );
 
@@ -349,9 +396,10 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.op(&owner, &name, "summarize", "t-retried", json!({ "text": "paid once", "tier": "cheap" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
     let once = charge(&tokens(CHEAP, 100, 0, 10));
+    let billed = s.eventually(wait, || run_charged(api, &owner_id, &name, &run) == once);
     s.ok(
         "a text step that failed after its paid call is tried again from what it kept: one call, one charge (bug 2)",
-        run["status"] == "succeeded" && run["output"]["text"] == "echo: paid once" && s.ai.calls().len() == calls + 1 && run_charged(api, &owner_id, &name, &run) == once && run_steps(api, &owner_id, &name, &run).len() == 1,
+        run["status"] == "succeeded" && run["output"]["text"] == "echo: paid once" && s.ai.calls().len() == calls + 1 && billed && run_steps(api, &owner_id, &name, &run).len() == 1 && run["costMicros"] == once,
         json!({ "run": run, "calls": s.ai.calls().len() - calls }),
     );
     lever(api, &name, "fail-after-paid", json!({ "times": 1 }))?;
@@ -361,24 +409,22 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
     // Workers AI's price: 4.80 neurons a 512×512 tile, 9.60 a step (fragment_core::media)
     let image = |tiles: u64, steps: u64| charge(&Usage::Neurons { milli: tiles * 4_800 + steps * 9_600 });
+    let billed = s.eventually(wait, || run_charged(api, &owner_id, &name, &run) == image(4, 4));
     s.ok(
         "an image step whose commit failed after it was paid commits from its kept bytes: one image bought (bug 2), charged its 4 tiles and 4 steps in neurons",
         run["status"] == "succeeded"
             && s.fake.file_at(c["repo"].as_str().unwrap_or(""), "main", "art/lighthouse.jpg") == Some(image_bytes("a lighthouse"))
             && images() == drawn + 1
-            && run_charged(api, &owner_id, &name, &run) == image(4, 4),
+            && billed,
         json!({ "run": run, "images": images() - drawn }),
     );
     let r = api.op(&owner, &name, "draw", "d-wide", json!({ "prompt": "a wide shore", "path": "art/shore.jpg", "steps": 8 }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    let billed = s.eventually(wait, || run_charged(api, &owner_id, &name, &run) == image(6, 8));
     let step = run_steps(api, &owner_id, &name, &run);
     s.ok(
-        "an image is charged the tiles it covers (1536×1024: 6) and the steps it took, past its 1024×1024 reservation, from its usage",
-        run["status"] == "succeeded"
-            && step.len() == 1
-            && step[0]["entry"]["end"]["basis"] == "usage"
-            && run_charged(api, &owner_id, &name, &run) == image(6, 8)
-            && m(&ledger(api, &owner), "reservedMicros") == 0,
+        "an image is charged the tiles it covers (1536×1024: 6) and the steps it took, from its usage",
+        run["status"] == "succeeded" && step.len() == 1 && billed && run["costMicros"] == image(6, 8) && m(&ledger(api, &owner), "reservedMicros") == 0,
         json!({ "run": run, "step": step }),
     );
     // a replay pays only for the step it had not paid for: the first call
@@ -388,12 +434,23 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ai.fail_next(&[400]);
     let r = api.op(&owner, &name, "twice", "w-1", json!({ "a": "first", "b": "second" }))?;
     let held = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    // its paid step's receipt as the release before decision 62 left it:
+    // kept, not marked charged, charged under an attempt's reference
+    let before = lever(api, &name, "receipt-before", json!({ "run": held["id"] }))?;
     api.signed(&owner, "POST", &format!("/api/f/{name}/replay"), Some(&json!({ "run": held["id"] })))?;
     let done = settle(api, &owner, &name, held["id"].as_i64().unwrap_or(0), &["succeeded"], wait);
     s.ok(
         "a replayed run reuses the step it paid for: the model is asked for the other alone",
         held["status"] == "held" && done["status"] == "succeeded" && done["output"] == json!({ "one": "echo: first", "two": "echo: second" }) && s.ai.calls().len() - calls == 3,
         json!({ "held": held, "done": done, "calls": s.ai.calls().len() - calls }),
+    );
+    let second = s.eventually(wait, || run_steps(api, &owner_id, &name, &done).len() == 2);
+    let rows = run_steps(api, &owner_id, &name, &done);
+    let step = |i: u32| rows.iter().find(|e| e["ref"].as_str().is_some_and(|r| r.ends_with(&format!("/step/{i}")))).and_then(charged);
+    s.ok(
+        "a receipt the release before kept is never charged again: the replay charges the other step alone, and the run's cost counts the first once",
+        before.status == 200 && before.body["receipts"] == 1 && second && step(1).is_some_and(|two| done["costMicros"].as_i64() == held["costMicros"].as_i64().map(|one| one + two)),
+        json!({ "held": held["costMicros"], "done": done["costMicros"], "rows": rows }),
     );
 
     // ---- zero credit: agents and AI steps stop; fragments keep taking writes
@@ -402,6 +459,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ai.set_usage(&[Used { prompt: 10, cached: 0, completion: n }]);
     let r = api.op(&owner, &name, "summarize", "t-big", json!({ "text": "a long answer", "tier": "medium" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    s.eventually(wait, || m(&ledger(api, &owner), "balanceMicros") < 0);
     let v = ledger(api, &owner);
     s.ok(
         "usage that happened is charged in full, past zero: the balance is below it",
@@ -409,6 +467,8 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         &v,
     );
     let calls = s.ai.calls().len();
+    // the gate heard the owner within the minute, when they had credit: it asks afresh
+    forget_gate(api, &owner_id)?;
     let r = api.op(&owner, &name, "summarize", "t-zero", json!({ "text": "at zero", "tier": "cheap" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
     s.ok(
@@ -424,6 +484,8 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let reg = "/api/identities";
     let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &owner) })))?;
     anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
+    // the gate may have heard the owner within the minute: it asks afresh
+    forget_gate(api, &owner_id)?;
     let r = api.signed(&hand, "POST", MODEL_ROUTE, Some(&hello()))?;
     s.ok(
         "and so is their agent's model call (402)",
@@ -447,16 +509,23 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     };
     let blocked = |op: &str, via: &str| runs(op).into_iter().find(|r| r["via"] == via && r["status"] == "blocked" && r["error"].as_str().is_some_and(|e| e.contains("read-only")));
     let succeeded = |op: &str, via: &str| runs(op).iter().filter(|r| r["via"] == via && r["status"] == "succeeded").count();
+    // and a scheduled record (docs/api.md, "Scheduled records"), due next new year too
+    let pings = || super::jobs::records(api, &owner, &trig, "pings").len();
+    let scheduled = api.signed(&owner, "POST", &format!("/api/f/{trig}/schedules"), Some(&json!({ "cron": "0 0 1 1 *", "channel": "pings", "record": { "ping": true } })))?;
     lever(api, &trig, "cron-now", json!({}))?;
     let ran = s.eventually(wait, || succeeded("tick", "cron") == 1);
-    s.ok("before, its cron runs (a mutation, as the fragment)", ran, json!(runs("tick")));
+    let pinged = s.eventually(wait, || pings() == 1);
+    s.ok("before, its cron runs (a mutation, as the fragment), and its scheduled record appends", ran && scheduled.status == 200 && pinged, json!({ "tick": runs("tick"), "scheduled": scheduled.body }));
     let back = m(&ledger(api, &owner), "balanceMicros").unsigned_abs() as i64 + USD;
     command(&owner_id, "grant", json!({ "id": "g-back", "micros": back, "by": op_id, "why": "back above zero" }))?;
     let v = ledger(api, &owner);
     let n = tokens_costing(GLM, 10, m(&v, "balanceMicros") + 3 * USD);
     s.ai.set_usage(&[Used { prompt: 10, cached: 0, completion: n }]);
+    // the gate heard the owner at zero: it asks afresh, now they have credit again
+    forget_gate(api, &owner_id)?;
     let r = api.op(&owner, &name, "summarize", "t-over", json!({ "text": "past the overdraft", "tier": "medium" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    s.eventually(wait, || ledger(api, &owner)["standing"]["standing"] == "read_only");
     let v = ledger(api, &owner);
     s.ok(
         "a charge past the $2 overdraft makes the person's fragments read-only",
@@ -486,6 +555,17 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     lever(api, &trig, "cron-now", json!({}))?;
     let cron = s.eventually(wait, || blocked("tick", "cron").is_some());
     s.ok("past the overdraft its cron starts no run: the tick is a blocked run, saying why", cron && succeeded("tick", "cron") == 1, json!(runs("tick")));
+    let said = || {
+        api.signed(&owner, "GET", &format!("/api/f/{trig}/events?tail=50"), None)
+            .ok()
+            .and_then(|r| r.body["events"].as_array().and_then(|l| l.iter().find(|e| e["kind"] == "schedules.blocked").cloned()))
+    };
+    let told = s.eventually(wait, || said().is_some());
+    s.ok(
+        "nor does its scheduled record append: one event says why",
+        told && pings() == 1 && said().is_some_and(|e| e["summary"].as_str().is_some_and(|t| t.contains("did not fire") && t.contains("read-only"))),
+        json!({ "event": said(), "pings": pings() }),
+    );
     s.commit(&tc, &[("notes/past.md", Some(b"past the overdraft"))]);
     let filed = s.eventually(wait, || blocked("filed", "files").is_some());
     s.ok("nor does a file trigger, for a commit to main from outside", filed && succeeded("filed", "files") == 0, json!(runs("filed")));
@@ -504,7 +584,8 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let cron = s.eventually(wait, || succeeded("tick", "cron") == 2);
     s.commit(&tc, &[("notes/after.md", Some(b"after the top-up"))]);
     let filed = s.eventually(wait, || succeeded("filed", "files") == 1);
-    s.ok("and its cron and file triggers start runs again", cron && filed, json!({ "tick": runs("tick"), "filed": runs("filed") }));
+    let pinged = s.eventually(wait, || pings() == 2);
+    s.ok("and its cron and file triggers start runs again, and its scheduled record appends", cron && filed && pinged, json!({ "tick": runs("tick"), "filed": runs("filed"), "pings": pings() }));
     let r = api.signed(&owner, "POST", &format!("/api/f/{trig}/replay"), Some(&json!({ "run": held })))?;
     let replayed = s.eventually(wait, || {
         api.signed(&owner, "GET", &format!("/api/f/{trig}/runs/{held}"), None).is_ok_and(|r| r.body["status"] == "succeeded" && r.body["attempt"] == 2)
@@ -514,7 +595,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     // ---- a fragment's cap stops everyone but its owner (decision 26)
     let visitor = api.person()?;
     let visitor_id = api.identity(&visitor)?;
-    api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{visitor_id}"), Some(&json!({ "role": "viewer" })))?;
+    api.share(&name, &visitor_id, "viewer")?;
     let r = api.signed(&visitor, "PUT", &format!("/api/f/{name}/cap"), Some(&json!({ "id": "c0", "micros": 1 })))?;
     s.ok("only a fragment's owner sets its cap", r.status == 403, &r);
     let cap = json!({ "id": "c1", "micros": 1_000 });
@@ -561,11 +642,11 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let before = aig().len();
     s.ai.set_usage(&[Used { prompt: 50, cached: 0, completion: 20 }]);
     let r = api.signed(&hand, "POST", route, Some(&chat(false)))?;
-    let settled = aig().into_iter().filter(|e| end_of(e) == "settled").count();
+    let paid = charge(&tokens(CHEAP, 50, 0, 20));
+    let landed = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| charged(e) == Some(paid)));
     s.ok(
-        "an unstreamed call answers OpenAI's shape, and is settled from its usage",
-        r.status == 200 && r.body["choices"][0]["message"]["content"] == "echo: hello" && aig().len() == before + 1 && settled == before + 1
-            && aig().iter().any(|e| e["entry"]["end"]["charge"] == charge(&tokens(CHEAP, 50, 0, 20))),
+        "an unstreamed call answers OpenAI's shape, and is charged after it, from its usage",
+        r.status == 200 && r.body["choices"][0]["message"]["content"] == "echo: hello" && landed,
         json!({ "answer": r.body, "entries": aig() }),
     );
     s.ai.set_usage(&[Used { prompt: 40, cached: 10, completion: 30 }]);
@@ -575,14 +656,19 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let shaped = lines.iter().filter(|l| l["choices"].as_array().is_some_and(|c| !c.is_empty())).all(|l| l.get("usage").is_none())
         && last["choices"] == json!([]) && last["usage"]["completion_tokens"] == 30;
     let streamed = charge(&tokens(CHEAP, 30, 10, 30));
-    let landed = s.eventually(wait, || aig().iter().any(|e| e["entry"]["end"]["charge"] == streamed && e["entry"]["end"]["basis"] == "usage"));
+    let landed = s.eventually(wait, || aig().iter().any(|e| charged(e) == Some(streamed)));
     s.ok("a streamed call reaches the client in OpenAI's shape (usage once, last)", r.status == 200 && shaped, &r.text);
-    s.ok("and is settled from its last, cumulative usage only", landed, json!(aig()));
+    s.ok("and is charged from its last, cumulative usage only", landed, json!(aig()));
+    let (before, said) = (aig().len(), logged(s, "ledger.unknown-usage"));
     s.ai.break_next();
     let r = api.signed(&hand, "POST", route, Some(&chat(true)))?;
-    let worst = charge(&Usage::Tokens { model: CHEAP.into(), input: chat(true).to_string().len() as u64 + 60, cached_input: 0, cache_write: 0, output: 16_384 });
-    let broke = s.eventually(wait, || aig().iter().filter(|e| e["entry"]["end"]["basis"] == "reservation").count() == 1);
-    s.ok("a stream that broke before its usage is settled at its worst case", r.status == 200 && broke, format!("about {worst} µ$: {}", json!(aig())));
+    let loud = s.eventually(wait, || logged(s, "ledger.unknown-usage") > said);
+    s.ok(
+        "a stream that broke before its usage is charged nothing, said aloud (ledger.unknown-usage): billing never stops an agent",
+        r.status == 200 && loud && aig().len() == before,
+        json!({ "loud": loud, "entries": aig().len() - before }),
+    );
+    gate_waits_on_no_ledger(s, api, &hand, &owner_id)?;
     fallback(s, api, &hand, &owner_id, wait)?;
     let r = api.signed(&hand, "POST", route, Some(&json!({ "model": "high", "messages": [{ "role": "user", "content": "hi" }] })))?;
     s.ok("the high tier is refused, saying why (decision 23)", r.status == 400 && r.message().contains("high tier is off"), &r);
@@ -617,34 +703,34 @@ fn by_id(s: &mut Suite, api: &Api, hand: &Keys, owner: &Keys, owner_id: &str, wa
     let aig = || entries(api, owner_id, "aig:");
     let say = |model: &str| json!({ "model": model, "messages": [{ "role": "user", "content": "hi" }] });
     let tried = |s: &Suite, from: usize| s.ai.calls()[from..].iter().map(|c| c.model.clone()).collect::<Vec<_>>();
-    let settled_at = |micros: i64, model: &str| aig().iter().any(|e| end_of(e) == "settled" && e["entry"]["end"]["charge"] == micros && e["entry"]["end"]["usage"]["model"] == model);
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let settled_at = |micros: i64, model: &str| aig().iter().any(|e| charged(e) == Some(micros) && usage(e)["model"] == model);
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     s.ai.set_usage(&[Used { prompt: 30, cached: 0, completion: 11 }]);
     let r = api.signed(hand, "POST", MODEL_ROUTE, Some(&say(GLM)))?;
     let priced = charge(&tokens(GLM, 30, 0, 11));
     let settled = s.eventually(wait, || aig().len() == before + 1 && settled_at(priced, GLM));
     s.ok(
-        "a call naming a model by its own id (GLM-5.3, the medium tier's) runs on it, settled at its price",
+        "a call naming a model by its own id (GLM-5.3, the medium tier's) runs on it, charged at its price",
         r.status == 200 && r.body["choices"][0]["message"]["content"] == "echo: hi" && tried(s, calls) == [GLM] && settled,
         json!({ "status": r.status, "tried": tried(s, calls), "entries": aig().len() - before }),
     );
     // the cheap tier's id, its caller's tier said: the cheap slot's, which falls back
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     s.ai.fail_next(&[429]);
     s.ai.set_usage(&[Used { prompt: 20, cached: 0, completion: 7 }]);
     let r = api.call(Call { method: "POST", url: format!("{}{MODEL_ROUTE}", api.base), body: Some(say(CHEAP).to_string().into_bytes()), content_type: Some("application/json"), keys: Some(hand), extra: vec![("x-fragment-tier", "cheap".into())], ..Call::default() })?;
     let priced = charge(&tokens(FALLBACK, 20, 0, 7));
     let settled = s.eventually(wait, || aig().len() == before + 1 && settled_at(priced, FALLBACK));
     s.ok(
-        "one naming the cheap tier's model by its id, its tier said, is the cheap tier's call: its 429 is made once more on the fallback model, under one hold",
+        "one naming the cheap tier's model by its id, its tier said, is the cheap tier's call: its 429 is made once more on the fallback model, charged once",
         r.status == 200 && tried(s, calls) == [CHEAP, FALLBACK] && settled,
         json!({ "status": r.status, "tried": tried(s, calls), "entries": aig().len() - before }),
     );
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let r = api.signed(hand, "POST", MODEL_ROUTE, Some(&say("gpt-4o")))?;
     let said = r.message().to_string();
     s.ok(
-        "an id no slot runs is refused (400), nothing reserved or sent, naming the ids the route takes and none of its names",
+        "an id no slot runs is refused (400), nothing charged or sent, naming the ids the route takes and none of its names",
         r.status == 400 && [CHEAP, GLM, FALLBACK].iter().all(|id| said.contains(id)) && !said.contains("cheap") && tried(s, calls).is_empty() && aig().len() == before,
         &r,
     );
@@ -662,26 +748,64 @@ fn by_id(s: &mut Suite, api: &Api, hand: &Keys, owner: &Keys, owner_id: &str, wa
     Ok(())
 }
 
+/// The gate (decision 62; docs/ledger.md, "The gate"): a paid call waits
+/// on no ledger in the common case. With the payer's ledger slowed to 10 s
+/// an answer (the `slow` lever), a call whose gate heard the payer within
+/// the minute answers at once; one whose gate must ask waits at most the
+/// gate's 1.5 s, then goes on (a ledger that does not answer refuses
+/// nothing); and both are charged once the ledger answers the queue.
+fn gate_waits_on_no_ledger(s: &mut Suite, api: &Api, hand: &Keys, owner_id: &str) -> Result<()> {
+    let call = || api.signed(hand, "POST", MODEL_ROUTE, Some(&json!({ "model": "cheap", "messages": [{ "role": "user", "content": "quick" }] })));
+    let slow = |ms: u64| api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": owner_id, "op": "slow", "ms": ms })));
+    let aig = || entries(api, owner_id, "aig:");
+    let before = aig().len();
+    // the gate hears the owner now
+    let warm = call()?;
+    let slowed = slow(10_000)?;
+    let t0 = Instant::now();
+    let quick = call();
+    let quick_took = t0.elapsed();
+    forget_gate(api, owner_id)?;
+    let t0 = Instant::now();
+    let cold = call();
+    let cold_took = t0.elapsed();
+    // the queue's consumer waits on the slowed ledger, and its rows land after
+    let all = s.eventually(Duration::from_secs(90), || aig().len() == before + 3);
+    let restored = slow(0)?;
+    let (quick, cold) = (quick?, cold?);
+    s.ok(
+        "with its payer's ledger slowed to 10 s an answer, a call whose gate heard the payer within the minute answers at once: it waits on no ledger",
+        warm.status == 200 && slowed.status == 200 && quick.status == 200 && quick.body["choices"][0]["message"]["content"] == "echo: quick" && quick_took < Duration::from_secs(5),
+        format!("{quick_took:?}: {quick}"),
+    );
+    s.ok(
+        "one whose gate must ask waits at most the gate's 1.5 s, then goes on (the ledger refuses nothing it did not answer), and every call is charged once the ledger answers",
+        cold.status == 200 && cold_took < Duration::from_secs(8) && all && restored.status == 200,
+        format!("{cold_took:?}: {cold}; {} rows", aig().len() - before),
+    );
+    Ok(())
+}
+
 /// The route's fallback (Paul, 2026-10-08): a call whose model fails before
 /// answering (Workers AI's 502 "could not route request to AI model", as
 /// GLM-5.3 Flash answered every call for five minutes on 2026-10-09) is
-/// made once more, the same, on the fallback model, DeepSeek V4 Flash, under
-/// the same hold, and settled at the fallback's prices; when the fallback
-/// fails too, its failure is the call's, after two tries and no more; a
-/// refusal of the request is never tried again.
+/// made once more, the same, on the fallback model, DeepSeek V4 Flash, and
+/// charged once at the fallback's prices; when the fallback fails too, its
+/// failure is the call's, after two tries and no more, and nothing is
+/// charged; a refusal of the request is never tried again.
 fn fallback(s: &mut Suite, api: &Api, hand: &Keys, owner_id: &str, wait: Duration) -> Result<()> {
     let chat = |stream: bool| json!({ "model": "cheap", "stream": stream, "messages": [{ "role": "user", "content": "hello" }] });
     let aig = || entries(api, owner_id, "aig:");
     let tried = |s: &Suite, from: usize| s.ai.calls()[from..].iter().map(|c| c.model.clone()).collect::<Vec<_>>();
     s.ai.down(&[CHEAP]);
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     s.ai.set_usage(&[Used { prompt: 60, cached: 0, completion: 25 }]);
     let r = api.signed(hand, "POST", MODEL_ROUTE, Some(&chat(false)))?;
     let made = s.ai.calls()[calls..].to_vec();
     let fell = charge(&tokens(FALLBACK, 60, 0, 25));
     let settled = s.eventually(wait, || {
         let new = aig();
-        new.len() == before + 1 && new.iter().filter(|e| e["entry"]["end"]["charge"] == fell && e["entry"]["end"]["basis"] == "usage").count() == 1
+        new.len() == before + 1 && new.iter().filter(|e| charged(e) == Some(fell)).count() == 1
     });
     s.ok(
         "a call whose model is down is made once more, the same, on the fallback model (DeepSeek V4 Flash), which answers it",
@@ -693,26 +817,25 @@ fn fallback(s: &mut Suite, api: &Api, hand: &Keys, owner_id: &str, wait: Duratio
             && made[0].metadata == made[1].metadata,
         json!({ "status": r.status, "answer": r.body, "tried": tried(s, calls) }),
     );
-    s.ok("under one hold, settled once from the fallback's usage, at its prices", settled, json!({ "charge": fell, "entries": aig() }));
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    s.ok("charged once, from the fallback's usage, at its prices", settled, json!({ "charge": fell, "entries": aig() }));
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     s.ai.set_usage(&[Used { prompt: 40, cached: 10, completion: 30 }]);
     let r = api.signed(hand, "POST", MODEL_ROUTE, Some(&chat(true)))?;
     let last = r.text.lines().filter_map(|l| l.strip_prefix("data: ")).filter(|d| *d != "[DONE]").filter_map(|d| serde_json::from_str::<Value>(d).ok()).next_back().unwrap_or_default();
     let streamed = charge(&tokens(FALLBACK, 30, 10, 30));
-    let settled = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| e["entry"]["end"]["charge"] == streamed && e["entry"]["end"]["basis"] == "usage"));
+    let settled = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| charged(e) == Some(streamed)));
     s.ok(
-        "a streamed call falls back the same, streams the fallback's answer in OpenAI's shape, and is settled from its last usage at its prices",
+        "a streamed call falls back the same, streams the fallback's answer in OpenAI's shape, and is charged from its last usage at its prices",
         r.status == 200 && last["choices"] == json!([]) && last["usage"]["completion_tokens"] == 30 && tried(s, calls) == [CHEAP, FALLBACK] && settled,
         json!({ "status": r.status, "tried": tried(s, calls), "entries": aig().len() - before }),
     );
     s.ai.down(&[CHEAP, FALLBACK]);
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let r = api.signed(hand, "POST", MODEL_ROUTE, Some(&chat(false)))?;
-    let released = s.eventually(wait, || aig().len() == before + 1 && aig().iter().filter(|e| end_of(e) == "released").count() >= 1);
     s.ai.down(&[]);
     s.ok(
-        "when the fallback is down too, its 502 is the call's, after two tries and no more, and the hold goes back",
-        r.status == 502 && r.text.contains("could not route request to AI model") && tried(s, calls) == [CHEAP, FALLBACK] && released,
+        "when the fallback is down too, its 502 is the call's, after two tries and no more, and nothing is charged",
+        r.status == 502 && r.text.contains("could not route request to AI model") && tried(s, calls) == [CHEAP, FALLBACK] && aig().len() == before,
         json!({ "status": r.status, "answer": r.text, "tried": tried(s, calls) }),
     );
     let calls = s.ai.calls().len();
@@ -721,13 +844,13 @@ fn fallback(s: &mut Suite, api: &Api, hand: &Keys, owner_id: &str, wait: Duratio
     s.ok("a refusal of the request (400) is the call's: the fallback is not asked", r.status == 400 && tried(s, calls) == [CHEAP], json!({ "status": r.status, "tried": tried(s, calls) }));
     // a runtime's own switch when its model stalls (Hermes' `fallback_providers`): the route's `fallback`
     let named = |stream: bool| json!({ "model": "fallback", "stream": stream, "messages": [{ "role": "user", "content": "hello" }] });
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     s.ai.set_usage(&[Used { prompt: 30, cached: 0, completion: 10 }]);
     let r = api.signed(hand, "POST", MODEL_ROUTE, Some(&named(false)))?;
     let priced = charge(&tokens(FALLBACK, 30, 0, 10));
-    let settled = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| e["entry"]["end"]["charge"] == priced && e["entry"]["end"]["basis"] == "usage"));
+    let settled = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| charged(e) == Some(priced)));
     s.ok(
-        "`fallback` names the deployment's fallback model (a runtime's switch when its model stalls), and is settled at its prices",
+        "`fallback` names the deployment's fallback model (a runtime's switch when its model stalls), and is charged at its prices",
         r.status == 200 && r.body["choices"][0]["message"]["content"] == "echo: hello" && tried(s, calls) == [FALLBACK] && settled,
         json!({ "status": r.status, "tried": tried(s, calls), "entries": aig().len() - before }),
     );
@@ -772,16 +895,16 @@ fn vision(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let route = MODEL_ROUTE;
     let look = |url: &str| json!({ "model": "vision", "messages": [{ "role": "user", "content": [{ "type": "text", "text": "what is on this screen?" }, { "type": "image_url", "image_url": { "url": url } }] }] });
     let aig = || entries(api, owner_id, "aig:");
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let small = png_url(256);
     s.ai.set_usage(&[Used { prompt: 1_200, cached: 0, completion: 40 }]);
     let r = api.signed(hand, "POST", route, Some(&look(&small)))?;
     let call = s.ai.calls().get(calls).cloned();
     let shown = call.as_ref().is_some_and(|c| c.model == VISION && c.body.get("model").is_none() && c.body["messages"][0]["content"][1]["image_url"]["url"] == small.as_str());
     let priced = charge(&tokens(VISION, 1_200, 0, 40));
-    let settled = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| end_of(e) == "settled" && e["entry"]["end"]["charge"] == priced));
+    let settled = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| charged(e) == Some(priced)));
     s.ok(
-        "`vision` runs the deployment's vision model (GLM-5.3 Flash by default), the image as it was sent, and is settled on its payer's ledger",
+        "`vision` runs the deployment's vision model (GLM-5.3 Flash by default), the image as it was sent, and is charged on its payer's ledger",
         r.status == 200 && shown && settled,
         json!({ "status": r.status, "model": call.as_ref().map(|c| c.model.clone()), "entries": aig().len() - before }),
     );
@@ -808,11 +931,11 @@ fn vision(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         r.status == 200 && sent == Some(shrunk.len()),
         json!({ "status": r.status, "sent": sent, "message": r.message() }),
     );
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let over = png_url(fragment_core::models::MODEL_BODY_MAX_BYTES + 1024);
     let r = api.signed(hand, "POST", route, Some(&look(&over)))?;
     s.ok(
-        "one past the route's cap is refused, 413, nothing reserved or sent",
+        "one past the route's cap is refused, 413, nothing charged or sent",
         r.status == 413 && s.ai.calls().len() == calls && aig().len() == before,
         json!({ "status": r.status, "message": r.message(), "calls": s.ai.calls().len() - calls }),
     );
@@ -847,12 +970,11 @@ fn transcription_call(api: &Api, keys: &Keys, fields: &[(&str, &str)], audio: &[
 
 /// The model route's decisions (docs/api.md, Models): an agent's `POST
 /// /api/models/v1/decide`, a job's `ai.decide` input with its media
-/// inline, on the Clef family, its owner paying: reserved at its model's
-/// context window and settled at the input tokens it counted, answered as
-/// the step is; refused before anything is reserved or sent when it is no
-/// decision the route takes; the model's refusal passed through and
-/// released; a malformed answer charged, and 502; never a person's. Its
-/// payer is a person of its own.
+/// inline, on the Clef family, its owner paying: charged after it at the
+/// input tokens it counted, answered as the step is; refused before
+/// anything is sent when it is no decision the route takes; the model's
+/// refusal passed through and charged nothing; a malformed answer charged,
+/// and 502; never a person's. Its payer is a person of its own.
 fn decisions_route(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     use base64::Engine;
     use fragment_core::decide::Model;
@@ -864,36 +986,36 @@ fn decisions_route(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
     let owner_id = owner_id.as_str();
     let aig = || entries(api, owner_id, "aig:");
-    let settled_at = |charge: i64, basis: &str| aig().iter().any(|e| end_of(e) == "settled" && e["entry"]["end"]["charge"] == charge && e["entry"]["end"]["basis"] == basis);
+    let settled_at = |charge: i64| aig().iter().any(|e| charged(e) == Some(charge));
     let snack = json!({ "snack": { "type": "predicate", "instructions": "Is it a snack?" } });
     let asked = json!({ "input": "kale chips", "questions": snack });
     s.ai.clear_script();
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     s.ai.set_usage(&[Used { prompt: 400, cached: 0, completion: 0 }]);
     let r = api.signed(hand, "POST", DECIDE_ROUTE, Some(&asked))?;
     let call = s.ai.calls().get(calls).cloned();
     let priced = charge(&tokens(Model::ClefFlash.id(), 400, 0, 0));
-    let settled = s.eventually(wait, || aig().len() == before + 1 && settled_at(priced, "usage"));
+    let settled = s.eventually(wait, || aig().len() == before + 1 && settled_at(priced));
     s.ok(
-        "an agent's decision runs clef-flash unless named, answers as the step does ({model, answers, usage}), and is settled on its owner's ledger at its input tokens",
+        "an agent's decision runs clef-flash unless named, answers as the step does ({model, answers, usage}), and is charged on its owner's ledger at its input tokens",
         r.status == 200 && r.body["model"] == Model::ClefFlash.id() && r.body["answers"]["snack"] == json!({ "type": "predicate", "probability": 0.5 })
             && call.as_ref().is_some_and(|c| c.model == Model::ClefFlash.id() && c.body["state"] == "kale chips" && c.authorization.is_none()) && settled,
         json!({ "status": r.status, "answer": r.body, "entries": aig() }),
     );
     let memo = format!("data:audio/wav;base64,{}", base64::engine::general_purpose::STANDARD.encode(spoken_wav("is this a snack", 1)));
     let heard = json!({ "model": "clef-omni", "input": "a voice memo", "questions": snack, "media": [{ "data": memo }] });
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     s.ai.set_usage(&[Used { prompt: 900, cached: 0, completion: 0 }]);
     let r = api.signed(hand, "POST", DECIDE_ROUTE, Some(&heard))?;
     let call = s.ai.calls().get(calls).cloned();
     let priced = charge(&tokens(Model::ClefOmni.id(), 900, 0, 0));
-    let settled = s.eventually(wait, || aig().len() == before + 1 && settled_at(priced, "usage"));
+    let settled = s.eventually(wait, || aig().len() == before + 1 && settled_at(priced));
     s.ok(
         "a voice memo inline is heard on clef-omni, at its price",
         r.status == 200 && r.body["model"] == Model::ClefOmni.id() && call.as_ref().is_some_and(|c| c.model == Model::ClefOmni.id() && c.body["audio"] == json!([memo])) && settled,
         json!({ "status": r.status, "answer": r.body }),
     );
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let mut refused = Vec::new();
     for (body, why) in [
         (json!({ "input": "a voice memo", "questions": snack, "media": [{ "data": memo }] }), "clef-omni alone"),
@@ -905,18 +1027,17 @@ fn decisions_route(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         refused.push((r.status == 400 && r.message().contains(why), r.status, r.message().to_string()));
     }
     s.ok(
-        "audio for clef-flash, a blob (an agent's media is inline), a model no Clef's, and the provider's own names are refused, 400, saying why, nothing reserved or sent",
+        "audio for clef-flash, a blob (an agent's media is inline), a model no Clef's, and the provider's own names are refused, 400, saying why, nothing charged or sent",
         refused.iter().all(|(ok, _, _)| *ok) && s.ai.calls().len() == calls && aig().len() == before,
         format!("{refused:?}"),
     );
     s.ai.fail_next(&[400]);
     let r = api.signed(hand, "POST", DECIDE_ROUTE, Some(&asked))?;
-    let released = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| end_of(e) == "released"));
-    s.ok("the model's refusal is passed through, and its reservation released", r.status == 400 && released, json!({ "status": r.status, "entries": aig() }));
+    s.ok("the model's refusal is passed through, and nothing is charged", r.status == 400 && aig().len() == before, json!({ "status": r.status, "entries": aig() }));
     s.ai.decide_next(&[json!({ "answers": {}, "usage": { "input_tokens": 300 } })]);
     let r = api.signed(hand, "POST", DECIDE_ROUTE, Some(&asked))?;
     let priced = charge(&tokens(Model::ClefFlash.id(), 300, 0, 0));
-    let settled = s.eventually(wait, || aig().len() == before + 2 && settled_at(priced, "usage"));
+    let settled = s.eventually(wait, || aig().len() == before + 1 && settled_at(priced));
     s.ok("an answer that does not answer what was asked is 502, and charged: it was paid for", r.status == 502 && r.message().contains("question set") && settled, json!({ "status": r.status, "message": r.message() }));
     let r = api.signed(&owner, "POST", DECIDE_ROUTE, Some(&asked))?;
     s.ok("a person does not call it (an agent does, for whom its owner pays)", r.status == 403, &r);
@@ -927,9 +1048,9 @@ fn decisions_route(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
 /// agent transcribes itself): OpenAI's multipart shape, `model` `whisper`,
 /// Workers AI's Whisper (the fake reads a memo's words from it), metered on
 /// the agent's owner's ledger at Workers AI's 46.63 neurons a minute of
-/// audio, reserved at its bytes and settled at what it heard; refused past
-/// its 10 MiB, nothing reserved or sent, and for a person. Its payer is a
-/// person of its own.
+/// audio, charged after it at what it heard; refused past its 10 MiB,
+/// nothing charged or sent, and for a person. Its payer is a person of its
+/// own.
 fn transcription(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let owner = api.person()?;
     let owner_id = api.identity(&owner)?;
@@ -940,7 +1061,7 @@ fn transcription(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let owner_id = owner_id.as_str();
     let aig = || entries(api, owner_id, "aig:");
     let memo = spoken_wav("hello from a voice memo", 3);
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let r = transcription_call(api, hand, &[("model", "whisper"), ("response_format", "json")], &memo)?;
     let call = s.ai.calls().get(calls).cloned();
     use base64::Engine;
@@ -948,9 +1069,9 @@ fn transcription(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         c.model == TRANSCRIBE_MODEL && c.body["audio"] == base64::engine::general_purpose::STANDARD.encode(&memo) && c.body["task"] == "transcribe" && c.body.get("language").is_none() && c.authorization.is_none()
     });
     let heard = charge(&Usage::Neurons { milli: 2_332 });
-    let settled = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| end_of(e) == "settled" && e["entry"]["end"]["charge"] == heard && e["entry"]["end"]["basis"] == "usage"));
+    let settled = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| charged(e) == Some(heard)));
     s.ok(
-        "a transcription is OpenAI's shape on Workers AI's Whisper (the audio as it came, no language: Whisper detects it), settled at the 3 s it heard",
+        "a transcription is OpenAI's shape on Workers AI's Whisper (the audio as it came, no language: Whisper detects it), charged at the 3 s it heard",
         r.status == 200 && r.body == json!({ "text": "hello from a voice memo" }) && sent && settled,
         json!({ "status": r.status, "answer": r.text, "model": call.as_ref().map(|c| c.model.clone()), "entries": aig() }),
     );
@@ -961,21 +1082,20 @@ fn transcription(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         r.status == 200 && r.text == "hello from a voice memo" && asked == Some(json!("de")) && r.headers.get("content-type").is_some_and(|t| t.to_str().unwrap_or("").starts_with("text/plain")),
         json!({ "status": r.status, "answer": r.text, "language": asked }),
     );
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let over = vec![0u8; fragment_core::transcribe::AUDIO_MAX_BYTES + 1];
     let r = transcription_call(api, hand, &[("model", "whisper")], &over)?;
-    s.ok("audio past 10 MiB is refused, 413, nothing reserved or sent", r.status == 413 && s.ai.calls().len() == calls && aig().len() == before, json!({ "status": r.status, "message": r.message() }));
+    s.ok("audio past 10 MiB is refused, 413, nothing charged or sent", r.status == 413 && s.ai.calls().len() == calls && aig().len() == before, json!({ "status": r.status, "message": r.message() }));
     let r = transcription_call(api, hand, &[("model", "whisper-1")], &memo)?;
     let r2 = api.signed(hand, "POST", TRANSCRIBE_ROUTE, Some(&json!({ "model": "whisper" })))?;
     s.ok(
-        "a model other than `whisper`, or a body that is no form, is refused, saying why, nothing reserved",
+        "a model other than `whisper`, or a body that is no form, is refused, saying why, nothing charged",
         r.status == 400 && r.message().contains("whisper") && r2.status == 400 && r2.message().contains("multipart") && s.ai.calls().len() == calls && aig().len() == before,
         json!({ "model": r.message(), "json": r2.message() }),
     );
     s.ai.fail_next(&[400]);
     let r = transcription_call(api, hand, &[("model", "whisper")], &memo)?;
-    let released = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| end_of(e) == "released"));
-    s.ok("Whisper's refusal is passed through, and its reservation released", r.status == 400 && released, json!({ "status": r.status, "entries": aig() }));
+    s.ok("Whisper's refusal is passed through, and nothing is charged", r.status == 400 && aig().len() == before, json!({ "status": r.status, "entries": aig() }));
     let r = transcription_call(api, &owner, &[("model", "whisper")], &memo)?;
     s.ok("a person does not call it (an agent does, for whom its owner pays)", r.status == 403, &r);
     Ok(())
@@ -1081,16 +1201,14 @@ pub fn transcribe_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let r = transcription_call(api, hand, &[("model", "whisper"), ("response_format", "json")], &memo)?;
     let shape = r.headers.get("x-fragment-answer-shape").and_then(|v| v.to_str().ok()).unwrap_or("(none)").to_string();
     println!("      (transcribed: {} {}; Whisper's answer: {shape})", r.status, r.text.chars().take(200).collect::<String>());
-    let usage = |e: &Value| e["entry"]["end"]["usage"].clone();
-    let heard = |e: &Value| end_of(e) == "settled" && e["entry"]["end"]["basis"] == "usage" && usage(e)["kind"] == "neurons" && usage(e)["milli"].as_u64().is_some_and(|m| (1_400..=1_700).contains(&m));
-    let ended = |e: &Value| end_of(e) != "held";
-    s.eventually(Duration::from_secs(60), || entries(api, &owner_id, "aig:").iter().any(ended));
+    let heard = |e: &Value| charged(e).is_some() && usage(e)["kind"] == "neurons" && usage(e)["milli"].as_u64().is_some_and(|m| (1_400..=1_700).contains(&m));
+    s.eventually(Duration::from_secs(60), || !entries(api, &owner_id, "aig:").is_empty());
     let aig = entries(api, &owner_id, "aig:");
     for e in &aig {
-        println!("      (its settle: {} basis {} usage {} charge {})", end_of(e), e["entry"]["end"]["basis"], usage(e), e["entry"]["end"]["charge"]);
+        println!("      (its charge: usage {} charge {:?})", usage(e), charged(e));
     }
     s.ok(
-        "the model route transcribes a memo on the deployment's Whisper, answered in OpenAI's shape and settled at the 2 s it heard, in neurons",
+        "the model route transcribes a memo on the deployment's Whisper, answered in OpenAI's shape and charged at the 2 s it heard, in neurons",
         r.status == 200 && r.body["text"].is_string() && aig.len() == 1 && aig.iter().all(heard),
         json!({ "status": r.status, "answer": r.text.chars().take(300).collect::<String>(), "shape": shape, "entries": aig }),
     );

@@ -1215,7 +1215,7 @@ async fn the_hermes_desktop() {
     // before any agent's call: the page, the control socket, the RFB stream
     assert!(c.exec_out(&["curl", "-sf", "http://127.0.0.1:6080/"]).contains("Take over"));
     let mut watching = Control::open(&base, "watcher", "juniper--k3x9").await.unwrap_or_else(|e| panic!("the control socket: {e}"));
-    assert_eq!(watching.next().await.unwrap(), json!({ "type": "control", "agent": "juniper--k3x9", "name": "juniper", "holder": null }), "a viewer hears whose screen it is, and who holds control");
+    assert_eq!(watching.next().await.unwrap(), json!({ "type": "control", "agent": "juniper--k3x9", "holder": null }), "a viewer hears whose screen it is, and who holds control");
     let t = Instant::now();
     let opened = Viewer::open(&base, "watcher", "juniper--k3x9", Duration::from_secs(60)).await;
     let mut watcher = opened.unwrap_or_else(|e| panic!("the screen's RFB stream: {e}\n{}\nlauncher: {}", c.logs(), c.exec_out(&["cat", "/data/hermes/profiles/juniper--k3x9/bot-desktop/launcher.log"])));
@@ -1394,9 +1394,9 @@ async fn two_agents_two_desktops() {
 
     // each agent's own screen, refusals included
     let mut jc = Control::open(&base, "watcher", "juniper--k3x9").await.unwrap();
-    assert_eq!(jc.next().await.unwrap(), json!({ "type": "control", "agent": "juniper--k3x9", "name": "juniper", "holder": null }));
+    assert_eq!(jc.next().await.unwrap(), json!({ "type": "control", "agent": "juniper--k3x9", "holder": null }));
     let mut fc = Control::open(&base, "watcher", "fred--k3x9").await.unwrap();
-    assert_eq!(fc.next().await.unwrap(), json!({ "type": "control", "agent": "fred--k3x9", "name": "fred", "holder": null }));
+    assert_eq!(fc.next().await.unwrap(), json!({ "type": "control", "agent": "fred--k3x9", "holder": null }));
     let nobody = fragment_bridge::net::connect_ws(&base, "/websockify?viewer=w&agent=nobody--k3x9", &[]).await.err().unwrap_or_default();
     assert!(nobody.contains("404"), "an agent not on this computer: {nobody}");
     let unnamed = fragment_bridge::net::connect_ws(&base, "/websockify?viewer=w&agent=../fred--k3x9", &[]).await.err().unwrap_or_default();
@@ -1713,7 +1713,10 @@ async fn a_tools_temp_files_are_its_work() {
 /// sets PATH anew, without the image's `/opt/hermes/bin`; the image puts
 /// `hermes` in `/usr/local/bin` (images/hermes/Dockerfile). Pinned that
 /// it is the image's that the terminal finds, so the day Hermes' login
-/// shell keeps the image's PATH this fails and that file goes.
+/// shell keeps the image's PATH this fails and that file goes. Invalid
+/// (Paul, 2026-10-20: an agent asked to check something hourly had no
+/// scheduler that lasted): `hermes cron` in its terminal is refused (exit
+/// 2), saying to add a schedule (`fragment schedule add`) instead.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn an_agent_runs_hermes_by_name() {
@@ -1747,6 +1750,13 @@ async fn an_agent_runs_hermes_by_name() {
     }
     let found = said(&terminal, "found");
     assert_eq!(found, "/usr/local/bin/hermes", "its terminal found Hermes' CLI at {found:?}: at /opt/hermes/bin/hermes, Hermes' login shell keeps the image's PATH now, and /usr/local/bin/hermes (images/hermes/Dockerfile) can go");
+    // Hermes' own scheduler is off (decision 38): in its terminal, `hermes
+    // cron` is refused, pointing at the platform's routines; `--version`
+    // passed through above
+    let cron = tool_said(&fake, &chat, &c, "run: hermes cron list 2>&1; echo cron-exit=$?").await;
+    eprintln!("by name: hermes cron said {cron:?}");
+    assert_eq!(said(&cron, "cron-exit"), "2", "the image's hermes refuses `hermes cron`: {cron:?}");
+    assert!(cron.contains("fragment schedule add --routine"), "and says to add a schedule instead: {cron:?}");
 }
 
 /// Goal (Paul on p5, 2026-10-09: "'other' type your answer for questions
@@ -2104,8 +2114,9 @@ impl Expiry {
 /// chats"), with real Hermes: a card nobody answers is closed `expired` once
 /// its `expiresAt` passes, its turn ends once, as Hermes ends it (its wait
 /// on the card times out with it), and the chat's next message is claimed
-/// and answered, not met by the card asked again; and a message said while
-/// a card is open waits behind its turn, then is answered the same way.
+/// and answered, not met by the card asked again; and its owner's message
+/// said while a card that takes words is open answers it, its turn going on
+/// with the words (Paul on production, 2026-10-22).
 ///
 /// Method: the image with a 20 s card (`HERMES_BOOT_CARD_TIMEOUT_S`: Hermes'
 /// clarify waits as long as the bridge's card lives), the scripted model
@@ -2179,16 +2190,21 @@ async fn an_expired_card_ends_its_turn() {
     });
     assert!(!let_go, "the card holds the computer awake");
 
-    // 2. a message while a card is open waits behind it, then is answered
+    // 2. its owner's message while the card (a clarify's, which takes words)
+    // is open answers it (Paul on production, 2026-10-22: his typed answer
+    // stayed queued, the card open): the card closes with their words,
+    // Hermes' clarify takes them (as "Other" with those words), its turn
+    // replies once with them, and the message starts no turn of its own
     let risky2 = x.say(&format!("{CARD_ASKED} | none"));
     within(fake, chat, &c, 120_000, "the second card", |w| !x.cards(w, &risky2).is_empty()).await;
-    let meanwhile = x.say("hello while you wait");
-    within(fake, chat, &c, CARD_S * 1000 + 90_000, "the second card expired, and its turn's end", |w| x.closed(w, &risky2).iter().any(|p| p["outcome"] == "expired") && !x.ends(w, &risky2).is_empty()).await;
-    within(fake, chat, &c, 120_000, "the message said while it waited answered", |w| x.reply(w, &meanwhile).is_some() && !x.ends(w, &meanwhile).is_empty()).await;
+    let meanwhile = x.say("a terracotta one");
+    within(fake, chat, &c, 120_000, "the card answered by the message, and its turn's end", |w| x.closed(w, &risky2).iter().any(|p| p["outcome"] == "answered") && !x.ends(w, &risky2).is_empty()).await;
     fake.with(|w| {
-        assert_eq!((x.ends(w, &risky2).len(), x.closed(w, &risky2).len()), (1, 1), "each once");
-        assert!(x.cards(w, &meanwhile).is_empty(), "it asks nothing again: {:?}", x.cards(w, &meanwhile));
-        assert!(x.reply(w, &meanwhile).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("hello while you wait")), "{:?}", x.reply(w, &meanwhile));
+        let closed = x.closed(w, &risky2);
+        assert_eq!((closed.len(), closed[0]["option"].as_str(), closed[0]["text"].as_str(), closed[0]["by"].as_str()), (1, Some("other"), Some("a terracotta one"), Some("npub1paul")), "closed once, with their words: {closed:?}");
+        assert_eq!(x.ends(w, &risky2).len(), 1, "its turn ends once");
+        assert!(x.reply(w, &risky2).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("a terracotta one")), "Hermes' clarify had their words: {:?}", x.reply(w, &risky2));
+        assert!(x.ends(w, &meanwhile).is_empty() && x.reply(w, &meanwhile).is_none(), "the message started no turn of its own");
     });
 }
 
@@ -2242,6 +2258,8 @@ async fn nothing_technical_asks_its_owner() {
     let calls = x.model.calls.lock().unwrap();
     assert!(!calls.iter().any(|m| m.body["messages"].to_string().contains("APPROVE, DENY, or ESCALATE")), "no guardian");
     let told = calls.iter().filter(|m| m.path.ends_with("/chat/completions")).filter(|m| m.body["messages"][0]["role"] == "system").map(|m| m.body["messages"][0]["content"].to_string()).find(|s| s.contains("Never ask them to approve a command, a file, a path or code"));
+    assert!(told.as_ref().is_some_and(|s| s.contains("already on your computer") && s.contains("into the file dialog on your desktop with computer_use")), "and that a file attached in the chat is on its computer, and how to upload it (hermes::FILES)");
+    assert!(told.as_ref().is_some_and(|s| s.contains("put MEDIA: and its absolute path on a line of its own")), "and how it attaches a file in the chat (hermes::SENDING)");
     assert!(told.is_some_and(|s| s.contains("with the clarify tool and its choices")), "every turn's system prompt says how to ask (the image's platform_hints.relay)");
 }
 
@@ -2931,6 +2949,32 @@ async fn an_agent_runs_on_its_owners_model() {
     asked(&fake, &chat, &c, "hello on the route", replied).await;
     let calls = calls_of(before);
     assert!(!calls.is_empty() && calls.iter().all(|c| c.path == "/v1/chat/completions" && c.model == CHEAP_ID), "its tier, through the route: {calls:?}");
+
+    // how hard it thinks (Paul, 2026-10-22): `high` with no `reasoning` in
+    // its agent.json, each of its turn's calls saying so; its owner's pick,
+    // `low`, from its next turn, nothing restarted
+    // (the turn's own calls: with its tools, its last user message its
+    // message; Hermes' title for the chat, an auxiliary call of its own
+    // with no tools, asks for no reasoning, `none`, which the route takes
+    // as `low`)
+    let efforts = |calls: &[support::model::Call], said: &str| -> Vec<serde_json::Value> {
+        let turns = calls.iter().filter(|c| c.body.get("tools").is_some() && c.body["messages"].as_array().and_then(|m| m.iter().rev().find(|m| m["role"] == "user")).is_some_and(|m| m["content"].to_string().contains(said)));
+        turns.map(|c| c.body["reasoning_effort"].clone()).collect()
+    };
+    let high = efforts(&calls, "hello on the route");
+    assert!(!high.is_empty() && high.iter().all(|e| e == "high"), "it thinks hard by default: {high:?}");
+    fake.with(|w| {
+        w.fragments.get_mut("juniper--k3x9").unwrap().files.insert("agent.json".into(), bytes::Bytes::from_static(br#"{"tier":"cheap","reasoning":"low"}"#));
+    });
+    let t = Instant::now();
+    while !config().contains("\n  reasoning_effort: \"low\"\n") {
+        assert!(t.elapsed() < Duration::from_secs(30), "the profile never took its reasoning; its config:\n{}", config());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let before = model.calls.lock().unwrap().len();
+    asked(&fake, &chat, &c, "hello thinking less", replied).await;
+    let low = efforts(&calls_of(before), "hello thinking less");
+    assert!(!low.is_empty() && low.iter().all(|e| e == "low"), "its owner's pick, at its next turn: {low:?}");
 
     // its owner connects the provider and picks one of its models
     let placeholder = format!("fck_openrouter_{}", "0123456789abcdef0123456789abcdef");

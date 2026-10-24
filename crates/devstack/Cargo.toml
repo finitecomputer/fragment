@@ -16,6 +16,9 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 sha2 = "0.10"
 flate2 = "1"
 tar = { version = "0.4", default-features = false }
-# termination signals (src/signals.rs): sigaction and a self-pipe, as the
-# standard library has neither; already in the lock beneath reqwest
+# termination signals (src/signals.rs): signal-hook's handler and the
+# thread that hears it; libc for what it has no say in (a disposition read,
+# Ctrl-C ignored for the processes started; src/node.rs's ETXTBSY), already
+# in the lock beneath reqwest
+signal-hook = "0.4"
 libc = "0.2"

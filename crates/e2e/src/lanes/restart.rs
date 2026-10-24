@@ -1,6 +1,10 @@
 //! State survives a graceful restart and a crash of the node (a sleeping
 //! job, sealed secrets and keys, sessions, and a channel's sequence
-//! included).
+//! included). The graceful restart comes back with one operator key's row
+//! more in its configuration, and the crash's without it again, as an
+//! operator adds a row and then rolls it back: each time, a ledger made
+//! before charges with the book its release configured, no version raised
+//! (#451; it keeps none of its own: decision 62).
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,9 +19,10 @@ use serde_json::{json, Value};
 use super::ai_tools;
 use super::app::ship;
 use super::jobs;
+use super::posts;
 use super::signin::{site_cookie, who};
 use crate::api::Api;
-use crate::Suite;
+use crate::{Suite, ADDED_KEY};
 
 const TODO_APP: &[u8] = include_bytes!("../../fixtures/todo.mjs");
 const TODO_JSON: &[u8] = include_bytes!("../../fixtures/todo.json");
@@ -28,6 +33,21 @@ const MEMBER_EMAIL: &str = "restart-member@e2e.test";
 
 fn count(api: &Api, keys: &Keys, name: &str) -> i64 {
     api.op(keys, name, "count", "q", json!({})).ok().and_then(|r| r.body["result"]["n"].as_i64()).unwrap_or(-1)
+}
+
+/// The price book `owner`'s ledger charges with (the ledger's `book`
+/// lever: its release's), and its status's `priceBook`.
+fn book_of(api: &Api, owner: &Keys) -> Result<(Value, Value)> {
+    let status = api.signed(owner, "GET", "/api/ledger", None)?;
+    let identity = api.identity(owner)?;
+    let held = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": identity, "op": "book" })))?;
+    anyhow::ensure!(status.status == 200 && held.status == 200, "the ledger's book: {status} {held}");
+    Ok((held.body["book"].clone(), status.body["priceBook"].clone()))
+}
+
+/// The book's price for `ADDED_KEY`'s calls, when it has one.
+fn added_key_price(book: &Value) -> Option<Value> {
+    book["keys"].as_array()?.iter().find(|k| k["key"] == ADDED_KEY.0).cloned()
 }
 
 pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
@@ -42,7 +62,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     api.approve(&member_session, &member)?;
     let name = s.named(&api, &owner, "restart")?;
     let c = s.create(&api, &owner, &name)?;
-    api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", member.pubkey_hex()), Some(&json!({ "role": "editor" })))?;
+    api.share(&name, member.pubkey_hex(), "editor")?;
     let live = ship(s, &c, TODO_APP, TODO_JSON);
     // a site session on the fragment, and the fragment's VAPID key (sealed like a secret)
     let member_site = site_cookie(&api, &member_session, &name)?;
@@ -65,6 +85,10 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.eventually(Duration::from_secs(30), || api.op(&owner, &paid, "notes", "q", json!({})).is_ok_and(|r| r.status == 200));
     let r = api.op(&owner, &paid, "summarize", "before", json!({ "text": "before the restart" }))?;
     jobs::settle(&api, &owner, &paid, jobs::started(&r), &["succeeded"], Duration::from_secs(40));
+    // a scheduled record (docs/api.md, "Scheduled records"), due next new year
+    let scheduled = api.signed(&owner, "POST", &format!("/api/f/{paid}/schedules"), Some(&json!({ "cron": "0 0 1 1 *", "channel": "talk", "record": { "text": "kept" } })))?;
+    anyhow::ensure!(scheduled.status == 200, "a scheduled record: {scheduled}");
+    let paid_npub = api.status(&owner, &paid)?.body["npub"].as_str().unwrap_or("").to_string();
     // A held run bought its first decision, but the second was refused.
     // Restart and replay must reuse the first decision's durable receipt.
     let decider = s.named(&api, &owner, "restart-decide")?;
@@ -86,7 +110,24 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let cap = json!({ "id": "restart-c", "micros": 7_000_000 });
     let r2 = api.signed(&owner, "PUT", &format!("/api/f/{paid}/cap"), Some(&cap))?;
     anyhow::ensure!(r.status == 200 && r2.status == 200, "ledger setup: {r} {r2}");
+    // the step's charge goes with the fragment's meters, just after it
+    let step_rows = || api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": owner_id, "op": "entries", "prefix": format!("step:{paid}@") }))).map(|r| r.body["entries"].as_array().map_or(0, Vec::len)).unwrap_or(0);
+    s.eventually(Duration::from_secs(40), || step_rows() == 1);
     let balance = api.signed(&owner, "GET", "/api/ledger", None)?.body["balanceMicros"].clone();
+    let (book_before, version) = book_of(&api, &owner)?;
+    anyhow::ensure!(book_before["models"].is_array() && added_key_price(&book_before).is_none(), "the ledger's book before the restart: {book_before}");
+    // what a fragment's members are doing (listed.rs): the fragment's own
+    // copy of its agent's newest turn, and the owner's row that carries it
+    let busy = s.named(&api, &owner, "restart-listed")?;
+    let bc = s.create(&api, &owner, &busy)?;
+    let (hand, hand_id) = super::delegation::agent_of(&api, &owner)?;
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{busy}/members/{hand_id}"), Some(&json!({ "role": "editor" })))?;
+    s.commit(&bc, &[("fragment.json", Some(posts::LISTED_JSON.as_bytes()))]);
+    s.deploy(&bc);
+    let asked = json!({ "id": "r1", "body": { "kind": "turn.asked", "turn": "t1", "asks": owner_id } });
+    let r2 = api.signed(&hand, "POST", &format!("/api/f/{busy}/channels/work"), Some(&asked))?;
+    let listed_before = s.eventually(Duration::from_secs(20), || !posts::listed_of(&api, &owner, &busy).is_empty()).then(|| posts::listed_of(&api, &owner, &busy));
+    anyhow::ensure!(r.status == 200 && r2.status == 200 && listed_before.as_ref().is_some_and(|l| l[0].2 == "turn.asked"), "listed setup: {r} {r2} {listed_before:?}");
     // a paused operation: its pause is a row, not a cached list
     let r = api.signed(&owner, "POST", &format!("/api/f/{paid}/pause"), Some(&json!({ "op": "summarize", "paused": true })))?;
     anyhow::ensure!(r.status == 200, "pause setup: {r}");
@@ -117,6 +158,10 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let invitee = format!("restart-invitee-{}@e2e.test", &Keys::generate().pubkey_hex()[..8]);
     let r = api.signed(&owner, "POST", &format!("/api/f/{name}/invites"), Some(&json!({ "email": invitee, "role": "viewer" })))?;
     anyhow::ensure!(r.status == 200 && !r.body["invited"].is_null(), "invite setup: {r}");
+    // and one to someone who signs in already, waiting for their yes (decision 63)
+    let asked_person = api.person()?;
+    let r = api.signed(&owner, "POST", &format!("/api/f/{name}/invites"), Some(&json!({ "email": Api::email_of(&asked_person), "role": "viewer" })))?;
+    anyhow::ensure!(r.status == 200 && !r.body["invited"].is_null(), "an invite waiting for a yes, setup: {r}");
     let access_row = |api: &Api| -> Value {
         let r = api.signed(&owner, "GET", "/api/access", None).ok();
         r.and_then(|r| r.body["fragments"].as_array().and_then(|a| a.iter().find(|f| f["name"] == name.as_str()).cloned())).unwrap_or_default()
@@ -145,9 +190,52 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let tools_held = ai_tools::look_up(&api, &owner, &tooled, "before", json!({ "question": "What is a shard?" }), Duration::from_secs(40))?;
     anyhow::ensure!(tools_held["status"] == "held", "tool loop setup: {tools_held}");
     let tool_calls_before = s.ai.calls().len();
+    // a CLI's code asked for and an own key's sign-in begun, each left
+    // under way across the restart: their state is the registry's and the
+    // computer's rows, and the browser's cookie
+    let pending_key = Keys::generate();
+    let pending_code = api.cli_begin(&pending_key)?.body["code"].as_str().unwrap_or("").to_string();
+    let connector = api.person()?;
+    let connector_session = api.sign_in(&Api::email_of(&connector))?;
+    let made = api.signed(&connector, "POST", "/api/computers", Some(&json!({})))?;
+    let asked = super::credentials::shell_authorize(&api, &connector_session)?;
+    let bound = super::credentials::own_key_cookie(&asked);
+    let back = super::credentials::sent_back(&api, asked.body["url"].as_str().unwrap_or_default())?;
+    anyhow::ensure!(made.status == 200 && asked.status == 200 && !pending_code.is_empty() && !bound.is_empty() && back.contains("code="), "pending sign-ins setup: {made} {asked} {back}");
 
     s.stop()?;
-    let api = s.start(false)?;
+    let api = s.start_with_a_key_more()?;
+    let (book, shown) = book_of(&api, &owner)?;
+    s.ok(
+        "after a restart whose configuration adds an operator key's row, its version as it was, a ledger made before charges with that book: the key at its row's price",
+        added_key_price(&book) == Some(json!({ "key": ADDED_KEY.0, "micros": 20_000, "per": 1 })) && shown == version,
+        format!("{} (version {shown}, before {version})", book["keys"]),
+    );
+    let kept = api.signed(&owner, "GET", &format!("/api/f/{paid}/schedules"), None)?;
+    let kept_talk = |api: &Api| jobs::records(api, &owner, &paid, "talk").into_iter().filter(|r| r["body"] == json!({ "text": "kept" })).collect::<Vec<_>>();
+    let lever = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": paid, "op": "cron-now" })))?;
+    let fired = s.eventually(Duration::from_secs(30), || kept_talk(&api).len() == 1);
+    s.ok(
+        "after a restart a fragment's scheduled record is kept as it was, and fires, as the fragment",
+        kept.body["schedules"] == json!([scheduled.body["schedule"]]) && lever.body["records"] == 1 && fired && kept_talk(&api)[0]["principal"] == paid_npub.as_str(),
+        json!({ "kept": kept.body, "lever": lever.body, "talk": kept_talk(&api) }),
+    );
+    let typed = api.type_code(&member_session, &pending_code)?;
+    let pressed = api.add_code(&member_session, &pending_code)?;
+    let theirs = api.signed(&pending_key, "GET", "/api/identities/me", None)?;
+    s.ok(
+        "after a restart a CLI's code asked for before it is still good: typed, it adds its key",
+        typed.status == 200 && pressed.status == 200 && theirs.status == 200 && theirs.body["email"] == MEMBER_EMAIL,
+        json!({ "typed": typed.status, "added": pressed.status, "me": theirs.body }),
+    );
+    let page = super::credentials::came_back(&api, &back, &[&bound, &format!("fragment_session={connector_session}")])?;
+    let state = api.signed(&connector, "GET", "/api/connections", None)?;
+    let connected = state.body["providers"].as_array().is_some_and(|l| l.iter().any(|p| p["provider"] == crate::SWAP_ROUTER && p["state"] == "set"));
+    s.ok(
+        "after a restart an own key's sign-in begun before it finishes, in the browser that began it, signed in: connected",
+        page.status == 200 && page.text.contains("is connected") && connected,
+        json!({ "page": page.to_string(), "connections": state.body }),
+    );
     let face_row = super::faces::row(&api, &face_owner, &faced);
     let face_got = super::faces::fetched(&api, &face_path)?;
     let face_sheet = super::signin::with_session(&api, "GET", &format!("/share/{faced}"), &face_session)?;
@@ -161,6 +249,27 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         "after a restart the access view answers as it did: who is in, by email, and the invite waiting",
         access_after == access_before,
         format!("{access_before} → {access_after}"),
+    );
+    let waiting = api.signed(&asked_person, "GET", "/api/invites", None)?;
+    let yes = api.signed(&asked_person, "POST", &format!("/api/invites/{name}/accept"), Some(&json!({})))?;
+    let theirs = api.status(&asked_person, &name)?;
+    s.ok(
+        "after a restart an invite waiting for its person's yes still waits for them, and their yes makes them a member",
+        waiting.body["invites"].as_array().is_some_and(|l| l.iter().any(|i| i["fragment"] == name.as_str() && i["role"] == "viewer"))
+            && yes.status == 200
+            && theirs.body["role"] == "viewer",
+        format!("{waiting} {yes} {theirs}"),
+    );
+    // the row a member added now gets is made from the fragment's own copy:
+    // only a copy that survived the restart carries the agent's turn
+    let listed_after = posts::listed_of(&api, &owner, &busy);
+    let newcomer = api.person()?;
+    let r = api.share(&busy, &api.identity(&newcomer)?, "viewer")?;
+    let theirs = s.eventually(Duration::from_secs(20), || posts::listed_of(&api, &newcomer, &busy) == listed_after);
+    s.ok(
+        "after a restart a list keeps what an agent was doing, and the fragment its own copy: a member added after it is sent the agent's turn",
+        listed_before.as_ref() == Some(&listed_after) && r.status == 200 && theirs,
+        json!({ "before": listed_before, "after": listed_after, "newcomer": posts::listed_of(&api, &newcomer, &busy) }),
     );
     s.ai.say_next(&["A small piece of something larger."]);
     api.signed(&owner, "POST", &format!("/api/f/{tooled}/replay"), Some(&json!({ "run": tools_held["id"] })))?;
@@ -193,11 +302,11 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.ok("and a revoked key stays revoked", r.status == 401, &r);
     let r = api.signed(&owner, "GET", "/api/ledger", None)?;
     let steps = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": owner_id, "op": "entries", "prefix": format!("step:{paid}@") })))?;
-    let settled = steps.body["entries"].as_array().is_some_and(|e| e.len() == 1 && e[0]["entry"]["end"]["end"] == "settled");
+    let settled = steps.body["entries"].as_array().is_some_and(|e| e.len() == 1 && super::ledger::charged(&e[0]).is_some());
     // the fragments' meters land when their batches do: requests and a few
     // dynamic workers' days (3000 µ$ each) may have charged the owner since
     let kept = r.body["balanceMicros"].as_i64().zip(balance.as_i64()).is_some_and(|(now, then)| now <= then && then - now < 50_000 && then < 51_000_000 && then > 50_000_000);
-    s.ok("after a restart the ledger is what it was: the step's charge settled, the balance less it", r.status == 200 && settled && kept, json!({ "ledger": r.body, "then": balance, "steps": steps.body }));
+    s.ok("after a restart the ledger is what it was: the step's charge, the balance less it", r.status == 200 && settled && kept, json!({ "ledger": r.body, "then": balance, "steps": steps.body }));
     let capped = r.body["fragments"].as_array().is_some_and(|f| f.iter().any(|f| f["fragment"] == paid.as_str() && f["capMicros"] == 7_000_000));
     let again = api.signed(&s.operator, "POST", &format!("/api/ledger/{owner_id}/grant"), Some(&grant))?;
     let other = api.signed(&s.operator, "POST", &format!("/api/ledger/{owner_id}/grant"), Some(&json!({ "id": "restart-g", "micros": 2_000_000, "by": op_id, "why": "" })))?;
@@ -267,7 +376,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     // fragment's alarm finishes it after
     let ended = s.named(&api, &owner, "restart-ended")?;
     s.create(&api, &owner, &ended)?;
-    api.signed(&owner, "PUT", &format!("/api/f/{ended}/members/{}", member.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;
+    api.share(&ended, member.pubkey_hex(), "viewer")?;
     let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": ended, "op": "members", "fill": limits::MEMBERS_MAX })))?;
     anyhow::ensure!(r.status == 200, "members setup: {r}");
     let r = api.signed(&owner, "DELETE", &format!("/api/f/{ended}"), None)?;
@@ -280,6 +389,12 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let calls_before_crash = s.ai.calls().iter().filter(|c| c.model == fragment_core::decide::Model::ClefFlash.id()).count();
     s.crash()?;
     let api = s.start(false)?;
+    let (book, shown) = book_of(&api, &owner)?;
+    s.ok(
+        "after a crash back on the configuration from before the key's row (a rollback), the ledger charges with that book again",
+        book == book_before && shown == version,
+        format!("{} (before: {})", book["keys"], book_before["keys"]),
+    );
     api.signed(&owner, "POST", &format!("/api/f/{decider}/replay"), Some(&json!({ "run": bad_decision["id"] })))?;
     let bad_again = jobs::settle(&api, &owner, &decider, bad_decision["id"].as_i64().unwrap_or(0), &["held"], Duration::from_secs(40));
     s.ok("after a crash a malformed paid decision remains rejected without another vendor call", bad_again["error"] == bad_decision["error"] && bad_again["status"] == "held" && s.ai.calls().iter().filter(|c| c.model == fragment_core::decide::Model::ClefFlash.id()).count() == calls_before_crash, &bad_again);

@@ -2,9 +2,13 @@
 
 The blessed agent template (docs/cloudflare-v1.md, decisions 14–16 and
 40). An agent is a fragment: its repo holds its job (`SOUL.md`), its
-settings (`agent.json`: `{"tier", "model"?}`, `model` a model of a
-provider its owner connected, `{provider, id}`: docs/computers.md, "An
-agent's own model"), its picture (`avatar.png`: a PNG, JPEG, WebP or GIF
+settings (`agent.json`: `{"tier", "model"?, "reasoning"?}`, `model` a
+model of a provider its owner connected, `{provider, id}`: docs/computers.md,
+"An agent's own model"; its page shows the model it runs by its id, as its
+owner's shell hands over their computer's view of it; `reasoning` how hard
+it thinks, `"low"` or `"high"`, high when absent, which its owner picks
+beside its model in Settings: docs/computers.md, "Our images"), its picture
+(`avatar.png`: a PNG, JPEG, WebP or GIF
 of at most 256 KiB), and what its runtime keeps
 (`memories/`, `skills/`); the platform serves this template's manifest and
 page from its release. A fragment on it names it in its own
@@ -20,5 +24,8 @@ is chosen by its identity (`site/agent-color.js`, which the chat
 template's page and the shell link to), never stored.
 
 The `tasks` channel is what its computer follows besides its chats
-(docs/chat-records.md): routines, and the platform's `joined` record when
-the agent is added to a fragment.
+(docs/chat-records.md): its routines, and the platform's `joined`
+record when the agent is added to a fragment. A routine is a scheduled
+record on this fragment's `tasks` (docs/api.md, "Scheduled records";
+`fragment schedule add --routine`), which the agent, an editor of its own
+fragment, adds to itself; its page lists them (`__schedules`, read only).

@@ -163,6 +163,15 @@ const helloWaiters = [];
 const closedHandlers = new Set();
 // Close codes after which reconnecting cannot help (live.rs, fragment.rs).
 const FINAL_CLOSE_CODES = [4003, 4004];
+// How long a socket may take to open before it is closed, and so dialled
+// again as any closed socket is: an upgrade never answered (a dropped
+// connection, a phone's network changing under it) would otherwise leave
+// the page waiting for its hello for good, as only a close dials again. A
+// healthy open takes tens of milliseconds at the node (the e2e's 277: a
+// median of 17 ms, the slowest 297 ms), and a phone's slow network adds its
+// round trips: ten seconds is far past both. Each try waits its backoff
+// longer, so a network slower still gets there on a later try.
+const OPEN_WAIT_MS = 10_000;
 // Under the fragment's 10 presence changes a second (limits::PRESENCE_PER_S).
 const PRESENCE_EVERY_MS = 150;
 const subs = new Map(); // channel -> { after, last, handlers }
@@ -198,7 +207,9 @@ function connect() {
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(url);
   socket = ws;
+  const opening = setTimeout(() => ws.close(), OPEN_WAIT_MS + backoff);
   ws.onopen = () => {
+    clearTimeout(opening);
     backoff = 1000;
     for (const [channel, s] of subs) send(subscribeFrame(channel, s));
     if (presenceData !== null) sendPresence();
@@ -249,6 +260,7 @@ function connect() {
     }
   };
   ws.onclose = (event) => {
+    clearTimeout(opening);
     socket = null;
     // runs the socket will not answer now go over HTTP
     const unanswered = [...asked.values()];

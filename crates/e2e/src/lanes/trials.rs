@@ -1,9 +1,10 @@
 //! Trials (docs/billing.md, "Trials"; decision 56), on the Stripe fake: an
 //! operator makes a code; a person who never paid redeems it through a
-//! Checkout that takes a card first, with Stripe's trial of its days; its
-//! places are held by open Checkouts and subscriptions; one trial per
-//! person. Operators list, raise, edit and end codes, compare-and-set.
-//! Valid, invalid, replay.
+//! Checkout that asks no card, with Stripe's trial of its days; its end
+//! with no card cancels it, and they pay again with one; its places are
+//! held by open Checkouts and subscriptions; one trial per person.
+//! Operators list, raise, edit and end codes, compare-and-set. Valid,
+//! invalid, replay.
 
 use std::time::Duration;
 
@@ -64,13 +65,13 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
     let asked = s.stripe.requests().into_iter().rev().find(|a| a.path == "/v1/checkout/sessions").context("a Checkout")?;
     let f = |k: &str| asked.form.get(k).cloned().unwrap_or_default();
     s.ok(
-        "a code as typed (any case, spaces) opens a Checkout: Stripe's 30-day trial of one always-on seat, a card first, no discount on top, back to the welcome paid or canceled",
+        "a code as typed (any case, spaces) opens a Checkout: Stripe's 30-day trial of one always-on seat, no card asked (its end with none cancels it), no discount on top, back to the welcome paid or canceled",
         r.status == 200
             && f("success_url").ends_with("/welcome?checkout={CHECKOUT_SESSION_ID}")
             && f("cancel_url").ends_with("/welcome?checkout=canceled")
             && f("subscription_data[trial_period_days]") == "30"
             && f("subscription_data[trial_settings][end_behavior][missing_payment_method]") == "cancel"
-            && f("payment_method_collection") == "always"
+            && f("payment_method_collection") == "if_required"
             && f("line_items[0][quantity]") == "1"
             && !asked.form.contains_key("allow_promotion_codes")
             && f("metadata[fragment_kind]") == "seat_always_on"
@@ -83,7 +84,7 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
     let sub = s.stripe.requests().iter().rev().find_map(|a| a.path.strip_prefix("/v1/subscriptions/").map(str::to_string)).context("the trial's subscription")?;
     let items = s.stripe.subscription(&sub).map(|x| x.items.iter().map(|(_, k, q)| (k.clone(), *q)).collect::<Vec<_>>()).unwrap_or_default();
     s.ok(
-        "paid with a card through the fake's Checkout, they hold a good $200 always-on seat in its 30-day trial, which says when it ends, on the always-on price alone",
+        "through the fake's Checkout, with no card, they hold a good $200 always-on seat in its 30-day trial, which says when it ends, on the always-on price alone",
         trialing
             && mine["seat"]["kind"] == "seat_always_on"
             && mine["seat"]["trialEnds"].as_i64().is_some_and(|t| t > crate::api::now_s() + 29 * 86_400 && t <= crate::api::now_s() + 30 * 86_400)
@@ -121,15 +122,34 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
     // ---- once a person; for those who never paid
     let mine_again = api.signed(&kim, "POST", "/api/billing/checkout", Some(&json!({ "trialCode": code })))?;
     s.ok("someone with a seat redeems none (409)", mine_again.status == 409, &mine_again);
+    // its end with no card added: Stripe cancels it (`missing_payment_method: cancel`)
     s.stripe.set_status(&sub, "canceled").map_err(anyhow::Error::msg)?;
     let lapsed = s.eventually(PUSHED, || seat(api, &kim)["seat"]["good"] == false);
     let twice = api.signed(&kim, "POST", "/api/billing/checkout", Some(&json!({ "trialCode": code })))?;
     let hundred = api.signed(&kim, "POST", "/api/billing/checkout", Some(&json!({ "kind": "seat" })))?;
     let paid = api.signed(&kim, "POST", "/api/billing/checkout", Some(&json!({})))?;
     s.ok(
-        "a trial ended unpaid lapses its seat; a trial is once a person (409), but they may buy the seat sold (not a $100 one: 400)",
+        "a trial ended with no card lapses its seat; a trial is once a person (409), but they may buy the seat sold (not a $100 one: 400)",
         lapsed && twice.status == 409 && hundred.status == 400 && hundred.message().contains("not sold") && paid.status == 200,
         json!([seat(api, &kim), twice.status, twice.message(), hundred.status, paid.status]),
+    );
+    // ---- they pay again (Billing's Pay again), a card now, and keep the org they trialed in
+    let org = mine["seat"]["org"]["id"].clone();
+    let asked = s.stripe.requests().into_iter().rev().find(|a| a.path == "/v1/checkout/sessions").context("Pay again's Checkout")?;
+    let f = |k: &str| asked.form.get(k).cloned().unwrap_or_default();
+    let own = s.stripe.subscription(&sub).map(|x| x.customer).context("the trial's customer")?;
+    s.stripe.complete(paid.body["session"].as_str().unwrap_or("")).map_err(anyhow::Error::msg)?;
+    let again = s.eventually(PUSHED, || seat(api, &kim)["seat"]["good"] == true);
+    let back = seat(api, &kim);
+    s.ok(
+        "paying again takes a card, no trial, on the trial's own customer, and its seat is good again in the org they trialed in, its trial over",
+        f("payment_method_collection") == "always"
+            && !asked.form.contains_key("subscription_data[trial_period_days]")
+            && f("customer") == own
+            && again
+            && back["seat"]["org"]["id"] == org
+            && back["seat"]["trialEnds"].is_null(),
+        json!({ "seat": back, "form": format!("{:?}", asked.form) }),
     );
 
     // ---- codes that refuse
@@ -171,6 +191,82 @@ pub fn trials(s: &mut Suite, api: &Api) -> Result<()> {
         "an operator lists the codes, newest first",
         list.status == 200 && list.body["codes"][0]["id"] == typed_id.as_str() && list.body["codes"].as_array().is_some_and(|c| c.iter().any(|c| c["id"] == id.as_str())),
         &list,
+    );
+
+    // ---- a Checkout Stripe refuses gives back the place it held at once
+    // (a code of one place): refused for one person, another's Checkout
+    // takes the place; then that one's open Checkout keeps it, through a
+    // retry of theirs Stripe refuses too, and a third finds none
+    let r = admin("POST", "/trials", Some(&json!({ "name": "One place", "kind": "seat_always_on", "days": 7, "capacity": 1 })))?;
+    let one = r.body["code"].as_str().unwrap_or("").to_string();
+    let ora = api.person()?;
+    let pip = api.person()?;
+    let quo = api.person()?;
+    let try_code = |who: &fragment_nip98::Keys| api.signed(who, "POST", "/api/billing/checkout", Some(&json!({ "trialCode": one })));
+    s.stripe.fail("POST", "/v1/checkout/sessions", true);
+    let refused = try_code(&ora)?;
+    s.stripe.fail("POST", "/v1/checkout/sessions", false);
+    let taken = try_code(&pip)?;
+    s.stripe.fail("POST", "/v1/checkout/sessions", true);
+    let pip_again = try_code(&pip)?;
+    s.stripe.fail("POST", "/v1/checkout/sessions", false);
+    let full = try_code(&quo)?;
+    let mine = try_code(&ora)?;
+    let view = admin("GET", &format!("/trials/{}", r.body["id"].as_str().unwrap_or("")), None)?;
+    s.ok(
+        "a trial's Checkout Stripe refuses gives its place back at once: another person's Checkout with that code takes it; theirs, made, keeps it through a retry Stripe refuses, so others find none (409), the first person too",
+        r.status == 200
+            && refused.status >= 500
+            && taken.status == 200
+            && pip_again.status >= 500
+            && full.status == 409
+            && full.message().contains("places")
+            && mine.status == 409
+            && view.body["open"] == 1,
+        json!({ "refused": refused.status, "taken": taken.status, "again": pip_again.status, "full": [full.status, full.message()], "mine": mine.status, "view": view.body }),
+    );
+
+    // ---- overlapping Checkouts of one person's place (#484's review),
+    // Stripe slow (a 3 s wait on its Checkouts): A under way, then B; both
+    // refused, the place goes once both have (another's Checkout takes
+    // it); A refused while B was made meanwhile, it stays B's (another
+    // finds none)
+    let codes = [admin("POST", "/trials", Some(&json!({ "name": "Both fail", "kind": "seat_always_on", "days": 7, "capacity": 1 })))?, admin("POST", "/trials", Some(&json!({ "name": "One made", "kind": "seat_always_on", "days": 7, "capacity": 1 })))?];
+    let code_of = |i: usize| codes[i].body["code"].as_str().unwrap_or("").to_string();
+    let checkout = |who: &fragment_nip98::Keys, code: &str| api.signed(who, "POST", "/api/billing/checkout", Some(&json!({ "trialCode": code })));
+    let sessions = || s.stripe.requests().iter().filter(|r| r.path == "/v1/checkout/sessions").count();
+    // A under way (its Checkout at Stripe), then `b` asked while it waits; A's answer
+    let overlapping = |who: &fragment_nip98::Keys, code: &str, b: &dyn Fn() -> Result<crate::api::Reply>| -> Result<(u16, u16)> {
+        let before = sessions();
+        std::thread::scope(|scope| {
+            let a = scope.spawn(|| checkout(who, code));
+            let arrived = s.eventually(Duration::from_secs(10), || sessions() > before);
+            anyhow::ensure!(arrived, "A's Checkout reached Stripe");
+            let b = b()?;
+            let a = a.join().map_err(|_| anyhow::anyhow!("A's call panicked"))??;
+            Ok((a.status, b.status))
+        })
+    };
+    let (rae, sal, tom, uli) = (api.person()?, api.person()?, api.person()?, api.person()?);
+    s.stripe.delay("POST", "/v1/checkout/sessions", Some(Duration::from_secs(3)));
+    s.stripe.fail("POST", "/v1/checkout/sessions", true);
+    let (a_both, b_both) = overlapping(&rae, &code_of(0), &|| checkout(&rae, &code_of(0)))?;
+    s.stripe.fail("POST", "/v1/checkout/sessions", false);
+    s.stripe.delay("POST", "/v1/checkout/sessions", None);
+    let freed = checkout(&sal, &code_of(0))?;
+    s.stripe.delay("POST", "/v1/checkout/sessions", Some(Duration::from_secs(3)));
+    s.stripe.fail("POST", "/v1/checkout/sessions", true);
+    let (a_one, b_one) = overlapping(&tom, &code_of(1), &|| {
+        // A refused as it arrived; B, after it, made at once
+        s.stripe.fail("POST", "/v1/checkout/sessions", false);
+        s.stripe.delay("POST", "/v1/checkout/sessions", None);
+        checkout(&tom, &code_of(1))
+    })?;
+    let kept = checkout(&uli, &code_of(1))?;
+    s.ok(
+        "overlapping Checkouts of one person's trial place: both refused, it goes once both have (another person's Checkout takes it); one refused while the other was made, it stays (another finds none, 409)",
+        a_both >= 500 && b_both >= 500 && freed.status == 200 && a_one >= 500 && b_one == 200 && kept.status == 409 && kept.message().contains("places"),
+        json!({ "both": [a_both, b_both, freed.status], "one_made": [a_one, b_one, kept.status, kept.message()] }),
     );
     Ok(())
 }

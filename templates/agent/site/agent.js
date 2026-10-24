@@ -1,7 +1,6 @@
 // The agent's page: its name (the fragment's title), its picture
 // (`avatar.png`, else its image in its colour, by its identity as the shell
-// and its chats choose it), its model (`agent.json`: its tier, or a model
-// of a provider its owner connected, `model: {provider, id}`), its job
+// and its chats choose it), the model it runs (`runs`, below), its job
 // (`SOUL.md`) and the skills in its repo, read from the fragment's own
 // files (`__file`, `__files`). Its name and picture are changed from
 // Settings, or by the agent (`fragment agent`: docs/api.md, "An agent's
@@ -30,19 +29,48 @@ async function identity() {
   return agents.find((id) => people?.profiles?.[id]?.fragment === here) ?? null;
 }
 
+// The model it runs, by its id, as its owner's shell says their computer
+// runs it (its `agents` answer, docs/api.md, The shell): the model of a
+// provider its owner connected (`agent.json`'s `model: {provider, id}`)
+// while the computer gives it that provider's models (`modelProviders`),
+// else its tier's (`medium`, else the default `cheap`: `high` is off,
+// decision 23), as the deployment names it (`models`). Without that answer
+// (opened outside its owner's shell), or with the agent on no computer of
+// theirs, it names none: `agent.json` alone does not say what runs
+// (docs/computers.md, "An agent's own model").
+function runs(settings, me, models) {
+  if (!me) return "";
+  const own = settings.model;
+  if (own?.provider && own?.id && me.modelProviders?.includes(own.provider)) return `${own.id} (${own.provider})`;
+  return models?.[settings.tier === "medium" ? "medium" : "cheap"] ?? "";
+}
+
 async function main() {
+  let settings = null, roster = null;
+  const here = location.hostname.match(NAME_AT)?.[0];
+  const model = () => {
+    if (settings && roster) document.getElementById("tier").textContent = runs(settings, roster.agents.find((a) => a.fragment === here), roster.models);
+  };
   window.addEventListener("message", (e) => {
     if (e.data?.fragment === "theme" && (e.data.mode === "light" || e.data.mode === "dark")) document.documentElement.dataset.theme = e.data.mode;
+    // its owner's shell, framing it: their agents, again on any change
+    if (e.source === window.parent && e.data?.fragment === "agents" && Array.isArray(e.data.agents)) {
+      roster = e.data;
+      model();
+    }
   });
+  if (window.parent !== window) window.parent.postMessage({ fragment: "agents?" }, "*");
   const who = identity();
   // the platform puts the fragment's own title on its page (Open Graph)
   const name = document.querySelector('meta[property="og:title"]')?.content || location.hostname.split("--")[0] || "Agent";
   document.title = name;
   document.getElementById("name").textContent = name;
-  let settings = {};
   try {
     settings = JSON.parse((await text("agent.json")) || "{}");
   } catch {}
+  // anything but an object names the default tier, as its computer reads it
+  if (!settings || typeof settings !== "object") settings = {};
+  model();
   const avatar = document.getElementById("avatar");
   avatar.style.setProperty("--agent-color", colorOf(await who));
   const picture = new Image();
@@ -52,7 +80,6 @@ async function main() {
     avatar.replaceChildren(picture);
   };
   picture.src = "__file?path=avatar.png";
-  document.getElementById("tier").textContent = settings.model?.id ? `${settings.model.id} (${settings.model.provider})` : settings.tier ? `${settings.tier} model` : "";
   const soul = await text("SOUL.md");
   const box = document.getElementById("soul");
   box.textContent = soul?.trim() || "No job written down yet.";
@@ -65,4 +92,26 @@ async function main() {
   }
 }
 
+// Its routines: the scheduled records on its own `tasks` that ask it
+// something (`{kind: "routine", text, chat}`: docs/chat-records.md), as
+// the platform keeps them (`__schedules`, docs/api.md "Scheduled records":
+// its viewers', as every fragment's). Each says when in words, the next
+// time in this page's own clock, the chat it is done in, and what it is
+// asked. Read only: its owner asks the agent, and the agent adds them
+// (`fragment schedule add --routine`).
+async function routines() {
+  const list = ((await json("__schedules"))?.schedules ?? []).filter((s) => s.channel === "tasks" && s.record?.kind === "routine");
+  if (!list.length) return;
+  const rows = list.map((s) => {
+    const next = s.nextAt ? `next ${new Date(s.nextAt).toLocaleString()}` : "paused";
+    const when = Object.assign(document.createElement("p"), { className: "when", textContent: `${s.said} · in ${s.record.chat} · ${next}` });
+    const item = document.createElement("li");
+    item.append(when, Object.assign(document.createElement("p"), { textContent: s.record.text }));
+    return item;
+  });
+  document.getElementById("routines").replaceChildren(...rows);
+  document.getElementById("routines-section").hidden = false;
+}
+
 main();
+routines();

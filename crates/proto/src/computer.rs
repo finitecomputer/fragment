@@ -57,10 +57,21 @@ pub struct ComputerAgent {
     /// role's specialization rather than a wall.
     #[serde(default)]
     pub connections: Option<Vec<String>>,
+    /// The providers whose models it may run now
+    /// (`fragment_core::catalog::Catalog::model_providers`): its
+    /// `agent.json`'s `model` runs only on one of these, else it runs on
+    /// its tier (docs/computers.md, "An agent's own model").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_providers: Vec<String>,
     /// The guest's view only (`GET /api/computer`): each credential the
     /// agent may use now, its placeholder in its environment variables.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credentials: Vec<AgentCredential>,
+    /// Which of its owner's accounts it uses at each connection that takes
+    /// several (`PUT …/agents/{fragment}/accounts/{provider}`): provider →
+    /// the account's id. None named: the default, the oldest connected.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub accounts: std::collections::BTreeMap<String, String>,
 }
 
 /// The model route's models' ids by the route's names
@@ -160,6 +171,58 @@ pub struct ProviderView {
     /// The models an own key's provider offers for the person's agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<ProviderModel>>,
+    /// The account a connection is connected to, as its provider named it
+    /// when the person connected it (its email): shown to them, never
+    /// trusted for access. None when the provider gave none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// The scopes a connection's account holds, as Pipes says of it: what
+    /// the person allowed when they connected it, which may be less than
+    /// its row asks for. None when Pipes names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granted: Option<Vec<String>>,
+    /// What its row asks for that `granted` lacks, never a sign-in scope
+    /// (`connection_signin::missing`): settings names them, with a
+    /// reconnect to add them. Empty when nothing is; None when `granted`
+    /// is, or its row names no scopes (no `connection_oauth`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing: Option<Vec<String>>,
+    /// The deployment's note on it (its catalog row's `note`), which
+    /// settings shows under its name, connected or not: plain text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// A connection the person may connect several accounts at (its row's
+    /// `accounts_max` above 1): each of theirs, oldest first, the default
+    /// the oldest connected one, whose `account`, `granted` and `missing`
+    /// the fields above are (and `state` connected while any is). None
+    /// where a person connects one account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounts: Option<Vec<ConnectionAccount>>,
+    /// How many accounts they may connect there (its row's `accounts_max`),
+    /// beside `accounts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounts_max: Option<u8>,
+}
+
+/// One of a person's accounts at a connection that takes several: its
+/// Pipes id (what an agent's pick, a reconnect and a disconnect name), its
+/// label, state and scopes as `ProviderView`'s are a single account's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionAccount {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    pub state: ProviderState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granted: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing: Option<Vec<String>>,
+    /// One they disconnected that Pipes holds still (its disconnect did not
+    /// finish, or an import landed after it): not connected, used by no
+    /// agent; settings offers to disconnect it again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disconnecting: bool,
 }
 
 /// An own key's sign-in, as its person sees it.
@@ -220,6 +283,15 @@ pub struct AgentConnections {
     pub connections: Option<Vec<String>>,
 }
 
+/// `PUT /api/computers/{id}/agents/{fragment}/accounts/{provider}`: which
+/// of its owner's accounts there the agent uses, by its id (one of theirs,
+/// as `GET /api/connections` lists it), or `null` for the default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentAccount {
+    pub account: Option<String>,
+}
+
 /// `GET /api/computers/{id}` (its owner), `POST /api/computers` (made, or
 /// the one the person has), and the guest's `GET /api/computer`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,10 +336,10 @@ pub struct ComputerView {
     /// or not (so an image can pass them all through, once).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credential_env: Vec<String>,
-    /// The guest's view only: the model route's models' ids, by its names,
-    /// as the deployment names them now (docs/computers.md, "A model by its
-    /// id"), so a guest names its models by their ids and follows a change
-    /// of them while it runs.
+    /// The model route's models' ids, by its names, as the deployment
+    /// names them now (docs/computers.md, "A model by its id"): a guest
+    /// names its models by their ids and follows a change of them while it
+    /// runs, and its owner's pages show the model each agent runs by its id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<ModelIds>,
     /// What its last start that came up restored (docs/computers.md, "What
@@ -539,13 +611,16 @@ mod tests {
         assert_eq!(all.connections, None);
         let narrowed: AgentConnections = serde_json::from_str(r#"{"connections":["github"]}"#).unwrap();
         assert_eq!(narrowed.connections, Some(vec!["github".to_string()]));
-        let agent = ComputerAgent { fragment: "juniper.paul".into(), identity: "id:a".into(), name: "juniper".into(), owner: "id:p".into(), connections: None, credentials: vec![] };
+        let agent = ComputerAgent { fragment: "juniper.paul".into(), identity: "id:a".into(), name: "juniper".into(), owner: "id:p".into(), connections: None, model_providers: vec![], credentials: vec![], accounts: Default::default() };
         let v = serde_json::to_value(&agent).unwrap();
         assert_eq!(v["connections"], serde_json::Value::Null, "the default is named, as null");
         assert!(v.get("credentials").is_none(), "the owner's view names no placeholder");
+        assert!(v.get("modelProviders").is_none(), "none whose models it may run, left out");
+        let own = ComputerAgent { model_providers: vec!["openrouter".into()], ..agent };
+        assert_eq!(serde_json::to_value(&own).unwrap()["modelProviders"], serde_json::json!(["openrouter"]));
         let older: ComputerAgent = serde_json::from_str(r#"{"fragment":"juniper.paul","identity":"id:a","name":"juniper","owner":"id:p"}"#).unwrap();
         assert_eq!(older.connections, None);
-        assert!(older.credentials.is_empty());
+        assert!(older.credentials.is_empty() && older.model_providers.is_empty());
     }
 
     /// What its owner is told, on the wire as the shell reads it: a kind,

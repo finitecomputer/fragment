@@ -73,6 +73,9 @@ pub struct Config {
     /// `BRIDGE_SCREEN_LISTEN` and the rest: the screen of each agent it runs
     /// (screen.rs); none, no screen.
     pub screen: Option<ScreenConfig>,
+    /// `BRIDGE_KEEPALIVE_PING_MS`: how often the keepalive pings; silent
+    /// twice that, it is opened again (`limits::KEEPALIVE_PING_MS`).
+    pub keepalive_ping: Duration,
 }
 
 /// Why the bridge stopped.
@@ -246,7 +249,7 @@ impl Shared {
 
 /// The agents the screen names, from those the bridge runs.
 fn named(agents: &[Agent]) -> Vec<Named> {
-    agents.iter().map(|a| Named { fragment: a.fragment.clone(), name: a.name.clone() }).collect()
+    agents.iter().map(|a| Named { fragment: a.fragment.clone() }).collect()
 }
 
 /// Runs the bridge until `stop` turns true.
@@ -327,7 +330,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
 
     let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight });
     let runtime_lane = RuntimeLane::spawn(api.clone(), cmd_tx, cfg.media_dir.clone());
-    tokio::spawn(keepalive(api.clone(), keep_rx, stop.clone()));
+    tokio::spawn(keepalive(api.clone(), keep_rx, cfg.keepalive_ping, stop.clone()));
     let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), discovering: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()) };
 
     let act = |engine: &Engine, step: engine::Step| -> Result<(), BridgeError> {
@@ -1135,7 +1138,7 @@ async fn upload(api: &Api, fragment: &str, agent: &str, files: &[LocalFile]) -> 
 
 /// Commands to the runtime in order; a turn's attachments are downloaded,
 /// and its note read from its chat's journal, before it is handed (so a Stop
-/// never overtakes its Start).
+/// never overtakes its Start), as an answer's are before it is.
 struct RuntimeLane {
     tx: mpsc::UnboundedSender<Command>,
 }
@@ -1146,6 +1149,23 @@ impl RuntimeLane {
         tokio::spawn(async move {
             // bounded by the engine: ends when it drops its sender
             while let Some(mut c) = rx.recv().await {
+                // an answer's files, downloaded as a turn's are, then named
+                // in its words with where each is (`with_files`)
+                match &mut c {
+                    Command::Tell { text, attached, .. } => {
+                        if let Some(a) = attached.take() {
+                            let files = download(&api, &a.agent, &a.fragment, &a.refs, &media_dir).await;
+                            *text = crate::runtime::with_files(text, &a, &files);
+                        }
+                    }
+                    Command::Answer { words, attached, .. } => {
+                        if let Some(a) = attached.take() {
+                            let files = download(&api, &a.agent, &a.fragment, &a.refs, &media_dir).await;
+                            *words = Some(crate::runtime::with_files(words.as_deref().unwrap_or(""), &a, &files));
+                        }
+                    }
+                    _ => {}
+                }
                 if let Command::Start(ts) = &mut c {
                     let note = async {
                         let read = tokio::time::timeout(Duration::from_millis(limits::NOTE_READ_MS_MAX), note_for(&api, ts)).await;
@@ -1385,8 +1405,13 @@ async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: A
 // ---- keepalive ----
 
 /// Holds `GET /api/computer/keepalive` open while `hold` is true, and only
-/// then (decision 39: the computer stays awake while it is open).
-async fn keepalive(api: Api, mut hold: watch::Receiver<bool>, stop: watch::Receiver<bool>) {
+/// then (decision 39: the computer stays awake while it is open). It pings
+/// every `every`, as a `__live` socket does: one silent twice that is
+/// opened again, since a deploy can cut the platform's side of it with no
+/// close reaching here (#557), and the platform, holding no socket, counts
+/// it closed.
+async fn keepalive(api: Api, mut hold: watch::Receiver<bool>, every: Duration, stop: watch::Receiver<bool>) {
+    assert!(!every.is_zero(), "the keepalive pings at an interval");
     let mut backoff = Backoff::default();
     // bounded by the bridge's life: one connection per pass
     loop {
@@ -1415,7 +1440,10 @@ async fn keepalive(api: Api, mut hold: watch::Receiver<bool>, stop: watch::Recei
         crate::ev!("keepalive.held");
         let (mut sink, mut stream) = ws.split();
         let mut stop2 = stop.clone();
-        // bounded by the socket, `hold`, or `stop`
+        let mut ping = tokio::time::interval(every);
+        ping.tick().await;
+        let mut heard = Instant::now();
+        // bounded by the socket, its silence, `hold`, or `stop`
         loop {
             tokio::select! {
                 r = hold.changed() => {
@@ -1425,12 +1453,23 @@ async fn keepalive(api: Api, mut hold: watch::Receiver<bool>, stop: watch::Recei
                         break;
                     }
                 }
+                _ = ping.tick() => {
+                    // dropped, not closed: its far side may hear nothing
+                    if heard.elapsed() > 2 * every {
+                        crate::ev!("keepalive.quiet", { "ms": heard.elapsed().as_millis() as u64 });
+                        break;
+                    }
+                    if sink.send(Message::text(json!({ "type": "ping" }).to_string())).await.is_err() {
+                        crate::ev!("keepalive.lost");
+                        break;
+                    }
+                }
                 m = stream.next() => match m {
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
                         crate::ev!("keepalive.lost");
                         break;
                     }
-                    Some(Ok(_)) => {}
+                    Some(Ok(_)) => heard = Instant::now(),
                 },
                 _ = crate::net::stopped(&mut stop2) => {
                     let _ = sink.close().await;

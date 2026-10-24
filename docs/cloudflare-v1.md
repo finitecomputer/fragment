@@ -71,6 +71,33 @@ speaking Cloudflare's APIs) returns once this product works.
    from a clean configuration, the way a stranger would. WorkOS'
    staging environment serves dev and previews; its production
    environment serves production (`finite.chat`, decision 5).
+
+   *Status (Paul, 2026-10-16).* CI deploys on a green push
+   (.github/workflows/ci.yml, `deploy`): master's to the preview
+   (`preview.finite.build`), and the `production` branch's to
+   production. Only Paul updates `production`: his push, or the pull
+   request he merges into it, is a production deploy's approval.
+   Promoting a commit master's run has proved green deploys in minutes,
+   its e2e not run again (ci.yml's `proven`); anything else, a hotfix pushed
+   straight there or a commit whose master run is red or still running,
+   runs the full tests first (Paul, 2026-10-20). So does a merge to
+   master, unless its pull request's green run tested the merge's very
+   tree (master unmoved since): it deploys the preview once `check`, a
+   couple of minutes, is green (Paul, 2026-10-23; `proven` matches trees,
+   which every run records; `check` runs on every push, as it holds the
+   schema lock to what the push moved from). Each
+   deploys from a GitHub environment (`preview`, `production`) that only
+   its branch may use, holding its Cloudflare token and a token that
+   reads its config: a file in the private repo
+   finitecomputer/fragment-deploy (`preview.jsonc`, `production.jsonc`;
+   names and paths, as a stranger's file is, no secret's value, kept out
+   of the public repo's logs), which the team can read and change by a
+   commit, the environment's next deploy taking it (Paul, 2026-10-21: it
+   was a GitHub secret, which no one could read back to edit); its
+   images are pinned by digest (`xtask deploy --pinned-only`), and one
+   is built by the Image workflow, run by hand, and copied by it, at its
+   digest, into production's registry once a round proves it
+   (docs/computers.md, "Stable and canary").
 4. **Self-deploy without forking.** Configuration lives in a file
    outside the repo: domains, the WorkOS environment, AI Gateway,
    pricing, the code.storage organization, and the default computer
@@ -355,8 +382,11 @@ speaking Cloudflare's APIs) returns once this product works.
 
     *Status (2026-10-13).* Stable and canary are two names of a
     deployment's images: the default kept at a digest, the canary built
-    at every deploy; a promotion moves the default's digest, a rollback
-    pins back (docs/computers.md, "Stable and canary"). The point-in-time
+    at every deploy until 2026-10-16, then by a deploy by hand, and since
+    2026-10-20 by the Image workflow, run by hand, and pinned (CI's build
+    no image, decision 3's status); a promotion moves the default's
+    digest, a rollback pins back (docs/computers.md, "Stable and
+    canary"). The point-in-time
     restore is not built: three rotating saves keep none from before a
     canary, so a Hermes release is forward only for now (Paul, 2026-10-13;
     docs/technical-debt-ledger.md, "A Hermes release has no rollback").
@@ -376,8 +406,9 @@ speaking Cloudflare's APIs) returns once this product works.
     *Status (2026-10-16).* `finite.place` is production's now (decision
     5's status). The master preview is the branch `preview` on the zone
     `finite.build`: `preview.finite.build`, its fragments
-    `<name>--preview.finite.build`, master deployed continuously
-    (docs/computers.md, "One round"). The phases' evidence below, from
+    `<name>--preview.finite.build`, master's, which CI deploys at every
+    green push (decision 3's status; docs/computers.md, "One round").
+    The phases' evidence below, from
     `p5.finite.place` and `e2e.finite.place`, is from before the move,
     and deploy/e2e.jsonc still names that zone.
 
@@ -531,8 +562,8 @@ speaking Cloudflare's APIs) returns once this product works.
     fragment's own blobs or small and inline; agents ask the same
     contract on the model route (`POST /api/models/v1/decide`, and
     `/v1/decide` on a computer's model intercept), metered to their
-    owner. Each reserves its model's context window and settles at its
-    input tokens (docs/api.md, Decisions).
+    owner. Each is charged after its answer at its input tokens
+    (docs/api.md, Decisions; decision 62).
 24. **Every per-person cost is metered** in integer micro-dollars into
     a per-person usage ledger:
     - AI;
@@ -563,7 +594,7 @@ speaking Cloudflare's APIs) returns once this product works.
     neither its Product nor its Price. The `seat` plan stays for an
     operator's comp and a deployment's `default_plan` (dev's and the
     e2e's people are seats). Trials are a month at most, of the $200
-    seat, a card first (decision 56). SimpleX is still not built.
+    seat, no card asked (decision 56). SimpleX is still not built.
 26. **A fragment's costs bill its owner**, with a monthly cap the owner
     sets per fragment (default $5). Past it, AI steps and agent turns
     stop for everyone but the owner.
@@ -573,6 +604,9 @@ speaking Cloudflare's APIs) returns once this product works.
     and triggers start no runs either: each run they would have started
     is recorded `blocked`, with the reason, and they start again once the
     owner has credit (Paul, 2026-10-03).
+    Status (2026-10-21, decision 62): the stop is read from a cached
+    standing, so it reaches an agent within a minute of zero, and a
+    ledger that does not answer stops nothing.
 28. **Sign-up is open; creating needs a seat** (decision 49, which
     replaced invite-only sign-up on 2026-10-08).
 
@@ -690,11 +724,34 @@ speaking Cloudflare's APIs) returns once this product works.
     auth as its row says; a person's own keys are a third kind (`own`),
     sealed by their computer and never metered. The managed skills read
     the variables.
+    Status (2026-10-21, decision 62): an operator key's call is no longer
+    held first, nor refused when the ledger does not answer: it asks the
+    cached gate, and is charged after the provider answered.
 38. **Routines are fragment cron.** An agent's routines are its
     fragment's cron triggers, not Hermes' own scheduler, which is turned
     off. A trigger posts to a channel the agent's bridge subscribes to,
     and the generic rule of decision 39 wakes the computer. Agents add
     and change routines with the fragment CLI (a skill).
+
+    Status, 2026-10-20 (branch `claude/agent-routines`; Paul, in
+    production: asked to "check it every hour and ping me if ikea gets
+    back", his agent found no scheduler and started a loop in its
+    container, which died at the next restart). Built as a generic
+    fragment primitive, not an agent's (Paul: "I want to make sure we're
+    making generic fragment logic and not something only hermes can
+    use"; "for basic crons the agent shouldn't need to build a new
+    fragment, it would just add schedule to itself"): **scheduled
+    records**. Any fragment's editors add data schedules at run time
+    (`{cron, channel, record}`, at most 32, at most every 15 minutes, a
+    record of at most 4 KiB), each appending its record to one of the
+    fragment's own channels, as the fragment, at each minute its cron
+    names; the same alarm pass fires them as its code's cron triggers.
+    A routine is one on the agent's own `tasks` (`{kind: "routine",
+    text, chat}`), which the agent, an editor of its own fragment, adds
+    with `fragment schedule add --routine`. What must run without the
+    agent is an app's cron trigger and its job. Our Hermes image's
+    platform skill teaches both, and its `hermes` refuses `hermes cron`.
+    docs/api.md, "Scheduled records".
 
 ### The generic pieces that make the rule work (Paul, 2026-10-02)
 
@@ -790,8 +847,11 @@ runaround".
     agent's identity is its fragment's npub.
     - A person's email is the verified email of their sign-in (WorkOS's
       `email_verified`; a sign-in without one is refused). An email
-      belongs to at most one person; `/auth/link` adds a second sign-in
-      and its email.
+      belongs to at most one person. Linking a second sign-in and its
+      email (`/auth/link`) is off until WorkOS offers an account picker:
+      AuthKit answered it from the session it held in the browser, as
+      the same email, and linked nothing (Paul, 2026-10-21, in
+      production); the route went.
     - The share sheet, member lists and the shell show people by email.
       A changed email follows at the next sign-in, and no grant moves,
       because grants name the npub.
@@ -827,7 +887,9 @@ runaround".
 48. **Sharing is by email** (Paul: shared fragments "feel like sharing
     google docs"). The share sheet and the CLI take an email and a
     role.
-    - A person who holds that verified email is a member at once.
+    - (Changed by decision 63: every invite waits for its person's yes,
+      in the shell; signing in meets nothing.) A person who holds that
+      verified email is a member at once.
     - Otherwise the invite waits on the email, and the platform mails a
       link to the fragment. Whoever signs in with that verified email
       becomes a member as the invite said, from then on by their npub.
@@ -899,6 +961,15 @@ Paul's (its slice 10).
     org's admins manage its seats and billing, need not hold a seat
     themselves, and number at least one. Prices are monthly; there is
     no annual plan.
+    *Status (Paul, 2026-10-17, from the security audit's H1):* teams are
+    kept, and nobody joins an org without accepting. An org is made only
+    once its first Checkout is paid; an org's seats and admins' places
+    are offers, theirs once they accept them; who pays is no other
+    admin's to remove, only they open its billing (a default from the
+    review of #367, Paul's to reverse), and while its subscription
+    lives they stay (Alex's rule, Paul's call, 2026-10-18: they cancel
+    it first; a handoff is an operator's, by hand; docs/billing.md, "The
+    model").
 52. **Seats are paid or comped, held or pending.** A seat is `seat`
     ($100) or `seat_always_on` ($200; since 2026-10-15 the only one
     sold, decision 25's status), held by an npub or pending on an
@@ -908,6 +979,9 @@ Paul's (its slice 10).
     removing and changing a seat's kind take effect at once, prorated
     onto the next invoice. Comped seats are an operator's, outside
     Stripe, and replace decision 49's "operator's grant".
+    *Status (2026-10-17):* a pending seat is an offer: someone who signs
+    in with its email sees it and accepts or declines it; signing in
+    takes nothing. It still bills from the offer.
 53. **Standing is Stripe's status.** `trialing`, `active` and
     `past_due` are good (Stripe's retries are the grace period);
     anything else lapses the org's paid seats. A lapsed or removed seat
@@ -916,6 +990,11 @@ Paul's (its slice 10).
     is deleted, and paying again restores it. A removed member's
     fragments stay theirs. How long a lapsed person's data stays is
     decided later.
+    *Status (Paul, 2026-10-17, from the audit's M4):* a wipe cancels the
+    subscription of an org it ends, or that the wiped person pays for, at
+    once, and keeps its Stripe customer (invoices, tax, refunds),
+    dropping the platform's link to it; an org with no paid seat left
+    has its subscription canceled at once (docs/billing.md, "A wipe").
 54. **Stripe automatic tax, prices before tax** ("$100 + tax"), as
     finite-mono's.
 55. **One credit pack, $25, kept until spent**, bought through
@@ -923,8 +1002,11 @@ Paul's (its slice 10).
     on the ledger by its payment's id. Usage never goes to Stripe.
 56. **Trials are our codes on Stripe's trial**, finite-mono's shape: a
     code names a kind (since 2026-10-15, `seat_always_on` only), days
-    (1 to 30), a capacity and an expiry; a
-    card is taken first; one trial per person ever, for a seat of one.
+    (1 to 30), a capacity and an expiry; no card is asked (Alex,
+    2026-10-23: a card was taken first until then): one added before
+    the end is charged then, and with none the end cancels the
+    subscription, its person paying again with a card to go on; one
+    trial per person ever, for a seat of one.
     A place is held by a Checkout that has not expired, and freed by
     its expiry. Discounts are Stripe promotion codes, made in Stripe's
     dashboard.
@@ -1035,17 +1117,23 @@ Private stays possible by config.
       parameter sent, fp8 or bf16, at most $0.15 a million tokens in and
       $0.50 out (6 of GLM-5.3 Flash's 34 endpoints on 2026-10-15). The
       body is generic (any OpenAI-compatible API's own fields, never one
-      the route writes, 4 KiB at most), and nothing in the cell is
-      OpenRouter's: an OpenAI-compatible API's stream is metered from its
-      usage on whichever chunk carries it (OpenRouter's last keeps a
-      choice).
+      the route writes, 4 KiB at most), and the cell knows OpenRouter
+      only by its ceiling (below): an OpenAI-compatible API's stream is
+      metered from its usage on whichever chunk carries it (OpenRouter's
+      last keeps a choice).
     - **Its price** (a decision for Paul): the ceiling above, not what a
       call's provider billed: a cached or written token at the prompt
       ceiling too (none of OpenRouter's cache prices is bounded by
       `max_price`), and OpenRouter's 5.5% fee on credits in place of AI
       Gateway's 5%, then the margin (docs/ledger.md, "OpenRouter's
-      price"). Price book 7. Settling from OpenRouter's reported
-      `usage.cost` instead is a follow-up (docs/technical-debt-ledger.md).
+      price"). Price book 7. Since 2026-10-22 (Paul: "we try a config
+      out on preview, if we don't like it we revert it") the ceiling is
+      read from the slot's `max_price`, not kept per model in the code
+      (GLM-5.3 Flash's row stays, for its usage queued past a switch):
+      any model OpenRouter serves is priced, a tier moves to another by
+      config alone, and a slot on OpenRouter without a ceiling is
+      refused. Settling from OpenRouter's reported `usage.cost` instead
+      is a follow-up (docs/technical-debt-ledger.md).
     - **The platform's trouble falls back** (the coordinator for Paul,
       2026-10-15): on an OpenAI-compatible API, whose key is the
       platform's, a key refused (401) or denied (403), an account out of
@@ -1162,6 +1250,174 @@ Private stays possible by config.
     the Worker's logs, `model.settled` names `glm-5-3-flash` for the
     tiers' calls, and `model.fallback` from it says why a call went to
     Workers AI (a 429 there is the window spent).
+
+### Billing never stops an agent (Paul, 2026-10-21)
+
+Paul:
+- "I don't want us to break people's agents. that should always be goal
+  #1, over time we can get tighter and better about how we price
+  everything but just do the simple thing that will work for now."
+- "we aren't adding some rest roundtrip per inference call yeah? billing
+  should be settled best effort not interrupt every request"
+- "'overspend by whatever is in flight during the cache window' is a
+  small price to pay for 1. simplifying the code, 2. not breaking
+  agents, 3. lowering latency. we want that to be the case even when
+  billing is on"
+
+62. **A spend is gated by a cached standing and charged after.**
+    - **The gate.** Before a paid call (a model call, an operator key's
+      call, an AI step) or a write, its payer's standing is read through
+      one cached question (`ledger::may`; docs/ledger.md, "The gate"):
+      each isolate asks the payer's ledger at most once a minute, for at
+      most 1.5 s, and keeps the answer, a refusal too. The one deliberate
+      refusal is a person out of credit, read-only or a guest, or a
+      capped caller past a fragment's cap (decisions 26 and 27). A ledger
+      that does not answer lets the spend start: a billing or pricing
+      problem never refuses an agent's call.
+    - **The charge.** A paid call is charged after its answer, as a meter
+      row idempotent by its reference, sent to the payer's ledger without
+      the call waiting on it (the ledger's queue, which retries). Nothing
+      is held before a call. A person out of credit may overspend by what
+      starts within the gate's minute.
+    - Status (2026-10-21; the stack from `claude/ledger-cached-gate`):
+      the gate is built, and a fragment's writes and an e2e person's paid
+      calls are read through it. Model calls (the route's chat calls,
+      decisions and transcriptions) are gated by it and charged after
+      their answers (`claude/models-charged-after`); one that reports no
+      usage is charged nothing, said aloud. So are operator keys'
+      calls through the swap (`claude/keys-charged-after`): gated, and
+      charged once the provider answered; a ledger that does not answer
+      no longer refuses them. So are AI steps
+      (`claude/steps-charged-after`): gated in the fragment's isolate,
+      and charged from its meter outbox under `step:<step's key>`, once
+      whatever attempt or replay makes the call; one that fails for good
+      is charged nothing, as nothing was held.
+
+63. **An invite waits for its person's yes** (Paul, 2026-10-22: "When
+    inviting someone as an editor on a fragment it shouldn't auto add to
+    their app list, they should see the invite somewhere in shell and be
+    able to accept it"). It changes decision 48's first bullet; the rest
+    of 48 holds.
+    - An invite by email (the share sheet's Add, `fragment members add
+      <name> <email>`, an agent's for its owner) is never a membership at
+      once, whether someone signs in as the email already or not yet: it
+      waits on the email in the fragment and in the registry, which mails
+      it a link to the platform's page (never the fragment's) and keeps,
+      beside it, the role, the title it was sent with and whose day it
+      counted in.
+    - Whoever signs in with that verified email sees it at the top of
+      the shell's sidebar (`GET /api/invites`), and accepts it (`POST
+      /api/invites/<name>/accept`: the fragment's claim, as a sign-in's
+      was) or declines it (`…/decline`: taken back, as a revoke). Their
+      open pages are told as one is made, renewed, revoked, answered (in
+      another tab, or by their agent) or its fragment deleted (`{type:
+      "invited"}` on the list's socket), so it goes from every sidebar at
+      once. Signing in meets nothing.
+    - Their agent answers for them (Paul, 2026-10-22: "It can already
+      publish for you and edit your own stuff! Why shouldn't it be able
+      to handle 'skyler invited me to edit a fragment, do you see it?'"):
+      signed with `for` its owner and not held below them, an agent
+      lists, accepts and declines its owner's invites (`fragment invites`,
+      `fragment invites accept|decline <name>`); its yes makes its owner
+      a member. Any other agent is 403.
+    - An invite is to a person and their agents: accepted, their agents
+      reach it acting for them (R17, as any share of a person's), and
+      none is ever named to anyone else ("I invite Skyler and his agents,
+      not Skyler and his agent Agent123"): not in the invite, its mail,
+      the API's answers, the share sheet, the access view, nor an export.
+    - Adding someone directly (`PUT members`, by npub, key or email) works
+      only within one person (Paul: "I shouldn't be able to add someone
+      to something and then it just shows up for them. That's weird: it
+      means I could spam people that don't know me with fragments"): the
+      owner, or their agent for them, adds the owner's own agents. Anyone
+      else is 403, saying to invite them by email instead (refusing is
+      simpler than turning an npub into an invite: an npub names no email
+      to mail). A role change of someone in already is no add. The e2e's
+      setups share by a lever (`/api/test/fragment {op: "member"}`).
+    - The wire is added to, never changed: `POST invites` answers
+      `{invited}` (the shape it answered for an email no one held);
+      `{member}` stays a shape clients read, which no invite answers now;
+      the access view's `agents` is never sent. An agent's invite keeps
+      working, and its CLI says the person is in once they accept it; a
+      shipped CLI or Hermes image that adds a person by npub gets the
+      refusal, saying to invite by email.
+    - Invites mailed before it (their registry row names no role) said
+      "sign in to open it": a sign-in still meets them, until the last
+      runs out (docs/technical-debt-ledger.md, "Invites from before their
+      yes").
+    - (The open question this left, a member adding their own agent, is
+      decision 64's.)
+    - Status (2026-10-22): approved by Paul with the four changes above
+      (agents answer for their owner, direct adds within one person,
+      agents unnamed, an answer goes from every tab); merged (#536).
+
+64. **A person's membership is their agents'** (Paul, 2026-10-23: "If I
+    invite a member to a fragment, when they accept they add their agent.
+    That should be the default. It's too confusing for people to try to
+    remember what 'they' have access to vs their 'agent'. We have to
+    treat them as one entity and work to secure the whole entity").
+    - **Rows, kept in step with the person's.** Accepting an invite makes
+      the person a member and each of their agents a member beside them,
+      as itself, at the person's role (`members.rs` `agents_join`; the
+      registry's claim names their agents). An agent is then in as any
+      agent member is: it acts there as itself, a chat's roster has it
+      (after the chat's own agent, its lead, which stays first), its own
+      list names the fragment (its computer follows it) and its computer
+      hears it joined. Rows rather than a membership derived at access
+      time because everything that makes an agent take part reads rows:
+      the roster (`__members`), its list (the bridge's discovery), its
+      join, a channel's `from: agent`; a derived membership would reach
+      the fragment but take part in nothing. The person's row stays the
+      one truth: an agent's row is the person's, kept in the same
+      fragment, in the same turn, by every change to them.
+    - **One entity.** The person's role is their agents' (a role change
+      moves them all; an agent's own is refused, 400, saying so). Removing
+      or leaving, by the person or by any agent of theirs, takes the
+      person and every agent of theirs out (`remove_member`). No yes,
+      role change, removal or leaving leaves a person in without their
+      agents, nor an agent without its person (an agent made later and
+      not told, below, is the one gap).
+      Room under `MEMBERS_MAX` is for the whole entity, or the yes is
+      refused whole.
+    - **Agents made later** come in where their person is: as an agent is
+      registered (the API's `POST /api/identities`; a computer's, once
+      its agent fragment and the computer both hold it, so the computer
+      hears each join), the platform reads its person's list and asks
+      each fragment of someone else's they are in to add it
+      (`members/agent`, `members::agent_made`). Best effort, logged: one
+      not told keeps it out until its person's next yes there
+      (docs/technical-debt-ledger.md, "An agent made later joins best
+      effort").
+    - **The owner's side is unchanged and consistent.** The owner's own
+      agents reach everything the owner owns acting for them (R17;
+      Hermes always acts `for` its owner) and are members of what the
+      owner puts them in (a chat's lead, an agent fragment), each as the
+      owner chose: a chat of the owner's is not given every agent of
+      theirs. The owner is never half in: they own it whole.
+    - **Never named to the inviter.** The invite, its mail and its
+      answers name no agent; the share sheet, the access view and an
+      export show the person as one entry, "with their agents", and name
+      none (`share.rs` `with_their_person`). In a chat, an agent that
+      takes part shows as itself (it speaks), and the `@` list shows each
+      agent under its person ("Skyler's agent"). The fragment's own
+      members list (the API's, `GET members`) has every row, its truth.
+    - **Securing the whole entity.** An agent in with its person reaches
+      what they do, capped as agents are (R17: never above editor, never
+      owner, its own membership never shares). A hold now caps it there as
+      itself too (`standing`: a hold caps an agent in someone else's
+      fragment, never its own memberships, decision 36). Whoever is in a
+      chat talks to the agents in it, and a Hermes agent acts `for` its
+      owner whoever asks it: this is the design (Paul, 2026-10-23: "Yes,
+      I am aware, this is the design. The solution is a warning when
+      inviting someone to your chat ... Not making everything way more
+      complicated"). Inviting someone where an agent takes part warns its
+      inviter: "Make sure you trust this person. They'll be able to talk to
+      your agent until you remove them." (the share sheet, `fragment
+      members add`, the apps skill).
+    - Storage: no new column (an agent row names its owner already: in
+      with its person when its owner is a member who is not the fragment's
+      owner); a rollback reads the rows as agent members, as before.
+    - Status (2026-10-23): built on `claude/member-with-agents`.
 
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 
@@ -1892,7 +2148,8 @@ Each one needs a test in the phase that ports its feature.
    metered.
 3. **A failed step keeps its reservation.** A step that fails for good
    still holds its budget reservation. Phase 3: a final failure releases
-   it, with a test.
+   it, with a test. Since decision 62 nothing is held before a call, so
+   there is nothing to release: a failed step is charged nothing.
 4. **`fragment deploy` reports success when the code is refused.** It
    printed `live:` while the status said an operation name broke
    `^[a-z][a-z0-9_]{0,63}$`, and the guide never names that rule. Phase 2:
@@ -1953,7 +2210,8 @@ Each one needs a test in the phase that ports its feature.
 ## Escalations (ask Paul)
 
 - Product semantics, pricing, privacy posture.
-- Production deploys.
+- Production deploys (a push to `production`, Paul's alone: decision
+  3's status).
 - Zone and DNS moves.
 - Every teardown or delete.
 - New vendor accounts and secrets.

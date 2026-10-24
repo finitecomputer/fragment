@@ -19,8 +19,11 @@
 //! its owner on its own origin through a one-time ticket, in a tab or in a
 //! frame of the platform's page (frames.rs, `computer_ports`), and no one
 //! else.
-//! A routine, its agent fragment's cron, wakes it asleep, and so does its
-//! agent being added to a new chat, which it then follows at once. A $200
+//! Its agent's routines are scheduled records on its own agent fragment
+//! (decision 38), which its owner and the agent itself (that fragment's
+//! editor) add; a restart of the computer, or of the platform, keeps them;
+//! one due wakes it asleep, and so does its agent being added to a new
+//! chat, which it then follows at once. A $200
 //! seat's computer stays awake unless its owner lets it sleep, and one made
 //! while the registry fails the ask for its seat's push fails its making,
 //! and made again, stays awake all the same.
@@ -33,7 +36,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::jobs::records;
-use super::ledger::{end_of, entries};
+use super::ledger::{charged, entries, quiet};
 use crate::api::{Api, Call, Socket};
 use super::credentials::{model_checks, placeholder, swap_checks, Swapping, MODEL_CHECKS, SWAP_CHECKS};
 use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_HOST};
@@ -64,15 +67,6 @@ pub(super) fn turn_of(agent: &str, fragment: &str, channel: &str, seq: i64) -> S
 pub(super) fn work_of(recs: &[Value], turn: &str) -> Vec<Value> {
     recs.iter().filter(|r| r["body"]["turn"] == turn).cloned().collect()
 }
-
-/// The agent fragment's app: its routine, which its cron runs.
-pub(super) fn routine_app(chat: &str) -> String {
-    format!(
-        "import {{ DurableObject }} from \"cloudflare:workers\";\nexport class App extends DurableObject {{\n  routine(input, call) {{\n    call.publish(\"tasks\", {{ kind: \"routine\", text: \"water the plants\", chat: {chat:?} }});\n    return {{ ok: true }};\n  }}\n}}\n"
-    )
-}
-
-pub(super) const ROUTINE_JSON: &[u8] = br#"{ "operations": { "routine": { "kind": "mutation", "role": "editor" } }, "channels": { "tasks": { "read": "editor", "post": "editor" } }, "triggers": [{ "cron": "* * * * *", "run": "routine" }] }"#;
 
 /// The `joined` records on an agent fragment's `tasks` for `fragment`
 /// (docs/chat-records.md): the platform posts one when the agent is added.
@@ -329,6 +323,9 @@ fn bound_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
     let took = t0.elapsed();
     let kept = lever(api, c.id, "saves")?;
     let why = r.body["why"].as_str().unwrap_or("");
+    // the backups share the bound, so it names what was left of it when the
+    // hung one began: the whole bound, or a millisecond or so less (CI saw 4999)
+    let named = why.split("no answer within ").nth(1).and_then(|t| t.split(" ms").next()).and_then(|n| n.parse::<u128>().ok());
     // the hold (the stub answers at once) and the unhold are seconds more
     s.ok(
         BOUND_CHECKS[2],
@@ -336,7 +333,7 @@ fn bound_checks(s: &mut Suite, api: &Api, c: &Crashing) -> Result<()> {
             && r.body["phase"] == "awake"
             && r.body["generation"] == generation
             && why.contains("could not save")
-            && why.contains(&format!("no answer within {} ms", bound.as_millis()))
+            && named.is_some_and(|ms| ms <= bound.as_millis() && ms + 1_000 > bound.as_millis())
             && newest_save(api, c.id) == before
             && kept.body["unsavedSince"].is_i64()
             && kept.body["hangBackups"].as_u64() == Some(bound.as_millis() as u64)
@@ -490,10 +487,48 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     Ok(added)
 }
 
+/// The keepalive across a deploy (#557), each skipped off a local node,
+/// the stub, and the fakes.
+const KEEPALIVE_CHECKS: [&str; 2] = [
+    "a keepalive open across a reload of the cell (a deploy: every socket disconnected, its guest's close reaching no release) is counted open, none held; at its next event the computer counts only those held",
+    "the turn answers, and nothing is counted open after it: none held, none counted",
+];
+
+/// A turn's keepalive across a reload of the node's Worker, which restarts
+/// every Durable Object and disconnects every socket as a deploy does: on
+/// the preview its guest's close after one never reached the computer,
+/// which counted it open for 14 hours, never slept, and was metered
+/// (#557); the reload shows the same, counted open, none held. The turn's
+/// model call is held, so it runs across the reload. Its guest opening its
+/// keepalive again is the bridge's own test (`a_keepalive_a_deploy_cut_is_
+/// opened_again`): after a local reload, workerd destroys every keepalive
+/// the computer's egress upgrades at once (`other end of WebSocketPipe was
+/// destroyed`), which a deploy on Cloudflare does not (the preview's
+/// computer opened its next keepalive after each, and was held by it). The
+/// replies it adds.
+fn keepalive_across_a_reload(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str, say: &dyn Fn(u32, &str) -> Result<crate::api::Reply>, replied: &dyn Fn(i64) -> bool) -> Result<usize> {
+    let counts = || lever(api, id, "saves").map(|r| (r.body["keepalives"].as_u64().unwrap_or(u64::MAX), r.body["keepalivesHeld"].as_u64().unwrap_or(u64::MAX))).unwrap_or((u64::MAX, u64::MAX));
+    let called = s.ai.chats().len();
+    s.ai.delay_next(&[15_000]);
+    let r = say(95, "think slowly across a reload")?;
+    let seq = r.body["record"]["seq"].as_i64().unwrap_or(0);
+    let in_flight = s.eventually(WAKE, || s.ai.chats().len() > called && counts() == (1, 1));
+    s.reload()?;
+    let reloaded = counts();
+    // its owner's wake of it awake: an event, after which it counts only what is held
+    let woke = api.signed(owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
+    let after = counts();
+    s.ok(KEEPALIVE_CHECKS[0], in_flight && reloaded.0 > reloaded.1 && woke.body["phase"] == "awake" && after.0 == after.1, json!({ "reloaded": reloaded, "woke": woke.body["phase"], "after": after }));
+    let answered = s.eventually(WAKE, || replied(seq));
+    let closed = s.eventually(Duration::from_secs(10), || counts() == (0, 0));
+    s.ok(KEEPALIVE_CHECKS[1], answered && closed, json!({ "answered": answered, "counts": counts() }));
+    Ok(1)
+}
+
 /// The recovery checks (docs/computers.md, "What its owner is told"), each
 /// skipped off the stub and the fakes (the lever fails saves, and the
 /// node's bound is short: `crate::UNSAVED_MAX_MS`).
-const RECOVERY_CHECKS: [&str; 11] = [
+const RECOVERY_CHECKS: [&str; 12] = [
     "a sleep whose save fails tells its owner at once: since when its work is in no save, the save a stop goes back to, and when the bound stops it",
     "no one else restarts it",
     "its owner's restart, its save failing too: it starts again at once, from its last save",
@@ -505,6 +540,7 @@ const RECOVERY_CHECKS: [&str; 11] = [
     "and its agent is told, once, what it no longer remembers of the chat: the turn the stop lost, from the journal",
     "asleep, its owner's restart starts it, fresh from its save",
     "the time it was kept for failed saves is free (Paul, 2026-10-08): nothing is charged from the start of a sleep's try whose save failed to its bound, or to the restart that ended it; the time before and after is",
+    "a restart whose save fails, with nothing done since the save it came up from: it goes back to that save and tells its owner nothing, since nothing was lost (Paul, 2026-10-23); a notice of it is refused",
 ];
 
 /// What its owner is told, and the way back to working (rung 4 of
@@ -559,7 +595,10 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
     );
     let r = api.signed(stranger, "POST", &path("/restart"), Some(&json!({ "generation": g })))?;
     s.ok(RECOVERY_CHECKS[1], r.status == 404, &r);
-    // its owner restarts it: the restart's own save fails, so it goes back
+    // its owner restarts it: the restart's own save fails, so it goes back,
+    // and its last turn (the crash checks' last, ended seconds before its
+    // sleep, well within the 30 s before its end is saved) is in no save:
+    // told
     let restart = || api.signed(c.owner, "POST", &path("/restart"), Some(&json!({ "generation": g })));
     let restarted_at = crate::api::now_ms();
     let r = restart()?;
@@ -688,6 +727,34 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
             && woke.body["notices"].as_array().is_none_or(|l| l.is_empty()),
         format!("{r} / {woke}"),
     );
+    // a life on which nothing is done: its owner's sleep saves it once its
+    // guest settled (a start after a rollback first ends what its save left
+    // open, holding its keepalive a moment: work, until a save keeps it),
+    // and its wake comes up from that save; its restart's save fails, so it
+    // goes back to that save, and lost nothing
+    std::thread::sleep(QUEUE_DRAIN);
+    s.eventually(Duration::from_secs(15), || lever(api, c.id, "saves").is_ok_and(|r| r.body["keepalives"] == 0));
+    let slept = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let kept = newest_save(api, c.id);
+    let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    let life = woke.body["generation"].as_u64().unwrap_or(0);
+    let failing = lever_with(api, c.id, json!({ "op": "fail-saves", "times": 100 }))?;
+    let quiet = api.signed(c.owner, "POST", &path("/restart"), Some(&json!({ "generation": life })))?;
+    let never_told = api.signed(c.owner, "POST", &path("/notices/seen"), Some(&json!({ "life": life })))?;
+    lever_with(api, c.id, json!({ "op": "fail-saves", "times": 0 }))?;
+    s.ok(
+        RECOVERY_CHECKS[11],
+        slept.body["phase"] == "asleep"
+            && woke.body["restored"]["save"] == kept["id"]
+            && failing.status == 200
+            && quiet.status == 200
+            && quiet.body["generation"].as_u64() == Some(life + 1)
+            && quiet.body["restored"]["rollback"] == true
+            && quiet.body["restored"]["save"] == kept["id"]
+            && notice(&quiet.body, "went_back").is_null()
+            && never_told.status == 400,
+        format!("{woke} / {quiet} / {never_told}"),
+    );
     Ok(3)
 }
 
@@ -702,13 +769,14 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
 /// (401), each before anything is reserved or sent. The replies it adds.
 fn intercept_names_by_key(s: &mut Suite, api: &Api, owner_id: &str, agent: &str, chat: &str, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
     use fragment_fakes::workers_ai::TRANSCRIBE_MODEL;
-    let (calls, before) = (s.ai.calls().len(), entries(api, owner_id, "aig:").len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let said = fetched(s, 70, "transcribe hello from a voice memo")?;
     let sent = s.ai.calls().get(calls).cloned();
+    let metered = s.eventually(Duration::from_secs(20), || entries(api, owner_id, "aig:").len() == before + 1);
     let aig = entries(api, owner_id, "aig:");
     s.ok(
-        "a voice memo through the intercept, its agent named by its key (agent:<name>), is transcribed by Whisper and metered to the agent's owner",
-        said == "heard: hello from a voice memo" && aig.len() == before + 1 && aig.iter().filter(|e| end_of(e) == "settled").count() == aig.len(),
+        "a voice memo through the intercept, its agent named by its key (agent:<name>), is transcribed by Whisper and charged to the agent's owner",
+        said == "heard: hello from a voice memo" && metered && aig.iter().all(|e| charged(e).is_some()),
         json!({ "said": said, "aig": aig }),
     );
     s.ok(
@@ -718,13 +786,13 @@ fn intercept_names_by_key(s: &mut Suite, api: &Api, owner_id: &str, agent: &str,
     );
     let said = fetched(s, 71, &format!("think as agent:{agent} hello by key"))?;
     s.ok("a chat call names its agent the same way, by its key alone", said == "thought: echo: hello by key", &said);
-    let (calls, before) = (s.ai.calls().len(), entries(api, owner_id, "aig:").len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let elsewhere = fetched(s, 72, &format!("transcribe hi as agent:{chat}"))?;
     let malformed = fetched(s, 73, "transcribe hi as agent:not-a-name")?;
     let disagree = fetched(s, 74, &format!("transcribe hi as agent:{chat} header {agent}"))?;
     let missing = fetched(s, 75, "transcribe hi as fragment-model")?;
     s.ok(
-        "a key naming a fragment that does not run on this computer is refused (403); a malformed one, one that disagrees with x-fragment-agent, and a key that names no agent (401); nothing reserved or sent",
+        "a key naming a fragment that does not run on this computer is refused (403); a malformed one, one that disagrees with x-fragment-agent, and a key that names no agent (401); nothing charged or sent",
         elsewhere.starts_with("transcribe refused: 403") && malformed.starts_with("transcribe refused: 401") && disagree.starts_with("transcribe refused: 401") && missing.starts_with("transcribe refused: 401")
             && s.ai.calls().len() == calls && entries(api, owner_id, "aig:").len() == before,
         json!({ "elsewhere": elsewhere, "malformed": malformed, "disagree": disagree, "missing": missing }),
@@ -732,18 +800,19 @@ fn intercept_names_by_key(s: &mut Suite, api: &Api, owner_id: &str, agent: &str,
     // a tool the agent built on its computer decides as it calls a model:
     // `POST /v1/decide` on the intercept, its agent named by its key
     use fragment_core::decide::Model;
-    let (calls, before) = (s.ai.calls().len(), entries(api, owner_id, "aig:").len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let decided = fetched(s, 76, "decide kale chips")?;
     let heard = fetched(s, 77, "decide heard is this a snack")?;
     let sent = s.ai.calls()[calls..].to_vec();
+    s.eventually(Duration::from_secs(20), || entries(api, owner_id, "aig:").len() == before + 2);
     let aig = entries(api, owner_id, "aig:");
     s.ok(
-        "a decision through the intercept (POST /v1/decide), its agent named by its key, runs clef-flash, and with a voice memo inline clef-omni, each metered to the agent's owner; the vendor sees no key",
+        "a decision through the intercept (POST /v1/decide), its agent named by its key, runs clef-flash, and with a voice memo inline clef-omni, each charged to the agent's owner; the vendor sees no key",
         decided == format!("decided: {} snack 0.5", Model::ClefFlash.id()) && heard == format!("decided: {} snack 0.5", Model::ClefOmni.id())
             && sent.len() == 2 && sent[0].model == Model::ClefFlash.id() && sent[0].body["state"] == "kale chips"
             && sent[1].model == Model::ClefOmni.id() && sent[1].body["audio"].as_array().is_some_and(|a| a.len() == 1)
             && sent.iter().all(|c| c.authorization.is_none() && !c.body.to_string().contains("agent:"))
-            && aig.len() == before + 2 && aig.iter().all(|e| end_of(e) == "settled"),
+            && aig.len() == before + 2 && aig.iter().all(|e| charged(e).is_some()),
         json!({ "decided": decided, "heard": heard, "models": sent.iter().map(|c| c.model.clone()).collect::<Vec<_>>(), "aig": aig.len() - before }),
     );
     Ok(8)
@@ -756,6 +825,50 @@ fn intercept_names_by_key(s: &mut Suite, api: &Api, owner_id: &str, agent: &str,
 /// names by the route's names (`GET /api/computer`'s `models`); a call
 /// naming one runs on it, metered to the agent's owner; one no slot runs is
 /// refused, naming them, nothing reserved or sent. The replies it adds.
+/// A local fleet's code.storage is at the machine's loopback, which the
+/// guest's container cannot reach (its loopback is its own): the guest
+/// reaches it through its egress at `codestorage.fragment.internal`, as an
+/// agent's `fragment sync` and `deploy` do, with the token it was minted
+/// and nothing of the egress's (docs/computers.md, "The fragment API").
+/// Six replies: code.storage access and token-route boundaries.
+fn codestorage_through_egress(s: &mut Suite, api: &Api, owner: &crate::Keys, agent: &Value, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+    let name = agent["name"].as_str().expect("the agent's name");
+    let r = api.signed(owner, "GET", &format!("/api/f/{name}/storage-token"), None)?;
+    let (token, repo) = (r.body["token"].as_str().unwrap_or_default(), r.body["repo"].as_str().unwrap_or_default());
+    s.ok("(its owner mints a storage token for the agent's fragment, naming the fake at its loopback address)", r.status == 200 && r.body["api"].as_str().is_some_and(|a| a.starts_with("http://127.0.0.1:")), &r);
+    let branch = format!("http://{}/api/repos/{repo}/branch?name=main", fragment_core::codestorage::GUEST_HOST);
+    let said = fetched(s, 83, &format!("fetch {branch} with {token}"))?;
+    s.ok("the guest reaches a local fleet's code.storage through its egress, with its token", said.starts_with("fetched 200") && said.contains("head_sha"), &said);
+    let said = fetched(s, 84, &format!("fetch {branch} with not-a-token"))?;
+    s.ok("and with no token of its own, the egress adds none: code.storage refuses it", said.starts_with("fetched 401"), &said);
+    // A channel and an application's route may both be named storage-token.
+    // They must keep their own response bodies through the guest's egress.
+    let manifest = br#"{"channels":{"tasks":{"read":"editor","post":"editor"},"storage-token":{"read":"editor","post":"editor"}}}"#;
+    let app = br#"import { DurableObject } from "cloudflare:workers";
+export class App extends DurableObject {
+  fetch() { return new Response("application storage-token route"); }
+}
+"#;
+    s.commit(agent, &[("fragment.json", Some(manifest)), ("app.mjs", Some(app))]);
+    s.deploy(agent);
+    let channel = format!("/api/f/{name}/channels/storage-token");
+    let r = api.signed(owner, "POST", &channel, Some(&json!({ "id": "token-name", "body": { "text": "storage-token record" } })))?;
+    anyhow::ensure!(r.status == 200, "the storage-token channel's fixture: {r}");
+    for (n, endpoint) in [(85, "storage-token"), (86, "%73torage-token")] {
+        let said = fetched(s, n, &format!("fetch http://api.fragment.internal/api/f/{name}/{endpoint} with {name} in x-fragment-agent"))?;
+        s.ok(
+            &format!("the guest still mints a storage token at {endpoint}"),
+            said.starts_with("fetched 200:") && said.contains("\"token\":"),
+            said.split(':').next().unwrap_or_default(),
+        );
+    }
+    let said = fetched(s, 87, &format!("fetch http://api.fragment.internal{channel} with {name} in x-fragment-agent"))?;
+    s.ok("a channel named storage-token keeps its records through the guest's egress", said.starts_with("fetched 200:") && said.contains("storage-token record"), &said);
+    let said = fetched(s, 88, &format!("fetch http://api.fragment.internal/f/{name}/storage-token with {name} in x-fragment-agent"))?;
+    s.ok("an application route named storage-token keeps its response through the guest's egress", said == "fetched 200: application storage-token route", &said);
+    Ok(6)
+}
+
 fn intercept_takes_model_ids(s: &mut Suite, api: &Api, owner_id: &str, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
     use fragment_core::models::{DEEPSEEK_FLASH, GLM_FLASH, MEDIUM_MODEL};
     let said = fetched(s, 80, "models")?;
@@ -766,19 +879,20 @@ fn intercept_takes_model_ids(s: &mut Suite, api: &Api, owner_id: &str, fetched: 
         listed == format!("{GLM_FLASH}, {MEDIUM_MODEL}, {DEEPSEEK_FLASH}") && given == json!({ "cheap": GLM_FLASH, "medium": MEDIUM_MODEL, "fallback": DEEPSEEK_FLASH, "vision": GLM_FLASH }),
         &said,
     );
-    let (calls, before) = (s.ai.calls().len(), entries(api, owner_id, "aig:").len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let said = fetched(s, 81, &format!("think on {MEDIUM_MODEL} hello by id"))?;
     let tried: Vec<String> = s.ai.calls()[calls..].iter().map(|c| c.model.clone()).collect();
+    let metered = s.eventually(Duration::from_secs(20), || entries(api, owner_id, "aig:").len() == before + 1);
     let aig = entries(api, owner_id, "aig:");
     s.ok(
-        "a call through the intercept naming a model by its id (GLM-5.3, the medium tier's) runs on it, metered to the agent's owner",
-        said == "thought: echo: hello by id" && tried == [MEDIUM_MODEL] && aig.len() == before + 1 && aig.iter().all(|e| end_of(e) == "settled"),
+        "a call through the intercept naming a model by its id (GLM-5.3, the medium tier's) runs on it, charged to the agent's owner",
+        said == "thought: echo: hello by id" && tried == [MEDIUM_MODEL] && metered && aig.iter().all(|e| charged(e).is_some()),
         json!({ "said": said, "tried": tried, "aig": aig.len() - before }),
     );
-    let (calls, before) = (s.ai.calls().len(), entries(api, owner_id, "aig:").len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, owner_id, "aig:"));
     let said = fetched(s, 82, "think on gpt-4o hello")?;
     s.ok(
-        "one naming a model no slot runs is refused (400), naming the ids it may, nothing reserved or sent",
+        "one naming a model no slot runs is refused (400), naming the ids it may, nothing charged or sent",
         said.starts_with("think failed: 400") && said.contains(MEDIUM_MODEL) && s.ai.calls().len() == calls && entries(api, owner_id, "aig:").len() == before,
         &said,
     );
@@ -876,8 +990,184 @@ fn made_while_its_seat_sync_fails(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
+/// An agent's routine (docs/chat-records.md, `tasks`): the record a
+/// scheduled record on its own fragment's `tasks` appends, as `fragment
+/// schedule add --routine` builds it.
+pub(super) fn routine(text: &str, chat: &str) -> Value {
+    json!({ "kind": "routine", "text": text, "chat": chat })
+}
+
+/// The routines on an agent fragment's `tasks`: what its scheduled records
+/// appended.
+pub(super) fn fired(api: &Api, owner: &crate::Keys, agent: &str) -> Vec<Value> {
+    records(api, owner, agent, "tasks").into_iter().filter(|r| r["body"]["kind"] == "routine").collect()
+}
+
+/// The `cron-now` lever on a fragment: each of its cron schedules, and each
+/// of its scheduled records not paused, due at once (`{due, records}`).
+pub(super) fn cron_now(api: &Api, fragment: &str) -> Result<crate::api::Reply> {
+    api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": fragment, "op": "cron-now" })))
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
+/// The computer put to sleep, asked until it is (a turn's last record may
+/// wake it again): whether it slept, and its last view.
+fn put_to_sleep(s: &Suite, api: &Api, owner: &crate::Keys, id: &str) -> (bool, Value) {
+    std::thread::sleep(QUEUE_DRAIN);
+    let mut last = Value::Null;
+    let slept = s.eventually(Duration::from_secs(90), || {
+        let r = api.signed(owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})));
+        last = r.as_ref().map(|r| r.body.clone()).unwrap_or(Value::Null);
+        last["phase"] == "asleep"
+    });
+    (slept, last)
+}
+
+/// What the routine checks act on: the lane's computer, its agent and chat.
+struct Routined<'a> {
+    owner: &'a crate::Keys,
+    owner_id: &'a str,
+    id: &'a str,
+    chat: &'a str,
+    agent: &'a str,
+    /// The agent fragment's own npub: who its scheduled records append as.
+    agent_npub: &'a str,
+    identity: &'a str,
+    scripted: bool,
+    wake: Duration,
+}
+
+const ROUTINE_AGENT_CHECKS: [&str; 4] = [
+    "the agent schedules a routine on itself through its computer (its own fragment's editor, acting for its owner): it is who added it",
+    "the agent's own schedule is held to the same bounds, saying why",
+    "the agent lists its fragment's schedules",
+    "the agent removes its own schedule",
+];
+
+/// An agent's routines (decision 38): scheduled records on its own agent
+/// fragment's `tasks` (docs/api.md, "Scheduled records"), which its owner
+/// adds with the CLI's `--routine` and the agent adds to itself through its
+/// computer, as that fragment's editor, no agent special case anywhere.
+/// One is kept through its computer's restart; due (the `cron-now`
+/// lever), its record wakes the sleeping computer, and the agent does it in
+/// its chat; removed, it fires no more. (The bounds, pauses and an app's
+/// trigger are the triggers section's, on an app.) Starts awake; ends
+/// awake, its schedules gone.
+fn routine_checks(s: &mut Suite, api: &Api, c: &Routined, say: &dyn Fn(u32, &str) -> Result<crate::api::Reply>) -> Result<()> {
+    let path = format!("/api/f/{}/schedules", c.agent);
+    let list = |api: &Api| api.signed(c.owner, "GET", &path, None).ok().and_then(|r| r.body["schedules"].as_array().cloned()).unwrap_or_default();
+    // its owner, with the CLI's routine: due next new year, so only the lever makes it due
+    let home = s.dir("computers-cli");
+    let config = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment");
+    std::fs::create_dir_all(&config)?;
+    std::fs::write(config.join("config.json"), json!({ "secret_key": c.owner.secret_hex() }).to_string())?;
+    let cli = |s: &Suite, args: &[&str]| -> (Option<i32>, Value) {
+        let out = s.cli(api, &home, args);
+        (out.status.code(), serde_json::from_slice(&out.stdout).unwrap_or_default())
+    };
+    let (exit, r) = cli(s, &["schedule", "add", c.agent, "--routine", "water the plants", "--chat", c.chat, "--cron", "0 0 1 1 *", "--json"]);
+    let first = r["data"]["schedule"].clone();
+    let r1 = first["id"].as_i64().unwrap_or(0);
+    s.ok(
+        "its owner schedules a routine on its agent (`fragment schedule add --routine`): the routine record on its tasks, its schedule in words, its owner as who added it",
+        exit == Some(0)
+            && r["data"]["replayed"] == false
+            && r1 > 0
+            && first["channel"] == "tasks"
+            && first["record"] == routine("water the plants", c.chat)
+            && first["said"] == "every year on January 1 at 00:00 UTC"
+            && first["createdBy"] == c.owner_id
+            && first["nextAt"].as_i64().is_some_and(|n| n > now_ms()),
+        &r,
+    );
+    let (exit, listed) = cli(s, &["schedule", "list", c.agent, "--json"]);
+    let (refused_exit, refused) = cli(s, &["schedule", "add", c.agent, "--routine", "look again", "--chat", c.chat, "--cron", "*/5 * * * *", "--json"]);
+    s.ok(
+        "`fragment schedule list` lists it; a bound the platform refuses is the CLI's invalid_request (exit 1)",
+        exit == Some(0) && listed["data"]["schedules"] == json!([first]) && refused_exit == Some(1) && refused["error"]["code"] == "invalid_request",
+        json!({ "listed": listed, "refused": refused }),
+    );
+
+    // the agent itself, as `fragment schedule` on its computer asks: through
+    // its egress, acting for its owner, as its own fragment's editor (the
+    // stub's `schedule` command)
+    if c.scripted {
+        let answer = |s: &Suite, n: u32, text: &str| -> Result<String> {
+            let r = say(n, text)?;
+            anyhow::ensure!(r.status == 200, "the message m{n} to the chat: {r}");
+            let turn = turn_of(c.agent, c.chat, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
+            let of = || agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity).into_iter().find(|x| x["body"]["turn"] == turn.as_str());
+            s.eventually(c.wake, || of().is_some());
+            Ok(of().and_then(|x| x["body"]["text"].as_str().map(str::to_string)).unwrap_or_default())
+        };
+        let said = answer(s, 300, "schedule add 30 9 * * mon-fri check the shelf")?;
+        let r2: i64 = said.strip_prefix("schedule added ").and_then(|n| n.trim().parse().ok()).unwrap_or(0);
+        let theirs = list(api).into_iter().find(|x| x["id"] == r2).unwrap_or_default();
+        s.ok(
+            ROUTINE_AGENT_CHECKS[0],
+            r2 > 0 && theirs["createdBy"] == c.identity && theirs["channel"] == "tasks" && theirs["record"] == routine("check the shelf", c.chat) && theirs["said"] == "every Monday to Friday at 09:30 UTC",
+            json!({ "said": said, "schedule": theirs }),
+        );
+        let too_often = answer(s, 301, "schedule add */5 * * * * look again")?;
+        s.ok(ROUTINE_AGENT_CHECKS[1], too_often.starts_with("schedule refused") && too_often.contains("at most every 15 minutes") && list(api).len() == 2, &too_often);
+        let listed = answer(s, 302, "schedule list")?;
+        s.ok(ROUTINE_AGENT_CHECKS[2], listed.contains(&format!("{r1} 0 0 1 1 * by {}", c.owner_id)) && listed.contains(&format!("{r2} 30 9 * * mon-fri by {}", c.identity)), &listed);
+        let rm = answer(s, 303, &format!("schedule rm {r2}"))?;
+        s.ok(ROUTINE_AGENT_CHECKS[3], rm == format!("schedule removed {r2}") && list(api).iter().all(|x| x["id"] != r2), &rm);
+    } else {
+        for label in ROUTINE_AGENT_CHECKS {
+            s.skip(label, "it needs the stub's scripted runtime to ask as the agent");
+        }
+    }
+
+    // a restart of its computer (Paul, 2026-10-20: the loop an agent started
+    // in it died at the next one) touches no schedule: they are its fragment's
+    let generation = api.signed(c.owner, "GET", &format!("/api/computers/{}", c.id), None)?.body["generation"].as_u64().unwrap_or(0);
+    let r = api.patient(c.wake + Duration::from_secs(60)).signed(c.owner, "POST", &format!("/api/computers/{}/restart", c.id), Some(&json!({ "generation": generation })))?;
+    // it answers once its start is up (a real Hermes on a preview answered
+    // `starting` while its container's exit report made that start)
+    s.ok("its computer restarts, and its routine is kept as it was", r.status == 200 && r.body["phase"] == "awake" && list(api) == vec![first.clone()], json!({ "restart": r.body, "schedules": list(api) }));
+
+    // asleep, due: its record on tasks wakes the computer, and the agent does it in the chat
+    let (slept, last) = put_to_sleep(s, api, c.owner, c.id);
+    s.ok("asleep, it waits for its routine", slept, &last);
+    let before = fired(api, c.owner, c.agent).len();
+    let replied_before = agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity).len();
+    let lever = cron_now(api, c.agent)?;
+    let woke = s.eventually(c.wake, || phase(api, c.owner, c.id) == "awake");
+    let done = |recs: &[Value]| {
+        agent_replies(recs, c.identity).iter().skip(replied_before).any(|r| match c.scripted {
+            true => r["body"]["text"].as_str().is_some_and(|t| t.contains("[your routine] water the plants")),
+            false => said_something(r),
+        })
+    };
+    let ran = s.eventually(c.wake + Duration::from_secs(60), || done(&records(api, c.owner, c.chat, "chat")));
+    let posted = fired(api, c.owner, c.agent);
+    s.ok(
+        "due, its schedule appends the routine on the agent's tasks, once, as the agent fragment itself",
+        lever.body["records"] == 1 && posted.len() == before + 1 && posted.last().is_some_and(|p| p["principal"] == c.agent_npub && p["body"] == routine("water the plants", c.chat)),
+        json!({ "lever": lever.body, "fired": posted }),
+    );
+    s.ok("which wakes the sleeping computer, and the agent does it in the chat, asked by its owner", woke && ran, json!(agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity)));
+
+    // removed, it fires no more
+    let (exit, rm) = cli(s, &["schedule", "rm", c.agent, &r1.to_string(), "--json"]);
+    let before = fired(api, c.owner, c.agent).len();
+    let lever = cron_now(api, c.agent)?;
+    std::thread::sleep(Duration::from_secs(3));
+    s.ok(
+        "removed (`fragment schedule rm`), it fires no more",
+        exit == Some(0) && rm["data"]["removed"] == r1 && lever.body["records"] == 0 && fired(api, c.owner, c.agent).len() == before && list(api).is_empty(),
+        json!({ "removed": rm, "lever": lever.body }),
+    );
+    Ok(())
+}
+
 pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("computers", &[crate::Need::Computers, crate::Need::Models]) {
+    if !s.section("computers", &[crate::Need::Computers, crate::Need::Models, crate::Need::Levers]) {
         return Ok(());
     }
     // a hosted run's owner pays a real model, from the run's budget
@@ -1044,7 +1334,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let card = work.iter().find(|r| r["body"]["kind"] == "turn.prompt").cloned().unwrap_or_default();
         let prompt = card["body"]["prompt"].as_str().unwrap_or("").to_string();
         s.ok("a prompt is a card on work, asking the agent's owner", asked && card["body"]["asks"] == api.identity(&owner)?.as_str(), &card);
-        let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": "once" } });
+        let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": "once", "agent": card["principal"], "turn": card["body"]["turn"] } });
         let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&answer))?;
         s.ok("its owner answers it", r.status == 200, &r);
         let approved = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|r| r["body"]["turn"] == turn.as_str() && r["body"]["text"].as_str().is_some_and(|t| t.contains("(approved)"))));
@@ -1127,36 +1417,45 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         if fakes {
             s.ai.clear_script();
         }
-        let aig_before = entries(api, &owner_id, "aig:").len();
+        let aig_before = quiet(api, &owner_id, "aig:");
         let said = fetched(s, 23, "think hello model")?;
         replies_so_far += 1;
         s.ok("a model call through the computer's intercept answers as the model did", said == "thought: echo: hello model", &said);
+        let metered = s.eventually(Duration::from_secs(20), || entries(api, &owner_id, "aig:").len() == aig_before + 1);
         let aig = entries(api, &owner_id, "aig:");
-        s.ok(
-            "and is metered to the agent's owner, settled from its usage",
-            aig.len() == aig_before + 1 && aig.iter().filter(|e| end_of(e) == "settled").count() == aig_before + 1,
-            json!(aig),
-        );
+        s.ok("and is charged to the agent's owner after it, from its usage", metered && aig.iter().all(|e| charged(e).is_some()), json!(aig));
         if fakes {
             replies_so_far += intercept_names_by_key(s, api, &owner_id, &agent_name, &chat_name, &fetched)?;
             replies_so_far += intercept_takes_model_ids(s, api, &owner_id, &fetched)?;
+            replies_so_far += codestorage_through_egress(s, api, &owner, &agent, &fetched)?;
         }
     } else {
         // a real runtime called its model to answer at all: each call went
-        // through the intercept, reserved and settled on its owner's ledger.
+        // through the intercept, charged on its owner's ledger after it.
         // Hermes may make one more after its reply (on the e2e preview,
-        // 2026-10-06, one 55 s after the answer's), which settles only when
-        // that call ends: the wait covers a model call, not just the ledger.
-        let settled = |aig: &[Value]| !aig.is_empty() && aig.iter().all(|e| end_of(e) == "settled");
+        // 2026-10-06, one 55 s after the answer's), charged only when that
+        // call ends: the wait covers a model call, not just the ledger.
+        let settled = |aig: &[Value]| !aig.is_empty() && aig.iter().all(|e| charged(e).is_some());
         s.eventually(Duration::from_secs(150), || settled(&entries(api, &owner_id, "aig:")));
         let aig = entries(api, &owner_id, "aig:");
         s.ok(
-            "its answer's model calls went through the computer's intercept, each metered to the agent's owner and settled from its usage",
+            "its answer's model calls went through the computer's intercept, each charged to the agent's owner from its usage",
             settled(&aig),
             json!(aig),
         );
     }
 
+    // a turn's keepalive across a deploy; then a sleep, and a fresh container
+    if scripted && fakes {
+        replies_so_far += keepalive_across_a_reload(s, api, &owner, &id, &|n, text| say(n, text), &|seq| {
+            let turn = turn_of(&agent_name, &chat_name, "chat", seq);
+            agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|r| r["body"]["turn"] == turn.as_str())
+        })?;
+    } else {
+        for label in KEEPALIVE_CHECKS {
+            s.skip(label, "it reloads the local node, under the stub's scripted runtime and the fakes' held model call");
+        }
+    }
     // asleep, a record wakes it, restored, and nothing runs twice
     std::thread::sleep(QUEUE_DRAIN);
     let ran = fakes.then(|| runs(s, api, &owner, &owner_id, &id));
@@ -1323,8 +1622,8 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         Ok((first, taken))
     });
     s.ok(
-        "a socket on its port opens from its own page, and carries the container's first word (the agent's screen, held by no one) and the page's answer",
-        heard.as_ref().is_ok_and(|(first, taken)| first["type"] == "control" && first["agent"] == agent_name.as_str() && first["name"].as_str().is_some_and(|n| !n.is_empty()) && first["holder"].is_null() && taken["holder"] == "e2e"),
+        "a socket on its port opens from its own page, and carries the container's first word (the agent's screen, by its fragment and never its label, held by no one) and the page's answer",
+        heard.as_ref().is_ok_and(|(first, taken)| first["type"] == "control" && first["agent"] == agent_name.as_str() && first.get("name").is_none() && first["holder"].is_null() && taken["holder"] == "e2e"),
         format!("{heard:?}"),
     );
     // an agent this computer does not run, or no agent's name, is refused
@@ -1386,7 +1685,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok(PINS[4], asked && held.as_u64().is_some_and(|n| n > 0) && mid["phase"] == "awake" && notice(&mid, "update").is_null(), json!({ "keepalives": held, "view": mid }));
         let card = work_of(&records(api, &owner, &chat_name, "work"), &turn).into_iter().find(|r| r["body"]["kind"] == "turn.prompt").unwrap_or_default();
         let prompt = card["body"]["prompt"].as_str().unwrap_or("").to_string();
-        let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": "once" } });
+        let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": "once", "agent": card["principal"], "turn": card["body"]["turn"] } });
         api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&answer))?;
         let approved = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|r| r["body"]["turn"] == turn.as_str()));
         replies_so_far += 1;
@@ -1443,28 +1742,20 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/subscriptions"), Some(&json!({ "channel": "chat", "wake": true })))?;
     s.ok("a wake subscription from outside a computer is no wake (it names no URL)", r.status == 400, &r);
 
-    // a routine: its agent fragment's cron, on time, wakes it asleep
-    s.commit(&agent, &[("app.mjs", Some(routine_app(&chat_name).as_bytes())), ("fragment.json", Some(ROUTINE_JSON))]);
-    s.deploy(&agent);
-    std::thread::sleep(QUEUE_DRAIN);
-    // its cron runs every minute, so a routine may wake it before it sleeps:
-    // asked until asleep, and only a routine after that counts
-    let mut last = Value::Null;
-    let slept = s.eventually(Duration::from_secs(90), || {
-        let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})));
-        last = r.as_ref().map(|r| r.body.clone()).unwrap_or(Value::Null);
-        last["phase"] == "asleep"
-    });
-    s.ok("asleep, it waits for its routine", slept, &last);
-    // the stub says the routine's text; a real model says what it likes, in a reply of its own
-    let replied_before = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len();
-    let routine = |recs: &[Value]| match scripted {
-        true => agent_replies(recs, &identity).iter().skip(replied_before).any(|r| echoed(r, "water the plants")),
-        false => agent_replies(recs, &identity).iter().skip(replied_before).any(said_something),
+    // its routines (decision 38): scheduled records on its own agent
+    // fragment, which that fragment's alarm fires, each fire waking it asleep
+    let routined = Routined {
+        owner: &owner,
+        owner_id: &owner_id,
+        id: &id,
+        chat: &chat_name,
+        agent: &agent_name,
+        agent_npub: &agent_npub,
+        identity: &identity,
+        scripted,
+        wake,
     };
-    let ran = s.eventually(Duration::from_secs(150) + if scripted { Duration::ZERO } else { wake }, || routine(&records(api, &owner, &chat_name, "chat")));
-    s.ok("its cron's routine wakes it, and the agent does it in the chat", ran, "");
-    api.signed(&owner, "POST", &format!("/api/f/{agent_name}/pause"), Some(&json!({ "op": "routine", "paused": true })))?;
+    routine_checks(s, api, &routined, &|n, text| say(n, text))?;
 
     // asleep, its agent added to a new chat wakes it, and it follows that
     // chat before anyone speaks there (Paul, 2026-10-03)
@@ -1502,11 +1793,41 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let before = all_joined(api);
     s.ok("adding it again is no new join: nothing is posted twice", r.status == 200 && told(api, &owner, &agent_name, &next_name).len() == 1, json!(told(api, &owner, &agent_name, &next_name)));
     let stranger_id = api.identity(&stranger)?;
-    let r = api.signed(&owner, "PUT", &format!("/api/f/{next_name}/members/{stranger_id}"), Some(&json!({ "role": "viewer" })))?;
+    let r = api.share(&next_name, &stranger_id, "viewer")?;
     s.ok("a person added is no agent's join: nothing is posted", r.status == 200 && all_joined(api) == before, json!(all_joined(api)));
     let r = api.signed(&owner, "POST", &format!("/api/f/{next_name}/channels/chat"), Some(&json!({ "id": "n1", "body": { "text": "hello in the new chat" } })))?;
     let answered = s.eventually(wake, || agent_replies(&records(api, &owner, &next_name, "chat"), &identity).len() == 1);
     s.ok("it answers there", r.status == 200 && answered, json!(agent_replies(&records(api, &owner, &next_name, "chat"), &identity)));
+
+    // an agent its person makes after their yes elsewhere comes in there
+    // beside them as their computer takes it, and that computer hears it
+    // joined (decision 64): its join is sent once both its agent fragment
+    // and the computer hold it; a replay of the assignment joins nothing twice
+    let theirs = s.named(api, &stranger, "their-chat")?;
+    let made = api.create_with(&stranger, json!({ "name": theirs, "template": "chat" }))?;
+    let invited = api.signed(&stranger, "POST", &format!("/api/f/{theirs}/invites"), Some(&json!({ "email": Api::email_of(&owner), "role": "editor" })))?;
+    let yes = api.signed(&owner, "POST", &format!("/api/invites/{theirs}/accept"), Some(&json!({})))?;
+    anyhow::ensure!(made.status == 200 && invited.status == 200 && yes.status == 200, "their chat, and its owner's yes: {made} {invited} {yes}");
+    let later_name = s.named(api, &owner, "later")?;
+    let later = s.create(api, &owner, &later_name)?;
+    s.commit(&later, &[("fragment.json", Some(AGENT_JSON))]);
+    s.deploy(&later);
+    let assign = || api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{later_name}"), Some(&json!({})));
+    let r = assign()?;
+    let later_id = r.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == later_name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
+    let joined = s.eventually(Duration::from_secs(30), || told(api, &owner, &later_name, &theirs).len() == 1);
+    let row = api.signed(&stranger, "GET", &format!("/api/f/{theirs}/members"), None)?.body["members"]
+        .as_array()
+        .and_then(|m| m.iter().find(|m| m["principal"] == later_id.as_str()).cloned())
+        .unwrap_or_default();
+    s.ok(
+        "an agent assigned after its person's yes elsewhere is in there beside them, at their role, and its computer heard it joined (its first assignment)",
+        r.status == 200 && fragment_core::npub::is_identity(&later_id) && joined && row["owner"] == owner_id.as_str() && row["role"] == "editor",
+        json!({ "row": row, "told": told(api, &owner, &later_name, &theirs) }),
+    );
+    let again = assign()?;
+    std::thread::sleep(QUEUE_DRAIN);
+    s.ok("assigned again (a replay), it joins nothing twice: one join told", again.status == 200 && told(api, &owner, &later_name, &theirs).len() == 1, json!(told(api, &owner, &later_name, &theirs)));
 
     if !fakes {
         // the node and the deployment's operator are a local run's; a
@@ -1519,14 +1840,17 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     // the platform crashes while it is awake: a new isolate takes the
-    // computer over (lesson 6), and it answers what comes next, once
+    // computer over (lesson 6), and it answers what comes next, once; its
+    // agent's routine, the platform's own data, is kept, and fires
+    let routines_of = format!("/api/f/{agent_name}/schedules");
+    let r = api.signed(&owner, "POST", &routines_of, Some(&json!({ "cron": "0 0 1 1 *", "channel": "tasks", "record": routine("water the plants again", &chat_name) })))?;
+    let kept = r.body["schedule"].clone();
     api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
     s.crash()?;
     let api = s.start(false)?;
     let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": "m40", "body": { "text": "after the crash" } })))?;
     s.ok("after a crash of the platform, a message to the chat", r.status == 200, &r);
-    // its own turn's replies: a routine's, on its cron minute, may land in
-    // the same window and is no second answer
+    // its own turn's replies
     let turn = turn_of(&agent_name, &chat_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
     let its = |api: &Api| agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().filter(|r| r["body"]["turn"] == turn.as_str()).collect::<Vec<_>>();
     let after = s.eventually(wake, || its(&api).len() == 1);
@@ -1537,6 +1861,17 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         after && replies.len() == 1 && replies[0]["body"]["text"].as_str().is_some_and(|t| t.contains("after the crash")),
         json!(replies),
     );
+    let listed = api.signed(&owner, "GET", &routines_of, None)?;
+    let replied_before = agent_replies(&records(&api, &owner, &chat_name, "chat"), &identity).len();
+    let lever = cron_now(&api, &agent_name)?;
+    let again = |api: &Api| agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().skip(replied_before).any(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("[your routine] water the plants again")));
+    let ran = s.eventually(wake, || again(&api));
+    s.ok(
+        "after a crash of the platform its agent's scheduled routine is kept as it was, and fires",
+        kept["id"].is_i64() && listed.body["schedules"] == json!([kept]) && lever.body["records"] == 1 && ran,
+        json!({ "kept": kept, "listed": listed.body, "lever": lever.body }),
+    );
+    api.signed(&owner, "DELETE", &format!("{routines_of}/{}", kept["id"]), None)?;
     std::thread::sleep(QUEUE_DRAIN);
 
     // a $200 seat's computer stays awake unless its owner lets it sleep

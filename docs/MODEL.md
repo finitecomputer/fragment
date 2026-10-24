@@ -38,6 +38,16 @@ the wire contract in full.
 
 ## Anatomy of a fragment, in Cloudflare terms
 
+Connection authorization's pending state lives in the Registry's
+`connection_signins`: a state hash, session hash, provider, issuer/subject,
+configuration hash, sealed verifier and expiry, and what the connect is for
+(an account, another of several, or one again). A browser cookie proves the
+round trip; a one-use transaction is consumed before the provider exchange.
+Completed connection credentials live only in WorkOS Pipes, one account a
+person a provider, or several where its catalog row says so (`accounts_max`):
+which of them each agent uses is its computer's (`agent_accounts`). See
+[browser-bound Pipes connections](pipes-browser-binding.md).
+
 | Part | Cloudflare primitive | Holds |
 |---|---|---|
 | Supervisor | a Durable Object (`Fragment`), platform code in Rust | members, invites, the audit copy of the operation ledger, channels, schedules, wrapped secrets, the file-plane pins and tree index, the live code pin |
@@ -175,6 +185,11 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   last `seq`); channel-triggered operations; agents; and outbound
   deliveries (a subscription's URL, web push) through a Queue.
 - Presence is per socket and never stored.
+- A channel may declare record kinds its members' lists show
+  (`listed`): each member's newest record of those kinds rides their
+  row in each member's list whose role may read the channel, so a list
+  says what a fragment's people and agents are doing (a chat's agents:
+  working, waiting) with no fragment read (docs/api.md, Listed records).
 - fragment's per-room persisted document becomes a query operation plus
   a change signal; `ctx.state` becomes the app's SQL.
 
@@ -193,7 +208,11 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   transaction; a revoke closes that principal's sockets. The `events`
   channel records every change. Membership leaves `fragment.json` (a git
   commit can no longer grant access). Only the owner manages members,
-  invites, visibility, and tokens; a member may leave. Members name
+  invites, visibility, and tokens; a member may leave, and no one is
+  made a member of someone else's fragment but by their own yes to an
+  invite (decision 63: a direct add is the owner's own agents), which
+  brings their agents in beside them as one entity (decision 64: their
+  role theirs, in and out together). Members name
   identities, so replacing a key rewrites no grant. Each identity's list
   of fragments is an index in its own `Principal` cell, fed from the
   fragment's outbox. A request sends at most one round of the outbox (32
@@ -251,8 +270,12 @@ Every change is checked against this table.
 | File bytes, their history, `main` and `live` | code.storage git | a local folder is a disposable working copy |
 | Tree index (path, size, SHA per pinned commit) | derived from git | in the cell's SQLite; names its pinned SHA; moved by the platform's own moves (its commits, a deploy), a writer's refresh after its push, or the poll backstop |
 | Manifest and declared operations | `fragment.json` in git | the cell's copy at the pin; an invalid one at a new pin keeps the last good and says why (`status.code.error`) |
-| Members, roles, invites | the fragment's supervisor | grants and revokes are transactional; `events` records each. The registry keeps each invite waiting on an email against that email, to meet it at a sign-in: a pointer the fragment overrules (one with none waiting is forgotten); a claim the fragment could not take is tried again by the registry's alarm, bounded, then waits on the next sign-in |
+| Members, roles, invites | the fragment's supervisor | grants and revokes are transactional; `events` records each. The registry keeps each invite waiting on an email against that email, with its role, the title it was sent with and its sharer, for the person who signs in as it to accept or decline (decision 63; `GET /api/invites` reads it): a pointer the fragment overrules (an accept or a decline the fragment finds none waiting for is forgotten; a revoke tells the registry to forget it). An invite from before decision 63 (no role) is met at a sign-in still, and a claim the fragment could not take is tried again by the registry's alarm, bounded, then waits on the next sign-in |
 | Cell state (supervisor tables, the operation ledger, channels, the app's SQL) | the Durable Objects' own storage | none |
+| A platform object's schema: its tables, and the steps that made them | its class's steps, `crates/core/migrations/<class>/` (Schemas, below) | each object's `_schema` holds the steps it took (number, name, SHA, ran or adopted) and refuses code whose steps differ (`schema_refused`); `crates/core/migrations/schema.lock` locks each step and what the steps make, and `cargo xtask check` holds the tree to it. An app facet's SQLite is its author's |
+| The release a call between the Worker and an object (or two objects) was made by | the caller's `FRAGMENT_DEPLOY_ID`, its deploy's commit, and `FRAGMENT_DEPLOYED_AT`, its deploy's second (Calls between releases, below) | stamped on each call (`x-fragment-release`, `x-fragment-release-deployed`) and checked first by the object, which refuses another's (503 `deploying`) before it acts, and restarts onto it when it was deployed later; never stored |
+| The release a browser's page of the platform runs, and the one under it now | the shell's page as it was answered (its `<meta name="fragment-release">`, filled with the answering `FRAGMENT_DEPLOY_ID`), and every answer of the platform's host (`x-fragment-deploy`) | the page compares the two on each answer it reads and reloads once they differ, at a safe moment (docs/api.md, The shell, "A new release"); its tab keeps its last such reload (`sessionStorage`: from, to, when, how often), so a deploy's old side answering again, or a reload that met it, is no loop; it reloads only while hidden or at the person's next move, and while no chat's page says it is busy |
+| A chat's unsent words (its composer's draft) | the chat's page, as its person types | that page's origin's storage (`localStorage`, `fragment.chat.draft.v1`), as the principal it is signed in as: put back for that principal alone as the page loads (anyone else's let go), emptied as it is sent, and let go when the shell asks as its person signs out or uses another account (docs/chat-records.md, "Its draft, kept") |
 | Large file bytes (1 MiB or more) | R2 (`BLOBS`), keyed by SHA-256 | git holds a pointer; a sync resolves it; a blob no branch tip references is deleted |
 | Identities (npubs) and their keys, each person's own key (sealed), sign-ins and their verified emails, agents' owners, sessions | the registry (fragment's BANKS: docs/cloudflare-v1.md, decisions 45 to 50) | an identity's npub never changes; an email names at most one person; sessions and caches name an identity and never outlive a revocation; cookies hold only tokens, the registry their hashes |
 | A person's wipe: how far it got, and that it locks them | the registry's `wipes` (docs/api.md, Operators) | a wiped person's ledger, list and computer each keep one row saying so, and take nothing more |
@@ -262,22 +285,180 @@ Every change is checked against this table.
 | What is sold: a seat's and a pack's price, the credit a seat includes | core's constants (`fragment_core::stripe`, `ledger::included`) | Stripe's Prices, which Checkout refuses at any other amount; every page shows them from `GET /api/seat`'s `offer` |
 | A subscription's status, items and periods; an org's Stripe customer | Stripe (docs/billing.md) | the registry's copy (`orgs`) is written only from a subscription fetched from Stripe (a Checkout's return, a webhook, the daily reconcile), never from an event's own copy; a newer subscription replaces one only once it has ended, and an older event changes nothing |
 | The image a computer's next start runs | the deployment's container config: each image name's reference in the Worker version (`ctx.container.images`); a computer's pin names one | the Computer DO's last look (`Images`), at its every event and every read of its view; a start runs what it looked at and records it as the image that life runs, from which its owner is told an update is ready |
-| An agent's name and picture | the agent fragment at live: `fragment.json`'s `meta.title` and its `avatar.png` (docs/api.md, "An agent's name and picture") | its cell's face, read at each install of live (a picture checked, a bad one refusing the install); its members' lists, `__people`, `job.people`, the share sheet and the export read that face, its picture served from the commit the install checked; its computer's profile (Hermes' `profile.yaml`, and its config's `agent.system_prompt`, which tells the agent its name at every turn), rewritten from it within seconds while awake and at each boot. No chat's title and no `SOUL.md` copies it. Its label, the word that `@mentions` it, never changes with it |
+| An agent's name and picture | the agent fragment at live: `fragment.json`'s `meta.title` and its `avatar.png` (docs/api.md, "An agent's name and picture") | its cell's face, read at each install of live (a picture checked, a bad one refusing the install); its members' lists, `__people`, `job.people`, the share sheet and the export read that face, its picture served from the commit the install checked; its computer's profile (Hermes' `profile.yaml`, and its config's `agent.system_prompt`, which tells the agent its name at every turn), rewritten from it within seconds while awake and at each boot; its screen's page and window, told it by the shell as they open and on a rename (its computer knows the agent by its label alone). No chat's title and no `SOUL.md` copies it. Its label, the word that `@mentions` it, never changes with it |
+| A fragment's scheduled records (data schedules: at each minute a cron names, a record on one of its channels; an agent's routines are these, on its `tasks`) | the fragment's supervisor (`record_schedules`: docs/api.md, "Scheduled records"), beside its code's cron schedules (`schedules`, made again from the installed manifest at each install), which never touch them | each fire's record on its channel, keyed by the schedule and its minute, so appended once; its owner's export copies them. An agent's computer keeps none (Hermes' own cron is off: decision 38), so no restart, upgrade or sleep of it loses one |
 | An agent's colour | its identity, through one function (templates/agent/site/agent-color.js, which the chat template and the shell link to) | none: never stored (`agent.json` names none) |
-| An agent's model (its tier, and a model of a provider its owner connected: `model: {provider, id}`) | the agent fragment's `agent.json` in git (docs/computers.md, "An agent's own model") | its computer's profile config, rewritten from it within seconds while awake and at each boot; used only while the agent's credentials hold that provider (else its tier) |
-| The model route's models (each slot's model, and where it runs) | the deployment's config's `models` (`FRAGMENT_MODELS`, a Workers variable; docs/computers.md, Models) | their ids only, by slot, in each computer's guest view (`models`), which our Hermes image reads every 3 s and writes into each profile's config; `GET /v1/models` and the route's refusal of an unknown id list the same ids, read from the config at each request |
+| An agent's model (its tier, and a model of a provider its owner connected: `model: {provider, id}`) and its reasoning (`reasoning`, `low` or `high`, high when absent) | the agent fragment's `agent.json` in git (docs/computers.md, "An agent's own model" and "Our images") | its computer's profile config, rewritten from it within seconds while awake and at each boot; its model used only while the agent's credentials hold that provider (else its tier), which its owner's view of the computer names (`modelProviders`); the agent's page shows the model it runs from these and `agent.json`, as its owner's shell hands them over; Settings shows its reasoning from `agent.json` |
+| The model route's models (each slot's model, and where it runs) | the deployment's config's `models` (`FRAGMENT_MODELS`, a Workers variable; docs/computers.md, Models) | their ids only, by slot, in each computer's guest view and its owner's view (`models`; Settings and the agent's page show them), which our Hermes image reads every 3 s and writes into each profile's config; `GET /v1/models` and the route's refusal of an unknown id list the same ids, read from the config at each request |
 | A computer's agents (which agent fragments it runs) | the Computer DO's `agents`, assigned and unassigned by its owner (docs/computers.md) | the agent fragment's own `computer` (whom it signs for) and the registry's name of its agent (`agent_fragments`); they follow the fragment: its delete unassigns it from its computer and drops the registry's row, that life's agent alone, retried until done (cell/src/ended.rs) |
-| Money | each payer's ledger (docs/ledger.md) | meters batch usage rows to it, idempotently |
-| A job's paid AI answer (text, decision, image), including a rejected decision answer | the fragment supervisor's `paid` receipts, keyed by incarnation, run and step (docs/api.md, AI) | retries and replays settle and reuse the receipt; no provider call once a receipt exists |
+| Money | each payer's ledger (docs/ledger.md) | meters batch usage rows to it, idempotently; each isolate's gate keeps what a person's ledger last answered whether a spend may start, a minute at most, and a spend whose ledger does not answer starts (docs/ledger.md, "The gate") |
+| A job's paid AI answer (text, decision, image), including a rejected decision answer | the fragment supervisor's `paid` receipts, keyed by incarnation, run and step (docs/api.md, AI) | its charge, a row in the fragment's meter outbox (`step:<key>`), written with the receipt and charged once by the owner's ledger; retries and replays reuse the receipt; no provider call once a receipt exists |
 | Audit trail | the `events` channel | pin moves recorded as events |
 | The agent docs | `cli/SKILL.md` and `cli/GUIDE.md`, naming no host | never edited elsewhere: compiled into the CLI (`fragment skill`, `fragment guide`, filled with its host), and the release's files on the platform (`/llms.txt`, `/llms-full.txt`, filled with its own platform and fragments as served; docs/api.md, Agent docs) |
 | The release's files: the templates, the shell's files, the agent docs | the repo (`templates/`, `cell/shell/`, `cli/`) | the cell's index of them (path, SHA-256, size, each template's release), made by its build; their bytes in the Worker's Static Assets, named by hash, written by the same build and uploaded with it, served only through the router (docs/api.md, The release's files); the CLI embeds the templates |
 | A fragment's preview card, and what its page reported as the card's shot loaded it | the fragment's own storage (`fragment_core::card::Cards`; docs/api.md, Cards) | status's `page` reads it; a report with errors is also a `page.errors` event |
+| What a fragment's members are doing: each one's newest record of a kind a channel lists | the channel's records | the fragment's `listed` (written in each record's append while its kind is listed, what is listed no more dropped at an install, a member's going when they leave), and each member's list row, sent from the index outbox as the row's face is (at most once in 3 s), made as it is sent from what is installed then and carrying only the channels its role reads (`channel_read_role`); a list's copy is at most a minute behind while its poster keeps at it (docs/api.md, Listed records) |
 | A person's own view of their fragments: what they archived, and how far they have seen each chat | their list, the `Principal` cell (principal.rs; docs/api.md, Control API) | none: no fragment holds it, and it goes when they leave the fragment |
 | A person's export: whether it builds, how far it got, and its archive | their list, the `Principal` cell (its row, its job and its kept place: export.rs; docs/api.md, Export), and its archive in R2 (`exports/<npub>/<id>/archive.tar`) | the archive is a copy of what each fragment, the registry and their computer answered its person as it was read, never updated; it is deleted seven days after it is ready, when a newer export starts, or by a wipe of its person |
 
 No file bytes persist in the cell's SQLite: a file lives in git or, at
 1 MiB and above, in R2 under its hash, named by a pointer in git.
+
+## Schemas: the platform objects' steps
+
+Each platform Durable Object class (`Fragment`'s supervisor, `Registry`,
+`Principal`, `Ledger`, `Computer`) declares its schema as numbered steps,
+one SQL file each under `crates/core/migrations/<class>/`, run by
+`fragment_core::migrate` as an object starts, in one transaction: a new
+object takes them all, an older one the steps it lacks, and one that
+fails rolls them all back. Step 1 is each class's schema as it stood on
+2026-10-19; an object made before then (none holds a version) is adopted
+at 1 only when what it holds is step 1's, text for text, or a shape the
+class names with its fix (a fragment's `members.people_only`). An object
+refuses its code (`schema_refused`, on every call, naming it and why)
+when it holds a newer version (a rollback), another code's step of the
+same number (another branch's), or tables from before versions that are
+not step 1's: a reset is the operator's call, and nothing is guessed.
+A wipe's or a delete's tables are dropped and made again as the object
+holds them (`migrate::remake`), so they keep every step's shape.
+
+What removes everything still runs on a refused object: a fragment's
+delete (its cleanup, and the release of its storage after, which makes
+the object current again), and a wipe's end of a fragment, a list, a
+ledger or a computer (a wiped one answers as wiped). The Registry, the
+deployment's one, refuses everything, its wipe steps included (those
+delete a person's rows by name, and could miss a newer step's table):
+if it ever refuses, its recovery is Paul's call, and no operator reset
+exists for it. A refused object's alarm wakes again, at most every five
+minutes, only where newer code could take it (a newer version, another
+code's step, a step that failed), never for a reset required.
+
+**No rollback below the versions (#383) once any class has a step 2.**
+Code from before them ignores `_schema`, runs its step 1 as it always
+did, and its wipes and deletes make tables again from that text,
+dropping a later step's columns under a `_schema` that still names them.
+A rollback to code that has versions is refused as above, object by
+object, until it is rolled forward.
+
+To change a schema, add a step: the file
+`crates/core/migrations/<class>/<NNNN>_<name>.sql` (an `ALTER TABLE …
+ADD COLUMN`, a new table or index, or a table rebuilt), its `step!` at
+the end of the class's `steps` (crates/core/src/migrate.rs, whose
+module doc says it in full), then `cargo xtask schema-lock`, and commit
+the three. A step is never edited, renumbered or removed once merged;
+`cargo xtask check` fails a schema changed any other way: the lock
+against the steps, the lock against master's, step for step (CI names
+master: a pull request's base, or what a push moved it from), and a
+statement in the cell that makes, alters or drops a table
+(xtask/src/guards.rs). The lock's SQLite refuses what a Durable
+Object's does (PRAGMAs that write, a transaction's or a savepoint's
+statements, ATTACH, TEMP objects), so no step that would fail there
+locks; and each class's schema as the deployments ran it before
+versions is checked in (`crates/core/migrations/deployed`) and must
+adopt.
+
+## Calls between releases
+
+A deploy does not move the Worker and its Durable Objects at one
+instant: for seconds (minutes, Cloudflare says, at worst) a Worker of
+the new release calls objects still running the old one, an old Worker
+calls objects already on the new one, and objects call each other
+across the two. Their calls (the router's to a supervisor, any call to
+the Registry, a fragment's to a list or a ledger, the queue consumers',
+a run's Workflow's) are the platform's own and change shape freely
+between releases, so each must meet its own release on the other side.
+On 2026-10-20, as master `bc8b87e7` replaced `33e323cd` on finite.chat,
+the new Worker asked the old Registry to exchange a sign-in's WorkOS
+code (#351 had changed its answer's shape); the old Registry exchanged
+it and answered the old shape, the new Worker could not read it (503
+`registry_unavailable`), and the person's refresh replayed a code
+already spent (WorkOS's 400).
+
+So every call into a platform object carries its caller's release, and
+the object admits only its own (`fragment_core::release`). The release
+is the deployment's `FRAGMENT_DEPLOY_ID`: a Worker variable, so a part of
+the Worker version, and the router, the queue consumers, the Workflow
+and all five object classes are one script (cell/entry.mjs), each
+running with the variables of the version it runs; one deploy is one
+value everywhere. It is the deploy's commit (`git rev-parse --short=12`,
+what `/healthz` answers in `x-fragment-deploy` and CD checks), so a
+commit deployed again (a secret or a variable changed) is one release,
+whose code agrees with itself; an uncommitted tree's is that deploy's
+alone (`<sha>-dirty-<second>`). Dev and the e2e run one build in one
+`workerd` (`dev` everywhere), and nothing changes for them.
+
+- **The caller** stamps it (`x-fragment-release`) on every call, and
+  when it was deployed (`x-fragment-release-deployed`: the deployment's
+  `FRAGMENT_DEPLOYED_AT`, the deploy's second): the cell calls an object
+  only through `routed::send` and `send_again`, and the JavaScript only
+  with requests `InternalRoute.request` makes (both held by xtask's
+  guard).
+- **The object** checks it first in its `fetch`, before it reads the
+  call or does anything for it (its schema's steps ran as it started,
+  its own release's, whoever called): a call from another release,
+  newer or older, or one naming none (a caller from before this check),
+  is answered 503 `deploying`, marked as that refusal
+  (`x-fragment-release-refused`), and nothing was done. Its alarms and
+  its sockets' messages are its own release's, and the calls they make
+  are checked as any other.
+- **On a refusal** the caller asks again, since nothing was done,
+  however the call acts: after 250, 500 and 1000 ms, at most four asks
+  (`release::ASKS`), then it answers `deploying` itself (the person
+  tries again; the CLI reads it as `unavailable`). A request that cannot
+  be made again (a body streamed through, a socket's upgrade) is asked
+  once. An outbox, a queue message or a Workflow step that meets it is
+  retried as any failure of theirs is. A `deploying` an object answers
+  because a call of its own was refused is its answer, never asked
+  again: it may have acted before that call.
+- **An object behind restarts.** A deploy restarts every object onto
+  its code, but Cloudflare holds one it keeps busy on the code before:
+  on the preview on 2026-10-21, after 7 of its 17 deploys, a busy
+  object (the Registry, a computer, its agent fragment) ran the release
+  before for 283 to 297 seconds, refusing every call of the new one
+  while those refusals kept it busy (two more met one for 5 and 38
+  seconds, until it went idle); every client-visible 503 of that day
+  was in those windows (up to 340 a deploy, most of them agents'
+  calls). So an object that refuses a call from a release deployed
+  after its own restarts (`release::restarts`; `ctx.abort()` from a
+  timer 50 ms on: `routed::restart_soon`), and the caller's next ask
+  meets its next instance, the new release's. It is that restart
+  brought forward, and costs what it costs: the requests the instance
+  is answering end, its sockets close (their pages reconnect), an alarm
+  running is run again, and a computer's container runs on (the next
+  instance adopts it). An object restarts so at most once in an isolate
+  (which runs one release): one Cloudflare starts again on the code
+  before refuses, as it would have, until Cloudflare's own restart. A
+  call from a release deployed before the object's, at the same second,
+  or naming no time restarts nothing.
+
+Both directions refuse alike: an old caller at a new object will not be
+admitted from that isolate, and its asks run out; a new caller at an old
+object is admitted once the object restarts on the new release, which
+its first refusal of that caller makes it do. Only that restart orders
+two releases, by when each was deployed (a rollback deployed by xtask is
+the newer, as it should be; `wrangler rollback` brings back an older
+version's time, so its objects are left to Cloudflare's own restart). A
+deploy is all at once (`wrangler deploy`): a gradual deployment, two
+versions serving for a while, would refuse between them for that while.
+What outlives a
+deploy is not a call and is not covered: a queue message or a stored row
+written by one release is read by the next, so its shape stays readable
+(a message no release can read is acked and logged; a table changes by
+its steps, above). The first deploy of the check met callers that named
+no release, refused like any other, and old objects that checked
+nothing, as before it; the first of the restart meets old objects that
+do not restart, and the next deploy is the first that has them restart.
+
+A browser's page outlives a deploy too, and it is no call: the shell (and
+the chats' pages it frames, the release's own) runs the release it
+loaded with for as long as its tab or its home screen's app stays open,
+against whatever the platform runs now. So its page names the release
+that answered it, every answer of the platform's host names its own
+(`x-fragment-deploy`, what `/healthz` says), and the page reloads itself
+once they differ, at a safe moment: never over anything unsent, and
+never in a loop, the deploy's old side answering again included
+(docs/api.md, The shell, "A new release"). Until it reloads it asks the
+API as the release it loaded with did, as any older client does.
 
 ## Limits (initial; each enforced and tested)
 

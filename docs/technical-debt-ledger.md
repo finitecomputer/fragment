@@ -37,6 +37,33 @@ fragment.club until cutover (decisions 34–35).
   with the same ownership and fresh-read guarantees; remove the plugin
   after that behavior passes the promotion test. Budget tuning is Paul's call.
 
+## The agent's page derives the model an agent runs; the image does not say it
+
+- **Observed:** Paul, 2026-10-20 (production, his agent Waffle): the
+  agent's page said "cheap model" while its chat's `/model` named the real
+  one. The page now names it by its id from their computer's view
+  (`models`, and each agent's `modelProviders`) and the agent's
+  `agent.json` (docs/computers.md, "An agent's own model").
+- **Shortcut:** the rule that picks the model (its own while its provider
+  is one it may run models of, else its tier's: `medium`, else `cheap`) is
+  written twice: in our Hermes image (`hermes-boot`'s `MainModel::of` and
+  `Tier::of`, which also refuse an `agent.json` model whose id is no id)
+  and in the agent template's page (`runs`). Nothing the image chose
+  reaches the platform.
+- **Risk:** the two drift, or an image runs by a rule of its own (a high
+  tier turned on, an id the image refuses), and the page names a model the
+  agent does not run. The page reads `agent.json` as live has it
+  (`__file`), the computer as main has it: Settings puts each pick live,
+  but a change committed and not deployed (the agent's own, the CLI's)
+  shows on the page only once it is.
+- **First proof:** an agent whose `agent.json` names a model its image
+  refuses while its provider is connected: the page names it, the chat's
+  `/model` does not.
+- **Delete when:** the image says what each agent runs (its view's agents
+  written back, `PUT /api/computer/agents/{a}/model` or the like, as
+  `profile.model` already logs it), its owner's view carries it, and the
+  page shows that; an image change, which ships through a canary.
+
 ## OpenRouter's calls are charged at their ceiling, not their cost
 
 - **Observed:** 2026-10-15, moving Finite's tiers to GLM-5.3 Flash
@@ -44,9 +71,10 @@ fragment.club until cutover (decisions 34–35).
   book; OpenRouter routes each call to one of several providers, each at
   its own price under the slot's `max_price`, and reports what the call
   cost in its usage (`usage.cost`, in credits).
-- **Shortcut:** the book's `z-ai/glm-5.3-flash` row is the routing's
-  ceiling ($0.15 in, $0.50 out per million), cached and written tokens
-  at the prompt's, with OpenRouter's 5.5% fee (fragment_core::price), so
+- **Shortcut:** an OpenRouter slot's model is priced at its routing's
+  ceiling, read from the config (`max_price`: $0.15 in, $0.50 out per
+  million on Finite's), cached and written tokens at the prompt's, with
+  OpenRouter's 5.5% fee (fragment_core::models::Upstream::ceiling), so
   no call is charged below what OpenRouter could bill. `usage.cost` is
   not read.
 - **Risk:** cached input is overcharged most: a cached token is charged
@@ -56,16 +84,58 @@ fragment.club until cutover (decisions 34–35).
   call of 30,000 tokens in (25,000 cached) and 600 out is charged about
   $0.0076, against $0.0028 on Workers AI's GLM-5.3 Flash; output is at
   most the call's cost (Novita's endpoint bills $0.28 a million, under the
-  $0.50 charged). And the ceiling in the config and the row in the code
-  are two numbers that must move together (xtask's test checks the
-  example's against the book).
+  $0.50 charged).
 - **First proof:** a person's month on the ledger against the platform's
   OpenRouter activity for the same calls (its generation ids), or a
   person asking why a turn costs more than it did on Workers AI.
-- **Delete when:** a call is settled from OpenRouter's reported cost
+- **Delete when:** a call is charged from OpenRouter's reported cost
   (a `Usage` of the vendor's cost in micro-dollars, the fee and margin
-  on it, the ceiling still its reservation): the first change after
-  launch (the coordinator for Paul, 2026-10-15).
+  on it): the first change after launch (the coordinator for Paul,
+  2026-10-15).
+
+## A ledger's head carries `holds` and a `book` for a rollback
+
+- **Observed:** 2026-10-21 (decision 62; review of #474 and #475). A
+  ledger keeps no holds and no price book now, but the releases before
+  require both in a head, and every route writes its head back.
+- **Shortcut:** a head is written with `holds` empty and the book of the
+  release writing it (`fragment_core::ledger` `OldHolds`,
+  `Ledger::written`), which no release since reads, and a head read with
+  holds has them retired, their entries ended as released
+  (`retire_holds`), so a rollback to a release before decision 62 reads
+  every head this one wrote and finds no held entry.
+- **Risk:** none in use: a few hundred bytes a head, written and never
+  read. Kept past its need, it is dead weight that reads as if it meant
+  something.
+- **First proof:** n/a (a compatibility field, not a bug).
+- **Delete when:** no release before decision 62 can be deployed again
+  (production and the preview past it, and Paul agrees a rollback that
+  far is not wanted), and no head holds any (every ledger read since):
+  drop `OldHolds`, `retire_holds` and `written`'s book, and the
+  `a_head_written_here_reads_in_the_release_before` and
+  `a_rollback_finds_no_hold_and_no_held_entry` tests.
+
+## A paid call's charge is best effort
+
+- **Observed:** 2026-10-21 (decision 62; Paul: "billing should be
+  settled best effort not interrupt every request"). A model call is
+  gated by a cached standing and charged after its answer, as a row on
+  the ledger's queue (cell/src/models.rs, meter.rs `charge`).
+- **Shortcut:** a call that reports no usage (an upstream stream that
+  broke before its last chunk, an answer with no `usage`) is charged
+  nothing, said aloud (`ledger.unknown-usage`), where a hold charged its
+  worst case; a charge whose queue send fails is lost, said aloud
+  (`ledger.charge-lost`); and a person out of credit spends on for up to
+  the gate's minute in each isolate.
+- **Risk:** calls given away: a provider whose streams break before
+  their usage, or a queue outage, costs the platform what those calls
+  cost; an agent at zero runs on for up to a minute. Cents, against an
+  agent never stopped by billing.
+- **First proof:** `ledger.unknown-usage` or `ledger.charge-lost` lines
+  in the Worker's logs, more than a few a day.
+- **Delete when:** a call with no usage is charged from what it streamed
+  (its output's tokens counted, its input's bytes), and a failed send is
+  kept and sent again.
 
 ## The cell's Wasm budget was raised for launch
 
@@ -76,6 +146,11 @@ fragment.club until cutover (decisions 34–35).
   tools still to land.
 - **Shortcut:** `CELL_WASM_MAX_BYTES` is 6.5 MB (xtask/src/build.rs), so
   the launch week's features land without squeezing.
+- **2026-10-19:** master with #365 and #366 was 6.38 MB, and #367 took it
+  18 KB over. #367 made the registry's and Stripe's round trips
+  non-generic (`ask_registry` and the Stripe client parse their answer in
+  the one generic step, so a call type no longer copies a whole async
+  round trip): 6.34 MB with #367's 134 KB.
 - **Risk:** every isolate copies the Wasm's data into its memory and
   every deploy uploads it: a bigger cell starts slower and leaves less
   memory to requests, and a budget moved once is easier to move again.
@@ -112,6 +187,37 @@ fragment.club until cutover (decisions 34–35).
   until its next image change, and a pin back restores it: a rollback then
   loses only the canary's own work, and says so as any going back does.
 
+## CI deploys pinned images only; a pushed image's digest is pinned by hand
+
+- **Observed:** 2026-10-16, continuous deployment (.github/workflows/
+  ci.yml, `deploy`). A runner keeps no Docker layer cache: a build there
+  stamps every layer anew, pushes the whole Hermes base (gigabytes, whose
+  push has timed out even from a machine with the cache) and makes a new
+  digest at every deploy, which tells every computer on that image an
+  update is ready (docs/computers.md, "What changes a version").
+- **Shortcut:** CI deploys with `--pinned-only` (xtask/src/deploy.rs),
+  which refuses a config with an image built from the tree. The canary
+  is built and pushed by the Image workflow (.github/workflows/image.yml,
+  run by hand: `cargo xtask image push`, since 2026-10-20), on a runner
+  with no layer cache, so each build makes a new digest and pushes the
+  whole base, tried up to four times; production's next stable is the
+  round's proven image, copied by it at its digest (`cargo xtask image
+  copy`). The digest its summary names is copied by hand into the
+  environment's config in finitecomputer/fragment-deploy and committed
+  there.
+- **Risk:** a deploy by hand from a config that is not fragment-deploy's
+  committed one (a canary pinned only in a local copy) is put back at
+  the committed digest by the environment's next CI deploy, telling the
+  canary group of an update no round made. A run for a commit whose
+  image did not change still makes a new digest, which, pinned, tells
+  the canary group of an update that changes nothing.
+- **First proof:** a canary computer told an update is ready after a
+  master deploy that no round built.
+- **Delete when:** the Image workflow builds on a builder whose cache
+  keeps a digest while its inputs stay the same, and the digest it names
+  becomes the image's line in fragment-deploy's config without a copy
+  by hand.
+
 ## A direct chat's label is its agent's, which a branch may lack room for
 
 - **Observed:** 2026-10-08, no usernames (decision 47) on the host label
@@ -146,6 +252,45 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** the registry (or a per-person index) records each
   fragment as it is made, and the wipe reads it beside the lists.
 
+## An agent made later joins best effort
+
+- **Observed:** 2026-10-23, decision 64 (`claude/member-with-agents`):
+  a person's agents are members beside them where they accepted an
+  invite. One made after their yes comes in as it is registered (a
+  computer's, once its computer takes it: computer.rs): the
+  platform reads its person's list and asks each fragment of someone
+  else's they are in (`members::agent_made`), once, with no outbox: a
+  fragment that does not answer then never hears it.
+- **Risk:** a person in with only some of their agents (one made later
+  missing), until their next yes there: it reaches the fragment acting
+  for them (R17), but is in no chat's roster there, and its computer
+  does not follow it.
+- **First proof:** a log line `{"agent-made": …, "fragment": …, "failed":
+  …}`; a person's agent missing from a fragment's members beside them.
+- **Delete when:** an outbox carries it (the person's list, which knows
+  both their fragments and when one is told, retrying on its alarm), or
+  a fragment reconciles a person's agents as it is read.
+
+## Invites from before their yes are met by a sign-in
+
+- **Observed:** 2026-10-22, decision 63 (`claude/editor-invites`): an
+  invite now waits for its person's yes in the shell, but those mailed
+  before it said "sign in as … to open it" and keep no role in the
+  registry (`invites_waiting.role` NULL). So a sign-in still meets them
+  as it did (registry/invites.rs `meet_invites`), with the kept claims
+  and the alarm's retries (`invite_claims`, `claims_alarm`), which only
+  they use now, and `GET /api/invites` lists none of them.
+- **Risk:** two ways into a fragment by email for a month: someone
+  invited the day before the release joins at their sign-in without
+  being asked. Each is one the owner made, as they made it.
+- **First proof:** a sign-in after the release that makes its person a
+  member (`member.joined`) of a fragment they never accepted, whose
+  invite was made before it.
+- **Delete when:** `INVITE_TTL_S` (30 days) has passed since the release
+  that carries decision 63: every such row has run out. Then
+  `meet_invites`, the kept claims, the alarm's claims and the `role IS
+  NULL` clauses go, and `invite_claims` with them (a step that drops it).
+
 ## Objects made before a column of their table refuse what writes it
 
 - **Observed:** 2026-10-08, p5: a wipe's cleanup never finished. #197
@@ -166,16 +311,57 @@ fragment.club until cutover (decisions 34–35).
   fragment is made again). A wipe no longer waits on its person's own lists
   (ended.rs), so this holds no wipe; everything else of such an object
   stays refused.
+- **Since 2026-10-19** schemas are versioned steps (docs/MODEL.md,
+  Schemas; `fragment_core::migrate`): a column is a step that reaches
+  every object, `cargo xtask check` fails one added any other way (the
+  schema lock), and an object from before versions is adopted only when
+  its tables are step 1's. Such an object, made before one of those
+  columns, now refuses every call as it starts (`schema_refused`, "reset
+  required", naming its table), not only the statements that name the
+  column; a delete or a wipe still ends it (a Registry aside), and a
+  fragment's delete makes its object current again.
 - **Risk:** p5's (and the e2e preview's) objects made before those
-  columns stay broken until they are made again. A fragment its owner's
-  frozen list never took is one a wipe does not find (the entry above).
-- **First proof:** a list that refuses an index change with `no column
-  named searched` (the wipe's report names it; `POST /api/test/list
-  {op: before-searched}` makes one).
+  columns stay refused until they are reset. A Registry so made refuses
+  the whole deployment. A fragment its owner's frozen list never took is
+  one a wipe does not find (the entry above).
+- **First proof:** an object answering `schema_refused` "reset
+  required" (its log line `{"schema": …, "refused": …}` names it), or
+  before this deploy a list that refuses an index change with `no column
+  named searched` (`POST /api/test/list {op: before-searched}` makes one).
 - **Delete when:** the deployments that hold such objects are reset (or
-  those objects deleted: Paul's call, a hard cut), and a check refuses a
-  column added to an existing table without a migration or a reset the
-  deploy enforces.
+  those objects deleted: Paul's call, a hard cut).
+
+## Objects made before schema versions are adopted, a variant fixed
+
+- **Observed:** 2026-10-19, versioned schemas (docs/MODEL.md, Schemas).
+  Every object deployed before then holds tables and no `_schema`:
+  `migrate::adopt` runs step 1 on it and compares what it then holds
+  with what step 1 makes, text for text, and `Class::variants` names the
+  one shape known to differ harmlessly (a fragment's
+  `members.people_only`, from 2026-10-03 to 2026-10-13), fixed by
+  dropping the column. Production (finite.chat) starts with none.
+- **Risk:** none beyond its code: an object adopted is one step 1 makes
+  exactly; one that is not is refused, never guessed at.
+- **First proof:** an adoption's log line (`{"schema": …, "ran":
+  "adopted at 1 …"}`), or the e2e's `migrations` section.
+- **Delete when:** the deployments made before 2026-10-19 (the e2e
+  preview, p5, preview.finite.build) are reset or retired: an idle object
+  adopts only when it next starts, so nothing else says every one has.
+
+## An app facet's operation ledger has no schema version
+
+- **Observed:** 2026-10-19. The platform's table in each app facet's
+  SQLite (`_fragment_ops`, cell/platform.mjs) is made with `CREATE TABLE
+  IF NOT EXISTS` as the facet starts; the platform objects' steps
+  (`fragment_core::migrate`) do not reach it, and the schema lock does
+  not name it (an app facet's database is its author's).
+- **Risk:** a column added to it reaches no facet made before, which
+  then refuses every mutation that names it, as the platform objects'
+  did before their steps.
+- **First proof:** a mutation answering `no such column` from
+  `_fragment_ops` after a deploy that changed it.
+- **Delete when:** the facet's ledger takes versioned steps of its own,
+  or its shape is held by a check as the platform objects' are.
 
 ## The browser half of web push is not driven by a test
 
@@ -276,6 +462,76 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** `fragment.json` can declare a channel's retention
   (count or age) with a platform ceiling, enforced and tested.
 
+## A connection's consent is not bound to the browser that began it
+
+- **Code fix (2026-10-20; rollout pending):** the legacy REST authorize
+  path is removed. Fragment now completes a provider authorization-code
+  flow under `auth::Bound`, the same live platform session, a one-use
+  Registry transaction and S256 PKCE, before importing credentials into
+  Pipes. Missing `connection_oauth` fails closed. See
+  [the contract, evidence and remaining operational work](pipes-browser-binding.md).
+  The local `connections` lane covers two users/browsers and replay/restart;
+  vendor configuration and refresh still require controlled staging validation.
+- **Observed before this fix:** the 2026-10-16 security audit's round-trip work (H3).
+  Every round trip that comes back to the platform now finishes only in
+  the browser that began it (`auth::trip_bound`). A connection's does not
+  come back: `POST /api/connections/{provider}/authorize` asks WorkOS
+  Pipes for a consent URL for the person's WorkOS user (`POST
+  /data-integrations/{provider}/authorize {user_id}`, spike S5), the shell
+  opens it, and WorkOS finishes the provider's OAuth itself. WorkOS's docs
+  (the Pipes guide, the authorize reference, the OpenAPI spec,
+  workos-node) say nothing of who may complete it; its own Pipes widget
+  binds the flow to the opener's browser with a handoff token (an
+  internal GraphQL mutation, `requireHandoff: true`) that the REST
+  endpoint does not offer. Paul's test, 2026-10-17, settled it: in the old
+  WorkOS "Fragment" project's Staging environment
+  (environment_01M39VWAVVQ05KTFQ9VR22GAQV), a REST consent link for user A
+  (user_01M3ZQ6R42PT5581BTPT4VHE85: an `/authorize-redirect` URL, no
+  `return_to`), opened in an Incognito window signed in to nothing but a
+  different Google account, showed Google's consent; Allow completed it,
+  and WorkOS emitted `pipes.connected_account.connected`
+  (event_01M551YAQEBPM4EBX8AJJVGJYN, 13:48:39Z), attaching the other
+  person's Google to user A, with `established_by_user_id` = user A. The
+  REST consent is bound to no one.
+- **Remaining gate:** the user's staging Google OAuth client and WorkOS
+  provider are now configured, but the provider remains Disabled. The
+  new platform callback, matching client-secret binding and catalog
+  configuration must be reviewed before Paul deploys. The documented
+  WorkOS import/update contract supports this design; no real grant,
+  import or refresh has been tested here. Previously issued unbound
+  URLs/accounts must be resolved before enabling a previously used
+  environment: removing our old path cannot invalidate those URLs.
+- **Risk:** confirmed, not hypothetical. Whoever holds a consent link gets
+  the account of whoever approves it: someone who can connect accounts
+  sends another person their own link, that person approves at Google,
+  and their Google (Paul's test granted gmail.modify and gmail.send,
+  Drive, Calendar, Docs, Sheets and Contacts) is attached to the sender's
+  WorkOS user, which the sender's agents then read and write through
+  their swap. Deleting the connected account at WorkOS does not revoke it
+  at Google.
+- **First proof:** done, Paul's test above (2026-10-17). Any deployment
+  that enables a connection provider reproduces it with one link.
+- **Delete when:** the new browser-bound flow and its regression tests
+  are reviewed, deployed by Paul and proven in controlled staging,
+  including imported-token refresh with the matching OAuth client.
+  Provider enablement and real grants need separate authorization.
+
+## An own key's sign-in finishes at the person's one computer
+
+- **Observed:** the audit's H3 fix (2026-10-17). An own key's callback
+  asks the signed-in person's computer for the sign-in it began, and that
+  computer is `default_computer_of(person)` (`computer::SignedIn::of`):
+  one computer per person (decision 13), never one a URL names.
+- **Shortcut:** none today; the binding rests on that one-to-one.
+- **Risk:** once a person has several computers, the callback would ask
+  only the first, and a sign-in begun from another would come back as
+  "not under way". Naming the computer in the URL again would reopen H3.
+- **First proof:** a person's second computer, connecting an own key.
+- **Delete when:** a person may hold several computers: the sign-in's
+  computer is kept with its state where the callback can find it from the
+  bound state alone (the registry, or a cookie of the binding's), never
+  from the URL, with the H3 checks run against it.
+
 ## Running runs are checked a few at a time
 
 - **Observed:** phase 2 slice D. A run whose Workflow ended without
@@ -329,27 +585,6 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** someone needs old versions of large files (the
   "Photoshop file" exception in MODEL), and a per-fragment policy keeps
   the bytes named by the last N live commits.
-
-## The notes viewer is a prebuilt bundle
-
-- **Observed:** phase 2 slice G. `templates/notes/site/assets/` is
-  committed esbuild output (marked 18.0.4 and @pierre/diffs 1.2.2, with
-  Shiki's language chunks trimmed to a list); its source is
-  `templates/notes/src/viewer.mjs`. The repo has no Node tooling, so a
-  rebuild is by hand (the recipe is at the top of the source). Since
-  phase 6 the blessed brain template serves the same bundle
-  (`templates/brain/site/assets` is a symlink to it, one asset), and
-  its search box is a separate script beside it (`site/brain.js`), not a
-  change to the viewer: nothing pins the bundle's transitive dependencies
-  (Shiki's among them), so a rebuild could not be checked against the
-  committed bytes.
-- **Risk:** a viewer change needs a toolchain the repo no longer has;
-  third-party code ships in every notes fragment and every brain without
-  a build the repo can reproduce.
-- **First proof:** the first change to the viewer, or an advisory
-  against marked or Shiki.
-- **Delete when:** the viewer is small enough to ship as source (no
-  bundler), or a viewer of the platform's replaces it.
 
 ## Local nodes keep their computers apart through wrangler's and workerd's internals
 
@@ -471,16 +706,18 @@ fragment.club until cutover (decisions 34–35).
 ## The price book is the core's defaults
 
 - **Observed:** phase 3. Every ledger charges with
-  `PriceBook::defaults()` (cell/src/ledger.rs `configured_book`): the
-  list prices of 2026-10-02 and a 50% margin, version 1. Decision 4 puts
-  pricing in the deployment's configuration.
+  `PriceBook::defaults()` and the configuration's operator keys' prices
+  (cell/src/config.rs `configured_book`): the list prices of 2026-10-02
+  and a 50% margin. Decision 4 puts pricing in the deployment's
+  configuration.
 - **Risk:** a self-deployer cannot set their own margin or prices without
   a fork; a Cloudflare price change needs a code change and a deploy.
 - **First proof:** a deployment that wants another margin.
 - **Delete when:** `xtask deploy` renders a price book from the
   deployment's config (a versioned file) into a Worker variable that
-  `configured_book` reads, and each ledger takes the newer version at its
-  next call (`take_book` already does), with a test of a book's change.
+  `configured_book` reads (each ledger prices with its release's book
+  since decision 62, so a changed one reaches them all with its deploy),
+  with a test of a book's change.
 
 ## A plan has two writers: the registry, and an operator's `plan` command
 
@@ -1117,9 +1354,12 @@ fragment.club until cutover (decisions 34–35).
   `rollback` and `drafts` still go to code.storage itself, with the
   15-minute, repo-scoped token the platform mints for the agent.
 - **Risk:** that token is a credential in the guest, which otherwise
-  holds none (decision 43), for as long as the command runs; and the
-  local lanes cannot prove an agent's deploy at all, since a container
-  under `wrangler dev` cannot reach the dev stack's code.storage fake.
+  holds none (decision 43), for as long as the command runs. Locally,
+  where a container under `wrangler dev` cannot reach the dev stack's
+  code.storage fake at the machine's loopback, the egress sends the
+  guest's calls on to it, its token with them (docs/computers.md, The
+  fragment API; the computers lane's "through its egress" checks): the
+  path, not yet the token swap.
 - **First proof:** phase 6's exit, an agent building and deploying an
   app from a chat, on a preview.
 - **Delete when:** a computer's sync and deploy go through its API egress
@@ -1190,6 +1430,21 @@ fragment.club until cutover (decisions 34–35).
   needs a compatibility date of 2026-03-24 or later, where the cell's is
   2026-01-01 (moving it brings ~25 flags, `delete_all_deletes_alarm` and
   `websocket_close_reason_byte_limit` among them).
+  Re-checked 2026-10-19 (the review of code we wrote where something off
+  the shelf exists), and kept: quick actions still cannot take this shot.
+  Cloudflare's docs (the product is now Browser Run) still have no local
+  `quickAction` (only `wrangler dev --remote`, which the e2e's node is
+  not), and its screenshot answers with the image alone: no console
+  messages, exceptions or log entries, which the page's report (status's
+  `page`, `page.errors`; cec664ad, a day after this entry) is made of
+  (`card::Heard` hears `Runtime.exceptionThrown`,
+  `Runtime.consoleAPICalled` and `Log.entryAdded`). `@cloudflare/puppeteer`
+  in the shim, on the same session routes, was weighed and not taken: it
+  swaps about 200 lines of plumbing here for a library the Worker bundles
+  and every isolate evaluates as it starts, for a shot once a deploy; the
+  shim would make the shot's decisions (its waits, its qualities), which
+  the shim leaves to Rust; and the session, its keep-alive billing and
+  the events `Heard` reads would all stay.
 - **Risk:** the CDP client is ours to keep speaking Browser Rendering's
   session routes as `@cloudflare/puppeteer` does; a change there fails
   every try (`card.failed`) while the pages serve on. The deployment pays
@@ -1197,10 +1452,13 @@ fragment.club until cutover (decisions 34–35).
   Assumptions).
 - **First proof:** `card.failed` events on a preview whose message is a
   CDP or session error.
-- **Delete when:** `wrangler dev` answers `quickAction` locally (or a fake
-  at the vendor boundary stands in for it there, `FRAGMENT_BROWSER_URL`
-  as `FRAGMENT_AI_URL` does for the model route) and the cell's
-  compatibility date reaches 2026-03-24: `take` becomes one
+- **Delete when:** a quick action reports what the page said as it
+  loaded (its exceptions, console errors and log entries), or the page's
+  report comes from somewhere else; `wrangler dev` answers `quickAction`
+  locally (or a fake at the vendor boundary stands in for it there,
+  `FRAGMENT_BROWSER_URL` as `FRAGMENT_AI_URL` does for the model route);
+  and the cell's compatibility date reaches 2026-03-24 (a change in the
+  runtime's behaviour its pull request names): `take` becomes one
   `quickAction("screenshot", …)` billed from `X-Browser-Ms-Used`, and the
   session's acquire and release, `Cdp`, `billed_ms`'s keep-alive and the
   concurrent-browser assumption go.

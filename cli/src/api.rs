@@ -67,8 +67,10 @@ impl Code {
             ErrorCode::RateLimited => Code::RateLimited,
             ErrorCode::BudgetUsedUp => Code::BudgetUsedUp,
             ErrorCode::StorageFull => Code::StorageFull,
-            ErrorCode::HostFailed => Code::ServerError,
-            ErrorCode::UpstreamFailed | ErrorCode::RegistryUnavailable | ErrorCode::NodeFull | ErrorCode::WontWake => Code::Unavailable,
+            // the platform's own object refuses its schema: nothing an agent can fix
+            ErrorCode::HostFailed | ErrorCode::SchemaRefused => Code::ServerError,
+            // a deploy going out: the same call again in a few seconds
+            ErrorCode::UpstreamFailed | ErrorCode::RegistryUnavailable | ErrorCode::NodeFull | ErrorCode::WontWake | ErrorCode::Deploying => Code::Unavailable,
         }
     }
 
@@ -241,11 +243,12 @@ pub struct AgentMode {
 pub const AGENT_HEADER: &str = "x-fragment-agent";
 
 /// Whether the platform honors `for` on `path`: a fragment's routes
-/// (`/api/f/…`, and its own at `/f/…`) and the fragment list; it refuses it
-/// on every other route (cell/src/lib.rs `signer`).
+/// (`/api/f/…`, and its own at `/f/…`), the fragment list, and the invites
+/// waiting (`/api/invites…`, an agent's for its owner); it refuses it on
+/// every other route (cell/src/lib.rs `signer`).
 pub fn honors_for(path: &str) -> bool {
     let p = path.split('?').next().unwrap_or(path);
-    p.starts_with("/api/f/") || p.starts_with("/f/") || p == "/api/fragments"
+    p.starts_with("/api/f/") || p.starts_with("/f/") || p == "/api/fragments" || p == "/api/invites" || p.starts_with("/api/invites/")
 }
 
 impl From<Identity> for Signer {
@@ -313,6 +316,11 @@ impl Resp {
     }
 }
 
+/// What the CLI calls itself to a host: its name, version, and system.
+pub fn user_agent() -> String {
+    format!("fragment-cli/{} ({}; {})", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH)
+}
+
 impl Client {
     pub fn new(host: &str, signer: impl Into<Signer>) -> Self {
         Self {
@@ -320,8 +328,11 @@ impl Client {
             signer: signer.into(),
             verbose: false,
             // every request sets its own total timeout (`timeout_for`)
+            // named, so a person adding this machine's key sees what asked
+            // (`/cli`'s confirm page and its mail: the begin's agent)
             http: reqwest::blocking::Client::builder()
                 .connect_timeout(CONNECT_TIMEOUT)
+                .user_agent(user_agent())
                 .build()
                 .expect("the HTTP client builds (its TLS backend is compiled in)"),
             names: Default::default(),
@@ -603,6 +614,19 @@ mod tests {
         (server, seen, client)
     }
 
+    /// A port no host is at, held while the socket lives: bound and never
+    /// listening, so a connection to it is refused (it never opens), and
+    /// no other process can take the port meanwhile. A port freed by
+    /// dropping a listener could be taken, and answer ("expected a failure,
+    /// got http 404", on a machine running other servers).
+    fn refusing_port() -> (socket2::Socket, u16) {
+        let held = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).expect("a socket");
+        held.bind(&std::net::SocketAddr::from(([127, 0, 0, 1], 0)).into()).expect("bound to a free port");
+        let port = held.local_addr().expect("its address").as_socket().expect("an IP address").port();
+        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_err(), "no one else may listen on a held port");
+        (held, port)
+    }
+
     /// The failure's stable code (a request that got an answer fails the test).
     fn code_of(r: Result<Resp>) -> &'static str {
         match r {
@@ -648,7 +672,7 @@ mod tests {
         let call = serde_json::json!({ "id": "cli-1", "input": {} });
         assert_eq!(code_of(c.post_json_by_id("/api/f/x--k3x9/ops/add", &call)), "outcome_unknown");
         assert_eq!(seen.load(Ordering::SeqCst), REQUEST_ATTEMPTS, "each try arrived");
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let (_held, port) = refusing_port();
         let nowhere = Client::new(&format!("http://127.0.0.1:{port}"), crate::auth::fixed(7));
         assert_eq!(code_of(nowhere.post_json_by_id("/api/f/x--k3x9/ops/add", &call)), "unavailable", "no try reached a host");
     }
@@ -657,7 +681,7 @@ mod tests {
     /// retried, and the failure is plain unavailability.
     #[test]
     fn a_write_that_never_connected_is_unavailable() {
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let (_held, port) = refusing_port();
         let c = Client::new(&format!("http://127.0.0.1:{port}"), crate::auth::fixed(7));
         assert_eq!(code_of(c.post_json("/api/fragments", &serde_json::json!({ "name": "x" }))), "unavailable");
     }
@@ -706,9 +730,11 @@ mod tests {
             (ErrorCode::NodeFull, "unavailable"),
             (ErrorCode::WontWake, "unavailable"),
             (ErrorCode::NotConnected, "forbidden"),
+            (ErrorCode::SchemaRefused, "server_error"),
+            (ErrorCode::Deploying, "unavailable"),
         ];
         for (error, cli) in table {
-            let body = serde_json::to_vec(&ErrorBody { error, message: "name taken, already exists".into() }).unwrap();
+            let body = serde_json::to_vec(&ErrorBody { error, message: "name taken, already exists".into(), reason: None }).unwrap();
             let refusal = Resp { status: error.status(), body }.refusal();
             assert_eq!(refusal.code.as_str(), cli, "{error:?}");
             assert_eq!(refusal.msg, format!("http {}: name taken, already exists", error.status()));
@@ -783,11 +809,11 @@ mod tests {
     }
 
     #[test]
-    fn for_is_named_on_a_fragments_routes_and_the_list_only() {
-        for yes in ["/api/f/x--k3x9.paul/status", "/api/f/x--k3x9.paul/ops/add", "/f/x.paul/__live", "/api/fragments", "/api/fragments?x=1"] {
+    fn for_is_named_on_a_fragments_routes_the_list_and_the_invites_only() {
+        for yes in ["/api/f/x--k3x9.paul/status", "/api/f/x--k3x9.paul/ops/add", "/f/x.paul/__live", "/api/fragments", "/api/fragments?x=1", "/api/invites", "/api/invites/x--k3x9/accept"] {
             assert!(honors_for(yes), "{yes}");
         }
-        for no in ["/api/identities/me", "/api/ledger", "/api/search?q=a", "/api/fragments/x.paul/archived", "/api/computers", "/api/fx"] {
+        for no in ["/api/identities/me", "/api/ledger", "/api/search?q=a", "/api/fragments/x.paul/archived", "/api/computers", "/api/fx", "/api/invitesx"] {
             assert!(!honors_for(no), "{no}");
         }
     }

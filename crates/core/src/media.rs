@@ -3,9 +3,8 @@
 //! Gateway as text is (cell/src/models.rs; decisions 17 and 23), and
 //! metered on the payer's ledger in the neurons Workers AI prices it at:
 //! its 512×512 tiles and its diffusion steps (`price::Usage::Neurons`). A
-//! step reserves its worst case first, so a step the payer cannot cover
-//! never reaches the model; it settles at the image it got, its tiles read
-//! from the JPEG's own header. Videos are off until they run on Cloudflare
+//! step is charged after its call at the image it got, its tiles read from
+//! the JPEG's own header. Videos are off until they run on Cloudflare
 //! (the debt ledger): `job.ai.video` is refused, saying so.
 
 use base64::Engine;
@@ -31,15 +30,11 @@ pub const STEPS_MAX: u32 = 8;
 pub const TILE_MILLI_NEURONS: u64 = 4_800;
 pub const STEP_MILLI_NEURONS: u64 = 9_600;
 pub const TILE_PX: u64 = 512;
-/// The tiles a worst case holds: FLUX.1 [schnell] draws 1024×1024. An
-/// image with more is charged them all when it settles (a settle above its
-/// reservation is charged in full: docs/ledger.md).
-pub const TILES_WORST: u64 = 4;
 /// The largest image kept: a 1024×1024 JPEG is a few hundred KiB, and its
 /// base64 stays inside the model route's answer limit.
 pub const IMAGE_MAX_BYTES: usize = 4 * 1024 * 1024;
 
-/// Why a media step is refused before it reserves anything.
+/// Why a media step is refused before it calls anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     /// A prompt that is empty or over `PROMPT_MAX_CHARS`.
@@ -112,11 +107,6 @@ pub fn image_call(step: &AiImage) -> Result<ImageCall, Refusal> {
 }
 
 impl ImageCall {
-    /// What the call reserves: a 1024×1024 image at its steps.
-    pub fn worst(&self) -> Usage {
-        neurons(TILES_WORST, self.steps)
-    }
-
     /// What an image of `width` × `height` at its steps cost.
     pub fn usage(&self, width: u16, height: u16) -> Usage {
         neurons(tiles(width, height), self.steps)
@@ -230,7 +220,7 @@ mod tests {
     /// bounded, its path a JPEG's. Method: valid and invalid steps, each
     /// bound at and past its edge.
     #[test]
-    fn an_image_step_is_checked_before_it_reserves() {
+    fn an_image_step_is_checked_before_it_calls() {
         let call = image_call(&image(json!({ "prompt": "a lighthouse", "path": "art/a.jpg" }))).unwrap();
         assert_eq!(call, ImageCall { input: json!({ "prompt": "a lighthouse", "steps": 4 }), steps: 4 });
         let call = image_call(&image(json!({ "prompt": "p", "path": "A.JPEG", "steps": 8 }))).unwrap();
@@ -247,13 +237,12 @@ mod tests {
 
     /// Goal: an image costs its tiles and steps at Workers AI's neurons,
     /// so the book charges its listed price. Method: the default 1024×1024
-    /// at 4 steps lists at 57.6 neurons ($0.0006336), part tiles count
-    /// whole, and the worst case is the 1024×1024 image at the call's steps.
+    /// at 4 steps lists at 57.6 neurons ($0.0006336), and part tiles count
+    /// whole.
     #[test]
     fn an_image_costs_its_tiles_and_steps() {
         let call = image_call(&image(json!({ "prompt": "p", "path": "a.jpg" }))).unwrap();
         assert_eq!(call.usage(1024, 1024), Usage::Neurons { milli: 57_600 });
-        assert_eq!(call.worst(), call.usage(1024, 1024));
         let list = PriceBook::defaults().price(&call.usage(1024, 1024)).unwrap().list;
         assert_eq!(list, 634, "57.6 neurons × $0.011 a thousand: $0.0006336, rounded up");
         assert_eq!(PriceBook::defaults().price(&neurons(1, 0)).unwrap().list, 53, "a tile lists at $0.0000528, rounded up");
@@ -261,7 +250,7 @@ mod tests {
         assert_eq!((tiles(512, 512), tiles(513, 512), tiles(1024, 768), tiles(1, 1)), (1, 2, 4, 1));
         assert_eq!(tiles(u16::MAX, u16::MAX), 128 * 128);
         let eight = image_call(&image(json!({ "prompt": "p", "path": "a.jpg", "steps": 8 }))).unwrap();
-        assert_eq!(eight.worst(), Usage::Neurons { milli: 4 * 4_800 + 8 * 9_600 });
+        assert_eq!(eight.usage(1024, 1024), Usage::Neurons { milli: 4 * 4_800 + 8 * 9_600 });
         assert!(neurons(tiles(u16::MAX, u16::MAX), STEPS_MAX).validate().is_ok(), "the largest image's usage prices");
     }
 

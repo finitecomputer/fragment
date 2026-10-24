@@ -126,6 +126,9 @@ pub struct Config {
     /// the Registry keeps before it lets the oldest go (default
     /// `SIGNINS_PENDING_MAX_DEFAULT`).
     pub signins_pending_max: u64,
+    /// `FRAGMENT_CLI_BEGINS_PER_IP_MINUTE`: CLI codes one address may ask
+    /// for a minute (default `CLI_BEGINS_PER_IP_MINUTE_DEFAULT`).
+    pub cli_begins_per_ip_minute: u32,
     /// `FRAGMENT_TEST_SECRET` (a Worker secret): the test levers
     /// (`/api/test/*`) answer requests that carry it, on a local fleet or a
     /// branch deployment only (`fragment_core::levers`). Without it they
@@ -141,8 +144,18 @@ pub struct Config {
     /// are made within a day's caps. A local fleet's reach everything.
     pub levers_scoped: bool,
     /// `FRAGMENT_DEPLOY_ID`: which deployment this is (the deploy sets it;
-    /// `/healthz` answers it in `x-fragment-deploy`; default `dev`).
+    /// `/healthz` answers it in `x-fragment-deploy`; default `dev`). It is
+    /// the release every call into a platform object carries, and every
+    /// object admits only its own (fragment_core::release): a Worker
+    /// variable, so the Worker and every object of one deploy run one value.
     pub deploy_id: String,
+    /// `FRAGMENT_DEPLOYED_AT`: when this release was deployed, whole
+    /// seconds since 1970 (the deploy sets it; none where a fleet sets none,
+    /// dev's default). Every call into a platform object carries it beside
+    /// the release, and an object that refuses a call from a release
+    /// deployed after its own restarts onto it (fragment_core::release
+    /// `restarts`). A Worker variable, as the release is.
+    pub deployed_at: Option<u64>,
     /// `FRAGMENT_PROVIDERS`: the provider catalog (`fragment_core::catalog`),
     /// every credential a computer's guest may use: the WorkOS Pipes
     /// connections, the operator's keys (each bound as
@@ -151,10 +164,14 @@ pub struct Config {
     /// placements and its environment variables. None by default.
     /// `FRAGMENT_PRICE_BOOK_VERSION` (default the defaults',
     /// `fragment_core::price::DEFAULT_BOOK_VERSION`; the book's is the higher
-    /// of the two) grows with every change to a key's price, or ledgers made
-    /// before keep their book.
+    /// of the two) is informational (#451).
     pub providers: fragment_core::catalog::Catalog,
-    pub price_book_version: u32,
+    /// The price book this release charges with (`configured_book`): the
+    /// core's defaults, each OpenRouter slot's ceiling from `models`, the
+    /// operator keys' prices from `providers`, and the version. Built and checked once per isolate; every call into a
+    /// ledger is its own release's, so a ledger keeps none of its own
+    /// (decision 62).
+    pub book: fragment_core::price::PriceBook,
     /// `FRAGMENT_MODELS` (the deploy config's `models`, less its keys): where
     /// each of the model route's names runs, its tiers', `fallback` (a
     /// tier's call is made on it once more when its own fails before
@@ -162,8 +179,9 @@ pub struct Config {
     /// AI model, or a model on an OpenAI-compatible API, whose key is bound
     /// for its slot (`secrets_store::model_key`). Each slot unnamed is on
     /// Workers AI as before (`fragment_core::models::Models`); one out of
-    /// shape, or whose model the price book does not price, is refused, at
-    /// the deploy and here. A local fleet's may name its fake on
+    /// shape, or whose model neither the price book nor its slot's ceiling
+    /// prices (one on OpenRouter names its ceiling), is refused, at the
+    /// deploy and here. A local fleet's may name its fake on
     /// 127.0.0.1.
     pub models: fragment_core::models::Models,
     /// `FRAGMENT_SWAP_UPSTREAM` (the e2e only): a swapped request goes here,
@@ -204,9 +222,21 @@ fn test_secret(env: &Env, fleet: fragment_core::levers::Fleet) -> Option<fragmen
     }
 }
 
-/// `FRAGMENT_DEPLOY_ID`, or `dev` where a fleet names none.
+/// `FRAGMENT_DEPLOY_ID`, or `dev` where a fleet names none: a release's
+/// id (fragment_core::release::valid), or the isolate does not start.
 fn deploy_id(env: &Env) -> String {
-    var(env, "FRAGMENT_DEPLOY_ID").unwrap_or_else(|| "dev".into())
+    let id = var(env, "FRAGMENT_DEPLOY_ID").unwrap_or_else(|| "dev".into());
+    assert!(fragment_core::release::valid(&id), "FRAGMENT_DEPLOY_ID is 1 to {} of letters, digits, `.`, `_` and `-`", fragment_core::release::ID_MAX_BYTES);
+    id
+}
+
+/// `FRAGMENT_DEPLOYED_AT`, or `None` where a fleet sets none: seconds as
+/// digits (fragment_core::release::deployed), or the isolate does not start.
+fn deployed_at(env: &Env) -> Option<u64> {
+    let v = var(env, "FRAGMENT_DEPLOYED_AT")?;
+    let at = fragment_core::release::deployed(&v);
+    assert!(at.is_some(), "FRAGMENT_DEPLOYED_AT is whole seconds since 1970, 1 to {} digits", fragment_core::release::DEPLOYED_MAX_DIGITS);
+    at
 }
 
 /// The isolate's settings, built from the first `env` it is handed and
@@ -219,6 +249,26 @@ fn deploy_id(env: &Env) -> String {
 /// isolate that runs it; `from_env` checks that on every call against
 /// `FRAGMENT_DEPLOY_ID`.
 static CONFIG: OnceLock<Config> = OnceLock::new();
+
+/// The price book a release charges with: the core's defaults, each model
+/// slot's ceiling (an OpenRouter tier's: `Models::priced`), the
+/// configuration's operator keys' prices, and the higher of its version
+/// and the defaults' (decision 4: pricing lives there). One the core
+/// refuses (its checks are the deploy's too, so none should come) is said
+/// aloud, and the defaults charge instead: a billing problem never stops
+/// an agent (decision 62).
+fn configured_book(providers: &fragment_core::catalog::Catalog, models: &fragment_core::models::Models, version: u32) -> fragment_core::price::PriceBook {
+    let mut book = models.priced(fragment_core::price::PriceBook::defaults());
+    book.keys = providers.key_prices();
+    book.version = book.version.max(version);
+    match book.validate() {
+        Ok(()) => book,
+        Err(fault) => {
+            worker::console_error!("{}", serde_json::json!({ "event": "ledger.book-refused", "version": book.version, "fault": format!("{fault:?}") }));
+            fragment_core::price::PriceBook::defaults()
+        }
+    }
+}
 
 impl Config {
     /// The isolate's settings (`CONFIG`): built once, from `env`'s variables.
@@ -247,6 +297,9 @@ impl Config {
         assert!(fragment_core::frames::is_origin(&platform_url), "FRAGMENT_PLATFORM_URL (required) is an origin (scheme://host[:port], lower case, no path)");
         assert!(fragment_core::frames::is_origin(&format!("https://{host_suffix}")), "FRAGMENT_HOST_SUFFIX is a host name");
         let egress_local = var(env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow");
+        let providers = providers(env);
+        let models = fragment_core::models::Models::parse(var(env, "FRAGMENT_MODELS").as_deref(), &fragment_core::price::PriceBook::defaults(), egress_local)
+            .unwrap_or_else(|e| panic!("FRAGMENT_MODELS: {e}"));
         let levers_fleet = levers_fleet(egress_local, host_label_suffix.is_some());
         let test_secret = test_secret(env, levers_fleet);
         Config {
@@ -306,16 +359,18 @@ impl Config {
                 // the registry counts rows as i64; a larger setting means "no cap to speak of"
                 .map(|n| n.min(i64::MAX as u64))
                 .unwrap_or(fragment_proto::limits::SIGNINS_PENDING_MAX_DEFAULT),
+            cli_begins_per_ip_minute: var(env, "FRAGMENT_CLI_BEGINS_PER_IP_MINUTE")
+                .and_then(|s| s.parse::<u32>().ok())
+                .filter(|n| *n >= 1)
+                .unwrap_or(fragment_proto::limits::CLI_BEGINS_PER_IP_MINUTE_DEFAULT),
             test_hooks: test_secret.is_some(),
             levers_scoped: test_secret.is_some() && levers_fleet == fragment_core::levers::Fleet::Branch,
             test_secret,
             deploy_id: deploy_id(env),
-            providers: providers(env),
-            price_book_version: var(env, "FRAGMENT_PRICE_BOOK_VERSION")
-                .map(|v| v.parse().unwrap_or_else(|_| panic!("FRAGMENT_PRICE_BOOK_VERSION is a whole number")))
-                .unwrap_or(1),
-            models: fragment_core::models::Models::parse(var(env, "FRAGMENT_MODELS").as_deref(), &fragment_core::price::PriceBook::defaults(), egress_local)
-                .unwrap_or_else(|e| panic!("FRAGMENT_MODELS: {e}")),
+            deployed_at: deployed_at(env),
+            book: configured_book(&providers, &models, var(env, "FRAGMENT_PRICE_BOOK_VERSION").map(|v| v.parse().unwrap_or_else(|_| panic!("FRAGMENT_PRICE_BOOK_VERSION is a whole number"))).unwrap_or(1)),
+            providers,
+            models,
             swap_upstream: var(env, "FRAGMENT_SWAP_UPSTREAM").map(|u| u.trim_end_matches('/').to_string()),
         }
     }
@@ -340,7 +395,7 @@ impl Config {
     pub fn stripe(&self) -> CellResult<&StripeConfig> {
         self.stripe
             .as_ref()
-            .ok_or_else(|| CellError::invalid(format!("this deployment sells no seats (no {} binding): an operator comps them", fragment_core::secrets_store::STRIPE_KEY)))
+            .ok_or_else(|| CellError::invalid(format!("this deployment sells no seats (no {} binding): an operator comps them", fragment_core::secrets_store::STRIPE_KEY)).because(fragment_proto::Reason::NotSold))
     }
 
     /// The deployment as Stripe's metadata names it: its platform's origin.

@@ -7,9 +7,9 @@
 //! say: an agent's name (`__people`), the members (`__members`), and an
 //! editor's upload (`PUT __blob/<sha256>`). Then the owner, signed in on
 //! the chat's page, types and presses Enter, and sees the agent's draft
-//! live, then its reply; a tool step as a card, saying what it does
-//! ("Searching the web: …"); the runtime's notices as quiet lines of the
-//! turn, the one after its end too; a question asked to be answered in
+//! live, then its reply; a tool step as a card, saying what it does by
+//! its icon, which its verb names; the runtime's notices as quiet lines of
+//! the turn, the one after its end too; a question asked to be answered in
 //! words, the page waiting for their answer until they give it; an
 //! approval card they
 //! answer with its button, which another member sees but may not press;
@@ -58,6 +58,116 @@ fn shows(chrome: &mut Browser, page: &Page, cond: &str) -> bool {
     chrome.until(page, cond, TURN)
 }
 
+/// A chat page whose first live socket is never answered (its upgrade held,
+/// as a dropped connection or a phone's changing network leaves one: the
+/// library dialled again only on a close, so the page waited for its hello
+/// for good). Valid: the page closes it once it has waited past any healthy
+/// open (`OPEN_WAIT_MS`, cell/client.mjs), dials again, has its hello, and
+/// its composer is ready, its chat comes (the owner's newest message
+/// shown), and every message of the owner's is shown once.
+fn held_socket(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, chat: &str) -> Result<()> {
+    // the open wait and its first backoff, jittered, and the new open
+    let wait = Duration::from_secs(30);
+    // The chat comes after the hello: the new socket's subscribe, from the
+    // channel's cursor, then its page of records, drawn. Its newest message
+    // of the owner's shown, that page is (a look as the hello came found
+    // none drawn yet: runs 39667027692, 39679966640 and 39682770211).
+    let me = api.identity(owner)?;
+    let newest = records(api, owner, chat, "chat")
+        .into_iter()
+        .filter(|r| r["principal"] == me.as_str() && r["body"]["text"].is_string() && r["body"]["kind"].is_null())
+        .filter_map(|r| r["seq"].as_i64())
+        .max()
+        .context("the owner has said something in the chat")?;
+    let page = chrome.open_with_script(&api.site_url(chat, "__signin?return=/"), &crate::browser::hold_first_socket("/__live"))?;
+    fit(chrome, &page, 1280, 860, false)?;
+    let ready = chrome.until(
+        &page,
+        &format!("window.__heldSockets === 1 && window.__heldClosed === 1 && document.getElementById('say')?.dataset.ready === '1' && !!document.querySelector('.msg.user.mine[data-seq=\"{newest}\"]')"),
+        wait,
+    );
+    let seen = chrome.eval(&page, "({ held: window.__heldSockets, closed: window.__heldClosed, ready: document.getElementById('say')?.dataset.ready ?? null, mine: [...document.querySelectorAll('.msg.user.mine[data-seq]')].map((m) => m.dataset.seq) })")?;
+    let mine = strings_of(&seen["mine"]);
+    let once = !mine.is_empty() && mine.iter().collect::<std::collections::BTreeSet<_>>().len() == mine.len();
+    s.ok(
+        "a page whose first live socket is never answered closes it once it has waited past any healthy open, dials again, and is ready, each of the owner's messages shown once",
+        ready && once,
+        &seen,
+    );
+    chrome.close(page)?;
+    Ok(())
+}
+
+/// The chat's page whose script does not come, in the shell's frame (the
+/// frame was blank, with nothing to press): after a while it says it is
+/// still loading, with a reload of its own page, in its frame. Valid: a
+/// chat that loads never says it (its script draws the page, and the line
+/// goes with what was there). Its `chat.js` refused (the frame's own
+/// requests) and the frame loaded again: nothing for a while, then "Still
+/// loading… Reload", the link to the frame's own page; its Reload, the
+/// script let through, loads the chat again in its frame, and the shell
+/// around it stays as it was (not reloaded).
+fn still_loading_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let line = "document.getElementById('still-loading')";
+    let ready = format!("document.getElementById('say')?.dataset.ready === '1' && !{line}");
+    let shell = chrome.open(&format!("{}/", api.base))?;
+    chrome.viewport(&shell, 1280, 860, false)?;
+    let row = format!("#chats [data-key={}]", js(&format!("chat:{chat}")));
+    let listed = chrome.until(&shell, &format!("!document.getElementById('layout').hidden && !!document.querySelector({})", js(&row)), wait);
+    chrome.eval(&shell, &format!("(document.querySelector({})?.click(), window.__shellStays = true, true)", js(&row)))?;
+    let framed = s.eventually(wait, || chrome.eval_in_frame(&shell, chat, &ready).ok() == Some(Value::Bool(true)));
+    s.ok("the chat in the shell's frame loads, and never says it is still loading (its script drew the page, the line gone with what was there)", listed && framed, "");
+
+    let frame = chrome.frame(chat)?;
+    chrome.block(&frame, &["*/chat.js"])?;
+    chrome.eval(&frame, "(location.reload(), true)")?;
+    // (styled: its stylesheet in; before it a line is unstyled, which a
+    // person never sees, as the page draws nothing until it has come)
+    let styled = format!("!!{line} && getComputedStyle({line}).position === 'fixed'");
+    let quiet = chrome.until(&frame, &format!("{styled} && getComputedStyle({line}).visibility === 'hidden'"), wait);
+    let t0 = std::time::Instant::now();
+    let shown = quiet && chrome.until(&frame, &format!("{styled} && getComputedStyle({line}).visibility === 'visible'"), wait);
+    let after = t0.elapsed();
+    let seen = chrome.eval(&frame, &format!("({{ said: {line}?.textContent ?? null, link: {line}?.querySelector('a')?.href ?? null, here: location.href }})"))?;
+    s.ok(
+        "its script refused, the chat's frame says nothing for a while, then \"Still loading… Reload\", the link to its own page",
+        shown && after >= Duration::from_secs(8) && seen["said"] == "Still loading… Reload" && seen["link"] == seen["here"],
+        json!({ "seen": seen, "afterMs": after.as_millis() as u64 }),
+    );
+    chrome.block(&frame, &[])?;
+    // (a press, as a script's: with no line, a FAIL here, the checks after it made)
+    chrome.eval(&frame, "(document.querySelector('#still-loading a')?.click(), true)")?;
+    let back = chrome.until(&frame, &ready, wait);
+    let stays = chrome.eval(&shell, "window.__shellStays === true")?;
+    s.ok("its Reload, the script let through, loads the chat again in its frame, and the shell stays as it was", back && stays == true, json!({ "back": back, "stays": stays }));
+    chrome.detach(frame)?;
+    chrome.close(shell)?;
+    Ok(())
+}
+
+/// A JSON array's strings.
+fn strings_of(v: &Value) -> Vec<String> {
+    v.as_array().into_iter().flatten().filter_map(|x| x.as_str().map(str::to_string)).collect()
+}
+
+/// The page's viewport made `width`×`height` (a phone's when `mobile`),
+/// and waited for until the chat fits it. The chat is as tall as the
+/// visual viewport, from that viewport's `resize` (chat.js `fitViewport`,
+/// `--viewport-height`), which comes a frame or more after the change;
+/// until it does, the composer is where the old size put it, and a press
+/// read from its box lands beside it (what was typed then went nowhere:
+/// run 39542336296's "on a desktop Enter sends", a local run's "on a phone
+/// too, Reply quotes").
+fn fit(chrome: &mut Browser, page: &Page, width: u32, height: u32, mobile: bool) -> Result<()> {
+    chrome.viewport(page, width, height, mobile)?;
+    let fitted = format!(
+        "innerWidth === {width} && Math.round(visualViewport.height) === {height} && document.documentElement.style.getPropertyValue('--viewport-height') === '{height}px'"
+    );
+    anyhow::ensure!(chrome.until(page, &fitted, TURN), "the chat fits {width}×{height}: {}", chrome.eval(page, "[innerWidth, visualViewport.height, document.documentElement.style.getPropertyValue('--viewport-height')]")?);
+    Ok(())
+}
+
 /// A JS string literal.
 fn js(s: &str) -> String {
     serde_json::to_string(s).expect("a string encodes")
@@ -90,7 +200,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the agent joins the chat on the template", r.status == 200, &r);
     // the platform tells the agent it joined (Paul, 2026-10-03), and wakes its computer
     let member_id = api.identity(&member)?;
-    let r = api.signed(&owner, "PUT", &format!("/api/f/{chat_name}/members/{member_id}"), Some(&json!({ "role": "viewer" })))?;
+    let r = api.share(&chat_name, &member_id, "viewer")?;
     anyhow::ensure!(r.status == 200, "adding a viewer: {r}");
 
     // ---- the template's code runs from the platform's release (decision 40): its push job
@@ -196,7 +306,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let shots = s.dir("chat");
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &owner_session)?;
     let page = chrome.open(&api.site_url(&chat_name, "__signin?return=/"))?;
-    chrome.viewport(&page, 1280, 860, false)?;
+    fit(&mut chrome, &page, 1280, 860, false)?;
     let ready = chrome.until(&page, "document.getElementById('say')?.dataset.ready === '1'", TURN);
     let role = chrome.eval(&page, "import('./__fragment.js').then((f) => f.me()).then((m) => m.role)").unwrap_or_default();
     s.ok("the owner, signed in on the chat's page, may write", ready && role == "owner" && chrome.eval(&page, "!document.getElementById('text').disabled")? == true, &role);
@@ -216,6 +326,18 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     };
     let mine = |text: &str| format!("[...document.querySelectorAll('.msg.user.mine .bubble')].some((b) => b.textContent === {})", js(text));
     let replied = |text: &str| format!("[...document.querySelectorAll('.msg.agent:not(.streaming) .md')].some((m) => m.textContent.includes({}))", js(text));
+    // The record of the owner's message `text`, waited for within TURN: the
+    // page shows its own message as it posts it (`.sending`), before the
+    // platform has answered the post and written its record, so a read
+    // right after it shows may find none (as #456 found for a command's).
+    let posted = |s: &Suite, text: &str| -> Value {
+        let mut found = Value::Null;
+        s.eventually(TURN, || {
+            found = records(api, &owner, &chat_name, "chat").into_iter().find(|x| x["body"]["text"] == text).unwrap_or_default();
+            !found.is_null()
+        });
+        found
+    };
 
     // typed, Enter: the message, the agent's draft live, then its reply
     let first = "hello there, slowly";
@@ -228,9 +350,8 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     say(&mut chrome, first)?;
     s.ok("typed and sent with Enter, the message shows as the owner's", shows(&mut chrome, &page, &mine(first)), "");
     s.ok("and the composer is empty again", chrome.eval(&page, "document.getElementById('text').value")? == "", "");
-    let r = records(api, &owner, &chat_name, "chat");
-    let sent = r.iter().find(|x| x["body"]["text"] == first);
-    s.ok("the page posted it to chat as the owner, `{text}`", sent.is_some_and(|x| x["principal"] == api.identity(&owner).unwrap_or_default().as_str()), json!(r));
+    let sent = posted(s, first);
+    s.ok("the page posted it to chat as the owner, `{text}`", sent["principal"] == api.identity(&owner).unwrap_or_default().as_str(), &sent);
     let answered = shows(&mut chrome, &page, &format!("{} && !document.querySelector('.msg.agent.streaming')", replied(first)));
     let reply = chrome.eval(&page, &format!("[...document.querySelectorAll('.msg.agent .md')].map((m) => m.textContent).find((t) => t.includes({})) ?? ''", js(first)))?;
     let reply = reply.as_str().unwrap_or("").to_string();
@@ -241,12 +362,12 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("then its reply replaces the draft", answered && reply.starts_with("echo:"), chrome.eval(&page, "document.getElementById('messages').innerText")?);
     s.ok("the agent's reply is under its name", chrome.eval(&page, &format!("[...document.querySelectorAll('.msg.agent .who')].every((w) => w.textContent === {})", js(&capital(&label))))? == true, "");
 
-    // a tool step, as a card: what it does, in words (its category's icon
-    // and verb), then its arguments and what came of it
+    // a tool step, as a card: what it does (its category's icon, its verb
+    // the icon's name), then its arguments and what came of it
     say(&mut chrome, "tool please")?;
     let step = "[...document.querySelectorAll('details.tools .step[data-category=\"web\"]')].find((s) => s.querySelector('.step-args')?.textContent === 'tool please')";
-    let stepped = shows(&mut chrome, &page, &format!("!!{step} && {step}.querySelector('svg') && {step}.querySelector('.step-verb').textContent === 'Searching the web:' && {step}.textContent.includes('3 results') && {}", replied("tool please")));
-    s.ok("a tool step shows as a card before the reply, saying what it does (\"Searching the web: tool please\")", stepped, chrome.eval(&page, "document.getElementById('messages').innerText")?);
+    let stepped = shows(&mut chrome, &page, &format!("!!{step} && !{step}.querySelector('.step-verb') && {step}.querySelector('.step-name > svg[role=\"img\"]')?.getAttribute('aria-label') === 'Searching the web' && {step}.textContent.includes('3 results') && {}", replied("tool please")));
+    s.ok("a tool step shows as a card before the reply, saying what it does by its icon (named \"Searching the web\") and its arguments (\"tool please\")", stepped, chrome.eval(&page, "document.getElementById('messages').innerText")?);
     // every card open, for the screenshots: what each step says
     let open_cards = "(() => { const cards = [...document.querySelectorAll('details.tools')]; cards.forEach((d) => (d.open = true)); cards.at(-1)?.scrollIntoView({ block: 'center' }); return true; })()";
     chrome.eval(&page, open_cards)?;
@@ -303,7 +424,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let elsewhere = chrome.another_context()?;
     chrome.set_cookie_in(&elsewhere, &format!("{}/", api.base), "fragment_session", &member_session)?;
     let theirs = chrome.open_in(&elsewhere, &api.site_url(&chat_name, "__signin?return=/"))?;
-    chrome.viewport(&theirs, 1280, 860, false)?;
+    fit(&mut chrome, &theirs, 1280, 860, false)?;
     let seen = chrome.until(&theirs, "document.querySelectorAll('.prompt:not(.closed) .options button').length === 2", TURN);
     let pressable = chrome.eval(&theirs, "[...document.querySelectorAll('.prompt:not(.closed) .options button')].filter((b) => !b.disabled).length")?;
     let note = chrome.eval(&theirs, "document.querySelector('.prompt .prompt-note')?.textContent ?? ''")?;
@@ -316,7 +437,12 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the turn goes on approved", shows(&mut chrome, &page, &replied("(approved)")), "");
     let r = records(api, &owner, &chat_name, "chat");
     let answer = r.iter().find(|x| x["body"]["kind"] == "prompt_response").cloned().unwrap_or_default();
-    s.ok("the page answered with a prompt_response for the card's option", answer["body"]["option"] == "once" && answer["body"]["prompt"].is_string(), &answer);
+    let asked = records(api, &owner, &chat_name, "work").into_iter().find(|x| x["body"]["kind"] == "turn.prompt" && x["body"]["prompt"] == answer["body"]["prompt"]).unwrap_or_default();
+    s.ok(
+        "the page answered with a prompt_response for the card's option, naming the card's agent and turn",
+        answer["body"]["option"] == "once" && answer["body"]["prompt"].is_string() && answer["body"]["agent"] == identity.as_str() && answer["body"]["turn"] == asked["body"]["turn"] && asked["principal"] == identity.as_str(),
+        json!({ "answer": answer, "card": asked }),
+    );
     s.ok("the member's card closes too", chrome.until(&theirs, "!!document.querySelector('.prompt.closed .outcome.answered')", TURN), "");
     chrome.close(theirs)?;
 
@@ -340,6 +466,22 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let answer = r.iter().find(|x| x["body"]["kind"] == "prompt_response" && x["body"]["option"] == "other").cloned().unwrap_or_default();
     s.ok("the page answered with the option and its words, `{option, text}`", answer["body"]["text"] == "rosemary", &answer);
     let _ = chrome.screenshot(&page, &shots.join("desktop-choices-answered.png"));
+
+    // the same card answered in the message box (Paul on production,
+    // 2026-10-22: his typed reply stayed queued and the card open): the
+    // composer says what they type answers it; sent, the card closes with
+    // their words, the agent has them, and the message waits for nothing
+    say(&mut chrome, "choose again")?;
+    let open = shows(&mut chrome, &page, &format!("!!document.querySelector({}) && {answer_here}", js(field)));
+    s.ok("a card that takes words open, the composer says what its owner types answers it", open, chrome.eval(&page, "document.getElementById('text').placeholder")?);
+    say(&mut chrome, "thyme")?;
+    let closed = shows(&mut chrome, &page, "[...document.querySelectorAll('.prompt.closed .outcome.answered')].some((o) => o.textContent.startsWith('thyme'))");
+    s.ok("sent from the message box, it answers the card: the card closes saying the words", closed, chrome.eval(&page, "[...document.querySelectorAll('.prompt')].map((p) => p.innerText)")?);
+    let ran_on = shows(&mut chrome, &page, &format!("{} && !document.querySelector('.prompt:not(.closed)') && !({answer_here})", replied("choose again (chose: thyme)")));
+    let waits = chrome.eval(&page, "[...document.querySelectorAll('.msg.user.mine')].some((m) => m.querySelector('.bubble')?.textContent === 'thyme' && !!m.querySelector('.queued'))")?;
+    let thyme = posted(s, "thyme");
+    let own_turns = records(api, &owner, &chat_name, "work").iter().filter(|r| r["body"]["kind"] == "turn.start" && r["body"]["cause"]["seq"] == thyme["seq"]).count();
+    s.ok("the turn goes on with them, and the message waits for nothing: never marked queued, no turn of its own", ran_on && waits == false && own_turns == 0, json!({ "queued": waits, "turns": own_turns }));
 
     // Stop: the send circle becomes Stop while the owner's turn runs. The
     // turn is the message's own (docs/chat-records.md): the page may still
@@ -383,8 +525,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the page reads it back as the chat's blob, as uploaded", fetched == json!([200, "image/png", picture.len()]), &fetched);
     let blob = api.signed(&owner, "GET", &format!("/api/f/{chat_name}/blobs/{picture_sha}"), None)?;
     s.ok("the same bytes the API serves", blob.status == 200 && blob.bytes == picture, blob.status);
-    let r = records(api, &owner, &chat_name, "chat");
-    let carried = r.iter().find(|x| x["body"]["text"] == "here is a picture").map(|x| x["body"]["attachments"].clone()).unwrap_or_default();
+    let carried = posted(s, "here is a picture")["body"]["attachments"].clone();
     s.ok(
         "its record names the file as docs/chat-records.md does",
         carried == json!([{ "sha256": picture_sha, "size": picture.len(), "type": "image/png", "name": "picture.png" }]),
@@ -426,8 +567,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.click(&page, "#record")?;
     let memo_shown = "[...document.querySelectorAll('.msg.user.mine')].some((m) => m.querySelector('.attachment-audio audio[src^=\"./__blob/\"]') && m.textContent.includes('a voice memo'))";
     s.ok("pressed again, it sends the clip with what was typed, shown as a player", ticking && shows(&mut chrome, &page, memo_shown), chrome.eval(&page, "document.getElementById('messages').innerHTML.slice(-600)")?);
-    let r = records(api, &owner, &chat_name, "chat");
-    let memo = r.iter().find(|x| x["body"]["text"] == "a voice memo").map(|x| x["body"]["attachments"].clone()).unwrap_or_default();
+    let memo = posted(s, "a voice memo")["body"]["attachments"].clone();
     let memo_sha = memo[0]["sha256"].as_str().unwrap_or("").to_string();
     s.ok(
         "its record names the clip as an audio attachment, as the recorder made it",
@@ -449,7 +589,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.color_scheme(&page, "light")?;
     chrome.screenshot(&page, &shots.join("desktop-light-cards.png"))?;
     chrome.color_scheme(&page, "dark")?;
-    chrome.viewport(&page, 375, 812, true)?;
+    fit(&mut chrome, &page, 375, 812, true)?;
     chrome.eval(&page, "(() => { const s = document.getElementById('scroll'); s.scrollTop = s.scrollHeight; return true; })()")?;
     std::thread::sleep(Duration::from_millis(300));
     let widths = chrome.eval(
@@ -468,8 +608,8 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     // nothing answered twice, and the computer goes back to sleep
     let turns: Vec<String> = records(api, &owner, &chat_name, "work").iter().filter(|r| r["body"]["kind"] == "turn.start").filter_map(|r| r["body"]["turn"].as_str().map(str::to_string)).collect();
     let once: std::collections::BTreeSet<&String> = turns.iter().collect();
-    s.ok("every message the page sent was one turn", turns.len() == 11 && once.len() == turns.len(), json!(turns));
-    let first_turn = turn_of(&agent_name, &chat_name, "chat", sent.and_then(|x| x["seq"].as_i64()).unwrap_or(0));
+    s.ok("every message the page sent was one turn (the one that answered a card, none)", turns.len() == 12 && once.len() == turns.len(), json!(turns));
+    let first_turn = turn_of(&agent_name, &chat_name, "chat", sent["seq"].as_i64().unwrap_or(0));
     s.ok("the first of them the turn of the page's first message", turns.first() == Some(&first_turn), json!({ "first": first_turn, "turns": turns }));
 
     commands_queued_and_quotes(s, api, &mut chrome, &page, Owned { owner: &owner, member_session: &member_session, chat: &chat_name, identity: &identity, label: &label }, &shots)?;
@@ -581,9 +721,14 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         by_hand["status"] == "succeeded" && by_hand["output"]["pushed"] == 0 && s.push.received(&owner_push).len() == 1,
         &by_hand,
     );
+    // (a tab of its own, in front: after the push checks, which ask whether
+    // the owner's page is on screen)
+    held_socket(s, api, &mut chrome, &owner, &chat_name)?;
+    still_loading_in_frame(s, api, &mut chrome, &chat_name)?;
 
-    polish::check(s, api, &owner, &owner_session, &mut chrome, &identity, &label)?;
+    polish::check(s, api, &owner, &owner_session, &mut chrome, &label)?;
     polish::working_card(s, api, &owner, &mut chrome, &identity, &agent_name)?;
+    polish::record_shapes(s, api, &owner, &owner_session, &mut chrome)?;
 
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;
@@ -613,7 +758,7 @@ struct Owned<'a> {
 /// sends, a desktop's Enter sends. Screenshots in the run's scratch
 /// (`chat/`).
 fn commands_queued_and_quotes(s: &mut Suite, api: &Api, chrome: &mut Browser, page: &Page, o: Owned, shots: &Path) -> Result<()> {
-    chrome.viewport(page, 1280, 860, false)?;
+    fit(chrome, page, 1280, 860, false)?;
     chrome.color_scheme(page, "light")?;
     let shows = |chrome: &mut Browser, cond: &str| chrome.until(page, cond, TURN);
     let replied = |text: &str| format!("[...document.querySelectorAll('.msg.agent:not(.streaming) .md')].some((m) => m.textContent.includes({}))", js(text));
@@ -648,7 +793,13 @@ fn commands_queued_and_quotes(s: &mut Suite, api: &Api, chrome: &mut Browser, pa
     chrome.press(page, "Enter", false)?;
     let bubble = "[...document.querySelectorAll('.msg.user.mine .bubble.command')].some((b) => b.textContent === '/usage')";
     s.ok("Enter sends it, shown as the command it is", shows(chrome, bubble), chrome.eval(page, "document.getElementById('messages').innerText.slice(-300)")?);
-    let sent = chat_records().into_iter().find(|r| r["body"]["kind"] == "command" && r["body"]["command"] == "usage").unwrap_or_default();
+    // its bubble shows as it is posted (`.sending`), before its record is
+    // written: the record is waited for, not read once (Alex's, from #430)
+    let mut sent = Value::Null;
+    s.eventually(TURN, || {
+        sent = chat_records().into_iter().find(|r| r["body"]["kind"] == "command" && r["body"]["command"] == "usage").unwrap_or_default();
+        !sent.is_null()
+    });
     s.ok("its record is `{kind: \"command\", command, to}`, the agent named", sent["body"] == json!({ "kind": "command", "command": "usage", "to": [o.identity] }), &sent);
     s.ok("and the agent answers it as a turn of its own", shows(chrome, &replied("ran /usage")), "");
 
@@ -715,7 +866,7 @@ fn commands_queued_and_quotes(s: &mut Suite, api: &Api, chrome: &mut Browser, pa
     chrome.press(page, "Enter", false)?;
     s.ok("/btw is answered as a message of the agent's own", shows(chrome, &replied("aside: /btw which file?")), "");
     // and on a phone, the page fitted to its visual viewport, its fields 16px
-    chrome.viewport(page, 375, 812, true)?;
+    fit(chrome, page, 375, 812, true)?;
     chrome.eval(page, &format!("(() => {{ document.querySelector('.msg.agent[data-seq=\"{reply_seq}\"] .actions .reply')?.click(); return true; }})()"))?;
     let phone_shown = shows(chrome, &quoting);
     typed(chrome, "and on a phone")?;
@@ -730,14 +881,13 @@ fn commands_queued_and_quotes(s: &mut Suite, api: &Api, chrome: &mut Browser, pa
         phone_shown && phone_sent && on_phone["body"]["reply_to"] == reply_seq && phone_handed,
         &on_phone,
     );
-    chrome.viewport(page, 1280, 860, false)?;
-    chrome.until(page, "innerWidth === 1280", TURN);
+    fit(chrome, page, 1280, 860, false)?;
 
     // a phone's return is a newline, and the send button sends (Paul,
     // 2026-10-14): a touch screen with no finer pointer, at a phone's width
     let composer = "(() => { const t = document.getElementById('text'); return { value: t.value, hint: t.enterKeyHint }; })()";
     let said = |text: &str| chat_records().into_iter().filter(|r| r["body"]["text"] == text).count();
-    chrome.viewport(page, 375, 812, true)?;
+    fit(chrome, page, 375, 812, true)?;
     chrome.touch(page, true)?;
     let labelled = shows(chrome, "document.getElementById('text').enterKeyHint === 'enter'");
     let before = chat_records().len();
@@ -759,7 +909,7 @@ fn commands_queued_and_quotes(s: &mut Suite, api: &Api, chrome: &mut Browser, pa
     let _ = shows(chrome, &replied("a line on a phone"));
     // a desktop's: Enter sends, Shift+Enter adds a line
     chrome.touch(page, false)?;
-    chrome.viewport(page, 1280, 860, false)?;
+    fit(chrome, page, 1280, 860, false)?;
     let labelled = shows(chrome, "innerWidth === 1280 && document.getElementById('text').enterKeyHint === 'send'");
     typed(chrome, "first of two")?;
     chrome.press(page, "Enter", true)?;

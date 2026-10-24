@@ -37,3 +37,6 @@ tungstenite = { version = "=0.29.0", features = ["rustls-tls-webpki-roots", "rus
 
 [dev-dependencies]
 fragment-fakes = { path = "../crates/fakes" }
+# a port bound and never listened on (api.rs's tests: a host never reached),
+# which std's TcpListener cannot hold; already in the lock, through tokio
+socket2 = "=0.6.5"

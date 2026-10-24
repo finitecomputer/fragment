@@ -17,9 +17,14 @@
 //! change at once), and what takes access away (removing someone, a new
 //! share link, leaving) asks a second click.
 //!
-//! An email no one signs in as yet is mailed a link to the fragment, and
-//! their first sign-in as it makes them a member (decision 48): there is no
-//! page to accept an invite on.
+//! An email is mailed a link to the platform's page, where whoever signs
+//! in as it accepts the invite, or declines it (decision 63: the shell's
+//! sidebar, through `/api/invites`, below): nobody is made a member by an
+//! invite without their yes.
+//!
+//!   GET  /api/invites                    the invites waiting on a person's emails
+//!   POST /api/invites/<name>/accept      their yes: a member now
+//!   POST /api/invites/<name>/decline     their no: it waits no more
 //!
 //! A fragment's page (its author's code, or an agent's) is cross-site from
 //! the platform on fragment.club, but one site
@@ -46,7 +51,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::{form, npub};
 use fragment_proto::{
-    limits, Access, AccessAgent, AccessMember, AccessRow, ErrorBody, ErrorCode, IdentityKind, Invite, InviteList, ListedFragment, Member, MemberList, Role, Shared, Visibility,
+    limits, Access, AccessMember, AccessRow, ErrorBody, ErrorCode, IdentityKind, Invite, InviteAccepted, InviteList, ListedFragment, Member, MemberList, Role, Shared, Visibility,
 };
 use futures_util::future::{join, join_all};
 use serde_json::{json, Value};
@@ -58,6 +63,7 @@ use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::js;
 use crate::registry::calls::{self, Profile};
+use crate::registry::invites::{AnswerInvite, InvitesFor};
 use crate::routed::{Routed, Signed};
 
 /// A form of a few short fields (the longest: an email).
@@ -73,10 +79,10 @@ pub(crate) const FACES_MAX: usize = 64;
 /// pill buttons), as a card: the page's, or, in the shell's dialog
 /// (`framed`), the dialog's whole.
 const SHEET_STYLE: &str = ":root{color-scheme:light dark;--bg:light-dark(#f7f6f3,#212121);--fg:light-dark(#171717,#ececec);--muted:light-dark(#66615b,#a6a19d);--line:light-dark(rgba(20,20,20,.105),rgba(255,255,255,.085));--line-strong:light-dark(rgba(20,20,20,.18),rgba(255,255,255,.16));--surface:light-dark(#fffdfa,#2b2b2a);--soft:light-dark(#f0eee9,#262625);--accent:light-dark(#315fbd,#8ab4ff);--danger:light-dark(#81112f,#f3b3b3);--open:light-dark(#167a52,#39d98a)}
-body{margin:0 auto;padding:16px;max-width:32rem;background:var(--bg);color:var(--fg);font:15px/1.5 \"Funnel Sans\",ui-sans-serif,system-ui,-apple-system,sans-serif;-webkit-font-smoothing:antialiased}
-main{background:var(--surface);border-radius:14px;padding:20px 24px;box-shadow:0 1px 2px #0000001a,0 8px 28px #0000001a}
+body{box-sizing:border-box;margin:0 auto;padding:16px;max-width:34rem;min-height:100vh;min-height:100dvh;display:flex;flex-direction:column;background:var(--bg);color:var(--fg);font:15px/1.5 \"Funnel Sans\",ui-sans-serif,system-ui,-apple-system,sans-serif;-webkit-font-smoothing:antialiased}
+main{flex:none;margin-block:auto;background:var(--surface);border-radius:14px;padding:20px 24px;box-shadow:0 1px 2px #0000001a,0 8px 28px #0000001a}
 h1{font-size:1.25rem;font-weight:600;margin:0 0 .9em;overflow-wrap:anywhere}h2{font-size:.8125rem;font-weight:600;color:var(--muted);margin:1.4em 0 .4em}
-a{color:var(--accent)}code{background:var(--soft)}form{margin:0}
+a{color:var(--accent)}code{background:var(--soft);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}pre code{display:block;padding:.6em .8em;white-space:pre-wrap;word-break:break-all}form{margin:0}
 ul.people{list-style:none;padding:0;margin:0}.people li{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:6px 0;min-height:40px;border-top:1px solid var(--line)}.people li:first-child{border-top:0}
 .av{width:32px;height:32px;border-radius:50%;object-fit:cover;background:var(--soft);display:inline-grid;place-items:center;font-size:14px;font-weight:600;flex:none}
 .who{flex:1 1 10rem;min-width:0;overflow-wrap:anywhere}.who small{display:block;color:var(--muted);font-size:.8125rem}
@@ -100,7 +106,7 @@ button.text.away{color:var(--muted)}button[data-sure]{color:var(--danger)!import
 .more{margin-top:1.2em;padding-top:.2em;border-top:1px solid var(--line)}.more .row{display:flex;gap:12px;align-items:center;justify-content:space-between}
 footer{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin-top:1.4em}footer .leave{margin-right:auto}
 .flash{padding:4px 14px;border-radius:10px;background:var(--soft);margin-bottom:1em}.flash.error{background:color-mix(in srgb,var(--danger) 18%,transparent)}
-.framed body{max-width:none;padding:0;background:var(--surface)}.framed main{box-shadow:none;border-radius:0}
+.framed body{max-width:none;min-height:0;display:block;padding:0;background:var(--surface)}.framed main{box-shadow:none;border-radius:0}
 @media (max-width:420px){body{padding:8px}main{padding:16px}}
 html{-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%;text-size-adjust:100%}body{overscroll-behavior:none}
 button,.seg,.option{-webkit-user-select:none;user-select:none;touch-action:manipulation}
@@ -169,7 +175,7 @@ fn script() -> String {
 /// platform, and who may frame it (`ancestors`).
 fn policy(forms_here: bool, ancestors: &str) -> String {
     let forms = if forms_here { " form-action 'self';" } else { "" };
-    format!("default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline';{forms} base-uri 'none'; frame-ancestors {ancestors}")
+    format!("default-src 'none'; img-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'unsafe-inline';{forms} base-uri 'none'; frame-ancestors {ancestors}")
 }
 
 /// One of sharing's pages: the platform's look, its protections, and
@@ -177,16 +183,7 @@ fn policy(forms_here: bool, ancestors: &str) -> String {
 /// join page's redirects on to the fragment's, which `form-action` would
 /// refuse).
 pub(crate) fn sheet_page(status: u16, title: &str, body: &str, forms_here: bool) -> CellResult<Response> {
-    let html = format!(
-        r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{t}</title>
-<style>{style}
-{sheet}</style>
-<main><h1>{t}</h1>{body}</main>{script}"#,
-        t = esc(title),
-        style = auth::STYLE,
-        sheet = SHEET_STYLE,
-        script = script(),
-    );
+    let html = format!("{}{}", platform_html(title, body), script());
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;
     h.set("cache-control", "no-store")?;
@@ -196,6 +193,29 @@ pub(crate) fn sheet_page(status: u16, title: &str, body: &str, forms_here: bool)
     // the join page's URL holds its token: no other origin hears it
     h.set("referrer-policy", "same-origin")?;
     Ok(Response::ok(html)?.with_status(status).with_headers(h))
+}
+
+/// Shared markup only: callers keep their own framing, navigation and
+/// script policies. Plain notices need none of the sharing controls.
+pub(crate) fn sheet_html(title: &str, body: &str) -> String {
+    format!(
+        r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{t}</title>
+<style>{sheet}</style>
+<main><h1>{t}</h1>{body}</main>"#,
+        t = esc(title),
+        sheet = SHEET_STYLE,
+    )
+}
+
+/// Platform-origin pages can load the onboarding assets from the release.
+/// Fragment-origin notices retain the self-contained sheet above.
+pub(crate) fn platform_html(title: &str, body: &str) -> String {
+    sheet_html(title, body)
+        .replacen("<html lang=\"en\">", "<html lang=\"en\" class=\"platform-page\">", 1)
+        .replacen("<main>", "<link rel=\"stylesheet\" href=\"/__shell/platform-pages.css\"><div class=\"platform-brand\"><img src=\"/__shell/finite-logo.svg\" alt=\"Finite\" width=\"44\" height=\"46\"></div><main>", 1)
+        + "<script>"
+        + include_str!("../shell/platform-pages.js")
+        + "</script>"
 }
 
 /// The share sheet itself: a sharing page only the platform's own pages
@@ -270,7 +290,7 @@ pub(crate) async fn ask(env: &Env, url: &Url, name: &str, who: &Signed, method: 
         init.with_body(Some(b.to_string().into()));
     }
     let req = Request::new_with_init(&format!("https://fragment.internal{inner}"), &init)?;
-    let mut resp = env.durable_object("FRAGMENT")?.get_by_name(name)?.fetch_with_request(req).await?;
+    let mut resp = crate::routed::send(env, "FRAGMENT", name, req).await?;
     let status = resp.status_code();
     let v: Value = resp.json().await.map_err(|e| CellError::host(format!("{inner} answered {status}, not JSON: {e}")))?;
     if status == 200 {
@@ -286,18 +306,18 @@ fn decoded<T: serde::de::DeserializeOwned>(v: Value, what: &str) -> CellResult<T
     serde_json::from_value(v).map_err(|e| CellError::host(format!("{what}: {e}")))
 }
 
-/// Emails and pictures for identities, and a person's agents, asked of
-/// the registry `PROFILES_MAX` at a time. One it cannot answer shows as its
-/// id. Their emails are shown: the sheet and the access view are of a
-/// fragment's people, shown to its members (docs/cloudflare-v1.md,
-/// decision 48), and an agent member's owner, who reads what it reads. A
-/// person's agents are named: they reach what the person does (Paul,
-/// 2026-10-13).
+/// Emails and pictures for identities, asked of the registry
+/// `PROFILES_MAX` at a time. One it cannot answer shows as its id. Their
+/// emails are shown: the sheet and the access view are of a fragment's
+/// people, shown to its members (docs/cloudflare-v1.md, decision 48), and
+/// an agent member's owner, who reads what it reads. A person's own agents
+/// are not named (decision 63: "I invite Skyler and his agents, not Skyler
+/// and his agent Agent123"): they reach what the person does, unnamed.
 pub(crate) async fn profiles(env: &Env, mut ids: Vec<String>) -> BTreeMap<String, Profile> {
     ids.sort();
     ids.dedup();
     let asked = ids.chunks(crate::registry::PROFILES_MAX).map(|chunk| {
-        let call = calls::Profiles { ids: chunk.to_vec(), emails_of: chunk.to_vec(), agents_of: chunk.to_vec() };
+        let call = calls::Profiles { ids: chunk.to_vec(), emails_of: chunk.to_vec() };
         async move { ask_registry(env, &call).await }
     });
     let mut all = BTreeMap::new();
@@ -311,16 +331,14 @@ pub(crate) async fn profiles(env: &Env, mut ids: Vec<String>) -> BTreeMap<String
     all
 }
 
-/// Names each agent among `profiles`, and each person's agents they list,
-/// by its agent fragment's face (its title, and its picture's address on
-/// the platform), the one source every page and the platform show an agent
-/// by (docs/api.md, "An agent's name and picture"): at most `FACES_MAX`
-/// fragments asked at once, the profiles' own agents first. One not asked,
-/// or whose fragment does not answer, keeps its label.
+/// Names each agent among `profiles` by its agent fragment's face (its
+/// title, and its picture's address on the platform), the one source every
+/// page and the platform show an agent by (docs/api.md, "An agent's name
+/// and picture"): at most `FACES_MAX` fragments asked at once. One not
+/// asked, or whose fragment does not answer, keeps its label.
 pub(crate) async fn name_agents(env: &Env, profiles: &mut BTreeMap<String, Profile>) {
     let mut asked: Vec<String> = vec![];
-    let own = profiles.values().filter_map(|p| p.fragment.clone());
-    for f in own.chain(profiles.values().flat_map(|p| p.agents.iter().filter_map(|a| a.fragment.clone()))) {
+    for f in profiles.values().filter_map(|p| p.fragment.clone()) {
         if asked.len() < FACES_MAX && !asked.contains(&f) {
             asked.push(f);
         }
@@ -334,10 +352,15 @@ pub(crate) async fn name_agents(env: &Env, profiles: &mut BTreeMap<String, Profi
             p.title = face(&p.fragment, "title");
             p.picture = face(&p.fragment, "picture");
         }
-        for a in &mut p.agents {
-            a.title = face(&a.fragment, "title");
-        }
     }
+}
+
+/// Whether `m` is an agent in with its person, a member who is not the
+/// owner (decision 64; members.rs `entity_of`): never an entry of its own,
+/// nor named; its person is the one entry. The owner's agents are each in
+/// as the owner chose them, and shown as theirs.
+pub(crate) fn with_their_person(m: &Member, members: &[Member]) -> bool {
+    m.kind == Some(IdentityKind::Agent) && m.owner.as_deref().is_some_and(|o| members.iter().any(|p| p.principal == o && p.role != Role::Owner))
 }
 
 /// The ids a member list needs named: its members, and its agent
@@ -384,9 +407,8 @@ fn person(m: &Member, sheet: &Sheet) -> String {
             None => "An agent".to_string(),
         });
     }
-    let theirs: Vec<String> = p.map_or(&[][..], |p| &p.agents[..]).iter().map(|a| esc(a.title.as_deref().or(a.name.as_deref()).unwrap_or(&npub::display(&a.id)))).collect();
-    if !theirs.is_empty() {
-        under.push(format!("With their agent{} {}", if theirs.len() == 1 { "" } else { "s" }, theirs.join(", ")));
+    if sheet.with_agents.contains(&m.principal) {
+        under.push("With their agents".to_string());
     }
     let under = if under.is_empty() { String::new() } else { format!("<small>{}</small>", under.join(" · ")) };
     format!("{picture}<span class=\"who\">{name}{you}{under}</span>")
@@ -397,7 +419,10 @@ struct Sheet {
     me: String,
     /// The person's own role (`None`: they read through an agent of theirs).
     role: Option<Role>,
+    /// Its members, less the agents in with their person.
     members: Vec<Member>,
+    /// The people whose agents are in with them.
+    with_agents: Vec<String>,
     /// The invites waiting: the owner's only.
     invites: Vec<Invite>,
     visibility: Visibility,
@@ -428,10 +453,8 @@ impl Sheet {
 
 /// What happened, shown above the sheet.
 enum Flash {
-    /// A person who signs in as the email: a member now.
-    Added { who: String, role: Role },
-    /// No one does yet: an invite waits on it, and they were mailed
-    /// (`again`: it waited already, and was renewed).
+    /// An invite waits on the email for its person's yes, and they were
+    /// mailed (`again`: it waited already, and was renewed).
     Invited { who: String, role: Role, again: bool },
     /// They are in already, at `role`: the list changes roles.
     Already { who: String, role: Role },
@@ -462,12 +485,18 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
         (Some(Role::Owner), Some(token)) => Some(format!("{canonical}?view={token}")),
         _ => None,
     };
+    // an agent in with its person is no entry of its own (decision 64):
+    // its person is the one, "with their agents", never named
+    let all = members.members;
+    let with_agents: Vec<String> = all.iter().filter(|m| with_their_person(m, &all)).filter_map(|m| m.owner.clone()).collect();
+    let members: Vec<Member> = all.iter().filter(|m| !with_their_person(m, &all)).cloned().collect();
     // an agent by its title and picture, as the shell shows it
-    let profiles = profiles(env, named_ids(&members.members)).await;
+    let profiles = profiles(env, named_ids(&members)).await;
     Ok(Sheet {
         me: who.id.clone(),
         role,
-        members: members.members,
+        members,
+        with_agents,
         invites,
         visibility,
         title,
@@ -542,9 +571,8 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     let mut out = String::new();
     let days = fragment_proto::limits::INVITE_TTL_S / 86400;
     match flash {
-        Some(Flash::Added { who, role }) => out += &format!("<div class=\"flash\"><p>Added <b>{}</b> as {}: they can open it now.</p></div>", esc(&who), role_phrase(role)),
         Some(Flash::Invited { who, role, again: false }) => out += &format!(
-            "<div class=\"flash\"><p>Invited <b>{w}</b> as {r}: we mailed them a link. They are in once they sign in as {w} (within {days} days).</p></div>",
+            "<div class=\"flash\"><p>Invited <b>{w}</b> as {r}: we mailed them a link. They are in once they accept it, signed in as {w} (within {days} days).</p></div>",
             w = esc(&who),
             r = role_phrase(role),
         ),
@@ -579,6 +607,11 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
             "add",
         );
         out += "<p class=\"hint\">Viewers can see it; editors can change it too. Someone without an account yet is mailed a link, and is in once they sign in with that address.</p>";
+        // whoever comes in can talk to the owner's agent: trust them
+        // (Paul, 2026-10-23: the design, and this its safeguard)
+        if fragment_core::access::talks_to_owners_agent(&sheet.members) {
+            out += &format!("<p class=\"hint trust\">{}</p>", fragment_core::access::TRUST_WARNING);
+        }
     }
     out += "<h2>People with access</h2><ul class=\"people\">";
     for m in &sheet.members {
@@ -802,10 +835,10 @@ fn left(title: &str) -> CellResult<Response> {
     )
 }
 
-/// Shares it with whoever signs in as `email` (decision 48): the person
-/// who does, a member now; or, when no one does yet, the invite waiting on
-/// it, mailed to them. Someone in already is not added again: a role
-/// changes in the list, so an Add at the default role never lowers one.
+/// Shares it with whoever signs in as `email` (decisions 48 and 63): the
+/// invite waiting on it, mailed to them, theirs once they accept it.
+/// Someone in already is not added again: a role changes in the list, so
+/// an Add at the default role never lowers one.
 #[allow(clippy::too_many_arguments)]
 async fn invite(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, session: &str, email: &str, role: CellResult<Role>) -> CellResult<Response> {
     let role = role?;
@@ -824,10 +857,35 @@ async fn invite(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, se
     let again = before.invites.iter().any(|i| i.email == email);
     let shared = ask(env, url, name, who, Method::Post, "/api/invites", Some(json!({ "email": email, "role": role }))).await?;
     let flash = match decoded::<Shared>(shared, "the invite")? {
-        Shared::Member(m) => Flash::Added { who: email, role: m.role },
         Shared::Invited(i) => Flash::Invited { who: email, role: i.role, again },
+        Shared::Member(_) => return Err(CellError::host("an invite made a member at once: invites wait for a yes (decision 63)")),
     };
     shown(env, cfg, url, name, who, session, Some(flash), 200).await
+}
+
+/// `/api/invites…`: a person's own answers to the invites waiting on the
+/// emails they sign in with (decision 63; registry/invites.rs). `GET`
+/// them; `POST <fragment>/accept`, their yes, which makes them a member
+/// there; `POST <fragment>/decline`, their no. Each takes no body (or
+/// `{}`). Their agent answers them for them, acting `for` them (the
+/// registry decides: invites.rs `invitee_by`).
+pub(crate) async fn invites(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> CellResult<Response> {
+    let bytes = crate::read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+    let (by, acting_for) = (crate::orgs::signed_by(env, &req, url, &bytes)?, crate::acting_for(url)?);
+    let empty = bytes.is_empty() || serde_json::from_slice::<serde_json::Map<String, Value>>(&bytes).is_ok_and(|m| m.is_empty());
+    match (req.method(), rest) {
+        (Method::Get, []) => crate::json_answer(&ask_registry(env, &InvitesFor { by, acting_for }).await?),
+        (Method::Post, [_, "accept" | "decline"]) if !empty => Err(CellError::invalid("this takes no body (or {})")),
+        (Method::Post, [fragment, verb @ ("accept" | "decline")]) => {
+            let (fragment, yes) = (crate::named_fragment(fragment)?, *verb == "accept");
+            match (ask_registry(env, &AnswerInvite { by, acting_for, fragment: fragment.clone(), yes }).await?, yes) {
+                (Some(role), true) => crate::json_answer(&InviteAccepted { fragment, role }),
+                (None, false) => crate::json_answer(&json!({ "ok": true, "declined": fragment })),
+                _ => Err(CellError::host("the registry's answer to an invite's yes or no named no role, or one after a no")),
+            }
+        }
+        (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
+    }
 }
 
 /// `GET /api/access`: the fragments `who` owns, in their list's order,
@@ -846,6 +904,7 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
     let asked: Vec<String> = owned.iter().filter(|f| f.sharing.is_none_or(|s| s.with_others())).take(limits::ACCESS_ASKED_MAX).map(|f| f.name.clone()).collect();
     assert!(asked.len() <= limits::ACCESS_ASKED_MAX, "the access view asks a bounded number of fragments");
     let mut found: BTreeMap<String, (Vec<Member>, Vec<Invite>)> = BTreeMap::new();
+    let mut unnamed: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for round in asked.chunks(limits::ACCESS_ASKED_AT_ONCE) {
         let answers = join_all(round.iter().map(|name| async move {
             let (members, invites) = join(ask(env, url, name, who, Method::Get, "/api/members", None), ask(env, url, name, who, Method::Get, "/api/invites", None)).await;
@@ -858,8 +917,12 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
         .await;
         for (name, read) in answers {
             match read {
-                Ok(read) => {
-                    found.insert(name, read);
+                // an agent in with its person is no entry of its own, nor
+                // named among its agents (decision 64)
+                Ok((all, invites)) => {
+                    let (entity, members): (Vec<Member>, Vec<Member>) = all.iter().cloned().partition(|m| with_their_person(m, &all));
+                    unnamed.insert(name.clone(), entity.into_iter().map(|m| m.principal).collect());
+                    found.insert(name, (members, invites));
                 }
                 // deleted since its row was read, or not answering now:
                 // its row keeps its counts
@@ -897,17 +960,18 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
                             title: named.get(&m.principal).and_then(|p| p.title.clone()),
                             owner: m.owner.clone(),
                             owner_email: m.owner.as_deref().and_then(email),
-                            agents: named
-                                .get(&m.principal)
-                                .map(|p| p.agents.iter().map(|a| AccessAgent { principal: a.id.clone(), name: a.name.clone(), title: a.title.clone() }).collect())
-                                .unwrap_or_default(),
+                            // a person's own agents are never named (decision 63)
+                            agents: vec![],
                         })
                         .collect();
                     (Some(listed), more, invites)
                 }
                 None => (None, 0, vec![]),
             };
-            AccessRow { name: f.name, kind: f.kind, title: f.title, sharing: f.sharing, agents: f.agents, members, more, invites }
+            // a guest's agent named nowhere, its members read or not (decision 64)
+            let others = f.sharing.as_ref().is_none_or(|s| s.with_others());
+            let agents = fragment_core::access::access_agents(f.agents, unnamed.get(&f.name).map(Vec::as_slice), others);
+            AccessRow { name: f.name, kind: f.kind, title: f.title, sharing: f.sharing, agents, members, more, invites }
         })
         .collect();
     Ok(Access { fragments })

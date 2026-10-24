@@ -132,6 +132,10 @@ async fn main() {
                 settings: Settings { prompt_ttl_ms: parse_ms("BRIDGE_PROMPT_TTL_MS", limits::PROMPT_TTL_MS_DEFAULT), turn_idle_ms: parse_ms("BRIDGE_TURN_IDLE_MS", limits::TURN_IDLE_MS_MAX) },
                 agents_file: env("BRIDGE_AGENTS_FILE").map(PathBuf::from),
                 screen: screen_config(),
+                keepalive_ping: Duration::from_millis(match parse_ms("BRIDGE_KEEPALIVE_PING_MS", limits::KEEPALIVE_PING_MS) {
+                    0 => fail("BRIDGE_KEEPALIVE_PING_MS is more than 0"),
+                    ms => ms,
+                }),
             };
             ev!("bridge.boot", { "computer": env("FRAGMENT_COMPUTER"), "image": env("FRAGMENT_IMAGE"), "restorePending": cfg.restore_pending, "agentsFile": cfg.agents_file.as_ref().map(|p| p.display().to_string()) });
             match driver::run(cfg, runtime(), stop).await {

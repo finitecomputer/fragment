@@ -774,9 +774,11 @@ fn screen_checks(s: &mut Suite, c: &Chat, chrome: &mut Browser, api: &Api, keys:
     let (open, connected) = open_screen(chrome, api, keys, id, &c.agent)?;
     let before = connected.then(|| within(FOLLOW, || Frame::read(chrome, &open))).flatten();
     let shows = chrome.eval(&open, "[document.getElementById('screen')?.dataset.agent, document.title]").unwrap_or_default();
+    // a tab of its own: no page of the platform's tells it the agent's name,
+    // so it names none (never its label)
     s.ok(
-        "the screen's page (a ticket, in Chrome) names its chat's agent, connects to that agent's desktop and draws a frame",
-        connected && before.is_some() && shows[0] == c.agent.as_str() && shows[1].as_str().is_some_and(|t| t.ends_with("'s screen")),
+        "the screen's page (a ticket, in Chrome) shows its chat's agent's, connects to that agent's desktop and draws a frame",
+        connected && before.is_some() && shows[0] == c.agent.as_str() && shows[1] == "Screen",
         json!({ "status": status(chrome, &open), "shows": shows, "frame": describe(&before) }),
     );
     let _ = chrome.screenshot(&open, &shots.join("1-desktop-before.png"));

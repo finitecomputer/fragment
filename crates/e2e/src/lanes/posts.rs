@@ -2,7 +2,9 @@
 //! `post` role takes records the platform appends for the poster, with no
 //! app code at all. Checked in the `channels` section (the rules: the role,
 //! the replay, the size, a channel without one, the deploy check, the
-//! public call budget, and who hears a post) and the `browser` section
+//! public call budget, who hears a post, a channel's posters' kind,
+//! `from`, and what its members' lists show of it, `listed`) and the
+//! `browser` section
 //! (`fragment.post` from a page).
 
 use std::time::Duration;
@@ -73,7 +75,7 @@ pub fn posts(s: &mut Suite, api: &Api) -> Result<()> {
     let stranger = api.person()?;
     let (name, c) = room(s, api, &owner, "room", false)?;
     for (who, role) in [(&editor, "editor"), (&viewer, "viewer")] {
-        api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", who.pubkey_hex()), Some(&json!({ "role": role })))?;
+        api.share(&name, who.pubkey_hex(), role)?;
     }
     let (owner_id, editor_id) = (api.identity(&owner)?, api.identity(&editor)?);
 
@@ -207,7 +209,363 @@ pub fn posts(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and the channels deployed before it stand", r.status == 200, &r);
 
     heard(s, api, &owner, &stranger)?;
+    posters_kind(s, api, &owner)?;
+    listed(s, api, &owner)?;
     retention(s, api, &owner)
+}
+
+/// A fragment with a channel its agents post to that any member reads, and
+/// a desk only its editors read, both `listed`.
+pub(super) const LISTED_JSON: &str = r#"{"channels":{
+  "work":{"read":"viewer","post":"editor","from":"agent","listed":{"kinds":["turn.start","turn.asked","turn.end"],"fields":["asks"]}},
+  "desk":{"read":"editor","post":"editor","listed":{"kinds":["note"],"fields":["text"]}}}}"#;
+
+/// `keys`' row of `name` in their list, or null when it lists none.
+pub(super) fn row_of(api: &Api, keys: &Keys, name: &str) -> Value {
+    let r = api.signed(keys, "GET", "/api/fragments", None).ok();
+    r.and_then(|r| r.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == name).cloned())).unwrap_or(Value::Null)
+}
+
+/// What `keys`' row of `name` lists: `[(channel, principal, kind, fields)]`,
+/// the newest first.
+pub(super) fn listed_of(api: &Api, keys: &Keys, name: &str) -> Vec<(String, String, String, Value)> {
+    let row = row_of(api, keys, name);
+    let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
+    row["listed"].as_array().map(|l| l.iter().map(|r| (text(&r["channel"]), text(&r["principal"]), text(&r["kind"]), r["fields"].clone())).collect()).unwrap_or_default()
+}
+
+/// `json` committed as the fragment's manifest, and deployed.
+fn redeploy(s: &Suite, c: &Value, json: &str) {
+    s.commit(c, &[("fragment.json", Some(json.as_bytes()))]);
+    s.deploy(c);
+}
+
+/// The next frame a list's socket is told within `wait`, or none.
+fn told_within(w: &mut Socket, wait: Duration) -> Option<Value> {
+    w.patience(wait).ok()?;
+    let frame = w.next().ok();
+    let _ = w.patience(Duration::from_secs(5));
+    frame
+}
+
+/// A channel's `listed` (docs/api.md, Listed records): each member's newest
+/// record of a listed kind rides the rows of the members whose role reads
+/// its channel. Goal: a list follows what a fragment's members are doing,
+/// told to their open page as it changes and a few times a burst, never
+/// one a record; it never shows a member what their role may not read,
+/// nor what a member who left did, nor what is listed no more. Method: a fragment with an agents'
+/// channel any member reads and a desk only editors read; its owner, a
+/// viewer, an editor, an outsider and the owner's agent; each one's list
+/// read signed, and the viewer's watched with their key, as the CLI does.
+/// Each check is one only the mechanism it names makes pass: a re-send the
+/// change would cause anyway is not counted as the proof.
+fn listed(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let name = s.named(api, owner, "listed")?;
+    let c = s.create(api, owner, &name)?;
+    let (viewer, editor, outsider) = (api.person()?, api.person()?, api.person()?);
+    let (viewer_id, editor_id) = (api.identity(&viewer)?, api.identity(&editor)?);
+    let (agent, agent_id) = super::delegation::agent_of(api, owner)?;
+    let set_role = |who: &str, role: &str| api.share(&name, who, role);
+    for (who, role) in [(viewer_id.as_str(), "viewer"), (editor_id.as_str(), "editor"), (agent_id.as_str(), "editor")] {
+        let r = set_role(who, role)?;
+        anyhow::ensure!(r.status == 200, "adding {who} as {role}: {r}");
+    }
+    redeploy(s, &c, LISTED_JSON);
+    let r = api.signed(owner, "GET", &format!("/api/f/{name}/channels"), None)?;
+    let declared = r.body["channels"].as_array().and_then(|l| l.iter().find(|c| c["name"] == "work").map(|c| c["listed"].clone())).unwrap_or_default();
+    s.ok(
+        "a channel's listed is installed, and the channel list names it",
+        declared == json!({ "kinds": ["turn.start", "turn.asked", "turn.end"], "fields": ["asks"] }),
+        &r,
+    );
+
+    // the viewer's open page (a key's socket), past what setting up told it
+    let url = format!("{}/api/fragments/watch", api.base);
+    let (mut tab, _) = Socket::connect(api, &url, Some(&viewer), None, None)?;
+    tab.expect("hello")?;
+    while told_within(&mut tab, Duration::from_secs(2)).is_some() {}
+    let work = |id: &str, body: Value| post(api, &agent, &name, "work", id, body);
+    let start = work("w1", json!({ "kind": "turn.start", "turn": "t1", "agent": agent_id, "asker": viewer_id }))?;
+    let changed = told_within(&mut tab, Duration::from_secs(10));
+    let mine = row_of(api, &viewer, &name);
+    let at = start.body["record"]["at"].clone();
+    s.ok(
+        "an agent's listed record reaches a member's row, its kind and when, and their open page is told at once",
+        start.status == 200
+            && changed == Some(json!({ "type": "changed" }))
+            && mine["listed"] == json!([{ "channel": "work", "principal": agent_id, "kind": "turn.start", "at": at }]),
+        json!({ "told": changed, "row": mine }),
+    );
+
+    let step = work("w2", json!({ "kind": "turn.step", "turn": "t1", "step": 1 }))?;
+    let same = work("w3", json!({ "kind": "turn.start", "turn": "t2", "agent": agent_id, "asker": viewer_id }))?;
+    let again = work("w1", json!({ "kind": "turn.start", "turn": "t1", "agent": agent_id, "asker": viewer_id }))?;
+    let quiet = told_within(&mut tab, Duration::from_millis(limits::LISTED_MIN_GAP_MS as u64 + 2000));
+    let mine = row_of(api, &viewer, &name);
+    s.ok(
+        "records that show nothing new move nothing: a kind not listed, the same kind again, a post replayed (the page is told nothing; the row keeps the first's time)",
+        step.status == 200 && same.status == 200 && again.body["replayed"] == true && quiet.is_none() && mine["listed"][0]["at"] == at && mine["listed"].as_array().map(Vec::len) == Some(1),
+        json!({ "told": quiet, "row": mine }),
+    );
+
+    let asked = work("w4", json!({ "kind": "turn.asked", "turn": "t2", "asks": viewer_id, "text": "never listed" }))?;
+    let changed = told_within(&mut tab, Duration::from_secs(10));
+    let shown = listed_of(api, &viewer, &name);
+    s.ok(
+        "another kind moves it, with its listed fields and no others",
+        asked.status == 200 && changed.is_some() && shown == [("work".to_string(), agent_id.clone(), "turn.asked".to_string(), json!({ "asks": viewer_id }))],
+        json!({ "told": changed, "listed": shown }),
+    );
+
+    // a burst of moves is a send or two, the last with the newest record
+    let t0 = std::time::Instant::now();
+    let kinds = ["turn.start", "turn.end", "turn.start", "turn.end", "turn.start", "turn.end"];
+    for (i, kind) in kinds.iter().enumerate() {
+        let r = work(&format!("b{i}"), json!({ "kind": kind, "turn": format!("b{i}") }))?;
+        anyhow::ensure!(r.status == 200, "the burst's post {i}: {r}");
+    }
+    let burst = t0.elapsed();
+    let mut frames = 0;
+    while told_within(&mut tab, Duration::from_millis(limits::LISTED_MIN_GAP_MS as u64 + 2000)).is_some() {
+        frames += 1;
+    }
+    // a burst that outlasts a gap may take one send more a gap
+    let allowed = 2 + burst.as_millis() as i64 / limits::LISTED_MIN_GAP_MS;
+    let last = listed_of(api, &viewer, &name);
+    s.ok(
+        &format!("a burst of {} moves within a gap is told at most twice, not once a record, and the row ends on the newest", kinds.len()),
+        frames >= 1 && frames <= allowed && last.first().is_some_and(|r| r.2 == "turn.end"),
+        json!({ "frames": frames, "allowed": allowed, "burstMs": burst.as_millis() as u64, "listed": last }),
+    );
+
+    // the desk is the editors': the viewer's row never carries it
+    let note = post(api, &editor, &name, "desk", "d1", json!({ "kind": "note", "text": "the budget is 4k" }))?;
+    let owners = s.eventually(Duration::from_secs(10), || listed_of(api, owner, &name).iter().any(|r| r.0 == "desk"));
+    let quiet = told_within(&mut tab, Duration::from_millis(limits::LISTED_MIN_GAP_MS as u64 + 2000));
+    let (theirs, editors) = (listed_of(api, &viewer, &name), listed_of(api, &editor, &name));
+    let outside = row_of(api, &outsider, &name);
+    s.ok(
+        "a channel only editors read lists to the owner's and the editor's rows alone: the viewer's row carries none of it and their page is told nothing; an outsider's list has no row",
+        note.status == 200
+            && owners
+            && editors.iter().any(|r| r.0 == "desk" && r.1 == editor_id && r.3 == json!({ "text": "the budget is 4k" }))
+            && theirs.iter().all(|r| r.0 == "work")
+            && quiet.is_none()
+            && outside.is_null(),
+        json!({ "viewer": theirs, "editor": editors, "told": quiet, "outsider": outside }),
+    );
+
+    // a role changed sends the row again: given, then taken
+    let up = set_role(&viewer_id, "editor")?;
+    let told_up = told_within(&mut tab, Duration::from_secs(10));
+    let raised = listed_of(api, &viewer, &name);
+    let down = set_role(&editor_id, "viewer")?;
+    let lowered = s.eventually(Duration::from_secs(10), || listed_of(api, &editor, &name).iter().all(|r| r.0 != "desk"));
+    s.ok(
+        "a role changed sends the member's row again: raised to editor it carries the desk; lowered to viewer it no longer does",
+        up.status == 200 && told_up.is_some() && raised.iter().any(|r| r.0 == "desk") && down.status == 200 && lowered,
+        json!({ "raised": raised, "lowered": listed_of(api, &editor, &name) }),
+    );
+    tab.close();
+
+    // a deploy that tightens a channel's read takes it from the rows that may no longer read it
+    let tightened = LISTED_JSON.replacen(r#""work":{"read":"viewer""#, r#""work":{"read":"editor""#, 1);
+    redeploy(s, &c, &tightened);
+    let gone = s.eventually(Duration::from_secs(20), || listed_of(api, &editor, &name).is_empty());
+    let (kept, owners) = (listed_of(api, &viewer, &name), listed_of(api, owner, &name));
+    s.ok(
+        "a deploy that tightens work's read to editors takes its record from the row of the member now a viewer (none left), and the editors' rows keep it",
+        gone && kept.iter().any(|r| r.0 == "work") && owners.iter().any(|r| r.0 == "work"),
+        json!({ "now a viewer": listed_of(api, &editor, &name), "now an editor": kept, "owner": owners }),
+    );
+
+    // an invalid listed is refused at deploy, and what was installed stands
+    let bad = tightened.replacen(r#""kinds":["note"]"#, r#""kinds":["a note"]"#, 1);
+    redeploy(s, &c, &bad);
+    let status = api.status(owner, &name)?;
+    s.ok(
+        "a listed kind that is no kind is refused at deploy, saying why, and the rows keep what they carried",
+        status.body["code"]["error"].as_str().is_some_and(|e| e.contains("channels.desk.listed.kinds has \"a note\", which is no kind")) && listed_of(api, owner, &name) == owners,
+        &status.body["code"],
+    );
+
+    // a person who leaves takes their record from every other row: the
+    // other editor's row is sent again only because of it
+    let r = api.signed(owner, "DELETE", &format!("/api/f/{name}/members/{editor_id}"), None)?;
+    let left = s.eventually(Duration::from_secs(20), || listed_of(api, &viewer, &name).iter().all(|r| r.1 != editor_id));
+    s.ok(
+        "a person removed takes their listed record from another member's row (the desk's note), which nothing else sends again",
+        r.status == 200 && left,
+        json!({ "other": listed_of(api, &viewer, &name) }),
+    );
+    // a kind listed no more leaves every row, and is dropped from what the
+    // fragment keeps: listed again, it starts from its next record, never
+    // the old one (which only the drop keeps from coming back)
+    let ends = |json: &str| json.replacen(r#""kinds":["turn.start","turn.asked","turn.end"]"#, r#""kinds":["turn.start","turn.asked"]"#, 1);
+    redeploy(s, &c, &ends(&tightened));
+    let dropped = s.eventually(Duration::from_secs(20), || listed_of(api, owner, &name).iter().all(|r| r.0 != "work"));
+    redeploy(s, &c, &tightened);
+    let relisted = s.eventually(Duration::from_secs(20), || {
+        let r = api.signed(owner, "GET", &format!("/api/f/{name}/channels"), None).ok();
+        r.is_some_and(|r| r.body["channels"].as_array().is_some_and(|l| l.iter().any(|c| c["name"] == "work" && c["listed"]["kinds"].as_array().is_some_and(|k| k.len() == 3))))
+    });
+    // the install sent every row again: an old turn.end kept would show now
+    std::thread::sleep(Duration::from_millis(limits::LISTED_MIN_GAP_MS as u64));
+    let after = listed_of(api, owner, &name);
+    let next = work("n1", json!({ "kind": "turn.end", "turn": "n1" }))?;
+    let fresh = s.eventually(Duration::from_secs(20), || listed_of(api, owner, &name).iter().any(|r| r.0 == "work" && r.2 == "turn.end"));
+    s.ok(
+        "a kind listed no more leaves every row; listed again, the old record does not come back, and the next one shows",
+        dropped && relisted && after.iter().all(|r| r.0 != "work") && next.status == 200 && fresh,
+        json!({ "afterRelisting": after, "now": listed_of(api, owner, &name) }),
+    );
+
+    // a listing dropped, and a channel removed, take theirs from every row
+    let mine = post(api, owner, &name, "desk", "d2", json!({ "kind": "note", "text": "mine" }))?;
+    let noted = s.eventually(Duration::from_secs(10), || listed_of(api, owner, &name).iter().any(|r| r.0 == "desk"));
+    anyhow::ensure!(mine.status == 200 && noted, "the owner's note: {mine}");
+    let without_desk = r#"{"channels":{"work":{"read":"editor","post":"editor","from":"agent","listed":{"kinds":["turn.start","turn.asked","turn.end"],"fields":["asks"]}}}}"#;
+    redeploy(s, &c, without_desk);
+    let no_desk = s.eventually(Duration::from_secs(20), || !listed_of(api, owner, &name).iter().any(|r| r.0 == "desk"));
+    s.ok("a deploy that removes a listed channel takes its records from every row", no_desk && listed_of(api, owner, &name).iter().any(|r| r.0 == "work"), json!(listed_of(api, owner, &name)));
+    redeploy(s, &c, r#"{"channels":{"work":{"read":"editor","post":"editor","from":"agent"}}}"#);
+    let none = s.eventually(Duration::from_secs(20), || listed_of(api, owner, &name).is_empty() && listed_of(api, &viewer, &name).is_empty());
+    s.ok("one that drops a channel's listed (the channel kept) takes its records from every row", none, json!([listed_of(api, owner, &name), listed_of(api, &viewer, &name)]));
+    listed_posters(s, api)
+}
+
+/// A listed channel keeps its `LISTED_POSTERS_MAX` posters seen latest.
+/// Goal: past the bound the poster seen longest ago goes, and one who
+/// posts the same again (moving nothing) still counts as seen. Method: one
+/// more agent member than the bound, each posting once in turn, the first
+/// posting the same again before the last.
+fn listed_posters(s: &mut Suite, api: &Api) -> Result<()> {
+    let owner = api.person()?;
+    let name = s.named(api, &owner, "listed-many")?;
+    let c = s.create(api, &owner, &name)?;
+    s.commit(&c, &[("fragment.json", Some(br#"{"channels":{"wall":{"post":"editor","listed":{"kinds":["mood"]}}}}"#))]);
+    s.deploy(&c);
+    let mut posters = vec![];
+    for _ in 0..=limits::LISTED_POSTERS_MAX {
+        let (keys, id) = super::delegation::agent_of(api, &owner)?;
+        let r = api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{id}"), Some(&json!({ "role": "editor" })))?;
+        anyhow::ensure!(r.status == 200, "adding a poster: {r}");
+        posters.push((keys, id));
+    }
+    let mood = |i: usize, id: &str| post(api, &posters[i].0, &name, "wall", id, json!({ "kind": "mood", "n": i }));
+    for i in 0..limits::LISTED_POSTERS_MAX {
+        let r = mood(i, "m1")?;
+        anyhow::ensure!(r.status == 200, "poster {i}: {r}");
+    }
+    let again = mood(0, "m2")?;
+    let last = mood(limits::LISTED_POSTERS_MAX, "m1")?;
+    let ids = |l: Vec<(String, String, String, Value)>| l.into_iter().map(|r| r.1).collect::<Vec<_>>();
+    let full = s.eventually(Duration::from_secs(20), || ids(listed_of(api, &owner, &name)).contains(&posters[limits::LISTED_POSTERS_MAX].1));
+    let shown = ids(listed_of(api, &owner, &name));
+    s.ok(
+        &format!("past {} posters the one seen longest ago goes: the second (the first posted the same again, and stays)", limits::LISTED_POSTERS_MAX),
+        again.status == 200 && last.status == 200 && full && shown.len() == limits::LISTED_POSTERS_MAX && shown.contains(&posters[0].1) && !shown.contains(&posters[1].1),
+        json!({ "shown": shown.len(), "first": shown.contains(&posters[0].1), "second": shown.contains(&posters[1].1) }),
+    );
+    Ok(())
+}
+
+/// A channel that says `"from": "agent"` (a chat's `work`) takes posts and
+/// drafts from the fragment's agent members only, each posting as itself:
+/// an editor person holds the role it asks for and is refused all the
+/// same, as is the agent acting for its owner. Goal: no person's record
+/// reads as an agent's (audit M7). Method: a fragment of channels alone,
+/// an editor person and an editor agent, each posting and drafting there.
+fn posters_kind(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let name = s.named(api, owner, "agents-only")?;
+    let c = s.create(api, owner, &name)?;
+    let editor = api.person()?;
+    let (agent, agent_id) = super::delegation::agent_of(api, owner)?;
+    let owner_id = api.identity(owner)?;
+    for who in [api.identity(&editor)?, agent_id.clone()] {
+        let r = api.share(&name, &who, "editor")?;
+        anyhow::ensure!(r.status == 200, "adding {who} as an editor: {r}");
+    }
+    s.commit(&c, &[("fragment.json", Some(br#"{"channels":{"work":{"read":"viewer","post":"editor","from":"agent"},"notes":{"post":"editor"}}}"#))]);
+    s.deploy(&c);
+    let work = || records(api, owner, &name, "work");
+
+    let person = post(api, &editor, &name, "work", "w1", json!({ "kind": "turn.step", "turn": "t1", "text": "forged" }))?;
+    let owners = post(api, owner, &name, "work", "w1", json!({ "kind": "turn.step", "turn": "t1", "text": "forged" }))?;
+    s.ok(
+        "an agents' channel refuses an editor person's post, and its owner's (403, saying who posts there), and appends nothing",
+        person.status == 403
+            && person.code() == Some(ErrorCode::Forbidden)
+            && person.message().contains("agent members only")
+            && owners.status == 403
+            && work().is_empty(),
+        format!("{person} {owners}"),
+    );
+    let notes = post(api, &editor, &name, "notes", "n1", json!({ "text": "a person's note" }))?;
+    s.ok("while a channel without from takes the same person's post", notes.status == 200, &notes);
+
+    let step = json!({ "kind": "turn.step", "turn": "t1", "text": "the agent's step" });
+    let r = post(api, &agent, &name, "work", "w1", step.clone())?;
+    s.ok(
+        "an agent member's post is appended, naming the agent itself",
+        r.status == 200 && r.body["replayed"] == false && r.body["record"]["principal"] == agent_id.as_str() && work().len() == 1,
+        &r,
+    );
+    let acting = api.signed(&agent, "POST", &format!("/api/f/{name}/channels/work?for={owner_id}"), Some(&json!({ "id": "w2", "body": step })))?;
+    s.ok(
+        "the same agent acting for its owner is refused (403): the post would be the owner's say",
+        acting.status == 403 && acting.message().contains("agent members only") && work().len() == 1,
+        &acting,
+    );
+    let again = post(api, &agent, &name, "work", "w1", step)?;
+    s.ok(
+        "the agent's same id and body again answer its record, replayed",
+        again.status == 200 && again.body["replayed"] == true && again.body["record"]["seq"] == r.body["record"]["seq"] && work().len() == 1,
+        &again,
+    );
+
+    let draft = |keys: &Keys| api.signed(keys, "PUT", &format!("/api/f/{name}/channels/work/draft"), Some(&json!({ "turn": "t2", "text": "writing" })));
+    let (person, agents) = (draft(&editor)?, draft(&agent)?);
+    s.ok(
+        "a draft there is a post in progress: the person's is 403, the agent's goes through",
+        person.status == 403 && person.message().contains("agent members only") && agents.status == 200,
+        format!("{person} {agents}"),
+    );
+
+    let r = api.signed(owner, "GET", &format!("/api/f/{name}/channels"), None)?;
+    let list = r.body["channels"].as_array().cloned().unwrap_or_default();
+    let from_of = |n: &str| list.iter().find(|c| c["name"] == n).map(|c| c["from"].clone());
+    s.ok(
+        "the channel list names each channel's posters' kind (null without one)",
+        from_of("work") == Some(json!("agent")) && from_of("notes") == Some(Value::Null) && from_of("events") == Some(Value::Null),
+        &r,
+    );
+
+    // A chat whose agent joined before member rows named their kind (its
+    // row's kind NULL) still takes its agent's posts: the row takes the
+    // kind of the identity the registry resolved, and keeps it.
+    let kind_of = |who: &str| -> Result<Value> {
+        let r = api.signed(owner, "GET", &format!("/api/f/{name}/members"), None)?;
+        Ok(r.body["members"].as_array().and_then(|l| l.iter().find(|m| m["principal"] == who).map(|m| m["kind"].clone())).unwrap_or(Value::Null))
+    };
+    let lever = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "legacy-member-kind", "principal": agent_id })))?;
+    let legacy = kind_of(&agent_id)?;
+    let r = post(api, &agent, &name, "work", "w-legacy", json!({ "kind": "turn.step", "turn": "t3", "step": 1 }))?;
+    let filled = kind_of(&agent_id)?;
+    s.ok(
+        "an agent member whose row predates its kind posts there all the same, and its row takes the agent's kind",
+        lever.status == 200 && lever.body["members"] == 1 && legacy.is_null() && r.status == 200 && r.body["record"]["principal"] == agent_id.as_str() && filled == "agent",
+        json!({ "lever": lever.body, "before": legacy, "post": r.body, "after": filled }),
+    );
+    let editor_id = api.identity(&editor)?;
+    api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "legacy-member-kind", "principal": editor_id })))?;
+    let r = post(api, &editor, &name, "work", "p-legacy", json!({ "kind": "turn.step", "turn": "t3", "step": 2 }))?;
+    s.ok(
+        "a person whose row predates its kind is still refused there, its row taking the person's kind",
+        r.status == 403 && kind_of(&editor_id)? == "person",
+        &r,
+    );
+    Ok(())
 }
 
 /// A channel people may post to keeps its newest `limits::POSTED_KEPT`

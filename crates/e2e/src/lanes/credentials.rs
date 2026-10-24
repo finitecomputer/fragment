@@ -6,8 +6,8 @@
 //! fake. Each placement (a header, a query parameter, basic auth), each
 //! kind (a connection through the WorkOS fake, the operator's keys, an own
 //! key), and each refusal (a forged tag, another computer's, the wrong
-//! host, the wrong place), then the holds and the counts, and a key's call
-//! its owner's ledger will not hold.
+//! host, the wrong place), then the charges and the counts, and a key's
+//! call its owner's ledger's gate refuses.
 
 use std::time::Duration;
 
@@ -15,9 +15,9 @@ use anyhow::Result;
 use base64::Engine;
 use serde_json::{json, Value};
 
-use super::ledger::{end_of, entries};
+use super::ledger::{charged, entries, forget_gate, usage};
 use crate::api::Api;
-use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_ENV, SWAP_CONNECTION_HOST, SWAP_KEYS, SWAP_OWN, SWAP_OWN_ENV, SWAP_OWN_HOST, SWAP_ROUTER, SWAP_ROUTER_ENV, SWAP_ROUTER_HOST};
+use crate::{Suite, SEVERAL, SEVERAL_HOST, SWAP_CONNECTION, SWAP_CONNECTION_ENV, SWAP_CONNECTION_HOST, SWAP_KEYS, SWAP_OWN, SWAP_OWN_ENV, SWAP_OWN_HOST, SWAP_ROUTER, SWAP_ROUTER_ENV, SWAP_ROUTER_HOST};
 
 /// Who the swap's checks act as, and on what.
 pub(super) struct Swapping<'a> {
@@ -48,16 +48,20 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "an own key: its owner gives it, sealed by the computer, and it is the guest's at once",
     "basic auth: the own key in its password's place, its user as it came",
     "a key that is no printable token is refused; taken away, the guest is given it no more",
-    "each operator key's call is held on the agent's owner's ledger, as the agent, and settled at its list price and the margin",
+    "each operator key's call is charged to the agent's owner's ledger after it, as the agent, at its list price and the margin",
     "this month's uses: each call by agent, a connection's and an own key's counted, never charged, an operator key's at its charge",
     "no one else reads them, and a month is YYYY-MM",
     "a request with no placeholder goes on as it came",
-    "an operator key's call its owner's ledger will not hold is refused, and reaches no provider",
+    "an operator key's call its owner's ledger's gate refuses is refused, and reaches no provider",
     "firecrawl: its SDK header is swapped only at its catalog host",
     "fal: its SDK header is swapped only at its catalog host",
     "browser-use: its SDK header is swapped only at its catalog host",
     "xai: its SDK header is swapped only at its catalog host",
     "x: its SDK header is swapped only at its catalog host",
+    "disconnected, an account Pipes holds again with no connect known to have imported it (an import landed late) is not its owner's: read as not connected, its swaps refused, no token asked",
+    "of several accounts at a connection, an agent that picked none is swapped its owner's default, the oldest connected: Pipes' token for that account",
+    "its owner picks another account for it: its next request is swapped that account's token",
+    "the account it picked disconnected, it falls back to the default, its pick kept until it is next written",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -73,7 +77,7 @@ fn charge_of(key: &str) -> i64 {
 /// `provider`: a local run holds the node's host secret, so it makes one
 /// as the platform does (a forgery needs the secret; a guest has none).
 pub(super) fn placeholder(s: &Suite, id: &str, agent: &str, provider: &str) -> String {
-    let kind = if provider == SWAP_CONNECTION { fragment_core::catalog::Kind::Connection } else { fragment_core::catalog::Kind::Operator };
+    let kind = if [SWAP_CONNECTION, SEVERAL].contains(&provider) { fragment_core::catalog::Kind::Connection } else { fragment_core::catalog::Kind::Operator };
     let tag = fragment_core::swap::TagKey::derive(&s.host_secret).tag(id, agent, provider);
     fragment_core::swap::Placeholder::new(kind, provider, &tag).text()
 }
@@ -154,6 +158,57 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         json!({ "redirect": said, "stopped": stopped }),
     );
 
+    // disconnected, then an account at Pipes again with no connect known
+    // to have imported it (an import whose outcome was unknown, landing
+    // late: the fake's lever): its swaps stay refused, no token asked
+    let off = api.signed(w.owner, "DELETE", &format!("/api/connections/{SWAP_CONNECTION}"), None)?;
+    s.workos.connect(&email, SWAP_CONNECTION, true);
+    let (minted, seen_before) = (s.workos.tokens(SWAP_CONNECTION).len(), s.upstream.seen().len());
+    let fenced = api.signed(w.owner, "GET", "/api/connections", None)?;
+    let refused = say(s, 120, &format!("fetch http://{SWAP_CONNECTION_HOST}/drive/v3/files with {}", placeholder(s, w.id, w.agent, SWAP_CONNECTION)))?;
+    s.ok(
+        SWAP_CHECKS[27],
+        off.status == 200
+            && state_of(&fenced, SWAP_CONNECTION) == "not_connected"
+            && refused.starts_with("fetched 403")
+            && refused.contains("connect google first")
+            && s.workos.tokens(SWAP_CONNECTION).len() == minted
+            && s.upstream.seen().len() == seen_before,
+        json!({ "disconnect": off.body, "connections": fenced.body, "refused": refused }),
+    );
+    // connected again for the checks after: a connect known to import lifts
+    // the fence (its row has no `connection_oauth` here: the registry's lever)
+    let hook = api.unsigned("POST", "/api/test/registry", Some(&json!({ "signins": { "unfenceConnection": { "email": email, "provider": SWAP_CONNECTION } } })))?;
+    anyhow::ensure!(hook.status == 200, "lift the fence: {hook}");
+    let again = api.signed(w.owner, "GET", "/api/connections", None)?;
+    anyhow::ensure!(state_of(&again, SWAP_CONNECTION) == "connected", "connected again after the fence: {again}");
+
+    // several accounts at one connection: the agent's pick says whose token
+    s.workos.connect(&email, SEVERAL, true);
+    s.workos.label(&email, SEVERAL, "work@oauth.test");
+    let home = s.workos.add_account(&email, SEVERAL, "home", "home@oauth.test");
+    let r = api.signed(w.owner, "GET", "/api/connections", None)?;
+    let listed: Vec<String> = r.body["providers"].as_array().and_then(|l| l.iter().find(|x| x["provider"] == SEVERAL)).and_then(|x| x["accounts"].as_array()).map(|l| l.iter().filter_map(|a| a["id"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let work = listed.first().cloned().unwrap_or_default();
+    let fetch = |s: &Suite| format!("fetch http://{SEVERAL_HOST}/v1/me with {}", placeholder(s, w.id, w.agent, SEVERAL));
+    let whose = |s: &Suite| s.workos.tokens(SEVERAL).last().and_then(|t| s.workos.token_account(t));
+    let swapped = |s: &Suite| s.workos.tokens(SEVERAL).last().is_some_and(|t| s.upstream.seen().last().is_some_and(|seen| seen["host"] == SEVERAL_HOST && seen["auth"]["authorization"] == format!("Bearer {t}")));
+    let said = say(s, 121, &fetch(s))?;
+    s.ok(SWAP_CHECKS[28], listed == [work.clone(), home.clone()] && said.starts_with("fetched 200") && whose(s).as_deref() == Some(work.as_str()) && swapped(s), json!({ "listed": listed, "said": said }));
+    let picked = format!("/api/computers/{}/agents/{}/accounts/{SEVERAL}", w.id, w.agent);
+    let pick = api.signed(w.owner, "PUT", &picked, Some(&json!({ "account": home })))?;
+    let shown = pick.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == w.agent)).map(|a| a["accounts"][SEVERAL].clone()).unwrap_or(Value::Null);
+    let said = say(s, 122, &fetch(s))?;
+    s.ok(SWAP_CHECKS[29], pick.status == 200 && shown == home.as_str() && said.starts_with("fetched 200") && whose(s).as_deref() == Some(home.as_str()) && swapped(s), json!({ "pick": pick.body, "said": said }));
+    let off = api.signed(w.owner, "DELETE", &format!("/api/connections/{SEVERAL}?account={home}"), None)?;
+    let said = say(s, 123, &fetch(s))?;
+    let view = api.signed(w.owner, "GET", &format!("/api/computers/{}", w.id), None)?;
+    let kept = view.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == w.agent)).map(|a| a["accounts"][SEVERAL].clone()).unwrap_or(Value::Null);
+    s.ok(SWAP_CHECKS[30], off.status == 200 && said.starts_with("fetched 200") && whose(s).as_deref() == Some(work.as_str()) && swapped(s) && kept == home.as_str(), json!({ "off": off.body, "said": said, "kept": kept }));
+    let cleared = api.signed(w.owner, "PUT", &picked, Some(&json!({ "account": null })))?;
+    let gone = api.signed(w.owner, "DELETE", &format!("/api/connections/{SEVERAL}"), None)?;
+    anyhow::ensure!(cleared.status == 200 && gone.status == 200, "the several accounts' checks cleared: {cleared}; {gone}");
+
     // the operator's keys: a bearer token, a header of the provider's own, a query parameter
     let said = say(s, 107, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
     let seen = s.upstream.seen().last().cloned().unwrap_or_default();
@@ -218,14 +273,14 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         json!({ "bad": bad.status, "notOwn": not_own.status, "gone": gone.status, "given": given }),
     );
 
-    // the holds: each operator key's call, settled at its price; and the month's counts
+    // the charges: each operator key's call, at its price; and the month's counts
     let keyed = ["perplexity", "elevenlabs", "google-places", "firecrawl", "fal", "browser-use", "xai", "x"];
     let held = || entries(api, &owner_id, &format!("key:{}:", w.id));
-    let metered = s.eventually(Duration::from_secs(20), || held().iter().filter(|e| end_of(e) == "settled").count() == keyed.len());
+    let metered = s.eventually(Duration::from_secs(20), || held().iter().filter(|e| charged(e).is_some()).count() == keyed.len());
     let rows = held();
     let priced = rows.len() == keyed.len()
         && keyed.iter().all(|k| {
-            rows.iter().any(|r| r["entry"]["reserve"]["worst"] == json!({ "kind": "key", "key": k, "units": 1 }) && r["entry"]["reserve"]["agent"] == w.identity && r["entry"]["end"]["charge"] == charge_of(k))
+            rows.iter().any(|r| *usage(r) == json!({ "kind": "key", "key": k, "units": 1 }) && r["entry"]["row"]["agent"] == w.identity && r["entry"]["row"]["computer"] == w.id && charged(r) == Some(charge_of(k)))
         });
     s.ok(SWAP_CHECKS[17], metered && priced, json!(rows));
     let expect = [(SWAP_CONNECTION, 2, 0), ("perplexity", 1, charge_of("perplexity")), ("elevenlabs", 1, charge_of("elevenlabs")), ("google-places", 1, charge_of("google-places")), ("firecrawl", 1, charge_of("firecrawl")), ("fal", 1, charge_of("fal")), ("browser-use", 1, charge_of("browser-use")), ("xai", 1, charge_of("xai")), (SWAP_OWN, 1, 0)];
@@ -244,14 +299,16 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let seen = s.upstream.seen().last().cloned().unwrap_or_default();
     s.ok(SWAP_CHECKS[20], said.starts_with("fetched 200") && seen["auth"]["authorization"] == "Bearer nothing-swapped", &seen);
 
-    // a key is the operator's money: with the owner's paid calls capped at
-    // none (a refusal that is no typed one, as a ledger that does not answer
-    // gives), the call is not made
+    // with the owner's paid calls capped at none (their ledger's gate
+    // refuses as at zero credit), the call is not made; the gate, which
+    // heard the owner within the minute, asks afresh each time
     let cap = |max: u64| api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": owner_id, "op": "paid-calls", "max": max })));
     let capped = cap(0)?;
+    forget_gate(api, &owner_id)?;
     let seen_before = s.upstream.seen().len();
     let refused = say(s, 118, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
     let uncapped = cap(u64::from(u32::MAX))?;
+    forget_gate(api, &owner_id)?;
     s.ok(
         SWAP_CHECKS[21],
         capped.status == 200 && uncapped.status == 200 && refused.starts_with("fetched 402") && refused.contains("perplexity's call is not made") && s.upstream.seen().len() == seen_before && held().len() == keyed.len(),
@@ -264,14 +321,17 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
 /// skips them.
 pub(super) const MODEL_CHECKS: &[&str] = &[
     "an own key signed in to is listed with its provider's page to revoke it and the models it offers, not set; its guest is given none",
-    "connecting sends the person's browser to the provider with the platform's callback, an S256 challenge, a state that names their computer, and the key's label",
+    "connecting, from settings, sends the person's browser to the provider with the platform's callback, an S256 challenge, a bare state that names no computer, bound to that browser by a cookie, and the key's label",
     "a person who declines at the provider comes back to a page that says so; nothing is exchanged or set",
     "back from the provider with a code, the platform exchanges it with the sign-in's verifier, and the computer seals the key the provider made: connected, the key in no answer",
     "the guest is given a placeholder in OPENROUTER_API_KEY, with its models' base URL, and never the key",
     "its call to the provider with the placeholder reaches the provider with the person's key, counted as the agent's, never charged",
-    "a sign-in comes back once: replayed, or a state that names none here, it is refused and nothing is exchanged",
+    "a sign-in comes back once: replayed, past its time, or a state that names none here, it is refused and nothing is exchanged",
     "sign-ins under way are bounded: past eight, another is refused until one ends",
     "disconnected, the guest is given it no more",
+    "connecting is a browser's, the shell's: a request signed by a key is refused, and binds nothing",
+    "a sign-in finishes only in the browser that began it, signed in as its person: sent to anyone else (no state cookie, no session, another person's session even with the cookie, or its state in another kind of round trip's cookie), it seals nothing and exchanges nothing, its refusal a 303 to a page whose address holds no code, and it is still the person's to finish",
+    "a browser holds one own-key sign-in at a time: a second Connect replaces the first's binding, so the first comes back refused and the second connects",
 ];
 
 /// The path and query of `url` (the platform's callback, as the provider
@@ -281,9 +341,73 @@ fn path_of(url: &str) -> String {
 }
 
 /// Where the provider's page sent the browser (its 302's `location`).
-fn sent_back(api: &Api, page: &str) -> Result<String> {
+pub(super) fn sent_back(api: &Api, page: &str) -> Result<String> {
     let r = api.external(page)?;
     Ok(r.headers.get("location").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string())
+}
+
+/// Settings' Connect, as the shell sends it (its session, from the
+/// platform's own page): the provider's page, and the cookie binding the
+/// sign-in to this browser.
+pub(super) fn shell_authorize(api: &Api, session: &str) -> Result<crate::api::Reply> {
+    api.call(crate::api::Call {
+        method: "POST",
+        url: format!("{}/api/connections/{SWAP_ROUTER}/authorize", api.base),
+        body: Some(b"{}".to_vec()),
+        content_type: Some("application/json"),
+        cookie: Some(format!("fragment_session={session}")),
+        extra: vec![("x-fragment-shell", "1".into()), ("sec-fetch-site", "same-origin".into()), ("origin", api.base.clone())],
+        ..crate::api::Call::default()
+    })
+}
+
+/// The `name=value` of the own-key sign-in's cookie an answer set, or "".
+pub(super) fn own_key_cookie(r: &crate::api::Reply) -> String {
+    r.cookies().into_iter().find(|c| c.starts_with("fragment_own_key=")).unwrap_or_default()
+}
+
+/// Where a browser landed back from the provider: the page it shows, and
+/// the clean address a refusal sent it to on the way (`?refused=`), or ""
+/// when the callback answered at once.
+pub(super) struct Landed {
+    pub page: crate::api::Reply,
+    pub via: String,
+}
+
+impl std::ops::Deref for Landed {
+    type Target = crate::api::Reply;
+    fn deref(&self) -> &crate::api::Reply {
+        &self.page
+    }
+}
+
+impl std::fmt::Display for Landed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (via {:?})", self.page, self.via)
+    }
+}
+
+impl Landed {
+    /// A refusal, as the callback answers one: a 303 to the clean page,
+    /// whose address holds no code nor state, and that page, saying so.
+    pub(super) fn refused_cleanly(&self) -> bool {
+        self.via.contains("?refused=") && !self.via.contains("code=") && !self.via.contains("state=") && self.page.status == 400 && self.page.text.contains("Not connected")
+    }
+}
+
+/// A browser holding `cookies` (each `name=value`; "" for none) opens
+/// `back`, where the provider sent it: the platform's callback, and the
+/// clean page a refusal redirects to (303), as a browser follows it.
+pub(super) fn came_back(api: &Api, back: &str, cookies: &[&str]) -> Result<Landed> {
+    let cookie = cookies.iter().filter(|c| !c.is_empty()).copied().collect::<Vec<_>>().join("; ");
+    let at = |path: String| api.call(crate::api::Call { method: "GET", url: format!("{}{path}", api.base), cookie: (!cookie.is_empty()).then(|| cookie.clone()), ..crate::api::Call::default() });
+    let first = at(path_of(back))?;
+    if first.status != 303 {
+        return Ok(Landed { page: first, via: String::new() });
+    }
+    let via = first.header("location");
+    let page = at(path_of(&format!("{}{via}", if via.starts_with('/') { api.base.as_str() } else { "" })))?;
+    Ok(Landed { page, via })
 }
 
 /// An own key signed in to, through its provider's own page (Paul,
@@ -308,24 +432,34 @@ pub(super) fn model_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
         json!({ "row": r, "given": given }),
     );
 
+    // connecting is the shell's, from settings: its session, and a browser
+    // to bind the sign-in to; a key's own request is refused
+    let owner_session = api.sign_in(&Api::email_of(w.owner))?;
+    let stranger_session = api.sign_in(&Api::email_of(w.stranger))?;
+    let session_of = |session: &str| format!("fragment_session={session}");
+    let by_key = api.signed(w.owner, "POST", &format!("/api/connections/{SWAP_ROUTER}/authorize"), Some(&json!({})))?;
+    s.ok(MODEL_CHECKS[9], by_key.status == 403 && own_key_cookie(&by_key).is_empty() && by_key.body["url"].is_null(), &by_key);
+    let authorize = || shell_authorize(api, &owner_session);
+
     // the person declines at the provider: nothing set, the sign-in let go
-    let authorize = || api.signed(w.owner, "POST", &format!("/api/connections/{SWAP_ROUTER}/authorize"), Some(&json!({})));
     s.openrouter.decline_next();
     let declined = authorize()?;
     let back = sent_back(api, declined.body["url"].as_str().unwrap_or_default())?;
-    let page = api.unsigned("GET", &path_of(&back), None)?;
+    let page = came_back(api, &back, &[&own_key_cookie(&declined), &session_of(&owner_session)])?;
     let exchanges = s.openrouter.exchanges().len();
     s.ok(
         MODEL_CHECKS[2],
-        declined.status == 200 && !back.contains("code=") && page.status == 400 && page.text.contains("sent no key back") && exchanges == 0 && row(&api.signed(w.owner, "GET", "/api/connections", None)?)["state"] == "not_set",
+        declined.status == 200 && !back.contains("code=") && page.refused_cleanly() && page.text.contains("sent no key back") && exchanges == 0 && row(&api.signed(w.owner, "GET", "/api/connections", None)?)["state"] == "not_set",
         json!({ "back": back, "page": page.to_string(), "exchanges": exchanges }),
     );
 
-    // connecting: the browser goes to the provider's page
+    // connecting: the browser goes to the provider's page, its state bound to it
     let asked = authorize()?;
     let url = asked.body["url"].as_str().unwrap_or_default().to_string();
     let q: std::collections::BTreeMap<String, String> = reqwest::Url::parse(&url).map(|u| u.query_pairs().map(|(k, v)| (k.into_owned(), v.into_owned())).collect()).unwrap_or_default();
     let state = q.get("state").cloned().unwrap_or_default();
+    let bound = own_key_cookie(&asked);
+    let bound_line = asked.headers.get_all("set-cookie").iter().filter_map(|v| v.to_str().ok()).find(|c| c.contains("fragment_own_key=")).unwrap_or("").to_string();
     s.ok(
         MODEL_CHECKS[1],
         asked.status == 200
@@ -333,14 +467,37 @@ pub(super) fn model_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
             && q.get("callback_url") == Some(&format!("{}/api/connections/{SWAP_ROUTER}/callback", api.base))
             && q.get("code_challenge_method").map(String::as_str) == Some("S256")
             && q.get("code_challenge").is_some_and(|c| c.len() == 43)
-            && fragment_core::own_signin::parse_state(&state).is_some_and(|(computer, _)| computer == w.id)
+            && fragment_core::roundtrip::valid_state(&state)
+            && !state.contains(&w.id["computer:".len()..])
+            && bound == format!("fragment_own_key={state}")
+            && bound_line.contains("HttpOnly") && bound_line.contains("SameSite=Lax") && bound_line.contains("Max-Age=600")
             && q.get("key_label").map(String::as_str) == Some(fragment_core::own_signin::KEY_LABEL),
-        json!({ "authorize": asked.body, "query": q }),
+        json!({ "authorize": asked.body, "query": q, "cookie": bound_line }),
     );
 
-    // back with a code: exchanged, the key sealed by the computer
+    // the attack (audit H3): the sign-in the owner began, sent to someone
+    // else, whose browser comes back with it; then the owner's own
     let back = sent_back(api, &url)?;
-    let page = api.unsigned("GET", &path_of(&back), None)?;
+    let (exchanges, keys_before) = (s.openrouter.exchanges().len(), s.openrouter.keys().len());
+    let elsewhere = [
+        ("the owner's session, but another browser (no cookie)", came_back(api, &back, &[&session_of(&owner_session)])?),
+        ("the cookie, signed in to no one", came_back(api, &back, &[&bound])?),
+        ("another person's browser", came_back(api, &back, &[&session_of(&stranger_session)])?),
+        ("another person's session, with the cookie", came_back(api, &back, &[&bound, &session_of(&stranger_session)])?),
+        // a round trip's cookie is its kind's alone: a sign-in's holds no own key's state
+        ("the owner's session, the state in a sign-in's cookie", came_back(api, &back, &[&format!("fragment_login={state}"), &format!("fragment_switch={state}"), &session_of(&owner_session)])?),
+    ];
+    let set = |keys: &crate::Keys| api.signed(keys, "GET", "/api/connections", None).map(|r| row(&r)["state"].clone()).unwrap_or(Value::Null);
+    let sealed_nowhere = s.openrouter.exchanges().len() == exchanges && s.openrouter.keys().len() == keys_before && set(w.owner) == "not_set" && set(w.stranger) != "set";
+    s.ok(
+        MODEL_CHECKS[10],
+        elsewhere.iter().all(|(_, r)| r.refused_cleanly()) && sealed_nowhere,
+        json!(elsewhere.iter().map(|(how, r)| format!("{how}: {r}")).collect::<Vec<_>>()),
+    );
+
+    // back with a code, in the browser that began it, signed in: exchanged,
+    // the key sealed by the person's own computer
+    let page = came_back(api, &back, &[&bound, &session_of(&owner_session)])?;
     let keys = s.openrouter.keys();
     let key = keys.last().cloned().unwrap_or_default();
     let exchanged = s.openrouter.exchanges();
@@ -378,16 +535,44 @@ pub(super) fn model_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn
         json!({ "said": said, "calls": calls, "uses": uses() }),
     );
 
-    // once only: a replay, and a state naming no sign-in here
-    let again = api.unsigned("GET", &path_of(&back), None)?;
-    let forged = format!("/api/connections/{SWAP_ROUTER}/callback?code=x&state={}", fragment_core::own_signin::state(w.id, &"A".repeat(43)));
-    let none = api.unsigned("GET", &forged, None)?;
-    let garbled = api.unsigned("GET", &format!("/api/connections/{SWAP_ROUTER}/callback?code=x&state=nope"), None)?;
+    // once only: a replay (its cookie kept), a sign-in past its time, and a
+    // state naming no sign-in here, each with a cookie that matches it
+    let again = came_back(api, &back, &[&bound, &session_of(&owner_session)])?;
+    let expiring = authorize()?;
+    let expiring_back = sent_back(api, expiring.body["url"].as_str().unwrap_or_default())?;
+    let expired = super::computers::lever_with(api, w.id, json!({ "op": "expire-sign-ins" }))?;
+    let late = came_back(api, &expiring_back, &[&own_key_cookie(&expiring), &session_of(&owner_session)])?;
+    let forged_state = "a".repeat(fragment_core::roundtrip::STATE_HEX_LEN);
+    let forged = format!("{}/api/connections/{SWAP_ROUTER}/callback?code=x&state={forged_state}", api.base);
+    let none = came_back(api, &forged, &[&format!("fragment_own_key={forged_state}"), &session_of(&owner_session)])?;
+    let garbled = came_back(api, &format!("{}/api/connections/{SWAP_ROUTER}/callback?code=x&state=nope", api.base), &["fragment_own_key=nope", &session_of(&owner_session)])?;
     s.ok(
         MODEL_CHECKS[6],
-        again.status == 400 && none.status == 400 && garbled.status == 400 && s.openrouter.exchanges().len() == exchanged.len() && s.openrouter.keys().len() == 1,
-        json!({ "replay": again.to_string(), "none": none.to_string(), "garbled": garbled.to_string() }),
+        again.refused_cleanly()
+            && expired.status == 200
+            && late.refused_cleanly()
+            && none.refused_cleanly()
+            && garbled.refused_cleanly()
+            && s.openrouter.exchanges().len() == exchanged.len()
+            && s.openrouter.keys().len() == 1,
+        json!({ "replay": again.to_string(), "expired": expired.body, "late": late.to_string(), "none": none.to_string(), "garbled": garbled.to_string() }),
     );
+
+    // a browser holds one own-key sign-in at a time: a second Connect's
+    // binding replaces the first's, so the first comes back refused and
+    // the second connects (fragment_core::roundtrip::Trip)
+    let (first, second) = (authorize()?, authorize()?);
+    let (first_back, second_back) = (sent_back(api, first.body["url"].as_str().unwrap_or_default())?, sent_back(api, second.body["url"].as_str().unwrap_or_default())?);
+    let held = own_key_cookie(&second);
+    let first_page = came_back(api, &first_back, &[&held, &session_of(&owner_session)])?;
+    let second_page = came_back(api, &second_back, &[&held, &session_of(&owner_session)])?;
+    s.ok(
+        MODEL_CHECKS[11],
+        first_page.refused_cleanly() && first_page.text.contains("another began since") && second_page.status == 200 && second_page.text.contains("is connected") && s.openrouter.keys().len() == 2,
+        json!({ "first": first_page.to_string(), "second": second_page.to_string() }),
+    );
+    // the first's sign-in is left under way; past its time, it counts no more
+    super::computers::lever_with(api, w.id, json!({ "op": "expire-sign-ins" }))?;
 
     // bounded: eight under way, the ninth refused
     let pending: Vec<u16> = (0..fragment_core::own_signin::SIGNINS_PENDING_MAX + 1).map(|_| authorize().map(|r| r.status).unwrap_or(0)).collect();

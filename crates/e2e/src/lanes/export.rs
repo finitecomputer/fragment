@@ -63,6 +63,16 @@ fn pace(api: &Api, identity: &str, steps: Option<u32>) -> Result<Reply> {
     api.unsigned("POST", "/api/test/export", Some(&json!({ "identity": identity, "op": "pace", "steps": steps })))
 }
 
+/// The shell's calls to its export counted in `window.__export`: its reads
+/// (`reads`, `GET /api/export`) and its presses (`presses`, POST); while
+/// `refuse` is above 0, a read is refused as a failing network's is (a 503
+/// with a message), one less each time.
+const COUNT_EXPORT_CALLS: &str = "(() => { const real = window.fetch; const c = window.__export = { reads: 0, presses: 0, refuse: 0 }; window.fetch = async (url, o) => { \
+    if (String(url) === '/api/export' && o?.method === 'POST') c.presses++; \
+    if (String(url) === '/api/export' && o?.method === 'GET') { c.reads++; if (c.refuse > 0) { c.refuse--; \
+      return new Response(JSON.stringify({ error: 'unavailable', message: 'refused for the test' }), { status: 503, headers: { 'content-type': 'application/json' } }); } } \
+    return real(url, o); }; return true; })()";
+
 /// Waits for `keys`' export to be ready (or to fail): its view.
 fn built(s: &Suite, api: &Api, keys: &Keys) -> Value {
     s.eventually(BUILT, || view(api, keys)["state"] != "building");
@@ -128,7 +138,7 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     ship(s, &app, TODO_APP, TODO_JSON);
     let installed = s.eventually(Duration::from_secs(30), || api.op(&paul, &app_name, "count", "q", json!({})).is_ok_and(|r| r.status == 200));
     let row = api.op(&paul, &app_name, "add_todo", "x1", json!({ "text": "export me, a row" }))?;
-    let member = api.signed(&paul, "PUT", &format!("/api/f/{app_name}/members/{bob_id}"), Some(&json!({ "role": "viewer" })))?;
+    let member = api.share(&app_name, &bob_id, "viewer")?;
     let invitee = format!("export-invitee-{}@example.com", &Keys::generate().pubkey_hex()[..8]);
     let invited = api.signed(&paul, "POST", &format!("/api/f/{app_name}/invites"), Some(&json!({ "email": invitee, "role": "editor" })))?;
     let secret = api.signed(&paul, "PUT", &format!("/api/f/{app_name}/secrets/API_KEY"), Some(&json!({ "value": SECRET, "hosts": ["api.example.com"] })))?;
@@ -142,7 +152,7 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     // someone else's fragment, shared with them
     let bobs = s.named(api, &bob, "export-bobs")?;
     s.create(api, &bob, &bobs)?;
-    let shared = api.signed(&bob, "PUT", &format!("/api/f/{bobs}/members/{paul_id}"), Some(&json!({ "role": "editor" })))?;
+    let shared = api.share(&bobs, &paul_id, "editor")?;
     anyhow::ensure!(shared.status == 200, "sharing bob's fragment: {shared}");
 
     // a computer running their agent, in a chat on the template
@@ -159,6 +169,11 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "making the chat: {r}");
     s.owned(&r.body, &paul);
     api.signed(&paul, "PUT", &format!("/api/f/{chat_name}/members/{agent_id}"), Some(&json!({ "role": "editor" })))?;
+    // a routine of its, in that chat: a scheduled record on its tasks
+    // (docs/api.md, "Scheduled records"), due next new year: no run fires it
+    let routine = json!({ "kind": "routine", "text": "water the garden", "chat": chat_name });
+    let scheduled = api.signed(&paul, "POST", &format!("/api/f/{agent_name}/schedules"), Some(&json!({ "cron": "0 0 1 1 *", "channel": "tasks", "record": routine })))?;
+    anyhow::ensure!(scheduled.status == 200, "a scheduled routine of the agent's: {scheduled}");
     let pic_sha = sha256_hex(PICTURE);
     let up = api.call(Call {
         method: "PUT",
@@ -292,11 +307,12 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     let meta = json_at(&files, &frag(&app_name, "meta.json"));
     let bob_row = meta["members"].as_array().into_iter().flatten().find(|m| m["principal"] == bob_id.as_str()).cloned().unwrap_or(Value::Null);
     s.ok(
-        "an app's meta: its owner, its member (their email, and their agents: a share is a person's and their agents'), the invite waiting, its secret's name, whether its links are",
+        "an app's meta: its owner, its member (their email; their agents never named: decision 63), the invite waiting, its secret's name, whether its links are",
         meta["owner"] == paul_id.as_str()
             && bob_row["role"] == "viewer"
             && bob_row["email"] == Api::email_of(&bob).as_str()
-            && bob_row["agents"].as_array().is_some_and(|a| a.iter().any(|x| x["principal"] == bob_agent_id.as_str()))
+            && bob_row.get("agents").is_none()
+            && !meta.to_string().contains(&bob_agent_id)
             && !bob_row.as_object().is_some_and(|o| o.contains_key("peopleOnly"))
             && meta["invites"][0]["email"] == invitee.as_str()
             && meta["secrets"] == json!(["API_KEY"])
@@ -357,12 +373,18 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
     let agent_row = chat_meta["members"].as_array().into_iter().flatten().find(|m| m["principal"] == agent_id.as_str()).cloned().unwrap_or(Value::Null);
     let owner_row = chat_meta["members"].as_array().into_iter().flatten().find(|m| m["principal"] == paul_id.as_str()).cloned().unwrap_or(Value::Null);
     s.ok(
-        "a chat's meta: made members only, its agent named with its owner's email, its person with their agents",
-        chat_meta["visibility"] == "members" && chat_meta["shareLink"] == false && agent_row["kind"] == "agent" && agent_row["ownerEmail"] == email.as_str() && owner_row["agents"].as_array().is_some_and(|a| a.iter().any(|x| x["principal"] == agent_id.as_str())),
+        "a chat's meta: made members only, its agent named with its owner's email, its person by their email alone (a person's agents are never named under them: decision 63)",
+        chat_meta["visibility"] == "members" && chat_meta["shareLink"] == false && agent_row["kind"] == "agent" && agent_row["ownerEmail"] == email.as_str() && owner_row["email"] == email.as_str() && owner_row.get("agents").is_none(),
         &chat_meta["members"],
     );
     s.ok("the file a record attaches, by its hash", files.get(&frag(&chat_name, &format!("blobs/{pic_sha}"))).map(Vec::as_slice) == Some(PICTURE), "");
     s.ok("an agent's soul is its fragment's file", files.get(&frag(&agent_name, "files/SOUL.md")).map(Vec::as_slice) == Some(SOUL), "");
+    let agent_meta = json_at(&files, &frag(&agent_name, "meta.json"));
+    s.ok(
+        "a fragment's scheduled records are in its meta, as its viewers list them (an agent's routine); one with none names none",
+        agent_meta["schedules"] == json!([scheduled.body["schedule"]]) && meta.get("schedules").is_none(),
+        &agent_meta["schedules"],
+    );
     let hex = computer.strip_prefix("computer:").unwrap_or("");
     let cmeta = json_at(&files, &format!("{root}/computers/{hex}/meta.json"));
     let stored: Vec<(String, bool)> = records_of_save
@@ -437,11 +459,59 @@ pub fn export(s: &mut Suite, api: &Api) -> Result<()> {
             let got = s.eventually(Duration::from_secs(30), || saved().and_then(|p| std::fs::metadata(p).ok()).is_some_and(|m| m.len() == archive.len() as u64));
             let same = saved().and_then(|p| std::fs::read(p).ok()).is_some_and(|b| b == archive);
             s.ok("a click on its download saves the archive, byte for byte", got && same, format!("{:?}", saved()));
+            // a new one, held building (#440): behind a chat, the page reads
+            // it no more; settings shown again read it again; a read of it
+            // that fails keeps its rows and says so once, with Try again,
+            // which only reads; then it is followed until it is ready
+            pace(api, &paul_id, Some(0))?;
+            chrome.eval(&page, COUNT_EXPORT_CALLS)?;
             chrome.click(&page, "#settings-data [data-action=export]")?;
-            let again = s.eventually(BUILT, || view(api, &paul)["id"] != id.as_str() && view(api, &paul)["state"] == "ready");
+            let building = "(() => { const e = document.querySelector('#settings-data .settings-export'); return e?.dataset.state === 'building' && e.innerText.includes('Building') && e.innerText.includes('Progress'); })()";
+            let held = chrome.until(&page, building, Duration::from_secs(30));
             let new_id = view(api, &paul)["id"].as_str().unwrap_or("").to_string();
+            let polled = chrome.until(&page, "window.__export.reads >= 1", Duration::from_secs(30));
+            chrome.eval(&page, &format!("(document.querySelector({:?}).click(), true)", format!("#chats [data-key=\"chat:{chat_name}\"]")))?;
+            let left = chrome.until(&page, "location.pathname === '/' && document.getElementById('settings-page').hidden", Duration::from_secs(30));
+            let before = chrome.eval(&page, "window.__export.reads")?;
+            std::thread::sleep(Duration::from_secs(5));
+            let after = chrome.eval(&page, "window.__export.reads")?;
+            s.ok(
+                "while an export builds, settings read it every 2 s; behind a chat, they read it no more (5 s: two of their reads)",
+                held && polled && left && before == after,
+                json!({ "before": before, "after": after }),
+            );
+            chrome.eval(&page, "(document.getElementById('settings').click(), true)")?;
+            let back = chrome.until(&page, &format!("{building} && window.__export.reads > {before}"), Duration::from_secs(30));
+            chrome.eval(&page, "(window.__export.refuse = 1, true)")?;
+            let warned = chrome.until(
+                &page,
+                &format!("{building} && document.querySelectorAll('#settings-data [data-unread]').length === 1 && !!document.querySelector('#settings-data [data-unread] [data-action=export-read]')"),
+                Duration::from_secs(30),
+            );
+            let text = chrome.eval(&page, "document.getElementById('settings-data')?.innerText ?? ''")?;
+            let text = text.as_str().unwrap_or("").to_string();
+            s.ok(
+                "settings shown again read it again; a read of it that fails keeps its rows (Building, its progress), and one line says it could not be checked, with Try again: never the platform's words",
+                back && warned && text.contains("Couldn't check your export.") && !text.contains("refused for the test"),
+                &text,
+            );
+            let reads = chrome.eval(&page, "window.__export.reads")?.as_u64().unwrap_or(0);
+            chrome.eval(&page, "(document.querySelector('#settings-data [data-action=export-read]')?.click(), true)")?;
+            let resumed = chrome.until(&page, &format!("{building} && !document.querySelector('#settings-data [data-unread]') && window.__export.reads >= {}", reads + 2), Duration::from_secs(30));
+            let counted = chrome.eval(&page, "window.__export")?;
+            s.ok(
+                "its Try again reads it again, and starts nothing: the line goes, the rows stay, and settings read it again every 2 s as it builds",
+                resumed && counted["presses"] == 1 && view(api, &paul)["id"] == new_id.as_str(),
+                &counted,
+            );
+            pace(api, &paul_id, None)?;
+            let again = s.eventually(BUILT, || view(api, &paul)["state"] == "ready");
             let followed = again && chrome.until(&page, &link(&new_id), Duration::from_secs(30));
-            s.ok("its Export again starts a new one, which the page follows until it is ready", followed && fragment_proto::export::valid_export_id(&new_id), view(api, &paul));
+            s.ok(
+                "its Export again started a new one, which the page follows until it is ready",
+                followed && new_id != id && fragment_proto::export::valid_export_id(&new_id),
+                view(api, &paul),
+            );
         }
     }
 

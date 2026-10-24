@@ -39,7 +39,7 @@
   --primary:var(--text-primary); --primary-foreground:var(--bg-window);
   --font-sans:"Funnel Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono:"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  --wallpaper: #071f3d url("/__shell/wallpaper-dark.jpg") center / cover no-repeat fixed;
+  --wallpaper-dark-opacity: 1;
   color-scheme: dark;
 }
 @media (prefers-color-scheme: light) {
@@ -52,7 +52,7 @@
     --accent-blue:#315fbd; --success:#167a52;
     --border:rgba(20,20,20,.105); --border-strong:rgba(20,20,20,.18);
     --danger-text:#81112f;
-    --wallpaper: #80b2df url("/__shell/wallpaper.jpg") center / cover no-repeat fixed;
+    --wallpaper-dark-opacity: 0;
     color-scheme: light;
   }
 }
@@ -73,6 +73,18 @@ html, body { position: fixed; inset: 0; margin: 0; overflow: hidden; overscroll-
 html { -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 body { top: var(--viewport-top, 0px); bottom: auto; height: var(--viewport-height, 100%); transform: translateZ(0); font: 15px/1.5 var(--font-sans); font-feature-settings: "ss01", "cv11", "kern"; -webkit-font-smoothing: antialiased; }
 :root { --vh: var(--viewport-height, 100dvh); }
+/* the screen's bottom edge's inset (the home indicator's), for what sits on
+   that edge; with a keyboard up the page ends at the keyboard, the edge under
+   it (shell.js `fitViewport`), and nothing keeps clear of it */
+:root { --inset-bottom: env(safe-area-inset-bottom, 0px); }
+:root[data-keyboard] { --inset-bottom: 0px; }
+/* "Still loading… Reload" (index.html): hidden, then shown 9 s after the
+   page, past a slow phone's whole load of the shell (its page, its nine
+   scripts and their first answers), if shell.js has not drawn the shell,
+   and so taken it away, by then */
+.still-loading { position: fixed; inset: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0 8px; margin: 0; padding: 24px; color: var(--text-secondary); visibility: hidden; animation: still-loading 0s 9s forwards; }
+.still-loading a { color: var(--accent-blue); }
+@keyframes still-loading { to { visibility: visible; } }
 /* the chrome is the app's, not text to select or hold; what people write and read stays selectable */
 button, .row, .menu, .topbar, .sidebar-top, .settings-nav, .pane-head, .desktop-dock, .chip { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 button, a, .row, summary, label { touch-action: manipulation; }
@@ -153,8 +165,10 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; }
 .frames { flex: 1; min-height: 0; position: relative; border-top: 1px solid var(--border); }
 .frames > iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; }
 .notice { margin: 12vh auto 0; max-width: 28rem; padding: 24px; text-align: center; color: var(--text-secondary); }
-.notice strong { display: block; color: var(--text-primary); font-size: 17px; margin-bottom: 6px; }
+.notice > strong { display: block; color: var(--text-primary); font-size: 17px; margin-bottom: 6px; }
 .notice a, .notice button { color: var(--accent-blue); background: none; border: 0; padding: 0; text-decoration: underline; }
+.notice-row { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 0 8px; }
+.notice-row form { margin: 0; }
 /* what the person should know of their computer (shell.js renderComputer):
    a band over the chat or settings, one row a notice */
 .computer-notices { display: flex; flex-direction: column; gap: 8px; padding: 0 14px 10px; }
@@ -174,8 +188,14 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; }
 /* ---- viewer: panes stacked vertically (viewer.js writes the rows) ---- */
 /* Fixed attachment shares the viewport's crop with search, regardless of panel size. */
 .viewer { display: flex; flex-direction: column; border-radius: 16px 16px 0 16px; overflow: hidden; clip-path: inset(0 round 16px 16px 0 16px); }
-/* Mirror only the viewport-sized artwork, leaving apps and controls unchanged. */
-.viewer::after, .search-dialog::before { content: ""; position: fixed; inset: 0; z-index: -2; background: var(--wallpaper); transform: scaleX(-1); pointer-events: none; }
+/* Keep both images mounted. The light layer stays opaque while the dark
+   layer fades over it, so no empty background shows through mid-transition.
+   shell.js waits for the target image to decode before changing opacity. */
+.wallpaper { position: fixed; inset: 0; z-index: -2; transform: scaleX(-1); pointer-events: none; }
+.wallpaper::before, .wallpaper::after { content: ""; position: absolute; inset: 0; }
+.wallpaper::before { background: #80b2df url("/__shell/wallpaper.jpg") center / cover no-repeat; }
+.wallpaper::after { background: #071f3d url("/__shell/wallpaper-dark.jpg") center / cover no-repeat; opacity: var(--wallpaper-dark-opacity); transition: opacity 450ms ease-in-out; }
+@media (prefers-reduced-motion: reduce) { .wallpaper::after { transition: none; } }
 .stack { flex: 1; display: grid; grid-template-columns: 100%; min-height: 0; padding: 8px; }
 .stack > * { min-height: 0; overflow: hidden; }
 .viewer.is-empty .stack { display: none; }
@@ -240,12 +260,12 @@ body.reordering iframe { pointer-events: none; }
   input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="range"]), textarea, select { font-size: 16px !important; }
   /* a phone's own edges: the status bar, the home indicator, a notch turned sideways */
   .layout.narrow { padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px); }
-  .layout.narrow .chat { padding-bottom: env(safe-area-inset-bottom, 0px); }
+  .layout.narrow .chat { padding-bottom: var(--inset-bottom); }
   .layout.narrow .sidebar-shell, .layout.narrow .viewer { position: fixed; z-index: 10; top: 0; bottom: 0; }
   .layout.narrow .sidebar-shell { left: 0; width: 100%; padding: max(8px, env(safe-area-inset-top, 0px)) max(8px, env(safe-area-inset-right, 0px)) max(8px, env(safe-area-inset-bottom, 0px)) max(8px, env(safe-area-inset-left, 0px)); }
   /* the viewer is a sheet from the bottom, the chat's top still showing above it */
   .layout.narrow .viewer { top: auto; left: 0; right: 0; height: min(calc(var(--vh) * .88), calc(var(--vh) - 48px - env(safe-area-inset-top, 0px))); border-top: 1px solid var(--border); border-radius: 16px 16px 0 0; clip-path: inset(0 round 16px 16px 0 0); box-shadow: 0 -12px 32px rgba(0,0,0,.28); }
-  .layout.narrow .viewer .stack { padding: 6px 6px max(6px, env(safe-area-inset-bottom)); }
+  .layout.narrow .viewer .stack { padding: 6px 6px max(6px, var(--inset-bottom)); }
   /* the sheet is the whole viewer: no pane needs maximizing in it, and its title keeps the room */
   .layout.narrow .pane-max { display: none; }
   .layout.narrow .gutter-col { display: none; }
@@ -361,54 +381,73 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 .primary:disabled { opacity: .6; cursor: default; }
 .quiet { display: inline-flex; align-items: center; height: 30px; padding: 0 14px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-primary); font-size: 13px; font-weight: 600; text-decoration: none; }
 /* a frame that could not sign in, saying why (shell.js BLOCKED) */
-body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); color: var(--text-primary); font-family: "Funnel Sans", system-ui, sans-serif; }
+iframe[data-blocked] { display: none; }
+.frame-note { flex: 1; overflow: auto; background: var(--bg-window); color: var(--text-primary); }
+.frames > .frame-note { position: absolute; inset: 0; }
 .frame-note .notice span { display: block; }
 .page-title { font-weight: 700; margin: 0 auto; }
-/* first run (sign in, the welcome, a seat's step): one card on the
-   landscape, as the launcher's panel is (Skyler's design) */
-.first-run { position: relative; isolation: isolate; height: 100%; overflow-y: auto; display: grid; place-items: safe center; padding: max(24px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(24px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); background: transparent; }
-.first-run::before { content: ""; position: fixed; inset: 0; z-index: -1; background: var(--wallpaper); transform: scaleX(-1); pointer-events: none; }
-.first-run-card { width: min(100%, 480px); display: flex; flex-direction: column; gap: 14px; padding: 30px 30px 24px; border: 1px solid var(--border-strong); border-radius: 28px; background: var(--bg-sidebar); box-shadow: 0 24px 60px rgba(0,0,0,.22); }
-.first-run-card .brand { font-weight: 700; font-size: 15px; margin-bottom: 10px; padding: 0; }
-@media (max-width: 520px) { .first-run { padding: max(16px, env(safe-area-inset-top, 0px)) 12px max(16px, env(safe-area-inset-bottom, 0px)); align-items: safe end; } .first-run-card { padding: 24px 20px 20px; border-radius: 24px; } }
-.first-run-card > .primary, .first-run-card > .quiet { align-self: flex-start; }
-.first-run-card h1 { margin: 0; font-size: 28px; line-height: 1.2; font-weight: 600; letter-spacing: -.01em; }
-.first-run-card p { margin: 0; }
-.first-run-form { display: flex; flex-direction: column; gap: 10px; }
-.first-run-form label { font-size: 13px; color: var(--text-secondary); }
-.first-run-form input, .first-run-form textarea, .rename-agent textarea {
-  width: 100%; padding: 12px 14px; border: 0; border-radius: 12px; background: var(--chat-composer); color: var(--text-primary);
-  box-shadow: inset 0 1px 2px rgba(0,0,0,.18); font: inherit; resize: vertical;
+/* first run (sign in, the welcome, a seat's step): the platform pages'
+   grid and card (platform-pages.css: Skyler's onboarding design,
+   2026-10-22) on the shell's landscape, inside a phone's edges, scrolling
+   when the card is taller than the screen. What follows is what its steps
+   need besides: their buttons, their rhythm, nested in steps. */
+.first-run { position: relative; isolation: isolate; height: 100%; overflow-y: auto; padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px); background: transparent; }
+.first-run-content { box-sizing: border-box; min-height: 100%; color: var(--fg); }
+.first-run-card { color: var(--fg); }
+.first-run-card p { margin: 16px 0 0; color: var(--muted); line-height: 1.5; }
+.first-run-card h1 + p { line-height: 1.4; text-wrap: balance; }
+.first-run-card h1 { text-wrap: balance; }
+.first-run-card h1[tabindex="-1"]:focus { outline: none; }
+.first-run-card h2 { margin: 24px 0 0; font-size: 14px; font-weight: 600; line-height: 1.5; text-align: left; }
+.first-run-card strong { font-weight: 600; color: var(--fg); }
+.first-run-card form { margin: 0; }
+.first-run-card :is(.primary, .secondary) {
+  box-sizing: border-box; display: flex; align-items: center; justify-content: center; width: 100%; height: auto; min-height: 44px; margin: 24px 0 0; padding: 12px 15px;
+  border: 1px solid var(--line); border-radius: 999px; font: 500 14px/1.5 var(--font-sans); text-align: center; text-decoration: none; cursor: pointer; transition: opacity .15s, border-color .15s;
 }
-.first-run-form input:focus, .first-run-form textarea:focus, .rename-agent textarea:focus { outline: 1px solid var(--border-strong); }
-.first-run-form .primary { align-self: flex-start; margin-top: 4px; }
-/* the welcome: the seats, a trial code, who is signed in (shell.js welcome, billing.js seatOffer) */
-.plans { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
-.plan { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 16px 18px; border: 1px solid var(--border-strong); border-radius: 18px; background: var(--surface-muted); color: var(--text-primary); font: inherit; text-align: left; cursor: pointer; transition: background .15s, border-color .15s; }
-.plan:hover:not(:disabled), .plan:focus-visible { background: var(--bg-active); border-color: var(--text-tertiary); }
-.plan:disabled { opacity: .6; cursor: default; }
-.plan strong { font-size: 15px; font-weight: 600; }
-.plan span { color: var(--text-secondary); font-size: 13px; line-height: 1.45; }
-.trial-code { display: flex; gap: 8px; }
-.trial-code input { flex: 1; min-width: 0; min-height: 36px; padding: 0 14px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 13px; }
-.trial-code .quiet { min-height: 36px; height: auto; border-radius: 999px; background: var(--bg-active); }
-.trial-code button:disabled { opacity: .6; }
-/* a seat's step before the first agent (shell.js seatFirst) */
-.creating-steps { list-style: none; margin: 4px 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
-.creating-steps li { display: flex; align-items: center; gap: 10px; color: var(--text-tertiary); }
-.creating-steps li::before { content: ""; width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border-strong); box-sizing: border-box; flex: none; }
-.creating-steps li.doing { color: var(--text-primary); }
-.creating-steps li.doing::before { border-color: var(--text-primary); border-right-color: transparent; animation: creating-spin .8s linear infinite; }
-.creating-steps li.done { color: var(--text-secondary); }
-.creating-steps li.done::before { border-color: var(--success); background: var(--success); }
+.first-run-card :is(.primary, .secondary) + :is(.primary, .secondary) { margin-top: 10px; }
+.first-run-card .primary { background: var(--fg); color: var(--bg); }
+.first-run-card .secondary { background: transparent; color: var(--fg); }
+.first-run-card .primary:hover:not(:disabled) { opacity: .88; }
+.first-run-card .secondary:hover:not(:disabled) { border-color: var(--muted); }
+.first-run-card .text { display: block; margin: 17px auto 0; padding: 2px; border: 0; border-radius: 999px; background: none; color: var(--fg); font: 400 14px/1.5 var(--font-sans); text-decoration: none; cursor: pointer; }
+.first-run-card .text:hover:not(:disabled) { text-decoration: underline; text-underline-offset: 3px; }
+.first-run-card button:disabled { opacity: .5; cursor: default; }
+.first-run-card label { display: block; margin: 24px 0 0; text-align: left; }
+.first-run-card input { display: block; width: 100%; margin-top: 7px; color: var(--fg); }
+.first-run-card input::placeholder { color: var(--muted); }
+.first-run-card p.fine { margin-top: 18px; font-size: 14px; }
+.first-run-card .ticket p { margin: 0; color: inherit; }
+.first-run-card .ticket p + p { margin-top: 8px; }
+/* its card's size, animated from one step to another (shell.js cardStep) */
+.first-run-card.moving { overflow: hidden; }
+.first-run-card p:is(.form-error, .settings-warning) { margin: 14px 0 0; color: var(--danger-text); font-size: 14px; line-height: 1.5; }
+.first-run-card .form-error:not([hidden]) + .primary { margin-top: 14px; }
+/* the welcome's offers from an org, each a ticket (billing.js seatOffer):
+   its two answers, Accept first */
+.first-run-card .billing-offer { padding: 20px; border-bottom: 0; text-align: left; }
+.first-run-card .billing-offer .settings-actions { justify-content: flex-start; margin-top: 14px; }
+.first-run-card .billing-offer .quiet { height: auto; padding: 8px 15px; border: 1px solid var(--line); background: transparent; color: var(--fg); font: 500 14px/1.5 var(--font-sans); }
+.first-run-card .billing-offer .quiet:first-child { border-color: transparent; background: var(--fg); color: var(--bg); }
+/* a seat's step before the first agent (shell.js seatFirst): its steps on a ticket */
+.creating-steps { list-style: none; display: flex; flex-direction: column; gap: 10px; text-align: left; }
+.creating-steps li { display: flex; align-items: center; gap: 12px; color: var(--muted); }
+.creating-steps li::before { content: ""; width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line); box-sizing: border-box; flex: none; }
+.creating-steps li.doing { color: var(--fg); }
+.creating-steps li.doing::before { border-color: var(--fg); border-right-color: transparent; animation: creating-spin .8s linear infinite; }
+.creating-steps li.done::before { border-color: var(--accent); background: var(--accent); }
 .creating-steps li.failed { color: var(--danger-text); }
 .creating-steps li.failed::before { border-color: var(--danger-text); }
 @keyframes creating-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .creating-steps li.doing::before { animation: none; } }
-.first-run-card .creating-steps { margin: 6px 0; padding: 14px 16px; border: 1px solid var(--border-strong); border-radius: 18px; background: var(--surface-muted); }
-.welcome-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-top: 10px; font-size: 13px; }
-.welcome-foot > .muted { margin-right: auto; }
-.welcome-foot form { margin: 0; }
+/* who is signed in, under the welcome's steps, and its ways out */
+.welcome-foot { display: flex; flex-wrap: wrap; justify-content: center; gap: 0 20px; margin-top: 24px; border-top: 1px solid var(--line); }
+.welcome-foot .text { margin: 12px 0 0; }
+/* who is signed in, to someone with no seat (shell.js noSeatSaid): the
+   welcome's, Billing's, and a guest's home's */
+.no-seat { overflow-wrap: anywhere; }
+.welcome-foot > .no-seat { flex-basis: 100%; margin: 16px 0 4px; font-size: 14px; line-height: 1.5; }
+.notice > .no-seat { margin: 12px 0 0; }
 /* Settings use the full work area, with quiet section navigation and readable rows. */
 .layout.settings-view .chat { grid-column: 3 / 6; }
 .layout.settings-view .viewer, .layout.settings-view #gutter-right, .layout.settings-view .toggle-right { display: none; }
@@ -416,8 +455,9 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .layout.settings-view.left-open:not(.narrow) .topbar { display: none; }
 .layout.settings-view.left-open:not(.narrow) .page { border-top: 0; }
 .layout.settings-view:not(.left-open) .topbar { min-height: 52px; }
-/* its width, not the window's, lays settings out: a window opened beside them narrows it */
-.page { flex: 1; min-height: 0; overflow: auto; border-top: 1px solid var(--border); padding: 0; scroll-padding-top: 20px; container: settings / inline-size; }
+/* its width, not the window's, lays settings out: a window opened beside them narrows it;
+   its scrollbar's room is kept while it loads, short, so nothing moves once it scrolls */
+.page { flex: 1; min-height: 0; overflow: auto; scrollbar-gutter: stable; border-top: 1px solid var(--border); padding: 0; scroll-padding-top: 20px; container: settings / inline-size; }
 .settings-layout { display: grid; grid-template-columns: 176px minmax(0, 720px); justify-content: center; gap: clamp(28px, 4vw, 64px); max-width: 1160px; min-height: 100%; margin: 0 auto; padding: 34px clamp(24px, 4vw, 56px) 88px; }
 .settings-nav { position: sticky; top: 24px; align-self: start; display: flex; flex-direction: column; gap: 2px; }
 .settings-nav-title { padding: 10px 12px 14px; color: var(--text-tertiary); font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
@@ -428,6 +468,8 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .settings-intro { padding: 2px 0 8px; }
 .settings-intro h1 { margin: 0 0 6px; font-size: clamp(26px, 2.5vw, 32px); font-weight: 600; line-height: 1.2; letter-spacing: -.035em; text-wrap: balance; }
 .settings-intro p { margin: 0; color: var(--text-secondary); font-size: 14px; }
+/* settings loading: in the loaded page's layout, where its first section's heading comes */
+.settings-loading { margin: 22px 0 0; font-size: 14px; }
 .settings-section { position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 0; min-width: 0; margin-top: 64px; padding: 8px 22px 16px; border: 1px solid var(--border-strong); border-radius: 18px; background: var(--surface-muted); scroll-margin-top: 64px; }
 .settings-section h2 { position: absolute; top: -42px; left: 0; margin: 0; font-size: 18px; font-weight: 600; line-height: 1.35; letter-spacing: -.018em; }
 .settings-section h2:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 4px; border-radius: 2px; }
@@ -471,7 +513,8 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .settings-section .picture img { width: 24px; height: 24px; }
 @container settings (max-width: 880px) {
   .settings-layout { display: block; max-width: 760px; padding: 22px 24px 72px; }
-  .settings-nav { position: sticky; z-index: 4; top: 0; flex-direction: row; gap: 4px; margin: -22px -24px 24px; padding: 12px 24px; border-bottom: 1px solid var(--border); background: var(--bg-sidebar); overflow-x: auto; scrollbar-width: none; }
+  /* as tall before its links come (settings loading) as with them: a link's 36px, padded */
+  .settings-nav { position: sticky; z-index: 4; top: 0; flex-direction: row; gap: 4px; min-height: 61px; margin: -22px -24px 24px; padding: 12px 24px; border-bottom: 1px solid var(--border); background: var(--bg-sidebar); overflow-x: auto; scrollbar-width: none; }
   .settings-nav::-webkit-scrollbar { display: none; }
   .settings-nav-title { display: none; }
   .settings-nav-link { flex: none; white-space: nowrap; }
@@ -479,12 +522,16 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 }
 @container settings (max-width: 620px) {
   .settings-layout { padding: 16px 20px 60px; }
-  .settings-nav { margin: -16px -20px 22px; padding: 10px 20px; }
+  .settings-nav { min-height: 57px; margin: -16px -20px 22px; padding: 10px 20px; }
   .settings-section .settings-line:not(.settings-action-line):not(.settings-line-with-action) { flex-direction: column; align-items: flex-start; gap: 2px; }
   .settings-info { flex-direction: column; gap: 2px; }
   .settings-info .settings-key { flex: none; }
   .settings-control { flex: none; max-width: 58%; }
   .settings-key { flex: none; }
+  /* a line whose buttons go under it (who is signed in, and a guest's seat) */
+  .settings-section .settings-stack { flex-wrap: wrap; row-gap: 10px; }
+  .settings-stack .settings-control { flex: 1 1 100%; max-width: none; justify-content: flex-start; }
+  .settings-stack .settings-actions { justify-content: flex-start; }
   .settings-intro { padding-bottom: 4px; }
   .settings-section { margin-top: 60px; padding: 6px 16px 12px; border-radius: 16px; }
 }
@@ -495,17 +542,22 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .provider-identity { display: flex; flex: 1; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; }
 .provider-head .settings-actions { flex: none; max-width: 60%; margin: 0; }
 .provider-detail { font-size: 12.5px; line-height: 1.45; }
+.provider-said:empty { display: none; }
 .provider-name { font-weight: 600; }
 .provider-kind { font-size: 12px; color: var(--text-tertiary); }
 .provider-state { font-size: 13px; color: var(--text-secondary); }
+.provider-account { font-size: 12.5px; color: var(--text-secondary); overflow-wrap: anywhere; }
 .provider-state.connected, .provider-state.set, .provider-state.offered { color: var(--success); }
-.provider-state.needs_reauthorization { color: var(--danger-text); }
+.provider-state.needs_reauthorization, .provider-state.disconnecting { color: var(--danger-text); }
 .provider-agents, .provider-uses { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; font-size: 13px; }
 .provider-agents { justify-content: flex-end; }
 .provider-agents .settings-key { margin-right: auto; }
 .provider .settings-key { flex: 0 0 auto; min-width: 80px; font-size: 13px; }
 .provider .use { color: var(--text-secondary); }
 .provider .use + .use::before { content: "·"; margin-right: 8px; color: var(--text-tertiary); }
+.provider-accounts { display: flex; flex-direction: column; gap: 8px; padding-left: 12px; border-left: 2px solid var(--border-strong); }
+.provider-account-row { display: flex; flex-direction: column; gap: 4px; }
+.provider-account-pick { height: 26px; max-width: 220px; padding: 0 6px; border: 1px solid var(--border-strong); border-radius: 8px; background: none; color: var(--text-primary); font: inherit; font-size: 12.5px; }
 .provider-key { display: flex; gap: 8px; flex-wrap: wrap; }
 .provider-key input { height: 30px; min-width: 0; width: 220px; max-width: 100%; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: none; color: var(--text-primary); font: inherit; font-size: 13px; }
 /* settings' agents: an agent's model, when a provider that offers models is connected (shell.js modelPicker) */
@@ -516,7 +568,7 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .agent-model-label { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; font-size: 13px; }
 .agent-model-label .settings-key { flex: 0 0 auto; min-width: 80px; }
 .agent-model-label::after { content: ""; position: absolute; top: 50%; right: 15px; width: 7px; height: 7px; border-right: 1.5px solid var(--text-secondary); border-bottom: 1.5px solid var(--text-secondary); transform: translateY(-70%) rotate(45deg); pointer-events: none; }
-.settings-section select.agent-model { width: min(230px, 62%); height: 36px; min-width: 0; padding: 0 34px 0 15px; appearance: none; -webkit-appearance: none; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-active); color: var(--text-primary); font-size: 13px; font-weight: 600; text-overflow: ellipsis; cursor: pointer; }
+.settings-section select.agent-model { width: min(320px, 62%); height: 36px; min-width: 0; padding: 0 34px 0 15px; appearance: none; -webkit-appearance: none; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-active); color: var(--text-primary); font-size: 13px; font-weight: 600; text-overflow: ellipsis; cursor: pointer; }
 .settings-section select.agent-model:hover { background: var(--bg-hover); }
 .settings-section select.agent-model:disabled { opacity: .55; cursor: default; }
 .agent-model-said { font-size: 12.5px; }
@@ -568,6 +620,9 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .billing-seats { border-collapse: collapse; width: 100%; font-size: 14px; }
 .billing-seats td { padding: 6px 8px 6px 0; border-bottom: 1px solid var(--border-strong); vertical-align: middle; }
 .billing-seats td:last-child { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+/* an org's offer to the person, to accept or decline (billing.js `offers`) */
+.billing-offer { padding: 8px 0 10px; border-bottom: 1px solid var(--border-strong); }
+.billing-offer p { margin: 0 0 6px; }
 
 /* One agent, a quiet list of conversations, and an app dock on the desktop. */
 .sidebar-agent-toolbar { --edge-light: 0; display: flex; align-items: center; flex: none; margin: 6px 0 8px; }
@@ -582,6 +637,12 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .menu.agent-menu button { min-height: 34px; border-radius: 8px; font-size: 13px; }
 .sidebar-agent .title { flex: 1; text-align: left; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-agent-mark { display: flex; flex: none; }
+/* its name, and under it what it is doing, as its chats' rows in the list say */
+.sidebar-agent-named { display: flex; flex: 1; flex-direction: column; justify-content: center; min-width: 0; }
+.sidebar-agent-named .title { flex: none; }
+.sidebar-agent .agent-doing { font-size: 11px; font-weight: 600; line-height: 14px; text-align: left; color: var(--text-tertiary); }
+.sidebar-agent .agent-doing.working { color: var(--success); }
+.sidebar-agent .agent-doing.you { color: var(--accent-blue); }
 .sidebar-agent-mark .agent-avatar { width: 26px; height: 26px; }
 .sidebar-new-chat { --edge-light: 0; width: 32px; height: 32px; border: 1px solid transparent; border-radius: 50%; background: transparent; }
 .sidebar-new-chat:hover { background: transparent; }
@@ -603,6 +664,17 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 @media (prefers-reduced-motion: reduce) {
   .sidebar-agent::before, .sidebar-agent::after, .sidebar-new-chat::before, .sidebar-new-chat::after, .agent-menu-edge::before, .agent-menu-edge::after { transition: none; }
 }
+/* an invite waiting on the person's email, above their chats: what it
+   shares, who invited them and as what, Accept and Decline (shell.js renderInvites) */
+.invites { display: flex; flex: none; flex-direction: column; gap: 6px; max-height: 30vh; margin: 0 0 8px; overflow-y: auto; scrollbar-width: thin; }
+.invites[hidden] { display: none; }
+.invite { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 14px; }
+.invite-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.invite-from { overflow-wrap: anywhere; font-size: 12px; color: var(--text-secondary); }
+.invite-actions { display: flex; gap: 6px; margin-top: 6px; }
+.invite-actions button { height: 28px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-primary); font-size: 12px; font-weight: 600; }
+.invite-actions .invite-accept { border-color: transparent; background: var(--text-primary); color: var(--bg-window); }
+.invite-actions button:disabled { opacity: .55; cursor: default; }
 #chats { gap: 2px; padding: 0 0 6px; }
 #chats .chat-row { width: 100%; min-height: 32px; padding: 4px 10px; font-size: 14px; color: var(--text-secondary); }
 #chats .chat-row.active { color: var(--text-primary); }
@@ -642,3 +714,7 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .desktop-empty .prompt-dice { border-color: rgba(255,255,255,.28); background: rgba(20,20,20,.38); text-shadow: none; -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
 .desktop-empty .prompt-dice:hover { background: rgba(20,20,20,.56); }
 @media (max-width: 760px) { .desktop-dock { margin-bottom: max(8px, env(safe-area-inset-bottom)); } }
+/* Finite's privacy policy and terms, at the end of Settings' Account (the
+   first run's footer is platform-pages.css's .page-footer) */
+.legal-links, .settings-section > p.legal-links { font-size: 12.5px; }
+.legal-links a { color: inherit; }

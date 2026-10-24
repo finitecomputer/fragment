@@ -147,6 +147,29 @@ pub mod limits {
     /// A chat's unread messages its row counts, at most: past it the count
     /// stops (the shell shows this many as "99+").
     pub const LISTED_UNREAD_MAX: u32 = 100;
+    /// A channel's `listed` (`ListedDecl`): the kinds of record it lists,
+    /// at most (`valid_listed_kind`).
+    pub const LISTED_KINDS_MAX: usize = 8;
+    /// The body's fields a listed record carries to a list, at most
+    /// (`valid_listed_field`).
+    pub const LISTED_FIELDS_MAX: usize = 4;
+    /// A listed field's value: a longer string is cut to this many
+    /// characters (an npub is 63).
+    pub const LISTED_VALUE_MAX_CHARS: usize = 128;
+    /// The posters a listed channel keeps the newest record of, at most
+    /// (the one who posted longest ago goes first), and the listed records
+    /// a row in a person's list carries, at most (the newest first).
+    pub const LISTED_POSTERS_MAX: usize = 16;
+    /// How far a listed record's time may fall behind while its poster
+    /// posts the same again: the newest is sent once it is this much newer
+    /// than the one sent, so a list tells a poster still at it from one
+    /// gone quiet to within a minute.
+    pub const LISTED_FRESH_MS: i64 = 60_000;
+    /// A fragment sends its listed records' rows at most once in this
+    /// long: a move within it waits for its end and goes with every move
+    /// till then, so an agent's turn costs a few fan-outs to its members'
+    /// lists, not one a record.
+    pub const LISTED_MIN_GAP_MS: i64 = 3_000;
     /// Fragments `GET /api/access` asks for their members and invites, at
     /// most: those someone else is in or invited to, the first listed
     /// first. Past it, a fragment's row has its counts alone (its share
@@ -184,11 +207,45 @@ pub mod limits {
     pub const AUTO_PAUSE_WINDOW_MS: i64 = 10 * 60 * 1000;
     /// … or after this many triggered runs within an hour.
     pub const TRIGGERED_RUNS_PER_HOUR: u64 = 120;
+    /// A fragment's scheduled records (docs/api.md, "Scheduled records"):
+    /// data schedules its editors add at run time, at most this many. The
+    /// same bound as its code's triggers (`TRIGGERS_MAX`): a list a person
+    /// reads, and a small alarm pass. What their fires start is its
+    /// owner's ledger's to bound.
+    pub const RECORD_SCHEDULES_MAX: usize = 32;
+    /// The closest two fires of one scheduled record may be, in minutes:
+    /// every 15 at most often. A record is what wakes a computer that
+    /// follows its channel (an agent's `tasks`: a turn of model calls, and
+    /// a computer that then stays awake 20 idle minutes, docs/computers.md)
+    /// and what starts an app's channel triggers' runs, all its owner's to
+    /// pay for, and a schedule is added at run time, by any editor (an
+    /// agent among them), with no deploy. At 15 minutes one already keeps
+    /// a computer awake around the clock (about $46 a month at
+    /// `2vcpu-6gib`'s $0.064224 an hour) and makes 96 turns a day; every 5
+    /// minutes would make 288 and buy no freshness a person notices. What
+    /// must run more often is code's: an app's cron trigger and its job,
+    /// which the trigger breakers watch (`TRIGGERED_RUNS_PER_HOUR`).
+    pub const RECORD_SCHEDULE_EVERY_MIN_MINUTES: i64 = 15;
+    /// A scheduled record's body, as JSON: an instruction of a paragraph or
+    /// two (an agent's routine) or a small payload a job reads, well under
+    /// a channel record's `RECORD_BODY_MAX_BYTES`, and every fire stores
+    /// it again.
+    pub const RECORD_SCHEDULE_BODY_MAX_BYTES: usize = 4 * 1024;
     /// Sign-ins begun and not yet finished that the platform keeps when the
     /// fleet does not say (`FRAGMENT_SIGNINS_PENDING_MAX`): each is good for
     /// ten minutes, so the oldest is let go only past about 166 starts a
     /// second, sustained.
     pub const SIGNINS_PENDING_MAX_DEFAULT: u64 = 100_000;
+    /// CLI codes one address may ask for a minute (`POST /cli/begin`) when
+    /// the fleet does not say (`FRAGMENT_CLI_BEGINS_PER_IP_MINUTE`): a
+    /// person logs in a machine or two; past it, 429 until the next minute.
+    pub const CLI_BEGINS_PER_IP_MINUTE_DEFAULT: u32 = 30;
+    /// CLI codes the whole fleet hands out a minute, at most: in a code's
+    /// ten minutes that is far below the codes the registry keeps, so a
+    /// flood from many addresses is refused before it can push out the
+    /// codes real people are typing.
+    pub const CLI_BEGINS_PER_MINUTE_MAX: u32 = 5_000;
+    const _: () = assert!(CLI_BEGINS_PER_MINUTE_MAX as u64 * 10 < SIGNINS_PENDING_MAX_DEFAULT, "a code's ten minutes of the fleet's begins fit the codes it keeps");
     /// The sessions one browser's platform session keeps on one fragment's
     /// origin (past this, the oldest go first).
     pub const SITE_SESSIONS_PER_FRAGMENT_MAX: u64 = 4;
@@ -534,6 +591,17 @@ pub enum ErrorCode {
     /// 403: a computer's swap found no account to swap in: the agent's
     /// owner has not connected that provider, or must connect it again.
     NotConnected,
+    /// 500: the platform's object refuses its code's schema (fragment_core::
+    /// migrate): it holds a newer version (a rollback), another code's step,
+    /// or tables from before versions that need a reset. It answers nothing
+    /// else until newer code is deployed or an operator resets it; the
+    /// message names it and why.
+    SchemaRefused,
+    /// 503: a deploy is going out, and a call between the platform's own
+    /// Worker and one of its objects met another release on the other
+    /// side, which refused it before doing anything (docs/MODEL.md, "Calls
+    /// between releases"); try again in a few seconds.
+    Deploying,
 }
 
 impl ErrorCode {
@@ -547,12 +615,12 @@ impl ErrorCode {
             ErrorCode::TooLarge => 413,
             ErrorCode::AppFailed => 422,
             ErrorCode::RateLimited => 429,
-            ErrorCode::HostFailed => 500,
+            ErrorCode::HostFailed | ErrorCode::SchemaRefused => 500,
             ErrorCode::UpstreamFailed => 502,
             ErrorCode::RegistryUnavailable => 503,
             ErrorCode::BudgetUsedUp => 402,
             ErrorCode::StorageFull => 507,
-            ErrorCode::NodeFull | ErrorCode::WontWake => 503,
+            ErrorCode::NodeFull | ErrorCode::WontWake | ErrorCode::Deploying => 503,
             ErrorCode::NotConnected => 403,
         }
     }
@@ -562,6 +630,154 @@ impl ErrorCode {
 pub struct ErrorBody {
     pub error: ErrorCode,
     pub message: String,
+    /// Why, where one status means several causes a person acts on
+    /// differently (billing's, seats' and orgs' refusals): the shell picks
+    /// its plain words by it. Add-only: absent from every other refusal, and
+    /// a client that knows none ignores it, and one that does not know this
+    /// one reads none (`reason_or_none`).
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "reason_or_none")]
+    pub reason: Option<Reason>,
+}
+
+/// A reason this reader does not know is none: reasons are add-only, so a
+/// refusal of a newer platform still reads as its code and message.
+fn reason_or_none<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Reason>, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.and_then(|s| Reason::parse(&s)))
+}
+
+/// A refusal's cause, for the people who read it (`ErrorBody::reason`):
+/// billing's, seats' and orgs' (docs/api.md, "Seats and orgs"). On the wire
+/// as its snake_case name (`as_str`), written by hand rather than derived:
+/// the cell's Wasm carries one name table, not serde's visitors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reason {
+    /// No such trial code.
+    TrialUnknown,
+    /// The trial code was turned off, is past its expiry, or is of a seat
+    /// no longer sold.
+    TrialEnded,
+    /// A trial is once a person, and they had theirs.
+    TrialUsed,
+    /// The trial code's places are taken.
+    TrialTaken,
+    /// A trial is for someone starting a seat of their own: not an org
+    /// that paid before, nor a seat beside others.
+    TrialNotHere,
+    /// This deployment sells no seats, or not that one.
+    NotSold,
+    /// Stripe refused, or did not answer, the call the platform made for
+    /// it (a Checkout, the portal): nothing the person asked is wrong.
+    StripeRefused,
+    /// They hold a seat already (here, or in this org).
+    HoldsSeat,
+    /// Their org pays for its seats: an admin adds theirs.
+    OrgPays,
+    /// They hold no seat.
+    NoSeat,
+    /// Only whoever pays for the org opens its billing.
+    NotPayer,
+    /// They pay for their org, and its subscription has not ended: they
+    /// stay (an admin, a member) until it has.
+    Pays,
+    /// They are the last admin of an org other people are in.
+    LastAdmin,
+    /// An admin leaves only by stepping down first.
+    StepDownFirst,
+    /// That is whoever pays's seat or admin's place: theirs alone to give up.
+    PayerOnly,
+    /// The seat, offer or admin's place named is gone (withdrawn, answered,
+    /// removed).
+    Gone,
+    /// The org pays for no seats now: it buys again first.
+    OrgNotPaying,
+    /// Only an org's admins do that.
+    NotAdmin,
+    /// That is not an email.
+    NotAnEmail,
+    /// That email holds a seat in the org, or is offered one, already.
+    AlreadyOffered,
+    /// The org holds as many seats as it may.
+    OrgFull,
+    /// The org has as many admins as it may, offered ones included.
+    AdminsFull,
+    /// That email is offered something by as many orgs as it may be.
+    TooManyOffers,
+    /// The org has mailed as many offers as it may today.
+    OffersPerDay,
+    /// The org's last paid seat: its subscription is canceled instead.
+    LastPaidSeat,
+}
+
+impl Reason {
+    pub const ALL: [Reason; 25] = [
+        Reason::TrialUnknown,
+        Reason::TrialEnded,
+        Reason::TrialUsed,
+        Reason::TrialTaken,
+        Reason::TrialNotHere,
+        Reason::NotSold,
+        Reason::StripeRefused,
+        Reason::HoldsSeat,
+        Reason::OrgPays,
+        Reason::NoSeat,
+        Reason::NotPayer,
+        Reason::Pays,
+        Reason::LastAdmin,
+        Reason::StepDownFirst,
+        Reason::PayerOnly,
+        Reason::Gone,
+        Reason::OrgNotPaying,
+        Reason::NotAdmin,
+        Reason::NotAnEmail,
+        Reason::AlreadyOffered,
+        Reason::OrgFull,
+        Reason::AdminsFull,
+        Reason::TooManyOffers,
+        Reason::OffersPerDay,
+        Reason::LastPaidSeat,
+    ];
+
+    /// Its name on the wire.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Reason::TrialUnknown => "trial_unknown",
+            Reason::TrialEnded => "trial_ended",
+            Reason::TrialUsed => "trial_used",
+            Reason::TrialTaken => "trial_taken",
+            Reason::TrialNotHere => "trial_not_here",
+            Reason::NotSold => "not_sold",
+            Reason::StripeRefused => "stripe_refused",
+            Reason::HoldsSeat => "holds_seat",
+            Reason::OrgPays => "org_pays",
+            Reason::NoSeat => "no_seat",
+            Reason::NotPayer => "not_payer",
+            Reason::Pays => "pays",
+            Reason::LastAdmin => "last_admin",
+            Reason::StepDownFirst => "step_down_first",
+            Reason::PayerOnly => "payer_only",
+            Reason::Gone => "gone",
+            Reason::OrgNotPaying => "org_not_paying",
+            Reason::NotAdmin => "not_admin",
+            Reason::NotAnEmail => "not_an_email",
+            Reason::AlreadyOffered => "already_offered",
+            Reason::OrgFull => "org_full",
+            Reason::AdminsFull => "admins_full",
+            Reason::TooManyOffers => "too_many_offers",
+            Reason::OffersPerDay => "offers_per_day",
+            Reason::LastPaidSeat => "last_paid_seat",
+        }
+    }
+
+    /// The reason a wire name names; none for one this reader does not know.
+    pub fn parse(name: &str) -> Option<Reason> {
+        Reason::ALL.into_iter().find(|r| r.as_str() == name)
+    }
+}
+
+impl Serialize for Reason {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
 }
 
 /// A member's role in a fragment. `Public` is the floor anyone who can see
@@ -883,6 +1099,12 @@ pub struct ListedFragment {
     /// the role the agent acts with there), as no name says any more.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub owned: bool,
+    /// What its members are doing, as its channels that declare `listed`
+    /// last said (each member's newest such record, the newest first, at
+    /// most `limits::LISTED_POSTERS_MAX`): only those of channels this
+    /// row's role may read; none when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub listed: Vec<ListedRecord>,
 }
 
 /// `PUT /api/fragments/{name}/archived`: the signer's own view of a
@@ -1187,6 +1409,18 @@ pub struct AddKey {
     pub proof: String,
 }
 
+/// `POST <platform>/cli/begin`'s answer (signed by a new key, which no one
+/// holds yet): the code its person types at `url`, a page signed in to the
+/// platform, by `expires_at` (ms), once.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliCode {
+    /// As shown: `WDJB-MJHT`.
+    pub code: String,
+    pub url: String,
+    pub expires_at: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyView {
@@ -1243,8 +1477,8 @@ pub struct CreateInvite {
     pub role: Role,
 }
 
-/// An invite waiting on an email: whoever signs in as it becomes a member,
-/// at its role.
+/// An invite waiting on an email: whoever signs in as it, and accepts it,
+/// becomes a member at its role.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Invite {
@@ -1254,13 +1488,49 @@ pub struct Invite {
     pub created_by: String,
 }
 
-/// The answer to `POST /api/f/<name>/invites`: the person who holds the
-/// email, a member at once; or, when no one does yet, the invite, mailed.
+/// The answer to `POST /api/f/<name>/invites`: the invite, mailed, waiting
+/// on its person's yes. `Member` is what it answered before invites waited
+/// for one (the person who held the email, a member at once): no invite
+/// answers it now, and clients still read it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Shared {
     Member(Member),
     Invited(Invite),
+}
+
+/// `GET /api/invites` (a person): the invites waiting on the emails they
+/// sign in with, theirs to accept or decline, the soonest to run out
+/// first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InvitesWaiting {
+    pub invites: Vec<WaitingInvite>,
+}
+
+/// An invite waiting on an email of the asker's: the fragment, the role
+/// it grants, what it was called as it was sent, who shared it (their
+/// email; null when no one signs in as them now), the email it waits on,
+/// and when it runs out. The cell answers it as its registry reads it
+/// (cell/src/registry/invites.rs `waiting_for`, which names each column
+/// as this names its field), not through this type.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitingInvite {
+    pub fragment: String,
+    pub role: Role,
+    pub title: String,
+    #[serde(default)]
+    pub from: Option<String>,
+    pub email: String,
+    pub expires_at: i64,
+}
+
+/// The answer to `POST /api/invites/<fragment>/accept`: the role they
+/// hold there now (a stronger one they held already is kept).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InviteAccepted {
+    pub fragment: String,
+    pub role: Role,
 }
 
 /// `GET /api/f/<name>/invites` (owner): the invites waiting.
@@ -1382,6 +1652,68 @@ pub struct ChannelDecl {
     /// anonymous visitor holding the `post` role is refused (401).
     #[serde(default, rename = "signedIn", skip_serializing_if = "std::ops::Not::not")]
     pub signed_in: bool,
+    /// Only this kind of member posts (`"from": "agent"`): a poster who is
+    /// no member of the fragment, a member of the other kind, or an agent
+    /// acting for someone is refused (403), and an app publishes nothing
+    /// there (a mutation's effect or a job step names whoever called it:
+    /// `effects::check_record`), so a record there is that kind's own (a
+    /// chat's `work`: its agents' steps, never a person's forgery of one).
+    /// The same fact a channel trigger's `from` reads.
+    /// `None`: whoever holds the `post` role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<IdentityKind>,
+    /// Its members' lists show each member's newest record of these kinds
+    /// (`"listed": {"kinds": [...], "fields": [...]}`): what a chat's agents
+    /// are doing, on their people's rows. The platform never reads what a
+    /// kind means: it is the template's. `None`: nothing is listed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listed: Option<ListedDecl>,
+}
+
+/// A channel's `listed`: the kinds of record whose newest, each member's,
+/// its members' lists show, and the fields of its body they carry. A
+/// record's kind here is its body's `kind` (a string), as a template
+/// writes it (a post's record kind is always `message`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListedDecl {
+    /// 1 to `limits::LISTED_KINDS_MAX`, each `valid_listed_kind`, no repeats.
+    pub kinds: Vec<String>,
+    /// At most `limits::LISTED_FIELDS_MAX`, each `valid_listed_field`, no
+    /// repeats; a body's field that is no string is left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<String>,
+}
+
+/// A listed record as a person's list carries it (`ListedFragment.listed`):
+/// a member's newest record of a kind its channel lists, sent to the lists
+/// of the members whose role may read that channel, and to no one else's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListedRecord {
+    pub channel: String,
+    /// Who posted it: a member of the fragment.
+    pub principal: String,
+    /// Its body's `kind`.
+    pub kind: String,
+    /// Its body's listed fields that are strings, each cut to
+    /// `limits::LISTED_VALUE_MAX_CHARS` characters.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub fields: std::collections::BTreeMap<String, String>,
+    /// When it was posted (ms); a poster who posts the same again moves it
+    /// at most `limits::LISTED_FRESH_MS` behind.
+    pub at: i64,
+}
+
+/// A listed kind: `^[A-Za-z0-9._-]{1,64}$` (a chat's `turn.start`).
+pub fn valid_listed_kind(kind: &str) -> bool {
+    !kind.is_empty() && kind.len() <= 64 && kind.bytes().all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+}
+
+/// A listed field: `^[A-Za-z][A-Za-z0-9_]{0,31}$`, and never `kind`, which
+/// every listed record names already.
+pub fn valid_listed_field(field: &str) -> bool {
+    let b = field.as_bytes();
+    !b.is_empty() && b.len() <= 32 && b[0].is_ascii_alphabetic() && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_') && field != "kind"
 }
 
 /// One record in a channel. Records are appended by the platform (`events`,
@@ -1636,6 +1968,62 @@ pub struct SetPaused {
     pub paused: bool,
 }
 
+/// `POST /api/f/<name>/schedules` (editor): a scheduled record (docs/api.md,
+/// "Scheduled records"): at each minute `cron` names (UTC), the fragment
+/// appends `record` to its channel `channel`, as itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddSchedule {
+    pub cron: String,
+    pub channel: String,
+    pub record: Value,
+}
+
+/// `PUT /api/f/<name>/schedules/<id>` (editor): a schedule paused (it fires
+/// no more until resumed) or resumed (from its next minute after now).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetSchedule {
+    pub paused: bool,
+}
+
+/// A scheduled record, as a fragment's viewers read it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Schedule {
+    pub id: i64,
+    pub cron: String,
+    /// Its schedule in words (`fragment_core::schedule::said`).
+    pub said: String,
+    pub channel: String,
+    /// The record's body each fire appends.
+    pub record: Value,
+    /// Who added it (an editor).
+    pub created_by: String,
+    pub created_at: i64,
+    pub paused: bool,
+    /// When it fires next (ms since the epoch); none while paused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_at: Option<i64>,
+    /// When it last fired; none before its first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_at: Option<i64>,
+}
+
+/// `GET /api/f/<name>/schedules` (viewer): oldest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleList {
+    pub schedules: Vec<Schedule>,
+}
+
+/// An add's answer: the schedule, and whether the same one was there
+/// already (the same cron, channel and record: added again, it is that one).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleAdded {
+    pub schedule: Schedule,
+    pub replayed: bool,
+}
+
 /// `POST /api/f/<name>/replay` (editor): runs a held or blocked run again
 /// with its original input.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1873,12 +2261,40 @@ mod tests {
     fn a_channel_without_post_reads_and_writes_as_before() {
         // code stored before posts (the code row's JSON columns) decodes
         let old: ChannelDecl = serde_json::from_str(r#"{"read":"viewer"}"#).unwrap();
-        assert_eq!(old, ChannelDecl { read: Role::Viewer, post: None, signed_in: false });
+        assert_eq!(old, ChannelDecl { read: Role::Viewer, post: None, signed_in: false, from: None, listed: None });
         assert_eq!(serde_json::to_string(&old).unwrap(), r#"{"read":"viewer"}"#);
-        let postable = ChannelDecl { read: Role::Public, post: Some(Role::Public), signed_in: true };
+        let postable = ChannelDecl { read: Role::Public, post: Some(Role::Public), signed_in: true, from: None, listed: None };
         assert_eq!(serde_json::from_str::<ChannelDecl>(&serde_json::to_string(&postable).unwrap()).unwrap(), postable);
+        let agents = ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(IdentityKind::Agent), listed: None };
+        assert_eq!(serde_json::to_string(&agents).unwrap(), r#"{"read":"viewer","post":"editor","from":"agent"}"#);
+        assert_eq!(serde_json::from_str::<ChannelDecl>(&serde_json::to_string(&agents).unwrap()).unwrap(), agents, "its posters' kind reads back");
         assert!(serde_json::from_str::<PostRecord>(r#"{"id":"a","body":1,"kind":"x"}"#).is_err(), "a post names only its id and body");
         assert!(serde_json::from_str::<PostRecord>(r#"{"id":"a"}"#).is_err(), "a post has a body");
+    }
+
+    /// A channel's `listed` reads back as it was written, and says nothing
+    /// when there is none; a listed record's fields go when there are none.
+    #[test]
+    fn a_listed_channel_reads_and_writes() {
+        let listed = ListedDecl { kinds: vec!["turn.start".into(), "turn.asked".into()], fields: vec!["asks".into()] };
+        let work = ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false, from: Some(IdentityKind::Agent), listed: Some(listed) };
+        let text = serde_json::to_string(&work).unwrap();
+        assert_eq!(text, r#"{"read":"viewer","post":"editor","from":"agent","listed":{"kinds":["turn.start","turn.asked"],"fields":["asks"]}}"#);
+        assert_eq!(serde_json::from_str::<ChannelDecl>(&text).unwrap(), work);
+        let bare: ListedDecl = serde_json::from_str(r#"{"kinds":["a"]}"#).unwrap();
+        assert!(bare.fields.is_empty() && serde_json::to_string(&bare).unwrap() == r#"{"kinds":["a"]}"#, "no fields: none written");
+        assert!(serde_json::from_str::<ListedDecl>(r#"{"kinds":["a"],"what":1}"#).is_err(), "a listed names only kinds and fields");
+        let record = ListedRecord { channel: "work".into(), principal: "npub1x".into(), kind: "turn.end".into(), fields: Default::default(), at: 5 };
+        assert_eq!(serde_json::to_string(&record).unwrap(), r#"{"channel":"work","principal":"npub1x","kind":"turn.end","at":5}"#);
+    }
+
+    #[test]
+    fn listed_kinds_and_fields() {
+        assert!(valid_listed_kind("turn.prompt.closed") && valid_listed_kind("A-b_c.9") && valid_listed_kind(&"k".repeat(64)));
+        assert!(!valid_listed_kind("") && !valid_listed_kind(&"k".repeat(65)) && !valid_listed_kind("turn start") && !valid_listed_kind("é"));
+        assert!(valid_listed_field("asks") && valid_listed_field("a_1") && valid_listed_field(&"f".repeat(32)));
+        assert!(!valid_listed_field("") && !valid_listed_field("1a") && !valid_listed_field("a.b") && !valid_listed_field(&"f".repeat(33)));
+        assert!(!valid_listed_field("kind"), "every listed record names its kind already");
     }
 
     #[test]
@@ -1932,15 +2348,15 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, owned: false }] };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, owned: false, listed: vec![] }] };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes-k3x9", "role": "owner", "kind": "app" }] }));
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1, invites: Some(2) };
         let listed = FragmentList {
-            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, owned: false }],
+            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
         };
         assert_eq!(
             value(&listed),
-            serde_json::json!({ "fragments": [{ "name": "todo-k3x9", "role": "owner", "kind": "chat", "title": "Todo", "agents": ["npub1juniper"], "preview": "hi", "previewAt": 1_760_000_000_000_i64, "unread": 3, "sharing": { "visibility": "link", "members": 3, "guests": 1, "invites": 2 }, "archived": true }] })
+            serde_json::json!({ "fragments": [{ "name": "todo-k3x9", "role": "owner", "kind": "chat", "title": "Todo", "agents": ["npub1juniper"], "preview": "hi", "previewAt": 1_760_000_000_000_i64, "unread": 3, "sharing": { "visibility": "link", "members": 3, "guests": 1, "invites": 2 }, "archived": true, "listed": [{ "channel": "work", "principal": "npub1juniper", "kind": "turn.asked", "fields": { "asks": "npub1me" }, "at": 1_760_000_000_001_i64 }] }] })
         );
         // a row not archived leaves the flag out, and reads back so
         let read: ListedFragment = serde_json::from_value(serde_json::json!({ "name": "notes-k3x9", "role": "viewer" })).unwrap();
@@ -2001,10 +2417,61 @@ mod tests {
         assert_eq!(DEFAULT_TIER.as_str(), "cheap");
     }
 
+    /// Every refusal reason is on the wire as its snake_case name and reads
+    /// back; a body names one only when it has one, and one a reader does
+    /// not know (a newer platform's) reads as none, the body still read.
+    #[test]
+    fn refusal_reasons_serialize_and_are_add_only() {
+        use Reason::*;
+        let all = [
+            (TrialUnknown, "trial_unknown"),
+            (TrialEnded, "trial_ended"),
+            (TrialUsed, "trial_used"),
+            (TrialTaken, "trial_taken"),
+            (TrialNotHere, "trial_not_here"),
+            (NotSold, "not_sold"),
+            (StripeRefused, "stripe_refused"),
+            (HoldsSeat, "holds_seat"),
+            (OrgPays, "org_pays"),
+            (NoSeat, "no_seat"),
+            (NotPayer, "not_payer"),
+            (Pays, "pays"),
+            (LastAdmin, "last_admin"),
+            (StepDownFirst, "step_down_first"),
+            (PayerOnly, "payer_only"),
+            (Gone, "gone"),
+            (OrgNotPaying, "org_not_paying"),
+            (NotAdmin, "not_admin"),
+            (NotAnEmail, "not_an_email"),
+            (AlreadyOffered, "already_offered"),
+            (OrgFull, "org_full"),
+            (AdminsFull, "admins_full"),
+            (TooManyOffers, "too_many_offers"),
+            (OffersPerDay, "offers_per_day"),
+            (LastPaidSeat, "last_paid_seat"),
+        ];
+        assert_eq!(all.len(), Reason::ALL.len(), "every reason is named here");
+        for (reason, wire) in all {
+            assert!(Reason::ALL.contains(&reason));
+            assert_eq!(serde_json::to_value(reason).unwrap(), wire);
+            assert_eq!(Reason::parse(wire), Some(reason));
+            let body = ErrorBody { error: ErrorCode::AlreadyExists, message: "m".into(), reason: Some(reason) };
+            let text = serde_json::to_string(&body).unwrap();
+            assert_eq!(text, format!(r#"{{"error":"already_exists","message":"m","reason":"{wire}"}}"#));
+            assert_eq!(serde_json::from_str::<ErrorBody>(&text).unwrap(), body);
+        }
+        let none = ErrorBody { error: ErrorCode::AlreadyExists, message: "m".into(), reason: None };
+        assert_eq!(serde_json::to_string(&none).unwrap(), r#"{"error":"already_exists","message":"m"}"#, "no reason, no field");
+        let newer: ErrorBody = serde_json::from_str(r#"{"error":"already_exists","message":"m","reason":"one_from_later"}"#).unwrap();
+        assert_eq!(newer, none, "a reason this reader does not know reads as none");
+    }
+
     #[test]
     fn error_codes_serialize_snake_case() {
-        let body = ErrorBody { error: ErrorCode::ConflictingBody, message: "x".into() };
+        let body = ErrorBody { error: ErrorCode::ConflictingBody, message: "x".into(), reason: None };
         assert_eq!(serde_json::to_string(&body).unwrap(), r#"{"error":"conflicting_body","message":"x"}"#);
         assert_eq!(ErrorCode::ConflictingBody.status(), 409);
+        assert_eq!(serde_json::to_value(ErrorCode::Deploying).unwrap(), "deploying");
+        assert_eq!(ErrorCode::Deploying.status(), 503, "a deploy going out is tried again, as a 503 is");
     }
 }

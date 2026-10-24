@@ -1,4 +1,4 @@
-# fragment-next
+# fragment
 
 Fragment is the product: stateful, multiplayer web apps published from
 the CLI. Agents are fragments a computer of your own runs (today, Hermes
@@ -52,10 +52,11 @@ image's agent runtime.
 ## Commands
 
 The cell (`cell/`, Rust on Workers), the CLI (`cli/`), and the harness
-(`xtask/`, `crates/`). All tooling is Rust; the repo has no shell or
-Python tooling. Its JavaScript from npm is wrangler and the Sandbox SDK
-the cell's shim bundles, pinned in `package.json` (the notes viewer's
-prebuilt bundle is in the debt ledger).
+(`xtask/`, `crates/`). Tooling is Rust, and JavaScript's own tools come
+through `package.json` on xtask's pinned Node ("Choosing tools", below);
+the repo has no shell or Python tooling. Its JavaScript from npm is
+wrangler and the Sandbox SDK the cell's shim bundles, pinned in
+`package.json`; every page's script is first-party source.
 
 - One-time setup: `cargo install worker-build --version 0.8.5 --locked`,
   `rustup target add wasm32-unknown-unknown`, an LLVM clang that compiles
@@ -63,7 +64,7 @@ prebuilt bundle is in the debt ledger).
   finds; or name one with `CC_wasm32_unknown_unknown` and
   `AR_wasm32_unknown_unknown`), and Docker. No Node install and no `npm
   ci`: xtask (and the e2e) bring their own. On first use they fetch the
-  pinned Node (v24.21.0, `crates/devstack/src/node_release.rs`) from
+  pinned Node (v24.22.1, `crates/devstack/src/node_release.rs`) from
   nodejs.org/dist into `target/tools/node-v<version>-<platform>/`,
   checking the tarball's SHA-256 before unpacking it, and run that Node's
   own npm (`npm ci`) whenever node_modules is missing or was installed
@@ -75,7 +76,7 @@ prebuilt bundle is in the debt ledger).
   that preview cards' local Browser Rendering downloads, 126, about 145
   MB, in `target/cache/.wrangler/chrome`), `WRANGLER_CACHE_DIR=
   target/cache/wrangler`, and npm's in `target/cache/npm`; nothing goes
-  to the system's cache. Moving the pin: README.md, "The pinned Node".
+  to the system's cache. Moving the pin: docs/pinned-node.md.
 - `cargo xtask build`: the cell for wasm32, held to its budget
   (`CELL_WASM_MAX_BYTES`, 6.5 MB raw, xtask/src/build.rs: it fails over
   it, saying so), and the release's files (the templates, the shell's
@@ -89,8 +90,14 @@ prebuilt bundle is in the debt ledger).
   `.cjs` git tracks or would add, less the vendored ones) through `node
   --check` on the pinned Node, each as a module or a classic script as
   it is loaded (`xtask/src/js_syntax.rs`: its `VENDORED` and `CLASSIC`
-  lists), naming each file and line that does not parse; then host tests
-  and clippy (host and wasm), warnings denied.
+  lists), naming each file and line that does not parse; that the
+  schema lock (`crates/core/migrations/schema.lock`) is what the
+  platform Durable Objects' steps make (`xtask/src/schema_lock.rs`); then
+  host tests and clippy (host and wasm), warnings denied.
+- `cargo xtask schema-lock`: appends the Durable Objects' new schema
+  steps, and what they make, to the lock; it refuses to change or drop a
+  locked step. A schema changes only by a new step (docs/MODEL.md,
+  Schemas; `crates/core/src/migrate.rs` says how).
 - `cargo xtask e2e [--only <section>[,...] | --except <section>[,...]]`:
   builds `cell/` and the CLI, then runs `crates/e2e` against
   a fresh `wrangler dev` node (workerd) and the in-process fakes, which
@@ -101,7 +108,7 @@ prebuilt bundle is in the debt ledger).
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
   brain, doc, push, ai, ledger, transcribe, finite-private, orgs, billing,
   billing-page, trials, admin, admin-page, shell, computers, chat,
-  shell-ui, wipe, hermes, agent-smoke, sync, restart;
+  shell-ui, wipe, hermes, agent-smoke, sync, migrations, restart;
   `crates/e2e/src/lanes/mod.rs`). `finite-private` starts its own node
   shaped as Finite's deployment (`cheap` on Finite Private, `medium` on
   OpenRouter with its provider routing, both the model fake's
@@ -165,8 +172,8 @@ prebuilt bundle is in the debt ledger).
   `https://<b>.<zone>` on its real vendors (crates/e2e/src/hosted.rs). Its
   people sign in through the preview's levers as `<name>@e2e.test` (the
   config's `test_secret_file`, read from its file; docs/secrets.md), its
-  fragments are `e2e-<run>-…` (the run's id, 6 hex digits, printed as it
-  starts), and a section that needs what a preview lacks is
+  fragments are `e2e-<run>-…` (the run's id, 10 hex digits: its clock's 6
+  and 4 random, printed as it starts), and a section that needs what a preview lacks is
   a skip that says why. Paid calls (models, AI steps) are lent from the
   run's budget (default 60), each person's capped by their ledger, and the
   run ends saying what it spent. `agent-smoke` runs only here, and only
@@ -205,7 +212,7 @@ prebuilt bundle is in the debt ledger).
   another run's fragment made beside it, then the whole one's, which
   spares it for its age. Running it against a preview spends test cents:
   Paul's or the coordinating session's to run.
-- `cargo xtask dev [--clean]`: the dev stack in the foreground under
+- `cargo xtask dev [--clean] [--real-agent [--models <config>]]`: the dev stack in the foreground under
   `wrangler dev`: the cell on :8790 with fragments at
   `http://<name>.fragment.localhost:8790/`, which rebuilds
   when `cell/src` or `crates/` change, the model route and AI steps on
@@ -225,7 +232,19 @@ prebuilt bundle is in the debt ledger).
   `target/devstack/node-8790-<boot>.log` (printed at start;
   `FRAGMENT_NODE_LOGS=1` adds wrangler's debug logs). Point the CLI at it with
   `FRAGMENT_HOST=http://127.0.0.1:8790` and run `fragment login` once. Dev fleets let jobs
-  fetch local addresses (`FRAGMENT_EGRESS_LOCAL=allow`).
+  fetch local addresses (`FRAGMENT_EGRESS_LOCAL=allow`). `--real-agent`
+  runs new computers on our Hermes image, built from the tree (its first
+  build takes a while), and the text tiers on real models: a deployment
+  config's `models` (deploy/example.jsonc's, or `--models <config>`'s: a
+  copy of the preview's runs the preview's), checked as a deploy checks
+  them, whose OpenAI-compatible slots call with the one key in the file
+  `FRAGMENT_DEV_MODEL_KEY_FILE` names; its Workers AI slots stay on the
+  fake (xtask/src/dev_agent.rs). The node lists an operator key of its
+  own (`target/devstack/operator-key`, made on first run), so `fragment
+  operator wipe <email> --yes --key-file target/devstack/operator-key`
+  wipes a person there; signed in again, they are a new person, whose
+  first run makes a fresh agent: a fresh agent's test, as on a preview
+  with an operator key its config lists.
 - `cargo xtask try <todo|inbox|notes|doc> [name]` (with `cargo xtask dev` running):
   creates and deploys a fragment from a template under
   `target/devstack/try/` (never in the repo) and prints the link to open,
@@ -259,15 +278,40 @@ prebuilt bundle is in the debt ledger).
   to run. A branch deploy whose config names `stripe.key_file` makes the
   branch's own endpoint each time and uploads its secret as a Worker
   secret beside the test secret (decision 58).
-- `cargo xtask deploy --config <file> [--branch <name>]`: builds and
-  deploys to Cloudflare from a deployment's config, kept outside the repo
-  (`deploy/example.jsonc`; xtask/src/deploy.rs). It lists the store first
-  and refuses, before anything is built, when a secret the config names
-  is missing (naming the `secret set` for each); it binds them by name
-  and uploads no secret but a branch's test secret. A branch is a complete
-  copy at `<branch>.<zone>`, its fragments at
-  `<name>--<branch>.<zone>`. `cargo xtask teardown --config
-  <file> --branch <name>` removes one (irreversible: ask Paul).
+- `cargo xtask deploy --config <file> [--branch <name>] [--pinned-only]`:
+  builds and deploys to Cloudflare from a deployment's config, kept
+  outside the repo (`deploy/example.jsonc`; xtask/src/deploy.rs). It
+  lists the store first and refuses, before anything is built, when a
+  secret the config names is missing (naming the `secret set` for each);
+  it binds them by name and uploads no secret but a branch's test
+  secret, and runs `wrangler deploy` again (three tries at most, 10 s
+  apart) only for a failure a re-run answers: its Container settings not
+  applied, or an image's push to the registry timing out. A branch is a
+  complete copy at `<branch>.<zone>`, its fragments at
+  `<name>--<branch>.<zone>`. `--pinned-only` (CI's)
+  refuses, before anything is read or built, a config with a computer
+  image built from the tree (a `dockerfile`), naming it: every image is
+  kept at its digest, and the deploy needs no Docker. `cargo xtask
+  teardown --config <file> --branch <name>` removes one (irreversible:
+  ask Paul).
+- `cargo xtask image push hermes --repository <name> --tag <tag>
+  [--summary <file>]`: builds the Hermes image as a deploy builds it and
+  pushes it to the Cloudflare registry of the account
+  `CLOUDFLARE_ACCOUNT_ID` names (wrangler's `containers push` on the
+  pinned Node, with `CLOUDFLARE_API_TOKEN`; up to four tries, as its
+  base's layer is 1.4 GB), then prints the reference a config pins it at
+  (`registry.cloudflare.com/<account>/<repository>@sha256:<64 hex>`,
+  read from the registry's digest and held to deploy.rs's `pinned_ok`)
+  and its config line (xtask/src/image.rs). `cargo xtask image copy
+  hermes --from <reference> --repository <name> --tag <tag>` builds
+  nothing: it copies an image another account's registry holds (the
+  source's account and token in `FROM_CLOUDFLARE_ACCOUNT_ID` and
+  `FROM_CLOUDFLARE_API_TOKEN`; `<account>` may stand for it in the
+  reference) byte for byte, through skopeo (`--preserve-digests`, each
+  side's login minted by wrangler, in a file of its own: both are
+  registry.cloudflare.com, where one Docker login holds one), and
+  refuses a copy whose manifest is not the source's digest. The Image
+  workflow runs both (below).
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
   logic, host-tested; sealing at rest is `seal.rs`), `crates/nip98`,
   `crates/templates` (the release's files: `templates/`, the shell's,
@@ -285,25 +329,101 @@ prebuilt bundle is in the debt ledger).
   included (CI: images.yml's `docker`, below). The e2e's computer
   sections run the stub image under `wrangler dev`, which needs Docker.
 - `.github/workflows/ci.yml` runs `check`, the e2e's four shards (`e2e
-  shard k/4`), and `e2e`, green when they all are, on Linux. Its caches
-  restore on every run and save only from master's pushes (each key's
-  contents are named in the workflow). `images.yml` runs `images/`'s
+  shard k/4`), and `e2e`, green when they all are, on Linux, and then, on
+  a push to master or `production` that both are green for, `deploy`
+  (below). A push whose tree a green run already tested skips the e2e's
+  shards and deploys once `check` is green (about two minutes: it holds
+  the schema lock to what the push moved from, which no earlier run can
+  prove): its first job, `proven`, asks the API. Each run's
+  `e2e` job records the tree its shards tested (an artifact,
+  `tested-tree-<tree>`). On `production`, a run of ci.yml that succeeded
+  on a push to master of that SHA, or of a commit with that tree, proves
+  it, its preview deploy included (Paul, 2026-10-20); on master, such a
+  run, or the green run of the pull request a merge commit merges (its
+  head the commit's second parent) that recorded the merge commit's
+  tree: a pull request's run tests its merge into master as master
+  stood, so this holds when master has not moved since (Paul,
+  2026-10-23). Its caches restore on
+  every run and save only from master's pushes (each one's contents are
+  named in the workflow): `check`'s Rust dependencies and the e2e's
+  tools through `Swatinem/rust-cache`; the e2e's builds, our own crates'
+  with them, through `actions/cache`, one entry per master commit with
+  a record of the tree it was built from, from which `xtask/src/stamp.rs`
+  (compiled alone, before any cargo build) sets a checkout's mtimes so
+  cargo rebuilds only what was not built from its very content; `prune`
+  deletes the older entries); the stub image's layers through BuildKit's
+  Actions cache, built before the e2e's build so it and the node's boot
+  find them; the pinned Node's and the JavaScript caches through
+  `actions/cache`. A push's run is never cancelled by a newer
+  one, which waits (a pull request's is). `images.yml` runs `images/`'s
   `check` on every change there, and `docker`, the Docker lane above
   (both images built, then every `--ignored` test of docker.rs on them,
   in parallel; about 13 minutes), on pull requests and master's
   pushes that touch images/hermes, images/bridge, images/stub, the
-  images' manifest or lock, or the workflow (its `changes` job reads what
-  changed), and on a run by hand. It keeps no layer cache: the workflow
+  images' manifest or lock, or the workflow (its `changes` job, through
+  `dorny/paths-filter`), and on a run by hand. It keeps no layer cache: the workflow
   says why. `release.yml` builds the CLI for macOS and Linux.
-- Master deploys to Cloudflare (`xtask deploy`): branch copies on a dev
-  zone (master's preview is `preview.finite.build`), and production
-  (`finite.chat`, its fragments on `*.finite.place`, in Finite's
-  production account: Paul, 2026-10-16) only at cutover.
+  `image.yml`, the Image workflow, runs only by hand (Actions, image, Run
+  workflow: `environment` preview or production, `from`, `tag`) in that
+  GitHub environment, for its `CLOUDFLARE_API_TOKEN` and
+  `CLOUDFLARE_ACCOUNT_ID` (required there), from the branch that deploys
+  it (master for the preview, `production` for production; any other
+  is refused), to the repository the deploys made
+  (`fragment-preview-computer-hermes-canary`,
+  `fragment-computer-hermes`). Without `from` it builds and pushes
+  (`cargo xtask image push`; `tag` empty for the commit's first 12 hex
+  digits): the preview's canary, or, warned that its digest is not the
+  canary's, production's. With `from`, production's alone, a proven
+  preview reference, it copies it (`cargo xtask image copy`, with
+  production's `PREVIEW_REGISTRY_TOKEN` and `PREVIEW_ACCOUNT_ID`; `tag`
+  empty for the digest's first 12 hex digits): a promotion keeps the
+  digest the round proved (Paul, 2026-10-20). Its summary names the
+  digest and the `computers.images` line to pin it with, the account
+  masked.
+- CI deploys to Cloudflare (ci.yml's `deploy`: `xtask deploy
+  --pinned-only`) on every green push: master's to its preview,
+  `preview.finite.build` (`--branch preview`, a branch copy on the dev
+  zone), and the `production` branch's to production (`finite.chat`, its
+  fragments on `*.finite.place`, in Finite's production account: Paul,
+  2026-10-16). Only Paul updates `production` (protected: no force push,
+  no deletion): his push, or the pull request he merges into it, is the
+  approval of a production deploy. Promoting a commit master's run has
+  proved green deploys in minutes; anything else (a hotfix pushed
+  straight to `production`, a commit whose master run is red or still
+  running) runs the full tests first, about 20 minutes. Each deploys
+  from a GitHub environment, `preview` or `production`, that only its
+  branch may use,
+  holding the variable `DEPLOY_HOST` (its platform's host, whose
+  `/healthz` must then answer the commit) and the secrets
+  `DEPLOY_REPO_TOKEN` (a fine-grained token with Contents · Read on
+  finitecomputer/fragment-deploy alone),
+  `CLOUDFLARE_API_TOKEN` (wrangler's, and the DNS token), the preview's
+  `PREVIEW_TEST_SECRET`, and, optional but recommended,
+  `CLOUDFLARE_ACCOUNT_ID`, named only so the job's logs mask the account
+  wherever wrangler or xtask print it. The configs live in the private
+  repo finitecomputer/fragment-deploy, `preview.jsonc` and
+  `production.jsonc` at the root of its `main`: names and paths, no
+  secret's value, kept out of this public repo's logs and readable by
+  the team. The job checks out its environment's at `main` as it stands
+  then, prints that commit (never the contents), and deploys from it,
+  so a change there deploys at the environment's next deploy: the
+  preview's at master's next green push or a re-run of the `deploy` job
+  of master's latest ci run, production's only at a deploy of Paul's
+  (his next move of `production`, or his re-run of its `deploy` job).
+  The job writes the token and the test secret where a CI config names
+  them, `~/.config/fragment/secrets/cloudflare-api-token` and
+  `…/preview-test-secret` (deploy/example.jsonc). Every image a CI
+  config names is pinned by digest: a canary is built and pushed by the
+  Image workflow (above), production's stable copied by it from the
+  preview's registry, and the digest its summary names then pinned by a
+  commit to the environment's file in fragment-deploy
+  (docs/computers.md, "One round"). Other branches' copies deploy by
+  hand.
   fragment.club (the celld fleet on Fly) deploys only from the `celld`
   branch (tag `celld-final`) until cutover: its fleet file, node image
   and docs/operate.md's commands are that branch's. Deploys to the
-  hosted fleet, production deploys, and DNS changes are Paul's to
-  approve.
+  hosted fleet, production deploys by hand, and DNS changes are Paul's
+  to approve.
 
 ## Rules
 
@@ -313,11 +433,47 @@ prebuilt bundle is in the debt ledger).
   Only the DNS token and a preview's test secret are files read by path.
   Never print them, pass them on a command line (no `--value`), or commit
   them; deleting one is Paul's.
+- The configs CI deploys from live in the private repo
+  finitecomputer/fragment-deploy (`preview.jsonc`, `production.jsonc`):
+  names and paths, never a secret's value (a secret is named there by
+  its store name). A change to one is a commit there, which its
+  environment's next deploy takes (the CI bullets above); none is kept
+  in a GitHub secret.
 - `cargo xtask dev` runs `wrangler dev` on `cell/`, which rebuilds when it
   changes; the e2e runs a staged copy (`target/e2e/<run>/cell`) with its own
   variables, state and dev registry, so the two can run at once.
+- A change to a call's shape between the Worker and a Durable Object (or
+  between two objects) ships safely: every call carries its caller's
+  release (`FRAGMENT_DEPLOY_ID`, the deploy's commit) and the object
+  refuses another release's (503 `deploying`) before it acts, so callers
+  and callees of different releases refuse each other during a deploy and
+  the caller asks again (docs/MODEL.md, Calls between releases). Call an
+  object only through `routed::send`/`send_again` (xtask's guard). What
+  outlives a deploy (a queue message, a stored row) is not a call: its
+  shape stays readable by the next release.
 - The remote is `fragment-rs`, github.com/finitecomputer/fragment: work goes
   up as a branch and a pull request against `master` (branch names under
   `ci/` are refused). The coordinating session reviews and merges a PR
-  once its CI is green. Deploys, adding a remote, deleting Sprites, DNS,
-  and anything else irreversible are Paul's to approve.
+  once its CI is green, which deploys it to the preview. Only Paul
+  updates the `production` branch. Other deploys, adding a remote,
+  deleting Sprites, DNS, and anything else irreversible are Paul's to
+  approve.
+
+## Choosing tools
+
+Paul, 2026-10-19, after a review of the code we wrote ourselves where
+something off the shelf exists:
+
+- **Prefer what already exists.** When an idiomatic Cloudflare feature, a
+  standard crate or a well-kept library simplifies the stack, use it and
+  delete ours. Code of our own needs a reason a reader finds beside it
+  (the cell's wasm budget, a Workers limit, a security property): in a
+  comment, a decision, or a debt-ledger entry.
+- **A build step is acceptable when it buys significant simplification or
+  safety:** a type checker, a linter, a bundler for code that would
+  otherwise be copied by hand. Pages are served as the source in git
+  today. JavaScript's tools come through `package.json` on xtask's pinned
+  Node, as wrangler does, never from a developer's own install.
+- **One concern per pull request.** A fix for one finding, one swap, one
+  convergence: separable changes go up separately, so each stays small
+  to review and to revert.

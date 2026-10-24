@@ -15,7 +15,10 @@ own code, which runs from the platform's release as its page does
 ```json
 "channels": {
   "chat": { "read": "public", "post": "viewer" },
-  "work": { "read": "viewer", "post": "editor" }
+  "work": { "read": "viewer", "post": "editor", "from": "agent",
+            "listed": { "kinds": ["turn.start", "turn.step", "turn.prompt",
+                                  "turn.prompt.closed", "turn.asked", "turn.end"],
+                        "fields": ["asks"] } }
 },
 "operations": { "notify_reply": { "kind": "job" } },
 "triggers": [{ "channel": "chat", "from": "agent", "run": "notify_reply" }]
@@ -25,8 +28,18 @@ own code, which runs from the platform's release as its page does
   prompt answers, and an agent's owner's commands. Anyone who may post
   may say them.
 - `work` holds an agent's progress: turns, steps, prompts, and the
-  commands its runtime takes. Only editors post there (the chat's agents
-  are editors), so no person can forge a step, a card or a menu.
+  commands its runtime takes. Only the chat's agent members post there,
+  each as itself (`"from": "agent"`: the platform refuses every other
+  poster, an editor person included, and an agent acting for someone),
+  so no person can forge a step, a card or a menu. The page counts a
+  turn's records only from the agent whose `turn.start` began it, so
+  one agent cannot write into another's turn either. Its turns' kinds
+  are `listed` (docs/api.md, Listed records): each agent's newest, with
+  its `asks`, rides the chat's row in its viewers' lists, so the shell
+  says what an agent is doing in every chat (working; waiting for a
+  card's answer; waiting on `asks`; done) without reading `work`. A
+  message waiting for its turn has no record yet, so queued is not
+  listed.
 
 An agent fragment has one more channel its computer follows:
 
@@ -95,9 +108,16 @@ it, and a new draft may follow (the next part).
   posted before the agent joined the chat (its membership's `addedAt`).
 - While an agent's turn asks its asker something to answer in words (the
   question is one of its replies), the asker's next message to it is that
-  answer: it goes to the running turn and starts no turn of its own. A
-  turn a restart ended asks nothing, so the message is then a turn of its
-  own (docs/bridge.md, "State").
+  answer: it goes to the running turn and starts no turn of its own. While
+  it waits on a card that takes words (an option with `"words": true`, a
+  clarify's "Other": below), its owner's next message to it answers the
+  card with that option and those words, as if typed on the card (Paul,
+  2026-10-22: a reply typed in the message box stayed queued, the card
+  open). Words, files, or both: the files go with the answer, the card
+  showing their names when there are no words. Anyone else's message, and
+  any message while it waits on a card that takes no words (Allow, Deny),
+  waits its turn. A turn a restart ended asks nothing, so the message is
+  then a turn of its own (docs/bridge.md, "State").
 - A body that is a bare string is a message with that text.
 
 **An agent's reply:**
@@ -153,13 +173,20 @@ From anyone else it is ignored. A waiting turn named by Stop never runs.
 **A prompt's answer:**
 
 ```json
-{ "kind": "prompt_response", "prompt": "<prompt>", "option": "<option>", "text": "purple" }
+{ "kind": "prompt_response", "prompt": "<prompt>", "option": "<option>",
+  "agent": "npub1…", "turn": "<turn>", "text": "purple" }
 ```
 
 Only the agent's owner answers its prompts (decision 42); anyone else's
 is ignored. The first answer on the channel wins; later ones are
-ignored. A page posts it with the id `pr:<prompt>`, so a second tap is
-the same record (or 409, for another option). `text`, only for an option
+ignored. `agent` and `turn` name the card it answers (both, or neither):
+prompt ids are each agent's own, so two agents of a chat may show cards
+of one id, and a bridge ignores an answer naming another agent or
+another turn of its own. The page always names them; an answer naming
+neither (the API's) is matched by its prompt alone. A page posts it with
+the id `pr:<32 hex of SHA-256 of "<agent> <turn>:<prompt>">`, so a second
+tap is the same record (or 409, for another option) and an answer to one
+card never blocks another's. `text`, only for an option
 answered in words (`words`, below): what was typed, trimmed, at most 32
 KiB (more is cut); with any other option it is ignored, and without it
 such an option is answered as a question in words is (its runtime asks
@@ -255,10 +282,11 @@ run), `web` (a search of the web), `read` (a file, page or skill read, or
 files searched), `write` (a file written or edited), `browser` (its
 browser or desktop driven), `image` (an image made), `delegate` (work
 handed to another agent), `memory` (what it remembers, changed), or
-`other`; a page shows each with its own icon and verb ("Running: ls -la",
-"Searching the web: …"), and a step with another or none (one from before
-steps said) as `other`, by its `tool`. The bridge's runtime says which
-(our Hermes image's: one table of Hermes' tools, docs/bridge.md).
+`other`; a page shows each by its own icon, which its verb ("Running",
+"Searching the web") names for assistive technology, then its arguments
+(`ls -la`), and a step with another or none (one from before steps said)
+as `other`, its `tool` in words. The bridge's runtime says which (our
+Hermes image's: one table of Hermes' tools, docs/bridge.md).
 
 ```json
 { "kind": "turn.prompt", "turn": "…", "prompt": "<prompt>",
@@ -288,7 +316,8 @@ ends it.
 ```
 
 Part `pc:<prompt>`. `outcome` is `answered` (with `option` and `by`, and
-`text` for an option answered in words),
+`text` for an option answered in words: typed on the card, or the owner's
+message that answered it, its files' names when it had no words),
 `expired` (no answer by `expiresAt`, or the computer restarted while it
 waited, as an owner's sleep or a crash does: Hermes cannot resume a turn
 across a restart, and the agent's next turn is told the card was cut
@@ -398,16 +427,27 @@ on its own side if it does.
 
 ## The page (`templates/chat`)
 
-**On a phone, an app's page.** The page never scrolls, bounces or
-zooms, framed or on its own: its html and body are pinned
+**Still loading.** A page whose script has not drawn it 9 s after it
+came (its script, or one it imports, never came) says "Still loading…
+Reload", the link to its own page, in its own frame when framed: its
+HTML holds the line, its CSS shows it after the delay, and drawing the
+page takes it away.
+
+**On a phone, an app's page.** The page never scrolls, bounces or zooms,
+framed or on its own: its html and body are pinned
 (`overscroll-behavior: none`) and the messages scroll, holding their own
 overscroll. It is as tall as the visual viewport, from where it is (its
-`resize` and `scroll`), so the composer sits just above a phone's keyboard
-(Safari shrinks and pans only that viewport); framed, the shell does the
-same for the frame. Its fields are 16px or more on a phone's width (no
-zoom as one takes focus), its buttons neither selected nor held; a table's
-cells keep their words whole, and a wide table or a long line of code
-scrolls in its own box, never the page.
+`resize` and `scroll`), so the composer sits just above a phone's
+keyboard (Safari shrinks and pans only that viewport); framed, the shell
+does the same for the frame. It keeps clear of the home indicator
+(`env(safe-area-inset-bottom)`) only on its own with no keyboard up:
+framed, the shell keeps the frame off that edge, and a keyboard covers
+it. Its composer is one line (Paul, 2026-10-22): the field between
+attach and voice and the bell and send, growing as its text wraps, up to
+six lines, a quote and files above it. Its fields are 16px or more on a
+phone's width (no zoom as one takes focus), its buttons neither selected
+nor held; a table's cells keep their words whole, and a wide table or a
+long line of code scrolls in its own box, never the page.
 
 **A phone's return is a newline** (Paul, 2026-10-14). On a touch screen
 with no finer pointer beside it (`(pointer: coarse) and (not (any-pointer:
@@ -452,24 +492,38 @@ step says why, with Try again (`{fragment: "retry-setup"}` to the
 shell), in the same frame, keeping what was typed. When the shell sends
 `setup: null` the card goes.
 
-The chat template's page reads and writes only these records. It
+The chat template's page reads and writes only these records, and
+attributes each by the poster the platform stamps on it
+(`record.principal`), never by what a body says: a turn is its agent's
+from that agent's own `turn.start`, its later records count only from
+that agent, and records naming it from anyone else (or from before its
+start is read) show nothing. It
 follows `chat` from its last 400 records and, for a viewer, `work` from
 its last 1000 (each agent's menu among them), and lays them out in time:
 a person's message (or command); an
 agent's consecutive steps as one card (each its category's icon, verb and
 arguments; while it works, the card's head says what it does now); a
 prompt as a card whose buttons
-only `asks` may press (enabled for them alone), an option answered in
+only `asks` may press (enabled for them alone, and only their answer
+marks it sent: anyone else's changes nothing on it), an option answered in
 words a field there that Enter sends, then how it closed (the words, for
 one answered in words); a
 reply; a runtime's notice, quietly, its category's icon beside its
 words; and a turn's end when it was not `idle` (Stopped, or the error,
-quietly). A turn's draft shows after the turn's last record, and while
+quietly). A turn's draft (its agent's own: a draft
+naming another poster's turn shows nothing) shows after the turn's last
+record, and while
 a turn runs with no draft nor open card, a working line does: "Waiting
 for your answer" in its place while the turn waits on the page's person's
 words (`turn.asked`), its composer saying what they type answers it
 ("Your answer for Juniper"), or whose answer it waits for, to anyone
 else.
+
+An item the page cannot draw (a record of a shape nothing here expects,
+a fault of a renderer's or of the browser's) is a quiet line in its place,
+"This part of the chat could not be shown.", said once to the console:
+one record never keeps the rest of the chat from drawing (the page draws
+its whole timeline each time, so one item that threw once drew nothing).
 
 Commentary uses the replies' safe markdown, smaller and muted; a long note
 folds at a whole block or sentence and expands on request. A step's line
@@ -490,7 +544,12 @@ fenced code with a language label and Copy). Share reply uses the native
 share sheet where available, otherwise copies the reply. Cancelling a
 share sheet copies nothing. Video and PDFs show inline beside open,
 download and share actions; PDFs retain those actions when a browser
-cannot embed them.
+cannot embed them. Download saves the file through the page: it reads
+the bytes with a fetch of its own origin, as it reads the chat, and
+saves them. A link's own download is the browser's request, which
+carries none of a frame's cookies, so in the shell's frame (signed in by
+the frame's partitioned cookie alone) it was refused (Paul, 2026-10-23:
+"file wasn't available on site").
 
 A channel post that fails has its error and Retry on the message itself.
 Retry keeps its id and body so a lost answer cannot write it twice. Until
@@ -585,6 +644,23 @@ sends `{fragment: "open-launcher"}` to its parent. The shell accepts it
 only from its focused, listed fragment iframe with the expected origin.
 Standalone chats leave the shortcut to the browser.
 
+**Its draft, kept.** What is typed in the composer is kept in the page's
+own origin's storage (`localStorage`, `fragment.chat.draft.v1`: `{who,
+text, at}`, `who` the principal it is signed in as), a moment after each
+change and as the page goes, and put back in an empty composer as the
+page loads, for that principal alone: a draft of anyone else's is let go
+then, never shown. So words typed survive any reload: the shell's for a
+new release (docs/api.md, The shell, "A new release"), a crash, a quit
+app. Sending empties it. Framed, the page lets its draft go when the
+shell asks as its person signs out or uses another account (`{fragment:
+"forget-draft"}`, answered `{fragment: "draft-forgotten"}`), and keeps
+none after. It also tells the shell, as it changes, whether it is busy
+with what no storage keeps (`{fragment: "busy", busy}`: files chosen, a
+voice memo, a message on its way or one that failed (its Retry, a retry
+under way: newer words may be in the composer), a quote chosen, a card's
+answer typed and not sent, or on its way); the shell reloads only while
+it is not, and stops a reload under way if it becomes so.
+
 **Your other agents.** Framed, the page asks the shell for its person's
 agents as it mounts (`{fragment: "agents?"}`). A shell answers only a
 frame of a fragment its person owns (docs/api.md, The shell), so in its
@@ -647,10 +723,18 @@ in an hour pauses its push (the debt ledger has both).
 { "kind": "routine", "text": "Water the plants", "chat": "<chat fragment>" }
 ```
 
-A routine (decision 38): the agent fragment's cron posts it, which wakes
-the computer; the agent takes it as a turn in `chat`, asked by its
-owner. One older than an hour when its computer first reads it is
-skipped, as cron skips a missed run.
+A routine (decision 38): a scheduled record on the agent fragment's
+`tasks` (docs/api.md, "Scheduled records"; `fragment schedule add
+--routine`, which builds this body) appends it, as the fragment itself,
+at each minute its cron names, keyed by the schedule and that minute,
+which wakes the computer; the agent takes it as a turn in `chat`, asked
+by its owner. One older than an hour when its computer first reads it is
+skipped, as cron skips a missed run. Whoever may edit the agent fragment
+may schedule one: its owner, the agent itself (an editor of its own
+fragment), and the owner's other agents acting for the owner, each with
+the owner's authority there. Such a fire starts a turn at no hop, so
+where a hop count cannot bound a loop, the schedule's own bounds do (at
+most every 15 minutes, 32 a fragment).
 
 **The agent's hello.** The shell posts one as its owner, with the id
 `hello`, once it has made an agent and added it to its chat (the first

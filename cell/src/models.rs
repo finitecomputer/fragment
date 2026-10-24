@@ -2,19 +2,23 @@
 //! cloudflare/agents" 7 and 8; spike S4): one OpenAI-shaped chat
 //! completion on a tier's model, metered on its payer's ledger.
 //!
-//! Every call reserves its worst case on the payer's ledger first (the
-//! request's bytes as tokens in, the tier's capped `max_tokens` out), under
-//! a reference of its own (`aig:<hex>`), so a call the payer cannot cover
-//! never reaches the model. Then it is made, bounded (`fragment_core::models`:
-//! the tier's model, the capped `max_tokens`, GLM's `reasoning_effort`
-//! clamped, none of the client's headers), and settled with its last,
-//! cumulative usage (input less what was cached). A call that failed
-//! before it used anything is released; one whose stream broke settles
-//! without usage, at its worst case. A stream settles at its `[DONE]`, not
-//! at its end: the gateway has held one open ~150 s after its answer. Nothing
-//! of the request or its answer is kept: only the usage, on the ledger,
-//! and the call's timing on its `model.settled` line (`first_ms`, `ms`,
-//! `calls`).
+//! Every call asks the gate first (ledger.rs `may`, decision 62): its
+//! payer's standing as this isolate heard it within the minute, so it waits
+//! on no ledger in the common case, and only a person out of credit (or a
+//! capped caller past a fragment's cap) is refused; a ledger that does not
+//! answer refuses nothing. Then it is made, bounded
+//! (`fragment_core::models`: the tier's model, the capped `max_tokens`,
+//! GLM's `reasoning_effort` clamped, none of the client's headers), and
+//! charged after its answer, never in its way: its last, cumulative usage
+//! (input less what was cached) as one meter row under a reference of its
+//! own (`aig:<hex>`), sent to the payer's ledger on the ledger's queue
+//! (meter.rs `charge`). A call the model refused or that never reached it
+//! used nothing, and is charged nothing; one that reported no usage (its
+//! stream broke) is charged nothing too, said aloud (`ledger.unknown-usage`).
+//! A stream is charged at its `[DONE]`, not at its end: the gateway has held
+//! one open ~150 s after its answer. Nothing of the request or its answer
+//! is kept: only the usage, on the ledger, and the call's timing on its
+//! `model.settled` line (`first_ms`, `ms`, `calls`).
 //!
 //! A tier's call whose model fails before answering anything (not reached,
 //! 429, or a 5xx; on an OpenAI-compatible API, where the key is the
@@ -23,7 +27,7 @@
 //! model (its `models.fallback`: DeepSeek V4 Flash unless named, behind the
 //! cheap tier's GLM-5.3 Flash; Workers AI's GLM-5.3 Flash behind
 //! OpenRouter on Finite's own; `fragment_core::models::Tries`), logged as
-//! `model.fallback`, under the same hold, and settled as the fallback's.
+//! `model.fallback`, and charged as the fallback's.
 //! Not a race: the fallback is called only after the model failed. An
 //! answer that began is final, and the fallback's failure is passed
 //! through as any. `vision` has none (the default fallback, DeepSeek, reads
@@ -68,22 +72,20 @@
 //! Transcription (decision 9: a voice memo is one the agent transcribes
 //! itself): `POST /api/models/v1/audio/transcriptions`, OpenAI's multipart
 //! shape, `model` the route's `whisper` (`transcription_route`), runs
-//! Workers AI's Whisper on the same transport, reserved at its audio's
-//! bytes and settled at the length Whisper heard, in neurons
-//! (`fragment_core::transcribe`). It names no fragment: its agent's owner
-//! pays, under no fragment's cap, as a call through the model intercept
-//! does.
+//! Workers AI's Whisper on the same transport, charged at the length
+//! Whisper heard, in neurons (`fragment_core::transcribe`). It names no
+//! fragment: its agent's owner pays, under no fragment's cap, as a call
+//! through the model intercept does.
 //!
 //! Decisions: `POST /api/models/v1/decide` (`decide_route`), a job's
 //! `ai.decide` input with its media inline, on the Clef family
 //! (fragment_core::decide) over the same transport, from the same caller
-//! as `route`, reserved at its model's context window and settled at the
-//! input tokens it counted; no fallback (a decision's answer is its
-//! model's).
+//! as `route`, charged at the input tokens it counted; no fallback (a
+//! decision's answer is its model's).
 
 use std::pin::Pin;
 
-use fragment_core::ledger::{Release, Reserve, Settle, Spend};
+use fragment_core::ledger::{MeterRow, Spend};
 use fragment_core::models::{self as bounds, Bounded, Model, Named, Stream, Tried, Tries, Upstream};
 use fragment_core::price::Usage;
 use fragment_core::{decide, multipart, transcribe};
@@ -96,7 +98,7 @@ use worker::*;
 
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
-use crate::ledger::{self, FragmentOpen};
+use crate::ledger::{self, FragmentOpen, MaySpend};
 use crate::{js, read_body, routed};
 
 /// A call's request (`fragment_core::models`): Hermes' shrunk screenshot
@@ -132,8 +134,8 @@ pub struct ModelCall<'a> {
     pub stream: bool,
 }
 
-/// Work a call leaves to finish after its answer has started (a streamed
-/// answer's settle): the router's `Context`, or a Durable Object's `State`.
+/// Work a call leaves to finish after its answer has started (its
+/// charge): the router's `Context`, or a Durable Object's `State`.
 pub trait Background {
     fn later(&self, work: LocalBoxFuture<'static, ()>);
 }
@@ -162,14 +164,18 @@ fn refused(why: bounds::Refusal) -> CellError {
     CellError::invalid(why.message())
 }
 
-/// A call's hold on its payer's ledger, until it settles or is released.
-struct Held {
+/// A call's charge, after its answer: who pays, under which reference,
+/// where, and the call's timing for its log line.
+struct Charge {
     env: Env,
     payer: String,
     reference: String,
+    agent: Option<String>,
+    /// The payer's own fragment the call is in: its month's spend counts it.
+    fragment: Option<String>,
     /// The model whose answer the call's is (the fallback's, when it fell back).
     model: &'static str,
-    /// What the call named: a tier, `vision` or `whisper`.
+    /// What the call named: a tier, `vision`, `whisper` or `decide`.
     name: &'static str,
     /// When its first try was made: its log line says how long it took.
     t0: i64,
@@ -180,66 +186,71 @@ struct Held {
     first_ms: Option<i64>,
 }
 
-impl Held {
-    /// The call's end, charged once: its usage, or its worst case when it
-    /// reported none (or the stream broke). A settle that does not land is
-    /// left held, and the ledger's sweep charges it at its worst case after
-    /// six hours: the money path fails closed. Its log line says its timing
-    /// (docs/api.md, Models: a latency lane reads it).
-    async fn settle(&self, usage: Option<Usage>, log_id: Option<String>) {
-        let settle = Settle { reference: self.reference.clone(), usage };
+impl Charge {
+    /// The call's end, charged once by its reference (meter.rs `charge`): its
+    /// usage, priced by the payer's ledger. A call that reported none is
+    /// charged nothing, said aloud: billing never stops an agent (decision
+    /// 62). Its log line says its timing (docs/api.md, Models: a latency
+    /// lane reads it).
+    async fn charge(self, usage: Option<Usage>, log_id: Option<String>) {
         let ms = js::now_ms() - self.t0;
-        match ledger::retried(&self.env, &self.payer, &settle).await {
-            // one line per event: `wrangler tail` drops lines (lesson 14)
-            Ok(settled) => console_log!(
-                "{}",
-                json!({ "event": "model.settled", "ref": self.reference, "logId": log_id, "tier": self.name, "model": self.model, "charge": settled.charge, "basis": settled.basis, "first_ms": self.first_ms, "ms": ms, "calls": self.calls })
-            ),
-            Err(e) => console_error!("{}", json!({ "event": "model.settle-failed", "ref": self.reference, "logId": log_id, "message": e.message })),
-        }
+        // one line per event: `wrangler tail` drops lines (lesson 14)
+        console_log!(
+            "{}",
+            json!({ "event": "model.settled", "ref": self.reference, "logId": log_id, "tier": self.name, "model": self.model, "usage": usage, "first_ms": self.first_ms, "ms": ms, "calls": self.calls })
+        );
+        let Some(usage) = usage else {
+            console_error!("{}", json!({ "event": "ledger.unknown-usage", "ref": self.reference, "logId": log_id, "tier": self.name, "model": self.model, "why": "the call reported no usage: charged nothing" }));
+            return;
+        };
+        let row = MeterRow { reference: self.reference, usage, fragment: self.fragment, agent: self.agent, computer: None, at_ms: js::now_ms() };
+        crate::meter::charge(&self.env, &self.payer, vec![row]).await;
     }
 
-    /// The model refused the call, which used nothing: its reservation
-    /// goes back, and its answer is passed on as it came.
-    async fn refused(&self, status: u16, text: String) -> CellResult<Response> {
-        self.release(&format!("the model answered {status}")).await;
-        let mut resp = Response::ok(text)?.with_status(status);
-        resp.headers_mut().set("content-type", "application/json")?;
-        Ok(resp)
-    }
-
-    /// The call failed before it used anything: its reservation goes back.
-    async fn release(&self, why: &str) {
-        match ledger::retried(&self.env, &self.payer, &Release { reference: self.reference.clone() }).await {
-            Ok(_) => console_log!("{}", json!({ "event": "model.released", "ref": self.reference, "why": why })),
-            Err(e) => console_error!("{}", json!({ "event": "model.release-failed", "ref": self.reference, "why": why, "message": e.message })),
-        }
+    /// `charge`, as work after the answer.
+    fn later(self, after: &dyn Background, usage: Option<Usage>, log_id: Option<String>) {
+        after.later(Box::pin(self.charge(usage, log_id)));
     }
 }
 
-/// Holds a call's worst case on its payer's ledger, under a reference of
-/// its own (`aig:<hex>`), as an agent's turn. Whose cap applies: the
+/// Asks the gate whether `payer` may make an agent's call (ledger.rs `may`:
+/// what this isolate heard within the minute; a ledger that does not
+/// answer refuses nothing), and the call's charge. Whose cap applies: the
 /// payer's own fragment's, on its ledger; another owner's, asked of
-/// theirs first, unless the spender is that owner's (decision 26).
-async fn hold(env: &Env, payer: &str, agent: Option<&str>, fragment: Option<&InFragment<'_>>, worst: Usage, model: &'static str, name: &'static str) -> CellResult<Held> {
-    let (fragment, capped) = match fragment {
-        Some(f) if f.owner == payer => (Some(f.name.to_string()), !f.by_owner),
-        Some(f) => {
-            if !f.by_owner {
-                ledger::retried(env, f.owner, &FragmentOpen { fragment: f.name.to_string() }).await?;
-            }
-            (None, false)
-        }
-        None => (None, false),
-    };
-    let reserve = Reserve { reference: format!("aig:{}", js::random_hex::<16>()), spend: Spend::AgentTurn, worst, fragment, agent: agent.map(str::to_string), capped };
-    ledger::hold(env, payer, &reserve).await?;
-    Ok(Held { env: env.clone(), payer: payer.to_string(), reference: reserve.reference, model, name, t0: js::now_ms(), calls: 1, first_ms: None })
+/// theirs, unless the spender is that owner's (decision 26).
+async fn gate(env: &Env, payer: &str, agent: Option<&str>, fragment: Option<&InFragment<'_>>, model: &'static str, name: &'static str) -> CellResult<Charge> {
+    let own = fragment.filter(|f| f.owner == payer);
+    let capped = own.filter(|f| !f.by_owner).map(|f| f.name.to_string());
+    ledger::may(env, payer, &MaySpend { spend: Spend::AgentTurn, by_owner: capped.is_none(), fragment: capped }).await?;
+    if let Some(f) = fragment.filter(|f| f.owner != payer && !f.by_owner) {
+        ledger::may(env, f.owner, &FragmentOpen { fragment: f.name.to_string() }).await?;
+    }
+    Ok(Charge {
+        env: env.clone(),
+        payer: payer.to_string(),
+        reference: format!("aig:{}", js::random_hex::<16>()),
+        agent: agent.map(str::to_string),
+        fragment: own.map(|f| f.name.to_string()),
+        model,
+        name,
+        t0: js::now_ms(),
+        calls: 1,
+        first_ms: None,
+    })
+}
+
+/// A refusal of the model's, passed on as it came: the call used nothing,
+/// and is charged nothing.
+fn passed(status: u16, text: String) -> CellResult<Response> {
+    let mut resp = Response::ok(text)?.with_status(status);
+    resp.headers_mut().set("content-type", "application/json")?;
+    Ok(resp)
 }
 
 /// One model call, metered (the module's doc): its answer as the client
-/// reads it, OpenAI's shape. A streamed answer is settled after it ends,
-/// by `after`, whether or not the client read it to its end.
+/// reads it, OpenAI's shape. It is charged by `after`, after its answer
+/// (a stream's at its `[DONE]`, whether or not the client read it to its
+/// end).
 pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     let body_bytes = serde_json::to_vec(&call.body).expect("a JSON value serializes").len();
@@ -248,7 +259,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     }
     let model = cfg.models.capped(call.named).map_err(refused)?;
     let bounded = bounds::bound(model, call.body, call.stream).map_err(refused)?;
-    let mut held = hold(env, call.payer, call.agent, call.fragment.as_ref(), bounded.worst(body_bytes), bounded.model.id(), call.named.as_str()).await?;
+    let mut charge = gate(env, call.payer, call.agent, call.fragment.as_ref(), bounded.model.id(), call.named.as_str()).await?;
     let meta = Metadata { user_id: opaque(call.payer), agent_id: call.agent.map(opaque) };
     // a tier's call falls back; `vision`'s model reads images the fallback
     // may not, and `fallback` is the fallback already
@@ -257,50 +268,44 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
         Named::Vision | Named::Fallback => None,
     };
     let (answer, model, calls) = tried(env, cfg, &bounded, fallback, &meta).await;
-    held.model = model.id();
-    held.calls = calls;
+    charge.model = model.id();
+    charge.calls = calls;
     // its stream is read as the API that answered streams
     let api = model.upstream;
     let model = model.id();
-    let mut upstream = match answer {
-        Ok(r) => r,
-        Err(e) => {
-            held.release("the model was not reached").await;
-            return Err(e);
-        }
-    };
+    // not reached, or refused: it used nothing, and nothing is charged
+    let mut upstream = answer?;
     let status = upstream.status_code();
     let log_id = upstream.headers().get("cf-aig-log-id")?;
     if status != 200 {
-        let text = bounded_text(&mut upstream).await;
-        return held.refused(status, text).await;
+        return passed(status, bounded_text(&mut upstream).await);
     }
     if !bounded.stream {
-        held.first_ms = Some(js::now_ms() - held.t0);
+        charge.first_ms = Some(js::now_ms() - charge.t0);
         let bytes = match read_whole(&mut upstream).await {
             Ok(b) => b,
             Err(e) => {
-                // what it used is unknown: its worst case
-                held.settle(None, log_id).await;
+                // what it used is unknown
+                charge.later(after, None, log_id);
                 return Err(e);
             }
         };
         let usage = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| bounds::usage_of(model, &v["usage"]));
-        held.settle(usage, log_id).await;
+        charge.later(after, usage, log_id);
         let mut resp = Response::from_bytes(bytes)?;
         resp.headers_mut().set("content-type", "application/json")?;
         return Ok(resp);
     }
     let ResponseBody::Stream(source) = upstream.body() else {
-        held.settle(None, log_id).await;
+        charge.later(after, None, log_id);
         return Err(CellError::new(ErrorCode::UpstreamFailed, "the model's stream had no body"));
     };
     // one branch for the client, one read to its end for the meter: a
-    // client that goes away mid-answer does not leave the call unsettled.
-    // The call settles at its `[DONE]`, where its usage is whole: a gateway
-    // has held a stream open ~150 s past it, and a settle at the stream's
-    // end came that late, or was cut with the Worker's waitUntil. Both
-    // branches are read on to the end, as before: a branch dropped at
+    // client that goes away mid-answer does not leave the call uncharged.
+    // The call is charged at its `[DONE]`, where its usage is whole: a
+    // gateway has held a stream open ~150 s past it, and a charge at the
+    // stream's end came that late, or was cut with the Worker's waitUntil.
+    // Both branches are read on to the end, as before: a branch dropped at
     // `[DONE]` changed nothing for the client in the e2e's held stream, and
     // how a tee's branches part is the runtime's.
     let (client, meter) = js::tee(source)?;
@@ -308,7 +313,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
         let mut stream = Stream::default().on(api);
         let mut bytes = ByteStream::from(meter);
         let mut broke = false;
-        let mut settled = false;
+        let mut charge = Some(charge);
         // bounded by the model's answer: at most the tier's max_tokens, then
         // the stream's end (nothing after `[DONE]` is read into it)
         while let Some(chunk) = bytes.next().await {
@@ -319,18 +324,19 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
                     break;
                 }
             }
-            if held.first_ms.is_none() && stream.began() {
-                held.first_ms = Some(js::now_ms() - held.t0);
+            if let Some(c) = charge.as_mut().filter(|c| c.first_ms.is_none() && stream.began()) {
+                c.first_ms = Some(js::now_ms() - c.t0);
             }
-            if stream.done() && !settled {
-                settled = true;
-                held.settle(stream.usage().and_then(|u| bounds::usage_of(model, u)), log_id.clone()).await;
+            if stream.done() {
+                if let Some(c) = charge.take() {
+                    c.charge(stream.usage().and_then(|u| bounds::usage_of(model, u)), log_id.clone()).await;
+                }
             }
         }
-        if !settled {
+        if let Some(c) = charge {
             stream.finish(None);
             let usage = if broke { None } else { stream.usage().and_then(|u| bounds::usage_of(model, u)) };
-            held.settle(usage, log_id).await;
+            c.charge(usage, log_id).await;
         }
     }));
     let normalized = Normalized { source: Box::pin(ByteStream::from(client)), stream: Stream::default().on(api), done: false };
@@ -610,7 +616,7 @@ async fn caller(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<
         return Err(CellError::invalid("`fragment` is a fragment's name, <label>--<suffix>"));
     }
     let ask = routed::internal_request("meter/whose", &json!({ "principal": agent.id }).to_string())?;
-    let mut answer = env.durable_object("FRAGMENT")?.get_by_name(&name)?.fetch_with_request(ask).await?;
+    let mut answer = crate::routed::send(env, "FRAGMENT", &name, ask).await?;
     if answer.status_code() != 200 {
         return Err(CellError::new(ErrorCode::NotFound, format!("no fragment {name}")));
     }
@@ -627,13 +633,13 @@ async fn caller(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<
 /// `POST /api/models/v1/decide[?fragment=<name>]`: an agent's decision
 /// (docs/api.md, Models), its body a job's `ai.decide` input with its
 /// media inline (fragment_core::decide), checked as a step is before
-/// anything is reserved; its caller, payer and fragment `route`'s. It
-/// reserves its model's context window and settles at the input tokens
-/// the model counted (output is free). Its answer is the step's, `{model,
-/// answers, usage}`. A call the model refuses is released and its refusal
-/// passed through; an answer that does not answer what was asked is
-/// settled (it was paid for) and answered 502.
-pub(crate) async fn decide_route(mut req: Request, env: &Env, url: &Url) -> CellResult<Response> {
+/// anything is sent; its caller, payer and fragment `route`'s. It is
+/// charged, after its answer, at the input tokens the model counted
+/// (output is free). Its answer is the step's, `{model, answers, usage}`.
+/// A call the model refuses is charged nothing and its refusal passed
+/// through; an answer that does not answer what was asked is charged (it
+/// was paid for) and answered 502.
+pub(crate) async fn decide_route(mut req: Request, env: &Env, url: &Url, after: &dyn Background) -> CellResult<Response> {
     let body = read_body(&mut req, MODEL_BODY_MAX_BYTES).await?;
     let caller = caller(env, &req, url, &body).await?;
     let asked: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("a decision is JSON: {e}")))?;
@@ -641,38 +647,33 @@ pub(crate) async fn decide_route(mut req: Request, env: &Env, url: &Url) -> Cell
     let call = decide::bound(&asked, decide::Asker::Agent).map_err(|why| CellError::invalid(why.message()))?;
     drop(asked);
     let model = call.model;
-    let mut held = hold(env, &caller.owner, Some(&caller.agent), caller.in_fragment().as_ref(), call.worst(), model.id(), DECIDE).await?;
+    let mut charge = gate(env, &caller.owner, Some(&caller.agent), caller.in_fragment().as_ref(), model.id(), DECIDE).await?;
     let input = call.input(vec![]);
     let answered = run(env, model.id(), &input, &caller.owner, Some(&caller.agent)).await;
     drop(input);
-    let (status, bytes, log_id) = match answered {
-        Ok(a) => a,
-        Err(e) => {
-            held.release("the model was not reached").await;
-            return Err(e);
-        }
-    };
-    held.first_ms = Some(js::now_ms() - held.t0);
+    // not reached: it used nothing, and nothing is charged
+    let (status, bytes, log_id) = answered?;
+    charge.first_ms = Some(js::now_ms() - charge.t0);
     if status != 200 {
-        return held.refused(status, String::from_utf8_lossy(&bytes).chars().take(REFUSAL_MAX_CHARS).collect()).await;
+        return passed(status, String::from_utf8_lossy(&bytes).chars().take(REFUSAL_MAX_CHARS).collect());
     }
     let response: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    // it answered, so it was paid for: its usage, or its reservation
-    held.settle(call.usage(&response), log_id).await;
+    // it answered, so it was paid for: its usage
+    charge.later(after, call.usage(&response), log_id);
     match call.answer(&response) {
         Ok(answer) => Ok(Response::from_json(&answer)?),
         Err(fault) => Err(CellError::new(ErrorCode::UpstreamFailed, format!("{}: the call is charged", fault.message()))),
     }
 }
 
-/// What a decision's log lines name it (`Held::name`).
+/// What a decision's log lines name it (`Charge::name`).
 const DECIDE: &str = "decide";
 
 /// `POST /api/models/v1/audio/transcriptions`: an agent's transcription
 /// (the module's doc), signed by the agent; OpenAI's multipart shape, its
-/// `model` `whisper`. Its owner pays. The audio is refused past
-/// `transcribe::AUDIO_MAX_BYTES` (413) before anything is reserved or sent.
-pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url) -> CellResult<Response> {
+/// `model` `whisper`. Its owner pays, after its answer. The audio is
+/// refused past `transcribe::AUDIO_MAX_BYTES` (413) before anything is sent.
+pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url, after: &dyn Background) -> CellResult<Response> {
     let body = read_body(&mut req, transcribe::BODY_MAX_BYTES).await?;
     let agent = crate::signer_for(env, &req, url, &body).await?;
     if agent.kind != IdentityKind::Agent {
@@ -690,27 +691,21 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url) 
     };
     drop(parts);
     drop(body);
-    let mut held = hold(env, &owner, Some(&agent.id), None, bounded.worst(), transcribe::TRANSCRIBE_MODEL, transcribe::WHISPER).await?;
+    let mut charge = gate(env, &owner, Some(&agent.id), None, transcribe::TRANSCRIBE_MODEL, transcribe::WHISPER).await?;
     let meta = Metadata { user_id: opaque(&owner), agent_id: Some(opaque(&agent.id)) };
-    let mut upstream = match workers_ai(env, Config::from_env(env), transcribe::TRANSCRIBE_MODEL, &bounded.input, &meta).await {
-        Ok(r) => r,
-        Err(e) => {
-            held.release("the model was not reached").await;
-            return Err(e);
-        }
-    };
-    held.first_ms = Some(js::now_ms() - held.t0);
+    // not reached: it used nothing, and nothing is charged
+    let mut upstream = workers_ai(env, Config::from_env(env), transcribe::TRANSCRIBE_MODEL, &bounded.input, &meta).await?;
+    charge.first_ms = Some(js::now_ms() - charge.t0);
     let status = upstream.status_code();
     let log_id = upstream.headers().get("cf-aig-log-id")?;
     if status != 200 {
-        let text = bounded_text(&mut upstream).await;
-        return held.refused(status, text).await;
+        return passed(status, bounded_text(&mut upstream).await);
     }
     let answer = match read_whole(&mut upstream).await {
         Ok(b) => b,
         Err(e) => {
-            // what it used is unknown: its worst case
-            held.settle(None, log_id).await;
+            // what it used is unknown
+            charge.later(after, None, log_id);
             return Err(e);
         }
     };
@@ -718,8 +713,8 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url) 
     // its shape, never its words (`transcribe::shape`): logged, and told
     // the client (`ANSWER_SHAPE_HEADER`)
     let shape = transcribe::shape(&whisper);
-    console_log!("{}", json!({ "event": "model.transcribed", "ref": held.reference, "shape": shape, "bytes": answer.len() }));
-    held.settle(transcribe::usage_of(&whisper), log_id).await;
+    console_log!("{}", json!({ "event": "model.transcribed", "ref": charge.reference, "shape": shape, "bytes": answer.len() }));
+    charge.later(after, transcribe::usage_of(&whisper), log_id);
     let Some((kind, out)) = transcribe::answer(bounded.format, &whisper) else {
         return Err(CellError::new(ErrorCode::UpstreamFailed, "the model's transcription carried no text"));
     };

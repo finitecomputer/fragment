@@ -74,17 +74,42 @@ pub fn agent_doc(text: &str, platform: &str, fragment: &str) -> String {
 pub static CATALOG: [&Template; 5] = [&BLANK, &TODO, &INBOX, &CALORIES, &DOC];
 
 /// A file of cell/shell/ by its path there: a published one, or a page
-/// (`index.html`, `admin.html`).
+/// (`index.html`, `admin.html`, `about.html`, `privacy.html`, `terms.html`).
 #[cfg(feature = "platform")]
 pub fn shell(name: &str) -> Option<&'static File> {
     SHELL.binary_search_by(|f| f.path.cmp(name)).ok().map(|i| &SHELL[i])
+}
+
+/// The shell's page's one blank (cell/shell/index.html, its
+/// `<meta name="fragment-release">`): the release that answers it, which
+/// its script compares with the release every later answer names, to
+/// reload once the platform under it changed (docs/api.md, The shell).
+#[cfg(feature = "platform")]
+pub const RELEASE_BLANK: &str = "{{release}}";
+
+/// The shell's page (`index.html`'s text) as `release` answers it: its
+/// blank filled once. `release` is a release's id
+/// (`fragment_core::release::valid`), which an attribute holds as it is.
+#[cfg(feature = "platform")]
+pub fn shell_page(text: &str, release: &str) -> String {
+    assert!(fragment_core::release::valid(release) && text.matches(RELEASE_BLANK).count() == 1, "the shell's page has its release's blank once, for a release's id");
+    text.replacen(RELEASE_BLANK, release, 1)
 }
 
 /// The shell's files it publishes at `/__shell/<name>` (cell/src/shell.rs),
 /// each with its content type: of the rest of cell/shell/, its pages are
 /// served at their own paths, and its credits and licenses not at all.
 #[cfg(feature = "platform")]
-const SHELL_PUBLISHED: [(&str, &str); 18] = [
+const SHELL_PUBLISHED: [(&str, &str); 29] = [
+    // the platform's pages' look and Funnel Sans (vendor/funnel-sans-OFL.txt),
+    // which the shell loads too: its type, and its first run's card
+    ("platform-pages.css", "text/css; charset=utf-8"),
+    ("platform-landscape.jpg", "image/jpeg"),
+    ("platform-landscape-dark.jpg", "image/jpeg"),
+    ("funnel-sans-400.ttf", "font/ttf"),
+    ("funnel-sans-500.ttf", "font/ttf"),
+    ("funnel-sans-600.ttf", "font/ttf"),
+    ("funnel-sans-700.ttf", "font/ttf"),
     ("shell.js", "text/javascript; charset=utf-8"),
     ("shell.css", "text/css; charset=utf-8"),
     ("layout.js", "text/javascript; charset=utf-8"),
@@ -92,14 +117,22 @@ const SHELL_PUBLISHED: [(&str, &str); 18] = [
     ("agent-identity.js", "text/javascript; charset=utf-8"),
     // an agent's colour: the agent template's, linked (templates/agent/site)
     ("agent-color.js", "text/javascript; charset=utf-8"),
-    ("app-icons.js", "text/javascript; charset=utf-8"),
-    ("lucide-icons.js", "text/javascript; charset=utf-8"),
+    // its icons (Lucide's among them: vendor/lucide-LICENSE) and an app's
+    ("icons.js", "text/javascript; charset=utf-8"),
     ("tooltips.js", "text/javascript; charset=utf-8"),
     // Settings' Billing: a seat, credit, an org (docs/billing.md)
     ("billing.js", "text/javascript; charset=utf-8"),
     ("vendor/split-grid.js", "text/javascript; charset=utf-8"),
     ("manifest.webmanifest", "application/manifest+json"),
+    // the shell's favicon (a tab's, and the sign-in page's logo, which WorkOS takes from
+    // it): Finite's mark full-bleed, black, or white in a dark scheme
     ("icon.svg", "image/svg+xml"),
+    // the app's icon (the manifest's; iOS's home screen takes only a PNG of it): the mark,
+    // white, on a dark square, inside a maskable icon's safe zone
+    ("app-icon.svg", "image/svg+xml"),
+    ("apple-touch-icon.png", "image/png"),
+    // Finite's logo, above the splash's and the welcome's card (CREDITS.md)
+    ("finite-logo.svg", "image/svg+xml"),
     // the desktop's and the launcher's light and dark landscapes (cell/shell/CREDITS.md)
     ("wallpaper.jpg", "image/jpeg"),
     ("wallpaper-dark.jpg", "image/jpeg"),
@@ -108,6 +141,10 @@ const SHELL_PUBLISHED: [(&str, &str); 18] = [
     // the operators' admin page (`/admin`)
     ("admin.js", "text/javascript; charset=utf-8"),
     ("admin.css", "text/css; charset=utf-8"),
+    // the look of Finite's about page, privacy policy and terms (`/about`,
+    // `/privacy`, `/terms`): a sheet of paper, its edges bowed by this mask
+    ("legal.css", "text/css; charset=utf-8"),
+    ("paper-edge.svg", "image/svg+xml"),
 ];
 
 /// A file the shell publishes, by its name, and its content type.
@@ -269,10 +306,29 @@ pub(crate) mod tests {
         for (name, content_type) in SHELL_PUBLISHED {
             assert_eq!(shell_published(name), Some((shell(name).unwrap(), content_type)), "{name}");
         }
-        for name in ["index.html", "admin.html", "CREDITS.md", "vendor/lucide-LICENSE", "vendor/split-grid.LICENSE.txt"] {
+        for name in ["index.html", "admin.html", "about.html", "privacy.html", "terms.html", "CREDITS.md", "vendor/lucide-LICENSE", "vendor/split-grid.LICENSE.txt", "vendor/funnel-sans-OFL.txt"] {
             assert!(shell(name).is_some() && shell_published(name).is_none(), "{name}");
         }
         assert!(shell_published("nope.js").is_none() && shell_published("../templates/chat/app.mjs").is_none());
+    }
+
+    /// Goal: the shell's page names the release that answered it, in the
+    /// one place its script reads (shell.js `RELEASE`). Valid: index.html
+    /// has the blank once, in that meta; filled, the meta names the id and
+    /// no blank is left. Invalid: an id that is none (an attribute's quote,
+    /// a space), or a page without its blank or with two.
+    #[test]
+    fn the_shell_page_names_its_release() {
+        let page = std::fs::read_to_string(repo().join("cell/shell/index.html")).unwrap();
+        assert!(page.contains(&format!(r#"<meta name="fragment-release" content="{RELEASE_BLANK}">"#)), "its meta holds the blank");
+        let filled = shell_page(&page, "bc8b87e7a1b2-dirty-1760918400");
+        assert!(filled.contains(r#"<meta name="fragment-release" content="bc8b87e7a1b2-dirty-1760918400">"#) && !filled.contains(RELEASE_BLANK));
+        assert_eq!(filled.len(), page.len() - RELEASE_BLANK.len() + "bc8b87e7a1b2-dirty-1760918400".len(), "nothing else changes");
+        for bad in [r#"x" onload="y"#, "a b", ""] {
+            assert!(std::panic::catch_unwind(|| shell_page(&page, bad)).is_err(), "{bad:?}");
+        }
+        assert!(std::panic::catch_unwind(|| shell_page("<html>", "dev")).is_err(), "no blank");
+        assert!(std::panic::catch_unwind(|| shell_page(&format!("{RELEASE_BLANK}{RELEASE_BLANK}"), "dev")).is_err(), "two");
     }
 
     fn walkdir(dir: &std::path::Path) -> usize {

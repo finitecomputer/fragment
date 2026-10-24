@@ -55,6 +55,15 @@ pub fn cell_dir() -> PathBuf {
     repo_root().join("cell")
 }
 
+/// Our Hermes image as a node's config names a computer image, built from
+/// the tree: from the repo's root, since it carries the fragment CLI
+/// (docs/computers.md, "Skills and the CLI in our Hermes image"). The
+/// hermes lane's, and `cargo xtask dev --real-agent`'s.
+pub fn hermes_image() -> serde_json::Value {
+    let root = repo_root();
+    serde_json::json!({ "dockerfile": root.join("images/hermes/Dockerfile"), "build_context": root })
+}
+
 /// `text` (JSONC: JSON with `//` comments) as JSON.
 pub fn strip_comments(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -160,11 +169,18 @@ pub fn local_config(project: &Path) -> PathBuf {
 /// The project's config as a local node runs it (`local_config`): less the
 /// remote-only bindings, its secrets bound by name (`secrets`, each a
 /// binding and its secret's name) in wrangler's local store, as a deploy
-/// binds them in the account's, and its computer images built from
-/// Dockerfiles of its own (`containers::scope_images`), so that no other
-/// stack's teardown removes its computers.
-fn write_local_config(project: &Path, secrets: &[(String, &str)]) -> Result<PathBuf> {
+/// binds them in the account's, `images` beside its own computer images,
+/// and every one built from a Dockerfile of its own
+/// (`containers::scope_images`), so that no other stack's teardown removes
+/// its computers.
+fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(String, serde_json::Value)]) -> Result<PathBuf> {
     let mut config = read_config(project)?;
+    if !images.is_empty() {
+        let named = config["containers"][0]["images"].as_object_mut().context("the config's computer container names its images")?;
+        for (name, image) in images {
+            anyhow::ensure!(named.insert(name.clone(), image.clone()).is_none(), "the image {name} is the config's own already");
+        }
+    }
     absolute_images(&mut config, project)?;
     containers::scope_images(&mut config, project)?;
     let obj = config.as_object_mut().context("a wrangler config is an object")?;
@@ -313,13 +329,22 @@ pub struct Fleet {
     /// Pending sign-ins the Registry keeps (`None`: the cell's default,
     /// `limits::SIGNINS_PENDING_MAX_DEFAULT`).
     pub signins_pending_max: Option<u64>,
+    /// CLI codes one address may ask for a minute
+    /// (`FRAGMENT_CLI_BEGINS_PER_IP_MINUTE`; `None`: the cell's default,
+    /// `limits::CLI_BEGINS_PER_IP_MINUTE_DEFAULT`).
+    pub cli_begins_per_ip_minute: Option<u32>,
     /// The test levers' secret (`FRAGMENT_TEST_SECRET`: `/api/test/*`
     /// answers requests that carry it; the registry can be made to fail).
     /// The e2e's, made per run; never dev's.
     pub test_secret: Option<String>,
     /// The image new computers are pinned to (a name in cell/wrangler.jsonc's
-    /// `containers` images), and whether they sleep with a snapshot.
+    /// `containers` images, or in `images`), and whether they sleep with a
+    /// snapshot.
     pub computer_image: Option<String>,
+    /// Computer images beside the project's own (its stubs), by name, each
+    /// as its config names one: dev's Hermes image (`hermes_image`), with
+    /// `cargo xtask dev --real-agent`.
+    pub images: Vec<(String, serde_json::Value)>,
     pub computer_snapshots: bool,
     /// How long a computer whose sleep's save keeps failing stays awake
     /// before it sleeps unsaved (`FRAGMENT_COMPUTER_UNSAVED_MAX_MS`; `None`:
@@ -334,6 +359,7 @@ pub struct Fleet {
     /// place of its host.
     pub providers: Option<String>,
     pub operator_key_values: Vec<(String, String)>,
+    pub connection_secret_values: Vec<(String, String)>,
     pub swap_upstream: Option<String>,
 }
 
@@ -362,7 +388,9 @@ impl Fleet {
     fn bound(&self) -> store::Bound {
         let providers: Vec<&str> = self.operator_key_values.iter().map(|(p, _)| p.as_str()).collect();
         let slots: Vec<&str> = self.model_key_slots.iter().map(String::as_str).collect();
-        store::Bound::conventional(self.workos.is_some(), self.stripe.is_some(), &providers, &slots)
+        let mut bound = store::Bound::conventional(self.workos.is_some(), self.stripe.is_some(), &providers, &slots);
+        bound.connection_secrets = self.connection_secret_values.iter().map(|(p, _)| (p.clone(), format!("fragment-{p}-oauth-secret"))).collect();
+        bound
     }
 
     /// Renders the deployment for a node on `project`: its settings into
@@ -390,17 +418,25 @@ impl Fleet {
         for ((_, name), (_, value)) in bound.operator_keys.iter().zip(&self.operator_key_values) {
             values.push((name.as_str(), value.as_str()));
         }
+        for ((_, name), (_, value)) in bound.connection_secrets.iter().zip(&self.connection_secret_values) {
+            values.push((name.as_str(), value.as_str()));
+        }
         assert_eq!(values.len(), bound.secrets().len(), "every secret bound has its value, once");
         store::seed_local(tools, &state_dir(project), &values).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
-        write_local_config(project, &bound.cell())?;
+        write_local_config(project, &bound.cell(), &self.images)?;
         let poll = self.poll_interval_s.to_string();
         let retry = self.job_retry_delay_s.to_string();
+        // the node's one release (`dev`) deployed as it is configured, as a
+        // deploy names its second: what the levers' older and newer
+        // stand-ins are ordered against (fragment_core::release `restarts`)
+        let deployed_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs().to_string();
         let mut vars = vec![
             ("CODESTORAGE_ORG", self.codestorage_org.as_str()),
             ("CODESTORAGE_API_URL", self.codestorage_url.as_str()),
             ("FRAGMENT_PLATFORM_URL", self.platform_url.as_str()),
             ("FRAGMENT_POLL_INTERVAL_S", poll.as_str()),
             ("FRAGMENT_JOB_RETRY_DELAY_S", retry.as_str()),
+            ("FRAGMENT_DEPLOYED_AT", deployed_at.as_str()),
         ];
         if self.egress_local {
             vars.push(("FRAGMENT_EGRESS_LOCAL", "allow"));
@@ -455,6 +491,10 @@ impl Fleet {
         let signins = self.signins_pending_max.map(|n| n.to_string());
         if let Some(n) = &signins {
             vars.push(("FRAGMENT_SIGNINS_PENDING_MAX", n.as_str()));
+        }
+        let begins = self.cli_begins_per_ip_minute.map(|n| n.to_string());
+        if let Some(n) = &begins {
+            vars.push(("FRAGMENT_CLI_BEGINS_PER_IP_MINUTE", n.as_str()));
         }
         if let Some(secret) = &self.test_secret {
             vars.push(("FRAGMENT_TEST_SECRET", secret.as_str()));

@@ -1,0 +1,179 @@
+# The platform's Durable Object schemas (crates/core/src/migrate.rs): each
+# class's steps, frozen once merged, then what they make on a new object.
+# `cargo xtask schema-lock` writes it, appending new steps and refusing to
+# change a locked one; `cargo xtask check` fails when it is not what the
+# steps make. Never edit it by hand.
+
+step Fragment 1 baseline 6f010c0c276b4871
+step Fragment 2 listed 464da803484efc23
+step Fragment 3 record_schedules 90308e727fc4ce8b
+step Registry 1 baseline fd5a79e5c834a15d
+step Registry 2 connection_signins e9d1f862c2e3e4ed
+step Registry 3 trial_hold_attempts 07e123e05a049abe
+step Registry 4 connection_fences ac8ad73c1302c4be
+step Registry 5 invites_answered 189ad3c09884ab61
+step Registry 6 connection_accounts 05c1285d594517cb
+step Principal 1 baseline 28b4d4bf3f8cdb71
+step Principal 2 listed 09e5aab70c4f7f61
+step Ledger 1 baseline 6d5c6ebad64a53b2
+step Computer 1 baseline 0f429c07654198e6
+step Computer 2 agent_accounts 55b329a8b0da4bbd
+
+Fragment table blobs: CREATE TABLE blobs ( sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL, mime TEXT)
+Fragment table charges: CREATE TABLE charges ( ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, held INTEGER NOT NULL, at INTEGER NOT NULL)
+Fragment index charges_run: CREATE INDEX charges_run ON charges (run)
+Fragment table code: CREATE TABLE code ( id INTEGER PRIMARY KEY CHECK (id = 1), sha TEXT NOT NULL, loader_id TEXT NOT NULL, source TEXT NOT NULL, cpu_ms INTEGER NOT NULL, installed_at INTEGER NOT NULL, modules TEXT NOT NULL DEFAULT '{}')
+Fragment table code_channel_from: CREATE TABLE code_channel_from (channel TEXT PRIMARY KEY, from_kind TEXT NOT NULL)
+Fragment table code_channel_listed: CREATE TABLE code_channel_listed (channel TEXT PRIMARY KEY, kinds TEXT NOT NULL, fields TEXT NOT NULL)
+Fragment table code_channels: CREATE TABLE code_channels (channel TEXT PRIMARY KEY, read TEXT NOT NULL, post TEXT, signed_in INTEGER NOT NULL DEFAULT 0)
+Fragment table code_op_descriptions: CREATE TABLE code_op_descriptions (op TEXT PRIMARY KEY, description TEXT NOT NULL)
+Fragment table code_ops: CREATE TABLE code_ops (op TEXT PRIMARY KEY, kind TEXT NOT NULL, role TEXT NOT NULL, input TEXT, ephemeral INTEGER NOT NULL DEFAULT 0)
+Fragment table code_triggers: CREATE TABLE code_triggers (idx INTEGER PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT NULL, run TEXT NOT NULL, from_kind TEXT)
+Fragment index code_triggers_on: CREATE INDEX code_triggers_on ON code_triggers (kind, target)
+Fragment table delivery_outbox: CREATE TABLE delivery_outbox ( id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL CHECK (kind IN ('record', 'push')), sub INTEGER, channel TEXT, seq INTEGER, who TEXT, body TEXT, after_sub INTEGER NOT NULL DEFAULT 0, upto_sub INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL)
+Fragment index delivery_outbox_due: CREATE INDEX delivery_outbox_due ON delivery_outbox (next_at)
+Fragment index delivery_outbox_waiting: CREATE INDEX delivery_outbox_waiting ON delivery_outbox (id) WHERE attempts > 0
+Fragment table ended: CREATE TABLE ended ( incarnation INTEGER PRIMARY KEY, name TEXT NOT NULL, npub TEXT NOT NULL, facet TEXT NOT NULL, ended_at INTEGER NOT NULL, stored INTEGER NOT NULL DEFAULT 1, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL)
+Fragment table ended_agents: CREATE TABLE ended_agents ( incarnation INTEGER PRIMARY KEY, identity TEXT NOT NULL, computer TEXT, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL)
+Fragment table ended_errors: CREATE TABLE ended_errors ( incarnation INTEGER NOT NULL, part TEXT NOT NULL, error TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (incarnation, part))
+Fragment table ended_index: CREATE TABLE ended_index ( incarnation INTEGER NOT NULL, principal TEXT NOT NULL, version INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL, PRIMARY KEY (incarnation, principal))
+Fragment index ended_index_due: CREATE INDEX ended_index_due ON ended_index (next_at)
+Fragment table ended_repos: CREATE TABLE ended_repos ( incarnation INTEGER PRIMARY KEY, repo TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL)
+Fragment table file_commits: CREATE TABLE file_commits (key TEXT PRIMARY KEY, sha TEXT NOT NULL, at INTEGER NOT NULL)
+Fragment table index_outbox: CREATE TABLE index_outbox ( principal TEXT PRIMARY KEY, role TEXT, version INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL)
+Fragment table invites: CREATE TABLE invites ( email TEXT PRIMARY KEY, role TEXT NOT NULL, expires_at INTEGER NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL)
+Fragment table joined_outbox: CREATE TABLE joined_outbox ( principal TEXT PRIMARY KEY, owner TEXT NOT NULL, added_at INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL)
+Fragment table listed: CREATE TABLE listed ( channel TEXT NOT NULL, principal TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, kind TEXT NOT NULL, fields TEXT NOT NULL, last INTEGER NOT NULL, PRIMARY KEY (channel, principal))
+Fragment table members: CREATE TABLE members ( principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL, kind TEXT, owner TEXT)
+Fragment index members_owner: CREATE INDEX members_owner ON members (owner) WHERE owner IS NOT NULL
+Fragment table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
+Fragment table meter_batches: CREATE TABLE meter_batches (id INTEGER PRIMARY KEY AUTOINCREMENT, sent_at INTEGER)
+Fragment table meter_requests: CREATE TABLE meter_requests (minute INTEGER PRIMARY KEY, count INTEGER NOT NULL)
+Fragment table meter_rows: CREATE TABLE meter_rows (ref TEXT PRIMARY KEY, row TEXT NOT NULL, batch INTEGER)
+Fragment index meter_rows_batch: CREATE INDEX meter_rows_batch ON meter_rows (batch)
+Fragment table op_breakers: CREATE TABLE op_breakers (op TEXT PRIMARY KEY, reset_at INTEGER NOT NULL)
+Fragment table own_commits: CREATE TABLE own_commits (sha TEXT PRIMARY KEY, depth INTEGER NOT NULL, at INTEGER NOT NULL)
+Fragment table paid: CREATE TABLE paid ( key TEXT PRIMARY KEY, run INTEGER NOT NULL, result TEXT NOT NULL, usage TEXT, settled INTEGER NOT NULL, at INTEGER NOT NULL)
+Fragment index paid_run: CREATE INDEX paid_run ON paid (run)
+Fragment table paused_ops: CREATE TABLE paused_ops (op TEXT PRIMARY KEY, by TEXT NOT NULL, at INTEGER NOT NULL)
+Fragment table pending: CREATE TABLE pending ( seq INTEGER PRIMARY KEY AUTOINCREMENT, ledger_id TEXT NOT NULL UNIQUE, op TEXT NOT NULL, principal TEXT NOT NULL, depth INTEGER NOT NULL, tries INTEGER NOT NULL, next_at INTEGER NOT NULL, at INTEGER NOT NULL)
+Fragment index pending_due: CREATE INDEX pending_due ON pending (next_at)
+Fragment table pointers: CREATE TABLE pointers ( ref TEXT NOT NULL, path TEXT NOT NULL, sha TEXT NOT NULL, size INTEGER NOT NULL, PRIMARY KEY (ref, path))
+Fragment table push_subs: CREATE TABLE push_subs ( id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL, who TEXT NOT NULL, principal TEXT NOT NULL, created_at INTEGER NOT NULL)
+Fragment table record_schedules: CREATE TABLE record_schedules ( id INTEGER PRIMARY KEY AUTOINCREMENT, cron TEXT NOT NULL, channel TEXT NOT NULL, body TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, next_at INTEGER, last_at INTEGER)
+Fragment index record_schedules_due: CREATE INDEX record_schedules_due ON record_schedules (next_at) WHERE next_at IS NOT NULL
+Fragment table records: CREATE TABLE records ( channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, principal TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, op TEXT, idx INTEGER, outboxed INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (channel, seq))
+Fragment index records_effect: CREATE UNIQUE INDEX records_effect ON records (op, idx) WHERE op IS NOT NULL
+Fragment table runs: CREATE TABLE runs ( id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, via TEXT NOT NULL, trigger TEXT, principal TEXT NOT NULL, role TEXT NOT NULL, depth INTEGER NOT NULL, call_id TEXT, input_sha TEXT, input TEXT NOT NULL, status TEXT NOT NULL, attempt INTEGER NOT NULL, output TEXT, error TEXT, created_at INTEGER NOT NULL, launched_at INTEGER, finished_at INTEGER, code TEXT)
+Fragment index runs_call: CREATE UNIQUE INDEX runs_call ON runs (principal, call_id) WHERE call_id IS NOT NULL
+Fragment index runs_status: CREATE INDEX runs_status ON runs (status, op)
+Fragment table schedules: CREATE TABLE schedules (idx INTEGER PRIMARY KEY, op TEXT NOT NULL, cron TEXT NOT NULL, next_at INTEGER NOT NULL)
+Fragment table search_log: CREATE TABLE search_log ( n INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, text TEXT NOT NULL)
+Fragment table search_outbox: CREATE TABLE search_outbox ( principal TEXT PRIMARY KEY, sent INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER)
+Fragment index search_outbox_due: CREATE INDEX search_outbox_due ON search_outbox (next_at)
+Fragment table secret_hosts: CREATE TABLE secret_hosts ( name TEXT NOT NULL, host TEXT NOT NULL, PRIMARY KEY (name, host))
+Fragment table secrets: CREATE TABLE secrets ( name TEXT PRIMARY KEY, sealed TEXT NOT NULL, set_by TEXT NOT NULL, set_at INTEGER NOT NULL)
+Fragment table sent: CREATE TABLE sent (key TEXT PRIMARY KEY, at INTEGER NOT NULL)
+Fragment table steps: CREATE TABLE steps ( run INTEGER NOT NULL, attempt INTEGER NOT NULL, idx INTEGER NOT NULL, kind TEXT NOT NULL, value TEXT, error TEXT, CHECK ((value IS NULL) <> (error IS NULL)), PRIMARY KEY (run, attempt, idx))
+Fragment table subs: CREATE TABLE subs ( id INTEGER PRIMARY KEY AUTOINCREMENT, principal TEXT NOT NULL, channel TEXT NOT NULL, url TEXT NOT NULL, created_at INTEGER NOT NULL)
+Fragment table tree: CREATE TABLE tree ( ref TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL, mode TEXT NOT NULL, last_commit TEXT NOT NULL, PRIMARY KEY (ref, path))
+
+Registry table admin_log: CREATE TABLE admin_log ( n INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, operator TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, detail TEXT NOT NULL)
+Registry table agent_fragments: CREATE TABLE agent_fragments ( identity TEXT PRIMARY KEY, fragment TEXT NOT NULL)
+Registry table checkouts: CREATE TABLE checkouts ( session TEXT PRIMARY KEY, org TEXT NOT NULL, person TEXT NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL)
+Registry table cli_codes: CREATE TABLE cli_codes ( code TEXT PRIMARY KEY, key TEXT NOT NULL, created_at INTEGER NOT NULL, asked_place TEXT, asked_agent TEXT)
+Registry index cli_codes_created: CREATE INDEX cli_codes_created ON cli_codes (created_at)
+Registry index cli_codes_key: CREATE INDEX cli_codes_key ON cli_codes (key)
+Registry table cli_misses: CREATE TABLE cli_misses ( identity TEXT PRIMARY KEY, misses INTEGER NOT NULL, since INTEGER NOT NULL)
+Registry index cli_misses_since: CREATE INDEX cli_misses_since ON cli_misses (since)
+Registry table connection_account_fences: CREATE TABLE connection_account_fences ( issuer TEXT NOT NULL, subject TEXT NOT NULL, provider TEXT NOT NULL, identifier TEXT NOT NULL, fenced_at INTEGER NOT NULL, PRIMARY KEY (issuer, subject, provider, identifier))
+Registry table connection_disconnects: CREATE TABLE connection_disconnects ( issuer TEXT NOT NULL, subject TEXT NOT NULL, provider TEXT NOT NULL, account TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (issuer, subject, provider, account))
+Registry table connection_fences: CREATE TABLE connection_fences ( issuer TEXT NOT NULL, subject TEXT NOT NULL, provider TEXT NOT NULL, fenced_at INTEGER NOT NULL, PRIMARY KEY (issuer, subject, provider))
+Registry table connection_signins: CREATE TABLE connection_signins ( state TEXT PRIMARY KEY, session TEXT NOT NULL, provider TEXT NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL, config TEXT NOT NULL, sealed TEXT NOT NULL, expires_at INTEGER NOT NULL, intent TEXT NOT NULL DEFAULT 'connect', account TEXT)
+Registry index connection_signins_expires: CREATE INDEX connection_signins_expires ON connection_signins (expires_at)
+Registry index connection_signins_session: CREATE INDEX connection_signins_session ON connection_signins (session)
+Registry table consents: CREATE TABLE consents ( identity TEXT NOT NULL, fragment TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (identity, fragment))
+Registry index consents_at: CREATE INDEX consents_at ON consents (identity, at)
+Registry table e2e_days: CREATE TABLE e2e_days ( day INTEGER PRIMARY KEY, people INTEGER NOT NULL, paid_calls INTEGER NOT NULL)
+Registry table identities: CREATE TABLE identities ( id TEXT PRIMARY KEY, kind TEXT NOT NULL, owner TEXT, created_at INTEGER NOT NULL, held TEXT)
+Registry index identities_owner: CREATE INDEX identities_owner ON identities (owner) WHERE owner IS NOT NULL
+Registry table invite_claims: CREATE TABLE invite_claims ( email TEXT NOT NULL, fragment TEXT NOT NULL, due INTEGER NOT NULL, failed INTEGER NOT NULL, PRIMARY KEY (email, fragment))
+Registry index invite_claims_due: CREATE INDEX invite_claims_due ON invite_claims (due)
+Registry table invite_mails: CREATE TABLE invite_mails ( sharer TEXT NOT NULL, day INTEGER NOT NULL, mailed INTEGER NOT NULL, PRIMARY KEY (sharer, day))
+Registry table invites_waiting: CREATE TABLE invites_waiting ( email TEXT NOT NULL, fragment TEXT NOT NULL, expires_at INTEGER NOT NULL, role TEXT, title TEXT, sharer TEXT, PRIMARY KEY (email, fragment))
+Registry index invites_waiting_expiry: CREATE INDEX invites_waiting_expiry ON invites_waiting (expires_at)
+Registry table keys: CREATE TABLE keys ( key TEXT PRIMARY KEY, identity TEXT NOT NULL, added_at INTEGER NOT NULL, added_by TEXT NOT NULL, revoked_at INTEGER)
+Registry index keys_identity: CREATE INDEX keys_identity ON keys (identity)
+Registry table logins: CREATE TABLE logins ( state TEXT PRIMARY KEY, return_to TEXT NOT NULL, link_to TEXT, created_at INTEGER NOT NULL)
+Registry index logins_created: CREATE INDEX logins_created ON logins (created_at)
+Registry table offer_answers: CREATE TABLE offer_answers ( offer TEXT PRIMARY KEY, person TEXT NOT NULL, at INTEGER NOT NULL)
+Registry index offer_answers_person: CREATE INDEX offer_answers_person ON offer_answers (person)
+Registry table offer_mails: CREATE TABLE offer_mails ( org TEXT NOT NULL, day INTEGER NOT NULL, mailed INTEGER NOT NULL, PRIMARY KEY (org, day))
+Registry table org_members: CREATE TABLE org_members ( id TEXT PRIMARY KEY, org TEXT NOT NULL, person TEXT UNIQUE, email TEXT NOT NULL, admin INTEGER NOT NULL, seat TEXT, comped INTEGER NOT NULL, sleeps INTEGER NOT NULL, added_at INTEGER NOT NULL, added_by TEXT NOT NULL)
+Registry index org_members_offer_email: CREATE UNIQUE INDEX org_members_offer_email ON org_members (org, email) WHERE person IS NULL
+Registry index org_members_offers: CREATE INDEX org_members_offers ON org_members (email, added_at) WHERE person IS NULL
+Registry index org_members_org: CREATE INDEX org_members_org ON org_members (org)
+Registry table org_payers: CREATE TABLE org_payers ( org TEXT PRIMARY KEY, person TEXT NOT NULL, subscription TEXT NOT NULL)
+Registry index org_payers_person: CREATE INDEX org_payers_person ON org_payers (person)
+Registry table orgs: CREATE TABLE orgs ( id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL, created_by TEXT NOT NULL, status TEXT, customer TEXT UNIQUE, subscription TEXT UNIQUE, items TEXT, period_end INTEGER, trial_end INTEGER, cancel_at_end INTEGER NOT NULL DEFAULT 0, event_at INTEGER, synced_at INTEGER)
+Registry index orgs_synced: CREATE INDEX orgs_synced ON orgs (synced_at) WHERE subscription IS NOT NULL
+Registry table person_keys: CREATE TABLE person_keys ( identity TEXT PRIMARY KEY, sealed TEXT NOT NULL)
+Registry table pictures: CREATE TABLE pictures ( identity TEXT PRIMARY KEY, sha TEXT NOT NULL, mime TEXT NOT NULL, set_at INTEGER NOT NULL)
+Registry table plan_seq: CREATE TABLE plan_seq ( one INTEGER PRIMARY KEY CHECK (one = 1), seq INTEGER NOT NULL)
+Registry table plan_syncs: CREATE TABLE plan_syncs ( person TEXT PRIMARY KEY, since INTEGER NOT NULL, due INTEGER NOT NULL, tries INTEGER NOT NULL)
+Registry index plan_syncs_due: CREATE INDEX plan_syncs_due ON plan_syncs (due)
+Registry table quantity_syncs: CREATE TABLE quantity_syncs ( org TEXT PRIMARY KEY, since INTEGER NOT NULL, due INTEGER NOT NULL, tries INTEGER NOT NULL)
+Registry table redemptions: CREATE TABLE redemptions ( hash TEXT PRIMARY KEY, session TEXT NOT NULL, fragment TEXT NOT NULL, return_to TEXT NOT NULL, expires_at INTEGER NOT NULL, embedder TEXT)
+Registry index redemptions_expires: CREATE INDEX redemptions_expires ON redemptions (expires_at)
+Registry index redemptions_session: CREATE INDEX redemptions_session ON redemptions (session, expires_at)
+Registry table sessions: CREATE TABLE sessions ( hash TEXT PRIMARY KEY, identity TEXT NOT NULL, fragment TEXT, parent TEXT, workos_sid TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, revoked_at INTEGER, embedder TEXT)
+Registry index sessions_expires: CREATE INDEX sessions_expires ON sessions (expires_at)
+Registry index sessions_parent_fragment: CREATE INDEX sessions_parent_fragment ON sessions (parent, fragment, created_at) WHERE parent IS NOT NULL
+Registry table stripe_cancels: CREATE TABLE stripe_cancels ( subscription TEXT PRIMARY KEY, org TEXT NOT NULL, why TEXT NOT NULL, since INTEGER NOT NULL, due INTEGER NOT NULL, tries INTEGER NOT NULL)
+Registry index stripe_cancels_org: CREATE INDEX stripe_cancels_org ON stripe_cancels (org)
+Registry table subjects: CREATE TABLE subjects ( issuer TEXT NOT NULL, subject TEXT NOT NULL, identity TEXT NOT NULL, linked_at INTEGER NOT NULL, email TEXT NOT NULL, signed_in_at INTEGER NOT NULL, PRIMARY KEY (issuer, subject))
+Registry index subjects_email: CREATE INDEX subjects_email ON subjects (email)
+Registry index subjects_identity: CREATE INDEX subjects_identity ON subjects (identity)
+Registry table trial_codes: CREATE TABLE trial_codes ( id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, name TEXT NOT NULL, kind TEXT NOT NULL, days INTEGER NOT NULL, capacity INTEGER NOT NULL, expires_at INTEGER, active INTEGER NOT NULL, revision INTEGER NOT NULL, created_at INTEGER NOT NULL, created_by TEXT NOT NULL)
+Registry table trial_uses: CREATE TABLE trial_uses ( person TEXT PRIMARY KEY, code TEXT NOT NULL, at INTEGER NOT NULL, expires_at INTEGER NOT NULL, subscription TEXT, attempts TEXT)
+Registry index trial_uses_code: CREATE INDEX trial_uses_code ON trial_uses (code, expires_at)
+Registry table wiped_agents: CREATE TABLE wiped_agents ( identity TEXT NOT NULL, agent TEXT NOT NULL, PRIMARY KEY (identity, agent))
+Registry table wiped_orgs: CREATE TABLE wiped_orgs ( identity TEXT NOT NULL, org TEXT NOT NULL, ended INTEGER NOT NULL, canceled INTEGER NOT NULL, lapsed INTEGER NOT NULL, PRIMARY KEY (identity, org))
+Registry table wipes: CREATE TABLE wipes ( identity TEXT PRIMARY KEY, done INTEGER NOT NULL, started_at INTEGER NOT NULL, by TEXT NOT NULL, finished_at INTEGER)
+
+Principal table export_blobs: CREATE TABLE export_blobs (export TEXT NOT NULL, fragment TEXT NOT NULL, sha TEXT NOT NULL, PRIMARY KEY (export, fragment, sha))
+Principal table export_levers: CREATE TABLE export_levers (name TEXT PRIMARY KEY, value INTEGER)
+Principal table export_parts: CREATE TABLE export_parts (export TEXT NOT NULL, part INTEGER NOT NULL, etag TEXT NOT NULL, PRIMARY KEY (export, part))
+Principal table export_tail: CREATE TABLE export_tail (export TEXT NOT NULL, n INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (export, n))
+Principal table exports: CREATE TABLE exports ( id TEXT PRIMARY KEY, person TEXT NOT NULL, state TEXT NOT NULL, started_at INTEGER NOT NULL, ready_at INTEGER, expires_at INTEGER, size INTEGER, error TEXT, job TEXT, upload TEXT, requests INTEGER NOT NULL DEFAULT 0, downloads INTEGER NOT NULL DEFAULT 0, gone_at INTEGER, metered INTEGER NOT NULL DEFAULT 0)
+Principal table listed: CREATE TABLE listed (fragment TEXT PRIMARY KEY, records TEXT NOT NULL)
+Principal table memberships: CREATE TABLE memberships ( fragment TEXT PRIMARY KEY, role TEXT, incarnation INTEGER NOT NULL, version INTEGER NOT NULL, sharing TEXT, face TEXT, archived INTEGER NOT NULL DEFAULT 0, searched TEXT)
+Principal table search_entries: CREATE TABLE search_entries ( id INTEGER PRIMARY KEY, fragment TEXT NOT NULL, n INTEGER NOT NULL, channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, text TEXT NOT NULL, UNIQUE (fragment, n))
+Principal index search_entries_at: CREATE INDEX search_entries_at ON search_entries (at, id)
+Principal trigger search_entries_added: CREATE TRIGGER search_entries_added AFTER INSERT ON search_entries BEGIN INSERT INTO search_text (rowid, text) VALUES (new.id, new.text); END
+Principal trigger search_entries_dropped: CREATE TRIGGER search_entries_dropped AFTER DELETE ON search_entries BEGIN INSERT INTO search_text (search_text, rowid, text) VALUES ('delete', old.id, old.text); END
+Principal table search_text: CREATE VIRTUAL TABLE search_text USING fts5( text, content = 'search_entries', content_rowid = 'id', tokenize = 'unicode61 remove_diacritics 2')
+Principal table seen: CREATE TABLE seen (fragment TEXT PRIMARY KEY, n INTEGER NOT NULL)
+Principal table wiped: CREATE TABLE wiped (at INTEGER NOT NULL)
+
+Ledger table batches: CREATE TABLE batches (id TEXT PRIMARY KEY, digest TEXT NOT NULL, answer TEXT NOT NULL, at_ms INTEGER NOT NULL)
+Ledger index batches_at: CREATE INDEX batches_at ON batches (at_ms)
+Ledger table caps: CREATE TABLE caps (fragment TEXT PRIMARY KEY, micros INTEGER NOT NULL)
+Ledger table commands: CREATE TABLE commands (id TEXT PRIMARY KEY, command TEXT NOT NULL, at_ms INTEGER NOT NULL)
+Ledger table entries: CREATE TABLE entries (ref TEXT PRIMARY KEY, at_ms INTEGER NOT NULL, held INTEGER NOT NULL, entry TEXT NOT NULL)
+Ledger index entries_at: CREATE INDEX entries_at ON entries (at_ms)
+Ledger table head: CREATE TABLE head (id INTEGER PRIMARY KEY CHECK (id = 1), ledger TEXT NOT NULL)
+Ledger table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
+Ledger table spend: CREATE TABLE spend (month INTEGER NOT NULL, fragment TEXT NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, fragment))
+Ledger table wiped: CREATE TABLE wiped (at INTEGER NOT NULL)
+
+Computer table agent_accounts: CREATE TABLE agent_accounts (agent TEXT NOT NULL, provider TEXT NOT NULL, account TEXT NOT NULL, PRIMARY KEY (agent, provider))
+Computer table agents: CREATE TABLE agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL, connections TEXT NOT NULL DEFAULT 'null')
+Computer table awake: CREATE TABLE awake (from_ms INTEGER PRIMARY KEY, to_ms INTEGER NOT NULL)
+Computer table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
+Computer table own_keys: CREATE TABLE own_keys (provider TEXT PRIMARY KEY, sealed TEXT NOT NULL, set_at INTEGER NOT NULL)
+Computer table own_signins: CREATE TABLE own_signins (nonce TEXT PRIMARY KEY, provider TEXT NOT NULL, sealed TEXT NOT NULL, expires_at INTEGER NOT NULL)
+Computer table sessions: CREATE TABLE sessions (hash TEXT PRIMARY KEY, identity TEXT NOT NULL, expires_at INTEGER NOT NULL)
+Computer table tickets: CREATE TABLE tickets (hash TEXT PRIMARY KEY, port INTEGER NOT NULL, identity TEXT NOT NULL, expires_at INTEGER NOT NULL)
+Computer table uses: CREATE TABLE uses (month INTEGER NOT NULL, provider TEXT NOT NULL, agent TEXT NOT NULL, calls INTEGER NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, provider, agent))
+Computer table wiped: CREATE TABLE wiped (at INTEGER NOT NULL)

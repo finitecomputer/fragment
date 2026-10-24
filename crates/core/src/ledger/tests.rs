@@ -3,7 +3,8 @@
 //! answers as the first did and changes nothing; another body under it is
 //! refused), and a restart (the state written and read back answers the
 //! rest as the state that never stopped). Then the money rules (decisions
-//! 25–27) and the port's fixes (bugs 2 and 3), each on its own.
+//! 25–27 and 62) and the port's fix (bug 2), each on its own; and what the
+//! releases before decision 62 kept (holds, reservations) reads.
 
 use fragment_proto::ledger::{GrantCredit, Plan, SeatState, SetFragmentCap, SetOverdraft, SetPlan, SetSeat, Standing, Why};
 use fragment_proto::ErrorCode;
@@ -57,31 +58,9 @@ fn cap(id: &str, fragment: &str, micros: Option<i64>) -> Op {
     Op::Cap(SetFragmentCap { id: id.into(), fragment: fragment.into(), micros })
 }
 
-fn set_book(id: &str, version: u32, margin_bp: u32) -> Op {
-    let mut b = book();
-    b.version = version;
-    b.margin_bp = margin_bp;
-    Op::Book(SetPriceBook { id: id.into(), book: b })
-}
-
-fn reservation(reference: &str, worst: Usage) -> Reserve {
-    Reserve { reference: reference.into(), spend: Spend::AgentTurn, worst, fragment: None, agent: Some("juniper.ann".into()), capped: false }
-}
-
-fn reserve(reference: &str) -> Op {
-    Op::Reserve(reservation(reference, turn()))
-}
-
-fn reserve_in(reference: &str, fragment: &str, capped: bool) -> Op {
-    Op::Reserve(Reserve { fragment: Some(fragment.into()), capped, ..reservation(reference, turn()) })
-}
-
-fn settle(reference: &str, usage: Option<Usage>) -> Op {
-    Op::Settle(Settle { reference: reference.into(), usage })
-}
-
-fn release(reference: &str) -> Op {
-    Op::Release(Release { reference: reference.into() })
+/// `book()` at another margin.
+fn set_book(margin_bp: u32) -> Op {
+    Op::Book(PriceBook { margin_bp, ..book() })
 }
 
 fn row(reference: &str, usage: Usage, fragment: Option<&str>, at_ms: i64) -> MeterRow {
@@ -92,23 +71,17 @@ fn meter(batch: &str, rows: Vec<MeterRow>) -> Op {
     Op::Meter(Meter { batch: batch.into(), rows })
 }
 
-fn held(amount: i64) -> Outcome {
-    Outcome::Reserved(Reserved::Held { amount })
-}
-
-fn settled(charge: i64, basis: Basis) -> Outcome {
-    Outcome::Settled(Settled { charge, basis })
-}
-
 struct World {
     ledger: Ledger,
     store: Memory,
     now: i64,
+    /// The configured book of the release applying each op.
+    book: PriceBook,
 }
 
 impl World {
     fn guest() -> World {
-        World { ledger: Ledger::new(T0, book()), store: Memory::default(), now: T0 }
+        World { ledger: Ledger::new(T0), store: Memory::default(), now: T0, book: book() }
     }
 
     /// A $100 seat, active, with its $50 for October.
@@ -119,7 +92,7 @@ impl World {
     }
 
     fn apply(&mut self, op: &Op) -> Result<Outcome, Refused> {
-        apply(&mut self.ledger, &mut self.store, op, self.now)
+        apply(&mut self.ledger, &mut self.store, op, self.now, &mut self.book)
     }
 
     fn ok(&mut self, op: Op) -> Outcome {
@@ -127,7 +100,7 @@ impl World {
     }
 
     fn status(&self) -> LedgerStatus {
-        self.ledger.status(&self.store, self.now)
+        self.ledger.status(&self.store, self.now, &self.book)
     }
 
     fn balance(&self) -> i64 {
@@ -144,6 +117,14 @@ impl World {
 
     fn spend(&mut self, id: &str, micros: i64) {
         self.spend_in(id, micros, None);
+    }
+
+    /// What a one-row batch of its own (`id`, the row's reference too)
+    /// charged: a paid call's charge, as the cell sends it after the call.
+    fn charged(&mut self, id: &str, usage: Usage) -> i64 {
+        let Outcome::Metered(m) = self.ok(meter(id, vec![row(id, usage, None, self.now)])) else { panic!("a batch answers Metered") };
+        assert_eq!((m.rows_new, m.refused.len()), (1, 0), "{id} is charged");
+        m.charged
     }
 
     /// `op` is refused with `why`, and nothing changes.
@@ -169,7 +150,7 @@ impl World {
         let ledger: Ledger = serde_json::from_str(&serde_json::to_string(&self.ledger).unwrap()).unwrap();
         let store: Memory = serde_json::from_str(&serde_json::to_string(&self.store).unwrap()).unwrap();
         assert_eq!((&ledger, &store), (&self.ledger, &self.store), "the state reads back as it was written");
-        World { ledger, store, now: self.now }
+        World { ledger, store, now: self.now, book: self.book.clone() }
     }
 }
 
@@ -225,11 +206,10 @@ fn a_new_ledger_is_a_guest_who_pays_for_nothing() {
         assert_eq!(w.ledger.gate(spend, T0), Err(Refused::GuestPayer), "{spend:?}");
     }
     assert_eq!(w.ledger.gate(Spend::Create, T0), Err(Refused::GuestCreates), "nor makes a fragment");
-    w.refused(reserve("r1"), Refused::GuestPayer);
     w.refused(meter("b1", vec![row("row:1", Usage::Requests { count: 1 }, None, T0)]), Refused::GuestPayer);
     let s = w.status();
     assert_eq!((s.plan, s.seat, s.month.as_str(), s.balance_micros, s.included_micros), (Plan::Guest, SeatState::Active, "2026-10", 0, 0));
-    assert_eq!((s.overdraft_micros, s.price_book, s.reserved_micros), (OVERDRAFT_DEFAULT, 1, 0));
+    assert_eq!((s.overdraft_micros, s.price_book, s.reserved_micros, s.available_micros), (OVERDRAFT_DEFAULT, 1, 0, OVERDRAFT_DEFAULT));
 }
 
 /// Goal: a guest makes no fragment (Paul, 2026-10-03), and a seat does,
@@ -311,7 +291,6 @@ fn every_command_refuses_a_bad_id() {
         w.refused(seat(id, SeatState::Canceled, 1), bad);
         w.refused(overdraft(id, USD), bad);
         w.refused(cap(id, "todo.ann", Some(USD)), bad);
-        w.refused(set_book(id, 2, 0), bad);
     }
 }
 
@@ -381,7 +360,6 @@ fn a_canceled_seat_stops_agents_and_its_fragments_keep_writing() {
         assert_eq!(w.ledger.gate(spend, T0), Err(stopped), "{spend:?}");
     }
     assert_eq!(w.ledger.gate(Spend::Write, T0), Ok(()));
-    w.refused(reserve("r1"), stopped);
     w.spend("b1", USD);
     assert_eq!(w.balance(), 49 * USD, "its fragments' hosting is still metered");
 }
@@ -429,7 +407,7 @@ fn at_zero_agents_stop_and_fragments_write_until_the_overdraft() {
         assert_eq!(w.ledger.gate(spend, T0), Err(no_credit), "{spend:?}");
     }
     assert_eq!(w.ledger.gate(Spend::Write, T0), Ok(()));
-    w.refused(reserve("r1"), no_credit);
+    assert_eq!(w.status().available_micros, OVERDRAFT_DEFAULT, "what may still be charged before read-only: the overdraft's room");
     // meters always record: what happened is charged
     w.spend("b2", 3 * USD / 2);
     assert_eq!((w.balance(), w.ledger.standing(T0)), (-3 * USD / 2, Standing::AgentsStopped { why: Why::NoCredit }));
@@ -438,7 +416,7 @@ fn at_zero_agents_stop_and_fragments_write_until_the_overdraft() {
     assert_eq!((w.balance(), w.ledger.standing(T0)), (-2 * USD, Standing::ReadOnly { why: Why::Overdrawn }), "read-only at the overdraft");
     assert_eq!(w.ledger.gate(Spend::Write, T0), Err(read_only));
     assert_eq!(w.ledger.gate(Spend::AgentTurn, T0), Err(read_only));
-    w.refused(reserve("r1"), read_only);
+    assert_eq!(w.status().available_micros, 0, "read-only, nothing more");
     w.spend("b4", USD);
     // a top-up that leaves the balance at or below zero keeps it read-only
     w.ok(grant("g1", 3 * USD));
@@ -491,11 +469,14 @@ fn a_fragment_past_its_cap_stops_others_but_not_its_owner() {
     w.spend_in("b2", 1, Some("todo.ann"));
     let reached = Refused::CapReached { cap: CAP_DEFAULT, spent: CAP_DEFAULT };
     assert_eq!(w.ledger.fragment_open(&w.store, "todo.ann", T0), Err(reached));
-    w.refused(reserve_in("r1", "todo.ann", true), reached);
-    assert_eq!(w.ok(reserve_in("r2", "todo.ann", false)), held(TURN), "the owner spends past the cap");
-    assert_eq!(w.ok(reserve_in("r3", "chat.ann", true)), held(TURN), "another fragment has its own cap");
+    let may = |w: &World, fragment, by_owner| w.ledger.may_spend(&w.store, Spend::AgentTurn, Some(fragment), by_owner, T0);
+    assert_eq!(may(&w, "todo.ann", false), Err(reached));
+    assert_eq!(may(&w, "todo.ann", true), Ok(()), "the owner spends past the cap");
+    assert_eq!(may(&w, "chat.ann", false), Ok(()), "another fragment has its own cap");
+    // usage that happened in it is charged past it, by anyone: meters always record
+    w.spend_in("b3", 1, Some("todo.ann"));
     let listed = w.status().fragments;
-    assert_eq!(listed[0], FragmentSpend { fragment: "todo.ann".into(), spent_micros: CAP_DEFAULT, cap_micros: CAP_DEFAULT });
+    assert_eq!(listed[0], FragmentSpend { fragment: "todo.ann".into(), spent_micros: CAP_DEFAULT + 1, cap_micros: CAP_DEFAULT });
     w.now = NOVEMBER;
     assert_eq!(w.ledger.fragment_open(&w.store, "todo.ann", NOVEMBER), Ok(()), "a new month, a new cap");
 }
@@ -519,17 +500,6 @@ fn may_this_spend_happen_for_whom_in_which_fragment() {
     assert_eq!(may(&w, Spend::AgentTurn, Some("chat.ann"), true), Err(Refused::AgentsStopped { why: Why::SeatCanceled }), "the payer's standing first");
     let g = World::guest();
     assert_eq!(may(&g, Spend::Write, None, true), Err(Refused::GuestPayer));
-}
-
-#[test]
-fn what_is_held_in_a_fragment_counts_toward_its_cap() {
-    let mut w = World::seat();
-    w.ok(cap("c1", "todo.ann", Some(10_000)));
-    assert_eq!(w.ok(reserve_in("r1", "todo.ann", true)), held(TURN));
-    assert_eq!(w.ok(reserve_in("r2", "todo.ann", true)), held(TURN), "a reservation may cross the cap; only past it is closed");
-    w.refused(reserve_in("r3", "todo.ann", true), Refused::CapReached { cap: 10_000, spent: 2 * TURN });
-    w.ok(release("r2"));
-    assert_eq!(w.ok(reserve_in("r3", "todo.ann", true)), held(TURN));
 }
 
 #[test]
@@ -562,170 +532,81 @@ fn a_late_row_from_last_month_does_not_spend_this_months_cap() {
 
 // Price books
 
+/// A ledger keeps no book (decision 62): a batch is priced with the
+/// configured book of the release applying it, whatever its version (#451):
+/// the books are compared, never ordered, and one used before is used
+/// again, as a configuration rolled back is. Each is kept once, under
+/// `book:<digest>`, as it first priced a batch, for the audit; a row is
+/// charged at the book of its time.
 #[test]
-fn a_newer_price_book_replaces_the_old_and_an_older_is_refused() {
+fn a_batch_is_priced_with_the_configured_book_of_its_release() {
     let mut w = World::seat();
-    w.replays(set_book("book:2", 2, 0));
-    assert_eq!(w.status().price_book, 2);
-    assert_eq!(w.ok(reserve("r1")), held(4_200), "no margin: the cost basis");
-    w.refused(set_book("book:2b", 2, 0), Refused::StaleBook { current: 2 });
-    w.refused(set_book("book:1", 1, 5_000), Refused::StaleBook { current: 2 });
-    w.refused(set_book("book:2", 3, 0), Refused::ConflictingBody);
-    let mut bad = book();
-    bad.version = 9;
-    bad.margin_bp = price::MARGIN_BP_MAX + 1;
-    w.refused(Op::Book(SetPriceBook { id: "book:9".into(), book: bad }), Refused::Invalid { what: Invalid::Book(BookFault::Rate) });
-    // a hold keeps the price it was held at
-    w.ok(set_book("book:3", 3, 10_000));
-    assert_eq!(w.ok(settle("r1", None)), settled(4_200, Basis::Reservation));
-    assert_eq!(w.ok(reserve("r2")), held(8_400), "the new book's margin");
-}
-
-// Reservations
-
-#[test]
-fn a_reservation_holds_its_worst_case() {
-    let mut w = World::seat();
-    assert_eq!(w.replays(reserve("r1")), held(TURN));
-    let s = w.status();
-    assert_eq!((s.balance_micros, s.reserved_micros, s.available_micros), (50 * USD, TURN, 50 * USD - TURN), "a hold is not a charge");
-    assert_eq!(w.ledger.next_sweep_ms(T0), T0 + HOLD_MAX_MS);
-}
-
-#[test]
-fn a_reservation_that_does_not_fit_is_refused() {
-    let mut w = World::seat();
-    w.spend("b1", 50 * USD - 10_000);
-    assert_eq!(w.ok(reserve("r1")), held(TURN));
-    w.refused(reserve("r2"), Refused::CreditShort { available: 10_000 - TURN, needed: TURN });
-    w.ok(release("r1"));
-    assert_eq!(w.ok(reserve("r2")), held(TURN), "a refused reference may be tried again");
-}
-
-#[test]
-fn every_refusal_of_a_reservation() {
-    let mut w = World::seat();
-    let bad_id = Refused::Invalid { what: Invalid::Id };
-    w.refused(reserve(""), bad_id);
-    w.refused(Op::Reserve(Reserve { fragment: Some("a b".into()), ..reservation("r1", turn()) }), bad_id);
-    w.refused(Op::Reserve(Reserve { agent: Some(String::new()), ..reservation("r1", turn()) }), bad_id);
-    w.refused(Op::Reserve(reservation("r1", flash(price::QUANTITY_MAX + 1, 0))), Refused::Invalid { what: Invalid::Usage(UsageFault::Quantity) });
-    for spend in [Spend::Wake, Spend::Write, Spend::Create] {
-        w.refused(Op::Reserve(Reserve { spend, ..reservation("r1", turn()) }), Refused::Invalid { what: Invalid::Spend });
+    let (cost_basis, dearer) = (PriceBook { margin_bp: 0, ..book() }, PriceBook { margin_bp: 10_000, ..book() });
+    w.replays(Op::Book(cost_basis.clone()));
+    assert_eq!(w.status().price_book, 1, "the status names the configured book's version: it is informational");
+    assert_eq!(w.charged("aig:1", turn()), 4_200, "no margin: the cost basis");
+    w.now += 1_000;
+    w.replays(Op::Book(PriceBook { version: 0, ..dearer.clone() }));
+    assert_eq!(w.status().price_book, 0, "and at a lower one");
+    w.replays(Op::Book(dearer.clone()));
+    assert_eq!(w.store.entry("aig:1").and_then(|e| e.charge()), Some(4_200), "charged at the book of its time");
+    assert_eq!(w.charged("aig:2", turn()), 8_400, "the new book's margin");
+    // rolled back, then forward again: each taken again
+    w.now += 1_000;
+    w.replays(Op::Book(cost_basis.clone()));
+    assert_eq!(w.charged("aig:3", turn()), 4_200, "the book rolled back to");
+    w.replays(Op::Book(dearer.clone()));
+    assert_eq!(w.charged("aig:4", turn()), 8_400, "and forward");
+    for (b, at_ms) in [(&cost_basis, T0), (&dearer, T0 + 1_000)] {
+        let id = format!("book:{}", b.digest());
+        let kept = CommandRecord { command: Command::SetBook(SetPriceBook { id: id.clone(), book: b.clone() }), at_ms };
+        assert_eq!(w.store.command(&id), Some(kept), "kept once, as first taken");
     }
-    w.refused(Op::Reserve(Reserve { capped: true, ..reservation("r1", turn()) }), Refused::Invalid { what: Invalid::Capped });
-    let unknown = Usage::Tokens { model: "@cf/other".into(), input: 1, cached_input: 0, cache_write: 0, output: 1 };
-    w.refused(Op::Reserve(reservation("r1", unknown)), Refused::NoPrice);
-    // $4 a million in: ten million tokens of Opus is $63 with the fee and margin
-    let dear = Usage::Tokens { model: "anthropic/claude-opus-5.5".into(), input: 10_000_000, cached_input: 0, cache_write: 0, output: 0 };
-    w.refused(Op::Reserve(reservation("r1", dear)), Refused::TooLarge);
-    for i in 0..HOLDS_MAX {
-        w.ok(Op::Reserve(reservation(&format!("tiny:{i}"), flash(1, 0))));
-    }
-    w.refused(reserve("r1"), Refused::TooManyHolds);
-    // the money refusals (credit, standing, caps) have tests of their own above
 }
 
-/// A replayed reservation answers where its reference stands, so a retry
-/// never makes a call that was already made.
+/// #451: operator keys' rows were added to the deployments' configurations
+/// with no version raised, and every ledger kept the book it had and
+/// refused their calls as unpriced. Goal: a configuration that adds one
+/// key's price, and changes nothing else (its version included), prices
+/// the next call on that key, across a restart and a replay; the ledger
+/// keeps no book of its own. Method: the release's book changed, then its
+/// batches, restarted between.
 #[test]
-fn a_replayed_reservation_answers_where_it_stands() {
+fn a_key_the_configuration_adds_is_priced_at_the_next_call() {
+    let mut configured = book();
+    configured.keys.push(KeyPrice { key: "google-places".into(), micros: 35_000_000, per: 1_000 });
     let mut w = World::seat();
-    assert_eq!(w.replays(reserve("r1")), held(TURN));
-    w.ok(settle("r1", Some(flash(10_000, 1_000))));
-    assert_eq!(w.replays(reserve("r1")), Outcome::Reserved(Reserved::Settled { charge: 3_150 }));
-    w.ok(reserve("r2"));
-    w.ok(release("r2"));
-    assert_eq!(w.replays(reserve("r2")), Outcome::Reserved(Reserved::Released));
-    w.refused(Op::Reserve(reservation("r1", flash(1, 1))), Refused::ConflictingBody);
-    w.ok(meter("b1", vec![row("row:1", Usage::Requests { count: 1 }, None, T0)]));
-    w.refused(reserve("row:1"), Refused::ConflictingBody);
+    let call = Usage::Key { key: "google-places".into(), units: 1 };
+    let charge_call = meter("key:1", vec![row("key:1", call.clone(), None, T0)]);
+    assert_eq!(w.book.price(&call), Err(PriceError::NoPrice), "the book configured before has no price for the key");
+    w.ok(Op::Book(configured.clone()));
+    // $35 per thousand calls, and the margin
+    let charge = 52_500;
+    let charged = Outcome::Metered(Metered { charged: charge, rows_new: 1, rows_before: 0, refused: vec![] });
+    assert_eq!(w.replays(charge_call.clone()), charged);
+    let mut w = w.restarted();
+    assert!(serde_json::to_value(&w.ledger).unwrap().get("book").is_none(), "the head keeps no book");
+    w.replays(Op::Book(configured.clone()));
+    assert_eq!(w.ok(charge_call.clone()), charged, "a batch sent again answers as it did");
+    let mut w = w.restarted();
+    let (ledger, store) = (w.ledger.clone(), w.store.clone());
+    w.ok(Op::Book(configured.clone()));
+    assert_eq!((&w.ledger, &w.store), (&ledger, &store), "the same configuration again changes nothing");
+    let again = w.ok(meter("key:1-again", vec![row("key:1", call, None, T0)]));
+    assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 1, refused: vec![] }), "and the row in another batch is charged once");
 }
 
-// Settles
-
-#[test]
-fn a_settle_charges_what_was_used_once() {
-    let mut w = World::seat();
-    w.ok(reserve("r1"));
-    // 10,000 Flash tokens in and 1,000 out list at $0.002: $0.00315 charged
-    assert_eq!(w.replays(settle("r1", Some(flash(10_000, 1_000)))), settled(3_150, Basis::Usage));
-    let s = w.status();
-    assert_eq!((s.balance_micros, s.reserved_micros), (50 * USD - 3_150, 0));
-    let Some(Entry::Reservation { end: Some(End::Settled { priced, .. }), .. }) = w.store.entry("r1") else { panic!("r1 settled") };
-    assert_eq!(priced, Some(Priced { list: 2_000, cost: 2_100, charge: 3_150 }), "the list price is kept, for the gateway's log");
-    w.refused(settle("r1", Some(flash(10_000, 1_001))), Refused::ConflictingBody);
-    w.refused(settle("r1", None), Refused::ConflictingBody);
-}
-
-/// A settle larger than its reservation is still recorded: it happened.
-#[test]
-fn a_settle_past_its_reservation_is_charged_in_full() {
-    let mut w = World::seat();
-    assert_eq!(w.ok(Op::Reserve(reservation("r1", flash(1_000, 0)))), held(237));
-    assert_eq!(w.ok(settle("r1", Some(flash(100_000, 10_000)))), settled(31_500, Basis::Usage));
-    assert_eq!(w.balance(), 50 * USD - 31_500);
-}
-
-/// A call that reported nothing, or a usage the book cannot price, is
-/// charged its worst case: the money path fails closed.
-#[test]
-fn a_settle_without_a_priced_usage_is_charged_its_reservation() {
-    let mut w = World::seat();
-    w.ok(reserve("r1"));
-    assert_eq!(w.ok(settle("r1", None)), settled(TURN, Basis::Reservation));
-    w.ok(reserve("r2"));
-    let unknown = Usage::Tokens { model: "@cf/other".into(), input: 1, cached_input: 0, cache_write: 0, output: 1 };
-    assert_eq!(w.ok(settle("r2", Some(unknown))), settled(TURN, Basis::Reservation));
-    assert_eq!(w.balance(), 50 * USD - 2 * TURN);
-}
-
-#[test]
-fn every_refusal_of_a_settle() {
-    let mut w = World::seat();
-    w.refused(settle("nothing", None), Refused::UnknownRef);
-    w.refused(settle("", None), Refused::Invalid { what: Invalid::Id });
-    w.ok(reserve("r1"));
-    w.refused(settle("r1", Some(flash(0, price::QUANTITY_MAX + 1))), Refused::Invalid { what: Invalid::Usage(UsageFault::Quantity) });
-    let absurd = Usage::Tokens { model: "anthropic/claude-opus-5.5".into(), input: 0, cached_input: 0, cache_write: 0, output: price::QUANTITY_MAX };
-    w.refused(settle("r1", Some(absurd)), Refused::TooLarge);
-    w.ok(release("r1"));
-    w.refused(settle("r1", None), Refused::Ended);
-    w.ok(meter("b1", vec![row("row:1", Usage::Requests { count: 1 }, None, T0)]));
-    w.refused(settle("row:1", None), Refused::ConflictingBody);
-}
-
-// Releases
-
-/// Bug 3: a step that fails for good gives its reservation back.
-#[test]
-fn a_final_failure_releases_its_reservation() {
-    let mut w = World::seat();
-    w.ok(reserve("r1"));
-    assert_eq!(w.status().available_micros, 50 * USD - TURN);
-    assert_eq!(w.replays(release("r1")), Outcome::Released(Released::Back));
-    let s = w.status();
-    assert_eq!((s.available_micros, s.reserved_micros, s.balance_micros), (50 * USD, 0, 50 * USD));
-    w.ok(reserve("r2"));
-    w.ok(settle("r2", None));
-    assert_eq!(w.replays(release("r2")), Outcome::Released(Released::Settled { charge: TURN }), "its charge stands");
-    w.refused(release("nothing"), Refused::UnknownRef);
-    w.refused(release("a b"), Refused::Invalid { what: Invalid::Id });
-    w.ok(meter("b1", vec![row("row:1", Usage::Requests { count: 1 }, None, T0)]));
-    w.refused(release("row:1"), Refused::ConflictingBody);
-}
-
-/// Bug 2: a step whose storage failed after its paid call retries under
-/// the same reference, learns the call was paid, and never pays again.
+/// Bug 2: a step's charge is its row under the step's key, whatever
+/// attempt made the call (decision 62): a retry or a replay that sends it
+/// again, in a batch of its own, is charged nothing more.
 #[test]
 fn a_retried_step_after_a_storage_failure_never_pays_twice() {
     let mut w = World::seat();
     let step = "step:avatar-lab.paul@1/run/7/step/2";
-    assert_eq!(w.ok(reserve(step)), held(TURN));
-    assert_eq!(w.ok(settle(step, Some(flash(10_000, 1_000)))), settled(3_150, Basis::Usage));
-    // storing the image failed; the job retries the step
-    assert_eq!(w.ok(reserve(step)), Outcome::Reserved(Reserved::Settled { charge: 3_150 }), "do not call the model again");
-    assert_eq!(w.ok(settle(step, Some(flash(10_000, 1_000)))), settled(3_150, Basis::Usage));
+    assert_eq!(w.charged(step, flash(10_000, 1_000)), 3_150);
+    // storing the image failed; the job retries the step, which finds what it kept
+    let again = w.ok(meter("frag:avatar-lab.paul@1:2", vec![row(step, flash(10_000, 1_000), None, T0)]));
+    assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 1, refused: vec![] }));
     assert_eq!(w.ledger.totals().charged, 3_150, "one paid call, metered once");
 }
 
@@ -787,7 +668,8 @@ fn every_refusal_of_a_batch() {
 #[test]
 fn every_refusal_of_a_row() {
     let mut w = World::seat();
-    w.ok(reserve("r1"));
+    // a reservation the releases before decision 62 kept
+    w.store.put_entry("r1", serde_json::from_value(old_reservation("r1", T0)).expect("a record from before reads"));
     w.now = T0 + REF_KEEP_MS + DAY_MS;
     let now = w.now;
     let req = || Usage::Requests { count: 1 };
@@ -826,9 +708,8 @@ fn every_refusal_of_a_row() {
     assert_eq!((m.rows_new, m.rows_before, m.charged), (2, 1, 2), "row:8 once, its twin as before, and row:9");
     // once the book prices it, the refused row comes again
     let mut priced = book();
-    priced.version = 2;
     priced.instances.push(price::InstancePrice { instance: "8vcpu".into(), hour: 3_600_000 });
-    w.ok(Op::Book(SetPriceBook { id: "book:2".into(), book: priced }));
+    w.ok(Op::Book(priced));
     let again = w.ok(meter("b2", vec![row("row:6", Usage::Awake { instance: "8vcpu".into(), ms: 1 }, None, now)]));
     assert_eq!(again, Outcome::Metered(Metered { charged: 2, rows_new: 1, rows_before: 0, refused: vec![] }));
 }
@@ -852,40 +733,19 @@ fn an_always_on_seats_awake_time_is_not_charged() {
 // Sweeps
 
 #[test]
-fn a_sweep_expires_holds_at_their_worst_case() {
-    let mut w = World::seat();
-    w.ok(reserve_in("r1", "todo.ann", false));
-    w.now = T0 + HOLD_MAX_MS - 1;
-    assert_eq!(w.ok(Op::Sweep), Outcome::Swept(Swept { expired: vec![], forgotten: 0 }));
-    w.now = T0 + HOLD_MAX_MS;
-    let expired = vec![Expired { reference: "r1".into(), charge: TURN }];
-    assert_eq!(w.ok(Op::Sweep), Outcome::Swept(Swept { expired, forgotten: 0 }));
-    assert_eq!((w.balance(), w.status().reserved_micros), (50 * USD - TURN, 0));
-    assert_eq!(w.store.spent(Month::of(T0), "todo.ann"), TURN);
-    // a sweep again at the same time does nothing
-    assert_eq!(w.replays(Op::Sweep), Outcome::Swept(Swept { expired: vec![], forgotten: 0 }));
-    // its caller, come back: the expired settlement stands
-    assert_eq!(w.ok(settle("r1", Some(flash(1, 1)))), settled(TURN, Basis::Expired));
-    assert_eq!(w.ok(release("r1")), Outcome::Released(Released::Settled { charge: TURN }));
-    assert_eq!(w.ledger.next_sweep_ms(w.now), w.now + SWEEP_EVERY_MS);
-}
-
-#[test]
 fn a_sweep_forgets_what_is_past_the_ledgers_memory() {
     let mut w = World::seat();
-    w.ok(reserve("r1"));
-    w.ok(settle("r1", None));
     w.ok(meter("b1", vec![row("row:1", Usage::Requests { count: 1 }, Some("todo.ann"), T0)]));
     w.now = T0 + REF_KEEP_MS;
-    assert_eq!(w.ok(Op::Sweep), Outcome::Swept(Swept { expired: vec![], forgotten: 0 }), "kept for REF_KEEP_MS");
+    assert_eq!(w.ok(Op::Sweep), Outcome::Swept(Swept { forgotten: 0 }), "kept for REF_KEEP_MS");
+    assert_eq!(w.ledger.next_sweep_ms(w.now), w.now + SWEEP_EVERY_MS, "a sweep a day");
     w.now += 1;
-    assert_eq!(w.ok(Op::Sweep), Outcome::Swept(Swept { expired: vec![], forgotten: 3 }), "two references and a batch");
+    assert_eq!(w.ok(Op::Sweep), Outcome::Swept(Swept { forgotten: 2 }), "a reference and a batch");
     assert_eq!(w.store.spent(Month::of(T0), "todo.ann"), 1, "October's spend is kept while part of October is remembered");
-    w.refused(settle("r1", None), Refused::UnknownRef);
     // a row from then, sent again, is refused as stale: it is never charged twice
     let Outcome::Metered(m) = w.ok(meter("b1", vec![row("row:1", Usage::Requests { count: 1 }, Some("todo.ann"), T0)])) else { panic!() };
     assert_eq!(m.refused, [RowRefused { index: 0, why: Refused::Stale }]);
-    assert_eq!(w.ledger.totals().charged, TURN + 1);
+    assert_eq!(w.ledger.totals().charged, 1);
     w.now = NOVEMBER + REF_KEEP_MS;
     w.ok(Op::Sweep);
     assert_eq!(w.store.spent(Month::of(T0), "todo.ann"), 0, "and forgotten once all of October is");
@@ -898,7 +758,7 @@ fn a_read_sees_its_own_month_and_changes_nothing() {
     let mut w = World::seat();
     w.spend("b1", 10 * USD);
     let ledger = w.ledger.clone();
-    let s = w.ledger.status(&w.store, NOVEMBER);
+    let s = w.ledger.status(&w.store, NOVEMBER, &w.book);
     assert_eq!((s.month.as_str(), s.included_micros, s.balance_micros), ("2026-11", 50 * USD, 50 * USD));
     assert_eq!(w.ledger.standing(NOVEMBER), Standing::Ok);
     assert_eq!(w.ledger, ledger, "a read rolls a copy, never the ledger");
@@ -918,18 +778,15 @@ fn every_mutation_answers_the_same_after_a_restart() {
         (0, seat("s1", SeatState::PastDue, 1)),
         (0, overdraft("o1", USD)),
         (0, cap("c1", "todo.ann", Some(USD))),
-        (0, set_book("book:2", 2, 4_000)),
-        (60_000, reserve_in("r1", "todo.ann", true)),
-        (60_000, reserve("r2")),
-        (120_000, settle("r1", Some(flash(50_000, 2_000)))),
-        (120_000, release("r2")),
+        (0, set_book(4_000)),
+        (60_000, meter("aig:1", vec![row("aig:1", flash(50_000, 2_000), Some("todo.ann"), T0 + 60_000)])),
+        (120_000, meter("aig:2", vec![row("aig:2", turn(), None, T0 + 120_000)])),
         (180_000, meter("b1", vec![row("row:1", Usage::Requests { count: 10_000 }, Some("todo.ann"), T0)])),
         (180_000, grant("g1", 5 * USD)),
         (180_000, meter("b1", vec![row("row:1", Usage::Requests { count: 10_000 }, Some("todo.ann"), T0)])),
-        (240_000, reserve("r3")),
+        (240_000, meter("aig:2", vec![row("aig:2", turn(), None, T0 + 120_000)])),
         (31 * DAY_MS, seat("s2", SeatState::Active, 2)),
         (31 * DAY_MS, Op::Sweep),
-        (31 * DAY_MS, settle("r3", None)),
         (31 * DAY_MS + 1, plan("p2", Plan::SeatAlwaysOn)),
         (31 * DAY_MS + 2, meter("b2", vec![row("awake:1", Usage::Awake { instance: "2vcpu-6gib".into(), ms: 60_000 }, None, T0 + 31 * DAY_MS)])),
     ];
@@ -957,9 +814,6 @@ fn every_mutation_answers_the_same_after_a_restart() {
 
 #[test]
 fn money_refusals_are_402_with_a_reason_people_can_read() {
-    let short = Refused::CreditShort { available: 1_000, needed: TURN };
-    assert_eq!(short.code(), ErrorCode::BudgetUsedUp);
-    assert_eq!(short.message(), "not enough credit: this needs up to $0.0063, and $0.001 is available");
     let capped = Refused::CapReached { cap: CAP_DEFAULT, spent: CAP_DEFAULT };
     assert_eq!(capped.message(), "this fragment spent $5.00 of its $5.00 cap this month: only its owner spends in it until next month");
     for r in [Refused::AgentsStopped { why: Why::NoCredit }, Refused::ReadOnly { why: Why::Overdrawn }, capped] {
@@ -967,7 +821,6 @@ fn money_refusals_are_402_with_a_reason_people_can_read() {
     }
     assert!(Refused::AgentsStopped { why: Why::NoCredit }.message().contains("credit is used up"));
     assert_eq!(Refused::ConflictingBody.code(), ErrorCode::ConflictingBody);
-    assert_eq!(Refused::UnknownRef.code(), ErrorCode::NotFound);
     assert_eq!(Refused::GuestPayer.code(), ErrorCode::Forbidden);
     assert_eq!(Refused::GuestCreates.code(), ErrorCode::Forbidden);
     assert_eq!(serde_json::to_value(Refused::GuestCreates).unwrap(), serde_json::json!({ "refused": "guest_creates" }));
@@ -975,10 +828,9 @@ fn money_refusals_are_402_with_a_reason_people_can_read() {
     assert_eq!(Refused::Wiped.code(), ErrorCode::NotFound);
     assert_eq!(serde_json::to_value(Refused::Wiped).unwrap(), serde_json::json!({ "refused": "wiped" }));
     assert!(Refused::Wiped.message().contains("wiped"));
-    assert_eq!(Refused::TooManyHolds.code(), ErrorCode::RateLimited);
     assert_eq!(Refused::TooLarge.code(), ErrorCode::TooLarge);
     assert_eq!(Refused::Invalid { what: Invalid::Rows }.code(), ErrorCode::InvalidRequest);
-    assert_eq!(serde_json::to_value(short).unwrap(), serde_json::json!({ "refused": "credit_short", "available": 1_000, "needed": TURN }));
+    assert_eq!(serde_json::to_value(capped).unwrap(), serde_json::json!({ "refused": "cap_reached", "cap": CAP_DEFAULT, "spent": CAP_DEFAULT }));
     assert_eq!(
         serde_json::to_value(Refused::Invalid { what: Invalid::Usage(UsageFault::Name) }).unwrap(),
         serde_json::json!({ "refused": "invalid", "what": { "usage": "name" } })
@@ -989,11 +841,246 @@ fn money_refusals_are_402_with_a_reason_people_can_read() {
 /// not name.
 #[test]
 fn route_bodies_refuse_unknown_fields() {
-    let body = serde_json::json!({ "ref": "r1", "spend": "agent_turn", "worst": { "kind": "requests", "count": 1 }, "fragment": null, "agent": null, "capped": false });
-    let r: Reserve = serde_json::from_value(body.clone()).unwrap();
-    assert_eq!(r.reference, "r1");
+    let row = serde_json::json!({ "ref": "aig:1", "usage": { "kind": "requests", "count": 1 }, "fragment": null, "agent": null, "computer": null, "at_ms": T0 });
+    let body = serde_json::json!({ "batch": "aig:1", "rows": [row] });
+    let m: Meter = serde_json::from_value(body.clone()).unwrap();
+    assert_eq!(m.rows[0].reference, "aig:1");
     let mut extra = body;
-    extra["amount"] = serde_json::json!(5);
-    assert!(serde_json::from_value::<Reserve>(extra).is_err());
-    assert!(serde_json::from_value::<Settle>(serde_json::json!({ "ref": "r1", "usage": null, "cost": 3 })).is_err());
+    extra["rows"][0]["amount"] = serde_json::json!(5);
+    assert!(serde_json::from_value::<Meter>(extra).is_err());
+    assert!(serde_json::from_value::<Meter>(serde_json::json!({ "batch": "b", "rows": [], "cost": 3 })).is_err());
+}
+
+// What the releases before decision 62 kept
+
+/// A reservation's entry as those releases wrote it (settled, here).
+fn old_reservation(reference: &str, at_ms: i64) -> serde_json::Value {
+    serde_json::json!({
+        "entry": "reservation",
+        "reserve": { "ref": reference, "spend": "agent_turn", "worst": { "kind": "requests", "count": 1 }, "fragment": "todo.ann", "agent": null, "capped": false },
+        "amount": TURN,
+        "at_ms": at_ms,
+        "end": { "end": "settled", "usage": null, "priced": null, "charge": TURN, "basis": "reservation" }
+    })
+}
+
+/// Goal: a head those releases kept, holding reservations, loads; its
+/// holds are retired, never charged (what they held was never drawn), and
+/// its balance and every other part are as they were; it is written back
+/// without them. Valid, replayed (read and retired twice: the same), and
+/// restarted. Method: a head written now, the holds of the old shape put
+/// back into its JSON (their entries are the next test's).
+#[test]
+fn a_head_kept_with_holds_loads_without_them_and_charges_nothing() {
+    let mut w = World::seat();
+    w.spend_in("b1", 3 * USD, Some("todo.ann"));
+    let mut old = serde_json::to_value(&w.ledger).unwrap();
+    old["holds"] = serde_json::json!({
+        "aig:held": { "amount": TURN, "fragment": "todo.ann", "at_ms": T0 },
+        "step:x@1/run/1/attempt/1/step/0": { "amount": 25 * USD, "fragment": null, "at_ms": T0 - 7 * 3_600_000 }
+    });
+    let mut loaded: Ledger = serde_json::from_value(old.clone()).expect("a head with holds loads");
+    assert_eq!(loaded.retire_holds(&mut w.store), 2, "both retired");
+    loaded.assert_valid();
+    assert_eq!(loaded, w.ledger, "the holds are gone; nothing else moves");
+    let mut again: Ledger = serde_json::from_value(old).unwrap();
+    again.retire_holds(&mut w.store);
+    assert_eq!(again, loaded, "read and retired again, the same");
+    assert_eq!(loaded.clone().retire_holds(&mut w.store), 0, "a head with none retires nothing");
+    let s = loaded.status(&w.store, T0, &w.book);
+    assert_eq!((s.balance_micros, s.reserved_micros, s.available_micros), (47 * USD, 0, 47 * USD + OVERDRAFT_DEFAULT), "nothing held, nothing charged");
+    assert_eq!(loaded.fragment_open(&w.store, "todo.ann", T0), Ok(()), "a hold no more counts toward a cap: $3 of $5");
+    w.ledger = loaded;
+    let mut w = w.restarted();
+    w.now += 7 * 3_600_000;
+    assert_eq!(w.ok(Op::Sweep), Outcome::Swept(Swept { forgotten: 0 }));
+    assert_eq!((w.balance(), w.ledger.totals().charged), (47 * USD, 3 * USD), "no sweep charges a hold that was");
+    let written = serde_json::to_value(&w.ledger).unwrap();
+    assert_eq!(written["holds"], serde_json::json!({}), "written back without them: {written}");
+}
+
+/// The head as the release before decision 62 read it: every field
+/// required, `holds` a map (its `Ledger`; what a hold holds is no matter
+/// here, as this release writes none).
+#[derive(Debug, serde::Deserialize)]
+struct HeadBefore {
+    money: Money,
+    book: PriceBook,
+    holds: BTreeMap<String, serde::de::IgnoredAny>,
+}
+
+/// Goal: a rollback to a release before decision 62 reads every head this
+/// one writes: old → new → old, a head with holds and a book, one without,
+/// a new person's, and one restarted. Method: the head shape of the
+/// release before the holds went (`HeadBefore`: a book and holds, both
+/// required; the release before the book went requires the book alone)
+/// reads what this one wrote (`written`), its money as it was, the book
+/// the release's own, and no holds.
+#[test]
+fn a_head_written_here_reads_in_the_release_before() {
+    let mut w = World::seat();
+    w.spend_in("b1", 3 * USD, Some("todo.ann"));
+    let mut old = serde_json::to_value(&w.ledger).unwrap();
+    old["holds"] = serde_json::json!({ "aig:held": { "amount": TURN, "fragment": "todo.ann", "at_ms": T0 } });
+    old["book"] = serde_json::to_value(PriceBook { margin_bp: 10_000, ..book() }).unwrap();
+    let before: HeadBefore = serde_json::from_value(old.clone()).expect("the old shape, as the release before wrote it");
+    assert_eq!(before.holds.len(), 1);
+    let fresh = World::guest().ledger;
+    let mut retired = serde_json::from_value::<Ledger>(old).unwrap();
+    retired.retire_holds(&mut w.store);
+    for (what, head) in [("with holds and a book", retired), ("without", w.ledger.clone()), ("a new person's", fresh)] {
+        let written = head.written(&w.book);
+        let back: HeadBefore = serde_json::from_str(&written).unwrap_or_else(|e| panic!("{what}: the release before reads it: {e}"));
+        assert_eq!((back.money, &back.book, back.holds.len()), (head.money, &w.book, 0), "{what}");
+        let again: Ledger = serde_json::from_str(&written).unwrap();
+        assert_eq!(again, head, "{what}: and this one reads it back the same");
+    }
+    let w = w.restarted();
+    let back: HeadBefore = serde_json::from_str(&w.ledger.written(&w.book)).expect("restarted, the same");
+    assert_eq!(back.money, w.ledger.money);
+}
+
+/// Goal: a head those releases kept names the book it charged with: it
+/// loads, the book let go, and its next batch is priced with the
+/// configured book of the release applying it, not that one. Method: a
+/// head written now, a dearer book of the old shape put back into it.
+#[test]
+fn a_head_kept_with_its_book_loads_and_charges_with_the_configured_one() {
+    let mut w = World::seat();
+    let mut old = serde_json::to_value(&w.ledger).unwrap();
+    old["book"] = serde_json::to_value(PriceBook { margin_bp: 10_000, version: 7, ..book() }).unwrap();
+    let loaded: Ledger = serde_json::from_value(old).expect("a head with its book loads");
+    assert_eq!(loaded, w.ledger, "the book is let go; nothing else moves");
+    w.ledger = loaded;
+    let mut w = w.restarted();
+    assert_eq!(w.charged("aig:1", turn()), TURN, "priced with the configured book (a 50% margin), not the head's (100%)");
+    assert_eq!(w.status().price_book, 1, "and the status names the configured one");
+}
+
+/// Goal: an entry those releases kept (a reservation, held, settled or
+/// released) reads as one from before, kept as it was written: never
+/// charged again, a row under its reference another body, forgotten by
+/// its own time as any is. Valid and invalid shapes. Method: each as it
+/// was written.
+#[test]
+fn an_old_reservation_entry_reads_as_one_from_before() {
+    let settled = old_reservation("aig:old", T0);
+    let mut held = settled.clone();
+    held["end"] = serde_json::Value::Null;
+    let mut released = settled.clone();
+    released["end"] = serde_json::json!({ "end": "released" });
+    for old in [settled.clone(), held.clone(), released] {
+        let read = serde_json::from_value::<Entry>(old.clone()).unwrap();
+        assert_eq!(read, Entry::Before(old.clone()), "{old}");
+        assert_eq!((read.charge(), read.at_ms(), read.held_before()), (None, T0, old["end"].is_null()));
+        assert_eq!(serde_json::to_value(&read).unwrap(), old, "written back as it was");
+    }
+    assert!(serde_json::from_value::<Entry>(serde_json::json!({ "row": {} })).is_err(), "an entry names its kind");
+    let mut timeless = held;
+    timeless.as_object_mut().unwrap().remove("at_ms");
+    assert!(serde_json::from_value::<Entry>(timeless).is_err(), "a reservation from before has its time");
+    let mut w = World::seat();
+    w.store.put_entry("aig:old", Entry::Before(settled));
+    let Outcome::Metered(m) = w.ok(meter("b1", vec![row("aig:old", turn(), None, T0)])) else { panic!() };
+    assert_eq!((m.charged, m.refused.clone()), (0, vec![RowRefused { index: 0, why: Refused::ConflictingBody }]));
+    w.now = T0 + REF_KEEP_MS;
+    w.ok(Op::Sweep);
+    assert!(w.store.entry("aig:old").is_some(), "kept for its time: a replay stays refused");
+    w.now += 1;
+    w.ok(Op::Sweep);
+    assert_eq!(w.store.entry("aig:old"), None, "forgotten as any is");
+}
+
+/// An entry as the releases before decision 62 read it (their `Entry`
+/// and `End`, every field required), and their sweep's guard: no
+/// reservation still held may be forgotten (`Memory::prune`'s assert, and
+/// the SQL store's refusal of a held entry older than the horizon).
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "entry", rename_all = "snake_case")]
+enum EntryBefore {
+    Reservation {
+        #[serde(rename = "reserve")]
+        _reserve: serde_json::Value,
+        amount: i64,
+        at_ms: i64,
+        end: Option<EndBefore>,
+    },
+    // its fields are read to prove the shape, not looked at
+    Row {
+        #[serde(rename = "row")]
+        _row: MeterRow,
+        #[serde(rename = "priced")]
+        _priced: Priced,
+        #[serde(rename = "charge")]
+        _charge: i64,
+        #[serde(rename = "book")]
+        _book: u32,
+    },
+}
+
+#[derive(Debug, PartialEq, serde::Deserialize)]
+#[serde(tag = "end", rename_all = "snake_case")]
+enum EndBefore {
+    Settled { usage: Option<Usage>, priced: Option<Priced>, charge: i64, basis: String },
+    Released,
+}
+
+/// Every entry of `store`, read as the release before reads it.
+fn entries_before(store: &Memory) -> BTreeMap<String, EntryBefore> {
+    let all = serde_json::to_value(store).unwrap()["entries"].clone();
+    serde_json::from_value(all).expect("every entry reads in the release before")
+}
+
+/// Review (#474, Alex): holds forgiven in the head left their entries
+/// held, and a release rolled back to before decision 62 found them: once
+/// one passed 90 days its sweep's guard failed, every minute. Goal: a
+/// rollback finds no hold and no held entry. Method: old → new → old. A
+/// head of the release before holding one reservation, beside a settled
+/// and a released one; read here (`retire_holds`, as the Durable Object
+/// does in the transaction that writes the head back), restarted; then
+/// read as the release before reads it, its head and every entry, and its
+/// sweep's guard at 90 days and a millisecond.
+#[test]
+fn a_rollback_finds_no_hold_and_no_held_entry() {
+    let mut w = World::seat();
+    w.spend_in("b1", 3 * USD, Some("todo.ann"));
+    let mut head = serde_json::to_value(&w.ledger).unwrap();
+    head["holds"] = serde_json::json!({ "aig:held": { "amount": TURN, "fragment": "todo.ann", "at_ms": T0 } });
+    let settled = old_reservation("aig:settled", T0);
+    let mut held = old_reservation("aig:held", T0);
+    held["end"] = serde_json::Value::Null;
+    let mut released = old_reservation("aig:released", T0);
+    released["end"] = serde_json::json!({ "end": "released" });
+    for (reference, entry) in [("aig:settled", &settled), ("aig:held", &held), ("aig:released", &released)] {
+        w.store.put_entry(reference, serde_json::from_value(entry.clone()).unwrap());
+    }
+    let held_before = |store: &Memory| entries_before(store).into_iter().filter(|(_, e)| matches!(e, EntryBefore::Reservation { end: None, .. })).count();
+    assert_eq!(held_before(&w.store), 1, "the release before's state: one held");
+
+    // this release reads it
+    let mut ledger: Ledger = serde_json::from_value(head).unwrap();
+    assert_eq!(ledger.retire_holds(&mut w.store), 1);
+    ledger.assert_valid();
+    w.ledger = ledger;
+    let mut w = w.restarted();
+    assert_eq!((w.balance(), w.ledger.totals().charged), (47 * USD, 3 * USD), "forgiven: nothing charged");
+    let mut ended = held.clone();
+    ended["end"] = serde_json::json!({ "end": "released" });
+    assert_eq!(w.store.entry("aig:held"), Some(Entry::Before(ended)), "ended as released, its time as it was");
+    assert_eq!((w.store.entry("aig:settled"), w.store.entry("aig:released")), (Some(Entry::Before(settled)), Some(Entry::Before(released))), "the others as they were");
+    let Outcome::Metered(m) = w.ok(meter("b2", vec![row("aig:held", turn(), None, T0)])) else { panic!() };
+    assert_eq!(m.refused, [RowRefused { index: 0, why: Refused::ConflictingBody }], "a replay of it stays refused");
+
+    // rolled back: the release before reads the head and every entry
+    let back: HeadBefore = serde_json::from_str(&w.ledger.written(&w.book)).unwrap();
+    assert_eq!((back.holds.len(), back.money), (0, w.ledger.money));
+    assert_eq!(held_before(&w.store), 0, "no held entry for its sweep to find");
+    let ended_before = entries_before(&w.store);
+    assert!(matches!(&ended_before["aig:held"], EntryBefore::Reservation { end: Some(EndBefore::Released), amount, at_ms, .. } if *amount == TURN && *at_ms == T0));
+    // its sweep at 90 days and a millisecond: its guard holds (nothing held
+    // is forgotten), and the entries go by their time, as this one's do
+    w.now = T0 + REF_KEEP_MS + 1;
+    let Outcome::Swept(swept) = w.ok(Op::Sweep) else { panic!() };
+    assert_eq!(swept.forgotten, 6, "three reservations, the row and its batch, and the replay's batch");
+    assert!(entries_before(&w.store).is_empty());
 }

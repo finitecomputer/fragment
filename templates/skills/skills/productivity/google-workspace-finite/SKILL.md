@@ -1,19 +1,19 @@
 ---
 name: google-workspace-finite
-description: Gmail, Calendar, Drive, Contacts, Sheets, and Docs through the person's connected Google account, with `gws` (Google's Workspace CLI, in your computer's image) or the bundled helper. No OAuth setup, no keys on the computer.
-version: 2.2.0
+description: Gmail, Calendar, Drive, Contacts, Sheets, Docs, and Slides through the person's connected Google account, with `gws` (Google's Workspace CLI, in your computer's image) or the bundled helper. No OAuth setup, no keys on the computer.
+version: 2.4.2
 author: Nous Research (rewritten for fragment)
 license: MIT
 metadata:
   hermes:
-    tags: [Google, Gmail, Calendar, Drive, Sheets, Docs, Contacts, Email]
+    tags: [Google, Gmail, Calendar, Drive, Sheets, Docs, Slides, Contacts, Email]
     homepage: https://github.com/NousResearch/hermes-agent
 ---
 
 # Google Workspace
 
-Gmail, Calendar, Drive, Contacts, Sheets, and Docs through your owner's
-connected Google account. Your computer holds no Google credential:
+Gmail, Calendar, Drive, Contacts, Sheets, Docs, and Slides through your
+owner's connected Google account. Your computer holds no Google credential:
 `GOOGLE_OAUTH_ACCESS_TOKEN` holds the connection's placeholder (it names
 you), it goes as a bearer token to Google's own hosts, and the computer
 swaps in a short-lived token for your owner's account. There is no OAuth
@@ -32,6 +32,14 @@ Hermes' standalone `google-workspace` skill is omitted from this image:
 its OAuth setup and token-file helpers are for a different authentication
 contract. Use this skill and `gws` here.
 
+For Google Docs tasks, load `skill_view("gws-docs")` if not already loaded
+for Docs command and schema discovery. This skill owns the connection
+and authentication.
+
+For Google Slides tasks, load `skill_view("gws-slides")` if not already
+loaded for Slides command and schema discovery. This skill owns the
+connection and authentication.
+
 ## Connected?
 
 ```bash
@@ -45,16 +53,33 @@ $GAPI check
   has no credentials, exit 2). Ask them to connect it in the shell's
   Settings, under Connections, then check again: your computer is given it
   within seconds.
-- `forbidden`: your owner narrowed your connections and left Google out, or
-  Google refused the scope. Say which, and stop.
+- `forbidden`: your owner narrowed your connections and left Google out. Say
+  so, and stop.
 
 The deployment's Google connection (`google`) is swapped for the hosts
 `gmail.googleapis.com`, `www.googleapis.com` (Drive, Calendar),
-`people.googleapis.com`, `sheets.googleapis.com` and `docs.googleapis.com`
-only. An API on any other host (Tasks, Chat, Slides, Forms, Apps Script,
-and the `gws workflow` helpers that use them) gets the placeholder itself,
-which Google refuses (401): do not use those. The scopes the connection
-grants are in `references/google-workspace-scopes.json`.
+`people.googleapis.com`, `sheets.googleapis.com`, `docs.googleapis.com` and
+`slides.googleapis.com` only. An API on any other host (Tasks, Chat, Forms,
+Apps Script, and the `gws workflow` helpers that use them) gets the
+placeholder itself, which Google refuses (401): do not use those. The
+scopes the connection asks for are in
+`references/google-workspace-scopes.json`.
+
+## Not allowed
+
+Your owner may have allowed only part of Google when they connected it:
+Google's consent screen lets them untick Gmail, Drive, Sheets and the rest
+one by one, and the connection holds what they left ticked. A call outside
+it is refused by Google with a 403: the helper's `insufficient_scope`, or,
+from `gws` or `curl`, `insufficient authentication scopes`,
+`ACCESS_TOKEN_SCOPE_INSUFFICIENT` or `insufficientPermissions`. Tell your
+owner, in plain words, that they didn't allow that part of Google (say
+which: Gmail, Drive, Sheets, Docs, Calendar or Contacts) when connecting
+it, and that they can add it in Settings → Connections → Reconnect to add.
+The connection asks for no Slides permission of its own (Google allows
+Slides with Drive's), so a Slides call refused this way is Drive left
+unticked: say Drive. Do not retry the call until they say they have; go on
+with what they did allow.
 
 ## gws
 
@@ -72,6 +97,9 @@ gws sheets +read --spreadsheet SHEET_ID --range 'Sheet1!A1:D10'
 gws sheets spreadsheets values append --params '{"spreadsheetId": "SHEET_ID", "range": "Sheet1!A1", "valueInputOption": "USER_ENTERED"}' --json '{"values": [["Name", "Score"], ["Alice", 95]]}'
 gws docs documents get --params '{"documentId": "DOC_ID"}'
 gws docs +write --document DOC_ID --text "A line to append"
+gws slides presentations get --params '{"presentationId": "DECK_ID"}'
+gws slides presentations create --json '{"title": "Q4 review"}'
+gws slides presentations batchUpdate --params '{"presentationId": "DECK_ID"}' --json '{"requests": [{"createSlide": {"slideLayoutReference": {"predefinedLayout": "TITLE_AND_BODY"}}}]}'
 gws people people connections list --params '{"resourceName": "people/me", "personFields": "names,emailAddresses", "pageSize": 20}'
 ```
 
@@ -86,10 +114,12 @@ gws people people connections list --params '{"resourceName": "people/me", "pers
 ## References
 
 - `references/gmail-search-syntax.md`: Gmail search operators (is:unread, from:, newer_than:, etc.)
-- `references/google-workspace-scopes.json`: the scopes the connection grants
+- `references/google-workspace-scopes.json`: the scopes the connection asks for
 
-The helper reads Docs only; `gws docs +write` appends to one. Neither uses
-Apps Script.
+The helper reads Docs and Slides only; `gws docs +write` appends to a doc,
+and `gws slides presentations batchUpdate` edits a deck (`gws schema
+slides.presentations.batchUpdate` shows its requests). Neither uses Apps
+Script.
 
 ## Login emails
 
@@ -175,6 +205,13 @@ $GAPI sheets append SHEET_ID "Sheet1!A:C" --values '[["new","row","data"]]'
 $GAPI docs get DOC_ID
 ```
 
+### Slides
+
+```bash
+# Each slide's text and speaker notes
+$GAPI slides get DECK_ID
+```
+
 ### Anything else
 
 Any other Google REST call, or Google's own client libraries given the
@@ -198,6 +235,7 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 - **Drive search**: `[{id, name, mimeType, modifiedTime, webViewLink}]`
 - **Contacts list**: `[{name, emails: [...], phones: [...]}]`
 - **Sheets get**: `[[cell, cell, ...], ...]`
+- **Slides get**: `{title, presentationId, slides: [{objectId, text, notes}]}`
 
 A helper's failure is one JSON line on stderr, `{error, status, message,
 hint}`, and exit 1. `gws` answers Google's JSON, and its errors on stderr.
@@ -218,5 +256,6 @@ hint}`, and exit 1. `gws` answers Google's JSON, and its errors on stderr.
 |---------|-----|
 | `not_connected`, or `gws` exits 2 | Your owner connects Google in Settings → Connections |
 | `401` from a Google API | That API's host is not one the connection is swapped for: it is not offered |
-| `forbidden` | Your owner left Google off this agent's connections, or the scope is missing |
-| `HttpError 403: Access Not Configured` | That API is not enabled for the deployment's Google client: tell the person, and stop |
+| `forbidden` | Your owner left Google off this agent's connections |
+| `insufficient_scope`, or a 403 `insufficient authentication scopes` | Your owner didn't allow that part of Google when connecting it: they add it in Settings → Connections → Reconnect to add (above, "Not allowed") |
+| A 403 `SERVICE_DISABLED` ("… has not been used in project … or it is disabled"), or `Access Not Configured` | That API is not enabled for the deployment's Google client: tell the person, and stop |

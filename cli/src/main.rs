@@ -56,16 +56,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Make a nostr key (or use the one you have) and add it to you: sign
-    /// in on the host in a browser and approve it there (--force makes a
-    /// new key)
+    /// Make a nostr key (or use the one you have) and add it to you: it
+    /// prints a code, which you type at the host's /cli page, signed in, in
+    /// a browser (--force makes a new key)
     Login {
         #[arg(long)]
         force: bool,
-        /// Print the approval link and return (run `fragment login` again after approving)
+        /// Print the code and the page to type it at, and return (run `fragment login` again once it is typed)
         #[arg(long)]
         no_wait: bool,
-        /// Print the link instead of opening a browser
+        /// Print the page's address instead of opening a browser
         #[arg(long)]
         no_browser: bool,
     },
@@ -250,6 +250,12 @@ enum Cmd {
         #[command(subcommand)]
         sub: InviteCmd,
     },
+    /// The invites waiting for your yes (an agent: its owner's, acting for
+    /// them): list them, or accept or decline one
+    Invites {
+        #[command(subcommand)]
+        sub: Option<InvitesCmd>,
+    },
     /// Call an operation; prints its result (a retry with the same --id is a replay)
     Call {
         name: String,
@@ -340,6 +346,16 @@ enum Cmd {
         /// Take its picture away
         #[arg(long)]
         no_picture: bool,
+    },
+    /// A fragment's scheduled records: at each minute a cron names (UTC),
+    /// it appends a record to one of its channels, as itself, which its
+    /// channel triggers, pages and the computers following it take from
+    /// there (an agent's routine is one on its own `tasks`). Editors add
+    /// and change them, viewers list them; on an agent's computer the
+    /// fragment is the agent's own unless named
+    Schedule {
+        #[command(subcommand)]
+        sub: ScheduleCmd,
     },
     /// Write one text file to main through the platform (no folder, no git):
     /// what an agent on a computer uses. `fragment deploy` puts it live.
@@ -549,6 +565,111 @@ fn standing_text(s: &Standing) -> String {
 }
 
 #[derive(Subcommand)]
+enum ScheduleCmd {
+    /// Add one: at each minute --cron names (UTC), the fragment appends
+    /// --record to --channel, as itself; or, an agent's routine, it asks
+    /// the agent --routine in --chat, as its owner (the record `{kind:
+    /// "routine", text, chat}` on its `tasks`). The same one added again
+    /// is that one
+    Add {
+        /// The fragment (on an agent's computer, the agent's own unless named)
+        fragment: Option<String>,
+        /// When: five fields in UTC, minute hour day month weekday
+        /// (weekdays by name: `mon-fri`), at most every 15 minutes:
+        /// "0 * * * *" every hour, "30 8 * * mon-fri" weekdays at 08:30 UTC
+        #[arg(long)]
+        cron: String,
+        /// The channel it appends to (one that takes posts)
+        #[arg(long, requires = "record", conflicts_with_all = ["routine", "chat"])]
+        channel: Option<String>,
+        /// The record's body, as JSON (at most 4 KiB)
+        #[arg(long, requires = "channel")]
+        record: Option<String>,
+        /// An agent's routine: what it is to do each time
+        #[arg(long, requires = "chat")]
+        routine: Option<String>,
+        /// An agent's routine: the chat it is done in, one the agent is in
+        #[arg(long, requires = "routine")]
+        chat: Option<String>,
+    },
+    /// List them: each one's id, schedule, channel and record
+    List {
+        /// The fragment (on an agent's computer, the agent's own unless named)
+        fragment: Option<String>,
+    },
+    /// Remove one: it fires no more
+    Rm {
+        /// [FRAGMENT] ID
+        #[arg(num_args = 1..=2, value_names = ["FRAGMENT", "ID"], required = true)]
+        args: Vec<String>,
+    },
+    /// Pause one: it fires no more until resumed
+    Pause {
+        /// [FRAGMENT] ID
+        #[arg(num_args = 1..=2, value_names = ["FRAGMENT", "ID"], required = true)]
+        args: Vec<String>,
+    },
+    /// Resume one: from its next minute (none it missed)
+    Resume {
+        /// [FRAGMENT] ID
+        #[arg(num_args = 1..=2, value_names = ["FRAGMENT", "ID"], required = true)]
+        args: Vec<String>,
+    },
+}
+
+/// The fragment `fragment schedule` acts on: the one named, else the agent
+/// this CLI acts as on a computer (its own agent fragment).
+fn schedule_fragment(agent: Option<&api::AgentMode>, named: Option<String>, verb: &str) -> Result<String> {
+    named
+        .or_else(|| agent.map(|m| m.agent.clone()))
+        .ok_or_else(|| usage(format!("name the fragment: `fragment schedule {verb} my-app …` (on an agent's computer, the agent's own unless named)")))
+}
+
+/// `[FRAGMENT] X` (`fragment schedule rm|pause|resume`): the fragment
+/// (`schedule_fragment`), and X.
+fn fragment_and(agent: Option<&api::AgentMode>, mut args: Vec<String>, verb: &str) -> Result<(String, String)> {
+    let last = args.pop().ok_or_else(|| usage(format!("fragment schedule {verb} needs a schedule's id")))?;
+    if args.len() > 1 {
+        return Err(usage(format!("fragment schedule {verb} takes a fragment and a schedule's id")));
+    }
+    Ok((schedule_fragment(agent, args.pop(), verb)?, last))
+}
+
+/// What `fragment schedule add` appends, and where: `--channel` and
+/// `--record` as given, or an agent's routine (`--routine` and `--chat`)
+/// on its `tasks` (docs/chat-records.md).
+fn scheduled_record(channel: Option<String>, record: Option<String>, routine: Option<String>, chat: Option<String>) -> Result<(String, Value)> {
+    match (channel, record, routine, chat) {
+        (Some(channel), Some(record), None, None) => {
+            let record: Value = serde_json::from_str(&record).map_err(|e| usage(format!("--record is the record's body as JSON: {e}")))?;
+            Ok((channel, record))
+        }
+        (None, None, Some(text), Some(chat)) => Ok(("tasks".to_string(), json!({ "kind": "routine", "text": text, "chat": chat }))),
+        _ => Err(usage("say what to append: --channel <channel> --record '<json>', or an agent's --routine '<what to do>' --chat <chat>")),
+    }
+}
+
+/// `fragment schedule pause|resume [FRAGMENT] ID`.
+fn set_schedule(c: &api::Client, j: bool, args: Vec<String>, paused: bool) -> Result<()> {
+    let (fragment, id) = fragment_and(c.agent(), args, if paused { "pause" } else { "resume" })?;
+    let v = c.call(c.put_json(&format!("/api/f/{fragment}/schedules/{}", encode_q(&id)), &fragment_proto::SetSchedule { paused })?)?;
+    json_exit(j, &v);
+    let s: fragment_proto::Schedule = serde_json::from_value(v["schedule"].clone()).map_err(|e| anyhow!("the platform's schedule: {e}"))?;
+    print_schedule(&s);
+    Ok(())
+}
+
+/// A schedule as `fragment schedule` prints it.
+fn print_schedule(s: &fragment_proto::Schedule) {
+    let when = match s.next_at {
+        Some(at) => format!("next {}", chrono_like(at.max(0) as u64 / 1000)),
+        None => "paused".to_string(),
+    };
+    println!("#{}\t{}\ton {}\t{when}", s.id, s.said, s.channel);
+    println!("  {}", s.record.to_string().chars().take(200).collect::<String>());
+}
+
+#[derive(Subcommand)]
 enum KeysCmd {
     /// Your identity's keys (the same as `fragment whoami`)
     List,
@@ -574,9 +695,11 @@ enum MembersCmd {
     /// List members and their roles
     List { name: String },
     /// Add a member (the owner, or their agent for them): a person and
-    /// their agents, by email, or an identity by npub. An email no one
-    /// signs in as yet is mailed an invite: they are in once they sign in
-    /// as it. Someone in already is refused: `members role` changes a role
+    /// their agents, by email; or one of its owner's own agents, by npub,
+    /// at once. An email is mailed an invite, and its person (and their
+    /// agents) are in once they accept it, signed in as it (`invite list`
+    /// shows it waiting). Anyone else by npub is refused: invite them by
+    /// email. Someone in already is refused: `members role` changes a role
     Add {
         name: String,
         /// an email, or an identity or key (an npub, or 64 hex)
@@ -597,6 +720,15 @@ enum MembersCmd {
     Rm { name: String, who: String },
     /// Leave a fragment you are a member of
     Leave { name: String },
+}
+
+#[derive(Subcommand)]
+enum InvitesCmd {
+    /// Accept one (its name, or its label): you are a member at its role,
+    /// and it is in your list (an agent's: its owner is, and its owner's list)
+    Accept { name: String },
+    /// Decline one: it waits no more
+    Decline { name: String },
 }
 
 #[derive(Subcommand)]
@@ -980,40 +1112,47 @@ fn run(cli: Cli) -> Result<()> {
                 save_config("host", &c.host)?;
             }
             if done.is_none() {
-                // the link carries this key's own proof (ten minutes good):
-                // approving it in a signed-in browser adds the key at once
+                // a code for the person to type at the platform's `/cli`,
+                // signed in (ten minutes good, once): no link approves a key,
+                // only what they type from this terminal
+                let begun: fragment_proto::CliCode = c.call_as(c.post_json("/cli/begin", &json!({}))?)?;
+                // the page to type it at is this host's own: never one an
+                // answer names, which the CLI would open in a browser
+                let page = format!("{}/cli", c.host);
+                // and the code is one a person can type, as the CLI shows it,
+                // nothing else (a host's answer is printed to a terminal)
+                let code = fragment_core::cli_code::normalize(&begun.code).map(|k| fragment_core::cli_code::display(&k)).ok_or_else(|| anyhow!("{} answered no code a person can type", c.host))?;
                 let npub = key.npub();
-                let approve = format!("{}/cli/approve", c.host);
-                let proof = key.nip98_header("POST", &approve, &[]);
-                let proof = proof.strip_prefix("Nostr ").unwrap_or(&proof);
-                let url = format!("{}/cli?key={npub}&proof={}", c.host, encode_q(proof));
                 let tail = &npub[npub.len() - 8..];
                 if no_wait {
-                    json_exit(j, &json!({ "npub": npub, "pending": true, "approve": url }));
-                    println!("approve this key in a browser where you are signed in (the link is good for ten minutes):\n  {url}");
-                    println!("its key ends in {tail}; then run `fragment login` again");
+                    json_exit(j, &json!({ "npub": npub, "pending": true, "code": code, "url": page, "expiresAt": begun.expires_at }));
+                    println!("open {} in a browser where you are signed in, and type this code (good for ten minutes, once):\n  {}", page, code);
+                    println!("the page should show a key ending in {tail}; then run `fragment login` again");
                     return Ok(());
                 }
-                eprintln!("sign in and approve this key (the link is good for ten minutes):\n  {url}\nthe page should show a key ending in {tail}");
+                eprintln!("open {}, sign in, and type this code (good for ten minutes, once):\n  {}\nthe page should show a key ending in {tail}", page, code);
                 if !no_browser {
-                    let _ = open_link(if cfg!(target_os = "macos") { "open" } else { "xdg-open" }, &url);
+                    let _ = open_link(if cfg!(target_os = "macos") { "open" } else { "xdg-open" }, &page);
                 }
                 let t0 = std::time::Instant::now();
                 while done.is_none() {
                     if t0.elapsed() > std::time::Duration::from_secs(600) {
-                        anyhow::bail!("no approval in ten minutes; run `fragment login` again for a fresh link");
+                        anyhow::bail!("no one typed the code in ten minutes; run `fragment login` again for a fresh one");
                     }
                     std::thread::sleep(std::time::Duration::from_secs(2));
                     done = me()?;
                 }
             }
             let v = done.expect("approved");
-            // never echo the key itself
+            // whom it acts as, by the email they sign in with: a key added
+            // to someone else's account shows here at once (never echo the
+            // key itself)
             json_exit(
                 j,
-                &json!({ "npub": key.npub(), "id": v.id, "kind": v.kind, "owner": v.owner, "host": c.host, "config": config_path().display().to_string(), "existing": key_existed }),
+                &json!({ "npub": key.npub(), "id": v.id, "email": v.email, "kind": v.kind, "owner": v.owner, "host": c.host, "config": config_path().display().to_string(), "existing": key_existed }),
             );
-            println!("logged in as {} on {}", v.id, c.host);
+            println!("logged in as {} on {}", v.email.as_deref().unwrap_or(&v.id), c.host);
+            println!("identity: {}", v.id);
             println!("key: {}", key.npub());
             return Ok(());
         }
@@ -1638,7 +1777,8 @@ fn run(cli: Cli) -> Result<()> {
                 let v: LedgerStatus = c.call_as(c.get("/api/ledger")?)?;
                 json_exit(j, &v);
                 let plan = serde_json::to_value(v.plan)?.as_str().unwrap_or("").to_string();
-                println!("{}: {} available ({} balance, {} held by calls running now), plan {plan}", v.month, dollars(v.available_micros.max(0)), dollars(v.balance_micros), dollars(v.reserved_micros));
+                let credit = if v.balance_micros < 0 { format!("{} owed", dollars(-v.balance_micros)) } else { format!("{} left", dollars(v.balance_micros)) };
+                println!("{}: {credit}, plan {plan}", v.month);
                 println!("{}", standing_text(&v.standing));
                 for f in &v.fragments {
                     println!("  {}\t{} of its {} cap", f.fragment, dollars(f.spent_micros), dollars(f.cap_micros));
@@ -1816,14 +1956,20 @@ fn run(cli: Cli) -> Result<()> {
                 let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer or editor, not {role:?}")))?;
                 let v: Member = match auth::member_of(&who)? {
                     auth::Member::Email(email) => {
+                        // read before the invite, so a failed read invites no one
+                        let members: MemberList = c.call_as(c.get(&format!("/api/f/{name}/members"))?)?;
                         let body = fragment_proto::CreateInvite { email: email.clone(), role };
                         match c.call_as::<Shared>(c.post_json(&format!("/api/f/{name}/invites"), &body)?)? {
                             Shared::Member(m) => m,
                             Shared::Invited(i) => {
                                 json_exit(j, &Shared::Invited(i.clone()));
                                 let expires_s = u64::try_from(i.expires_at / 1000).unwrap_or(0);
-                                println!("invited {email} as {} on {name}: they were mailed a link, and are in once they sign in as {email}", i.role.as_str());
+                                println!("invited {email} as {} on {name}: they were mailed a link, and are in once they accept it, signed in as {email}", i.role.as_str());
                                 println!("  it waits until {}; `fragment invite revoke {name} {email}` takes it back", chrono_like(expires_s));
+                                // they can talk to the owner's agent there (Paul, 2026-10-23)
+                                if fragment_core::access::talks_to_owners_agent(&members.members) {
+                                    println!("  {}", fragment_core::access::TRUST_WARNING);
+                                }
                                 return Ok(());
                             }
                         }
@@ -1871,6 +2017,39 @@ fn run(cli: Cli) -> Result<()> {
                 println!("revoked the invite waiting on {email}");
             }
         },
+        Cmd::Invites { sub } => {
+            let waiting: fragment_proto::InvitesWaiting = c.call_as(c.get("/api/invites")?)?;
+            let Some(sub) = sub else {
+                json_exit(j, &waiting);
+                if waiting.invites.is_empty() {
+                    println!("no invites wait for a yes");
+                }
+                for i in &waiting.invites {
+                    let expires_s = u64::try_from(i.expires_at / 1000).unwrap_or(0);
+                    let from = i.from.as_deref().unwrap_or("someone");
+                    println!("{}\t{}\t{}\tfrom {from}, to {}, until {}", i.fragment, i.role.as_str(), i.title, i.email, chrono_like(expires_s));
+                }
+                return Ok(());
+            };
+            let (name, yes) = match &sub {
+                InvitesCmd::Accept { name } => (name, true),
+                InvitesCmd::Decline { name } => (name, false),
+            };
+            // a name in full, or the label of one invite waiting
+            let label = |f: &str| fragment_proto::split_fragment_name(f).map(|(l, _)| l.to_string());
+            let named: Vec<&str> = waiting.invites.iter().map(|i| i.fragment.as_str()).filter(|f| *f == name.as_str() || label(f).as_deref() == Some(name.as_str())).collect();
+            let full = match named.as_slice() {
+                [one] => one.to_string(),
+                [] => return Err(anyhow::Error::new(CodedError { code: Code::NotFound, msg: format!("no invite waits for a yes on {name} (`fragment invites` lists them)") })),
+                _ => return Err(usage(format!("several invites wait on fragments labeled {name}: name one in full ({})", named.join(", ")))),
+            };
+            let v = c.call(c.post_json(&format!("/api/invites/{full}/{}", if yes { "accept" } else { "decline" }), &serde_json::json!({}))?)?;
+            json_exit(j, &v);
+            match yes {
+                true => println!("accepted: {full} is shared with you now, as {}", v["role"].as_str().unwrap_or("?")),
+                false => println!("declined the invite to {full}"),
+            }
+        }
         Cmd::Call { name, op, input, id } => {
             let input = match (input.as_str(), input.strip_prefix('@')) {
                 ("-", _) => std::io::read_to_string(std::io::stdin()).map_err(|e| usage(format!("--input -: reading stdin: {e}")))?,
@@ -2001,6 +2180,37 @@ fn run(cli: Cli) -> Result<()> {
                 _ => {}
             }
         }
+        Cmd::Schedule { sub } => match sub {
+            ScheduleCmd::Add { fragment, cron, channel, record, routine, chat } => {
+                let fragment = schedule_fragment(c.agent(), fragment, "add")?;
+                let (channel, record) = scheduled_record(channel, record, routine, chat)?;
+                let v: fragment_proto::ScheduleAdded = c.call_as(c.post_json(&format!("/api/f/{fragment}/schedules"), &fragment_proto::AddSchedule { cron, channel, record })?)?;
+                json_exit(j, &v);
+                println!("{} schedule #{} on {fragment}: {}, on {}", if v.replayed { "already had" } else { "added" }, v.schedule.id, v.schedule.said, v.schedule.channel);
+                if let Some(at) = v.schedule.next_at {
+                    println!("next {}", chrono_like(at.max(0) as u64 / 1000));
+                }
+            }
+            ScheduleCmd::List { fragment } => {
+                let fragment = schedule_fragment(c.agent(), fragment, "list")?;
+                let v: fragment_proto::ScheduleList = c.call_as(c.get(&format!("/api/f/{fragment}/schedules"))?)?;
+                json_exit(j, &v);
+                for s in &v.schedules {
+                    print_schedule(s);
+                }
+                if v.schedules.is_empty() {
+                    println!("(no schedules)");
+                }
+            }
+            ScheduleCmd::Rm { args } => {
+                let (fragment, id) = fragment_and(c.agent(), args, "rm")?;
+                let v = c.call(c.delete(&format!("/api/f/{fragment}/schedules/{}", encode_q(&id)))?)?;
+                json_exit(j, &v);
+                println!("removed schedule #{id} from {fragment}");
+            }
+            ScheduleCmd::Pause { args } => set_schedule(&c, j, args, true)?,
+            ScheduleCmd::Resume { args } => set_schedule(&c, j, args, false)?,
+        },
         Cmd::Visibility { name, value } => {
             let visibility = match value {
                 None => c.call_as::<FragmentStatus>(c.get(&format!("/api/f/{name}/status"))?)?.visibility,
@@ -2160,6 +2370,35 @@ mod tests {
 
     fn code_of(r: Result<impl std::fmt::Debug>) -> Code {
         classify_err(&r.expect_err("a failure"))
+    }
+
+    /// Goal: `fragment schedule`'s fragment and record. Valid: a fragment
+    /// named, an agent on a computer leaving its own out, a record as
+    /// given, and an agent's routine on its `tasks`. Invalid: no fragment
+    /// named off a computer, nothing to append, a record that is no JSON
+    /// (each invalid_usage, saying how).
+    #[test]
+    fn a_schedule_names_its_fragment_and_its_record() {
+        let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let some = |s: &str| Some(s.to_string());
+        let on_computer = api::AgentMode { agent: "juniper--k3x9".into(), acting_for: None };
+        assert_eq!(schedule_fragment(None, some("todo--k3x9"), "add").unwrap(), "todo--k3x9");
+        assert_eq!(schedule_fragment(Some(&on_computer), None, "add").unwrap(), "juniper--k3x9", "an agent's own");
+        assert_eq!(schedule_fragment(Some(&on_computer), some("todo--k3x9"), "add").unwrap(), "todo--k3x9", "a name given wins");
+        assert_eq!(fragment_and(Some(&on_computer), words(&["3"]), "rm").unwrap(), ("juniper--k3x9".into(), "3".into()));
+        assert_eq!(fragment_and(None, words(&["todo--k3x9", "3"]), "rm").unwrap(), ("todo--k3x9".into(), "3".into()));
+        assert_eq!(scheduled_record(some("pings"), some(r#"{"n":1}"#), None, None).unwrap(), ("pings".into(), json!({ "n": 1 })));
+        assert_eq!(
+            scheduled_record(None, None, some("water the plants"), some("talk--k3x9")).unwrap(),
+            ("tasks".into(), json!({ "kind": "routine", "text": "water the plants", "chat": "talk--k3x9" }))
+        );
+        let alone = schedule_fragment(None, None, "list");
+        assert!(alone.as_ref().is_err_and(|e| e.to_string().contains("name the fragment")), "{alone:?}");
+        assert_eq!(code_of(alone), Code::InvalidUsage);
+        assert_eq!(code_of(fragment_and(None, vec![], "rm")), Code::InvalidUsage);
+        assert_eq!(code_of(fragment_and(None, words(&["a--k3x9", "b", "c"]), "rm")), Code::InvalidUsage);
+        assert_eq!(code_of(scheduled_record(None, None, None, None)), Code::InvalidUsage);
+        assert_eq!(code_of(scheduled_record(some("pings"), some("{not json"), None, None)), Code::InvalidUsage);
     }
 
     /// Goal: the agent mode is on only when the computer names an agent, and
@@ -2431,14 +2670,23 @@ mod tests {
     fn a_platform_that_knows_no_key() -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
+        let base = origin.clone();
         std::thread::spawn(move || {
             for mut stream in listener.incoming().flatten() {
                 let (mut head, mut byte) = (Vec::new(), [0u8; 1]);
                 while !head.ends_with(b"\r\n\r\n") && std::io::Read::read(&mut stream, &mut byte).unwrap_or(0) == 1 {
                     head.push(byte[0]);
                 }
-                let body = r#"{"error":"unauthenticated","message":"this key belongs to no one"}"#;
-                let answer = format!("HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+                // its body read, so closing never resets what it answers
+                let head = String::from_utf8_lossy(&head).to_string();
+                let length = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|n| n.trim().parse::<usize>().unwrap_or(0))).unwrap_or(0);
+                let _ = std::io::Read::read_exact(&mut stream, &mut vec![0u8; length.min(1 << 16)]);
+                // no one holds the key yet; it asks for a code to be typed
+                let (status, body) = match head.starts_with("POST /cli/begin ") {
+                    true => ("200 OK", json!({ "code": "WDJB-MJHT", "url": format!("{base}/cli"), "expiresAt": 0 }).to_string()),
+                    false => ("401 Unauthorized", r#"{"error":"unauthenticated","message":"this key belongs to no one"}"#.to_string()),
+                };
+                let answer = format!("HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
                 let _ = std::io::Write::write_all(&mut stream, answer.as_bytes());
             }
         });
@@ -2448,7 +2696,8 @@ mod tests {
     /// Goal: `fragment login --host` is typed once: the host it named,
     /// once it answered, is the config's, so every later command (and the
     /// next `fragment login`, after a `--no-wait`) calls it. Valid: a named
-    /// host that answers as a platform does (401: this key is no one's yet)
+    /// host that answers as a platform does (401: this key is no one's yet;
+    /// its code to type, from `POST /cli/begin`)
     /// is kept, beside the key. Invalid: a named host that does not answer
     /// is not kept, nor is a FRAGMENT_HOST (the environment's to keep
     /// naming). Method: a copy of this test runs each login with a HOME of

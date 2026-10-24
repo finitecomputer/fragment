@@ -15,11 +15,12 @@ a vendor's product beyond the credential it holds.
 | Surface | Why it is platform | Built on |
 |---|---|---|
 | Sign-in, sessions, CLI approval (`/auth/*`, `/cli`; the shell's tabs sign in through `/auth/frame`; a stranger's fragment asks first, at `/auth/fragment`) | Security: it mints the credentials every other surface trusts. Which of a browser's cookies count on a fragment's origin is the router's (Fetch Metadata), so another fragment's page reaches it as a stranger (docs/api.md, Sign-in). | WorkOS AuthKit; the registry |
-| The shell (`/`, `/settings`, `/welcome`): sidebar, desktop (its dock and windows), settings, the launcher (search), first run (the welcome); to a page of a fragment you own that asks, your agents, and adding one of them to that fragment; to your own chat's page, a way to ask for an app put in its composer (`compose`; docs/api.md, The shell) | Security: it holds your session and frames your fragments and computers. The thin page users can't break. A page asks it, never grants: the shell checks the page is your own fragment's, at its own origin, offers only your own agents, and adds one only once you confirm it in the shell's own dialog, every time. A chat's page takes `compose` only from the platform's origin (its hello's `platform`) and sends nothing: you do. | The public fragment, computer, identity and ledger APIs |
+| The shell (`/`, `/settings`, `/welcome`): sidebar, desktop (its dock and windows), settings, the launcher (search), first run (the welcome); to a page of a fragment you own that asks, your agents, and adding one of them to that fragment; to your own chat's page, a way to ask for an app put in its composer (`compose`; docs/api.md, The shell); what your agent is doing, which it reads from your chats' rows' listed records by the chat's turn kinds (docs/chat-records.md): the shell is that contract's third reader, beside the bridge and the chat's page, so a change to it changes the shell too | Security: it holds your session and frames your fragments and computers. The thin page users can't break. A page asks it, never grants: the shell checks the page is your own fragment's, at its own origin, offers only your own agents, and adds one only once you confirm it in the shell's own dialog, every time. A chat's page takes `compose` only from the platform's origin (its hello's `platform`) and sends nothing: you do. | The public fragment, computer, identity and ledger APIs |
 | Identity and delegation | Security: who an agent acts for, and at what role. | The registry |
 | Connections and the egress swap | Security: it holds the route to your accounts' tokens and the operator's keys. | WorkOS Pipes; the computer's intercepts |
 | Usage, credit and plans | Billing integrity. | The ledger API (read-only to fragments) |
 | Seats and orgs (`/api/seat`, `/api/org`), buying them (`/api/billing/*`, Stripe's webhook at `/api/stripe/webhook`), and the operators' admin (`/api/admin/*`, its page `/admin`) | Billing integrity: a seat sets its holder's plan, and only its org's admins, Stripe, and the deployment's operators change one; Stripe's webhook is signed with this deployment's secret (docs/billing.md). | The registry; Stripe; each holder's ledger and computer |
+| Finite's about page, privacy policy and terms (`/about`, `/privacy`, `/terms`) | Legal and public: the operator's own words, at the platform's origin for anyone, signed out too, where WorkOS's sign-in and Stripe's Checkout link them; static pages of the release, no script. | The release's files (cell/shell) |
 | The share sheet (`/share/<name>`) | Security: it acts as the fragment's owner, so no fragment's code (which its author or an agent rewrites) may frame, fetch or script it (docs/api.md, Sharing). | The members and invites API |
 | A person's export of everything that is theirs (`/api/export`, the shell's Your data, `fragment export`) | Account integrity: it reads across every fragment and computer of its person's (and the names of those shared with them), as them, which no fragment may; only its person starts, reads or downloads it, and it adds no power to anyone else (docs/api.md, Export). | Each fragment's own routes as its owner reads them, the registry's view of the person, their list, and their computer's saves through its Durable Object |
 | An operator's wipe of a person (`/api/people/{person}/wipe`, `fragment operator wipe`) | Security and account integrity: only the deployment's operators delete a person, and it reaches every object of theirs (their fragments, computer, ledger, lists and registry rows), which no fragment may (docs/api.md, Operators). | The registry, and each object's own end (a fragment's delete, a computer's saves) |
@@ -28,8 +29,8 @@ a vendor's product beyond the credential it holds.
 ## Fragment plumbing (not special cases)
 
 Every fragment gets these routes (docs/api.md, Serving), and none of
-them knows what a fragment is for: `__fragment.js` and
-`__fragment.css`, `__signin` and `__signout`, `__op`, `__live` and `__watch`, `__people`, `__members`,
+them knows what a fragment is for: `__fragment.js`, `__fragment.css`
+and `__markdown.js`, `__signin` and `__signout`, `__op`, `__live` and `__watch`, `__people`, `__members`, `__schedules`,
 `__blob`, `__files` and `__file` (the vault UI), `__sw.js` and
 `__push-*`, `__preview.svg`, people's pictures
 (`/api/users/{u}/picture`), and the frame-session redeem path the
@@ -47,5 +48,7 @@ These are fragments or computers, or components any fragment may use:
 - A computer's screen is a page its image serves, reached through the
   generic port proxy.
 - Platform components any fragment may use: the vault UI (files and
-  notes, used by brains), the browser library (`__fragment.js`), and
-  the stylesheet a page may link (`__fragment.css`).
+  notes, used by brains), the browser library (`__fragment.js`), the
+  markdown renderer (`__markdown.js`: markdown to DOM, never markup; the
+  vault UI, the chat and the notes viewer use it), and the stylesheet a
+  page may link (`__fragment.css`).

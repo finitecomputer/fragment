@@ -41,9 +41,9 @@ A runtime gets commands and sends events, each naming its turn
 |---|---|
 | `Start(TurnStart)` | a turn: agent, chat, asker and their name, text (`command`: a command of the runtime's menu, said as it is; below, "Commands"), attachments as local files, the message it quotes (`quote`: its text and whether it is the agent's own, read from the chat by the driver), whether it is a routine, and its `note` when the agent's turn before it in the chat was cut by a restart (below, "The turn after a cut one is told") |
 | `Stop {turn}` | the asker pressed Stop |
-| `Answer {turn, prompt, option?}` | a prompt's answer, or its expiry (`None`), once |
+| `Answer {turn, prompt, option?, words?, attached?}` | a prompt's answer, or its expiry (`None`), once; `words` for an option answered in words, typed on its card or sent as the owner's message in the chat while it waited (the message is that option's answer, no turn of its own); `attached`, that message's files, which the driver downloads and names in `words` (below, `Tell`) |
 | `Forget {turn}` | the bridge ended it (it went quiet 15 minutes, or its agent left) |
-| `Tell {turn, seq, by, text}` | the asker's next message while the turn asked them in words (`Asked`): its answer, handed to the running turn, never a turn of its own; only ever to a turn this life runs |
+| `Tell {turn, seq, by, text, attached?}` | the asker's next message while the turn asked them in words (`Asked`): its answer, handed to the running turn, never a turn of its own; only ever to a turn this life runs. Words, files (photos sent as the answer) or both: `attached`, its files, which the driver downloads as a turn's are (`BRIDGE_MEDIA_DIR`), then adds a line for each to `text` (its name, its type, and where it is on the computer: `runtime::with_files`) and takes off, as a runtime takes an answer in words alone (Hermes' clarify does) |
 | `Aside {agent, fragment, turn?, id, by, text}` | a command said at once beside whatever runs in the agent's chat, no turn of its own (`/steer` into the running turn `turn`, `/btw`): below, "Commands" |
 
 | Event | |
@@ -53,7 +53,7 @@ A runtime gets commands and sends events, each naming its turn
 | `Reply {part, text}` | reply `part` (from 1) whole; posted at the next part, step, prompt, or end |
 | `Attachment {part, file}` · `Retract {part}` | a file on a reply; a reply taken back |
 | `Step {tool, args, ok, excerpt, text, category}` | a tool call, and what it does (docs/chat-records.md, `turn.step`) |
-| `Prompt {prompt, text, options, ttl?}` | a card; the turn waits, its computer kept awake until the card is answered or expires |
+| `Prompt {prompt, text, options, ttl?}` | a card; the turn waits, its computer kept awake until the card is answered (a press, or, for a card that takes words, its owner's message in the chat: `Answer`) or expires |
 | `Asked` | the turn asked its asker something to answer in words (the question is a reply part before it): their next message to the agent in that chat is its answer (`Tell`); it waits, running, as long as a prompt's life, and the chat is told (`turn.asked`) |
 | `End {outcome}` | `idle`, `stopped`, or `error` |
 | `Say {agent, fragment, text}` | said with no turn running, or answering a command said beside one (`Aside`): a turn of its own |
@@ -74,7 +74,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | Method and path | Body | Reads |
 |---|---|---|
 | `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute, and within a second of a change to the ready file (below) |
-| `GET /api/computer/keepalive` (no agent), WebSocket | | held while a turn waits to run, runs, or waits on its card (below, "A card keeps its computer awake") |
+| `GET /api/computer/keepalive` (no agent), WebSocket | | held while a turn waits to run, runs, or waits on its card (below, "A card keeps its computer awake"); pinged every `BRIDGE_KEEPALIVE_PING_MS` (15 s), and opened again after twice that with nothing heard, since a deploy can cut the platform's side of it with no close reaching here (#557) |
 | `GET /api/fragments` | | `{fragments: [{name, role}]}`: what the agent follows, listed at start, on a `joined` of it (as the agent the engine runs, no read of the computer first), and every 5 minutes. A listing a read of which fails with no answer, a 429 or a 5xx is asked again after a jittered backoff (from 1 s, at most 30 s) until it answers: the list, or only the fragments whose channels did not read; what was found meanwhile is followed, so one fragment that fails keeps the agent from no other. One listing an agent at a time: a newer one takes the place of one under way |
 | `GET /api/f/{f}/channels` | | `{channels: [{name, post, seq}]}`: a postable `chat` is a chat; the agent's own `tasks` |
 | `GET /api/f/{f}/members` | | `{members: [{principal, kind, addedAt}]}`: the lead (first `kind: agent` by `addedAt`), and when this agent joined; read again after 30 s, and at once after a `joined` of one of the computer's agents to that fragment (so its lead never answers an `@mention` of an agent that just joined) |
@@ -87,6 +87,12 @@ Bodies are JSON. `api.rs` has one method for each.
 | `PUT /api/f/{f}/channels/chat/draft` | `{turn, text \| null}` | at most 4 a second a turn; a 429 is ignored |
 | `PUT /api/f/{f}/blobs/{sha256}` | the bytes, `content-type` the file's | a reply's files, before its record |
 | `GET /api/f/{f}/blobs/{sha256}` | | a message's files (at most 25 MiB), checked against their hash |
+
+The script runtime (the stub's) also calls, as its agent acting for its
+owner, `GET|POST /api/f/{agent}/schedules?for=` and `DELETE
+/api/f/{agent}/schedules/{id}?for=` on its own fragment (its `schedule`
+command: docs/api.md, "Scheduled records"), as `fragment schedule` does
+on a computer.
 
 `hermes-boot` also calls, as each agent, on its own fragment:
 `GET /api/f/{agent}/files`, `GET /api/f/{agent}/file?path=` (its
@@ -113,6 +119,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | `BRIDGE_MEDIA_LOCAL` | | `allow`: a file Hermes sends by URL may come over plain `http`, from a local address (a test's fake server: tests/docker.rs). Unset in every image |
 | `BRIDGE_PROMPT_TTL_MS` | 3 600 000 | a card's life unless the runtime says |
 | `BRIDGE_TURN_IDLE_MS` | 900 000 | a running turn this quiet ends as an error |
+| `BRIDGE_KEEPALIVE_PING_MS` | 15 000 | how often the keepalive pings; silent twice that, it is opened again (#557) |
 | `BRIDGE_RELAY_LISTEN` | `127.0.0.1:8650` | where Hermes dials |
 | `BRIDGE_RELAY_SECRET_FILE` | required for `relay` | the per-boot secret (32+ characters) |
 | `GATEWAY_RELAY_ID` | `fragment-computer` | the gateway id both sides name |
@@ -162,7 +169,15 @@ earlier save, or lost, costs reads and runs nothing twice
 - **An answer in words goes only to its turn's life.** A turn that asks
   its asker something in words (`Asked`) is a running turn of its life,
   and their next message to the agent in that chat is its answer
-  (`Tell`), starting no turn. A restart ends it as lost, as it ends every
+  (`Tell`), starting no turn: its words, its files, or both. A turn
+  waiting on a card that takes words (a clarify's "Other") takes its
+  owner's next message to the agent there the same way, as that option
+  answered in those words (`Answer`), the card closed with them (Paul on
+  production, 2026-10-22: a reply typed in the message box stayed
+  queued, the card open, for up to its hour). Someone else's message
+  waits its turn, as does any while the card takes no words (an
+  approval's Allow and Deny: a press alone answers it, and a yes is no
+  guess to make from a sentence). A restart ends it as lost, as it ends every
   running turn, so a later life tells it nothing: the message, read
   there, is a turn of its own, claimed and run once. So is one a rollback
   sends a cursor back before, though an earlier life told it (a Tell
@@ -502,6 +517,12 @@ get_chat_info`.
   next inbound, which its clarify intercept takes as the answer; its
   `✏️ Type your answer:` that follows shows nothing and asks nothing. An
   "Other" answered with no words (an older page) asks for them as above.
+  The owner's message in the chat while the card is open is "Other" with
+  those words, the same way: Hermes' clarify takes free text only once
+  "Other" is chosen (its `mark_awaiting_text`; text that names no choice
+  otherwise cancels the clarify and runs as a message of its own). Files
+  sent with an answer reach Hermes as lines of its words (`Tell`, above):
+  its clarify takes words alone.
 - Stop is `interrupt_inbound` for the profile's session key. A clarify
   waiting on its person (their words, or its card of choices) never sees
   it, so a Stop while the turn asks, or while a clarify's card is open, is

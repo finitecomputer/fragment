@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use sha2::{Digest, Sha256};
 
-use super::computers::{agent_replies, newest_save, phase, routine_app, told, turn_of, work_of, AGENT_JSON, CHAT_JSON, QUEUE_DRAIN, ROUTINE_JSON};
+use super::computers::{agent_replies, cron_now, newest_save, phase, told, turn_of, work_of, AGENT_JSON, CHAT_JSON, QUEUE_DRAIN};
 use super::jobs::records;
 use crate::api::{Api, Call, Socket};
 use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_ENV, SWAP_CONNECTION_HOST, SWAP_KEYS};
@@ -29,8 +29,8 @@ pub const SECTION: &str = "hermes";
 const WAKE: Duration = Duration::from_secs(300);
 /// One Hermes turn against the scripted model.
 const TURN: Duration = Duration::from_secs(120);
-/// A routine's cron minute, and the wake it starts.
-const ROUTINE: Duration = Duration::from_secs(420);
+/// A routine made due, to Hermes' reply: the wake it starts, and its turn.
+const ROUTINE: Duration = Duration::from_secs(WAKE.as_secs() + TURN.as_secs());
 /// An agent assigned to the awake computer, to its first reply: the image
 /// reads its agents every 3 s, writes the new one's profile, and has its
 /// gateway serve it; its bridge follows the agent within a second of that
@@ -80,12 +80,12 @@ fn said_count(text: &str) -> Option<u32> {
 pub fn stage_images(project: &Path) -> Result<()> {
     let config = project.join("wrangler.jsonc");
     let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&config)?)?;
-    // the Hermes image builds from the repo's root: it carries the fragment CLI
-    let root = fragment_devstack::repo_root();
-    let dockerfile = root.join("images/hermes/Dockerfile");
+    let hermes = fragment_devstack::hermes_image();
+    let mut next = hermes.clone();
+    next["build_vars"] = json!({ "IMAGE_VERSION": "2" });
     let images = v["containers"][0]["images"].as_object_mut().context("the staged config's container has images")?;
-    images.insert("hermes".into(), json!({ "dockerfile": dockerfile, "build_context": root }));
-    images.insert("hermes-next".into(), json!({ "dockerfile": dockerfile, "build_context": root, "build_vars": { "IMAGE_VERSION": "2" } }));
+    images.insert("hermes".into(), hermes);
+    images.insert("hermes-next".into(), next);
     std::fs::write(&config, serde_json::to_string_pretty(&v)?)?;
     Ok(())
 }
@@ -162,6 +162,23 @@ fn screen(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, id: &str, agen
     let watching = s.eventually(wait, || chrome.eval_in_frame(&shell, &computer, &ready).ok() == Some(json!(true)));
     let said = |chrome: &mut crate::browser::Browser| chrome.eval_in_frame(&shell, &computer, "[document.body.dataset.state, document.getElementById('status')?.textContent ?? '']").unwrap_or_default();
     s.ok("in a frame of the platform's page, the agent's screen's page names it and connects to it (noVNC through the port), Take over ready", watching, said(&mut chrome));
+    // whose it is, by name, as the page framing it says it (the shell, as it
+    // opens it and on a rename: docs/computers.md, Ports); until then no
+    // one, never its label (Paul, 2026-10-20: "Watching pulsar-360's screen")
+    let unnamed = said(&mut chrome);
+    let tell = |chrome: &mut crate::browser::Browser, name: &str| -> Result<Value> {
+        chrome.eval(&shell, &format!("(document.querySelector('iframe').contentWindow.postMessage({{ fragment: 'screen', agent: {}, name: {} }}, '*'), true)", serde_json::to_string(agent)?, serde_json::to_string(name)?))
+    };
+    let says = |name: &str| format!("document.getElementById('status')?.textContent === {} && document.title === {}", serde_json::to_string(&format!("Watching {name}'s screen")).unwrap_or_default(), serde_json::to_string(&format!("{name}'s screen")).unwrap_or_default());
+    tell(&mut chrome, "Juniper")?;
+    let named = s.eventually(Duration::from_secs(10), || chrome.eval_in_frame(&shell, &computer, &says("Juniper")).ok() == Some(json!(true)));
+    tell(&mut chrome, "Junie")?;
+    let renamed = s.eventually(Duration::from_secs(10), || chrome.eval_in_frame(&shell, &computer, &says("Junie")).ok() == Some(json!(true)));
+    s.ok(
+        "told its name by the page framing it, the screen's page says it (\"Watching Juniper's screen\"), and again on a rename; before that it names no one, never its label",
+        unnamed[1] == "Watching the screen" && named && renamed,
+        json!({ "before": unnamed, "after": said(&mut chrome) }),
+    );
     chrome.eval_in_frame(&shell, &computer, "document.getElementById('control').click(), true")?;
     let mine = "document.body.dataset.state === 'mine'";
     let taken = s.eventually(Duration::from_secs(20), || chrome.eval_in_frame(&shell, &computer, mine).ok() == Some(json!(true)));
@@ -286,7 +303,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         json!(calls.iter().map(|c| json!({ "model": c.model, "metadata": c.metadata })).collect::<Vec<_>>()),
     );
     let aig = super::ledger::entries(api, &owner_id, "aig:");
-    s.ok("and each is settled on its owner's ledger", !aig.is_empty() && aig.iter().all(|e| super::ledger::end_of(e) == "settled"), json!(aig));
+    s.ok("and each is charged on its owner's ledger", !aig.is_empty() && aig.iter().all(|e| super::ledger::charged(e).is_some()), json!(aig));
 
     // a tool step, then the answer that names it
     let r = say(2, "run: echo tool-ran")?;
@@ -344,7 +361,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let card = work_of(&records(api, &owner, &chat_name, "work"), &asking).into_iter().find(|r| r["body"]["kind"] == "turn.prompt").unwrap_or_default();
     s.ok("a question with choices is a card asking the agent's owner", carded && card["body"]["asks"] == owner_id.as_str() && card["body"]["text"].as_str().is_some_and(|t| t.starts_with("Which pot")), &card);
     let prompt = card["body"]["prompt"].as_str().unwrap_or("").to_string();
-    let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": "c0" } });
+    let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": "c0", "agent": card["principal"], "turn": card["body"]["turn"] } });
     api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&answer))?;
     let heard = s.eventually(TURN, || reply_of(&asking).is_some_and(|t| t.contains("clay")));
     let closed = work_of(&records(api, &owner, &chat_name, "work"), &asking).into_iter().find(|r| r["body"]["kind"] == "turn.prompt.closed").unwrap_or_default();
@@ -530,12 +547,14 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "reply": live, "token": !token.is_empty() }),
     );
     // it shares as its owner would (Paul, 2026-10-04): it makes the app
-    // public, and adds another person to it as a viewer
+    // public, and invites another person to it as a viewer, by email, who
+    // is in once they accept it (decision 63)
     let guest = api.person()?;
-    let guest_id = api.identity(&guest)?;
+    let guest_email = Api::email_of(&guest);
     let public = run(s, 66, "fragment visibility groceries public --json | grep -c '\"ok\":true' | sed 's/^/public-/'")?;
-    let added = run(s, 67, &format!("fragment members add groceries {guest_id} --role viewer --json | grep -c '\"ok\":true' | sed 's/^/added-/'"))?;
+    let added = run(s, 67, &format!("fragment members add groceries {guest_email} --role viewer --json | grep -c '\"ok\":true' | sed 's/^/added-/'"))?;
     let anonymous = api.call(Call { method: "GET", url: api.site_url(&app, "hello.html"), ..Call::default() })?;
+    api.signed(&guest, "POST", &format!("/api/invites/{app}/accept"), Some(&json!({})))?;
     let lists = api.signed(&guest, "GET", "/api/fragments", None)?;
     let guest_role = lists.body["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == app.as_str()).map(|f| f["role"].clone());
     s.ok(
@@ -544,7 +563,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "reply": public, "page": anonymous.status }),
     );
     s.ok(
-        "and adds another person as a viewer, who sees it in their list as one",
+        "and invites another person as a viewer, by email, who sees it in their list as one once they accept it",
         said(&added, "added-1") && guest_role == Some(json!("viewer")),
         json!({ "reply": added, "role": guest_role }),
     );
@@ -573,7 +592,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let notes = s.create(api, &skyler, &notes_name)?;
     s.commit(&notes, &[("fragment.json", Some(NOTES_JSON))]);
     s.deploy(&notes);
-    api.signed(&skyler, "PUT", &format!("/api/f/{notes_name}/members/{owner_id}"), Some(&json!({ "role": "editor" })))?;
+    api.share(&notes_name, &owner_id, "editor")?;
     let post_note = |n: u32| {
         let body = json!({ "id": format!("d{n}"), "body": { "text": "from juniper" } }).to_string();
         format!("run: curl -s -o /dev/null -w 'status %{{http_code}}' -X POST 'http://api.fragment.internal/api/f/{notes_name}/channels/notes?for={owner_id}' -H 'x-fragment-agent: {agent_name}' -H 'content-type: application/json' -d '{body}'")
@@ -751,11 +770,11 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let vision_entries: Vec<Value> = super::ledger::entries(api, &owner_id, "aig:")
         .into_iter()
-        .filter(|e| e["entry"]["reserve"]["agent"] == maple_id.as_str() && e["entry"]["reserve"]["worst"]["model"] == fragment_core::models::VISION_MODEL_DEFAULT)
+        .filter(|e| e["entry"]["row"]["agent"] == maple_id.as_str() && super::ledger::usage(e)["model"] == fragment_core::models::VISION_MODEL_DEFAULT)
         .collect();
     s.ok(
-        "each vision call is metered to the agent's owner, as the agent, settled at the vision model's price",
-        vision_entries.len() >= looks.len() && !looks.is_empty() && vision_entries.iter().all(|e| super::ledger::end_of(e) == "settled" && e["entry"]["end"]["usage"]["model"] == fragment_core::models::VISION_MODEL_DEFAULT),
+        "each vision call is metered to the agent's owner, as the agent, charged at the vision model's price",
+        vision_entries.len() >= looks.len() && !looks.is_empty() && vision_entries.iter().all(|e| super::ledger::charged(e).is_some()),
         json!(vision_entries),
     );
 
@@ -777,21 +796,31 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     std::thread::sleep(Duration::from_secs(5));
     s.ok("and the lead does not", agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == lead_before, "");
 
-    // a routine: the second agent's cron wakes the sleeping computer on time.
-    // Its cron runs each minute from its deploy: one answered awake first,
-    // so the sleep comes a minute before the next
-    s.commit(&maple, &[("fragment.json", Some(ROUTINE_JSON)), ("app.mjs", Some(routine_app(&chat_name).as_bytes()))]);
-    s.deploy(&maple);
-    let routines =|| agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id).into_iter().filter(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("water the plants"))).count();
-    let awake_routines = routines();
-    s.eventually(ROUTINE, || routines() > awake_routines);
+    // a routine (decision 38): the second agent adds its own with the
+    // fragment CLI in its terminal, as its platform skill teaches (the
+    // scripted model runs the command); asleep, the routine due (the lever:
+    // it is due next new year) wakes the computer, and Hermes does it in the
+    // lead's chat
+    let r = api.signed(&owner, "POST", &format!("/api/f/{grove_name}/channels/chat"), Some(&json!({ "id": "g3", "body": { "text": format!("run: fragment schedule add --routine 'water the plants' --chat {chat_name} --cron '0 0 1 1 *'") } })))?;
+    let added = turn_of(&maple_name, &grove_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
+    s.eventually(TURN, || grove_ended(&added).is_some());
+    let theirs = api.signed(&owner, "GET", &format!("/api/f/{maple_name}/schedules"), None)?;
+    s.ok(
+        "Hermes schedules a routine on itself with `fragment schedule add --routine` in its terminal, as the agent, acting for its owner",
+        theirs.body["schedules"].as_array().is_some_and(|l| {
+            l.len() == 1 && l[0]["createdBy"] == maple_id.as_str() && l[0]["channel"] == "tasks" && l[0]["record"] == json!({ "kind": "routine", "text": "water the plants", "chat": chat_name })
+        }),
+        json!({ "schedules": theirs.body, "reply": maple_reply(&added) }),
+    );
+    let routines = || agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id).into_iter().filter(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("water the plants"))).count();
     std::thread::sleep(QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     let r = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?;
     s.ok("asleep, it waits for the routine", r.body["phase"] == "asleep", &r);
     let routine_before = routines();
+    let lever = cron_now(api, &maple_name)?;
     let ran = s.eventually(ROUTINE, || routines() > routine_before);
-    s.ok("its cron's routine wakes it, and Hermes does it in the chat", ran, json!(agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id)));
+    s.ok("its routine, due, wakes it, and Hermes does it in the chat", lever.body["records"] == 1 && ran, json!(agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id)));
 
     std::thread::sleep(QUEUE_DRAIN);
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;

@@ -13,8 +13,11 @@ use serde::{Deserialize, Serialize};
 use crate::error::{CellError, CellResult};
 
 /// A call to the Registry: `PATH` names its route, the implementing type is
-/// its body, and `Answer` is what a 200 carries.
-pub(crate) trait Call: Serialize + DeserializeOwned {
+/// its body, and `Answer` is what a 200 carries. A body is `Deserialize` as
+/// the Registry decodes it (`RegistryCell::route`), but for a finished round
+/// trip's (`Exchange`), which no one but `Exchange::of` makes: its route
+/// decodes a type of its own.
+pub(crate) trait Call: Serialize {
     const PATH: &'static str;
     type Answer: Serialize + DeserializeOwned;
 
@@ -80,9 +83,9 @@ impl Call for Lookup {
 }
 
 /// `POST /invite`: a fragment shared with whoever signs in as `email`
-/// (decision 48): the person who holds it, or, when no one does yet, the
-/// invite kept against the email and mailed to it, counted in the
-/// sharer's day (429 past `limits::INVITE_MAILS_DAILY_MAX`).
+/// (decisions 48 and 63): the invite kept against the email for its
+/// person's yes, and mailed to it, counted in the sharer's day (429 past
+/// `limits::INVITE_MAILS_DAILY_MAX`).
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct InviteEmail {
@@ -92,37 +95,29 @@ pub(crate) struct InviteEmail {
     /// The person whose day it counts in (an agent's owner).
     pub sharer: String,
     pub role: Role,
-    /// What the mail calls the fragment: its title, or its label.
+    /// What the mail, and the invite's person's list of them, call the
+    /// fragment: its title, or its label.
     pub title: String,
     pub expires_at: i64,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum Invited {
-    /// The person who holds the email: the fragment makes them a member.
-    Holder(Identity),
-    /// No one does: the invite waits on it, and the mail went.
-    Mailed,
-}
-
+/// Answered, the invite waits on the email, and its mail went.
 impl Call for InviteEmail {
     const PATH: &'static str = "/invite";
-    type Answer = Invited;
-    fn checked(answer: Invited) -> CellResult<Invited> {
-        match answer {
-            Invited::Holder(person) => Ok(Invited::Holder(identity_checked(person)?)),
-            Invited::Mailed => Ok(Invited::Mailed),
-        }
-    }
+    type Answer = ();
 }
 
-/// A fragment's `invites/claim`: the person `identity` signed in as
-/// `email`, verified, and meets the invite waiting on it there.
+/// A fragment's `invites/claim` (and `invites/decline`): the person
+/// `identity`, who signs in as `email`, verified, accepts (declines) the
+/// invite waiting on it there; or, for an invite from before invites
+/// waited for a yes, signed in as it and meets it. `agents` are theirs,
+/// which come in with them (decision 64), at most `AGENTS_PER_OWNER_MAX`.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ClaimInvite {
     pub email: String,
     pub identity: String,
+    #[serde(default)]
+    pub agents: Vec<String>,
 }
 
 /// `POST /agents`: an agent its owner vouches for (the key's proof was
@@ -277,29 +272,16 @@ impl Call for PictureOf {
 /// only for those `emails_of` names: the members of the fragment that
 /// asks, when its asker is a member too (docs/cloudflare-v1.md, decision
 /// 48). The caller decides; the registry gives none unless named.
+///
+/// A person's own agents are never named to anyone else (Paul,
+/// 2026-10-22: "I invite Skyler and his agents, not Skyler and his agent
+/// Agent123"): they reach what the person does, acting for them (R17),
+/// unnamed. An agent is named only as itself, a member.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Profiles {
     pub ids: Vec<String>,
     #[serde(default)]
     pub emails_of: Vec<String>,
-    /// People whose agents to name: a share is a person's and their
-    /// agents' (Paul, 2026-10-13), so who has access says them.
-    #[serde(default)]
-    pub agents_of: Vec<String>,
-}
-
-/// A person's agent, as who has access names it.
-#[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct ProfileAgent {
-    pub id: String,
-    /// Its agent fragment's label, made from one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fragment: Option<String>,
-    /// Its agent fragment's title, filled as `Profile::title` is.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
 }
 
 /// A person's picture, and their email when the caller may show it; an
@@ -320,9 +302,6 @@ pub(crate) struct Profile {
     /// An agent's fragment's title (`XBT-2000`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// A person's agents, when the caller named them in `agents_of`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub agents: Vec<ProfileAgent>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -385,6 +364,9 @@ pub(crate) struct WipeFacts {
     pub sessions: u64,
     pub pictures: Vec<WipePicture>,
     pub done: Option<u32>,
+    /// The orgs its `billing` step settles (their own, and any whose
+    /// subscription their card pays), and what it does to each.
+    pub orgs: Vec<fragment_proto::wipe::OrgFound>,
 }
 
 impl Call for WipeLook {
@@ -427,6 +409,27 @@ impl Call for WipeStep {
     type Answer = WipeDone;
 }
 
+/// `POST /wipe/billing`: the `billing` step of a wipe of `identity`, as far
+/// as one call goes (registry/wipe.rs `wipe_billing`): done once Stripe has
+/// what each org it settled asks; `note` says what it did, or waits for.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct WipeBilling {
+    pub identity: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct WipeBilled {
+    pub done: bool,
+    /// The orgs it settled.
+    pub orgs: u64,
+    pub note: Option<String>,
+}
+
+impl Call for WipeBilling {
+    const PATH: &'static str = "/wipe/billing";
+    type Answer = WipeBilled;
+}
+
 /// `POST /test`: the levers of a fleet with a test secret
 /// (`FRAGMENT_TEST_SECRET`; cell/src/levers.rs).
 #[derive(Serialize, Deserialize)]
@@ -438,8 +441,18 @@ pub(crate) enum TestHook {
     /// `TEST_DOWN_FOR_MAX`; 0 answers them again), as `Down` does: a test
     /// fails one call a request makes, and the rest go on.
     DownFor(DownFor),
-    /// How many calls the Registry has had since it started (`{calls:
-    /// null}`): a test counts a request's round trips by the difference.
+    /// Answer the next `times` calls to one path (at most
+    /// `TEST_DOWN_FOR_MAX`; 0 answers them again) as an object of another
+    /// release (`SKEWED`) would: each refused, 503 `deploying`, before it is
+    /// read, by the check every call meets (`routed::refused`), so a test
+    /// sees what a deploy going out does to that call, and that its caller
+    /// asks again. Deployed before the caller's release, the stand-in is a
+    /// registry a deploy replaced, which restarts at its first refusal
+    /// (fragment_core::release `restarts`), its hooks gone with it.
+    SkewFor(SkewFor),
+    /// How many calls the Registry has had since it started, and how many
+    /// it refused for their release (`{calls: null}` → `{calls, skewed}`):
+    /// a test counts a request's round trips by the difference.
     Calls,
     /// The next call waits this many milliseconds (at most
     /// `TEST_HOLD_MAX_MS`) before it is answered: a test lets other
@@ -455,6 +468,13 @@ pub(crate) enum TestHook {
     /// Whether an identity is an e2e person (`{e2e}`): a branch's ledger
     /// levers reach no one else.
     E2eIs(String),
+    /// The steps its schema holds (schema.rs `view`), answered by a
+    /// registry that refuses its schema too.
+    Schema,
+    /// Makes every invite waiting on this email one mailed before invites
+    /// waited for a yes (decision 63: no role, title or sharer kept), which
+    /// a sign-in as it still meets (`{before}`: how many).
+    InvitesBefore(String),
 }
 
 /// `TestHook::E2eSignIn`: who, and the paid calls they are lent (the
@@ -511,8 +531,27 @@ pub(crate) struct DownFor {
     pub times: u32,
 }
 
-/// The most calls one `TestHook::DownFor` fails.
+/// The most calls one `TestHook::DownFor` fails (or `SkewFor` refuses).
 pub(crate) const TEST_DOWN_FOR_MAX: u32 = 100;
+
+/// The release `TestHook::SkewFor` answers its calls as: no deploy's
+/// (`FRAGMENT_DEPLOY_ID` is a commit, or `dev`).
+pub(crate) const SKEWED: &str = "another-release-a-test-hook";
+
+/// `TestHook::SkewFor`: which call (a `Call`'s path), how many times, and
+/// when its stand-in release was deployed (`FRAGMENT_DEPLOYED_AT`'s
+/// seconds: 0 is before every caller's, an old registry a newer caller's
+/// call restarts; `u64::MAX` after every caller's, a new one an older
+/// caller's leaves as it is; none, by default, a release from before deploy
+/// times were named: refused, and no restart).
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SkewFor {
+    pub path: String,
+    pub times: u32,
+    #[serde(default)]
+    pub deployed: Option<u64>,
+}
 
 /// The controls over sign-in's rows.
 #[derive(Serialize, Deserialize)]
@@ -527,6 +566,18 @@ pub(crate) enum SigninsHook {
     /// The session this token names expires now (its row stays for the
     /// sweep; a platform session's site sessions end with it).
     ExpireSession(String),
+    /// Expire just this local test's connection attempt (its nonce).
+    ExpireConnection(String),
+    /// This local test's connection attempt (its nonce) expires `ms` from
+    /// now: a callback taking it before then finds it past its time later.
+    ExpireConnectionIn { state: String, ms: i64 },
+    /// Lift the fence of the account an email signed in with, at a
+    /// provider, as a connect known to import does (a test connects a row
+    /// with no `connection_oauth` through the WorkOS fake, never a callback).
+    UnfenceConnection { email: String, provider: String },
+    /// Every connect import whose outcome was unknown is let go, as its
+    /// while running out (`connection_accounts::Deciding`).
+    ForgetUncertainImports,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -534,23 +585,161 @@ pub(crate) struct SigninCounts {
     pub logins: u64,
     pub redemptions: u64,
     pub sessions: u64,
+    /// CLI codes waiting to be typed, and the people with wrong ones counted.
+    pub cli_codes: u64,
+    pub cli_misses: u64,
 }
 
 impl Call for TestHook {
     const PATH: &'static str = "/test";
-    /// The hook's setting, `{down}`, `{downFor}`, `{calls}`, or `{hold}`, or `SigninCounts`.
+    /// The hook's setting, `{down}`, `{downFor}`, `{skewFor}`, `{calls, skewed}`, or `{hold}`, or `SigninCounts`.
     type Answer = serde_json::Value;
 }
 
 // ------------------------------------------------------------- sign-in
 
-/// `POST /login/begin`: a sign-in starts (`link_to`: a signed-in session
-/// adding a second sign-in to its person).
+/// `POST /connection/begin`: a connect of `provider` from this session,
+/// for what its body asked (`connection_accounts::Intent`: another of
+/// several accounts, or one again), which its pending row keeps.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct BeginConnection {
+    pub session: String,
+    pub provider: String,
+    pub intent: fragment_core::connection_accounts::Intent,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ConnectionBegun {
+    pub state: String,
+    pub challenge: String,
+}
+
+impl Call for BeginConnection {
+    const PATH: &'static str = "/connection/begin";
+    type Answer = ConnectionBegun;
+}
+
+/// Only a callback proved to belong to this browser can request an exchange.
+#[derive(Serialize)]
+pub(crate) struct FinishConnection {
+    state: String,
+    session: String,
+    provider: String,
+    code: Option<String>,
+}
+
+impl FinishConnection {
+    pub(crate) fn of(bound: crate::auth::Bound, session: String, provider: String, code: Option<String>) -> Self {
+        assert_eq!(bound.trip(), fragment_core::roundtrip::Trip::Connection);
+        Self { state: bound.state().into(), session, provider, code }
+    }
+}
+
+#[derive(Deserialize)]
+pub(in crate::registry) struct FinishConnectionIn {
+    pub state: String,
+    pub session: String,
+    pub provider: String,
+    pub code: Option<String>,
+}
+
+/// How a callback's attempt ended. `NoScopes`: the provider granted
+/// nothing its row asks for beyond signing in (`connection_signin::
+/// Refused::NoScopes`), and nothing was imported. `OneAccount` and
+/// `AccountLimit`: another of several accounts, refused (Pipes connects one
+/// a person for now; the row's `accounts_max`, or Pipes' limit, reached),
+/// and nothing was imported. `Finishing`: of several accounts, an earlier
+/// connect of theirs there may still land (its outcome unknown), or
+/// another decided too long, and nothing was imported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ConnectionFinished { Connected, NotUnderWay, Declined, CodeRefused, NoScopes, OneAccount, AccountLimit, Finishing, Failed }
+
+impl Call for FinishConnection {
+    const PATH: &'static str = "/connection/finish";
+    type Answer = ConnectionFinished;
+}
+
+/// `POST /connection/fence`: a person's connection to `provider` about to
+/// be disconnected, fenced in one turn (`fragment_core::connection_signin::
+/// Finishing`): every attempt at it still pending ended, and each callback
+/// still exchanging cancelled, so none begun before the disconnect imports
+/// after it. 429 while a callback imports into it (nothing ended: the
+/// disconnect is asked again). Answers their WorkOS user, whose account the
+/// disconnect then deletes (none: no account, and nothing was under way).
+/// `lasting` is what stays fenced after (`connection_accounts::lasting`):
+/// the provider whole, as with one account, or of several, the one the
+/// disconnect takes away, or nothing. `account`, of several, is the Pipes
+/// id it takes away, recorded whatever stays fenced
+/// (`connection_signin::DISCONNECTING`).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct FenceConnection {
+    pub identity: String,
+    pub issuer: String,
+    pub provider: String,
+    pub lasting: fragment_core::connection_accounts::Lasting,
+    pub account: Option<String>,
+}
+
+/// `POST /connection/disconnected`: whether a person disconnected their
+/// account `account` (its Pipes id) at `provider`, as a disconnect of it
+/// asked again, once Pipes deleted it, asks: only theirs is ever found.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Disconnected {
+    pub identity: String,
+    pub issuer: String,
+    pub provider: String,
+    pub account: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct WasDisconnected {
+    pub disconnected: bool,
+}
+
+impl Call for Disconnected {
+    const PATH: &'static str = "/connection/disconnected";
+    type Answer = WasDisconnected;
+}
+
+impl Call for FenceConnection {
+    const PATH: &'static str = "/connection/fence";
+    type Answer = SubjectAnswer;
+}
+
+/// `POST /connection/fenced`: the providers a WorkOS user's account stands
+/// fenced at (`fragment_core::connection_signin::FENCE`), which no read or
+/// swap takes Pipes' word for until a connect is known to import again.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ConnectionFences {
+    pub issuer: String,
+    pub subject: String,
+}
+
+/// The providers fenced whole, and each account fenced alone, at most
+/// `connection_signin::ACCOUNT_FENCES_MAX` a provider.
+#[derive(Default, Serialize, Deserialize)]
+pub(crate) struct FencedProviders {
+    pub providers: Vec<String>,
+    pub accounts: Vec<FencedAccount>,
+}
+
+/// One account a disconnect fenced: its provider, and its identifier.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct FencedAccount {
+    pub provider: String,
+    pub identifier: String,
+}
+
+impl Call for ConnectionFences {
+    const PATH: &'static str = "/connection/fenced";
+    type Answer = FencedProviders;
+}
+
+/// `POST /login/begin`: a sign-in starts.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Begin {
     pub return_to: String,
-    pub link_to: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -565,15 +754,39 @@ impl Call for Begin {
 
 /// `POST /login/exchange`: WorkOS's code, exchanged through KEYS, and the
 /// sign-in finished (`switching`: one `/auth/switch` began, to use another
-/// account).
-#[derive(Serialize, Deserialize)]
+/// account). It is a finished round trip, so the router makes one only
+/// with `of`, from the `Bound` of the browser that began it: its fields
+/// are private and it is not `Deserialize` (the Registry decodes the same
+/// body as an `ExchangeIn`, which is its own).
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Exchange {
-    pub state: String,
-    pub code: String,
-    pub client_id: String,
-    pub issuer: String,
-    pub switching: bool,
+    state: String,
+    code: String,
+    client_id: String,
+    issuer: String,
+    switching: bool,
+}
+
+impl Exchange {
+    /// The exchange of a sign-in's (or a switch's) code, coming back to
+    /// the browser that began it: the only way to make one.
+    pub(crate) fn of(bound: crate::auth::Bound, code: String, client_id: String, issuer: String) -> Exchange {
+        use fragment_core::roundtrip::Trip;
+        assert!(matches!(bound.trip(), Trip::SignIn | Trip::Switch), "a WorkOS code finishes a sign-in or a switch");
+        Exchange { state: bound.state().to_string(), code, client_id, issuer, switching: bound.trip() == Trip::Switch }
+    }
+}
+
+/// `Exchange`'s body as the Registry decodes it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(in crate::registry) struct ExchangeIn {
+    pub(in crate::registry) state: String,
+    pub(in crate::registry) code: String,
+    pub(in crate::registry) client_id: String,
+    pub(in crate::registry) issuer: String,
+    pub(in crate::registry) switching: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -728,15 +941,91 @@ impl Call for Redeem {
     type Answer = Redeemed;
 }
 
-/// `POST /cli/add`: a key the signed-in person approved joins them (the
-/// router checked the key's own proof).
+/// `POST /cli/begin`: a CLI's new key (the router checked its signature)
+/// asks for the code its person types (`fragment_core::cli_code`). A key
+/// someone holds, or held, is 409; past the address's or the fleet's
+/// begins this minute, 429.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct CliBegin {
+    pub key: String,
+    /// The address it came from (`CF-Connecting-IP`), its begins counted
+    /// by: at most `FROM_MAX_BYTES`.
+    pub from: String,
+    /// What the platform knew of the request, shown to whoever types it.
+    pub asked: fragment_core::cli_code::Asked,
+}
+
+impl CliBegin {
+    /// An address, at most (an IPv6 one is 45 characters).
+    pub const FROM_MAX_BYTES: usize = 64;
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliBegun {
+    /// As kept: `cli_code::LEN` letters, no hyphen.
+    pub code: String,
+    pub expires_at: i64,
+}
+
+impl Call for CliBegin {
+    const PATH: &'static str = "/cli/begin";
+    type Answer = CliBegun;
+    fn checked(answer: CliBegun) -> CellResult<CliBegun> {
+        if fragment_core::cli_code::valid(&answer.code) {
+            Ok(answer)
+        } else {
+            Err(CellError::host("the registry made a code no one could type"))
+        }
+    }
+}
+
+/// `POST /cli/code`: the key a code a signed-in person typed names, to
+/// show them before they add it. A wrong code is a miss
+/// (`cli_code::MISSES_MAX`; past it, 429): 400, as is a used or expired one.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct CliCodeOf {
+    pub token: String,
+    /// As typed.
+    pub code: String,
+}
+
+/// A code's key, and whom the session names.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct CliCoded {
+    /// As kept.
+    pub code: String,
+    /// 64 hex.
+    pub key: String,
+    pub identity: String,
+    pub email: Option<String>,
+    pub asked: fragment_core::cli_code::Asked,
+}
+
+impl Call for CliCodeOf {
+    const PATH: &'static str = "/cli/code";
+    type Answer = CliCoded;
+}
+
+/// `POST /cli/add`: a code the signed-in person typed, spent: its key
+/// joins them (a key someone else holds, or a revoked one, 409). Misses as
+/// `CliCodeOf` does.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ApproveKey {
     pub token: String,
+    /// As kept (the confirming page's).
+    pub code: String,
+}
+
+/// The key added, and the email of the person it joined (to mail).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct KeyAdded {
     pub key: String,
+    pub email: Option<String>,
+    pub asked: fragment_core::cli_code::Asked,
 }
 
 impl Call for ApproveKey {
     const PATH: &'static str = "/cli/add";
-    type Answer = ();
+    type Answer = KeyAdded;
 }

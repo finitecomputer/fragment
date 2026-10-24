@@ -12,12 +12,12 @@
 //!
 //! What it proves: an agent's call on either tier reaches its API with the
 //! platform's key and nothing of the agent's, unstreamed, streamed and
-//! calling a tool, and is settled on its payer's ledger at its model's
+//! calling a tool, and is charged on its payer's ledger at its model's
 //! price; OpenRouter's carries the slot's provider routing over the
-//! agent's own, and its stream is settled from its accounting frame, not
-//! its reservation; one Finite Private fails before answering (its spent
-//! window's 429, a 5xx, its model down) is made once more on Workers AI and
-//! settled as Workers AI's; the platform's own trouble on either API (a
+//! agent's own, and its stream is charged from its accounting frame; one
+//! Finite Private fails before answering (its spent window's 429, a 5xx,
+//! its model down) is made once more on Workers AI and charged as Workers
+//! AI's; the platform's own trouble on either API (a
 //! key refused, its credit spent, no endpoint left) falls back too, a 401
 //! or 402 logged aloud; a refusal of the request is the call's; the agent's
 //! fields past the chat completion's never reach OpenRouter; the route's
@@ -32,6 +32,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use fragment_core::models::Models;
 use fragment_core::price::{PriceBook, Usage};
 use fragment_fakes::workers_ai::{Face, Reply, Used};
 use fragment_nip98::Keys;
@@ -40,7 +41,7 @@ use serde_json::{json, Value};
 use super::ai_tools;
 use super::app::ship;
 use super::jobs::{settle, started};
-use super::ledger::{end_of, entries};
+use super::ledger::{charged, entries, logged, quiet, usage};
 use crate::api::{Api, Call};
 use crate::{Suite, FINITE_PRIVATE_KEY};
 
@@ -65,16 +66,6 @@ fn tokens(model: &str, input: u64, output: u64) -> Usage {
 
 fn cached(model: &str, input: u64, cached_input: u64, output: u64) -> Usage {
     Usage::Tokens { model: model.into(), input, cached_input, cache_write: 0, output }
-}
-
-/// How many of the node's log lines so far are `event`'s.
-fn logged(s: &Suite, event: &str) -> usize {
-    let log = s.node.as_ref().map(|n| std::fs::read_to_string(&n.log).unwrap_or_default()).unwrap_or_default();
-    log.matches(&format!("\"event\":\"{event}\"")).count()
-}
-
-fn charge(usage: &Usage) -> i64 {
-    PriceBook::defaults().price(usage).expect("the book prices both models").charge
 }
 
 fn chat(model: &str, stream: bool) -> Value {
@@ -120,23 +111,27 @@ fn checks(s: &mut Suite, api: &Api) -> Result<()> {
     let fell = || vec![(Face::OpenAi, PRIVATE.to_string()), (Face::WorkersAi, FLASH.to_string())];
     let fell_from_routed = || vec![(Face::OpenAi, ROUTED.to_string()), (Face::WorkersAi, FLASH.to_string())];
     let routing = crate::openrouter_routing();
+    // what a usage is charged here: the node's book is the defaults and
+    // OpenRouter's slot at its ceiling, from its config (`Models::priced`)
+    let models = crate::finite_private_models(&s.ai.node().url).to_string();
+    let book = Models::parse(Some(&models), &PriceBook::defaults(), true).expect("the node's models").priced(PriceBook::defaults());
+    let charge = |usage: &Usage| book.price(usage).expect("the node's book prices its models").charge;
     let platform_key = format!("Bearer {FINITE_PRIVATE_KEY}");
-    // the one new entry since `before`, settled at `charge` from its usage, on `model`
+    // the one new row since `before`, charged `micros` from its usage, on `model`
     let settled_as = |before: usize, model: &str, micros: i64| {
         let now = aig();
-        now.len() == before + 1
-            && now.iter().any(|e| end_of(e) == "settled" && e["entry"]["end"]["basis"] == "usage" && e["entry"]["end"]["charge"] == micros && e["entry"]["end"]["usage"]["model"] == model)
+        now.len() == before + 1 && now.iter().any(|e| charged(e) == Some(micros) && usage(e)["model"] == model)
     };
 
     // ---- each tier on Finite Private, with the platform's key alone
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
     s.ai.set_usage(&[Used { prompt: 50, cached: 0, completion: 20 }]);
     let r = api.signed(&hand, "POST", ROUTE, Some(&chat("cheap", false)))?;
     let call = s.ai.calls().get(calls).cloned();
     let priced = charge(&tokens(PRIVATE, 50, 20));
     let settled = s.eventually(wait, || settled_as(before, PRIVATE, priced));
     s.ok(
-        "a cheap call runs on Finite Private (its model by its id there), answered in OpenAI's shape, and is settled on its payer's ledger at its price",
+        "a cheap call runs on Finite Private (its model by its id there), answered in OpenAI's shape, and is charged on its payer's ledger at its price",
         r.status == 200 && r.body["choices"][0]["message"]["content"] == "echo: hello" && tried(s, calls) == private(1) && call.as_ref().is_some_and(|c| c.body["model"] == PRIVATE) && settled,
         json!({ "status": r.status, "answer": r.body, "tried": format!("{:?}", tried(s, calls)), "entries": aig().len() - before }),
     );
@@ -147,11 +142,14 @@ fn checks(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     // ---- the medium tier on OpenRouter, its slot's provider routing over the agent's own
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
     s.ai.set_usage(&[Used { prompt: 70, cached: 40, completion: 20 }]);
     let mut asked = chat("medium", false);
     asked["provider"] = json!({ "zdr": false, "order": ["somewhere-dear"] });
     asked["temperature"] = json!(0.3);
+    // how hard it thinks, as its owner picked it (agent.json's `reasoning`,
+    // which its Hermes sends as each call's `reasoning_effort`)
+    asked["reasoning_effort"] = json!("high");
     asked["plugins"] = json!([{ "id": "web" }]);
     asked["web_search_options"] = json!({ "search_context_size": "high" });
     asked["models"] = json!(["anthropic/claude-opus-5.5"]);
@@ -160,12 +158,13 @@ fn checks(s: &mut Suite, api: &Api) -> Result<()> {
     let priced = charge(&cached(ROUTED, 30, 40, 20));
     let settled = s.eventually(wait, || settled_as(before, ROUTED, priced));
     s.ok(
-        "a medium call runs on OpenRouter's GLM-5.3 Flash with the platform's key, carrying its slot's provider routing in place of the agent's, the agent's temperature as it sent it and none of its extras (plugins, web search, other models), and is settled at OpenRouter's price, its cached tokens told",
+        "a medium call runs on OpenRouter's GLM-5.3 Flash with the platform's key, carrying its slot's provider routing in place of the agent's, the agent's temperature and reasoning effort as it sent them and none of its extras (plugins, web search, other models), and is charged at OpenRouter's price, its cached tokens told",
         r.status == 200
             && tried(s, calls) == routed(1)
             && call.as_ref().is_some_and(|c| {
                 c.body["provider"] == routing["provider"]
                     && c.body["temperature"] == 0.3
+                    && c.body["reasoning_effort"] == "high"
                     && ["plugins", "web_search_options", "models"].iter().all(|k| c.body.get(*k).is_none())
                     && c.body["model"] == ROUTED
                     && c.authorization.as_deref() == Some(platform_key.as_str())
@@ -173,9 +172,9 @@ fn checks(s: &mut Suite, api: &Api) -> Result<()> {
             && settled,
         json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "body": call.map(|c| c.body), "entries": aig().len() - before }),
     );
-    // streamed, calling a tool: settled from OpenRouter's accounting frame, not at its reservation
+    // streamed, calling a tool: charged from OpenRouter's accounting frame
     s.ai.transcripts(true);
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
     s.ai.set_usage(&[Used { prompt: 45, cached: 0, completion: 13 }]);
     let tools = json!([{ "type": "function", "function": { "name": "terminal", "parameters": { "type": "object" } } }]);
     let run = json!({ "model": "medium", "stream": true, "tools": tools, "messages": [{ "role": "user", "content": "[paul] run: echo routed" }] });
@@ -189,14 +188,14 @@ fn checks(s: &mut Suite, api: &Api) -> Result<()> {
     let priced = charge(&tokens(ROUTED, 45, 13));
     let settled = s.eventually(wait, || settled_as(before, ROUTED, priced));
     s.ok(
-        "a streamed medium call on OpenRouter calls its tool, carrying the routing and the tools, reaches the agent in OpenAI's shape (its usage once, last), and is settled from OpenRouter's accounting frame",
+        "a streamed medium call on OpenRouter calls its tool, carrying the routing and the tools, reaches the agent in OpenAI's shape (its usage once, last), and is charged from OpenRouter's accounting frame",
         r.status == 200 && called.as_deref() == Some("terminal") && shaped && tried(s, calls) == routed(1) && call.as_ref().is_some_and(|c| c.body["provider"] == routing["provider"] && c.body["tools"] == tools && c.body["stream"] == true) && settled,
         json!({ "status": r.status, "called": called, "last": last, "entries": aig(), "charge": priced }),
     );
 
     // streamed, calling a tool
     s.ai.transcripts(true);
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
     s.ai.set_usage(&[Used { prompt: 40, cached: 0, completion: 12 }]);
     let tools = json!([{ "type": "function", "function": { "name": "terminal", "parameters": { "type": "object" } } }]);
     let run = json!({ "model": "cheap", "stream": true, "tools": tools, "messages": [{ "role": "user", "content": "[paul] run: echo private" }] });
@@ -209,13 +208,13 @@ fn checks(s: &mut Suite, api: &Api) -> Result<()> {
     let priced = charge(&tokens(PRIVATE, 40, 12));
     let settled = s.eventually(wait, || settled_as(before, PRIVATE, priced));
     s.ok(
-        "a streamed call reaches the agent in OpenAI's shape, its tool call as Finite Private streamed it, and is settled from its last usage",
+        "a streamed call reaches the agent in OpenAI's shape, its tool call as Finite Private streamed it, and is charged from its last usage",
         r.status == 200 && called.as_deref() == Some("terminal") && shaped && tried(s, calls) == private(1) && settled,
         json!({ "status": r.status, "called": called, "last": last, "entries": aig().len() - before }),
     );
 
     // ---- failed before answering: once more on Workers AI's GLM-5.3 Flash
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
     s.ai.fail_next(&[429]);
     s.ai.set_usage(&[Used { prompt: 60, cached: 0, completion: 25 }]);
     let r = api.signed(&hand, "POST", ROUTE, Some(&chat("cheap", false)))?;
@@ -227,8 +226,8 @@ fn checks(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && r.body["choices"][0]["message"]["content"] == "echo: hello" && tried(s, calls) == fell() && made.len() == 2 && made[0].body["messages"] == made[1].body["messages"] && made[1].authorization.is_none(),
         json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)) }),
     );
-    s.ok("under one hold, settled once from Workers AI's usage, at its price", settled, json!({ "charge": priced, "entries": aig() }));
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    s.ok("charged once, from Workers AI's usage, at its price", settled, json!({ "charge": priced, "entries": aig() }));
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
     s.ai.down(&[PRIVATE]);
     s.ai.set_usage(&[Used { prompt: 30, cached: 0, completion: 30 }]);
     let r = api.signed(&hand, "POST", ROUTE, Some(&chat("cheap", true)))?;
@@ -237,35 +236,36 @@ fn checks(s: &mut Suite, api: &Api) -> Result<()> {
     let priced = charge(&tokens(FLASH, 30, 30));
     let settled = s.eventually(wait, || settled_as(before, FLASH, priced));
     s.ok(
-        "a streamed call whose Finite Private model is down (its limiter's 502) falls back the same, streamed in OpenAI's shape, settled as Workers AI's",
+        "a streamed call whose Finite Private model is down (its limiter's 502) falls back the same, streamed in OpenAI's shape, charged as Workers AI's",
         r.status == 200 && last["choices"] == json!([]) && last["usage"]["completion_tokens"] == 30 && tried(s, calls) == fell() && settled,
         json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "last": last }),
     );
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
     s.ai.fail_next(&[503]);
     let r = api.signed(&hand, "POST", ROUTE, Some(&chat("cheap", false)))?;
+    let once = s.eventually(wait, || aig().len() == before + 1);
     s.ok(
-        "a 503 (finite.computer not answering its limiter) falls back too, under one hold",
-        r.status == 200 && tried(s, calls) == fell() && aig().len() == before + 1,
+        "a 503 (finite.computer not answering its limiter) falls back too, charged once",
+        r.status == 200 && tried(s, calls) == fell() && once,
         format!("{} {:?}", r.status, tried(s, calls)),
     );
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
     s.ai.fail_next(&[502]);
     let r = api.signed(&hand, "POST", ROUTE, Some(&chat("medium", false)))?;
     let made = s.ai.calls()[calls..].to_vec();
+    let once = s.eventually(wait, || aig().len() == before + 1);
     s.ok(
-        "OpenRouter's 502 falls back the same, under one hold, and Workers AI is sent the call without OpenRouter's routing",
-        r.status == 200 && tried(s, calls) == fell_from_routed() && aig().len() == before + 1 && made.len() == 2 && made[0].body["provider"] == routing["provider"] && made[1].body.get("provider").is_none(),
+        "OpenRouter's 502 falls back the same, charged once, and Workers AI is sent the call without OpenRouter's routing",
+        r.status == 200 && tried(s, calls) == fell_from_routed() && once && made.len() == 2 && made[0].body["provider"] == routing["provider"] && made[1].body.get("provider").is_none(),
         json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "fallback": made.get(1).map(|c| c.body.clone()) }),
     );
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
     s.ai.down(&[PRIVATE, FLASH]);
     let r = api.signed(&hand, "POST", ROUTE, Some(&chat("cheap", false)))?;
     s.ai.down(&[]);
-    let released = s.eventually(wait, || aig().len() == before + 1 && aig().iter().filter(|e| end_of(e) == "released").count() >= 1);
     s.ok(
-        "when Workers AI fails too, its failure is the call's, after two tries and no more, and the hold goes back",
-        r.status == 502 && r.text.contains("could not route request to AI model") && tried(s, calls) == fell() && released,
+        "when Workers AI fails too, its failure is the call's, after two tries and no more, and nothing is charged",
+        r.status == 502 && r.text.contains("could not route request to AI model") && tried(s, calls) == fell() && aig().len() == before,
         json!({ "status": r.status, "answer": r.text, "tried": format!("{:?}", tried(s, calls)) }),
     );
     let calls = s.ai.calls().len();
@@ -273,18 +273,20 @@ fn checks(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&hand, "POST", ROUTE, Some(&chat("cheap", false)))?;
     s.ok("a refusal of the request (400) is the call's: Workers AI is not asked", r.status == 400 && tried(s, calls) == private(1), format!("{} {:?}", r.status, tried(s, calls)));
     // the platform's own trouble on an OpenAI-compatible API: not the caller's to fail for
-    let alarms = logged(s, "model.platform-key");
+    let (alarms, before) = (logged(s, "model.platform-key"), aig().len());
     s.ai.accept_key("fpk_live_another");
     let calls = s.ai.calls().len();
     let r = api.signed(&hand, "POST", ROUTE, Some(&chat("cheap", false)))?;
     s.ai.accept_key(FINITE_PRIVATE_KEY);
     let loud = s.eventually(wait, || logged(s, "model.platform-key") > alarms);
+    // charged after its answer: its row lands before the next call's count
+    let once = s.eventually(wait, || aig().len() == before + 1);
     s.ok(
-        "a platform key Finite Private refuses (its 401) falls back to Workers AI, which answers, and is logged aloud",
-        r.status == 200 && r.body["choices"][0]["message"]["content"] == "echo: hello" && tried(s, calls) == fell() && loud,
+        "a platform key Finite Private refuses (its 401) falls back to Workers AI, which answers, is charged once, and is logged aloud",
+        r.status == 200 && r.body["choices"][0]["message"]["content"] == "echo: hello" && tried(s, calls) == fell() && loud && once,
         format!("{} {:?} {} loud={loud}", r.status, tried(s, calls), r.text),
     );
-    let (calls, before, alarms) = (s.ai.calls().len(), aig().len(), logged(s, "model.platform-key"));
+    let (calls, before, alarms) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"), logged(s, "model.platform-key"));
     s.ai.fail_next(&[402]);
     s.ai.set_usage(&[Used { prompt: 20, cached: 0, completion: 9 }]);
     let r = api.signed(&hand, "POST", ROUTE, Some(&chat("medium", true)))?;
@@ -292,16 +294,17 @@ fn checks(s: &mut Suite, api: &Api) -> Result<()> {
     let settled = s.eventually(wait, || settled_as(before, FLASH, priced));
     let loud = s.eventually(wait, || logged(s, "model.platform-key") > alarms);
     s.ok(
-        "OpenRouter's 402 (the platform's credit spent) falls back to Workers AI, streamed, settled as Workers AI's, and is logged aloud",
+        "OpenRouter's 402 (the platform's credit spent) falls back to Workers AI, streamed, charged as Workers AI's, and is logged aloud",
         r.status == 200 && lines(&r.text).last().is_some_and(|l| l["usage"]["completion_tokens"] == 9) && tried(s, calls) == fell_from_routed() && settled && loud,
         json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "loud": loud, "entries": aig().len() - before }),
     );
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
     s.ai.fail_next(&[404]);
     let r = api.signed(&hand, "POST", ROUTE, Some(&chat("medium", false)))?;
+    let once = s.eventually(wait, || aig().len() == before + 1);
     s.ok(
-        "OpenRouter's 404 (no endpoint left by its routing) falls back to Workers AI, under one hold",
-        r.status == 200 && r.body["choices"][0]["message"]["content"] == "echo: hello" && tried(s, calls) == fell_from_routed() && aig().len() == before + 1,
+        "OpenRouter's 404 (no endpoint left by its routing) falls back to Workers AI, charged once",
+        r.status == 200 && r.body["choices"][0]["message"]["content"] == "echo: hello" && tried(s, calls) == fell_from_routed() && once,
         format!("{} {:?}", r.status, tried(s, calls)),
     );
     let calls = s.ai.calls().len();
@@ -310,55 +313,55 @@ fn checks(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("OpenRouter's refusal of the request (400) is the call's too", r.status == 400 && tried(s, calls) == routed(1), format!("{} {:?}", r.status, tried(s, calls)));
 
     // ---- the route's other names: on Workers AI
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
     s.ai.set_usage(&[Used { prompt: 30, cached: 0, completion: 10 }]);
     let r = api.signed(&hand, "POST", ROUTE, Some(&chat("fallback", false)))?;
     let priced = charge(&tokens(FLASH, 30, 10));
     let settled = s.eventually(wait, || settled_as(before, FLASH, priced));
     s.ok(
-        "`fallback` (Hermes' own switch when a call stalls) runs on Workers AI's GLM-5.3 Flash, and is settled at its price",
+        "`fallback` (Hermes' own switch when a call stalls) runs on Workers AI's GLM-5.3 Flash, and is charged at its price",
         r.status == 200 && tried(s, calls) == [(Face::WorkersAi, FLASH.to_string())] && settled,
         format!("{} {:?}", r.status, tried(s, calls)),
     );
     let png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
     let look = json!({ "model": "vision", "messages": [{ "role": "user", "content": [{ "type": "text", "text": "what is this?" }, { "type": "image_url", "image_url": { "url": png } }] }] });
-    let calls = s.ai.calls().len();
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
     let r = api.signed(&hand, "POST", ROUTE, Some(&look))?;
+    let once = s.eventually(wait, || aig().len() == before + 1);
     s.ok(
         "`vision` runs on Workers AI's GLM-5.3 Flash: Finite Private's images are not qualified",
-        r.status == 200 && tried(s, calls) == [(Face::WorkersAi, FLASH.to_string())],
+        r.status == 200 && tried(s, calls) == [(Face::WorkersAi, FLASH.to_string())] && once,
         format!("{} {:?} {}", r.status, tried(s, calls), r.text),
     );
 
     // ---- each slot's model by its own id (Paul, 2026-10-16: "see the real model")
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
     s.ai.set_usage(&[Used { prompt: 25, cached: 0, completion: 9 }]);
     let r = api.signed(&hand, "POST", ROUTE, Some(&chat(PRIVATE, false)))?;
     let call = s.ai.calls().get(calls).cloned();
     let settled = s.eventually(wait, || settled_as(before, PRIVATE, charge(&tokens(PRIVATE, 25, 9))));
     s.ok(
-        "a call naming Finite Private's model by its id is the cheap tier's: on Finite Private with the platform's key, settled at its price",
+        "a call naming Finite Private's model by its id is the cheap tier's: on Finite Private with the platform's key, charged at its price",
         r.status == 200 && tried(s, calls) == private(1) && call.as_ref().is_some_and(|c| c.body["model"] == PRIVATE && c.authorization.as_deref() == Some(platform_key.as_str())) && settled,
         json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "entries": aig().len() - before }),
     );
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
     s.ai.set_usage(&[Used { prompt: 35, cached: 0, completion: 12 }]);
     let as_medium = Call { method: "POST", url: format!("{}{ROUTE}", api.base), body: Some(chat(ROUTED, true).to_string().into_bytes()), content_type: Some("application/json"), keys: Some(&hand), extra: vec![("x-fragment-tier", "medium".into())], ..Call::default() };
     let r = api.call(as_medium)?;
     let call = s.ai.calls().get(calls).cloned();
     let settled = s.eventually(wait, || settled_as(before, ROUTED, charge(&tokens(ROUTED, 35, 12))));
     s.ok(
-        "one naming OpenRouter's GLM-5.3 Flash by its id, its tier said (medium), is the medium tier's: streamed on OpenRouter with its slot's provider routing, settled from its accounting frame",
+        "one naming OpenRouter's GLM-5.3 Flash by its id, its tier said (medium), is the medium tier's: streamed on OpenRouter with its slot's provider routing, charged from its accounting frame",
         r.status == 200 && lines(&r.text).last().is_some_and(|l| l["usage"]["completion_tokens"] == 12) && tried(s, calls) == routed(1) && call.as_ref().is_some_and(|c| c.body["provider"] == routing["provider"] && c.body["model"] == ROUTED) && settled,
         json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "entries": aig().len() - before }),
     );
-    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
     s.ai.fail_next(&[429]);
     let r = api.signed(&hand, "POST", ROUTE, Some(&chat(FLASH, false)))?;
-    let released = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| end_of(e) == "released"));
     s.ok(
-        "one naming Workers AI's GLM-5.3 Flash (the fallback's and vision's) is the fallback's: on Workers AI, and its 429 is the call's, no second try, the hold given back",
-        r.status == 429 && tried(s, calls) == [(Face::WorkersAi, FLASH.to_string())] && released,
+        "one naming Workers AI's GLM-5.3 Flash (the fallback's and vision's) is the fallback's: on Workers AI, and its 429 is the call's, no second try, nothing charged",
+        r.status == 429 && tried(s, calls) == [(Face::WorkersAi, FLASH.to_string())] && aig().len() == before,
         json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)) }),
     );
     let r = api.signed(&hand, "GET", "/api/models/v1/models", None)?;

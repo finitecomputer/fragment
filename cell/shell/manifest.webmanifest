@@ -7,5 +7,5 @@
   "display": "standalone",
   "background_color": "#181818",
   "theme_color": "#181818",
-  "icons": [{ "src": "/__shell/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+  "icons": [{ "src": "/__shell/app-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
 }

@@ -87,7 +87,7 @@ pub fn channels(s: &mut Suite, api: &Api) -> Result<()> {
     let viewer = api.person()?;
     let stranger = api.person()?;
     let (name, _) = chat(s, api, &owner, "channels")?;
-    api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", viewer.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;
+    api.share(&name, viewer.pubkey_hex(), "viewer")?;
     let owner_id = api.identity(&owner)?;
 
     let r = api.op(&owner, &name, "say", "c1", json!({ "text": "one" }))?;
@@ -589,7 +589,7 @@ fn live_queries(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     // changes has theirs reopened (4001, which the library reconnects
     // after), and the new one runs queries at the new role
     let member = api.person()?;
-    api.signed(owner, "PUT", &format!("/api/f/{name}/members/{}", member.pubkey_hex()), Some(&json!({ "role": "editor" })))?;
+    api.share(&name, member.pubkey_hex(), "editor")?;
     let mut m = Socket::open(api, &name, "__live", Some(&member), None)?;
     m.until("hello", 5)?;
     let as_editor = ask(&mut m, "staff", "backstage", json!({}))?;
@@ -752,6 +752,27 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let (exit, v) = refused(s, &["call", &name, "measure", "--input", "@/nowhere/at-all.json", "--json"]);
     s.ok("a file that is not there is invalid_usage (exit 2)", exit == Some(2) && v["error"]["code"] == "invalid_usage", &v);
+    // `fragment schedule` (docs/api.md, "Scheduled records"; the triggers
+    // section adds, fires and removes them on an app, the computers section
+    // an agent's): off a computer it names its fragment, a record is JSON,
+    // and an app lists none and keeps none on a channel that takes no posts
+    let (unnamed_exit, unnamed) = refused(s, &["schedule", "list", "--json"]);
+    let (listed_exit, listed) = refused(s, &["schedule", "list", &name, "--json"]);
+    let (bad_exit, bad) = refused(s, &["schedule", "add", &name, "--cron", "0 * * * *", "--channel", "room", "--record", "{not json", "--json"]);
+    let (room_exit, room) = refused(s, &["schedule", "add", &name, "--cron", "0 * * * *", "--channel", "room", "--record", r#"{"said":"hi"}"#, "--json"]);
+    s.ok(
+        "fragment schedule: no fragment named off a computer, and a record that is no JSON, are invalid_usage (exit 2); an app lists none, and schedules none on a channel that takes no posts (invalid_request, exit 1)",
+        unnamed_exit == Some(2)
+            && unnamed["error"]["code"] == "invalid_usage"
+            && bad_exit == Some(2)
+            && bad["error"]["code"] == "invalid_usage"
+            && listed_exit == Some(0)
+            && listed["data"]["schedules"] == json!([])
+            && room_exit == Some(1)
+            && room["error"]["code"] == "invalid_request"
+            && room["error"]["message"].as_str().is_some_and(|m| m.contains("takes no posts")),
+        json!({ "unnamed": unnamed, "bad": bad, "listed": listed, "room": room }),
+    );
     // `fragment mcp`: the described operations as an MCP server's tools, over stdio
     let mcp = |write: bool, calls: &[(&str, Value)]| -> Result<Vec<Value>> {
         let mut args = vec!["mcp", name.as_str()];
@@ -879,10 +900,18 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
             && after["invites"].as_array().is_some_and(|a| a.iter().all(|i| i["email"] != invited.as_str())),
         json!([listed, revoked, after]),
     );
-    // someone in already: `members add` is refused, `members role` changes it
+    // someone who signs in already is invited, and in once they accept
+    // (decision 63); someone in already: `members add` is refused,
+    // `members role` changes it
     let bea = api.person()?;
     let bea_email = Api::email_of(&bea);
     let added = s.cli_json(api, &home, &["members", "add", &name, &bea_email, "--json"])?;
+    let yes = api.signed(&bea, "POST", &format!("/api/invites/{name}/accept"), Some(&json!({})))?;
+    s.ok(
+        "fragment members add <email> of someone who signs in already invites them too (mailed), and their yes makes them a member",
+        added["invited"]["email"] == bea_email.as_str() && added["invited"]["role"] == "viewer" && yes.status == 200 && yes.body["role"] == "viewer",
+        json!([added, yes.body]),
+    );
     let (again, v) = {
         let out = s.cli(api, &home, &["members", "add", &name, &bea_email, "--role", "editor", "--json"]);
         (out.status.code(), serde_json::from_slice::<Value>(&out.stdout).unwrap_or_default())
@@ -890,11 +919,63 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     let changed = s.cli_json(api, &home, &["members", "role", &name, &bea_email, "editor", "--json"])?;
     s.ok(
         "fragment members add: someone in already is refused (invalid_request, saying `fragment members role`), which changes their role",
-        added["role"] == "viewer" && again == Some(1) && v["error"]["code"] == "invalid_request" && v["error"]["message"].as_str().is_some_and(|m| m.contains("fragment members role")) && changed["role"] == "editor",
-        json!([added, v, changed]),
+        again == Some(1) && v["error"]["code"] == "invalid_request" && v["error"]["message"].as_str().is_some_and(|m| m.contains("fragment members role")) && changed["role"] == "editor",
+        json!([v, changed]),
+    );
+    // the invites waiting for the CLI's person's yes: listed, accepted by
+    // label, declined by name (decision 63)
+    let me_email = s.cli_keys(&home).map(|k| crate::cli_email(&fragment_core::npub::encode(k.pubkey_hex()))).transpose()?.unwrap_or_default();
+    let (to_keep, to_drop) = (s.named(api, &bea, "cli-asks")?, s.named(api, &bea, "cli-asks-too")?);
+    for f in [&to_keep, &to_drop] {
+        s.create(api, &bea, f)?;
+        let r = api.signed(&bea, "POST", &format!("/api/f/{f}/invites"), Some(&json!({ "email": me_email, "role": "viewer" })))?;
+        anyhow::ensure!(r.status == 200, "an invite to the CLI's person on {f}: {r}");
+    }
+    let waiting = s.cli_json(api, &home, &["invites", "--json"])?;
+    let listed: Vec<&str> = waiting["invites"].as_array().into_iter().flatten().filter_map(|i| i["fragment"].as_str()).collect();
+    let label = fragment_proto::split_fragment_name(&to_keep).map(|(l, _)| l.to_string()).unwrap_or_default();
+    let accepted = s.cli_json(api, &home, &["invites", "accept", &label, "--json"])?;
+    let declined = s.cli_json(api, &home, &["invites", "decline", &to_drop, "--json"])?;
+    let (again, gone) = {
+        let out = s.cli(api, &home, &["invites", "accept", &to_drop, "--json"]);
+        (out.status.code(), serde_json::from_slice::<Value>(&out.stdout).unwrap_or_default())
+    };
+    let mine = s.cli_json(api, &home, &["list", "--json"])?;
+    let has = |f: &str| mine["fragments"].as_array().is_some_and(|l| l.iter().any(|x| x["name"] == f));
+    s.ok(
+        "fragment invites lists the invites waiting for its person's yes; `invites accept <label>` makes them a member, `invites decline <name>` takes one back, and one no longer waiting is not_found",
+        listed.contains(&to_keep.as_str())
+            && listed.contains(&to_drop.as_str())
+            && accepted["role"] == "viewer"
+            && declined["declined"] == to_drop.as_str()
+            && again == Some(1)
+            && gone["error"]["code"] == "not_found"
+            && has(&to_keep)
+            && !has(&to_drop),
+        json!([waiting, accepted, declined, gone]),
     );
     let out = s.cli(api, &home, &["members", "add", &name, &invited, "--people-only", "--json"]);
     s.ok("--people-only is no flag now: a share is a person's and their agents'", out.status.code() == Some(2), String::from_utf8_lossy(&out.stderr));
+    // inviting someone to a chat its owner's agent is in tells the owner
+    // to trust them (Paul, 2026-10-23); before the agent is in, nothing
+    let me = s.cli_keys(&home).ok_or_else(|| anyhow::anyhow!("the CLI's key"))?;
+    let chat = s.named(api, &me, "cli-trust")?;
+    let made = api.create_with(&me, json!({ "name": chat, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "the CLI's person's chat: {made}");
+    let invite = || {
+        let email = format!("t-{}@e2e.test", &Keys::generate().pubkey_hex()[..12]);
+        String::from_utf8_lossy(&s.cli(api, &home, &["members", "add", &chat, &email]).stdout).into_owned()
+    };
+    let before = invite();
+    let (_, agent) = super::delegation::agent_of(api, &me)?;
+    s.cli_json(api, &home, &["members", "add", &chat, &agent, "--role", "editor", "--json"])?;
+    let after = invite();
+    let warning = fragment_core::access::TRUST_WARNING;
+    s.ok(
+        "fragment members add <email> on a chat its owner's agent is in says to trust whoever they invite; with no agent of theirs in it, it does not",
+        before.starts_with("invited ") && !before.contains(warning) && after.starts_with("invited ") && after.contains(warning),
+        json!([before, after]),
+    );
     // `fragment open` names a share link only where one opens it (this
     // chat is public: its address is its link)
     let public = s.cli_json(api, &home, &["open", &name, "--json"])?;

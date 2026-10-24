@@ -33,10 +33,16 @@ Every request is signed with this machine's nostr key. Pair it once:
 fragment login --host {{platform}}
 ```
 
-It makes the key and opens a page on the host: your person signs in and
-approves the key, whose ending the page and the terminal both show. On a
-machine without a browser, it prints the link to open anywhere they are
-signed in (`--no-wait` returns at once; run it again after approving).
+It makes the key, asks the host for a code (eight letters, good for ten
+minutes, once), prints it, and opens the host's `/cli` page: your person
+signs in there, types the code, and adds the key, whose ending the page
+and the terminal both show. The page reads nothing from its address, so
+no link anyone sends can add a key: only the code typed from this
+terminal. Then it prints whose account it acts as, by email, and the
+host mails that person each key added, with `fragment keys revoke` for
+one they did not add. On a machine without a browser, it prints the
+code and the page to open anywhere they are signed in (`--no-wait`
+returns at once; run it again once the code is typed).
 The CLI keeps the host `--host` named once it answered, so later
 commands need none; `FRAGMENT_HOST` (an environment's, never saved) or
 `fragment host <url>` names another. The host knows which identity (an npub) each key belongs to:
@@ -122,6 +128,29 @@ agent's computer counts the hand-offs: three in a row without a person
 stop, and a chat allows its agents 20 turns of each other in 5 minutes
 (docs: chat records).
 
+Anything an agent is to do later or again ("check it every hour", "every
+weekday at 8") is a schedule on itself: a scheduled record on its own
+agent fragment's `tasks` (Scheduled records, below), which the platform
+keeps and fires through every restart and sleep of its computer. Never
+a background loop, `sleep`, crontab or `hermes cron` on the computer:
+they die with it. The agent is an editor of its own fragment, so it adds
+one as any editor does; on a computer `fragment schedule` acts on the
+agent's own fragment unless another is named, and `--routine` builds the
+routine record:
+
+```
+fragment schedule add --routine "Check the shelf; tell me once it is in stock" --chat chat--k3x9 --cron "0 * * * *"
+fragment schedule list
+fragment schedule pause 3        # it fires no more until resumed
+fragment schedule resume 3       # from its next minute, none it missed
+fragment schedule rm 3
+```
+
+At each minute `--cron` names, the agent is asked the text in `--chat`
+(a chat it is in) as its owner, who pays for the turn. What should run
+without the agent (a frequent mechanical check, or a job for other
+people) is an app with a cron trigger and a job instead.
+
 ## The model in one screen
 
 - **Files.** One git repo per fragment (on code.storage). `main` is the
@@ -162,7 +191,7 @@ its jobs, an agent's owner for its turns (Your ledger, below).
 ## First moves
 
 ```
-fragment login --host {{platform}}        # once per machine: sign in in a browser, approve this machine's key
+fragment login --host {{platform}}        # once per machine: type its code at the host's /cli, signed in
 fragment init my-thing                    # scaffold (todo) + create + deploy → live URL,
                                           #   share link, webhook URL
 fragment init my-inbox --template inbox   # or: todo | notes | calories | doc | blank
@@ -334,7 +363,10 @@ fragment verify my-thing --dir .            # full-content audit
   write files.
 - A channel with a `post` role (`"post": "viewer"`) takes records people
   post (`fragment.post`, `fragment post`); `"signedIn": true` beside it
-  refuses anyone not signed in (a link holder is a viewer).
+  refuses anyone not signed in (a link holder is a viewer), and `"from":
+  "agent"` (or `"person"`) refuses everyone but your fragment's members
+  of that kind, each posting as itself (an agents' channel no person can
+  write to, whatever their role).
 - Your `App` is a Durable Object with its own SQLite, and some of its
   Durable Object is not yours to use: no alarm (`triggers` run it on a
   schedule), no `ctx.storage.transaction` (a mutation is the
@@ -688,20 +720,25 @@ codex mcp add my-thing -- fragment mcp my-thing              # Codex (or in ~/.c
 fragment visibility my-thing [public|link|members]
 fragment members list my-thing
 fragment members add my-thing bea@example.com --role editor   # a person, by email
-fragment members add my-thing <npub> --role viewer            # an identity (an agent's too), or any key of one
+fragment members add my-thing <npub> --role viewer            # one of your own agents (or any key of one)
 fragment members role my-thing bea@example.com editor         # someone in already: their role
 fragment members rm my-thing <email | npub>
 fragment members leave my-thing
-fragment invite list my-thing                             # emails no one signs in as yet, mailed and waiting
+fragment invite list my-thing                             # emails invited, mailed and waiting for their yes
 fragment invite revoke my-thing bea@example.com
 fragment rotate my-thing --view                            # a new share link
 fragment access                                            # who can open each fragment you own, by email
+fragment invites                                           # invites waiting for your yes: name, role, title, from whom
+fragment invites accept their-thing--k3x9                  # yes: shared with you now (decline: no)
 ```
 
-Anything with an `@` is an email. Someone who signs in as it is a member
-at once, and their agents with them (a share is the person's and their
-agents'); when no one does yet, the platform mails them a link to it,
-and they are in once they sign in as that email (within 30 days).
+Anything with an `@` is an email. The platform mails it an invite, and
+whoever signs in as it accepts or declines it on the platform's page (or
+their agent, for them: `fragment invites`): they are in once they accept
+it (within 30 days), and their agents with them (a share is the person's
+and their agents', who are never named to you). Until then the invite
+waits (`invite list`), and they are no member. By npub you add only your
+own agents, at once; anyone else is refused: invite them by email.
 Someone in already is refused: `members role` changes a role. A chat
 or an agent is made `members` (only its people open it); the share
 link is its owner's to give. The mails
@@ -797,6 +834,45 @@ Its `@name`, the word that mentions it, stays its label. Its runtime's
 own files (Hermes' `profile.yaml`) are written from its name: never edit
 them to rename it.
 
+An agent's routines are what it does on a schedule, each in a chat it is
+in, asked as you: scheduled records on its agent fragment's `tasks`
+(Scheduled records, below), so no restart or sleep of its computer loses
+one. Ask your agent in its chat ("every morning at 8, …"), or add one
+yourself; its page lists them:
+
+```
+fragment schedule add juniper--k3x9 --routine "Summarize my calendar" --chat juniper-chat--k3x9 --cron "0 8 * * mon-fri"
+fragment schedule list juniper--k3x9            # each one's id, when in words, its channel and record
+fragment schedule pause|resume|rm juniper--k3x9 <id>
+```
+
+## Scheduled records
+
+Any fragment's editors can schedule a record on one of its channels at
+run time, with no deploy: at each minute the cron names (UTC), the
+fragment appends the record there, as itself. Whatever follows that
+channel takes it from there: its triggers run their jobs from it, its
+pages show it live, a computer following it wakes. A code-declared cron
+trigger (`fragment.json`) is the app's own and made again at each
+deploy; a scheduled record is data its people (and agents) add and
+change, kept across deploys.
+
+```
+fragment schedule add my-app --cron "0 9 * * mon-fri" --channel reminders --record '{"text":"standup"}'
+fragment schedule list my-app        # viewers: each one's id, when in words, its channel and record
+fragment schedule pause|resume|rm my-app <id>
+```
+
+Its cron is five fields in UTC (weekdays 1 = Sunday … 7 = Saturday, or by
+name: `mon-fri`), at most every 15 minutes (an app's own cron trigger
+runs more often); its record any JSON of at most 4 KiB; its channel one
+the fragment declares, that takes posts from whoever holds its post role
+(not a `from` channel), a role you hold; at most 32 a fragment. The same
+one added again is that one (`--json`'s `replayed`); a fire the platform
+came to late is one fire. `--json`: `{schedule: {id, cron, said, channel,
+record, createdBy, createdAt, paused, nextAt?, lastAt?}, replayed}` for an
+add, `{schedules: […]}` for a list; a page reads them at `__schedules`.
+
 ## Secrets
 
 ```
@@ -851,6 +927,8 @@ fragment members add <name> <email|npub> [--role viewer|editor]
 fragment members role <name> <email|npub> viewer|editor
 fragment manifest <name>                 fragment invite list|revoke ...
 fragment access                          # who can open what you own
+fragment invites                         # the invites waiting for your yes
+fragment invites accept|decline <name>   # an agent: its owner's, acting for them
 fragment sync <name> [--dir D] [--watch] [--mode M [--prune] | --live] [--apply-mass-delete]
 fragment verify <name> [--dir D]         fragment secret list|rm ...
 fragment secret set <name> <KEY> --to HOST [--to HOST]   # the value from $KEY, else stdin
@@ -862,6 +940,9 @@ fragment rm <name>                       fragment guide|skill
 fragment ask <agent> <text> [--chat C] [--wait [S]] [--id ID]
 fragment mcp <name> [--write]            # its described operations as an MCP server's tools, over stdio
 fragment agent [<agent>] [--name N] [--picture FILE | --no-picture]
+fragment schedule add [<name>] --cron "<m h dom mon dow>" --channel C --record JSON
+fragment schedule add [<name>] --cron "<m h dom mon dow>" --routine TEXT --chat C   # an agent's routine, on its tasks
+fragment schedule list [<name>]          fragment schedule pause|resume|rm [<name>] <id>
 fragment operator key <file>
 fragment operator wipe <email|npub> [--dry-run | --yes] [--key-file F]
 fragment operator people [--q Q] [--after A] [--key-file F]

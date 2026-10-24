@@ -55,10 +55,12 @@
     throw new Error("no ?agent=");
   }
   screen.dataset.agent = agent;
-  // the agent's name, as the screen's control socket says it; its fragment until then
-  let name = agent;
-  const titled = () => (document.title = `${name}'s screen`);
-  titled();
+  // the agent's name (its fragment's title), as the platform's page framing
+  // this one says it as it opens it and again on a rename; none until then
+  // (its computer knows it by its label alone, which is no name)
+  let name = null;
+  const whose = (start) => (name ? `${name}'s screen` : start ? "The screen" : "the screen");
+  const titled = () => (document.title = whose(true));
 
   // The screen is shown once its RFB stream connects; Take over works once
   // the control socket is open too (a click before would be lost).
@@ -74,12 +76,19 @@
     // a holder may give back while the stream reconnects
     const ready = control.readyState === WebSocket.OPEN && (shown || mine);
     button.disabled = !ready || closed !== null;
-    if (closed !== null) return say("closed", closed);
-    if (!shown) return connects === 0 ? say("connecting", `Connecting to ${name}'s screen…`) : say("reconnecting", `${name}'s screen restarted. Reconnecting…`);
-    if (mine) return say("mine", `You have ${name}'s screen`);
-    if (holder) return say("theirs", `Someone else has ${name}'s screen`);
-    say("watching", `Watching ${name}'s screen`);
+    if (closed !== null) return say("closed", closed());
+    if (!shown) return connects === 0 ? say("connecting", `Connecting to ${whose()}…`) : say("reconnecting", `${whose(true)} restarted. Reconnecting…`);
+    if (mine) return say("mine", `You have ${whose()}`);
+    if (holder) return say("theirs", `Someone else has ${whose()}`);
+    say("watching", `Watching ${whose()}`);
   };
+  addEventListener("message", (e) => {
+    const d = e.data;
+    if (window.parent === window || e.source !== window.parent || d?.fragment !== "screen" || d.agent !== agent || typeof d.name !== "string" || !d.name) return;
+    name = d.name;
+    titled();
+    show();
+  });
 
   const connect = () => {
     rfb = new RFB(screen, socket("websockify"), { shared: true });
@@ -107,20 +116,16 @@
   // the page says once both are closed.
   const again = () => (closed === null ? connect() : gone());
   const gone = () => {
-    if (closed !== null && !shown) closed = `${name}'s screen closed. Reload to see it again.`;
+    if (closed !== null && !shown) closed = () => `${whose(true)} closed. Reload to see it again.`;
     show();
   };
   connect();
 
   control.addEventListener("open", show);
-  control.addEventListener("close", () => { closed ??= "Take over is unavailable. Reload to try again."; gone(); });
+  control.addEventListener("close", () => { closed ??= () => "Take over is unavailable. Reload to try again."; gone(); });
   control.addEventListener("message", (e) => {
     const m = JSON.parse(e.data);
     if (m.type !== "control" || m.agent !== agent) return;
-    if (typeof m.name === "string" && m.name) {
-      name = m.name;
-      titled();
-    }
     holder = m.holder;
     mine = holder === viewer;
     if (rfb) rfb.viewOnly = !mine;

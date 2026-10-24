@@ -19,7 +19,10 @@
 //!   2026-10-08; `own_signin`);
 //! - an own key's models (`models`): the chat-completions base URL a guest
 //!   sends its model calls to, and the few models a person is offered for
-//!   an agent (its `agent.json`'s `model`).
+//!   an agent (its `agent.json`'s `model`);
+//! - a note (`note`): a line settings' Connections shows people under the
+//!   provider's name (a provider still reviewing the platform's sign-in,
+//!   say).
 //!
 //! Adding a provider is a catalog row (and, for a connection, the provider
 //! enabled in the WorkOS environment): nothing in code names one.
@@ -48,6 +51,12 @@ pub const MODELS_OFFERED_MAX: usize = 16;
 pub const MODEL_ID_MAX_BYTES: usize = 128;
 /// A model's name for people, at most.
 pub const MODEL_NAME_MAX_BYTES: usize = 64;
+/// A provider's note for people, at most, in characters (a post's length:
+/// a line or two under its name).
+pub const NOTE_MAX_CHARS: usize = 280;
+/// The most accounts a person connects at one provider: Pipes' own limit
+/// (it answers 409 `connected_account_limit_reached` past it).
+pub const ACCOUNTS_MAX: u8 = 25;
 
 /// What a provider's credential is (decisions 22 and 37): a `connection`
 /// (WorkOS Pipes, a short-lived token acting as the person), an `operator`
@@ -155,6 +164,26 @@ pub struct KeyOAuth {
     pub manage: String,
 }
 
+/// Standard authorization-code connection. Fragment completes the browser
+/// round trip before importing tokens into Pipes; Pipes owns refresh.
+/// The same confidential client must be configured at Pipes. Fixed vendor
+/// options (for example offline access) may be in `authorize`'s query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectionOAuth {
+    pub authorize: String,
+    pub exchange: String,
+    pub client_id: String,
+    pub scopes: Vec<String>,
+    /// Where a disconnect revokes the grant (RFC 7009, `POST token=`): a
+    /// token Pipes mints for the account, whose grant goes with it
+    /// (Google's `https://oauth2.googleapis.com/revoke` takes an access
+    /// token and revokes its refresh token too). Without it a disconnect
+    /// deletes the account at Pipes and the grant stays at the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoke: Option<String>,
+}
+
 /// A model a person may pick for an agent: its id as the provider names it,
 /// and its name for people.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,9 +221,39 @@ pub struct Provider {
     /// An own key's sign-in: connected from settings, never pasted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<KeyOAuth>,
+    /// Absent means connection authorization is disabled; never falls back
+    /// to an unbound Pipes authorization URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_oauth: Option<ConnectionOAuth>,
+    /// How many accounts a person may connect at it, 1 to `ACCOUNTS_MAX`
+    /// (absent: 1): a connection with `connection_oauth` only. Above 1 it
+    /// reads and writes Pipes' several connections (`several`;
+    /// docs/pipes-browser-binding.md, Several accounts); at 1 every call
+    /// is the compatibility connection's, as before the field was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounts_max: Option<u8>,
     /// An own key's models, which a person may pick for their agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Models>,
+    /// What settings' Connections tells people under its name, whatever
+    /// their state: plain text, one line (`check_note`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl Provider {
+    /// How many accounts a person may connect at it (`accounts_max`; 1
+    /// when the row names none).
+    pub fn accounts_max(&self) -> u8 {
+        self.accounts_max.unwrap_or(1)
+    }
+
+    /// Whether a person may connect several accounts at it: Pipes' plural
+    /// calls, each naming its connected account. Otherwise every call is
+    /// the compatibility connection's.
+    pub fn several(&self) -> bool {
+        self.accounts_max() > 1
+    }
 }
 
 /// Why a catalog is refused (the deploy checks it first; a node with a
@@ -227,6 +286,12 @@ pub enum CatalogError {
     /// Models on a row that is no own key, a base URL not on its hosts, or
     /// an offer that is empty, too long, or names a model badly or twice.
     Models { provider: String, why: String },
+    /// A note that is blank, over `NOTE_MAX_CHARS`, or more than one line
+    /// of plain text.
+    Note { provider: String, why: String },
+    /// `accounts_max` out of 1 to `ACCOUNTS_MAX`, or on a row that is no
+    /// connection with `connection_oauth`.
+    Accounts { provider: String, why: String },
 }
 
 impl std::fmt::Display for CatalogError {
@@ -244,6 +309,8 @@ impl std::fmt::Display for CatalogError {
             CatalogError::NoPrice(n) => write!(f, "the operator key {n} has no price: name one (micro-dollars per calls at list), since the price book has none for it"),
             CatalogError::OAuth { provider, why } => write!(f, "{provider}'s oauth: {why}"),
             CatalogError::Models { provider, why } => write!(f, "{provider}'s models: {why}"),
+            CatalogError::Note { provider, why } => write!(f, "{provider}'s note: {why}"),
+            CatalogError::Accounts { provider, why } => write!(f, "{provider}'s accounts_max: {why}"),
         }
     }
 }
@@ -416,6 +483,20 @@ fn check_models(m: &Models, hosts: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// A note people read under a provider's name: 1 to `NOTE_MAX_CHARS`
+/// characters, not blank, and no control character (so one line; settings
+/// shows it as text, never as markup).
+fn check_note(note: &str) -> Result<(), String> {
+    let chars = note.chars().count();
+    if !(1..=NOTE_MAX_CHARS).contains(&chars) || note.trim().is_empty() {
+        return Err(format!("1 to {NOTE_MAX_CHARS} characters, not blank (it has {chars})"));
+    }
+    if note.chars().any(char::is_control) {
+        return Err("one line of plain text: no line break or other control character".into());
+    }
+    Ok(())
+}
+
 /// A deployment's providers, checked: each is offered as its row says.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Catalog {
@@ -486,11 +567,28 @@ impl Catalog {
                 }
                 check_oauth(o).map_err(|why| CatalogError::OAuth { provider: provider.clone(), why })?;
             }
+            if let Some(o) = &p.connection_oauth {
+                if p.kind != Kind::Connection {
+                    return Err(CatalogError::OAuth { provider, why: "connection_oauth belongs only to a connection".into() });
+                }
+                crate::connection_signin::check(o).map_err(|why| CatalogError::OAuth { provider: provider.clone(), why })?;
+            }
             if let Some(m) = &p.models {
                 if p.kind != Kind::Own {
                     return Err(CatalogError::Models { provider, why: format!("a {} offers no models: only an own key does, its owner's credit paying", p.kind.name()) });
                 }
                 check_models(m, &p.hosts).map_err(|why| CatalogError::Models { provider: provider.clone(), why })?;
+            }
+            if let Some(n) = &p.note {
+                check_note(n).map_err(|why| CatalogError::Note { provider: provider.clone(), why })?;
+            }
+            if let Some(n) = p.accounts_max {
+                if !(1..=ACCOUNTS_MAX).contains(&n) {
+                    return Err(CatalogError::Accounts { provider, why: format!("1 to {ACCOUNTS_MAX} (Pipes' limit), not {n}") });
+                }
+                if p.kind != Kind::Connection || p.connection_oauth.is_none() {
+                    return Err(CatalogError::Accounts { provider, why: "only a connection with connection_oauth connects several accounts: they are imported by its callback".into() });
+                }
             }
         }
         Ok(Catalog { providers: rows })
@@ -522,6 +620,21 @@ impl Catalog {
         let mut names: Vec<String> = self.providers.iter().flat_map(|p| p.env.iter().cloned()).collect();
         names.sort();
         names
+    }
+
+    /// The providers whose models an agent may run now, in the catalog's
+    /// order (docs/computers.md, "An agent's own model"): each an own key
+    /// whose row offers models, which its owner set (`set`) and the agent
+    /// is not narrowed from (`narrowed`, its `connections`: `None` is every
+    /// one). Its guest's view gives it each as a credential with a
+    /// `modelBase`; its `agent.json`'s `model` runs only on one of these,
+    /// and otherwise it runs on its tier.
+    pub fn model_providers(&self, set: &[String], narrowed: Option<&[String]>) -> Vec<String> {
+        self.providers
+            .iter()
+            .filter(|p| p.kind == Kind::Own && p.models.is_some() && set.contains(&p.name) && narrowed.is_none_or(|list| list.contains(&p.name)))
+            .map(|p| p.name.clone())
+            .collect()
     }
 
     /// The operator keys' prices, as the price book takes them.
@@ -625,6 +738,66 @@ mod tests {
         assert!(matches!(parse(json!(many)), Err(CatalogError::TooMany(_))));
     }
 
+    /// A note: any kind's, kept as written, up to `NOTE_MAX_CHARS`
+    /// characters (not bytes); one over, a blank one, or one of two lines
+    /// is refused at load.
+    #[test]
+    fn a_note_is_one_line_of_at_most_its_length() {
+        let with = |note: &str| {
+            let mut g = google();
+            g["note"] = json!(note);
+            parse(json!([g]))
+        };
+        let said = "Google is still reviewing Finite, so Google shows a warning that the app isn't verified when you connect.";
+        assert_eq!(with(said).unwrap().get("google").unwrap().note.as_deref(), Some(said));
+        assert_eq!(parse(json!([google()])).unwrap().get("google").unwrap().note, None, "no note, none");
+        let longest = "é".repeat(NOTE_MAX_CHARS);
+        assert!(with(&longest).is_ok(), "{NOTE_MAX_CHARS} characters, though more bytes");
+        let over = with(&"a".repeat(NOTE_MAX_CHARS + 1));
+        assert!(matches!(&over, Err(CatalogError::Note { provider, .. }) if provider == "google"), "{over:?}");
+        assert_eq!(over.unwrap_err().to_string(), "google's note: 1 to 280 characters, not blank (it has 281)");
+        for bad in ["", "   ", "one line\nand another", "a\u{7}bell"] {
+            assert!(matches!(with(bad), Err(CatalogError::Note { .. })), "{bad:?}");
+        }
+        let mut key = router();
+        key["note"] = json!("Your OpenRouter credit pays.");
+        assert!(parse(json!([key])).is_ok(), "an own key's too");
+    }
+
+    /// Several accounts: a connection whose callback imports them (its
+    /// `connection_oauth`) may name 1 to Pipes' 25; absent, it is 1, and the
+    /// row hashes and reads back as before the field was.
+    #[test]
+    fn several_accounts_are_a_browser_bound_connections_up_to_pipes_limit() {
+        let oauth = json!({ "authorize": "https://accounts.example/authorize", "exchange": "https://accounts.example/token", "client_id": "client", "scopes": ["mail.read"] });
+        let with = |accounts: serde_json::Value, oauth: Option<&serde_json::Value>| {
+            let mut g = google();
+            g["accounts_max"] = accounts;
+            if let Some(o) = oauth {
+                g["connection_oauth"] = o.clone();
+            }
+            parse(json!([g]))
+        };
+        for n in [1, 2, 25] {
+            let c = with(json!(n), Some(&oauth)).unwrap();
+            let p = c.get("google").unwrap();
+            assert_eq!((p.accounts_max(), p.several()), (n, n > 1), "{n}");
+            assert_eq!(Catalog::parse(&serde_json::to_string(c.providers()).unwrap()).unwrap(), c, "the wire form reads back");
+        }
+        let plain = parse(json!([google()])).unwrap();
+        let p = plain.get("google").unwrap();
+        assert_eq!((p.accounts_max(), p.several()), (1, false), "absent is one account");
+        assert!(!serde_json::to_string(p).unwrap().contains("accounts_max"), "a row without it writes as before");
+        for n in [json!(0), json!(26), json!(-1), json!("2"), json!(2.5)] {
+            let r = with(n.clone(), Some(&oauth));
+            assert!(matches!(r, Err(CatalogError::Accounts { .. }) | Err(CatalogError::Shape(_))), "{n}: {r:?}");
+        }
+        assert!(matches!(with(json!(2), None), Err(CatalogError::Accounts { .. })), "a connection Pipes' own page connects has no callback to import several");
+        let mut key = router();
+        key["accounts_max"] = json!(2);
+        assert!(matches!(parse(json!([key])), Err(CatalogError::Accounts { .. })), "an own key is one key");
+    }
+
     /// An own key connected through its provider's sign-in, with models: OpenRouter's row.
     pub(crate) fn router() -> serde_json::Value {
         json!({
@@ -681,6 +854,22 @@ mod tests {
         }
         assert!(matches!(with(&|r| r["models"]["offer"] = json!([{ "id": "a", "name": "A" }, { "id": "a", "name": "B" }])), Err(CatalogError::Models { .. })), "named twice");
         assert!(valid_model_id("anthropic/claude-sonnet-5.5") && valid_model_id("deepseek/deepseek-v4.1-flash:floor") && !valid_model_id("a\"b"));
+    }
+
+    /// Valid: an own key with models, set, runs an agent's own model, unless
+    /// the agent is narrowed from it. Invalid: not set, an own key with no
+    /// models, a connection, or a provider the catalog lacks is none.
+    #[test]
+    fn the_providers_whose_models_an_agent_may_run() {
+        let voice = json!({ "name": "elevenlabs", "kind": "own", "hosts": ["api.elevenlabs.io"], "placements": [{ "header": "xi-api-key" }], "env": ["ELEVENLABS_API_KEY"] });
+        let c = parse(json!([google(), voice, router()])).unwrap();
+        let every: Vec<String> = ["google", "elevenlabs", "openrouter", "nonesuch"].map(String::from).into();
+        assert_eq!(c.model_providers(&every, None), vec!["openrouter"], "an own key with models, set, the agent narrowed from nothing");
+        assert_eq!(c.model_providers(&every, Some(&["openrouter".into()])), vec!["openrouter"], "narrowed to it");
+        assert!(c.model_providers(&every, Some(&["elevenlabs".into(), "google".into()])).is_empty(), "narrowed from it");
+        assert!(c.model_providers(&every, Some(&[])).is_empty(), "narrowed from every one");
+        assert!(c.model_providers(&["elevenlabs".into(), "google".into()], None).is_empty(), "its key not set");
+        assert!(Catalog::default().model_providers(&every, None).is_empty(), "a catalog with no providers");
     }
 
     #[test]

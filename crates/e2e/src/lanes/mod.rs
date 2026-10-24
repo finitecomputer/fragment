@@ -17,6 +17,7 @@ mod checkout;
 mod computers;
 mod control;
 mod credentials;
+mod connections;
 mod delegation;
 mod export;
 mod faces;
@@ -33,6 +34,7 @@ mod levers;
 mod ledger;
 mod limits;
 mod members;
+mod migrations;
 mod notes;
 mod orgs;
 mod plane;
@@ -67,6 +69,7 @@ const LANES: &[Lane] = &[
     members::members,
     identities::identities,
     signin::signin,
+    connections::connections,
     levers::levers,
     members::secrets,
     delegation::delegation,
@@ -131,6 +134,7 @@ const LANES: &[Lane] = &[
     bot_mode::bot_mode,
     checkout::checkout,
     sync::folder_sync,
+    migrations::migrations,
     restart::restart,
 ];
 
@@ -145,14 +149,13 @@ const LANES: &[Lane] = &[
 /// Balanced by measured time (each section's, as its shard's log prints
 /// it, on CI's runners; run 37534339123): `computers` alone is about 4
 /// minutes, so its shard holds little else, and the others are about 3
-/// minutes each. The slow ones vary from run to run: `computers` waits up
-/// to a minute for its routine's cron minute, and `channels` fills 10 000
-/// records. Shard 3 holds `triggers` and the sections from the cron
+/// minutes each. The slow ones vary from run to run: `channels` fills
+/// 10 000 records. Shard 3 holds `triggers` and the sections from the cron
 /// fragment's deploy (after `effects`) up to it, so its first cron minute
 /// passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [
     &["shell", "computers", "export", "hermes", "agent-smoke", "agent-ask", "agent-restart", "bot-mode", "checkout"],
-    &["finite-private", "chat", "shell-ui", "wipe", "sync", "restart"],
+    &["finite-private", "chat", "shell-ui", "wipe", "sync", "migrations", "restart", "connections"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "faces", "isolation", "frames",

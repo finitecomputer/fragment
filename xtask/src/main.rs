@@ -1,13 +1,15 @@
 //! `cargo xtask <command>`: the repo's tooling, in Rust.
 //!
 //!   build            build cell/ for wasm32 (worker-build 0.8.5: build.rs)
-//!   dev [--clean]    build, then run the stack in the foreground under
+//!   dev [--clean] [--real-agent [--models <config>]]
+//!                    build, then run the stack in the foreground under
 //!                    `wrangler dev`: the cell on :8790 (fragments at
 //!                    <name>.fragment.localhost:8790), the
 //!                    code.storage fake on :8792, and the Workers AI fake on :8796
 //!                    behind the model route (its calls spend their payer's
 //!                    ledger; new people are seats with the month's included
-//!                    credit)
+//!                    credit); --real-agent runs computers on our Hermes image
+//!                    and text on real models (xtask/src/dev_agent.rs)
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -29,8 +31,15 @@
 //!                    the config's canary, which the real-agent sections run
 //!                    and agent-restart upgrades into and back
 //!   check            every first-party JavaScript file parses (node --check;
-//!                    xtask/src/js_syntax.rs), then host tests and clippy,
-//!                    warnings denied
+//!                    xtask/src/js_syntax.rs) and none turns a string into
+//!                    markup (xtask/src/html_sinks.rs), no runtime code runs
+//!                    a string as script (xtask/src/eval_sinks.rs), the
+//!                    schema lock is what the Durable Objects' steps make
+//!                    (xtask/src/schema_lock.rs), then host tests and
+//!                    clippy, warnings denied
+//!   schema-lock      appends the Durable Objects' new schema steps to
+//!                    crates/core/migrations/schema.lock, refusing to change
+//!                    or drop a locked one (crates/core/src/migrate.rs)
 //!   secret set <name> --config <file> [--from-file <path>]
 //!   secret gen <name> --config <file>
 //!   secret list --config <file>
@@ -39,11 +48,22 @@
 //!                    input, or a file once), make a host secret, or list names
 //!                    and times; --local <state dir> for wrangler's local store
 //!                    instead (xtask/src/secret.rs)
-//!   deploy --config <file> [--branch <name>]
+//!   deploy --config <file> [--branch <name>] [--pinned-only]
 //!                    build and deploy to Cloudflare from a deployment's config
 //!                    (deploy/example.jsonc), once its secrets are all in the
 //!                    store: a branch gets a complete copy of its own at
-//!                    <branch>.<zone> (xtask/src/deploy.rs)
+//!                    <branch>.<zone> (xtask/src/deploy.rs); --pinned-only
+//!                    (CI's) refuses a config that builds a computer image
+//!                    rather than keeping it at its digest
+//!   image push <image> --repository <name> --tag <tag> [--summary <file>]
+//!                    build a computer image (hermes) as a deploy builds it and
+//!                    push it to the registry of the account CLOUDFLARE_ACCOUNT_ID
+//!                    names, then print the digest a config pins it at
+//!                    (xtask/src/image.rs; the Image workflow runs it)
+//!   image copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>]
+//!                    copy an image another account's registry holds
+//!                    (FROM_CLOUDFLARE_ACCOUNT_ID's) into that one, byte for
+//!                    byte (skopeo), its digest checked unchanged: a promotion
 //!   teardown --config <file> --branch <name>
 //!                    remove a branch deployment (irreversible)
 //!   stripe check|setup --config <file> [--branch <name>] [--webhook-secret-file <path>]
@@ -51,7 +71,7 @@
 //!                    account its stripe.key_file names: check reads and says what
 //!                    is wrong; setup makes what is missing (xtask/src/stripe.rs)
 //!
-//! dev, e2e, secret, deploy and teardown run wrangler and npm on the pinned Node,
+//! dev, e2e, secret, deploy, image and teardown run wrangler and npm on the pinned Node,
 //! and check runs `node --check` on it, fetched into target/tools on first
 //! use, never a `node` from PATH (crates/devstack/src/node.rs).
 //!
@@ -68,8 +88,20 @@ use fragment_devstack as devstack;
 
 mod build;
 mod deploy;
+mod dev_agent;
 mod dns;
+mod eval_sinks;
+mod guards;
+mod html_sinks;
+mod image;
 mod js_syntax;
+#[cfg(test)]
+mod markdown_dom;
+mod schema_lock;
+// CI's freshness of its cached builds, compiled by itself with rustc
+// (ci.yml); here for its tests alone
+#[cfg(test)]
+mod stamp;
 mod secret;
 mod stripe;
 
@@ -115,12 +147,40 @@ fn build() -> Result<()> {
     build::cell()
 }
 
+/// What `cargo xtask dev` is asked for: `--clean`, `--real-agent`, and
+/// `--models <config>` with it.
+struct DevArgs {
+    clean: bool,
+    real_agent: bool,
+    models: Option<std::path::PathBuf>,
+}
+
+fn dev_args(args: &[String]) -> Result<DevArgs> {
+    let mut out = DevArgs { clean: false, real_agent: false, models: None };
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--clean" => out.clean = true,
+            "--real-agent" => out.real_agent = true,
+            "--models" => out.models = Some(it.next().context("--models names a deployment's config")?.into()),
+            other => bail!("dev takes --clean, --real-agent and --models <config>, not {other:?}"),
+        }
+    }
+    if out.models.is_some() && !out.real_agent {
+        bail!("--models picks --real-agent's models: name --real-agent too");
+    }
+    Ok(out)
+}
+
 fn dev(args: &[String]) -> Result<()> {
+    let args = dev_args(args)?;
+    // its models and key are read before anything builds
+    let real = args.real_agent.then(|| dev_agent::RealAgent::read(args.models.as_deref())).transpose()?;
     // the pinned Node and node_modules first: one that cannot be had stops
     // the run before a build
     let tools = devstack::Tools::locate()?;
     build()?;
-    let clean = args.iter().any(|a| a == "--clean");
+    let clean = args.clean;
     let state = devstack::repo_root().join("target/devstack/codestorage.json");
     if clean {
         let _ = std::fs::remove_file(&state);
@@ -150,6 +210,12 @@ fn dev(args: &[String]) -> Result<()> {
             (devstack::WorkOsVars { client_id: DEV_WORKOS_CLIENT.into(), api_key: DEV_WORKOS_KEY.into(), api_url: Some(fake.url.clone()) }, Some(fake))
         }
     };
+    // an operator key no person holds, the dev node's own, so a person is
+    // wiped here as on a deployment (`fragment operator wipe`), and signs in
+    // again as a new one: a fresh agent's first run
+    let operator_file = devstack::repo_root().join("target/devstack/operator-key");
+    let operator = devstack::dev_secret("operator-key", || fragment_nip98::Keys::generate().secret_hex())?;
+    let operator = fragment_nip98::Keys::from_secret_hex(operator.trim()).with_context(|| format!("{} holds an operator key (64 hex)", operator_file.display()))?;
     let ai = fragment_fakes::workers_ai::WorkersAi::start(DEV_AI_PORT)?;
     let mailer = fragment_fakes::mail::Mailer::start(DEV_MAIL_PORT, true)?;
     let stripe = fragment_fakes::stripe::Stripe::start(DEV_STRIPE_PORT, DEV_STRIPE_KEY)?;
@@ -170,13 +236,13 @@ fn dev(args: &[String]) -> Result<()> {
         egress_local: true,
         job_retry_delay_s: 2,
         blob_grace_s: None,
-        // text and images: the Workers AI fake (dev never calls a real model),
-        // every tier on it
+        // text and images: the Workers AI fake, every tier on it, unless
+        // --real-agent puts the text tiers on real models
         ai_url: Some(ai.url.clone()),
         ai_gateway: None,
-        models: None,
-        model_key_slots: vec![],
-        model_key_value: None,
+        models: real.as_ref().map(|r| r.models.clone()),
+        model_key_slots: real.as_ref().map(|r| r.slots.clone()).unwrap_or_default(),
+        model_key_value: real.as_ref().map(|r| r.key.clone()),
         // the mail fake, which prints each message (dev never sends real mail)
         mail_url: Some(mailer.url.clone()),
         mail_from: Some(DEV_MAIL_FROM.into()),
@@ -193,14 +259,20 @@ fn dev(args: &[String]) -> Result<()> {
         }),
         // the CLI's host: sign-in and approvals happen where it points
         platform_url: format!("http://127.0.0.1:{DEV_PORT}"),
-        operators: None,
+        operators: Some(fragment_core::npub::encode(operator.pubkey_hex())),
         signins_pending_max: None,
+        cli_begins_per_ip_minute: None,
         test_secret: None,
-        computer_image: Some("stub".into()),
+        computer_image: Some(if real.is_some() { dev_agent::RealAgent::IMAGE } else { "stub" }.into()),
+        images: match &real {
+            Some(_) => vec![(dev_agent::RealAgent::IMAGE.into(), devstack::hermes_image())],
+            None => vec![],
+        },
         computer_snapshots: false,
         computer_unsaved_max_ms: None,
         providers: None,
         operator_key_values: vec![],
+        connection_secret_values: vec![],
         swap_upstream: None,
     };
     // its secrets go to wrangler's local store under cell/.wrangler/state
@@ -219,11 +291,18 @@ fn dev(args: &[String]) -> Result<()> {
     println!("  node log:     {}", node.log.display());
     println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");
     println!("  code.storage: {} (the fake)", fake.url);
-    println!("  models:       {} (the Workers AI fake: echoes, never a real model)", ai.url);
+    match &real {
+        Some(r) => {
+            println!("  models:       {} on real models, {}'s (paid by {}'s key); the rest on the Workers AI fake at {}", r.slots.join(", "), r.from.display(), dev_agent::KEY_FILE_ENV, ai.url);
+            println!("  computers:    our Hermes image, built from the tree (its first build takes a while)");
+        }
+        None => println!("  models:       {} (the Workers AI fake: echoes, never a real model; --real-agent for real ones)", ai.url),
+    }
     println!("  seats:        {} (the Stripe fake: its Checkout is a Pay button)", stripe.url);
 
     println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
     println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");
+    println!("  wipe someone: fragment --host http://127.0.0.1:{DEV_PORT} operator wipe <email> --yes --key-file {}", operator_file.display());
     // Ctrl-C stops the node, and xtask outlives it to remove the containers
     // it left (wrangler's teardown removes its computers, not their sidecars)
     devstack::signals::outlive_interrupt()?;
@@ -386,9 +465,32 @@ fn javascript_parses(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// No first-party JavaScript turns a string into markup
+/// (xtask/src/html_sinks.rs): text becomes DOM only by the DOM's own
+/// constructors, so no file or message can script a fragment's origin.
+fn no_html_sinks(root: &Path) -> Result<()> {
+    let sources = html_sinks::sources(root)?;
+    html_sinks::check(&sources, &html_sinks::ALLOWED)?;
+    println!("HTML sinks: none in {} sources ({} allowed, each with why)", sources.len(), html_sinks::ALLOWED.len());
+    Ok(())
+}
+
+/// No runtime code runs a string as script (xtask/src/eval_sinks.rs): no
+/// DevTools evaluate, no page driver's, no `eval`, `Function` or timer of a
+/// string, no `import()` of a URL made at run time.
+fn no_eval_sinks(root: &Path) -> Result<()> {
+    let files = eval_sinks::sources(root)?;
+    eval_sinks::check(&files, &eval_sinks::ALLOWED)?;
+    println!("eval sinks: none in {} runtime files ({} allowed, each with why)", files.len(), eval_sinks::ALLOWED.len());
+    Ok(())
+}
+
 fn check() -> Result<()> {
     let root = devstack::repo_root();
     no_conflict_markers(&root)?;
+    no_html_sinks(&root)?;
+    no_eval_sinks(&root)?;
+    schema_lock::holds(&root)?;
     let read = |path: &str| std::fs::read_to_string(root.join(path)).with_context(|| format!("read {path}"));
     let copies = ["cli/GUIDE.md", "README.md", "cell/shell/shell.js"].map(|path| read(path).map(|text| (path, text)));
     let copies: Vec<(&str, String)> = copies.into_iter().collect::<Result<_>>()?;
@@ -445,16 +547,33 @@ fn main() -> Result<()> {
         Some("try") => try_template(&args[1..]),
         Some("e2e") => e2e(&args[1..]),
         Some("check") => check(),
+        Some("schema-lock") => schema_lock::write(&devstack::repo_root()),
         Some("secret") => secret::secret(&args[1..]),
         Some("deploy") => deploy::deploy(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
         Some("stripe") => deploy::stripe(&args[1..]),
-        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
+        Some("image") => image::image(&args[1..]),
+        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | schema-lock | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] [--pinned-only] | image push <image> | copy <image> --from <reference> --repository <name> --tag <tag> [--summary <file>] | teardown --config <file> --branch <name>"),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    /// `cargo xtask dev`'s flags: each alone and together; an unknown one,
+    /// `--models` without its config, and `--models` without `--real-agent`
+    /// are refused before anything builds.
+    #[test]
+    fn dev_takes_its_flags_and_refuses_others() {
+        let args = |a: &[&str]| super::dev_args(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let none = args(&[]).unwrap();
+        assert!(!none.clean && !none.real_agent && none.models.is_none());
+        let all = args(&["--real-agent", "--clean", "--models", "preview.jsonc"]).unwrap();
+        assert!(all.clean && all.real_agent && all.models.as_deref() == Some(std::path::Path::new("preview.jsonc")));
+        for bad in [&["--hermes"][..], &["--real-agent", "--models"], &["--models", "preview.jsonc"]] {
+            assert!(args(bad).is_err(), "{bad:?}");
+        }
+    }
+
     /// Git's markers, the diff3 base's included, are caught at a line's
     /// start; text that only mentions one, or a longer rule, is not.
     #[test]
