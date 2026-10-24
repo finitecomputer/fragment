@@ -22,26 +22,78 @@ pub const WORKER_BUILD_VERSION: &str = "0.8.5";
 /// budget was raised for launch").
 pub const CELL_WASM_MAX_BYTES: u64 = 6_500_000;
 
+/// Which build of the cell: the release's, which deploys upload and the
+/// e2e stages, or `cargo xtask dev`'s, which only `wrangler dev` under it
+/// runs (`cargo xtask build --dev`: cell/wrangler.jsonc's `build`, and
+/// `dev`'s first build). The two compile the same source with the same
+/// flags into the same `build/`, and write the same release's files
+/// beside it, which the cell reads by the same index through the same
+/// code; dev's compiles without fat LTO, into many codegen units,
+/// incrementally, and skips wasm-opt (cell/Cargo.toml, `[profile.devstack]`),
+/// so a change to a file of the release, which moves only the index the
+/// cell carries, rebuilds in seconds, not minutes. Its Wasm is about 7.7 MB
+/// to the release's 5.5, and no budget holds it. Each build marks what it built
+/// (devstack's built.rs), and a deploy and the e2e take the release's alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Profile {
+    Release,
+    Dev,
+}
+
+/// `Profile::Dev`'s cargo profile, in cell/Cargo.toml.
+const DEV_PROFILE: &str = "devstack";
+
+impl Profile {
+    /// Its cargo profile (cell/Cargo.toml), as its build marks it.
+    fn name(self) -> &'static str {
+        match self {
+            Profile::Release => devstack::built::RELEASE,
+            Profile::Dev => DEV_PROFILE,
+        }
+    }
+
+    fn worker_build_args(self) -> &'static [&'static str] {
+        match self {
+            Profile::Release => &["--release"],
+            Profile::Dev => &["--profile", DEV_PROFILE, "--no-opt"],
+        }
+    }
+}
+
+/// The release's cell (`Profile::Release`).
+pub fn cell() -> Result<()> {
+    cell_as(Profile::Release)
+}
+
 /// cell/ for wasm32, into its `build/`, and the release's files beside it
 /// in `build/assets`, the Worker's Static Assets (cell/wrangler.jsonc): what
 /// a deploy uploads, `wrangler dev` serves and the e2e's staged copy holds.
-pub fn cell() -> Result<()> {
+pub fn cell_as(profile: Profile) -> Result<()> {
     worker_build_installed()?;
     let t0 = Instant::now();
     let dir = devstack::cell_dir();
+    let out = dir.join("build");
+    // what `build/` holds is no finished build until this one is
+    std::fs::create_dir_all(&out).with_context(|| format!("create {}", out.display()))?;
+    devstack::built::clear(&out)?;
     let local = LocalPaths::here(&dir)?;
     let given = (std::env::var("CARGO_ENCODED_RUSTFLAGS").ok(), std::env::var("RUSTFLAGS").ok());
     let flags = encoded_rustflags(given, &local.remapped());
-    run(Command::new("worker-build").arg("--release").env("CARGO_ENCODED_RUSTFLAGS", flags).current_dir(&dir))?;
-    let wasm = dir.join("build/index_bg.wasm");
+    run(Command::new("worker-build").args(profile.worker_build_args()).env("CARGO_ENCODED_RUSTFLAGS", flags).current_dir(&dir))?;
+    let wasm = out.join(devstack::built::WASM);
     let built = std::fs::read(&wasm).with_context(|| format!("{} after worker-build", wasm.display()))?;
     let stripped = without_names(&built).with_context(|| format!("{} after worker-build", wasm.display()))?;
     std::fs::write(&wasm, &stripped).with_context(|| format!("write {}", wasm.display()))?;
     local.named_in(&stripped)?;
-    let wasm_budget = within_budget(stripped.len() as u64)?;
-    let (files, bytes) = fragment_templates::write_assets(&dir.join("build/assets")).context("writing the release's files into cell/build/assets")?;
+    let size = match profile {
+        Profile::Release => within_budget(stripped.len() as u64)?,
+        Profile::Dev => format!("{} bytes of Wasm ({:.2} MB), dev's: no budget holds it (the release's is {CELL_WASM_MAX_BYTES} bytes)", stripped.len(), stripped.len() as f64 / 1e6),
+    };
+    let (files, bytes) = fragment_templates::write_assets(&out.join("assets")).context("writing the release's files into cell/build/assets")?;
+    devstack::built::mark(&out, profile.name())?;
     println!(
-        "built the cell for wasm32 in {:.1?}: {wasm_budget}, and {files} files of the release, {:.2} MB, in its Static Assets",
+        "built the cell ({}) for wasm32 in {:.1?}: {size}, and {files} files of the release, {:.2} MB, in its Static Assets",
+        profile.name(),
         t0.elapsed(),
         bytes as f64 / 1e6
     );

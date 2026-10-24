@@ -137,6 +137,29 @@ fragment.club until cutover (decisions 34–35).
   (its output's tokens counted, its input's bytes), and a failed send is
   kept and sent again.
 
+## Dev's cell is not the release's build
+
+- **Observed:** 2026-10-24. A change to one of the release's files (a
+  CSS rule in cell/shell) moves the index the cell carries, so the cell
+  recompiled to wasm32 under fat LTO and wasm-opt: about 115 s on an M-series
+  Mac per edit under `cargo xtask dev`.
+- **Shortcut:** `cargo xtask dev` builds the cell in cell/Cargo.toml's
+  `devstack` profile (the release's less fat LTO and one codegen unit,
+  incremental) without wasm-opt (`cargo xtask build --dev`,
+  xtask/src/build.rs `Profile`): about 13 s for such an edit, 8 of them the cell's. Same
+  source, same flags, same files, same router and asset code; its Wasm
+  is about 7.7 MB and held to no budget. Deploys and the e2e build the
+  release's and refuse dev's (crates/devstack/src/built.rs).
+- **Risk:** what only the release's code generation shows (a size
+  regression, a miscompile under LTO, wasm-opt's rewriting, a slower
+  cold start) is not seen in dev; it is seen by `cargo xtask e2e`, CI
+  and the preview, which run the release's.
+- **First proof:** a behaviour the e2e or the preview shows that the
+  same tree under `cargo xtask dev` does not.
+- **Delete when:** the release's build rebuilds a change to one of its
+  files in seconds (its index supplied without recompiling the cell),
+  and dev builds the release's again.
+
 ## The cell's Wasm budget was raised for launch
 
 - **Observed:** 2026-10-14. The cell diet (#305) set the budget at

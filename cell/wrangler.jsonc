@@ -14,9 +14,12 @@
   // PID 1 as on Containers (without it, `wrangler dev` shares the host's,
   // and Hermes' s6-overlay refuses to start)
   "compatibility_flags": ["nodejs_compat", "containers_pid_namespace"],
-  // `cargo xtask build`: worker-build, then the release's files into
-  // build/assets (below), so a rebuild under `wrangler dev` writes both
-  "build": { "command": "cargo run --quiet --manifest-path ../Cargo.toml --package xtask -- build", "watch_dir": ["src", "shell", "../crates", "../templates", "../cli"] },
+  // `cargo xtask build --dev`: worker-build in dev's profile, then the
+  // release's files into build/assets (below), so a rebuild under `wrangler
+  // dev` writes both, in seconds (xtask/src/build.rs, `Profile`). Only
+  // `cargo xtask dev` runs it: a deploy and the e2e drop this step, build
+  // the release's cell themselves, and refuse dev's (devstack's built.rs)
+  "build": { "command": "cargo run --quiet --manifest-path ../Cargo.toml --package xtask -- build --dev", "watch_dir": ["src", "shell", "../crates", "../templates", "../cli"] },
   // The release's files (assets.rs): the templates, the shell's files and
   // the agent docs, each named by its SHA-256, which the cell reads through
   // ASSETS by the index it carries (crates/templates). Every request runs

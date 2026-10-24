@@ -1013,6 +1013,9 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         }
         true => None,
     };
+    // the release's build, finished, as wrangler reads it: never one a
+    // `cargo xtask dev` rebuilt meanwhile (devstack's built.rs)
+    devstack::built::release(&devstack::cell_dir().join("build"))?;
     deploy_with_retries(&mut deploy_cell)?;
     drop(test_secrets);
     println!("deployed {deploy_id}:");
