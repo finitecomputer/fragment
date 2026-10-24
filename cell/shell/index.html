@@ -66,6 +66,7 @@
         </div>
         <h1 class="chat-heading" id="chat-heading" hidden>
           <span class="title" id="chat-title"></span>
+          <span class="offline-mark" id="offline" role="img" aria-label="Offline" data-tooltip="Lost connection" hidden></span>
         </h1>
         <strong class="page-title" id="page-title" hidden></strong>
         <div class="topbar-right">
@@ -82,7 +83,9 @@
       <!-- the shell's own notice (shell.js notice), above a chat or
            settings alike: never in #frames, which settings hide -->
       <div class="notice" id="notice"><strong>Loading…</strong></div>
-      <div class="frames" id="frames"></div>
+      <div class="frames" id="frames">
+        <p class="offline-note" id="offline-note" hidden>This chat loads when you're back online.</p>
+      </div>
       <section class="page" id="settings-page" hidden></section>
     </main>
 
