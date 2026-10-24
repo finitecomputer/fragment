@@ -1967,9 +1967,12 @@ Transcription (decision 9, as Paul changed it on 2026-10-07: a voice
 memo is one the agent transcribes itself, through this route):
 - **The model.** `whisper` is Workers AI's Whisper
   (`@cf/openai/whisper-large-v3-turbo`), called as a tier's model is.
-- **What it is sent.** The audio as base64. A `language` or `prompt` it
-  was given passes on; with no language, Whisper detects it. OpenAI's
-  other fields are let go.
+- **What it is sent.** The audio as base64, with Whisper's
+  voice-activity filter on (`vad_filter`): silence and noise are heard
+  as no words, not as a phrase Whisper is known to make up in them
+  ("Thank you."), so an agent asks for the memo again. A `language` or
+  `prompt` it was given passes on; with no language, Whisper detects it.
+  OpenAI's other fields are let go.
 - **Refusals before anything is sent.** A form that is not one, a
   model other than `whisper`, and a format other than `json` or `text`
   are refused 400. Audio past 10 MiB is refused 413.
