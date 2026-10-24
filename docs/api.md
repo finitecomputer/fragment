@@ -2929,7 +2929,8 @@ of `on`, `off`, `denied` (this browser refuses the platform's
 notifications), `unsupported` and `failed`. On asks the browser first
 when it has not been asked (the press in the frame is the gesture), then
 registers the shell's alerts worker (`/__shell/alerts-sw.js`, push only)
-at a scope of that chat's own (`/__shell/alerts/<chat>/`) and subscribes
+at a scope of that person's and chat's own
+(`/__shell/alerts/<person>/<chat>/`) and subscribes
 it with the key, answering `subscription: {endpoint, p256dh, auth}`; the
 page stores it on its fragment as its person (`__push-sub`, tagged with
 their identity), as `fragment.push.register` does in a tab of its own,
@@ -2938,13 +2939,19 @@ unregisters it, answering the `endpoint` the page drops (`__push-unsub`).
 So whose alerts are on stays each chat's own subscriptions, and only the
 chat's fragment, whose key it is, can push to one (Deliveries: web push,
 above). The worker shows a push with the chat as its tag (one
-notification a chat, its latest), and a click opens the chat in the
-shell: a shell already open is told `{fragment: "open-chat", name}` by
-the worker (never by a page), else one opens at `/?chat=<chat>`. Signing
-out and Use another account let every registration of the worker go
-first, so the next person in that browser gets none of the last one's
-alerts. A frame of anything else, or a message from another origin, is
-answered nothing.
+notification a chat, its latest) only while its person is the one signed
+in to this browser (`GET /api/identities/me`, as the shell asks it): with
+no one signed in (401), or another, it shows nothing and lets itself go,
+and the push service then tells the chat its subscription is gone
+(410), however the session ended (the shell's Sign out or Use another
+account, the sign-out page, a session that ran out), in every tab. The
+shell's Sign out and Use another account also let every registration of
+the worker go first (waited for at most a second), and turn none on after
+(one made as the person left lets go at once). A click opens the chat in
+the shell: a shell already open is told `{fragment: "open-chat", name}`
+by the worker (never by a page), else one opens at `/?chat=<chat>`. A
+frame of anything else, or a message from another origin, is answered
+nothing.
 
 **The launcher** (the sidebar's +, a phone's top bar +, and ⌘K or
 Ctrl K, from the chat's frame too: `{fragment: "open-launcher"}`, taken

@@ -496,10 +496,15 @@ $("add-agent-cancel").onclick = () => addDialog.close();
 // (`__push-sub`), as in a tab of its own, so whose alerts are on stays
 // each chat's, and only that chat's fragment can push to it. Only a frame
 // of one of the person's chats on the release's chat template asks, from
-// its fragment's own origin ----
+// its fragment's own origin. The scope names its person too: the worker
+// shows nothing once another, or no one, is signed in here, and lets itself
+// go (alerts-sw.js), whatever ended the session ----
 const ALERTS_WORKER = "/__shell/alerts-sw.js";
 const ALERTS_SCOPE = "/__shell/alerts/";
-const alertsScope = (name) => new URL(`${ALERTS_SCOPE}${encodeURIComponent(name)}/`, location.origin).href;
+const alertsScope = (name) => new URL(`${ALERTS_SCOPE}${encodeURIComponent(state.me.id)}/${encodeURIComponent(name)}/`, location.origin).href;
+// the person leaving (signing out, or in as another): no alerts are
+// turned on from then, and one made as they left lets go at once
+let alertsEnded = false;
 const alertable = () => "serviceWorker" in navigator && typeof PushManager !== "undefined" && typeof Notification !== "undefined";
 const b64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 // a P-256 public key, uncompressed (65 bytes): a VAPID key
@@ -533,6 +538,10 @@ async function alertsOn(name, key) {
   if (Notification.permission !== "granted") return { state: Notification.permission === "denied" ? "denied" : "off" };
   const reg = await activated(await navigator.serviceWorker.register(ALERTS_WORKER, { scope: alertsScope(name) }));
   const sub = (await reg.pushManager.getSubscription()) ?? (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }));
+  if (alertsEnded) {
+    await alertsOff(name);
+    return { state: "failed", error: "signed out" };
+  }
   return { state: "on", subscription: { endpoint: sub.endpoint, p256dh: b64u(sub.getKey("p256dh")), auth: b64u(sub.getKey("auth")) } };
 }
 async function alertsOff(name) {
@@ -544,7 +553,7 @@ async function alertsOff(name) {
 }
 addEventListener("message", async (event) => {
   const d = event.data;
-  if (!["alerts?", "alerts"].includes(d?.fragment) || typeof d.nonce !== "string" || d.nonce.length > 64) return;
+  if (!["alerts?", "alerts"].includes(d?.fragment) || typeof d.nonce !== "string" || d.nonce.length > 64 || alertsEnded) return;
   const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === event.source);
   const name = frame?.dataset.fragment;
   if (!name || byName(name)?.kind !== "chat") return;
@@ -4007,6 +4016,7 @@ document.addEventListener("submit", (e) => {
   tab.drop(WINDOWS_KEY);
   const frames = [...state.frames.values()].filter((f) => f.isConnected && greeted.has(f));
   e.preventDefault();
+  alertsEnded = true;
   const dropped = Promise.race([dropAlerts(), new Promise((done) => setTimeout(done, FORGET_WAIT_MS))]);
   Promise.all([frames.length ? forgetDrafts(frames) : null, dropped]).then(() => HTMLFormElement.prototype.submit.call(form));
 }, true);

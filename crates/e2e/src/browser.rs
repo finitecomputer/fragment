@@ -459,6 +459,35 @@ impl Browser {
         Ok(())
     }
 
+    /// The id DevTools knows the service worker registration at `scope` by,
+    /// as `page`'s origin's registrations are reported once asked
+    /// (`ServiceWorker.workerRegistrationUpdated`, after `enable`).
+    pub fn registration_id(&mut self, page: &Page, scope: &str) -> Result<String> {
+        self.next += 1;
+        let asked = json!({ "id": self.next, "method": "ServiceWorker.enable", "params": {}, "sessionId": page.session });
+        self.ws.send(Message::Text(asked.to_string().into()))?;
+        let t0 = Instant::now();
+        let mut found = None;
+        while found.is_none() && t0.elapsed() < Duration::from_secs(30) {
+            let Message::Text(t) = self.ws.read()? else { continue };
+            let v: Value = serde_json::from_str(&t)?;
+            if v["method"] == "ServiceWorker.workerRegistrationUpdated" {
+                let registrations = v["params"]["registrations"].as_array().cloned().unwrap_or_default();
+                found = registrations.iter().find(|r| r["scopeURL"] == scope && r["isDeleted"] != true).and_then(|r| r["registrationId"].as_str().map(str::to_string));
+            }
+        }
+        found.with_context(|| format!("no service worker registration at {scope}"))
+    }
+
+    /// A push message delivered to the registration DevTools knows as
+    /// `registration` (`registration_id`), as a push service would deliver
+    /// one: its worker's `push` event, with `data`.
+    pub fn deliver_push(&mut self, page: &Page, origin: &str, registration: &str, data: &str) -> Result<()> {
+        self.send("ServiceWorker.enable", json!({}), Some(&page.session))?;
+        self.send("ServiceWorker.deliverPushMessage", json!({ "origin": origin, "registrationId": registration, "data": data }), Some(&page.session))?;
+        Ok(())
+    }
+
     /// Lets the lease's context save what it downloads into `dir` (a click
     /// on a link that answers an attachment).
     pub fn allow_downloads(&mut self, dir: &Path) -> Result<()> {

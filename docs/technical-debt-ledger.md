@@ -374,7 +374,8 @@ fragment.club until cutover (decisions 34–35).
   subscribes the push fake by `__push-sub`, as the page's bell would, and
   the shell's alerts (docs/api.md, The shell) subscribe through a fake of
   the browser's `PushManager` that hands over the push fake's
-  subscription; `alerts-sw.js`'s display and click are not driven.
+  subscription, and `alerts-sw.js` takes pushes DevTools delivers; its
+  click is not driven.
 - **Risk:** a page's subscribe or the service worker's display breaks
   unnoticed.
 - **First proof:** subscribing from a phone or desktop browser to a

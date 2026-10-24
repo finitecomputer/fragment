@@ -2525,10 +2525,13 @@ export function mount(root) {
     $("notify").hidden = !canNotify();
     if (!canNotify()) return;
     if (framed) {
+      // shown once it is known whose it is (a press before would ask the frame)
+      $("notify").hidden = true;
       const a = await askShell({ fragment: "alerts?" }, ALERTS_READ_MS);
       shellAlerts = !!a;
+      if (a?.state === "unsupported") return;
+      $("notify").hidden = false;
       if (!a) return setNotify("framed");
-      if (a.state === "unsupported") return void ($("notify").hidden = true);
       return setNotify(["on", "denied"].includes(a.state) ? a.state : "off");
     }
     if (Notification.permission === "denied") return setNotify("denied");

@@ -731,7 +731,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     polish::check(s, api, &owner, &owner_session, &mut chrome, &label)?;
     polish::working_card(s, api, &owner, &mut chrome, &identity, &agent_name)?;
     polish::record_shapes(s, api, &owner, &owner_session, &mut chrome)?;
-    alerts_in_frame(s, api, &mut chrome, &owner, &owner_site, &chat_name, &identity)?;
+    alerts_in_frame(s, api, &mut chrome, &owner, &owner_session, &member_session, &owner_site, &chat_name, &identity)?;
 
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;
@@ -968,23 +968,32 @@ fn push_service_fake(sub: &fragment_fakes::push::Subscribed) -> String {
 /// 2026-10-24: alerts should not take a tab). Valid: framed, the bell
 /// reads off; pressed, with the browser's notifications allowed to the
 /// platform, it says on, and the shell holds a registration of its alerts
-/// worker for that chat alone, subscribed with the chat's own key; away,
-/// an agent's reply is pushed to that subscription once; a shell opened
-/// again reads it on, and pressed, off: the registration gone, and the
-/// next reply pushed there nothing.
-fn alerts_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, owner_site: &str, chat: &str, identity: &str) -> Result<()> {
+/// worker for that person and chat alone, subscribed with the chat's own
+/// key; a push delivered to it (DevTools, as a push service would) shows
+/// under the chat, whatever its tag said; away, an agent's reply is pushed
+/// to that subscription once; a shell opened again reads it on, and
+/// pressed, off: the registration gone, and the next reply pushed there
+/// nothing. Turned on again and the person gone from the browser (signed
+/// out, or another signed in: however the session ended, its cookie alone
+/// changed here; Alex's review), a push shows nothing and the worker lets
+/// itself go.
+#[allow(clippy::too_many_arguments)]
+fn alerts_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, owner_session: &str, member_session: &str, owner_site: &str, chat: &str, identity: &str) -> Result<()> {
     let wait = Duration::from_secs(30);
     let id = s.name("chat-shell-alerts");
     let fake = push_service_fake(&s.push.subscribe(&id, 37));
     let platform = api.base.trim_end_matches('/').to_string();
+    let base = format!("{platform}/");
     chrome.set_permission(&platform, "notifications", "granted")?;
     let key = api.call(Call { method: "GET", url: api.site_url(chat, "__push-key"), cookie: Some(owner_site.to_string()), ..Call::default() })?.body["key"].clone();
-    let scope = format!("{platform}/__shell/alerts/{chat}/");
+    let scope = format!("{platform}/__shell/alerts/{}/{chat}/", api.identity(owner)?);
     let bell = "document.getElementById('notify')";
     let held = format!(
         "navigator.serviceWorker.getRegistration({scope}).then((r) => ({{ scope: r?.scope ?? null, worker: (r?.active ?? r?.waiting ?? r?.installing)?.scriptURL ?? null, key: JSON.parse(localStorage.getItem('e2e-push') || '{{}}')[{scope}] ?? null }}))",
         scope = js(&scope)
     );
+    let gone_now = format!("navigator.serviceWorker.getRegistration({}).then((r) => !r || r.scope !== {})", js(&scope), js(&scope));
+    let push = json!({ "title": "Juniper", "body": "a reply", "tag": "another-chat", "url": "./" }).to_string();
     let Some((shell, frame)) = framing_shell(s, api, chrome, chat, &fake)? else {
         s.ok("framed by the shell, the chat's bell reads off; pressed, on: the shell holds the chat's registration of its alerts worker, subscribed with the chat's own key", false, "the chat never framed");
         return Ok(());
@@ -1000,6 +1009,18 @@ fn alerts_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys,
         read && on && holds == json!({ "scope": scope, "worker": format!("{platform}/__shell/alerts-sw.js"), "key": key }),
         json!({ "was": was, "holds": holds, "key": key, "banner": banner }),
     );
+    // its worker, as a push service would reach it
+    let notified = format!("navigator.serviceWorker.getRegistration({}).then((r) => (r ? r.getNotifications() : [])).then((l) => l.map((n) => ({{ title: n.title, body: n.body, tag: n.tag }})))", js(&scope));
+    let registration = chrome.registration_id(&shell, &scope)?;
+    chrome.deliver_push(&shell, &platform, &registration, &push)?;
+    let shown = s.eventually(wait, || chrome.eval(&shell, &notified).ok().is_some_and(|v| v.as_array().is_some_and(|l| !l.is_empty())));
+    let seen = chrome.eval(&shell, &notified)?;
+    s.ok(
+        "a push to it, its person signed in, shows under the chat: its title and words, its tag the chat's, whatever the push said",
+        shown && seen == json!([{ "title": "Juniper", "body": "a reply", "tag": chat }]),
+        &seen,
+    );
+    chrome.eval(&shell, &format!("navigator.serviceWorker.getRegistration({}).then((r) => r.getNotifications()).then((l) => (l.forEach((n) => n.close()), true))", js(&scope)))?;
     chrome.detach(frame)?;
     chrome.close(shell)?;
 
@@ -1033,6 +1054,43 @@ fn alerts_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys,
         "a shell opened again reads it on; pressed, off: the registration gone, and the next reply pushed there nothing",
         again && off && gone == json!({ "scope": null, "worker": null, "key": null }) && !reply.is_null() && got.len() == 1,
         json!({ "again": again, "off": off, "gone": gone, "received": got.len() }),
+    );
+
+    // on again, then the person gone from this browser (the shell closed
+    // first, so nothing of its own answers the change): nothing shown
+    let mut left = vec![];
+    for (how, session) in [("signed out", ""), ("another person signed in", member_session)] {
+        chrome.set_cookie(&base, "fragment_session", owner_session)?;
+        let Some((shell, frame)) = framing_shell(s, api, chrome, chat, &fake)? else {
+            left.push(json!({ "how": how, "framed": false }));
+            continue;
+        };
+        let read = chrome.until(&frame, &format!("!{bell}.hidden && {bell}.dataset.state === 'off'"), wait);
+        let before = chrome.eval(&frame, &format!("({{ state: {bell}.dataset.state ?? null, hidden: {bell}.hidden }})"))?;
+        let held_before = chrome.eval(&shell, &held)?;
+        if read {
+            chrome.eval(&frame, &format!("({bell}.click(), true)"))?;
+        }
+        let on = read && chrome.until(&frame, &format!("{bell}.dataset.state === 'on'"), wait);
+        chrome.detach(frame)?;
+        chrome.close(shell)?;
+        if !on {
+            left.push(json!({ "how": how, "on": false, "read": read, "before": before, "held": held_before }));
+            continue;
+        }
+        chrome.set_cookie(&base, "fragment_session", session)?;
+        let quiet = chrome.open(&format!("{platform}/about"))?;
+        let registration = chrome.registration_id(&quiet, &scope)?;
+        chrome.deliver_push(&quiet, &platform, &registration, &push)?;
+        let let_go = chrome.until(&quiet, &gone_now, wait);
+        left.push(json!({ "how": how, "on": on, "letGo": let_go }));
+        chrome.close(quiet)?;
+        chrome.set_cookie(&base, "fragment_session", owner_session)?;
+    }
+    s.ok(
+        "on again, and its person gone from the browser (signed out, or another signed in), a push shows nothing and the worker lets itself go",
+        left.len() == 2 && left.iter().all(|l| l["on"] == true && l["letGo"] == true),
+        json!(left),
     );
     Ok(())
 }
