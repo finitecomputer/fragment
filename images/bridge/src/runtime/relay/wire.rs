@@ -551,8 +551,8 @@ pub fn uncursored(content: &str) -> (&str, bool) {
 /// step's arguments, never a step of its own. Back to back, a command's
 /// header is dropped, and its block is a step of the tool before it. A
 /// header whose block has not closed yet (an edit cut inside it) is no
-/// step until it has. Each step is said `ok`, with no excerpt nor words:
-/// progress says neither.
+/// step until it has. Each step is said `ok`, with no excerpt: progress
+/// says none (the model's words before it are a reply of their own).
 pub fn new_steps(content: &str, seen: usize) -> Vec<Step> {
     let (text, _) = uncursored(content);
     let mut steps: Vec<Step> = Vec::new();
@@ -591,7 +591,7 @@ pub fn new_steps(content: &str, seen: usize) -> Vec<Step> {
 
 fn step(tool: String, args: String) -> Step {
     let category = category_of(&tool);
-    Step { tool, args, ok: true, excerpt: String::new(), text: String::new(), category }
+    Step { tool, args, ok: true, excerpt: String::new(), category }
 }
 
 /// Hermes' tools, as v0.21.6 registers them (`tools/`): what each does (a
@@ -883,7 +883,7 @@ mod tests {
         assert_eq!(all("💻 terminal: `ls`\n✍️ Writing /data/hermes/notes.md\n⚙️ thinking...", 0), vec![step("terminal", "`ls`", "shell"), step("write_file", "/data/hermes/notes.md", "write"), step("thinking", "", "other")]);
         assert_eq!(all("💻 terminal\n```\nls\n``` (×2)", 0), vec![step("terminal", "ls", "shell")]);
         assert!(all("", 0).is_empty());
-        assert!(new_steps("💻 terminal: `ls`", 0).iter().all(|s| s.ok && s.excerpt.is_empty() && s.text.is_empty()));
+        assert!(new_steps("💻 terminal: `ls`", 0).iter().all(|s| s.ok && s.excerpt.is_empty()));
     }
 
     /// Hermes' progress lines, each read as its tool, its preview and what

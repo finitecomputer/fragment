@@ -1967,6 +1967,40 @@ async fn steps_say_what_they_do() {
     }
 }
 
+/// Goal (Paul on production, 2026-10-24: an agent's words mid-turn were
+/// cut to a step's 300 characters and folded into its steps, "I can't read
+/// it all"; everything the agent says is a reply in the chat): real
+/// Hermes' words before a tool call, said in the response that calls it,
+/// are a reply of their own, whole, posted before the step and marked
+/// `interim`; the step carries no words; the turn's answer is a reply after
+/// it. Two full replies, one step. Method: the scripted model says a long
+/// answer before its terminal call (`narrate:`), its command slow enough
+/// that Hermes sends the step (the debt ledger, "A quick tool's step can be
+/// lost in Hermes").
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn words_before_a_tool_call_are_a_reply() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    let ended = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
+    let turn = asked(&fake, &chat, &c, "narrate: sleep 2 && echo narrated-ran", ended).await;
+    fake.with(|w| {
+        let replies: Vec<serde_json::Value> = w.records(&chat, "chat").into_iter().filter(|r| r["body"]["turn"] == turn).collect();
+        let steps: Vec<serde_json::Value> = w.records(&chat, "work").into_iter().filter(|r| r["body"]["turn"] == turn && r["body"]["kind"] == "turn.step").collect();
+        let said: Vec<serde_json::Value> = replies.iter().map(|r| r["body"].clone()).collect();
+        eprintln!("words: replies {said:?}; steps {:?}", steps.iter().map(|s| s["body"].clone()).collect::<Vec<_>>());
+        assert_eq!(said.len(), 2, "its words and its answer: {said:?}");
+        let words = support::model::narrated();
+        assert!(words.chars().count() > 1000);
+        assert_eq!(said[0], json!({ "text": words, "turn": turn, "interim": true }), "the words before the call, whole (never cut to 300), interim");
+        assert!(said[1]["text"].as_str().is_some_and(|t| t.contains("narrated-ran")) && said[1].get("interim").is_none(), "the answer after: {said:?}");
+        assert_eq!(steps.len(), 1, "one step: {steps:?}");
+        assert_eq!((&steps[0]["body"]["tool"], &steps[0]["body"]["category"]), (&json!("terminal"), &json!("shell")));
+        assert!(steps[0]["body"].get("text").is_none(), "the step carries no words: {steps:?}");
+        let at = |r: &serde_json::Value| r["at"].as_i64().expect("a record's time");
+        assert!(at(&replies[0]) < at(&steps[0]) && at(&steps[0]) < at(&replies[1]), "the words, the step, then the answer");
+    });
+}
+
 /// Goal (the finite-mono parity audit, 2026-10-09: Hermes' notices read as
 /// steps, `💾 Self-improvement review: Memory updated` one named
 /// "Self-improvement"; Paul keeps these): real Hermes' review of its memory,

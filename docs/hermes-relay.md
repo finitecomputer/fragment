@@ -97,7 +97,8 @@ upgrade re-reads it, and the real-Hermes lane
     `send` too (`gateway/stream_consumer.py`, `_send_or_edit` with
     `finalize`), so the model's text before a tool call arrives as a
     reply like any other, whatever `display.interim_assistant_messages`
-    says; the bridge takes it back as the step's words (docs/bridge.md);
+    says; the bridge posts it as a reply of its own, before the step
+    (docs/bridge.md);
   - `prompt {prompt_kind, prompt_id, content, options: [{id, label,
     style?}], timeout_s?}`: buttons; exec approvals offer `once`,
     `session`, `always`, `deny` (fewer after a smart deny);

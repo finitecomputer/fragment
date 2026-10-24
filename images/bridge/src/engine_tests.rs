@@ -216,32 +216,96 @@ fn notices_belong_to_the_chats_turn() {
     assert!(posts(&e2.step(Input::Runtime(mine("late")), T0 + 9)).is_empty(), "no turn of this life's there");
 }
 
-/// Goal: text, then a tool call, then text: the first reply posts before the
-/// step, steps number from 1, and a late edit of a posted part is dropped.
+/// Goal (Paul, 2026-10-24: everything the agent says is a reply in the
+/// chat): text, then a tool call, then text: the first reply posts before
+/// the step, whole (a mid-turn answer past a step's old 300 characters is
+/// never cut), marked `interim` (the turn worked on after it), the chat's
+/// draft of it put away; steps number from 1, carry no words, and a late
+/// edit of a posted part is dropped. The last reply is no interim one, nor
+/// is an answer said beside a call that only updates memory.
 #[test]
 fn steps_split_replies() {
     let a = agent("juniper");
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "look it up" }), T0)).expect("started").turn;
-    ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: "Looking.".into() }, T0 + 1);
-    let step = ToolStep { tool: "web_search".into(), args: "{\"q\":\"x\"}".into(), ok: true, excerpt: "3 results".into(), text: String::new(), category: crate::records::Category::Web };
+    let looking = format!("Looking. {}", "I will read every page of the docs first, then the code, so nothing I change breaks what works. ".repeat(20));
+    assert!(looking.chars().count() > 1000);
+    ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: looking.clone() }, T0 + 1);
+    let step = ToolStep { tool: "web_search".into(), args: "{\"q\":\"x\"}".into(), ok: true, excerpt: "3 results".into(), category: crate::records::Category::Web };
     let s = ev(&mut e, Event::Step { turn: turn.clone(), step: step.clone() }, T0 + 2);
     assert_eq!(kinds(&s), vec!["reply", "turn.step"]);
+    assert_eq!(posts(&s)[0], (records::reply_id(&turn, 1), json!({ "text": looking, "turn": turn, "interim": true })), "whole, before the step, interim");
+    assert!(s.effects.iter().any(|x| matches!(x, Effect::Draft { turn: t, text: None, .. } if *t == turn)), "its draft put away as it posts: {:?}", s.effects);
     assert_eq!(posts(&s)[1].0, records::work_id(&turn, "1"));
     assert_eq!(posts(&s)[1].1["step"], 1);
+    assert!(posts(&s)[1].1.get("text").is_none(), "a step carries no words: {}", posts(&s)[1].1);
     let late = ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: "Looking!".into() }, T0 + 3);
     assert!(posts(&late).is_empty() && late.effects.is_empty(), "part 1 was posted");
     ev(&mut e, Event::Step { turn: turn.clone(), step }, T0 + 4);
     ev(&mut e, Event::Reply { turn: turn.clone(), part: 2, text: "Found it.".into() }, T0 + 5);
     let end = ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 6);
-    assert_eq!(posts(&end)[0].0, records::reply_id(&turn, 2));
+    assert_eq!(posts(&end)[0], (records::reply_id(&turn, 2), json!({ "text": "Found it.", "turn": turn })), "the answer, no interim one");
+    // an answer said beside a call that only updates memory (Hermes sends
+    // nothing after it) is the turn's answer, not interim
+    let t3 = started(&said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": "remember this" }), T0 + 7)).expect("started").turn;
+    ev(&mut e, Event::Reply { turn: t3.clone(), part: 1, text: "Noted: you like tomatoes.".into() }, T0 + 8);
+    let memory = ToolStep { tool: "memory".into(), args: "tomatoes".into(), ok: true, excerpt: String::new(), category: crate::records::Category::Memory };
+    let m = ev(&mut e, Event::Step { turn: t3.clone(), step: memory }, T0 + 9);
+    assert_eq!(posts(&m)[0], (records::reply_id(&t3, 1), json!({ "text": "Noted: you like tomatoes.", "turn": t3 })));
+    let end3 = ev(&mut e, Event::End { turn: t3.clone(), outcome: Outcome::Idle }, T0 + 10);
+    assert_eq!(kinds(&end3), vec!["turn.end"], "nothing said again");
     // a retracted part never posts
-    let t2 = started(&said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "again" }), T0 + 7)).expect("started").turn;
-    ev(&mut e, Event::Reply { turn: t2.clone(), part: 1, text: "oops".into() }, T0 + 8);
-    ev(&mut e, Event::Retract { turn: t2.clone(), part: 1 }, T0 + 9);
-    let end2 = ev(&mut e, Event::End { turn: t2.clone(), outcome: Outcome::Stopped }, T0 + 10);
+    let t2 = started(&said(&mut e, &a, &v, 4, "npub1paul", json!({ "text": "again" }), T0 + 11)).expect("started").turn;
+    ev(&mut e, Event::Reply { turn: t2.clone(), part: 1, text: "oops".into() }, T0 + 12);
+    ev(&mut e, Event::Retract { turn: t2.clone(), part: 1 }, T0 + 13);
+    let end2 = ev(&mut e, Event::End { turn: t2.clone(), outcome: Outcome::Stopped }, T0 + 14);
     assert_eq!(kinds(&end2), vec!["turn.end"]);
+}
+
+/// Goal (Alex's review of #584: 64 narrated tool calls spent the turn's
+/// replies, and its answer was dropped): the words before a tool call have
+/// a bound of their own (`INTERIM_REPLIES_PER_TURN_MAX`, one a posted
+/// step), so narration never costs the answer. A turn that narrates past
+/// `REPLIES_PER_TURN_MAX`, and past its own bound, still posts its answer,
+/// whole and not interim (so it is pushed), numbered after the words; the
+/// words past their bound go unposted. The answer's own bound still holds
+/// for a turn that replies without end. Restart: the counts are the state's.
+#[test]
+fn narration_never_costs_the_answer() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "fix everything" }), T0)).expect("started").turn;
+    let step = || ToolStep { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), category: crate::records::Category::Shell };
+    let narrated = limits::INTERIM_REPLIES_PER_TURN_MAX + 5;
+    assert!(narrated > limits::REPLIES_PER_TURN_MAX && limits::REPLIES_PER_TURN_MAX >= 64);
+    let mut posted = Vec::new();
+    for part in 1..=narrated {
+        ev(&mut e, Event::Reply { turn: turn.clone(), part, text: format!("Checking part {part}.") }, T0 + 1);
+        let s = ev(&mut e, Event::Step { turn: turn.clone(), step: step() }, T0 + 1);
+        posted.extend(posts(&s).into_iter().filter(|(id, _)| id.starts_with("rp:")));
+    }
+    assert_eq!(posted.len(), limits::INTERIM_REPLIES_PER_TURN_MAX as usize, "the words, up to their own bound, past the replies' 64");
+    assert!(posted.iter().all(|(_, b)| b["interim"] == true));
+    assert_eq!(posted[64], (records::reply_id(&turn, 65), json!({ "text": "Checking part 65.", "turn": turn, "interim": true })), "the 65th words post");
+    // a restart in the middle keeps the counts (the state's)
+    let saved: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
+    assert_eq!(saved.turns[&turn].interim, limits::INTERIM_REPLIES_PER_TURN_MAX);
+    ev(&mut e, Event::Reply { turn: turn.clone(), part: narrated + 1, text: "Final answer: all fixed.".into() }, T0 + 2);
+    let end = ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 3);
+    let n = limits::INTERIM_REPLIES_PER_TURN_MAX + 1;
+    assert_eq!(posts(&end)[0], (records::reply_id(&turn, n), json!({ "text": "Final answer: all fixed.", "turn": turn })), "the answer, whole and not interim");
+    // the answer's own bound: a runtime that replies without end
+    let t2 = started(&said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "talk" }), T0 + 4)).expect("started").turn;
+    let mut said_parts = 0;
+    for part in 1..=limits::REPLIES_PER_TURN_MAX + 3 {
+        let s = ev(&mut e, Event::Reply { turn: t2.clone(), part, text: format!("part {part}") }, T0 + 5);
+        said_parts += posts(&s).len();
+    }
+    let end2 = ev(&mut e, Event::End { turn: t2.clone(), outcome: Outcome::Idle }, T0 + 6);
+    said_parts += posts(&end2).iter().filter(|(id, _)| id.starts_with("rp:")).count();
+    assert_eq!(said_parts, limits::REPLIES_PER_TURN_MAX as usize, "at most so many, interim ones apart");
 }
 
 /// Goal: one turn of an agent runs in a chat at a time, the rest in order;
@@ -1847,7 +1911,7 @@ impl World {
 
     /// A step of a turn the runtime holds, as the runtime reports it.
     fn did(&mut self, turn: &str, tool: &str, args: &str) {
-        self.step(Input::Runtime(Event::Step { turn: turn.into(), step: ToolStep { tool: tool.into(), args: args.into(), ok: true, excerpt: String::new(), text: String::new(), category: crate::records::Category::Shell } }));
+        self.step(Input::Runtime(Event::Step { turn: turn.into(), step: ToolStep { tool: tool.into(), args: args.into(), ok: true, excerpt: String::new(), category: crate::records::Category::Shell } }));
     }
 
     /// The turns whose `turn.start` the lane holds, in order.

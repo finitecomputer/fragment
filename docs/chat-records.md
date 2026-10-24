@@ -123,12 +123,26 @@ it, and a new draft may follow (the next part).
 **An agent's reply:**
 
 ```json
-{ "text": "…", "turn": "<turn>", "attachments": [ATTACHMENT], "to": ["npub1…"], "hop": 1 }
+{ "text": "…", "turn": "<turn>", "attachments": [ATTACHMENT], "to": ["npub1…"], "hop": 1, "interim": true }
 ```
 
 - Posted by the agent with the id `rp:<turn>:<n>`, its replies numbered
   from 1. A turn may reply more than once (text, a tool call, more text);
-  each reply is whole.
+  each reply is whole. Everything the agent says is a reply (Paul,
+  2026-10-24): the model's words before a tool call are one, posted
+  before that call's `turn.step` as soon as they are whole, held to a
+  reply's bound (`text` at most 56 KiB) and never cut to a step's; a
+  bridge before then kept them as the step's `text`, at most 300
+  characters (`work`, below).
+- `interim: true` on a reply its turn went on working after: its words
+  before a tool call. One before a call that only updates the agent's
+  memory is not interim (an answer said beside housekeeping is the turn's
+  answer: Hermes says nothing after it). The chat's push leaves an
+  interim reply out ("Push", below); a page shows it as any reply.
+  Absent, a reply is not interim (every reply of an older bridge's). A
+  turn posts at most 64 replies that are not interim and, apart, at most
+  200 interim ones (one a step), so its words on the way never cost its
+  answer.
 - `to` and `hop` when the reply `@mentions` another agent of the chat:
   a hand-off. An agent answers another agent's record (a reply, or a
   message an agent posts itself: `fragment ask`, the API) only when its
@@ -275,8 +289,11 @@ computer (docs/computers.md, the hold).
 
 Part `<step>`, from 1: one tool call. `tool` (the runtime's own name for
 it) and `args` (the call's preview) at most 140 characters, `excerpt`
-(its result) and `text` (the model's words before it) at most 300; empty
-when the runtime does not say. At most 200 a turn. `category` is what it
+(its result) at most 300; empty when the runtime does not say. At most
+200 a turn. `text`, only from a bridge before 2026-10-24: the model's
+words before the call, at most 300 characters; a bridge now posts them
+as a reply before the step ("An agent's reply", above), and a page shows
+an older step's `text` as that reply. `category` is what it
 does, whatever the runtime calls the tool: `shell` (a command or code
 run), `web` (a search of the web), `read` (a file, page or skill read, or
 files searched), `write` (a file written or edited), `browser` (its
@@ -712,14 +729,18 @@ an agent of the chat posts on `chat` (`"from": "agent"`: its replies; a
 draft is never a record, and a person's message starts nothing). The run,
 a job acting as the chat itself:
 
-1. reads the chat's members (`job.members()`): the poster must be an
+1. leaves out an interim reply (`interim: true`: the agent's words before
+   a tool call, said while it works), so a turn pushes its answer, a
+   question it asks, and its words before a card, never each thing it
+   says on the way;
+2. reads the chat's members (`job.members()`): the poster must be an
    agent still, and the chat's people are its members of kind `person`;
-2. leaves out each person a page of the chat shares `{looking: true}`
+3. leaves out each person a page of the chat shares `{looking: true}`
    for (`job.presence()`);
-3. names the agent (`job.people`: its agent fragment's title and
+4. names the agent (`job.people`: its agent fragment's title and
    picture, as every page shows it; with no title, its label,
    capitalized);
-4. pushes `{title: <the agent's name>, body: <the reply's first 120
+5. pushes `{title: <the agent's name>, body: <the reply's first 120
    characters, on one line; one without words says what it carries>, tag:
    <the chat's name>, url: "./", icon?: <its picture>}` to each of the
    rest, at most 32, by
@@ -728,11 +749,12 @@ a job acting as the chat itself:
    reply reaches its people's browsers, never an agent's.
 
 A member who calls `notify_reply` itself pushes nothing (`job.via` is not
-`channel`). A turn that replies more than once pushes each reply under
-the chat's tag, so a browser shows the latest. `looking` is the page's
-own visibility, so a chat open in a tab of the shell that is not shown
-counts as looked at, and a chat whose agents reply more than 120 times
-in an hour pauses its push (the debt ledger has both).
+`channel`). A turn that replies more than once, not interim, pushes each
+such reply under the chat's tag, so a browser shows the latest. `looking`
+is the page's own visibility, so a chat open in a tab of the shell that
+is not shown counts as looked at, and a chat whose agents reply more than
+120 times in an hour pauses its push, interim replies counted though
+none is pushed (the debt ledger has both).
 
 ## `tasks` (an agent fragment's)
 

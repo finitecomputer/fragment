@@ -50,9 +50,9 @@ A runtime gets commands and sends events, each naming its turn
 |---|---|
 | `Connected(bool)` | the runtime can take turns now, or cannot: the bridge claims a turn only while it can (Relay: Hermes on its socket, greeted; `script`: from its start) |
 | `Draft {text}` | the reply so far, shown live |
-| `Reply {part, text}` | reply `part` (from 1) whole; posted at the next part, step, prompt, or end |
+| `Reply {part, text}` | reply `part` (from 1) whole; posted at the next part, step, prompt, or end (at a step, `interim`: the turn works on after it, unless the step only updates memory) |
 | `Attachment {part, file}` · `Retract {part}` | a file on a reply; a reply taken back |
-| `Step {tool, args, ok, excerpt, text, category}` | a tool call, and what it does (docs/chat-records.md, `turn.step`) |
+| `Step {tool, args, ok, excerpt, category}` | a tool call, and what it does (docs/chat-records.md, `turn.step`); the model's words before it are a reply part of their own, sent before it |
 | `Prompt {prompt, text, options, ttl?}` | a card; the turn waits, its computer kept awake until the card is answered (a press, or, for a card that takes words, its owner's message in the chat: `Answer`) or expires |
 | `Asked` | the turn asked its asker something to answer in words (the question is a reply part before it): their next message to the agent in that chat is its answer (`Tell`); it waits, running, as long as a prompt's life, and the chat is told (`turn.asked`) |
 | `End {outcome}` | `idle`, `stopped`, or `error` |
@@ -440,17 +440,37 @@ get_chat_info`.
   there is `other`, but for its browser's (`browser_…`). Hermes cuts a
   preview at its `display.tool_preview_length`, 40 unless set: our image
   sets it to 140, the most a step's `args` keeps (`hermes-boot`).
-- One reply a turn, its answer (Paul, 2026-10-05). Hermes ends a draft
-  segment at every tool boundary with a `send` answering the message, so
-  the model's text beside a tool call ("Let me check that.") arrives as
-  a reply, whatever its `display.interim_assistant_messages` (off in our
-  image: docs/hermes-relay.md, "Hermes' settings"). The step that follows
-  takes it back (`Retract`) as its words, the step's `text`; when the
-  step reaches the bridge first, the `send` ending drafts that began
-  before it is its words, never a reply. A turn that ends idle having
-  said nothing since says the last words a step took as its reply:
-  Hermes' answer written beside a housekeeping call (`memory`), which it
-  sends once.
+- Everything the agent says is a reply (Paul, 2026-10-24, in place of
+  2026-10-05's one reply a turn). Hermes ends a draft segment at every
+  tool boundary with a `send` answering the message, so the model's text
+  beside a tool call ("Let me check that.") arrives as a reply, whatever
+  its `display.interim_assistant_messages` (off in our image:
+  docs/hermes-relay.md, "Hermes' settings"), and is one: whole (a
+  reply's bound, never a step's 300 characters), with the safe markdown
+  of any reply, posted before the step that follows, its draft put away
+  as it posts. The engine marks it `interim` (the chat's push leaves it
+  out: docs/chat-records.md, "Push") unless that step only updates
+  memory: Hermes' answer written beside a housekeeping call, which it
+  sends once and says nothing after, is the turn's answer. Interim
+  replies have a bound of their own (`INTERIM_REPLIES_PER_TURN_MAX`, one
+  a posted step), apart from `REPLIES_PER_TURN_MAX`, so narration never
+  costs the turn its answer (`narration_never_costs_the_answer`). The
+  tool's progress can reach the bridge before that `send`: a step that
+  comes while a draft segment streams waits for it, at most
+  `STEP_HOLD_MS` (3 s), the words then going before it; a question, a
+  card, a file or the end stops the wait. And while a reply's image links
+  are fetched (within the fetch's own 20 s) everything of its turn after
+  it waits in order (`Inflight::queue`: its steps, a later reply, a card,
+  a file, its end), so the reply keeps its files and the answer after it
+  is never sealed by a step that waited (`later_parts_wait_for_a_replys_
+  image`). A step whose words do not come in time posts, and the words
+  after it, a reply of their own. Until 2026-10-24 the step took the
+  words back as its `text`, at most 300 characters, which the page showed
+  folded into the steps (Paul on production: "I can't read it all").
+  Proven with the scripted gateway in every order (tests/relay.rs,
+  `text_beside_a_tool_call_is_a_reply_of_its_own`, `many_narrated_calls_
+  keep_the_answer`) and with the real Hermes (tests/docker.rs,
+  `words_before_a_tool_call_are_a_reply`).
 - An approval is a `prompt` op (`once`, `session`, `always`, `deny`);
   the owner's answer goes back at once as an inbound `prompt_response`.
   What asks at all is the image's (docs/computers.md, "Approvals in our
