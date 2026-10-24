@@ -3992,17 +3992,18 @@ function reopenWindows(settings) {
 // Signing out, or in with another account, ends the tab's person: what was
 // kept for them goes first, its windows here, each chat page's draft
 // (`{fragment: "forget-draft"}`, answered `draft-forgotten`, waited for at
-// most FORGET_WAIT_MS) and their chats' alerts (`dropAlerts`), then the
-// form goes. A draft of theirs a page not
-// open here keeps is never shown to anyone else (its page gives a draft
-// back only to its own person) and goes when someone else opens it.
+// most FORGET_WAIT_MS) and their chats' alerts (`dropAlerts`, as long),
+// then the form goes. A draft of theirs a page not open here keeps is
+// never shown to anyone else (its page gives a draft back only to its own
+// person) and goes when someone else opens it.
 document.addEventListener("submit", (e) => {
   const form = e.target;
   if (!(form instanceof HTMLFormElement) || !/^\/auth\/(logout|switch)(\?|$)/.test(form.getAttribute("action") ?? "")) return;
   tab.drop(WINDOWS_KEY);
   const frames = [...state.frames.values()].filter((f) => f.isConnected && greeted.has(f));
   e.preventDefault();
-  Promise.all([frames.length ? forgetDrafts(frames) : null, dropAlerts()]).then(() => HTMLFormElement.prototype.submit.call(form));
+  const dropped = Promise.race([dropAlerts(), new Promise((done) => setTimeout(done, FORGET_WAIT_MS))]);
+  Promise.all([frames.length ? forgetDrafts(frames) : null, dropped]).then(() => HTMLFormElement.prototype.submit.call(form));
 }, true);
 function forgetDrafts(frames) {
   return new Promise((done) => {
