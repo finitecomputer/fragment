@@ -250,6 +250,8 @@ pub fn icons(s: &mut Suite, api: &Api) -> Result<()> {
     });
     s.ok("its fitting is one Images row on the owner's ledger (`upload`), whoever uploads", paid, json!(entries(api, &owner_id, &prefix).iter().filter(|e| call_of(e) == "upload").collect::<Vec<_>>()));
 
+    favicon(s, api, &owner)?;
+
     // ---- a making whose drawings are all tiles offers none, saying why
     let r = make(api, &owner, &name, json!({ "hint": "a square" }))?;
     made += usize::from(r.status == 200);
@@ -335,6 +337,50 @@ pub fn icons(s: &mut Suite, api: &Api) -> Result<()> {
         made == icon::MAKINGS_PER_HOUR && r.status == 429 && r.code() == Some(ErrorCode::RateLimited) && kept.status == 200,
         json!({ "made": made, "stopped": last, "then": told(&r), "kept": kept.to_string() }),
     );
+    Ok(())
+}
+
+/// A page that names no icon of its own is asked its favicon on the
+/// fragment's origin (`favicon.ico`): the fragment's icon, revalidated by its
+/// hash, to whoever may open its pages (here a share link's holder); a live
+/// with its own favicon.ico serves that; with no icon, none (404).
+fn favicon(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let name = s.named(api, owner, "favicon")?;
+    let c = s.create(api, owner, &name)?;
+    let cookie = format!("fragview={}", c["viewToken"].as_str().unwrap_or(""));
+    s.commit(&c, &[("site/index.html", Some(b"<!doctype html><html><head></head><body>hi</body></html>"))]);
+    s.deploy(&c);
+    let ask = |etag: Option<&str>| {
+        let extra = etag.map(|e| vec![("if-none-match", e.to_string())]).unwrap_or_default();
+        api.call(Call { method: "GET", url: api.site_url(&name, "favicon.ico"), cookie: Some(cookie.clone()), extra, ..Call::default() })
+    };
+    let none = ask(None)?;
+    let kept = put(api, owner, &name, &photo())?;
+    let sha = kept.body["sha256"].as_str().unwrap_or("").to_string();
+    let icon = get(api, owner, &name, None)?;
+    let r = ask(None)?;
+    let again = ask(Some(&format!("\"{sha}\"")))?;
+    s.ok(
+        "a page with no icon of its own is asked favicon.ico on its origin: none before, then the fragment's icon (a PNG, revalidated by its hash: 304)",
+        none.status == 404
+            && kept.status == 200
+            && r.status == 200
+            && r.header("content-type") == icon::MEDIA_TYPE
+            && r.bytes == icon.bytes
+            && r.header("etag") == format!("\"{sha}\"")
+            && r.header("cache-control").contains("no-cache")
+            && again.status == 304,
+        format!("{none} / {r} / {again}"),
+    );
+    s.commit(&c, &[("site/favicon.ico", Some(b"\0\0\x01\0its own"))]);
+    s.deploy(&c);
+    let own = s.eventually(WAIT, || ask(None).is_ok_and(|r| r.status == 200 && r.bytes.ends_with(b"its own")));
+    s.ok("a live with its own favicon.ico serves that, icon or not", own, ask(None)?);
+    s.commit(&c, &[("site/favicon.ico", None)]);
+    s.deploy(&c);
+    api.signed(owner, "DELETE", &route(&name), None)?;
+    let gone = s.eventually(WAIT, || ask(None).is_ok_and(|r| r.status == 404));
+    s.ok("its icon removed, and no favicon.ico of its own, none is served (404)", gone, ask(None)?);
     Ok(())
 }
 

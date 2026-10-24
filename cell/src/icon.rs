@@ -237,6 +237,25 @@ impl FragmentCell {
         Ok(Response::from_json(&json!({ "icon": null }))?)
     }
 
+    /// `favicon.ico` on the fragment's own origin, which a browser asks of
+    /// a page that names no icon (serve.rs, once its live has no such
+    /// file), to whoever may open its pages: the icon's PNG (browsers read
+    /// one there), revalidated each time so a new icon shows; `None` when it
+    /// has none.
+    pub(crate) async fn favicon(&self, req: &Request, public: bool) -> CellResult<Option<Response>> {
+        let Some(sha) = self.icon_sha()? else { return Ok(None) };
+        let cache = if public { "public, no-cache" } else { "private, no-cache" };
+        let etag = format!("\"{sha}\"");
+        if let Some(resp) = crate::serve::not_modified(req, &etag, cache)? {
+            return Ok(Some(resp));
+        }
+        let mut resp = self.stream_blob(&sha, icon::MEDIA_TYPE, None).await?;
+        let h = resp.headers_mut();
+        h.set("cache-control", cache)?;
+        h.set("x-content-type-options", "nosniff")?;
+        Ok(Some(resp))
+    }
+
     /// `GET /api/f/{name}/icon` (viewers and up): the icon's PNG, tagged by
     /// its SHA-256, or 404 when it has none.
     pub(crate) async fn icon_get(&self, caller: &Caller, req: &Request) -> CellResult<Response> {
