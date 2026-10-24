@@ -152,6 +152,9 @@ impl DurableObject for RegistryCell {
             self.skewed.set(self.skewed.get() + 1);
             return Ok(refused);
         }
+        if let Some(probed) = crate::routed::probed(&req, &self.schema)? {
+            return Ok(probed);
+        }
         match self.route(req).await {
             Ok(resp) => Ok(resp),
             Err(e) => e.response(),

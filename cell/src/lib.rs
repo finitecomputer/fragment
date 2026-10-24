@@ -1148,6 +1148,8 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         (Method::Get | Method::Head, ["llms-full.txt"]) => assets::agent_doc(&req, env, cfg, LLMS_FULL_TXT).await,
         // its release in `DEPLOY_HEADER`, as every answer here names it (`platform_origin`)
         (Method::Get | Method::Head, ["healthz"]) => Ok(Response::ok("ok")?),
+        // each object class answering this release, which a deploy waits for
+        (Method::Get, ["healthz", "objects"]) => routed::objects(env, cfg).await,
         (Method::Post, ["api", "fragments"]) => {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let create: CreateFragment = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;

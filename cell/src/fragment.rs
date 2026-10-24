@@ -156,6 +156,9 @@ impl DurableObject for FragmentCell {
         if let Some(refused) = crate::routed::refused(&req, crate::routed::Own::of(self.cfg), &self.raw)? {
             return Ok(refused);
         }
+        if let Some(probed) = crate::routed::probed(&req, &self.schema)? {
+            return Ok(probed);
+        }
         match self.route(req).await {
             Ok(resp) => Ok(resp),
             Err(e) => e.response(),
