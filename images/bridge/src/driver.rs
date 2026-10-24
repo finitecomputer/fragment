@@ -289,6 +289,10 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     let claims_in_flight = Arc::new(AtomicUsize::new(0));
     let quiet = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let answer: String = cfg.left_out.iter().map(|p| format!("{p}\n")).collect();
+    // a core a bridge before this one left running is gone before any hold is answered
+    if let Some(sc) = &cfg.simplex {
+        crate::simplex::run::kill_strays(sc).await;
+    }
     tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), answer, claims_in_flight.clone(), quiet.clone(), stop.clone()));
     // SimpleX, when the image names its core: told of the computer at each read
     let simplex = cfg.simplex.clone().map(|sc| crate::simplex::run::start(sc, api.clone(), quiet.clone(), cfg.hold.clone(), stop.clone()));

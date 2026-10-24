@@ -66,6 +66,8 @@ const PULSE_MS: u64 = 3_000;
 /// answer them (an unlink's delete) first.
 const DRAIN_MS: u64 = 5_000;
 const TICK_MS: u64 = 100;
+/// A forced sync that failed is asked again this often until it is `ok`.
+const RESYNC_MS: u64 = 30_000;
 const INBOX_MAX: usize = 256;
 const WRITER_MAX: usize = 64;
 /// What the core's last words (stderr) are kept to, for its exit's line.
@@ -300,6 +302,8 @@ struct Slot {
     started: bool,
     exits: VecDeque<Instant>,
     retry_at: Option<Instant>,
+    /// When a forced sync still waiting is asked again (`Input::Resync`).
+    resync_at: Option<Instant>,
     /// It stopped too often: not started again until its owner asks.
     broken: Option<String>,
     /// What last went wrong, or what the owner last did, for its page.
@@ -446,6 +450,7 @@ impl Manager {
                 started: false,
                 exits: VecDeque::new(),
                 retry_at: None,
+                resync_at: None,
                 broken: None,
                 note: None,
                 draining_since: None,
@@ -482,7 +487,33 @@ impl Manager {
             let _ = self.pulse.send(false);
         }
         self.reconcile().await;
+        self.resync();
         self.quiet.store(self.running() == 0, Ordering::SeqCst);
+    }
+
+    /// A forced sync still waiting (one the core refused), asked again every
+    /// `RESYNC_MS` while its core is up, until the ratchet is `ok`.
+    fn resync(&mut self) {
+        let now = Instant::now();
+        let due: Vec<String> = self
+            .slots
+            .iter_mut()
+            .filter_map(|(f, s)| {
+                if !(s.up && s.saved.link.syncing && s.saved.link.forced) {
+                    s.resync_at = None;
+                    return None;
+                }
+                let at = *s.resync_at.get_or_insert(now + Duration::from_millis(RESYNC_MS));
+                (now >= at).then(|| {
+                    s.resync_at = Some(now + Duration::from_millis(RESYNC_MS));
+                    f.clone()
+                })
+            })
+            .collect();
+        for f in due {
+            crate::ev!("simplex.resync", { "agent": f });
+            self.apply(&f, Input::Resync);
+        }
     }
 
     fn running(&self) -> usize {
@@ -542,6 +573,22 @@ impl Manager {
         };
         let name = display_name(s.title.as_deref(), &s.agent.name);
         let mut cmd = tokio::process::Command::new(&cfg.bin);
+        // it dies with the bridge, however the bridge dies (a SIGKILL runs no
+        // handler of ours): no core outlives it to run beside the next one's
+        let parent = std::process::id();
+        // SAFETY: only async-signal-safe calls, in the child before its exec
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // the bridge died before the line above took: so does this
+                if libc::getppid() as u32 != parent {
+                    libc::_exit(1);
+                }
+                Ok(())
+            });
+        }
         cmd.arg("-d").arg(s.dir.join("sx")).args(["-p", &port.to_string()]).arg("--files-folder").arg(s.dir.join("files")).arg("--temp-folder").arg(s.dir.join("tmp"));
         cmd.args(["-y", "--mute", "--create-bot-display-name", &name, "--create-bot-allow-files"]);
         if let Some(smp) = &cfg.smp {
@@ -856,6 +903,41 @@ pub async fn stop_cores(grace: Duration) {
     crate::ev!("simplex.cores_stopped", { "ms": t0.elapsed().as_millis() as u64, "left": cores_alive().len() });
 }
 
+/// Any core still running as this computer's from a bridge before this one
+/// (one whose death its child outlived: the image before this one, which
+/// set no parent-death signal), killed before this bridge answers a hold or
+/// starts a core of its own: a process whose command line names `cfg.bin`
+/// and a `-d` under `cfg.dir`. Bounded: two seconds for each to end.
+pub async fn kill_strays(cfg: &Config) {
+    let (bin, dir) = (cfg.bin.to_string_lossy().to_string(), cfg.dir.to_string_lossy().to_string());
+    let me = std::process::id();
+    let mut strays: Vec<u32> = vec![];
+    for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()).filter(|p| *p != me) else { continue };
+        let Ok(raw) = std::fs::read(e.path().join("cmdline")) else { continue };
+        let args: Vec<String> = raw.split(|b| *b == 0).map(|a| String::from_utf8_lossy(a).to_string()).collect();
+        let names_bin = args.contains(&bin);
+        let in_dir = args.windows(2).any(|w| w[0] == "-d" && w[1].starts_with(&dir));
+        if names_bin && in_dir {
+            strays.push(pid);
+        }
+    }
+    if strays.is_empty() {
+        return;
+    }
+    for pid in &strays {
+        // SAFETY: SIGKILL to a stray core of this computer's, by its pid
+        unsafe { libc::kill(*pid as i32, libc::SIGKILL) };
+    }
+    let alive = |pid: u32| std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| s.rsplit_once(')').is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z')));
+    let t0 = Instant::now();
+    // bounded: two seconds
+    while strays.iter().any(|p| alive(*p)) && t0.elapsed() < Duration::from_millis(2_000) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    crate::ev!("simplex.strays_killed", { "pids": strays, "left": strays.iter().filter(|p| alive(**p)).count() });
+}
+
 /// SIGKILL to every core still running (the bridge's forced exit).
 pub fn kill_cores() {
     for pid in cores_alive() {
@@ -981,6 +1063,7 @@ mod tests {
             started: false,
             exits: VecDeque::new(),
             retry_at: None,
+            resync_at: None,
             broken: None,
             note: None,
             draining_since: None,
@@ -1054,6 +1137,7 @@ mod tests {
             started: true,
             exits: VecDeque::new(),
             retry_at: None,
+            resync_at: None,
             broken: None,
             note: None,
             draining_since: None,
@@ -1068,5 +1152,82 @@ mod tests {
         assert!(*exited.borrow(), "its process ended");
         assert_eq!(s.exits.len(), 1, "an exit of its own");
         assert!(s.retry_at.is_some() && s.broken.is_none(), "started again after a while");
+    }
+
+    /// Goal (Alex's re-review of #546): a core a bridge before this one left
+    /// running (one whose death it outlived) is killed before this bridge
+    /// answers a hold or starts its own; a process that is not this
+    /// computer's core is left alone.
+    #[tokio::test]
+    async fn a_core_left_by_a_bridge_before_is_killed_first() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("simplex-strays-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a directory");
+        let bin = root.join("simplex-chat");
+        std::fs::write(&bin, "#!/bin/sh\nsleep 30\n").expect("a fake core");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("runnable");
+        let dir = root.join("data");
+        let spawn = |d: String| {
+            let mut child = tokio::process::Command::new(&bin).args(["-d", &d]).spawn().expect("it runs");
+            let pid = child.id().expect("a pid");
+            // reaped as the container's init would
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+            });
+            pid
+        };
+        let stray = spawn(dir.join("juniper--k3x9/sx").to_string_lossy().to_string());
+        let other = spawn("/elsewhere/sx".into());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        kill_strays(&Config { bin: bin.clone(), dir, smp: None, xftp: None }).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // SAFETY: signal 0 only asks whether the pid exists
+        assert_eq!(unsafe { libc::kill(stray as i32, 0) }, -1, "the stray core is gone");
+        assert_eq!(unsafe { libc::kill(other as i32, 0) }, 0, "another's left alone");
+        unsafe { libc::kill(other as i32, libc::SIGKILL) };
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Goal (Alex's re-review of #523): a forced sync still waiting is asked
+    /// again every `RESYNC_MS` while its core is up, and no more once the
+    /// ratchet is ok.
+    #[tokio::test]
+    async fn a_forced_sync_still_waiting_is_asked_again() {
+        let (tx, _rx) = mpsc::channel(4);
+        let (pulse, _) = watch::channel(false);
+        let mut link = Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() };
+        link.apply(Input::Started { rollback: true });
+        assert!(link.syncing && link.forced);
+        let mut slot = Slot {
+            agent: agent(),
+            dir: PathBuf::from("/nowhere"),
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link },
+            title: None,
+            epoch: 1,
+            core: None,
+            up: true,
+            corr: 0,
+            pending: BTreeMap::new(),
+            started: true,
+            exits: VecDeque::new(),
+            retry_at: None,
+            resync_at: None,
+            broken: None,
+            note: None,
+            draining_since: None,
+        };
+        slot.up = true;
+        let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
+        let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(true)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None };
+        m.resync();
+        let first = m.slots["juniper--k3x9"].resync_at.expect("its next ask, set");
+        m.slots.get_mut("juniper--k3x9").expect("its slot").resync_at = Some(Instant::now() - Duration::from_millis(1));
+        m.resync();
+        assert!(m.slots["juniper--k3x9"].resync_at.is_some_and(|t| t > Instant::now()), "asked, and the next one set");
+        assert!(first > Instant::now());
+        m.apply("juniper--k3x9", Input::Said(&Resp::Sync { contact: 3, status: wire::SyncStatus::Ok }));
+        m.resync();
+        assert_eq!(m.slots["juniper--k3x9"].resync_at, None, "ok: nothing more");
     }
 }
