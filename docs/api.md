@@ -2916,7 +2916,10 @@ should not take a tab of its own). A browser lets no cross-origin frame
 ask for notifications, so a chat's bell, framed, asks the shell, which
 asks on the platform's origin and holds the subscription. A frame of one
 of the person's chats (a row of `kind: "chat"`, theirs or shared with
-them) may ask, from its fragment's own origin, `{fragment: "alerts?",
+them) that runs the release's chat (its status's `code.id` is
+`blessed:chat@…`: a fork's page is its author's code, which could push
+anything in the platform's name) may ask, from its fragment's own
+origin, `{fragment: "alerts?",
 nonce}` (what this browser holds for it), `{fragment: "alerts", nonce,
 on: true, key}` (`key` its fragment's VAPID key, `__push-key`'s) or
 `{fragment: "alerts", nonce, on: false}` (a nonce of at most 64

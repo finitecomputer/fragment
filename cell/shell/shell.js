@@ -495,7 +495,8 @@ $("add-agent-cancel").onclick = () => addDialog.close();
 // The page stores the subscription on its fragment as its person
 // (`__push-sub`), as in a tab of its own, so whose alerts are on stays
 // each chat's, and only that chat's fragment can push to it. Only a frame
-// of one of the person's chats asks, from its fragment's own origin ----
+// of one of the person's chats on the release's chat template asks, from
+// its fragment's own origin ----
 const ALERTS_WORKER = "/__shell/alerts-sw.js";
 const ALERTS_SCOPE = "/__shell/alerts/";
 const alertsScope = (name) => new URL(`${ALERTS_SCOPE}${encodeURIComponent(name)}/`, location.origin).href;
@@ -547,13 +548,17 @@ addEventListener("message", async (event) => {
   const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === event.source);
   const name = frame?.dataset.fragment;
   if (!name || byName(name)?.kind !== "chat") return;
-  let origin;
+  let status;
   try {
-    origin = await originOf(name);
+    status = await api("GET", `/api/f/${seg(name)}/status`);
   } catch {
     return;
   }
-  if (event.origin !== origin || frame.contentWindow !== event.source) return;
+  // the release's chat alone, whose page is the platform's own code
+  // (decision 40): a fork's is its author's, which could push anything in
+  // this origin's name
+  const origin = new URL(status.urls.canonical).origin;
+  if (event.origin !== origin || frame.contentWindow !== event.source || !String(status.code?.id ?? "").startsWith("blessed:chat@")) return;
   const answer = (a) => event.source.postMessage({ fragment: "alerts", nonce: d.nonce, ...a }, origin);
   if (!alertable()) return answer({ state: "unsupported" });
   try {
