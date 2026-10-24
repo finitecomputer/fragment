@@ -56,8 +56,9 @@ pub enum Cmd {
     Delete { contact: ContactId, notify: bool },
     /// A connection that never became a contact (a pending invitation).
     DeleteConn { conn: ConnId },
-    /// The contact's newest `count` items.
-    Chat { contact: ContactId, count: u16 },
+    /// The contact's newest `count` items, or with `after`, its first
+    /// `count` after that item (a catch-up's next page).
+    Chat { contact: ContactId, count: u16, after: Option<i64> },
 }
 
 impl Cmd {
@@ -86,9 +87,12 @@ impl Cmd {
                 assert!(*conn > 0, "a delete names a connection");
                 format!("/_delete :{conn}")
             }
-            Cmd::Chat { contact, count } => {
+            Cmd::Chat { contact, count, after } => {
                 assert!(*contact > 0 && *count > 0, "a read names a contact and a count");
-                format!("/_get chat @{contact} count={count}")
+                match after {
+                    Some(item) => format!("/_get chat @{contact} after={item} count={count}"),
+                    None => format!("/_get chat @{contact} count={count}"),
+                }
             }
         }
     }
@@ -156,9 +160,10 @@ pub enum Resp {
     /// A contact connected, over connection `conn` (the invitation's, for
     /// one that came through it).
     Connected { contact: ContactId, conn: ConnId, name: String },
-    /// Chat items: new ones (`newChatItems`, also a send's answer) or a
-    /// chat's newest (`apiChat`).
+    /// New chat items (`newChatItems`, also a send's answer).
     Items(Vec<Item>),
+    /// A page of a chat's items, oldest first (`apiChat`: a catch-up's).
+    Page(Vec<Item>),
     /// A contact's ratchet synchronization moved (`contactRatchetSync`).
     Sync { contact: ContactId, status: SyncStatus },
     /// A forced synchronization started (`contactRatchetSyncStarted`).
@@ -190,6 +195,10 @@ pub enum SyncStatus {
 /// One chat item of a contact's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
+    /// The core's own id for it (`itemId`): where a catch-up reads on
+    /// from. A rollback reuses ids, but takes the link's file back with
+    /// the database, so the two agree.
+    pub id: i64,
     pub contact: ContactId,
     /// Received (`directRcv`), else sent by this side.
     pub received: bool,
@@ -291,7 +300,7 @@ fn read_resp(r: &Value) -> Result<Resp, WireError> {
         "apiChat" => {
             let chat = &r["chat"];
             let items = chat["chatItems"].as_array().ok_or_else(|| shape("a chat with no items"))?;
-            Resp::Items(items.iter().take(ITEMS_MAX).filter_map(|ci| item(&chat["chatInfo"], ci)).collect())
+            Resp::Page(items.iter().take(ITEMS_MAX).filter_map(|ci| item(&chat["chatInfo"], ci)).collect())
         }
         "contactRatchetSync" => {
             let status = match r["ratchetSyncProgress"]["ratchetSyncStatus"].as_str() {
@@ -335,7 +344,8 @@ fn item(info: &Value, ci: &Value) -> Option<Item> {
     };
     let meta = &ci["meta"];
     let shared = meta["itemSharedMsgId"].as_str().filter(|s| !s.is_empty() && s.len() <= 64).map(str::to_string);
-    Some(Item { contact, received, content, shared, at: cut(meta["itemTs"].as_str().unwrap_or(""), 64).into() })
+    let id = meta["itemId"].as_i64().filter(|n| *n > 0).unwrap_or(0);
+    Some(Item { id, contact, received, content, shared, at: cut(meta["itemTs"].as_str().unwrap_or(""), 64).into() })
 }
 
 /// An error, as short words: its type and what is inside it.
@@ -390,12 +400,14 @@ mod tests {
         assert!(short.is_some_and(|s| s.starts_with("https://smp.lab.test/i#")));
         assert_eq!(fixture("contactConnected"), Resp::Connected { contact: 3, conn: 1, name: "person".into() });
         let Resp::Items(items) = fixture("newChatItems") else { panic!("items") };
-        assert_eq!(items, vec![Item { contact: 3, received: true, content: Content::Message { kind: "text".into(), text: "hello agent".into() }, shared: Some("RlBFOStpcVFyc1VrNDJyZQ==".into()), at: items[0].at.clone() }]);
+        assert_eq!(items, vec![Item { id: items[0].id, contact: 3, received: true, content: Content::Message { kind: "text".into(), text: "hello agent".into() }, shared: Some("RlBFOStpcVFyc1VrNDJyZQ==".into()), at: items[0].at.clone() }]);
+        assert!(items[0].id > 0, "its item id");
         assert!(items[0].at.starts_with("2026-10-23T"), "{}", items[0].at);
         let Resp::Items(sent) = fixture("sent") else { panic!("a send's answer") };
         assert!(matches!(&sent[..], [Item { received: false, content: Content::Message { .. }, shared: Some(_), .. }]), "{sent:?}");
-        let Resp::Items(chat) = fixture("apiChat") else { panic!("a chat") };
+        let Resp::Page(chat) = fixture("apiChat") else { panic!("a chat's page") };
         assert_eq!(chat.len(), 8, "every item of the chat, the banner and the features too");
+        assert!(chat.windows(2).all(|w| w[0].id < w[1].id), "oldest first, by id");
         assert!(chat.iter().all(|i| i.contact == 3));
         assert!(matches!(chat[0].content, Content::Other(ref t) if t == "chatBanner"));
         assert!(matches!(chat[7], Item { received: false, content: Content::Message { .. }, .. }));
@@ -418,7 +430,8 @@ mod tests {
         assert_eq!(Cmd::Sync { contact: 3, force: true }.line(), "/_sync @3 force=on");
         assert_eq!(Cmd::Delete { contact: 4, notify: false }.line(), "/_delete @4 full notify=off");
         assert_eq!(Cmd::DeleteConn { conn: 2 }.line(), "/_delete :2");
-        assert_eq!(Cmd::Chat { contact: 3, count: 20 }.line(), "/_get chat @3 count=20");
+        assert_eq!(Cmd::Chat { contact: 3, count: 20, after: None }.line(), "/_get chat @3 count=20");
+        assert_eq!(Cmd::Chat { contact: 3, count: 20, after: Some(41) }.line(), "/_get chat @3 after=41 count=20");
         // a text is JSON, so nothing in it reads as more of the command
         let line = Cmd::Send { contact: 3, text: "hi\" json [] /_delete @3\nthere".into() }.line();
         let body = line.strip_prefix("/_send @3 json ").expect("its prefix");

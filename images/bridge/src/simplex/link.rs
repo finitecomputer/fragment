@@ -31,10 +31,16 @@
 //!   so the save is exact. A ratchet the core itself finds out of step
 //!   (`required`, `allowed`, an undecryptable message) is synchronized the
 //!   same way, unforced.
-//! - **A start** reads back the newest items (`CATCHUP_ITEMS`) and forwards
-//!   the owner's again: a core killed mid-burst had committed messages whose
-//!   events died with it (the spike's `crash` runs). Forwarding is
-//!   idempotent, so this costs reads.
+//! - **A start** reads back what came after the newest item the link read
+//!   (`seen`), a page (`CATCHUP_ITEMS`) at a time until a page is not full,
+//!   and forwards the owner's again: a core killed mid-burst had committed
+//!   messages whose events died with it (the spike's `crash` runs).
+//!   Forwarding is idempotent, so this costs reads. A link read nothing yet
+//!   reads its newest page.
+//! - **A reply the core will not send now** (`PROHIBITED` while its ratchet
+//!   synchronizes, which an unforced sync after a restart cannot tell
+//!   apart from one in step) waits in the outbox until the ratchet is `ok`
+//!   or the next start, never dropped.
 
 use std::collections::VecDeque;
 
@@ -80,6 +86,14 @@ pub struct Link {
     /// Parts the outbox dropped, full, since the link was made.
     #[serde(default)]
     pub dropped: u64,
+    /// The newest item of the bound contact the link has read (the core's
+    /// item id): a start's catch-up reads on from it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub seen: i64,
+}
+
+fn is_zero(n: &i64) -> bool {
+    *n == 0
 }
 
 /// What reaches the link.
@@ -186,7 +200,7 @@ impl Link {
                         // a sync the last life asked: asked again, refused if done
                         out.push(Action::Ask(Cmd::Sync { contact, force: false }));
                     }
-                    out.push(Action::Ask(Cmd::Chat { contact, count: CATCHUP_ITEMS }));
+                    out.push(Action::Ask(Cmd::Chat { contact, count: CATCHUP_ITEMS, after: (self.seen > 0).then_some(self.seen) }));
                 }
             },
             Input::Said(resp) => self.said(resp, &mut out),
@@ -202,7 +216,14 @@ impl Link {
                         self.syncing = false;
                         self.flush(&mut out);
                     }
-                    Cmd::Send { contact, .. } if self.linked_to(*contact) => out.push(Action::Tell(Notice::Failed { what })),
+                    // not sent now (a ratchet mid-sync refuses sends): it
+                    // waits, and what comes after it, until the ratchet is
+                    // ok or the next start
+                    Cmd::Send { contact, text } if self.linked_to(*contact) => {
+                        self.syncing = true;
+                        self.hold(text.clone());
+                        out.push(Action::Tell(Notice::Failed { what }));
+                    }
                     _ => {}
                 }
             }
@@ -210,11 +231,7 @@ impl Link {
                 if let Phase::Linked { contact, .. } = self.phase {
                     for part in wire::parts(text) {
                         if self.syncing {
-                            if self.outbox.len() == OUTBOX_MAX {
-                                self.outbox.pop_front();
-                                self.dropped += 1;
-                            }
-                            self.outbox.push_back(part);
+                            self.hold(part);
                         } else {
                             out.push(Action::Ask(Cmd::Send { contact, text: part }));
                         }
@@ -245,7 +262,40 @@ impl Link {
                 Phase::Linked { contact: linked, .. } if linked == contact => {}
                 _ => out.extend([Action::Ask(Cmd::Delete { contact: *contact, notify: false }), Action::Tell(Notice::Refused)]),
             },
-            Resp::Items(items) => {
+            Resp::Items(items) => self.items(items, out),
+            Resp::Page(items) => {
+                self.items(items, out);
+                // a full page: the next one, after its newest
+                let newest = items.iter().map(|i| i.id).max().unwrap_or(0);
+                if let (Some(contact), true) = (self.contact(), items.len() >= usize::from(CATCHUP_ITEMS) && newest > 0) {
+                    out.push(Action::Ask(Cmd::Chat { contact, count: CATCHUP_ITEMS, after: Some(newest) }));
+                }
+            }
+            Resp::Sync { contact, status } if self.linked_to(*contact) => match status {
+                SyncStatus::Required | SyncStatus::Allowed => self.sync(*contact, out),
+                SyncStatus::Ok if self.syncing => {
+                    self.syncing = false;
+                    out.push(Action::Tell(Notice::Resynced));
+                    self.flush(out);
+                }
+                SyncStatus::Ok | SyncStatus::Started | SyncStatus::Agreed => {}
+            },
+            Resp::Deleted { contact, by_them } if self.linked_to(*contact) => {
+                self.phase = Phase::Off;
+                self.let_go();
+                out.extend([Action::Tell(Notice::Unlinked { by_them: *by_them }), Action::Save]);
+            }
+            Resp::Sync { .. } | Resp::SyncStarted { .. } | Resp::Deleted { .. } | Resp::ConnDeleted { .. } | Resp::Error { .. } | Resp::Other(_) => {}
+        }
+    }
+
+    /// Chat items read (new ones, or a catch-up's page): the owner's
+    /// messages forwarded, anyone else let go, the newest read noted.
+    fn items(&mut self, items: &[wire::Item], out: &mut Vec<Action>) {
+        if let Some(newest) = items.iter().filter(|i| self.linked_to(i.contact)).map(|i| i.id).max() {
+            self.seen = self.seen.max(newest);
+        }
+        {
                 let mut refused: Vec<ContactId> = vec![];
                 for item in items.iter().filter(|i| i.received) {
                     if !self.linked_to(item.contact) {
@@ -267,23 +317,17 @@ impl Link {
                         Content::Skipped | Content::Other(_) => {}
                     }
                 }
-            }
-            Resp::Sync { contact, status } if self.linked_to(*contact) => match status {
-                SyncStatus::Required | SyncStatus::Allowed => self.sync(*contact, out),
-                SyncStatus::Ok if self.syncing => {
-                    self.syncing = false;
-                    out.push(Action::Tell(Notice::Resynced));
-                    self.flush(out);
-                }
-                SyncStatus::Ok | SyncStatus::Started | SyncStatus::Agreed => {}
-            },
-            Resp::Deleted { contact, by_them } if self.linked_to(*contact) => {
-                self.phase = Phase::Off;
-                self.let_go();
-                out.extend([Action::Tell(Notice::Unlinked { by_them: *by_them }), Action::Save]);
-            }
-            Resp::Sync { .. } | Resp::SyncStarted { .. } | Resp::Deleted { .. } | Resp::ConnDeleted { .. } | Resp::Error { .. } | Resp::Other(_) => {}
         }
+    }
+
+    /// A part held until the ratchet is in step; past `OUTBOX_MAX` the
+    /// oldest goes, counted.
+    fn hold(&mut self, part: String) {
+        if self.outbox.len() == OUTBOX_MAX {
+            self.outbox.pop_front();
+            self.dropped += 1;
+        }
+        self.outbox.push_back(part);
     }
 
     /// An unforced sync, once until it is answered.
@@ -305,6 +349,7 @@ impl Link {
     fn let_go(&mut self) {
         self.syncing = false;
         self.outbox.clear();
+        self.seen = 0;
     }
 
     fn linked_to(&self, contact: ContactId) -> bool {
@@ -364,7 +409,7 @@ mod tests {
     }
 
     fn msg(contact: ContactId, id: Option<&str>, text: &str) -> Item {
-        Item { contact, received: true, content: Content::Message { kind: "text".into(), text: text.into() }, shared: id.map(str::to_string), at: "2026-10-22T10:00:00Z".into() }
+        Item { id: 1, contact, received: true, content: Content::Message { kind: "text".into(), text: text.into() }, shared: id.map(str::to_string), at: "2026-10-22T10:00:00Z".into() }
     }
 
     fn forwards(actions: &[Action]) -> Vec<(String, String)> {
@@ -444,6 +489,64 @@ mod tests {
         assert!(link.apply(Input::Said(&ok)).is_empty(), "in step already: nothing to tell");
     }
 
+    /// Goal (Alex's review of #523): a restart reads back everything after
+    /// the newest item the link read, page by page, so a burst bigger than
+    /// a page (sent items and the core's own among it) reaches the agent
+    /// whole; the boundary survives a restart in the link's file.
+    #[test]
+    fn a_catch_up_reads_every_page() {
+        let mut link = linked();
+        let item = |id: i64, received: bool| Item { id, received, shared: Some(format!("m{id}")), ..msg(3, None, &format!("text {id}")) };
+        link.apply(Input::Said(&Resp::Items(vec![item(10, true), item(11, false)])));
+        assert_eq!(link.seen, 11, "the newest read, sent or received");
+        let mut link = Link::from_json(&link.to_json()).expect("it reads back");
+        assert_eq!(link.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, after: Some(11) })]);
+        // a full page, a third of it ours or the core's: the next is asked after its newest
+        let page: Vec<Item> = (12..44).map(|id| if id % 3 == 0 { item(id, false) } else { item(id, true) }).collect();
+        let got = link.apply(Input::Said(&Resp::Page(page.clone())));
+        assert_eq!(forwards(&got).len(), page.iter().filter(|i| i.received).count());
+        assert_eq!(got.last(), Some(&Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, after: Some(43) })));
+        // the last page, not full: the catch-up is done, and the 33rd message forwarded
+        let got = link.apply(Input::Said(&Resp::Page(vec![item(44, true)])));
+        assert_eq!(forwards(&got), vec![("m44".to_string(), "text 44".to_string())]);
+        assert!(!got.iter().any(|a| matches!(a, Action::Ask(Cmd::Chat { .. }))));
+        assert_eq!(link.seen, 44);
+        // a new contact starts from its own newest page
+        link.apply(Input::Unlink);
+        assert_eq!(link.seen, 0);
+    }
+
+    /// Goal (Alex's review of #523): a reply the core will not send now (a
+    /// restart mid-sync, the peer away: the unforced sync is refused as it
+    /// is when in step, and the send then too) waits, and is sent once the
+    /// ratchet is ok, never dropped; a sync refused when in step sends what
+    /// waited at once.
+    #[test]
+    fn a_reply_the_core_refuses_waits_for_the_ratchet() {
+        let mut link = linked();
+        link.apply(Input::Said(&Resp::Sync { contact: 3, status: SyncStatus::Required }));
+        assert!(link.apply(Input::Reply("must survive restart")).is_empty());
+        let mut link = Link::from_json(&link.to_json()).expect("it reads back");
+        link.apply(Input::Started { rollback: false });
+        let prohibited = "errorAgent CMD PROHIBITED synchronizeRatchet: not allowed";
+        let flushed = link.apply(Input::Failed { cmd: &Cmd::Sync { contact: 3, force: false }, what: prohibited });
+        assert_eq!(sends(&flushed), vec!["must survive restart"]);
+        // the core is mid-sync after all: the send is refused, and the reply waits
+        let send = Cmd::Send { contact: 3, text: "must survive restart".into() };
+        link.apply(Input::Failed { cmd: &send, what: "errorAgent CMD PROHIBITED" });
+        assert_eq!((link.syncing, link.outbox.iter().cloned().collect::<Vec<_>>()), (true, vec!["must survive restart".to_string()]));
+        assert!(link.apply(Input::Reply("and this")).is_empty(), "what comes after it waits behind it");
+        let ok = link.apply(Input::Said(&Resp::Sync { contact: 3, status: SyncStatus::Ok }));
+        assert_eq!(sends(&ok), vec!["must survive restart", "and this"]);
+        assert!(!link.syncing && link.outbox.is_empty());
+        // a forced sync refused (a rollback's): nothing is dropped either
+        link.apply(Input::Said(&Resp::Sync { contact: 3, status: SyncStatus::Required }));
+        link.apply(Input::Reply("held again"));
+        let flushed = link.apply(Input::Failed { cmd: &Cmd::Sync { contact: 3, force: true }, what: "errorAgent CMD PROHIBITED" });
+        assert_eq!(sends(&flushed), vec!["held again"]);
+        link.apply(Input::Failed { cmd: &Cmd::Send { contact: 3, text: "held again".into() }, what: "errorAgent CMD PROHIBITED" });
+        assert_eq!(link.outbox.len(), 1, "kept for the ratchet's ok, or the next start");
+    }
     /// Goal (restart): every start reads back the newest items; a start
     /// that went back in time forces a sync before anything is sent, tells
     /// the owner, and holds replies until it is in step; a pending
@@ -451,10 +554,10 @@ mod tests {
     #[test]
     fn a_start_catches_up_and_a_rollback_forces_a_sync() {
         let mut link = linked();
-        assert_eq!(link.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS })]);
+        assert_eq!(link.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, after: None })]);
         assert_eq!(
             link.apply(Input::Started { rollback: true }),
-            vec![Action::Ask(Cmd::Sync { contact: 3, force: true }), Action::Tell(Notice::MaybeLost), Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS })]
+            vec![Action::Ask(Cmd::Sync { contact: 3, force: true }), Action::Tell(Notice::MaybeLost), Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, after: None })]
         );
         assert!(link.syncing);
         assert!(link.apply(Input::Reply("held")).is_empty(), "nothing is sent out of step");
@@ -466,7 +569,7 @@ mod tests {
         let back = Link::from_json(&link.to_json()).expect("it reads back");
         assert_eq!(back, link);
         let mut back = back;
-        assert_eq!(back.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::Sync { contact: 3, force: false }), Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS })]);
+        assert_eq!(back.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::Sync { contact: 3, force: false }), Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, after: None })]);
         // refused as needless (in step after all): what waited goes
         back.apply(Input::Reply("after"));
         let sent = back.apply(Input::Failed { cmd: &Cmd::Sync { contact: 3, force: false }, what: "errorAgent CMD PROHIBITED synchronizeRatchet: not allowed" });
