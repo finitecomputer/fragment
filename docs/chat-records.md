@@ -501,11 +501,17 @@ start is read) show nothing. It
 follows `chat` from its last 400 records and, for a viewer, `work` from
 its last 1000 (each agent's menu among them), and lays them out in time:
 a person's message (or command); an
-agent's consecutive steps as one card (each its category's icon, verb and
-arguments; while it works, the card's head says how long it has worked
-and how many steps, and only its last three lines show under it, each
-older one fainter; once done, it folds to one line: how long it worked,
-how many steps, and an icon for each kind of work); a
+agent's consecutive steps as one card, a quiet timeline of its tool steps
+alone (each its category's icon, which names its verb, and its arguments;
+while it works, the card's head says how long it has worked and how many
+steps, and only its last three steps show under it, each older one
+fainter; once done, it folds to one line: how long it worked, how many
+steps, and an icon for each kind of work); a step's `text` (an older
+bridge's record of the model's words before the call) as the agent's
+reply just before its step, whole as recorded and never in the card
+(Paul, 2026-10-24: everything the agent says is a reply in the chat;
+words its turn also replied with, the answer it said beside a
+housekeeping call, show once, as that reply); a
 prompt as a card whose buttons
 only `asks` may press (enabled for them alone, and only their answer
 marks it sent: anyone else's changes nothing on it), an option answered in
@@ -529,13 +535,14 @@ a fault of a renderer's or of the browser's) is a quiet line in its place,
 one record never keeps the rest of the chat from drawing (the page draws
 its whole timeline each time, so one item that threw once drew nothing).
 
-Commentary uses the replies' safe markdown, smaller and muted; a long note
-folds at a whole block or sentence and expands on request (while the card
-works, each note is its first line). A step is one line in a quieter grey
-than the commentary, its verb in the tense it is in: "Running" while it is
-the turn's last record without a result, "Ran" once done, "Failed running"
-for `ok: false`, which alone is in colour; a step of no category is its
-tool's name. A step opened shows its whole arguments and its `excerpt`. The
+A step is one line in a quiet grey: its icon, then its arguments. The
+icon's accessible name is its verb, in the tense the step is in:
+"Running" while it is the last step of a card whose turn works (unless it
+failed: a runtime's progress may say `ok` before its result), "Ran" once
+done. The verb shows in words only where the icon cannot say it: a step
+with no arguments, a step of no category (its tool's name), and a failed
+one (`ok: false`: "Failed running", which alone is in colour). A step
+opened shows its whole arguments and its `excerpt`. The
 posting agent's own `/data/work/<agent>/home/` shows as `~/`, its workspace
 as `work/`, and `/data/hermes/managed-skills/` as `skills/`; the full
 arguments stay in a title on their text. A line too long for its width has

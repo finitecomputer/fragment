@@ -264,11 +264,11 @@ a.attachment-chip:hover { color: var(--text-primary); background: var(--bg-activ
 .message-error { display: flex; align-items: baseline; gap: 10px; max-width: 100%; font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
 .message-retry { border: 0; background: none; color: var(--accent-blue); font: inherit; padding: 2px; }
 
-/* a turn's steps (chat.js, stepsNode): no box, one quiet line for its head;
-   under it a line of the card's own, one rule, from which its lines hang.
-   One size and two greys: the agent's commentary in the secondary text's,
-   the steps in --step-text (as legible in either theme, 3.7:1), a failed
-   one alone in colour. */
+/* a turn's steps (chat.js, stepsNode): a quiet timeline of its tool steps
+   alone (what the agent says is a reply, between its cards). No box, one
+   quiet line for its head; under it one rule, from which its steps hang,
+   each one line in --step-text (as legible in either theme, 3.7:1), a
+   failed one alone in colour. */
 details.tools { margin: 14px 0; font-size: 13px; line-height: 1.55; }
 details.tools summary { display: flex; align-items: center; gap: 8px; width: fit-content; max-width: 100%; min-height: 24px; color: var(--step-text); cursor: pointer; list-style: none; border-radius: 6px; }
 details.tools summary:hover, details.tools summary:focus-visible { color: var(--text-secondary); }
@@ -285,11 +285,12 @@ details.tools[open]:not(.rolling) summary .chev { transform: rotate(90deg); }
 /* what is being done now: a light that passes over its words */
 .shimmer { background: linear-gradient(90deg, var(--text-secondary) 0, var(--text-secondary) 40%, var(--text-primary) 50%, var(--text-secondary) 60%, var(--text-secondary) 100%) 0 0 / 250% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: shimmer 2.4s linear infinite; }
 @keyframes shimmer { from { background-position: 100% 0; } to { background-position: -150% 0; } }
-details.tools > :is(.step, .step-text) { margin-left: 9px; padding: 3px 0 3px 16px; border-left: 1px solid var(--border-strong); }
+details.tools > .step { margin-left: 9px; padding: 3px 0 3px 16px; border-left: 1px solid var(--border-strong); }
 details.tools > summary + * { margin-top: 6px; }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-/* a step: its icon, its verb, its arguments, on one line as quiet as its words */
+/* a step: its icon (which names its verb), its arguments, on one line as
+   quiet as its words; its verb in words only where the icon cannot say it */
 .step-name { display: flex; align-items: center; gap: 7px; width: 100%; min-width: 0; padding: 0; border: 0; background: none; font: inherit; color: var(--step-text); text-align: left; }
 button.step-name { cursor: pointer; }
 button.step-name:hover, button.step-name:focus-visible { color: var(--text-secondary); }
@@ -304,26 +305,18 @@ button.step-name:hover, button.step-name:focus-visible { color: var(--text-secon
 .step-detail pre { margin: 0; font: 400 12px/1.6 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-tertiary); max-height: 240px; overflow-y: auto; }
 .step-detail .step-call { color: var(--text-secondary); }
 .step-detail pre + pre { margin-top: 10px; }
-.step-text { padding-top: 6px; padding-bottom: 4px; color: var(--text-secondary); overflow-wrap: anywhere; }
-.step-text .md > :first-child { margin-top: 0; }
-.step-text .md > :last-child { margin-bottom: 0; }
-.step-text .md code { background: var(--surface-muted); }
-.note-expand { border: 0; padding: 2px 0; background: none; color: var(--text-tertiary); font: inherit; cursor: pointer; }
-.note-expand:hover, .note-expand:focus-visible { color: var(--text-primary); }
-/* while it works: its last three lines, each older one fainter, each one
-   line; a line come since the last draw arrives as the one past them leaves */
+/* while it works: its last three steps, each older one fainter; a step come
+   since the last draw arrives as the one past them leaves */
 details.tools.rolling { cursor: pointer; }
-details.tools.rolling > :is(.step, .step-text) { pointer-events: none; }
-details.tools.rolling > :is(.step, .step-text):not(:nth-last-child(-n+3)) { display: none; }
-details.tools.rolling > :is(.step, .step-text):nth-last-child(2) { opacity: .6; }
-details.tools.rolling > :is(.step, .step-text):nth-last-child(3) { opacity: .3; }
-details.tools.rolling .step-text .md > * { display: none; }
-details.tools.rolling .step-text .md > :first-child { display: block; margin: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-details.tools.rolling .note-expand, details.tools.rolling .step-detail { display: none; }
-details.tools.rolling.advanced > :is(.step, .step-text):last-child { animation: step-in .32s ease; }
-details.tools.rolling.advanced > :is(.step, .step-text):nth-last-child(2) { animation: step-back-60 .32s ease; }
-details.tools.rolling.advanced > :is(.step, .step-text):nth-last-child(3) { animation: step-back-30 .32s ease; }
-details.tools.rolling.advanced > :is(.step, .step-text):nth-last-child(4) { display: block; overflow: hidden; animation: step-out .32s ease forwards; }
+details.tools.rolling > .step { pointer-events: none; }
+details.tools.rolling > .step:not(:nth-last-child(-n+3)) { display: none; }
+details.tools.rolling > .step:nth-last-child(2) { opacity: .6; }
+details.tools.rolling > .step:nth-last-child(3) { opacity: .3; }
+details.tools.rolling .step-detail { display: none; }
+details.tools.rolling.advanced > .step:last-child { animation: step-in .32s ease; }
+details.tools.rolling.advanced > .step:nth-last-child(2) { animation: step-back-60 .32s ease; }
+details.tools.rolling.advanced > .step:nth-last-child(3) { animation: step-back-30 .32s ease; }
+details.tools.rolling.advanced > .step:nth-last-child(4) { display: block; overflow: hidden; animation: step-out .32s ease forwards; }
 @keyframes step-in { from { opacity: 0; max-height: 0; } to { max-height: 3em; } }
 @keyframes step-back-60 { from { opacity: 1; } }
 @keyframes step-back-30 { from { opacity: .6; } }
@@ -477,6 +470,6 @@ details.tools.rolling.advanced > :is(.step, .step-text):nth-last-child(4) { disp
 @media (prefers-reduced-motion: reduce) {
   .msg.agent.streaming .cursor, .dots i, .spin, .attachment-chip.uploading svg, .recording i, .setup-steps li.doing::before, .step-dot, details.tools.rolling.advanced > * { animation: none; }
   .shimmer { animation: none; background: none; color: var(--text-secondary); }
-  details.tools.rolling.advanced > :is(.step, .step-text):nth-last-child(4) { display: none; }
+  details.tools.rolling.advanced > .step:nth-last-child(4) { display: none; }
   .composer::before, .composer::after { transition: none; }
 }

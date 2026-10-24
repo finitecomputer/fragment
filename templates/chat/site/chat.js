@@ -112,9 +112,10 @@ const MEMO_MAX_MS = 5 * 60 * 1000;
 const MEMO_EXT = { "audio/webm": "webm", "audio/ogg": "ogg", "audio/mp4": "m4a", "audio/mpeg": "mp3", "audio/wav": "wav" };
 
 // What a step does (its `category`, docs/chat-records.md): an icon, the
-// verb its line starts with while it runs and once it ran, and what ends
-// the verb before its arguments. A step of any other (`other`, or one from
-// before steps said) is its tool's own name, in no tense.
+// verb it is named by while it runs and once it ran (its icon's name for
+// assistive technology, and its words where the icon cannot say it), and
+// what ends the verb before its arguments. A step of any other (`other`, or
+// one from before steps said) is its tool's own name, in no tense.
 const STEP_SAYS = {
   shell: ["terminal", "Running", "Ran", ""],
   web: ["globe", "Searching the web", "Searched the web", " for"],
@@ -131,17 +132,18 @@ const NOTICE_ICON = { info: "info", warning: "alert", memory: "brain" };
 
 /// A step as a line reads it: `{icon, verb, args}` ("Ran", `npm test`), as
 /// it runs (`now`) or once it ran ("Failed running", for `ok: false`); the
-/// verb ends as it joins its arguments ("Searched the web for").
-export function stepSays(s, now = false) {
+/// verb ends as it joins its arguments ("Searched the web for") unless it
+/// stands alone (`joined` false: an icon's name).
+export function stepSays(s, now = false, joined = true) {
   const args = typeof s.args === "string" ? s.args : "";
   const failed = s.ok === false ? "Failed " : "";
   if (!Object.hasOwn(STEP_SAYS, s.category)) {
     const tool = typeof s.tool === "string" && s.tool ? s.tool : "a tool";
-    return { icon: "wrench", verb: `${failed}${tool}${args ? ":" : ""}`, args };
+    return { icon: "wrench", verb: `${failed}${tool}${args && joined ? ":" : ""}`, args };
   }
   const [icon, doing, did, joins] = STEP_SAYS[s.category];
   const verb = failed ? `${failed}${doing.charAt(0).toLowerCase()}${doing.slice(1)}` : now ? doing : did;
-  return { icon, verb: `${verb}${args ? joins : ""}`, args };
+  return { icon, verb: `${verb}${args && joined ? joins : ""}`, args };
 }
 
 // How long, as a card's head says it: "40s", "3m 05s", "1h 5m".
@@ -158,6 +160,15 @@ function took(ms) {
 function shortStepArgs(text, agent) {
   return text.replace(/\/data\/work\/([^/\s]+)\/(home\/)?/g, (path, owner, home) => owner === agent ? (home ? "~/" : "work/") : path)
     .replaceAll("/data/hermes/managed-skills/", "skills/");
+}
+
+/// Whether a turn's replies hold words an older bridge also kept on one of
+/// its steps (`text`, at most 300 characters, cut with "…"): the turn's
+/// answer said beside a housekeeping call was both, and shows once.
+function repliedWith(replies, said) {
+  const cut = said.endsWith("…");
+  const words = cut ? said.slice(0, -1).trimEnd() : said;
+  return replies.some((r) => (cut ? r.startsWith(words) : r === words));
 }
 
 // Keep a path's beginning and its filename, removing directories first.
@@ -189,31 +200,6 @@ function fitStepArgs(node) {
     else high = room - 1;
   }
   node.textContent = middlePaths(text, low);
-}
-
-// A complete first block or sentence, cloned from safe DOM. Range preserves
-// emphasis and code spans without slicing markdown delimiters or a sentence.
-function notePreview(body) {
-  const first = body.firstElementChild;
-  if (!first) return document.createDocumentFragment();
-  if (first.textContent.length <= 160 && body.children.length > 1) return first.cloneNode(true);
-  if (first.nodeName !== "P") return el("span", null, "Commentary");
-  const sentence = [...new Intl.Segmenter(undefined, { granularity: "sentence" }).segment(first.textContent)][0]?.segment;
-  if (!sentence || sentence.length >= body.textContent.length) return el("span", null, "Commentary");
-  const range = document.createRange();
-  range.setStart(first, 0);
-  const walker = document.createTreeWalker(first, NodeFilter.SHOW_TEXT);
-  let left = sentence.trimEnd().length;
-  for (let text = walker.nextNode(); text; text = walker.nextNode()) {
-    if (left <= text.length) {
-      range.setEnd(text, left);
-      const preview = el("p");
-      preview.append(range.cloneContents());
-      return preview;
-    }
-    left -= text.length;
-  }
-  return first.cloneNode(true);
 }
 
 /// A media type without its parameters (`audio/webm;codecs=opus` is `audio/webm`).
@@ -379,7 +365,6 @@ export function mount(root) {
     pending: null, // { seq, at, n, target }: this page's message no turn has started on yet
     here: [], // the fragment's presence: [{ id, principal, data }]
     toggled: new Map(), // a step card's key -> true, once someone opened it whole
-    expandedNotes: new Set(), // turn:step, a commentary someone expanded
     openSteps: new Set(), // turn:step, a step someone opened to its arguments and result
     roster: [], // the owner's agents, from the shell that frames the chat: [{ identity, name, title, picture }]
     failed: new Map(), // post id -> the message and its transport error
@@ -813,11 +798,27 @@ export function mount(root) {
   // line) after its last record, and a turn's consecutive steps as one card ----
   function timeline() {
     const items = [];
-    for (const m of state.chat) items.push({ at: m.at, n: m.n, type: "message", m });
+    // each turn's replies, by its agent: the words an older bridge kept on a
+    // step that its turn also replied with show once, as the reply
+    const replies = new Map();
+    for (const m of state.chat) {
+      items.push({ at: m.at, n: m.n, type: "message", m });
+      if (!m.turn) continue;
+      const key = turnKey(m.principal, m.turn);
+      if (!replies.has(key)) replies.set(key, []);
+      replies.get(key).push(m.text.trim());
+    }
     for (const t of state.turns.values()) {
       // a turn its agent never began here (no turn.start of its own) shows nothing
       if (!started(t)) continue;
-      for (const s of t.steps.values()) items.push({ at: s.at, n: s.n, type: "step", t, s });
+      for (const s of t.steps.values()) {
+        // what an older bridge recorded as a step's `text`, the agent's words
+        // before the call: they are its reply, shown whole just before the
+        // step, never in the card (a bridge now posts them as a reply)
+        const said = typeof s.text === "string" ? s.text.trim() : "";
+        if (said && !repliedWith(replies.get(t.key) ?? [], said)) items.push({ at: s.at, n: s.n - 0.5, type: "said", t, s, text: said });
+        items.push({ at: s.at, n: s.n, type: "step", t, s });
+      }
       for (const p of t.prompts.values()) items.push({ at: p.at, n: p.n, type: "prompt", t, p });
       for (const x of t.notices.values()) items.push({ at: x.at, n: x.n, type: "notice", t, x });
       if (t.end && t.end.outcome !== "idle") items.push({ at: t.end.at, n: t.end.n, type: "end", t });
@@ -887,6 +888,8 @@ export function mount(root) {
         return messageNode(it.m);
       case "steps":
         return stepsNode(it.t, it.steps, it.until ?? null);
+      case "said":
+        return saidNode(it.t, it.s, it.text);
       case "prompt":
         return promptNode(it.t, it.p);
       case "end":
@@ -909,7 +912,7 @@ export function mount(root) {
     try {
       return itemNode(it);
     } catch (err) {
-      const key = `x:${it.type}:${it.m?.seq ?? it.key ?? it.t?.key ?? "pending"}:${it.steps?.[0].step ?? it.p?.prompt ?? it.x?.seq ?? ""}`;
+      const key = `x:${it.type}:${it.m?.seq ?? it.key ?? it.t?.key ?? "pending"}:${it.steps?.[0].step ?? it.s?.step ?? it.p?.prompt ?? it.x?.seq ?? ""}`;
       if (!nodes.has(key)) console.error("chat: a part of the chat could not be shown", it, err);
       return [key, cached(key, "", () => {
         const line = el("div", "msg notice unshown");
@@ -1230,9 +1233,9 @@ export function mount(root) {
     return wrap;
   }
 
-  function agentMessage(m, w) {
+  function agentMessage(m, w, quotable = true) {
     const wrap = el("div", "msg agent");
-    wrap.dataset.seq = m.seq;
+    if (m.seq !== null) wrap.dataset.seq = m.seq;
     if (m.turn) wrap.dataset.turn = m.turn;
     const body = el("div", "md");
     body.append(renderMarkdown(m.text));
@@ -1252,10 +1255,29 @@ export function mount(root) {
     shareButton.setAttribute("aria-label", "Share reply");
     shareButton.replaceChildren(icon("share"));
     shareButton.onclick = () => feedback(shareButton, () => share({ text: m.text, title: document.title }));
-    if (canPost()) actions.append(replyButton(m));
+    if (canPost() && quotable) actions.append(replyButton(m));
     actions.append(copy, shareButton, el("span", "time", time(m.at)));
     wrap.append(actions);
     return wrap;
+  }
+
+  // What an older bridge kept as a step's words (`text`, the model's words
+  // before the call): the agent said them, so they are its reply, whole as
+  // recorded, just before the step and never in its card, as a bridge now
+  // posts them (docs/chat-records.md). No Reply: no record of `chat` holds
+  // them for a message to quote.
+  function saidNode(t, s, text) {
+    const key = `c:${t.key}:${s.step}`;
+    const w = who(t.agent);
+    const sig = [w.name, w.picture ?? "", w.color ?? "", text].join("|");
+    return [
+      key,
+      cached(key, sig, () => {
+        const node = agentMessage({ seq: null, at: s.at, principal: t.agent, text, turn: t.id, attachments: [] }, w, false);
+        node.dataset.step = String(s.step);
+        return node;
+      }),
+    ];
   }
 
   const attachmentsNode = renderMessageAttachments;
@@ -1278,42 +1300,14 @@ export function mount(root) {
     }
   }
 
-  // A turn's steps, one card. While its turn works the card's head says for
-  // how long, and only its last three lines show under it (chat.css), each
-  // older one fainter; once done it folds to one line, how long it worked.
-  // Opened, it is every line: the agent's commentary, and what each step
-  // does (its icon, its verb in the tense it is in, its arguments, on one
-  // line). A step opened shows its whole arguments and what came of it.
-  function stepNote(t, s) {
-    const note = el("div", "step-text");
-    const body = el("div", "md");
-    body.append(renderMarkdown(s.text));
-    if (body.textContent.length <= 160) { openBeside(body); note.append(body); return note; }
-    const key = `${t.key}:${s.step}`;
-    const preview = el("div", "md note-preview");
-    preview.append(notePreview(body));
-    openBeside(preview);
-    openBeside(body);
-    const button = el("button", "note-expand");
-    button.type = "button";
-    const update = () => {
-      const expanded = state.expandedNotes.has(key);
-      body.hidden = !expanded;
-      preview.hidden = expanded;
-      button.textContent = expanded ? "Show less" : "…";
-      button.setAttribute("aria-label", expanded ? "Collapse commentary" : "Expand commentary");
-      button.setAttribute("aria-expanded", String(expanded));
-    };
-    button.onclick = () => {
-      if (state.expandedNotes.has(key)) state.expandedNotes.delete(key);
-      else state.expandedNotes.add(key);
-      update();
-    };
-    update();
-    note.append(preview, body, button);
-    return note;
-  }
-
+  // A turn's consecutive steps, one card: a quiet timeline of its tool
+  // steps alone (whatever the agent says is a reply, between its cards).
+  // While its turn works the card's head says for how long, and only its
+  // last three steps show under it (chat.css), each older one fainter; once
+  // done it folds to one line, how long it worked. Opened, it is every step
+  // on a line of its own: its icon, which names its verb in the tense it is
+  // in, and its arguments. A step opened shows its whole arguments and what
+  // came of it.
   let stepWidth = 0;
   const stepWidths = new ResizeObserver(([entry]) => {
     if (entry.contentRect.width === stepWidth) return;
@@ -1356,11 +1350,9 @@ export function mount(root) {
           summary.append(kinds, el("span", null, `Worked for ${took((until ?? t.end?.at ?? t.lastAt) - from)}`));
         }
         summary.append(el("span", null, `· ${plural(steps.length, "step")}`), icon("chevron", "chev"));
-        const lines = [];
-        steps.forEach((s, i) => {
-          if (s.text) lines.push(stepNote(t, s));
-          lines.push(stepLine(t, s, live && i === steps.length - 1 && typeof s.ok !== "boolean", agent));
-        });
+        // the step it is on now: the last of a card its turn works in, unless
+        // it failed (a runtime's progress may say `ok` before its result)
+        const lines = steps.map((s, i) => stepLine(t, s, live && i === steps.length - 1 && s.ok !== false, agent));
         d.dataset.lines = String(lines.length);
         d.append(summary, ...lines);
         // a line come since the last draw arrives as the ones before it step back
@@ -1394,21 +1386,32 @@ export function mount(root) {
     ];
   }
 
+  // A step's line: its icon, its arguments. The icon says the verb (its
+  // accessible name, in the tense the step is in), so the verb shows in
+  // words only where the icon cannot say it: a step with no arguments,
+  // another tool's (its wrench names none), and a failed one (its colour
+  // alone would say so).
   function stepLine(t, s, now, agent) {
     const says = stepSays(s, now);
     const step = el("div", `step${s.ok === false ? " error" : ""}${now ? " running" : ""}`);
-    step.dataset.category = Object.hasOwn(STEP_SAYS, s.category) ? s.category : "other";
+    const known = Object.hasOwn(STEP_SAYS, s.category);
+    step.dataset.category = known ? s.category : "other";
     const opens = !!(says.args || s.excerpt);
     const line = el(opens ? "button" : "div", "step-name");
     const label = el("span", "step-label");
-    label.append(el("span", `step-verb${now ? " shimmer" : ""}`, says.verb));
+    const glyph = icon(says.icon);
+    if (known && says.args && s.ok !== false) {
+      glyph.removeAttribute("aria-hidden");
+      glyph.setAttribute("role", "img");
+      glyph.setAttribute("aria-label", stepSays(s, now, false).verb);
+    } else label.append(el("span", `step-verb${now ? " shimmer" : ""}`, says.verb));
     if (says.args) {
       const args = el("span", `step-args${now ? " shimmer" : ""}`, shortStepArgs(says.args, agent));
       args.title = says.args;
       args.dataset.short = args.textContent;
       label.append(args);
     }
-    line.append(icon(says.icon), label);
+    line.append(glyph, label);
     step.append(line);
     if (!opens) return step;
     line.type = "button";
