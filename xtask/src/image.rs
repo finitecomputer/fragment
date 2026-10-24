@@ -168,7 +168,7 @@ pub fn image(rest: &[String]) -> Result<()> {
     // through: one that cannot be had stops the run before a build or a
     // copy of minutes
     let tools = devstack::Tools::locate()?;
-    let mut api = crate::prepare::Api::from_env(&req.account)?;
+    let mut api = crate::cloudflare::Api::from_env(&req.account)?;
     let reference = match &req.from {
         None => push(&req, &tools)?,
         Some(source) => copy(&req, source, &tools)?,
