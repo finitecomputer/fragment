@@ -1257,11 +1257,7 @@ function openChat(name, push = true) {
   state.current = name;
   store.set(CURRENT, name);
   hideNotice();
-  if (!state.frames.has(name)) {
-    const frame = frameOf(framed(name, setupFor(name) ? "/?setup=1" : "/"), titleOf(name), name);
-    $("frames").append(frame);
-    state.frames.set(name, frame);
-  }
+  chatFrame(name);
   for (const [n, frame] of state.frames) frame.hidden = n !== name;
   renderHeading();
   renderChats();
@@ -1270,6 +1266,14 @@ function openChat(name, push = true) {
   navigated();
   // home: a first run a failed read put off goes on from here too
   if (firstRunPutOff) resumeFirstRun();
+}
+
+// A chat's frame, made once and kept.
+function chatFrame(name, path = setupFor(name) ? "/?setup=1" : "/") {
+  if (state.frames.has(name)) return;
+  const frame = frameOf(framed(name, path), titleOf(name), name);
+  $("frames").append(frame);
+  state.frames.set(name, frame);
 }
 
 // ---- apps: every other fragment, each a window in the viewer ----
@@ -1669,7 +1673,9 @@ const chatLabel = (agent) => freeLabel(`${labelOf(agent).slice(0, LABEL_ROOM - "
 // yet is the one to open again, not another.
 const blank = (identity) => chats().find((f) => own(f) && !f.archived && f.title === UNTITLED && !f.preview && agentsOf(f.name).length === 1 && agentsOf(f.name)[0] === identity);
 let starting = false;
-async function newChat(identity, { quiet = false } = {}) {
+// `open: false` makes it (or finds the blank one) without opening it: the
+// launcher opens it itself, as it posts its first message.
+async function newChat(identity, { quiet = false, open = true } = {}) {
   const agent = state.agents.get(identity);
   if (!agent || starting) return;
   starting = true;
@@ -1682,6 +1688,7 @@ async function newChat(identity, { quiet = false } = {}) {
       await load();
       name = chat.name;
     }
+    if (!open) return name;
     openChat(name);
     leaveSidebar();
     return name;
@@ -1800,6 +1807,9 @@ async function composeApp(text) {
     layout.hide("right");
     layout.hide("left");
   }
+  composeIn(name, text);
+}
+function composeIn(name, text) {
   if (state.page || state.current !== name) openChat(name);
   const frame = state.frames.get(name);
   frame?.focus();
@@ -1880,13 +1890,14 @@ function renderFound(fragments, messages) {
   results.replaceChildren();
   const q = $("workspace-search").value.trim();
   if (!q) return;
-  if (canLaunch()) {
+  const waiting = !canLaunch() && firstChat();
+  if (canLaunch() || waiting) {
     const action = el("button", "row search-result search-start");
     action.type = "button";
     const mark = el("span", "search-action-icon");
     mark.append(icon("newChat"));
     const copy = el("span", "agent-copy");
-    copy.append(el("span", "label", `Start a new chat with ${titleOf(state.agents.get(searchIdentity).fragment)}`), el("span", "agent-preview", q));
+    copy.append(el("span", "label", waiting ? `Say it in ${titleOf(waiting)}` : `Start a new chat with ${titleOf(state.agents.get(searchIdentity).fragment)}`), el("span", "agent-preview", q));
     const enter = el("span", "meta search-enter");
     enter.title = "Enter";
     enter.replaceChildren(icon("cornerDownLeft"));
@@ -1912,9 +1923,7 @@ function renderFound(fragments, messages) {
     count += rows.length;
     results.append(el("h3", null, heading), ...rows);
   }
-  // a seat's agent not made yet starts nothing: said, not offered
-  const waits = !state.guest && !canLaunch() ? "A new chat can start once your agent is made." : "";
-  $("search-status").textContent = [count || canLaunch() ? "" : "Nothing found.", waits].filter(Boolean).join(" ");
+  $("search-status").textContent = [launchError, count || canLaunch() || waiting ? "" : "Nothing found."].filter(Boolean).join(" ");
 }
 let asked = 0;
 let typing = null;
@@ -1925,7 +1934,113 @@ let closingSearch = false;
 // Keep the same chat and record id after an uncertain send, so retry cannot
 // duplicate the first message. This is only the current dialog's draft.
 let pendingLaunch = null;
-const canLaunch = () => !state.guest && !!searchIdentity && state.agents.has(searchIdentity);
+// Why the last send failed, said until the words change.
+let launchError = "";
+// The person's agent, asked again each time (their computer's agents may
+// arrive after the launcher opened); kept while a send is on its way.
+function canLaunch() {
+  if (!launching) searchIdentity = primaryAgent()?.identity ?? null;
+  return !state.guest && !!searchIdentity && state.agents.has(searchIdentity);
+}
+// Before their agent runs (its first run, or its computer not read yet),
+// the words go to the person's first chat, in its composer, to send there:
+// the chat the first run makes, else their agent's own.
+function firstChat() {
+  if (state.guest) return null;
+  if (setup?.chat && byName(setup.chat)) return setup.chat;
+  const primary = primaryAgent();
+  return primary ? agentsOwnChat(primary.fragment)?.name ?? null : null;
+}
+const canSend = () => canLaunch() || !!firstChat();
+// The launcher's files, dropped on it or pasted: sent with its words as
+// the new chat's first message's attachments (docs/chat-records.md,
+// Attachments), each uploaded to the chat once it is made. At most 8, 25
+// MiB each, as the chat's page takes them.
+const LAUNCH_FILES_MAX = 8;
+const LAUNCH_FILE_MAX_BYTES = 25 * 1024 * 1024;
+let launchFiles = []; // { file, url }: url, an image's preview
+const sendable = () => canSend() && (!!$("workspace-search").value.trim() || (launchFiles.length > 0 && canLaunch()));
+function addLaunchFiles(files) {
+  launchError = "";
+  for (const file of files) {
+    if (launchFiles.length >= LAUNCH_FILES_MAX) {
+      launchError = `A message carries at most ${LAUNCH_FILES_MAX} files.`;
+      break;
+    }
+    if (file.size > LAUNCH_FILE_MAX_BYTES) {
+      launchError = `${file.name || "A file"} is over 25 MB.`;
+      continue;
+    }
+    launchFiles.push({ file, url: file.type.startsWith("image/") ? URL.createObjectURL(file) : null });
+  }
+  renderLaunchFiles();
+  updateSearch();
+}
+function dropLaunchFile(f) {
+  if (f.url) URL.revokeObjectURL(f.url);
+  launchFiles = launchFiles.filter((x) => x !== f);
+}
+function clearLaunchFiles() {
+  for (const f of launchFiles) dropLaunchFile(f);
+  renderLaunchFiles();
+}
+function renderLaunchFiles() {
+  const box = $("search-files");
+  box.hidden = !launchFiles.length;
+  box.replaceChildren(...launchFiles.map((f) => {
+    const name = f.file.name || "a file";
+    const chip = el("span", "search-file");
+    chip.title = name;
+    if (f.url) {
+      const img = el("img");
+      img.src = f.url;
+      img.alt = "";
+      chip.append(img);
+    } else {
+      const mark = el("span", "search-file-icon");
+      mark.append(icon("file"));
+      chip.append(mark);
+    }
+    const remove = el("button", "search-file-remove");
+    remove.type = "button";
+    remove.append(icon("x"));
+    remove.setAttribute("aria-label", `Remove ${name}`);
+    remove.onclick = () => {
+      if (launching) return;
+      dropLaunchFile(f);
+      renderLaunchFiles();
+      updateSearch();
+      $("workspace-search").focus();
+    };
+    chip.append(el("span", "search-file-name", name), remove);
+    return chip;
+  }));
+}
+// One of the launcher's files as one of `chat`'s blobs (`PUT
+// /api/f/{chat}/blobs/{sha256}`, its bytes hashed here): what a record
+// names it by. A connection dropped on the way is tried again, as
+// `fragment.blob` does: the same bytes under the same hash store nothing twice.
+const UPLOAD_TRIES = 3;
+async function uploadLaunchFile(chat, file) {
+  const bytes = await file.arrayBuffer();
+  const sha256 = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const type = file.type || "application/octet-stream";
+  let r;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      r = await fetch(`/api/f/${seg(chat)}/blobs/${sha256}`, { method: "PUT", headers: { "x-fragment-shell": "1", "content-type": type }, body: bytes, credentials: "same-origin" });
+      break;
+    } catch (e) {
+      if (attempt >= UPLOAD_TRIES) throw e;
+      await new Promise((resolve) => setTimeout(resolve, 300 * attempt));
+    }
+  }
+  if (!r.ok) {
+    const out = await r.json().catch(() => ({}));
+    throw new ApiError(r.status, out.error, out.message || r.statusText);
+  }
+  return { sha256, size: bytes.byteLength, type, name: file.name || "" };
+}
 async function search() {
   const q = $("workspace-search").value.trim();
   const mine = ++asked;
@@ -1947,14 +2062,18 @@ function openSearch(trigger, text = null) {
   if ($("search-dialog").open || launching) return;
   closeMenu(true);
   searchTrigger = trigger;
-  searchIdentity = primaryAgent()?.identity ?? null;
   $("workspace-search").value = text ?? pendingLaunch?.text ?? "";
   updateSearch();
   $("search-dialog").showModal();
+  // measured once shown: a closed dialog's input has no height
+  fitSearch();
   trigger?.setAttribute("aria-expanded", "true");
   $("workspace-search").focus();
+  // the computer starts waking as the person types, not when they send
+  prewake();
 }
-async function closeSearch(force = false) {
+// `launched`: the panel lifts away as the chat it started shows beneath.
+async function closeSearch(force = false, launched = false) {
   const dialog = $("search-dialog");
   if (!dialog.open || closingSearch || launching && !force) return;
   closingSearch = true;
@@ -1964,7 +2083,7 @@ async function closeSearch(force = false) {
   // Start at the current visual state, even if Escape interrupts the entrance.
   const animations = matchMedia("(prefers-reduced-motion: reduce)").matches ? [] : [
     dialog.animate([{ opacity: getComputedStyle(dialog).opacity }, { opacity: 0 }], { duration: 280, easing: "cubic-bezier(.4, 0, 1, 1)", fill: "forwards" }),
-    panel.animate([{ opacity: getComputedStyle(panel).opacity, transform: getComputedStyle(panel).transform }, { opacity: 0, transform: "translateY(8px)" }], { duration: 240, easing: "cubic-bezier(.4, 0, 1, 1)", fill: "forwards" }),
+    panel.animate([{ opacity: getComputedStyle(panel).opacity, transform: getComputedStyle(panel).transform }, { opacity: 0, transform: launched ? "translateY(-10px) scale(1.02)" : "translateY(8px)" }], { duration: launched ? 320 : 240, easing: "cubic-bezier(.4, 0, 1, 1)", fill: "forwards" }),
   ];
   dialog.inert = true;
   await Promise.allSettled(animations.map(animation => animation.finished));
@@ -1973,40 +2092,82 @@ async function closeSearch(force = false) {
   dialog.inert = false;
   closingSearch = false;
 }
+// The launcher's send goes straight to the chat: the launcher closes at
+// once and the middle column is the new chat's, while it is made; its page
+// loads (`?sent=1`: no new chat's start, only the message once it is here)
+// as its files are uploaded and its message posted. A message not sent
+// opens the launcher again on its words and files, saying why. Before the
+// person's agent runs, the words go to their first chat's composer.
 async function startFromSearch() {
   const text = $("workspace-search").value.trim();
-  if (!text || !canLaunch() || launching || closingSearch) return;
+  const files = launchFiles.map((f) => f.file);
+  if ((!text && !files.length) || launching || closingSearch) return;
+  if (!canLaunch()) {
+    const chat = firstChat();
+    if (!chat || !text) return;
+    await closeSearch(true);
+    composeIn(chat, text);
+    leaveSidebar();
+    return;
+  }
   launching = true;
   ++asked;
   clearTimeout(typing);
-  $("workspace-search").readOnly = true;
-  $("search-send").disabled = true;
-  $("search-results").inert = true;
-  $("search-status").textContent = "Starting your chat…";
+  const trigger = searchTrigger;
+  const closed = closeSearch(true, true);
+  if (!state.page) {
+    for (const frame of state.frames.values()) frame.hidden = true;
+    $("chat-title").textContent = UNTITLED;
+  }
+  let name = null;
   try {
-    if (!pendingLaunch || pendingLaunch.text !== text || pendingLaunch.identity !== searchIdentity) pendingLaunch = { text, identity: searchIdentity, id: crypto.randomUUID(), chat: null };
-    pendingLaunch.chat ||= await newChat(searchIdentity, { quiet: true });
+    const same = pendingLaunch && pendingLaunch.text === text && pendingLaunch.identity === searchIdentity && pendingLaunch.files.length === files.length && pendingLaunch.files.every((f, i) => f === files[i]);
+    if (!same) pendingLaunch = { text, files, identity: searchIdentity, id: crypto.randomUUID(), chat: null };
+    pendingLaunch.chat ||= await newChat(searchIdentity, { quiet: true, open: false });
     if (!pendingLaunch.chat) throw new Error("Another new chat is being made; try again in a moment.");
-    await api("POST", `/api/f/${seg(pendingLaunch.chat)}/channels/chat`, { id: pendingLaunch.id, body: { text } });
-    openChat(pendingLaunch.chat);
-    pendingLaunch = null;
-    await closeSearch(true);
+    name = pendingLaunch.chat;
+    // a blank chat found again loads again so, its start never showing
+    state.frames.get(name)?.remove();
+    state.frames.delete(name);
+    chatFrame(name, "/?sent=1");
+    openChat(name);
     leaveSidebar();
+    // bounded: at most LAUNCH_FILES_MAX, uploaded together
+    const attachments = await Promise.all(files.map((f) => uploadLaunchFile(name, f)));
+    await api("POST", `/api/f/${seg(name)}/channels/chat`, { id: pendingLaunch.id, body: { text, ...(attachments.length ? { attachments } : {}) } });
+    pendingLaunch = null;
+    clearLaunchFiles();
   } catch (e) {
-    $("search-status").textContent = `Your message wasn't sent. ${e.message}`;
+    // the chat stays, its start shown again, for the same message tried again
+    if (name) {
+      state.frames.get(name)?.remove();
+      state.frames.delete(name);
+    }
+    if (state.current && !state.page) openChat(state.current, false);
+    await closed;
+    launching = false;
+    // a connection that dropped is fetch's TypeError, in each browser's words
+    const unreached = e instanceof TypeError && /fetch|load failed|network/i.test(e.message);
+    launchError = `Your message wasn't sent. ${unreached ? "Finite couldn't be reached: check your connection and try again." : e.message}`;
+    openSearch(trigger, text);
   } finally {
     launching = false;
-    $("workspace-search").readOnly = false;
-    $("search-results").inert = false;
-    $("search-send").disabled = !canLaunch() || !$("workspace-search").value.trim();
-    if ($("search-dialog").open) $("workspace-search").focus();
   }
 }
+// The launcher's input grows with a long prompt, to SEARCH_INPUT_MAX_PX.
+const SEARCH_INPUT_MAX_PX = 200;
+function fitSearch() {
+  const input = $("workspace-search");
+  if (!input.offsetParent) return;
+  input.style.height = "auto";
+  input.style.height = `${Math.min(input.scrollHeight, SEARCH_INPUT_MAX_PX)}px`;
+}
 function updateSearch() {
+  fitSearch();
   ++asked; // Invalidate in-flight responses immediately, before the debounce.
   clearTimeout(typing);
-  $("search-status").textContent = "";
-  $("search-send").disabled = !canLaunch() || !$("workspace-search").value.trim();
+  $("search-status").textContent = launchError;
+  $("search-send").disabled = !sendable();
   renderFound([], []);
   if ($("workspace-search").value.trim()) typing = setTimeout(search, 150);
 }
@@ -2038,17 +2199,57 @@ $("search-dialog").addEventListener("click", (e) => {
 });
 $("search-dialog").addEventListener("cancel", (e) => { e.preventDefault(); closeSearch(); });
 $("search-dialog").addEventListener("close", () => {
+  // files are a draft of this opening's, as its words are (a send's, kept
+  // until it is sent)
+  if (!launching && !pendingLaunch) clearLaunchFiles();
   ++asked;
   clearTimeout(typing);
   searchTrigger?.setAttribute("aria-expanded", "false");
 });
+// Files dragged over the launcher drop into it, for a person whose agent
+// runs (a new chat takes them); dropped anywhere else in it, they never
+// open in the page.
+let dragDepth = 0;
+const hasFiles = (e) => [...(e.dataTransfer?.types ?? [])].includes("Files");
+const takesFiles = () => canLaunch() && !launching;
+$("search-dialog").addEventListener("dragenter", (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  if (dragDepth++ === 0 && takesFiles()) $("search-dialog").classList.add("dropping");
+});
+$("search-dialog").addEventListener("dragover", (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = takesFiles() ? "copy" : "none";
+});
+$("search-dialog").addEventListener("dragleave", (e) => {
+  if (!hasFiles(e) || --dragDepth > 0) return;
+  dragDepth = 0;
+  $("search-dialog").classList.remove("dropping");
+});
+$("search-dialog").addEventListener("drop", (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  $("search-dialog").classList.remove("dropping");
+  if (takesFiles()) addLaunchFiles([...e.dataTransfer.files]);
+  $("workspace-search").focus();
+});
+$("workspace-search").addEventListener("paste", (e) => {
+  const files = [...(e.clipboardData?.files ?? [])];
+  if (!files.length || !takesFiles()) return;
+  e.preventDefault();
+  addLaunchFiles(files);
+});
 $("search-form").onsubmit = (e) => { e.preventDefault(); startFromSearch(); };
-$("workspace-search").addEventListener("input", updateSearch);
+$("workspace-search").addEventListener("input", () => { launchError = ""; updateSearch(); });
 $("workspace-search").addEventListener("keydown", (e) => {
   if (e.isComposing) return;
   const first = $("search-results").querySelector("button");
-  if (e.key === "ArrowDown" && first) { e.preventDefault(); first.focus(); }
-  if (e.key === "Enter") { e.preventDefault(); if (canLaunch()) startFromSearch(); else first?.click(); }
+  const input = $("workspace-search");
+  // down from the input's last line goes to the results; Shift+Enter is a new line
+  if (e.key === "ArrowDown" && first && input.selectionEnd === input.value.length) { e.preventDefault(); first.focus(); }
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (sendable()) startFromSearch(); else first?.click(); }
 });
 $("search-results").addEventListener("keydown", (e) => {
   if (!["ArrowDown", "ArrowUp"].includes(e.key)) return;
@@ -4144,6 +4345,8 @@ async function load(changed = false) {
   rosterChanged();
   refreshSimplex();
   markSeen();
+  // an agent read while the launcher is open can start the chat now
+  if ($("search-dialog").open && !launching) $("search-send").disabled = !sendable();
   renderAgentFaces();
   loadHomes();
   for (const f of chats()) if (own(f) && f.title === UNTITLED && f.preview) titleFromFirst(f.name);
