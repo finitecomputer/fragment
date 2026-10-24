@@ -1124,6 +1124,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = s.eventually(wait, || b.eval_in_frame(&page, &reader_chat, "!!document.querySelector('.msg.agent:not(.streaming)')").ok() == Some(Value::Bool(true)));
     unread_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
     new_chat_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
+    launch_late_ui(s, api, &mut b, &page, &me, &reader_chat)?;
 
     // both agents in one chat, search, and archiving, as the person uses them
     groups_ui(s, api, &mut b, &page, &me, &shots)?;
@@ -4625,6 +4626,164 @@ fn app_policy_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, app: &s
         json!({ "up": up, "opened": opened, "waited": waited, "allow": allow, "told": told }),
     );
     b.close(shell)?;
+    Ok(())
+}
+
+/// A file pasted into the launcher's input, as the clipboard hands it
+/// over: how many files the launcher holds then.
+const PASTE_FILE: &str = "(() => { const d = new DataTransfer(); d.items.add(new File(['a list of atlases'], 'launch.txt', { type: 'text/plain' })); \
+    document.getElementById('workspace-search').dispatchEvent(new ClipboardEvent('paste', { clipboardData: d, bubbles: true, cancelable: true })); return document.querySelectorAll('#search-files .search-file').length; })()";
+
+/// What the launcher's send does late (Alex's review of #592). A chat's
+/// page holding what no storage keeps is never loaded again under it: a
+/// blank chat found again with a file chosen and not sent keeps it, as
+/// does the chat the launcher opened, a file chosen there while the
+/// launcher's own uploads, when that upload is refused (the launcher
+/// opening again on its words and file; sent again from there, posted
+/// there). And once the person gives the middle column another view while
+/// the chat is made, its answer changes nothing on screen: another chat
+/// opened, the message is still posted; settings, then Back, and the
+/// making refused: a notice, the words in the launcher's next opening,
+/// sent from there.
+fn launch_late_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, reader_chat: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let own_chat = format!("{}-chat", me.first);
+    let says = |chat: &str, text: &str| -> Vec<Value> {
+        shell(api, me.session, "GET", &format!("/api/f/{chat}/channels/chat?after=0&limit=100"), None, &[])
+            .map(|r| r.body["records"].as_array().into_iter().flatten().filter(|r| r["body"]["text"] == text).cloned().collect())
+            .unwrap_or_default()
+    };
+    // the person's new chats with their agent (`<first>-chat-<n>`)
+    let new_chats = || -> Vec<String> {
+        shell(api, me.session, "GET", "/api/fragments", None, &[])
+            .map(|r| r.body["fragments"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str()).filter(|n| label_of(n).starts_with(&format!("{own_chat}-"))).map(str::to_string).collect())
+            .unwrap_or_default()
+    };
+    let chips = |b: &mut Browser, chat: &str| b.eval_in_frame(page, chat, "document.querySelectorAll('#attachments .attachment-chip').length").unwrap_or(Value::Null);
+    let shows = |chat: &str| format!("location.pathname === '/' && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(chat));
+    let closed = "!document.getElementById('search-dialog').open";
+    let opened = "document.getElementById('search-dialog').open";
+    let submit = "(document.getElementById('search-form').requestSubmit(), true)";
+    // its first message titles a chat: the launcher finds it blank no more
+    let titled = |b: &mut Browser, chat: &str| b.until(page, &format!("(document.querySelector({})?.querySelector('.label')?.textContent ?? 'New chat') !== 'New chat'", js(&format!("#chats [data-key={}]", js(&format!("chat:{chat}"))))), wait);
+
+    // a blank chat found again, a file chosen in it and not sent
+    let blank = own_named(api, me.session, &format!("{own_chat}-3"))?;
+    open_row(b, page, &blank, wait)?;
+    let ready = s.eventually(wait, || b.eval_in_frame(page, &blank, COMPOSER_READY).ok() == Some(Value::Bool(true)));
+    let picked = b.eval_in_frame(page, &blank, PICK_FILE)? == json!(1);
+    // its page tells the shell it holds it (a message, heard in a moment)
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let said = "Which projection suits a classroom wall map best";
+    b.click(page, "#sidebar-new-chat")?;
+    let open = b.until(page, opened, wait);
+    b.eval(page, &fill("#workspace-search", said))?;
+    b.eval(page, submit)?;
+    let posted = s.eventually(wait, || says(&blank, said).len() == 1);
+    let shown = b.until(page, &format!("{closed} && {}", shows(&blank)), wait);
+    let arrived = s.eventually(wait, || b.eval_in_frame(page, &blank, &format!("document.body.innerText.includes({})", js(said))).ok() == Some(Value::Bool(true)));
+    let kept = chips(b, &blank);
+    s.ok(
+        "the launcher's message to a blank chat found again whose page holds a file chosen and not sent: posted there and the chat opened, its page as it was (the file still in its composer)",
+        ready && picked && open && posted && shown && arrived && kept == json!(1),
+        json!({ "chips": kept, "shows": open_chat(b, page) }),
+    );
+    anyhow::ensure!(b.eval_in_frame(page, &blank, REMOVE_FILE)? == true, "the blank chat's file taken out");
+    anyhow::ensure!(titled(b, &blank), "the blank chat titled from its message");
+
+    // the launcher's own file, its upload held; a file chosen in the chat it
+    // opened meanwhile; then the upload refused
+    let said = "Sort the attached atlases by the year each was printed";
+    let before = new_chats();
+    b.click(page, "#sidebar-new-chat")?;
+    let open = b.until(page, opened, wait);
+    let pasted = b.eval(page, PASTE_FILE)? == json!(1);
+    b.eval(page, &fill("#workspace-search", said))?;
+    b.eval(page, &hold("PUT", "/blobs/[0-9a-f]{64}$", Hold::Request))?;
+    b.eval(page, submit)?;
+    let held = b.until(page, "!!window.__held.release", wait);
+    let made = open_chat(b, page);
+    let fresh = !made.is_empty() && !before.contains(&made);
+    let ready = fresh && s.eventually(wait, || b.eval_in_frame(page, &made, COMPOSER_READY).ok() == Some(Value::Bool(true)));
+    let picked = ready && b.eval_in_frame(page, &made, PICK_FILE)? == json!(1);
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
+    let reopened = b.until(page, &format!("{opened} && document.getElementById('search-status').textContent.includes(\"wasn't sent\")"), wait);
+    let seen = b.eval(page, "({ words: document.getElementById('workspace-search').value, files: document.querySelectorAll('#search-files .search-file').length })")?;
+    let kept = if fresh { chips(b, &made) } else { Value::Null };
+    let still = b.eval(page, &shows(&made))?;
+    b.eval(page, "(window.__held.restore(), true)")?;
+    s.ok(
+        "a file chosen in the chat the launcher opened, while the launcher's own file uploads, stays in its composer when that upload is refused; the launcher opens again over it on its words and file, saying it wasn't sent",
+        open && pasted && held && fresh && picked && reopened && seen == json!({ "words": said, "files": 1 }) && kept == json!(1) && still == true,
+        json!({ "made": made, "seen": seen, "chips": kept }),
+    );
+    b.eval(page, submit)?;
+    let posted = s.eventually(wait, || says(&made, said).first().is_some_and(|r| r["body"]["attachments"][0]["name"] == "launch.txt"));
+    let shown = b.until(page, &format!("{closed} && {}", shows(&made)), wait);
+    s.ok("sent again from there, it is posted to that chat with the launcher's file", posted && shown, json!(says(&made, said)));
+    if fresh {
+        anyhow::ensure!(b.eval_in_frame(page, &made, REMOVE_FILE)? == true, "the new chat's file taken out");
+        anyhow::ensure!(titled(b, &made), "the new chat titled from its message");
+    }
+
+    // the chat's making held; another chat opened meanwhile; then made
+    let said = "Name three atlases worth owning and say why";
+    let before = new_chats();
+    b.eval(page, &hold("POST", "^/api/fragments$", Hold::Request))?;
+    b.click(page, "#sidebar-new-chat")?;
+    let open = b.until(page, opened, wait);
+    b.eval(page, &fill("#workspace-search", said))?;
+    b.eval(page, submit)?;
+    let held = b.until(page, &format!("{closed} && !!window.__held.release"), wait);
+    open_row(b, page, reader_chat, wait)?;
+    b.eval(page, "(window.__held.release?.(), true)")?;
+    let made = s.eventually(wait, || new_chats().iter().any(|c| !before.contains(c) && says(c, said).len() == 1));
+    let settled = b.until(page, HELD_SETTLED, wait);
+    b.eval(page, "(window.__held.restore(), true)")?;
+    let stayed = b.eval(page, &format!("{closed} && {} && document.getElementById('chat-title').textContent === 'Reader'", shows(reader_chat)))?;
+    s.ok(
+        "another chat opened while the launcher's chat is made: the chat made and the message posted there, the person left where they went",
+        open && held && made && settled && stayed == true,
+        json!({ "shows": open_chat(b, page), "title": b.eval(page, "document.getElementById('chat-title').textContent")? }),
+    );
+
+    // held again; settings opened meanwhile, then Back; the making refused
+    let said = "Find a printed atlas of the oceans from before 1900";
+    let before = new_chats();
+    b.eval(page, &hold("POST", "^/api/fragments$", Hold::Request))?;
+    b.click(page, "#sidebar-new-chat")?;
+    let open = b.until(page, opened, wait);
+    b.eval(page, &fill("#workspace-search", said))?;
+    b.eval(page, submit)?;
+    let held = b.until(page, &format!("{closed} && !!window.__held.release"), wait);
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    let settings = b.until(page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden", wait);
+    b.eval(page, "(history.back(), true)")?;
+    let back = b.until(page, &shows(reader_chat), wait);
+    b.eval(page, "(window.__held.release?.('refuse'), true)")?;
+    let told = b.until(page, "!document.getElementById('notice').hidden && document.getElementById('notice').innerText.startsWith(\"Your message wasn't sent\")", wait);
+    let settled = b.until(page, HELD_SETTLED, wait);
+    b.eval(page, "(window.__held.restore(), true)")?;
+    let seen = b.eval(page, NOTICE_SEEN)?;
+    let stayed = b.eval(page, &format!("{closed} && {}", shows(reader_chat)))?;
+    s.ok(
+        "settings, then Back, while the launcher's chat is made, and the making refused: the person stays where Back took them, the launcher closed, and a notice says the message wasn't sent",
+        open && held && settings && back && told && settled && stayed == true && seen["ok"] == true,
+        &seen,
+    );
+    b.click(page, "#sidebar-new-chat")?;
+    let kept = b.until(page, &format!("{opened} && document.getElementById('workspace-search').value === {} && document.getElementById('search-status').textContent.includes(\"wasn't sent\")", js(said)), wait);
+    b.eval(page, submit)?;
+    // another chat than the Reader's on screen: the one it made
+    let shown = b.until(page, &format!("{closed} && location.pathname === '/' && ((f) => !!f && f.dataset.fragment !== {})([...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden))", js(reader_chat)), wait);
+    let made = open_chat(b, page);
+    let posted = !before.contains(&made) && s.eventually(wait, || says(&made, said).len() == 1);
+    s.ok("the launcher's next opening has its words, saying they weren't sent; sent from there, its chat opens with the message", kept && shown && posted, json!({ "made": made }));
+
+    // the Reader's chat again, as the sections after expect
+    open_row(b, page, reader_chat, wait)?;
+    b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
     Ok(())
 }
 

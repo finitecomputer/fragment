@@ -315,6 +315,10 @@ export function mount(root) {
   // message from before its joining starts nothing). Typing waits for
   // nothing.
   let setup = framed && new URLSearchParams(location.search).has("setup") ? { steps: [], error: null } : null;
+  // The shell's launcher opens a chat as it posts its first message
+  // (`?sent=1`): the page shows no new chat's start, only that message
+  // once it is here.
+  const sent = framed && new URLSearchParams(location.search).has("sent");
   root.classList.add("fragment-chat");
   // What is visible: the page is as tall as the visual viewport, from where
   // it is (chat.css, --viewport-*). A phone's keyboard shrinks that viewport
@@ -602,6 +606,7 @@ export function mount(root) {
       const v = await r.json();
       state.members = Array.isArray(v.members) ? v.members.filter((m) => m && typeof m.principal === "string") : [];
       for (const m of state.members) want(m.principal);
+      arrive();
       schedule();
     } catch {
       // a visitor who may not list them: the records name who wrote
@@ -709,6 +714,7 @@ export function mount(root) {
     }
     if (state.pending && record.seq === state.pending.seq) state.pending.n = n;
     want(record.principal);
+    arrive();
     schedule();
   }
 
@@ -940,7 +946,9 @@ export function mount(root) {
       used.add(key);
       shown.push(node);
     }
-    if (!shown.length) {
+    // a new chat's start shows once its history is read and holds nothing,
+    // never before (it would flash) nor while the launcher's message is on its way
+    if (!shown.length && caughtUp && !sent) {
       const [key, node] = emptyNode();
       used.add(key);
       shown.push(node);
@@ -2530,7 +2538,7 @@ export function mount(root) {
 
   // Someone signed in, in a chat with an agent: a turn starts on it soon
   // (the one it names, else the lead), unless that agent is busy.
-  function expectTurn(record, to, text) {
+  function expectTurn(record, to, text, since = Date.now()) {
     if (!record || !state.me?.principal.startsWith("npub1")) return;
     const target = to[0] ?? chatAgents().find((a) => mentions(text).includes(handleOf(a))) ?? lead();
     if (!target) return;
@@ -2538,9 +2546,24 @@ export function mount(root) {
     if (turns.some((t) => t.cause?.channel === "chat" && t.cause?.seq === record.seq)) return;
     if (turns.some((t) => t.agent === target && running(t))) return;
     const n = state.chat.find((m) => m.seq === record.seq)?.n ?? Number.MAX_SAFE_INTEGER;
-    state.pending = { seq: record.seq, at: record.at, n, target, since: Date.now() };
+    state.pending = { seq: record.seq, at: record.at, n, target, since };
     schedule();
-    setTimeout(schedule, PENDING_MS + 50);
+    setTimeout(schedule, Math.max(0, since + PENDING_MS - Date.now()) + 50);
+  }
+
+  // Arriving at a chat whose newest message is this person's own, said
+  // under PENDING_MS ago and answered by no one yet (one the launcher sent,
+  // or a reload just after a send): its agent's waiting line shows at once,
+  // as it would have on the page that sent it. Once, when the history, who
+  // this page is, and the chat's agents are all known (and, opened by the
+  // launcher, its message is here).
+  let arrived = false;
+  function arrive() {
+    if (arrived || !caughtUp || !state.me || !lead() || (sent && !state.chat.length)) return;
+    arrived = true;
+    const last = state.chat.reduce((newest, m) => (!newest || m.seq > newest.seq ? m : newest), null);
+    if (!last || last.command || last.principal !== state.me.principal || Date.now() - last.at >= PENDING_MS) return;
+    expectTurn(last, last.to, last.text, last.at);
   }
 
   // Answering a card: one record, its id the card's, so a second tap is the same.
@@ -2722,7 +2745,7 @@ export function mount(root) {
   });
 
   // ---- who this page is, then the channels it may read, and who is here ----
-  fragment.subscribe("chat", onChat, { last: CHAT_LAST, onDraft, onReady: () => { caughtUp = true; historyReady(); } });
+  fragment.subscribe("chat", onChat, { last: CHAT_LAST, onDraft, onReady: () => { caughtUp = true; historyReady(); arrive(); schedule(); } });
   readMembers();
   fragment.presence.set({ ...shared });
   fragment.presence.on((list) => {
@@ -2757,6 +2780,7 @@ export function mount(root) {
     $("record").hidden = !recordable();
     $("record").disabled = !canAttach();
     readNotify();
+    arrive();
     composer.dataset.ready = "1";
     render();
     grow();
