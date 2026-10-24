@@ -404,6 +404,19 @@ details.tools.rolling.advanced > .step:nth-last-child(4) { display: block; overf
 .banner { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; padding: 10px 14px; border: 1px solid var(--danger-border); border-radius: 14px; background: var(--danger-bg); color: var(--danger-text); font-size: .9rem; }
 .banner span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .banner button { border: 1px solid var(--danger-border); background: none; border-radius: 999px; padding: 3px 10px; font-size: 12px; }
+.mic-card { position: relative; display: flex; flex-direction: column; align-items: center; text-align: center; margin-bottom: 10px; padding: 26px 22px 20px; border: 1px solid var(--border); border-radius: 22px; background: var(--bg-card); color: var(--text-primary); box-shadow: 0 10px 32px rgba(0,0,0,.1); animation: mic-card-in .2s ease-out; }
+.mic-card[hidden] { display: none; }
+.mic-card-icon { width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; margin-bottom: 14px; background: var(--surface-subtle); color: var(--chat-agent-color, var(--text-icon)); }
+.mic-card-icon svg { width: 24px; height: 24px; }
+.mic-card[data-kind="denied"] .mic-card-icon { color: var(--danger-text); }
+.mic-card-copy strong { display: block; font-size: 1.05rem; font-weight: 600; line-height: 1.3; }
+.mic-card-copy p { margin: 6px 0 0; font-size: .9rem; line-height: 1.45; color: var(--text-secondary); }
+#mic-card-go { width: 100%; margin-top: 20px; padding: 13px 16px; border: 0; border-radius: 999px; background: var(--primary); color: var(--primary-foreground); font-size: 1rem; font-weight: 600; }
+#mic-card-go:active { transform: scale(.98); }
+.mic-card-close { position: absolute; top: 10px; right: 10px; width: 28px; height: 28px; color: var(--text-tertiary); }
+.mic-card-close svg { width: 15px; height: 15px; }
+@keyframes mic-card-in { from { opacity: 0; transform: translateY(6px) scale(.98); } }
+@media (prefers-reduced-motion: reduce) { .mic-card { animation: none; } }
 /* @mentions: the chat's agents, then the owner's others, as the composer's word starts one */
 .mentions { position: absolute; left: 8px; bottom: calc(100% + 6px); z-index: 5; min-width: 180px; max-width: calc(100% - 16px); padding: 4px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-card); box-shadow: 0 10px 28px rgba(0,0,0,.28); }
 .mentions button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 10px; border: 0; border-radius: 6px; background: none; text-align: left; font-size: 14px; }

@@ -1171,6 +1171,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = b.screenshot(&page, &shots.join("desktop-app.png"));
     compose_elsewhere_ui(s, api, &mut b, &page, &session, &asked_in, &groceries)?;
     open_beside_ui(s, api, &mut b, &page, &me, &groceries, &shots)?;
+    app_policy_ui(s, api, &mut b, &page, &groceries)?;
     sidebar_live(s, api, &mut b, &page, &session, &shots)?;
     held_list_socket(s, api, &mut b, &page, &session)?;
 
@@ -4576,6 +4577,54 @@ fn new_chat_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Pers
     s.ok("the agent's own chat keeps its label, apart from the new ones", label_of(&own) == own_chat && label_of(&fresh) == format!("{own_chat}-2"), json!([own, fresh]));
     b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{reader_chat}"))))?;
     b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
+    Ok(())
+}
+
+/// An app's window asked to load again before the shell knows its origin
+/// (Alex's review of PR 582). A fragment's frame names its origin in its
+/// policy (`allow="… microphone <origin>"`) before it navigates (a policy
+/// is read as a navigation starts), and the origin is its status's: a
+/// Reload pressed while that was still asked navigated at once under the
+/// bare policy, which names only the mint's origin, and the page stayed
+/// refused the microphone. Valid: in a shell of its own (no origin known),
+/// the app's status held, its window opened and its Reload pressed, the
+/// frame waits (no `src` yet); its status let through, it loads once,
+/// under the policy that names its origin, and its page may use the
+/// microphone (Chrome's fake, allowed).
+fn app_policy_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, app: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let pane = format!("document.querySelector({})", js(&format!("#stack .pane[data-key=\"app:{app}\"]")));
+    // the app's window elsewhere closed: its page here is the only one
+    b.eval(page, &format!("({pane}?.querySelector('button[aria-label=Close]')?.click(), true)"))?;
+    b.until(page, &format!("!{pane}"), wait);
+    // its status held until let through, from the page's start
+    let hold = format!(
+        "(() => {{ const real = window.fetch; let go; window.__let = new Promise((r) => {{ go = r; }}); window.__letGo = () => go(); window.__holding = false; window.fetch = async (url, o) => {{ if (window.__holding && String(url).includes({})) await window.__let; return real(url, o); }}; }})();",
+        js(&format!("/api/f/{app}/status"))
+    );
+    let shell = b.open_with_script(&format!("{}/", api.base), &hold)?;
+    b.viewport(&shell, 1280, 860, false)?;
+    let icon = format!("document.querySelector({})", js(&format!("#apps [data-key=\"app:{app}\"]")));
+    let up = b.until(&shell, &format!("!document.getElementById('layout').hidden && !!{icon}"), wait);
+    b.eval(&shell, &format!("(window.__holding = true, {icon}.click(), true)"))?;
+    let opened = b.until(&shell, &format!("!!{pane}?.querySelector('iframe') && !!{pane}.querySelector('button[aria-label=Reload]')"), wait);
+    b.eval(&shell, &format!("({pane}.querySelector('button[aria-label=Reload]').click(), true)"))?;
+    let waited = b.eval(&shell, &format!("!{pane}.querySelector('iframe').hasAttribute('src')"))?;
+    b.eval(&shell, "(window.__letGo(), true)")?;
+    let named = b.until(&shell, &format!("/microphone https?:/.test({pane}?.querySelector('iframe')?.allow ?? '') && {pane}.querySelector('iframe').hasAttribute('src')"), wait);
+    let allow = b.eval(&shell, &format!("{pane}?.querySelector('iframe')?.allow ?? null"))?;
+    let told = s.eventually(wait, || {
+        let Ok(frame) = b.frame(app) else { return false };
+        let state = b.eval(&frame, "navigator.permissions.query({ name: 'microphone' }).then((p) => p.state)");
+        let _ = b.detach(frame);
+        state.ok() == Some(json!("granted"))
+    });
+    s.ok(
+        "an app's window opened and reloaded while the shell still asks for its origin waits for it, then loads under the policy that names it: its page may use the microphone",
+        up && opened && waited == true && named && told,
+        json!({ "up": up, "opened": opened, "waited": waited, "allow": allow, "told": told }),
+    );
+    b.close(shell)?;
     Ok(())
 }
 

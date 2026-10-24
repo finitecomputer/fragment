@@ -1842,6 +1842,8 @@ export function mount(root) {
   let attachments = []; // { file, name, size, type, uploading }
   let sending = false;
   let recording = null; // the voice memo being recorded (`startMemo`)
+  // the page's access ended (`fragment.closed`): nothing records after it
+  let ended = false;
   function refreshSend() {
     const typed = !!input.value.trim() || attachments.length > 0 || !!recording;
     $("send").disabled = sending || !typed || !canPost() || setupHolds();
@@ -2078,7 +2080,7 @@ export function mount(root) {
     if (recording) $("recording-time").textContent = clock(Date.now() - recording.startedAt);
   }
   async function startMemo() {
-    if (recording || !canAttach() || !recordable()) return;
+    if (ended || recording || !canAttach() || !recordable()) return;
     if (attachments.length >= ATTACHMENTS_MAX) return problem(`A message carries at most ${ATTACHMENTS_MAX} files.`);
     const memo = { recorder: null, stream: null, chunks: [], bytes: 0, startedAt: Date.now(), timer: 0, tick: 0, stopped: false, discard: false, failed: null, tooLarge: false };
     // held while the browser asks for the microphone, so a second press waits
@@ -2092,7 +2094,8 @@ export function mount(root) {
       memo.stream?.getTracks().forEach((t) => t.stop());
       recording = null;
       renderRecording();
-      return problem(err?.name === "NotAllowedError" ? "The microphone is off for this chat: allow it in your browser to record." : `Could not record: ${err?.message ?? err}`);
+      if (ended) return;
+      return err?.name === "NotAllowedError" ? showMicCard("denied") : problem(`Could not record: ${err?.message ?? err}`);
     }
     // pressed again while the browser asked: nothing was recorded to send
     if (memo.stopped) {
@@ -2147,7 +2150,53 @@ export function mount(root) {
     renderAttachments();
     send(input.value);
   }
-  $("record").onclick = () => (recording ? stopMemo(false) : startMemo());
+  // Before the browser's own prompt, a card says what the microphone is
+  // for, and asks only on Continue; one the browser refused says where it
+  // is allowed again (the page can do nothing more: Okay closes it). A
+  // browser that cannot say (Firefox) or asks every visit (Safari) shows
+  // the first card once: this browser remembers it was read.
+  const MIC_PRIMED = "fragment-chat:mic-primed";
+  const MIC_CARD = {
+    ask: ["Send voice memos to your agent", "Allow the microphone on the next step.", "Continue"],
+    denied: ["Your browser needs microphone permissions", "Turn on the microphone in your browser's settings.", "Okay"],
+  };
+  const primed = () => {
+    try { return localStorage.getItem(MIC_PRIMED) === "1"; } catch { return false; }
+  };
+  async function micPermission() {
+    try { return (await navigator.permissions.query({ name: "microphone" })).state; } catch { return null; }
+  }
+  function showMicCard(kind) {
+    const [title, text, go] = MIC_CARD[kind];
+    const card = $("mic-card");
+    card.dataset.kind = kind;
+    $("mic-card-title").textContent = title;
+    $("mic-card-text").textContent = text;
+    $("mic-card-go").textContent = go;
+    $("banner").hidden = true;
+    card.hidden = false;
+    $("mic-card-go").focus();
+  }
+  const hideMicCard = () => { $("mic-card").hidden = true; };
+  $("mic-card-close").onclick = () => {
+    hideMicCard();
+    input.focus();
+  };
+  $("mic-card-go").onclick = () => {
+    if ($("mic-card").dataset.kind === "denied") return $("mic-card-close").onclick();
+    try { localStorage.setItem(MIC_PRIMED, "1"); } catch {}
+    hideMicCard();
+    startMemo();
+  };
+  $("record").onclick = async () => {
+    if (recording) return stopMemo(false);
+    if (!canAttach() || !recordable()) return;
+    const mic = await micPermission();
+    // its access ended while the browser was asked
+    if (ended) return;
+    if (mic === "granted" || (mic !== "denied" && primed())) return startMemo();
+    showMicCard(mic === "denied" ? "denied" : "ask");
+  };
   $("discard").onclick = () => {
     stopMemo(true);
     input.focus();
@@ -2716,7 +2765,9 @@ export function mount(root) {
     problem(code === 4004 ? "This chat was deleted." : "Your access to this chat changed: reload the page.");
     input.disabled = true;
     $("attach").disabled = true;
+    ended = true;
     stopMemo(true);
+    hideMicCard();
     $("record").disabled = true;
   });
   render();

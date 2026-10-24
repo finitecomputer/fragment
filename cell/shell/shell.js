@@ -230,12 +230,34 @@ function show(spec) {
 function frameOf(src, title, name = null) {
   const frame = el("iframe");
   frame.setAttribute("aria-label", title);
-  frame.src = src;
   frame.allow = "clipboard-write; microphone";
-  if (name) frame.dataset.fragment = name;
   frame.dataset.src = src;
+  if (name) {
+    // A bare `microphone` is the src's origin's, the mint's on this page's;
+    // the page lands at the fragment's own, which the browser would refuse
+    // without asking. So it names that origin before the frame navigates
+    // (a policy is read as a navigation starts), and loads regardless:
+    // until then a navigation asked of it waits (`go`), the last one kept.
+    frame.dataset.fragment = name;
+    unready.set(frame, src);
+    originOf(name)
+      .then((origin) => { frame.allow = `clipboard-write; microphone ${origin}`; }, () => {})
+      .finally(() => {
+        const next = unready.get(frame);
+        unready.delete(frame);
+        frame.src = next;
+      });
+  } else frame.src = src;
   frame.addEventListener("load", () => theme(frame));
   return frame;
+}
+// a fragment's frame whose policy does not name its origin yet -> the
+// navigation it makes once it does (frameOf)
+const unready = new WeakMap();
+// A frame sent to `src`: at once, or, its origin not known yet, once it is.
+function go(frame, src) {
+  if (unready.has(frame)) unready.set(frame, src);
+  else frame.src = src;
 }
 
 // A frame that could not sign in says so, and how on (the mint's note,
@@ -275,7 +297,7 @@ addEventListener("focus", () => {
     blockedNote(frame)?.remove();
     greeted.delete(frame);
     busyFrames.delete(frame);
-    frame.src = frame.dataset.src;
+    go(frame, frame.dataset.src);
   }
 });
 // The frames follow this page's light or dark (they may not see its media).
@@ -1249,7 +1271,7 @@ function renderDesktopEmpty(empty) {
 function openApp(name, path = "/") {
   const f = byName(name);
   const shown = document.querySelector(`#stack .pane[data-key="${CSS.escape(`app:${name}`)}"] iframe`);
-  if (shown && path !== "/") shown.src = framed(name, path);
+  if (shown && path !== "/") go(shown, framed(name, path));
   const frame = frameOf(framed(name, path), titleOf(name), name);
   const status = el("span", "pane-sharing");
   if (f) status.append(...badges(f));
@@ -1261,7 +1283,7 @@ function openApp(name, path = "/") {
     actions: [
       ...(f && own(f) ? [{ icon: "share", title: "Share…", onClick: () => share(name) }] : []),
       { icon: "folder", title: "Files", onClick: () => show({ key: `tree:${name}`, title: titleOf(name), subtitle: "files", icon: paneIcon("folder"), body: frameOf(framed(name, "/__files"), `${titleOf(name)} files`, name) }) },
-      { icon: "reload", title: "Reload", onClick: () => { frame.src = framed(name, path); } },
+      { icon: "reload", title: "Reload", onClick: () => go(frame, framed(name, path)) },
       { icon: "external", title: "Open in a new tab", onClick: () => window.open(`/auth/fragment?name=${encodeURIComponent(name)}&return=${encodeURIComponent(path)}`, "_blank", "noopener") },
       {
         icon: "more", title: "More", onClick: (e) => openMenu(e.currentTarget, [

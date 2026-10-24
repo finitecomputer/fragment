@@ -28,6 +28,12 @@
     <div class="latest-wrap"><button type="button" id="latest" hidden>Jump to latest</button></div>
     <div class="composer-wrap">
       <div class="banner" id="banner" role="alert" hidden><span id="banner-text"></span><button type="button" id="banner-dismiss">Dismiss</button></div>
+      <div class="mic-card" id="mic-card" role="dialog" aria-labelledby="mic-card-title" hidden>
+        <span class="mic-card-icon" aria-hidden="true"><i data-icon="mic"></i></span>
+        <div class="mic-card-copy"><strong id="mic-card-title"></strong><p id="mic-card-text"></p></div>
+        <button type="button" class="primary" id="mic-card-go"></button>
+        <button class="icon-button mic-card-close" id="mic-card-close" type="button" title="Close" aria-label="Close"><i data-icon="x"></i></button>
+      </div>
       <div class="here" id="here" hidden></div>
       <form class="composer" id="say">
         <div class="mentions" id="mentions" role="listbox" aria-label="Agents" hidden></div>
