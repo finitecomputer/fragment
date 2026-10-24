@@ -188,6 +188,69 @@ fn mic_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str) -> R
     Ok(())
 }
 
+/// The mic once the chat's access ends (Alex's review of PR 582): a
+/// person's page whose access is taken away (4003) while the mic's card is
+/// open, and one whose chat is deleted (4004) while the browser is still
+/// asked whether it may record. Valid: neither asks for the microphone nor
+/// records after: the card goes, its Continue (pressed as a script would,
+/// though hidden) starts nothing, and an answer that comes after starts
+/// nothing.
+fn mic_after_access_ends(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, member: &Keys, member_session: &str) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let name = s.named(api, owner, "chat-mic-ends")?;
+    let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "making the chat whose access ends: {made}");
+    s.owned(&made.body, owner);
+    let member_id = api.identity(member)?;
+    let shared = api.share(&name, &member_id, "editor")?;
+    anyhow::ensure!(shared.status == 200, "sharing it with the member: {shared}");
+    let ready = "document.getElementById('say')?.dataset.ready === '1' && !document.getElementById('record').hidden && !document.getElementById('record').disabled";
+    // the page's asks for the microphone, counted
+    let counted = "(() => { window.__asked = 0; const real = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices); navigator.mediaDevices.getUserMedia = (c) => { window.__asked += 1; return real(c); }; return true; })()";
+    let after = "({ card: !document.getElementById('mic-card').hidden, asked: window.__asked, on: document.getElementById('record').classList.contains('on'), said: document.getElementById('banner').hidden ? null : document.getElementById('banner-text').textContent })";
+
+    // the member's page, the card open, their access taken away
+    let elsewhere = chrome.another_context()?;
+    chrome.set_cookie_in(&elsewhere, &format!("{}/", api.base), "fragment_session", member_session)?;
+    let theirs = chrome.open_in(&elsewhere, &api.site_url(&name, "__signin?return=/"))?;
+    let up = chrome.until(&theirs, ready, wait);
+    chrome.eval(&theirs, counted)?;
+    chrome.eval(&theirs, "(navigator.permissions.query = async () => ({ state: 'prompt' }), true)")?;
+    chrome.eval(&theirs, "(document.getElementById('record').click(), true)")?;
+    let carded = chrome.until(&theirs, "!document.getElementById('mic-card').hidden && document.getElementById('mic-card').dataset.kind === 'ask'", wait);
+    let gone = api.signed(owner, "DELETE", &format!("/api/f/{name}/members/{member_id}"), None)?;
+    let closed = chrome.until(&theirs, "document.getElementById('banner-text')?.textContent === 'Your access to this chat changed: reload the page.'", wait);
+    chrome.eval(&theirs, "(document.getElementById('mic-card-go').click(), true)")?;
+    std::thread::sleep(Duration::from_secs(1));
+    let seen = chrome.eval(&theirs, after)?;
+    s.ok(
+        "their access taken away (4003) while the mic's card is open, the card goes and its Continue asks for nothing: no microphone, no memo",
+        up && carded && gone.status == 200 && closed && seen["card"] == false && seen["asked"] == 0 && seen["on"] == false,
+        json!({ "up": up, "carded": carded, "removed": gone.status, "closed": closed, "seen": seen }),
+    );
+    chrome.close(theirs)?;
+
+    // the owner's page, the browser still asked, the chat deleted
+    let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
+    let up = chrome.until(&page, ready, wait);
+    chrome.eval(&page, counted)?;
+    chrome.eval(&page, "(navigator.permissions.query = () => new Promise((answer) => { window.__answer = answer; }), true)")?;
+    chrome.eval(&page, "(document.getElementById('record').click(), true)")?;
+    let asking = chrome.until(&page, "typeof window.__answer === 'function'", wait);
+    let deleted = api.signed(owner, "DELETE", &format!("/api/f/{name}"), None)?;
+    let closed = chrome.until(&page, "document.getElementById('banner-text')?.textContent === 'This chat was deleted.'", wait);
+    chrome.eval(&page, "(window.__answer?.({ state: 'granted' }), true)")?;
+    std::thread::sleep(Duration::from_secs(1));
+    let seen = chrome.eval(&page, after)?;
+    s.ok(
+        "its chat deleted (4004) while the browser is asked whether it may record, the answer that comes after starts nothing: no microphone, no memo",
+        up && asking && deleted.status == 200 && closed && seen["card"] == false && seen["asked"] == 0 && seen["on"] == false,
+        json!({ "up": up, "asking": asking, "deleted": deleted.status, "closed": closed, "seen": seen }),
+    );
+    chrome.close(page)?;
+    Ok(())
+}
+
 /// The mic's card as shown (`kind`, "ask" or "denied"), light and dark,
 /// into the run's screenshots; the page left light, as it starts.
 fn mic_card_shots(chrome: &mut Browser, page: &Page, shots: &Path, kind: &str) -> Result<()> {
@@ -804,6 +867,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     held_socket(s, api, &mut chrome, &owner, &chat_name)?;
     still_loading_in_frame(s, api, &mut chrome, &chat_name)?;
     mic_in_frame(s, api, &mut chrome, &chat_name)?;
+    mic_after_access_ends(s, api, &mut chrome, &owner, &member, &member_session)?;
 
     polish::check(s, api, &owner, &owner_session, &mut chrome, &label)?;
     polish::working_card(s, api, &owner, &mut chrome, &identity, &agent_name)?;

@@ -1742,6 +1742,8 @@ export function mount(root) {
   let attachments = []; // { file, name, size, type, uploading }
   let sending = false;
   let recording = null; // the voice memo being recorded (`startMemo`)
+  // the page's access ended (`fragment.closed`): nothing records after it
+  let ended = false;
   function refreshSend() {
     const typed = !!input.value.trim() || attachments.length > 0 || !!recording;
     $("send").disabled = sending || !typed || !canPost() || setupHolds();
@@ -1978,7 +1980,7 @@ export function mount(root) {
     if (recording) $("recording-time").textContent = clock(Date.now() - recording.startedAt);
   }
   async function startMemo() {
-    if (recording || !canAttach() || !recordable()) return;
+    if (ended || recording || !canAttach() || !recordable()) return;
     if (attachments.length >= ATTACHMENTS_MAX) return problem(`A message carries at most ${ATTACHMENTS_MAX} files.`);
     const memo = { recorder: null, stream: null, chunks: [], bytes: 0, startedAt: Date.now(), timer: 0, tick: 0, stopped: false, discard: false, failed: null, tooLarge: false };
     // held while the browser asks for the microphone, so a second press waits
@@ -1992,6 +1994,7 @@ export function mount(root) {
       memo.stream?.getTracks().forEach((t) => t.stop());
       recording = null;
       renderRecording();
+      if (ended) return;
       return err?.name === "NotAllowedError" ? showMicCard("denied") : problem(`Could not record: ${err?.message ?? err}`);
     }
     // pressed again while the browser asked: nothing was recorded to send
@@ -2089,6 +2092,8 @@ export function mount(root) {
     if (recording) return stopMemo(false);
     if (!canAttach() || !recordable()) return;
     const mic = await micPermission();
+    // its access ended while the browser was asked
+    if (ended) return;
     if (mic === "granted" || (mic !== "denied" && primed())) return startMemo();
     showMicCard(mic === "denied" ? "denied" : "ask");
   };
@@ -2594,7 +2599,9 @@ export function mount(root) {
     problem(code === 4004 ? "This chat was deleted." : "Your access to this chat changed: reload the page.");
     input.disabled = true;
     $("attach").disabled = true;
+    ended = true;
     stopMemo(true);
+    hideMicCard();
     $("record").disabled = true;
   });
   render();
