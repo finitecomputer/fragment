@@ -386,88 +386,67 @@ iframe[data-blocked] { display: none; }
 .frames > .frame-note { position: absolute; inset: 0; }
 .frame-note .notice span { display: block; }
 .page-title { font-weight: 700; margin: 0 auto; }
-/* first run (sign in, the welcome, a seat's step): one card on the
-   landscape, as the launcher's panel is (Skyler's design), never wider
-   than the screen (its min-width: at 320 px the grid sized it to the
-   trial code's row, past the screen's edge) */
-.first-run { position: relative; isolation: isolate; height: 100%; overflow-y: auto; display: grid; place-items: safe center; padding: max(24px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(24px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); background: transparent; }
-.first-run-content { width: min(100%, 480px); min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); justify-items: center; gap: 28px; }
-.first-run-logo { display: block; width: 88px; height: 88px; filter: drop-shadow(0 2px 8px rgba(0,0,0,.18)); }
-@media (prefers-color-scheme: light) { .first-run-logo { filter: brightness(0) drop-shadow(0 2px 8px rgba(0,0,0,.1)); } }
-.first-run-card { width: min(100%, 480px); min-width: 0; display: flex; flex-direction: column; gap: 14px; padding: 30px 30px 24px; border: 1px solid var(--border-strong); border-radius: 28px; background: var(--bg-sidebar); box-shadow: 0 24px 60px rgba(0,0,0,.22); }
-@media (max-width: 520px) { .first-run { padding: max(16px, env(safe-area-inset-top, 0px)) 12px max(16px, env(safe-area-inset-bottom, 0px)); align-items: safe end; } .first-run-card { padding: 24px 20px 20px; border-radius: 24px; } }
-.first-run-card > .primary, .first-run-card > .quiet { align-self: flex-start; }
-.first-run-card h1 { margin: 0; font-size: 28px; line-height: 1.2; font-weight: 600; letter-spacing: -.01em; text-align: center; text-wrap: balance; }
-.first-run-card p { margin: 0; }
-.first-run.splash { grid-template-rows: minmax(0, 1fr); align-items: safe center; }
-/* Equal space above and below centers the card itself; the logo lives
-   separately at the top. Short screens can scroll without overlap. */
-.splash .first-run-content { max-width: 420px; align-self: stretch; grid-template-rows: minmax(96px, 1fr) auto minmax(96px, 1fr); gap: 0; }
-.splash .first-run-logo { grid-row: 1; align-self: start; width: 64px; height: 64px; margin-top: clamp(8px, 2vh, 20px); }
-.splash .first-run-card {
-  grid-row: 2; position: relative; --edge-light: 0; align-items: center; gap: 28px; padding: 40px 28px;
-  background: linear-gradient(150deg, rgba(255,255,255,.065), rgba(255,255,255,.01)), color-mix(in srgb, var(--bg-card) 64%, transparent);
-  -webkit-backdrop-filter: blur(24px) saturate(1.25); backdrop-filter: blur(24px) saturate(1.25);
-  box-shadow: 0 24px 60px rgba(0,0,0,.22), inset 0 1px 0 rgba(255,255,255,.06); text-align: center;
+/* first run (sign in, the welcome, a seat's step): the platform pages'
+   grid and card (platform-pages.css: Skyler's onboarding design,
+   2026-10-22) on the shell's landscape, inside a phone's edges, scrolling
+   when the card is taller than the screen. What follows is what its steps
+   need besides: their buttons, their rhythm, nested in steps. */
+.first-run { position: relative; isolation: isolate; height: 100%; overflow-y: auto; padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px); background: transparent; }
+.first-run-content { box-sizing: border-box; min-height: 100%; color: var(--fg); }
+.first-run-card { color: var(--fg); }
+.first-run-card p { margin: 16px 0 0; color: var(--muted); line-height: 1.5; }
+.first-run-card h1 + p { line-height: 1.4; text-wrap: balance; }
+.first-run-card h1 { text-wrap: balance; }
+.first-run-card h1[tabindex="-1"]:focus { outline: none; }
+.first-run-card h2 { margin: 24px 0 0; font-size: 14px; font-weight: 600; line-height: 1.5; text-align: left; }
+.first-run-card strong { font-weight: 600; color: var(--fg); }
+.first-run-card form { margin: 0; }
+.first-run-card :is(.primary, .secondary) {
+  box-sizing: border-box; display: flex; align-items: center; justify-content: center; width: 100%; height: auto; min-height: 44px; margin: 24px 0 0; padding: 12px 15px;
+  border: 1px solid var(--line); border-radius: 999px; font: 500 14px/1.5 var(--font-sans); text-align: center; text-decoration: none; cursor: pointer; transition: opacity .15s, border-color .15s;
 }
-/* The chat composer's cursor-following reflection, clipped to the rim. */
-.splash .first-run-card::before, .splash .first-run-card::after {
-  content: ""; position: absolute; inset: -1px; border-radius: inherit; padding: 1px; pointer-events: none;
-  background: radial-gradient(var(--edge-radius, 180px) circle at var(--edge-x, 50%) var(--edge-y, 50%), rgba(255,255,255,.65), rgba(255,255,255,.16) 45%, transparent 100%);
-  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor; mask-composite: exclude;
-  opacity: var(--edge-light); transition: opacity 160ms ease-out;
-}
-.splash .first-run-card::after { filter: blur(2px); opacity: calc(var(--edge-light) * .35); }
-@media (prefers-reduced-motion: reduce) { .splash .first-run-card::before, .splash .first-run-card::after { transition: none; } }
-.splash-heading { display: grid; gap: 12px; }
-.splash h1 { font-size: clamp(28px, 6vw, 36px); line-height: 1.15; letter-spacing: -.035em; }
-.splash-heading p { max-width: 32ch; margin-inline: auto; color: color-mix(in srgb, var(--text-primary) 82%, transparent); font-size: 16px; line-height: 1.5; text-wrap: balance; }
-.splash-actions { display: grid; gap: 10px; width: 100%; }
-.splash .primary, .splash-secondary { display: flex; align-items: center; justify-content: center; width: 100%; min-height: 48px; height: auto; padding: 12px 24px; font-size: 16px; transition: background .15s, opacity .15s; }
-.splash .primary:hover { opacity: .85; }
-.splash-secondary { border: 1px solid var(--border-strong); border-radius: 999px; background: transparent; color: var(--text-primary); font-weight: 600; text-decoration: none; transition: border-color .15s; }
-.splash-secondary:hover { border-color: var(--text-secondary); }
-.splash :is(.primary, .splash-secondary):focus-visible { outline: 2px solid var(--text-primary); outline-offset: 4px; }
-.first-run-form { display: flex; flex-direction: column; gap: 10px; }
-.first-run-form label { font-size: 13px; color: var(--text-secondary); }
-.first-run-form input, .first-run-form textarea, .rename-agent textarea {
-  width: 100%; padding: 12px 14px; border: 0; border-radius: 12px; background: var(--chat-composer); color: var(--text-primary);
-  box-shadow: inset 0 1px 2px rgba(0,0,0,.18); font: inherit; resize: vertical;
-}
-.first-run-form input:focus, .first-run-form textarea:focus, .rename-agent textarea:focus { outline: 1px solid var(--border-strong); }
-.first-run-form .primary { align-self: flex-start; margin-top: 4px; }
-/* the welcome: the seats, a trial code, who is signed in (shell.js welcome, billing.js seatOffer) */
-.plans { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
-.plan { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 16px 18px; border: 1px solid var(--border-strong); border-radius: 18px; background: var(--surface-muted); color: var(--text-primary); font: inherit; text-align: left; cursor: pointer; transition: background .15s, border-color .15s; }
-.plan:hover:not(:disabled), .plan:focus-visible { background: var(--bg-active); border-color: var(--text-tertiary); }
-.plan:disabled { opacity: .6; cursor: default; }
-.plan strong { font-size: 15px; font-weight: 600; }
-.plan span { color: var(--text-secondary); font-size: 13px; line-height: 1.45; }
-.trial-code { display: flex; gap: 8px; }
-.trial-code input { flex: 1; min-width: 0; min-height: 36px; padding: 0 14px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 13px; }
-.trial-code .quiet { min-height: 36px; height: auto; border-radius: 999px; background: var(--bg-active); }
-.trial-code button:disabled { opacity: .6; }
-/* a seat's step before the first agent (shell.js seatFirst) */
-.creating-steps { list-style: none; margin: 4px 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
-.creating-steps li { display: flex; align-items: center; gap: 10px; color: var(--text-tertiary); }
-.creating-steps li::before { content: ""; width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border-strong); box-sizing: border-box; flex: none; }
-.creating-steps li.doing { color: var(--text-primary); }
-.creating-steps li.doing::before { border-color: var(--text-primary); border-right-color: transparent; animation: creating-spin .8s linear infinite; }
-.creating-steps li.done { color: var(--text-secondary); }
-.creating-steps li.done::before { border-color: var(--success); background: var(--success); }
+.first-run-card :is(.primary, .secondary) + :is(.primary, .secondary) { margin-top: 10px; }
+.first-run-card .primary { background: var(--fg); color: var(--bg); }
+.first-run-card .secondary { background: transparent; color: var(--fg); }
+.first-run-card .primary:hover:not(:disabled) { opacity: .88; }
+.first-run-card .secondary:hover:not(:disabled) { border-color: var(--muted); }
+.first-run-card .text { display: block; margin: 17px auto 0; padding: 2px; border: 0; border-radius: 999px; background: none; color: var(--fg); font: 400 14px/1.5 var(--font-sans); text-decoration: none; cursor: pointer; }
+.first-run-card .text:hover:not(:disabled) { text-decoration: underline; text-underline-offset: 3px; }
+.first-run-card button:disabled { opacity: .5; cursor: default; }
+.first-run-card label { display: block; margin: 24px 0 0; text-align: left; }
+.first-run-card input { display: block; width: 100%; margin-top: 7px; color: var(--fg); }
+.first-run-card input::placeholder { color: var(--muted); }
+.first-run-card p.fine { margin-top: 18px; font-size: 14px; }
+.first-run-card .ticket p { margin: 0; color: inherit; }
+.first-run-card .ticket p + p { margin-top: 8px; }
+/* its card's size, animated from one step to another (shell.js cardStep) */
+.first-run-card.moving { overflow: hidden; }
+.first-run-card p:is(.form-error, .settings-warning) { margin: 14px 0 0; color: var(--danger-text); font-size: 14px; line-height: 1.5; }
+.first-run-card .form-error:not([hidden]) + .primary { margin-top: 14px; }
+/* the welcome's offers from an org, each a ticket (billing.js seatOffer):
+   its two answers, Accept first */
+.first-run-card .billing-offer { padding: 20px; border-bottom: 0; text-align: left; }
+.first-run-card .billing-offer .settings-actions { justify-content: flex-start; margin-top: 14px; }
+.first-run-card .billing-offer .quiet { height: auto; padding: 8px 15px; border: 1px solid var(--line); background: transparent; color: var(--fg); font: 500 14px/1.5 var(--font-sans); }
+.first-run-card .billing-offer .quiet:first-child { border-color: transparent; background: var(--fg); color: var(--bg); }
+/* a seat's step before the first agent (shell.js seatFirst): its steps on a ticket */
+.creating-steps { list-style: none; display: flex; flex-direction: column; gap: 10px; text-align: left; }
+.creating-steps li { display: flex; align-items: center; gap: 12px; color: var(--muted); }
+.creating-steps li::before { content: ""; width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line); box-sizing: border-box; flex: none; }
+.creating-steps li.doing { color: var(--fg); }
+.creating-steps li.doing::before { border-color: var(--fg); border-right-color: transparent; animation: creating-spin .8s linear infinite; }
+.creating-steps li.done::before { border-color: var(--accent); background: var(--accent); }
 .creating-steps li.failed { color: var(--danger-text); }
 .creating-steps li.failed::before { border-color: var(--danger-text); }
 @keyframes creating-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .creating-steps li.doing::before { animation: none; } }
-.first-run-card .creating-steps { margin: 6px 0; padding: 14px 16px; border: 1px solid var(--border-strong); border-radius: 18px; background: var(--surface-muted); }
-.welcome-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-top: 10px; font-size: 13px; }
-.welcome-foot form { margin: 0; }
+/* who is signed in, under the welcome's steps, and its ways out */
+.welcome-foot { display: flex; flex-wrap: wrap; justify-content: center; gap: 0 20px; margin-top: 24px; border-top: 1px solid var(--line); }
+.welcome-foot .text { margin: 12px 0 0; }
 /* who is signed in, to someone with no seat (shell.js noSeatSaid): the
    welcome's, Billing's, and a guest's home's */
 .no-seat { overflow-wrap: anywhere; }
-.welcome-foot > .no-seat { flex-basis: 100%; font-size: 14px; line-height: 1.45; }
+.welcome-foot > .no-seat { flex-basis: 100%; margin: 16px 0 4px; font-size: 14px; line-height: 1.5; }
 .notice > .no-seat { margin: 12px 0 0; }
 /* Settings use the full work area, with quiet section navigation and readable rows. */
 .layout.settings-view .chat { grid-column: 3 / 6; }
@@ -733,8 +712,7 @@ iframe[data-blocked] { display: none; }
 .desktop-empty .prompt-dice { border-color: rgba(255,255,255,.28); background: rgba(20,20,20,.38); text-shadow: none; -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
 .desktop-empty .prompt-dice:hover { background: rgba(20,20,20,.56); }
 @media (max-width: 760px) { .desktop-dock { margin-bottom: max(8px, env(safe-area-inset-bottom)); } }
-/* Finite's about page, privacy policy and terms: under the landing's Sign In,
-   the welcome's seat, and at the end of Settings' Account */
+/* Finite's privacy policy and terms, at the end of Settings' Account (the
+   first run's footer is platform-pages.css's .page-footer) */
 .legal-links, .settings-section > p.legal-links { font-size: 12.5px; }
 .legal-links a { color: inherit; }
-.splash .legal-links { margin-top: -14px; }

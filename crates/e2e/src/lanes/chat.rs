@@ -7,9 +7,9 @@
 //! say: an agent's name (`__people`), the members (`__members`), and an
 //! editor's upload (`PUT __blob/<sha256>`). Then the owner, signed in on
 //! the chat's page, types and presses Enter, and sees the agent's draft
-//! live, then its reply; a tool step as a card, saying what it does
-//! ("Searching the web: …"); the runtime's notices as quiet lines of the
-//! turn, the one after its end too; a question asked to be answered in
+//! live, then its reply; a tool step as a card, saying what it does by
+//! its icon, which its verb names; the runtime's notices as quiet lines of
+//! the turn, the one after its end too; a question asked to be answered in
 //! words, the page waiting for their answer until they give it; an
 //! approval card they
 //! answer with its button, which another member sees but may not press;
@@ -362,12 +362,12 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("then its reply replaces the draft", answered && reply.starts_with("echo:"), chrome.eval(&page, "document.getElementById('messages').innerText")?);
     s.ok("the agent's reply is under its name", chrome.eval(&page, &format!("[...document.querySelectorAll('.msg.agent .who')].every((w) => w.textContent === {})", js(&capital(&label))))? == true, "");
 
-    // a tool step, as a card: what it does, in words (its category's icon
-    // and verb), then its arguments and what came of it
+    // a tool step, as a card: what it does (its category's icon, its verb
+    // the icon's name), then its arguments and what came of it
     say(&mut chrome, "tool please")?;
     let step = "[...document.querySelectorAll('details.tools .step[data-category=\"web\"]')].find((s) => s.querySelector('.step-args')?.textContent === 'tool please')";
-    let stepped = shows(&mut chrome, &page, &format!("!!{step} && {step}.querySelector('svg') && {step}.querySelector('.step-verb').textContent === 'Searching the web:' && {step}.textContent.includes('3 results') && {}", replied("tool please")));
-    s.ok("a tool step shows as a card before the reply, saying what it does (\"Searching the web: tool please\")", stepped, chrome.eval(&page, "document.getElementById('messages').innerText")?);
+    let stepped = shows(&mut chrome, &page, &format!("!!{step} && !{step}.querySelector('.step-verb') && {step}.querySelector('.step-name > svg[role=\"img\"]')?.getAttribute('aria-label') === 'Searching the web' && {step}.textContent.includes('3 results') && {}", replied("tool please")));
+    s.ok("a tool step shows as a card before the reply, saying what it does by its icon (named \"Searching the web\") and its arguments (\"tool please\")", stepped, chrome.eval(&page, "document.getElementById('messages').innerText")?);
     // every card open, for the screenshots: what each step says
     let open_cards = "(() => { const cards = [...document.querySelectorAll('details.tools')]; cards.forEach((d) => (d.open = true)); cards.at(-1)?.scrollIntoView({ block: 'center' }); return true; })()";
     chrome.eval(&page, open_cards)?;

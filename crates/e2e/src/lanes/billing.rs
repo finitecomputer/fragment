@@ -1330,7 +1330,7 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = b.screenshot(&page, &shots.join("1-welcome.png"));
     let seen = b.eval(&page, SEEN)?;
     s.ok(
-        &format!("a new guest's first run is the welcome, never settings: what this is, the one seat sold ({seat_price} a month, always on, {included} of credit: core's prices), a trial code, what more credit costs, the import's place kept hidden, and who is signed in"),
+        &format!("a new guest's first run is the welcome, never settings: what this is, the one seat sold ({seat_price} a month, always on, {included} of credit: core's prices, on its ticket), a trial code, what more credit costs, the import's place kept hidden, and who is signed in"),
         welcomed
             && seen["layout"] == false
             && seen["plans"] == json!(["seat_always_on"])
@@ -1340,8 +1340,10 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
             && seen["card"].as_str().is_some_and(|t| {
                 t.contains("Welcome to Finite")
                     && t.contains("Superintelligent agents for you and your organization")
-                    && t.contains(&format!("{seat_price} a month, always on"))
-                    && t.contains(&format!("{included} of credit included each month"))
+                    && t.contains(&format!("{seat_price} / month"))
+                    && t.contains("Always on")
+                    && t.contains(&format!("{included} in monthly usage credit"))
+                    && t.contains("Secure Stripe checkout")
                     && t.contains(&format!("{pack} a pack"))
                     && t.contains(&Api::email_of(&gus))
                     && t.contains("Sign out")
@@ -1388,12 +1390,12 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let legal = b.eval(
         &page,
-        "(() => { const c = document.getElementById('first-run-card'); const p = c?.querySelector('.legal-links'); const plans = c?.querySelector('.plans'); \
-         return { under: !!p && !!plans && !!(plans.compareDocumentPosition(p) & Node.DOCUMENT_POSITION_FOLLOWING), links: [...(p?.querySelectorAll('a') ?? [])].map((a) => [a.textContent, a.getAttribute('href'), a.target]) }; })()",
+        "(() => { const f = document.querySelector('#first-run .page-footer'); \
+         return { shown: !!f && f.getClientRects().length > 0, links: [...(f?.querySelectorAll('a[href^=\"/\"]') ?? [])].filter((a) => /^(Privacy Policy|Terms)$/.test(a.textContent)).map((a) => [a.textContent, a.getAttribute('href'), a.target]) }; })()",
     )?;
     s.ok(
-        "the welcome names Finite's Privacy and Terms under its seat, each in a tab of its own",
-        legal == json!({ "under": true, "links": [["Privacy", "/privacy", "_blank"], ["Terms", "/terms", "_blank"]] }),
+        "the welcome's footer names Finite's Privacy Policy and Terms, each in a tab of its own",
+        legal == json!({ "shown": true, "links": [["Privacy Policy", "/privacy", "_blank"], ["Terms", "/terms", "_blank"]] }),
         &legal,
     );
     let typed = "(() => { const f = document.querySelector('#first-run-card form.trial-code'); if (!f) return false; f.querySelector('input').value = 'ZZZZ-ZZZZ-ZZZZ-ZZZZ'; f.requestSubmit(); return true; })()";
@@ -1860,16 +1862,30 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     if !act(s, &mut b, &page, "the welcome's Start a trial", started)? {
         return Ok(());
     }
-    let at_stripe = b.until(&page, &format!("location.href.startsWith({:?}) && /30-day trial/.test(document.body.innerText)", s.stripe.url), wait);
+    let at_stripe = b.until(&page, &format!("location.href.startsWith({:?}) && /30-day trial/.test(document.body.innerText) && /no card asked/.test(document.body.innerText)", s.stripe.url), wait);
     if !act_at(s, &mut b, &page, "Stripe's Pay", "form button") {
         return Ok(());
     }
     let seated = view(&mut b, &page, SEATED, wait);
     let mine = seat(api, &jo);
     s.ok(
-        "signed in, the link's welcome has its code filled in; its 30-day trial takes a card on Stripe's page and comes back to the welcome, which seats them in their trial of the always-on seat and goes on to their first agent",
+        "signed in, the link's welcome has its code filled in; its 30-day trial asks no card on Stripe's page and comes back to the welcome, which seats them in their trial of the always-on seat and goes on to their first agent",
         filled && at_stripe && seated && mine["seat"]["good"] == true && mine["seat"]["kind"] == "seat_always_on" && mine["seat"]["trialEnds"].as_i64().is_some(),
         json!({ "seen": b.eval(&page, SEEN)?, "seat": mine }),
+    );
+    b.close(page)?;
+    // their Billing, in the trial: when it ends, and how to keep the seat after it
+    let page = page_of(&mut b, api, &session, "/settings")?;
+    let told = view(
+        &mut b,
+        &page,
+        "location.pathname === '/settings' && ((t) => /Trial ends/.test(t) && /add a card in Payment and invoices/.test(t))(document.getElementById('settings-page')?.innerText ?? '') && [...document.querySelectorAll('#settings-page button')].some((b) => b.textContent === 'Payment and invoices')",
+        wait,
+    );
+    s.ok(
+        "in their trial, their Billing says when it ends and that a card added in Payment and invoices keeps the seat after it (none asked at its start)",
+        told,
+        json!({ "shown": text(&mut b, &page) }),
     );
     b.close(page)?;
 
@@ -1923,7 +1939,7 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     let offered = view(
         &mut b,
         &page,
-        &format!("{WELCOMED} && [...document.querySelectorAll('#first-run-card a')].some((a) => a.textContent === 'Not now') && document.getElementById('first-run-card').innerText.includes({:?})", format!("{seat_price} a month, always on")),
+        &format!("{WELCOMED} && [...document.querySelectorAll('#first-run-card a')].some((a) => a.textContent === 'Not now') && document.getElementById('first-run-card').innerText.includes({:?})", format!("{seat_price} / month")),
         wait,
     );
     let _ = b.screenshot(&page, &shots.join("10-comp-ended.png"));

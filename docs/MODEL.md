@@ -210,7 +210,9 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   commit can no longer grant access). Only the owner manages members,
   invites, visibility, and tokens; a member may leave, and no one is
   made a member of someone else's fragment but by their own yes to an
-  invite (decision 63: a direct add is the owner's own agents). Members name
+  invite (decision 63: a direct add is the owner's own agents), which
+  brings their agents in beside them as one entity (decision 64: their
+  role theirs, in and out together). Members name
   identities, so replacing a key rewrites no grant. Each identity's list
   of fragments is an index in its own `Principal` cell, fed from the
   fragment's outbox. A request sends at most one round of the outbox (32

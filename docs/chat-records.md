@@ -282,10 +282,11 @@ run), `web` (a search of the web), `read` (a file, page or skill read, or
 files searched), `write` (a file written or edited), `browser` (its
 browser or desktop driven), `image` (an image made), `delegate` (work
 handed to another agent), `memory` (what it remembers, changed), or
-`other`; a page shows each with its own icon and verb ("Running: ls -la",
-"Searching the web: …"), and a step with another or none (one from before
-steps said) as `other`, by its `tool`. The bridge's runtime says which
-(our Hermes image's: one table of Hermes' tools, docs/bridge.md).
+`other`; a page shows each by its own icon, which its verb ("Running",
+"Searching the web") names for assistive technology, then its arguments
+(`ls -la`), and a step with another or none (one from before steps said)
+as `other`, its `tool` in words. The bridge's runtime says which (our
+Hermes image's: one table of Hermes' tools, docs/bridge.md).
 
 ```json
 { "kind": "turn.prompt", "turn": "…", "prompt": "<prompt>",
@@ -543,7 +544,12 @@ fenced code with a language label and Copy). Share reply uses the native
 share sheet where available, otherwise copies the reply. Cancelling a
 share sheet copies nothing. Video and PDFs show inline beside open,
 download and share actions; PDFs retain those actions when a browser
-cannot embed them.
+cannot embed them. Download saves the file through the page: it reads
+the bytes with a fetch of its own origin, as it reads the chat, and
+saves them. A link's own download is the browser's request, which
+carries none of a frame's cookies, so in the shell's frame (signed in by
+the frame's partitioned cookie alone) it was refused (Paul, 2026-10-23:
+"file wasn't available on site").
 
 A channel post that fails has its error and Retry on the message itself.
 Retry keeps its id and body so a lost answer cannot write it twice. Until

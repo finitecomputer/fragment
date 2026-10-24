@@ -190,6 +190,16 @@ impl RegistryCell {
     /// Tells the open pages of whoever signs in as `email` now that the
     /// invites waiting on it changed, so each reads them again. Best
     /// effort: a page that missed it reads them as it reconnects.
+    /// A person's agents, the first made first, which come in with them
+    /// where they accept (decision 64): at most `AGENTS_PER_OWNER_MAX`.
+    fn agents_of(&self, person: &str) -> CellResult<Vec<String>> {
+        let rows = self.rows::<super::IdRow>(
+            "SELECT id FROM identities WHERE owner = ? AND kind = 'agent' ORDER BY created_at, id LIMIT ?",
+            vec![person.into(), SqlStorageValue::Integer(limits::AGENTS_PER_OWNER_MAX as i64)],
+        )?;
+        Ok(rows.into_iter().map(|r| r.id).collect())
+    }
+
     async fn tell_invitee(&self, email: &str) {
         if let Ok(Some(person)) = self.person_by_email(email) {
             self.tell_person(&person).await;
@@ -275,7 +285,7 @@ impl RegistryCell {
     async fn answer_invite(&self, b: AnswerInvite) -> CellResult<Option<Role>> {
         let who = self.invitee_by(&b.by, b.acting_for.as_deref())?;
         let email = self.invite_to(&who.id, &b.fragment)?;
-        let claim = serde_json::to_value(ClaimInvite { email: email.clone(), identity: who.id.clone() }).expect("a claim serializes");
+        let claim = serde_json::to_value(ClaimInvite { email: email.clone(), identity: who.id.clone(), agents: self.agents_of(&who.id)? }).expect("a claim serializes");
         let route = if b.yes { "invites/claim" } else { "invites/decline" };
         let met = match crate::fragment::ask(&self.env, &b.fragment, route, &claim).await {
             Ok(met) => Some(met),
@@ -335,7 +345,7 @@ impl RegistryCell {
             "SELECT fragment FROM invites_waiting WHERE email = ? AND role IS NULL ORDER BY expires_at LIMIT ?",
             vec![email.into(), SqlStorageValue::Integer(limits::INVITES_PER_EMAIL_MAX as i64)],
         )?;
-        let claim = serde_json::to_value(ClaimInvite { email: email.to_string(), identity: identity.to_string() }).expect("a claim serializes");
+        let claim = serde_json::to_value(ClaimInvite { email: email.to_string(), identity: identity.to_string(), agents: self.agents_of(identity)? }).expect("a claim serializes");
         for batch in waiting.chunks(CLAIMS_AT_ONCE) {
             let answers = join_all(batch.iter().map(|w| crate::fragment::ask(&self.env, &w.fragment, "invites/claim", &claim))).await;
             for (w, answer) in batch.iter().zip(answers) {
@@ -394,7 +404,7 @@ impl RegistryCell {
         }
         // bounded: at most CLAIMS_AT_ONCE claims a run
         let answers = join_all(tried.iter().map(|(email, fragment, _, person)| {
-            let claim = serde_json::to_value(ClaimInvite { email: email.clone(), identity: person.clone() }).expect("a claim serializes");
+            let claim = serde_json::to_value(ClaimInvite { email: email.clone(), identity: person.clone(), agents: self.agents_of(person).unwrap_or_default() }).expect("a claim serializes");
             async move { crate::fragment::ask(&self.env, fragment, "invites/claim", &claim).await }
         }))
         .await;

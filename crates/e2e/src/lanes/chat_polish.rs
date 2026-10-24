@@ -8,6 +8,63 @@ use crate::browser::Browser;
 use crate::Suite;
 use fragment_nip98::Keys;
 
+/// The PDF the media message attaches.
+const PREVIEW_PDF: &[u8] = include_bytes!("../../fixtures/chat-preview.pdf");
+
+/// The chat with its PDF in the platform's page, framed as the shell frames
+/// it: through the platform's mint (`/auth/frame`), signed in by the
+/// frame's own partitioned cookie, with no cookie of the chat's origin
+/// (a person who never opened the chat in a tab of its own: Paul,
+/// 2026-10-23, whose PDF showed the browser's refused frame, and whose
+/// Download failed, "file wasn't available on site", while opening the
+/// file in a tab worked). Valid: the attachment's view shows the PDF, in
+/// a frame of the chat's own; its Download, pressed there, saves the PDF
+/// byte for byte.
+fn in_the_platforms_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, name: &str) -> Result<()> {
+    let page = chrome.open(&format!("{}/settings", api.base))?;
+    chrome.viewport(&page, 1280, 860, false)?;
+    let loaded = format!("location.origin === {} && document.readyState === 'complete'", super::js(&api.base));
+    anyhow::ensure!(super::shows(chrome, &page, &loaded), "the platform's page loads");
+    let src = format!("{}/auth/frame?name={name}&return=/", api.base);
+    let frame = format!(
+        "(() => {{ const f = document.createElement('iframe'); f.src = {}; f.allow = 'clipboard-write; microphone'; \
+         f.style.cssText = 'position: fixed; inset: 0; width: 100%; height: 100%; border: 0; z-index: 2147483647; background: #fff'; \
+         document.body.append(f); return true; }})()",
+        super::js(&src)
+    );
+    chrome.eval(&page, &frame)?;
+    let ready = "document.getElementById('say')?.dataset.ready === '1' && !!document.querySelector('.attachment-download[aria-label=\"Download preview.pdf\"]')";
+    let wait = Duration::from_secs(30);
+    if !s.eventually(wait, || chrome.eval_in_frame(&page, name, ready).ok() == Some(Value::Bool(true))) {
+        let seen = chrome.eval_in_frame(&page, name, "location.href + ' ' + (document.body?.innerText ?? '').slice(0, 300)").unwrap_or_default();
+        anyhow::bail!("the chat in the platform's frame is ready: {seen}");
+    }
+
+    // its view: the PDF in a frame of the chat's own (a refused frame is
+    // the browser's error page, of no origin the chat may read)
+    let pdf = "(() => { const f = document.querySelector('.attachment-pdf[title=\"preview.pdf\"]'); if (!f) return 'none'; const d = f.contentDocument; return d ? d.contentType : 'refused'; })()";
+    let shown = s.eventually(wait, || chrome.eval_in_frame(&page, name, &format!("{pdf} === 'application/pdf'")).ok() == Some(Value::Bool(true)));
+    let seen = chrome.eval_in_frame(&page, name, pdf)?;
+    chrome.screenshot(&page, &s.dir("chat-files").join("pdf-in-the-platforms-frame.png"))?;
+    s.ok("in the platform's frame, as the shell shows a chat, a PDF attachment's view shows the PDF", shown, &seen);
+
+    // its Download, as a person presses it (the frame fills the page)
+    let downloads = s.dir("chat-files-downloads");
+    chrome.allow_downloads(&downloads)?;
+    let at = chrome.eval_in_frame(
+        &page,
+        name,
+        "(() => { const a = document.querySelector('.attachment-download[aria-label=\"Download preview.pdf\"]'); a.scrollIntoView({ block: 'nearest' }); const r = a.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })()",
+    )?;
+    let (Some(x), Some(y)) = (at[0].as_f64(), at[1].as_f64()) else { anyhow::bail!("no Download to press: {at}") };
+    chrome.click_at(&page, (x, y))?;
+    let saved = s.eventually(wait, || std::fs::read(downloads.join("preview.pdf")).ok().as_deref() == Some(PREVIEW_PDF));
+    let there: Vec<String> = std::fs::read_dir(&downloads).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    s.ok("in the platform's frame, as the shell shows a chat, a file's Download saves it byte for byte, signed in by the frame's cookie alone", saved, json!({ "saved": there }));
+    chrome.close(page)?;
+    Ok(())
+}
+
 pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrome: &mut Browser, label: &str) -> Result<()> {
     let name = s.named(api, owner, "chat-polish")?;
     let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
@@ -19,7 +76,7 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     let mut attachments = vec![];
     for (filename, mime, bytes) in [
         ("clip.mp4", "video/mp4", include_bytes!("../../fixtures/chat-video.mp4").as_slice()),
-        ("preview.pdf", "application/pdf", include_bytes!("../../fixtures/chat-preview.pdf").as_slice()),
+        ("preview.pdf", "application/pdf", PREVIEW_PDF),
     ] {
         use sha2::{Digest, Sha256};
         let sha = hex::encode(Sha256::digest(bytes));
@@ -33,6 +90,8 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     let posted = api.signed(owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&json!({ "id": "media", "body": { "text": "Video and PDF", "attachments": attachments } })))?;
     anyhow::ensure!(posted.status == 200, "posting media: {posted}");
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
+    // (before any page of the chat's own: its origin has no cookie yet)
+    in_the_platforms_frame(s, api, chrome, &name)?;
     let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
     super::fit(chrome, &page, 1280, 860, false)?;
     s.ok("a video attachment is a labelled inline player with loaded metadata", super::shows(chrome, &page, "!!document.querySelector('.attachment-video video[controls][aria-label=\"clip.mp4\"]') && document.querySelector('video').readyState >= 1"), "");
@@ -375,7 +434,7 @@ pub(super) fn working_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut 
         json!({ "kind": "turn.step", "turn": "working-card", "step": 1, "category": "read", "tool": "read_file", "args": format!("{home}apps-finite/README.md"), "ok": true, "text": "It works **partially.** I’ll check `apps-finite`.\n\n> **Design standards** — keep the card readable.\n\n- Read the files\n- [Check the docs](https://example.com/docs)\n\n<img src=x onerror=\"window.__noteInjected=true\">" }),
         json!({ "kind": "turn.step", "turn": "working-card", "step": 2, "category": "write", "tool": "patch", "args": format!("{home}apps-finite/src/components/chat/working-card/variants/desktop/theme/layout/WorkingCard.tsx"), "ok": true }),
         json!({ "kind": "turn.step", "turn": "working-card", "step": 3, "tool": "terminal", "args": "ls -R /data/hermes/managed-skills/software-development/references/engineering-style.md", "ok": true, "text": "I’ll keep the filename visible and shorten the directories. This sentence is deliberately long enough to make the note fold at a sentence boundary while retaining its markdown and the full explanation when expanded. **The final sentence stays available.**" }),
-        json!({ "kind": "turn.step", "turn": "working-card", "step": 4, "category": "shell", "tool": "terminal", "args": format!("ls /data/work/{agent_name}/apps-finite"), "ok": true, "excerpt": "README.md\nsrc" }),
+        json!({ "kind": "turn.step", "turn": "working-card", "step": 4, "category": "shell", "tool": "terminal", "args": format!("ls /data/work/{agent_name}/apps-finite"), "ok": true, "excerpt": "README.md\nsrc", "text": "Installed cleanly. Now listing the app:" }),
         json!({ "kind": "turn.step", "turn": "working-card", "step": 5, "category": "shell", "tool": "terminal", "args": "cargo test", "ok": false, "excerpt": "error: expected a closing delimiter" }),
         json!({ "kind": "turn.step", "turn": "working-card", "step": 6, "category": "read", "tool": "read_file", "args": "/data/work/another-agent/home/SOUL.md", "ok": true }),
         json!({ "kind": "turn.step", "turn": "working-card", "step": 7, "category": "web", "tool": "web_search", "args": "working card design", "ok": true }),
@@ -390,10 +449,12 @@ pub(super) fn working_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut 
     anyhow::ensure!(super::shows(chrome, &page, "document.querySelectorAll('details.tools[open] .step').length === 8"), "eight-step working card rendered");
     s.ok("commentary renders bold, code, quotes, lists and safe links with the reply renderer", chrome.eval(&page, "(() => { const n = document.querySelector('.step-text'); return n.querySelector('strong').textContent === 'partially.' && n.querySelector('code').textContent === 'apps-finite' && !!n.querySelector('blockquote strong') && n.querySelectorAll('li').length === 2 && n.querySelector('a').getAttribute('href') === 'https://example.com/docs' && n.querySelector('a').rel === 'noopener noreferrer'; })()")? == true, "");
     s.ok("HTML in commentary is escaped, including after expanding it", chrome.eval(&page, "(() => { const n = document.querySelector('.step-text'); n.querySelector('.note-expand').click(); return !n.querySelector('img,script') && !window.__noteInjected && n.innerText.includes('<img src=x onerror=') && n.querySelector('.note-expand').getAttribute('aria-expanded') === 'true'; })()")? == true, "");
+    s.ok("a step's icon says what it does, its verb the icon's name for assistive technology and not in words beside it", chrome.eval(&page, "(() => { const steps = document.querySelectorAll('.step'); return [[0, 'Reading'], [1, 'Writing'], [6, 'Searching the web']].every(([i, verb]) => { const g = steps[i].querySelector('.step-name > svg'); return !steps[i].querySelector('.step-verb') && g.getAttribute('role') === 'img' && g.getAttribute('aria-label') === verb && !g.hasAttribute('aria-hidden') && !!steps[i].querySelector('.step-label > .step-args:only-child'); }); })()")? == true, chrome.eval(&page, "[...document.querySelectorAll('.step')].slice(0, 2).map((s) => s.querySelector('.step-name').outerHTML)")?);
+    s.ok("every commentary has even room above and below, a short one with no fold too", chrome.eval(&page, "(() => { const notes = [...document.querySelectorAll('details.tools .step-text')]; return notes.length === 3 && !notes[2].querySelector('.note-expand') && notes.every((n) => { const shown = [...n.children].filter((c) => !c.hidden); const r = n.getBoundingClientRect(); const above = shown[0].getBoundingClientRect().top - r.top - n.clientTop; const below = r.bottom - shown.at(-1).getBoundingClientRect().bottom; return above >= 8 && Math.abs(above - below) < 1; }); })()")? == true, chrome.eval(&page, "[...document.querySelectorAll('details.tools .step-text')].map((n) => { const shown = [...n.children].filter((c) => !c.hidden); const r = n.getBoundingClientRect(); return [shown[0].getBoundingClientRect().top - r.top - n.clientTop, r.bottom - shown.at(-1).getBoundingClientRect().bottom]; })")?);
     s.ok("done steps have a check on the tool line and no separate done result", chrome.eval(&page, "(() => { const s = document.querySelector('.step'); const m = s.querySelector('.step-name .step-status.done'); return !!m?.querySelector('svg') && m.getAttribute('aria-label') === 'done' && !s.querySelector('pre') && !s.innerText.includes('done'); })()")? == true, "");
     let full = format!("{home}apps-finite/README.md");
     s.ok("the agent's own home becomes ~/ with the full original path in its title", super::shows(chrome, &page, &format!("document.querySelector('.step-args')?.textContent === '~/apps-finite/README.md' && document.querySelector('.step-args').title === {}", super::js(&full))), &full);
-    s.ok("workspace and managed-skill prefixes shorten, including an older bridge's tool fallback", chrome.eval(&page, "(() => { const steps = document.querySelectorAll('.step'); return steps[2].dataset.category === 'other' && steps[2].querySelector('.step-verb').textContent === 'terminal:' && steps[2].querySelector('.step-args').textContent === 'ls -R skills/software-development/references/engineering-style.md' && !!steps[2].querySelector('.step-status.done') && steps[3].querySelector('.step-args').textContent === 'ls work/apps-finite' && steps[5].querySelector('.step-args').textContent.startsWith('/data/work/another-agent/home/'); })()")? == true, "");
+    s.ok("workspace and managed-skill prefixes shorten, including an older bridge's tool fallback, named in words (its wrench names no tool)", chrome.eval(&page, "(() => { const steps = document.querySelectorAll('.step'); return steps[2].dataset.category === 'other' && steps[2].querySelector('.step-verb').textContent === 'terminal:' && steps[2].querySelector('.step-name > svg').getAttribute('aria-hidden') === 'true' && steps[2].querySelector('.step-args').textContent === 'ls -R skills/software-development/references/engineering-style.md' && !!steps[2].querySelector('.step-status.done') && steps[3].querySelector('.step-args').textContent === 'ls work/apps-finite' && steps[5].querySelector('.step-args').textContent.startsWith('/data/work/another-agent/home/'); })()")? == true, "");
     s.ok("a failed step has a red error mark and its result excerpt", chrome.eval(&page, "(() => { const s = document.querySelector('.step.error'); const m = s.querySelector('.step-status.failed'); return m?.getAttribute('aria-label') === 'failed' && !!m.querySelector('svg') && s.querySelector('.step-result').textContent === 'error: expected a closing delimiter' && getComputedStyle(m.querySelector('svg')).color === getComputedStyle(s.querySelector('.step-result')).color; })()")? == true, "");
     s.ok("a step without its result has a running spinner", chrome.eval(&page, "!!document.querySelector('.step:last-child .step-status.running .spin')")? == true, "");
     s.ok("long commentary folds at a complete sentence and expands its full markdown", chrome.eval(&page, "(() => { const n = document.querySelectorAll('.step-text')[1]; const p = n.querySelector('.note-preview'); const b = n.querySelector('.note-expand'); const folded = p.innerText === 'I’ll keep the filename visible and shorten the directories.' && b.textContent === '…' && b.getAttribute('aria-expanded') === 'false'; b.click(); return folded && p.hidden && n.innerText.includes('The final sentence stays available.') && n.querySelector('.md:not([hidden]) strong')?.textContent === 'The final sentence stays available.'; })()")? == true, "");

@@ -238,15 +238,22 @@ fn catalog_of(d: &Deployment) -> Result<(fragment_core::catalog::Catalog, Provid
 
 /// Each slot of the model route on an OpenAI-compatible API, and its key's
 /// name in the store.
-type SlotKeys = Vec<(String, String)>;
+pub(crate) type SlotKeys = Vec<(String, String)>;
 
-/// The deployment's models (`models`): the cell's (`FRAGMENT_MODELS`, each
+/// The deployment's models (`models`, `models_cell`), when it names them.
+fn models_of(d: &Deployment) -> Result<(Option<Value>, SlotKeys)> {
+    let Some(models) = &d.models else { return Ok((None, vec![])) };
+    let (cell, keys) = models_cell(models)?;
+    Ok((Some(cell), keys))
+}
+
+/// A deployment config's `models`: the cell's (`FRAGMENT_MODELS`, each
 /// slot's upstream less its key) and the store secret each slot on an
 /// OpenAI-compatible API names for its key. Such a slot names one; a
 /// Workers AI slot names none. Checked as the cell checks them
-/// (`fragment_core::models::Models::parse`), on no local address.
-fn models_of(d: &Deployment) -> Result<(Option<Value>, SlotKeys)> {
-    let Some(models) = &d.models else { return Ok((None, vec![])) };
+/// (`fragment_core::models::Models::parse`), on no local address. `cargo
+/// xtask dev --real-agent` reads one too (dev_agent.rs).
+pub(crate) fn models_cell(models: &Value) -> Result<(Value, SlotKeys)> {
     let Some(slots) = models.as_object() else { bail!("models is an object: the slots it names ({}), each where it runs", fragment_core::models::SLOTS.join(", ")) };
     let mut cell = serde_json::Map::new();
     let mut keys = vec![];
@@ -272,7 +279,7 @@ fn models_of(d: &Deployment) -> Result<(Option<Value>, SlotKeys)> {
     if text.len() > WORKER_VAR_MAX_BYTES {
         bail!("models is {} bytes as the cell's FRAGMENT_MODELS, past a Workers variable's {WORKER_VAR_MAX_BYTES}: shorten the slots' bodies", text.len());
     }
-    Ok((Some(cell), keys))
+    Ok((cell, keys))
 }
 
 /// A Workers variable's largest value: 5 KB (developers.cloudflare.com/

@@ -302,6 +302,14 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("one no one else is in wakes for nothing: its list row's counts alone, no members asked", alone["name"] == mine.as_str() && alone["members"].is_null() && alone["sharing"]["guests"] == 0, &alone);
     let r = api.signed(&carol, "GET", "/api/access", None)?;
     s.ok("a member's own view lists what they own, not what is shared with them", r.status == 200 && !r.text.contains(&name), &r);
+    // a guest's agents are named nowhere in it (decision 64), its members
+    // read (carol's agent came in with her) or past the view's bound
+    s.ok(
+        "carol's agent, in with her, is named nowhere on its row: not among its members, nor its agents",
+        !shared.to_string().contains(&theirs),
+        &shared,
+    );
+    access_past_its_bound(s, api)?;
     let r = api.unsigned("GET", "/api/access", None)?;
     s.ok("unsigned, the access view is 401", r.status == 401, &r);
     let hand = Keys::generate();
@@ -485,6 +493,37 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
 /// Principal calls, at most (it took 300 s at 1000 on the e2e preview,
 /// telling each list in turn, 2026-10-06).
 const DELETE_ANSWERS_IN: Duration = Duration::from_secs(5);
+
+/// The access view past its bound (`ACCESS_ASKED_MAX` fragments asked for
+/// their members): a fragment it does not read names no agent in its row
+/// when someone else may be in it, since a guest's may be among them
+/// (decision 64). Method: an owner with `ACCESS_ASKED_MAX` fragments
+/// shared with a person, and one more, last by name, whose guest accepted
+/// with an agent of theirs.
+fn access_past_its_bound(s: &mut Suite, api: &Api) -> Result<()> {
+    let (owner, plain, guest) = (api.person()?, api.person()?, api.person()?);
+    let plain_id = api.identity(&plain)?;
+    for n in 0..limits::ACCESS_ASKED_MAX {
+        let name = s.named(api, &owner, &format!("bound-a{n:02}"))?;
+        s.create(api, &owner, &name)?;
+        let r = api.share(&name, &plain_id, "viewer")?;
+        anyhow::ensure!(r.status == 200, "sharing {name}: {r}");
+    }
+    let last = s.named(api, &owner, "bound-zz")?;
+    s.create(api, &owner, &last)?;
+    let (_, guest_agent) = super::delegation::agent_of(api, &guest)?;
+    let invited = api.signed(&owner, "POST", &format!("/api/f/{last}/invites"), Some(&json!({ "email": Api::email_of(&guest), "role": "viewer" })))?;
+    let yes = api.signed(&guest, "POST", &format!("/api/invites/{last}/accept"), Some(&json!({})))?;
+    let in_there = api.signed(&owner, "GET", &format!("/api/f/{last}/members"), None)?.text.contains(&guest_agent);
+    let r = api.signed(&owner, "GET", "/api/access", None)?;
+    let row = r.body["fragments"].as_array().and_then(|a| a.iter().find(|f| f["name"] == last.as_str())).cloned().unwrap_or_default();
+    s.ok(
+        &format!("past the access view's bound (its {}th fragment, unread), a guest's agent in with them is named nowhere: no members, no agents, its counts alone", limits::ACCESS_ASKED_MAX + 1),
+        invited.status == 200 && yes.status == 200 && in_there && row["members"].is_null() && row["sharing"]["guests"] == 1 && !row.to_string().contains(&guest_agent),
+        &row,
+    );
+    Ok(())
+}
 
 pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("secrets", &[]) {

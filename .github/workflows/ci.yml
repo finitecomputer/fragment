@@ -10,20 +10,26 @@
 # with its own build and node; the `e2e` job is green when every shard is.
 #
 # Caches are restored on every run and saved only from master's pushes (a
-# PR reads master's, and so does production's). Rust's are
-# Swatinem/rust-cache's, keyed by the job (the e2e's by a key it shares
-# with `deploy`, which restores it), rustc, and every Cargo.toml and
+# PR reads master's, and so does production's). `check`'s Rust cache is
+# Swatinem/rust-cache's, keyed by the job, rustc, and every Cargo.toml and
 # Cargo.lock, and saved at the job's end with only the dependencies'
 # builds: a checkout's fresh mtimes rebuild the workspace's own crates
 # anyway. It is given the target directories by name (`cache-targets:
 # false`), not `target` whole: its cleaning would leave target/tools an
-# empty tree, which xtask would take for the pinned Node. The pinned Node
-# and the JavaScript caches are actions/cache's, each key naming what it
-# holds below, saved right after the step that fills it.
+# empty tree, which xtask would take for the pinned Node. The e2e's builds,
+# our own crates' with them, are actions/cache's, one entry per master
+# commit, with the tree they were built from, so cargo rebuilds only what
+# a change touched (`e2e-shard`, below; `prune` keeps the newest alone);
+# their tools are rust-cache's, and the stub image's layers BuildKit's,
+# in the same Actions cache. The pinned Node and the JavaScript caches are
+# actions/cache's, each key naming what it holds below, saved right after
+# the step that fills it.
 #
 # A green push deploys (`deploy`, below): master's to the preview,
-# production's to production. A push to production of a commit master's
-# run already proved skips the tests and deploys at once (`proven`, below).
+# production's to production. A push of a tree a green run already
+# tested (master's, for production; for master, its pull request's, when
+# master had not moved since) skips the tests and deploys at once
+# (`proven`, below).
 name: ci
 
 on:
@@ -40,54 +46,93 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # A push to production only: whether master already proved this commit,
-  # by a run of this workflow (by its id, not its name) on a push to master
-  # whose head is this SHA, and which succeeded. A job can only need jobs
-  # of its own run, so without this a promotion tested again, for 20
-  # minutes, what master's run had (Paul, 2026-10-20). The same SHA is the
-  # same ci.yml, whose master runs always test and then deploy the
-  # preview: such a run's success is its check's, its e2e's and its
-  # deploy's. Proven, the tests skip and `deploy` runs at once; otherwise
-  # (a hotfix pushed straight to production, master's run red or still
-  # running) they run as on any push. Should this job fail, nothing after
-  # it runs and nothing deploys.
+  # A push to master or production: whether a run of this workflow (by its
+  # id, not its name) already proved what it holds. A job can only need
+  # jobs of its own run, so without this a promotion tested again, for 20
+  # minutes, what master's run had (Paul, 2026-10-20), and a merge what its
+  # pull request's run had (Paul, 2026-10-23). What a run proves is a tree:
+  # its success is its check's and every shard's, on the tree each checked
+  # out, which `e2e` records (an artifact named `tested-tree-<tree>`). So a
+  # commit is proven by a run that succeeded and is one of these:
+  #
+  # - on a push to master of a commit whose tree is this one's; for
+  #   production, master's runs of this very SHA too, recorded or not (as
+  #   before trees were). Master's runs test and then deploy the preview,
+  #   or deploy a tree proven so: such a run's success is its deploy's too.
+  # - on master only, the run of the pull request this merge commit merges,
+  #   whose head is this commit's second parent, that recorded this tree. A
+  #   pull request's run tests GitHub's merge of its head into master as
+  #   master stood then: if master has not moved since, the merge commit's
+  #   tree is that one; if it has, they differ, and the tests run. The head
+  #   binds the run to this merge: another branch's run (a fork's included)
+  #   proves nothing here, whatever tree it names, and this one's workflow
+  #   is the one this merge brings to master. A squash or a rebase merge
+  #   has no such parent.
+  #
+  # Proven, the e2e's shards skip and `deploy` runs once `check` is green;
+  # otherwise (a hotfix pushed straight to production, master moved since
+  # the pull request's run, a run red or still running) they run as on any
+  # push. Should this job fail, nothing after it runs and nothing deploys.
+  #
+  # `check` runs on every push, proven or not: besides the tree's own
+  # checks it holds the tree's schema lock to the one at what the push
+  # moved from (`github.event.before`; xtask/src/schema_lock.rs), which no
+  # tree can prove ahead of the push. A tree proven before a migration
+  # step shipped, and pushed again after it (a revert), drops that step,
+  # and every object that took it refuses code without it (docs/MODEL.md,
+  # Schemas): its `check` fails, and nothing deploys. On production too:
+  # its last deploy can hold a step its new commit lost (a hotfix's, lost
+  # in a merge back), which no run of master's checked against. `check`
+  # takes about two minutes, beside `proven`; the shards are the 15 to 20.
   proven:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/production'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/production')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      actions: read # this workflow's runs, through the API
-      contents: read
+      actions: read # this workflow's runs and their artifacts, through the API
+      contents: read # the commits' trees and parents
     outputs:
       proven: ${{ steps.ask.outputs.proven }}
     steps:
-      # the API's filters, held again to each run it answers; every one
-      # found is printed, with its state
+      # the runs the API's filters find, each fetched and held to the rules
+      # above again; every one found is printed, with its state
       - id: ask
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          workflow=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .workflow_id)
-          runs=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs" \
-              -f head_sha="$GITHUB_SHA" -f branch=master -f event=push -f per_page=100 |
-            jq -c --argjson w "$workflow" --arg sha "$GITHUB_SHA" --arg repo "$GITHUB_REPOSITORY" \
-              '[.workflow_runs[] | select(.workflow_id == $w and .head_sha == $sha and .head_branch == "master" and .event == "push" and .head_repository.full_name == $repo)]')
-          jq -r '.[] | "on master: \(.html_url), attempt \(.run_attempt): \(.status) \(.conclusion // "")"' <<< "$runs"
-          if jq -e 'any(.status == "completed" and .conclusion == "success")' <<< "$runs" > /dev/null; then
-            echo "master proved $GITHUB_SHA: deploying it without testing it again"
-            echo proven=true >> "$GITHUB_OUTPUT"
-          else
-            echo "master has not proved $GITHUB_SHA (no run of this workflow on a push to master of it succeeded): testing it first"
-            echo proven=false >> "$GITHUB_OUTPUT"
+          repo=repos/$GITHUB_REPOSITORY
+          workflow=$(gh api "$repo/actions/runs/$GITHUB_RUN_ID" --jq .workflow_id)
+          commit=$(gh api "$repo/git/commits/$GITHUB_SHA")
+          tree=$(jq -r .tree.sha <<< "$commit")
+          merged=$(jq -r 'if (.parents | length) == 2 then .parents[1].sha else "" end' <<< "$commit")
+          echo "$GITHUB_SHA's tree is $tree${merged:+; it merges $merged}"
+          ids=$(gh api -X GET "$repo/actions/artifacts" -f name="tested-tree-$tree" -f per_page=100 --jq '.artifacts[].workflow_run.id')
+          if [ "$GITHUB_REF" = refs/heads/production ]; then
+            ids+=$'\n'$(gh api -X GET "$repo/actions/workflows/$workflow/runs" -f head_sha="$GITHUB_SHA" -f branch=master -f event=push -f per_page=100 --jq '.workflow_runs[].id')
           fi
+          for id in $(sort -u <<< "$ids"); do
+            run=$(gh api "$repo/actions/runs/$id")
+            jq -r '"\(.html_url), attempt \(.run_attempt): \(.event) of \(.head_sha) (\(.head_repository.full_name) \(.head_branch)), \(.status) \(.conclusion // "")"' <<< "$run"
+            jq -e --argjson w "$workflow" '.workflow_id == $w and .status == "completed" and .conclusion == "success"' <<< "$run" > /dev/null || continue
+            head=$(jq -r .head_sha <<< "$run")
+            if jq -e --arg r "$GITHUB_REPOSITORY" '.event == "push" and .head_branch == "master" and .head_repository.full_name == $r' <<< "$run" > /dev/null; then
+              [ "$head" = "$GITHUB_SHA" ] || [ "$(gh api "$repo/git/commits/$head" --jq .tree.sha)" = "$tree" ] || continue
+              why="master's run of $head proved this tree"
+            elif [ "$GITHUB_REF" = refs/heads/master ] && [ -n "$merged" ] && jq -e --arg h "$merged" '.event == "pull_request" and .head_sha == $h' <<< "$run" > /dev/null; then
+              why="the run of the pull request this merges, at its head $head, proved this tree"
+            else
+              continue
+            fi
+            echo "$why: deploying $GITHUB_SHA without testing it again"
+            echo proven=true >> "$GITHUB_OUTPUT"
+            exit 0
+          done
+          echo "no run of this workflow proved $GITHUB_SHA's tree: testing it first"
+          echo proven=false >> "$GITHUB_OUTPUT"
 
+  # on every run, a proven push's too (`proven`, above, says why)
   check:
-    # on every run but a production push of a commit master proved
-    # (`proven`, which skips on every other run: `!cancelled()` keeps its
-    # skip from skipping this), and never after `proven` fails
-    needs: proven
-    if: ${{ !cancelled() && (needs.proven.result == 'skipped' || (needs.proven.result == 'success' && needs.proven.outputs.proven == 'false')) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -123,7 +168,9 @@ jobs:
 
   e2e-shard:
     name: e2e shard ${{ matrix.shard }}/4
-    # as `check`
+    # on every run but a push whose tree a run proved (`proven`, which
+    # skips on every other run: `!cancelled()` keeps its skip from skipping
+    # this), and never after `proven` fails
     needs: proven
     if: ${{ !cancelled() && (needs.proven.result == 'skipped' || (needs.proven.result == 'success' && needs.proven.outputs.proven == 'false')) }}
     runs-on: ubuntu-latest
@@ -137,29 +184,53 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - id: rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      # what the e2e's build compiles: the CLI and the suite
-      # (target/release), xtask (target/debug), and the cell's wasm32 builds;
-      # worker-build itself (~/.cargo/bin; its version is in the key) and the
-      # tools it fetches (wasm-bindgen at the lockfile's version, wasm-opt,
-      # esbuild). The first shard saves it, even from a red run; `deploy`
-      # restores it (its key shared, not the job's: the same inputs there).
+      # the e2e build's tools: cargo's home (the registry, and worker-build
+      # in ~/.cargo/bin; its version is in the key) and what worker-build
+      # fetches (wasm-bindgen at the lockfile's version, wasm-opt, esbuild).
+      # The first shard saves it, even from a red run; `deploy` restores it
+      # (its key shared, not the job's: the same inputs there). Its builds
+      # are the next step's.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: e2e-build-worker-build-${{ env.WORKER_BUILD_VERSION }}
+          shared-key: e2e-tools-worker-build-${{ env.WORKER_BUILD_VERSION }}
           workspaces: |
             . -> target
             cell -> target
           cache-targets: false
-          cache-directories: |
+          cache-directories: ~/.cache/worker-build
+          cache-on-failure: true
+          save-if: ${{ matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+      # The e2e's builds, our own crates' with them: xtask (target/debug),
+      # the CLI and the suite (target/release), and the cell's wasm32 builds
+      # (cell/target), as the newest master commit that saved them left
+      # them (below), with the record of the tree they were built from
+      # (target/built-tree). After this rust-cache's, which may clean the
+      # target directories as it restores.
+      - id: builds
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            target/built-tree
             target/debug
             target/release
             cell/target
-            ~/.cache/worker-build
-          cache-on-failure: true
-          save-if: ${{ matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+          key: e2e-builds-${{ runner.os }}-${{ steps.rust.outputs.cachekey }}-${{ github.sha }}
+          restore-keys: e2e-builds-${{ runner.os }}-${{ steps.rust.outputs.cachekey }}-
+      # The checkout's mtimes, before any cargo build (xtask/src/stamp.rs,
+      # which says how, compiled alone for it): every file and directory
+      # now, newer than any build restored, then each the record holds as
+      # the checkout does at the time since which it has, so cargo takes as
+      # built what was built from this very content, and nothing else
+      # (another feature set's build, kept from an older tree). The record
+      # goes into the state directory with this build's start, for the
+      # record saved below: only a build that succeeded saves one.
+      - run: |
+          rustc --edition 2021 -O -o "$RUNNER_TEMP/stamp" xtask/src/stamp.rs
+          "$RUNNER_TEMP/stamp" restore target/built-tree "$RUNNER_TEMP/stamp-state"
       # no setup-node: xtask fetches the pinned Node into target/tools
       # (crates/devstack/src/node_release.rs, checked by its SHA-256) and
       # runs its own npm ci; the runner's node is never used. A new pin is
@@ -178,9 +249,56 @@ jobs:
           path: target/cache
           key: js-cache-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs', 'package-lock.json') }}
       - run: worker-build --version | grep -qF "$WORKER_BUILD_VERSION" || cargo install worker-build --version "$WORKER_BUILD_VERSION" --locked
+      # The stub image's layers (images/stub/Dockerfile), BuildKit's, in the
+      # Actions cache (scope e2e-stub), built first and here, where a build
+      # can read and write that cache: into a builder of BuildKit's own
+      # (setup-buildx's), whose cache the builds after it find every step in,
+      # xtask's beside the Rust and the node's boot (wrangler's): their
+      # `docker build` goes to it by BUILDX_BUILDER (below), as it would
+      # otherwise to the Docker engine's own builder, which has none of
+      # these layers (`buildx use` does not move `docker build`). An
+      # unchanged bridge (images/bridge,
+      # images/hermes/boot, the images' manifest and lock: about one master
+      # commit in eight changes one) is its layers fetched in seconds, not
+      # its bridge compiled (about 100 s alone, 250 beside the Rust); a
+      # changed one compiles here, before the Rust rather than beside it.
+      # Saved from the first shard on master's pushes, every stage's layers
+      # (mode=max: the build stage's base too, 345 MB in all, each layer
+      # kept once by its digest).
+      - id: buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          # no job summary, and no build record artifact
+          DOCKER_BUILD_SUMMARY: false
+          DOCKER_BUILD_RECORD_UPLOAD: false
+        with:
+          context: images
+          file: images/stub/Dockerfile
+          platforms: linux/amd64
+          provenance: false
+          cache-from: type=gha,scope=e2e-stub
+          cache-to: ${{ matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/master' && 'type=gha,scope=e2e-stub,mode=max,ignore-error=true' || '' }}
       # the cell, the CLI and the suite, and the computer images the
       # node's boot builds (xtask/src/build.rs), all at once
       - run: cargo xtask e2e --build-only
+        env:
+          BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
+      # this commit's builds, with the tree they were built from, for the
+      # runs after it: the first shard's, on master's pushes (a red e2e's
+      # too: its build was green), unless this commit's are kept already
+      # (a re-run)
+      - if: matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.builds.outputs.cache-hit != 'true'
+        run: '"$RUNNER_TEMP/stamp" record target/built-tree "$RUNNER_TEMP/stamp-state"'
+      - if: matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.builds.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/built-tree
+            target/debug
+            target/release
+            cell/target
+          key: ${{ steps.builds.outputs.cache-primary-key }}
       - if: matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.node.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
@@ -191,6 +309,7 @@ jobs:
       # uploaded below
       - run: cargo xtask e2e --no-build --shard ${{ matrix.shard }}/4
         env:
+          BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
           CHROME_BIN: /usr/bin/google-chrome
       # after the run, from any shard that shot a preview card: miniflare
       # fetches its Chrome for the first one during the run (the first
@@ -208,22 +327,53 @@ jobs:
           retention-days: 7
 
   # the check named `e2e`: green when every shard is (a re-run's, by each
-  # shard's latest attempt). It runs whenever the shards were to run, as
-  # `check`, whatever they did (unless the run was cancelled), so a red or
-  # skipped shard makes it red; it skips with them alone.
+  # shard's latest attempt). It runs whenever the shards were to run,
+  # whatever they did (unless the run was cancelled), so a red or skipped
+  # shard makes it red; it skips with them alone.
   e2e:
     needs: [proven, e2e-shard]
     if: ${{ !cancelled() && (needs.proven.result == 'skipped' || (needs.proven.result == 'success' && needs.proven.outputs.proven == 'false')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read # the tested commit's tree, through the API
     steps:
       - run: test "${{ needs.e2e-shard.result }}" = success || { echo "a shard's job failed (${{ needs.e2e-shard.result }}); its log says where"; exit 1; }
+      # The tree every shard tested, for `proven`: GITHUB_SHA's (a pull
+      # request's merge commit, a push's head), which each checked out,
+      # recorded once they are all green as an artifact named by it (the
+      # commit and the tree in it). `proven` counts it only for a run that
+      # succeeded, `check` and every shard of its latest attempt included.
+      # A re-run's replaces its own. Recording is a saving, not a test: a
+      # step of it that fails warns and leaves the run as green as its
+      # shards, unrecorded (a push of its tree is then tested again).
+      - id: tree
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tree=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$GITHUB_SHA" --jq .tree.sha)
+          [[ $tree =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || { echo "::warning::the API named no tree for $GITHUB_SHA: '$tree'"; exit 1; }
+          echo "this run tested $GITHUB_SHA, whose tree is $tree"
+          echo "$GITHUB_SHA $tree" > "$RUNNER_TEMP/tested-tree"
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
+      - if: steps.tree.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: tested-tree-${{ steps.tree.outputs.tree }}
+          path: ${{ runner.temp }}/tested-tree
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
 
   # Continuous deployment, on a green push: master's to the preview
-  # (`--branch preview`), production's to production, at once when master
-  # proved its commit (`proven`), and never after a red test or a failed
-  # `proven`. Only Paul updates `production` (a protected branch): his
-  # push, or the pull request he merges into it, is the approval. Each
+  # (`--branch preview`), production's to production, after `check` and
+  # the e2e, or after `check` alone when a run proved its tree (`proven`),
+  # and never after a red test or a failed `proven`. Only Paul updates
+  # `production` (a protected branch): his push, or the pull request he
+  # merges into it, is the approval. Each
   # deploys from a GitHub environment of its name, `preview` or
   # `production`, which the repo's settings let
   # only its branch use, and which holds the variable DEPLOY_HOST (its
@@ -242,8 +392,9 @@ jobs:
     if: >-
       ${{ !cancelled() && github.event_name == 'push'
       && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/production')
+      && needs.check.result == 'success'
       && ((needs.proven.result == 'success' && needs.proven.outputs.proven == 'true')
-      || (needs.check.result == 'success' && needs.e2e.result == 'success')) }}
+      || needs.e2e.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -286,29 +437,42 @@ jobs:
           at=$(git -C deploy-config rev-parse --short HEAD)
           test -s "deploy-config/$CONFIG_FILE" || { echo "::error::finitecomputer/fragment-deploy has no $CONFIG_FILE at its root on main ($at)"; exit 1; }
           echo "$GITHUB_REF_NAME deploys with finitecomputer/fragment-deploy's $CONFIG_FILE at $at"
-      - uses: dtolnay/rust-toolchain@stable
+      - id: rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      # the e2e's cache, restored and never saved here: a deploy builds what
-      # its build does (xtask in target/debug, the cell's wasm32 builds,
-      # worker-build and its tools). Every input but save-if is the e2e
-      # shards' own, as the paths are part of the cache's version. On
-      # production it is always master's (a branch reads the default
-      # branch's caches), as its shards save none, and a proven push runs
-      # none.
+      # the e2e's caches, restored and never saved here: a deploy builds what
+      # its build does (xtask in target/debug, the cell's wasm32 builds, with
+      # worker-build and its tools). Every input of each but save-if is the
+      # e2e shards' own, as the paths are part of a cache's version. Its
+      # builds are this commit's when its first shard saved them (a master
+      # push the e2e ran on), and their mtimes are made as there: the cell's
+      # crates are then all fresh, and the Wasm this ships is made from the
+      # compile the e2e ran. On production they are master's newest (a
+      # branch reads the default branch's caches), as its shards save none,
+      # and a proven push runs none; what changed since then is rebuilt.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: e2e-build-worker-build-${{ env.WORKER_BUILD_VERSION }}
+          shared-key: e2e-tools-worker-build-${{ env.WORKER_BUILD_VERSION }}
           workspaces: |
             . -> target
             cell -> target
           cache-targets: false
-          cache-directories: |
+          cache-directories: ~/.cache/worker-build
+          save-if: false
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            target/built-tree
             target/debug
             target/release
             cell/target
-            ~/.cache/worker-build
-          save-if: false
+          key: e2e-builds-${{ runner.os }}-${{ steps.rust.outputs.cachekey }}-${{ github.sha }}
+          restore-keys: e2e-builds-${{ runner.os }}-${{ steps.rust.outputs.cachekey }}-
+      # as e2e-shard's
+      - run: |
+          rustc --edition 2021 -O -o "$RUNNER_TEMP/stamp" xtask/src/stamp.rs
+          "$RUNNER_TEMP/stamp" restore target/built-tree "$RUNNER_TEMP/stamp-state"
       - uses: actions/cache/restore@v4
         with:
           path: target/tools
@@ -353,3 +517,28 @@ jobs:
           echo "https://$DEPLOY_HOST/healthz answers with ${got:-no x-fragment-deploy}, not $want"
           exit 1
 
+  # The e2e's builds are kept one entry per master commit (`e2e-shard`),
+  # each about 0.5 GB of the repository's 10 GB of caches, and a run
+  # restores the newest: after a master push's shards, every older entry is
+  # deleted. A job of its own, as deleting one needs `actions: write`,
+  # which no job that runs the repo's code is given.
+  prune:
+    needs: e2e-shard
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          entries=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/caches" -f key=e2e-builds- -f ref=refs/heads/master \
+            -f sort=created_at -f direction=desc -f per_page=100 --jq '.actions_caches[] | "\(.id) \(.key) \(.size_in_bytes / 1e6 | floor) MB"')
+          echo "$entries" | head -n 1 | sed 's/^/kept: /'
+          echo "$entries" | tail -n +2 | while read -r id rest; do
+            [ -n "$id" ] || continue
+            echo "deleted: $id $rest"
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id"
+          done

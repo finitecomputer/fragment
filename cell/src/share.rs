@@ -79,10 +79,10 @@ pub(crate) const FACES_MAX: usize = 64;
 /// pill buttons), as a card: the page's, or, in the shell's dialog
 /// (`framed`), the dialog's whole.
 const SHEET_STYLE: &str = ":root{color-scheme:light dark;--bg:light-dark(#f7f6f3,#212121);--fg:light-dark(#171717,#ececec);--muted:light-dark(#66615b,#a6a19d);--line:light-dark(rgba(20,20,20,.105),rgba(255,255,255,.085));--line-strong:light-dark(rgba(20,20,20,.18),rgba(255,255,255,.16));--surface:light-dark(#fffdfa,#2b2b2a);--soft:light-dark(#f0eee9,#262625);--accent:light-dark(#315fbd,#8ab4ff);--danger:light-dark(#81112f,#f3b3b3);--open:light-dark(#167a52,#39d98a)}
-body{margin:0 auto;padding:16px;max-width:32rem;background:var(--bg);color:var(--fg);font:15px/1.5 \"Funnel Sans\",ui-sans-serif,system-ui,-apple-system,sans-serif;-webkit-font-smoothing:antialiased}
-main{background:var(--surface);border-radius:14px;padding:20px 24px;box-shadow:0 1px 2px #0000001a,0 8px 28px #0000001a}
+body{box-sizing:border-box;margin:0 auto;padding:16px;max-width:34rem;min-height:100vh;min-height:100dvh;display:flex;flex-direction:column;background:var(--bg);color:var(--fg);font:15px/1.5 \"Funnel Sans\",ui-sans-serif,system-ui,-apple-system,sans-serif;-webkit-font-smoothing:antialiased}
+main{flex:none;margin-block:auto;background:var(--surface);border-radius:14px;padding:20px 24px;box-shadow:0 1px 2px #0000001a,0 8px 28px #0000001a}
 h1{font-size:1.25rem;font-weight:600;margin:0 0 .9em;overflow-wrap:anywhere}h2{font-size:.8125rem;font-weight:600;color:var(--muted);margin:1.4em 0 .4em}
-a{color:var(--accent)}code{background:var(--soft)}form{margin:0}
+a{color:var(--accent)}code{background:var(--soft);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}pre code{display:block;padding:.6em .8em;white-space:pre-wrap;word-break:break-all}form{margin:0}
 ul.people{list-style:none;padding:0;margin:0}.people li{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:6px 0;min-height:40px;border-top:1px solid var(--line)}.people li:first-child{border-top:0}
 .av{width:32px;height:32px;border-radius:50%;object-fit:cover;background:var(--soft);display:inline-grid;place-items:center;font-size:14px;font-weight:600;flex:none}
 .who{flex:1 1 10rem;min-width:0;overflow-wrap:anywhere}.who small{display:block;color:var(--muted);font-size:.8125rem}
@@ -106,7 +106,7 @@ button.text.away{color:var(--muted)}button[data-sure]{color:var(--danger)!import
 .more{margin-top:1.2em;padding-top:.2em;border-top:1px solid var(--line)}.more .row{display:flex;gap:12px;align-items:center;justify-content:space-between}
 footer{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin-top:1.4em}footer .leave{margin-right:auto}
 .flash{padding:4px 14px;border-radius:10px;background:var(--soft);margin-bottom:1em}.flash.error{background:color-mix(in srgb,var(--danger) 18%,transparent)}
-.framed body{max-width:none;padding:0;background:var(--surface)}.framed main{box-shadow:none;border-radius:0}
+.framed body{max-width:none;min-height:0;display:block;padding:0;background:var(--surface)}.framed main{box-shadow:none;border-radius:0}
 @media (max-width:420px){body{padding:8px}main{padding:16px}}
 html{-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%;text-size-adjust:100%}body{overscroll-behavior:none}
 button,.seg,.option{-webkit-user-select:none;user-select:none;touch-action:manipulation}
@@ -175,7 +175,7 @@ fn script() -> String {
 /// platform, and who may frame it (`ancestors`).
 fn policy(forms_here: bool, ancestors: &str) -> String {
     let forms = if forms_here { " form-action 'self';" } else { "" };
-    format!("default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline';{forms} base-uri 'none'; frame-ancestors {ancestors}")
+    format!("default-src 'none'; img-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'unsafe-inline';{forms} base-uri 'none'; frame-ancestors {ancestors}")
 }
 
 /// One of sharing's pages: the platform's look, its protections, and
@@ -183,16 +183,7 @@ fn policy(forms_here: bool, ancestors: &str) -> String {
 /// join page's redirects on to the fragment's, which `form-action` would
 /// refuse).
 pub(crate) fn sheet_page(status: u16, title: &str, body: &str, forms_here: bool) -> CellResult<Response> {
-    let html = format!(
-        r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{t}</title>
-<style>{style}
-{sheet}</style>
-<main><h1>{t}</h1>{body}</main>{script}"#,
-        t = esc(title),
-        style = auth::STYLE,
-        sheet = SHEET_STYLE,
-        script = script(),
-    );
+    let html = format!("{}{}", platform_html(title, body), script());
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;
     h.set("cache-control", "no-store")?;
@@ -202,6 +193,29 @@ pub(crate) fn sheet_page(status: u16, title: &str, body: &str, forms_here: bool)
     // the join page's URL holds its token: no other origin hears it
     h.set("referrer-policy", "same-origin")?;
     Ok(Response::ok(html)?.with_status(status).with_headers(h))
+}
+
+/// Shared markup only: callers keep their own framing, navigation and
+/// script policies. Plain notices need none of the sharing controls.
+pub(crate) fn sheet_html(title: &str, body: &str) -> String {
+    format!(
+        r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{t}</title>
+<style>{sheet}</style>
+<main><h1>{t}</h1>{body}</main>"#,
+        t = esc(title),
+        sheet = SHEET_STYLE,
+    )
+}
+
+/// Platform-origin pages can load the onboarding assets from the release.
+/// Fragment-origin notices retain the self-contained sheet above.
+pub(crate) fn platform_html(title: &str, body: &str) -> String {
+    sheet_html(title, body)
+        .replacen("<html lang=\"en\">", "<html lang=\"en\" class=\"platform-page\">", 1)
+        .replacen("<main>", "<link rel=\"stylesheet\" href=\"/__shell/platform-pages.css\"><div class=\"platform-brand\"><img src=\"/__shell/finite-logo.svg\" alt=\"Finite\" width=\"44\" height=\"46\"></div><main>", 1)
+        + "<script>"
+        + include_str!("../shell/platform-pages.js")
+        + "</script>"
 }
 
 /// The share sheet itself: a sharing page only the platform's own pages
@@ -341,6 +355,14 @@ pub(crate) async fn name_agents(env: &Env, profiles: &mut BTreeMap<String, Profi
     }
 }
 
+/// Whether `m` is an agent in with its person, a member who is not the
+/// owner (decision 64; members.rs `entity_of`): never an entry of its own,
+/// nor named; its person is the one entry. The owner's agents are each in
+/// as the owner chose them, and shown as theirs.
+pub(crate) fn with_their_person(m: &Member, members: &[Member]) -> bool {
+    m.kind == Some(IdentityKind::Agent) && m.owner.as_deref().is_some_and(|o| members.iter().any(|p| p.principal == o && p.role != Role::Owner))
+}
+
 /// The ids a member list needs named: its members, and its agent
 /// members' owners.
 fn named_ids(members: &[Member]) -> Vec<String> {
@@ -385,6 +407,9 @@ fn person(m: &Member, sheet: &Sheet) -> String {
             None => "An agent".to_string(),
         });
     }
+    if sheet.with_agents.contains(&m.principal) {
+        under.push("With their agents".to_string());
+    }
     let under = if under.is_empty() { String::new() } else { format!("<small>{}</small>", under.join(" · ")) };
     format!("{picture}<span class=\"who\">{name}{you}{under}</span>")
 }
@@ -394,7 +419,10 @@ struct Sheet {
     me: String,
     /// The person's own role (`None`: they read through an agent of theirs).
     role: Option<Role>,
+    /// Its members, less the agents in with their person.
     members: Vec<Member>,
+    /// The people whose agents are in with them.
+    with_agents: Vec<String>,
     /// The invites waiting: the owner's only.
     invites: Vec<Invite>,
     visibility: Visibility,
@@ -457,12 +485,18 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
         (Some(Role::Owner), Some(token)) => Some(format!("{canonical}?view={token}")),
         _ => None,
     };
+    // an agent in with its person is no entry of its own (decision 64):
+    // its person is the one, "with their agents", never named
+    let all = members.members;
+    let with_agents: Vec<String> = all.iter().filter(|m| with_their_person(m, &all)).filter_map(|m| m.owner.clone()).collect();
+    let members: Vec<Member> = all.iter().filter(|m| !with_their_person(m, &all)).cloned().collect();
     // an agent by its title and picture, as the shell shows it
-    let profiles = profiles(env, named_ids(&members.members)).await;
+    let profiles = profiles(env, named_ids(&members)).await;
     Ok(Sheet {
         me: who.id.clone(),
         role,
-        members: members.members,
+        members,
+        with_agents,
         invites,
         visibility,
         title,
@@ -573,6 +607,11 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
             "add",
         );
         out += "<p class=\"hint\">Viewers can see it; editors can change it too. Someone without an account yet is mailed a link, and is in once they sign in with that address.</p>";
+        // whoever comes in can talk to the owner's agent: trust them
+        // (Paul, 2026-10-23: the design, and this its safeguard)
+        if fragment_core::access::talks_to_owners_agent(&sheet.members) {
+            out += &format!("<p class=\"hint trust\">{}</p>", fragment_core::access::TRUST_WARNING);
+        }
     }
     out += "<h2>People with access</h2><ul class=\"people\">";
     for m in &sheet.members {
@@ -865,6 +904,7 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
     let asked: Vec<String> = owned.iter().filter(|f| f.sharing.is_none_or(|s| s.with_others())).take(limits::ACCESS_ASKED_MAX).map(|f| f.name.clone()).collect();
     assert!(asked.len() <= limits::ACCESS_ASKED_MAX, "the access view asks a bounded number of fragments");
     let mut found: BTreeMap<String, (Vec<Member>, Vec<Invite>)> = BTreeMap::new();
+    let mut unnamed: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for round in asked.chunks(limits::ACCESS_ASKED_AT_ONCE) {
         let answers = join_all(round.iter().map(|name| async move {
             let (members, invites) = join(ask(env, url, name, who, Method::Get, "/api/members", None), ask(env, url, name, who, Method::Get, "/api/invites", None)).await;
@@ -877,8 +917,12 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
         .await;
         for (name, read) in answers {
             match read {
-                Ok(read) => {
-                    found.insert(name, read);
+                // an agent in with its person is no entry of its own, nor
+                // named among its agents (decision 64)
+                Ok((all, invites)) => {
+                    let (entity, members): (Vec<Member>, Vec<Member>) = all.iter().cloned().partition(|m| with_their_person(m, &all));
+                    unnamed.insert(name.clone(), entity.into_iter().map(|m| m.principal).collect());
+                    found.insert(name, (members, invites));
                 }
                 // deleted since its row was read, or not answering now:
                 // its row keeps its counts
@@ -924,7 +968,10 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
                 }
                 None => (None, 0, vec![]),
             };
-            AccessRow { name: f.name, kind: f.kind, title: f.title, sharing: f.sharing, agents: f.agents, members, more, invites }
+            // a guest's agent named nowhere, its members read or not (decision 64)
+            let others = f.sharing.as_ref().is_none_or(|s| s.with_others());
+            let agents = fragment_core::access::access_agents(f.agents, unnamed.get(&f.name).map(Vec::as_slice), others);
+            AccessRow { name: f.name, kind: f.kind, title: f.title, sharing: f.sharing, agents, members, more, invites }
         })
         .collect();
     Ok(Access { fragments })

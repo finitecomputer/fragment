@@ -212,7 +212,7 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   another run's fragment made beside it, then the whole one's, which
   spares it for its age. Running it against a preview spends test cents:
   Paul's or the coordinating session's to run.
-- `cargo xtask dev [--clean]`: the dev stack in the foreground under
+- `cargo xtask dev [--clean] [--real-agent [--models <config>]]`: the dev stack in the foreground under
   `wrangler dev`: the cell on :8790 with fragments at
   `http://<name>.fragment.localhost:8790/`, which rebuilds
   when `cell/src` or `crates/` change, the model route and AI steps on
@@ -232,7 +232,19 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   `target/devstack/node-8790-<boot>.log` (printed at start;
   `FRAGMENT_NODE_LOGS=1` adds wrangler's debug logs). Point the CLI at it with
   `FRAGMENT_HOST=http://127.0.0.1:8790` and run `fragment login` once. Dev fleets let jobs
-  fetch local addresses (`FRAGMENT_EGRESS_LOCAL=allow`).
+  fetch local addresses (`FRAGMENT_EGRESS_LOCAL=allow`). `--real-agent`
+  runs new computers on our Hermes image, built from the tree (its first
+  build takes a while), and the text tiers on real models: a deployment
+  config's `models` (deploy/example.jsonc's, or `--models <config>`'s: a
+  copy of the preview's runs the preview's), checked as a deploy checks
+  them, whose OpenAI-compatible slots call with the one key in the file
+  `FRAGMENT_DEV_MODEL_KEY_FILE` names; its Workers AI slots stay on the
+  fake (xtask/src/dev_agent.rs). The node lists an operator key of its
+  own (`target/devstack/operator-key`, made on first run), so `fragment
+  operator wipe <email> --yes --key-file target/devstack/operator-key`
+  wipes a person there; signed in again, they are a new person, whose
+  first run makes a fresh agent: a fresh agent's test, as on a preview
+  with an operator key its config lists.
 - `cargo xtask try <todo|inbox|notes|doc> [name]` (with `cargo xtask dev` running):
   creates and deploys a fragment from a template under
   `target/devstack/try/` (never in the repo) and prints the link to open,
@@ -319,14 +331,30 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
 - `.github/workflows/ci.yml` runs `check`, the e2e's four shards (`e2e
   shard k/4`), and `e2e`, green when they all are, on Linux, and then, on
   a push to master or `production` that both are green for, `deploy`
-  (below). A push to `production` of a commit master already proved (a
-  run of ci.yml on a push to master of that SHA succeeded, its preview
-  deploy included) skips them and deploys at once: its first job,
-  `proven`, asks the API (Paul, 2026-10-20). Its caches restore on
+  (below). A push whose tree a green run already tested skips the e2e's
+  shards and deploys once `check` is green (about two minutes: it holds
+  the schema lock to what the push moved from, which no earlier run can
+  prove): its first job, `proven`, asks the API. Each run's
+  `e2e` job records the tree its shards tested (an artifact,
+  `tested-tree-<tree>`). On `production`, a run of ci.yml that succeeded
+  on a push to master of that SHA, or of a commit with that tree, proves
+  it, its preview deploy included (Paul, 2026-10-20); on master, such a
+  run, or the green run of the pull request a merge commit merges (its
+  head the commit's second parent) that recorded the merge commit's
+  tree: a pull request's run tests its merge into master as master
+  stood, so this holds when master has not moved since (Paul,
+  2026-10-23). Its caches restore on
   every run and save only from master's pushes (each one's contents are
-  named in the workflow): Rust's through
-  `Swatinem/rust-cache`, the pinned Node's and the JavaScript caches
-  through `actions/cache`. A push's run is never cancelled by a newer
+  named in the workflow): `check`'s Rust dependencies and the e2e's
+  tools through `Swatinem/rust-cache`; the e2e's builds, our own crates'
+  with them, through `actions/cache`, one entry per master commit with
+  a record of the tree it was built from, from which `xtask/src/stamp.rs`
+  (compiled alone, before any cargo build) sets a checkout's mtimes so
+  cargo rebuilds only what was not built from its very content; `prune`
+  deletes the older entries); the stub image's layers through BuildKit's
+  Actions cache, built before the e2e's build so it and the node's boot
+  find them; the pinned Node's and the JavaScript caches through
+  `actions/cache`. A push's run is never cancelled by a newer
   one, which waits (a pull request's is). `images.yml` runs `images/`'s
   `check` on every change there, and `docker`, the Docker lane above
   (both images built, then every `--ignored` test of docker.rs on them,

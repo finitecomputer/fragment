@@ -406,10 +406,10 @@ pub(crate) fn fetched(req: &Request) -> CellResult<Fetched> {
 
 /// A navigation's answer: it differs by the kind of navigation (`Vary`),
 /// and a frame's (`ancestors`: `fragment_core::frames::ancestors`) shows
-/// only in the pages that names: the platform's for a frame session its
-/// mint made (`/auth/frame`), this origin's own, or, for a stranger's
-/// answer, those and the platform's. It is never reused from a cache
-/// without that. An app's own policy stays: a second one only narrows it.
+/// only in the pages that names: this origin's own, and, for a frame
+/// session its mint made (`/auth/frame`) or a stranger's answer, the
+/// platform's. It is never reused from a cache without that. An app's own
+/// policy stays: a second one only narrows it.
 fn bound(resp: Response, ancestors: Option<&str>) -> CellResult<Response> {
     let h = resp.headers().clone();
     h.append("vary", "sec-fetch-dest")?;
@@ -732,7 +732,12 @@ async fn identities(mut req: Request, env: &Env, ctx: &Context, url: &Url, rest:
                 let owner_key = authenticate(&req, url, Payload::Read(&body))?;
                 let proof = reg.proof.ok_or_else(|| CellError::invalid("registering an agent needs a proof by its key"))?;
                 let key = proven_key(&proof, &req, url, &owner_key)?;
-                json_answer(&ask_registry(env, &calls::RegisterAgent { owner: calls::By::Key(owner_key), key, fragment: None }).await?)
+                let agent = ask_registry(env, &calls::RegisterAgent { owner: calls::By::Key(owner_key), key, fragment: None }).await?;
+                // it comes in where its person is (decision 64)
+                if let Some(person) = &agent.owner {
+                    members::agent_made(env, person, &agent.id).await;
+                }
+                json_answer(&agent)
             }
         };
     }
@@ -961,10 +966,11 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
         None => Payload::Read(&body),
     };
     let mut credential = site_credential(&req, url, payload, fetched)?;
-    // a frame's page shows only in the page its session was made for: that
-    // session is asked for here, for the page's origin (`bound`). Only the
-    // platform's page has one (its mint names it): a session for any
-    // other is no one's, so no answer names another page.
+    // a frame's page shows only in the page its session was made for (and
+    // in its own frames there): that session is asked for here, for the
+    // page's origin (`bound`). Only the platform's page has one (its mint
+    // names it): a session for any other is no one's, so no answer names
+    // another page.
     let platform = cfg.platform();
     let (mut signed, mut framed) = (None, Framed::Stranger);
     if let (true, Some(Credential::Frame(token))) = (fetched.framed, &credential) {

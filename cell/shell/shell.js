@@ -1722,12 +1722,6 @@ const clock = (ms) => {
   const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   return today ? time : `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
 };
-const span = (ms) => {
-  const m = Math.max(1, Math.round(ms / 60_000));
-  if (m < 60) return `${m} minute${m === 1 ? "" : "s"}`;
-  const h = Math.round(m / 60);
-  return h < 48 ? `${h} hour${h === 1 ? "" : "s"}` : `${Math.round(h / 24)} days`;
-};
 // why a computer won't start, in plain words (the platform's own words
 // stay beside them, for whoever helps)
 function wontStart(why) {
@@ -1737,12 +1731,6 @@ function wontStart(why) {
   if (/restore|archive|backup/i.test(why)) return "Its save couldn't be restored.";
   return "It couldn't start.";
 }
-const LOST = {
-  crash: "Your computer stopped unexpectedly",
-  unsaved: "Your computer was stopped because it couldn't save",
-  restart: "Your restart couldn't save first",
-  unusable: "Your computer's newest save couldn't be restored",
-};
 // a restart the person asked for in this page, and of which start: a
 // computer that still won't start after one says where to get help
 let restarted = 0;
@@ -1785,10 +1773,13 @@ function noticeRow(n) {
     say("Your computer can't save right now", `It hasn't saved since ${clock(n.since)}, so what its agents did after that isn't kept yet. It keeps trying.${stop} Restarting tries to save first.`, n.why);
     restart("Restart now");
   } else if (n.kind === "went_back") {
-    const back = n.save && n.savedAt
-      ? `${n.pending ? "It goes back" : "It went back"} to its save of ${clock(n.savedAt)}${n.endedAt ? `, ${span(n.endedAt - n.savedAt)} before it stopped` : ""}.`
-      : `${n.pending ? "It starts again" : "It started again"} with nothing kept from before.`;
-    say(LOST[n.cause] ?? "Your computer went back to an older save", `${back} Work on the computer after that is gone; your chats keep everything that was said.`);
+    // told only when something was done on it after that save (a stop
+    // that lost nothing tells nothing), so it says what went, calmly
+    const since = n.save && n.savedAt ? clock(n.savedAt) : null;
+    const back = n.pending
+      ? (since ? `When it starts again, changes on it since ${since} won't be there.` : "Nothing on it was saved yet, so it will start fresh.")
+      : (since ? `Changes on it since ${since} weren't kept.` : "Nothing on it was saved yet, so it started fresh.");
+    say(n.pending ? "Your computer stopped" : "Your computer restarted", `${back} Your chats are all here.`);
     const ok = el("button", null, "OK");
     ok.type = "button";
     ok.dataset.action = "seen";
@@ -1938,12 +1929,11 @@ function actionLine(label, ...actions) {
   return row;
 }
 // Finite's privacy policy and terms (`/privacy`, `/terms`), small and
-// muted, each in a tab of its own: under the welcome's seat, and at the
-// end of Settings' Account; with its about page first (`/about`) under
-// the signed-out landing's Sign In
-function legalLinks(about = false) {
+// muted, each in a tab of its own, at the end of Settings' Account (the
+// first run's footer, index.html, has About, Contact and these)
+function legalLinks() {
   const p = el("p", "muted legal-links");
-  const pages = [...(about ? [["/about", "About"]] : []), ["/privacy", "Privacy"], ["/terms", "Terms"]];
+  const pages = [["/privacy", "Privacy"], ["/terms", "Terms"]];
   pages.forEach(([href, text], i) => {
     const a = el("a", null, text);
     a.href = href;
@@ -3183,7 +3173,8 @@ $("settings").onclick = () => openSettings().catch((e) => notice("Settings did n
 // ---- first run: sign in, a seat, then the default agent is made
 // (decision 10); it never goes through settings ----
 // Match the chat composer's rim reflection, including its 64px approach
-// and rounded corners. Listen once: firstRun replaces only the card's children.
+// and rounded corners, on every first-run card (Skyler's onboarding design,
+// 2026-10-22). Listen once: firstRun replaces only the card's children.
 const splashPointer = matchMedia("(hover: hover) and (pointer: fine)");
 let splashEdgeFrame = 0;
 let splashEdgePointer = null;
@@ -3193,7 +3184,7 @@ function clearSplashEdge() {
   $("first-run-card").style.setProperty("--edge-light", "0");
 }
 $("first-run").addEventListener("pointermove", (event) => {
-  if (!$("first-run").classList.contains("splash") || !splashPointer.matches || event.pointerType === "touch") return;
+  if (!splashPointer.matches || event.pointerType === "touch") return;
   splashEdgePointer = { x: event.clientX, y: event.clientY };
   if (splashEdgeFrame) return;
   splashEdgeFrame = requestAnimationFrame(() => {
@@ -3207,7 +3198,6 @@ $("first-run").addEventListener("pointermove", (event) => {
     const qy = Math.abs(y - rect.height / 2) - rect.height / 2 + radius;
     const distance = Math.max(0, Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - radius);
     const proximity = Math.max(0, 1 - distance / 64);
-    card.style.setProperty("--edge-radius", `${Math.max(180, rect.height)}px`);
     card.style.setProperty("--edge-x", `${x}px`);
     card.style.setProperty("--edge-y", `${y}px`);
     card.style.setProperty("--edge-light", String(proximity * proximity));
@@ -3224,10 +3214,47 @@ addEventListener("resize", clearSplashEdge);
 function firstRun(...children) {
   $("still-loading")?.remove();
   clearSplashEdge();
+  stopCardStep();
   $("layout").hidden = true;
   $("first-run").hidden = false;
-  $("first-run").classList.remove("splash");
+  $("first-run-year").textContent = String(new Date().getFullYear());
   $("first-run-card").replaceChildren(...children);
+}
+// One step of the first run's card to another, in place (the welcome's
+// seat and its trial code: billing.js seatOffer): the card's height moves
+// from the one to the other and the new step's parts rise in, as Skyler's
+// design moves them; at once with reduced motion. Focus that was in the
+// card goes to the new step's heading.
+let cardMotion = { run: 0, animations: [] };
+function stopCardStep() {
+  cardMotion.run++;
+  for (const a of cardMotion.animations) a.cancel();
+  cardMotion.animations = [];
+  $("first-run-card").classList.remove("moving");
+}
+async function cardStep(from, to) {
+  const card = $("first-run-card");
+  const before = card.getBoundingClientRect().height;
+  const focused = card.contains(document.activeElement);
+  stopCardStep();
+  const run = cardMotion.run;
+  from.hidden = true;
+  to.hidden = false;
+  const heading = to.querySelector("h1");
+  if (focused && heading) {
+    heading.tabIndex = -1;
+    heading.focus({ preventScroll: true });
+  }
+  if (!before || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const after = card.getBoundingClientRect().height;
+  const ease = "cubic-bezier(.22, 1, .36, 1)";
+  card.classList.add("moving");
+  cardMotion.animations = [
+    card.animate([{ height: `${before}px` }, { height: `${after}px` }], { duration: 520, easing: ease }),
+    ...[...to.children].map((part, i) => part.animate([{ opacity: 0, transform: "translateY(9px)" }, { opacity: 1, transform: "none" }], { duration: 380, delay: 65 + Math.min(i, 8) * 45, easing: ease, fill: "backwards" })),
+  ];
+  await Promise.all(cardMotion.animations.map((a) => a.finished.catch(() => {})));
+  if (run === cardMotion.run) stopCardStep();
 }
 function showLayout() {
   $("still-loading")?.remove();
@@ -3244,14 +3271,9 @@ function signIn() {
   const back = location.pathname + location.search;
   const go = el("a", "primary", "Sign Up");
   go.href = `/auth/login?screen_hint=sign-up&return=${encodeURIComponent(back)}`;
-  const other = el("a", "splash-secondary", "Sign In");
+  const other = el("a", "secondary splash-secondary", "Sign In");
   other.href = `/auth/login?screen_hint=sign-in&return=${encodeURIComponent(back)}`;
-  const heading = el("div", "splash-heading");
-  heading.append(el("h1", null, PITCH), el("p", "muted", SUBTITLE));
-  const actions = el("div", "splash-actions");
-  actions.append(go, other);
-  firstRun(heading, actions, legalLinks(true));
-  $("first-run").classList.add("splash");
+  firstRun(el("h1", null, PITCH), el("p", null, SUBTITLE), go, other);
 }
 // "Use another account" (`POST /auth/switch`, docs/api.md, Sign-in), back
 // to `back`: WorkOS keeps its own sign-in in the browser (clearing this
@@ -3312,33 +3334,29 @@ async function welcome() {
   imports.type = "button";
   imports.dataset.slot = "import";
   imports.hidden = true;
-  // who is signed in, and another account (back here, its trial code kept)
+  // who is signed in, and another account (back here, its trial code kept),
+  // under whichever step the card shows
   const trial = q.get("trial");
   const foot = el("div", "welcome-foot");
-  foot.append(noSeatSaid(), switchForm(trial ? `${WELCOME}?trial=${encodeURIComponent(trial)}` : WELCOME));
+  foot.append(noSeatSaid(), switchForm(trial ? `${WELCOME}?trial=${encodeURIComponent(trial)}` : WELCOME, "text"));
   // someone shared something with them first, or invited them: it is still
   // theirs to open, or to answer
   if (state.fragments.length || state.invites.length) {
-    const home = el("a", "quiet", "Not now");
+    const home = el("a", "text", "Not now");
     home.href = "/";
     foot.append(home);
   }
   const out = el("form");
   out.method = "post";
   out.action = "/auth/logout";
-  const leave = el("button", "quiet", "Sign out");
+  const leave = el("button", "text", "Sign out");
   leave.type = "submit";
   out.append(leave);
   foot.append(out);
-  firstRun(
-    el("h1", null, PITCH),
-    el("p", "muted", SUBTITLE),
-    ...(back === "canceled" ? [el("p", null, "Checkout was canceled: nothing was bought.")] : []),
-    ...seatOffer({ api, el }, mine, trial),
-    legalLinks(),
-    imports,
-    foot,
-  );
+  const canceled = el("div", "ticket");
+  canceled.append(el("p", null, "Checkout was canceled: nothing was bought."));
+  const top = [el("h1", null, PITCH), el("p", null, SUBTITLE), ...(back === "canceled" ? [canceled] : [])];
+  firstRun(...seatOffer({ api, el, step: cardStep }, mine, trial, top), imports, foot);
 }
 // A seat before the first agent. Checkout's return names its session,
 // applied at once (whatever Stripe's webhook's timing; again, it changes
@@ -3565,7 +3583,7 @@ function creatingAgent(seat = null) {
 // why, with Try again and Choose a seat (the welcome's seats again).
 function seatFirst(seat) {
   const step = el("li", "doing", "Setting up your seat");
-  const list = el("ol", "creating-steps");
+  const list = el("ol", "creating-steps ticket");
   list.append(step);
   const error = el("p", "form-error");
   error.hidden = true;
@@ -3573,7 +3591,7 @@ function seatFirst(seat) {
   retry.type = "button";
   retry.hidden = true;
   retry.onclick = () => creatingAgent(seat);
-  const choose = el("button", "quiet", "Choose a seat");
+  const choose = el("button", "text", "Choose a seat");
   choose.type = "button";
   choose.hidden = true;
   choose.onclick = () => {

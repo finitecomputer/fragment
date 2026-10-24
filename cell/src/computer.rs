@@ -423,6 +423,8 @@ impl DurableObject for ComputerCell {
     }
 
     async fn websocket_error(&self, ws: WebSocket, _error: worker::Error) -> Result<()> {
+        // closed here too, so the keepalives held open count it no more
+        let _ = ws.close(Some(1011), None::<&str>);
         self.keepalive_closed(&ws).await;
         Ok(())
     }
@@ -743,6 +745,13 @@ impl ComputerCell {
     /// wake while a start is under way) applies its own event between, and
     /// the generations keep a late report from changing anything.
     async fn drive(&self, first: Event) -> CellResult<Option<String>> {
+        self.drive_after(Some(first)).await
+    }
+
+    /// `drive`, after closing the keepalives its lifecycle counts that the
+    /// runtime no longer holds open (`keepalives_lost`); with no `first`,
+    /// those alone (a keepalive's close).
+    async fn drive_after(&self, first: Option<Event>) -> CellResult<Option<String>> {
         let told = self.notices()?;
         // a deploy since its last look is news, told as any change is
         self.look_logged().await;
@@ -803,12 +812,18 @@ impl ComputerCell {
         }
     }
 
-    async fn drive_events(&self, first: Event) -> CellResult<Option<String>> {
-        let mut queue = vec![first];
+    async fn drive_events(&self, first: Option<Event>) -> CellResult<Option<String>> {
+        let mut queue: Vec<Event> = first.into_iter().collect();
         if let Some(exited) = self.take_over().await? {
             // the event that brought this isolate up applies after the exit
             queue.push(exited);
         }
+        // before them all, the keepalives it counts that the runtime no
+        // longer holds open close, as their closes would have (#557: a deploy
+        // disconnects every socket, and the guest's close after it reaches no
+        // release); one the runtime holds never does
+        let lost = self.lifecycle()?.keepalives_lost(self.keepalives_held()?);
+        queue.extend((0..lost).map(|_| Event::Closed { socket: Socket::Keepalive }));
         let mut refused = None;
         let rules = self.rules();
         // bounded: each event's actions report at most one event each, and a
@@ -872,7 +887,7 @@ impl ComputerCell {
             }));
         }
         let id = self.must(MetaKey::Id)?;
-        self.call("arm", &[g, id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts()]).await?;
+        self.call("arm", &[g, id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts(), self.codestorage_through_egress()]).await?;
         Ok(None)
     }
 
@@ -1010,6 +1025,12 @@ impl ComputerCell {
     /// The hosts the swap intercepts: every provider's in the catalog.
     fn swap_hosts(&self) -> JsValue {
         js::to_js(&json!(self.cfg.providers.hosts()))
+    }
+
+    /// Whether the guest reaches code.storage through its egress
+    /// (`egress_codestorage`): a local fleet's, at a loopback address.
+    fn codestorage_through_egress(&self) -> JsValue {
+        JsValue::from_bool(fragment_core::codestorage::guest_api(&self.cfg.codestorage().api).is_some())
     }
 
     /// The environment every image may rely on (docs/computers.md).
@@ -1154,7 +1175,7 @@ impl ComputerCell {
         }
         let started_ms = js::now_ms();
         self.call("start", &[g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size)]).await?;
-        let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts()]).await?;
+        let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts(), self.codestorage_through_egress()]).await?;
         if armed.as_bool() != Some(true) {
             return Err(CellError::host(format!("start {generation} was superseded before it was armed")).into());
         }
@@ -2009,6 +2030,8 @@ impl ComputerCell {
                 v["unsavedSince"] = json!(life.unsaved_since_ms());
                 v["freeSince"] = json!(life.free_since_ms());
                 v["keepalives"] = json!(life.keepalives());
+                // the keepalives the runtime holds open, beside those it counts
+                v["keepalivesHeld"] = json!(self.keepalives_held()?);
                 v["failSaves"] = json!(self.meta(MetaKey::FailSaves)?.and_then(|n| n.parse::<u32>().ok()).unwrap_or(0));
                 v["hangBackups"] = json!(self.meta(MetaKey::HangBackups)?.and_then(|n| n.parse::<i64>().ok()).unwrap_or(0));
                 Ok(v)
@@ -2508,15 +2531,28 @@ impl ComputerCell {
         self.exec(&format!("DELETE FROM {table} WHERE hash NOT IN (SELECT hash FROM {table} ORDER BY expires_at DESC LIMIT {max})"), vec![])
     }
 
-    /// A keepalive closed: it counts only if its container is the running one.
+    /// A keepalive closed: it counts only if its container is the running
+    /// one, and as the lifecycle's count coming down to the keepalives still
+    /// open (`drive_after`): one closed already for want of its socket (a
+    /// deploy's, its close late) counts once.
     async fn keepalive_closed(&self, ws: &WebSocket) {
         let current = self.lifecycle().map(|l| format!("g{}", l.generation())).unwrap_or_default();
         if !self.state.get_tags(ws).contains(&current) {
             return;
         }
-        if let Err(e) = self.drive(Event::Closed { socket: Socket::Keepalive }).await {
+        if let Err(e) = self.drive_after(None).await {
             console_error!("{}", json!({ "computer": "keepalive-closed", "error": e.message }));
         }
+    }
+
+    /// The running start's keepalives the runtime holds open: each socket
+    /// accepted for that start (tagged with its generation) and open, so not
+    /// one closing (its close handler closed it first) nor one a deploy
+    /// disconnected (the runtime lists none such).
+    fn keepalives_held(&self) -> CellResult<usize> {
+        let tag = format!("g{}", self.lifecycle()?.generation());
+        let open = |ws: &WebSocket| AsRef::<worker_sys::web_sys::WebSocket>::as_ref(ws).ready_state() == worker_sys::web_sys::WebSocket::OPEN;
+        Ok(self.state.get_websockets_with_tag(&tag).iter().filter(|ws| open(ws)).count())
     }
 
     /// The guest's keepalive: accepted here, so it is the Computer DO's own
@@ -2687,7 +2723,12 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             let took = crate::fragment::ask(env, fragment, "computer/assign", &json!({ "computer": id, "owner": who })).await?;
             let identity = took["identity"].as_str().ok_or_else(|| CellError::host("the agent fragment named no identity"))?;
             let body = json!({ "fragment": fragment, "identity": identity, "owner": who });
-            json_response(&view_of(ask(env, id, "computer/assign", &body).await?)?)
+            let view = view_of(ask(env, id, "computer/assign", &body).await?)?;
+            // it comes in where its person is (decision 64), once both the
+            // fragment and the computer hold it, so its computer hears each
+            // join; a replay joins nothing twice
+            crate::members::agent_made(env, who, identity).await;
+            json_response(&view)
         }
         (Method::Put, [id, "agents", fragment, "connections"]) => {
             owned(env, who, id).await?;
@@ -2894,6 +2935,7 @@ impl ComputerEgress {
             "api" => egress_api(req, &env, &ctx, &computer).await,
             "model" => egress_model(req, &env, &ctx, &computer).await,
             "swap" => egress_swap(req, &env, &ctx, &computer).await,
+            "codestorage" => egress_codestorage(req, &env).await,
             r => Err(CellError::new(ErrorCode::NotFound, format!("no egress route {r}"))),
         };
         // one line per refusal (lesson 14): the guest's requests never reach
@@ -2914,7 +2956,9 @@ impl ComputerEgress {
 /// own routes (`/f/<fragment>/…`), as the agent its `x-fragment-agent`
 /// names: the agent fragment signs it (NIP-98) only when it runs on this
 /// computer, and the router answers it as it would from the internet.
-/// Without the header, only the computer's own routes answer.
+/// Without the header, only the computer's own routes answer. A storage
+/// token names the code.storage the guest can reach: its egress's, on a
+/// local fleet (`egress_codestorage`).
 async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     let url = req.url()?;
@@ -2956,6 +3000,11 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
         None => return Err(CellError::new(ErrorCode::NotFound, "the API is /api/… and a fragment's routes /f/<fragment>/…")),
     };
     let method = req.method();
+    // Only the platform's token endpoint: a channel or app route with
+    // this suffix keeps its own body. Decode as the fragment router does.
+    let segments: Vec<&str> = path.split('/').collect();
+    let storage_token = method == Method::Get
+        && matches!(segments.as_slice(), ["", "api", "f", _, endpoint] if crate::fragment::decode_segment(endpoint) == "storage-token");
     let socket = req.headers().get("upgrade")?.is_some_and(|u| u.eq_ignore_ascii_case("websocket"));
     let body = match method {
         Method::Get | Method::Head => vec![],
@@ -3011,7 +3060,49 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
         init.with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
     }
     let out = Request::new_with_init(&target, &init)?;
-    crate::route(out, env, ctx).await
+    let mut answered = crate::route(out, env, ctx).await?;
+    if let Some(api) = fragment_core::codestorage::guest_api(&cfg.codestorage().api).filter(|_| storage_token && answered.status_code() == 200) {
+        let mut token: fragment_proto::StorageToken = answered.json().await?;
+        token.api = api;
+        return json_response(&token);
+    }
+    Ok(answered)
+}
+
+/// The guest's call to code.storage on a local fleet, whose code.storage
+/// is at a loopback address the guest's container cannot reach (the
+/// machine's, not the container's): at `GUEST_HOST`, which a storage token
+/// minted through its egress names (`egress_api`), sent on as it came, its
+/// token with it, to `CODESTORAGE_API_URL`. On a deployment the guest
+/// reaches code.storage itself, and this is 404.
+async fn egress_codestorage(mut req: Request, env: &Env) -> CellResult<Response> {
+    let cfg = Config::from_env(env);
+    if fragment_core::codestorage::guest_api(&cfg.codestorage().api).is_none() {
+        return Err(CellError::new(ErrorCode::NotFound, "code.storage is reached directly here"));
+    }
+    let url = req.url()?;
+    let query = url.query().map(|q| format!("?{q}")).unwrap_or_default();
+    let target = format!("{}{}{query}", cfg.codestorage().api, url.path());
+    let method = req.method();
+    let body = match method {
+        Method::Get | Method::Head => vec![],
+        _ => crate::read_body(&mut req, EGRESS_BODY_MAX_BYTES).await?,
+    };
+    let headers = Headers::new();
+    for k in ["authorization", "content-type", "accept"] {
+        if let Some(v) = req.headers().get(k)? {
+            headers.set(k, &v)?;
+        }
+    }
+    if !body.is_empty() {
+        headers.set("content-length", &body.len().to_string())?;
+    }
+    let mut init = RequestInit::new();
+    init.with_method(method).with_headers(headers);
+    if !body.is_empty() {
+        init.with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
+    }
+    Ok(Fetch::Request(Request::new_with_init(&target, &init)?).send().await?)
 }
 
 /// The guest's model call (docs/computers.md, Models): `POST

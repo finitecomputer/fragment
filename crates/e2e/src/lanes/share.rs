@@ -71,6 +71,13 @@ fn framed_by_platform(r: &Reply) -> bool {
     csp.split(';').map(str::trim).filter(|d| d.starts_with("frame-ancestors")).eq(["frame-ancestors 'self'"]) && r.header("x-frame-options") == "SAMEORIGIN"
 }
 
+/// The shell's share sheet is open and has sized its frame: the sheet's own
+/// script told the shell its height, so its buttons are wired too. Its
+/// frame's DOM comes before that: the script waits on the platform's
+/// stylesheet, which the page links ahead of its content (share.rs
+/// `platform_html`), and a Done clicked meanwhile does nothing.
+const SHEET_SIZED: &str = "document.getElementById('sheet').open && !!document.querySelector('#sheet iframe')?.style.height";
+
 /// Whether a page severs a window that opened it.
 fn unopened(r: &Reply) -> bool {
     r.header("cross-origin-opener-policy") == "same-origin"
@@ -159,6 +166,17 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
             && r.text.contains("name=\"email\"")
             && r.text.contains("General access"),
         &r,
+    );
+    // whoever the owner lets in can talk to their agent in it: the sheet
+    // says to trust them, by the invite, and only where it applies (Paul,
+    // 2026-10-23)
+    let warning = fragment_core::access::TRUST_WARNING;
+    let plain = make(&s.name("plain"), "blank")?;
+    let without = with_session(api, "GET", &format!("/share/{plain}"), &owner_session)?;
+    s.ok(
+        "beside its invite, the sheet of a fragment the owner's agent is in says to trust whoever they invite; one with no agent of theirs in it does not",
+        r.text.contains(&format!("<p class=\"hint trust\">{warning}</p>")) && without.status == 200 && without.text.contains("name=\"email\"") && !without.text.contains(warning),
+        &without,
     );
     s.ok(
         "only the platform's own pages may frame it (`frame-ancestors 'self'` alone: every fragment is another origin), and it severs a window that opened it",
@@ -438,18 +456,25 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
             && own.status == 400 && own.message().contains("owns it"),
         format!("{r} {own}"),
     );
-    // a share is the person's and their agents' (Paul, 2026-10-13), and the
-    // sheet names the person, never their agents (decision 63: "I invite
-    // Skyler and his agents, not Skyler and his agent Agent123")
-    let theirs = Keys::generate();
+    // a person's membership is their agents' (decision 64): one they make
+    // now comes in beside them, and the sheet names the person, one entry
+    // "with their agents", never the agent (decision 63: "I invite Skyler
+    // and his agents, not Skyler and his agent Agent123")
+    let member_agent = Keys::generate();
     let reg = "/api/identities";
-    let made = api.signed(&member, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&theirs, "POST", reg, &member) })))?;
+    let made = api.signed(&member, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&member_agent, "POST", reg, &member) })))?;
     let theirs_id = made.body["id"].as_str().unwrap_or("-").to_string();
     let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "role"), ("member", &member_id), ("role", "editor")])?;
     let shown = with_session(api, "GET", &sheet, &owner_session)?;
     s.ok(
-        "the owner changes a role on the sheet; the person is named there, their agents never (no name, no npub)",
-        made.status == 200 && r.status == 303 && role_of(&member_id)?.as_deref() == Some("editor") && shown.text.contains(&member_name) && !shown.text.contains("With their agent") && !shown.text.contains(&theirs_id),
+        "an agent the member makes comes in beside them; the owner changes their role on the sheet, and it follows; the person is one entry there, \"with their agents\", the agent never named (no name, no npub)",
+        made.status == 200
+            && r.status == 303
+            && role_of(&member_id)?.as_deref() == Some("editor")
+            && role_of(&theirs_id)?.as_deref() == Some("editor")
+            && shown.text.contains(&member_name)
+            && shown.text.contains("With their agents")
+            && !shown.text.contains(&theirs_id),
         format!("{r} {made}"),
     );
     let r = api.signed(&owner, "PUT", &format!("/api/f/{chat}/members/{member_id}"), Some(&json!({ "role": "viewer" })))?;
@@ -561,6 +586,27 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         "a chat is made members only, and its sheet keeps its own agent's place: no role buttons, no Remove, saying why",
         r.status == 200 && r.text.contains("This chat's own agent") && controls == 0 && r.text.contains("value=\"members\" aria-pressed=\"true\""),
         &r,
+    );
+    // a person who accepts brings their agents into its roster, after its
+    // own agent, its lead (decision 64): each takes part as itself
+    let r = api.signed(&owner, "POST", &format!("/api/f/{talk}/invites"), Some(&json!({ "email": member_name, "role": "editor" })))?;
+    let yes = api.signed(&member, "POST", &format!("/api/invites/{talk}/accept"), Some(&json!({})))?;
+    let roster = api.signed(&member, "GET", &format!("/api/f/{talk}/members"), None)?;
+    let agents: Vec<&str> = roster.body["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").filter_map(|m| m["principal"].as_str()).collect();
+    let its_list = api.signed(&member_agent, "GET", "/api/fragments", None)?;
+    let listed_there = its_list.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == talk.as_str()));
+    let said = api.signed(&member_agent, "POST", &format!("/api/f/{talk}/channels/chat"), Some(&json!({ "id": "theirs-1", "body": { "text": "hello from the member's agent" } })))?;
+    let sheet_now = with_session(api, "GET", &format!("/share/{talk}"), &owner_session)?;
+    s.ok(
+        "a member who accepts a chat's invite brings their agent into its roster after its own (the lead stays first), in the agent's own list; it speaks there as itself; the sheet shows the member once, \"with their agents\", never naming it",
+        r.status == 200
+            && yes.status == 200
+            && agents == vec![agent.as_str(), theirs_id.as_str()]
+            && listed_there
+            && said.status == 200
+            && sheet_now.text.contains("With their agents")
+            && !sheet_now.text.contains(&theirs_id),
+        format!("{yes} {roster} {said}"),
     );
 
     // ---- the owner sets who can open it, and makes a new link
@@ -733,7 +779,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.click(&home, share)?;
     }
     let inside = |chrome: &mut Browser| chrome.eval_in_frame(&home, "/share/", "document.body?.innerText ?? ''").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
-    let shown = windowed && chrome.until(&home, "document.getElementById('sheet').open", wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
+    let shown = windowed && chrome.until(&home, SHEET_SIZED, wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
     chrome.screenshot(&home, &s.scratch.join("share-dialog.png"))?;
     let done = shown && chrome.eval_in_frame(&home, "/share/", "(document.querySelector('button[data-done]').click(), true)").is_ok();
     let closed = done && chrome.until(&home, &format!("!document.getElementById('sheet').open && !document.querySelector('#sheet iframe') && !!document.querySelector({row:?})"), wait);
@@ -741,6 +787,68 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         "the shell opens an app's share sheet in a dialog (a frame on its own origin), and its Done closes it (the shell reads the list again)",
         shown && closed,
         format!("listed {listed} windowed {windowed} shown {shown} done {done}: {}", inside(&mut chrome)),
+    );
+
+    // ---- at a short window and a tall one: the dialog is as tall as the
+    // sheet says, all of it in view when it fits and scrolling when it does
+    // not, and its Done, clicked where it is drawn, closes it
+    let (mut all, mut seen) = (true, vec![]);
+    for (height, fits) in [(700, false), (1440, true)] {
+        chrome.viewport(&home, 1280, height, false)?;
+        // (two frames for the desktop to lay itself out at the new size)
+        chrome.eval(&home, "new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))")?;
+        let ready = chrome.until(&home, &format!("innerHeight === {height} && {}", settled(share)), wait);
+        if ready {
+            chrome.click(&home, share)?;
+        }
+        let sized = ready && chrome.until(&home, SHEET_SIZED, wait);
+        // the sheet's own height, and the frame and dialog the shell gave it
+        let mut laid = Value::Null;
+        let fitted = sized
+            && s.eventually(wait, || {
+                let own = chrome.eval_in_frame(&home, "/share/", "document.body.offsetHeight").ok().and_then(|v| v.as_f64());
+                laid = chrome
+                    .eval(
+                        &home,
+                        "(() => { const d = document.getElementById('sheet'), r = d.getBoundingClientRect(); \
+                         return { frame: d.querySelector('iframe').getBoundingClientRect().height, dialog: r.height, inView: r.top >= 0 && r.bottom <= innerHeight, scrolls: d.scrollHeight > d.clientHeight }; })()",
+                    )
+                    .unwrap_or_default();
+                laid["own"] = json!(own);
+                own.is_some()
+                    && laid["frame"].as_f64() == own
+                    && laid["inView"] == json!(true)
+                    && laid["scrolls"] == json!(!fits)
+                    && (!fits || laid["dialog"].as_f64() == own)
+            });
+        chrome.screenshot(&home, &s.scratch.join(format!("share-dialog-{height}.png")))?;
+        // Done where it is drawn: the dialog scrolled to it, and the point
+        // the frame's place in the page plus the button's in the frame,
+        // the button what is there
+        chrome.eval(&home, "(() => { const d = document.getElementById('sheet'); d.scrollTop = d.scrollHeight; return true; })()")?;
+        let frame = chrome.eval(&home, "(() => { const r = document.querySelector('#sheet iframe')?.getBoundingClientRect(); return r ? [r.left, r.top] : []; })()")?;
+        let done = chrome
+            .eval_in_frame(&home, "/share/", "(() => { const r = document.querySelector('button[data-done]').getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2; return document.elementFromPoint(x, y)?.closest('button[data-done]') ? [x, y] : []; })()")
+            .unwrap_or_default();
+        let at = match (frame.as_array().map(Vec::as_slice), done.as_array().map(Vec::as_slice)) {
+            (Some([fx, fy]), Some([x, y])) => fx.as_f64().zip(fy.as_f64()).zip(x.as_f64().zip(y.as_f64())).map(|((fx, fy), (x, y))| (fx + x, fy + y)),
+            _ => None,
+        };
+        if let Some(at) = at {
+            chrome.click_at(&home, at)?;
+        }
+        let closed = at.is_some() && chrome.until(&home, "!document.getElementById('sheet').open && !document.querySelector('#sheet iframe')", wait);
+        seen.push(format!("{height}: sized {sized} {laid} Done at {at:?} closed {closed}"));
+        all &= sized && fitted && closed;
+        if !all {
+            break;
+        }
+    }
+    chrome.viewport(&home, 1280, 800, false)?;
+    s.ok(
+        "at a short window and a tall one the dialog is as tall as the sheet says, in view (scrolling only when the sheet does not fit), and its Done, clicked where it is drawn, closes it",
+        all,
+        seen.join("; "),
     );
 
     // ---- settings' Sharing: who has access to what of the owner's, by
@@ -756,6 +864,9 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         drawn && text.contains(&title) && text.contains("Anyone with the link") && text.contains(&member_name) && text.contains("Viewer") && text.contains(&waiting),
         text,
     );
+    // At this width Settings has a sticky nav. A nearest-edge scroll can
+    // put the view buttons behind it; center them before the real clicks.
+    chrome.eval(&home, "document.querySelector('#settings-access button[data-by=person]').scrollIntoView({block:'center'})")?;
     chrome.click(&home, "#settings-access button[data-by=person]")?;
     let by_person = chrome.until(
         &home,
@@ -764,9 +875,10 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     );
     chrome.screenshot(&home, &s.scratch.join("share-settings-by-person.png"))?;
     s.ok("and by person: what each of them can open of the owner's", by_person, chrome.eval(&home, "document.getElementById('settings-access').innerText")?);
+    chrome.eval(&home, "document.querySelector('#settings-access button[data-by=fragment]').scrollIntoView({block:'center'})")?;
     chrome.click(&home, "#settings-access button[data-by=fragment]")?;
     chrome.click(&home, &format!("#settings-access .access-name[data-share={chat:?}]"))?;
-    let opened = chrome.until(&home, "document.getElementById('sheet').open", wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
+    let opened = chrome.until(&home, SHEET_SIZED, wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
     let _ = chrome.eval_in_frame(&home, "/share/", "(document.querySelector('button[data-done]').click(), true)");
     let closed = opened && chrome.until(&home, "!document.getElementById('sheet').open && !!document.querySelector('#settings-access')", wait);
     s.ok("a fragment's title there opens its share sheet, and closing it draws the section again", opened && closed, inside(&mut chrome));
@@ -850,7 +962,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.eval(&theirs, "([...document.querySelectorAll('#menu button')].find(b => b.textContent === 'People…').click(), true)")?;
     }
     let inside = |chrome: &mut Browser| chrome.eval_in_frame(&theirs, "/share/", "document.body?.innerText ?? ''").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
-    let shown = offered && chrome.until(&theirs, "document.getElementById('sheet').open", wait) && s.eventually(wait, || inside(&mut chrome).contains("Who has access to"));
+    let shown = offered && chrome.until(&theirs, SHEET_SIZED, wait) && s.eventually(wait, || inside(&mut chrome).contains("Who has access to"));
     chrome.screenshot(&theirs, &s.scratch.join("share-people-member.png"))?;
     let text = inside(&mut chrome);
     s.ok(

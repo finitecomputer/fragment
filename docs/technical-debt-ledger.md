@@ -252,6 +252,25 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** the registry (or a per-person index) records each
   fragment as it is made, and the wipe reads it beside the lists.
 
+## An agent made later joins best effort
+
+- **Observed:** 2026-10-23, decision 64 (`claude/member-with-agents`):
+  a person's agents are members beside them where they accepted an
+  invite. One made after their yes comes in as it is registered (a
+  computer's, once its computer takes it: computer.rs): the
+  platform reads its person's list and asks each fragment of someone
+  else's they are in (`members::agent_made`), once, with no outbox: a
+  fragment that does not answer then never hears it.
+- **Risk:** a person in with only some of their agents (one made later
+  missing), until their next yes there: it reaches the fragment acting
+  for them (R17), but is in no chat's roster there, and its computer
+  does not follow it.
+- **First proof:** a log line `{"agent-made": …, "fragment": …, "failed":
+  …}`; a person's agent missing from a fragment's members beside them.
+- **Delete when:** an outbox carries it (the person's list, which knows
+  both their fragments and when one is told, retrying on its alarm), or
+  a fragment reconciles a person's agents as it is read.
+
 ## Invites from before their yes are met by a sign-in
 
 - **Observed:** 2026-10-22, decision 63 (`claude/editor-invites`): an
@@ -1335,9 +1354,12 @@ fragment.club until cutover (decisions 34–35).
   `rollback` and `drafts` still go to code.storage itself, with the
   15-minute, repo-scoped token the platform mints for the agent.
 - **Risk:** that token is a credential in the guest, which otherwise
-  holds none (decision 43), for as long as the command runs; and the
-  local lanes cannot prove an agent's deploy at all, since a container
-  under `wrangler dev` cannot reach the dev stack's code.storage fake.
+  holds none (decision 43), for as long as the command runs. Locally,
+  where a container under `wrangler dev` cannot reach the dev stack's
+  code.storage fake at the machine's loopback, the egress sends the
+  guest's calls on to it, its token with them (docs/computers.md, The
+  fragment API; the computers lane's "through its egress" checks): the
+  path, not yet the token swap.
 - **First proof:** phase 6's exit, an agent building and deploying an
   app from a chat, on a preview.
 - **Delete when:** a computer's sync and deploy go through its API egress

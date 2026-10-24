@@ -57,7 +57,16 @@ container starts until someone asks again).
 - **Awake while:** a port tab is open, or the guest holds the keepalive
   socket (below). Traffic from the container does not count (spike S3).
   Twenty minutes after neither holds, it sleeps. A $200 seat's computer
-  never sleeps (decision 25).
+  never sleeps (decision 25). A keepalive counts as long as the runtime
+  holds its socket: before each event the DO closes those it counts that
+  the runtime no longer holds open for the running start
+  (`Lifecycle::keepalives_lost`, `getWebSockets`), never one it holds
+  (#557). A deploy restarts every Durable Object and disconnects every
+  socket, and the guest's close after it reaches no release: on the
+  preview (2026-10-22) one stayed counted open for 14 hours, so its
+  computer never slept, took a busy save every 15 minutes and was
+  metered. Closed so, it is held as any closed one is (the 20 minutes),
+  and the guest opens it again if its turn still runs (below).
 - **Saved** (below, "Saves and what a wake restores"): when its work
   ends (the guest's last keepalive closes, and 30 s pass with none opened
   again), every 15 minutes while a keepalive stays open, and at every
@@ -144,10 +153,10 @@ the bridge), what its person saw before 2026-10-08, and what they see now:
 | **Its owner's sleep**, saved (the shell's update is one) | `POST …/sleep` | the same | the same |
 | **A sleep whose save fails** | any sleep; it is kept awake (I5) and tried again after 1, 2, 4, 8, 15 minutes | Settings' `why`, read only when Settings was opened after it / nothing; its owner charged for the time it was kept | an `unsaved` notice at once, over every chat and Settings, pushed to open pages: since when its work is in no save, the save a stop goes back to, the time the bound stops it, and Restart; the time it is kept, from its failing try's start to the bound, is free |
 | **Awake saves that keep failing** (a turn's end, every 15 minutes busy) | tried again after a growing pause, unbounded while awake | nothing anywhere: no `why` for an awake save | the `unsaved` notice once two fail in a row (no stop time: none is due until it would sleep) |
-| **The bound runs out**: put to sleep unsaved | the sleep tried at `unsaved_since + unsaved_max_ms` (exactly: the last try is the bound's), only when nothing holds it | Settings' `why` ("slept unsaved"), which then stayed for good (only a save of the same life cleared it) / nothing | a `went_back` notice (pending) while it is asleep: what it will go back to; the `why` goes at the next save that works |
-| **A crash**: the container stops on its own (out of memory, a host restart, the runtime's idle stop, or dying while its sleep held or saved it) | `Exited`; it starts again at once while anything wants it, else at its next wake | nothing (`restored` and `rollbacks` were in the API only) / a turn it cut ends quietly as "lost when the computer restarted"; the agent's next turn there is told what was cut (docs/bridge.md) | a `went_back` notice: stopped unexpectedly, back to its save of `HH:MM`, how much before it stopped; the chat and the agent as before |
+| **The bound runs out**: put to sleep unsaved | the sleep tried at `unsaved_since + unsaved_max_ms` (exactly: the last try is the bound's), only when nothing holds it | Settings' `why` ("slept unsaved"), which then stayed for good (only a save of the same life cleared it) / nothing | a `went_back` notice (pending) while it is asleep: since when changes on it won't be there; the `why` goes at the next save that works; nothing when nothing was done on it since that save |
+| **A crash**: the container stops on its own (out of memory, a host restart, the runtime's idle stop, or dying while its sleep held or saved it) | `Exited`; it starts again at once while anything wants it, else at its next wake | nothing (`restored` and `rollbacks` were in the API only) / a turn it cut ends quietly as "lost when the computer restarted"; the agent's next turn there is told what was cut (docs/bridge.md) | a `went_back` notice, only when something was done on it since the save it went back to (below): "Your computer restarted. Changes on it since `HH:MM` weren't kept. Your chats are all here."; the chat and the agent as before |
 | **A wake past an unusable save** (its archive gone, or the image's check failed) | `RestoreFailed`, the save before it at once | nothing | a `went_back` notice: the newest save could not be restored |
-| **Its owner's restart** | `POST …/restart` | (no restart) | saved first: nothing to tell; its save failing, a `went_back` notice for the restart |
+| **Its owner's restart** | `POST …/restart` | (no restart) | saved first: nothing to tell; its save failing, a `went_back` notice for the restart, when something was done on it since its last save |
 | **A wake whose snapshot will not start** | the image and the same save, in the same wake | nothing | nothing: nothing is lost |
 | **A wake from a snapshot that comes up dead** (#362: started, then no exec answered and its guest never read its view) | unheard 45 s after its start; the image and the same save, in the same wake | it was awake and answered no one: messages unanswered, and its sleep's save hung for good (r4, r6) | nothing: nothing is lost, its wake 45 s slower |
 | **A sleep whose backups never answer** (a sick container's) | its save fails at its bound (8 minutes), as one that fails | it stayed `sleeping`, held, answering no one, and owed as awake, for good; its owner's sleep never answered (r4, r6) | as a sleep whose save fails: kept, the `unsaved` notice, tried again, and the bound ends it |
@@ -174,7 +183,19 @@ whoever reads it:
   went back to an older save (`crash`, `unsaved`, `restart`, `unusable`),
   or will as it next starts (`pending`). Told until its owner says they
   saw it (`POST …/notices/seen {life}`), whatever starts come after; the
-  newest loss only.
+  newest loss only. None for a loss that lost nothing (Paul, 2026-10-23:
+  "if the user had no activity between last good save and stop I don't
+  know if we even need the notice at all"): nothing was done on that life
+  after the save it goes back to (its newest save that worked, or, with
+  none, the one it came up from). Done means what the Computer DO hears:
+  its guest's keepalive or a port tab opened or closed, or a record or a
+  join woke it, after that save's hold began (`Ended::quiet`). A socket
+  that only stays open across the save is not: the DO can count a
+  keepalive open that its guest let go of (on the preview, 2026-10-23, one
+  whose close was lost across a deploy stayed counted open for 14 hours,
+  so the computer took a busy save every 15 minutes all night and never
+  slept), and a turn really running at a stop is ended as lost in its own
+  chat. Its guest still reads such a start as a rollback (`restored`).
 - `update {version}`: it is awake on another version than its next start
   runs (`version`, the view's `latest`; the view's `version` is the one it
   runs), and no turn runs (no keepalive open). Told until a restart or a
@@ -722,7 +743,9 @@ docs/durable-computers.md. A computer keeps its newest three saves of
   included), or its start fell back to a save older than that life's
   newest, so what that life did since some save is in none. A start from
   the save its life's sleep took is none. Its owner is told of the newest
-  until they say they saw it (`went_back`: "What its owner is told").
+  until they say they saw it, when something was done on the life it
+  lost after the save it went back to (`went_back`: "What its owner is
+  told").
   Nothing's correctness depends on the guest reading either.
 
 ### Bounds
@@ -803,6 +826,14 @@ expires within 30 days. The container application is the deployment's
 - `http://api.fragment.internal/<path>` is the platform's API
   (`docs/api.md`), and `http://api.fragment.internal/f/<fragment>/<path>`
   is a fragment's own routes (`__live` sockets included), as on its host.
+- On a local fleet, whose code.storage is the dev stack's fake at the
+  machine's loopback (which a container's loopback is not), a storage
+  token minted through the egress (`GET …/storage-token`, as `fragment
+  sync` and `deploy` ask it) names `http://codestorage.fragment.internal`
+  as its `api`, which the egress sends on to the fake as it came, the
+  guest's token with it. On a deployment the guest reaches code.storage
+  itself (docs/technical-debt-ledger.md, "An agent's sync and deploy
+  reach code.storage directly").
 - `x-fragment-agent: <agent fragment name>` says which of its agents the
   request acts as. The intercept refuses an agent not assigned to this
   computer, then signs the request (NIP-98) as that agent's identity.
@@ -827,7 +858,12 @@ expires within 30 days. The container application is the deployment's
   - `GET /api/computer/keepalive` (a WebSocket): while it is open the
     computer stays awake. Hold it while busy, and while a turn waits on
     its card, until the card is answered or expires (decision 42 as
-    amended; docs/bridge.md, "A card keeps its computer awake").
+    amended; docs/bridge.md, "A card keeps its computer awake"). It
+    answers `{"type":"ping"}` with `{"type":"pong"}`: a deploy can cut
+    the platform's side of it with no close reaching the guest (#557),
+    and the platform then counts it closed, so a guest still busy pings
+    it and opens it again when it goes silent (our bridge: every 15 s,
+    silent after 30).
 - A subscription with `{channel, wake: true}` (in place of `url`), sent
   as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
   computer on each new record (the fragment asks the computer itself just
@@ -1269,7 +1305,7 @@ the provider's own hosts.
 
   | Provider | Kind | Hosts | Placement | Environment variable | Price per call (list) |
   |---|---|---|---|---|---|
-  | `google` | connection | `gmail`, `www`, `people`, `sheets`, `docs` `.googleapis.com` | `Authorization: Bearer {}` | `GOOGLE_OAUTH_ACCESS_TOKEN` (Terraform's Google provider reads it; Google's client libraries take a token as given) | none |
+  | `google` | connection | `gmail`, `www`, `people`, `sheets`, `docs`, `slides` `.googleapis.com` | `Authorization: Bearer {}` | `GOOGLE_OAUTH_ACCESS_TOKEN` (Terraform's Google provider reads it; Google's client libraries take a token as given) | none |
   | `firecrawl` | operator | `api.firecrawl.dev` | `Authorization: Bearer {}` | `FIRECRAWL_API_KEY` | $0.01 (10-result search, Hobby PAYG) |
   | `fal` | operator | `queue.fal.run`, `fal.run`, `rest.fal.ai` | `Authorization: Key {}` | `FAL_KEY` | $0.006 (1 MP Klein 9B image) |
   | `browser-use` | operator | `api.browser-use.com` | `X-Browser-Use-API-Key: {}` | `BROWSER_USE_API_KEY` | $0.02/12 (five browser minutes per control call) |
@@ -1902,6 +1938,17 @@ the file dialog on its desktop with `computer_use`. The `fragment`
 skill's first page says the same (`computer.md`, "Files your owner sends
 you").
 
+And every agent is told, after that, how it sends one (`hermes::SENDING`;
+2026-10-23: asked for a PDF in the chat, Paul's agent named a path on
+its computer, then emailed it): a line of its reply that is `MEDIA:` and
+the file's absolute path, outside code and quotes (Hermes delivers no
+other tag), puts the file in the chat as the reply's attachment (the
+bridge uploads it: docs/bridge.md), and a file asked for in the chat is
+attached there rather than emailed or named by its path. Hermes tells
+every platform it knows the same (its `_MEDIA_NATIVE` hint), but has no
+hint for `relay`. The `fragment` skill's first page says it too
+(`computer.md`, "Files you send").
+
 ### Its name, in our Hermes image
 
 An agent's name is its agent fragment's title (docs/api.md, "An agent's
@@ -2127,9 +2174,10 @@ and how a runtime finds them, is the image's.
   platform skill by the platform skill leaving the view. An agent's profile has
   its own, the managed set, which is what the shell's Skills section
   lists, the platform skill, and Hermes' pinned bundled skills. The managed
-  release has twelve workflows: apps, git, brains, connected Google,
-  image steps and model tiers, plus Cashu, Nostr CLI, X API, direct music,
-  market analysis and Polymarket (templates/skills/README.md). Generic skills
+  release has sixteen workflows: apps, git, brains, connected Google,
+  image steps, model tiers and a chat's attachments, plus Cashu, Nostr CLI, X API, direct music,
+  market analysis, Polymarket and design, and the upstream `gws-docs` and
+  `gws-slides` command guides alongside connected Google (templates/skills/README.md). Generic skills
   come from Hermes; optional ones remain in its hub. At build, the image
   moves Hermes' bundled tree to `/opt/fragment/bundled-skills`, so stage2
   and the gateway sync nothing into a saved profile. The boot copies each
@@ -2360,7 +2408,9 @@ for a host) and finds the same `HOME`, `~` and modes.
   sleep's first, with the stop at the bound itself, later while a record
   holds it, never while in use or always on; a start that went back told
   with its cause and save, pending while asleep, once until seen, a seen
-  older one hiding only itself, across a restart of the DO; won't wake
+  older one hiding only itself, across a restart of the DO, and none for
+  one that lost nothing (nothing done since its save; a keepalive only
+  counted open across it), an unseen older one still told; won't wake
   told until a restart; an update told while awake on another version
   than its next start runs, between turns, never asleep or starting,
   taken by a restart or a sleep and a wake, put off for that version only,
@@ -2406,19 +2456,29 @@ for a host) and finds the same `HOME`, `~` and modes.
   same wake starts it again from the save (#362). A check of
   what ran counts runs (the model fake's calls, the ledger's rows, the
   computer's `uses`), never records, which a second run replays. The
+  A turn's keepalive across a reload of the node's Worker (`Suite::reload`,
+  which restarts every Durable Object and disconnects every socket, as a
+  deploy does) is counted open with none held, and at the computer's next
+  event only those held; nothing stays counted once the turn answers
+  (#557). Its bridge opening it again is the bridge's own test, against
+  its fake API (`a_keepalive_a_deploy_cut_is_opened_again`): after a local
+  reload, workerd destroys every keepalive the computer's egress upgrades
+  at once, which a deploy on Cloudflare does not. The
   e2e's bound is 45 s (`crate::UNSAVED_MAX_MS`), so the `computers`
   lane's recovery checks see it run out: a failed sleep told at once with
   its stop time, a restart asked twice (its save failing too) going back
   once and saying so until seen, the unsaved stop at the time it said and
   the wake after told once, a restart of a sleeping computer, one
-  refused at zero credit, and no awake time on its owner's ledger in
-  either free window. Its image pin, which is what a deploy that changed
+  refused at zero credit, no awake time on its owner's ledger in
+  either free window, and a restart with nothing done since the save its
+  life came up from going back and telling nothing. Its image pin, which is what a deploy that changed
   the image is to a computer: the update told awake, not while a turn
   waits on its card, again when it ends, put off by Later (again the
   same; another version, or none, refused), taken by a restart (the next
   build served), and not told asleep. The `shell-ui` lane sees the same in
-  Chrome: the warning on Settings with no reload, its Restart, the notice
-  of what it went back to and its OK (gone after a reload), Settings'
+  Chrome: the warning on Settings with no reload, its Restart (after its
+  agent answered a message no save keeps), the notice of since when
+  changes weren't kept and its OK (gone after a reload), Settings'
   Restart computer, and an update: shown with no reload, Settings' version
   and the latest, its Restart taking it, its Later holding after a
   reload. On a preview, the hosted `agent-restart` section (by name)

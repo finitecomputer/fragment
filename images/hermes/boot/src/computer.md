@@ -157,6 +157,15 @@ click the site's upload button with your browser tools, then type its
 full path into the file dialog on your desktop with `computer_use` and
 press Enter.
 
+## Files you send
+
+To give someone in a chat a file you made or found (a PDF, an image, a
+document, a spreadsheet, audio or video), put `MEDIA:<absolute-path>` on
+a line of its own in your reply, outside code and quotes. It arrives in
+the chat as an attachment they can open and download. Attach it whenever
+they ask for a file in the chat: email it only when they ask for email,
+and never answer with a path on your computer, which they cannot open.
+
 ## Your desktop
 
 You have a desktop of your own, with a browser on it (each agent here

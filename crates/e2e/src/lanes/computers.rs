@@ -487,10 +487,48 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     Ok(added)
 }
 
+/// The keepalive across a deploy (#557), each skipped off a local node,
+/// the stub, and the fakes.
+const KEEPALIVE_CHECKS: [&str; 2] = [
+    "a keepalive open across a reload of the cell (a deploy: every socket disconnected, its guest's close reaching no release) is counted open, none held; at its next event the computer counts only those held",
+    "the turn answers, and nothing is counted open after it: none held, none counted",
+];
+
+/// A turn's keepalive across a reload of the node's Worker, which restarts
+/// every Durable Object and disconnects every socket as a deploy does: on
+/// the preview its guest's close after one never reached the computer,
+/// which counted it open for 14 hours, never slept, and was metered
+/// (#557); the reload shows the same, counted open, none held. The turn's
+/// model call is held, so it runs across the reload. Its guest opening its
+/// keepalive again is the bridge's own test (`a_keepalive_a_deploy_cut_is_
+/// opened_again`): after a local reload, workerd destroys every keepalive
+/// the computer's egress upgrades at once (`other end of WebSocketPipe was
+/// destroyed`), which a deploy on Cloudflare does not (the preview's
+/// computer opened its next keepalive after each, and was held by it). The
+/// replies it adds.
+fn keepalive_across_a_reload(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str, say: &dyn Fn(u32, &str) -> Result<crate::api::Reply>, replied: &dyn Fn(i64) -> bool) -> Result<usize> {
+    let counts = || lever(api, id, "saves").map(|r| (r.body["keepalives"].as_u64().unwrap_or(u64::MAX), r.body["keepalivesHeld"].as_u64().unwrap_or(u64::MAX))).unwrap_or((u64::MAX, u64::MAX));
+    let called = s.ai.chats().len();
+    s.ai.delay_next(&[15_000]);
+    let r = say(95, "think slowly across a reload")?;
+    let seq = r.body["record"]["seq"].as_i64().unwrap_or(0);
+    let in_flight = s.eventually(WAKE, || s.ai.chats().len() > called && counts() == (1, 1));
+    s.reload()?;
+    let reloaded = counts();
+    // its owner's wake of it awake: an event, after which it counts only what is held
+    let woke = api.signed(owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
+    let after = counts();
+    s.ok(KEEPALIVE_CHECKS[0], in_flight && reloaded.0 > reloaded.1 && woke.body["phase"] == "awake" && after.0 == after.1, json!({ "reloaded": reloaded, "woke": woke.body["phase"], "after": after }));
+    let answered = s.eventually(WAKE, || replied(seq));
+    let closed = s.eventually(Duration::from_secs(10), || counts() == (0, 0));
+    s.ok(KEEPALIVE_CHECKS[1], answered && closed, json!({ "answered": answered, "counts": counts() }));
+    Ok(1)
+}
+
 /// The recovery checks (docs/computers.md, "What its owner is told"), each
 /// skipped off the stub and the fakes (the lever fails saves, and the
 /// node's bound is short: `crate::UNSAVED_MAX_MS`).
-const RECOVERY_CHECKS: [&str; 11] = [
+const RECOVERY_CHECKS: [&str; 12] = [
     "a sleep whose save fails tells its owner at once: since when its work is in no save, the save a stop goes back to, and when the bound stops it",
     "no one else restarts it",
     "its owner's restart, its save failing too: it starts again at once, from its last save",
@@ -502,6 +540,7 @@ const RECOVERY_CHECKS: [&str; 11] = [
     "and its agent is told, once, what it no longer remembers of the chat: the turn the stop lost, from the journal",
     "asleep, its owner's restart starts it, fresh from its save",
     "the time it was kept for failed saves is free (Paul, 2026-10-08): nothing is charged from the start of a sleep's try whose save failed to its bound, or to the restart that ended it; the time before and after is",
+    "a restart whose save fails, with nothing done since the save it came up from: it goes back to that save and tells its owner nothing, since nothing was lost (Paul, 2026-10-23); a notice of it is refused",
 ];
 
 /// What its owner is told, and the way back to working (rung 4 of
@@ -556,7 +595,10 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
     );
     let r = api.signed(stranger, "POST", &path("/restart"), Some(&json!({ "generation": g })))?;
     s.ok(RECOVERY_CHECKS[1], r.status == 404, &r);
-    // its owner restarts it: the restart's own save fails, so it goes back
+    // its owner restarts it: the restart's own save fails, so it goes back,
+    // and its last turn (the crash checks' last, ended seconds before its
+    // sleep, well within the 30 s before its end is saved) is in no save:
+    // told
     let restart = || api.signed(c.owner, "POST", &path("/restart"), Some(&json!({ "generation": g })));
     let restarted_at = crate::api::now_ms();
     let r = restart()?;
@@ -685,6 +727,34 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
             && woke.body["notices"].as_array().is_none_or(|l| l.is_empty()),
         format!("{r} / {woke}"),
     );
+    // a life on which nothing is done: its owner's sleep saves it once its
+    // guest settled (a start after a rollback first ends what its save left
+    // open, holding its keepalive a moment: work, until a save keeps it),
+    // and its wake comes up from that save; its restart's save fails, so it
+    // goes back to that save, and lost nothing
+    std::thread::sleep(QUEUE_DRAIN);
+    s.eventually(Duration::from_secs(15), || lever(api, c.id, "saves").is_ok_and(|r| r.body["keepalives"] == 0));
+    let slept = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let kept = newest_save(api, c.id);
+    let woke = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    let life = woke.body["generation"].as_u64().unwrap_or(0);
+    let failing = lever_with(api, c.id, json!({ "op": "fail-saves", "times": 100 }))?;
+    let quiet = api.signed(c.owner, "POST", &path("/restart"), Some(&json!({ "generation": life })))?;
+    let never_told = api.signed(c.owner, "POST", &path("/notices/seen"), Some(&json!({ "life": life })))?;
+    lever_with(api, c.id, json!({ "op": "fail-saves", "times": 0 }))?;
+    s.ok(
+        RECOVERY_CHECKS[11],
+        slept.body["phase"] == "asleep"
+            && woke.body["restored"]["save"] == kept["id"]
+            && failing.status == 200
+            && quiet.status == 200
+            && quiet.body["generation"].as_u64() == Some(life + 1)
+            && quiet.body["restored"]["rollback"] == true
+            && quiet.body["restored"]["save"] == kept["id"]
+            && notice(&quiet.body, "went_back").is_null()
+            && never_told.status == 400,
+        format!("{woke} / {quiet} / {never_told}"),
+    );
     Ok(3)
 }
 
@@ -755,6 +825,50 @@ fn intercept_names_by_key(s: &mut Suite, api: &Api, owner_id: &str, agent: &str,
 /// names by the route's names (`GET /api/computer`'s `models`); a call
 /// naming one runs on it, metered to the agent's owner; one no slot runs is
 /// refused, naming them, nothing reserved or sent. The replies it adds.
+/// A local fleet's code.storage is at the machine's loopback, which the
+/// guest's container cannot reach (its loopback is its own): the guest
+/// reaches it through its egress at `codestorage.fragment.internal`, as an
+/// agent's `fragment sync` and `deploy` do, with the token it was minted
+/// and nothing of the egress's (docs/computers.md, "The fragment API").
+/// Six replies: code.storage access and token-route boundaries.
+fn codestorage_through_egress(s: &mut Suite, api: &Api, owner: &crate::Keys, agent: &Value, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+    let name = agent["name"].as_str().expect("the agent's name");
+    let r = api.signed(owner, "GET", &format!("/api/f/{name}/storage-token"), None)?;
+    let (token, repo) = (r.body["token"].as_str().unwrap_or_default(), r.body["repo"].as_str().unwrap_or_default());
+    s.ok("(its owner mints a storage token for the agent's fragment, naming the fake at its loopback address)", r.status == 200 && r.body["api"].as_str().is_some_and(|a| a.starts_with("http://127.0.0.1:")), &r);
+    let branch = format!("http://{}/api/repos/{repo}/branch?name=main", fragment_core::codestorage::GUEST_HOST);
+    let said = fetched(s, 83, &format!("fetch {branch} with {token}"))?;
+    s.ok("the guest reaches a local fleet's code.storage through its egress, with its token", said.starts_with("fetched 200") && said.contains("head_sha"), &said);
+    let said = fetched(s, 84, &format!("fetch {branch} with not-a-token"))?;
+    s.ok("and with no token of its own, the egress adds none: code.storage refuses it", said.starts_with("fetched 401"), &said);
+    // A channel and an application's route may both be named storage-token.
+    // They must keep their own response bodies through the guest's egress.
+    let manifest = br#"{"channels":{"tasks":{"read":"editor","post":"editor"},"storage-token":{"read":"editor","post":"editor"}}}"#;
+    let app = br#"import { DurableObject } from "cloudflare:workers";
+export class App extends DurableObject {
+  fetch() { return new Response("application storage-token route"); }
+}
+"#;
+    s.commit(agent, &[("fragment.json", Some(manifest)), ("app.mjs", Some(app))]);
+    s.deploy(agent);
+    let channel = format!("/api/f/{name}/channels/storage-token");
+    let r = api.signed(owner, "POST", &channel, Some(&json!({ "id": "token-name", "body": { "text": "storage-token record" } })))?;
+    anyhow::ensure!(r.status == 200, "the storage-token channel's fixture: {r}");
+    for (n, endpoint) in [(85, "storage-token"), (86, "%73torage-token")] {
+        let said = fetched(s, n, &format!("fetch http://api.fragment.internal/api/f/{name}/{endpoint} with {name} in x-fragment-agent"))?;
+        s.ok(
+            &format!("the guest still mints a storage token at {endpoint}"),
+            said.starts_with("fetched 200:") && said.contains("\"token\":"),
+            said.split(':').next().unwrap_or_default(),
+        );
+    }
+    let said = fetched(s, 87, &format!("fetch http://api.fragment.internal{channel} with {name} in x-fragment-agent"))?;
+    s.ok("a channel named storage-token keeps its records through the guest's egress", said.starts_with("fetched 200:") && said.contains("storage-token record"), &said);
+    let said = fetched(s, 88, &format!("fetch http://api.fragment.internal/f/{name}/storage-token with {name} in x-fragment-agent"))?;
+    s.ok("an application route named storage-token keeps its response through the guest's egress", said == "fetched 200: application storage-token route", &said);
+    Ok(6)
+}
+
 fn intercept_takes_model_ids(s: &mut Suite, api: &Api, owner_id: &str, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
     use fragment_core::models::{DEEPSEEK_FLASH, GLM_FLASH, MEDIUM_MODEL};
     let said = fetched(s, 80, "models")?;
@@ -1313,6 +1427,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         if fakes {
             replies_so_far += intercept_names_by_key(s, api, &owner_id, &agent_name, &chat_name, &fetched)?;
             replies_so_far += intercept_takes_model_ids(s, api, &owner_id, &fetched)?;
+            replies_so_far += codestorage_through_egress(s, api, &owner, &agent, &fetched)?;
         }
     } else {
         // a real runtime called its model to answer at all: each call went
@@ -1330,6 +1445,17 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         );
     }
 
+    // a turn's keepalive across a deploy; then a sleep, and a fresh container
+    if scripted && fakes {
+        replies_so_far += keepalive_across_a_reload(s, api, &owner, &id, &|n, text| say(n, text), &|seq| {
+            let turn = turn_of(&agent_name, &chat_name, "chat", seq);
+            agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|r| r["body"]["turn"] == turn.as_str())
+        })?;
+    } else {
+        for label in KEEPALIVE_CHECKS {
+            s.skip(label, "it reloads the local node, under the stub's scripted runtime and the fakes' held model call");
+        }
+    }
     // asleep, a record wakes it, restored, and nothing runs twice
     std::thread::sleep(QUEUE_DRAIN);
     let ran = fakes.then(|| runs(s, api, &owner, &owner_id, &id));
@@ -1672,6 +1798,36 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "POST", &format!("/api/f/{next_name}/channels/chat"), Some(&json!({ "id": "n1", "body": { "text": "hello in the new chat" } })))?;
     let answered = s.eventually(wake, || agent_replies(&records(api, &owner, &next_name, "chat"), &identity).len() == 1);
     s.ok("it answers there", r.status == 200 && answered, json!(agent_replies(&records(api, &owner, &next_name, "chat"), &identity)));
+
+    // an agent its person makes after their yes elsewhere comes in there
+    // beside them as their computer takes it, and that computer hears it
+    // joined (decision 64): its join is sent once both its agent fragment
+    // and the computer hold it; a replay of the assignment joins nothing twice
+    let theirs = s.named(api, &stranger, "their-chat")?;
+    let made = api.create_with(&stranger, json!({ "name": theirs, "template": "chat" }))?;
+    let invited = api.signed(&stranger, "POST", &format!("/api/f/{theirs}/invites"), Some(&json!({ "email": Api::email_of(&owner), "role": "editor" })))?;
+    let yes = api.signed(&owner, "POST", &format!("/api/invites/{theirs}/accept"), Some(&json!({})))?;
+    anyhow::ensure!(made.status == 200 && invited.status == 200 && yes.status == 200, "their chat, and its owner's yes: {made} {invited} {yes}");
+    let later_name = s.named(api, &owner, "later")?;
+    let later = s.create(api, &owner, &later_name)?;
+    s.commit(&later, &[("fragment.json", Some(AGENT_JSON))]);
+    s.deploy(&later);
+    let assign = || api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{later_name}"), Some(&json!({})));
+    let r = assign()?;
+    let later_id = r.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == later_name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
+    let joined = s.eventually(Duration::from_secs(30), || told(api, &owner, &later_name, &theirs).len() == 1);
+    let row = api.signed(&stranger, "GET", &format!("/api/f/{theirs}/members"), None)?.body["members"]
+        .as_array()
+        .and_then(|m| m.iter().find(|m| m["principal"] == later_id.as_str()).cloned())
+        .unwrap_or_default();
+    s.ok(
+        "an agent assigned after its person's yes elsewhere is in there beside them, at their role, and its computer heard it joined (its first assignment)",
+        r.status == 200 && fragment_core::npub::is_identity(&later_id) && joined && row["owner"] == owner_id.as_str() && row["role"] == "editor",
+        json!({ "row": row, "told": told(api, &owner, &later_name, &theirs) }),
+    );
+    let again = assign()?;
+    std::thread::sleep(QUEUE_DRAIN);
+    s.ok("assigned again (a replay), it joins nothing twice: one join told", again.status == 200 && told(api, &owner, &later_name, &theirs).len() == 1, json!(told(api, &owner, &later_name, &theirs)));
 
     if !fakes {
         // the node and the deployment's operator are a local run's; a
