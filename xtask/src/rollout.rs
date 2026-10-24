@@ -24,7 +24,10 @@
 //! 2. `wrangler deploy`, again only for an image's push that timed out
 //!    (the hand deploys' 4 GB layer did), which is before any upload.
 //! 3. Whether the Worker changed is read from its deployments, never from
-//!    wrangler's words: when it failed and nothing changed, the deploy ends
+//!    wrangler's words (one that could not even run to its end included),
+//!    asked again with backoff for `OBSERVE_LIMIT` while they cannot be
+//!    read, and failing as stuck, naming the release before, if they never
+//!    are: when it failed and nothing changed, the deploy ends
 //!    so, nothing to undo. When it failed with the Worker live, the deploy
 //!    is finished, not run again (each run is another upload): the version
 //!    read back, the Computer's container application checked as wrangler
@@ -40,7 +43,10 @@
 //!    deployed again (`wrangler rollback` to its version), and verified
 //!    the same way; unless the new release's schema is not the one before
 //!    (an object that ran a newer step refuses older code: docs/MODEL.md,
-//!    Schemas), or there was none: then it fails, forward only, saying so.
+//!    Schemas), or there was none, or the deploy changed what the release
+//!    before cannot take back (a branch's Stripe endpoint, made anew: its
+//!    old signing secret signs for an endpoint deleted): then it fails,
+//!    forward only, saying so.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -58,6 +64,9 @@ pub(crate) const DEPLOY_PAUSE: Duration = Duration::from_secs(10);
 /// How long a deploy whose Worker is live is asked to finish, its pauses
 /// doubling from `FINISH_PAUSE_FIRST` to `FINISH_PAUSE_MAX`.
 pub(crate) const FINISH_LIMIT: Duration = Duration::from_secs(10 * 60);
+/// How long the Worker's deployments are asked, after a failed deploy,
+/// whether it changed the Worker, with the same backoff.
+pub(crate) const OBSERVE_LIMIT: Duration = Duration::from_secs(3 * 60);
 const FINISH_PAUSE_FIRST: Duration = Duration::from_secs(10);
 const FINISH_PAUSE_MAX: Duration = Duration::from_secs(60);
 /// How long the platform has to answer a release at every object class:
@@ -149,26 +158,34 @@ impl Outcome {
 
 /// The deploy of release `new` (its schema `schema`) on `p`, from
 /// `wrangler deploy` on (the steps above), timed by `clock`.
-pub(crate) fn run(p: &mut impl Platform, clock: &mut impl Clock, new: &str, schema: &str) -> Result<Outcome> {
+/// `rollback` is `Err` saying why the release before cannot come back
+/// whatever its schema (deploy.rs: a branch whose Stripe endpoint this
+/// deploy made anew). Only reading the release live first may fail the
+/// run (`Err`): from `wrangler deploy` on, every failure is an outcome.
+pub(crate) fn run(p: &mut impl Platform, clock: &mut impl Clock, new: &str, schema: &str, rollback: Result<(), String>) -> Result<Outcome> {
     let before = p.live()?;
     if let Some(b) = &before {
         println!("deploy: live now: {} (version {})", b.release, b.version);
     }
-    let wrangled = deployed(p, clock)?;
-    let now = p.version()?;
-    let changed = now.as_deref() != before.as_ref().map(|l| l.version.as_str());
-    let unfinished = match (&wrangled, changed) {
-        (Wrangled::Done, _) => None,
-        (failed, false) => return Ok(Outcome::Unchanged(said(failed))),
-        (failed, true) => Some(said(failed)),
-    };
-    let why = match (unfinished, now) {
-        (Some(failed), Some(version)) => {
-            println!("deploy: wrangler failed with version {version} live ({failed}): finishing it, not running it again");
-            finished(p, clock, &version).err().map(|e| format!("{failed}; and finishing it failed for {} (the limit): {e:#}", minutes(FINISH_LIMIT)))
+    let why = match deployed(p, clock) {
+        Wrangled::Done => None,
+        failed => {
+            let failed = said(&failed);
+            match observed(p, clock, before.as_ref()) {
+                Observed::Unchanged => return Ok(Outcome::Unchanged(failed)),
+                Observed::Unknown(e) => {
+                    let was = before.as_ref().map_or("none".to_string(), |b| format!("{} (version {})", b.release, b.version));
+                    return Ok(Outcome::Stuck(format!(
+                        "{failed}; and whether the Worker changed could not be read for {} ({e}). The release before is {was}; {new} may be live: ask /healthz/objects, and roll back by hand (`wrangler rollback <version>`) if it is live and does not answer",
+                        minutes(OBSERVE_LIMIT)
+                    )));
+                }
+                Observed::Live(version) => {
+                    println!("deploy: wrangler failed with version {version} live ({failed}): finishing it, not running it again");
+                    finished(p, clock, &version).err().map(|e| format!("{failed}; and finishing it failed for {} (the limit): {e:#}", minutes(FINISH_LIMIT)))
+                }
+            }
         }
-        (Some(failed), None) => Some(format!("{failed}; and the Worker has no deployment")),
-        (None, _) => None,
     };
     let why = match why {
         Some(why) => why,
@@ -177,22 +194,58 @@ pub(crate) fn run(p: &mut impl Platform, clock: &mut impl Clock, new: &str, sche
             Err(why) => why,
         },
     };
-    back(p, clock, before, schema, why)
+    back(p, clock, before, schema, rollback, why)
 }
 
 /// `wrangler deploy` until it is done, fails other than by a push that
-/// timed out, or has run `DEPLOY_TRIES` times.
-fn deployed(p: &mut impl Platform, clock: &mut impl Clock) -> Result<Wrangled> {
+/// timed out, or has run `DEPLOY_TRIES` times. One that could not run to
+/// its end (it could not start, or its output could not be read) is a
+/// failure like any other: whether it changed the Worker is read after.
+fn deployed(p: &mut impl Platform, clock: &mut impl Clock) -> Wrangled {
     for tries in 1..=DEPLOY_TRIES {
-        match p.deploy()? {
-            Wrangled::PushTimedOut if tries < DEPLOY_TRIES => {
+        match p.deploy() {
+            Ok(Wrangled::PushTimedOut) if tries < DEPLOY_TRIES => {
                 eprintln!("deploy: an image's push timed out (try {tries} of {DEPLOY_TRIES}); running wrangler deploy again in {}", minutes(DEPLOY_PAUSE));
                 clock.sleep(DEPLOY_PAUSE);
             }
-            wrangled => return Ok(wrangled),
+            Ok(wrangled) => return wrangled,
+            Err(e) => return Wrangled::Failed(format!("wrangler deploy did not run to its end: {e:#}")),
         }
     }
     unreachable!("the last try returns")
+}
+
+/// Whether a failed deploy changed the Worker, as its deployments say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Observed {
+    /// Its version is the one before (or there is none, as before).
+    Unchanged,
+    /// This version is live now, another than the one before.
+    Live(String),
+    /// Not known: the deployments could not be read for `OBSERVE_LIMIT`.
+    Unknown(String),
+}
+
+/// The Worker's deployments read, after a failed `wrangler deploy`, asked
+/// again with backoff for `OBSERVE_LIMIT` while they cannot be: never
+/// uploaded again meanwhile.
+fn observed(p: &mut impl Platform, clock: &mut impl Clock, before: Option<&Live>) -> Observed {
+    let start = clock.now();
+    let mut pause = FINISH_PAUSE_FIRST;
+    loop {
+        let read = p.version();
+        match read {
+            Ok(now) if now.as_deref() == before.map(|b| b.version.as_str()) => return Observed::Unchanged,
+            Ok(Some(version)) => return Observed::Live(version),
+            Ok(None) => return Observed::Unknown("the Worker has no deployment, and had one".into()),
+            Err(e) if clock.now() - start + pause > OBSERVE_LIMIT => return Observed::Unknown(format!("{e:#}")),
+            Err(e) => {
+                eprintln!("deploy: the Worker's deployments could not be read ({e:#}); asking again in {}", minutes(pause));
+                clock.sleep(pause);
+                pause = (pause * 2).min(FINISH_PAUSE_MAX);
+            }
+        }
+    }
 }
 
 /// The finish of a deploy whose Worker (`version`) is live, asked again
@@ -253,10 +306,13 @@ fn verified(p: &mut impl Platform, clock: &mut impl Clock, release: &str, old: b
 
 /// The release `before` deployed again, after `why`, when it may be: the
 /// outcome either way.
-fn back(p: &mut impl Platform, clock: &mut impl Clock, before: Option<Live>, schema: &str, why: String) -> Result<Outcome> {
+fn back(p: &mut impl Platform, clock: &mut impl Clock, before: Option<Live>, schema: &str, rollback: Result<(), String>, why: String) -> Result<Outcome> {
     let Some(before) = before else {
         return Ok(Outcome::Stuck(format!("{why}; and there is no release before to go back to (the Worker's first deploy)")));
     };
+    if let Err(cannot) = rollback {
+        return Ok(Outcome::Stuck(format!("{why}; and it is not rolled back to {}: {cannot}", before.release)));
+    }
     match before.schema.as_deref() {
         Some(s) if s == schema => {}
         Some(s) => return Ok(Outcome::Stuck(format!("{why}; and it is not rolled back: its schema ({schema}) is not {}'s ({s}), whose code an object that ran the newer steps refuses (forward only: fix it forward)", before.release))),
@@ -335,6 +391,11 @@ mod tests {
         /// A release whose objects fail the probe whatever they run (a
         /// class that cannot start its code).
         broken: Option<String>,
+        /// How many reads of the deployments fail (503, a timeout).
+        version_fails: u32,
+        /// Whether `wrangler deploy` cannot run to its end (its output
+        /// lost), after its upload when `uploads_before_failing`.
+        deploy_breaks: bool,
         calls: Vec<String>,
         new: Live,
     }
@@ -353,6 +414,8 @@ mod tests {
                 finish_fails: 0,
                 rollback_lag: Some(0),
                 broken: None,
+                version_fails: 0,
+                deploy_breaks: false,
                 calls: vec![],
                 new: Live { version: "v-new".into(), release: new.into(), schema: Some(SCHEMA.into()) },
             }
@@ -380,10 +443,20 @@ mod tests {
         }
         fn version(&mut self) -> Result<Option<String>> {
             self.calls.push("version".into());
+            if self.version_fails > 0 {
+                self.version_fails -= 1;
+                anyhow::bail!("the Worker's deployments: 503");
+            }
             Ok(self.versions.last().map(|_| self.worker.version.clone()))
         }
         fn deploy(&mut self) -> Result<Wrangled> {
             self.calls.push("deploy".into());
+            if self.deploy_breaks {
+                if self.uploads_before_failing {
+                    self.upload();
+                }
+                anyhow::bail!("reading wrangler's output: broken pipe");
+            }
             let next = if self.deploys.len() > 1 { self.deploys.remove(0) } else { self.deploys[0].clone() };
             match &next {
                 Wrangled::Done => self.upload(),
@@ -431,11 +504,64 @@ mod tests {
     const NEW: &str = "bfc85d431653";
 
     fn deploy(w: &mut World) -> Outcome {
-        run(w, &mut Fake::default(), NEW, SCHEMA).unwrap()
+        run(w, &mut Fake::default(), NEW, SCHEMA, Ok(())).unwrap()
     }
 
     fn count(w: &World, call: &str) -> usize {
         w.calls.iter().filter(|c| c.starts_with(call)).count()
+    }
+
+    /// A Worker left live by a deploy that failed after its upload.
+    fn live_unfinished() -> World {
+        let mut w = World::new(OLD, NEW, Some(SCHEMA));
+        w.deploys = vec![Wrangled::Failed("could not finish applying its Durable Object-managed Container application settings".into())];
+        w.uploads_before_failing = true;
+        w
+    }
+
+    #[test]
+    fn deployments_that_cannot_be_read_at_once_are_read_again_never_uploaded_again() {
+        // review of #605: a 503 reading them after the Worker went live
+        let mut w = live_unfinished();
+        w.version_fails = 3;
+        assert_eq!(deploy(&mut w), Outcome::Deployed);
+        assert_eq!(w.ends(), (NEW.into(), NEW.into()));
+        assert_eq!((count(&w, "deploy"), count(&w, "version"), count(&w, "finish")), (1, 4, 1));
+    }
+
+    #[test]
+    fn deployments_never_read_leave_it_stuck_naming_the_release_before() {
+        let mut w = live_unfinished();
+        w.version_fails = u32::MAX;
+        let out = deploy(&mut w);
+        assert!(matches!(&out, Outcome::Stuck(why) if why.contains("could not be read") && why.contains(OLD) && why.contains("v-old") && why.contains(NEW)), "{out:?}");
+        assert_eq!((count(&w, "deploy"), count(&w, "finish"), count(&w, "rollback")), (1, 0, 0), "nothing more done blind");
+        assert!(count(&w, "version") > 1 && count(&w, "version") < 12, "asked again with backoff, bounded: {}", count(&w, "version"));
+    }
+
+    #[test]
+    fn a_deploy_that_could_not_run_to_its_end_is_read_as_any_failure() {
+        // its output lost after its upload: the Worker is live, and finished
+        let mut w = live_unfinished();
+        w.deploy_breaks = true;
+        assert_eq!(deploy(&mut w), Outcome::Deployed);
+        assert_eq!((count(&w, "deploy"), count(&w, "finish v-new")), (1, 1));
+        // and before it: nothing changed
+        let mut w = World::new(OLD, NEW, Some(SCHEMA));
+        w.deploy_breaks = true;
+        let out = deploy(&mut w);
+        assert!(matches!(&out, Outcome::Unchanged(why) if why.contains("did not run to its end")), "{out:?}");
+        assert_eq!(w.ends(), (OLD.into(), OLD.into()));
+    }
+
+    #[test]
+    fn a_deploy_that_changed_what_the_release_before_cannot_take_back_is_not_rolled_back() {
+        // review of #605: a branch's Stripe endpoint made anew, its old one deleted
+        let mut w = World::new(OLD, NEW, Some(SCHEMA));
+        w.lag = None;
+        let out = run(&mut w, &mut Fake::default(), NEW, SCHEMA, Err("its Stripe webhook endpoint was made anew".into())).unwrap();
+        assert!(matches!(&out, Outcome::Stuck(why) if why.contains("not rolled back") && why.contains("Stripe")), "{out:?}");
+        assert_eq!(count(&w, "rollback"), 0);
     }
 
     #[test]

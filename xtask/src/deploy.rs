@@ -882,13 +882,16 @@ impl crate::rollout::Platform for Cloudflare<'_> {
 }
 
 /// The schema a release's objects run, as the deploy names it
-/// (`FRAGMENT_SCHEMA`): the first 16 hex digits of the schema lock's
-/// SHA-256 (crates/core/migrations/schema.lock, every class's steps). A
-/// release is rolled back only to one of the same (rollout.rs): an object
-/// that ran a newer step refuses older code (docs/MODEL.md, Schemas).
-fn schema_id(root: &Path) -> Result<String> {
-    let lock = fs::read(root.join("crates/core/migrations/schema.lock")).context("read crates/core/migrations/schema.lock")?;
-    Ok(fragment_core::blob::sha256_hex(&lock)[..16].to_string())
+/// (`FRAGMENT_SCHEMA`): the first 16 hex digits of the SHA-256 of the
+/// lock the compiled steps make (`fragment_core::migrate::host::
+/// platform_lock`: every class's steps, applied to a new object), never of
+/// the lock file, which a hand deploy's tree may hold stale. The cell this
+/// deploy ships is built from the same crates. A release is rolled back
+/// only to one of the same (rollout.rs): an object that ran a newer step
+/// refuses older code (docs/MODEL.md, Schemas).
+fn schema_id() -> Result<String> {
+    let lock = fragment_core::migrate::host::platform_lock().map_err(|e| anyhow::anyhow!("the Durable Objects' steps do not apply to a new object: {e}"))?;
+    Ok(fragment_core::blob::sha256_hex(lock.as_bytes())[..16].to_string())
 }
 
 /// Runs `cmd` (no stdin) to its end, its output passed through to this
@@ -1138,7 +1141,13 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         platform: platform_url.clone(),
         http: reqwest::blocking::Client::builder().timeout(Duration::from_secs(20)).build()?,
     };
-    let outcome = crate::rollout::run(&mut platform, &mut crate::prepare::Wall::new(), deploy_id, &schema_id(&devstack::repo_root())?)?;
+    // a branch's Stripe endpoint made anew deleted the one before, whose
+    // signing secret the release before holds: no rollback restores it
+    let rollback = match &webhook {
+        Some(_) => Err(format!("this deploy made {}'s Stripe webhook endpoint anew and deleted the one before, whose signing secret the release before holds: rolled back, every webhook would fail its signature", crate::stripe::endpoint_url(&platform_url))),
+        None => Ok(()),
+    };
+    let outcome = crate::rollout::run(&mut platform, &mut crate::prepare::Wall::new(), deploy_id, &schema_id()?, rollback)?;
     drop(reading);
     drop(test_secrets);
     outcome.result()?;
@@ -1223,7 +1232,7 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
         "FRAGMENT_DEPLOY_ID": release.id,
         "FRAGMENT_DEPLOYED_AT": release.deployed_at.to_string(),
         // read back by the next deploy, which goes back to this release only at its schema (rollout.rs)
-        "FRAGMENT_SCHEMA": schema_id(root)?,
+        "FRAGMENT_SCHEMA": schema_id()?,
         "FRAGMENT_HOST_SUFFIX": n.suffix,
         "FRAGMENT_PLATFORM_URL": platform_url,
         "CODESTORAGE_ORG": d.codestorage.org,
@@ -1433,8 +1442,28 @@ mod tests {
         assert_eq!(variable(&version, "FRAGMENT_SCHEMA").as_deref(), Some("5c1e3b0f2a9d4e61"));
         assert_eq!(variable(&version, "HOST_SECRET"), None, "a secret is no variable");
         assert_eq!(variable(&json!({}), "FRAGMENT_DEPLOY_ID"), None);
-        let schema = schema_id(&devstack::repo_root()).unwrap();
+        let schema = schema_id().unwrap();
         assert!(schema.len() == 16 && schema.bytes().all(|b| b.is_ascii_hexdigit()), "{schema}");
+    }
+
+    /// Goal: the schema a version names is its code's, whatever the lock
+    /// file in a hand deploy's tree says (review of #605: a stale lock
+    /// would let a rollback go beneath steps the objects ran). Method: the
+    /// fingerprint is of the lock the compiled steps make; the tree's lock,
+    /// current, makes the same one, and a stale lock (a step's line cut
+    /// off) is drift `cargo xtask check` names, with the fingerprint unmoved.
+    #[test]
+    fn a_release_names_the_schema_its_code_runs_not_its_lock_file() {
+        use fragment_core::migrate::{host, CLASSES};
+        let made = host::platform_lock().unwrap();
+        assert_eq!(schema_id().unwrap(), fragment_core::blob::sha256_hex(made.as_bytes())[..16]);
+        let file = fs::read_to_string(devstack::repo_root().join(host::LOCK_PATH)).unwrap();
+        assert_eq!(file, made, "the tree's lock is current (cargo xtask check holds it)");
+        // the lock as a tree whose newest step was never locked holds it
+        let newest = file.lines().rfind(|l| l.starts_with("step ")).expect("a locked step").to_string();
+        let stale: String = file.lines().filter(|l| *l != newest).map(|l| format!("{l}\n")).collect();
+        assert!(!host::drift(&stale, &CLASSES).is_empty(), "a lock missing a step is drift: {newest}");
+        assert_eq!(schema_id().unwrap(), fragment_core::blob::sha256_hex(made.as_bytes())[..16], "and the fingerprint is the code's still");
     }
 
     /// A try's output is passed through whole, and only its end is kept
@@ -1486,7 +1515,7 @@ mod tests {
         assert_eq!(vars["FRAGMENT_DEPLOY_ID"], "abc123");
         assert_eq!(vars["FRAGMENT_DEPLOYED_AT"], "1792615843", "a Worker variable is a string");
         assert_eq!(vars["FRAGMENT_DEPLOYED_AT"].as_str().and_then(fragment_core::release::deployed), Some(1_792_615_843));
-        assert_eq!(vars["FRAGMENT_SCHEMA"], schema_id(&devstack::repo_root()).unwrap(), "the schema a rollback to it is checked against");
+        assert_eq!(vars["FRAGMENT_SCHEMA"], schema_id().unwrap(), "the schema a rollback to it is checked against");
         let release = this_release().unwrap();
         assert!(fragment_core::release::valid(&release.id) && release.deployed_at > 1_792_615_843, "this tree's, made now");
     }

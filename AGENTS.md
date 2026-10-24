@@ -319,7 +319,9 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   over a mix (xtask/src/rollout.rs): it reads the release live first (the
   Worker's deployments); runs `wrangler deploy` again only for an
   image's push that timed out (three tries at most); reads whether the
-  Worker changed from its deployments, never from wrangler's words; a
+  Worker changed from its deployments, never from wrangler's words
+  (asked again for 3 minutes when they cannot be read, then stuck,
+  naming the release before); a
   deploy that failed with the Worker live is finished, not uploaded
   again (the version read back, the Computer's container application
   checked, `wrangler triggers deploy`), asked again with backoff for 10
@@ -328,8 +330,10 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   holds a busy object on its old code for 5). One it cannot finish or
   verify is rolled back (`wrangler rollback` to the version live before,
   then verified the same way), unless its schema is not that release's
-  (`FRAGMENT_SCHEMA`, the schema lock's hash: an object that ran a newer
-  step refuses older code) or there was none; the job fails either way. A branch is a
+  (`FRAGMENT_SCHEMA`, the hash of the lock its compiled steps make: an
+  object that ran a newer step refuses older code), there was none, or
+  it made a branch's Stripe endpoint anew (the one before, whose secret
+  the release before holds, is deleted); the job fails either way. A branch is a
   complete copy at `<branch>.<zone>`, its fragments at
   `<name>--<branch>.<zone>`. `--pinned-only` (CI's)
   refuses, before anything is read or built, a config with a computer
