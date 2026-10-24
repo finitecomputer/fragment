@@ -26,24 +26,30 @@
 //!   The try that ends a live's tries, having opened the page, makes what
 //!   it heard the page's report (status's `page`), and one `page.errors`
 //!   event when the page reported any.
+//! - **An editor's asks** (`POST`, `PUT /api/f/{name}/card`): a shot of
+//!   the live again, asked here and taken by the alarm as a deploy's is
+//!   (`card::Cards::again`: at most one ask a minute, joining a shot
+//!   already wanted); or an image of their own, checked as a shot is and
+//!   stored as one of its blobs, which shots then leave until a shot is
+//!   asked for again (`card::Cards::upload`).
 //!
 //! Each read-modify-write of the schedule is one synchronous stretch: a
 //! deploy and the alarm interleave at their awaits, never inside one.
 
 use std::time::Duration;
 
-use fragment_core::card::{self, Cards, Heard, Next, Outcome, Pace, Skip, Verdict};
+use fragment_core::card::{self, Cards, Fault, Heard, Next, Outcome, Pace, Skip, Verdict};
 use fragment_core::site::VIEW_COOKIE;
 use fragment_core::ledger::{Refused, Spend};
 use fragment_core::price::Usage;
-use fragment_proto::{ErrorCode, FragmentKind, PageErrorKind, Role};
+use fragment_proto::{ErrorCode, PageErrorKind, Role};
 use futures_util::future::{select, Either};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
-use crate::fragment::{Caller, FragmentCell, MetaKey};
+use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 use crate::js;
 use crate::ledger::MaySpend;
 
@@ -144,7 +150,8 @@ impl FragmentCell {
             Ok(bytes) => {
                 let (blob, size) = (hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes)), bytes.len() as u64);
                 // stored before the schedule says it is the card: a shot
-                // that then lands stale leaves a blob the collection takes
+                // that then lands stale, or leaves an upload (one may come,
+                // or be let go, meanwhile), leaves a blob the collection takes
                 if self.cards()?.current(&shot) {
                     self.put_blob_typed(&blob, bytes, Some(card::MEDIA_TYPE)).await?;
                 }
@@ -163,8 +170,8 @@ impl FragmentCell {
                 self.event("card.made", &format!("a card of live {} ({} bytes)", &card.live[..12], card.size), json!({ "live": card.live, "blob": card.blob, "attempt": card.attempt }));
             }
             Verdict::GaveUp { failures } => self.card_failed(failures, &why),
-            // a retry and a stale shot are quiet
-            Verdict::Retry { .. } | Verdict::Stale => {}
+            // a retry, a stale shot and one an upload kept the card from are quiet
+            Verdict::Retry { .. } | Verdict::Stale | Verdict::LeftUpload => {}
         }
         if let Some(report) = report.filter(|r| !r.errors.is_empty()) {
             self.event("page.errors", &card::summary(&report), json!(report));
@@ -178,12 +185,7 @@ impl FragmentCell {
     /// overdraft, nothing new is made). A ledger that does not answer
     /// refuses none, as for writes.
     async fn card_page(&self) -> CellResult<Result<card::Visit, Skip>> {
-        let kind = self
-            .meta(MetaKey::Face)?
-            .and_then(|f| serde_json::from_str::<Value>(&f).ok())
-            .and_then(|f| f["kind"].as_str().and_then(FragmentKind::parse))
-            .unwrap_or_default();
-        let visitor = match card::visitor(kind, self.visibility()?) {
+        let visitor = match card::visitor(self.kind()?, self.visibility()?) {
             Ok(v) => v,
             Err(skip) => return Ok(Err(skip)),
         };
@@ -203,23 +205,86 @@ impl FragmentCell {
     }
 
     /// `GET /api/f/{name}/card` (viewers and up): the card's JPEG, tagged by
-    /// its blob, or 404 before the first is made.
+    /// its blob, or 404 before the first is made. A shot names the live it
+    /// shows; an upload shows none.
     pub(crate) async fn card_api(&self, caller: &Caller, req: &Request) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
         let Some(card) = self.cards()?.card else {
             return Err(CellError::new(ErrorCode::NotFound, "no card yet: one is taken after each deploy"));
         };
         let etag = format!("\"{}\"", card.blob);
-        if let Some(mut resp) = crate::serve::not_modified(req, &etag, CARD_CACHE)? {
+        let mut resp = match crate::serve::not_modified(req, &etag, CARD_CACHE)? {
+            Some(resp) => resp,
+            None => {
+                let mut resp = self.stream_blob(&card.blob, card::MEDIA_TYPE, None).await?;
+                let h = resp.headers_mut();
+                h.set("cache-control", CARD_CACHE)?;
+                h.set("x-content-type-options", "nosniff")?;
+                resp
+            }
+        };
+        if !card.uploaded() {
             resp.headers_mut().set("x-fragment-ref", &card.live)?;
-            return Ok(resp);
         }
-        let mut resp = self.stream_blob(&card.blob, card::MEDIA_TYPE, None).await?;
-        let h = resp.headers_mut();
-        h.set("cache-control", CARD_CACHE)?;
-        h.set("x-content-type-options", "nosniff")?;
-        h.set("x-fragment-ref", &card.live)?;
         Ok(resp)
+    }
+
+    /// `POST /api/f/{name}/card` (editors and up): a shot of the live
+    /// again, which the alarm takes as it takes a deploy's, and which
+    /// replaces the card, an upload too (`card::Cards::again`). Refused, with
+    /// the reason the alarm would give, where no shot is taken: a chat or an
+    /// agent, a members-only fragment, an owner who pays for nothing now;
+    /// and with nothing deployed, or within a minute of the last ask.
+    pub(crate) async fn again_card(&self, caller: &Caller) -> CellResult<Response> {
+        self.require(caller, false, Role::Editor)?;
+        if let Err(skip) = self.card_page().await? {
+            let code = match skip {
+                Skip::OwnerPays => ErrorCode::BudgetUsedUp,
+                Skip::NotAnApp | Skip::MembersOnly => ErrorCode::InvalidRequest,
+            };
+            return Err(CellError::new(code, skip.message()));
+        }
+        // read after the ledger's answer, as one stretch: a deploy meanwhile is the live asked of
+        let Some(live) = self.meta(MetaKey::PinLive)? else {
+            return Err(CellError::invalid("nothing is deployed yet: a card is a shot of the live page"));
+        };
+        let mut cards = self.cards()?;
+        let before = cards.clone();
+        let asked = cards.again(&live, js::now_ms()).map_err(|f| match f {
+            Fault::TooSoon { wait_ms } => CellError::new(
+                ErrorCode::RateLimited,
+                format!("a shot was asked for again within the minute: ask in {} s", (wait_ms + 999) / 1000),
+            ),
+            Fault::Live | Fault::Blob => CellError::host(format!("live is at {live}, which is no commit id")),
+        })?;
+        if cards != before {
+            self.keep_cards(&cards)?;
+        }
+        self.schedule().await?;
+        json_response(&json!({ "ok": true, "live": asked.live, "since": asked.since, "joined": asked.joined }))
+    }
+
+    /// `PUT /api/f/{name}/card` (editors and up): `bytes`, a JPEG of the
+    /// card's size within its cap (`card::check_image`), is the card until a
+    /// shot is asked for again or another is uploaded (`card::Cards::upload`).
+    /// An app's alone, members-only or not: an upload needs no visitor.
+    pub(crate) async fn upload_card(&self, caller: &Caller, bytes: Vec<u8>) -> CellResult<Response> {
+        self.require(caller, false, Role::Editor)?;
+        card::is_app(self.kind()?).map_err(|skip| CellError::invalid(skip.message()))?;
+        card::check_image(&bytes).map_err(|f| match f {
+            card::ImageFault::TooLarge { .. } => CellError::new(ErrorCode::TooLarge, f.message()),
+            card::ImageFault::Empty | card::ImageFault::NotJpeg | card::ImageFault::Size { .. } => CellError::invalid(f.message()),
+        })?;
+        self.writable().await?;
+        let (blob, size) = (hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes)), bytes.len() as u64);
+        self.put_blob_typed(&blob, bytes, Some(card::MEDIA_TYPE)).await?;
+        let mut cards = self.cards()?;
+        let changed = cards.upload(&blob, size, js::now_ms()).map_err(|_| CellError::host("a checked image's blob is its SHA-256"))?;
+        if changed {
+            self.keep_cards(&cards)?;
+            self.event("card.uploaded", &format!("an uploaded card ({size} bytes)"), json!({ "blob": blob, "size": size }));
+        }
+        json_response(&json!({ "ok": true, "blob": blob, "size": size }))
     }
 }
 
