@@ -26,8 +26,10 @@
 // blobs (`fragment.blob`, read at `__blob/<sha256>`); a voice memo is one,
 // recorded here (MediaRecorder) and shown as a player wherever audio is.
 // "Notify me" subscribes this browser for its person, from a click
-// (`fragment.push.register`), and the page's presence says whether the chat
-// is on screen (`looking`), so its person is not pushed while it is.
+// (`fragment.push.register`; framed by the shell, the shell holds the
+// subscription, `{fragment: "alerts"}`), and the page's presence says
+// whether the chat is on screen (`looking`), so its person is not pushed
+// while it is.
 // `@` lists the chat's agents, then (when the shell framing it is its
 // owner's) the owner's other agents, which the shell hands over on asking
 // (`{fragment: "agents?"}`); a message to one of those asks the shell to
@@ -85,6 +87,11 @@ const TIMER_MAX_MS = 2 ** 31 - 1;
 const ADD_WAIT_MS = 120000;
 // The owner's agents a shell may hand over, at most (a computer runs 32).
 const ROSTER_MAX = 64;
+// The shell's answer to what this browser holds for the chat's alerts is
+// waited for this long (none: no shell frames the page), and to turning
+// them on or off this long (its person answers the browser's question first).
+const ALERTS_READ_MS = 5000;
+const ALERTS_ASK_MS = 120000;
 // A sending message's bubble's opacity (chat.css `.msg.user.sending`).
 const SENDING_OPACITY = 0.55;
 // The first run's steps a shell may show here (its `setup`), and their states.
@@ -2282,6 +2289,11 @@ export function mount(root) {
       } else setup = null;
       schedule();
       if (picking) updateMentions();
+    } else if (d?.fragment === "alerts" && typeof d.nonce === "string" && event.origin === state.me?.platform) {
+      const waiting = askingShell.get(d.nonce);
+      if (!waiting) return;
+      askingShell.delete(d.nonce);
+      waiting(d);
     } else if (d?.fragment === "agent-added" && typeof d.nonce === "string" && event.origin === rosterOrigin) {
       const waiting = adding.get(d.nonce);
       if (!waiting) return;
@@ -2526,10 +2538,15 @@ export function mount(root) {
   };
 
   // ---- "Notify me": this browser subscribes for its person, from a click
-  // only (`fragment.push.register(<their identity>)`), and the chat's code
-  // pushes an agent's reply to its people while they are away (app.mjs).
-  // A browser keeps a framed chat from asking (a cross-origin frame may not
-  // ask for notifications): it says so, and opens the chat in a tab ----
+  // only, and the chat's code pushes an agent's reply to its people while
+  // they are away (app.mjs). In a tab of its own the page subscribes
+  // (`fragment.push.register(<their identity>)`). A browser lets no
+  // cross-origin frame ask for notifications, so framed by the shell, the
+  // shell asks on the platform's origin and holds the subscription
+  // (docs/api.md, The shell, "A chat's alerts are the shell's"): the page
+  // hands it this fragment's key, and stores what it subscribed as its
+  // person, as `register` does. Framed by a page that does not answer, it
+  // says so, and opens the chat in a tab ----
   const pushable = () => "serviceWorker" in navigator && typeof PushManager !== "undefined" && typeof Notification !== "undefined";
   const canNotify = () => pushable() && canPost() && state.me.principal.startsWith("npub1");
   const NOTIFY = {
@@ -2541,6 +2558,50 @@ export function mount(root) {
     failed: ["bell", "Notifications could not be turned on: click to try again"],
   };
   let notifying = "off";
+  // the shell around this page holds its alerts (it answered `alerts?`)
+  let shellAlerts = false;
+  const askingShell = new Map(); // nonce -> its answer's resolve
+  function askShell(ask, ms) {
+    return new Promise((resolve) => {
+      const nonce = crypto.randomUUID();
+      const timer = setTimeout(() => {
+        askingShell.delete(nonce);
+        resolve(null);
+      }, ms);
+      askingShell.set(nonce, (answer) => {
+        clearTimeout(timer);
+        resolve(answer);
+      });
+      window.parent.postMessage({ ...ask, nonce }, state.me.platform);
+    });
+  }
+  async function pushPost(path, body) {
+    try {
+      const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), credentials: "same-origin" });
+      const j = await r.json().catch(() => ({}));
+      return r.ok ? j : { ok: false, reason: "server", error: j.message || `http ${r.status}` };
+    } catch (err) {
+      return { ok: false, reason: "error", error: err.message };
+    }
+  }
+  // the shell's answer that is no subscription, as `register` says it
+  const unsubscribed = (a) =>
+    a?.state === "denied" ? { ok: false, reason: "denied" } : a?.state === "off" ? { ok: false, reason: "dismissed" } : { ok: false, reason: "error", error: a?.error ?? "the page around this chat did not answer" };
+  async function alertsOn() {
+    const { key } = await fetch("./__push-key", { credentials: "same-origin" }).then((r) => r.json()).catch(() => ({}));
+    if (typeof key !== "string" || !key) return { ok: false, reason: "error", error: "this chat has no key to push with" };
+    const a = await askShell({ fragment: "alerts", on: true, key }, ALERTS_ASK_MS);
+    if (a?.state !== "on" || !a.subscription) return unsubscribed(a);
+    const stored = await pushPost("./__push-sub", { who: state.me.principal, ...a.subscription });
+    // not stored here: the shell lets it go
+    if (stored.ok === false) await askShell({ fragment: "alerts", on: false }, ALERTS_ASK_MS);
+    return stored;
+  }
+  async function alertsOff() {
+    const a = await askShell({ fragment: "alerts", on: false }, ALERTS_ASK_MS);
+    if (a?.state !== "off") return unsubscribed(a);
+    return a.endpoint ? pushPost("./__push-unsub", { endpoint: a.endpoint }) : { ok: true, removed: 0 };
+  }
   function setNotify(to) {
     notifying = to;
     const b = $("notify");
@@ -2556,7 +2617,17 @@ export function mount(root) {
   async function readNotify() {
     $("notify").hidden = !canNotify();
     if (!canNotify()) return;
-    if (Notification.permission === "denied") return setNotify(framed ? "framed" : "denied");
+    if (framed) {
+      // shown once it is known whose it is (a press before would ask the frame)
+      $("notify").hidden = true;
+      const a = await askShell({ fragment: "alerts?" }, ALERTS_READ_MS);
+      shellAlerts = !!a;
+      if (a?.state === "unsupported") return;
+      $("notify").hidden = false;
+      if (!a) return setNotify("framed");
+      return setNotify(["on", "denied"].includes(a.state) ? a.state : "off");
+    }
+    if (Notification.permission === "denied") return setNotify("denied");
     try {
       const registration = await navigator.serviceWorker.getRegistration(location.href);
       const subscribed = Notification.permission === "granted" && !!(await registration?.pushManager.getSubscription());
@@ -2570,9 +2641,11 @@ export function mount(root) {
     if (notifying === "working" || !canNotify()) return;
     const was = notifying;
     setNotify("working");
-    const answer = was === "on" ? await fragment.push.unregister() : await fragment.push.register(state.me.principal);
+    const answer = shellAlerts ? await (was === "on" ? alertsOff() : alertsOn()) : was === "on" ? await fragment.push.unregister() : await fragment.push.register(state.me.principal);
     if (answer.ok !== false) return setNotify(was === "on" ? "off" : "on");
-    if (answer.reason === "denied") return setNotify(framed ? "framed" : "denied");
+    if (answer.reason === "denied") return setNotify(framed && !shellAlerts ? "framed" : "denied");
+    // the browser's question closed unanswered: nothing changed
+    if (answer.reason === "dismissed") return setNotify(was);
     setNotify(was === "on" ? "on" : "failed");
     problem(`Notifications were not turned ${was === "on" ? "off" : "on"}: ${answer.error ?? answer.reason}`);
   };

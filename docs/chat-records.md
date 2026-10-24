@@ -643,7 +643,12 @@ this browser for them (`fragment.push.register(<their identity>)`), and
 says whether it is on (a click again turns it off), blocked in the
 browser's settings, or failed. A chat framed by the shell is a
 cross-origin frame, which a browser does not let ask for notifications:
-there the bell says to open the chat in a tab of its own, and does.
+there the bell asks the shell, which asks on the platform's origin and
+holds the subscription, made with this chat's key, and the page stores
+it as in a tab of its own (docs/api.md, The shell, "A chat's alerts are
+the shell's"); a click on its notification opens the chat in the shell.
+Framed by a page that does not answer, the bell says to open the chat in
+a tab of its own, and does.
 
 Who is who comes from the fragment: `__members` lists the chat's agents
 (the lead first), and `__people` names them. An agent shows by its agent

@@ -112,7 +112,7 @@ pub fn shell_page(text: &str, release: &str, deployed: Option<u64>) -> String {
 /// each with its content type: of the rest of cell/shell/, its pages are
 /// served at their own paths, and its credits and licenses not at all.
 #[cfg(feature = "platform")]
-const SHELL_PUBLISHED: [(&str, &str); 31] = [
+const SHELL_PUBLISHED: [(&str, &str); 32] = [
     // the cell's server-rendered pages' base look (share.rs `sheet_html`),
     // on the platform's origin and, as /__sheet.css, on a fragment's
     ("sheet.css", "text/css; charset=utf-8"),
@@ -128,6 +128,9 @@ const SHELL_PUBLISHED: [(&str, &str); 31] = [
     ("funnel-sans-600.ttf", "font/ttf"),
     ("funnel-sans-700.ttf", "font/ttf"),
     ("shell.js", "text/javascript; charset=utf-8"),
+    // a chat's alerts: the service worker the shell registers for each
+    // chat whose alerts are on (shell.js, "a chat's alerts")
+    ("alerts-sw.js", "text/javascript; charset=utf-8"),
     ("shell.css", "text/css; charset=utf-8"),
     ("layout.js", "text/javascript; charset=utf-8"),
     ("viewer.js", "text/javascript; charset=utf-8"),

@@ -459,6 +459,50 @@ impl Browser {
         Ok(())
     }
 
+    /// The id DevTools knows the service worker registration at `scope` by,
+    /// as `page`'s origin's registrations are reported once asked
+    /// (`ServiceWorker.workerRegistrationUpdated`, after `enable`).
+    pub fn registration_id(&mut self, page: &Page, scope: &str) -> Result<String> {
+        self.next += 1;
+        let asked = json!({ "id": self.next, "method": "ServiceWorker.enable", "params": {}, "sessionId": page.session });
+        self.ws.send(Message::Text(asked.to_string().into()))?;
+        let t0 = Instant::now();
+        let mut found = None;
+        while found.is_none() && t0.elapsed() < Duration::from_secs(30) {
+            let Message::Text(t) = self.ws.read()? else { continue };
+            let v: Value = serde_json::from_str(&t)?;
+            if v["method"] == "ServiceWorker.workerRegistrationUpdated" {
+                let registrations = v["params"]["registrations"].as_array().cloned().unwrap_or_default();
+                found = registrations.iter().find(|r| r["scopeURL"] == scope && r["isDeleted"] != true).and_then(|r| r["registrationId"].as_str().map(str::to_string));
+            }
+        }
+        found.with_context(|| format!("no service worker registration at {scope}"))
+    }
+
+    /// A running service worker of this lease's contexts whose script's URL
+    /// contains `url_part`, attached (as `frame` attaches a frame), so its
+    /// own requests can be refused (`block`).
+    pub fn worker(&mut self, url_part: &str) -> Result<Page> {
+        let v = self.send("Target.getTargets", json!({}), None)?;
+        let target = v["targetInfos"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|t| t["type"] == "service_worker" && t["url"].as_str().is_some_and(|u| u.contains(url_part)))
+            .and_then(|t| t["targetId"].as_str().map(str::to_string))
+            .with_context(|| format!("no running service worker at {url_part}"))?;
+        self.attach(&target)
+    }
+
+    /// A push message delivered to the registration DevTools knows as
+    /// `registration` (`registration_id`), as a push service would deliver
+    /// one: its worker's `push` event, with `data`.
+    pub fn deliver_push(&mut self, page: &Page, origin: &str, registration: &str, data: &str) -> Result<()> {
+        self.send("ServiceWorker.enable", json!({}), Some(&page.session))?;
+        self.send("ServiceWorker.deliverPushMessage", json!({ "origin": origin, "registrationId": registration, "data": data }), Some(&page.session))?;
+        Ok(())
+    }
+
     /// Lets the lease's context save what it downloads into `dir` (a click
     /// on a link that answers an attachment).
     pub fn allow_downloads(&mut self, dir: &Path) -> Result<()> {
@@ -467,6 +511,20 @@ impl Browser {
             params["browserContextId"] = json!(context);
         }
         self.send("Browser.setDownloadBehavior", params, None)?;
+        Ok(())
+    }
+
+    /// What the lease's context tells pages of `origin` of the web
+    /// permission `name` (`navigator.permissions`: "microphone") from here
+    /// on: "granted", "denied" or "prompt", as a person's choice in the
+    /// browser's settings. Chrome's fake media UI (its command line) still
+    /// answers a page's request for the microphone yes.
+    pub fn set_permission(&mut self, origin: &str, name: &str, setting: &str) -> Result<()> {
+        let mut params = json!({ "permission": { "name": name }, "setting": setting, "origin": origin });
+        if let Some(context) = &self.context {
+            params["browserContextId"] = json!(context);
+        }
+        self.send("Browser.setPermission", params, None)?;
         Ok(())
     }
 
