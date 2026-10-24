@@ -1682,12 +1682,15 @@ settings and state):
   Python, Node 26.7, npm 12, uv, ffmpeg, ripgrep, Chromium 145) in PM's
   store at `/opt/hermes/tools`. Its layers go by how often each changes:
   the base, one layer (Hermes' image flattened, with everything pinned
-  on it: 4.3 GB, 1.4 GB compressed), then ours (the bridge, `hermes-boot`,
-  the fragment CLI and the image's own files: about 21 MB, 9 MB
-  compressed), then a few KB `hermes-boot build-info` writes and the
-  image's version. A deploy that changes only our code pushes the small
-  ones; the base changes only with a pin, `document-requirements.txt` or
-  one of its steps (or when the deploying machine's build cache has lost
+  on it: 4.3 GB, 1.4 GB compressed), then SimpleX's core (`simplex-chat`
+  v7.0.3 by checksum, 79.5 MB, 18.8 MB compressed: a layer of its own,
+  changed only with its pin; it runs only for an agent its owner linked,
+  on an always-on computer: docs/bridge.md, "SimpleX"), then ours (the
+  bridge, `hermes-boot`, the fragment CLI and the image's own files: about
+  21 MB, 9 MB compressed), then a few KB `hermes-boot build-info` writes
+  and the image's version. A deploy that changes only our code pushes the
+  small ones; the base changes only with a pin, `document-requirements.txt`
+  or one of its steps (or when the deploying machine's build cache has lost
   it). One Hermes
   profile per agent (named as its agent fragment, `juniper--k3x9`), its agent
   fragment's `SOUL.md`, `memories/` and `skills/` checked out into it and

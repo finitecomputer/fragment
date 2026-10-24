@@ -47,6 +47,8 @@ const FRAGMENT_CLI: &str = "/usr/local/bin/fragment";
 /// at every start, since a container started from a snapshot carries the
 /// last boot's (S3b).
 const RUN: &str = "/var/lib/fragment-run";
+/// The SimpleX core the image carries (images/hermes/Dockerfile).
+const SIMPLEX_CHAT: &str = "/usr/local/bin/simplex-chat";
 /// The relay's port, on loopback only: Hermes dials it, nothing else can.
 const RELAY_LISTEN: &str = "127.0.0.1:8650";
 /// The gateway id both sides name.
@@ -170,7 +172,7 @@ fn check_restore() -> ! {
             std::process::exit(1);
         }
     };
-    let dbs = held::databases(Path::new(held::DATA), &[Path::new(held::STAGING), Path::new(hermes::WORK)]).unwrap_or_else(|e| {
+    let dbs = held::databases(Path::new(held::DATA), &[Path::new(held::STAGING), Path::new(hermes::WORK), Path::new(held::SIMPLEX)]).unwrap_or_else(|e| {
         println!("{e}");
         std::process::exit(1)
     });
@@ -371,7 +373,7 @@ struct Copies {
 /// staging made anew, as the hermes user.
 async fn copy_databases(ids: Option<(u32, u32)>) -> Result<Copies, String> {
     let (data, staging) = (Path::new(held::DATA), Path::new(held::STAGING));
-    let found = held::databases(data, &[staging, Path::new(hermes::WORK)]).map_err(|e| e.to_string())?;
+    let found = held::databases(data, &[staging, Path::new(hermes::WORK), Path::new(held::SIMPLEX)]).map_err(|e| e.to_string())?;
     let (dbs, unnamed): (Vec<PathBuf>, Vec<PathBuf>) = found.into_iter().partition(|db| held::nameable(data, db));
     held::make_staging(staging, ids).map_err(|e| e.to_string())?;
     let run = tokio::process::Command::new("/command/s6-setuidgid").args(["hermes", &format!("{OPT}/bin/hermes-boot"), "copy"]).arg(staging).args(&dbs).kill_on_drop(true).output();
@@ -826,6 +828,10 @@ fn spawn_bridge(card_timeout_s: u64) -> Option<Child> {
         // for its first viewer (the agent's fragment is the start's last word).
         .env("BRIDGE_SCREENS_FILE", format!("{RUN}/{SCREENS_FILE}"))
         .env("BRIDGE_SCREEN_START", format!("{OPT}/bin/hermes-boot screen-start"))
+        // SimpleX, for the agents their owners link (the bridge's
+        // simplex/run.rs): the core the image carries. It runs only while
+        // the computer is always on, and only for a linked agent.
+        .env("BRIDGE_SIMPLEX_BIN", SIMPLEX_CHAT)
         // The restore already happened: the bridge reads /data at once.
         .env_remove("RESTORE_PENDING");
     match c.spawn() {

@@ -50,7 +50,7 @@ use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 
-use super::wire::{self, Cmd, ConnId, ContactId, Content, Resp, SyncStatus};
+use super::wire::{self, Cmd, ConnId, ContactId, Content, FileRef, Resp, SyncStatus};
 
 /// The newest items a start reads back, to forward what a killed core
 /// committed but never announced.
@@ -87,6 +87,11 @@ pub struct Link {
     /// A sync asked and not yet `ok`: replies wait in the outbox.
     #[serde(default)]
     pub syncing: bool,
+    /// That sync was forced (a start that went back in time): a restart
+    /// before it is `ok` forces it again, since an unforced one is refused
+    /// by a core that sees nothing wrong.
+    #[serde(default)]
+    pub forced: bool,
     #[serde(default)]
     pub outbox: VecDeque<String>,
     /// Parts the outbox dropped, full, since the link was made.
@@ -100,6 +105,29 @@ pub struct Link {
     /// A start's catch-up, under way: in no file, and in no comparison.
     #[serde(skip)]
     pub scan: Scan,
+    /// What an unlink still has the core let go (the contact, told, or an
+    /// unused invitation): asked again at each start until it is done, so
+    /// an unlink while the core cannot run (under a hold, not always on)
+    /// is finished when it next does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<Cleanup>,
+}
+
+/// What an unlink has the core let go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Cleanup {
+    Contact(ContactId),
+    Conn(ConnId),
+}
+
+impl Cleanup {
+    fn cmd(self) -> Cmd {
+        match self {
+            Cleanup::Contact(contact) => Cmd::Delete { contact, notify: true },
+            Cleanup::Conn(conn) => Cmd::DeleteConn { conn },
+        }
+    }
 }
 
 fn is_zero(n: &i64) -> bool {
@@ -176,6 +204,9 @@ pub struct Inbound {
     /// The core's id for its item: acknowledged once its chat has it
     /// (`Input::Delivered`).
     pub item: i64,
+    /// The file it carries (a voice message's, a photo's): the bridge
+    /// receives it, then carries it as the message's attachment.
+    pub file: Option<FileRef>,
 }
 
 /// What the owner is told.
@@ -211,36 +242,46 @@ impl Link {
             Input::Unlink => match std::mem::take(&mut self.phase) {
                 Phase::Linked { contact, .. } => {
                     self.let_go();
+                    self.cleanup = Some(Cleanup::Contact(contact));
                     out.extend([Action::Ask(Cmd::Delete { contact, notify: true }), Action::Tell(Notice::Unlinked { by_them: false }), Action::Save]);
                 }
-                Phase::Inviting { conn, .. } => out.extend([Action::Ask(Cmd::DeleteConn { conn }), Action::Save]),
+                Phase::Inviting { conn, .. } => {
+                    self.cleanup = Some(Cleanup::Conn(conn));
+                    out.extend([Action::Ask(Cmd::DeleteConn { conn }), Action::Save]);
+                }
                 // its answer, when it comes, is an invitation no one wants
                 Phase::Asking | Phase::Off => {}
             },
-            Input::Started { rollback } => match &self.phase {
-                Phase::Off => {}
-                // the answer died with the last life
-                Phase::Asking => out.push(Action::Ask(Cmd::Invite)),
-                // the lost life may have spent it: a new one to show
-                Phase::Inviting { conn, .. } if rollback => {
-                    out.extend([Action::Ask(Cmd::DeleteConn { conn: *conn }), Action::Ask(Cmd::Invite)]);
-                    self.phase = Phase::Asking;
-                }
-                Phase::Inviting { .. } => {}
-                Phase::Linked { contact, .. } => {
-                    let contact = *contact;
-                    if rollback {
-                        self.syncing = true;
-                        out.extend([Action::Ask(Cmd::Sync { contact, force: true }), Action::Tell(Notice::MaybeLost)]);
-                    } else if self.syncing {
-                        // a sync the last life asked: asked again, refused if done
-                        out.push(Action::Ask(Cmd::Sync { contact, force: false }));
+            Input::Started { rollback } => {
+                // an unlink the last life could not finish, first
+                out.extend(self.cleanup.map(|c| Action::Ask(c.cmd())));
+                match &self.phase {
+                    Phase::Off => {}
+                    // the answer died with the last life
+                    Phase::Asking => out.push(Action::Ask(Cmd::Invite)),
+                    // the lost life may have spent it: a new one to show
+                    Phase::Inviting { conn, .. } if rollback => {
+                        out.extend([Action::Ask(Cmd::DeleteConn { conn: *conn }), Action::Ask(Cmd::Invite)]);
+                        self.phase = Phase::Asking;
                     }
-                    self.scan.items.clear();
-                    self.scan.running = true;
-                    out.push(Action::Ask(Cmd::Chat { contact, count: CATCHUP_ITEMS, before: None }));
+                    Phase::Inviting { .. } => {}
+                    Phase::Linked { contact, .. } => {
+                        let contact = *contact;
+                        if rollback {
+                            self.syncing = true;
+                            self.forced = true;
+                            out.extend([Action::Ask(Cmd::Sync { contact, force: true }), Action::Tell(Notice::MaybeLost)]);
+                        } else if self.syncing {
+                            // a sync the last life asked: asked again (forced again
+                            // if it was), refused if done
+                            out.push(Action::Ask(Cmd::Sync { contact, force: self.forced }));
+                        }
+                        self.scan.items.clear();
+                        self.scan.running = true;
+                        out.push(Action::Ask(Cmd::Chat { contact, count: CATCHUP_ITEMS, before: None }));
+                    }
                 }
-            },
+            }
             Input::Said(resp) => self.said(resp, &mut out),
             Input::Failed { cmd, what } => {
                 let what = wire::cut(what, 300).to_string();
@@ -254,9 +295,13 @@ impl Link {
                     Cmd::Sync { contact, force: true } if self.linked_to(*contact) && self.syncing => out.push(Action::Tell(Notice::Failed { what })),
                     // the catch-up's next page, gone (its anchor deleted): what it read goes
                     Cmd::Chat { contact, .. } if self.linked_to(*contact) => self.finish_scan(false, &mut out),
+                    // gone already, or not the core's to let go: not asked again
+                    Cmd::Delete { contact, .. } if self.cleanup == Some(Cleanup::Contact(*contact)) => self.cleanup = None,
+                    Cmd::DeleteConn { conn } if self.cleanup == Some(Cleanup::Conn(*conn)) => self.cleanup = None,
                     // not needed (in step), or not possible: what waits goes
                     Cmd::Sync { contact, .. } if self.linked_to(*contact) && self.syncing => {
                         self.syncing = false;
+                        self.forced = false;
                         self.flush(&mut out);
                     }
                     // not sent now (a ratchet mid-sync refuses sends): it
@@ -276,7 +321,7 @@ impl Link {
                 }
             }
             Input::Resync => {
-                if let (Some(contact), true) = (self.contact(), self.syncing) {
+                if let (Some(contact), true) = (self.contact(), self.syncing && self.forced) {
                     out.push(Action::Ask(Cmd::Sync { contact, force: true }));
                 }
             }
@@ -321,6 +366,7 @@ impl Link {
                 SyncStatus::Required | SyncStatus::Allowed => self.sync(*contact, out),
                 SyncStatus::Ok if self.syncing => {
                     self.syncing = false;
+                    self.forced = false;
                     out.push(Action::Tell(Notice::Resynced));
                     self.flush(out);
                 }
@@ -331,7 +377,18 @@ impl Link {
                 self.let_go();
                 out.extend([Action::Tell(Notice::Unlinked { by_them: *by_them }), Action::Save]);
             }
-            Resp::Sync { .. } | Resp::SyncStarted { .. } | Resp::Deleted { .. } | Resp::ConnDeleted { .. } | Resp::Error { .. } | Resp::Other(_) => {}
+            // an unlink's let-go, done
+            Resp::Deleted { contact, .. } if self.cleanup == Some(Cleanup::Contact(*contact)) => {
+                self.cleanup = None;
+                out.push(Action::Save);
+            }
+            Resp::ConnDeleted { conn } if self.cleanup == Some(Cleanup::Conn(*conn)) => {
+                self.cleanup = None;
+                out.push(Action::Save);
+            }
+            // a file's own events are the bridge's to act on (it receives the
+            // file a forwarded message carries), never the link's
+            Resp::Sync { .. } | Resp::SyncStarted { .. } | Resp::Deleted { .. } | Resp::ConnDeleted { .. } | Resp::FileReady { .. } | Resp::FileDone { .. } | Resp::FileFailed { .. } | Resp::Error { .. } | Resp::Other(_) => {}
         }
     }
 
@@ -389,7 +446,7 @@ impl Link {
                         Content::Message { kind, text } => {
                             // a message has its sender's id; one without is no message to carry
                             if let Some(id) = &item.shared {
-                                out.push(Action::Forward(Inbound { id: id.clone(), kind: kind.clone(), text: text.clone(), at: item.at.clone(), item: item.id }));
+                                out.push(Action::Forward(Inbound { id: id.clone(), kind: kind.clone(), text: text.clone(), at: item.at.clone(), item: item.id, file: item.file.clone() }));
                             }
                         }
                         Content::Undecryptable => self.sync(item.contact, out),
@@ -427,6 +484,7 @@ impl Link {
     /// A contact bound or let go: nothing of the last one's waits.
     fn let_go(&mut self) {
         self.syncing = false;
+        self.forced = false;
         self.outbox.clear();
         self.delivered = 0;
         self.scan.items.clear();
@@ -449,6 +507,7 @@ impl Link {
     fn check(&self) {
         let linked = matches!(self.phase, Phase::Linked { .. });
         assert!(linked || (!self.syncing && self.outbox.is_empty()), "only a bound link syncs or holds replies");
+        assert!(self.syncing || !self.forced, "a forced sync is one under way");
         assert!(self.outbox.len() <= OUTBOX_MAX, "the outbox is bounded");
     }
 
@@ -463,7 +522,7 @@ impl Link {
     pub fn from_json(text: &str) -> Result<Link, String> {
         let link: Link = serde_json::from_str(text).map_err(|e| e.to_string())?;
         let linked = matches!(link.phase, Phase::Linked { .. });
-        if !(linked || (!link.syncing && link.outbox.is_empty())) || link.outbox.len() > OUTBOX_MAX {
+        if !(linked || (!link.syncing && link.outbox.is_empty())) || link.outbox.len() > OUTBOX_MAX || (link.forced && !link.syncing) {
             return Err("a link that contradicts itself".into());
         }
         Ok(link)
@@ -490,7 +549,7 @@ mod tests {
     }
 
     fn msg(contact: ContactId, id: Option<&str>, text: &str) -> Item {
-        Item { id: 1, contact, received: true, content: Content::Message { kind: "text".into(), text: text.into() }, shared: id.map(str::to_string), at: "2026-10-22T10:00:00Z".into() }
+        Item { id: 1, contact, received: true, content: Content::Message { kind: "text".into(), text: text.into() }, shared: id.map(str::to_string), at: "2026-10-22T10:00:00Z".into(), file: None }
     }
 
     fn forwards(actions: &[Action]) -> Vec<(String, String)> {
@@ -514,9 +573,14 @@ mod tests {
         let parts = sends(&link.apply(Input::Reply(&long)));
         assert_eq!(parts.len(), 3);
         assert_eq!(parts.concat(), long);
-        // a file's caption is carried, by its kind
-        let photo = Resp::Items(vec![Item { content: Content::Message { kind: "image".into(), text: "my cat".into() }, ..msg(3, Some("CCC="), "") }]);
-        assert!(matches!(&link.apply(Input::Said(&photo))[..], [Action::Forward(Inbound { kind, text, .. })] if kind == "image" && text == "my cat"));
+        // a file's caption is carried, by its kind, with the file
+        let cat = FileRef { id: 5, name: "cat.jpg".into(), size: 1_000, path: None };
+        let photo = Resp::Items(vec![Item { content: Content::Message { kind: "image".into(), text: "my cat".into() }, file: Some(cat.clone()), ..msg(3, Some("CCC="), "") }]);
+        assert!(matches!(&link.apply(Input::Said(&photo))[..], [Action::Forward(Inbound { kind, text, file: Some(f), .. })] if kind == "image" && text == "my cat" && *f == cat));
+        // a file's own events move nothing of the link's
+        for r in [Resp::FileReady { file: 5 }, Resp::FileDone { file: 5, path: "cat.jpg".into() }, Resp::FileFailed { file: 5 }] {
+            assert!(link.apply(Input::Said(&r)).is_empty());
+        }
     }
 
     /// Goal (invalid): no one but the owner talks to the agent here: a
@@ -684,6 +748,12 @@ mod tests {
         assert!(link.apply(Input::Said(&Resp::Sync { contact: 3, status: SyncStatus::Agreed })).is_empty());
         let ok = link.apply(Input::Said(&Resp::Sync { contact: 3, status: SyncStatus::Ok }));
         assert_eq!(ok, vec![Action::Tell(Notice::Resynced), Action::Ask(Cmd::Send { contact: 3, text: "held".into() })]);
+        // a restart while a forced sync was under way forces it again
+        let mut cut = linked();
+        cut.apply(Input::Started { rollback: true });
+        let mut cut = Link::from_json(&cut.to_json()).expect("it reads back");
+        assert!(cut.forced);
+        assert_eq!(cut.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::Sync { contact: 3, force: true }), Action::Ask(Cmd::Chat { contact: 3, count: CATCHUP_ITEMS, before: None })]);
         // a restart while a sync was under way asks it again, unforced
         link.apply(Input::Said(&Resp::Sync { contact: 3, status: SyncStatus::Required }));
         let back = Link::from_json(&link.to_json()).expect("it reads back");
@@ -741,7 +811,9 @@ mod tests {
         let mut link = linked();
         assert_eq!(link.apply(Input::Unlink), vec![Action::Ask(Cmd::Delete { contact: 3, notify: true }), Action::Tell(Notice::Unlinked { by_them: false }), Action::Save]);
         assert_eq!(link.phase, Phase::Off);
-        assert!(link.apply(Input::Said(&Resp::Deleted { contact: 3, by_them: false })).is_empty(), "our own delete's answer");
+        assert_eq!(link.cleanup, Some(Cleanup::Contact(3)), "its let-go waits for the core's answer");
+        assert_eq!(link.apply(Input::Said(&Resp::Deleted { contact: 3, by_them: false })), vec![Action::Save], "our own delete's answer: done");
+        assert_eq!(link.cleanup, None);
         let mut link = linked();
         link.apply(Input::Started { rollback: true });
         link.apply(Input::Reply("held"));
@@ -750,12 +822,32 @@ mod tests {
         let mut inviting = Link::default();
         invited(&mut inviting);
         assert_eq!(inviting.apply(Input::Unlink), vec![Action::Ask(Cmd::DeleteConn { conn: 1 }), Action::Save]);
+        assert_eq!(inviting.apply(Input::Said(&Resp::ConnDeleted { conn: 1 })), vec![Action::Save]);
+        assert_eq!(inviting.cleanup, None);
         let mut asking = Link::default();
         asking.apply(Input::Want);
         assert!(asking.apply(Input::Unlink).is_empty());
         let late = Resp::Invitation { conn: 2, link: "simplex:/invitation#/late".into(), short: None };
         assert_eq!(asking.apply(Input::Said(&late)), vec![Action::Ask(Cmd::DeleteConn { conn: 2 })], "its answer, withdrawn");
         assert!(Link::default().apply(Input::Unlink).is_empty());
+    }
+
+    /// Goal (Alex's review of #546): an unlink while the core cannot run
+    /// (under a hold, not always on), whose delete was never sent, is
+    /// finished at the core's next start, from its file; a relink meanwhile
+    /// does not lose it; a delete the core refuses (gone already) is not
+    /// asked again.
+    #[test]
+    fn an_unlink_is_finished_when_the_core_next_runs() {
+        let mut link = linked();
+        link.apply(Input::Unlink);
+        let mut back = Link::from_json(&link.to_json()).expect("it reads back");
+        assert_eq!(back.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::Delete { contact: 3, notify: true })]);
+        back.apply(Input::Want);
+        assert_eq!(back.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::Delete { contact: 3, notify: true }), Action::Ask(Cmd::Invite)], "asked again beside a new link");
+        back.apply(Input::Failed { cmd: &Cmd::Delete { contact: 3, notify: true }, what: "errorStore contactNotFound" });
+        assert_eq!(back.cleanup, None);
+        assert_eq!(back.apply(Input::Started { rollback: false }), vec![Action::Ask(Cmd::Invite)]);
     }
 
     /// Goal: a failed invitation goes back to off and says why; a failed
@@ -774,7 +866,8 @@ mod tests {
         assert!(Link::from_json("nope").is_err());
         assert!(Link::from_json(r#"{"phase":"linked"}"#).is_err(), "a bound link names its contact");
         assert_eq!(Link::from_json(r#"{"phase":"off"}"#), Ok(Link::default()));
-        assert_eq!(linked().to_json(), r#"{"phase":"linked","contact":3,"name":"paul","syncing":false,"outbox":[],"dropped":0}"#);
+        assert_eq!(linked().to_json(), r#"{"phase":"linked","contact":3,"name":"paul","syncing":false,"forced":false,"outbox":[],"dropped":0}"#);
+        assert!(Link::from_json(r#"{"phase":"linked","contact":3,"name":"p","forced":true}"#).is_err(), "forced, but no sync under way");
     }
 
     /// Goal: whatever arrives in whatever order, the link never contradicts

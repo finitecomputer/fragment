@@ -128,6 +128,9 @@ on a computer.
 | `BRIDGE_SCREEN_DIR` | `/opt/fragment/screen` | its page |
 | `BRIDGE_SCREENS_FILE` | | each agent's screen (`screens.rs`): `{"screens": [{agent, rfb, lease?, activity?}]}`, `rfb` as `unix:<path>` or `tcp:<host:port>`, written whole and renamed into place, read again when it changes. Unset, no agent has a display (the stub); set, an agent it does not name has no screen. While someone watches a screen its `activity` file's time is set every 10 s (`ACTIVITY_EVERY_MS`), so the image's idle stop leaves a watched desktop up. Our Hermes image's is `/var/lib/fragment-run/screens.json` (docs/computers.md) |
 | `BRIDGE_SCREEN_START` | | the command that starts an agent's display, run with the agent's fragment as its last argument by a viewer that finds it down: at once when it answered since the last start (it stopped or restarted under its viewers, whose streams end with it), else at most once a minute while it stays down |
+| `BRIDGE_SIMPLEX_BIN` | | SimpleX's core, `simplex-chat` (below, "SimpleX"): set, each linked agent's core runs while the computer is always on; unset (the stub), nothing of SimpleX runs, and `/simplex/…` is 404. Our Hermes image's is `/usr/local/bin/simplex-chat` |
+| `BRIDGE_SIMPLEX_DIR` | `/data/simplex` | each agent's SimpleX state, `<dir>/<agent fragment>/` |
+| `BRIDGE_SIMPLEX_SMP`, `BRIDGE_SIMPLEX_XFTP` | | servers its cores use (a test's lab); unset, the core's own presets (SimpleX Chat's and Flux's) |
 
 ## State, and what it never does twice
 
@@ -401,6 +404,57 @@ told twice), the two together at most 8 KiB. Said once in a life; a life that re
 `turns_another_life_ran_are_told_once_to_the_next_turn` (the engine),
 `forgotten_turns_are_told_from_the_journal` (note.rs), and on the platform
 by the `computers` lane's recovery checks, where the stub echoes it.
+
+## SimpleX
+
+An agent's owner may link the agent to their SimpleX app (decision 32;
+`src/simplex/`; what it adds to the platform, entry by entry:
+docs/explorations/simplex-complexity.md). The bridge runs SimpleX's own
+core, `simplex-chat`, one per linked agent, as a child process, driven
+over its bot API (`-p`, loopback only) by one task, so nothing else ever
+drives it.
+
+- **Only where the image names the core** (`BRIDGE_SIMPLEX_BIN`), and
+  **only while the computer is always on** (its view's `alwaysOn`: the
+  always-on seat; docs/billing.md). A computer that sleeps would hear
+  nothing, so it runs no core at all, and its link page says why. A seat
+  that lapses turns always-on off: the cores stop, and the computer sleeps
+  when idle, its links kept for when it is on again.
+- **Linking** is a one-time invitation the core makes when the owner asks
+  (`POST /simplex/link?agent=`, on the screen port, which only its owner
+  reaches); the contact that connects through it is the owner's, and the
+  spent link is refused to anyone after (the SMP server's `AUTH`). Any
+  other contact is deleted, and nothing of theirs is carried. Linked, the
+  core greets the owner's app. `POST /simplex/unlink?agent=` lets the
+  contact go (told in their app); their own delete in their app lets it go
+  here. `GET /simplex/state?agent=` says where it is (`off`, `asking`,
+  `inviting` with its link, `linked` with their name), whether it runs, and
+  why not.
+- **Its state** is `<dir>/<agent>/`: the core's two databases, its files
+  and temp folders (one device: a received file is renamed from one into
+  the other), and `link.json` (the link, the agent it is of, the start it
+  last ran in), written whole before what it causes. One of another agent
+  (a fragment's name made again) or that does not read is set aside,
+  renamed, never guessed.
+- **The hold stops every core** before the bridge answers it (`BRIDGE_HELD`
+  waits for them), and none starts while it lasts: a save takes the cores'
+  databases whole, as they are (`/_start` after `/_stop` crashes v7.0.3, so
+  the process stops: SIGTERM, then SIGKILL past 3 s). Our Hermes image's
+  copy of the databases under a hold passes `/data/simplex` over (held.rs,
+  `SIMPLEX`). An awake save starts them again as the hold goes.
+- **A start that went back in time** (the view's `restored.rollback`, for a
+  link last run in an earlier start) forces a ratchet sync before anything
+  is sent, holds replies through it, and tells the owner's app a message
+  may have been lost: the core cannot see a rollback itself
+  (docs/explorations/simplex-connector.md, "The lab"). Every start reads
+  back the newest items, and forwards are by the sender's message id, so
+  a core killed mid-burst loses nothing it committed.
+- **A link's change asks for a save**: the keepalive held for 3 s, so the
+  platform saves as that ends rather than after the next turn.
+- **A core that stops on its own** is started again (2 s, doubled); three
+  stops in 10 minutes and it waits for its owner to link again.
+- **What a core prints is not logged**: it echoes the commands it is sent,
+  message text among them.
 
 ## Hermes' Relay, as the bridge speaks it
 

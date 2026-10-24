@@ -1,0 +1,1239 @@
+//! The bridge's SimpleX (docs/bridge.md, "SimpleX"): one `simplex-chat`
+//! core per agent its owner linked, each a child process of the bridge,
+//! driven over its bot API by `link`'s rules. One task (`Manager`) owns
+//! every core, so no two things ever drive one.
+//!
+//! - **Only where the image says, only while always on.** Nothing here
+//!   runs unless the image names the core (`BRIDGE_SIMPLEX_BIN`), and a
+//!   core runs only while the computer is always on (`alwaysOn` in its
+//!   view: the always-on seat) and its agent's link is not off. A computer
+//!   that is not always on runs none: a sleeping one would hear nothing.
+//! - **Its state** is `<dir>/<agent>/` (`/data/simplex/<agent>/`): the
+//!   core's two databases (`sx_chat.db`, `sx_agent.db`), its files and temp
+//!   folders (on one device: a received file is renamed from one into the
+//!   other), and `link.json` (the link, the agent it is of, the start it
+//!   last ran in), written whole before what it causes is done.
+//! - **The hold stops every core** before the bridge answers it (`quiet`),
+//!   so a save takes the core's databases as they are, whole: planned stops
+//!   (a sleep, a restart, an update) lose nothing. The core starts again
+//!   when the hold goes. `/_start` after `/_stop` crashes v7.0.3, so it
+//!   is the process that stops (SIGTERM; the lab: whole, no `-wal`).
+//! - **A start that went back in time** (the platform's
+//!   `restored.rollback`, once in a start, for a link last run before it)
+//!   forces a ratchet sync (`link`).
+//! - **A link changed asks for a save**: the keepalive held for a moment,
+//!   so the platform saves as the work ends, rather than within 15
+//!   minutes of the next turn.
+//! - **What a core prints is not logged**: it echoes the commands it gets,
+//!   message text among them. Its exits are, by their code.
+
+use std::collections::{BTreeMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt;
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio_tungstenite::tungstenite::Message;
+
+use super::link::{Action, Input, Link, Notice, Phase};
+use super::wire::{self, Cmd, Resp};
+use crate::api::{self, Api};
+use crate::runtime::Agent;
+
+/// Each agent's state, under its directory.
+pub const LINK_FILE: &str = "link.json";
+/// The bot API answers within this of its process starting, or the start
+/// failed (the lab: about half a second).
+const CONNECT_MS_MAX: u64 = 30_000;
+/// A core is given this long to stop on SIGTERM, then killed.
+const STOP_MS_MAX: u64 = 3_000;
+/// A core that stops on its own this often in `EXITS_WINDOW_MS` is not
+/// started again until its owner asks (a link, an unlink) or the bridge
+/// starts again.
+const EXITS_MAX: usize = 3;
+const EXITS_WINDOW_MS: u64 = 10 * 60_000;
+/// A core that stopped on its own is started again after this, doubled
+/// for each exit in the window.
+const RESTART_MS: u64 = 2_000;
+/// A link's change holds the keepalive this long: the platform saves once
+/// it closes (docs/computers.md, "Saves").
+const PULSE_MS: u64 = 3_000;
+/// A core told to stop while commands are under way gets this long to
+/// answer them (an unlink's delete) first.
+const DRAIN_MS: u64 = 5_000;
+const TICK_MS: u64 = 100;
+/// A forced sync that failed is asked again this often until it is `ok`.
+const RESYNC_MS: u64 = 30_000;
+const INBOX_MAX: usize = 256;
+const WRITER_MAX: usize = 64;
+/// What the core's last words (stderr) are kept to, for its exit's line.
+const STDERR_TAIL_BYTES: usize = 2_048;
+/// An agent's name, as its SimpleX profile shows it, at most.
+const DISPLAY_NAME_MAX: usize = 32;
+
+/// What the image gives the bridge for SimpleX (main.rs reads it).
+#[derive(Debug, Clone)]
+pub struct Config {
+    /// `BRIDGE_SIMPLEX_BIN`: the core.
+    pub bin: PathBuf,
+    /// `BRIDGE_SIMPLEX_DIR`: each agent's state (`/data/simplex`).
+    pub dir: PathBuf,
+    /// `BRIDGE_SIMPLEX_SMP`, `BRIDGE_SIMPLEX_XFTP`: servers to use (a
+    /// test's); none, the core's own presets.
+    pub smp: Option<String>,
+    pub xftp: Option<String>,
+}
+
+/// What an agent's link page is told (`GET /simplex/state`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct View {
+    pub agent: String,
+    /// `off`, `asking` (an invitation is being made), `inviting` (shown,
+    /// unused), `linked`.
+    pub phase: &'static str,
+    /// The one-time invitation, while inviting: the full link every
+    /// SimpleX app reads, and the short one when the server made it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub short: Option<String>,
+    /// The SimpleX contact it is linked to, by their name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub always_on: bool,
+    /// Its core runs now.
+    pub running: bool,
+    /// Why it does not run, or what last went wrong, in plain words.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+/// What reaches the manager.
+pub enum Msg {
+    /// The computer as the bridge last read it, and the agents it runs.
+    Computer { computer: Box<api::Computer>, agents: Vec<Agent> },
+    View { agent: String, reply: oneshot::Sender<Option<View>> },
+    Want { agent: String, reply: oneshot::Sender<Option<View>> },
+    Unlink { agent: String, reply: oneshot::Sender<Option<View>> },
+    /// An agent's name, as its owner titled it (looked up off the loop).
+    Titled { agent: String, title: String },
+    /// A core's bot API answered.
+    Up { agent: String, epoch: u64 },
+    /// A frame its core sent.
+    Frame { agent: String, epoch: u64, text: String },
+    /// A core's process ended (`why`: its code and last words).
+    Exited { agent: String, epoch: u64, why: String },
+    /// A core's bot API closed while its process may live on.
+    Lost { agent: String, epoch: u64 },
+}
+
+/// How the rest of the bridge reaches the manager.
+#[derive(Clone)]
+pub struct Handle {
+    tx: mpsc::Sender<Msg>,
+}
+
+impl Handle {
+    /// The computer as just read: the manager starts and stops cores from it.
+    pub fn computer(&self, computer: api::Computer, agents: Vec<Agent>) {
+        if self.tx.try_send(Msg::Computer { computer: Box::new(computer), agents }).is_err() {
+            crate::ev!("simplex.busy", { "dropped": "computer" });
+        }
+    }
+
+    async fn ask(&self, make: impl FnOnce(oneshot::Sender<Option<View>>) -> Msg) -> Option<View> {
+        let (reply, answer) = oneshot::channel();
+        self.tx.send(make(reply)).await.ok()?;
+        answer.await.ok().flatten()
+    }
+
+    /// What `agent`'s link page shows; none for an agent this bridge does
+    /// not run.
+    pub async fn view(&self, agent: &str) -> Option<View> {
+        self.ask(|reply| Msg::View { agent: agent.to_string(), reply }).await
+    }
+
+    /// Its owner asked to link `agent` (an invitation, shown).
+    pub async fn want(&self, agent: &str) -> Option<View> {
+        self.ask(|reply| Msg::Want { agent: agent.to_string(), reply }).await
+    }
+
+    /// Its owner asked to unlink `agent`.
+    pub async fn unlink(&self, agent: &str) -> Option<View> {
+        self.ask(|reply| Msg::Unlink { agent: agent.to_string(), reply }).await
+    }
+}
+
+/// An agent's `link.json`: its link, the agent it is of (a fragment's name
+/// may come back as another agent's), and the computer's start it last
+/// ran in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Saved {
+    pub identity: String,
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(flatten)]
+    pub link: Link,
+}
+
+/// Whether a core's first start in this life went back in time: the
+/// platform says this start did, and the link last ran in an earlier one.
+pub fn rolled_back(computer: &api::Computer, saved: &Saved) -> bool {
+    computer.rolled_back() && saved.generation < computer.generation
+}
+
+/// An agent fragment's name, as a directory: `<label>--<suffix>`, of
+/// lowercase letters, digits and `-`.
+pub fn dir_name_ok(fragment: &str) -> bool {
+    !fragment.is_empty() && fragment.len() <= 96 && fragment.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// The name an agent's SimpleX profile shows: its title, of letters, digits,
+/// spaces and `-_.'`, at most `DISPLAY_NAME_MAX` bytes; else its label.
+pub fn display_name(title: Option<&str>, label: &str) -> String {
+    let clean = |s: &str| -> String {
+        let kept: String = s.chars().filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '\'')).collect();
+        wire::cut(kept.trim(), DISPLAY_NAME_MAX).trim().to_string()
+    };
+    let named = title.map(clean).unwrap_or_default();
+    if !named.is_empty() {
+        return named;
+    }
+    let label = clean(label);
+    if label.is_empty() {
+        "Agent".into()
+    } else {
+        label
+    }
+}
+
+/// What the owner's SimpleX app is told as the link is made.
+fn greeting(name: &str) -> String {
+    format!("Hi, it's {name}. You're linked: write to me here any time, as you would in our chat.")
+}
+
+/// What the owner's SimpleX app is told after a start that went back in time.
+const MAYBE_LOST: &str = "I restarted and may have missed a message you sent me just before. If I don't answer something, please send it again.";
+
+/// Reads an agent's `link.json`: none when there is none; one that does
+/// not read, contradicts itself, or is another agent's is set aside (its
+/// directory renamed, kept for whoever runs the computer) and none read.
+pub fn load(dir: &Path, agent: &Agent) -> Option<Saved> {
+    let path = dir.join(LINK_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            set_aside(dir, &format!("unreadable: {e}"));
+            return None;
+        }
+    };
+    let saved = serde_json::from_str::<Saved>(&text).map_err(|e| e.to_string()).and_then(|s| Link::from_json(&serde_json::to_string(&s.link).expect("a link serializes")).map(|_| s));
+    match saved {
+        Ok(s) if s.identity == agent.identity => Some(s),
+        Ok(_) => {
+            set_aside(dir, "another agent's");
+            None
+        }
+        Err(e) => {
+            set_aside(dir, &e);
+            None
+        }
+    }
+}
+
+fn set_aside(dir: &Path, why: &str) {
+    let to = dir.with_file_name(format!("{}.set-aside-{}", dir.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(), crate::log::now_ms()));
+    crate::ev!("simplex.set_aside", { "dir": dir.display().to_string(), "to": to.display().to_string(), "why": wire::cut(why, 200) });
+    if let Err(e) = std::fs::rename(dir, &to) {
+        crate::ev!("simplex.set_aside_failed", { "error": e.to_string() });
+    }
+}
+
+/// Writes an agent's `link.json` whole (a temporary file, synced, renamed).
+pub fn store(dir: &Path, saved: &Saved) -> std::io::Result<()> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!("{LINK_FILE}.tmp"));
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(serde_json::to_string(saved).expect("a link serializes").as_bytes())?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, dir.join(LINK_FILE))
+}
+
+/// The agents whose link is bound, as their files say (read at the
+/// bridge's start, before any record: the engine honors their relayed
+/// records from the first).
+pub fn linked_on_disk(dir: &Path, agents: &[Agent]) -> Vec<String> {
+    agents.iter().filter(|a| dir_name_ok(&a.fragment)).filter(|a| {
+        let text = std::fs::read_to_string(dir.join(&a.fragment).join(LINK_FILE)).unwrap_or_default();
+        serde_json::from_str::<Saved>(&text).is_ok_and(|s| s.identity == a.identity && matches!(s.link.phase, Phase::Linked { .. }))
+    }).map(|a| a.fragment.clone()).collect()
+}
+
+/// A running core.
+struct Core {
+    pid: u32,
+    writer: mpsc::Sender<String>,
+    /// Turns true when its process has ended.
+    exited: watch::Receiver<bool>,
+    /// The bridge stopped it: its end is no failure.
+    planned: bool,
+}
+
+/// One agent's SimpleX.
+struct Slot {
+    agent: Agent,
+    dir: PathBuf,
+    saved: Saved,
+    title: Option<String>,
+    epoch: u64,
+    core: Option<Core>,
+    up: bool,
+    corr: u64,
+    pending: BTreeMap<u64, Cmd>,
+    /// Its core has started once in this life (its first start asks
+    /// whether this start went back in time).
+    started: bool,
+    exits: VecDeque<Instant>,
+    retry_at: Option<Instant>,
+    /// When a forced sync still waiting is asked again (`Input::Resync`).
+    resync_at: Option<Instant>,
+    /// It stopped too often: not started again until its owner asks.
+    broken: Option<String>,
+    /// What last went wrong, or what the owner last did, for its page.
+    note: Option<String>,
+    /// Since when it should not run but has commands under way.
+    draining_since: Option<Instant>,
+}
+
+impl Slot {
+    fn view(&self, always_on: bool) -> View {
+        let (phase, link, short, name) = match &self.saved.link.phase {
+            Phase::Off => ("off", None, None, None),
+            Phase::Asking => ("asking", None, None, None),
+            Phase::Inviting { link, short, .. } => ("inviting", Some(link.clone()), short.clone(), None),
+            Phase::Linked { name, .. } => ("linked", None, None, Some(name.clone())),
+        };
+        let why = if !always_on {
+            Some("SimpleX works while your computer stays on, which the always-on plan does.".to_string())
+        } else {
+            self.broken.clone().or_else(|| self.note.clone())
+        };
+        View { agent: self.agent.fragment.clone(), phase, link, short, name, always_on, running: self.core.is_some() && self.up, why }
+    }
+}
+
+/// The manager's own state.
+struct Manager {
+    cfg: Config,
+    api: Api,
+    quiet: Arc<AtomicBool>,
+    hold: PathBuf,
+    tx: mpsc::Sender<Msg>,
+    slots: BTreeMap<String, Slot>,
+    computer: Option<api::Computer>,
+    held: bool,
+    pulse: watch::Sender<bool>,
+    pulse_until: Option<Instant>,
+}
+
+/// Starts the manager: its handle. `quiet` is true while no core runs
+/// (the bridge's answer to a hold waits on it); `hold` is the platform's
+/// hold file.
+pub fn start(cfg: Config, api: Api, quiet: Arc<AtomicBool>, hold: PathBuf, stop: watch::Receiver<bool>) -> Handle {
+    let (tx, rx) = mpsc::channel(INBOX_MAX);
+    let (pulse, pulse_rx) = watch::channel(false);
+    // held for a moment at a link's change, at the pace the bridge's own pings by default
+    tokio::spawn(crate::driver::keepalive(api.clone(), pulse_rx, Duration::from_millis(crate::limits::KEEPALIVE_PING_MS), stop.clone()));
+    let m = Manager { cfg, api, quiet, hold, tx: tx.clone(), slots: BTreeMap::new(), computer: None, held: false, pulse, pulse_until: None };
+    tokio::spawn(m.run(rx, stop));
+    Handle { tx }
+}
+
+impl Manager {
+    async fn run(mut self, mut rx: mpsc::Receiver<Msg>, mut stop: watch::Receiver<bool>) {
+        crate::ev!("simplex.started", { "bin": self.cfg.bin.display().to_string(), "dir": self.cfg.dir.display().to_string(), "servers": self.cfg.smp.is_some() });
+        let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // bounded by the bridge's life: one message or tick per pass, ended by `stop`
+        loop {
+            tokio::select! {
+                biased;
+                _ = crate::net::stopped(&mut stop) => {
+                    self.stop_all().await;
+                    return;
+                }
+                m = rx.recv() => match m {
+                    Some(m) => self.on(m).await,
+                    None => return,
+                },
+                _ = tick.tick() => self.tick().await,
+            }
+        }
+    }
+
+    async fn on(&mut self, m: Msg) {
+        match m {
+            Msg::Computer { computer, agents } => self.computer(*computer, agents).await,
+            Msg::View { agent, reply } => {
+                let _ = reply.send(self.view(&agent));
+            }
+            Msg::Want { agent, reply } => {
+                if let Some(s) = self.slots.get_mut(&agent) {
+                    // asked by its owner: a core that stopped too often is tried again
+                    s.broken = None;
+                    s.exits.clear();
+                    s.retry_at = None;
+                    s.note = None;
+                    self.apply(&agent, Input::Want);
+                    self.tick().await;
+                }
+                let _ = reply.send(self.view(&agent));
+            }
+            Msg::Unlink { agent, reply } => {
+                if let Some(s) = self.slots.get_mut(&agent) {
+                    s.broken = None;
+                    s.note = None;
+                    self.apply(&agent, Input::Unlink);
+                }
+                let _ = reply.send(self.view(&agent));
+            }
+            Msg::Titled { agent, title } => {
+                if let Some(s) = self.slots.get_mut(&agent) {
+                    s.title = Some(title);
+                }
+            }
+            Msg::Up { agent, epoch } => self.up(&agent, epoch),
+            Msg::Frame { agent, epoch, text } => self.frame(&agent, epoch, &text),
+            Msg::Exited { agent, epoch, why } => self.exited(&agent, epoch, &why),
+            Msg::Lost { agent, epoch } => self.lost(&agent, epoch).await,
+        }
+    }
+
+    fn view(&self, agent: &str) -> Option<View> {
+        let always_on = self.computer.as_ref().is_some_and(|c| c.always_on);
+        self.slots.get(agent).map(|s| s.view(always_on))
+    }
+
+    /// The computer as read: a slot for each agent it runs (its link read
+    /// from its file), none for one that left (its core stopped; its
+    /// state stays, as the agent's other files do).
+    async fn computer(&mut self, computer: api::Computer, agents: Vec<Agent>) {
+        let gone: Vec<String> = self.slots.keys().filter(|f| !agents.iter().any(|a| &a.fragment == *f)).cloned().collect();
+        for f in gone {
+            self.stop_core(&f).await;
+            self.slots.remove(&f);
+            crate::ev!("simplex.agent_gone", { "agent": f });
+        }
+        for a in &agents {
+            if self.slots.contains_key(&a.fragment) || !dir_name_ok(&a.fragment) {
+                continue;
+            }
+            let dir = self.cfg.dir.join(&a.fragment);
+            let saved = load(&dir, a).unwrap_or_else(|| Saved { identity: a.identity.clone(), generation: 0, link: Link::default() });
+            self.slots.insert(a.fragment.clone(), Slot {
+                agent: a.clone(),
+                dir,
+                saved,
+                title: None,
+                epoch: 0,
+                core: None,
+                up: false,
+                corr: 0,
+                pending: BTreeMap::new(),
+                started: false,
+                exits: VecDeque::new(),
+                retry_at: None,
+                resync_at: None,
+                broken: None,
+                note: None,
+                draining_since: None,
+            });
+            self.look_up_title(a.clone());
+        }
+        self.computer = Some(computer);
+        self.reconcile().await;
+    }
+
+    /// The agent's title, as its owner's list says it, read off the loop.
+    fn look_up_title(&self, agent: Agent) {
+        let (api, tx) = (self.api.clone(), self.tx.clone());
+        tokio::spawn(async move {
+            let Ok(list) = api.fragments_for(&agent.fragment, &agent.owner).await else { return };
+            if let Some(title) = list.into_iter().find(|f| f.name == agent.fragment && !f.title.is_empty()).map(|f| f.title) {
+                let _ = tx.send(Msg::Titled { agent: agent.fragment, title }).await;
+            }
+        });
+    }
+
+    async fn tick(&mut self) {
+        let held = self.hold.exists();
+        if held && !self.held {
+            self.held = true;
+            crate::ev!("simplex.hold", { "cores": self.running() });
+            self.stop_all().await;
+        } else if !held && self.held {
+            self.held = false;
+            crate::ev!("simplex.unhold");
+        }
+        if self.pulse_until.is_some_and(|t| Instant::now() >= t) {
+            self.pulse_until = None;
+            let _ = self.pulse.send(false);
+        }
+        self.reconcile().await;
+        self.resync();
+        self.quiet.store(self.running() == 0, Ordering::SeqCst);
+    }
+
+    /// A forced sync still waiting (one the core refused), asked again every
+    /// `RESYNC_MS` while its core is up, until the ratchet is `ok`.
+    fn resync(&mut self) {
+        let now = Instant::now();
+        let due: Vec<String> = self
+            .slots
+            .iter_mut()
+            .filter_map(|(f, s)| {
+                if !(s.up && s.saved.link.syncing && s.saved.link.forced) {
+                    s.resync_at = None;
+                    return None;
+                }
+                let at = *s.resync_at.get_or_insert(now + Duration::from_millis(RESYNC_MS));
+                (now >= at).then(|| {
+                    s.resync_at = Some(now + Duration::from_millis(RESYNC_MS));
+                    f.clone()
+                })
+            })
+            .collect();
+        for f in due {
+            crate::ev!("simplex.resync", { "agent": f });
+            self.apply(&f, Input::Resync);
+        }
+    }
+
+    fn running(&self) -> usize {
+        self.slots.values().filter(|s| s.core.is_some()).count()
+    }
+
+    /// Each core started or stopped as the computer, the hold and its link
+    /// say.
+    async fn reconcile(&mut self) {
+        let Some(always_on) = self.computer.as_ref().map(|c| c.always_on) else { return };
+        let now = Instant::now();
+        let names: Vec<String> = self.slots.keys().cloned().collect();
+        for f in names {
+            let s = &self.slots[&f];
+            // linked, or with an unlink's let-go still to do
+            let want = !self.held && always_on && (s.saved.link.phase != Phase::Off || s.saved.link.cleanup.is_some()) && s.broken.is_none();
+            match (want, s.core.is_some()) {
+                (true, false) if s.retry_at.is_none_or(|t| now >= t) => self.start_core(&f),
+                (false, true) => {
+                    // its last commands answered first (an unlink's delete), within a bound
+                    let s = self.slots.get_mut(&f).expect("listed");
+                    let since = *s.draining_since.get_or_insert(now);
+                    if self.held || s.pending.is_empty() || since.elapsed() >= Duration::from_millis(DRAIN_MS) {
+                        self.stop_core(&f).await;
+                    }
+                }
+                _ => {
+                    self.slots.get_mut(&f).expect("listed").draining_since = None;
+                }
+            }
+        }
+    }
+
+    fn start_core(&mut self, f: &str) {
+        // not running, then held: the bridge's answer to a hold that came
+        // as this start began waits for it, and it is called off
+        self.quiet.store(false, Ordering::SeqCst);
+        if self.hold.exists() {
+            self.quiet.store(self.running() == 0, Ordering::SeqCst);
+            return;
+        }
+        let cfg = self.cfg.clone();
+        let tx = self.tx.clone();
+        let s = self.slots.get_mut(f).expect("a slot");
+        for sub in ["", "files", "tmp"] {
+            if let Err(e) = std::fs::create_dir_all(s.dir.join(sub)) {
+                s.note = Some(format!("SimpleX could not start: its folder: {e}"));
+                return;
+            }
+        }
+        let port = match std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()) {
+            Ok(a) => a.port(),
+            Err(e) => {
+                s.note = Some(format!("SimpleX could not start: no port: {e}"));
+                return;
+            }
+        };
+        let name = display_name(s.title.as_deref(), &s.agent.name);
+        let mut cmd = tokio::process::Command::new(&cfg.bin);
+        // it dies with the bridge, however the bridge dies (a SIGKILL runs no
+        // handler of ours): no core outlives it to run beside the next one's
+        let parent = std::process::id();
+        // SAFETY: only async-signal-safe calls, in the child before its exec
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // the bridge died before the line above took: so does this
+                if libc::getppid() as u32 != parent {
+                    libc::_exit(1);
+                }
+                Ok(())
+            });
+        }
+        cmd.arg("-d").arg(s.dir.join("sx")).args(["-p", &port.to_string()]).arg("--files-folder").arg(s.dir.join("files")).arg("--temp-folder").arg(s.dir.join("tmp"));
+        cmd.args(["-y", "--mute", "--create-bot-display-name", &name, "--create-bot-allow-files"]);
+        if let Some(smp) = &cfg.smp {
+            cmd.args(["-s", smp]);
+        }
+        if let Some(xftp) = &cfg.xftp {
+            cmd.args(["--xftp-server", xftp]);
+        }
+        cmd.current_dir(&s.dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                s.broken = Some(format!("SimpleX could not start: {e}"));
+                crate::ev!("simplex.spawn_failed", { "agent": f, "error": e.to_string() });
+                return;
+            }
+        };
+        let Some(pid) = child.id() else {
+            s.broken = Some("SimpleX could not start: it ended at once".into());
+            return;
+        };
+        s.epoch += 1;
+        s.up = false;
+        s.pending.clear();
+        s.draining_since = None;
+        let epoch = s.epoch;
+        let (writer, writes) = mpsc::channel::<String>(WRITER_MAX);
+        let (ended, exited) = watch::channel(false);
+        CORES.lock().expect("not poisoned").insert(pid);
+        s.core = Some(Core { pid, writer, exited, planned: false });
+        crate::ev!("simplex.core_started", { "agent": f, "epoch": epoch, "pid": pid });
+        // its end, with its last words
+        let (agent, tx2) = (f.to_string(), tx.clone());
+        let stderr = child.stderr.take();
+        tokio::spawn(async move {
+            let mut tail = Vec::new();
+            if let Some(mut err) = stderr {
+                let mut buf = [0u8; 1024];
+                // bounded by the process: its stderr ends with it
+                while let Ok(n) = err.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    tail.extend_from_slice(&buf[..n]);
+                    if tail.len() > STDERR_TAIL_BYTES {
+                        tail.drain(..tail.len() - STDERR_TAIL_BYTES);
+                    }
+                }
+            }
+            let status = child.wait().await;
+            // reaped: no signal reaches its pid from here on
+            CORES.lock().expect("not poisoned").remove(&pid);
+            let _ = ended.send(true);
+            let last = String::from_utf8_lossy(&tail).lines().rev().find(|l| !l.trim().is_empty() && !l.contains("received command")).unwrap_or("").to_string();
+            let why = format!("{}{}", status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string()), if last.is_empty() { String::new() } else { format!(": {}", wire::cut(&last, 200)) });
+            let _ = tx2.send(Msg::Exited { agent, epoch, why }).await;
+        });
+        // its bot API, then its frames
+        let agent = f.to_string();
+        tokio::spawn(async move {
+            let url = format!("ws://127.0.0.1:{port}");
+            let t0 = Instant::now();
+            // bounded by CONNECT_MS_MAX
+            let ws = loop {
+                match tokio_tungstenite::connect_async(url.as_str()).await {
+                    Ok((ws, _)) => break ws,
+                    Err(_) if t0.elapsed() < Duration::from_millis(CONNECT_MS_MAX) => tokio::time::sleep(Duration::from_millis(200)).await,
+                    Err(e) => {
+                        crate::ev!("simplex.api_unreached", { "agent": agent, "error": e.to_string() });
+                        // SAFETY: a signal to the core's own process, by its pid
+                        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                        return;
+                    }
+                }
+            };
+            if tx.send(Msg::Up { agent: agent.clone(), epoch }).await.is_err() {
+                return;
+            }
+            let (mut sink, mut stream) = ws.split();
+            let mut writes = writes;
+            // bounded by the socket, which closes with the process
+            loop {
+                tokio::select! {
+                    w = writes.recv() => match w {
+                        Some(frame) => if sink.send(Message::text(frame)).await.is_err() { break },
+                        // its manager let it go (a planned stop)
+                        None => return,
+                    },
+                    m = stream.next() => match m {
+                        Some(Ok(Message::Text(t))) => {
+                            if t.len() > wire::FRAME_MAX_BYTES {
+                                crate::ev!("simplex.frame_too_large", { "agent": agent, "bytes": t.len() });
+                                continue;
+                            }
+                            if tx.send(Msg::Frame { agent: agent.clone(), epoch, text: t.to_string() }).await.is_err() {
+                                return;
+                            }
+                        }
+                        Some(Ok(_)) => {}
+                        Some(Err(_)) | None => break,
+                    },
+                }
+            }
+            // closed under it: its process may live on, unheard
+            let _ = tx.send(Msg::Lost { agent, epoch }).await;
+        });
+    }
+
+    /// A core whose bot API closed: its process stopped (if it lives on)
+    /// and counted as an exit of its own, so it is started again within
+    /// the bound as one that crashed is. One that ended anyway is its
+    /// `Exited`'s.
+    async fn lost(&mut self, f: &str, epoch: u64) {
+        let Some(s) = self.slots.get_mut(f).filter(|s| s.epoch == epoch) else { return };
+        let Some(core) = s.core.take_if(|c| !c.planned && !*c.exited.borrow()) else { return };
+        crate::ev!("simplex.api_lost", { "agent": f, "epoch": epoch });
+        s.up = false;
+        s.pending.clear();
+        stop_process(f, core).await;
+        self.count_exit(f, "its bot API closed");
+    }
+
+    async fn stop_core(&mut self, f: &str) {
+        let Some(s) = self.slots.get_mut(f) else { return };
+        let Some(mut core) = s.core.take() else { return };
+        core.planned = true;
+        s.up = false;
+        s.pending.clear();
+        s.draining_since = None;
+        stop_process(f, core).await;
+        self.quiet.store(self.running() == 0, Ordering::SeqCst);
+    }
+
+    /// Every core stopped, together (a hold, the bridge's own stop).
+    async fn stop_all(&mut self) {
+        let mut stopping = vec![];
+        for (f, s) in self.slots.iter_mut() {
+            if let Some(mut core) = s.core.take() {
+                core.planned = true;
+                s.up = false;
+                s.pending.clear();
+                stopping.push(stop_process(f, core));
+            }
+        }
+        futures_util::future::join_all(stopping).await;
+        self.quiet.store(true, Ordering::SeqCst);
+    }
+
+    fn up(&mut self, f: &str, epoch: u64) {
+        let Some(c) = self.computer.clone() else { return };
+        let Some(s) = self.slots.get_mut(f).filter(|s| s.epoch == epoch && s.core.is_some()) else { return };
+        s.up = true;
+        let rollback = !s.started && rolled_back(&c, &s.saved);
+        if !s.started && c.generation > s.saved.generation {
+            s.saved.generation = c.generation;
+        }
+        s.started = true;
+        crate::ev!("simplex.core_up", { "agent": f, "epoch": epoch, "rollback": rollback, "phase": s.view(c.always_on).phase });
+        self.apply(f, Input::Started { rollback });
+    }
+
+    fn frame(&mut self, f: &str, epoch: u64, text: &str) {
+        let Some(s) = self.slots.get_mut(f).filter(|s| s.epoch == epoch && s.core.is_some()) else { return };
+        let frame = match wire::parse(text) {
+            Ok(fr) => fr,
+            Err(e) => {
+                crate::ev!("simplex.frame_unread", { "agent": f, "error": wire::cut(&e.to_string(), 200) });
+                return;
+            }
+        };
+        match frame.corr.and_then(|c| s.pending.remove(&c)) {
+            Some(cmd) => match &frame.resp {
+                Resp::Error { what } => {
+                    crate::ev!("simplex.refused", { "agent": f, "cmd": kind_of(&cmd), "what": what });
+                    self.apply(f, Input::Failed { cmd: &cmd, what })
+                }
+                resp => self.apply(f, Input::Said(resp)),
+            },
+            None => self.apply(f, Input::Said(&frame.resp)),
+        }
+    }
+
+    fn exited(&mut self, f: &str, epoch: u64, why: &str) {
+        let Some(s) = self.slots.get_mut(f) else { return };
+        if s.epoch != epoch {
+            return;
+        }
+        let planned = s.core.as_ref().is_none_or(|c| c.planned);
+        crate::ev!("simplex.core_exited", { "agent": f, "epoch": epoch, "planned": planned, "why": why });
+        if planned {
+            return;
+        }
+        s.core = None;
+        s.up = false;
+        s.pending.clear();
+        self.count_exit(f, why);
+    }
+
+    /// An exit the bridge did not ask for: tried again after a while,
+    /// doubling, until `EXITS_MAX` in the window.
+    fn count_exit(&mut self, f: &str, why: &str) {
+        let Some(s) = self.slots.get_mut(f) else { return };
+        let now = Instant::now();
+        s.exits.push_back(now);
+        while s.exits.front().is_some_and(|t| now.duration_since(*t) > Duration::from_millis(EXITS_WINDOW_MS)) {
+            s.exits.pop_front();
+        }
+        if s.exits.len() >= EXITS_MAX {
+            s.broken = Some(format!("SimpleX stopped {} times in 10 minutes ({why}), so it waits for you to link again.", s.exits.len()));
+        } else {
+            s.retry_at = Some(now + Duration::from_millis(RESTART_MS << (s.exits.len() - 1)));
+        }
+        self.quiet.store(self.running() == 0, Ordering::SeqCst);
+    }
+
+    /// The link's rules on `input` for agent `f`: its file written if it
+    /// changed, then what it asks.
+    fn apply(&mut self, f: &str, input: Input<'_>) {
+        let Some(s) = self.slots.get_mut(f) else { return };
+        let before = s.saved.clone();
+        let actions = s.saved.link.apply(input);
+        if s.saved != before {
+            if let Err(e) = store(&s.dir, &s.saved) {
+                // the link moves on; a restart before it is written may go back
+                crate::ev!("simplex.store_failed", { "agent": f, "error": e.to_string() });
+            }
+        }
+        for a in actions {
+            self.act(f, a);
+        }
+    }
+
+    fn act(&mut self, f: &str, a: Action) {
+        let Some(s) = self.slots.get_mut(f) else { return };
+        match a {
+            Action::Ask(cmd) => {
+                let Some(core) = s.core.as_ref() else {
+                    crate::ev!("simplex.unsent", { "agent": f, "cmd": kind_of(&cmd), "why": "its core does not run" });
+                    return;
+                };
+                s.corr += 1;
+                let corr = s.corr;
+                match core.writer.try_send(cmd.frame(corr)) {
+                    Ok(()) => {
+                        s.pending.insert(corr, cmd);
+                    }
+                    Err(_) => crate::ev!("simplex.unsent", { "agent": f, "cmd": kind_of(&cmd), "why": "its core is not taking commands" }),
+                }
+            }
+            Action::Forward(i) => {
+                // carried to the agent's chat by the next part of the stack
+                // (docs/explorations/simplex-complexity.md)
+                crate::ev!("simplex.forward", { "agent": f, "kind": i.kind, "bytes": i.text.len(), "file": i.file.is_some() });
+            }
+            Action::Tell(n) => {
+                match &n {
+                    Notice::Linked { .. } => s.note = None,
+                    Notice::Refused => crate::ev!("simplex.refused_contact", { "agent": f }),
+                    Notice::MaybeLost | Notice::Resynced => {}
+                    Notice::Unlinked { by_them } => {
+                        s.note = Some(if *by_them { "They removed this agent in their SimpleX app.".into() } else { "Unlinked.".into() });
+                    }
+                    Notice::Failed { what } => s.note = Some(format!("SimpleX said: {what}")),
+                }
+                crate::ev!("simplex.told", { "agent": f, "notice": format!("{n:?}") });
+                let name = display_name(s.title.as_deref(), &s.agent.name);
+                match n {
+                    Notice::Linked { .. } => self.apply(f, Input::Reply(&greeting(&name))),
+                    Notice::MaybeLost => self.apply(f, Input::Reply(MAYBE_LOST)),
+                    _ => {}
+                }
+            }
+            Action::Save => {
+                let _ = self.pulse.send(true);
+                self.pulse_until = Some(Instant::now() + Duration::from_millis(PULSE_MS));
+                crate::ev!("simplex.save_asked", { "agent": f });
+            }
+        }
+    }
+}
+
+/// Every core's process the bridge runs, by pid, from its spawn until it is
+/// reaped: what the bridge stops before it exits (`stop_cores`), so no core
+/// outlives it (a bridge started again would run a second core on the same
+/// databases, outside its hold).
+static CORES: std::sync::Mutex<std::collections::BTreeSet<u32>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+fn cores_alive() -> Vec<u32> {
+    CORES.lock().expect("not poisoned").iter().copied().collect()
+}
+
+/// Every core this process runs stopped before the bridge exits (main.rs),
+/// whatever its manager is doing: SIGTERM, `grace` to end, then SIGKILL,
+/// until each is reaped (`grace` and a second more, at most).
+pub async fn stop_cores(grace: Duration) {
+    if cores_alive().is_empty() {
+        return;
+    }
+    let t0 = Instant::now();
+    for pid in cores_alive() {
+        // SAFETY: a signal to a core this process spawned and has not reaped
+        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    }
+    // bounded by `grace`, then a second
+    while !cores_alive().is_empty() && t0.elapsed() < grace {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    kill_cores();
+    while !cores_alive().is_empty() && t0.elapsed() < grace + Duration::from_millis(1_000) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    crate::ev!("simplex.cores_stopped", { "ms": t0.elapsed().as_millis() as u64, "left": cores_alive().len() });
+}
+
+/// Any core still running as this computer's from a bridge before this one
+/// (one whose death its child outlived: the image before this one, which
+/// set no parent-death signal), killed before this bridge answers a hold or
+/// starts a core of its own: a process whose command line names `cfg.bin`
+/// and a `-d` under `cfg.dir`. Bounded: two seconds for each to end.
+pub async fn kill_strays(cfg: &Config) {
+    let bin = cfg.bin.to_string_lossy().to_string();
+    let me = std::process::id();
+    let mut strays: Vec<u32> = vec![];
+    for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()).filter(|p| *p != me) else { continue };
+        let Ok(raw) = std::fs::read(e.path().join("cmdline")) else { continue };
+        let args: Vec<String> = raw.split(|b| *b == 0).map(|a| String::from_utf8_lossy(a).to_string()).collect();
+        let names_bin = args.contains(&bin);
+        // under it by path components: a sibling that shares its prefix (`simplex-other`) is not
+        let in_dir = args.windows(2).any(|w| w[0] == "-d" && Path::new(&w[1]).starts_with(&cfg.dir));
+        if names_bin && in_dir {
+            strays.push(pid);
+        }
+    }
+    if strays.is_empty() {
+        return;
+    }
+    for pid in &strays {
+        // SAFETY: SIGKILL to a stray core of this computer's, by its pid
+        unsafe { libc::kill(*pid as i32, libc::SIGKILL) };
+    }
+    let alive = |pid: u32| std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| s.rsplit_once(')').is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z')));
+    let t0 = Instant::now();
+    // bounded: two seconds
+    while strays.iter().any(|p| alive(*p)) && t0.elapsed() < Duration::from_millis(2_000) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    crate::ev!("simplex.strays_killed", { "pids": strays, "left": strays.iter().filter(|p| alive(**p)).count() });
+}
+
+/// SIGKILL to every core still running (the bridge's forced exit).
+pub fn kill_cores() {
+    for pid in cores_alive() {
+        // SAFETY: a signal to a core this process spawned and has not reaped
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    }
+}
+
+/// SIGTERM, then (past `STOP_MS_MAX`) SIGKILL; until its process ended.
+async fn stop_process(f: &str, mut core: Core) {
+    let t0 = Instant::now();
+    // SAFETY: signals to the core's own process, by its pid, while it lives
+    unsafe { libc::kill(core.pid as i32, libc::SIGTERM) };
+    let ended = tokio::time::timeout(Duration::from_millis(STOP_MS_MAX), core.exited.wait_for(|e| *e)).await.is_ok();
+    if !ended {
+        unsafe { libc::kill(core.pid as i32, libc::SIGKILL) };
+        let _ = tokio::time::timeout(Duration::from_millis(1_000), core.exited.wait_for(|e| *e)).await;
+    }
+    crate::ev!("simplex.core_stopped", { "agent": f, "ms": t0.elapsed().as_millis() as u64, "killed": !ended });
+}
+
+fn kind_of(cmd: &Cmd) -> &'static str {
+    match cmd {
+        Cmd::Invite => "invite",
+        Cmd::Send { .. } => "send",
+        Cmd::Sync { force: true, .. } => "sync_forced",
+        Cmd::Sync { .. } => "sync",
+        Cmd::Delete { .. } => "delete",
+        Cmd::DeleteConn { .. } => "delete_conn",
+        Cmd::Chat { .. } => "chat",
+        Cmd::Receive { .. } => "receive",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent() -> Agent {
+        Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![] }
+    }
+
+    fn computer(always_on: bool, generation: u64, restored: Option<(u64, bool)>) -> api::Computer {
+        api::Computer {
+            computer: "computer:00aa".into(),
+            owner: "npub1paul".into(),
+            image: String::new(),
+            agents: vec![agent()],
+            credential_env: vec![],
+            models: None,
+            always_on,
+            generation,
+            restored: restored.map(|(generation, rollback)| api::Restored { generation, rollback }),
+        }
+    }
+
+    /// Goal: a start went back in time only when the platform says this
+    /// start did and the link last ran in an earlier one: a bridge started
+    /// again in the same start forces nothing twice, and a platform that
+    /// says nothing (an old one) forces nothing.
+    #[test]
+    fn a_rollback_is_this_starts_and_once() {
+        let saved = |generation| Saved { identity: "npub1juniper".into(), generation, link: Link::default() };
+        assert!(rolled_back(&computer(true, 5, Some((5, true))), &saved(4)));
+        assert!(!rolled_back(&computer(true, 5, Some((5, true))), &saved(5)), "this start's, handled already");
+        assert!(!rolled_back(&computer(true, 5, Some((4, true))), &saved(3)), "an older start's restore");
+        assert!(!rolled_back(&computer(true, 5, Some((5, false))), &saved(4)), "a sleep that saved");
+        assert!(!rolled_back(&computer(true, 0, None), &saved(0)), "a platform that says nothing");
+    }
+
+    /// Goal: a link's file reads back as written; one of another agent, or
+    /// one that does not read, is set aside (kept, renamed), never guessed.
+    #[test]
+    fn a_links_file_is_its_agents_or_set_aside() {
+        let root = std::env::temp_dir().join(format!("simplex-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("juniper--k3x9");
+        assert_eq!(load(&dir, &agent()), None, "none yet");
+        let saved = Saved { identity: "npub1juniper".into(), generation: 7, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() } };
+        store(&dir, &saved).expect("written");
+        assert_eq!(load(&dir, &agent()), Some(saved.clone()));
+        assert_eq!(linked_on_disk(&root, &[agent()]), vec!["juniper--k3x9".to_string()]);
+        let other = Agent { identity: "npub1other".into(), ..agent() };
+        assert_eq!(load(&dir, &other), None, "another agent's");
+        assert!(!dir.exists(), "set aside");
+        assert!(std::fs::read_dir(&root).expect("the root").any(|e| e.expect("an entry").file_name().to_string_lossy().starts_with("juniper--k3x9.set-aside-")));
+        store(&dir, &saved).expect("written");
+        std::fs::write(dir.join(LINK_FILE), r#"{"identity":"npub1juniper","phase":"off","syncing":true}"#).expect("written");
+        assert_eq!(load(&dir, &agent()), None, "one that contradicts itself");
+        assert!(linked_on_disk(&root, &[agent()]).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Goal: an agent's SimpleX name is its title, cleaned and cut, else its
+    /// label; a fragment's name is a directory only in its own shape.
+    #[test]
+    fn names_are_clean() {
+        assert_eq!(display_name(Some("Waffle"), "pulsar-360"), "Waffle");
+        assert_eq!(display_name(Some("  Wa<ff>le! 🧇 "), "x"), "Waffle");
+        assert_eq!(display_name(Some("<<>>"), "pulsar-360"), "pulsar-360");
+        assert_eq!(display_name(None, ""), "Agent");
+        assert_eq!(display_name(Some(&"a".repeat(80)), "x").len(), DISPLAY_NAME_MAX);
+        assert!(dir_name_ok("juniper--k3x9"));
+        for bad in ["", "../x", "a/b", "Juniper", "a.b"] {
+            assert!(!dir_name_ok(bad), "{bad}");
+        }
+    }
+
+    /// Goal: the page says why SimpleX does not run, in plain words, and
+    /// shows the invitation only while it is one.
+    #[test]
+    fn its_view_says_what_it_is() {
+        let mut s = Slot {
+            agent: agent(),
+            dir: PathBuf::from("/x"),
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Inviting { conn: 1, link: "simplex:/invitation#/x".into(), short: None }, ..Link::default() } },
+            title: None,
+            epoch: 0,
+            core: None,
+            up: false,
+            corr: 0,
+            pending: BTreeMap::new(),
+            started: false,
+            exits: VecDeque::new(),
+            retry_at: None,
+            resync_at: None,
+            broken: None,
+            note: None,
+            draining_since: None,
+        };
+        let v = s.view(true);
+        assert_eq!((v.phase, v.link.as_deref(), v.running, v.why.as_deref()), ("inviting", Some("simplex:/invitation#/x"), false, None));
+        let v = s.view(false);
+        assert!(v.why.is_some_and(|w| w.contains("always-on")), "not always on: says so");
+        s.saved.link.phase = Phase::Linked { contact: 3, name: "paul".into() };
+        s.broken = Some("SimpleX stopped 3 times".into());
+        let v = s.view(true);
+        assert_eq!((v.phase, v.link.as_deref(), v.name.as_deref()), ("linked", None, Some("paul")));
+        assert_eq!(v.why.as_deref(), Some("SimpleX stopped 3 times"));
+        assert_eq!(serde_json::to_value(&v).expect("a view")["alwaysOn"], true);
+    }
+
+    /// A child as a core is one: registered from its spawn, reaped and
+    /// let go by its own task; `sh -c script`. Its pid, and its end.
+    fn fake_core(script: &str) -> (u32, watch::Receiver<bool>) {
+        let mut child = tokio::process::Command::new("sh").args(["-c", script]).spawn().expect("sh runs");
+        let pid = child.id().expect("a pid");
+        CORES.lock().expect("not poisoned").insert(pid);
+        let (ended, exited) = watch::channel(false);
+        tokio::spawn(async move {
+            let _ = child.wait().await;
+            CORES.lock().expect("not poisoned").remove(&pid);
+            let _ = ended.send(true);
+        });
+        (pid, exited)
+    }
+
+    /// Goal (Alex's review of #546): no core outlives the bridge: one that
+    /// ignores SIGTERM is killed past the grace, and reaped, before
+    /// `stop_cores` returns (main.rs calls it before it exits).
+    #[tokio::test]
+    async fn no_core_outlives_the_bridge() {
+        let (stubborn, ended) = fake_core("trap '' TERM; sleep 30");
+        let (willing, _) = fake_core("sleep 30");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let t0 = Instant::now();
+        stop_cores(Duration::from_millis(300)).await;
+        assert!(t0.elapsed() < Duration::from_millis(1_500), "within the grace and a second: {:?}", t0.elapsed());
+        assert!(*ended.borrow(), "the stubborn one ended");
+        for pid in [stubborn, willing] {
+            assert!(!cores_alive().contains(&pid), "{pid} reaped");
+            // SAFETY: signal 0 only asks whether the pid exists
+            assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1, "{pid} is gone");
+        }
+    }
+
+    /// Goal (Alex's review of #546): a core whose bot API closed while its
+    /// process lives on is stopped and counted as an exit, so it is started
+    /// again within the bound, not left running unheard.
+    #[tokio::test]
+    async fn a_core_whose_api_closed_is_stopped_and_tried_again() {
+        let (pid, exited) = fake_core("sleep 30");
+        let (writer, _writes) = mpsc::channel(1);
+        let (tx, _rx) = mpsc::channel(4);
+        let (pulse, _) = watch::channel(false);
+        let saved = Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() } };
+        let slot = Slot {
+            agent: agent(),
+            dir: PathBuf::from("/nowhere"),
+            saved,
+            title: None,
+            epoch: 4,
+            core: Some(Core { pid, writer, exited: exited.clone(), planned: false }),
+            up: true,
+            corr: 0,
+            pending: BTreeMap::new(),
+            started: true,
+            exits: VecDeque::new(),
+            retry_at: None,
+            resync_at: None,
+            broken: None,
+            note: None,
+            draining_since: None,
+        };
+        let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
+        let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(false)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None };
+        m.lost("juniper--k3x9", 3).await;
+        assert!(m.slots["juniper--k3x9"].core.is_some(), "another life's word: nothing");
+        m.lost("juniper--k3x9", 4).await;
+        let s = &m.slots["juniper--k3x9"];
+        assert!(s.core.is_none() && !s.up, "stopped");
+        assert!(*exited.borrow(), "its process ended");
+        assert_eq!(s.exits.len(), 1, "an exit of its own");
+        assert!(s.retry_at.is_some() && s.broken.is_none(), "started again after a while");
+    }
+
+    /// Goal (Alex's re-review of #546): a core a bridge before this one left
+    /// running (one whose death it outlived) is killed before this bridge
+    /// answers a hold or starts its own; a process that is not this
+    /// computer's core is left alone.
+    #[tokio::test]
+    async fn a_core_left_by_a_bridge_before_is_killed_first() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("simplex-strays-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a directory");
+        let bin = root.join("simplex-chat");
+        std::fs::write(&bin, "#!/bin/sh\nsleep 30\n").expect("a fake core");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("runnable");
+        let dir = root.join("data");
+        let spawn = |d: String| {
+            // by `sh`, never exec'ing the file just written (another test's fork may hold it open: ETXTBSY)
+            let mut child = tokio::process::Command::new("sh").arg(&bin).args(["-d", &d]).spawn().expect("it runs");
+            let pid = child.id().expect("a pid");
+            // reaped as the container's init would
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+            });
+            pid
+        };
+        let stray = spawn(dir.join("juniper--k3x9/sx").to_string_lossy().to_string());
+        let other = spawn("/elsewhere/sx".into());
+        // a sibling directory sharing its prefix is no part of it
+        let sibling = spawn(root.join("data-other/juniper--k3x9/sx").to_string_lossy().to_string());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        kill_strays(&Config { bin: bin.clone(), dir, smp: None, xftp: None }).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // SAFETY: signal 0 only asks whether the pid exists
+        assert_eq!(unsafe { libc::kill(stray as i32, 0) }, -1, "the stray core is gone");
+        for (pid, what) in [(other, "another directory's"), (sibling, "a prefix sibling's")] {
+            assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 0, "{what} left alone");
+            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Goal (Alex's re-review of #523): a forced sync still waiting is asked
+    /// again every `RESYNC_MS` while its core is up, and no more once the
+    /// ratchet is ok.
+    #[tokio::test]
+    async fn a_forced_sync_still_waiting_is_asked_again() {
+        let (tx, _rx) = mpsc::channel(4);
+        let (pulse, _) = watch::channel(false);
+        let mut link = Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() };
+        link.apply(Input::Started { rollback: true });
+        assert!(link.syncing && link.forced);
+        let mut slot = Slot {
+            agent: agent(),
+            dir: PathBuf::from("/nowhere"),
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link },
+            title: None,
+            epoch: 1,
+            core: None,
+            up: true,
+            corr: 0,
+            pending: BTreeMap::new(),
+            started: true,
+            exits: VecDeque::new(),
+            retry_at: None,
+            resync_at: None,
+            broken: None,
+            note: None,
+            draining_since: None,
+        };
+        slot.up = true;
+        let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
+        let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(true)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None };
+        m.resync();
+        let first = m.slots["juniper--k3x9"].resync_at.expect("its next ask, set");
+        m.slots.get_mut("juniper--k3x9").expect("its slot").resync_at = Some(Instant::now() - Duration::from_millis(1));
+        m.resync();
+        assert!(m.slots["juniper--k3x9"].resync_at.is_some_and(|t| t > Instant::now()), "asked, and the next one set");
+        assert!(first > Instant::now());
+        m.apply("juniper--k3x9", Input::Said(&Resp::Sync { contact: 3, status: wire::SyncStatus::Ok }));
+        m.resync();
+        assert_eq!(m.slots["juniper--k3x9"].resync_at, None, "ok: nothing more");
+    }
+}

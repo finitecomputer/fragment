@@ -17,7 +17,9 @@
 //!   note read from its chat's journal: what a restart cut of the agent's
 //!   turn before it, note.rs) and events;
 //! - the keepalive socket, held while the engine says so (decision 39);
-//! - the screen (screen.rs), told which agents it runs.
+//! - the screen (screen.rs), told which agents it runs;
+//! - SimpleX, when the image names its core (simplex/run.rs): told each
+//!   read of the computer, and waited for by the answer to a hold.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -76,6 +78,9 @@ pub struct Config {
     /// `BRIDGE_KEEPALIVE_PING_MS`: how often the keepalive pings; silent
     /// twice that, it is opened again (`limits::KEEPALIVE_PING_MS`).
     pub keepalive_ping: Duration,
+    /// `BRIDGE_SIMPLEX_BIN` and the rest: each linked agent's SimpleX core
+    /// (simplex/run.rs); none, no SimpleX, and nothing of it runs.
+    pub simplex: Option<crate::simplex::run::Config>,
 }
 
 /// Why the bridge stopped.
@@ -259,10 +264,11 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     // are told only past the restore gate, so no lease under `/data` is
     // touched before the restore.
     let (screen_agents, screen_rx) = watch::channel::<Option<Vec<Named>>>(None);
+    let simplex_page = crate::simplex::http::Simplex { configured: cfg.simplex.is_some(), ..Default::default() };
     if let Some(sc) = cfg.screen.clone() {
-        let stop = stop.clone();
+        let (stop, simplex_page) = (stop.clone(), simplex_page.clone());
         tokio::spawn(async move {
-            if let Err(e) = screen::serve(sc, screen_rx, stop).await {
+            if let Err(e) = screen::serve(sc, screen_rx, simplex_page, stop).await {
                 crate::ev!("screen.failed", { "error": e });
             }
         });
@@ -278,10 +284,21 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     std::fs::create_dir_all(&cfg.state_dir).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.state_dir.display())))?;
     let api = Api::new(&cfg.api).map_err(BridgeError::Runtime)?;
     std::fs::create_dir_all(&cfg.media_dir).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.media_dir.display())))?;
-    // its answer to the platform's holds, for its whole life (none claims yet)
+    // its answer to the platform's holds, for its whole life (none claims
+    // yet, and no SimpleX core runs: `quiet` is false only while one does)
     let claims_in_flight = Arc::new(AtomicUsize::new(0));
+    let quiet = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let answer: String = cfg.left_out.iter().map(|p| format!("{p}\n")).collect();
-    tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), answer, claims_in_flight.clone(), stop.clone()));
+    // a core a bridge before this one left running is gone before any hold is answered
+    if let Some(sc) = &cfg.simplex {
+        crate::simplex::run::kill_strays(sc).await;
+    }
+    tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), answer, claims_in_flight.clone(), quiet.clone(), stop.clone()));
+    // SimpleX, when the image names its core: told of the computer at each read
+    let simplex = cfg.simplex.clone().map(|sc| crate::simplex::run::start(sc, api.clone(), quiet.clone(), cfg.hold.clone(), stop.clone()));
+    if let Some(h) = &simplex {
+        let _ = simplex_page.handle.set(h.clone());
+    }
     let state = load(&cfg.state_dir)?;
     let life = new_life()?;
     let mut engine = Engine::new(state, cfg.settings, &life).map_err(|c| BridgeError::Corrupt(c.0))?.with_menu(runtime.menu());
@@ -326,6 +343,9 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     let listed = computer.agents.len();
     computer.agents = gated(computer.agents, &ready);
     screen_agents.send_replace(Some(named(&computer.agents)));
+    if let Some(h) = &simplex {
+        h.computer(computer.clone(), computer.agents.clone());
+    }
     crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtime": name, "boot": engine.state().boot + 1, "life": life });
 
     let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight });
@@ -385,7 +405,10 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                 let step = match m {
                     Msg::Input(input) => engine.step(input, crate::log::now_ms()),
                     Msg::Computer(c) => {
-                        let agents = gated(c.agents, &ready);
+                        let agents = gated(c.agents.clone(), &ready);
+                        if let Some(h) = &simplex {
+                            h.computer(c, agents.clone());
+                        }
                         let now = Some(named(&agents));
                         screen_agents.send_if_modified(|was| if *was == now { false } else { *was = now; true });
                         let s = engine.step(Input::Agents(agents.clone()), crate::log::now_ms());
@@ -1372,18 +1395,20 @@ async fn cut_note(api: &Api, ts: &TurnStart) -> Option<String> {
 // ---- the hold ----
 
 /// The bridge's answer to the platform's hold (docs/computers.md, "The
-/// hold"): `held` exists while `hold` does and no claim is in flight (a
-/// claim looks at the hold before each try, so none starts once it holds),
-/// and not otherwise. The platform clears `held` before each hold, so an
+/// hold"): `held` exists while `hold` does, no claim is in flight (a claim
+/// looks at the hold before each try, so none starts once it holds), and no
+/// SimpleX core runs (`cores_quiet`: SimpleX stops them all as it sees the
+/// hold, and starts none while it lasts; always true with no SimpleX), and
+/// not otherwise. The platform clears `held` before each hold, so an
 /// answer is always to the hold it finds. The answer is `answer`: what the
 /// save may leave out, one per line (none, empty). Looked at every
 /// `HOLD_POLL_MS`, for the bridge's life.
-async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: Arc<AtomicUsize>, mut stop: watch::Receiver<bool>) {
+async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: Arc<AtomicUsize>, cores_quiet: Arc<std::sync::atomic::AtomicBool>, mut stop: watch::Receiver<bool>) {
     assert!(hold != held, "a hold and its answer are two files");
     assert!(answer.len() <= limits::HELD_ANSWER_MAX_BYTES, "an answer the platform reads whole");
     // bounded by the bridge's life: one look per `HOLD_POLL_MS`, ended by `stop`
     loop {
-        let quiet = hold.exists() && in_flight.load(Ordering::SeqCst) == 0;
+        let quiet = hold.exists() && in_flight.load(Ordering::SeqCst) == 0 && cores_quiet.load(Ordering::SeqCst);
         match (quiet, held.exists()) {
             // written whole, then renamed: the platform never reads half
             (true, false) => match write_whole(&held, answer.as_bytes()) {
@@ -1410,7 +1435,7 @@ async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: A
 /// opened again, since a deploy can cut the platform's side of it with no
 /// close reaching here (#557), and the platform, holding no socket, counts
 /// it closed.
-async fn keepalive(api: Api, mut hold: watch::Receiver<bool>, every: Duration, stop: watch::Receiver<bool>) {
+pub(crate) async fn keepalive(api: Api, mut hold: watch::Receiver<bool>, every: Duration, stop: watch::Receiver<bool>) {
     assert!(!every.is_zero(), "the keepalive pings at an interval");
     let mut backoff = Backoff::default();
     // bounded by the bridge's life: one connection per pass
