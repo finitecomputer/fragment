@@ -114,6 +114,8 @@ const chats = () => state.fragments.filter((f) => f.kind === "chat");
 const apps = () => state.fragments.filter((f) => f.kind === "app" || f.kind === "brain");
 // the sidebar's: what the person has not archived (search still finds the rest)
 const shown = (list) => list.filter((f) => !f.archived);
+// the dock's: their apps shown, less those they took off it (`dock: false`)
+const docked = () => shown(apps()).filter((f) => f.dock !== false);
 // a frame of one of the person's fragments, signed in there by the platform
 // A path segment: the API's ids keep their ":" (`computer:…`) as
 // sent, since the router matches segments as they are, not decoded.
@@ -1029,7 +1031,7 @@ const cardsLoad = { wait: 0, timer: null, at: 0 };
 async function loadCards(only = null) {
   clearTimeout(cardsLoad.timer);
   cardsLoad.at = Date.now();
-  const listed = shown(apps()).map((f) => f.name);
+  const listed = docked().map((f) => f.name);
   for (const [name, card] of cards) if (!listed.includes(name)) { URL.revokeObjectURL(card.url); cards.delete(name); }
   const asked = listed.filter((name) => !only || only.has(name) || !cards.has(name));
   const got = await Promise.all(asked.map((name) => loadCard(name).catch(() => "same")));
@@ -1056,12 +1058,13 @@ function showPeek(row, name) {
   peek.style.top = `${Math.max(8, r.top - peek.offsetHeight - 12)}px`;
 }
 const hidePeek = () => { peek.hidden = true; };
-// The desktop's dock: the person's apps (their list's, less the archived),
-// each its icon and title, one shared with them saying their role there;
-// then, for a seat, Add (how to ask for one: `showPrompts`).
+// The desktop's dock: the person's apps (their list's, less the archived
+// and those they took off it), each its icon and title, one shared with
+// them saying their role there; then, for a seat, Add (how to ask for one:
+// `showPrompts`).
 function renderApps() {
   hidePeek();
-  const rows = shown(apps()).map((f) => {
+  const rows = docked().map((f) => {
     const key = `app:${f.name}`;
     const title = titleOf(f.name);
     const row = el("button", `dock-app${viewer.keys.includes(key) ? " open" : ""}`);

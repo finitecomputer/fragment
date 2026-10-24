@@ -225,6 +225,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "label": "lab", "template": "nope" })), &[])?;
     s.ok("a template that is none is refused, naming the blessed ones", r.status == 400 && r.text.contains("agent"), &r);
     search_and_archive(s, api, &session)?;
+    dock_choice(s, api, &session)?;
     search_follows_reading(s, api)?;
     unread_and_seen(s, api, &session)?;
     list_watch(s, api, &session, &id)
@@ -416,6 +417,9 @@ fn list_watch(s: &mut Suite, api: &Api, session: &str, id: &str) -> Result<()> {
     let r = shell(api, session, "PUT", &format!("/api/fragments/{made}/archived"), Some(&json!({ "archived": true })), &[])?;
     let (one, two) = (told(&mut tab), told(&mut second));
     s.ok("an archive in one tab is told to every tab", r.status == 200 && one == changed && two == changed, json!([r.status, one, two]));
+    let r = shell(api, session, "PUT", &format!("/api/fragments/{made}/dock"), Some(&json!({ "dock": false })), &[])?;
+    let (one, two) = (told(&mut tab), told(&mut second));
+    s.ok("and an app taken off the dock in one tab", r.status == 200 && one == changed && two == changed, json!([r.status, one, two]));
     let r = api.signed(&other, "DELETE", &format!("/api/f/{theirs}/members/{id}"), None)?;
     let removed = told(&mut tab);
     s.ok("their removal from someone else's is told", r.status == 200 && removed == changed, json!([r.status, removed]));
@@ -690,6 +694,81 @@ fn search_and_archive(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
     let r = api.signed(&outsider, "DELETE", &format!("/api/f/{own}"), None)?;
     let gone = s.eventually(SEARCH_WAIT, || theirs(&outsider, "tomatoes").is_ok_and(|r| r.status == 200 && hits_in(&r, &own).is_empty()));
     s.ok("a deleted fragment's messages leave its people's search", r.status == 200 && gone, theirs(&outsider, "tomatoes")?);
+    Ok(())
+}
+
+/// The dock, the person's own choice (#587; docs/api.md, `PUT
+/// /api/fragments/{name}/dock`): every fragment is on it until they take
+/// it off, for themselves alone (a member's list keeps its own), twice the
+/// same as once, and only one of theirs; archiving is a choice of its own;
+/// it goes when they leave (back in, it is on it). Valid, invalid and
+/// replay here; a restart keeps it (the restart section).
+fn dock_choice(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
+    let r = shell(api, session, "POST", "/api/fragments", Some(&json!({ "label": "docked" })), &[])?;
+    let app = r.body["name"].as_str().unwrap_or("").to_string();
+    anyhow::ensure!(r.status == 200 && label_of(&app) == "docked", "making the app: {r}");
+    let member = api.person()?;
+    let member_id = api.identity(&member)?;
+    let r = api.share(&app, &member_id, "viewer")?;
+    anyhow::ensure!(r.status == 200, "adding the member: {r}");
+    let row = |r: &Reply| r.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == app.as_str()).cloned());
+    // on the dock, a row leaves `dock` out; off it, it says `false`
+    let on = |r: &Reply| row(r).is_some_and(|f| f.get("dock").is_none());
+    let off = |r: &Reply| row(r).is_some_and(|f| f["dock"] == false);
+    let mine = || shell(api, session, "GET", "/api/fragments", None, &[]);
+    let theirs = || api.signed(&member, "GET", "/api/fragments", None);
+    let dock = |name: &str, body: Value| shell(api, session, "PUT", &format!("/api/fragments/{name}/dock"), Some(&body), &[]);
+    let listed = s.eventually(SEARCH_WAIT, || theirs().is_ok_and(|r| row(&r).is_some()));
+    let (m, t) = (mine()?, theirs()?);
+    s.ok("a new app is on its owner's dock and on a member's: their rows leave `dock` out", listed && on(&m) && on(&t), json!([row(&m), row(&t)]));
+
+    let r = dock(&app, json!({ "dock": false }))?;
+    s.ok("the person takes an app of theirs off their dock", r.status == 200 && r.body == json!({ "name": app, "dock": false }), &r);
+    let again = dock(&app, json!({ "dock": false }))?;
+    s.ok("taking it off again is the same", again.status == 200 && again.body == r.body, &again);
+    let (m, t) = (mine()?, theirs()?);
+    s.ok("their list says it is off their dock, and not archived; a member's has it on theirs still", off(&m) && row(&m).is_some_and(|f| f.get("archived").is_none()) && on(&t), json!([row(&m), row(&t)]));
+    let r = api.signed(&member, "PUT", &format!("/api/fragments/{app}/dock"), Some(&json!({ "dock": false })))?;
+    let back = dock(&app, json!({ "dock": true }))?;
+    let (m, t) = (mine()?, theirs()?);
+    s.ok(
+        "the member, a viewer, takes it off their own dock (with their key); the person puts it back on theirs, and each list keeps its own",
+        r.status == 200 && back.status == 200 && back.body == json!({ "name": app, "dock": true }) && on(&m) && off(&t),
+        json!([row(&m), row(&t)]),
+    );
+    // archiving is a choice of its own: neither changes the other
+    let archive = |on: bool| shell(api, session, "PUT", &format!("/api/fragments/{app}/archived"), Some(&json!({ "archived": on })), &[]);
+    let (a, d, u) = (archive(true)?, dock(&app, json!({ "dock": false }))?, archive(false)?);
+    let m = mine()?;
+    s.ok("archived, taken off, then unarchived, it is off their dock still", a.status == 200 && d.status == 200 && u.status == 200 && off(&m), json!(row(&m)));
+
+    let other = api.person()?;
+    let theirs_only = s.named(api, &other, "not-docked")?;
+    let r = api.create(&other, &theirs_only)?;
+    anyhow::ensure!(r.status == 200, "someone else's app: {r}");
+    let r = dock(&theirs_only, json!({ "dock": false }))?;
+    s.ok("a fragment they are not in is none of theirs to take off (404)", r.status == 404, &r);
+    let r = dock("nothing-here--k3x9", json!({ "dock": false }))?;
+    s.ok("nor one that does not exist (404)", r.status == 404, &r);
+    let r = dock("docked", json!({ "dock": false }))?;
+    s.ok("a bare label names nothing here (404): a fragment is named in full", r.status == 404 && r.message().contains("in full"), &r);
+    let r = dock("Not A Name", json!({ "dock": false }))?;
+    s.ok("a name that is none is refused (400)", r.status == 400, &r);
+    let (r, r2) = (dock(&app, json!({}))?, dock(&app, json!({ "dock": "no" }))?);
+    s.ok("a body without `dock`, or not a boolean, is refused (400)", r.status == 400 && r2.status == 400, format!("{r} {r2}"));
+    let r = api.unsigned("PUT", &format!("/api/fragments/{app}/dock"), Some(&json!({ "dock": true })))?;
+    let m = mine()?;
+    s.ok("no one chooses anyone's dock (401), and theirs is as it was", r.status == 401 && off(&m), &r);
+
+    // removed, their choice goes with their row; back in, it is on their dock
+    let r = shell(api, session, "DELETE", &format!("/api/f/{app}/members/{member_id}"), None, &[])?;
+    let gone = s.eventually(SEARCH_WAIT, || theirs().is_ok_and(|r| r.status == 200 && row(&r).is_none()));
+    let r2 = api.signed(&member, "PUT", &format!("/api/fragments/{app}/dock"), Some(&json!({ "dock": false })))?;
+    s.ok("a removed member's list has it no more, nor may they choose its place (404)", r.status == 200 && gone && r2.status == 404, &r2);
+    let r = api.share(&app, &member_id, "viewer")?;
+    let back = s.eventually(SEARCH_WAIT, || theirs().is_ok_and(|r| row(&r).is_some()));
+    let t = theirs()?;
+    s.ok("back in, it is on their dock again", r.status == 200 && back && on(&t), json!(row(&t)));
     Ok(())
 }
 
@@ -3885,7 +3964,7 @@ fn sidebar_live(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
 /// page closes it once it has waited past any healthy open
 /// (`LIST_OPEN_WAIT_MS`), opens another, and is live again: an app
 /// archived elsewhere leaves its dock, and comes back unarchived, with no
-/// reload.
+/// reload; so does one taken off the dock, and put back (#587).
 fn held_list_socket(s: &mut Suite, api: &Api, b: &mut Browser, main: &Page, session: &str) -> Result<()> {
     // the open wait and its first wait, jittered
     let wait = std::time::Duration::from_secs(30);
@@ -3908,6 +3987,13 @@ fn held_list_socket(s: &mut Suite, api: &Api, b: &mut Browser, main: &Page, sess
         shown && closed && r.status == 200 && r2.status == 200 && left && back,
         json!({ "app": name, "held": b.eval(&page, "[window.__heldSockets, window.__heldClosed]")?, "left": left, "back": back }),
     );
+    // the person's own dock (#587): taken off elsewhere, put back
+    let dock = |on: bool| shell(api, session, "PUT", &format!("/api/fragments/{name}/dock"), Some(&json!({ "dock": on })), &[]);
+    let r = dock(false)?;
+    let left = b.until(&page, &format!("!{row}"), live);
+    let r2 = dock(true)?;
+    let back = b.until(&page, &format!("!!{row}"), live);
+    s.ok("and an app taken off the dock elsewhere leaves it, and comes back put on it, with no reload", r.status == 200 && r2.status == 200 && left && back, json!({ "app": name, "left": left, "back": back }));
     b.close(page)?;
     // the person's own tab, on screen again
     b.front(main)?;
