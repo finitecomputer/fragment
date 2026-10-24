@@ -100,10 +100,15 @@ pub fn shell_page(text: &str, release: &str) -> String {
 /// each with its content type: of the rest of cell/shell/, its pages are
 /// served at their own paths, and its credits and licenses not at all.
 #[cfg(feature = "platform")]
-const SHELL_PUBLISHED: [(&str, &str); 29] = [
+const SHELL_PUBLISHED: [(&str, &str); 31] = [
+    // the cell's server-rendered pages' base look (share.rs `sheet_html`),
+    // on the platform's origin and, as /__sheet.css, on a fragment's
+    ("sheet.css", "text/css; charset=utf-8"),
     // the platform's pages' look and Funnel Sans (vendor/funnel-sans-OFL.txt),
-    // which the shell loads too: its type, and its first run's card
+    // which the shell loads too: its type, and its first run's card; their
+    // card's pointer-following rim
     ("platform-pages.css", "text/css; charset=utf-8"),
+    ("platform-pages.js", "text/javascript; charset=utf-8"),
     ("platform-landscape.jpg", "image/jpeg"),
     ("platform-landscape-dark.jpg", "image/jpeg"),
     ("funnel-sans-400.ttf", "font/ttf"),

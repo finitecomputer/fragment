@@ -942,6 +942,11 @@ async fn served(req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, re
 
 #[allow(clippy::too_many_arguments)]
 async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, fetched: Fetched, page: bool) -> CellResult<Response> {
+    // the platform's notices on this origin link their look from it
+    // (share.rs `sheet_html`): the release's, whoever asks
+    if shell::is_fragment_sheet(rest) && matches!(req.method(), Method::Get | Method::Head) {
+        return shell::fragment_sheet_asset(&req, env).await;
+    }
     if auth::is_fragment_route(rest) {
         return auth::fragment(&req, env, cfg, url, name, rest, fetched).await;
     }

@@ -1043,9 +1043,16 @@ cannot confirm in it. It sends no CORS headers (a fragment's page cannot
 read it, so it never holds a form's token), refuses every frame but its
 own on the platform's origin (the shell's dialog: `frame-ancestors
 'self'`, `X-Frame-Options: SAMEORIGIN`; every fragment is another
-origin), severs its opener, allows scripts and styles only inline and
-images only from the platform (`Content-Security-Policy`), and keeps its
-URL to the platform (`Referrer-Policy: same-origin`).
+origin), severs its opener, allows scripts and styles only inline or
+from the platform and images only from the platform
+(`Content-Security-Policy`), and keeps its URL to the platform
+(`Referrer-Policy: same-origin`). Its look is the release's files, linked
+by their versions: `sheet.css` (the cell's pages' base look),
+`platform-pages.css` over it, and `platform-pages.js` (a module: the
+card's pointer-following rim, off in the shell's dialog). The notices a
+fragment's own origin answers (a refusal, its sign-out, a blocked
+sign-in) link `sheet.css` from that origin, as `/__sheet.css?v=<hash>`,
+and so load nothing from the platform's.
 
 Whoever is in a chat can talk to the agents in it, and an agent acts for
 its owner whoever asks it: the design, with a warning as its safeguard
@@ -1058,10 +1065,10 @@ click through; an app or a doc never does, as agents hear only chats
 after the invite, on the same rule, and the apps skill has an agent pass
 it on to its owner.
 
-The sheet links the platform's stylesheet by its version
+The sheet links the platform's stylesheets by their versions
 (`/__shell/platform-pages.css?v=<hash>`), which the platform answers
 `immutable`; asked for by name alone, or by a version the release does
-not hold, it is revalidated as the shell's other files are. Opening the
+not hold, they are revalidated as the shell's other files are. Opening the
 sheet again so waits on no stylesheet round trip.
 
 ### Invites by email

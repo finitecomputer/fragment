@@ -75,12 +75,13 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
             && header("content-security-policy").contains("font-src 'self'")
     });
     // their stylesheets, their paper's edge, and the type they and the shell
-    // share (platform-pages.css), the release's own
-    let published = ["legal.css", "platform-pages.css", "funnel-sans-400.ttf", "funnel-sans-500.ttf", "funnel-sans-600.ttf", "funnel-sans-700.ttf", "paper-edge.svg"]
+    // share (platform-pages.css), the release's own; and the cell's pages'
+    // base look and their card's script, which they link too
+    let published = ["legal.css", "platform-pages.css", "funnel-sans-400.ttf", "funnel-sans-500.ttf", "funnel-sans-600.ttf", "funnel-sans-700.ttf", "paper-edge.svg", "sheet.css", "platform-pages.js"]
         .iter()
         .map(|f| api.unsigned("GET", &format!("/__shell/{f}"), None).map(|r| (r.status, r.headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string())))
         .collect::<Result<Vec<_>>>()?;
-    let typed = published.iter().zip(["text/css", "text/css", "font/ttf", "font/ttf", "font/ttf", "font/ttf", "image/svg+xml"]).all(|((status, got), want)| *status == 200 && got.starts_with(want));
+    let typed = published.iter().zip(["text/css", "text/css", "font/ttf", "font/ttf", "font/ttf", "font/ttf", "image/svg+xml", "text/css", "text/javascript"]).all(|((status, got), want)| *status == 200 && got.starts_with(want));
     s.ok(
         "Finite's about page (/about), privacy policy (/privacy) and terms (/terms) answer anyone, signed out: static pages with their titles, in the release's own type (their CSP allows its fonts), their stylesheets and paper published, never framed",
         shown && typed,
