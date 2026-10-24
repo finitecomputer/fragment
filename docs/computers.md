@@ -1094,6 +1094,30 @@ expires within 30 days. The container application is the deployment's
   - **Its limit** is its key's grant's: weighted tokens in a 5-hour
     window, no rate in calls, shared by every call the deployment makes
     (cloudflare-v1.md, decision 61, sizes it).
+
+  **A slot's `price`.** A slot on an OpenAI-compatible API that is not
+  OpenRouter may name its model's list price there, dollars a million
+  tokens as its vendor lists them: `{"input": <$>, "cached_input"?: <$>,
+  "output": <$>}` (cached input at `input` when unnamed, a cache write
+  at `input`). The ledger charges that list, with the book's fee and
+  margin as on any model (docs/ledger.md, "A slot's own price"), so a
+  model the book does not price runs priced from the config alone. A
+  slot on OpenRouter names its ceiling instead (`max_price`, above); one
+  naming both, or a price that is not 0 to 1,000 dollars, is refused.
+
+  Tinfoil (tinfoil.sh; the private tier's fallback, deploy/example.jsonc's
+  third alternative) is confidential inference on open models:
+  `https://inference.tinfoil.sh/v1`, OpenAI's chat completions, one key
+  of the platform's Tinfoil account (`fragment-tinfoil-api-key`). Its
+  DeepSeek V4.1 Flash, `deepseek-v4-1-flash` (`GET /v1/models`, read
+  2026-10-22: 1,048,576 tokens of context, tools, reasoning, image input,
+  marked experimental), lists at $0.65 in, $0.13 cached, $1.45 out a
+  million tokens, and its slot names that price. Its router maps
+  `reasoning_effort` `low` and `high` onto the model's own `low` and
+  `xhigh`. Its refusals are OpenAI's: a key refused, 401; the account's
+  balance spent, 402; a key's own cap, or the account's rate, 429. A
+  fallback's refusal is the call's (there is no third try), and a 401 or
+  402 there is logged aloud as any platform key's (`model.platform-key`).
 - A call that answers nothing (no first byte, a stream that stalls) is
   the runtime's own to give up on. Our Hermes image's text-tier profiles
   (cheap and medium) use Hermes' own mechanism (Paul, 2026-10-09: a

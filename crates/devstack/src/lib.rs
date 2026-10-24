@@ -301,12 +301,10 @@ pub struct Fleet {
     pub ai_gateway: Option<String>,
     /// Where the model route's names run (`FRAGMENT_MODELS`:
     /// `fragment_core::models::Models`' JSON, each slot an upstream; `None`:
-    /// every one on Workers AI), and, when some run on an OpenAI-compatible
-    /// API, the value of the key they name (`store::MODEL_KEY`,
-    /// bound for each slot `model_key_slots` lists).
+    /// every one on Workers AI), and the key of each that runs on an
+    /// OpenAI-compatible API (`ModelKey`).
     pub models: Option<String>,
-    pub model_key_slots: Vec<String>,
-    pub model_key_value: Option<String>,
+    pub model_keys: Vec<ModelKey>,
     /// Where the platform's mail goes (`FRAGMENT_MAIL_URL`: the mail fake in
     /// dev and the e2e; `None`: the Email Sending binding), and the address
     /// it comes from (`FRAGMENT_MAIL_FROM`).
@@ -375,6 +373,16 @@ pub struct StripeVars {
     pub tax: bool,
 }
 
+/// The key of a slot of the model route on an OpenAI-compatible API
+/// (`fragment_core::models::SLOTS`): its secret's name in the store, bound
+/// for the slot as a deploy binds the one its config names, and its value.
+/// Two slots may name one secret (Finite's tiers name one key), at one value.
+pub struct ModelKey {
+    pub slot: String,
+    pub name: String,
+    pub value: String,
+}
+
 /// A WorkOS environment as the cell reads it.
 pub struct WorkOsVars {
     pub client_id: String,
@@ -387,8 +395,8 @@ impl Fleet {
     /// The store secrets its Worker is bound to, by name.
     fn bound(&self) -> store::Bound {
         let providers: Vec<&str> = self.operator_key_values.iter().map(|(p, _)| p.as_str()).collect();
-        let slots: Vec<&str> = self.model_key_slots.iter().map(String::as_str).collect();
-        let mut bound = store::Bound::conventional(self.workos.is_some(), self.stripe.is_some(), &providers, &slots);
+        let mut bound = store::Bound::conventional(self.workos.is_some(), self.stripe.is_some(), &providers, &[]);
+        bound.model_keys = self.model_keys.iter().map(|k| (k.slot.clone(), k.name.clone())).collect();
         bound.connection_secrets = self.connection_secret_values.iter().map(|(p, _)| (p.clone(), format!("fragment-{p}-oauth-secret"))).collect();
         bound
     }
@@ -411,9 +419,12 @@ impl Fleet {
                 values.push((w.as_str(), s.webhook_secret.as_str()));
             }
         }
-        if !bound.model_keys.is_empty() {
-            let value = self.model_key_value.as_deref().context("a fleet whose models run on an OpenAI-compatible API names its key's value")?;
-            values.push((store::MODEL_KEY, value));
+        // each secret once: two slots naming one name one value
+        for key in &self.model_keys {
+            match values.iter().find(|(name, _)| *name == key.name) {
+                Some((_, value)) => anyhow::ensure!(*value == key.value, "the model key {} is one secret, at one value", key.name),
+                None => values.push((key.name.as_str(), key.value.as_str())),
+            }
         }
         for ((_, name), (_, value)) in bound.operator_keys.iter().zip(&self.operator_key_values) {
             values.push((name.as_str(), value.as_str()));
