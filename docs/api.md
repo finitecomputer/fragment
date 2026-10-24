@@ -1924,7 +1924,11 @@ charged nothing, after two tries in all.
 `vision` falls back so only when the fallback's slot says its model
 reads images (`"images": true` in the deployment's `models`; the
 default fallback, DeepSeek V4 Flash, reads none), and transcriptions
-never. A job's text step falls back the same, and its output's `model`
+never. Each tier has its route (a tier slot's `"fallback"` and
+`"vision"`; the deployment's `fallback` and `vision` unless it names
+others): a tier's call falls back to its route's fallback, and a caller
+that says its tier (`x-fragment-tier`) runs `vision` and `fallback` as
+its route's. A job's text step falls back the same, and its output's `model`
 names the model that answered.
 
 `fallback` names the deployment's fallback model itself: a runtime's own

@@ -1152,6 +1152,25 @@ expires within 30 days. The container application is the deployment's
   (`models.routes`: its label, whether it is private, its fallback's and
   vision model's ids).
 
+  **Each tier's route** (Paul, 2026-10-24: "A fallback on private should
+  fall back to something private, a fallback on normal should fall back
+  to something normal"). A tier slot may name `"fallback"` and
+  `"vision"`, each a slot's name: `fallback` and `vision` (the route's
+  four's, which it names unless it names others) or a slot of the
+  deployment's own beside them (at most 4, named 1 to 24 of a-z, 0-9 and
+  `_`, each some tier's fallback or vision: Standard's `cloudflare`). A
+  tier's call falls back to its route's fallback; a caller that says its
+  tier (`x-fragment-tier`: every call of our Hermes image's tier agents,
+  its auxiliary vision's included) runs `vision` and `fallback` as its
+  route's, a caller that says none the route's four's; a slot of the
+  deployment's own is named by its model's id (it is listed with the
+  rest), and has no fallback of its own. The private guard walks each
+  private tier's route. The computer's view carries each tier's route
+  (`models.routes`: its fallback's and vision model's ids), which our
+  Hermes image reads to name its stall's fallback; an image that does not
+  names the route's four's `fallback`, on which a Standard agent's stall
+  is stricter than its route, never less private.
+
   **A slot's `price`.** A slot on an OpenAI-compatible API that is not
   OpenRouter may name its model's list price there, dollars a million
   tokens as its vendor lists them: `{"input": <$>, "cached_input"?: <$>,

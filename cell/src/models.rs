@@ -131,6 +131,9 @@ pub struct ModelCall<'a> {
     pub agent: Option<&'a str>,
     pub fragment: Option<InFragment<'a>>,
     pub named: Named,
+    /// The tier its caller runs on (its `x-fragment-tier`): whose route's
+    /// `vision` and `fallback` it runs (`Models::route_for`).
+    pub tier: Option<Tier>,
     pub body: Value,
     pub stream: bool,
 }
@@ -258,16 +261,17 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     if body_bytes > MODEL_BODY_MAX_BYTES {
         return Err(CellError::too_large("a model call", body_bytes, MODEL_BODY_MAX_BYTES));
     }
-    let model = cfg.models.capped(call.named).map_err(refused)?;
+    let model = cfg.models.capped_for(call.named, call.tier).map_err(refused)?;
     let bounded = bounds::bound(model, call.body, call.stream).map_err(refused)?;
     let mut charge = gate(env, call.payer, call.agent, call.fragment.as_ref(), bounded.model.id(), call.named.as_str()).await?;
     let meta = Metadata { user_id: opaque(call.payer), agent_id: call.agent.map(opaque) };
-    // a tier's call falls back; a `vision` call only to a fallback whose
-    // slot says it reads images; `fallback` is the fallback already
+    // a tier's call falls back within its route; a `vision` call only to
+    // its route's fallback, when that slot says it reads images; `fallback`
+    // (and an extra slot named by its id) is a fallback already
     let fallback = match call.named {
-        Named::Tier(_) => Some(cfg.models.fallback()),
-        Named::Vision => cfg.models.vision_fallback(),
-        Named::Fallback => None,
+        Named::Tier(t) => cfg.models.fallback_for(t),
+        Named::Vision => cfg.models.vision_fallback_for(call.tier),
+        Named::Fallback | Named::Slot(_) => None,
     };
     let (answer, model, calls) = tried(env, cfg, &bounded, fallback, &meta).await;
     charge.model = model.id();
@@ -370,7 +374,12 @@ pub(crate) async fn streamed(env: &Env, bounded: &Bounded<'static>, payer: &str,
     assert!(bounded.stream, "a step's call streams: its answer is read as it comes");
     let cfg = Config::from_env(env);
     let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
-    let (answer, model, calls) = tried(env, cfg, bounded, Some(cfg.models.fallback()), &meta).await;
+    // a step names its tier: it falls back within that tier's route
+    let fallback = match bounded.model.named {
+        Named::Tier(t) => cfg.models.fallback_for(t),
+        _ => Some(cfg.models.fallback()),
+    };
+    let (answer, model, calls) = tried(env, cfg, bounded, fallback, &meta).await;
     let answer = answer?;
     let log_id = answer.headers().get("cf-aig-log-id")?;
     Ok(Streamed { answer, log_id, model: model.id(), upstream: model.upstream, calls })
@@ -471,7 +480,7 @@ struct Metadata {
 async fn transport(env: &Env, cfg: &Config, model: Model<'_>, input: &Value, meta: &Metadata) -> CellResult<Response> {
     match model.upstream {
         Upstream::WorkersAi { model } => workers_ai(env, cfg, model, input, meta).await,
-        Upstream::Openai { base_url, model: id, body, .. } => openai(env, model.named, base_url, &bounds::openai_request(input, id, body.as_ref())).await,
+        Upstream::Openai { base_url, model: id, body, .. } => openai(env, model.slot, base_url, &bounds::openai_request(input, id, body.as_ref())).await,
     }
 }
 
@@ -481,8 +490,8 @@ async fn transport(env: &Env, cfg: &Config, model: Model<'_>, input: &Value, met
 /// (`keys::model_key`) as its bearer token, and nothing of the client's
 /// or of the payer's. A key the deployment does not bind is a model not
 /// reached (its call falls back), said in the log without it.
-async fn openai(env: &Env, named: Named, base_url: &str, body: &Value) -> CellResult<Response> {
-    let key = crate::keys::model_key(env, named.as_str()).await?;
+async fn openai(env: &Env, slot: &str, base_url: &str, body: &Value) -> CellResult<Response> {
+    let key = crate::keys::model_key(env, slot).await?;
     let h = Headers::new();
     h.set("content-type", "application/json")?;
     h.set("authorization", &format!("Bearer {key}"))?;
@@ -569,7 +578,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, url: &Url, after: &dyn Ba
     };
     let named = named.map_err(|e| CellError::invalid(e.message()))?;
     let stream = v.get("stream") == Some(&Value::Bool(true));
-    let call = ModelCall { payer: &caller.owner, agent: Some(&caller.agent), fragment: caller.in_fragment(), named, body: v, stream };
+    let call = ModelCall { payer: &caller.owner, agent: Some(&caller.agent), fragment: caller.in_fragment(), named, tier, body: v, stream };
     complete(env, call, after).await
 }
 
