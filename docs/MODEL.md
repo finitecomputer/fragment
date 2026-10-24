@@ -435,11 +435,26 @@ Both directions refuse alike: an old caller at a new object will not be
 admitted from that isolate, and its asks run out; a new caller at an old
 object is admitted once the object restarts on the new release, which
 its first refusal of that caller makes it do. Only that restart orders
-two releases, by when each was deployed (a rollback deployed by xtask is
-the newer, as it should be; `wrangler rollback` brings back an older
-version's time, so its objects are left to Cloudflare's own restart). A
+two releases, by when each was deployed (a release deployed again by
+`cargo xtask deploy` is the newer, as it should be; `wrangler rollback`
+brings back an older version's time, so its objects are left to
+Cloudflare's own restart). A
 deploy is all at once (`wrangler deploy`): a gradual deployment, two
 versions serving for a while, would refuse between them for that while.
+
+**A deploy is done when every object class answers it.** `cargo xtask
+deploy` asks `/healthz/objects` (docs/api.md, Health) until each class
+admits the new release, for 7 minutes, past Cloudflare's five minutes of
+a busy object's old code (on 2026-10-24 a throwaway Worker's busy object
+took a deploy's code 300 s after it, whatever wrangler's
+`code_update_strategy` asked, immediate or a 5 s delay; and production's
+Registry, three computers and their agents' fragments, whose restarts
+came back on the old code that day, refused the new Worker for that
+long). One it cannot finish or verify goes back to the version live
+before it (`wrangler rollback`, its objects then left to Cloudflare's
+restart, which the same wait covers), unless that release's schema is
+not its own (Schemas, above): the job fails either way, never green over
+a mix (xtask/src/rollout.rs).
 What outlives a
 deploy is not a call and is not covered: a queue message or a stored row
 written by one release is read by the next, so its shape stays readable

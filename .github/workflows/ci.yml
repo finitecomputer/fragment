@@ -376,8 +376,7 @@ jobs:
   # merges into it, is the approval. Each
   # deploys from a GitHub environment of its name, `preview` or
   # `production`, which the repo's settings let
-  # only its branch use, and which holds the variable DEPLOY_HOST (its
-  # platform's host) and the secrets DEPLOY_REPO_TOKEN (below),
+  # only its branch use, and which holds the secrets DEPLOY_REPO_TOKEN (below),
   # CLOUDFLARE_API_TOKEN (wrangler's, and the DNS token), the preview's
   # PREVIEW_TEST_SECRET, and, optional, CLOUDFLARE_ACCOUNT_ID (below).
   # Its config is its environment's file in the private repo
@@ -398,8 +397,10 @@ jobs:
     runs-on: ubuntu-latest
     # the deploy waits up to 20 minutes for its images to be ready on
     # Cloudflare's network before it builds (xtask/src/prepare.rs,
-    # DEPLOY_LIMIT), beside its build and wrangler's deploy
-    timeout-minutes: 45
+    # DEPLOY_LIMIT), and, after wrangler's deploy, up to 10 to finish one
+    # whose Worker is live and 7 for every object class to answer it, and
+    # 7 more for the release before when it rolls back (rollout.rs)
+    timeout-minutes: 60
     permissions:
       contents: read
     environment: ${{ github.ref_name == 'production' && 'production' || 'preview' }}
@@ -490,35 +491,21 @@ jobs:
       # (wrangler's and xtask's registry paths and URLs); unset, it is empty
       # and masks nothing.
       - env:
-          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           PREVIEW_TEST_SECRET: ${{ secrets.PREVIEW_TEST_SECRET }}
           CLOUDFLARE_ACCOUNT_ID_MASKED: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           umask 077
-          for v in DEPLOY_HOST CLOUDFLARE_API_TOKEN; do
-            test -n "${!v}" || { echo "the environment of $GITHUB_REF_NAME's deploy has no $v"; exit 1; }
-          done
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "the environment of $GITHUB_REF_NAME's deploy has no CLOUDFLARE_API_TOKEN"; exit 1; }
           mkdir -p ~/.config/fragment/secrets
           printf '%s\n' "$CLOUDFLARE_API_TOKEN" > ~/.config/fragment/secrets/cloudflare-api-token
           if [ -n "$PREVIEW_TEST_SECRET" ]; then printf '%s\n' "$PREVIEW_TEST_SECRET" > ~/.config/fragment/secrets/preview-test-secret; fi
+      # green only when every object class answers this commit's release
+      # (`git rev-parse --short=12 HEAD`) at /healthz/objects; a deploy that
+      # cannot be finished or verified rolls back, and fails (rollout.rs)
       - run: cargo xtask deploy --config "deploy-config/$CONFIG_FILE" --pinned-only ${{ github.ref_name == 'master' && '--branch preview' || '' }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      # the deployment answers with this commit: /healthz's x-fragment-deploy
-      # is the deploy's `git rev-parse --short=12 HEAD`. A route can 522 for
-      # seconds after a deploy, so it is asked every 10 s, twelve times.
-      - env:
-          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
-        run: |
-          want=${GITHUB_SHA::12}
-          for _ in $(seq 12); do
-            got=$(curl -sI --max-time 10 "https://$DEPLOY_HOST/healthz" | tr -d '\r' | sed -n 's/^x-fragment-deploy: *//Ip')
-            case "$got" in "$want"*) echo "https://$DEPLOY_HOST answers with $got"; exit 0 ;; esac
-            sleep 10
-          done
-          echo "https://$DEPLOY_HOST/healthz answers with ${got:-no x-fragment-deploy}, not $want"
-          exit 1
 
   # The e2e's builds are kept one entry per master commit (`e2e-shard`),
   # each about 0.5 GB of the repository's 10 GB of caches, and a run

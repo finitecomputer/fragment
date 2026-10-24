@@ -18,10 +18,8 @@
 
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use serde_json::{json, Value};
-
-const API: &str = "https://api.cloudflare.com/client/v4";
 
 /// How long a deploy waits for its images, all of them: past it, it
 /// refuses, having changed nothing. Shorter than its CI job's limit
@@ -86,32 +84,11 @@ impl Clock for Wall {
     }
 }
 
-/// The Containers API of one account (`POST /accounts/{account}/containers/
-/// image-preparations`, as wrangler asks it), with a token that may use it.
-pub(crate) struct Api {
-    http: reqwest::blocking::Client,
-    account: String,
-    token: String,
-}
-
-impl Api {
-    /// The API for `account`, with wrangler's token (`CLOUDFLARE_API_TOKEN`,
-    /// as a deploy's wrangler and the Image workflow's are given it).
-    pub(crate) fn from_env(account: &str) -> Result<Api> {
-        let token = std::env::var("CLOUDFLARE_API_TOKEN").ok().filter(|t| !t.trim().is_empty()).context(
-            "CLOUDFLARE_API_TOKEN is not set: the image's preparation is asked of Cloudflare's API with wrangler's token (Containers on the account), before anything is built or changed",
-        )?;
-        let http = reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).build()?;
-        Ok(Api { http, account: account.to_string(), token: token.trim().to_string() })
-    }
-}
-
-impl Preparer for Api {
+/// The Containers API's `POST /accounts/{account}/containers/
+/// image-preparations`, asked as wrangler asks it.
+impl Preparer for crate::cloudflare::Api {
     fn ask(&mut self, image: &str) -> Result<Preparation, AskError> {
-        let url = format!("{API}/accounts/{}/containers/image-preparations", self.account);
-        let resp = self.http.post(url).bearer_auth(&self.token).json(&json!({ "image": image })).send().map_err(|e| AskError::Transient(format!("Cloudflare's API did not answer: {e}")))?;
-        let status = resp.status().as_u16();
-        let body: Value = resp.json().unwrap_or(Value::Null);
+        let (status, body) = self.call(reqwest::Method::POST, "/containers/image-preparations", Some(&json!({ "image": image }))).map_err(AskError::Transient)?;
         answered(status, &body)
     }
 }
@@ -122,10 +99,7 @@ impl Preparer for Api {
 /// registry: `{"error":"image does not exist in this account"}`); 401 and
 /// 403 a token that may not ask; 429 and 5xx (or no JSON) worth asking again.
 pub(crate) fn answered(status: u16, body: &Value) -> Result<Preparation, AskError> {
-    let errors = || {
-        let listed: Vec<String> = body["errors"].as_array().into_iter().flatten().map(|e| e["message"].as_str().unwrap_or("?").to_string()).collect();
-        if listed.is_empty() { format!("{status}") } else { format!("{status}: {}", listed.join("; ")) }
-    };
+    let errors = || crate::cloudflare::errors(status, body);
     match status {
         200..=299 if body["success"] == true => match body["result"]["status"].as_str() {
             Some("ready") => Ok(Preparation::Ready),
