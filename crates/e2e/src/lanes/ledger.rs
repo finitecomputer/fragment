@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use fragment_core::price::{PriceBook, Usage};
-use fragment_fakes::workers_ai::{image_bytes, spoken_wav, Used, IMAGE_MODEL, TRANSCRIBE_MODEL};
+use fragment_fakes::workers_ai::{heard as fake_heard, image_bytes, spoken_wav, Used, IMAGE_MODEL, TRANSCRIBE_MODEL};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
@@ -72,6 +72,21 @@ const BROWSER_MEMOS: [(&str, &[u8]); 4] = [
     ("Ogg/Opus", include_bytes!("../../fixtures/memo-opus.ogg")),
     ("MP4/AAC (SimpleX's voice message)", include_bytes!("../../fixtures/memo-simplex.m4a")),
 ];
+/// How long Whisper hears each of `BROWSER_MEMOS`, in seconds: its 2 s of
+/// tone, and its codec's padding (FFprobe: 2.000 s the WebM and the Ogg,
+/// 2.027 s the fragmented MP4, 2.048 s the plain one), as the WAV's
+/// 1,400 to 1,700 thousandths of a neuron allow its 2 s.
+const MEMO_SECONDS: (f64, f64) = (1.9, 2.2);
+
+/// Whether `milli` thousandths of a neuron is what the route charges for
+/// `lo..=hi` seconds of audio (fragment_core::transcribe::usage_of).
+fn charged_for(milli: u64, (lo, hi): (f64, f64)) -> bool {
+    let at = |seconds: f64| fragment_core::transcribe::usage_of(&json!({ "transcription_info": { "duration": seconds } }));
+    match (at(lo), at(hi)) {
+        (Some(Usage::Neurons { milli: lo }), Some(Usage::Neurons { milli: hi })) => (lo..=hi).contains(&milli),
+        _ => false,
+    }
+}
 /// Its decisions (fragment_core::decide).
 const DECIDE_ROUTE: &str = "/api/models/v1/decide";
 const GLM: &str = "@cf/zai-org/glm-5.3";
@@ -1206,8 +1221,9 @@ fn meters(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
 /// `x-fragment-answer-shape`: its keys, and its `usage`) and the settle,
 /// pass or fail; and that Whisper reads each browser's own recording
 /// (`BROWSER_MEMOS`: WebM/Opus, MP4/AAC fragmented and plain, Ogg/Opus),
-/// which the route sends on as it came, printing what it heard. Five paid
-/// calls.
+/// which the route sends on as it came, printing what it heard, each
+/// charged at its length (`MEMO_SECONDS`; on the fakes, which decode no
+/// audio, its bytes at 16 kbps). Five paid calls.
 pub fn transcribe_lane(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("transcribe", &[crate::Need::Models, crate::Need::Levers]) {
         return Ok(());
@@ -1237,19 +1253,55 @@ pub fn transcribe_lane(s: &mut Suite, api: &Api) -> Result<()> {
     // the containers a person's browser records in, sent on as they came:
     // Whisper must read each itself
     for (browser, memo) in BROWSER_MEMOS {
-        let before = entries(api, &owner_id, "aig:").len();
+        let earlier = entries(api, &owner_id, "aig:");
+        let before = earlier.len();
         let r = transcription_call(api, hand, &[("model", "whisper"), ("response_format", "json")], memo)?;
         println!("      ({browser}: {} {})", r.status, r.text.chars().take(200).collect::<String>());
         if r.status == 200 {
             s.eventually(Duration::from_secs(60), || entries(api, &owner_id, "aig:").len() > before);
         }
         let aig = entries(api, &owner_id, "aig:");
-        let charged_its_length = |e: &Value| charged(e).is_some() && usage(e)["kind"] == "neurons" && usage(e)["milli"].as_u64().is_some_and(|m| m > 0);
+        // its length as Whisper hears it; the fake decodes no audio, and
+        // hears its bytes at 16 kbps
+        let seconds = match s.on_fakes() {
+            true => (fake_heard(memo).1, fake_heard(memo).1),
+            false => MEMO_SECONDS,
+        };
+        let newest = aig.iter().find(|e| !earlier.contains(e));
+        let charged_its_length = newest.is_some_and(|e| charged(e).is_some() && usage(e)["kind"] == "neurons" && usage(e)["milli"].as_u64().is_some_and(|m| charged_for(m, seconds)));
         s.ok(
-            &format!("a memo in {browser} is heard on the deployment's Whisper, and charged at its length"),
-            r.status == 200 && r.body["text"].is_string() && aig.len() == before + 1 && aig.iter().all(charged_its_length),
+            &format!("a memo in {browser} is heard on the deployment's Whisper, and charged at its length ({:.2} to {:.2} s)", seconds.0, seconds.1),
+            r.status == 200 && r.body["text"].is_string() && aig.len() == before + 1 && charged_its_length,
             json!({ "status": r.status, "answer": r.text.chars().take(300).collect::<String>(), "entries": aig }),
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Goal: a browser's memo is charged at its length, not at any length.
+    /// Valid: 2 s and its codec's padding on Whisper; on the fakes, the
+    /// length the fake hears. Invalid: a minute, half its length, none, and
+    /// on the fakes, Whisper's 2 s.
+    #[test]
+    fn a_memo_is_charged_at_its_length() {
+        let milli = |seconds: f64| match fragment_core::transcribe::usage_of(&json!({ "transcription_info": { "duration": seconds } })) {
+            Some(Usage::Neurons { milli }) => milli,
+            other => panic!("{seconds} s is {other:?}"),
+        };
+        for seconds in [2.0, 2.027, 2.048] {
+            assert!(charged_for(milli(seconds), MEMO_SECONDS), "{seconds} s");
+        }
+        for seconds in [60.0, 1.0, 0.0, 3.0] {
+            assert!(!charged_for(milli(seconds), MEMO_SECONDS), "{seconds} s is not a 2 s memo's charge");
+        }
+        for (browser, memo) in BROWSER_MEMOS {
+            let heard = fake_heard(memo).1;
+            assert!(charged_for(milli(heard), (heard, heard)), "{browser} on the fake");
+            assert!(!charged_for(milli(2.0), (heard, heard)), "{browser} on the fake is not Whisper's 2 s");
+        }
+    }
 }
