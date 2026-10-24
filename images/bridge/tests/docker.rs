@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 
 use support::fake::{person, Fake};
-use support::model::{Model, CHEAP_ID, FALLBACK_ID};
+use support::model::{Model, CHEAP_ID, ROUTE_FALLBACK_ID};
 
 /// An install for the session, offline (as the e2e's hermes lane has it):
 /// a package Hermes builds and installs through apt as root, and a program
@@ -336,7 +336,7 @@ async fn the_hermes_image() {
             format!("  default: \"{CHEAP_ID}\"\n"),
             "    x-fragment-tier: \"cheap\"\n".to_string(),
             format!("      \"{CHEAP_ID}\":\n        stale_timeout_seconds: 20\n"),
-            format!("fallback_providers:\n  - provider: \"custom\"\n    base_url: \"http://model.fragment.internal:{}/v1\"\n    model: \"{FALLBACK_ID}\"\n", model.addr.port()),
+            format!("fallback_providers:\n  - provider: \"custom\"\n    base_url: \"http://model.fragment.internal:{}/v1\"\n    model: \"{ROUTE_FALLBACK_ID}\"\n", model.addr.port()),
             "    model: \"vision\"\n".to_string(),
             "\n  tool_use_enforcement: false\n  execution_guidance: false\n  api_max_retries: 1\n".to_string(),
         ] {
@@ -726,7 +726,8 @@ async fn a_stalled_model_falls_back_to_the_routes_fallback() {
     }
     let took = asked.elapsed();
     let made: Vec<support::model::Call> = calls()[before..].iter().filter(|c| c.path.ends_with("/chat/completions") && mentions(c, "stall, then answer")).cloned().collect();
-    let fell = made.iter().position(|c| c.model == FALLBACK_ID);
+    // its route's fallback (Paul, 2026-10-24: a route falls back within itself), by its id
+    let fell = made.iter().position(|c| c.model == ROUTE_FALLBACK_ID);
     eprintln!("hermes: a stalled turn's reply in {} ms; its calls: {:?}", took.as_millis(), made.iter().map(|c| format!("{} stream={}", c.model, c.stream)).collect::<Vec<_>>());
     let fell = fell.unwrap_or_else(|| panic!("the turn never asked the route's fallback: {:?}", made.iter().map(|c| &c.model).collect::<Vec<_>>()));
     let stalled = made[..fell].iter().filter(|c| c.model == CHEAP_ID).count();
@@ -753,7 +754,7 @@ async fn a_stalled_model_falls_back_to_the_routes_fallback() {
     fake.until(120_000, "the next turn's reply", |w| answered(w, &t2).is_some()).await;
     let next: Vec<String> = calls()[before..].iter().filter(|c| c.path.ends_with("/chat/completions") && mentions(c, "and now?")).map(|c| c.model.clone()).collect();
     assert_eq!(next.first().map(String::as_str), Some(CHEAP_ID), "the next turn is on its tier: {next:?}");
-    assert!(!next.iter().any(|m| m == FALLBACK_ID), "and needs no fallback: {next:?}");
+    assert!(!next.iter().any(|m| m == ROUTE_FALLBACK_ID), "and needs no fallback: {next:?}");
 }
 
 /// A turn whose tool writes a SQLite database of its own for about six

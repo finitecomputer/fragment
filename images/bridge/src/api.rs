@@ -103,6 +103,32 @@ pub struct ModelIds {
     pub medium: String,
     pub fallback: String,
     pub vision: String,
+    /// Each tier's route (2026-10-24; a platform before it names none):
+    /// its fallback's and vision model's ids, which a tier agent's stall
+    /// falls back to (Paul: "a fallback on private should fall back to
+    /// something private, a fallback on normal should fall back to
+    /// something normal").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routes: Option<TierRoutes>,
+}
+
+/// The two tiers' routes (`ModelIds::routes`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TierRoutes {
+    pub cheap: TierRoute,
+    pub medium: TierRoute,
+}
+
+/// A tier's route as the view names it: what Settings calls it, whether it
+/// is private, and its fallback's and vision model's ids.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TierRoute {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub private: bool,
+    pub fallback: String,
+    pub vision: String,
 }
 
 /// A model's id, at most (`anthropic/claude-sonnet-5.5`; the platform's
@@ -306,7 +332,8 @@ impl Api {
             return Err(ApiError::Decode(format!("more credentials than a deployment offers (at most {})", crate::runtime::CREDENTIALS_MAX)));
         }
         if let Some(m) = &c.models {
-            if let Some(bad) = [&m.cheap, &m.medium, &m.fallback, &m.vision].into_iter().find(|id| !model_id_ok(id)) {
+            let routed = m.routes.iter().flat_map(|r| [&r.cheap.fallback, &r.cheap.vision, &r.medium.fallback, &r.medium.vision]);
+            if let Some(bad) = [&m.cheap, &m.medium, &m.fallback, &m.vision].into_iter().chain(routed).find(|id| !model_id_ok(id)) {
                 return Err(ApiError::Decode(format!("models: {bad:?} is no model id")));
             }
         }
