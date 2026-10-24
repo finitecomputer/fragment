@@ -1280,6 +1280,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     settings_race_ui(s, api, &mut b, &page, &session)?;
     notice_ui(s, &mut b, &page, &chat, &shots)?;
     reasoning_ui(s, api, &mut b, &page, &session, &shots)?;
+    one_route_ui(s, api, &mut b, &session)?;
     models_ui(s, api, &mut b, &page, &session, &chat, &shots)?;
     left_and_back_ui(s, api, &mut b, &page, &session, &chat)?;
     computer_ui(s, api, &mut b, &page, &session, &chat, &shots)?;
@@ -3385,6 +3386,89 @@ fn notice_late_ui(s: &mut Suite, b: &mut Browser, page: &Page, chat: &str) -> Re
 /// default again takes it away. Invalid: a pick whose read of agent.json
 /// fails writes nothing and says so (Alex's review of #506: it wrote a
 /// fresh file, losing the model); none there (404) is written fresh.
+/// The shell at Settings, its computers' view with the tiers' labels named
+/// in `drop` taken away from its first document: a deployment that labels
+/// fewer routes than the node's two.
+fn open_with_fewer_labels(b: &mut Browser, api: &Api, drop: &[&str]) -> Result<Page> {
+    let script = format!(
+        "(() => {{ if (window !== window.top) return true; const real = window.fetch.bind(window); const drop = {}; \
+         window.fetch = async (url, o) => {{ const r = await real(url, o); if (url !== '/api/computers' || o?.method !== 'GET' || !r.ok) return r; \
+           const v = await r.clone().json(); for (const c of v.computers ?? []) for (const t of drop) if (c.models?.routes?.[t]) delete c.models.routes[t].label; \
+           return new Response(JSON.stringify(v), {{ status: r.status, headers: {{ 'content-type': 'application/json' }} }}); }}; return true; }})()",
+        serde_json::to_string(drop).expect("names")
+    );
+    let page = b.open_with_script(&format!("{}/settings", api.base), &script)?;
+    b.viewport(&page, 1280, 800, false)?;
+    Ok(page)
+}
+
+/// Alex's review of #586 (P2): with a single labelled route and no provider
+/// connected, an agent on the other tier still has a choice, its own tier
+/// or the route, so Settings offers it; one on the labelled route's own
+/// tier has none, and no pick is shown; none labelled, none, as before.
+fn one_route_ui(s: &mut Suite, api: &Api, b: &mut Browser, session: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let ready = "document.querySelector('[data-reasoning-for]')?.dataset.read === '1'";
+    let lead_of = "document.querySelector('[data-reasoning-for]')?.dataset.reasoningFor ?? ''";
+    // what Settings shows of the lead's model pick: none, hidden, or its options and its value
+    let shown = |b: &mut Browser, page: &Page, lead: &str| -> Result<Value> {
+        b.until(page, &format!("!document.querySelector('[data-model-for={lead:?}]') || document.querySelector('[data-model-for={lead:?}]').dataset.read === '1'"), wait);
+        b.eval(page, &format!("(() => {{ const p = document.querySelector('[data-model-for={lead:?}]'); if (!p) return null; if (p.parentElement.hidden) return 'hidden'; return {{ value: p.value, options: [...p.options].map((o) => [o.value, o.textContent]) }}; }})()"))
+    };
+    let probe = open_with_fewer_labels(b, api, &["medium"])?;
+    b.until(&probe, ready, wait);
+    let lead = b.eval(&probe, lead_of)?.as_str().unwrap_or("").to_string();
+    let file = format!("/api/f/{lead}/file?path=agent.json");
+    let agent_json = || shell(api, session, "GET", &file, None, &[]).map(|r| r.body).unwrap_or(Value::Null);
+    let write_tier = |tier: &str| shell(api, session, "POST", &format!("/api/f/{lead}/files"), Some(&json!({ "message": "the e2e's tier", "files": [{ "path": "agent.json", "text": format!("{:#}\n", json!({ "tier": tier })) }] })), &[]).map(|r| r.status);
+    let view = shell(api, session, "GET", "/api/computers", None, &[])?.body["computers"][0]["models"].clone();
+    let (cheap, medium) = (view["cheap"].as_str().unwrap_or("").to_string(), view["medium"].as_str().unwrap_or("").to_string());
+    let pick = |b: &mut Browser, page: &Page, value: &str| -> Result<bool> {
+        b.eval(page, &format!("(() => {{ const p = document.querySelector('[data-model-for={lead:?}]'); p.value = {value:?}; p.dispatchEvent(new Event('change')); return true; }})()"))?;
+        Ok(b.until(page, &format!("document.querySelector('[data-model-for={lead:?}]')?.dataset.saved === {value:?}"), wait))
+    };
+    // only the cheap tier labelled: an agent on it has no choice
+    let wrote = write_tier("cheap")?;
+    b.reload(&probe)?;
+    b.until(&probe, ready, wait);
+    let on_it = shown(b, &probe, &lead)?;
+    // one on the medium tier may pick the labelled route, its own tier shown as it is
+    let moved = write_tier("medium")?;
+    b.reload(&probe)?;
+    b.until(&probe, ready, wait);
+    let off_it = shown(b, &probe, &lead)?;
+    let took = pick(b, &probe, "route:cheap")? && agent_json()["tier"] == "cheap";
+    s.ok(
+        "one labelled route, no provider: an agent on its tier has no choice and no pick; one on the other tier is offered the route and its own tier, and picks the route",
+        wrote == 200 && moved == 200
+            && on_it == "hidden"
+            && off_it == json!({ "value": "route:medium", "options": [["route:cheap", format!("{} · {cheap}", crate::RECOMMENDED_LABEL)], ["route:medium", format!("Medium ({medium})")]] })
+            && took,
+        json!({ "onIt": on_it, "offIt": off_it, "took": took }),
+    );
+    b.close(probe)?;
+    // only the medium tier labelled: an agent on the cheap tier may pick it
+    let probe = open_with_fewer_labels(b, api, &["cheap"])?;
+    b.until(&probe, ready, wait);
+    let offered = shown(b, &probe, &lead)?;
+    let took = pick(b, &probe, "route:medium")? && agent_json()["tier"] == "medium";
+    s.ok(
+        "only the other route labelled: an agent on the cheap tier is offered it and its own tier, and picks it",
+        offered == json!({ "value": "route:cheap", "options": [["route:medium", format!("{} · {medium}", crate::STANDARD_LABEL)], ["route:cheap", format!("Cheap ({cheap})")]] }) && took,
+        json!({ "offered": offered, "took": took }),
+    );
+    b.close(probe)?;
+    // none labelled: no pick without a provider, as before
+    let probe = open_with_fewer_labels(b, api, &["cheap", "medium"])?;
+    b.until(&probe, ready, wait);
+    let none = shown(b, &probe, &lead)?;
+    s.ok("no route labelled, no provider: no model pick, as before", none.is_null(), &none);
+    b.close(probe)?;
+    let back = write_tier("cheap")?;
+    anyhow::ensure!(back == 200, "the agent back on the cheap tier: {back}");
+    Ok(())
+}
+
 fn reasoning_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     b.reload(page)?;
@@ -3393,11 +3477,11 @@ fn reasoning_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let pick_of = format!("document.querySelector('[data-reasoning-for={lead:?}]')");
     let options = b.eval(page, &format!("[...({pick_of}?.options ?? [])].map((o) => [o.value, o.textContent])"))?;
     let shown = b.eval(page, &format!("{pick_of}?.value ?? null"))?;
-    let every = b.eval(page, "document.querySelectorAll('.agent-setting').length > 0 && document.querySelectorAll('.agent-setting').length === document.querySelectorAll('.agent-setting [data-reasoning-for]').length && document.querySelectorAll('[data-model-for]').length === 0")?;
+    let every = b.eval(page, "document.querySelectorAll('.agent-setting').length > 0 && document.querySelectorAll('.agent-setting').length === document.querySelectorAll('.agent-setting [data-reasoning-for]').length && document.querySelectorAll('.agent-setting').length === document.querySelectorAll('.agent-setting [data-model-for]').length")?;
     let agent_json = || shell(api, session, "GET", &format!("/api/f/{lead}/file?path=agent.json"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
     let before = agent_json();
     s.ok(
-        "every agent offers how hard it thinks, with no provider connected too: Default (High), Low and High, the default shown while its agent.json names none",
+        "every agent offers how hard it thinks, with no provider connected too: Default (High), Low and High, the default shown while its agent.json names none (and its route, the deployment labelling two)",
         read && !lead.is_empty() && options == json!([["", "Default (High)"], ["low", "Low"], ["high", "High"]]) && shown == "" && every == true && before["tier"] == "cheap" && before.get("reasoning").is_none(),
         json!({ "options": options, "shown": shown, "every": every, "agentJson": before }),
     );
@@ -3476,8 +3560,8 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let offered = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'not_set' && !!document.querySelector('{row} [data-action=sign-in]')"), wait);
     let pasted = b.eval(page, &format!("!!document.querySelector('{row} input')"))?;
     s.ok(
-        "an own key with a sign-in is connected from its row with a press, never pasted: no key field, and no agent offers its models yet",
-        offered && pasted == false && b.eval(page, "document.querySelectorAll('[data-model-for]').length")? == 0,
+        "an own key with a sign-in is connected from its row with a press, never pasted: no key field, and no agent offers its models yet (only the deployment's routes)",
+        offered && pasted == false && b.eval(page, "[...document.querySelectorAll('[data-model-for] option')].every((o) => o.value.startsWith('route:'))")? == true,
         b.eval(page, &format!("document.querySelector('{row}')?.innerText"))?,
     );
     // its window opens in the press itself, before the authorize call (one
@@ -3535,8 +3619,8 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         came_back && said.0 && set && s.openrouter.keys().len() == keys_before + 1 && manage == "https://openrouter.ai/settings/keys",
         json!({ "popup": said.1, "manage": manage }),
     );
-    // each agent offers the provider's models beside its tier's, by the
-    // tier's name and its model's id, as their computer's view names it
+    // each agent offers the provider's models after the deployment's routes,
+    // each by its label and its model's id, as their computer's view names them
     let lead = b.eval(page, "document.querySelector('[data-model-for]')?.dataset.modelFor ?? ''")?.as_str().unwrap_or("").to_string();
     let read = b.until(page, &format!("document.querySelector('[data-model-for={lead:?}]')?.dataset.read === '1'"), wait);
     let options = b.eval(page, &format!("[...(document.querySelector('[data-model-for={lead:?}]')?.options ?? [])].map((o) => [o.value, o.textContent])"))?;
@@ -3547,14 +3631,18 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let runs_on = |v: &Value| v["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).map(|a| a["modelProviders"].clone()).unwrap_or(Value::Null);
     let connected = view();
     let cheap = connected["models"]["cheap"].as_str().unwrap_or("").to_string();
+    let medium = connected["models"]["medium"].as_str().unwrap_or("").to_string();
     let vendor = b.eval(page, "document.getElementById('settings-page').innerText.includes('Workers AI') || [...document.querySelectorAll('[data-model-for] option')].some((o) => o.textContent.includes('Workers AI'))")?;
+    let labels = [crate::RECOMMENDED_LABEL, crate::STANDARD_LABEL];
     s.ok(
-        "then each agent offers the provider's models, after its tier's, which it runs on now, named by its tier and its model's id as their computer's view names it (Cheap (<id>), never \"cheap\") and no vendor: no Workers AI anywhere in settings; the view names it among the providers whose models the agent may run",
+        "then each agent offers the deployment's routes, each by its label and its model's id as their computer's view names it (the one it runs on now picked), then the provider's models, and no vendor: no Workers AI anywhere in settings; the view names each route and the providers whose models the agent may run",
         read && !lead.is_empty()
             && before["tier"] == "cheap"
             && !cheap.is_empty() && cheap != "cheap"
             && ["medium", "fallback", "vision"].iter().all(|n| connected["models"][n].as_str().is_some_and(|id| !id.is_empty()))
-            && options.first().is_some_and(|o| o[0] == "" && o[1] == format!("Cheap ({cheap})").as_str())
+            && connected["models"]["routes"]["cheap"]["label"] == labels[0] && connected["models"]["routes"]["medium"]["label"] == labels[1]
+            && options.first().is_some_and(|o| o[0] == "route:cheap" && o[1] == format!("{} · {cheap}", labels[0]).as_str())
+            && options.get(1).is_some_and(|o| o[0] == "route:medium" && o[1] == format!("{} · {medium}", labels[1]).as_str())
             && options.iter().any(|o| o[0] == "openrouter anthropic/claude-sonnet-5.5" && o[1] == "Claude Sonnet 5.5")
             && vendor == false
             && runs_on(&connected) == json!([crate::SWAP_ROUTER]),
@@ -3599,9 +3687,19 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     b.until(page, &format!("location.pathname === '/settings' && !!document.querySelector('[data-model-for={lead:?}]')"), wait);
     b.reload(page)?;
     let shown = b.until(page, &format!("document.querySelector('[data-model-for={lead:?}]')?.dataset.read === '1' && document.querySelector('[data-model-for={lead:?}]').value === 'openrouter anthropic/claude-sonnet-5.5'"), wait);
-    let back = pick(b, "")?;
+    let back = pick(b, "route:cheap")?;
     let gone = agent_json();
-    s.ok("settings shows it again as picked; its tier again takes the model away, its tier kept", shown && back && gone.get("model").is_none() && gone["tier"] == before["tier"], &gone);
+    s.ok("settings shows it again as picked; its route again takes the model away, its tier kept", shown && back && gone.get("model").is_none() && gone["tier"] == before["tier"], &gone);
+    // the other route: the agent's tier, and back (Paul, 2026-10-24: Standard is one pick away)
+    let standard = pick(b, "route:medium")?;
+    let on_standard = agent_json();
+    let private = pick(b, "route:cheap")?;
+    let on_private = agent_json();
+    s.ok(
+        "picked, the other route is the agent's tier (medium), no model of its own; picked back, the first again",
+        standard && on_standard["tier"] == "medium" && on_standard.get("model").is_none() && private && on_private["tier"] == "cheap",
+        json!({ "standard": on_standard, "private": on_private }),
+    );
     // a Disconnect that does not go through (#439): settings reload, its row
     // still connected, saying so, with Disconnect to try again
     let said = format!("document.querySelector('{row} .provider-said')");
@@ -3619,10 +3717,10 @@ fn models_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     );
     // disconnected: the key goes, and no agent offers its models
     b.click(page, &format!("{row} [data-action=disconnect]"))?;
-    let off = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'not_set' && !{said}?.textContent && document.querySelectorAll('[data-model-for]').length === 0"), wait);
+    let off = b.until(page, &format!("document.querySelector('{row}')?.dataset.state === 'not_set' && !{said}?.textContent && [...document.querySelectorAll('[data-model-for] option')].every((o) => o.value.startsWith('route:'))"), wait);
     let left = runs_on(&view());
     s.ok(
-        "pressed again, Disconnect takes the key away, the failure no longer said, and no agent offers its models, nor may run them",
+        "pressed again, Disconnect takes the key away, the failure no longer said, and no agent offers its models (only the routes), nor may run them",
         off && left.is_null(),
         json!({ "row": b.eval(page, &format!("document.querySelector('{row}')?.innerText"))?, "modelProviders": left }),
     );

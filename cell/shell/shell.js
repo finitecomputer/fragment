@@ -2609,7 +2609,12 @@ function agentSettings(a, row, modeled) {
     await api("POST", `/api/f/${seg(a.fragment)}/files`, { message, files: [{ path: "agent.json", text: JSON.stringify(next, null, 2) + "\n" }] });
     await api("POST", `/api/f/${seg(a.fragment)}/deploy`, {});
   }));
-  const picks = [...(modeled.length ? [modelPicker(a, modeled, read, write, said)] : []), reasoningPicker(a, read, write, said)];
+  // the model pick: when there may be a choice, a route the deployment
+  // names (Private, Standard) or a model of a provider the person
+  // connected; whether there is one, with a single route, is the agent's
+  // own tier's to say (`modelPicker`, once agent.json is read)
+  const choice = modeled.length > 0 || routesOffered().length > 0;
+  const picks = [...(choice ? [modelPicker(a, modeled, read, write, said)] : []), reasoningPicker(a, read, write, said)];
   box.append(row, ...picks, said);
   return box;
 }
@@ -2643,22 +2648,36 @@ function modelOption(value, text) {
 
 // ---- an agent's model: its agent.json's `model` ({provider, id}), a model
 // of a provider the person connected, or none: its `tier`'s (`medium`, else
-// the default: `high` is off, decision 23), shown by the tier's name and its
-// model's id, as their computer's view names it (the deployment's `models`).
+// the default: `high` is off, decision 23), as their computer's view names
+// it (the deployment's `models`). A tier the deployment labels is a route
+// a person picks (Paul, 2026-10-24: "Private (recommended)", "Standard"):
+// each labelled tier is offered by its label and its model's id, and
+// picked, it is the agent's `tier`, its own model gone. None labelled, the
+// agent's own tier is shown by its name and its model's id, as before.
 // Vision and voice notes stay on the platform's own models.
 const TIER = { cheap: "Cheap", medium: "Medium" };
+const tierOf = (tier) => (tier === "medium" ? "medium" : DEFAULT_AGENT_TIER);
+const routesOffered = () => {
+  const routes = state.computer?.models?.routes;
+  return routes ? ["cheap", "medium"].filter((t) => routes[t]?.label) : [];
+};
 const tierName = (tier) => {
-  const t = tier === "medium" ? "medium" : DEFAULT_AGENT_TIER;
+  const t = tierOf(tier);
   const id = state.computer?.models?.[t];
+  const label = state.computer?.models?.routes?.[t]?.label;
+  if (label) return id ? `${label} · ${id}` : label;
   return id ? `${TIER[t]} (${id})` : TIER[t];
 };
+// a route's value: no provider's name has a colon (a model's is `provider id`)
+const routeValue = (tier) => `route:${tierOf(tier)}`;
 const modelValue = (provider, id) => `${provider} ${id}`;
 function modelPicker(a, modeled, read, write, said) {
   const pick = el("select", "agent-model");
   pick.dataset.modelFor = a.fragment;
   pick.setAttribute("aria-label", `${titleOf(a.fragment)}'s model`);
+  const offered = routesOffered();
   const tiered = modelOption("", tierName());
-  pick.append(tiered);
+  pick.append(...(offered.length ? offered.map((t) => modelOption(routeValue(t), tierName(t))) : [tiered]));
   for (const p of modeled) {
     const group = el("optgroup");
     group.label = `${providerName(p.provider)} (your account)`;
@@ -2669,20 +2688,25 @@ function modelPicker(a, modeled, read, write, said) {
   read
     .then((j) => {
       tiered.textContent = tierName(j?.tier);
-      const v = j?.model?.provider && j?.model?.id ? modelValue(j.model.provider, j.model.id) : "";
-      // one named by hand, not offered here, is shown as it is
-      if (v && ![...pick.options].some((o) => o.value === v)) pick.append(modelOption(v, j.model.id));
+      const own = j?.model?.provider && j?.model?.id ? modelValue(j.model.provider, j.model.id) : "";
+      const v = own || (offered.length ? routeValue(j?.tier) : "");
+      // one named by hand, or a tier no route names, is shown as it is
+      if (v && ![...pick.options].some((o) => o.value === v)) pick.append(modelOption(v, own ? j.model.id : tierName(j?.tier)));
       pick.value = v;
       pick.dataset.was = v;
+      // a single route that is the agent's own tier, and no provider: no choice, no pick
+      pick.parentElement.hidden = modeled.length === 0 && pick.options.length < 2;
     })
     .finally(() => { pick.disabled = false; pick.dataset.read = "1"; });
   pick.onchange = () => {
     const value = pick.value;
-    const [provider, id] = value ? value.split(" ") : [];
+    const route = value.startsWith("route:") ? tierOf(value.slice(6)) : null;
+    const [provider, id] = value && !route ? value.split(" ") : [];
     savePick(pick, value, said, write((next) => {
+      if (route) next.tier = route;
       if (provider) next.model = { provider, id };
       else delete next.model;
-      return `its model: ${provider ? id : next.tier}`;
+      return route ? `its route: ${state.computer?.models?.routes?.[route]?.label ?? route}` : `its model: ${provider ? id : next.tier}`;
     }));
   };
   return settingLabel("Model", pick);
