@@ -1,0 +1,201 @@
+<!doctype html>
+<!-- An agent's SimpleX link (images/bridge/src/simplex/http.rs), on its
+     computer's screen port, framed by the platform's page for its owner.
+     It reads and moves the link through `state`, `link` and `unlink`
+     beside it, and shows the one-time invitation as a QR code the bridge
+     draws (`qr.svg`). Its words are for someone who has never heard of
+     SimpleX. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SimpleX</title>
+<style>
+  :root { color-scheme: light dark; --text: #1d1d1f; --muted: #6e6e73; --line: #d2d2d7; --surface: #ffffff; --accent: #0a66ff; --danger: #c4282d; }
+  @media (prefers-color-scheme: dark) { :root { --text: #f5f5f7; --muted: #a1a1a6; --line: #3a3a3c; --surface: #1c1c1e; --accent: #4c8dff; --danger: #ff6b6b; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--text); background: var(--surface); }
+  main { max-width: 440px; margin: 0 auto; padding: 28px 22px 40px; }
+  h1 { font-size: 20px; margin: 0 0 10px; }
+  p { margin: 0 0 12px; }
+  .muted { color: var(--muted); }
+  .private { font-size: 13px; color: var(--muted); margin-top: 16px; }
+  ol { padding-left: 20px; margin: 0 0 16px; }
+  ol li { margin-bottom: 6px; }
+  .qr { display: block; width: 240px; height: 240px; margin: 4px auto 14px; background: #fff; padding: 10px; border-radius: 12px; border: 1px solid var(--line); }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 6px; }
+  button, a.button { font: inherit; font-weight: 600; border-radius: 10px; padding: 9px 16px; border: 1px solid var(--line); background: transparent; color: var(--text); cursor: pointer; text-decoration: none; }
+  button.primary, a.button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: .55; cursor: default; }
+  .why { margin-top: 12px; font-size: 13px; color: var(--muted); }
+</style>
+</head>
+<body>
+<main id="main" aria-live="polite"><p class="muted">Loading…</p></main>
+<script>
+  "use strict";
+  const params = new URLSearchParams(location.search);
+  const agent = params.get("agent") || "";
+  // the agent's name: its fragment's title, as the platform's page tells it
+  // (the computer knows only its label); its label until then
+  let name = agent.split("--")[0] || "your agent";
+  let view = null;
+  let busy = false;
+  let timer = 0;
+  const main = document.getElementById("main");
+  const q = (path) => `${path}?agent=${encodeURIComponent(agent)}`;
+
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+  function button(label, cls, onclick) {
+    const b = el("button", cls, label);
+    b.type = "button";
+    b.disabled = busy;
+    b.onclick = onclick;
+    return b;
+  }
+  const PRIVATE = "Your messages are encrypted between your SimpleX app and your computer.";
+
+  async function ask(method, path) {
+    const r = await fetch(q(path), { method, credentials: "same-origin" });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.message || `${r.status}`);
+    return body;
+  }
+  // each change of the link moves this on: a poll begun before it is
+  // obsolete, success or failure, and changes nothing it shows
+  let epoch = 0;
+  async function act(path, confirmWith) {
+    if (confirmWith && !window.confirm(confirmWith)) return;
+    epoch++;
+    clearTimeout(timer);
+    busy = true;
+    render();
+    try {
+      view = await ask("POST", path);
+    } catch (e) {
+      view = { ...(view || {}), why: `That didn't go through: ${e.message}` };
+    }
+    busy = false;
+    render();
+    schedule();
+  }
+  async function refresh() {
+    const at = epoch;
+    if (busy) return schedule();
+    let got;
+    try {
+      got = await ask("GET", "state");
+    } catch (e) {
+      got = { error: e.message };
+    }
+    if (at !== epoch || busy) return;
+    view = got;
+    render();
+    schedule();
+  }
+  function schedule() {
+    clearTimeout(timer);
+    // while a link is being made or shown, its use is seen at once
+    const soon = view && (view.phase === "asking" || view.phase === "inviting");
+    timer = setTimeout(refresh, soon ? 2000 : 10000);
+  }
+
+  function render() {
+    main.replaceChildren();
+    if (!view) {
+      main.append(el("p", "muted", "Loading…"));
+      return;
+    }
+    if (view.error) {
+      main.append(el("h1", null, "SimpleX"), el("p", null, view.error.includes("not on this computer") ? "SimpleX isn't available on this computer." : `SimpleX couldn't be reached: ${view.error}`));
+      return;
+    }
+    const why = () => (view.why ? [el("p", "why", view.why)] : []);
+    if (!view.alwaysOn) {
+      main.append(el("h1", null, `Message ${name} from SimpleX`), el("p", null, view.why || "SimpleX works while your computer stays on, which the always-on plan does."));
+      return;
+    }
+    switch (view.phase) {
+      case "off": {
+        main.append(
+          el("h1", null, `Message ${name} from SimpleX`),
+          el("p", null, `SimpleX Chat is a private messenger for your phone. Link it once, then write to ${name} from it any time. What you say shows up in your chat with ${name} here, and ${name} answers you there.`),
+        );
+        const a = el("div", "actions");
+        a.append(button("Link SimpleX", "primary", () => act("link")));
+        main.append(a, el("p", "private", PRIVATE), ...why());
+        break;
+      }
+      case "asking": {
+        main.append(el("h1", null, `Message ${name} from SimpleX`), el("p", "muted", "Making your link…"), ...why());
+        // stuck (SimpleX would not start, or stopped too often): its way on
+        if (view.why) {
+          const a = el("div", "actions");
+          a.append(button("Try again", "primary", () => act("link")), button("Cancel", null, () => act("unlink")));
+          main.append(a);
+        }
+        break;
+      }
+      case "inviting": {
+        main.append(el("h1", null, `Link SimpleX to ${name}`));
+        const steps = el("ol");
+        const get = el("li");
+        const site = el("a", null, "simplex.chat");
+        site.href = "https://simplex.chat/";
+        site.target = "_blank";
+        site.rel = "noopener noreferrer";
+        get.append("Get SimpleX Chat on your phone, from ", site, " or your app store.");
+        steps.append(get, el("li", null, "In it, start a new chat, choose to scan or paste a link, and scan this code."), el("li", null, `Say hi to ${name}.`));
+        const img = el("img", "qr");
+        img.alt = "A QR code that links your SimpleX app to this agent";
+        // the link in its name, so a new invitation is drawn anew
+        img.src = `${q("qr.svg")}&v=${encodeURIComponent((view.short || view.link || "").slice(-16))}`;
+        main.append(steps, img);
+        const a = el("div", "actions");
+        const open = el("a", "button primary", "Open in SimpleX");
+        open.href = view.link;
+        const copy = button("Copy link", null, async () => {
+          try {
+            await navigator.clipboard.writeText(view.short || view.link);
+            copy.textContent = "Copied";
+          } catch {
+            copy.textContent = "Couldn't copy";
+          }
+        });
+        a.append(open, copy, button("Cancel", null, () => act("unlink")));
+        main.append(a, el("p", "muted", "This code works once, for you: the first app to use it is linked."), el("p", "private", PRIVATE), ...why());
+        break;
+      }
+      case "linked": {
+        main.append(
+          el("h1", null, `${name} is on your SimpleX`),
+          el("p", null, `Linked to ${view.name || "your SimpleX app"}. Write to ${name} there: what you say shows up in your chat with ${name} here, and ${name} answers you there. Voice messages work too.`),
+        );
+        if (!view.running) main.append(el("p", "muted", "Starting SimpleX…"));
+        const a = el("div", "actions");
+        a.append(button("Unlink", "danger", () => act("unlink", `Unlink SimpleX? ${name} will stop getting your SimpleX messages, and your SimpleX app will show the chat as deleted.`)));
+        main.append(a, el("p", "private", PRIVATE), ...why());
+        break;
+      }
+      default:
+        main.append(el("p", "muted", "Loading…"));
+    }
+  }
+
+  // the agent's name, from the platform's page framing this one, for its own agent
+  window.addEventListener("message", (e) => {
+    const m = e.data;
+    if (e.source !== window.parent || !m || m.fragment !== "simplex" || m.agent !== agent || typeof m.name !== "string" || !m.name.trim()) return;
+    name = m.name.trim().slice(0, 80);
+    render();
+  });
+  refresh();
+</script>
+</body>
+</html>

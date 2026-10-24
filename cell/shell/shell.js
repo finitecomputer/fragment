@@ -1400,6 +1400,48 @@ function nameScreen(frame) {
   } catch {}
 }
 
+// ---- an agent's SimpleX: its link page, a port of its computer's own
+// origin as its screen is, through a ticket (docs/bridge.md, "SimpleX"):
+// the one-time QR code, and whom it is linked to ----
+async function openSimplex(agent) {
+  if (!state.computer || !agent) return;
+  try {
+    const t = await api("POST", `/api/computers/${seg(state.computer.computer)}/ports/6080/ticket`, { path: `/simplex/?agent=${encodeURIComponent(agent)}` });
+    const frame = frameOf(t.url, `${titleOf(agent)} on SimpleX`);
+    // its page knows the agent by its label: told its name, as a screen is
+    frame.addEventListener("load", () => {
+      try {
+        frame.contentWindow?.postMessage({ fragment: "simplex", agent, name: titleOf(agent) }, new URL(frame.dataset.src).origin);
+      } catch {}
+    });
+    show({ key: `simplex:${agent}`, title: titleOf(agent), subtitle: "SimpleX", icon: paneIcon("link"), body: frame, persist: false });
+  } catch (e) {
+    notice("SimpleX did not open", e.message);
+  }
+}
+// Settings' SimpleX: each agent's link, on an always-on computer
+function simplexSection() {
+  const s = section("SimpleX");
+  s.id = "settings-simplex";
+  const agents = state.computer?.agents ?? [];
+  s.append(el("p", "muted", "Message your agents from SimpleX Chat, a private messenger for your phone. Your messages are encrypted between your SimpleX app and your computer."));
+  if (!state.computer || !agents.length) {
+    s.append(el("p", "muted", "Make an agent first."));
+    return s;
+  }
+  if (!state.computer.alwaysOn) {
+    s.append(el("p", "muted", "SimpleX works while your computer stays on, which the always-on plan does."));
+    return s;
+  }
+  for (const a of agents) {
+    const open = el("button", "row", "Set up");
+    open.type = "button";
+    open.onclick = () => openSimplex(a.fragment);
+    s.append(actionLine(el("span", null, titleOf(a.fragment)), open));
+  }
+  return s;
+}
+
 // ---- making the agent: its fragment, its computer, its chat (decision 10, 16) ----
 // A label from a name, short enough that with freeLabel's `-<n>` and a
 // chat's `-chat` its address fits any deployment's hosts (docs/api.md,
@@ -2348,7 +2390,7 @@ async function openSettings(push = true, failed = null) {
   const skills = await skillsSection();
   if (lost()) return;
   returnSaid(back);
-  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, buildSection(), dataSection(), ...releaseLine(c)]);
+  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, simplexSection(), buildSection(), dataSection(), ...releaseLine(c)]);
   renderAgentFaces();
   tell();
 }

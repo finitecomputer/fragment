@@ -943,3 +943,48 @@ async fn messages_go_both_ways_through_the_chat() {
     say(&mut person, at_person, "after the restart").await;
     received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t == "echo: [paul] after the restart")).await;
 }
+
+/// What a QR code `svg` says, as the host's zbar reads it from its picture.
+fn decode_qr(svg: &[u8], dir: &Path) -> String {
+    let (svg_path, png) = (dir.join("qr.svg"), dir.join("qr.png"));
+    std::fs::write(&svg_path, svg).expect("written");
+    let made = Command::new("rsvg-convert").arg("-w").arg("480").arg("-o").arg(&png).arg(&svg_path).status().expect("the host has rsvg-convert");
+    assert!(made.success(), "drawn as a picture");
+    let out = Command::new("zbarimg").args(["-q", "--raw"]).arg(&png).output().expect("the host has zbarimg");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Goal: the link page, as the shell's pane shows it: served under its
+/// port's path; its QR code says the one-time invitation (its short link,
+/// the server's), and the person's app links by scanning it; then the page
+/// says whom it is linked to.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker, rsvg-convert and zbarimg; run by hand"]
+async fn the_link_pages_code_links() {
+    build_bridge_image();
+    let mut lab = Lab::up_with("page", true);
+    let mut person = lab.start("person", false).await;
+    let fake = support::fake::Fake::start("0.0.0.0:0", &["juniper"]).await;
+    fake.with(|w| {
+        w.computer["alwaysOn"] = json!(true);
+        w.computer["generation"] = json!(1);
+    });
+    let c = Computer::start(&lab, &fake, &lab.dir.join("computer-data"));
+    c.state_until(Duration::from_secs(60), "its state", |v| v["phase"] == "off").await;
+    let page = Command::new("curl").args(["-s", &format!("http://127.0.0.1:{}/simplex/?agent=juniper--k3x9", c.port)]).output().expect("curl runs");
+    let page = String::from_utf8_lossy(&page.stdout);
+    assert!(page.contains("<title>SimpleX</title>") && page.contains("Link SimpleX"), "its page");
+    let (code, _) = c.http("GET", "/simplex/qr.svg?agent=juniper--k3x9");
+    assert_eq!(code, 404, "no code before an invitation");
+    c.http("POST", "/simplex/link?agent=juniper--k3x9");
+    let v = c.state_until(Duration::from_secs(60), "an invitation", |v| v["phase"] == "inviting").await;
+    let svg = Command::new("curl").args(["-s", &format!("http://127.0.0.1:{}/simplex/qr.svg?agent=juniper--k3x9", c.port)]).output().expect("curl runs").stdout;
+    let said = decode_qr(&svg, &lab.dir);
+    let short = v["short"].as_str().expect("the lab's server makes a short link");
+    assert_eq!(said, short, "its code says its short link");
+    let r = person.cmd(&format!("/connect {said}")).await;
+    println!("the person scanned the page's code: {}", tag(&r));
+    let v = c.state_until(Duration::from_secs(90), "linked by its code", |v| v["phase"] == "linked").await;
+    assert_eq!(v["name"], "person");
+    received(&mut person, Duration::from_secs(30), |got| got.iter().any(|t| t.contains("You're linked"))).await;
+}
