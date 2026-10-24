@@ -73,9 +73,9 @@ pub fn cell_as(profile: Profile) -> Result<()> {
     let t0 = Instant::now();
     let dir = devstack::cell_dir();
     let out = dir.join("build");
-    // what `build/` holds is no finished build until this one is
-    std::fs::create_dir_all(&out).with_context(|| format!("create {}", out.display()))?;
-    devstack::built::clear(&out)?;
+    // what `build/` holds is no finished build until this one is, and this
+    // build alone writes it, and no reader reads it, until its mark
+    let building = devstack::built::building(&out, profile.name())?;
     let local = LocalPaths::here(&dir)?;
     let given = (std::env::var("CARGO_ENCODED_RUSTFLAGS").ok(), std::env::var("RUSTFLAGS").ok());
     let flags = encoded_rustflags(given, &local.remapped());
@@ -90,7 +90,7 @@ pub fn cell_as(profile: Profile) -> Result<()> {
         Profile::Dev => format!("{} bytes of Wasm ({:.2} MB), dev's: no budget holds it (the release's is {CELL_WASM_MAX_BYTES} bytes)", stripped.len(), stripped.len() as f64 / 1e6),
     };
     let (files, bytes) = fragment_templates::write_assets(&out.join("assets")).context("writing the release's files into cell/build/assets")?;
-    devstack::built::mark(&out, profile.name())?;
+    building.finish()?;
     println!(
         "built the cell ({}) for wasm32 in {:.1?}: {size}, and {files} files of the release, {:.2} MB, in its Static Assets",
         profile.name(),

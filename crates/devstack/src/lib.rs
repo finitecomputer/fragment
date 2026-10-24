@@ -131,7 +131,10 @@ pub fn stage_project(dir: &Path) -> Result<PathBuf> {
     fs::write(dir.join("wrangler.jsonc"), serde_json::to_string_pretty(&config)?)?;
     fs::copy(from.join("entry.mjs"), dir.join("entry.mjs")).context("stage entry.mjs")?;
     let _ = fs::remove_dir_all(dir.join("build"));
+    // no build writes among the files as they are copied
+    let reading = built::reading(&from.join("build"))?;
     copy_dir(&from.join("build"), &dir.join("build")).with_context(|| format!("stage {}/build (run `cargo xtask build`)", from.display()))?;
+    drop(reading);
     // the copy is the release's, finished, never `cargo xtask dev`'s
     built::release(&dir.join("build"))?;
     Ok(dir.to_path_buf())

@@ -94,7 +94,10 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   is held to no budget. Each build marks `cell/build/built` with its
   profile and its Wasm's SHA-256 (crates/devstack/src/built.rs), and a
   deploy and the e2e's staging refuse any build but the release's,
-  finished.
+  finished. A build holds `cell/build.lock` alone from its start to its
+  mark; the e2e's staging (while it copies) and a deploy (through every
+  wrangler try) hold it shared, so a rebuild waits for them, and they
+  for it.
 - `cargo xtask check`: every first-party JavaScript file (`.js`, `.mjs`,
   `.cjs` git tracks or would add, less the vendored ones) through `node
   --check` on the pinned Node, each as a module or a classic script as
