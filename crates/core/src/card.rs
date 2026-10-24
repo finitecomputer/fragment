@@ -110,7 +110,8 @@ impl Skip {
 /// Whether a fragment of `kind` and `visibility` is shot, and as whom.
 pub fn visitor(kind: FragmentKind, visibility: Visibility) -> Result<Visitor, Skip> {
     match (kind, visibility) {
-        (FragmentKind::Chat | FragmentKind::Agent | FragmentKind::Skills, _) => Err(Skip::NotAnApp),
+        // a kind this build does not know (a newer platform's) is shot as nothing
+        (FragmentKind::Chat | FragmentKind::Agent | FragmentKind::Skills | FragmentKind::Unknown, _) => Err(Skip::NotAnApp),
         (_, Visibility::Members) => Err(Skip::MembersOnly),
         (FragmentKind::App | FragmentKind::Brain, Visibility::Public) => Ok(Visitor::Anyone),
         (FragmentKind::App | FragmentKind::Brain, Visibility::Link) => Ok(Visitor::LinkHolder),
@@ -764,13 +765,14 @@ mod tests {
         assert_eq!((c.next(T0, PACE), c.due(T0)), (Next::Idle, None));
     }
 
-    /// Goal: chats and agents are not shot, members-only fragments are not
-    /// shot, and the others are shot as their visitors see them.
+    /// Goal: chats and agents are not shot, nor a kind this build does not
+    /// know, members-only fragments are not shot, and the others are shot
+    /// as their visitors see them.
     #[test]
     fn who_is_shot_and_as_whom() {
         use FragmentKind::*;
         use Visibility::*;
-        for kind in [Chat, Agent] {
+        for kind in [Chat, Agent, Unknown] {
             for v in [Public, Link, Members] {
                 assert_eq!(visitor(kind, v), Err(Skip::NotAnApp));
             }

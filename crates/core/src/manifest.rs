@@ -379,6 +379,13 @@ mod tests {
         assert_eq!(parse(br#"{"kind":"brain"}"#).unwrap().kind(), FragmentKind::Brain);
         assert_eq!(parse(br#"{"kind":"skills"}"#).unwrap().kind(), FragmentKind::Skills);
         assert!(parse(br#"{"kind":"bot"}"#).is_err());
+        // a kind this build does not know is refused, with what it may be:
+        // a list reads one as `Unknown` (proto), a manifest never, nor
+        // `unknown`, the fallback's own name
+        for k in ["site", "unknown", "App"] {
+            let refused = parse(format!(r#"{{"kind":"{k}"}}"#).as_bytes()).unwrap_err();
+            assert_eq!(refused, format!("kind is app, chat, agent, brain or skills, not {k:?}"));
+        }
         assert!(parse(br#"{"template":"Chat"}"#).is_err());
         let blessed = parse(br#"{"kind":"chat","meta":{"title":"Chat","description":"d"},"channels":{"chat":{"read":"public","post":"viewer"}}}"#).unwrap();
         let own = parse(br#"{"template":"chat","meta":{"title":"Garden"}}"#).unwrap();
