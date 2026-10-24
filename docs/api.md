@@ -1539,7 +1539,9 @@ A page subscribes with `await fragment.push.register(who)` (from a click:
 it registers `./__sw.js`, reads the fragment's VAPID key from
 `./__push-key`, and stores the subscription at `./__push-sub` tagged with
 `who`); `fragment.push.unregister()` drops it (`./__push-unsub`, by its
-endpoint). Anyone who can see the fragment may subscribe (at most 10 000
+endpoint). A chat's page the shell frames stores a subscription the shell
+made instead, with the same routes (The shell, "A chat's alerts are the
+shell's"). Anyone who can see the fragment may subscribe (at most 10 000
 subscriptions); a `who` that is an identity (an npub) is that identity's
 own, and from anyone else is 403, so what is pushed to a person's
 identity reaches their browsers alone (a chat's replies:
@@ -2908,6 +2910,38 @@ either, so it neither learns their agents nor adds one, and no page adds
 anyone but its own owner's agents to its own fragment, which is an
 owner's share with their own agent (decision 36). It names no template;
 the chat's `@` is its user (docs/chat-records.md, "The page").
+
+**A chat's alerts are the shell's** (Paul, 2026-10-24: a chat's alerts
+should not take a tab of its own). A browser lets no cross-origin frame
+ask for notifications, so a chat's bell, framed, asks the shell, which
+asks on the platform's origin and holds the subscription. A frame of one
+of the person's chats (a row of `kind: "chat"`, theirs or shared with
+them) may ask, from its fragment's own origin, `{fragment: "alerts?",
+nonce}` (what this browser holds for it), `{fragment: "alerts", nonce,
+on: true, key}` (`key` its fragment's VAPID key, `__push-key`'s) or
+`{fragment: "alerts", nonce, on: false}` (a nonce of at most 64
+characters); the shell answers that frame, at that origin, `{fragment:
+"alerts", nonce, state, subscription?, endpoint?, error?}`, `state` one
+of `on`, `off`, `denied` (this browser refuses the platform's
+notifications), `unsupported` and `failed`. On asks the browser first
+when it has not been asked (the press in the frame is the gesture), then
+registers the shell's alerts worker (`/__shell/alerts-sw.js`, push only)
+at a scope of that chat's own (`/__shell/alerts/<chat>/`) and subscribes
+it with the key, answering `subscription: {endpoint, p256dh, auth}`; the
+page stores it on its fragment as its person (`__push-sub`, tagged with
+their identity), as `fragment.push.register` does in a tab of its own,
+and asks the shell to let it go if that is refused. Off unsubscribes and
+unregisters it, answering the `endpoint` the page drops (`__push-unsub`).
+So whose alerts are on stays each chat's own subscriptions, and only the
+chat's fragment, whose key it is, can push to one (Deliveries: web push,
+above). The worker shows a push with the chat as its tag (one
+notification a chat, its latest), and a click opens the chat in the
+shell: a shell already open is told `{fragment: "open-chat", name}` by
+the worker (never by a page), else one opens at `/?chat=<chat>`. Signing
+out and Use another account let every registration of the worker go
+first, so the next person in that browser gets none of the last one's
+alerts. A frame of anything else, or a message from another origin, is
+answered nothing.
 
 **The launcher** (the sidebar's +, a phone's top bar +, and ⌘K or
 Ctrl K, from the chat's frame too: `{fragment: "open-launcher"}`, taken

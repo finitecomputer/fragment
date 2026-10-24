@@ -486,6 +486,115 @@ $("add-agent-form").onsubmit = (e) => {
 };
 $("add-agent-cancel").onclick = () => addDialog.close();
 
+// ---- a chat's alerts (docs/api.md, The shell, "A chat's alerts are the
+// shell's"; docs/chat-records.md, Push). A browser lets no cross-origin
+// frame ask for notifications, so the shell asks, on this origin, for the
+// chats it frames, and holds their subscriptions: one registration of its
+// alerts worker (alerts-sw.js) a chat, its scope /__shell/alerts/<chat>/,
+// subscribed with that chat's own VAPID key, which its page hands over.
+// The page stores the subscription on its fragment as its person
+// (`__push-sub`), as in a tab of its own, so whose alerts are on stays
+// each chat's, and only that chat's fragment can push to it. Only a frame
+// of one of the person's chats asks, from its fragment's own origin ----
+const ALERTS_WORKER = "/__shell/alerts-sw.js";
+const ALERTS_SCOPE = "/__shell/alerts/";
+const alertsScope = (name) => new URL(`${ALERTS_SCOPE}${encodeURIComponent(name)}/`, location.origin).href;
+const alertable = () => "serviceWorker" in navigator && typeof PushManager !== "undefined" && typeof Notification !== "undefined";
+const b64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+// a P-256 public key, uncompressed (65 bytes): a VAPID key
+function vapidKey(s) {
+  try {
+    const key = Uint8Array.from(atob(s.replaceAll("-", "+").replaceAll("_", "/")), (c) => c.charCodeAt(0));
+    return key.length === 65 && key[0] === 4 ? key : null;
+  } catch {
+    return null;
+  }
+}
+// a chat's registration (none when its alerts are off)
+async function alertsOf(name) {
+  const reg = await navigator.serviceWorker.getRegistration(alertsScope(name));
+  return reg?.scope === alertsScope(name) ? reg : null;
+}
+// a registration's worker, once it may hold a subscription
+function activated(reg) {
+  const w = reg.installing ?? reg.waiting;
+  if (!w) return Promise.resolve(reg);
+  return new Promise((resolve, reject) => {
+    w.addEventListener("statechange", () => {
+      if (w.state === "activated") resolve(reg);
+      else if (w.state === "redundant") reject(new Error("the alerts worker did not start"));
+    });
+  });
+}
+async function alertsOn(name, key) {
+  // the press in the frame is this page's too: the browser asks once
+  if (Notification.permission === "default") await Notification.requestPermission();
+  if (Notification.permission !== "granted") return { state: Notification.permission === "denied" ? "denied" : "off" };
+  const reg = await activated(await navigator.serviceWorker.register(ALERTS_WORKER, { scope: alertsScope(name) }));
+  const sub = (await reg.pushManager.getSubscription()) ?? (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }));
+  return { state: "on", subscription: { endpoint: sub.endpoint, p256dh: b64u(sub.getKey("p256dh")), auth: b64u(sub.getKey("auth")) } };
+}
+async function alertsOff(name) {
+  const reg = await alertsOf(name);
+  const sub = await reg?.pushManager.getSubscription();
+  await sub?.unsubscribe();
+  await reg?.unregister();
+  return { state: "off", ...(sub ? { endpoint: sub.endpoint } : {}) };
+}
+addEventListener("message", async (event) => {
+  const d = event.data;
+  if (!["alerts?", "alerts"].includes(d?.fragment) || typeof d.nonce !== "string" || d.nonce.length > 64) return;
+  const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === event.source);
+  const name = frame?.dataset.fragment;
+  if (!name || byName(name)?.kind !== "chat") return;
+  let origin;
+  try {
+    origin = await originOf(name);
+  } catch {
+    return;
+  }
+  if (event.origin !== origin || frame.contentWindow !== event.source) return;
+  const answer = (a) => event.source.postMessage({ fragment: "alerts", nonce: d.nonce, ...a }, origin);
+  if (!alertable()) return answer({ state: "unsupported" });
+  try {
+    if (d.fragment === "alerts?") {
+      if (Notification.permission === "denied") return answer({ state: "denied" });
+      const on = Notification.permission === "granted" && !!(await (await alertsOf(name))?.pushManager.getSubscription());
+      return answer({ state: on ? "on" : "off" });
+    }
+    const key = d.on === true && typeof d.key === "string" ? vapidKey(d.key) : null;
+    if (key) return answer(await alertsOn(name, key));
+    if (d.on === false) return answer(await alertsOff(name));
+  } catch (e) {
+    const denied = e?.name === "NotAllowedError" || e?.name === "PermissionDeniedError";
+    return answer(denied ? { state: "denied" } : { state: "failed", error: String(e?.message ?? e) });
+  }
+});
+// every chat's alerts this browser holds, let go (signing out: the next
+// person in it gets none of the last one's)
+async function dropAlerts() {
+  if (!alertable()) return;
+  const regs = await navigator.serviceWorker.getRegistrations().catch(() => []);
+  await Promise.all(
+    regs
+      .filter((r) => new URL(r.scope).pathname.startsWith(ALERTS_SCOPE))
+      .map(async (r) => {
+        await (await r.pushManager.getSubscription().catch(() => null))?.unsubscribe().catch(() => {});
+        await r.unregister().catch(() => {});
+      }),
+  );
+}
+// an alert clicked: its chat, here (alerts-sw.js; one opened for it comes
+// with `?chat=`, at the page's start)
+navigator.serviceWorker?.addEventListener("message", (event) => {
+  const d = event.data;
+  if (d?.fragment === "open-chat" && typeof d.name === "string" && byName(d.name)?.kind === "chat") {
+    openChat(d.name);
+    leaveSidebar();
+  }
+});
+navigator.serviceWorker?.startMessages();
+
 // ---- sharing: the platform's own sheet, framed (it is this origin's) ----
 function badges(f) {
   const out = [];
@@ -3881,9 +3990,10 @@ function reopenWindows(settings) {
 }
 
 // Signing out, or in with another account, ends the tab's person: what was
-// kept for them goes first, its windows here and each chat page's draft
+// kept for them goes first, its windows here, each chat page's draft
 // (`{fragment: "forget-draft"}`, answered `draft-forgotten`, waited for at
-// most FORGET_WAIT_MS), then the form goes. A draft of theirs a page not
+// most FORGET_WAIT_MS) and their chats' alerts (`dropAlerts`), then the
+// form goes. A draft of theirs a page not
 // open here keeps is never shown to anyone else (its page gives a draft
 // back only to its own person) and goes when someone else opens it.
 document.addEventListener("submit", (e) => {
@@ -3891,9 +4001,8 @@ document.addEventListener("submit", (e) => {
   if (!(form instanceof HTMLFormElement) || !/^\/auth\/(logout|switch)(\?|$)/.test(form.getAttribute("action") ?? "")) return;
   tab.drop(WINDOWS_KEY);
   const frames = [...state.frames.values()].filter((f) => f.isConnected && greeted.has(f));
-  if (!frames.length) return;
   e.preventDefault();
-  forgetDrafts(frames).then(() => HTMLFormElement.prototype.submit.call(form));
+  Promise.all([frames.length ? forgetDrafts(frames) : null, dropAlerts()]).then(() => HTMLFormElement.prototype.submit.call(form));
 }, true);
 function forgetDrafts(frames) {
   return new Promise((done) => {
@@ -3998,6 +4107,12 @@ function guestHome(offer) {
   notice("You're a guest", [`You see and edit what people share with you, once you accept their invite in the sidebar. ${seatGives(offer)}`, noSeatSaid()], [...(offer ? [seat] : []), switchForm("/", "allow")]);
 }
 
+// a chat's alert clicked with no shell open (alerts-sw.js): that chat
+const alerted = location.pathname === "/" ? new URLSearchParams(location.search).get("chat") : null;
+if (alerted) {
+  state.current = alerted;
+  history.replaceState(null, "", "/");
+}
 start().catch((e) => {
   showLayout();
   notice("This page did not load", e.message);

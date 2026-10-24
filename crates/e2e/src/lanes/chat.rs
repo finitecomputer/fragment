@@ -28,7 +28,9 @@
 //! person's record does; while the owner's page is on screen nothing is
 //! pushed to them, and once it is closed a reply reaches each of the
 //! chat's people's subscriptions once (the push fake decrypts it), never
-//! a tag that names no one; no one subscribes for another identity.
+//! a tag that names no one; no one subscribes for another identity. In
+//! the shell's frame its bell turns on alerts the shell holds, which a
+//! reply reaches, and turns them off.
 
 use std::path::Path;
 use std::time::Duration;
@@ -729,6 +731,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     polish::check(s, api, &owner, &owner_session, &mut chrome, &label)?;
     polish::working_card(s, api, &owner, &mut chrome, &identity, &agent_name)?;
     polish::record_shapes(s, api, &owner, &owner_session, &mut chrome)?;
+    alerts_in_frame(s, api, &mut chrome, &owner, &owner_site, &chat_name, &identity)?;
 
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;
@@ -920,6 +923,129 @@ fn commands_queued_and_quotes(s: &mut Suite, api: &Api, chrome: &mut Browser, pa
     s.ok("on a desktop Enter sends (enterkeyhint send), and Shift+Enter adds a line", labelled && held["value"] == "first of two\nsecond of two" && posted, json!({ "held": held, "posted": posted }));
     let _ = shows(chrome, &replied("first of two"));
     Ok(())
+}
+
+/// The shell, the browser's push service's fake on each of its documents,
+/// with `chat` open in its frame and ready: the shell, and its frame's own
+/// target; `None` when it never was.
+fn framing_shell(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str, script: &str) -> Result<Option<(Page, Page)>> {
+    let wait = Duration::from_secs(30);
+    let shell = chrome.open_with_script(&format!("{}/", api.base), script)?;
+    chrome.viewport(&shell, 1280, 860, false)?;
+    let row = format!("#chats [data-key={}]", js(&format!("chat:{chat}")));
+    let listed = chrome.until(&shell, &format!("!document.getElementById('layout').hidden && !!document.querySelector({})", js(&row)), wait);
+    chrome.eval(&shell, &format!("(document.querySelector({})?.click(), true)", js(&row)))?;
+    let ready = "document.getElementById('say')?.dataset.ready === '1'";
+    if !(listed && s.eventually(wait, || chrome.eval_in_frame(&shell, chat, ready).ok() == Some(Value::Bool(true)))) {
+        chrome.close(shell)?;
+        return Ok(None);
+    }
+    let frame = chrome.frame(chat)?;
+    Ok(Some((shell, frame)))
+}
+
+/// The browser's push service at the shell's subscribe (`PushManager`, the
+/// vendor's boundary: headless Chrome reaches none), on each of the shell's
+/// documents: a registration's subscription is the push fake's `sub`, kept
+/// by its scope with the key it was made with, in the shell's storage
+/// (`e2e-push`), so a page loaded again reads it.
+fn push_service_fake(sub: &fragment_fakes::push::Subscribed) -> String {
+    let sub = json!({ "endpoint": sub.endpoint, "p256dh": sub.p256dh, "auth": sub.auth });
+    format!(
+        "(() => {{ const SUB = {sub}; const kept = () => JSON.parse(localStorage.getItem('e2e-push') || '{{}}'); const keep = (all) => localStorage.setItem('e2e-push', JSON.stringify(all)); \
+         const bytes = (s) => Uint8Array.from(atob(s.replaceAll('-', '+').replaceAll('_', '/')), (c) => c.charCodeAt(0)).buffer; \
+         const made = (scope) => ({{ endpoint: SUB.endpoint, getKey: (k) => bytes(SUB[k]), unsubscribe: async () => {{ const all = kept(); delete all[scope]; keep(all); return true; }} }}); \
+         Object.defineProperty(ServiceWorkerRegistration.prototype, 'pushManager', {{ configurable: true, get() {{ const scope = this.scope; return {{ \
+           subscribe: async (o) => {{ const all = kept(); all[scope] = btoa(String.fromCharCode(...new Uint8Array(o.applicationServerKey))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', ''); keep(all); return made(scope); }}, \
+           getSubscription: async () => (kept()[scope] ? made(scope) : null) }}; }} }}); }})();"
+    )
+}
+
+/// A chat's alerts, from its bell in the shell's frame (docs/api.md, The
+/// shell, "A chat's alerts are the shell's"). A browser lets no
+/// cross-origin frame ask for notifications, so the bell of a chat the
+/// shell framed only said to open the chat in a tab of its own (Paul,
+/// 2026-10-24: alerts should not take a tab). Valid: framed, the bell
+/// reads off; pressed, with the browser's notifications allowed to the
+/// platform, it says on, and the shell holds a registration of its alerts
+/// worker for that chat alone, subscribed with the chat's own key; away,
+/// an agent's reply is pushed to that subscription once; a shell opened
+/// again reads it on, and pressed, off: the registration gone, and the
+/// next reply pushed there nothing.
+fn alerts_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, owner_site: &str, chat: &str, identity: &str) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let id = s.name("chat-shell-alerts");
+    let fake = push_service_fake(&s.push.subscribe(&id, 37));
+    let platform = api.base.trim_end_matches('/').to_string();
+    chrome.set_permission(&platform, "notifications", "granted")?;
+    let key = api.call(Call { method: "GET", url: api.site_url(chat, "__push-key"), cookie: Some(owner_site.to_string()), ..Call::default() })?.body["key"].clone();
+    let scope = format!("{platform}/__shell/alerts/{chat}/");
+    let bell = "document.getElementById('notify')";
+    let held = format!(
+        "navigator.serviceWorker.getRegistration({scope}).then((r) => ({{ scope: r?.scope ?? null, worker: (r?.active ?? r?.waiting ?? r?.installing)?.scriptURL ?? null, key: JSON.parse(localStorage.getItem('e2e-push') || '{{}}')[{scope}] ?? null }}))",
+        scope = js(&scope)
+    );
+    let Some((shell, frame)) = framing_shell(s, api, chrome, chat, &fake)? else {
+        s.ok("framed by the shell, the chat's bell reads off; pressed, on: the shell holds the chat's registration of its alerts worker, subscribed with the chat's own key", false, "the chat never framed");
+        return Ok(());
+    };
+    let read = chrome.until(&frame, &format!("!{bell}.hidden && {bell}.dataset.state === 'off'"), wait);
+    let was = chrome.eval(&frame, &format!("{bell}.dataset.state ?? null"))?;
+    chrome.eval(&frame, &format!("({bell}.click(), true)"))?;
+    let on = chrome.until(&frame, &format!("{bell}.dataset.state === 'on'"), wait);
+    let holds = chrome.eval(&shell, &held)?;
+    let banner = chrome.eval(&frame, "document.getElementById('banner').hidden ? null : document.getElementById('banner-text').textContent")?;
+    s.ok(
+        "framed by the shell, the chat's bell reads off; pressed, on: the shell holds the chat's registration of its alerts worker, subscribed with the chat's own key",
+        read && on && holds == json!({ "scope": scope, "worker": format!("{platform}/__shell/alerts-sw.js"), "key": key }),
+        json!({ "was": was, "holds": holds, "key": key, "banner": banner }),
+    );
+    chrome.detach(frame)?;
+    chrome.close(shell)?;
+
+    // away (the shell closed): a reply comes to the shell's subscription
+    let said = "alerts while the shell is closed";
+    let reply = said_away(s, api, owner, chat, identity, said)?;
+    let pushed = s.eventually(TURN, || !s.push.received(&id).is_empty());
+    std::thread::sleep(super::computers::QUEUE_DRAIN);
+    let got = s.push.received(&id);
+    s.ok(
+        "away, the agent's reply is pushed once to the subscription the shell holds: its words, the chat",
+        pushed && got.len() == 1 && got[0]["body"] == reply && got[0]["tag"] == chat,
+        json!({ "reply": reply, "received": got }),
+    );
+
+    // a shell opened again reads it on; pressed, off
+    let Some((shell, frame)) = framing_shell(s, api, chrome, chat, &fake)? else {
+        s.ok("a shell opened again reads it on; pressed, off: the registration gone, and the next reply pushed there nothing", false, "the chat never framed");
+        return Ok(());
+    };
+    let again = chrome.until(&frame, &format!("{bell}.dataset.state === 'on'"), wait);
+    chrome.eval(&frame, &format!("({bell}.click(), true)"))?;
+    let off = chrome.until(&frame, &format!("{bell}.dataset.state === 'off'"), wait);
+    let gone = chrome.eval(&shell, &held)?;
+    chrome.detach(frame)?;
+    chrome.close(shell)?;
+    let reply = said_away(s, api, owner, chat, identity, "and once alerts are off")?;
+    std::thread::sleep(super::computers::QUEUE_DRAIN);
+    let got = s.push.received(&id);
+    s.ok(
+        "a shell opened again reads it on; pressed, off: the registration gone, and the next reply pushed there nothing",
+        again && off && gone == json!({ "scope": null, "worker": null, "key": null }) && !reply.is_null() && got.len() == 1,
+        json!({ "again": again, "off": off, "gone": gone, "received": got.len() }),
+    );
+    Ok(())
+}
+
+/// The owner's message posted by the API (no page of theirs open), and
+/// the agent's reply's words once it comes (null when none did).
+fn said_away(s: &mut Suite, api: &Api, owner: &Keys, chat: &str, identity: &str, said: &str) -> Result<Value> {
+    let id = format!("away-{}", Sha256::digest(said.as_bytes()).iter().take(4).map(|b| format!("{b:02x}")).collect::<String>());
+    let r = api.signed(owner, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": id, "body": { "text": said } })))?;
+    anyhow::ensure!(r.status == 200, "posting while away: {r}");
+    let mine = |x: &Value| x["body"]["text"].as_str().is_some_and(|t| t.contains(said));
+    let _ = s.eventually(WAKE, || agent_replies(&records(api, owner, chat, "chat"), identity).iter().any(mine));
+    Ok(agent_replies(&records(api, owner, chat, "chat"), identity).into_iter().find(mine).map(|x| x["body"]["text"].clone()).unwrap_or(Value::Null))
 }
 
 /// A browser's push subscription at the push fake (`id`), stored by the
