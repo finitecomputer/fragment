@@ -2160,8 +2160,9 @@ async function startFromSearch() {
   } catch (e) {
     // the chat stays, its start shown again (unless it holds a draft, or
     // the person opened it since), for the same message tried again
-    if (name && (ours() || state.current !== name || state.page)) unload(name);
-    if (ours() && state.current && !state.page) openChat(state.current, false);
+    const mine = ours();
+    if (name && (mine || state.current !== name || state.page)) unload(name);
+    if (mine && state.current && !state.page) openChat(state.current, false);
     await closed;
     launching = false;
     // a connection that dropped is fetch's TypeError, in each browser's words
@@ -2170,7 +2171,7 @@ async function startFromSearch() {
     launchError = `Your message wasn't sent. ${why}`;
     // the launcher again on its words where the person still is; moved
     // on, a notice, and its next opening has them
-    if (ours()) openSearch(trigger, text);
+    if (mine) openSearch(trigger, text);
     else notice("Your message wasn't sent", why);
   } finally {
     launching = false;
