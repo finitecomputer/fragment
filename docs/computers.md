@@ -1162,10 +1162,14 @@ expires within 30 days. The container application is the deployment's
   tier's call falls back to its route's fallback; a caller that says its
   tier (`x-fragment-tier`: every call of our Hermes image's tier agents,
   its auxiliary vision's included) runs `vision` and `fallback` as its
-  route's, a caller that says none the route's four's; a slot of the
-  deployment's own is named by its model's id (it is listed with the
-  rest), and has no fallback of its own. The private guard walks each
-  private tier's route. The computer's view carries each tier's route
+  route's, a caller that says none the route's four's. A call naming a
+  model by its id runs that model, whatever the caller's route (only the
+  aliases `fallback` and `vision` follow it); a slot of the deployment's
+  own is named so (it is listed with the rest), and such a call has no
+  fallback of its own. The private guard walks each private tier's route,
+  and the route's four's `fallback` too: an image that has not read its
+  route names that fallback for its stall, its tier unsaid, so a
+  deployment with a private tier keeps it private. The computer's view carries each tier's route
   (`models.routes`: its fallback's and vision model's ids), which our
   Hermes image reads to name its stall's fallback; an image that does not
   names the route's four's `fallback`, on which a Standard agent's stall

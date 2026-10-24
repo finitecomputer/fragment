@@ -226,6 +226,15 @@ fn tier_checks(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && tried(s, calls) == [(Face::WorkersAi, FLASH.to_string())] && settled,
         format!("{} {:?}", r.status, tried(s, calls)),
     );
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    s.ai.set_usage(&[Used { prompt: 30, cached: 0, completion: 10 }]);
+    let r = api.call(as_standard(chat(TINFOIL, false)))?;
+    let settled = s.eventually(wait, || settled_as(before, TINFOIL, charge(&tokens(TINFOIL, 30, 10))));
+    s.ok(
+        "a Standard agent naming Tinfoil's model by its id runs that model, with Tinfoil's key, not its route's fallback: an id is a model, only the aliases follow a route",
+        r.status == 200 && tried(s, calls) == [(Face::OpenAi, TINFOIL.to_string())] && settled,
+        format!("{} {:?}", r.status, tried(s, calls)),
+    );
 
     // ---- `vision` on Finite Private, falling back to Tinfoil's, which reads images
     let png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";

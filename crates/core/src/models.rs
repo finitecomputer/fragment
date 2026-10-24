@@ -693,11 +693,15 @@ impl Models {
         Model { named, upstream, slot }
     }
 
-    /// Each slot as a call names it, in `SLOTS`' order then the extras',
-    /// and where it runs.
+    /// Each slot as a call naming its model's id names it, in `all_slots`'
+    /// order, and where it runs: a tier's as that tier (its route's fallback
+    /// behind it), any other as itself (`Named::Slot`, by its place in
+    /// `all_slots`), never through a caller's route: an id is a model (#589's
+    /// review, P2; only the aliases `fallback` and `vision` follow a route).
     fn named_slots(&self) -> Vec<(Named, &Upstream)> {
-        let mut all = vec![(Named::Tier(Tier::Cheap), &self.cheap), (Named::Tier(Tier::Medium), &self.medium), (Named::Fallback, &self.fallback), (Named::Vision, &self.vision)];
-        all.extend(self.extra.iter().enumerate().map(|(i, e)| (Named::Slot(u8::try_from(i).expect("at most EXTRA_SLOTS_MAX")), &e.upstream)));
+        let at = |i: usize| Named::Slot(u8::try_from(i).expect("at most SLOTS_MAX slots"));
+        let mut all = vec![(Named::Tier(Tier::Cheap), &self.cheap), (Named::Tier(Tier::Medium), &self.medium), (at(2), &self.fallback), (at(3), &self.vision)];
+        all.extend(self.extra.iter().enumerate().map(|(i, e)| (at(SLOTS.len() + i), &e.upstream)));
         all
     }
 
@@ -787,7 +791,10 @@ impl Models {
             Named::Tier(t) => self.model_of(t.as_str(), named),
             Named::Fallback => self.model_of(route.map_or(FALLBACK, |r| r.fallback.as_str()), named),
             Named::Vision => self.model_of(route.map_or(VISION, |r| r.vision.as_str()), named),
-            Named::Slot(i) => self.model_of(&self.extra[usize::from(i)].name, named),
+            Named::Slot(i) => {
+                let (name, _) = self.all_slots()[usize::from(i)];
+                self.model_of(name, named)
+            }
         })
     }
 
@@ -828,9 +835,21 @@ impl Models {
     /// auxiliary vision, whatever the tier, which falls back to the
     /// fallback). A private tier's are all private (`private_closed`); the
     /// high tier, off, reaches none.
+    ///
+    /// And the route's four's `fallback`, whatever the tier's route names:
+    /// an image before its route was read (#590) names the deployment's
+    /// fallback by its id for its stall, its tier unsaid (#589's review,
+    /// P1), so that slot is a private tier's too until every image reads
+    /// its route.
     pub fn reached(&self, tier: Tier) -> Vec<(&str, &'static str)> {
         match self.route_of(tier) {
-            Some(r) => vec![(tier.as_str(), "turns and recovered calls"), (r.fallback.as_str(), "failures and stalls"), (r.vision.as_str(), "images")],
+            Some(r) => {
+                let mut reached = vec![(tier.as_str(), "turns and recovered calls"), (r.fallback.as_str(), "failures and stalls"), (r.vision.as_str(), "images")];
+                if r.fallback != FALLBACK {
+                    reached.push((FALLBACK, "stalls on an older image (its tier unsaid)"));
+                }
+                reached
+            }
             None => vec![],
         }
     }
@@ -953,9 +972,12 @@ pub struct Capped<'a> {
     pub max_tokens: u32,
 }
 
-/// The slot a call to the route runs on: a tier's, `vision`, or `fallback`,
-/// named by its name or by its model's id (`Models::named`), or an extra
-/// (`Models::extra`, by its index), named by its model's id.
+/// The slot a call to the route runs on: a tier's, named by its name or by
+/// its model's id; `vision` or `fallback`, named by those aliases, which
+/// follow the caller's route (`Models::route_for`); or a slot named by its
+/// model's id (`Slot`, its place in `Models::all_slots`: the route's four's
+/// `fallback` and `vision`, then the extras), which runs that slot exactly,
+/// with no fallback of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Named {
     Tier(Tier),
@@ -970,6 +992,8 @@ impl Named {
             Named::Tier(t) => t.as_str(),
             Named::Vision => VISION,
             Named::Fallback => FALLBACK,
+            Named::Slot(2) => FALLBACK,
+            Named::Slot(3) => VISION,
             Named::Slot(_) => "slot",
         }
     }
@@ -1722,13 +1746,14 @@ mod tests {
         assert_eq!(d.named(Some(GLM_FLASH), None), Ok(cheap), "cheap's and vision's id: the first slot's, a tier's");
         assert_eq!(d.named(Some(GLM_FLASH), Some(Tier::Medium)), Ok(cheap), "a tier whose slot does not run it is passed over");
         assert_eq!(d.named(Some(MEDIUM_MODEL), Some(Tier::Cheap)), Ok(medium));
-        assert_eq!(d.named(Some(DEEPSEEK_FLASH), Some(Tier::Cheap)), Ok(Named::Fallback), "the fallback's id, its slot: no fallback of its own");
+        assert_eq!(d.named(Some(DEEPSEEK_FLASH), Some(Tier::Cheap)), Ok(Named::Slot(2)), "the fallback's id, its slot exactly: no fallback of its own");
         assert_eq!(d.named(Some(MEDIUM_MODEL), Some(Tier::High)), Ok(medium), "high has no slot");
         let routed = openrouter();
         assert_eq!(routed.named(Some(OPENROUTER_FLASH), None), Ok(cheap));
         assert_eq!(routed.named(Some(OPENROUTER_FLASH), Some(Tier::Cheap)), Ok(cheap));
         assert_eq!(routed.named(Some(OPENROUTER_FLASH), Some(Tier::Medium)), Ok(medium), "both tiers run it: the caller's tier's");
-        assert_eq!(routed.named(Some(GLM_FLASH), Some(Tier::Cheap)), Ok(Named::Fallback), "fallback's and vision's: the first, fallback");
+        assert_eq!(routed.named(Some(GLM_FLASH), Some(Tier::Cheap)), Ok(Named::Slot(2)), "fallback's and vision's: the first, fallback");
+        assert_eq!((Named::Slot(2).as_str(), Named::Slot(3).as_str()), ("fallback", "vision"));
         let m = routed.capped(medium).unwrap().model;
         assert_eq!((m.named.as_str(), m.id(), m.upstream), ("medium", OPENROUTER_FLASH, &routed.medium), "the medium slot's model, key and body");
         assert_eq!(finite().named(Some(FINITE_PRIVATE_FLASH), Some(Tier::Medium)), Ok(medium));
@@ -2278,8 +2303,23 @@ mod tests {
         let seen = m.route_for(Named::Vision, medium).unwrap();
         assert_eq!(Tries::new(seen, m.vision_fallback_for(medium)).after(Tried::Answered(503)), None, "Standard's vision is its fallback: no second try");
         // an extra is named by its model's id, and listed
-        assert_eq!(m.named(Some(GLM_FLASH), None), Ok(Named::Slot(0)));
-        assert_eq!(at(m.route(Named::Slot(0)).unwrap()), ("cloudflare".into(), GLM_FLASH.into()));
+        assert_eq!(m.named(Some(GLM_FLASH), None), Ok(Named::Slot(4)));
+        assert_eq!(at(m.route(Named::Slot(4)).unwrap()), ("cloudflare".into(), GLM_FLASH.into()));
+        // an id runs its model, whatever the caller's route; only the aliases follow it (#589's review, P2)
+        for (id, slot) in [("deepseek-v4-1-flash", "fallback"), (GLM_FLASH, "cloudflare")] {
+            let named = m.named(Some(id), medium).unwrap();
+            assert_eq!(at(m.route_for(named, medium).unwrap()), (slot.to_string(), id.to_string()), "{id}, asked by a Standard caller");
+            assert_eq!(at(m.route_for(m.named(Some(id), cheap).unwrap(), cheap).unwrap()), (slot.to_string(), id.to_string()), "{id}, by a Private one");
+        }
+        let mut seeing = per_route();
+        seeing["vision"] = json!({ "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "model": "gemma4-31b", "price": { "input": 0.4, "output": 1 }, "private": true });
+        let seeing = parse(seeing).unwrap();
+        let named = seeing.named(Some("gemma4-31b"), medium).unwrap();
+        assert_eq!((named, at(seeing.route_for(named, medium).unwrap())), (Named::Slot(3), ("vision".into(), "gemma4-31b".into())), "the vision model's own id, from a Standard caller: that model, not Standard's vision");
+        for (alias, slot, id) in [("fallback", "cloudflare", GLM_FLASH), ("vision", "cloudflare", GLM_FLASH)] {
+            let named = m.named(Some(alias), medium).unwrap();
+            assert_eq!(at(m.route_for(named, medium).unwrap()), (slot.to_string(), id.to_string()), "the alias {alias} follows Standard's route");
+        }
         assert_eq!(m.ids(), [FINITE_PRIVATE_FLASH, OPENROUTER_FLASH, "deepseek-v4-1-flash", GLM_FLASH]);
         assert_eq!(Named::Slot(0).as_str(), "slot");
         // the view: each tier's route by its slots' ids
@@ -2287,7 +2327,7 @@ mod tests {
         assert_eq!(view["routes"]["cheap"], json!({ "label": "Private (recommended)", "private": true, "fallback": "deepseek-v4-1-flash", "vision": FINITE_PRIVATE_FLASH }));
         assert_eq!(view["routes"]["medium"], json!({ "label": "Standard", "private": false, "fallback": GLM_FLASH, "vision": GLM_FLASH }));
         // the guard walks each route: Private's is private, Standard's its own
-        assert_eq!(m.reached(Tier::Medium).iter().map(|(slot, _)| *slot).collect::<Vec<_>>(), ["medium", "cloudflare", "cloudflare"]);
+        assert_eq!(m.reached(Tier::Medium).iter().map(|(slot, _)| *slot).collect::<Vec<_>>(), ["medium", "cloudflare", "cloudflare", "fallback"]);
         assert!(m.reached(Tier::Cheap).iter().all(|(slot, _)| m.slot_private(slot)));
         assert!(!m.slot_private("cloudflare") && m.slot_private("fallback"));
         // today's configs name no routes, and run as before
@@ -2318,6 +2358,24 @@ mod tests {
         refused(with(&|v| { for n in ["a1", "a2", "a3", "a4"] { v[n] = json!({ "provider": "workers_ai", "model": GLM_FLASH }); } }), &format!("models: at most {EXTRA_SLOTS_MAX} slots beyond"));
         refused(with(&|v| v["cheap"]["fallback"] = json!("cloudflare")), "models.cloudflare: models.cheap is private, and its agents' failures and stalls reach cloudflare");
         refused(with(&|v| v["cheap"]["vision"] = json!("cloudflare")), "models.cloudflare: models.cheap is private, and its agents' images reach cloudflare");
+        // P1 (#589's review): a private route of its own slots, the built-in fallback public: an older
+        // image's stall names that fallback by its id, its tier unsaid, so it is refused
+        let own = with(&|v| {
+            v["cheap"]["fallback"] = json!("private_fallback");
+            v["cheap"]["vision"] = json!("private_vision");
+            v["private_fallback"] = v["fallback"].clone();
+            v["private_vision"] = v["vision"].clone();
+            v["fallback"] = json!({ "provider": "workers_ai", "model": DEEPSEEK_FLASH });
+            v["vision"] = json!({ "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" });
+        });
+        refused(own.clone(), "models.fallback: models.cheap is private, and its agents' stalls on an older image (its tier unsaid) reach fallback");
+        let mut kept = own;
+        kept["fallback"] = kept["private_fallback"].clone();
+        kept["cheap"]["fallback"] = json!("fallback");
+        kept.as_object_mut().unwrap().remove("private_fallback");
+        let kept = parse(kept).unwrap();
+        let stall = kept.named(Some("deepseek-v4-1-flash"), None).unwrap();
+        assert!(kept.slot_private(kept.route_for(stall, None).unwrap().slot), "an older image's stall, its tier unsaid: the built-in fallback, private");
         // P3: one endpoint, model and body, its price spelled two ways, is one call: no second try
         let tinfoil_slot = |price: Value| json!({ "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "model": "deepseek-v4-1-flash", "price": price });
         let twice = parse(json!({ "cheap": tinfoil_slot(json!({ "input": 0.65, "output": 1.45 })), "fallback": tinfoil_slot(json!({ "input": 0.65, "cached_input": 0.65, "output": 1.45 })) })).unwrap();
