@@ -55,6 +55,15 @@ pub fn cell_dir() -> PathBuf {
     repo_root().join("cell")
 }
 
+/// Our Hermes image as a node's config names a computer image, built from
+/// the tree: from the repo's root, since it carries the fragment CLI
+/// (docs/computers.md, "Skills and the CLI in our Hermes image"). The
+/// hermes lane's, and `cargo xtask dev --real-agent`'s.
+pub fn hermes_image() -> serde_json::Value {
+    let root = repo_root();
+    serde_json::json!({ "dockerfile": root.join("images/hermes/Dockerfile"), "build_context": root })
+}
+
 /// `text` (JSONC: JSON with `//` comments) as JSON.
 pub fn strip_comments(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -160,11 +169,18 @@ pub fn local_config(project: &Path) -> PathBuf {
 /// The project's config as a local node runs it (`local_config`): less the
 /// remote-only bindings, its secrets bound by name (`secrets`, each a
 /// binding and its secret's name) in wrangler's local store, as a deploy
-/// binds them in the account's, and its computer images built from
-/// Dockerfiles of its own (`containers::scope_images`), so that no other
-/// stack's teardown removes its computers.
-fn write_local_config(project: &Path, secrets: &[(String, &str)]) -> Result<PathBuf> {
+/// binds them in the account's, `images` beside its own computer images,
+/// and every one built from a Dockerfile of its own
+/// (`containers::scope_images`), so that no other stack's teardown removes
+/// its computers.
+fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(String, serde_json::Value)]) -> Result<PathBuf> {
     let mut config = read_config(project)?;
+    if !images.is_empty() {
+        let named = config["containers"][0]["images"].as_object_mut().context("the config's computer container names its images")?;
+        for (name, image) in images {
+            anyhow::ensure!(named.insert(name.clone(), image.clone()).is_none(), "the image {name} is the config's own already");
+        }
+    }
     absolute_images(&mut config, project)?;
     containers::scope_images(&mut config, project)?;
     let obj = config.as_object_mut().context("a wrangler config is an object")?;
@@ -322,8 +338,13 @@ pub struct Fleet {
     /// The e2e's, made per run; never dev's.
     pub test_secret: Option<String>,
     /// The image new computers are pinned to (a name in cell/wrangler.jsonc's
-    /// `containers` images), and whether they sleep with a snapshot.
+    /// `containers` images, or in `images`), and whether they sleep with a
+    /// snapshot.
     pub computer_image: Option<String>,
+    /// Computer images beside the project's own (its stubs), by name, each
+    /// as its config names one: dev's Hermes image (`hermes_image`), with
+    /// `cargo xtask dev --real-agent`.
+    pub images: Vec<(String, serde_json::Value)>,
     pub computer_snapshots: bool,
     /// How long a computer whose sleep's save keeps failing stays awake
     /// before it sleeps unsaved (`FRAGMENT_COMPUTER_UNSAVED_MAX_MS`; `None`:
@@ -402,7 +423,7 @@ impl Fleet {
         }
         assert_eq!(values.len(), bound.secrets().len(), "every secret bound has its value, once");
         store::seed_local(tools, &state_dir(project), &values).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
-        write_local_config(project, &bound.cell())?;
+        write_local_config(project, &bound.cell(), &self.images)?;
         let poll = self.poll_interval_s.to_string();
         let retry = self.job_retry_delay_s.to_string();
         // the node's one release (`dev`) deployed as it is configured, as a

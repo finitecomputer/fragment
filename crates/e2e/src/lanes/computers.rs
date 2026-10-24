@@ -825,6 +825,50 @@ fn intercept_names_by_key(s: &mut Suite, api: &Api, owner_id: &str, agent: &str,
 /// names by the route's names (`GET /api/computer`'s `models`); a call
 /// naming one runs on it, metered to the agent's owner; one no slot runs is
 /// refused, naming them, nothing reserved or sent. The replies it adds.
+/// A local fleet's code.storage is at the machine's loopback, which the
+/// guest's container cannot reach (its loopback is its own): the guest
+/// reaches it through its egress at `codestorage.fragment.internal`, as an
+/// agent's `fragment sync` and `deploy` do, with the token it was minted
+/// and nothing of the egress's (docs/computers.md, "The fragment API").
+/// Six replies: code.storage access and token-route boundaries.
+fn codestorage_through_egress(s: &mut Suite, api: &Api, owner: &crate::Keys, agent: &Value, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+    let name = agent["name"].as_str().expect("the agent's name");
+    let r = api.signed(owner, "GET", &format!("/api/f/{name}/storage-token"), None)?;
+    let (token, repo) = (r.body["token"].as_str().unwrap_or_default(), r.body["repo"].as_str().unwrap_or_default());
+    s.ok("(its owner mints a storage token for the agent's fragment, naming the fake at its loopback address)", r.status == 200 && r.body["api"].as_str().is_some_and(|a| a.starts_with("http://127.0.0.1:")), &r);
+    let branch = format!("http://{}/api/repos/{repo}/branch?name=main", fragment_core::codestorage::GUEST_HOST);
+    let said = fetched(s, 83, &format!("fetch {branch} with {token}"))?;
+    s.ok("the guest reaches a local fleet's code.storage through its egress, with its token", said.starts_with("fetched 200") && said.contains("head_sha"), &said);
+    let said = fetched(s, 84, &format!("fetch {branch} with not-a-token"))?;
+    s.ok("and with no token of its own, the egress adds none: code.storage refuses it", said.starts_with("fetched 401"), &said);
+    // A channel and an application's route may both be named storage-token.
+    // They must keep their own response bodies through the guest's egress.
+    let manifest = br#"{"channels":{"tasks":{"read":"editor","post":"editor"},"storage-token":{"read":"editor","post":"editor"}}}"#;
+    let app = br#"import { DurableObject } from "cloudflare:workers";
+export class App extends DurableObject {
+  fetch() { return new Response("application storage-token route"); }
+}
+"#;
+    s.commit(agent, &[("fragment.json", Some(manifest)), ("app.mjs", Some(app))]);
+    s.deploy(agent);
+    let channel = format!("/api/f/{name}/channels/storage-token");
+    let r = api.signed(owner, "POST", &channel, Some(&json!({ "id": "token-name", "body": { "text": "storage-token record" } })))?;
+    anyhow::ensure!(r.status == 200, "the storage-token channel's fixture: {r}");
+    for (n, endpoint) in [(85, "storage-token"), (86, "%73torage-token")] {
+        let said = fetched(s, n, &format!("fetch http://api.fragment.internal/api/f/{name}/{endpoint} with {name} in x-fragment-agent"))?;
+        s.ok(
+            &format!("the guest still mints a storage token at {endpoint}"),
+            said.starts_with("fetched 200:") && said.contains("\"token\":"),
+            said.split(':').next().unwrap_or_default(),
+        );
+    }
+    let said = fetched(s, 87, &format!("fetch http://api.fragment.internal{channel} with {name} in x-fragment-agent"))?;
+    s.ok("a channel named storage-token keeps its records through the guest's egress", said.starts_with("fetched 200:") && said.contains("storage-token record"), &said);
+    let said = fetched(s, 88, &format!("fetch http://api.fragment.internal/f/{name}/storage-token with {name} in x-fragment-agent"))?;
+    s.ok("an application route named storage-token keeps its response through the guest's egress", said == "fetched 200: application storage-token route", &said);
+    Ok(6)
+}
+
 fn intercept_takes_model_ids(s: &mut Suite, api: &Api, owner_id: &str, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
     use fragment_core::models::{DEEPSEEK_FLASH, GLM_FLASH, MEDIUM_MODEL};
     let said = fetched(s, 80, "models")?;
@@ -1383,6 +1427,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         if fakes {
             replies_so_far += intercept_names_by_key(s, api, &owner_id, &agent_name, &chat_name, &fetched)?;
             replies_so_far += intercept_takes_model_ids(s, api, &owner_id, &fetched)?;
+            replies_so_far += codestorage_through_egress(s, api, &owner, &agent, &fetched)?;
         }
     } else {
         // a real runtime called its model to answer at all: each call went

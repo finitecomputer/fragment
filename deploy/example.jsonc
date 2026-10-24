@@ -219,6 +219,12 @@
       // "connection_oauth": { "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&include_granted_scopes=true&prompt=select_account%20consent",
       //   "exchange": "https://oauth2.googleapis.com/token", "revoke": "https://oauth2.googleapis.com/revoke",
       //   "client_id": "<the client's id>", "scopes": <the Google skill's references/google-workspace-scopes.json> },
+      // several Google accounts a person (personal and work), each agent
+      // using the one picked for it in Settings, once WorkOS has enabled
+      // additional connections and a release that knows the field is
+      // deployed (docs/pipes-browser-binding.md, Several accounts): 2 to 25;
+      // absent, one, as before
+      // "accounts_max": 5,
       "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"] },
     { "name": "perplexity", "kind": "operator", "hosts": ["api.perplexity.ai"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],

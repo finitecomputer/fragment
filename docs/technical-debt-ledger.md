@@ -1354,9 +1354,12 @@ fragment.club until cutover (decisions 34–35).
   `rollback` and `drafts` still go to code.storage itself, with the
   15-minute, repo-scoped token the platform mints for the agent.
 - **Risk:** that token is a credential in the guest, which otherwise
-  holds none (decision 43), for as long as the command runs; and the
-  local lanes cannot prove an agent's deploy at all, since a container
-  under `wrangler dev` cannot reach the dev stack's code.storage fake.
+  holds none (decision 43), for as long as the command runs. Locally,
+  where a container under `wrangler dev` cannot reach the dev stack's
+  code.storage fake at the machine's loopback, the egress sends the
+  guest's calls on to it, its token with them (docs/computers.md, The
+  fragment API; the computers lane's "through its egress" checks): the
+  path, not yet the token swap.
 - **First proof:** phase 6's exit, an agent building and deploying an
   app from a chat, on a preview.
 - **Delete when:** a computer's sync and deploy go through its API egress

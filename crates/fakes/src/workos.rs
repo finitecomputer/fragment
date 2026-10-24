@@ -33,6 +33,25 @@
 //! Pipes keeps the scopes an import names, and answers them in the
 //! account's state (`scopes`) and its tokens (`scopes`, and the
 //! connection's `missing_scopes`).
+//!
+//! And Pipes' several connections (https://workos.com/docs/pipes/multiple-connections,
+//! as workos-node's `src/pipes/pipes.ts` sends them): a person's accounts
+//! at a provider, each with its id (`data_installation_…`). The first an
+//! import makes with no intent is the compatibility connection, the one a
+//! call naming no account reaches (a `GET`, `PUT` or `DELETE` of the path
+//! with no `connected_account_id`, and a token asked with no plural
+//! opt-in), as before several were; an import with `connection_intent:
+//! "add"` in its body makes another (standard) one, up to its limit (25:
+//! 409 `connected_account_limit_reached`), or, while the test says Pipes
+//! offers one account a person (`refuse_additional_accounts`), 404
+//! `multiple_connections_unavailable` once they have one. A `PUT`, `GET`
+//! or `DELETE` naming `connected_account_id` in its query is that
+//! account's (a `PUT` may say `connection_intent=reauthorize` there, never
+//! `add`); the plural list (`GET /user_management/users/{user}/
+//! data_providers?supports_multiple_connections=true`) names each, oldest
+//! first; a token asked with `supports_multiple_connections` names one, or
+//! is refused (409 `account_selection_required`) while several match.
+//! Each token remembers the account it was for (`token_account`).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -61,8 +80,8 @@ struct State {
     held: Option<(String, String, i64)>,
     next_error: Option<String>,
     counter: u64,
-    /// (user id, provider) → whether the account is still authorized.
-    pipes: HashMap<(String, String), bool>,
+    /// (user id, provider) → its connected accounts, oldest first.
+    accounts: HashMap<(String, String), Vec<Account>>,
     /// Tokens handed out, by provider.
     tokens: HashMap<String, Vec<String>>,
     /// Consents given out and not yet followed: state → (user id, provider).
@@ -82,30 +101,97 @@ struct State {
     fail_revoke: bool,
     /// Connected accounts deleted (user id, provider), each asked once.
     deleted: Vec<(String, String)>,
-    /// Connected accounts' labels (`account_display_name`), as imported.
-    labels: HashMap<(String, String), String>,
-    /// Connected accounts' scopes, as imported (none: connected otherwise).
-    scopes: HashMap<(String, String), Vec<String>>,
     omit_id_token: bool,
+    /// An `add` for a person with an account already is refused, as Pipes
+    /// does until WorkOS enables additional connections.
+    refuse_additional: bool,
+    /// The next delete of a connected account fails (503), deleting nothing.
+    fail_delete: bool,
+    /// The plural list fails (503) once this many more reads have answered.
+    fail_list_after: Option<usize>,
+    /// The most accounts a person connects at a provider (None: Pipes' 25).
+    account_limit: Option<usize>,
     /// The next import is answered 504 and lands only when the test says
     /// (`land_deferred_import`): one whose outcome its caller cannot know.
     defer_import: bool,
     deferred: Option<Import>,
-    /// Pipes' tokens' accounts (user id, provider), for a revocation.
-    pipes_tokens: HashMap<String, (String, String)>,
+    /// Pipes' tokens' accounts (user id, provider, account id), for a
+    /// revocation and for a test asking whose a token was.
+    pipes_tokens: HashMap<String, (String, String, String)>,
+}
+
+/// Pipes' limit of accounts a person connects at a provider.
+const ACCOUNTS_LIMIT: usize = 25;
+
+/// A connected account at Pipes: the compatibility connection, or a
+/// standard one an `add` made; whether it is still authorized, its label
+/// (`account_display_name`), scopes and identifier as imported, and the
+/// stand-in provider's account its grant is (none: a test's lever made it).
+#[derive(Clone, Debug)]
+struct Account {
+    id: String,
+    compatibility: bool,
+    authorized: bool,
+    label: Option<String>,
+    scopes: Option<Vec<String>>,
+    identifier: Option<String>,
+    created_at: String,
+    grant: Option<String>,
+}
+
+/// A connected account as a test reads it, with no token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Connected {
+    pub id: String,
+    /// The compatibility connection (the one a call naming none reaches).
+    pub compatibility: bool,
+    pub authorized: bool,
+    pub label: Option<String>,
+    /// Empty: none named.
+    pub scopes: Vec<String>,
+    pub identifier: Option<String>,
+}
+
+/// Which account an import lands on.
+enum Target {
+    /// The compatibility connection: made (a `POST`, none there), or
+    /// updated, made when there is none (a `PUT` naming no account).
+    Compatibility,
+    /// Another account (`connection_intent: "add"`).
+    Add,
+    /// The account a `PUT` names.
+    Named(String),
 }
 
 /// An import as it lands: (user id, provider), its label as sent (absent:
 /// an update keeps the one there), the scopes it names (none: none kept),
-/// whether it made the account (POST), and the provider's account its
-/// grant is.
+/// its identifier (absent: an update keeps it), the account it lands on,
+/// and the provider's account its grant is.
 struct Import {
     user: String,
     provider: String,
     label: Option<Value>,
     scopes: Option<Vec<String>>,
-    made: bool,
+    identifier: Option<String>,
+    target: Target,
     account: String,
+}
+
+impl Account {
+    fn json(&self, user: &str, provider: &str) -> Value {
+        json!({
+            "object": "connected_account", "id": self.id, "provider_slug": provider,
+            "connection_role": if self.compatibility { "compatibility" } else { "standard" },
+            "account_identifier": self.identifier, "account_display_name": self.label, "user_id": user, "organization_id": null,
+            "scopes": self.scopes.clone().unwrap_or_default(), "auth_method": "oauth",
+            "state": if self.authorized { "connected" } else { "needs_reauthorization" },
+            "created_at": self.created_at, "updated_at": self.created_at, "config": {},
+        })
+    }
+
+    fn read(&self) -> Connected {
+        Connected { id: self.id.clone(), compatibility: self.compatibility, authorized: self.authorized, label: self.label.clone(), scopes: self.scopes.clone().unwrap_or_default(), identifier: self.identifier.clone() }
+    }
 }
 
 impl State {
@@ -114,32 +200,60 @@ impl State {
         format!("{prefix}_{:026}", self.counter)
     }
 
-    /// An import lands: its account connected, its label set (a string),
-    /// cleared (null) or, omitted, kept by an update.
-    fn land(&mut self, i: Import) {
-        let key = (i.user.clone(), i.provider.clone());
-        self.pipes.insert(key.clone(), true);
-        match i.scopes {
-            Some(scopes) => {
-                self.scopes.insert(key.clone(), scopes);
-            }
-            None => {
-                self.scopes.remove(&key);
-            }
+    /// A new account of `user`'s at `provider`, oldest last.
+    fn made(&mut self, user: &str, provider: &str, compatibility: bool) -> &mut Account {
+        let id = self.next("data_installation");
+        let created_at = crate::codestorage::iso(crate::codestorage::now_ms());
+        let list = self.accounts.entry((user.to_string(), provider.to_string())).or_default();
+        list.push(Account { id, compatibility, authorized: true, label: None, scopes: None, identifier: None, created_at, grant: None });
+        list.last_mut().expect("just made")
+    }
+
+    /// `user`'s compatibility connection at `provider`, made when there is none.
+    fn compatibility(&mut self, user: &str, provider: &str) -> &mut Account {
+        let key = (user.to_string(), provider.to_string());
+        match self.accounts.get(&key).and_then(|l| l.iter().position(|a| a.compatibility)) {
+            Some(at) => &mut self.accounts.get_mut(&key).expect("listed")[at],
+            None => self.made(user, provider, true),
         }
+    }
+
+    /// The account a call names (`connected_account_id`), else the
+    /// compatibility connection.
+    fn named(&self, user: &str, provider: &str, id: Option<&str>) -> Option<&Account> {
+        let list = self.accounts.get(&(user.to_string(), provider.to_string()))?;
+        match id {
+            Some(id) => list.iter().find(|a| a.id == id),
+            None => list.iter().find(|a| a.compatibility),
+        }
+    }
+
+    /// An import lands: its account connected, its label set (a string),
+    /// cleared (null) or, omitted, kept by an update (a new account has
+    /// none), its scopes as named, and its identifier set, or kept. One
+    /// naming an account deleted meanwhile lands nowhere. Answers the
+    /// account.
+    fn land(&mut self, i: Import) -> Option<Value> {
+        let key = (i.user.clone(), i.provider.clone());
+        let a = match &i.target {
+            Target::Compatibility => self.compatibility(&i.user, &i.provider),
+            Target::Add => self.made(&i.user, &i.provider, false),
+            Target::Named(id) => self.accounts.get_mut(&key)?.iter_mut().find(|a| a.id == *id)?,
+        };
+        a.authorized = true;
+        a.scopes = i.scopes;
         match i.label {
-            Some(Value::String(label)) => {
-                self.labels.insert(key, label);
-            }
-            Some(Value::Null) => {
-                self.labels.remove(&key);
-            }
-            _ if i.made => {
-                self.labels.remove(&key);
-            }
+            Some(Value::String(label)) => a.label = Some(label),
+            Some(Value::Null) => a.label = None,
             _ => {}
         }
+        if let Some(identifier) = i.identifier {
+            a.identifier = Some(identifier);
+        }
+        a.grant = Some(i.account.clone());
+        let answer = a.json(&i.user, &i.provider);
         self.imports.push((i.user, i.provider, i.account));
+        Some(answer)
     }
 
     /// A revocation of `token` at the provider, as Google's: it ends the
@@ -147,21 +261,20 @@ impl State {
     /// account last imported from that account (or, a token Pipes minted
     /// for an account no import made, that one) needs authorizing again.
     fn revoke(&mut self, token: &str) {
-        let account = self.oauth_grants.get(token).map(|g| g.1.clone()).or_else(|| {
-            let (user, provider) = self.pipes_tokens.get(token)?;
-            self.imports.iter().rev().find(|i| i.0 == *user && i.1 == *provider).map(|i| i.2.clone())
+        let minted = self.pipes_tokens.get(token).cloned();
+        let grant = self.oauth_grants.get(token).map(|g| g.1.clone()).or_else(|| {
+            let (user, provider, id) = minted.as_ref()?;
+            self.accounts.get(&(user.clone(), provider.clone()))?.iter().find(|a| a.id == *id)?.grant.clone()
         });
-        let mut latest: HashMap<(String, String), String> = HashMap::new();
-        for (user, provider, account) in &self.imports {
-            latest.insert((user.clone(), provider.clone()), account.clone());
-        }
-        let ended: Vec<(String, String)> = match account {
-            Some(account) => latest.into_iter().filter(|(_, a)| *a == account).map(|(k, _)| k).collect(),
-            None => self.pipes_tokens.get(token).cloned().into_iter().collect(),
-        };
-        for key in ended {
-            if let Some(authorized) = self.pipes.get_mut(&key) {
-                *authorized = false;
+        for ((user, provider), list) in self.accounts.iter_mut() {
+            for a in list.iter_mut() {
+                let ended = match &grant {
+                    Some(g) => a.grant.as_ref() == Some(g),
+                    None => minted.as_ref().is_some_and(|(u, p, id)| u == user && p == provider && *id == a.id),
+                };
+                if ended {
+                    a.authorized = false;
+                }
             }
         }
     }
@@ -229,6 +342,11 @@ fn problem(status: u16, error: &str, description: &str) -> Response {
     Response::json(status, &json!({ "error": error, "error_description": description }))
 }
 
+/// A refusal as WorkOS' API answers one (its `code`, and a `message`).
+fn pipes_problem(status: u16, code: &str, message: &str) -> Response {
+    Response::json(status, &json!({ "code": code, "message": message }))
+}
+
 fn redirect(to: &str) -> Response {
     Response::bytes(302, "text/plain", vec![]).with_header("location", to)
 }
@@ -282,8 +400,7 @@ impl WorkOs {
     pub fn land_deferred_import(&self) -> bool {
         let mut s = self.state.lock().expect("workos state");
         let Some(import) = s.deferred.take() else { return false };
-        s.land(import);
-        true
+        s.land(import).is_some()
     }
 
     /// `gate`'s requests wait from now until `resume`.
@@ -309,11 +426,58 @@ impl WorkOs {
     pub fn fail_next_revoke(&self) { self.state.lock().expect("workos state").fail_revoke = true; }
     /// The connected accounts deleted at Pipes: (user id, provider), oldest first.
     pub fn deleted(&self) -> Vec<(String, String)> { self.state.lock().expect("workos state").deleted.clone() }
-    /// Whether `email`'s account at `provider` is one Pipes holds.
+    /// Whether Pipes holds an account of `email`'s at `provider`.
     pub fn holds(&self, email: &str, provider: &str) -> bool {
+        !self.accounts(email, provider).is_empty()
+    }
+
+    /// `email`'s accounts at `provider`, oldest first.
+    pub fn accounts(&self, email: &str, provider: &str) -> Vec<Connected> {
         let mut s = self.state.lock().expect("workos state");
         let user = s.user_for(email);
-        s.pipes.contains_key(&(user.id, provider.to_string()))
+        s.accounts.get(&(user.id, provider.to_string())).map(|l| l.iter().map(Account::read).collect()).unwrap_or_default()
+    }
+
+    /// The account a token Pipes minted was for (its id).
+    pub fn token_account(&self, token: &str) -> Option<String> {
+        self.state.lock().expect("workos state").pipes_tokens.get(token).map(|t| t.2.clone())
+    }
+
+    /// Another account of `email`'s at `provider`, connected (a standard
+    /// one, as an `add` makes it), named `identifier` and labeled `label`:
+    /// its id.
+    pub fn add_account(&self, email: &str, provider: &str, identifier: &str, label: &str) -> String {
+        let mut s = self.state.lock().expect("workos state");
+        let user = s.user_for(email);
+        let a = s.made(&user.id, provider, false);
+        a.identifier = Some(identifier.to_string());
+        a.label = Some(label.to_string());
+        a.id.clone()
+    }
+
+    /// While `refuse` holds, an `add` for a person with an account at the
+    /// provider is 404 `multiple_connections_unavailable`, as Pipes answers
+    /// until WorkOS enables additional connections.
+    pub fn refuse_additional_accounts(&self, refuse: bool) { self.state.lock().expect("workos state").refuse_additional = refuse; }
+
+    /// A person connects at most `n` accounts at a provider (None: Pipes' 25).
+    pub fn limit_accounts(&self, n: Option<usize>) { self.state.lock().expect("workos state").account_limit = n; }
+
+    /// The next delete of a connected account fails (503), deleting nothing,
+    /// as Pipes not answering.
+    pub fn fail_next_delete(&self) { self.state.lock().expect("workos state").fail_delete = true; }
+
+    /// The plural list fails (503) once `reads` more reads have answered.
+    pub fn fail_list_after(&self, reads: usize) { self.state.lock().expect("workos state").fail_list_after = Some(reads); }
+
+    /// `email`'s account `id` at `provider` is connected (`true`), or comes
+    /// to need authorizing again (`false`).
+    pub fn authorize_account(&self, email: &str, provider: &str, id: &str, authorized: bool) {
+        let mut s = self.state.lock().expect("workos state");
+        let user = s.user_for(email);
+        if let Some(a) = s.accounts.get_mut(&(user.id, provider.to_string())).and_then(|l| l.iter_mut().find(|a| a.id == id)) {
+            a.authorized = authorized;
+        }
     }
 
     pub fn connection_counts(&self) -> (usize, usize, usize) {
@@ -410,18 +574,40 @@ impl WorkOs {
                     if req.header("authorization") != Some(format!("Bearer {key}").as_str()) { return problem(401, "unauthorized", "API key"); }
                     let Some((user, provider)) = p["/user_management/users/".len()..].split_once("/connected_accounts/") else { return problem(404, "not_found", "route"); };
                     if !s.users.iter().any(|u| u.id == user) { return problem(404, "not_found", "user"); }
-                    if req.method == "POST" && s.pipes.contains_key(&(user.into(), provider.into())) { return problem(409, "conflict", "already exists"); }
                     let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+                    let listed = s.accounts.get(&(user.to_string(), provider.to_string())).cloned().unwrap_or_default();
+                    // which account it lands on: the intent a POST's body
+                    // names; the account a PUT's query names, as the SDK sends
+                    let target = match (req.method.as_str(), body["connection_intent"].as_str(), req.query.get("connected_account_id")) {
+                        (_, Some(intent), _) if intent != "add" => return pipes_problem(422, "invalid_connection_intent", "a body's intent is add"),
+                        ("POST", _, Some(_)) => return pipes_problem(422, "invalid_request", "an import names no account"),
+                        ("POST", None, None) if listed.iter().any(|a| a.compatibility) => return problem(409, "conflict", "already exists"),
+                        ("POST", None, None) => Target::Compatibility,
+                        ("POST", Some(_), None) if s.refuse_additional && !listed.is_empty() => return pipes_problem(404, "multiple_connections_unavailable", "Additional connections are not available for this environment."),
+                        ("POST", Some(_), None) if listed.len() >= s.account_limit.unwrap_or(ACCOUNTS_LIMIT) => return pipes_problem(409, "connected_account_limit_reached", "This user has reached the connected account limit for this provider."),
+                        ("POST", Some(_), None) => Target::Add,
+                        (_, Some(_), _) => return pipes_problem(422, "invalid_connection_intent", "do not send add intent to PUT"),
+                        (_, None, named) => match (named, req.query.get("connection_intent").map(String::as_str)) {
+                            (None, Some(_)) => return pipes_problem(422, "invalid_request", "an intent needs the account it names"),
+                            (_, Some(intent)) if intent != "reauthorize" => return pipes_problem(422, "invalid_connection_intent", "an update's intent is reauthorize"),
+                            (None, None) => Target::Compatibility,
+                            (Some(id), _) if listed.iter().any(|a| a.id == *id) => Target::Named(id.clone()),
+                            (Some(_), _) => return pipes_problem(404, "not_found", "no such connected account"),
+                        },
+                    };
                     let Some((refresh, account)) = s.oauth_grants.get(body["access_token"].as_str().unwrap_or("")).cloned() else { return problem(422, "invalid_tokens", "not issued here"); };
                     if body["refresh_token"] != refresh || !body["expires_at"].is_string() || body["state"] != "connected" { return problem(422, "invalid_tokens", "token combination"); }
                     let scopes = serde_json::from_value::<Vec<String>>(body["scopes"].clone()).ok();
-                    let import = Import { user: user.into(), provider: provider.into(), label: body.get("account_display_name").cloned(), scopes, made: req.method == "POST", account };
+                    let identifier = body["account_identifier"].as_str().map(str::to_string);
+                    let import = Import { user: user.into(), provider: provider.into(), label: body.get("account_display_name").cloned(), scopes, identifier, target, account };
                     if std::mem::take(&mut s.defer_import) {
                         s.deferred = Some(import);
                         return problem(504, "gateway_timeout", "test import deferred: it lands later");
                     }
-                    s.land(import);
-                    Response::json(if req.method == "POST" { 201 } else { 200 }, &json!({ "id": format!("conn_{user}_{provider}"), "user_id": user, "state": "connected" }))
+                    match s.land(import) {
+                        Some(made) => Response::json(if req.method == "POST" { 201 } else { 200 }, &made),
+                        None => pipes_problem(404, "not_found", "no such connected account"),
+                    }
                 }
                 ("GET", "/user_management/authorize") | ("GET", "/user_management/authorize/as") => {
                     if q("client_id") != client {
@@ -518,7 +704,7 @@ impl WorkOs {
                 // the user's browser, consenting: the account is connected
                 ("GET", "/pipes/consent") => match s.consents.remove(&q("state")) {
                     Some((user, provider)) => {
-                        s.pipes.insert((user, provider.clone()), true);
+                        s.compatibility(&user, &provider).authorized = true;
                         Response::bytes(200, "text/html; charset=utf-8", format!("<!doctype html><title>Connected</title><p>{provider} is connected. You can close this window.</p>").into_bytes())
                     }
                     None => problem(400, "invalid_request", "this consent was used or never given"),
@@ -531,36 +717,56 @@ impl WorkOs {
                     let rest = &p["/user_management/users/".len()..];
                     let Some((user, provider)) = rest.split_once("/connected_accounts/") else { return problem(404, "not_found", "no such route") };
                     s.states_read += 1;
-                    let label = s.labels.get(&(user.to_string(), provider.to_string())).cloned();
-                    let scopes = s.scopes.get(&(user.to_string(), provider.to_string())).cloned().unwrap_or_default();
-                    match s.pipes.get(&(user.to_string(), provider.to_string())).copied() {
+                    match s.named(user, provider, req.query.get("connected_account_id").map(String::as_str)) {
                         None => problem(404, "not_found", "no connected account"),
-                        Some(authorized) => Response::json(
-                            200,
-                            &json!({
-                                "object": "connected_account", "id": format!("conn_{user}_{provider}"), "user_id": user, "organization_id": null,
-                                "account_display_name": label,
-                                "scopes": scopes, "state": if authorized { "connected" } else { "needs_reauthorization" },
-                                "created_at": "2026-10-01T00:00:00.000Z", "updated_at": "2026-10-01T00:00:00.000Z",
-                            }),
-                        ),
+                        Some(a) => Response::json(200, &a.json(user, provider)),
                     }
+                }
+                // a person's providers, each with every account of theirs
+                // there (with the plural opt-in), oldest first
+                ("GET", p) if p.starts_with("/user_management/users/") && p.ends_with("/data_providers") => {
+                    if req.header("authorization") != Some(format!("Bearer {key}").as_str()) {
+                        return problem(401, "unauthorized", "the API key is wrong");
+                    }
+                    let user = &p["/user_management/users/".len()..p.len() - "/data_providers".len()];
+                    if !s.users.iter().any(|u| u.id == user) { return pipes_problem(404, "not_found", "user"); }
+                    match s.fail_list_after {
+                        Some(0) => {
+                            s.fail_list_after = None;
+                            return pipes_problem(503, "unavailable", "test list failure");
+                        }
+                        Some(n) => s.fail_list_after = Some(n - 1),
+                        None => {}
+                    }
+                    s.states_read += 1;
+                    let plural = q("supports_multiple_connections") == "true";
+                    let mut data: Vec<Value> = s.accounts.iter().filter(|((u, _), _)| u == user).map(|((_, provider), list)| {
+                        let compatibility = list.iter().find(|a| a.compatibility).map(|a| a.json(user, provider));
+                        let mut entry = json!({ "object": "data_provider", "slug": provider, "connection_owner": "user", "connected_account": compatibility });
+                        if plural {
+                            entry["connected_accounts"] = list.iter().map(|a| a.json(user, provider)).collect();
+                        }
+                        entry
+                    }).collect();
+                    data.sort_by(|a, b| a["slug"].as_str().cmp(&b["slug"].as_str()));
+                    Response::json(200, &json!({ "object": "list", "data": data, "list_metadata": {} }))
                 }
                 // a connected account deleted: its tokens go; 404 when there is none
                 ("DELETE", p) if p.starts_with("/user_management/users/") && p.contains("/connected_accounts/") => {
                     if req.header("authorization") != Some(format!("Bearer {key}").as_str()) {
                         return problem(401, "unauthorized", "the API key is wrong");
                     }
+                    if std::mem::take(&mut s.fail_delete) { return pipes_problem(503, "unavailable", "test delete failure"); }
                     let Some((user, provider)) = p["/user_management/users/".len()..].split_once("/connected_accounts/") else { return problem(404, "not_found", "no such route") };
-                    match s.pipes.remove(&(user.to_string(), provider.to_string())) {
-                        None => problem(404, "not_found", "no connected account"),
-                        Some(_) => {
-                            s.labels.remove(&(user.to_string(), provider.to_string()));
-                            s.scopes.remove(&(user.to_string(), provider.to_string()));
-                            s.deleted.push((user.into(), provider.into()));
-                            Response::bytes(204, "text/plain", vec![])
-                        }
+                    let Some(id) = s.named(user, provider, req.query.get("connected_account_id").map(String::as_str)).map(|a| a.id.clone()) else { return problem(404, "not_found", "no connected account") };
+                    let key = (user.to_string(), provider.to_string());
+                    let list = s.accounts.get_mut(&key).expect("named");
+                    list.retain(|a| a.id != id);
+                    if list.is_empty() {
+                        s.accounts.remove(&key);
                     }
+                    s.deleted.push(key);
+                    Response::bytes(204, "text/plain", vec![])
                 }
                 ("POST", p) if p.starts_with("/data-integrations/") && p.ends_with("/token") => {
                     if req.header("authorization") != Some(format!("Bearer {key}").as_str()) {
@@ -571,14 +777,26 @@ impl WorkOs {
                     let Some(user) = body["user_id"].as_str().filter(|u| s.users.iter().any(|x| x.id == *u)).map(str::to_string) else {
                         return problem(404, "not_found", "no such user");
                     };
-                    match s.pipes.get(&(user.clone(), provider.clone())).copied() {
+                    // the account it names; with the plural opt-in and none
+                    // named, the one there is, or a refusal while several
+                    let named = body["connected_account_id"].as_str();
+                    let listed = s.accounts.get(&(user.clone(), provider.clone())).map(Vec::len).unwrap_or(0);
+                    if named.is_none() && body["supports_multiple_connections"] == true && listed > 1 {
+                        return pipes_problem(409, "account_selection_required", &format!("Several connected accounts match this user for '{provider}'. Name one with a connected account id."));
+                    }
+                    let account = match (named, body["supports_multiple_connections"] == true) {
+                        (None, true) => s.accounts.get(&(user.clone(), provider.clone())).and_then(|l| l.first()).cloned(),
+                        (named, _) => s.named(&user, &provider, named).cloned(),
+                    };
+                    match account.as_ref().map(|a| a.authorized) {
                         None => Response::json(200, &json!({ "active": false, "error": "not_installed" })),
                         Some(false) => Response::json(200, &json!({ "active": false, "error": "needs_reauthorization" })),
                         Some(true) => {
+                            let account = account.expect("matched");
                             let token = s.next(&format!("pipes_{provider}"));
-                            s.pipes_tokens.insert(token.clone(), (user.clone(), provider.clone()));
+                            s.pipes_tokens.insert(token.clone(), (user.clone(), provider.clone(), account.id.clone()));
                             // what the account holds, and what of the connection's asks it lacks
-                            let scopes = s.scopes.get(&(user.clone(), provider.clone())).cloned().unwrap_or_default();
+                            let scopes = account.scopes.clone().unwrap_or_default();
                             let missing: Vec<&str> = if scopes.is_empty() { vec![] } else { CONNECTION_SCOPES.into_iter().filter(|c| !scopes.iter().any(|s| s == c)).collect() };
                             s.tokens.entry(provider).or_default().push(token.clone());
                             let expires = crate::codestorage::iso(crate::codestorage::now_ms() + 3_600_000);
@@ -628,7 +846,7 @@ impl WorkOs {
     pub fn connect(&self, email: &str, provider: &str, authorized: bool) {
         let mut s = self.state.lock().expect("workos state");
         let user = s.user_for(email);
-        s.pipes.insert((user.id, provider.to_string()), authorized);
+        s.compatibility(&user.id, provider).authorized = authorized;
     }
 
     /// `email`'s account at `provider` is labeled `label` (its
@@ -636,7 +854,7 @@ impl WorkOs {
     pub fn label(&self, email: &str, provider: &str, label: &str) {
         let mut s = self.state.lock().expect("workos state");
         let user = s.user_for(email);
-        s.labels.insert((user.id, provider.to_string()), label.to_string());
+        s.compatibility(&user.id, provider).label = Some(label.to_string());
     }
 
     /// `email`'s account at `provider` holds `scopes` (its `scopes`), as a
@@ -644,14 +862,14 @@ impl WorkOs {
     pub fn grant(&self, email: &str, provider: &str, scopes: &[&str]) {
         let mut s = self.state.lock().expect("workos state");
         let user = s.user_for(email);
-        s.scopes.insert((user.id, provider.to_string()), scopes.iter().map(|s| s.to_string()).collect());
+        s.compatibility(&user.id, provider).scopes = Some(scopes.iter().map(|s| s.to_string()).collect());
     }
 
-    /// The scopes `email`'s account at `provider` holds, as imported (empty: none named).
+    /// The scopes `email`'s account at `provider` holds, as imported
+    /// (empty: none named): its compatibility connection's, else its oldest's.
     pub fn scopes(&self, email: &str, provider: &str) -> Vec<String> {
-        let mut s = self.state.lock().expect("workos state");
-        let user = s.user_for(email);
-        s.scopes.get(&(user.id, provider.to_string())).cloned().unwrap_or_default()
+        let accounts = self.accounts(email, provider);
+        accounts.iter().find(|a| a.compatibility).or(accounts.first()).map(|a| a.scopes.clone()).unwrap_or_default()
     }
 
     /// How many connected accounts' states were read.
@@ -684,3 +902,6 @@ impl WorkOs {
         self.state.lock().expect("workos state").held.as_ref().map(|(_, sid, _)| sid.clone())
     }
 }
+
+#[cfg(test)]
+mod tests;
