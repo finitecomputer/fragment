@@ -754,9 +754,12 @@ async fn whispered(env: &Env, cfg: &Config, input: &Value, meta: &Metadata) -> (
     if !transcribe::again(status, ms) {
         return (first, 1);
     }
-    // what Workers AI said (its error, never the audio's words)
+    // where Workers AI's error is (the gateway's log of the call), never
+    // its body: an answer whose headers came fast can still stall its body,
+    // and a read of it would hold back the second try past what its client
+    // waits (Alex's review of #520)
     let why = match first {
-        Ok(mut failed) => bounded_text(&mut failed).await.chars().take(300).collect::<String>(),
+        Ok(failed) => failed.headers().get("cf-aig-log-id").ok().flatten().map(|id| format!("cf-aig-log-id {id}")).unwrap_or_default(),
         Err(e) => e.message,
     };
     console_log!("{}", json!({ "event": "model.transcribe-again", "model": transcribe::TRANSCRIBE_MODEL, "status": status, "ms": ms, "why": why }));
