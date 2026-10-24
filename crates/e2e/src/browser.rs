@@ -470,6 +470,20 @@ impl Browser {
         Ok(())
     }
 
+    /// What the lease's context tells pages of `origin` of the web
+    /// permission `name` (`navigator.permissions`: "microphone") from here
+    /// on: "granted", "denied" or "prompt", as a person's choice in the
+    /// browser's settings. Chrome's fake media UI (its command line) still
+    /// answers a page's request for the microphone yes.
+    pub fn set_permission(&mut self, origin: &str, name: &str, setting: &str) -> Result<()> {
+        let mut params = json!({ "permission": { "name": name }, "setting": setting, "origin": origin });
+        if let Some(context) = &self.context {
+            params["browserContextId"] = json!(context);
+        }
+        self.send("Browser.setPermission", params, None)?;
+        Ok(())
+    }
+
     /// `set_cookie` in another of the lease's contexts (a second person's browser).
     pub fn set_cookie_in(&mut self, context: &BrowserContext, url: &str, name: &str, value: &str) -> Result<()> {
         let params = json!({ "cookies": [cookie(url, name, value)], "browserContextId": context.0 });

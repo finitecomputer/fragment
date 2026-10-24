@@ -16,9 +16,11 @@
 //! a card of choices whose last is answered in words, typed on the card
 //! and sent with Enter;
 //! Stop, which ends a slow turn; a picture they attach, in their message
-//! and as the chat's blob; a reply's file; a voice memo recorded from
-//! Chrome's fake microphone, sent as an audio attachment and shown as a
-//! player, which the agent receives. At a phone's width nothing scrolls
+//! and as the chat's blob; a reply's file; the mic's card before the
+//! browser asks, and the one a refused microphone shows; a voice memo
+//! recorded from Chrome's fake microphone, sent as an audio attachment and
+//! shown as a player, which the agent receives; the mic in the shell's
+//! frame, which names the chat's origin. At a phone's width nothing scrolls
 //! sideways. Screenshots (desktop light and dark, phone) stay in the run's
 //! scratch (`chat/`).
 //!
@@ -144,6 +146,56 @@ fn still_loading_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: 
     chrome.detach(frame)?;
     chrome.close(shell)?;
     Ok(())
+}
+
+/// The chat's mic in the shell's frame, which the platform's mint
+/// (`/auth/frame`) sends on to the chat's own origin. A bare
+/// `allow="microphone"` names the frame's `src`'s origin, the platform's,
+/// and the browser refused the chat's page the microphone without asking
+/// ("The microphone is off for this chat", PR 582). Valid: the shell's
+/// frame names the chat's origin, and there, the microphone allowed
+/// (Chrome's fake, as a person's Allow), the chat is told it may record,
+/// and a press records at once, with no card.
+fn mic_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let shell = chrome.open(&format!("{}/", api.base))?;
+    chrome.viewport(&shell, 1280, 860, false)?;
+    let row = format!("#chats [data-key={}]", js(&format!("chat:{chat}")));
+    let listed = chrome.until(&shell, &format!("!document.getElementById('layout').hidden && !!document.querySelector({})", js(&row)), wait);
+    chrome.eval(&shell, &format!("(document.querySelector({})?.click(), true)", js(&row)))?;
+    let ready = "document.getElementById('say')?.dataset.ready === '1'";
+    let framed = listed && s.eventually(wait, || chrome.eval_in_frame(&shell, chat, ready).ok() == Some(Value::Bool(true)));
+    let allow = chrome.eval(&shell, &format!("document.querySelector({})?.allow ?? null", js(&format!("iframe[data-fragment=\"{chat}\"]"))))?;
+    if !framed {
+        s.ok("in the shell's frame, which names the chat's own origin, the chat may use the microphone, and its mic records at once", false, json!({ "framed": false, "allow": allow }));
+        return chrome.close(shell);
+    }
+    let frame = chrome.frame(chat)?;
+    let told = chrome.eval(&frame, "navigator.permissions.query({ name: 'microphone' }).then((p) => p.state)")?;
+    let mic = "document.getElementById('record')";
+    chrome.eval(&frame, &format!("({mic}.click(), true)"))?;
+    let on = chrome.until(&frame, &format!("{mic}.classList.contains('on') && document.getElementById('mic-card').hidden && !document.getElementById('recording').hidden"), wait);
+    let card = chrome.eval(&frame, "document.getElementById('mic-card').hidden ? null : document.getElementById('mic-card-title').textContent")?;
+    chrome.eval(&frame, "(document.getElementById('discard').click(), true)")?;
+    let off = chrome.until(&frame, &format!("!{mic}.classList.contains('on')"), wait);
+    s.ok(
+        "in the shell's frame, which names the chat's own origin, the chat may use the microphone, and its mic records at once",
+        framed && told == "granted" && on && off,
+        json!({ "framed": framed, "allow": allow, "told": told, "on": on, "card": card, "off": off }),
+    );
+    chrome.detach(frame)?;
+    chrome.close(shell)?;
+    Ok(())
+}
+
+/// The mic's card as shown (`kind`, "ask" or "denied"), light and dark,
+/// into the run's screenshots; the page left light, as it starts.
+fn mic_card_shots(chrome: &mut Browser, page: &Page, shots: &Path, kind: &str) -> Result<()> {
+    for scheme in ["light", "dark"] {
+        chrome.color_scheme(page, scheme)?;
+        chrome.screenshot(page, &shots.join(format!("mic-card-{kind}-{scheme}.png")))?;
+    }
+    chrome.color_scheme(page, "light")
 }
 
 /// A JSON array's strings.
@@ -546,10 +598,17 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an editor's composer has a mic", chrome.eval(&page, &format!("!{mic}.hidden && !{mic}.disabled"))? == true, "");
     let bubbles = |chrome: &mut Browser| chrome.eval(&page, "document.querySelectorAll('.msg.user.mine').length").ok().and_then(|v| v.as_u64()).unwrap_or(0);
     let before = bubbles(&mut chrome);
+    // Chrome's fake microphone is allowed from its start (run 40070388501:
+    // the page told `granted` recorded at once, and showed no card); a
+    // person's browser would ask, so the page is told `prompt` (the fake
+    // still answers the request yes, as a person's Allow)
+    let origin = chrome.eval(&page, "location.origin")?.as_str().context("the chat's origin")?.to_string();
+    chrome.set_permission(&origin, "microphone", "prompt")?;
     chrome.click(&page, "#record")?;
     // the first press says what the mic is for, and asks the browser only on Continue
     let card = "(() => { const c = document.getElementById('mic-card'); return !c.hidden && c.dataset.kind === 'ask' && !document.getElementById('record').classList.contains('on'); })()";
     s.ok("the first press shows the microphone's card, asking nothing of the browser yet", shows(&mut chrome, &page, card), "");
+    mic_card_shots(&mut chrome, &page, &shots, "ask")?;
     chrome.click(&page, "#mic-card-go")?;
     let recording = format!("{mic}.classList.contains('on') && !document.getElementById('recording').hidden && !document.getElementById('discard').hidden");
     let on = shows(&mut chrome, &page, &recording);
@@ -564,8 +623,23 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.eval(&page, "Promise.race([navigator.mediaDevices.getUserMedia({ audio: true }).then((s) => { s.getTracks().forEach((t) => t.stop()); return 'granted'; }, (e) => e.name), new Promise((r) => setTimeout(() => r('no answer in 5 s'), 5000))]).then((mic) => ({ mic, focused: document.hasFocus(), visible: document.visibilityState, banner: document.getElementById('banner').hidden ? null : document.getElementById('banner-text').textContent, record: document.getElementById('record').outerHTML.slice(0, 200) }))")?
     };
     s.ok("pressed, it records, quietly (the mic is its Stop, beside a clock); the x lets the memo go, sending nothing", on && off && bubbles(&mut chrome) == before, json!({ "on": on, "off": off, "why": why }));
+    // a microphone the browser refused: the card says where to allow it,
+    // and its Okay closes it, recording nothing
+    chrome.set_permission(&origin, "microphone", "denied")?;
     chrome.click(&page, "#record")?;
-    let ticking = shows(&mut chrome, &page, &format!("{recording} && document.getElementById('recording-time').textContent !== '0:00'"));
+    let refused = format!(
+        "(() => {{ const c = document.getElementById('mic-card'); return !c.hidden && c.dataset.kind === 'denied' && document.getElementById('mic-card-title').textContent === 'Your browser needs microphone permissions' && !{mic}.classList.contains('on'); }})()"
+    );
+    let said = shows(&mut chrome, &page, &refused);
+    mic_card_shots(&mut chrome, &page, &shots, "denied")?;
+    chrome.click(&page, "#mic-card-go")?;
+    let closed = shows(&mut chrome, &page, &format!("document.getElementById('mic-card').hidden && !{mic}.classList.contains('on')"));
+    s.ok("a microphone the browser refused shows a card saying where to allow it, which Okay closes, recording nothing", said && closed, json!({ "said": said, "closed": closed }));
+    // allowed, a press records at once
+    chrome.set_permission(&origin, "microphone", "granted")?;
+    chrome.click(&page, "#record")?;
+    let ticking = shows(&mut chrome, &page, &format!("{recording} && document.getElementById('mic-card').hidden && document.getElementById('recording-time').textContent !== '0:00'"));
+    s.ok("the microphone allowed, a press records at once, with no card", ticking, "");
     chrome.click(&page, "#text")?;
     chrome.type_text(&page, "a voice memo")?;
     chrome.click(&page, "#record")?;
@@ -729,6 +803,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     // the owner's page is on screen)
     held_socket(s, api, &mut chrome, &owner, &chat_name)?;
     still_loading_in_frame(s, api, &mut chrome, &chat_name)?;
+    mic_in_frame(s, api, &mut chrome, &chat_name)?;
 
     polish::check(s, api, &owner, &owner_session, &mut chrome, &label)?;
     polish::working_card(s, api, &owner, &mut chrome, &identity, &agent_name)?;
