@@ -189,7 +189,7 @@ impl Route {
     /// The route at `base`, its ids the view's (`models`), or the route's
     /// own names, which it takes as well, from a platform that names none.
     pub fn new(base: &str, models: Option<&ModelIds>) -> Route {
-        let names = || ModelIds { cheap: Tier::Cheap.name().into(), medium: Tier::Medium.name().into(), fallback: FALLBACK_MODEL.into(), vision: VISION_MODEL.into() };
+        let names = || ModelIds { cheap: Tier::Cheap.name().into(), medium: Tier::Medium.name().into(), fallback: FALLBACK_MODEL.into(), vision: VISION_MODEL.into(), routes: None };
         Route { base: base.into(), ids: models.cloned().unwrap_or_else(names) }
     }
 
@@ -201,6 +201,18 @@ impl Route {
             Tier::Medium => &self.ids.medium,
             Tier::High => Tier::High.name(),
         }
+    }
+
+    /// The model a tier agent's stall falls back to: its route's fallback
+    /// by its id (Private's private, Standard's Cloudflare), or, from a
+    /// platform that names no routes, the deployment's fallback.
+    pub fn fallback(&self, tier: Tier) -> &str {
+        let routed = self.ids.routes.as_ref().and_then(|r| match tier {
+            Tier::Cheap => Some(&r.cheap.fallback),
+            Tier::Medium => Some(&r.medium.fallback),
+            Tier::High => None,
+        });
+        routed.unwrap_or(&self.ids.fallback)
     }
 }
 
@@ -524,9 +536,10 @@ pub fn profile_config(agent: &Agent, name: &str, main: &MainModel, reasoning: Re
     // (this model's alone: `vision`, whose answers are whole and slower,
     // keeps Hermes' default), tries it once more (`STREAM_RETRIES`), then,
     // its one retry spent (`api_max_retries`, in `agent` above), switches to its
-    // `fallback_providers`: the route's `fallback`, the deployment's
-    // fallback model by its id, through the intercept as the agent (its key
-    // names the agent). The next turn starts on its tier again (Hermes'
+    // `fallback_providers`: its route's fallback, by its id (`Route::fallback`:
+    // the deployment's fallback from a platform naming no routes), through
+    // the intercept as the agent (its key names the agent; this call carries
+    // no header of ours, so its tier is not said: the id names its slot). The next turn starts on its tier again (Hermes'
     // `restore_primary_runtime`). The route itself falls back when a model
     // answers 429 or a 5xx (cell/src/models.rs); this is for a call that
     // answers nothing. An owner's own model and the high tier have none.
@@ -535,7 +548,7 @@ pub fn profile_config(agent: &Agent, name: &str, main: &MainModel, reasoning: Re
         y.push_str(&format!(
             "fallback_providers:\n  - provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: {}\n",
             q(&format!("{base}/v1")),
-            q(&route.ids.fallback),
+            q(route.fallback(*tier)),
             q(&format!("agent:{}", agent.fragment))
         ));
     }
@@ -1043,7 +1056,7 @@ mod tests {
     const FALLBACK_ID: &str = "@cf/zai-org/glm-5.3-flash";
 
     fn ids() -> ModelIds {
-        ModelIds { cheap: CHEAP_ID.into(), medium: MEDIUM_ID.into(), fallback: FALLBACK_ID.into(), vision: FALLBACK_ID.into() }
+        ModelIds { cheap: CHEAP_ID.into(), medium: MEDIUM_ID.into(), fallback: FALLBACK_ID.into(), vision: FALLBACK_ID.into(), routes: None }
     }
 
     fn route(base: &str) -> Route {
@@ -1253,6 +1266,17 @@ mod tests {
             assert!(config.contains(&format!("\nagent:\n  system_prompt: {}\n  tool_use_enforcement: false\n  execution_guidance: false\n  api_max_retries: 1\n", q(&told_name("Juniper")))), "one retry, beside its name and its guidance: {config}");
             assert!(!config.contains("\"vision\":\n        stale_timeout_seconds"), "vision keeps Hermes' default: {config}");
         }
+        // each tier's stall falls back within its route (Paul, 2026-10-24), by its route's fallback's id
+        let mut routed = route("http://model.fragment.internal");
+        let tier_route = |fallback: &str| fragment_bridge::api::TierRoute { label: None, private: false, fallback: fallback.into(), vision: FALLBACK_ID.into() };
+        routed.ids.routes = Some(fragment_bridge::api::TierRoutes { cheap: tier_route("deepseek-v4-1-flash"), medium: tier_route("@cf/example/standard-fallback") });
+        for (tier, want) in [(Tier::Cheap, "deepseek-v4-1-flash"), (Tier::Medium, "@cf/example/standard-fallback")] {
+            let config = profile_config(&agent(), "Juniper", &tier.into(), DEFAULT_REASONING, &routed, &[], creds);
+            let stall = format!("fallback_providers:\n  - provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"{want}\"\n    api_key: \"agent:juniper--k3x9\"\n");
+            assert!(config.contains(&stall), "the {tier:?} tier's stall falls back to its route's fallback: {config}");
+            assert!(config.contains(vision), "its eyes are still the route's `vision`, its tier said: {config}");
+        }
+        assert_eq!((routed.fallback(Tier::High), route("http://x").fallback(Tier::Medium)), (FALLBACK_ID, FALLBACK_ID), "none named: the deployment's");
         assert!(!h.contains("fallback_providers") && !h.contains("stale_timeout_seconds") && !h.contains("api_max_retries"), "the high tier has none: {h}");
         assert!(!m.contains("fallback_providers") && !m.contains("stale_timeout_seconds") && !m.contains("api_max_retries"), "a profile's own, never the overlay's: {m}");
         assert!(p.contains("skills:\n  external_dirs: [\"/data/hermes/managed-skills\", \"/var/lib/fragment-run/platform-skills\"]\n"), "the managed skills and the platform skill's view, after its own: {p}");
