@@ -2609,9 +2609,11 @@ function agentSettings(a, row, modeled) {
     await api("POST", `/api/f/${seg(a.fragment)}/files`, { message, files: [{ path: "agent.json", text: JSON.stringify(next, null, 2) + "\n" }] });
     await api("POST", `/api/f/${seg(a.fragment)}/deploy`, {});
   }));
-  // the model pick: when there is a choice, routes the deployment names
-  // (Private, Standard) or models of a provider the person connected
-  const choice = modeled.length > 0 || routesOffered().length > 1;
+  // the model pick: when there may be a choice, a route the deployment
+  // names (Private, Standard) or a model of a provider the person
+  // connected; whether there is one, with a single route, is the agent's
+  // own tier's to say (`modelPicker`, once agent.json is read)
+  const choice = modeled.length > 0 || routesOffered().length > 0;
   const picks = [...(choice ? [modelPicker(a, modeled, read, write, said)] : []), reasoningPicker(a, read, write, said)];
   box.append(row, ...picks, said);
   return box;
@@ -2692,6 +2694,8 @@ function modelPicker(a, modeled, read, write, said) {
       if (v && ![...pick.options].some((o) => o.value === v)) pick.append(modelOption(v, own ? j.model.id : tierName(j?.tier)));
       pick.value = v;
       pick.dataset.was = v;
+      // a single route that is the agent's own tier, and no provider: no choice, no pick
+      pick.parentElement.hidden = modeled.length === 0 && pick.options.length < 2;
     })
     .finally(() => { pick.disabled = false; pick.dataset.read = "1"; });
   pick.onchange = () => {
