@@ -1133,12 +1133,17 @@ async fn poster(api: Api, agent: Agent, mut rx: mpsc::Receiver<Post>, stop: watc
         let body = records::relayed_message(&text, &agent.identity, &agent.owner, records::VIA_SIMPLEX, &[]);
         let id = records::relayed_id(&agent.fragment, &p.inbound.id);
         let files: Vec<LocalFile> = p.file.iter().cloned().collect();
-        if !crate::driver::post(&api, &chat, &agent.fragment, records::CHAT, &id, body, &files, stop.clone()).await {
-            return;
-        }
-        crate::ev!("simplex.posted", { "agent": agent.fragment, "chat": chat, "id": id, "kind": p.inbound.kind, "file": p.file.is_some() });
-        for f in &files {
-            let _ = tokio::fs::remove_file(&f.path).await;
+        match crate::driver::post(&api, &chat, &agent.fragment, records::CHAT, &id, body, &files, stop.clone()).await {
+            crate::driver::Sent::Stopped => return,
+            // its file kept: the message is read again at the next start's
+            // catch-up (by the same id), and carried then if it can be
+            crate::driver::Sent::Refused => crate::ev!("simplex.unposted", { "agent": agent.fragment, "chat": chat, "id": id, "kind": p.inbound.kind, "file": p.file.is_some() }),
+            crate::driver::Sent::Posted => {
+                crate::ev!("simplex.posted", { "agent": agent.fragment, "chat": chat, "id": id, "kind": p.inbound.kind, "file": p.file.is_some() });
+                for f in &files {
+                    let _ = tokio::fs::remove_file(&f.path).await;
+                }
+            }
         }
     }
 }

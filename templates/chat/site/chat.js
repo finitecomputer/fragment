@@ -1128,7 +1128,7 @@ export function mount(root) {
     const key = `m:${m.seq}`;
     const quoted = m.replyTo ? (state.chat.find((x) => x.seq === m.replyTo) ?? null) : null;
     const waits = !w.agent && queued(m);
-    const sig = [w.name, w.agent, mine, w.picture ?? "", w.color ?? "", canPost(), waits, quoted ? `${quoted.seq}:${who(quoted.principal).name}` : m.replyTo ?? "", m.error ?? "", m.retrying ?? false, m.sending ?? false, m.post ?? "", m.via ?? ""].join("|");
+    const sig = [w.name, w.agent, mine, w.picture ?? "", w.color ?? "", canPost(), waits, quoted ? `${quoted.seq}:${who(speaker(quoted)).name}` : m.replyTo ?? "", m.error ?? "", m.retrying ?? false, m.sending ?? false, m.post ?? "", m.via ?? ""].join("|");
     return [key, cached(key, sig, () => (w.agent ? agentMessage(m, w) : userMessage(m, w, mine, quoted, waits)))];
   }
 
@@ -1176,7 +1176,7 @@ export function mount(root) {
       q.disabled = true;
       return q;
     }
-    q.append(el("span", "quote-who", who(quoted.principal).name), quoteText(el("span", "quote-text"), quoted));
+    q.append(el("span", "quote-who", who(speaker(quoted)).name), quoteText(el("span", "quote-text"), quoted));
     q.onclick = () => $("messages").querySelector(`[data-seq="${quoted.seq}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
     return q;
   }
