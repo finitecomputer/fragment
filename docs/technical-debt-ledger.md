@@ -703,6 +703,23 @@ fragment.club until cutover (decisions 34–35).
   e2e check that a video is drawn, stored as a blob and charged; or Paul
   drops videos, and `job.ai.video` goes with this entry.
 
+## An icon's drawings skip the AI Gateway
+
+- **Observed:** 2026-10-24, building icons (docs/api.md, Icons). FLUX.2
+  [klein] 4B takes its input as a multipart form, and the AI binding
+  refuses a gateway for a form's streamed body ("AI Gateway does not
+  support ReadableStreams yet"); sent as bytes, the gateway answers 400.
+  So `js::ai_run_form` calls the binding with no gateway: a drawing has no
+  gateway log, no `cf-aig-log-id`, and no gateway metadata (its payer's
+  opaque id), and is charged from the binding's own `cf-ai-neurons`.
+- **Risk:** a drawing's cost cannot be matched to a gateway log, as a
+  job's image is; a drawing's failures are seen only in the cell's log
+  (`icon.step-failed`).
+- **First proof:** an `icon:` meter row whose drawing has no log in the
+  gateway's.
+- **Delete when:** the gateway takes a form's body through the binding;
+  then `ai_run_form` passes the gateway as `ai_run` does.
+
 ## The price book is the core's defaults
 
 - **Observed:** phase 3. Every ledger charges with

@@ -1065,9 +1065,10 @@ pub struct ListedFragment {
     pub kind: FragmentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// An agent fragment's picture (its `avatar.png` at live), as the
-    /// address on the platform that serves it (its agent's identity's
-    /// `/api/identities/<npub>/picture?v=…`).
+    /// Its picture, as the address on the platform that serves it: an
+    /// agent fragment's `avatar.png` at live (its agent's identity's
+    /// `/api/identities/<npub>/picture?v=…`), any other's icon
+    /// (`/api/f/<name>/icon?v=…`, docs/api.md, Icons).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub picture: Option<String>,
     /// Its agent members, the first added (a chat's lead) first, at most

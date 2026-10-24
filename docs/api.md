@@ -1547,6 +1547,67 @@ rules are pure (`fragment_core::card`); cell/src/card.rs runs them.
   A page's Open Graph image
   stays `__preview.svg`: the card is its members'.
 
+### Icons (issue #587)
+
+A fragment's **icon** is one 256×256 PNG of one object on a transparent
+background, a clean 3D CG render in the look of the bot's own picture,
+which the shell's dock shows and the fragment's pages take as their
+favicon. Its editors make one or upload one; the pure rules are
+`fragment_core::icon`, cell/src/icon.rs runs them. An agent fragment has
+none: its picture is its `avatar.png` (An agent's name and picture), and
+a making or a `PUT` on one answers 400.
+
+| Method | Path | Who | What |
+| --- | --- | --- | --- |
+| POST | `/api/f/{name}/icon/make` | editors | `{hint?}` (at most 200 characters) → `{subject, candidates: [{png, score}], flaws}` |
+| PUT | `/api/f/{name}/icon` | editors | the image's bytes → `{icon, sha256, size}` |
+| GET | `/api/f/{name}/icon` | viewers | the PNG (ETag its SHA-256), or 404 |
+| DELETE | `/api/f/{name}/icon` | editors | `{icon: null}` |
+
+- **A making** asks, in its request (a minute at most), for:
+  1. a **subject**: the fragment's title and description (live's
+     `fragment.json` `meta`, else its name's label) and the hint, named as
+     one concrete object by GLM-5.3 Flash on Workers AI (an abstract name
+     drawn as it is comes back a flat rounded square); when it names none,
+     the hint, or the title, is drawn;
+  2. four **drawings** of it at once, FLUX.2 [klein] 4B at 512×512, each
+     with a seed of its own;
+  3. each one **cut out** by Cloudflare Images (`segment: foreground`)
+     and examined by the cell from its alpha: refused when nothing was
+     cut out (`empty`), it runs off the frame (`cut_off`), it is a filled
+     square, a tile (`tile`), it is in several pieces (`pieces`), or its
+     edges are mostly half transparent (`ragged`);
+  4. each kept one **cropped** around its object (a margin of 6% of its
+     longer side), fitted inside 256×256 with transparent padding, and
+     **checked** by Clef flash on a plain blue: refused for writing
+     (`writing`), a tile or frame (`framed`), no one object
+     (`no_object`), or another subject (`off_subject`), each past even
+     odds. Its `score` is how surely it shows one object of its subject.
+  A step that fails is the drawing's `failed`. The answer's `candidates`
+  are the ones kept, best first, each `png` the icon's bytes as base64;
+  `flaws` counts the refused by flaw. Nothing of a making is kept: its
+  asker keeps a candidate by sending its bytes to `PUT`.
+- **Bounded per fragment: 10 makings an hour**, the 11th 429.
+- **Metered to the owner**, one row of the fragment's meter outbox per
+  call that answered, `icon:<fragment>@<incarnation>:<started>:<call>`
+  (`subject`, `draw-<n>`, `cut-<n>`, `fit-<n>`, `flat-<n>`, `check-<n>`,
+  `upload`): the subject and the checks in tokens, a drawing in the
+  neurons Workers AI says it cost (its `cf-ai-neurons`; 104.2 when it
+  says none), each Images transformation as one (docs/ledger.md). The
+  owner's ledger is asked first as a job's AI step is: a guest's fragment
+  makes none. A making that fails halfway has paid for what it bought.
+- **An upload** is a PNG, JPEG, WebP or GIF by its bytes, at most the
+  router's 2 MiB (413 past it). A 256×256 PNG of at most 256 KiB (a
+  candidate) is kept as it is; any other is fitted inside 256×256 by
+  Images, its padding transparent (one transformation, metered as
+  `upload`), and refused 413 when that is still over 256 KiB.
+- **Kept** as one of the fragment's blobs (`image/png`), named in its
+  meta, which the blob collection keeps. Its members' lists show it as
+  the fragment's `picture`, `/api/f/<name>/icon?v=<12 hex of its
+  SHA-256>`: a new icon is a new address, so `GET` may be cached a day.
+- **Events:** `icon.made` (`{subject, offered, flaws}`), `icon.set`
+  (`{sha256, fitted}`), `icon.removed`.
+
 ### Deliveries: web push
 
 A page subscribes with `await fragment.push.register(who)` (from a click:

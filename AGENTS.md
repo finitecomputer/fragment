@@ -104,7 +104,7 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   stand only at vendor boundaries (sections, in order:
   auth, create, lockdown, keys, members, identities, signin, levers, secrets,
   delegation, files, deploy, templates, share, faces, isolation, frames, ops, public,
-  effects, facet-cap, app-lockdown, site, watch, schemas, channels,
+  effects, facet-cap, app-lockdown, site, watch, icons, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
   brain, doc, push, ai, ledger, transcribe, finite-private, orgs, billing,
   billing-page, trials, admin, admin-page, shell, computers, chat,
