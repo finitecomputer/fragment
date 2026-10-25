@@ -347,9 +347,13 @@ impl Api {
 
     // ---- the computer's own routes (no agent) ----
 
-    /// `GET /api/computer`: the agents to run.
-    pub async fn computer(&self) -> Result<Computer, ApiError> {
-        let c: Computer = self.json(Method::GET, "/api/computer", None, None).await?;
+    /// `GET /api/computer`: the agents to run. `simplex`: the image does
+    /// SimpleX (it names its core), which the read says
+    /// (`?simplex=1`), so its owner's Settings offer it (docs/bridge.md,
+    /// "SimpleX").
+    pub async fn computer(&self, simplex: bool) -> Result<Computer, ApiError> {
+        let path = if simplex { "/api/computer?simplex=1" } else { "/api/computer" };
+        let c: Computer = self.json(Method::GET, path, None, None).await?;
         if c.agents.len() > limits::AGENTS_MAX {
             return Err(ApiError::Decode(format!("{} agents; a computer runs at most {}", c.agents.len(), limits::AGENTS_MAX)));
         }

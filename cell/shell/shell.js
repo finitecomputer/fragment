@@ -1404,7 +1404,7 @@ function nameScreen(frame) {
 // origin as its screen is, through a ticket (docs/bridge.md, "SimpleX"):
 // the one-time QR code, and whom it is linked to ----
 async function openSimplex(agent) {
-  if (!state.computer || !agent) return;
+  if (!state.computer?.simplex || !agent) return;
   try {
     const t = await api("POST", `/api/computers/${seg(state.computer.computer)}/ports/6080/ticket`, { path: `/simplex/?agent=${encodeURIComponent(agent)}` });
     const frame = frameOf(t.url, `${titleOf(agent)} on SimpleX`);
@@ -1428,7 +1428,7 @@ async function openSimplex(agent) {
 // "An agent's doors").
 addEventListener("message", async (e) => {
   const m = e.data;
-  if (m?.fragment !== "simplex" || !["link", "unlink"].includes(m.want) || !state.computer) return;
+  if (m?.fragment !== "simplex" || !["link", "unlink"].includes(m.want) || !state.computer?.simplex) return;
   const frame = [...document.querySelectorAll("iframe[data-simplex]")].find((f) => f.contentWindow === e.source);
   if (!frame || frame.dataset.simplex !== m.agent || e.origin !== new URL(frame.dataset.src).origin) return;
   const reply = { fragment: "simplex", agent: m.agent, for: m.want };
@@ -1439,19 +1439,41 @@ addEventListener("message", async (e) => {
   }
   frame.contentWindow?.postMessage(reply, e.origin);
 });
-// Settings' SimpleX: each agent's link, on an always-on computer
+// Settings' SimpleX: each agent's link, on an always-on computer. Only on
+// a computer whose image does SimpleX (its view's `simplex`: its bridge
+// said so); on any other, the section is hidden, nav link and all. It
+// follows the view while Settings are shown (`refreshSimplex`), with
+// nothing else on the page redrawn.
 function simplexSection() {
   const s = section("SimpleX");
   s.id = "settings-simplex";
-  const agents = state.computer?.agents ?? [];
+  fillSimplex(s);
+  return s;
+}
+const simplexKey = (c) => JSON.stringify([!!c?.simplex, !!c?.alwaysOn, (c?.agents ?? []).map((a) => a.fragment)]);
+// A computer's view read again (its list's socket told of a change): the
+// section shown, changed or hidden as the view now says.
+function refreshSimplex() {
+  const s = document.getElementById("settings-simplex");
+  if (s && s.dataset.key !== simplexKey(state.computer)) fillSimplex(s);
+}
+function fillSimplex(s) {
+  const c = state.computer;
+  s.replaceChildren(...s.querySelectorAll(":scope > h2"));
+  s.dataset.key = simplexKey(c);
+  s.hidden = !c?.simplex;
+  const jump = document.querySelector('.settings-nav-link[data-section="settings-simplex"]');
+  if (jump) jump.hidden = s.hidden;
+  if (s.hidden) return;
+  const agents = c.agents ?? [];
   s.append(el("p", "muted", "Message your agents from SimpleX Chat, a private messenger for your phone. Your messages are encrypted between your SimpleX app and your computer."));
-  if (!state.computer || !agents.length) {
+  if (!agents.length) {
     s.append(el("p", "muted", "Make an agent first."));
-    return s;
+    return;
   }
-  if (!state.computer.alwaysOn) {
+  if (!c.alwaysOn) {
     s.append(el("p", "muted", "SimpleX works while your computer stays on, which the always-on plan does."));
-    return s;
+    return;
   }
   for (const a of agents) {
     const open = el("button", "row", "Set up");
@@ -1459,7 +1481,6 @@ function simplexSection() {
     open.onclick = () => openSimplex(a.fragment);
     s.append(actionLine(el("span", null, titleOf(a.fragment)), open));
   }
-  return s;
 }
 
 // ---- making the agent: its fragment, its computer, its chat (decision 10, 16) ----
@@ -1926,6 +1947,7 @@ function computerIs(v) {
   renderComputer();
   renderChats();
   rosterChanged();
+  refreshSimplex();
 }
 
 // ---- what the person should know of their computer (docs/computers.md,
@@ -2210,6 +2232,9 @@ function renderSettingsPage(page, sections) {
       heading.tabIndex = -1;
       const jump = el("button", "settings-nav-link", heading.textContent);
       jump.type = "button";
+      // a hidden section (SimpleX on an image without it) hides its link too
+      jump.dataset.section = section.id;
+      jump.hidden = section.hidden;
       jump.onclick = () => {
         section.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
         heading.focus({ preventScroll: true });
@@ -2223,7 +2248,7 @@ function renderSettingsPage(page, sections) {
   page.replaceChildren(layout);
   page.onscroll = () => {
     const top = page.getBoundingClientRect().top + 130;
-    const current = [...links].reverse().find(([section]) => section.getBoundingClientRect().top <= top)?.[1] ?? links[0]?.[1];
+    const current = [...links].reverse().find(([section]) => !section.hidden && section.getBoundingClientRect().top <= top)?.[1] ?? links[0]?.[1];
     for (const [, button] of links) {
       if (button === current) button.setAttribute("aria-current", "location");
       else button.removeAttribute("aria-current");
@@ -3911,6 +3936,7 @@ async function load(changed = false) {
   renderHeading();
   renderComputer();
   rosterChanged();
+  refreshSimplex();
   markSeen();
   renderAgentFaces();
   for (const f of chats()) if (own(f) && f.title === UNTITLED && f.preview) titleFromFirst(f.name);

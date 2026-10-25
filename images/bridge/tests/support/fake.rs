@@ -106,6 +106,10 @@ pub struct World {
     /// Each agent's door, by its fragment: the nonce of the link ticket its
     /// owner was given last, and the door key its computer registered.
     pub door_tickets: BTreeMap<String, String>,
+    /// `GET /api/computer` reads that said the image does SimpleX
+    /// (`?simplex=1`), and those that did not.
+    pub simplex_said: u32,
+    pub simplex_unsaid: u32,
     pub doors: BTreeMap<String, String>,
     live: Vec<LiveSock>,
     keepalives: Vec<(u64, mpsc::UnboundedSender<Message>)>,
@@ -459,6 +463,11 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
     match (method.clone(), p.as_slice()) {
         (Method::GET, ["api", "computer"]) => {
             let mut w = world.lock().unwrap();
+            if query(&q, "simplex") == ["1"] {
+                w.simplex_said += 1;
+            } else {
+                w.simplex_unsaid += 1;
+            }
             if w.fail_computer_reads > 0 {
                 w.fail_computer_reads -= 1;
                 return refuse(StatusCode::SERVICE_UNAVAILABLE, "a failed read, as asked");
