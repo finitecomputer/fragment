@@ -405,10 +405,14 @@ fn error_of(e: &Value) -> String {
         if let Some(t) = inner["type"].as_str() {
             parts.push(t.to_string());
         }
-        for k in ["cmdErr", "smpErr", "agentErr"] {
+        for k in ["cmdErr", "smpErr", "agentErr", "brokerErr"] {
             if let Some(t) = inner[k]["type"].as_str() {
                 parts.push(t.to_string());
             }
+        }
+        // a server not reached: how (`NETWORK` `NETLSError`, `TIMEOUT`, …)
+        if let Some(t) = inner["brokerErr"]["networkError"]["type"].as_str() {
+            parts.push(t.to_string());
         }
         if let Some(c) = inner["errContext"].as_str() {
             parts.push(c.to_string());
@@ -471,6 +475,9 @@ mod tests {
         assert_eq!(skipped[0].shared, None, "a skip is no message of its sender's");
         assert_eq!(fixture("prohibited"), Resp::Error { what: "errorAgent CMD PROHIBITED synchronizeRatchet: not allowed".into() });
         assert_eq!(fixture("largeMsg"), Resp::Error { what: "errorStore largeMsg".into() });
+        // a server not reached says how (a preview computer's, 2026-10-25)
+        let broker = r#"{"corrId":"2","resp":{"type":"chatCmdError","chatError":{"type":"errorAgent","agentError":{"type":"BROKER","brokerAddress":"smp://a@smp5.simplex.im","brokerErr":{"type":"NETWORK","networkError":{"type":"NETLSError","tlsError":"HandshakeFailed"}}}}}}"#;
+        assert_eq!(parse(broker).expect("a frame").resp, Resp::Error { what: "errorAgent BROKER NETWORK NETLSError".into() });
         assert_eq!(fixture("contactDeleted"), Resp::Deleted { contact: 4, by_them: false });
         assert_eq!(fixture("contactConnectionDeleted"), Resp::ConnDeleted { conn: 2 });
         // a voice message and its file, received (the lab's `voice_against_the_real_core`)

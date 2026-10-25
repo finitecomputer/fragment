@@ -246,3 +246,23 @@ section 3's trust note) as far as a container whose agent is root allows.
 | **The bridge's new dependency: `k256`** (=0.13.4, BIP-340 only, the cell's own pin), in `images/` | Checking tickets and signing as the door | — | Adds k256's curve arithmetic to every image's bridge (about a dozen crates in the images lock) | Every image's bridge |
 | **Known gaps** | | | (a) An unlink made in Settings whose ticket never reaches the bridge (its pane closed first) closes the door at the platform, while the person's app stays linked; what they send is refused at the platform and logged, until they unlink in their app or the owner links again. (b) Unlinked from the person's side, the bridge forgets its key, but the platform keeps the public half until the owner's next link or unlink (it signs nothing: its private half is gone) | |
 | **Tests**: the platform's half in the `computers` lane (the stub's `door` commands): a stranger is given no ticket; the owner's is signed by the agent fragment's key, for this computer, for 10 minutes; a relayed record with no door's signature, posted with the agent's own key, is refused; one signed by another key, before and after linking, is refused; the bridge's check of the ticket passes and its redeem registers a key; the same ticket again is refused; a record the door's key signs is taken; after the unlink, it is refused. Unit tests: the shared vectors (core and bridge), `take` (unsigned, forged, another act, replay, after a restart, while linked, no key), the session's view, the key's file mode, a sealed record, `effects` refusing an app's relayed record. By hand and in the Docker lane: no ticket 403, a forged one 403, the invitation hidden from another page, the key registered, its file 0600 and in no process's environment, the unlink closing the door | | | | |
+
+## 8. Reaching SimpleX's servers from a Cloudflare computer (`claude/simplex-port`)
+
+Paul's first link on preview (2026-10-25) failed: "SimpleX said:
+errorAgent BROKER". Measured from a preview computer on the canary image
+(an e2e person's agent ran the probe in its terminal): DNS, IPv4 and IPv6
+work, and TCP connects on 443 and 5223. A TLS hello on 443 that names no
+server (SNI) is reset, to SimpleX's servers and to example.com alike; the
+same hello naming one completes. On 5223 both complete. A SimpleX server
+on 443 serves its website to a hello with a name and its protocol to one
+without, so the core sends none there, and so its default (presets on
+443) fails on Cloudflare. The core with SMP on 5223 made its invitation
+there and subscribed. XFTP's preset servers listen on 443 alone (checked
+on 5223, 5443, 8443): an upload from the computer was reset the same way.
+
+| What, where | Why | To remove it | If it misbehaves | Every computer? |
+|---|---|---|---|---|
+| **SMP on 5223** (`--smp-web-port-servers off`, `run.rs` `core_args`) | Cloudflare Containers reset a TLS hello without SNI on 443 | Drop the flag (once Cloudflare passes such a hello) | A network that blocks 5223 but not 443 would reach no SMP server: not Cloudflare's. The phone's own servers are reached on 5223 too | Linked agents' cores |
+| **Files do not arrive yet** (XFTP, on 443 alone) | The same reset, with no other port to use | One of: (a) a TCP relay through the cell (a Worker's `connect()`, raw TCP that Containers do not inspect), held to SimpleX's XFTP hosts on 443; (b) Tor in the image (its hello names a server; SimpleX's presets have onion addresses); (c) Cloudflare passing a hello without SNI where nothing intercepts it (an issue for Paul to post); (d) a SOCKS proxy off Cloudflare. **A decision for Paul** | A voice note or photo from the phone is posted, 3 minutes on (`FILE_WAIT_MS`: the core retries an unreachable server for good, and says nothing), as a note that it did not arrive, and the agent answers that; a text is unaffected. The agent's replies never send files (they are noted) | Linked agents' cores |
+| **The error says how** (`wire.rs` `error_of`: `brokerErr` and its `networkError`), as "errorAgent BROKER NETWORK NETLSError" | It said only "BROKER", which hid this | | None | No |

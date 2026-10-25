@@ -414,6 +414,14 @@ core, `simplex-chat`, one per linked agent, as a child process, driven
 over its bot API (`-p`, loopback only) by one task, so nothing else ever
 drives it.
 
+- **SMP on port 5223, never 443** (`--smp-web-port-servers off`,
+  `simplex/run.rs` `core_args`). A SimpleX server on 443 takes its
+  protocol only from a TLS hello that names no server (SNI), and
+  Cloudflare Containers reset every such hello on 443: a core on a
+  computer reaches SMP servers on 5223, and XFTP's (files: a voice note, a
+  photo), on 443 alone, not at all yet. A file not received within 3
+  minutes (`FILE_WAIT_MS`) is given up on: its message is posted with a
+  note that it did not arrive.
 - **Only where the image names the core** (`BRIDGE_SIMPLEX_BIN`), and
   **only while the computer is always on** (its view's `alwaysOn`: the
   always-on seat; docs/billing.md). A computer that sleeps would hear
