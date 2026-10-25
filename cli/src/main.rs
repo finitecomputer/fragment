@@ -434,7 +434,8 @@ enum OperatorCmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
-    /// One person: their seat, org, ledger and computer
+    /// One person: their seat (and whether they let its computer sleep),
+    /// org, ledger and computer
     Person {
         npub: String,
         #[arg(long)]
@@ -1236,7 +1237,14 @@ fn run(cli: Cli) -> Result<()> {
             for p in v["people"].as_array().into_iter().flatten() {
                 let seat = match &p["seat"] {
                     Value::Null => "no seat".to_string(),
-                    s => format!("{} {}{}", s["kind"].as_str().unwrap_or("?"), if s["comped"] == true { "comped" } else { "paid" }, if s["good"] == true { "" } else { " (lapsed)" }),
+                    s => format!(
+                        "{} {}{}{}",
+                        s["kind"].as_str().unwrap_or("?"),
+                        if s["comped"] == true { "comped" } else { "paid" },
+                        // why a good always-on seat's computer is not always on
+                        if s["kind"] == "seat_always_on" && s["sleeps"] == true { ", lets it sleep" } else { "" },
+                        if s["good"] == true { "" } else { " (lapsed)" }
+                    ),
                 };
                 println!("{}  {}  {seat}  {}", p["npub"].as_str().unwrap_or("?"), p["email"].as_str().unwrap_or("-"), p["org"]["name"].as_str().unwrap_or(""));
             }

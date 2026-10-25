@@ -155,8 +155,8 @@ pub fn admin(s: &mut Suite, api: &Api) -> Result<()> {
     let path = file.to_string_lossy().to_string();
     let listed = s.cli_json(api, &home, &["operator", "people", "--q", &ivy_email, "--key-file", &path, "--json"]);
     s.ok(
-        "`fragment operator people --q` with the operator key's file finds them too",
-        listed.as_ref().is_ok_and(|v| v["people"].as_array().is_some_and(|p| p.iter().any(|p| p["npub"] == ivy_id.as_str()))),
+        "`fragment operator people --q` with the operator key's file finds them too, their seat saying whether they let its computer sleep",
+        listed.as_ref().is_ok_and(|v| v["people"].as_array().is_some_and(|p| p.iter().any(|p| p["npub"] == ivy_id.as_str() && p["seat"]["sleeps"] == false))),
         format!("{listed:?}"),
     );
     let made = s.cli_json(api, &home, &["operator", "trials", "--name", "From the CLI", "--days", "30", "--capacity", "1", "--key-file", &path, "--json"]);
@@ -244,6 +244,20 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
     b.eval(&page, "(() => { const f = document.getElementById('search'); f.q.value = 'operator@'; f.requestSubmit(); })()")?;
     let found = b.until(&page, "[...document.querySelectorAll('#people-rows tr')].length === 1 && document.querySelector('#people-rows tr').textContent.includes('operator@e2e.test')", wait);
     s.ok("it finds a person by the start of their email", found, b.eval(&page, "document.getElementById('people-rows').textContent")?);
+    // an always-on seat's holder who lets its computer sleep: the list and
+    // their page say so, why their computer is not always on
+    let sleeper = api.person()?;
+    let sleeper_email = Api::email_of(&sleeper);
+    let r = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": sleeper_email, "kind": "seat_always_on" })))?;
+    let chose = api.signed(&sleeper, "PUT", "/api/seat", Some(&json!({ "sleeps": true })))?;
+    anyhow::ensure!(r.status == 200 && chose.status == 200, "an always-on seat, let sleep: {r} {chose}");
+    b.eval(&page, &format!("(() => {{ const f = document.getElementById('search'); f.q.value = {sleeper_email:?}; f.requestSubmit(); }})()"))?;
+    let listed = b.until(&page, "[...document.querySelectorAll('#people-rows tr')].length === 1 && document.querySelector('#people-rows tr').textContent.includes('always-on comped, lets it sleep')", wait);
+    if listed {
+        b.click(&page, "#people-rows tr")?;
+    }
+    let shown = listed && b.until(&page, "!document.getElementById('person').hidden && document.getElementById('person').textContent.includes('always-on comped, lets it sleep')", wait);
+    s.ok("a seat whose holder lets its computer sleep says so, listed and on their page", shown, b.eval(&page, "[document.getElementById('people-rows').textContent, document.getElementById('person').textContent]")?);
 
     b.click(&page, "#tabs button[data-tab=trials]")?;
     b.eval(&page, "(() => { const f = document.getElementById('trial-new'); f.elements.name.value = 'From the page'; f.elements.days.value = '9'; f.requestSubmit(); })()")?;
