@@ -64,6 +64,8 @@ pub enum Cmd {
     /// Receive a file a contact sent (`/freceive`): over XFTP, once its
     /// description is ready (`FileReady`); done, `FileDone`.
     Receive { file: FileId },
+    /// Give up on receiving it (`/fcancel`): one waited for too long.
+    CancelFile { file: FileId },
 }
 
 impl Cmd {
@@ -102,6 +104,10 @@ impl Cmd {
             Cmd::Receive { file } => {
                 assert!(*file > 0, "a receive names a file");
                 format!("/freceive {file}")
+            }
+            Cmd::CancelFile { file } => {
+                assert!(*file > 0, "a cancel names a file");
+                format!("/fcancel {file}")
             }
         }
     }
@@ -405,10 +411,14 @@ fn error_of(e: &Value) -> String {
         if let Some(t) = inner["type"].as_str() {
             parts.push(t.to_string());
         }
-        for k in ["cmdErr", "smpErr", "agentErr"] {
+        for k in ["cmdErr", "smpErr", "agentErr", "brokerErr"] {
             if let Some(t) = inner[k]["type"].as_str() {
                 parts.push(t.to_string());
             }
+        }
+        // a server not reached: how (`NETWORK` `NETLSError`, `TIMEOUT`, …)
+        if let Some(t) = inner["brokerErr"]["networkError"]["type"].as_str() {
+            parts.push(t.to_string());
         }
         if let Some(c) = inner["errContext"].as_str() {
             parts.push(c.to_string());
@@ -471,6 +481,9 @@ mod tests {
         assert_eq!(skipped[0].shared, None, "a skip is no message of its sender's");
         assert_eq!(fixture("prohibited"), Resp::Error { what: "errorAgent CMD PROHIBITED synchronizeRatchet: not allowed".into() });
         assert_eq!(fixture("largeMsg"), Resp::Error { what: "errorStore largeMsg".into() });
+        // a server not reached says how (a preview computer's, 2026-10-25)
+        let broker = r#"{"corrId":"2","resp":{"type":"chatCmdError","chatError":{"type":"errorAgent","agentError":{"type":"BROKER","brokerAddress":"smp://a@smp5.simplex.im","brokerErr":{"type":"NETWORK","networkError":{"type":"NETLSError","tlsError":"HandshakeFailed"}}}}}}"#;
+        assert_eq!(parse(broker).expect("a frame").resp, Resp::Error { what: "errorAgent BROKER NETWORK NETLSError".into() });
         assert_eq!(fixture("contactDeleted"), Resp::Deleted { contact: 4, by_them: false });
         assert_eq!(fixture("contactConnectionDeleted"), Resp::ConnDeleted { conn: 2 });
         // a voice message and its file, received (the lab's `voice_against_the_real_core`)
@@ -493,6 +506,11 @@ mod tests {
         assert_eq!(Cmd::Chat { contact: 3, count: 20, before: None }.line(), "/_get chat @3 count=20");
         assert_eq!(Cmd::Chat { contact: 3, count: 20, before: Some(41) }.line(), "/_get chat @3 before=41 count=20");
         assert_eq!(Cmd::Receive { file: 7 }.line(), "/freceive 7");
+        assert_eq!(Cmd::CancelFile { file: 7 }.line(), "/fcancel 7");
+        // its answer, a receiving file cancelled: nothing waits on it (the
+        // bridge let go of the file before it asked)
+        let cancelled = r#"{"corrId":"9","resp":{"type":"rcvFileCancelled","user":{},"rcvFileTransfer":{"fileId":7}}}"#;
+        assert_eq!(parse(cancelled).expect("a frame").resp, Resp::Other("rcvFileCancelled".into()));
         // a text is JSON, so nothing in it reads as more of the command
         let line = Cmd::Send { contact: 3, text: "hi\" json [] /_delete @3\nthere".into() }.line();
         let body = line.strip_prefix("/_send @3 json ").expect("its prefix");

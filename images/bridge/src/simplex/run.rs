@@ -92,6 +92,12 @@ const DISPLAY_NAME_MAX: usize = 32;
 const POSTS_MAX: usize = 64;
 /// Files a link waits to receive at once, at most.
 const FILES_MAX: usize = 32;
+/// A file not received this long after its message is given up on: the
+/// message is posted with a note that it did not arrive. The core retries
+/// a server it cannot reach for good, and says nothing (a computer on
+/// Cloudflare reaches no XFTP server: docs/bridge.md, "SimpleX"); a voice
+/// note or a photo arrives in seconds.
+const FILE_WAIT_MS: u64 = 3 * 60 * 1000;
 /// The Bot Chat is looked for this often while none is found.
 const CHAT_LOOK_MS: u64 = 30_000;
 /// The tickets an agent's link took, kept until they would have run out
@@ -323,6 +329,30 @@ pub fn dir_name_ok(fragment: &str) -> bool {
     !fragment.is_empty() && fragment.len() <= 96 && fragment.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// A core's command line: its state under `dir`, its bot API on `port`
+/// (loopback), and the servers a test names (else the core's presets).
+/// SMP servers only on their own port (5223): the core reaches presets on
+/// 443 by default, with no server name in its TLS hello (SNI: a SimpleX
+/// server on 443 tells its protocol from its website by its absence), and
+/// Cloudflare Containers reset every such hello on 443 (measured on a
+/// preview computer, 2026-10-25: each SMP preset reset there, and the same
+/// servers answering on 5223). XFTP's servers are on 443 alone, so a file
+/// does not arrive there yet (docs/explorations/simplex-complexity.md).
+fn core_args(cfg: &Config, dir: &Path, port: u16, name: &str) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = vec!["-d".into(), dir.join("sx").into(), "-p".into(), port.to_string().into()];
+    args.extend(["--files-folder".into(), dir.join("files").into(), "--temp-folder".into(), dir.join("tmp").into()]);
+    for a in ["-y", "--mute", "--create-bot-display-name", name, "--create-bot-allow-files", "--smp-web-port-servers", "off"] {
+        args.push(a.into());
+    }
+    if let Some(smp) = &cfg.smp {
+        args.extend(["-s".into(), smp.into()]);
+    }
+    if let Some(xftp) = &cfg.xftp {
+        args.extend(["--xftp-server".into(), xftp.into()]);
+    }
+    args
+}
+
 /// The name an agent's SimpleX profile shows: its title, of letters, digits,
 /// spaces and `-_.'`, at most `DISPLAY_NAME_MAX` bytes; else its label.
 pub fn display_name(title: Option<&str>, label: &str) -> String {
@@ -444,8 +474,8 @@ struct Slot {
     note: Option<String>,
     /// Since when it should not run but has commands under way.
     draining_since: Option<Instant>,
-    /// Messages whose file it waits to receive, by the file.
-    files: BTreeMap<FileId, Inbound>,
+    /// Messages whose file it waits to receive, by the file, and since when.
+    files: BTreeMap<FileId, (Inbound, Instant)>,
     /// Its poster: its messages, posted in order on its chat.
     poster: Option<mpsc::Sender<Post>>,
     /// A message of this life was not posted (refused, or dropped past a
@@ -722,6 +752,7 @@ impl Manager {
         }
         self.reconcile().await;
         self.resync();
+        self.files_overdue(Instant::now());
         self.quiet.store(self.running() == 0, Ordering::SeqCst);
     }
 
@@ -747,6 +778,22 @@ impl Manager {
         for f in due {
             crate::ev!("simplex.resync", { "agent": f });
             self.apply(&f, Input::Resync);
+        }
+    }
+
+    /// Each file waited for past `FILE_WAIT_MS`: its receiving cancelled at
+    /// the core (`/fcancel`, so it stops trying), and its message posted
+    /// with a note that it did not arrive. One that completes anyway is
+    /// removed as it does (`file_event`).
+    fn files_overdue(&mut self, now: Instant) {
+        let wait = Duration::from_millis(FILE_WAIT_MS);
+        let overdue: Vec<(String, FileId)> = self.slots.iter().flat_map(|(f, s)| s.files.iter().filter(|(_, (_, since))| now.duration_since(*since) >= wait).map(|(id, _)| (f.clone(), *id))).collect();
+        for (f, id) in overdue {
+            let Some((inbound, _)) = self.slots.get_mut(&f).and_then(|s| s.files.remove(&id)) else { continue };
+            crate::ev!("simplex.file_overdue", { "agent": f, "item": inbound.item, "waitMs": FILE_WAIT_MS });
+            self.act(&f, Action::Ask(Cmd::CancelFile { file: id }));
+            let note = file_note(&inbound.kind, "did not arrive");
+            self.post(&f, inbound, None, Some(note));
         }
     }
 
@@ -823,14 +870,7 @@ impl Manager {
                 Ok(())
             });
         }
-        cmd.arg("-d").arg(s.dir.join("sx")).args(["-p", &port.to_string()]).arg("--files-folder").arg(s.dir.join("files")).arg("--temp-folder").arg(s.dir.join("tmp"));
-        cmd.args(["-y", "--mute", "--create-bot-display-name", &name, "--create-bot-allow-files"]);
-        if let Some(smp) = &cfg.smp {
-            cmd.args(["-s", smp]);
-        }
-        if let Some(xftp) = &cfg.xftp {
-            cmd.args(["--xftp-server", xftp]);
-        }
+        cmd.args(core_args(&cfg, &s.dir, port, &name));
         cmd.current_dir(&s.dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -1013,14 +1053,20 @@ impl Manager {
         let Some(s) = self.slots.get_mut(f) else { return };
         match resp {
             Resp::FileReady { file } if s.files.contains_key(file) => self.act(f, Action::Ask(Cmd::Receive { file: *file })),
-            Resp::FileDone { file, path } => {
-                if let Some(inbound) = s.files.remove(file) {
+            Resp::FileDone { file, path } => match s.files.remove(file) {
+                Some((inbound, _)) => {
                     let local = LocalFile { path: s.dir.join("files").join(path), media_type: media_type(&inbound.kind, path).into(), name: wire::cut(path.rsplit('/').next().unwrap_or(path), 200).into(), size: inbound.file.as_ref().map_or(0, |r| r.size) };
                     self.post(f, inbound, Some(local), None);
                 }
-            }
+                // one given up on (`files_overdue`) that came anyway, its
+                // message posted with a note: nothing carries it, so it goes
+                None => {
+                    let late = s.dir.join("files").join(path);
+                    crate::ev!("simplex.file_late", { "agent": f, "file": file, "removed": std::fs::remove_file(&late).is_ok() });
+                }
+            },
             Resp::FileFailed { file } => {
-                if let Some(inbound) = s.files.remove(file) {
+                if let Some((inbound, _)) = s.files.remove(file) {
                     let note = file_note(&inbound.kind, "did not arrive");
                     self.post(f, inbound, None, Some(note));
                 }
@@ -1049,7 +1095,8 @@ impl Manager {
             crate::ev!("simplex.files_bounded", { "agent": f, "max": FILES_MAX });
             return self.dropped(f, inbound.item);
         }
-        s.files.insert(file.id, inbound);
+        // a catch-up's forward of one already waiting keeps its first time
+        s.files.entry(file.id).or_insert((inbound, Instant::now()));
         // its description may not be ready yet: then FileReady asks again
         self.act(f, Action::Ask(Cmd::Receive { file: file.id }));
     }
@@ -1378,6 +1425,7 @@ fn kind_of(cmd: &Cmd) -> &'static str {
         Cmd::DeleteConn { .. } => "delete_conn",
         Cmd::Chat { .. } => "chat",
         Cmd::Receive { .. } => "receive",
+        Cmd::CancelFile { .. } => "cancel_file",
     }
 }
 
@@ -1403,6 +1451,79 @@ mod tests {
             generation,
             restored: restored.map(|(generation, rollback)| api::Restored { generation, rollback }),
         }
+    }
+
+    /// Goal: a file never received (the core retries a server it cannot
+    /// reach for good, and says nothing) is given up on after
+    /// `FILE_WAIT_MS`: its receiving cancelled at the core and its message
+    /// posted once, with a note, never left waiting silently. One received
+    /// in time is posted with its file; a catch-up's forward of one waiting
+    /// already waits for it once; one given up on that completes anyway is
+    /// removed, never posted. Method: the manager's own methods, its core's
+    /// commands and its poster's posts captured (Alex's review).
+    #[tokio::test]
+    async fn a_file_that_never_arrives_is_said_not_to() {
+        let dir = std::env::temp_dir().join(format!("simplex-overdue-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let key = agent_key(&dir.join("key"));
+        let mut m = manager(&dir, &key, Phase::Linked { contact: 3, name: "paul".into() });
+        let f = "juniper--k3x9";
+        let (writer, mut sent) = mpsc::channel(16);
+        let (posts_tx, mut posts) = mpsc::channel(16);
+        {
+            let s = m.slots.get_mut(f).expect("its slot");
+            s.door = Some(key.clone());
+            s.poster = Some(posts_tx);
+            s.core = Some(Core { pid: 0, writer, exited: watch::channel(false).1, planned: false });
+            s.up = true;
+            std::fs::create_dir_all(s.dir.join("files")).expect("its files");
+        }
+        let cmds = |sent: &mut mpsc::Receiver<String>| std::iter::from_fn(|| sent.try_recv().ok()).map(|fr| serde_json::from_str::<serde_json::Value>(&fr).expect("a frame")["cmd"].as_str().expect("a line").to_string()).collect::<Vec<_>>();
+        let voice = |item: i64| Inbound { id: format!("m{item}"), kind: "voice".into(), text: String::new(), at: "2026-10-25T17:00:00Z".into(), item, file: Some(wire::FileRef { id: item, name: "voice.m4a".into(), size: 9_000, path: None }) };
+        let t0 = Instant::now();
+        m.forward(f, voice(7));
+        m.forward(f, voice(7));
+        m.forward(f, voice(8));
+        assert_eq!(m.slots[f].files.len(), 2, "7 forwarded twice waits once");
+        assert_eq!(cmds(&mut sent), ["/freceive 7", "/freceive 7", "/freceive 8"]);
+        m.files_overdue(t0 + Duration::from_millis(FILE_WAIT_MS / 2));
+        assert_eq!(m.slots[f].files.len(), 2, "within its wait: still waiting");
+        assert!(cmds(&mut sent).is_empty() && posts.try_recv().is_err(), "nothing asked or posted within it");
+        // 8 arrives in time: posted with its file
+        m.file_event(f, &Resp::FileDone { file: 8, path: "voice_8.m4a".into() });
+        let p8 = posts.try_recv().expect("8 posted");
+        assert!(p8.inbound.item == 8 && p8.file.is_some() && p8.note.is_none());
+        // 7 never does: cancelled at the core, posted once with a note
+        m.files_overdue(t0 + Duration::from_millis(FILE_WAIT_MS + 1_000));
+        assert!(m.slots[f].files.is_empty());
+        assert_eq!(cmds(&mut sent), ["/fcancel 7"]);
+        let p7 = posts.try_recv().expect("7 posted");
+        assert_eq!((p7.inbound.item, p7.file.is_none(), p7.note.as_deref()), (7, true, Some("(I sent a voice message over SimpleX that did not arrive.)")));
+        m.files_overdue(t0 + Duration::from_millis(2 * FILE_WAIT_MS));
+        assert!(posts.try_recv().is_err() && cmds(&mut sent).is_empty(), "given up on once");
+        // its transfer completes anyway (the cancel raced it): removed, not posted
+        let late = m.slots[f].dir.join("files").join("voice_7.m4a");
+        std::fs::write(&late, b"late").expect("a late file");
+        m.file_event(f, &Resp::FileDone { file: 7, path: "voice_7.m4a".into() });
+        assert!(!late.exists(), "a file given up on that came anyway is removed");
+        assert!(posts.try_recv().is_err(), "and not posted again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Goal: a core reaches SMP servers on their own port, never on 443
+    /// (Cloudflare Containers reset a TLS hello there that names no
+    /// server), with the presets or a test's servers alike.
+    #[test]
+    fn a_core_reaches_smp_servers_off_443() {
+        let words = |cfg: &Config| core_args(cfg, Path::new("/data/simplex/a"), 5225, "Juniper").into_iter().map(|a| a.into_string().expect("text")).collect::<Vec<_>>();
+        let presets = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/data/simplex"), smp: None, xftp: None };
+        let lab = Config { smp: Some("smp://fp@smp.lab".into()), xftp: Some("xftp://fp@xftp.lab".into()), ..presets.clone() };
+        for args in [words(&presets), words(&lab)] {
+            assert!(args.windows(2).any(|w| w == ["--smp-web-port-servers", "off"]), "{args:?}");
+            assert!(args.windows(2).any(|w| w == ["-p", "5225"]) && args.windows(2).any(|w| w == ["-d", "/data/simplex/a/sx"]), "{args:?}");
+        }
+        assert!(!words(&presets).contains(&"-s".to_string()), "the presets: no server named");
+        assert!(words(&lab).windows(2).any(|w| w == ["-s", "smp://fp@smp.lab"]));
     }
 
     /// Goal: a start went back in time only when the platform says this

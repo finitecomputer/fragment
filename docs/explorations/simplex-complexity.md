@@ -260,3 +260,23 @@ always-on owner a Set up that opens nothing.
 | **The view's `simplex`** (proto's `ComputerView`, `fragment_core::computer::does_simplex`): true while the computer is on the version that said so | Settings' gate | Drop the field | Add-only, absent when false | Every owner's view |
 | **The shell** (`shell.js`): Settings › SimpleX only with `simplex`, hidden (its nav link too) without it, and following the view while Settings are open (`refreshSimplex`: the list's socket tells the page, which redraws that section alone; Alex's review); `openSimplex` and the ticket listener refuse without it too, so no call to `/simplex/` or the door route is made for a computer without it | The coordinator: no broken SimpleX page for production's owners | Show it always again | **Order of rounds**: an image whose bridge predates this (the canary built from 145dd55 among them) never says so, so on a cell with this its owner sees no SimpleX until their computer runs an image built with it | Every person's Settings code (a platform release) |
 | **Tests**: `simplex_is_offered_only_on_an_image_whose_bridge_said_so` (core: never said, said, asleep, a deploy, a rollback); `its_reads_say_whether_its_image_does_simplex` (bridge, in process: with a core named and without); the Docker lane's stub (never says) and Hermes (says) cases; the shell-ui lane: a stub computer's view has no `simplex` and Settings show no SimpleX, then, Settings left open, the lever's word shows the section and its forgetting hides it, what was typed elsewhere kept. The core case covers a pin during a start and a crash before the bridge speaks again (Alex's review) | | | | |
+
+## 8. Reaching SimpleX's servers from a Cloudflare computer (`claude/simplex-port`)
+
+Paul's first link on preview (2026-10-25) failed: "SimpleX said:
+errorAgent BROKER". Measured from a preview computer on the canary image
+(an e2e person's agent ran the probe in its terminal): DNS, IPv4 and IPv6
+work, and TCP connects on 443 and 5223. A TLS hello on 443 that names no
+server (SNI) is reset, to SimpleX's servers and to example.com alike; the
+same hello naming one completes. On 5223 both complete. A SimpleX server
+on 443 serves its website to a hello with a name and its protocol to one
+without, so the core sends none there, and so its default (presets on
+443) fails on Cloudflare. The core with SMP on 5223 made its invitation
+there and subscribed. XFTP's preset servers listen on 443 alone (checked
+on 5223, 5443, 8443): an upload from the computer was reset the same way.
+
+| What, where | Why | To remove it | If it misbehaves | Every computer? |
+|---|---|---|---|---|
+| **SMP on 5223** (`--smp-web-port-servers off`, `run.rs` `core_args`) | Cloudflare Containers reset a TLS hello without SNI on 443 | Drop the flag (once Cloudflare passes such a hello) | A network that blocks 5223 but not 443 would reach no SMP server: not Cloudflare's. The phone's own servers are reached on 5223 too | Linked agents' cores |
+| **Files do not arrive yet** (XFTP, on 443 alone) | The same reset, with no other port to use | One of: (a) a TCP relay through the cell (a Worker's `connect()`, raw TCP that Containers do not inspect), held to SimpleX's XFTP hosts on 443; (b) Tor in the image (its hello names a server; SimpleX's presets have onion addresses); (c) Cloudflare passing a hello without SNI where nothing intercepts it (an issue for Paul to post); (d) a SOCKS proxy off Cloudflare. **A decision for Paul** | A voice note or photo from the phone is posted, 3 minutes on (`FILE_WAIT_MS`: the core retries an unreachable server for good, and says nothing), as a note that it did not arrive, and the agent answers that; its receiving is cancelled at the core (`/fcancel`), and one that completes anyway is removed, not posted (Alex's review); a text is unaffected. The agent's replies never send files (they are noted) | Linked agents' cores |
+| **The error says how** (`wire.rs` `error_of`: `brokerErr` and its `networkError`), as "errorAgent BROKER NETWORK NETLSError" | It said only "BROKER", which hid this | | None | No |
