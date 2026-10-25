@@ -340,8 +340,10 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   reference) byte for byte, through skopeo (`--preserve-digests`, each
   side's login minted by wrangler, in a file of its own: both are
   registry.cloudflare.com, where one Docker login holds one), and
-  refuses a copy whose manifest is not the source's digest. The Image
-  workflow runs both (below).
+  refuses a copy whose manifest is not the source's digest. Either then
+  waits, 40 minutes at most, until Cloudflare has prepared the image on
+  the account's network (xtask/src/prepare.rs), so the deploy that pins
+  it finds it ready. The Image workflow runs both (below).
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
   logic, host-tested; sealing at rest is `seal.rs`), `crates/nip98`,
   `crates/templates` (the release's files: `templates/`, the shell's,

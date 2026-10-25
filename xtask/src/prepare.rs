@@ -1,6 +1,8 @@
 //! A computer image prepared on Cloudflare's network before anything a
 //! deploy changes: `deploy` waits for each image the config pins to be
-//! ready to run, and refuses, having changed nothing, when one is not.
+//! ready to run, and refuses, having changed nothing, when one is not;
+//! and the Image workflow's push and copy wait for the image they made, so
+//! a promotion's deploy finds it ready (image.rs).
 //!
 //! Why ours, beside wrangler's own: wrangler prepares each named image as
 //! `wrangler deploy` starts (`waitForImagePreparation` in 4.145.0: the
@@ -25,6 +27,9 @@ use serde_json::{json, Value};
 /// refuses, having changed nothing. Shorter than its CI job's limit
 /// (ci.yml, `deploy`'s 45 minutes) by the build, the deploy and its checks.
 pub(crate) const DEPLOY_LIMIT: Duration = Duration::from_secs(20 * 60);
+/// How long a push or a copy waits for the image it made: within the
+/// Image workflow's 60 minutes, beside a push's build (image.yml).
+pub(crate) const IMAGE_LIMIT: Duration = Duration::from_secs(40 * 60);
 /// The pause between two asks about an image still pending.
 const POLL: Duration = Duration::from_secs(5);
 /// How often a wait says how long it has waited.
