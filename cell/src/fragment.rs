@@ -1412,7 +1412,7 @@ impl FragmentCell {
     /// every share-link holder (`view`).
     pub(crate) fn close_sockets(&self, tag: &str, reason: &str) {
         for ws in self.state.get_websockets_with_tag(tag) {
-            let _ = ws.close(Some(4003), Some(reason));
+            let _ = ws.close(Some(crate::live::ACCESS_ENDED), Some(reason));
         }
     }
 }
