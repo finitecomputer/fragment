@@ -44,7 +44,7 @@ use sha2::{Digest, Sha256};
 use super::computers::{agent_replies, turn_of, work_of, AGENT_JSON};
 use super::jobs::{records, settle, started};
 use super::signin::site_cookie;
-use crate::api::{Api, Call, Reply};
+use crate::api::{Api, Call, Reply, Socket};
 use fragment_nip98::Keys;
 use crate::browser::{Browser, Page};
 use crate::Suite;
@@ -248,6 +248,72 @@ fn mic_after_access_ends(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: 
         "its chat deleted (4004) while the browser is asked whether it may record, the answer that comes after starts nothing: no microphone, no memo",
         up && asking && deleted.status == 200 && closed && seen["card"] == false && seen["asked"] == 0 && seen["on"] == false,
         json!({ "up": up, "asking": asking, "deleted": deleted.status, "closed": closed, "seen": seen }),
+    );
+    chrome.close(page)?;
+    Ok(())
+}
+
+/// A chat page left open whose person signed out elsewhere (Austin,
+/// 2026-10-25: in Firefox a new chat's page stayed empty for minutes, even
+/// after a reload, while his phone opened it; a page in another tab whose
+/// session had ended dialled its socket again every half minute, each
+/// refused (401), and Firefox holds back every socket to the same address
+/// and path, `/__live` for every fragment, for up to a minute after each
+/// refusal). Its socket, asked again who it is, is closed to reconnect
+/// (4001), and the one it dials then names no one who may see the chat.
+/// Valid: that socket is opened and closed at once, for good (4003), not
+/// refused by a status the page cannot read: the page says its access
+/// changed and dials no more. A socket that names no page (the CLI's) is
+/// still refused by its status (401).
+fn signed_out_page(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let name = s.named(api, owner, "chat-signed-out")?;
+    let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "making the chat whose page signs out: {made}");
+    s.owned(&made.body, owner);
+    let member = api.person()?;
+    let shared = api.share(&name, &api.identity(&member)?, "editor")?;
+    anyhow::ensure!(shared.status == 200, "sharing it with the member: {shared}");
+    let session = api.sign_in(&Api::email_of(&member))?;
+    let site = format!("fragment_site={}", site_cookie(api, &session, &name)?);
+
+    // the member's page, open, its dials of `__live` counted from here
+    let elsewhere = chrome.another_context()?;
+    chrome.set_cookie_in(&elsewhere, &format!("{}/", api.base), "fragment_session", &session)?;
+    let page = chrome.open_in(&elsewhere, &api.site_url(&name, "__signin?return=/"))?;
+    let up = chrome.until(&page, "document.getElementById('say')?.dataset.ready === '1'", wait);
+    let counted = "(() => { window.__dials = 0; const Real = WebSocket; window.WebSocket = class extends Real { constructor(url, ...rest) { super(url, ...rest); if (String(url).includes('/__live')) window.__dials += 1; } }; return true; })()";
+    chrome.eval(&page, counted)?;
+
+    // signed out elsewhere: the platform session ends, and every site session made from it
+    let ended = api.unsigned("POST", "/api/test/registry", Some(&json!({ "signins": { "expireSession": session } })))?;
+    anyhow::ensure!(ended.status == 200, "ending the member's session: {ended}");
+    let own_page = match Socket::on_host(api, &name, "__live", None, Some(&site), Some(&api.site_origin(&name))) {
+        Ok(mut socket) => match socket.next() {
+            Ok(frame) => format!("opened: {frame}"),
+            Err(e) => format!("{e:#}"),
+        },
+        Err(e) => format!("refused: {e:#}"),
+    };
+    s.ok("a page's socket whose person signed out is opened and closed for good (4003), not refused by a status its page cannot read", own_page == "closed 4003", &own_page);
+    let unnamed = match Socket::on_host(api, &name, "__live", None, Some(&site), None) {
+        Ok(_) => "opened".to_string(),
+        Err(e) => format!("refused: {e:#}"),
+    };
+    s.ok("a socket that names no page is still refused by its status (members only: 401)", unnamed.contains("401"), &unnamed);
+
+    // the open page's socket asked again who it is (a test lever ages the
+    // check), at its next frame: the member typing
+    let aged = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "age-live", "ms": fragment_proto::limits::LIVE_IDENTITY_MS })))?;
+    chrome.eval(&page, "(() => { const t = document.getElementById('text'); t.value = 'still here?'; t.dispatchEvent(new Event('input')); return true; })()")?;
+    let told = chrome.until(&page, "document.getElementById('banner-text')?.textContent === 'Your access to this chat changed: reload the page.'", wait);
+    // past the library's first waits (half to one and a half of 1 s, then 2 s): it would have dialled again
+    std::thread::sleep(Duration::from_secs(5));
+    let seen = chrome.eval(&page, "({ dials: window.__dials, said: document.getElementById('banner').hidden ? null : document.getElementById('banner-text').textContent })")?;
+    s.ok(
+        "the open page, asked again who it is, dials once more, is closed for good (4003), says its access changed, and dials no more",
+        up && aged.status == 200 && told && seen["dials"] == 1,
+        json!({ "up": up, "aged": aged.status, "told": told, "seen": seen }),
     );
     chrome.close(page)?;
     Ok(())
@@ -893,6 +959,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     still_loading_in_frame(s, api, &mut chrome, &chat_name)?;
     mic_in_frame(s, api, &mut chrome, &chat_name)?;
     mic_after_access_ends(s, api, &mut chrome, &owner, &member, &member_session)?;
+    signed_out_page(s, api, &mut chrome, &owner)?;
 
     polish::check(s, api, &owner, &owner_session, &mut chrome, &label)?;
     polish::working_card(s, api, &owner, &mut chrome, &identity, &agent_name)?;

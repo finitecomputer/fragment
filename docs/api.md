@@ -2527,6 +2527,15 @@ at its next frame after that the registry is asked again, with the
 credential it connected with: a sign-out, an ended session, or a revoked
 key closes it with 4001, and so does a fragment that woke from
 hibernation (it keeps no credential) or a registry that cannot answer.
+A page's socket (its upgrade names the fragment's own origin and is not
+signed) that the fragment refuses, 401 or 403 (its person signed out,
+or may no longer see it), is opened and closed at once, for good, with
+4003, never refused by its status: a browser shows a page no refused
+upgrade's status, so its library dialled again for as long as the page
+stayed open, and Firefox holds back every socket to the same address
+and path (`/__live`, every fragment's) for up to a minute after each
+refused one (cell/src/live.rs `refused_page`). A socket that names no
+page (the CLI's, a computer's) is refused by its status, as any call.
 A fragment holds at most 1000 live sockets (`limits::LIVE_SOCKETS_MAX`),
 and one principal at most 8 (`limits::LIVE_SOCKETS_PER_PRINCIPAL`); past
 either a new one is refused (429). Opening a socket at the public role
