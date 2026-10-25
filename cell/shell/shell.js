@@ -1451,7 +1451,13 @@ function simplexSection() {
   fillSimplex(s);
   return s;
 }
-const simplexKey = (c) => JSON.stringify([!!c?.simplex, !!c?.alwaysOn, (c?.agents ?? []).map((a) => a.fragment)]);
+const simplexKey = (c) => JSON.stringify([!!c?.simplex, !!c?.alwaysOn, (c?.agents ?? []).map((a) => a.fragment), state.seat?.good, state.seat?.kind, state.seat?.sleeps]);
+// Their seat as an action answered it (Billing's sleep choice, #609's
+// review): what Settings' SimpleX says follows it at once.
+function seatIs(seat) {
+  state.seat = seat;
+  refreshSimplex();
+}
 // A computer's view read again (its list's socket told of a change): the
 // section shown, changed or hidden as the view now says.
 function refreshSimplex() {
@@ -2295,7 +2301,7 @@ async function openSettings(push = true, failed = null) {
   leaveSidebar();
   // a credit pack's Checkout returning, before the ledger is read (its
   // settlement every load awaits, said by the one that renders)
-  const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => reopenSettings(), noSeatSaid, switchForm, support: state.support };
+  const billingHelpers = { api, el, section, line, actionLine, usd, reopen: () => reopenSettings(), noSeatSaid, switchForm, support: state.support, seatIs };
   const back = await returning(billingHelpers);
   if (lost()) return;
   const [ledger, mySeat, linked, uses, access] = await Promise.all([

@@ -1302,6 +1302,29 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "on": on.body, "off": off.body, "shown": shown, "kept": kept, "hidden": hidden }),
     );
     b.eval(&page, "(document.getElementById('build-prompt').value = document.getElementById('build-prompt').value.replace('kept as typed', ''), true)")?;
+    // a $200 seat's holder who lets their computer sleep is told how to take
+    // it back, as they tick Billing's box, with Settings left open (#609's
+    // review: the line read the seat as Settings first did)
+    let op_session = api.sign_in("operator@e2e.test")?;
+    let _ = api.approve(&op_session, &s.operator);
+    super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": true }))?;
+    let comped = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": email, "kind": "seat_always_on" })))?;
+    b.eval(&page, "(document.getElementById('settings').click(), true)")?;
+    let box_ = "[...document.querySelectorAll('#settings-page label')].find((l) => l.textContent.includes('Let my computer sleep'))?.querySelector('input')";
+    let set_up = "!!document.querySelector('#settings-simplex:not([hidden]) button.row')";
+    let ready = b.until(&page, &format!("!!({box_}) && {set_up}"), std::time::Duration::from_secs(30));
+    b.eval(&page, &format!("({box_}).click(), true"))?;
+    let told = b.until(&page, "(() => { const t = document.getElementById('settings-simplex')?.innerText ?? ''; return t.includes('Untick') && t.includes('Let my computer sleep'); })()", std::time::Duration::from_secs(30));
+    b.eval(&page, &format!("({box_}).click(), true"))?;
+    let back = b.until(&page, set_up, std::time::Duration::from_secs(30));
+    s.ok(
+        "a $200 seat's holder who ticks Billing's sleep box, Settings left open, is told in SimpleX to untick it; unticked, SimpleX offers Set up again",
+        comped.status == 200 && ready && told && back,
+        json!({ "comped": comped.status, "ready": ready, "told": told, "back": back, "simplex": b.eval(&page, "document.getElementById('settings-simplex')?.innerText ?? ''")? }),
+    );
+    // as it was for what follows: its computer let sleep, no SimpleX
+    shell(api, &session, "PUT", "/api/seat", Some(&json!({ "sleeps": true })), &[])?;
+    super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": false }))?;
     let account = b.eval(&page, ACCOUNT_SEEN)?;
     s.ok(
         "settings' Account says who is signed in, the email in bold, beside Sign out and Use another account (back to settings); a seat's holder is told nothing a guest is",

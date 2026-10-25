@@ -2208,6 +2208,9 @@ impl ComputerCell {
                 self.must(MetaKey::Id)?;
                 if self.lifecycle()?.always_on() != b.on {
                     self.drive(Event::AlwaysOn { on: b.on }).await?;
+                    // its owner's open pages read it again (Settings' SimpleX
+                    // says what always on means for it)
+                    self.tell_owner().await;
                 }
                 json_response(&self.view()?)
             }
