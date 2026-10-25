@@ -323,7 +323,9 @@ pub struct Saved {
     /// is cancelled at the core, then settled: only these are ever deleted
     /// when they arrive anyway, and a message that carries one is posted
     /// with its note, never waited for again (Alex's review of #610). At
-    /// most `ABANDONED_MAX`, the oldest settled let go first.
+    /// most `ABANDONED_MAX`: only a settled one is ever let go (the oldest
+    /// first), never a cancel still to be taken; no new file is received
+    /// while those and the files waiting would pass it (`forward`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub abandoned: BTreeMap<FileId, Abandoned>,
 }
@@ -842,9 +844,10 @@ impl Manager {
             s.cancel_at = None;
         }
         s.saved.abandoned.insert(id, state);
-        // bounded: one goes for each past `ABANDONED_MAX`
+        // bounded: a settled one goes for each past `ABANDONED_MAX`, never a
+        // cancel still to be taken (`forward` keeps those within it)
         while s.saved.abandoned.len() > ABANDONED_MAX {
-            let oldest = s.saved.abandoned.iter().find(|(_, a)| **a == Abandoned::Settled).or_else(|| s.saved.abandoned.iter().next()).map(|(k, _)| *k).expect("one");
+            let Some(oldest) = s.saved.abandoned.iter().find(|(_, a)| **a == Abandoned::Settled).map(|(k, _)| *k) else { break };
             s.saved.abandoned.remove(&oldest);
         }
         if let Err(e) = store(&s.dir, &s.saved) {
@@ -1197,6 +1200,16 @@ impl Manager {
         if s.files.len() >= FILES_MAX && !s.files.contains_key(&file.id) {
             crate::ev!("simplex.files_bounded", { "agent": f, "max": FILES_MAX });
             return self.dropped(f, inbound.item);
+        }
+        // no new file while the cancels still to be taken and the files
+        // waiting (each a cancel to come) would pass what the link keeps
+        // (Alex's review): nothing is asked of the core, and its message is
+        // posted with its note now, so no unsettled cancel is ever let go
+        let unsettled = s.saved.abandoned.values().filter(|a| **a == Abandoned::Cancelling).count();
+        if !s.files.contains_key(&file.id) && unsettled + s.files.len() >= ABANDONED_MAX {
+            crate::ev!("simplex.files_held_back", { "agent": f, "unsettled": unsettled, "waiting": s.files.len() });
+            let note = file_note(&inbound.kind, "did not arrive");
+            return self.post(f, inbound, None, Some(note));
         }
         // a catch-up's forward of one already waiting keeps its first time
         s.files.entry(file.id).or_insert((inbound, Instant::now()));
@@ -1744,6 +1757,63 @@ mod tests {
         m.files_overdue(t + retry * 3);
         assert!(sent_lines(&mut sent).is_empty(), "settled: asked no more");
         assert!(posts.try_recv().is_err(), "its note was posted once, whatever the asking");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Goal (Alex's review of #612): no cancel still to be taken is ever let
+    /// go of. With every kept file's cancel unsettled (the core failing each
+    /// one), a new file is not received at all (nothing asked of the core,
+    /// its message posted with its note), the oldest cancel stays in its
+    /// link's file across a restart and is asked again, and a late
+    /// completion of it is deleted, which settles it and lets a new file in.
+    #[tokio::test]
+    async fn no_unsettled_cancel_is_let_go() {
+        let dir = std::env::temp_dir().join(format!("simplex-unsettled-{}", std::process::id()));
+        let (mut m, mut sent, mut posts) = captured(&dir, 4 * ABANDONED_MAX);
+        let f = "juniper--k3x9";
+        let mut t = Instant::now();
+        let retry = Duration::from_millis(CANCEL_RETRY_MS + 1);
+        let failed = |corr: &str| format!(r#"{{"corrId":"{corr}","resp":{{"type":"chatCmdError","chatError":{{"type":"errorDatabase","databaseError":{{"type":"errorSQL"}}}}}}}}"#);
+        // every kept file given up on, in batches of what may wait, each cancel failing
+        let mut next = 1;
+        while next <= ABANDONED_MAX as i64 {
+            let batch: Vec<i64> = (next..(next + FILES_MAX as i64).min(ABANDONED_MAX as i64 + 1)).collect();
+            next += batch.len() as i64;
+            for id in &batch {
+                m.forward(f, voice(*id, None));
+            }
+            t += Duration::from_millis(FILE_WAIT_MS + 1_000);
+            m.files_overdue(t);
+            for (corr, line) in sent_lines(&mut sent) {
+                if line.starts_with("/fcancel") {
+                    m.frame(f, 1, &failed(&corr));
+                }
+            }
+        }
+        let unsettled = |m: &Manager| m.slots[f].saved.abandoned.values().filter(|a| **a == Abandoned::Cancelling).count();
+        assert_eq!(unsettled(&m), ABANDONED_MAX, "every cancel kept, none settled");
+        while posts.try_recv().is_ok() {}
+        // one more: not received, posted with its note at once, nothing let go
+        m.forward(f, voice(1_000, None));
+        assert!(sent_lines(&mut sent).is_empty(), "nothing asked of the core for it");
+        assert!(posts.try_recv().is_ok_and(|p| p.inbound.item == 1_000 && p.note.is_some() && p.file.is_none()));
+        assert!(m.slots[f].files.is_empty() && !m.slots[f].saved.abandoned.contains_key(&1_000));
+        assert_eq!(m.slots[f].saved.abandoned.get(&1), Some(&Abandoned::Cancelling), "the oldest still kept");
+        // a restart reads them all back, the oldest among them, and asks it again
+        let saved = load(&m.slots[f].dir, &agent()).expect("its file");
+        assert_eq!((saved.abandoned.len(), saved.abandoned.get(&1)), (ABANDONED_MAX, Some(&Abandoned::Cancelling)));
+        t += retry;
+        m.files_overdue(t);
+        let asked: Vec<String> = sent_lines(&mut sent).into_iter().map(|(_, l)| l).collect();
+        assert!(asked.contains(&"/fcancel 1".to_string()) && asked.len() == ABANDONED_MAX, "every unsettled cancel asked again, the oldest too: {}", asked.len());
+        // the oldest arrives anyway: deleted, settled, and a new file is let in
+        let late = m.slots[f].dir.join("files").join("voice_1.m4a");
+        std::fs::write(&late, b"late").expect("a file");
+        m.file_event(f, &Resp::FileDone { file: 1, path: "voice_1.m4a".into() });
+        assert!(!late.exists(), "its late file deleted");
+        assert_eq!(m.slots[f].saved.abandoned.get(&1), Some(&Abandoned::Settled));
+        m.forward(f, voice(1_001, None));
+        assert_eq!(sent_lines(&mut sent).into_iter().map(|(_, l)| l).collect::<Vec<_>>(), ["/freceive 1001"], "room again: it is received");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
