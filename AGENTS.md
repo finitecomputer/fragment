@@ -308,7 +308,12 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   outside the repo (`deploy/example.jsonc`; xtask/src/deploy.rs). It
   lists the store first and refuses, before anything is built, when a
   secret the config names is missing (naming the `secret set` for each);
-  it binds them by name and uploads no secret but a branch's test
+  then it waits, 20 minutes at most, for every image the config pins to
+  be ready on Cloudflare's network (the Containers API's image
+  preparation, asked with `CLOUDFLARE_API_TOKEN`: xtask/src/prepare.rs),
+  and refuses, with nothing built or changed, an image the account
+  cannot prepare or one still pending then (wrangler's own wait gives up
+  at 15 minutes); it binds them by name and uploads no secret but a branch's test
   secret, and runs `wrangler deploy` again (three tries at most, 10 s
   apart) only for a failure a re-run answers: its Container settings not
   applied, or an image's push to the registry timing out. A branch is a

@@ -90,6 +90,7 @@ use anyhow::{bail, Context, Result};
 use fragment_devstack as devstack;
 
 mod build;
+mod cloudflare;
 mod deploy;
 mod dev_agent;
 mod dns;
@@ -98,6 +99,7 @@ mod guards;
 mod html_sinks;
 mod image;
 mod js_syntax;
+mod prepare;
 #[cfg(test)]
 mod markdown_dom;
 mod schema_lock;

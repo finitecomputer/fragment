@@ -8,7 +8,9 @@
 //! `cargo xtask secret` sets them), and the config names each by its store
 //! name: the deploy reads no secret's value. It first lists the store
 //! (read-only) and refuses, before anything is built or made, when a
-//! secret the config names is not there. From the config and the
+//! secret the config names is not there; then it waits for every image
+//! the config pins to be ready on Cloudflare's network (prepare.rs), and
+//! refuses, having changed nothing, when one is not. From the config and the
 //! checked-in config (`cell/wrangler.jsonc`) it renders the Worker's own
 //! wrangler config under `target/deploy/<name>/`, the store secrets bound
 //! by name (`secrets_store_secrets`), makes the bucket and queues it
@@ -159,8 +161,8 @@ struct Computers {
 /// One image computers may be pinned to, as wrangler takes a Durable
 /// Object container's named image: built from the tree at every deploy, or
 /// a digest already in the account's registry, which a deploy keeps as it
-/// is (wrangler skips its build and prepares it, and refuses the deploy
-/// when the account's registry does not have it).
+/// is (it waits for Cloudflare to prepare it before it changes anything,
+/// and refuses when the account's registry does not have it: prepare.rs).
 #[derive(Deserialize, serde::Serialize)]
 #[serde(untagged)]
 enum Image {
@@ -183,6 +185,20 @@ struct Pinned {
     /// `registry.cloudflare.com/<account>/<repository>@sha256:<64 hex>`: a
     /// reference a deploy printed, or a computer's (docs/computers.md).
     image: String,
+}
+
+/// The images the config keeps at a digest (`Image::Pinned`), by name:
+/// each one a deploy waits for on Cloudflare's network before it changes
+/// anything (prepare.rs). One built from the tree wrangler pushes and
+/// prepares itself, before it uploads the Worker.
+fn pinned_images(d: &Deployment) -> Vec<&str> {
+    let images = d.computers.iter().flat_map(|c| c.images.values());
+    images
+        .filter_map(|i| match i {
+            Image::Pinned(p) => Some(p.image.as_str()),
+            Image::Built(_) => None,
+        })
+        .collect()
 }
 
 /// The registry wrangler pushes a deployment's images to.
@@ -613,6 +629,9 @@ fn checked(d: Deployment) -> Result<Deployment> {
         if !c.images.contains_key(&c.default_image) {
             bail!("computers: the default image {:?} is not one of its images", c.default_image);
         }
+        if c.images.len() > crate::prepare::IMAGES_MAX {
+            bail!("computers: {} images, more than the {} a deploy prepares", c.images.len(), crate::prepare::IMAGES_MAX);
+        }
         for (name, image) in &c.images {
             if let Image::Pinned(p) = image {
                 if !pinned_ok(&p.image, &d.account_id) {
@@ -961,6 +980,15 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     // and every store secret the Worker is bound to is there (read-only)
     let store = preflight(&tools, &d, &config, &bound)?;
     println!("secrets: the {} the config names are in the account's Secrets Store {} ({})", named_secrets(&bound).len(), store.name, store.id);
+    // and every image it pins ready on Cloudflare's network, before anything
+    // is built or changed: wrangler waits 15 minutes and no longer
+    // (prepare.rs)
+    let pinned = pinned_images(&d);
+    if !pinned.is_empty() {
+        let mut api = crate::cloudflare::Api::from_env(&d.account_id)?;
+        crate::prepare::until_ready(&mut api, &mut crate::prepare::Wall::new(), &pinned, crate::prepare::DEPLOY_LIMIT)
+            .context("deploy: refused before anything was built or changed; deploy again once the image is ready")?;
+    }
     crate::build()?;
     let release = this_release()?;
     let deploy_id = &release.id;
@@ -1840,6 +1868,8 @@ mod tests {
         assert_eq!(images["hermes-canary"]["dockerfile"], json!(devstack::repo_root().join("images/hermes/Dockerfile")));
         assert_eq!(images["hermes-canary"]["build_context"], json!(devstack::repo_root().join(".")));
         assert_eq!(cell["vars"]["FRAGMENT_COMPUTER_IMAGE"], "hermes", "new computers start on stable");
+        assert_eq!(pinned_images(&d), vec![stable.as_str()], "the deploy waits for the pinned image alone: wrangler prepares the one it builds");
+        assert!(pinned_images(&deployment(None, None)).is_empty(), "no computers, no image to wait for");
 
         let refused = |hermes: Value, test: &str| {
             let mut v = v.clone();
