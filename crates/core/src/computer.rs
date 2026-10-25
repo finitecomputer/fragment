@@ -1927,6 +1927,23 @@ pub fn version_running(life: &Lifecycle, saves: &Saves) -> Option<String> {
     image_running(life, saves).map(version_of)
 }
 
+/// The version of the image a computer is on: the one it runs now, or,
+/// running none (asleep, or starting), the one its next start runs. What
+/// its guest's word of its image is taken to be of (`does_simplex`).
+pub fn version_now(life: &Lifecycle, saves: &Saves, images: &Images) -> Option<String> {
+    version_running(life, saves).or_else(|| images.latest())
+}
+
+/// Whether a computer's image does SimpleX (docs/computers.md, "SimpleX"),
+/// so its owner's Settings offer it: `said` is the version whose bridge
+/// last said it does (`GET /api/computer?simplex=1`), and it must be the
+/// version the computer is on now (`version_now`). An image without it
+/// (production's before SimpleX, or one a rollback goes back to) never
+/// said so; one deployed since is offered once its own bridge has.
+pub fn does_simplex(said: Option<&str>, life: &Lifecycle, saves: &Saves, images: &Images) -> bool {
+    said.is_some_and(|said| version_now(life, saves, images).as_deref() == Some(said))
+}
+
 /// A support link is at most this long.
 pub const SUPPORT_URL_MAX_BYTES: usize = 512;
 
@@ -3927,6 +3944,48 @@ mod tests {
         for bad in ["", "9f86d081884", "9f86d081884c0", "9F86D081884C", "9f86d081884g", " 9f86d08188c"] {
             assert!(!valid_version(bad), "{bad:?}");
         }
+    }
+
+    /// Goal: SimpleX is offered only on a computer whose image does it. An
+    /// image whose bridge never said so (production's before SimpleX) is
+    /// offered nothing, asleep or awake. One whose bridge said so is
+    /// offered while the computer runs it, sleeps, and wakes on it again,
+    /// and no longer once a deploy or a rollback moves the computer to
+    /// another, until that image's own bridge says so. Method: one
+    /// computer's history, a deploy being a look that finds another
+    /// reference, each word of its bridge's taken as the DO takes it
+    /// (`version_now`).
+    #[test]
+    fn simplex_is_offered_only_on_an_image_whose_bridge_said_so() {
+        let does = |c: &Computer, said: &Option<String>| does_simplex(said.as_deref(), &c.life, &c.saves, &c.images);
+        let next = format!("registry/hermes@sha256:{}", "2".repeat(64));
+        let mut c = Computer::new();
+        assert!(!does(&c, &None), "never said: nothing, before its first start");
+        c.wake();
+        assert!(!does(&c, &None), "awake on an image whose bridge says nothing");
+        let said = version_now(&c.life, &c.saves, &c.images);
+        assert_eq!(said, Some(version_of(IMAGE)), "its bridge's word is of the image it runs");
+        assert!(does(&c, &said));
+        c.sleep(Some("b1"));
+        assert!(does(&c, &said), "asleep: its next start runs the same image");
+        // a deploy of another image: still offered while it runs this one
+        c.wake();
+        assert!(c.images.looked(Some(&next)));
+        assert!(does(&c, &said), "awake on the image that said so, another deployed");
+        c.sleep(Some("b2"));
+        assert!(!does(&c, &said), "asleep: its next start runs one that never said so");
+        c.wake();
+        assert!(!does(&c, &said), "awake on the new image, until its bridge says so");
+        let said = version_now(&c.life, &c.saves, &c.images);
+        assert_eq!(said, Some(version_of(&next)));
+        assert!(does(&c, &said));
+        // a rollback to the first image: what the new one said is not its
+        assert!(c.images.looked(Some(IMAGE)));
+        c.sleep(Some("b3"));
+        assert!(!does(&c, &said));
+        c.wake();
+        assert!(!does(&c, &said), "rolled back, until its own bridge says so");
+        assert!(!does(&c, &Some("not a version".into())));
     }
 
     /// Goal (Paul, 2026-10-09: "a notification in the shell: new update,

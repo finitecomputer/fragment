@@ -852,7 +852,12 @@ expires within 30 days. The container application is the deployment's
     view does: "An agent's own model"), the key its fragment signs as
     (`key`, 64 hex: what a door's ticket is checked with, docs/api.md, "An
     agent's doors"), and the model route's models'
-    ids by its names (below, Models, "A model by its id"). **They
+    ids by its names (below, Models, "A model by its id").
+    `?simplex=1` says the image does SimpleX (docs/bridge.md, "SimpleX"):
+    the Computer DO keeps the version it is on as one that does (written
+    only when that is news, its owner's pages told), and its owner's view
+    says `simplex` while it is on that version, so Settings offer SimpleX
+    on no other image. **They
     may change while the computer runs** (its owner assigns or unassigns
     an agent, connects an account, narrows an agent): the guest reads them
     again while awake and runs the new set, with nothing restarted. The

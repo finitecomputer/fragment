@@ -50,7 +50,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{
-    alive, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, does_simplex, image_running, notices, valid_version, version_now, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS,
 };
 use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
@@ -268,6 +268,9 @@ enum MetaKey {
     /// (`fragment_core::computer::Images`): the reference its pinned name
     /// stood for as it last looked, and the version its owner put off.
     Images,
+    /// The version whose bridge last said it does SimpleX (`GET
+    /// /api/computer?simplex=1`: `fragment_core::computer::does_simplex`).
+    Simplex,
 }
 
 impl MetaKey {
@@ -286,6 +289,7 @@ impl MetaKey {
             MetaKey::AliveCheck => "alive_check",
             MetaKey::WorkosUser => "workos_user",
             MetaKey::Images => "images",
+            MetaKey::Simplex => "simplex",
         }
     }
 }
@@ -614,6 +618,13 @@ struct Redeem {
 #[derive(Deserialize)]
 struct Exited {
     generation: u64,
+}
+
+/// `computer/guest`'s body: its bridge said its image does SimpleX.
+#[derive(Deserialize)]
+struct GuestAsk {
+    #[serde(default)]
+    simplex: bool,
 }
 
 /// `computer/test`'s body (a test fleet's: `POST /api/test/computer`):
@@ -1575,6 +1586,19 @@ impl ComputerCell {
         Ok(agents)
     }
 
+    /// Its bridge said its image does SimpleX: of the version it is on
+    /// (`version_now`), kept until another's says so, and its owner's open
+    /// pages told when that is news (their Settings offer SimpleX from then).
+    /// Its bridge says so at each read, so this writes only for news.
+    async fn said_simplex(&self) -> CellResult<()> {
+        let Some(version) = version_now(&self.lifecycle()?, &self.saves()?, &self.images()?) else { return Ok(()) };
+        if self.meta(MetaKey::Simplex)?.as_deref() != Some(version.as_str()) {
+            self.set_meta(MetaKey::Simplex, &version)?;
+            self.tell_owner().await;
+        }
+        Ok(())
+    }
+
     /// The guest's own view (`GET /api/computer`): its agents, each with
     /// the credentials it may use now (a connection its owner connected, an
     /// operator key the deployment holds, an own key its owner gave; none
@@ -1845,6 +1869,7 @@ impl ComputerCell {
             rollbacks: saves.rollbacks(),
             saves: saves.views(),
             always_on: life.always_on(),
+            simplex: does_simplex(self.meta(MetaKey::Simplex)?.as_deref(), &life, &saves, &images),
         })
     }
 
@@ -2363,6 +2388,10 @@ impl ComputerCell {
             "computer/guest" => {
                 // its guest is alive: what a start that waits for it waits for
                 self.heard_ms.set(Some(js::now_ms()));
+                let b: GuestAsk = body_json(&mut req).await?;
+                if b.simplex {
+                    self.said_simplex().await?;
+                }
                 json_response(&self.guest_view().await?)
             }
             "computer/exited" => {
@@ -2980,7 +3009,11 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
     let url = req.url()?;
     let path = url.path().to_string();
     match path.as_str() {
-        "/api/computer" => return json_response(&ask(env, computer, "computer/guest", &json!({})).await?),
+        "/api/computer" => {
+            // its bridge says whether its image does SimpleX (docs/computers.md, "SimpleX")
+            let simplex = url.query_pairs().any(|(k, v)| k == "simplex" && v == "1");
+            return json_response(&ask(env, computer, "computer/guest", &json!({ "simplex": simplex })).await?);
+        }
         // a link's ticket redeemed with its door's public key, at the agent
         // fragment it names, for this computer alone (fragment_core::door)
         "/api/computer/door" if req.method() == Method::Post => {

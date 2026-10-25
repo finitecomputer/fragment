@@ -1278,6 +1278,14 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
             && has("#settings-page form[method=post][action='/auth/logout'] button"),
         &text[..text.len().min(600)],
     );
+    // SimpleX only on an image that does it: the stub's bridge never says so
+    let computers = shell(api, &session, "GET", "/api/computers", None, &[])?;
+    let said = computers.body["computers"][0].get("simplex").cloned();
+    s.ok(
+        "settings offer no SimpleX on a computer whose image does not do it (the stub's, as production's before SimpleX): no section, no Set up, and its view says nothing of it",
+        computers.status == 200 && said.is_none() && !has("#settings-simplex") && !text.contains("SimpleX"),
+        json!({ "simplex": said, "settings": &text[..text.len().min(600)] }),
+    );
     let account = b.eval(&page, ACCOUNT_SEEN)?;
     s.ok(
         "settings' Account says who is signed in, the email in bold, beside Sign out and Use another account (back to settings); a seat's holder is told nothing a guest is",

@@ -1195,10 +1195,11 @@ async fn boot_main() {
     let model = env("FRAGMENT_MODEL").unwrap_or_else(|| "http://model.fragment.internal".into());
 
     // The agents to run (GET /api/computer), asked until the platform answers.
+    // The bridge's own reads say the image does SimpleX; the boot's never do.
     let mut backoff = fragment_bridge::net::Backoff::default();
     let started = Instant::now();
     let computer = loop {
-        match api.computer().await {
+        match api.computer(false).await {
             Ok(c) => break c,
             Err(e) if started.elapsed() < Duration::from_secs(120) => {
                 ev!("boot.computer_unread", { "error": e.to_string() });
@@ -1363,7 +1364,7 @@ async fn boot_main() {
             // The computer's agents may change while it runs (docs/computers.md).
             if last_agents.elapsed() >= Duration::from_millis(AGENTS_EVERY_MS) {
                 last_agents = Instant::now();
-                match api.computer().await {
+                match api.computer(false).await {
                     Ok(c) => {
                         agents_unread = false;
                         // the deployment's credential names changed (a release):

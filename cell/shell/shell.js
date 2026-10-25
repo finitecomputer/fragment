@@ -1404,7 +1404,7 @@ function nameScreen(frame) {
 // origin as its screen is, through a ticket (docs/bridge.md, "SimpleX"):
 // the one-time QR code, and whom it is linked to ----
 async function openSimplex(agent) {
-  if (!state.computer || !agent) return;
+  if (!state.computer?.simplex || !agent) return;
   try {
     const t = await api("POST", `/api/computers/${seg(state.computer.computer)}/ports/6080/ticket`, { path: `/simplex/?agent=${encodeURIComponent(agent)}` });
     const frame = frameOf(t.url, `${titleOf(agent)} on SimpleX`);
@@ -1428,7 +1428,7 @@ async function openSimplex(agent) {
 // "An agent's doors").
 addEventListener("message", async (e) => {
   const m = e.data;
-  if (m?.fragment !== "simplex" || !["link", "unlink"].includes(m.want) || !state.computer) return;
+  if (m?.fragment !== "simplex" || !["link", "unlink"].includes(m.want) || !state.computer?.simplex) return;
   const frame = [...document.querySelectorAll("iframe[data-simplex]")].find((f) => f.contentWindow === e.source);
   if (!frame || frame.dataset.simplex !== m.agent || e.origin !== new URL(frame.dataset.src).origin) return;
   const reply = { fragment: "simplex", agent: m.agent, for: m.want };
@@ -1439,13 +1439,15 @@ addEventListener("message", async (e) => {
   }
   frame.contentWindow?.postMessage(reply, e.origin);
 });
-// Settings' SimpleX: each agent's link, on an always-on computer
+// Settings' SimpleX: each agent's link, on an always-on computer. Only on
+// a computer whose image does SimpleX (its view's `simplex`: its bridge
+// said so); on any other, no section at all.
 function simplexSection() {
   const s = section("SimpleX");
   s.id = "settings-simplex";
-  const agents = state.computer?.agents ?? [];
+  const agents = state.computer.agents ?? [];
   s.append(el("p", "muted", "Message your agents from SimpleX Chat, a private messenger for your phone. Your messages are encrypted between your SimpleX app and your computer."));
-  if (!state.computer || !agents.length) {
+  if (!agents.length) {
     s.append(el("p", "muted", "Make an agent first."));
     return s;
   }
@@ -2410,7 +2412,7 @@ async function openSettings(push = true, failed = null) {
   const skills = await skillsSection();
   if (lost()) return;
   returnSaid(back);
-  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, simplexSection(), buildSection(), dataSection(), ...releaseLine(c)]);
+  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, ...(state.computer?.simplex ? [simplexSection()] : []), buildSection(), dataSection(), ...releaseLine(c)]);
   renderAgentFaces();
   tell();
 }
