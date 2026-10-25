@@ -445,7 +445,14 @@ pub fn load(dir: &Path, agent: &Agent) -> Option<Saved> {
     };
     let saved = serde_json::from_str::<Saved>(&text).map_err(|e| e.to_string()).and_then(|s| Link::from_json(&serde_json::to_string(&s.link).expect("a link serializes")).map(|_| s));
     match saved {
-        Ok(s) if s.identity == agent.identity => Some(s),
+        Ok(mut s) if s.identity == agent.identity => {
+            // one given up on is received no more, whatever an earlier
+            // write left (Alex's review: it would hold its place for good)
+            let abandoned = std::mem::take(&mut s.abandoned);
+            s.receiving.retain(|id| !abandoned.contains_key(id));
+            s.abandoned = abandoned;
+            Some(s)
+        }
         Ok(_) => {
             set_aside(dir, "another agent's");
             None
@@ -866,20 +873,31 @@ impl Manager {
             let Some((inbound, _)) = self.slots.get_mut(&f).and_then(|s| s.files.remove(&id)) else { continue };
             crate::ev!("simplex.file_overdue", { "agent": f, "item": inbound.item, "waitMs": FILE_WAIT_MS });
             self.abandon(&f, id, Abandoned::Cancelling);
-            self.reserve(&f, id, false);
             let note = file_note(&inbound.kind, "did not arrive");
             self.post(&f, inbound, None, Some(note));
         }
         self.cancels(now);
     }
 
-    /// `id`'s receive asked of its core (`on`), or ended, in its link's file.
-    fn reserve(&mut self, f: &str, id: FileId, on: bool) {
-        let Some(s) = self.slots.get_mut(f) else { return };
+    /// `id`'s receive asked of its core (`on`), or ended, in its link's file:
+    /// whether its file holds it. One that could not be written is undone,
+    /// so the same change asked again writes it (Alex's review).
+    fn reserve(&mut self, f: &str, id: FileId, on: bool) -> bool {
+        let Some(s) = self.slots.get_mut(f) else { return false };
         let changed = if on { s.saved.receiving.insert(id) } else { s.saved.receiving.remove(&id) };
-        if changed {
-            if let Err(e) = store(&s.dir, &s.saved) {
+        if !changed {
+            return true;
+        }
+        match store(&s.dir, &s.saved) {
+            Ok(()) => true,
+            Err(e) => {
                 crate::ev!("simplex.store_failed", { "agent": f, "error": e.to_string() });
+                if on {
+                    s.saved.receiving.remove(&id);
+                } else {
+                    s.saved.receiving.insert(id);
+                }
+                false
             }
         }
     }
@@ -894,6 +912,8 @@ impl Manager {
         if state == Abandoned::Cancelling {
             s.cancel_at = None;
         }
+        // from receiving to given up on in one write (Alex's review)
+        s.saved.receiving.remove(&id);
         s.saved.abandoned.insert(id, state);
         // bounded: a settled one goes for each past `ABANDONED_MAX`, never a
         // cancel still to be taken (`forward` keeps those within it)
@@ -1272,8 +1292,20 @@ impl Manager {
         }
         // a catch-up's forward of one already waiting keeps its first time
         let id = file.id;
+        let waiting = s.files.contains_key(&id);
         s.files.entry(id).or_insert((inbound, Instant::now()));
-        self.reserve(f, id, true);
+        // only a reservation its file holds is received: one not written is
+        // held back (its note now), never asked of the core
+        if !self.reserve(f, id, true) {
+            let Some(s) = self.slots.get_mut(f) else { return };
+            if !waiting {
+                if let Some((inbound, _)) = s.files.remove(&id) {
+                    let note = file_note(&inbound.kind, "did not arrive");
+                    self.post(f, inbound, None, Some(note));
+                }
+            }
+            return;
+        }
         // its description may not be ready yet: then FileReady asks again
         self.act(f, Action::Ask(Cmd::Receive { file: id }));
     }
@@ -1940,6 +1972,44 @@ mod tests {
             assert!(load(&m.slots[f].dir, &agent()).expect("its file").receiving.is_empty(), "its place let go");
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// Goal (Alex's review of d9345ddc): the reservations kept are what
+    /// was written. A receive whose reservation could not be written is not
+    /// asked of the core (its message posted with its note), and the same
+    /// file asked again once the disk takes it is reserved and received; a
+    /// file given up on leaves receiving in the same write, and one an older
+    /// write left in both is read back as given up on alone, holding no
+    /// place.
+    #[tokio::test]
+    async fn the_reservations_kept_are_what_was_written() {
+        let dir = std::env::temp_dir().join(format!("simplex-durable-{}", std::process::id()));
+        let (mut m, mut sent, mut posts) = captured(&dir, 16);
+        let f = "juniper--k3x9";
+        let link_dir = m.slots[f].dir.clone();
+        // the disk refuses: nothing asked, its note posted, nothing reserved
+        let blocker = link_dir.join(format!("{LINK_FILE}.tmp"));
+        std::fs::create_dir_all(&blocker).expect("a directory where its file goes");
+        m.forward(f, voice(5, None));
+        assert!(sent_lines(&mut sent).is_empty(), "no receive without its reservation written");
+        assert!(posts.try_recv().is_ok_and(|p| p.inbound.item == 5 && p.note.is_some() && p.file.is_none()));
+        assert!(m.slots[f].saved.receiving.is_empty() && m.slots[f].files.is_empty(), "nothing held in memory either");
+        // the disk takes it again: the same file, asked again, is reserved and received
+        std::fs::remove_dir_all(&blocker).expect("its place back");
+        m.forward(f, voice(5, None));
+        assert_eq!(sent_lines(&mut sent).into_iter().map(|(_, l)| l).collect::<Vec<_>>(), ["/freceive 5"]);
+        assert!(load(&link_dir, &agent()).expect("its file").receiving.contains(&5), "written");
+        // given up on: out of receiving in the same write
+        m.files_overdue(Instant::now() + Duration::from_millis(FILE_WAIT_MS + 1_000));
+        let saved = load(&link_dir, &agent()).expect("its file");
+        assert!(saved.abandoned.contains_key(&5) && !saved.receiving.contains(&5));
+        // an older write's overlap is read back as given up on alone
+        let mut both = saved.clone();
+        both.receiving.insert(5);
+        store(&link_dir, &both).expect("written");
+        let read = load(&link_dir, &agent()).expect("its file");
+        assert!(read.abandoned.contains_key(&5) && read.receiving.is_empty(), "no place held by one given up on");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Goal: what settles a cancel. The core took it, or refused it for
