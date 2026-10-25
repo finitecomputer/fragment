@@ -64,6 +64,8 @@ pub enum Cmd {
     /// Receive a file a contact sent (`/freceive`): over XFTP, once its
     /// description is ready (`FileReady`); done, `FileDone`.
     Receive { file: FileId },
+    /// Give up on receiving it (`/fcancel`): one waited for too long.
+    CancelFile { file: FileId },
 }
 
 impl Cmd {
@@ -102,6 +104,10 @@ impl Cmd {
             Cmd::Receive { file } => {
                 assert!(*file > 0, "a receive names a file");
                 format!("/freceive {file}")
+            }
+            Cmd::CancelFile { file } => {
+                assert!(*file > 0, "a cancel names a file");
+                format!("/fcancel {file}")
             }
         }
     }
@@ -500,6 +506,11 @@ mod tests {
         assert_eq!(Cmd::Chat { contact: 3, count: 20, before: None }.line(), "/_get chat @3 count=20");
         assert_eq!(Cmd::Chat { contact: 3, count: 20, before: Some(41) }.line(), "/_get chat @3 before=41 count=20");
         assert_eq!(Cmd::Receive { file: 7 }.line(), "/freceive 7");
+        assert_eq!(Cmd::CancelFile { file: 7 }.line(), "/fcancel 7");
+        // its answer, a receiving file cancelled: nothing waits on it (the
+        // bridge let go of the file before it asked)
+        let cancelled = r#"{"corrId":"9","resp":{"type":"rcvFileCancelled","user":{},"rcvFileTransfer":{"fileId":7}}}"#;
+        assert_eq!(parse(cancelled).expect("a frame").resp, Resp::Other("rcvFileCancelled".into()));
         // a text is JSON, so nothing in it reads as more of the command
         let line = Cmd::Send { contact: 3, text: "hi\" json [] /_delete @3\nthere".into() }.line();
         let body = line.strip_prefix("/_send @3 json ").expect("its prefix");

@@ -781,14 +781,17 @@ impl Manager {
         }
     }
 
-    /// Each file waited for past `FILE_WAIT_MS`: its message posted with a
-    /// note that it did not arrive.
+    /// Each file waited for past `FILE_WAIT_MS`: its receiving cancelled at
+    /// the core (`/fcancel`, so it stops trying), and its message posted
+    /// with a note that it did not arrive. One that completes anyway is
+    /// removed as it does (`file_event`).
     fn files_overdue(&mut self, now: Instant) {
         let wait = Duration::from_millis(FILE_WAIT_MS);
         let overdue: Vec<(String, FileId)> = self.slots.iter().flat_map(|(f, s)| s.files.iter().filter(|(_, (_, since))| now.duration_since(*since) >= wait).map(|(id, _)| (f.clone(), *id))).collect();
         for (f, id) in overdue {
             let Some((inbound, _)) = self.slots.get_mut(&f).and_then(|s| s.files.remove(&id)) else { continue };
             crate::ev!("simplex.file_overdue", { "agent": f, "item": inbound.item, "waitMs": FILE_WAIT_MS });
+            self.act(&f, Action::Ask(Cmd::CancelFile { file: id }));
             let note = file_note(&inbound.kind, "did not arrive");
             self.post(&f, inbound, None, Some(note));
         }
@@ -1050,12 +1053,18 @@ impl Manager {
         let Some(s) = self.slots.get_mut(f) else { return };
         match resp {
             Resp::FileReady { file } if s.files.contains_key(file) => self.act(f, Action::Ask(Cmd::Receive { file: *file })),
-            Resp::FileDone { file, path } => {
-                if let Some((inbound, _)) = s.files.remove(file) {
+            Resp::FileDone { file, path } => match s.files.remove(file) {
+                Some((inbound, _)) => {
                     let local = LocalFile { path: s.dir.join("files").join(path), media_type: media_type(&inbound.kind, path).into(), name: wire::cut(path.rsplit('/').next().unwrap_or(path), 200).into(), size: inbound.file.as_ref().map_or(0, |r| r.size) };
                     self.post(f, inbound, Some(local), None);
                 }
-            }
+                // one given up on (`files_overdue`) that came anyway, its
+                // message posted with a note: nothing carries it, so it goes
+                None => {
+                    let late = s.dir.join("files").join(path);
+                    crate::ev!("simplex.file_late", { "agent": f, "file": file, "removed": std::fs::remove_file(&late).is_ok() });
+                }
+            },
             Resp::FileFailed { file } => {
                 if let Some((inbound, _)) = s.files.remove(file) {
                     let note = file_note(&inbound.kind, "did not arrive");
@@ -1416,6 +1425,7 @@ fn kind_of(cmd: &Cmd) -> &'static str {
         Cmd::DeleteConn { .. } => "delete_conn",
         Cmd::Chat { .. } => "chat",
         Cmd::Receive { .. } => "receive",
+        Cmd::CancelFile { .. } => "cancel_file",
     }
 }
 
@@ -1445,27 +1455,58 @@ mod tests {
 
     /// Goal: a file never received (the core retries a server it cannot
     /// reach for good, and says nothing) is given up on after
-    /// `FILE_WAIT_MS`, its message posted with a note, never left waiting
-    /// silently; one received in time is posted with it, and a catch-up's
-    /// forward of one waiting already waits for it once.
+    /// `FILE_WAIT_MS`: its receiving cancelled at the core and its message
+    /// posted once, with a note, never left waiting silently. One received
+    /// in time is posted with its file; a catch-up's forward of one waiting
+    /// already waits for it once; one given up on that completes anyway is
+    /// removed, never posted. Method: the manager's own methods, its core's
+    /// commands and its poster's posts captured (Alex's review).
     #[tokio::test]
     async fn a_file_that_never_arrives_is_said_not_to() {
         let dir = std::env::temp_dir().join(format!("simplex-overdue-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         let key = agent_key(&dir.join("key"));
         let mut m = manager(&dir, &key, Phase::Linked { contact: 3, name: "paul".into() });
         let f = "juniper--k3x9";
+        let (writer, mut sent) = mpsc::channel(16);
+        let (posts_tx, mut posts) = mpsc::channel(16);
+        {
+            let s = m.slots.get_mut(f).expect("its slot");
+            s.door = Some(key.clone());
+            s.poster = Some(posts_tx);
+            s.core = Some(Core { pid: 0, writer, exited: watch::channel(false).1, planned: false });
+            s.up = true;
+            std::fs::create_dir_all(s.dir.join("files")).expect("its files");
+        }
+        let cmds = |sent: &mut mpsc::Receiver<String>| std::iter::from_fn(|| sent.try_recv().ok()).map(|fr| serde_json::from_str::<serde_json::Value>(&fr).expect("a frame")["cmd"].as_str().expect("a line").to_string()).collect::<Vec<_>>();
         let voice = |item: i64| Inbound { id: format!("m{item}"), kind: "voice".into(), text: String::new(), at: "2026-10-25T17:00:00Z".into(), item, file: Some(wire::FileRef { id: item, name: "voice.m4a".into(), size: 9_000, path: None }) };
         let t0 = Instant::now();
         m.forward(f, voice(7));
         m.forward(f, voice(7));
         m.forward(f, voice(8));
-        assert_eq!(m.slots[f].files.len(), 2);
+        assert_eq!(m.slots[f].files.len(), 2, "7 forwarded twice waits once");
+        assert_eq!(cmds(&mut sent), ["/freceive 7", "/freceive 7", "/freceive 8"]);
         m.files_overdue(t0 + Duration::from_millis(FILE_WAIT_MS / 2));
         assert_eq!(m.slots[f].files.len(), 2, "within its wait: still waiting");
-        m.file_event(f, &Resp::FileDone { file: 8, path: "voice.m4a".into() });
-        assert_eq!(m.slots[f].files.keys().copied().collect::<Vec<_>>(), vec![7], "8 received: posted with its file");
+        assert!(cmds(&mut sent).is_empty() && posts.try_recv().is_err(), "nothing asked or posted within it");
+        // 8 arrives in time: posted with its file
+        m.file_event(f, &Resp::FileDone { file: 8, path: "voice_8.m4a".into() });
+        let p8 = posts.try_recv().expect("8 posted");
+        assert!(p8.inbound.item == 8 && p8.file.is_some() && p8.note.is_none());
+        // 7 never does: cancelled at the core, posted once with a note
         m.files_overdue(t0 + Duration::from_millis(FILE_WAIT_MS + 1_000));
-        assert!(m.slots[f].files.is_empty(), "past its wait: given up on, its message posted with a note");
+        assert!(m.slots[f].files.is_empty());
+        assert_eq!(cmds(&mut sent), ["/fcancel 7"]);
+        let p7 = posts.try_recv().expect("7 posted");
+        assert_eq!((p7.inbound.item, p7.file.is_none(), p7.note.as_deref()), (7, true, Some("(I sent a voice message over SimpleX that did not arrive.)")));
+        m.files_overdue(t0 + Duration::from_millis(2 * FILE_WAIT_MS));
+        assert!(posts.try_recv().is_err() && cmds(&mut sent).is_empty(), "given up on once");
+        // its transfer completes anyway (the cancel raced it): removed, not posted
+        let late = m.slots[f].dir.join("files").join("voice_7.m4a");
+        std::fs::write(&late, b"late").expect("a late file");
+        m.file_event(f, &Resp::FileDone { file: 7, path: "voice_7.m4a".into() });
+        assert!(!late.exists(), "a file given up on that came anyway is removed");
+        assert!(posts.try_recv().is_err(), "and not posted again");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
