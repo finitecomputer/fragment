@@ -1,6 +1,7 @@
 //! Cloudflare's API for one account, as a deploy asks it beside wrangler:
 //! with wrangler's own token (`CLOUDFLARE_API_TOKEN`), never printed.
-//! Image preparations (prepare.rs).
+//! Image preparations (prepare.rs), the Worker's deployments and versions,
+//! and its Computer's container application (rollout.rs, deploy.rs).
 
 use std::time::Duration;
 
@@ -20,7 +21,7 @@ impl Api {
     /// as a deploy's wrangler and the Image workflow's are given it).
     pub(crate) fn from_env(account: &str) -> Result<Api> {
         let token = std::env::var("CLOUDFLARE_API_TOKEN").ok().filter(|t| !t.trim().is_empty()).context(
-            "CLOUDFLARE_API_TOKEN is not set: Cloudflare's API is asked with wrangler's token (Containers on the account) beside wrangler",
+            "CLOUDFLARE_API_TOKEN is not set: a deploy asks Cloudflare's API with wrangler's token (its images' preparation, its Worker's deployments) beside wrangler",
         )?;
         let http = reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).build()?;
         Ok(Api { http, account: account.to_string(), token: token.trim().to_string() })

@@ -314,9 +314,26 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   and refuses, with nothing built or changed, an image the account
   cannot prepare or one still pending then (wrangler's own wait gives up
   at 15 minutes); it binds them by name and uploads no secret but a branch's test
-  secret, and runs `wrangler deploy` again (three tries at most, 10 s
-  apart) only for a failure a re-run answers: its Container settings not
-  applied, or an image's push to the registry timing out. A branch is a
+  secret. From `wrangler deploy` on it ends all on the new release, all
+  back on the one before, or failed saying where it stands, never green
+  over a mix (xtask/src/rollout.rs): it reads the release live first (the
+  Worker's deployments); runs `wrangler deploy` again only for an
+  image's push that timed out (three tries at most); reads whether the
+  Worker changed from its deployments, never from wrangler's words
+  (asked again for 3 minutes when they cannot be read, then stuck,
+  naming the release before); a
+  deploy that failed with the Worker live is finished, not uploaded
+  again (the version read back, the Computer's container application
+  checked, `wrangler triggers deploy`), asked again with backoff for 10
+  minutes; then it asks `/healthz/objects` (docs/api.md, Health) until
+  every object class answers the new release, for 7 minutes (Cloudflare
+  holds a busy object on its old code for 5). One it cannot finish or
+  verify is rolled back (`wrangler rollback` to the version live before,
+  then verified the same way), unless its schema is not that release's
+  (`FRAGMENT_SCHEMA`, the hash of the lock its compiled steps make: an
+  object that ran a newer step refuses older code), there was none, or
+  it made a branch's Stripe endpoint anew (the one before, whose secret
+  the release before holds, is deleted); the job fails either way. A branch is a
   complete copy at `<branch>.<zone>`, its fragments at
   `<name>--<branch>.<zone>`. `--pinned-only` (CI's)
   refuses, before anything is read or built, a config with a computer
@@ -425,8 +442,8 @@ wrangler and the Sandbox SDK the cell's shim bundles, pinned in
   running) runs the full tests first, about 20 minutes. Each deploys
   from a GitHub environment, `preview` or `production`, that only its
   branch may use,
-  holding the variable `DEPLOY_HOST` (its platform's host, whose
-  `/healthz` must then answer the commit) and the secrets
+  holding the secrets (the deploy itself checks that every object class
+  of its platform answers the commit: rollout.rs)
   `DEPLOY_REPO_TOKEN` (a fine-grained token with Contents · Read on
   finitecomputer/fragment-deploy alone),
   `CLOUDFLARE_API_TOKEN` (wrangler's, and the DNS token), the preview's

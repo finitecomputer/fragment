@@ -102,6 +102,7 @@ mod js_syntax;
 mod prepare;
 #[cfg(test)]
 mod markdown_dom;
+mod rollout;
 mod schema_lock;
 // CI's freshness of its cached builds, compiled by itself with rustc
 // (ci.yml); here for its tests alone
