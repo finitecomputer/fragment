@@ -265,6 +265,36 @@ fn restart_cases(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
+/// A deploy's probe, `GET /healthz/objects` (docs/api.md, Health), which
+/// `cargo xtask deploy` asks until every object class answers its release:
+/// the Registry's skew hook stands in for an object of another release.
+fn probe_cases(s: &mut Suite, api: &Api) -> Result<()> {
+    let classes = ["Registry", "Principal", "Ledger", "Fragment", "Computer"];
+    let probe = || api.unsigned("GET", "/healthz/objects", None);
+    // valid: every class's probe object admits the Worker's release, its schema ready
+    let r = probe()?;
+    let answered = |r: &Reply, of: &[&str]| of.iter().all(|c| r.body["objects"][c]["release"] == r.body["release"]);
+    s.ok(
+        "a deploy's probe is answered to anyone: every object class admits the Worker's release (200), the release every answer names",
+        r.status == 200 && answered(&r, &classes) && r.body["release"] == r.header("x-fragment-deploy"),
+        &r,
+    );
+    // invalid: an object of another release refuses it, and the probe names
+    // that object and its release, the others answering as before
+    let skew = api.unsigned("POST", "/api/test/registry", Some(&json!({ "skewFor": { "path": "/__probe", "times": 1, "deployed": u64::MAX } })))?;
+    anyhow::ensure!(skew.status == 200, "the skewFor test hook: {skew}");
+    let r = probe()?;
+    s.ok(
+        "an object of another release fails the probe (503), named with the release it runs: the deploy is not done",
+        r.status == 503 && r.body["objects"]["Registry"]["refusedBy"] == "another-release-a-test-hook" && answered(&r, &classes[1..]),
+        &r,
+    );
+    // replay: once that object runs the Worker's release, the probe is 200 again
+    let r = probe()?;
+    s.ok("and asked again, that object now of the Worker's release, it is 200", r.status == 200 && answered(&r, &classes), &r);
+    Ok(())
+}
+
 /// What `f` answered, and the registry calls it made.
 pub(super) fn calls_of<T>(api: &Api, f: impl FnOnce() -> Result<T>) -> Result<(T, u64)> {
     let before = registry_calls(api)?;
@@ -464,6 +494,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     );
     deploying_cases(s, api)?;
     restart_cases(s, api)?;
+    probe_cases(s, api)?;
     let r = api.unsigned("GET", "/auth/login?invitation_token=Z1uX3Rbw_cIl-5fIG", None)?;
     s.ok("an invitation's token rides along to WorkOS (it lets its invitee sign up)", r.header("location").contains("&invitation_token=Z1uX3Rbw_cIl-5fIG"), &r);
     let r = api.unsigned("GET", "/auth/login?invitation_token=%22%3E%3Cscript%3E", None)?;

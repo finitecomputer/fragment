@@ -2610,6 +2610,26 @@ platform is elsewhere (`Cache-Control: no-store`, so the platform can
 still move); any other name under the suffix, 404; anything else, the
 platform.
 
+### Health
+
+Both on the platform's host, for anyone, each naming its release in
+`x-fragment-deploy` as every answer there does.
+
+- `GET /healthz` answers `ok`: the Worker runs.
+- `GET /healthz/objects` asks each platform object class once, at once
+  (cell/src/routed.rs, `objects`): the Registry, the deployment's one,
+  and an object of each other class named `__probe` (a name no fragment,
+  person or computer has; made by its first probe, its schema's steps
+  run and nothing more). Each answers right after its release check
+  (docs/MODEL.md, Calls between releases), before anything of its own:
+  `{"release": <the Worker's>, "objects": {"Registry" | "Principal" |
+  "Ledger" | "Fragment" | "Computer": {"release": <the Worker's>} |
+  {"refusedBy": <the release it runs>} | {"error": <why>}}}`, 200 when
+  every one admitted the Worker's release with its schema ready, else
+  503. `cargo xtask deploy` asks it until it is 200. An object answers a
+  probe only with its header (`x-fragment-probe`), which the router
+  passes to no object from a client.
+
 ### The release's files
 
 The files the platform serves as they are in its release, a blessed

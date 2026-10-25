@@ -133,9 +133,14 @@ mod tests {
             let fetch = text[at..].find("    async fn fetch(&self, req: Request) -> Result<Response> {\n").unwrap_or_else(|| panic!("{class} answers fetch")) + at;
             let first = text[fetch..].lines().nth(1).unwrap_or_default();
             assert!(first.trim_start().starts_with("if let Some(refused) = crate::routed::refused(&req, "), "{class}'s fetch checks its caller's release before anything else, not: {first}");
+            // then a deploy's probe (`/healthz/objects`), before its own routes
+            let body = &text[fetch..];
+            let (probe, route) = (body.find("crate::routed::probed(&req, &self.schema)?"), body.find("self.route(req)"));
+            assert!(matches!((probe, route), (Some(p), Some(r)) if p < r), "{class}'s fetch answers a deploy's probe after its release check and before its routes");
         }
         let checked: BTreeMap<String, usize> = objects.iter().map(|(file, _)| (file.to_string(), 1)).collect();
         assert_eq!(uses(&files, "routed::refused(&req, "), checked, "each object checks once, in its fetch");
+        assert_eq!(uses(&files, "routed::probed(&req, "), checked, "and answers a probe once, there");
         let entry = std::fs::read_to_string(crate::devstack::repo_root().join("cell/entry.mjs")).expect("entry.mjs reads");
         let code: Vec<&str> = entry.lines().filter(|l| !l.trim_start().starts_with("//")).collect();
         assert_eq!(code.iter().filter(|l| l.contains(" extends DurableObject {")).count(), objects.len(), "the platform's objects are the five checked above");
