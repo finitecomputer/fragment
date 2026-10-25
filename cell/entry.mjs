@@ -557,6 +557,8 @@ function relay(ctx, env, computer, lease, headers) {
   server.addEventListener("message", (e) => {
     if (ended) return;
     const data = typeof e.data === "string" ? new TextEncoder().encode(e.data) : new Uint8Array(e.data);
+    // an empty frame carries nothing: no write is queued for it
+    if (data.byteLength === 0) return;
     if (data.byteLength > RELAY_FRAME_MAX) return end("a frame past its bound", 4008);
     if (!counted(data.byteLength)) return;
     queued += data.byteLength;

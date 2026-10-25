@@ -243,7 +243,9 @@ async fn session(mut tcp: TcpStream, api: &Api, offer: &watch::Receiver<Option<R
 /// the queue and ends the session (the relay's read never waits on it), so
 /// the relay's close, the core's own bytes up, and `stop` are each heard
 /// whatever the other side does; a write that takes past `STALL_MS` ends it
-/// too.
+/// too. A relay that closes cleanly first has what it sent before its close
+/// written to the core (its last answer is the core's), within the same
+/// bounds.
 pub async fn pipe(tcp: TcpStream, ws: ClientWs, mut stop: watch::Receiver<bool>) -> (u64, u64) {
     let (mut rd, mut wr) = tcp.into_split();
     let (mut sink, mut stream) = ws.split();
@@ -266,22 +268,27 @@ pub async fn pipe(tcp: TcpStream, ws: ClientWs, mut stop: watch::Receiver<bool>)
         }
         let _ = tokio::time::timeout(stall, sink.close()).await;
     };
-    // the relay's frames, into the queue: never waits on the core
-    let read = async {
+    // the relay's frames, into the queue: never waits on the core; how it
+    // ended, and the queue's sender gone with it (so what it holds drains)
+    let counted = &down;
+    let read = async move {
         // bounded by the relay's end, or a full queue (a core not reading)
-        loop {
+        let clean = loop {
             match stream.next().await {
                 Some(Ok(Message::Binary(b))) => {
-                    down.fetch_add(b.len() as u64, Ordering::Relaxed);
+                    counted.fetch_add(b.len() as u64, Ordering::Relaxed);
                     if queue.try_send(b).is_err() {
                         crate::ev!("simplex.relay_stalled", { "queued": DOWN_QUEUE });
-                        break;
+                        break false;
                     }
                 }
-                Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                Some(Ok(Message::Close(_))) | None => break true,
+                Some(Err(_)) => break false,
                 Some(Ok(_)) => {}
             }
-        }
+        };
+        drop(queue);
+        clean
     };
     // the queue, to the core
     let downward = async {
@@ -293,11 +300,19 @@ pub async fn pipe(tcp: TcpStream, ws: ClientWs, mut stop: watch::Receiver<bool>)
         }
         let _ = tokio::time::timeout(stall, wr.shutdown()).await;
     };
-    tokio::select! {
-        _ = upward => {}
-        _ = read => {}
-        _ = downward => {}
-        _ = net::stopped(&mut stop) => {}
+    tokio::pin!(upward, read, downward);
+    let closed = tokio::select! {
+        _ = &mut upward => false,
+        clean = &mut read => clean,
+        _ = &mut downward => false,
+        _ = net::stopped(&mut stop) => false,
+    };
+    // closed cleanly: the frames it sent before are written first
+    if closed {
+        tokio::select! {
+            _ = &mut downward => {}
+            _ = net::stopped(&mut stop) => {}
+        }
     }
     (up.load(Ordering::Relaxed), down.load(Ordering::Relaxed))
 }
@@ -305,6 +320,42 @@ pub async fn pipe(tcp: TcpStream, ws: ClientWs, mut stop: watch::Receiver<bool>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal (Alex's review of #611): a relay that closes cleanly right after
+    /// its last frame has that frame written to the core, every time (the
+    /// pipe's close never races its queue). Method: a WebSocket server that
+    /// sends one 65,536-byte frame and closes, twenty times, the core
+    /// reading to its end.
+    #[tokio::test]
+    async fn a_clean_close_delivers_what_came_before_it() {
+        for run in 0..20u8 {
+            let wsl = TcpListener::bind("127.0.0.1:0").await.expect("a relay's port");
+            let at = wsl.local_addr().expect("its address");
+            tokio::spawn(async move {
+                let (t, _) = wsl.accept().await.expect("the pipe connects");
+                let mut ws = tokio_tungstenite::accept_async(t).await.expect("a socket");
+                let _ = ws.send(Message::Binary(vec![run; 65_536].into())).await;
+                let _ = ws.close(None).await;
+                // bounded by the pipe's end
+                while ws.next().await.is_some() {}
+            });
+            let ws = net::connect_ws(&net::Base::parse(&format!("http://{at}")).expect("an address"), "/", &[]).await.expect("the relay answers");
+            let core_l = TcpListener::bind("127.0.0.1:0").await.expect("a core's port");
+            let core_at = core_l.local_addr().expect("its address");
+            let core = tokio::spawn(async move {
+                let mut c = TcpStream::connect(core_at).await.expect("connected");
+                let mut got = vec![];
+                let _ = c.read_to_end(&mut got).await;
+                got
+            });
+            let (side, _) = core_l.accept().await.expect("the core's side");
+            let (_stop_tx, stop) = watch::channel(false);
+            let (_, down) = pipe(side, ws, stop).await;
+            let got = core.await.expect("the core read");
+            assert_eq!((down, got.len()), (65_536, 65_536), "run {run}: the last frame before a clean close is the core's");
+            assert!(got.iter().all(|b| *b == run));
+        }
+    }
 
     async fn read_all(mut io: tokio::io::DuplexStream) -> Vec<u8> {
         let mut out = vec![];
