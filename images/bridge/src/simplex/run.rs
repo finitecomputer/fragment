@@ -328,6 +328,13 @@ pub struct Saved {
     /// while those and the files waiting would pass it (`forward`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub abandoned: BTreeMap<FileId, Abandoned>,
+    /// The files it asked its core to receive (`/freceive`) and that have
+    /// not yet arrived, failed or been given up on. Kept across restarts, as
+    /// the core resumes them from its own database: each holds its place
+    /// within `ABANDONED_MAX`, and its message is waited for again however
+    /// its catch-up and a newer message arrive (Alex's review of #612).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub receiving: BTreeSet<FileId>,
 }
 
 /// A file given up on: its cancel still to be taken by the core, or taken.
@@ -757,7 +764,7 @@ impl Manager {
                 continue;
             }
             let dir = self.cfg.dir.join(&a.fragment);
-            let saved = load(&dir, a).unwrap_or_else(|| Saved { identity: a.identity.clone(), generation: 0, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new() });
+            let saved = load(&dir, a).unwrap_or_else(|| Saved { identity: a.identity.clone(), generation: 0, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new() });
             let door = Key::load(&dir);
             self.slots.insert(a.fragment.clone(), Slot {
                 agent: a.clone(),
@@ -859,10 +866,22 @@ impl Manager {
             let Some((inbound, _)) = self.slots.get_mut(&f).and_then(|s| s.files.remove(&id)) else { continue };
             crate::ev!("simplex.file_overdue", { "agent": f, "item": inbound.item, "waitMs": FILE_WAIT_MS });
             self.abandon(&f, id, Abandoned::Cancelling);
+            self.reserve(&f, id, false);
             let note = file_note(&inbound.kind, "did not arrive");
             self.post(&f, inbound, None, Some(note));
         }
         self.cancels(now);
+    }
+
+    /// `id`'s receive asked of its core (`on`), or ended, in its link's file.
+    fn reserve(&mut self, f: &str, id: FileId, on: bool) {
+        let Some(s) = self.slots.get_mut(f) else { return };
+        let changed = if on { s.saved.receiving.insert(id) } else { s.saved.receiving.remove(&id) };
+        if changed {
+            if let Err(e) = store(&s.dir, &s.saved) {
+                crate::ev!("simplex.store_failed", { "agent": f, "error": e.to_string() });
+            }
+        }
     }
 
     /// `id` given up on (or its cancel settled), in its link's file: at most
@@ -1176,6 +1195,9 @@ impl Manager {
     /// is ready, posted with its message once whole, or the message posted
     /// with a note once it will not arrive.
     fn file_event(&mut self, f: &str, resp: &Resp) {
+        if let Resp::FileDone { file, .. } | Resp::FileFailed { file } = resp {
+            self.reserve(f, *file, false);
+        }
         let Some(s) = self.slots.get_mut(f) else { return };
         match resp {
             Resp::FileReady { file } if s.files.contains_key(file) => self.act(f, Action::Ask(Cmd::Receive { file: *file })),
@@ -1228,6 +1250,7 @@ impl Manager {
         if let Some(path) = file.path.clone() {
             // received already (a catch-up of one received before)
             let local = LocalFile { path: s.dir.join("files").join(&path), media_type: media_type(&inbound.kind, &path).into(), name: wire::cut(path.rsplit('/').next().unwrap_or(&path), 200).into(), size: file.size };
+            self.reserve(f, file.id, false);
             return self.post(f, inbound, Some(local), None);
         }
         if s.files.len() >= FILES_MAX && !s.files.contains_key(&file.id) {
@@ -1238,16 +1261,21 @@ impl Manager {
         // waiting (each a cancel to come) would pass what the link keeps
         // (Alex's review): nothing is asked of the core, and its message is
         // posted with its note now, so no unsettled cancel is ever let go
+        // (the receives asked count, kept across restarts: one the core
+        // resumed holds its place, and is waited for again, never refused)
         let unsettled = s.saved.abandoned.values().filter(|a| **a == Abandoned::Cancelling).count();
-        if !s.files.contains_key(&file.id) && unsettled + s.files.len() >= ABANDONED_MAX {
-            crate::ev!("simplex.files_held_back", { "agent": f, "unsettled": unsettled, "waiting": s.files.len() });
+        let reserved = s.saved.receiving.contains(&file.id) || s.files.contains_key(&file.id);
+        if !reserved && unsettled + s.saved.receiving.len() >= ABANDONED_MAX {
+            crate::ev!("simplex.files_held_back", { "agent": f, "unsettled": unsettled, "receiving": s.saved.receiving.len() });
             let note = file_note(&inbound.kind, "did not arrive");
             return self.post(f, inbound, None, Some(note));
         }
         // a catch-up's forward of one already waiting keeps its first time
-        s.files.entry(file.id).or_insert((inbound, Instant::now()));
+        let id = file.id;
+        s.files.entry(id).or_insert((inbound, Instant::now()));
+        self.reserve(f, id, true);
         // its description may not be ready yet: then FileReady asks again
-        self.act(f, Action::Ask(Cmd::Receive { file: file.id }));
+        self.act(f, Action::Ask(Cmd::Receive { file: id }));
     }
 
     /// A message's post, confirmed or refused: the link's delivered mark
@@ -1851,6 +1879,69 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Goal (Alex's review of #612): a receive asked before a restart keeps
+    /// its place after it. With the link one short of its bound (63 cancels
+    /// unsettled) and one receive under way, then a restart (the core
+    /// resumes it from its own database; the bridge's waits are gone), the
+    /// receive is waited for again and carried, whichever comes first: a
+    /// newer message's file (held back: its note) or the older message's
+    /// catch-up.
+    #[tokio::test]
+    async fn a_receive_asked_before_a_restart_keeps_its_place() {
+        for live_first in [true, false] {
+            let dir = std::env::temp_dir().join(format!("simplex-resumed-{}-{live_first}", std::process::id()));
+            let (mut m, mut sent, mut posts) = captured(&dir, 4 * ABANDONED_MAX);
+            let f = "juniper--k3x9";
+            let mut t = Instant::now();
+            let failed = |corr: &str| format!(r#"{{"corrId":"{corr}","resp":{{"type":"chatCmdError","chatError":{{"type":"errorDatabase","databaseError":{{"type":"errorSQL"}}}}}}}}"#);
+            // 63 cancels unsettled
+            let mut next = 1;
+            while next < ABANDONED_MAX as i64 {
+                let batch: Vec<i64> = (next..(next + FILES_MAX as i64).min(ABANDONED_MAX as i64)).collect();
+                next += batch.len() as i64;
+                for id in &batch {
+                    m.forward(f, voice(*id, None));
+                }
+                t += Duration::from_millis(FILE_WAIT_MS + 1_000);
+                m.files_overdue(t);
+                for (corr, line) in sent_lines(&mut sent) {
+                    if line.starts_with("/fcancel") {
+                        m.frame(f, 1, &failed(&corr));
+                    }
+                }
+            }
+            // one receive under way: the last place
+            m.forward(f, voice(65, None));
+            assert!(sent_lines(&mut sent).iter().any(|(_, l)| l == "/freceive 65"));
+            while posts.try_recv().is_ok() {}
+            // a restart: its waits gone, its link's file read back
+            {
+                let s = m.slots.get_mut(f).expect("its slot");
+                s.files.clear();
+                s.pending.clear();
+                s.saved = load(&s.dir, &agent()).expect("its file");
+                assert!(s.saved.receiving.contains(&65), "the receive under way, kept");
+            }
+            let order: [i64; 2] = if live_first { [66, 65] } else { [65, 66] };
+            for item in order {
+                m.forward(f, voice(item, None));
+            }
+            let asked: Vec<String> = sent_lines(&mut sent).into_iter().map(|(_, l)| l).collect();
+            assert_eq!(asked, ["/freceive 65"], "live first {live_first}: 65 waited for again, 66 not received");
+            let p = posts.try_recv().expect("66 posted");
+            assert!(p.inbound.item == 66 && p.note.is_some() && p.file.is_none(), "live first {live_first}: the newer file held back, with its note");
+            assert!(m.slots[f].files.contains_key(&65), "65 waited for");
+            // the resumed receive completes: carried, its place let go
+            std::fs::write(m.slots[f].dir.join("files").join("voice_65.m4a"), b"resumed").expect("a file");
+            m.file_event(f, &Resp::FileDone { file: 65, path: "voice_65.m4a".into() });
+            let p = posts.try_recv().expect("65 posted");
+            assert!(p.inbound.item == 65 && p.file.is_some() && p.note.is_none(), "live first {live_first}: carried with its file");
+            assert!(m.slots[f].dir.join("files").join("voice_65.m4a").exists(), "and kept for its post");
+            assert!(load(&m.slots[f].dir, &agent()).expect("its file").receiving.is_empty(), "its place let go");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
     /// Goal: what settles a cancel. The core took it, or refused it for
     /// good (a store or a chat error: the file unknown, done, cancelled);
     /// its agent's or database's failures are tried again.
@@ -1894,7 +1985,7 @@ mod tests {
     /// says nothing (an old one) forces nothing.
     #[test]
     fn a_rollback_is_this_starts_and_once() {
-        let saved = |generation| Saved { identity: "npub1juniper".into(), generation, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new() };
+        let saved = |generation| Saved { identity: "npub1juniper".into(), generation, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new() };
         assert!(rolled_back(&computer(true, 5, Some((5, true))), &saved(4)));
         assert!(!rolled_back(&computer(true, 5, Some((5, true))), &saved(5)), "this start's, handled already");
         assert!(!rolled_back(&computer(true, 5, Some((4, true))), &saved(3)), "an older start's restore");
@@ -1910,7 +2001,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("juniper--k3x9");
         assert_eq!(load(&dir, &agent()), None, "none yet");
-        let saved = Saved { identity: "npub1juniper".into(), generation: 7, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::from([("0f".repeat(16), 5)]), abandoned: BTreeMap::from([(7, Abandoned::Cancelling)]) };
+        let saved = Saved { identity: "npub1juniper".into(), generation: 7, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::from([("0f".repeat(16), 5)]), abandoned: BTreeMap::from([(7, Abandoned::Cancelling)]), receiving: BTreeSet::from([9]) };
         store(&dir, &saved).expect("written");
         assert_eq!(load(&dir, &agent()), Some(saved.clone()));
         assert_eq!(linked_on_disk(&root, &[agent()]), vec!["juniper--k3x9".to_string()]);
@@ -1957,7 +2048,7 @@ mod tests {
         Slot {
             agent: agent(),
             dir,
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new() },
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new() },
             title: None,
             epoch: 0,
             core: None,
@@ -2168,7 +2259,7 @@ mod tests {
         let (writer, _writes) = mpsc::channel(1);
         let (tx, _rx) = mpsc::channel(4);
         let (pulse, _) = watch::channel(false);
-        let saved = Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new() };
+        let saved = Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new() };
         let slot = Slot {
             agent: agent(),
             dir: PathBuf::from("/nowhere"),
@@ -2261,7 +2352,7 @@ mod tests {
         let mut slot = Slot {
             agent: agent(),
             dir: PathBuf::from("/nowhere"),
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link, used: BTreeMap::new(), abandoned: BTreeMap::new() },
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new() },
             title: None,
             epoch: 1,
             core: None,
@@ -2310,7 +2401,7 @@ mod tests {
         let slot = Slot {
             agent: agent(),
             dir: std::env::temp_dir().join(format!("simplex-ack-{}", std::process::id())),
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new() },
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new() },
             title: None,
             epoch: 1,
             core: None,
