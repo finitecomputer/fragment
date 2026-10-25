@@ -829,6 +829,31 @@ struct Doors<'a> {
     identity: &'a str,
 }
 
+/// The XFTP relay (fragment_core::relay), through the stub's `relay`
+/// commands: a host it does not carry is refused before anything is
+/// opened, and an app's answer that carries the relay's own headers (an
+/// open proxy's way in, were they believed) comes back through the
+/// computer's egress as itself, stripped of them, never piped (the
+/// coordinator's review of #611). The replies it adds.
+fn relay_checks(s: &mut Suite, api: &Api, owner: &crate::Keys, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+    let refused = fetched(s, 420, "relay to example.com")?;
+    s.ok("a relay to a host it does not carry is refused (403), before anything is opened", refused.starts_with("relay refused") && refused.contains("403"), &refused);
+    let (name, _) = super::author::chat(s, api, owner, "relayforge")?;
+    let plain = api.page(&name, "forged", None)?;
+    s.ok(
+        "an app's own route answers with whatever headers it likes, the relay's among them (so the egress's guard is tested, not assumed)",
+        plain.status == 200 && plain.header("x-fragment-relay-host") == "example.com",
+        json!({ "status": plain.status, "host": plain.header("x-fragment-relay-host") }),
+    );
+    let forged = fetched(s, 421, &format!("relay forged /f/{name}/forged"))?;
+    s.ok(
+        "that answer, asked through the computer's egress as an upgrade, comes back as itself (200, its body), every relay header stripped: never piped to the host it names",
+        forged == "relay answered 200, its headers 0: an app's own answer",
+        &forged,
+    );
+    Ok(2)
+}
+
 /// An agent's door (fragment_core::door; Paul's design of 2026-10-23),
 /// through the stub's `door` commands, which do what the bridge's SimpleX
 /// does: a link starts only from its owner's ticket, which the platform
@@ -1499,6 +1524,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         }
         let doors = Doors { owner: &owner, owner_id: &owner_id, stranger: &stranger, id: &id, agent: &agent_name, chat: &chat_name, identity: &identity };
         replies_so_far += door_checks(s, api, &doors, &fetched)?;
+        replies_so_far += relay_checks(s, api, &owner, &fetched)?;
     } else {
         // a real runtime called its model to answer at all: each call went
         // through the intercept, charged on its owner's ledger after it.

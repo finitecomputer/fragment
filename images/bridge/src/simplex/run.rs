@@ -363,18 +363,25 @@ pub fn dir_name_ok(fragment: &str) -> bool {
 
 /// A core's command line: its state under `dir`, its bot API on `port`
 /// (loopback), and the servers a test names (else the core's presets).
+/// Every connection through the bridge's own proxy (`socks`, on loopback, at
+/// `socks`), which sends SimpleX's file servers through the platform's XFTP
+/// relay, and the rest straight out: the hosts it names, never their onion
+/// addresses (`--host-mode public`: the proxy is no Tor).
 /// SMP servers only on their own port (5223): the core reaches presets on
 /// 443 by default, with no server name in its TLS hello (SNI: a SimpleX
 /// server on 443 tells its protocol from its website by its absence), and
 /// Cloudflare Containers reset every such hello on 443 (measured on a
 /// preview computer, 2026-10-25: each SMP preset reset there, and the same
 /// servers answering on 5223). XFTP's servers are on 443 alone, so a file
-/// does not arrive there yet (docs/explorations/simplex-complexity.md).
-fn core_args(cfg: &Config, dir: &Path, port: u16, name: &str) -> Vec<std::ffi::OsString> {
+/// arrives only through the relay (docs/explorations/simplex-complexity.md).
+fn core_args(cfg: &Config, dir: &Path, port: u16, name: &str, socks: Option<u16>) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = vec!["-d".into(), dir.join("sx").into(), "-p".into(), port.to_string().into()];
     args.extend(["--files-folder".into(), dir.join("files").into(), "--temp-folder".into(), dir.join("tmp").into()]);
     for a in ["-y", "--mute", "--create-bot-display-name", name, "--create-bot-allow-files", "--smp-web-port-servers", "off"] {
         args.push(a.into());
+    }
+    if let Some(p) = socks {
+        args.extend(["--socks-proxy".into(), format!("127.0.0.1:{p}").into(), "--host-mode".into(), "public".into()]);
     }
     if let Some(smp) = &cfg.smp {
         args.extend(["-s".into(), smp.into()]);
@@ -566,6 +573,10 @@ struct Manager {
     /// The agents whose link is bound: the bridge's engine honors only
     /// their relayed records.
     relaying: watch::Sender<BTreeSet<String>>,
+    /// The cores' way out (`socks`), on loopback: its port, once bound.
+    socks: Option<u16>,
+    /// What the platform's XFTP relay carries, as its view last said.
+    offer: watch::Sender<Option<api::RelayOffer>>,
     stop: watch::Receiver<bool>,
 }
 
@@ -577,7 +588,20 @@ pub fn start(cfg: Config, api: Api, quiet: Arc<AtomicBool>, hold: PathBuf, relay
     let (pulse, pulse_rx) = watch::channel(false);
     // held for a moment at a link's change, at the pace the bridge's own pings by default
     tokio::spawn(crate::driver::keepalive(api.clone(), pulse_rx, Duration::from_millis(crate::limits::KEEPALIVE_PING_MS), stop.clone()));
-    let m = Manager { cfg, api: api.clone(), quiet, hold, tx: tx.clone(), slots: BTreeMap::new(), computer: None, held: false, pulse, pulse_until: None, relaying, stop: stop.clone() };
+    // the cores' way out: SimpleX's file servers through the platform's relay
+    let (offer, offer_rx) = watch::channel(None);
+    let socks = match std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.set_nonblocking(true).map(|()| l)).and_then(tokio::net::TcpListener::from_std) {
+        Ok(l) => {
+            let port = l.local_addr().map(|a| a.port()).ok();
+            tokio::spawn(super::socks::serve(l, api.clone(), offer_rx, stop.clone()));
+            port
+        }
+        Err(e) => {
+            crate::ev!("simplex.socks_unbound", { "error": e.to_string() });
+            None
+        }
+    };
+    let m = Manager { cfg, api: api.clone(), quiet, hold, tx: tx.clone(), slots: BTreeMap::new(), computer: None, held: false, pulse, pulse_until: None, relaying, socks, offer, stop: stop.clone() };
     tokio::spawn(m.run(rx, stop));
     Handle { tx, api }
 }
@@ -714,6 +738,14 @@ impl Manager {
     /// from its file), none for one that left (its core stopped; its
     /// state stays, as the agent's other files do).
     async fn computer(&mut self, computer: api::Computer, agents: Vec<Agent>) {
+        self.offer.send_if_modified(|was| {
+            let news = *was != computer.relay;
+            if news {
+                crate::ev!("simplex.relay_offered", { "hosts": computer.relay.as_ref().map_or(0, |o| o.hosts.len()) });
+                was.clone_from(&computer.relay);
+            }
+            news
+        });
         let gone: Vec<String> = self.slots.keys().filter(|f| !agents.iter().any(|a| &a.fragment == *f)).cloned().collect();
         for f in gone {
             self.stop_core(&f).await;
@@ -923,6 +955,7 @@ impl Manager {
         }
         let cfg = self.cfg.clone();
         let tx = self.tx.clone();
+        let socks = self.socks;
         let s = self.slots.get_mut(f).expect("a slot");
         for sub in ["", "files", "tmp"] {
             if let Err(e) = std::fs::create_dir_all(s.dir.join(sub)) {
@@ -955,7 +988,7 @@ impl Manager {
                 Ok(())
             });
         }
-        cmd.args(core_args(&cfg, &s.dir, port, &name));
+        cmd.args(core_args(&cfg, &s.dir, port, &name, socks));
         cmd.current_dir(&s.dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -1562,6 +1595,7 @@ mod tests {
             image: String::new(),
             agents: vec![agent()],
             credential_env: vec![],
+            relay: None,
             models: None,
             always_on,
             generation,
@@ -1838,7 +1872,7 @@ mod tests {
     /// server), with the presets or a test's servers alike.
     #[test]
     fn a_core_reaches_smp_servers_off_443() {
-        let words = |cfg: &Config| core_args(cfg, Path::new("/data/simplex/a"), 5225, "Juniper").into_iter().map(|a| a.into_string().expect("text")).collect::<Vec<_>>();
+        let words = |cfg: &Config| core_args(cfg, Path::new("/data/simplex/a"), 5225, "Juniper", Some(40123)).into_iter().map(|a| a.into_string().expect("text")).collect::<Vec<_>>();
         let presets = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/data/simplex"), smp: None, xftp: None };
         let lab = Config { smp: Some("smp://fp@smp.lab".into()), xftp: Some("xftp://fp@xftp.lab".into()), ..presets.clone() };
         for args in [words(&presets), words(&lab)] {
@@ -1846,6 +1880,11 @@ mod tests {
             assert!(args.windows(2).any(|w| w == ["-p", "5225"]) && args.windows(2).any(|w| w == ["-d", "/data/simplex/a/sx"]), "{args:?}");
         }
         assert!(!words(&presets).contains(&"-s".to_string()), "the presets: no server named");
+        for args in [words(&presets), words(&lab)] {
+            assert!(args.windows(2).any(|w| w == ["--socks-proxy", "127.0.0.1:40123"]) && args.windows(2).any(|w| w == ["--host-mode", "public"]), "through the bridge's proxy, by name: {args:?}");
+        }
+        let unproxied = core_args(&presets, Path::new("/d"), 1, "J", None).into_iter().map(|a| a.into_string().expect("text")).collect::<Vec<_>>();
+        assert!(!unproxied.iter().any(|a| a.starts_with("--socks") || a == "--host-mode"), "no proxy bound: straight out");
         assert!(words(&lab).windows(2).any(|w| w == ["-s", "smp://fp@smp.lab"]));
     }
 
@@ -1981,7 +2020,7 @@ mod tests {
         let mut s = slot(dir.join("juniper--k3x9"), phase);
         s.agent.key = Some(key.public_hex());
         let api = Api::new("http://127.0.0.1:9").expect("an address");
-        Manager { cfg, api, quiet: Arc::new(AtomicBool::new(true)), hold: dir.join("hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), s)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying, stop }
+        Manager { cfg, api, quiet: Arc::new(AtomicBool::new(true)), hold: dir.join("hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), s)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying, socks: None, offer: watch::channel(None).0, stop }
     }
 
     /// The vectors' agent key (crates/core/src/door.rs: secret 0x07 × 32),
@@ -2158,7 +2197,7 @@ mod tests {
             linking: None,
         };
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
-        let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(false)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeSet::new()).0, stop: watch::channel(false).1 };
+        let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(false)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeSet::new()).0, socks: None, offer: watch::channel(None).0, stop: watch::channel(false).1 };
         m.lost("juniper--k3x9", 3).await;
         assert!(m.slots["juniper--k3x9"].core.is_some(), "another life's word: nothing");
         m.lost("juniper--k3x9", 4).await;
@@ -2248,7 +2287,7 @@ mod tests {
         };
         slot.up = true;
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
-        let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(true)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeSet::new()).0, stop: watch::channel(false).1 };
+        let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(true)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeSet::new()).0, socks: None, offer: watch::channel(None).0, stop: watch::channel(false).1 };
         m.resync();
         let first = m.slots["juniper--k3x9"].resync_at.expect("its next ask, set");
         m.slots.get_mut("juniper--k3x9").expect("its slot").resync_at = Some(Instant::now() - Duration::from_millis(1));
@@ -2296,7 +2335,7 @@ mod tests {
             linking: None,
         };
         let cfg = Config { bin: PathBuf::from("/nowhere"), dir: PathBuf::from("/nowhere"), smp: None, xftp: None };
-        let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(true)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeSet::new()).0, stop: watch::channel(false).1 };
+        let mut m = Manager { cfg, api: Api::new("http://127.0.0.1:9").expect("an address"), quiet: Arc::new(AtomicBool::new(true)), hold: PathBuf::from("/nowhere/hold"), tx, slots: BTreeMap::from([("juniper--k3x9".to_string(), slot)]), computer: Some(computer(true, 1, None)), held: false, pulse, pulse_until: None, relaying: watch::channel(BTreeSet::new()).0, socks: None, offer: watch::channel(None).0, stop: watch::channel(false).1 };
         let f = "juniper--k3x9";
         let delivered = |m: &Manager| m.slots[f].saved.link.delivered;
         let forwarded = |m: &mut Manager, item: i64| {

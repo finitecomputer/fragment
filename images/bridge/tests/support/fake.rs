@@ -106,6 +106,11 @@ pub struct World {
     /// Each agent's door, by its fragment: the nonce of the link ticket its
     /// owner was given last, and the door key its computer registered.
     pub door_tickets: BTreeMap<String, String>,
+    /// The XFTP relay, as the platform's (`GET /api/computer/relay`): each
+    /// host it carries on 443 and the local address it stands for; any
+    /// other is 403. Each relay's `host up down` once it closes.
+    pub relay_to: BTreeMap<String, std::net::SocketAddr>,
+    pub relayed: Vec<String>,
     /// `GET /api/computer` reads that said the image does SimpleX
     /// (`?simplex=1`), and those that did not.
     pub simplex_said: u32,
@@ -485,6 +490,39 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             w.door_tickets.remove(agent);
             w.doors.insert(agent.to_string(), key.to_string());
             return answer(StatusCode::OK, json!({ "door": "simplex", "key": key }));
+        }
+        (Method::GET, ["api", "computer", "relay"]) => {
+            let host = query(&q, "host").into_iter().next().unwrap_or_default();
+            let to = {
+                let w = world.lock().unwrap();
+                w.relay_to.get(&host).copied().filter(|_| query(&q, "port") == ["443"])
+            };
+            let Some(to) = to else { return refuse(StatusCode::FORBIDDEN, "not relayed") };
+            let Some((response, socket)) = net::accept_ws(&mut req) else { return refuse(StatusCode::BAD_REQUEST, "a socket") };
+            let world = world.clone();
+            tokio::spawn(async move {
+                let Some(ws) = socket.await else { return };
+                let Ok(mut tcp) = tokio::net::TcpStream::connect(to).await else { return };
+                let (mut rd, mut wr) = tcp.split();
+                let (mut sink, mut stream) = ws.split();
+                let mut buf = vec![0u8; 16 * 1024];
+                let (mut up, mut down) = (0usize, 0usize);
+                loop {
+                    tokio::select! {
+                        n = tokio::io::AsyncReadExt::read(&mut rd, &mut buf) => match n {
+                            Ok(0) | Err(_) => { let _ = sink.send(Message::Close(None)).await; break; }
+                            Ok(n) => { down += n; if sink.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() { break; } }
+                        },
+                        m = stream.next() => match m {
+                            Some(Ok(Message::Binary(b))) => { up += b.len(); if tokio::io::AsyncWriteExt::write_all(&mut wr, &b).await.is_err() { break; } }
+                            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                            _ => {}
+                        },
+                    }
+                }
+                world.lock().unwrap().relayed.push(format!("{host} {up} {down}"));
+            });
+            return response;
         }
         (Method::GET, ["api", "computer", "keepalive"]) => {
             let Some((response, socket)) = net::accept_ws(&mut req) else { return refuse(StatusCode::BAD_REQUEST, "a socket") };

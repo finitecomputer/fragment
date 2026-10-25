@@ -846,7 +846,8 @@ expires within 30 days. The container application is the deployment's
   - `GET /api/computer` → `{computer, owner, image, agents: [{fragment,
     identity, name, owner, connections, modelProviders?, credentials:
     [{provider, kind, env, placeholder, hosts, modelBase?}], key}],
-    credentialEnv, models: {cheap, medium, fallback, vision}}`: the agents
+    credentialEnv, models: {cheap, medium, fallback, vision}, relay?:
+    {hosts, port}}`: the agents
     to run, each one's credentials (below, Connections and operator keys;
     `modelProviders` names those of them with a `modelBase`, as its owner's
     view does: "An agent's own model"), the key its fragment signs as
@@ -880,6 +881,36 @@ expires within 30 days. The container application is the deployment's
     its agent's owner made last (its `nonce`, within its ten minutes),
     redeemed once with the public key of that link's door (docs/api.md,
     "An agent's doors"); 403 for any other.
+  - `GET /api/computer/relay?host=&port=` (a WebSocket): **the XFTP
+    relay** (`fragment_core::relay`), raw TCP to `host`:`port` and back,
+    each binary frame bytes passed untouched. Containers reset a TLS hello
+    on 443 that names no server (SNI), and a SimpleX server on 443 takes
+    its protocol only from one (measured on a preview computer,
+    2026-10-25), so a computer reaches SimpleX's file servers only through
+    this: the Worker's `connect()`, which nothing inspects, carries them
+    (the shim's `ComputerEgress`, entry.mjs `relay`). Only the hosts and
+    port the guest view's `relay` names (SimpleX's and Flux's preset XFTP
+    servers, `relay::HOSTS`, on 443; 403 for any other, and 400 without
+    an upgrade), at most `relay::OPEN_MAX` (4) open at once per computer
+    and `relay::DAY_BYTES_MAX` (2 GiB) a UTC day (429 past either), each
+    closed with code 4008 past its allowance (`relay::BYTES_MAX`, 32 MiB
+    both ways together, or what is left of the day's budget past what the
+    open ones hold, reserved as it opens), past `relay::MS_MAX` (5
+    minutes), or when what waits to be written toward the server passes
+    1 MiB. The Computer DO holds each one's place and reservation by a
+    lease in its memory (a restart forgets them; one whose close is never
+    heard lapses on its own bound, counting all it was allowed) and counts
+    its bytes in its `meta` `relay_day`. Only the relay route's own answer
+    can make the shim pipe: it pipes only an answer to that route's GET
+    with an upgrade, and the egress strips every `x-fragment-relay…`
+    header from every other answer (a fragment's or an app's passed
+    through among them). **What the platform sees:** the host, the port,
+    the byte counts and the times, which it logs at each open and close;
+    never what is carried, which is the core's TLS, end to end to the
+    server's own certificate (its fingerprint is in the server's address),
+    around XFTP's own encryption of each file's chunks. Any process in the
+    computer may use it, within the same hosts and bounds: no secret in a
+    container its agent is root in tells the bridge from its tools.
 - A subscription with `{channel, wake: true}` (in place of `url`), sent
   as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
   computer on each new record (the fragment asks the computer itself just
