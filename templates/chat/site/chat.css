@@ -434,6 +434,8 @@ details.tools.rolling.advanced > .step:nth-last-child(4) { display: block; overf
 .msg.user .actions { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
 .msg.user.mine .actions { flex-direction: row; }
 .msg.user .actions .time { margin: 0; }
+/* a message its owner said elsewhere (SimpleX), relayed by their agent */
+.msg.user .actions .via { font-size: 11px; color: var(--text-tertiary); }
 .msg .actions .reply { width: 26px; height: 26px; border-radius: 8px; }
 .msg .actions .icon-button { color: color-mix(in srgb, var(--text-icon) 70%, var(--bg-chat)); }
 .msg .actions .icon-button:hover, .msg .actions .icon-button:focus-visible { color: var(--text-icon); }

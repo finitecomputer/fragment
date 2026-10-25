@@ -273,6 +273,12 @@ pub struct Turn {
     /// The seq on `chat` of the message its message quotes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<u64>,
+    /// How its owner said its message, when its agent relayed it
+    /// (`records::VIA_SIMPLEX`): its replies go back that way too
+    /// (simplex/run.rs). None for every other turn, which writes nothing new
+    /// into the state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
     #[serde(skip)]
     pub open: Option<OpenReply>,
 }
@@ -334,6 +340,9 @@ pub enum Input {
     Tick,
     /// The agent is no longer in the fragment (403 or 404 there).
     Gone { agent: String, fragment: String },
+    /// The agents whose SimpleX link is bound now (simplex/run.rs): their
+    /// relayed records alone are honored, as their owner's messages.
+    Relaying(BTreeSet<String>),
 }
 
 /// What the engine asks the driver to do, in order.
@@ -416,6 +425,10 @@ pub struct Engine {
     /// turn there: `records::menu_id`). Never written to `/data`; at most
     /// one entry per followed chat of each agent.
     published: BTreeSet<(String, String)>,
+    /// The agents whose SimpleX link is bound (`Input::Relaying`): only
+    /// their own relayed records are their owner's messages. Never written
+    /// to `/data`: the bridge reads it from each link's file as it starts.
+    relaying: BTreeSet<String>,
     /// Per agent and chat, its turn there the runtime's notices belong to
     /// (the one running, else the last this life handed there) and how many
     /// it posted, the one used last at the back (at most
@@ -482,6 +495,7 @@ impl Engine {
             forgotten: BTreeMap::new(),
             menu: &[],
             published: BTreeSet::new(),
+            relaying: BTreeSet::new(),
             noticed: VecDeque::new(),
             out: Vec::new(),
             dirty: false,
@@ -556,6 +570,10 @@ impl Engine {
             Input::Posted { turn, id } => self.posted(&turn, &id),
             Input::Tick => self.tick(),
             Input::Gone { agent, fragment } => self.gone(&agent, &fragment),
+            Input::Relaying(agents) => {
+                assert!(agents.len() <= limits::AGENTS_MAX, "the bridge runs at most so many agents");
+                self.relaying = agents;
+            }
         }
         self.finish()
     }
@@ -645,7 +663,17 @@ impl Engine {
         }
         match record.channel.as_str() {
             // the agent's own words are not for it
-            records::CHAT if record.principal != agent.identity => self.said(&agent, fragment, &record),
+            records::CHAT if record.principal != agent.identity => self.said(&agent, fragment, &record, None),
+            // but its owner's words it relays are, when it is linked
+            // (docs/chat-records.md, "A relayed message"): its owner's
+            // message, as theirs, its turn's replies going back the same way
+            records::CHAT if self.relaying.contains(&agent.fragment) => {
+                if let Some(r) = records::relayed(&record.body).filter(|r| r.for_ == agent.owner && r.agent == agent.fragment) {
+                    crate::ev!("relayed", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "via": r.via });
+                    let as_owner = Record { principal: agent.owner.clone(), ..record };
+                    self.said(&agent, fragment, &as_owner, Some(r.via));
+                }
+            }
             records::TASKS if fragment == agent.fragment => {
                 // Only the agent's own fragment (its cron, the platform's
                 // `joined`: by the fragment's key, whose npub is the agent's
@@ -662,9 +690,10 @@ impl Engine {
         }
     }
 
-    fn said(&mut self, agent: &Agent, fragment: &str, record: &Record) {
+    fn said(&mut self, agent: &Agent, fragment: &str, record: &Record, via: Option<&'static str>) {
         match records::said(&record.body) {
-            Said::Message(m) => {
+            Said::Message(mut m) => {
+                m.via = via.map(str::to_string);
                 let view = self.views.get(fragment).cloned().unwrap_or_default();
                 let hop = self.addressed(agent, fragment, &view, &record.principal, &m);
                 if hop == Some(0) && self.told(agent, fragment, &record.principal, &view, &m, record.seq) {
@@ -896,6 +925,7 @@ impl Engine {
             asking: false,
             command: matches!(ask, Ask::Command | Ask::Refused(_)),
             reply_to: m.reply_to,
+            via: m.via.clone(),
             open: None,
         };
         self.dirty = true;

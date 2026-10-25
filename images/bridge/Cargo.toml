@@ -20,6 +20,11 @@ hmac.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+# BIP-340 for its doors (simplex/door.rs): the platform's curve and crate, at its pin
+k256.workspace = true
+# SIGTERM to a SimpleX core (simplex/run.rs): already in the lock, through tokio
+libc = "0.2"
+qrcode.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

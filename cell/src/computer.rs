@@ -1569,6 +1569,7 @@ impl ComputerCell {
                 name,
                 connections,
                 credentials: vec![],
+                key: None,
             });
         }
         Ok(agents)
@@ -1582,6 +1583,10 @@ impl ComputerCell {
         let mut view = self.view()?;
         // what its owner is told is theirs (its guest reads `restored`)
         view.notices = vec![];
+        // the key each agent's fragment signs as: a door's ticket is checked with it
+        for agent in &mut view.agents {
+            agent.key = fragment_core::npub::parse(&agent.identity);
+        }
         let catalog = &self.cfg.providers;
         view.credential_env = catalog.env_names();
         if catalog.is_empty() || view.agents.is_empty() {
@@ -2772,6 +2777,14 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             let set = json!({ "fragment": fragment, "provider": provider, "account": b.account });
             json_response(&view_of(ask(env, id, "computer/account", &set).await?)?)
         }
+        (Method::Post, [id, "agents", fragment, "door"]) => {
+            // a ticket to link or unlink the agent's door, its owner's alone
+            // (fragment_core::door): the agent fragment makes and signs it
+            owned(env, who, id).await?;
+            let v: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let asked = json!({ "computer": id, "owner": who, "door": v["door"], "act": v["act"] });
+            json_response(&crate::fragment::ask(env, fragment, "computer/door-ticket", &asked).await?)
+        }
         (Method::Get, [id, "uses"]) => {
             owned(env, who, id).await?;
             json_response(&ask(env, id, "computer/uses", &json!({ "month": null })).await?)
@@ -2968,6 +2981,14 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
     let path = url.path().to_string();
     match path.as_str() {
         "/api/computer" => return json_response(&ask(env, computer, "computer/guest", &json!({})).await?),
+        // a link's ticket redeemed with its door's public key, at the agent
+        // fragment it names, for this computer alone (fragment_core::door)
+        "/api/computer/door" if req.method() == Method::Post => {
+            let v: Value = serde_json::from_slice(&crate::read_body(&mut req, 4_096).await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let agent = v["agent"].as_str().filter(|a| fragment_proto::valid_fragment_name(a)).ok_or_else(|| CellError::invalid("name the agent fragment (agent)"))?;
+            let asked = json!({ "computer": computer, "door": v["door"], "nonce": v["nonce"], "key": v["key"] });
+            return json_response(&crate::fragment::ask(env, agent, "computer/door-key", &asked).await?);
+        }
         "/api/computer/keepalive" => {
             let headers = Headers::new();
             headers.set(KIND_HEADER, "keepalive")?;

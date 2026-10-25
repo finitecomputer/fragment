@@ -845,11 +845,13 @@ expires within 30 days. The container application is the deployment's
 - Without the header only the computer's own routes answer:
   - `GET /api/computer` → `{computer, owner, image, agents: [{fragment,
     identity, name, owner, connections, modelProviders?, credentials:
-    [{provider, kind, env, placeholder, hosts, modelBase?}]}],
+    [{provider, kind, env, placeholder, hosts, modelBase?}], key}],
     credentialEnv, models: {cheap, medium, fallback, vision}}`: the agents
     to run, each one's credentials (below, Connections and operator keys;
     `modelProviders` names those of them with a `modelBase`, as its owner's
-    view does: "An agent's own model"), and the model route's models'
+    view does: "An agent's own model"), the key its fragment signs as
+    (`key`, 64 hex: what a door's ticket is checked with, docs/api.md, "An
+    agent's doors"), and the model route's models'
     ids by its names (below, Models, "A model by its id"). **They
     may change while the computer runs** (its owner assigns or unassigns
     an agent, connects an account, narrows an agent): the guest reads them
@@ -867,6 +869,10 @@ expires within 30 days. The container application is the deployment's
     and the platform then counts it closed, so a guest still busy pings
     it and opens it again when it goes silent (our bridge: every 15 s,
     silent after 30).
+  - `POST /api/computer/door {agent, door, nonce, key}`: the link ticket
+    its agent's owner made last (its `nonce`, within its ten minutes),
+    redeemed once with the public key of that link's door (docs/api.md,
+    "An agent's doors"); 403 for any other.
 - A subscription with `{channel, wake: true}` (in place of `url`), sent
   as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
   computer on each new record (the fragment asks the computer itself just
@@ -1685,12 +1691,15 @@ settings and state):
   Python, Node 26.7, npm 12, uv, ffmpeg, ripgrep, Chromium 145) in PM's
   store at `/opt/hermes/tools`. Its layers go by how often each changes:
   the base, one layer (Hermes' image flattened, with everything pinned
-  on it: 4.3 GB, 1.4 GB compressed), then ours (the bridge, `hermes-boot`,
-  the fragment CLI and the image's own files: about 21 MB, 9 MB
-  compressed), then a few KB `hermes-boot build-info` writes and the
-  image's version. A deploy that changes only our code pushes the small
-  ones; the base changes only with a pin, `document-requirements.txt` or
-  one of its steps (or when the deploying machine's build cache has lost
+  on it: 4.3 GB, 1.4 GB compressed), then SimpleX's core (`simplex-chat`
+  v7.0.3 by checksum, 79.5 MB, 18.8 MB compressed: a layer of its own,
+  changed only with its pin; it runs only for an agent its owner linked,
+  on an always-on computer: docs/bridge.md, "SimpleX"), then ours (the
+  bridge, `hermes-boot`, the fragment CLI and the image's own files: about
+  21 MB, 9 MB compressed), then a few KB `hermes-boot build-info` writes
+  and the image's version. A deploy that changes only our code pushes the
+  small ones; the base changes only with a pin, `document-requirements.txt`
+  or one of its steps (or when the deploying machine's build cache has lost
   it). One Hermes
   profile per agent (named as its agent fragment, `juniper--k3x9`), its agent
   fragment's `SOUL.md`, `memories/` and `skills/` checked out into it and

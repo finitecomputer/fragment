@@ -73,6 +73,15 @@
 //!   <id>` (`schedule had <id>`: the same one was there), `schedules: <id>
 //!   <cron> by <who>; …`, `schedule removed <id>`, or `schedule refused:
 //!   <the refusal>`;
+//! - `door link <ticket>`, `door say <text>`, `door forge <text>`, `door
+//!   other <text>`: an agent's door as SimpleX's is (fragment_core::door),
+//!   for the platform's lanes: a link's ticket (its JSON, as the owner's
+//!   Settings made it) checked as the bridge checks one, then redeemed with
+//!   a door key the script makes (kept while it runs); a relayed record
+//!   that key signs, posted on this chat; one with no door's signature
+//!   (only the agent's own key's, as every request of its is); one signed
+//!   by a key that is no door's. The reply is `door linked`, `door said
+//!   <seq>`, or `door refused: <why>`;
 //! - a message with attachments: the reply names them;
 //! - a turn told something first (`TurnStart::note`: its agent's turn before
 //!   it in the chat was cut by a restart): the reply ends with
@@ -90,7 +99,7 @@
 //!
 //! A Stop ends the turn as `stopped` at its next draft.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -401,6 +410,39 @@ async fn schedule(agent: &crate::runtime::Agent, chat: &str, rest: &str) -> Stri
     asked.unwrap_or_else(|e| format!("schedule refused: {e}"))
 }
 
+/// The door keys `door link` made, by agent, for the process's life.
+static DOORS: std::sync::Mutex<BTreeMap<String, crate::simplex::door::Key>> = std::sync::Mutex::new(BTreeMap::new());
+
+/// `door …` (the module's list): an agent's door, as its lanes see it.
+async fn door(agent: &crate::runtime::Agent, chat: &str, rest: &str) -> Result<String, String> {
+    use crate::simplex::door::{self, Key, Ticket};
+    let api = crate::api::Api::new(&std::env::var("FRAGMENT_API").map_err(|_| "no FRAGMENT_API".to_string())?)?;
+    let now = crate::log::now_ms() as i64;
+    let (verb, said) = rest.split_once(' ').unwrap_or((rest, ""));
+    if verb == "link" {
+        let ticket: Ticket = serde_json::from_str(said.trim()).map_err(|e| format!("not a ticket: {e}"))?;
+        let computer = api.computer().await.map_err(|e| e.to_string())?.computer;
+        door::check(&ticket, "link", &agent.fragment, &computer, agent.key.as_deref().unwrap_or(""), now).map_err(str::to_string)?;
+        let key = Key::generate().map_err(|e| e.to_string())?;
+        api.door(&agent.fragment, door::DOOR, &ticket.nonce, &key.public_hex()).await.map_err(|e| e.to_string())?;
+        DOORS.lock().expect("not poisoned").insert(agent.fragment.clone(), key);
+        return Ok("door linked".into());
+    }
+    let mut body = crate::records::relayed_message(said, agent, crate::records::VIA_SIMPLEX, &[]);
+    let id = crate::records::relayed_id(&agent.fragment, &format!("{verb} {said} {now}"));
+    match verb {
+        "say" => {
+            let key = DOORS.lock().expect("not poisoned").get(&agent.fragment).cloned().ok_or("no door linked here")?;
+            key.seal(&mut body, chat, crate::records::CHAT, &id, now);
+        }
+        "other" => Key::generate().map_err(|e| e.to_string())?.seal(&mut body, chat, crate::records::CHAT, &id, now),
+        "forge" => body["relayed"]["at"] = serde_json::json!(now),
+        _ => return Err("say `door link <ticket>`, `door say <text>`, `door forge <text>` or `door other <text>`".into()),
+    }
+    let posted = api.post(&agent.fragment, chat, crate::records::CHAT, &id, &body).await.map_err(|e| e.to_string())?;
+    Ok(format!("door said {}", posted.seq.unwrap_or(0)))
+}
+
 /// `models`: the ids the intercept lists (`GET /v1/models`, naming no
 /// agent, as Hermes' `/model` asks it), and the computer's view's.
 async fn models() -> Result<String, String> {
@@ -650,6 +692,9 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     }
     if let Some(rest) = ts.text.strip_prefix("schedule ") {
         reply = schedule(&ts.agent, &ts.fragment, rest).await;
+    }
+    if let Some(rest) = ts.text.strip_prefix("door ") {
+        reply = door(&ts.agent, &ts.fragment, rest).await.unwrap_or_else(|e| format!("door refused: {e}"));
     }
     if let Some(rest) = ts.text.strip_prefix("decide ") {
         reply = match decide(&ts.agent.fragment, rest).await {

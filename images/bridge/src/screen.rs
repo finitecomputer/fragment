@@ -340,6 +340,9 @@ struct Shared {
     agents: Agents,
     screens_file: Option<Mutex<Screens>>,
     by_agent: Mutex<HashMap<String, Arc<Screen>>>,
+    /// An agent's SimpleX link (`/simplex/…`, simplex/http.rs): 404 on an
+    /// image that names no core.
+    simplex: crate::simplex::http::Simplex,
 }
 
 impl Shared {
@@ -372,11 +375,11 @@ impl Shared {
     }
 }
 
-pub async fn serve(cfg: ScreenConfig, agents: Agents, stop: watch::Receiver<bool>) -> Result<(), String> {
+pub async fn serve(cfg: ScreenConfig, agents: Agents, simplex: crate::simplex::http::Simplex, stop: watch::Receiver<bool>) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(cfg.listen).await.map_err(|e| format!("screen listen {}: {e}", cfg.listen))?;
     crate::ev!("screen.listening", { "listen": cfg.listen.to_string(), "screensFile": cfg.screens_file.as_ref().map(|p| p.display().to_string()) });
     let screens_file = cfg.screens_file.clone().map(|p| Mutex::new(Screens::new(p)));
-    let shared = Arc::new(Shared { cfg, agents, screens_file, by_agent: Mutex::new(HashMap::new()) });
+    let shared = Arc::new(Shared { cfg, agents, screens_file, by_agent: Mutex::new(HashMap::new()), simplex });
     tokio::spawn(tick(shared.clone(), stop.clone()));
     let handler = move |req: Request<Incoming>, _peer: SocketAddr| {
         let shared = shared.clone();
@@ -444,6 +447,9 @@ async fn running(agents: &Agents) -> Option<Vec<Named>> {
 
 async fn handle(mut req: Request<Incoming>, shared: Arc<Shared>) -> Response<Body> {
     let path = req.uri().path().to_string();
+    if crate::simplex::http::ours(&path) {
+        return crate::simplex::http::handle(req, &shared.simplex).await;
+    }
     match path.as_str() {
         "/websockify" | "/control" => {
             let rfb = path == "/websockify";

@@ -128,6 +128,9 @@ on a computer.
 | `BRIDGE_SCREEN_DIR` | `/opt/fragment/screen` | its page |
 | `BRIDGE_SCREENS_FILE` | | each agent's screen (`screens.rs`): `{"screens": [{agent, rfb, lease?, activity?}]}`, `rfb` as `unix:<path>` or `tcp:<host:port>`, written whole and renamed into place, read again when it changes. Unset, no agent has a display (the stub); set, an agent it does not name has no screen. While someone watches a screen its `activity` file's time is set every 10 s (`ACTIVITY_EVERY_MS`), so the image's idle stop leaves a watched desktop up. Our Hermes image's is `/var/lib/fragment-run/screens.json` (docs/computers.md) |
 | `BRIDGE_SCREEN_START` | | the command that starts an agent's display, run with the agent's fragment as its last argument by a viewer that finds it down: at once when it answered since the last start (it stopped or restarted under its viewers, whose streams end with it), else at most once a minute while it stays down |
+| `BRIDGE_SIMPLEX_BIN` | | SimpleX's core, `simplex-chat` (below, "SimpleX"): set, each linked agent's core runs while the computer is always on; unset (the stub), nothing of SimpleX runs, and `/simplex/…` is 404. Our Hermes image's is `/usr/local/bin/simplex-chat` |
+| `BRIDGE_SIMPLEX_DIR` | `/data/simplex` | each agent's SimpleX state, `<dir>/<agent fragment>/` |
+| `BRIDGE_SIMPLEX_SMP`, `BRIDGE_SIMPLEX_XFTP` | | servers its cores use (a test's lab); unset, the core's own presets (SimpleX Chat's and Flux's) |
 
 ## State, and what it never does twice
 
@@ -401,6 +404,114 @@ told twice), the two together at most 8 KiB. Said once in a life; a life that re
 `turns_another_life_ran_are_told_once_to_the_next_turn` (the engine),
 `forgotten_turns_are_told_from_the_journal` (note.rs), and on the platform
 by the `computers` lane's recovery checks, where the stub echoes it.
+
+## SimpleX
+
+An agent's owner may link the agent to their SimpleX app (decision 32;
+`src/simplex/`; what it adds to the platform, entry by entry:
+docs/explorations/simplex-complexity.md). The bridge runs SimpleX's own
+core, `simplex-chat`, one per linked agent, as a child process, driven
+over its bot API (`-p`, loopback only) by one task, so nothing else ever
+drives it.
+
+- **Only where the image names the core** (`BRIDGE_SIMPLEX_BIN`), and
+  **only while the computer is always on** (its view's `alwaysOn`: the
+  always-on seat; docs/billing.md). A computer that sleeps would hear
+  nothing, so it runs no core at all, and its link page says why. A seat
+  that lapses turns always-on off: the cores stop, and the computer sleeps
+  when idle, its links kept for when it is on again.
+- **The link page**, `GET /simplex/?agent=` on the screen port (in the
+  bridge, `src/simplex/page.html`, so every image serves the same one),
+  is what the shell opens from Settings' SimpleX, in a pane through a port
+  ticket as a screen is, telling it the agent's name (`{fragment:
+  "simplex", agent, name}`). It shows the one-time invitation as a QR code
+  the bridge draws (`GET /simplex/qr.svg?agent=&s=`: the server's short link
+  when it made one, which SimpleX's apps open, else the full link), with
+  Open in SimpleX and Copy link; then whom it is linked to, and Unlink. Its
+  words are for someone who has never heard of SimpleX, and it says
+  plainly: encrypted between your SimpleX app and your computer.
+- **Only its owner links or unlinks it, from their Settings** (Paul's
+  design of 2026-10-23; docs/api.md, "An agent's doors"; `src/simplex/
+  door.rs`). The agent's tools reach the screen port too, so the page's
+  Link and Unlink ask the platform's page framing it for a ticket
+  (`{fragment: "simplex", agent, want}`), which asks the platform for the
+  agent's owner alone and hands back `{fragment: "simplex", agent, for,
+  ticket}`; the page posts it as the body of `POST /simplex/link?agent=`
+  or `/simplex/unlink?agent=`. The bridge takes one only signed by the
+  agent's key (its view's `key`), for this computer and that agent, within
+  its ten minutes, once (the nonces it took kept in `link.json` until
+  they would have run out); a link's only while unlinked (else 409). With
+  none, or with any other, it is 403 and nothing moves.
+- **A link's door key**: before any invitation exists, the bridge makes a
+  key for the link (`door.key` in the agent's directory: 0600, the
+  directory 0700, in no process's environment) and redeems the ticket with
+  its public half at the platform (`POST /api/computer/door`), which
+  takes only the link ticket the owner made last, once. Every message the
+  link carries to the agent's chat is a relayed record that key signs
+  (`Key::seal`, at each try), and the platform takes no relayed record
+  without its door's signature, so nothing the agent's own key posts
+  speaks for its owner. The unlink's ticket closes the door at the
+  platform as it is made; the bridge forgets the key when the link goes
+  (an unlink, or the contact's own delete). A link with no key (one that
+  went back in time to before its key) tells the owner's app to link
+  again rather than carry what the platform would refuse.
+- **The invitation is shown to the page whose ticket made it** (its
+  nonce, `s`): `state` and `qr.svg` give anyone else no link (`hidden`),
+  and that page's ticket's nonce is held in memory only, so after a
+  restart, or from another window, the page asks for the code again with
+  a new link ticket (the same invitation).
+- **Linking** is a one-time invitation the core makes once its door's
+  key is registered; the contact that connects through it is the owner's,
+  and the spent link is refused to anyone after (the SMP server's
+  `AUTH`). Any other contact is deleted, and nothing of theirs is
+  carried. Linked, the core greets the owner's app. Unlinking lets the
+  contact go (told in their app); their own delete in their app lets it go
+  here. `GET /simplex/state?agent=` says where it is (`off`, `asking`,
+  `inviting` with its link for the page that asked, `linked` with their
+  name), whether it runs, and why not.
+- **Its state** is `<dir>/<agent>/`: the core's two databases, its files
+  and temp folders (one device: a received file is renamed from one into
+  the other), `door.key`, and `link.json` (the link, the agent it is of,
+  the start it last ran in, the tickets it took), written whole before
+  what it causes. One of another agent (a fragment's name made again) or
+  that does not read is set aside, renamed, never guessed.
+- **The hold stops every core** before the bridge answers it (`BRIDGE_HELD`
+  waits for them), and none starts while it lasts: a save takes the cores'
+  databases whole, as they are (`/_start` after `/_stop` crashes v7.0.3, so
+  the process stops: SIGTERM, then SIGKILL past 3 s). Our Hermes image's
+  copy of the databases under a hold passes `/data/simplex` over (held.rs,
+  `SIMPLEX`). An awake save starts them again as the hold goes.
+- **A start that went back in time** (the view's `restored.rollback`, for a
+  link last run in an earlier start) forces a ratchet sync before anything
+  is sent, holds replies through it, and tells the owner's app a message
+  may have been lost: the core cannot see a rollback itself
+  (docs/explorations/simplex-connector.md, "The lab"). Every start reads
+  back the newest items, and forwards are by the sender's message id, so
+  a core killed mid-burst loses nothing it committed.
+- **A link's change asks for a save**: the keepalive held for 3 s, so the
+  platform saves as that ends rather than after the next turn.
+- **A core that stops on its own** is started again (2 s, doubled); three
+  stops in 10 minutes and it waits for its owner to link again.
+- **What a core prints is not logged**: it echoes the commands it is sent,
+  message text among them.
+
+Proven by the Docker lane's `simplex_on_the_hermes_image` (the real image,
+a lab of a local SMP and XFTP server and the person's simplex-chat on a
+network it joins): linked from the screen port by its owner's ticket
+alone (none is 403), the invitation hidden from any other page, its door's
+key registered with the ticket; a message a turn of
+Hermes' asked as its owner, answered on SimpleX (1.2 s); a voice note
+transcribed through the route and answered (0.4 s); a hold that stops the
+core first, its copies naming none of the core's databases; a restart; and
+a wake from a save older than the life before it, healed, the person told
+(1.0 s after the gate). By hand, `tests/simplex.rs` holds the rest against
+the real core: the link's rules, voice both ways, the lifecycle (a forged
+ticket refused, the door key's file 0600 and in no environment, the unlink
+closing the door at the fake platform), messages through the chat, and the
+page's code, which another page cannot fetch. The platform's half (the
+ticket's signature, its one redeeming, refusing a relayed record the
+agent's own key or any other signs, and the unlink closing the door) is
+the `computers` lane's door checks, through the stub's `door` commands.
 
 ## Hermes' Relay, as the bridge speaks it
 
