@@ -21,7 +21,7 @@ const CHAT_JSON: &[u8] = include_bytes!("../../fixtures/chat.json");
 const FORMAT_MJS: &[u8] = include_bytes!("../../fixtures/format.mjs");
 
 /// A public chat fragment with its applib module deployed.
-fn chat(s: &Suite, api: &Api, owner: &Keys, base: &str) -> Result<(String, Value)> {
+pub(super) fn chat(s: &Suite, api: &Api, owner: &Keys, base: &str) -> Result<(String, Value)> {
     let name = s.named(api, owner, base)?;
     let c = s.create(api, owner, &name)?;
     api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "public" })))?;

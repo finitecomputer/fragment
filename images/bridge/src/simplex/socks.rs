@@ -21,6 +21,7 @@
 //! each relay's host, bytes and time, never what is carried.
 
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -43,6 +44,11 @@ const CONNECT_MS: u64 = 15_000;
 const CHUNK_BYTES: usize = 16 * 1024;
 /// A name in a request is at most this long (RFC 1928: one length byte).
 const NAME_MAX_BYTES: usize = 255;
+/// Frames from the relay waiting to be written to the core, at most: past
+/// them the core is not reading, and the session ends.
+const DOWN_QUEUE: usize = 64;
+/// A write to either side that takes longer than this ends the session.
+const STALL_MS: u64 = 30_000;
 
 /// SOCKS5's replies (RFC 1928, section 6).
 pub mod reply {
@@ -230,42 +236,70 @@ async fn session(mut tcp: TcpStream, api: &Api, offer: &watch::Receiver<Option<R
 }
 
 /// A core's connection and the relay's socket, piped both ways until either
-/// ends (or `stop`): the bytes sent up and down.
-async fn pipe(mut tcp: TcpStream, ws: ClientWs, mut stop: watch::Receiver<bool>) -> (u64, u64) {
-    let (mut rd, mut wr) = tcp.split();
+/// ends (or `stop`): the bytes sent up and down. The three ways it can end
+/// are driven at once (Alex's review): the core's bytes up, the relay's
+/// read, and its writes toward the core, which take frames from the read
+/// through a queue of `DOWN_QUEUE` frames. A core that stops reading fills
+/// the queue and ends the session (the relay's read never waits on it), so
+/// the relay's close, the core's own bytes up, and `stop` are each heard
+/// whatever the other side does; a write that takes past `STALL_MS` ends it
+/// too.
+pub async fn pipe(tcp: TcpStream, ws: ClientWs, mut stop: watch::Receiver<bool>) -> (u64, u64) {
+    let (mut rd, mut wr) = tcp.into_split();
     let (mut sink, mut stream) = ws.split();
-    let mut buf = vec![0u8; CHUNK_BYTES];
-    let (mut up, mut down) = (0u64, 0u64);
-    // bounded by either side's end, the relay's own bounds, or `stop`
-    loop {
-        tokio::select! {
-            n = rd.read(&mut buf) => match n {
-                Ok(0) | Err(_) => {
-                    let _ = sink.send(Message::Close(None)).await;
-                    break;
-                }
-                Ok(n) => {
-                    up += n as u64;
-                    if sink.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
-                        break;
-                    }
-                }
-            },
-            m = stream.next() => match m {
+    let (up, down) = (AtomicU64::new(0), AtomicU64::new(0));
+    let (queue, mut queued) = tokio::sync::mpsc::channel::<tokio_tungstenite::tungstenite::Bytes>(DOWN_QUEUE);
+    let stall = Duration::from_millis(STALL_MS);
+    // the core's bytes, up the relay
+    let upward = async {
+        let mut buf = vec![0u8; CHUNK_BYTES];
+        // bounded by the core's end, a stalled relay (`STALL_MS`), or the select
+        loop {
+            let n = match rd.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            up.fetch_add(n as u64, Ordering::Relaxed);
+            if !matches!(tokio::time::timeout(stall, sink.send(Message::Binary(buf[..n].to_vec().into()))).await, Ok(Ok(()))) {
+                break;
+            }
+        }
+        let _ = tokio::time::timeout(stall, sink.close()).await;
+    };
+    // the relay's frames, into the queue: never waits on the core
+    let read = async {
+        // bounded by the relay's end, or a full queue (a core not reading)
+        loop {
+            match stream.next().await {
                 Some(Ok(Message::Binary(b))) => {
-                    down += b.len() as u64;
-                    if wr.write_all(&b).await.is_err() {
+                    down.fetch_add(b.len() as u64, Ordering::Relaxed);
+                    if queue.try_send(b).is_err() {
+                        crate::ev!("simplex.relay_stalled", { "queued": DOWN_QUEUE });
                         break;
                     }
                 }
                 Some(Ok(Message::Close(_)) | Err(_)) | None => break,
                 Some(Ok(_)) => {}
-            },
-            _ = net::stopped(&mut stop) => break,
+            }
         }
+    };
+    // the queue, to the core
+    let downward = async {
+        // bounded by the queue's end, or a write that stalls (`STALL_MS`)
+        while let Some(b) = queued.recv().await {
+            if !matches!(tokio::time::timeout(stall, wr.write_all(&b)).await, Ok(Ok(()))) {
+                break;
+            }
+        }
+        let _ = tokio::time::timeout(stall, wr.shutdown()).await;
+    };
+    tokio::select! {
+        _ = upward => {}
+        _ = read => {}
+        _ = downward => {}
+        _ = net::stopped(&mut stop) => {}
     }
-    let _ = wr.shutdown().await;
-    (up, down)
+    (up.load(Ordering::Relaxed), down.load(Ordering::Relaxed))
 }
 
 #[cfg(test)]

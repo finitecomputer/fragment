@@ -893,11 +893,18 @@ expires within 30 days. The container application is the deployment's
     servers, `relay::HOSTS`, on 443; 403 for any other, and 400 without
     an upgrade), at most `relay::OPEN_MAX` (4) open at once per computer
     and `relay::DAY_BYTES_MAX` (2 GiB) a UTC day (429 past either), each
-    closed past `relay::BYTES_MAX` (64 MiB, both ways together) or
-    `relay::MS_MAX` (5 minutes) with close code 4008. The Computer DO
-    holds each one's place by a lease in its memory (a restart forgets
-    them, and they lapse on their own bounds) and counts its bytes in its
-    `meta` `relay_day`. **What the platform sees:** the host, the port,
+    closed with code 4008 past its allowance (`relay::BYTES_MAX`, 32 MiB
+    both ways together, or what is left of the day's budget past what the
+    open ones hold, reserved as it opens), past `relay::MS_MAX` (5
+    minutes), or when what waits to be written toward the server passes
+    1 MiB. The Computer DO holds each one's place and reservation by a
+    lease in its memory (a restart forgets them; one whose close is never
+    heard lapses on its own bound, counting all it was allowed) and counts
+    its bytes in its `meta` `relay_day`. Only the relay route's own answer
+    can make the shim pipe: it pipes only an answer to that route's GET
+    with an upgrade, and the egress strips every `x-fragment-relay…`
+    header from every other answer (a fragment's or an app's passed
+    through among them). **What the platform sees:** the host, the port,
     the byte counts and the times, which it logs at each open and close;
     never what is carried, which is the core's TLS, end to end to the
     server's own certificate (its fingerprint is in the server's address),

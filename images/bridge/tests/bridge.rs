@@ -961,6 +961,108 @@ async fn the_cores_proxy_relays_what_the_platform_carries() {
     let _ = stop_tx.send(true);
 }
 
+/// Goal (Alex's review of #611): a stalled peer on either side never holds
+/// a relayed session. A core that stops reading still sends its own bytes
+/// up, and its session ends by itself once what waits for it passes its
+/// bound, closing the relay; a server that stops reading leaves the session
+/// to end at `stop` at once. Method: the proxy in process, the fake
+/// platform's relay piping to a server that floods, then to one that never
+/// reads.
+#[tokio::test]
+async fn a_stalled_peer_never_holds_the_relay() {
+    use fragment_bridge::api::{Api, RelayOffer};
+    use fragment_bridge::simplex::socks;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // a server that floods what it sends, and says what it heard
+    let flood = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a flood");
+    let flood_at = flood.local_addr().expect("its address");
+    let (heard_tx, mut heard) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    tokio::spawn(async move {
+        let Ok((s, _)) = flood.accept().await else { return };
+        let (mut r, mut w) = s.into_split();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            // bounded by its peer's end
+            while let Ok(n) = r.read(&mut buf).await {
+                if n == 0 || heard_tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        let chunk = vec![7u8; 64 * 1024];
+        for _ in 0..512 {
+            if w.write_all(&chunk).await.is_err() {
+                break;
+            }
+        }
+    });
+    // a server that takes the connection and never reads it
+    let deaf = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a deaf one");
+    let deaf_at = deaf.local_addr().expect("its address");
+    tokio::spawn(async move {
+        let mut held = vec![];
+        // bounded by the test
+        while let Ok((s, _)) = deaf.accept().await {
+            held.push(s);
+        }
+    });
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    fake.with(|w| {
+        w.relay_to.insert("xftp1.simplex.im".into(), flood_at);
+        w.relay_to.insert("xftp2.simplex.im".into(), deaf_at);
+    });
+    let offer = RelayOffer { hosts: vec!["xftp1.simplex.im".into(), "xftp2.simplex.im".into()], port: 443 };
+    let (_offer_tx, offer_rx) = tokio::sync::watch::channel(Some(offer));
+    let (stop_tx, stop) = tokio::sync::watch::channel(false);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("the proxy's port");
+    let proxy = listener.local_addr().expect("its address");
+    tokio::spawn(socks::serve(listener, Api::new(&fake.url()).expect("the fake's address"), offer_rx, stop));
+    async fn to(proxy: std::net::SocketAddr, host: &str) -> tokio::net::TcpStream {
+        let mut c = tokio::net::TcpStream::connect(proxy).await.expect("the proxy answers");
+        let mut b = vec![5, 1, 0, 5, 1, 0, 3, host.len() as u8];
+        b.extend(host.as_bytes());
+        b.extend(443u16.to_be_bytes());
+        c.write_all(&b).await.expect("its handshake");
+        let mut said = [0u8; 2 + 10];
+        c.read_exact(&mut said).await.expect("its replies");
+        assert_eq!(said[..4], [5, 0, 5, socks::reply::SUCCEEDED]);
+        c
+    }
+
+    // a core that never reads: its own bytes still go up, and its session ends by itself
+    let mut core = to(proxy, "xftp1.simplex.im").await;
+    core.write_all(b"upstream marker").await.expect("sent up");
+    let mut got = vec![];
+    let up = tokio::time::timeout(Duration::from_secs(5), async {
+        // bounded by the timeout
+        while !got.ends_with(b"upstream marker") {
+            match heard.recv().await {
+                Some(b) => got.extend(b),
+                None => break,
+            }
+        }
+    })
+    .await;
+    assert!(up.is_ok() && got.ends_with(b"upstream marker"), "its bytes up arrive while what comes down waits for it: {got:?}");
+    fake.until(10_000, "the stalled core's relay to close by itself", |w| w.relayed.iter().any(|r| r.starts_with("xftp1.simplex.im "))).await;
+
+    // a server that never reads: the core's writes back up, and `stop` ends the session at once
+    let deafened = to(proxy, "xftp2.simplex.im").await;
+    let (mut r, mut w) = deafened.into_split();
+    tokio::spawn(async move {
+        let chunk = vec![1u8; 64 * 1024];
+        // bounded by its session's end
+        while w.write_all(&chunk).await.is_ok() {}
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let t0 = Instant::now();
+    let _ = stop_tx.send(true);
+    let mut buf = [0u8; 16];
+    let ended = tokio::time::timeout(Duration::from_secs(3), r.read(&mut buf)).await;
+    assert!(matches!(ended, Ok(Ok(0)) | Ok(Err(_))), "its session ended at `stop`: {ended:?}");
+    assert!(t0.elapsed() < Duration::from_secs(3), "at once, not at a write's stall: {:?}", t0.elapsed());
+}
+
 /// Goal: a bridge whose image names a SimpleX core says so at its reads
 /// of its computer (`?simplex=1`), so its owner's Settings offer SimpleX;
 /// one whose image names none (production's before SimpleX, the stub)

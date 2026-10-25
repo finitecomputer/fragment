@@ -500,8 +500,11 @@ export class Computer extends DurableObject {
 export class ComputerEgress extends WorkerEntrypoint {
   async fetch(request) {
     const { computer, route } = this.ctx.props;
+    // a relay only where one was asked for: its route, a GET that upgrades
+    // (Rust strips the relay's headers from every other answer besides)
+    const asked = route === "api" && request.method === "GET" && new URL(request.url).pathname === "/api/computer/relay" && (request.headers.get("upgrade") ?? "").toLowerCase() === "websocket";
     const answer = await rs.ComputerEgress.handle(request, this.env, this.ctx, computer, route);
-    const lease = route === "api" ? answer.headers.get("x-fragment-relay") : null;
+    const lease = asked ? answer.headers.get("x-fragment-relay") : null;
     return lease ? relay(this.ctx, this.env, computer, lease, answer.headers) : answer;
   }
 }
@@ -515,6 +518,10 @@ export class ComputerEgress extends WorkerEntrypoint {
 // carried. It ends at its bounds (bytes, time), on either side's close or
 // error, and once: its place freed and its bytes counted at the computer.
 // Not piped through Rust: a stream of bytes, nothing in it to decide.
+// A frame from the computer is at most this (the bridge sends 16 KiB), and
+// what waits to be written toward the server at most this, at once.
+const RELAY_FRAME_MAX = 256 * 1024;
+const RELAY_QUEUE_MAX = 1024 * 1024;
 function relay(ctx, env, computer, lease, headers) {
   const host = headers.get("x-fragment-relay-host");
   const port = Number(headers.get("x-fragment-relay-port"));
@@ -524,6 +531,10 @@ function relay(ctx, env, computer, lease, headers) {
   server.accept();
   const t0 = Date.now();
   let bytes = 0;
+  // what waits to be written toward the server: bounded on its own, apart
+  // from the relay's total (Alex's review): a server that stops reading
+  // closes the relay, never piles the computer's bytes up in memory
+  let queued = 0;
   let ended = false;
   const socket = connect({ hostname: host, port }, { secureTransport: "off", allowHalfOpen: false });
   const writer = socket.writable.getWriter();
@@ -546,7 +557,12 @@ function relay(ctx, env, computer, lease, headers) {
   server.addEventListener("message", (e) => {
     if (ended) return;
     const data = typeof e.data === "string" ? new TextEncoder().encode(e.data) : new Uint8Array(e.data);
-    if (counted(data.byteLength)) writer.write(data).catch(() => end("the server's side failed", 1011));
+    if (data.byteLength > RELAY_FRAME_MAX) return end("a frame past its bound", 4008);
+    if (!counted(data.byteLength)) return;
+    queued += data.byteLength;
+    if (queued > RELAY_QUEUE_MAX) return end("the server is not taking what it is sent", 4008);
+    // writes queue in order on the stream; each one written frees its bytes
+    writer.write(data).then(() => { queued -= data.byteLength; }, () => end("the server's side failed", 1011));
   });
   server.addEventListener("close", () => end("the computer closed it", 1000));
   server.addEventListener("error", () => end("the computer's side failed", 1011));

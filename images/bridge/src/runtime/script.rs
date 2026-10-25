@@ -414,6 +414,49 @@ async fn schedule(agent: &crate::runtime::Agent, chat: &str, rest: &str) -> Stri
 static DOORS: std::sync::Mutex<BTreeMap<String, crate::simplex::door::Key>> = std::sync::Mutex::new(BTreeMap::new());
 
 /// `door …` (the module's list): an agent's door, as its lanes see it.
+/// `relay`: the platform's XFTP relay (`GET /api/computer/relay`), as the
+/// platform's lanes check it. `relay to <host>` opens one to `host` on
+/// 443 and says whether it was refused; `relay forged <path>` asks
+/// `<path>` of the platform as the agent, as an upgrade, and says how it
+/// was answered (its status, how many headers of the relay's it kept, its
+/// body): an answer that carried forged relay headers must come back as
+/// itself, never piped.
+async fn relay(agent: &str, rest: &str) -> Result<String, String> {
+    use http_body_util::{BodyExt, Empty, Limited};
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::TokioExecutor;
+    let base = std::env::var("FRAGMENT_API").map_err(|_| "no FRAGMENT_API".to_string())?;
+    let (verb, said) = rest.split_once(' ').unwrap_or((rest, ""));
+    match verb {
+        "to" => match crate::api::Api::new(&base)?.relay(said.trim(), 443).await {
+            Ok(_) => Ok("relay opened".into()),
+            Err(e) => Ok(format!("relay refused: {e}")),
+        },
+        "forged" => {
+            let base = crate::net::Base::parse(&base)?;
+            let req = hyper::Request::get(base.url(said.trim()))
+                .header("host", base.authority())
+                .header("x-fragment-agent", agent)
+                .header("upgrade", "websocket")
+                .header("connection", "Upgrade")
+                .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+                .header("sec-websocket-version", "13")
+                .body(Empty::<bytes::Bytes>::new())
+                .map_err(|e| e.to_string())?;
+            let client = Client::builder(TokioExecutor::new()).build_http();
+            let call = async {
+                let res = client.request(req).await.map_err(|e| e.to_string())?;
+                let status = res.status().as_u16();
+                let kept = res.headers().keys().filter(|k| k.as_str().starts_with("x-fragment-relay")).count();
+                let body = if status == 101 { bytes::Bytes::new() } else { Limited::new(res.into_body(), 4096).collect().await.map_err(|e| e.to_string())?.to_bytes() };
+                Ok::<_, String>(format!("relay answered {status}, its headers {kept}: {}", String::from_utf8_lossy(&body).chars().take(80).collect::<String>()))
+            };
+            tokio::time::timeout(Duration::from_millis(crate::limits::HTTP_TIMEOUT_MS), call).await.map_err(|_| "no answer".to_string())?
+        }
+        _ => Err("say `relay to <host>` or `relay forged <path>`".into()),
+    }
+}
+
 async fn door(agent: &crate::runtime::Agent, chat: &str, rest: &str) -> Result<String, String> {
     use crate::simplex::door::{self, Key, Ticket};
     let api = crate::api::Api::new(&std::env::var("FRAGMENT_API").map_err(|_| "no FRAGMENT_API".to_string())?)?;
@@ -692,6 +735,9 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     }
     if let Some(rest) = ts.text.strip_prefix("schedule ") {
         reply = schedule(&ts.agent, &ts.fragment, rest).await;
+    }
+    if let Some(rest) = ts.text.strip_prefix("relay ") {
+        reply = relay(&ts.agent.fragment, rest).await.unwrap_or_else(|e| format!("relay failed: {e}"));
     }
     if let Some(rest) = ts.text.strip_prefix("door ") {
         reply = door(&ts.agent, &ts.fragment, rest).await.unwrap_or_else(|e| format!("door refused: {e}"));
