@@ -961,6 +961,26 @@ async fn the_cores_proxy_relays_what_the_platform_carries() {
     let _ = stop_tx.send(true);
 }
 
+/// Goal: a bridge whose image names a SimpleX core says so at its reads
+/// of its computer (`?simplex=1`), so its owner's Settings offer SimpleX;
+/// one whose image names none (production's before SimpleX, the stub)
+/// never does, and Settings offer nothing.
+#[tokio::test]
+async fn its_reads_say_whether_its_image_does_simplex() {
+    for simplex in [false, true] {
+        let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+        fake.chat("talk", &["juniper"]);
+        let dir = support::dir(if simplex { "simplex-said" } else { "simplex-unsaid" });
+        let mut cfg = support::config(&fake.url(), &dir, support::settings());
+        // nothing linked: no core is run, so none need be there
+        cfg.simplex = simplex.then(|| fragment_bridge::simplex::run::Config { bin: dir.join("no-core"), dir: dir.join("simplex"), smp: None, xftp: None });
+        let bridge = support::start(cfg, support::script());
+        following(&fake, 2).await;
+        fake.with(|w| assert_eq!((w.simplex_said > 0, w.simplex_unsaid > 0), (simplex, !simplex), "simplex {simplex}"));
+        bridge.stop().await;
+    }
+}
+
 /// Goal: SIGTERM means stop now: the real binary exits within 5 s of it,
 /// even mid-turn, with its keepalive and sockets closed.
 #[tokio::test]

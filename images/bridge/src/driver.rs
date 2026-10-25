@@ -340,7 +340,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
         None => agents,
     };
     let computer = tokio::select! {
-        c = ask_until(&api, stop.clone()) => c,
+        c = ask_until(&api, cfg.simplex.is_some(), stop.clone()) => c,
         r = &mut runtime_task => return runtime_result(r, name),
     };
     let Some(mut computer) = computer else { return Ok(()) };
@@ -461,7 +461,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                 let ready_changed = ready.as_mut().is_some_and(Ready::refresh);
                 if ready_changed || computer_read.elapsed() >= Duration::from_millis(limits::COMPUTER_EVERY_MS) {
                     computer_read = Instant::now();
-                    reread(&api, &inbox_tx);
+                    reread(&api, cfg.simplex.is_some(), &inbox_tx);
                 }
             }
             r = &mut runtime_task => break runtime_result(r, name),
@@ -481,17 +481,17 @@ fn runtime_result(r: Result<Result<(), crate::runtime::RuntimeError>, tokio::tas
 
 /// Reads `GET /api/computer` in a task of its own (a slow platform never
 /// holds the engine), into the inbox.
-fn reread(api: &Api, inbox: &mpsc::Sender<Msg>) {
+fn reread(api: &Api, simplex: bool, inbox: &mpsc::Sender<Msg>) {
     let (api, inbox) = (api.clone(), inbox.clone());
     tokio::spawn(async move {
-        if let Some(c) = ask_once(&api).await {
+        if let Some(c) = ask_once(&api, simplex).await {
             let _ = inbox.send(Msg::Computer(c)).await;
         }
     });
 }
 
-async fn ask_once(api: &Api) -> Option<api::Computer> {
-    match api.computer().await {
+async fn ask_once(api: &Api, simplex: bool) -> Option<api::Computer> {
+    match api.computer(simplex).await {
         Ok(c) => Some(c),
         Err(e) => {
             crate::ev!("computer.unread", { "error": e.to_string() });
@@ -501,11 +501,11 @@ async fn ask_once(api: &Api) -> Option<api::Computer> {
 }
 
 /// `GET /api/computer` until it answers.
-async fn ask_until(api: &Api, stop: watch::Receiver<bool>) -> Option<api::Computer> {
+async fn ask_until(api: &Api, simplex: bool, stop: watch::Receiver<bool>) -> Option<api::Computer> {
     let mut backoff = Backoff::default();
     // bounded by the platform's answer, or `stop`
     loop {
-        if let Some(c) = ask_once(api).await {
+        if let Some(c) = ask_once(api, simplex).await {
             return Some(c);
         }
         if !backoff.wait(stop.clone()).await {

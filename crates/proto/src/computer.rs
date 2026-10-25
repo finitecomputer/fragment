@@ -391,6 +391,11 @@ pub struct ComputerView {
     /// unless they let it sleep (docs/billing.md).
     #[serde(default)]
     pub always_on: bool,
+    /// The image it is on does SimpleX: its bridge said so
+    /// (`fragment_core::computer::does_simplex`), and its owner's Settings
+    /// offer SimpleX only then. Absent for an image that never said so.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub simplex: bool,
     /// The guest's view only: what its XFTP relay carries
     /// (`fragment_core::relay`; `GET /api/computer/relay`), so its bridge
     /// sends its SimpleX core's files through it. Absent from a platform

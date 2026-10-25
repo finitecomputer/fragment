@@ -272,7 +272,7 @@ fn fetch_words(text: &str) -> Result<(&str, &str, Place<'_>), String> {
 /// `agent`'s credentials, as `GET /api/computer` lists them now.
 async fn credentials_of(agent: &str) -> Result<Vec<crate::runtime::Credential>, String> {
     let api = std::env::var("FRAGMENT_API").map_err(|_| "no FRAGMENT_API".to_string())?;
-    let computer = crate::api::Api::new(&api)?.computer().await.map_err(|e| format!("GET /api/computer: {e}"))?;
+    let computer = crate::api::Api::new(&api)?.computer(false).await.map_err(|e| format!("GET /api/computer: {e}"))?;
     let a = computer.agents.into_iter().find(|a| a.fragment == agent).ok_or_else(|| format!("{agent} is not on this computer"))?;
     Ok(a.credentials)
 }
@@ -421,7 +421,7 @@ async fn door(agent: &crate::runtime::Agent, chat: &str, rest: &str) -> Result<S
     let (verb, said) = rest.split_once(' ').unwrap_or((rest, ""));
     if verb == "link" {
         let ticket: Ticket = serde_json::from_str(said.trim()).map_err(|e| format!("not a ticket: {e}"))?;
-        let computer = api.computer().await.map_err(|e| e.to_string())?.computer;
+        let computer = api.computer(false).await.map_err(|e| e.to_string())?.computer;
         door::check(&ticket, "link", &agent.fragment, &computer, agent.key.as_deref().unwrap_or(""), now).map_err(str::to_string)?;
         let key = Key::generate().map_err(|e| e.to_string())?;
         api.door(&agent.fragment, door::DOOR, &ticket.nonce, &key.public_hex()).await.map_err(|e| e.to_string())?;
@@ -453,7 +453,7 @@ async fn models() -> Result<String, String> {
     let model = std::env::var("FRAGMENT_MODEL").map_err(|_| "no FRAGMENT_MODEL".to_string())?;
     let base = crate::net::Base::parse(&model)?;
     let api = std::env::var("FRAGMENT_API").map_err(|_| "no FRAGMENT_API".to_string())?;
-    let view = crate::api::Api::new(&api)?.computer().await.map_err(|e| format!("GET /api/computer: {e}"))?;
+    let view = crate::api::Api::new(&api)?.computer(false).await.map_err(|e| format!("GET /api/computer: {e}"))?;
     let given = serde_json::to_string(&view.models).expect("ids serialize");
     let req = hyper::Request::get(base.url("/v1/models")).header("host", base.authority()).body(Empty::<bytes::Bytes>::new()).map_err(|e| e.to_string())?;
     let client = Client::builder(TokioExecutor::new()).build_http();
