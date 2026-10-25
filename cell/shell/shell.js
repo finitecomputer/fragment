@@ -64,8 +64,9 @@ const promptDeck = { hand: APP_PROMPTS.map((_, i) => i).slice(0, PROMPT_HAND), d
 // first, and its newest message); computer: theirs, with its agents;
 // agents: by identity; computerFailed: whether the last read of their computer
 // failed (what an earlier one said stays: a failure is not "none");
-// invites: those waiting on their emails, theirs to answer (`GET /api/invites`)
-const state = { me: null, guest: false, fragments: [], invites: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null };
+// invites: those waiting on their emails, theirs to answer (`GET /api/invites`);
+// seat: theirs, as Settings last read it (`GET /api/seat`'s; none unread)
+const state = { me: null, guest: false, fragments: [], invites: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null };
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -1450,7 +1451,11 @@ function simplexSection() {
     return s;
   }
   if (!state.computer.alwaysOn) {
-    s.append(el("p", "muted", "SimpleX works while your computer stays on, which the always-on plan does."));
+    // an always-on seat whose holder let its computer sleep (Billing's
+    // checkbox) is told how to take it back; anyone else, what keeps it on
+    const seat = state.seat;
+    const chose = seat?.good && seat.kind === "seat_always_on" && seat.sleeps;
+    s.append(el("p", "muted", chose ? 'SimpleX needs your computer to stay on. Untick "Let my computer sleep when nothing is open" in Billing.' : "SimpleX works while your computer stays on, which the always-on plan does."));
     return s;
   }
   for (const a of agents) {
@@ -2277,6 +2282,7 @@ async function openSettings(push = true, failed = null) {
   ]);
   if (lost()) return;
   if (mySeat) setGuest(mySeat.guest);
+  state.seat = mySeat?.seat ?? null;
   const emails = (state.me.subjects ?? []).map((x) => x.email).filter(Boolean);
   // who is signed in (their latest sign-in's email), signing out, and
   // another account: a seat may wait under another email
