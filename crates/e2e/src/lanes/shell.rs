@@ -1278,6 +1278,30 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
             && has("#settings-page form[method=post][action='/auth/logout'] button"),
         &text[..text.len().min(600)],
     );
+    // SimpleX only on an image that does it: the stub's bridge never says so
+    let computers = shell(api, &session, "GET", "/api/computers", None, &[])?;
+    let said = computers.body["computers"][0].get("simplex").cloned();
+    let simplex_id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
+    s.ok(
+        "settings offer no SimpleX on a computer whose image does not do it (the stub's, as production's before SimpleX): the section and its link hidden, no Set up, and its view says nothing of it",
+        computers.status == 200 && said.is_none() && !has("#settings-simplex:not([hidden])") && !has(".settings-nav-link[data-section=settings-simplex]:not([hidden])") && !text.contains("SimpleX"),
+        json!({ "simplex": said, "settings": &text[..text.len().min(600)] }),
+    );
+    // its bridge says its image does (the lever, as `?simplex=1` would), and
+    // then no more: the open settings follow each, through the list's
+    // socket, with what was typed elsewhere on them kept (Alex's review)
+    b.eval(&page, "(document.getElementById('build-prompt').value += 'kept as typed', true)")?;
+    let on = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": true }))?;
+    let shown = b.until(&page, "(() => { const s = document.querySelector('#settings-simplex:not([hidden])'); return !!s && /always-on plan/.test(s.innerText) && !!document.querySelector('.settings-nav-link[data-section=settings-simplex]:not([hidden])'); })()", wait);
+    let kept = b.eval(&page, "location.pathname === '/settings' && document.getElementById('build-prompt').value.endsWith('kept as typed')")?;
+    let off = super::computers::lever_with(api, &simplex_id, json!({ "op": "simplex", "on": false }))?;
+    let hidden = b.until(&page, "!!document.querySelector('#settings-simplex[hidden]') && !document.querySelector('.settings-nav-link[data-section=settings-simplex]:not([hidden])')", wait);
+    s.ok(
+        "settings left open follow the computer's SimpleX: shown once its bridge says its image does it (not always on: it says the plan does), hidden once it no longer does, with nothing else redrawn",
+        on.status == 200 && on.body["simplex"] == true && shown && kept == json!(true) && off.status == 200 && off.body["simplex"] == false && hidden,
+        json!({ "on": on.body, "off": off.body, "shown": shown, "kept": kept, "hidden": hidden }),
+    );
+    b.eval(&page, "(document.getElementById('build-prompt').value = document.getElementById('build-prompt').value.replace('kept as typed', ''), true)")?;
     let account = b.eval(&page, ACCOUNT_SEEN)?;
     s.ok(
         "settings' Account says who is signed in, the email in bold, beside Sign out and Use another account (back to settings); a seat's holder is told nothing a guest is",
