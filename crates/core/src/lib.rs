@@ -42,6 +42,7 @@ pub mod org;
 pub mod price;
 pub mod ratelimit;
 pub mod registry;
+pub mod relay;
 pub mod release;
 pub mod roundtrip;
 pub mod schedule;

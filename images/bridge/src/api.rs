@@ -104,6 +104,25 @@ pub struct Computer {
     /// What its last start that came up restored; none before its first.
     #[serde(default)]
     pub restored: Option<Restored>,
+    /// What the platform's XFTP relay carries (`GET /api/computer/relay`):
+    /// none from a platform without one, whose cores then reach no file
+    /// server from a Cloudflare computer.
+    #[serde(default)]
+    pub relay: Option<RelayOffer>,
+}
+
+/// The hosts and the port the platform's XFTP relay carries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayOffer {
+    pub hosts: Vec<String>,
+    pub port: u16,
+}
+
+impl RelayOffer {
+    /// The host it carries that `host` names (any case), on `port`.
+    pub fn carried(&self, host: &str, port: u16) -> Option<&str> {
+        self.hosts.iter().find(|h| port == self.port && h.eq_ignore_ascii_case(host)).map(String::as_str)
+    }
 }
 
 /// What a start restored, as far as the bridge reads it (docs/computers.md,
@@ -375,6 +394,13 @@ impl Api {
     pub async fn door(&self, agent: &str, door: &str, nonce: &str, key: &str) -> Result<(), ApiError> {
         let _: Value = self.json(Method::POST, "/api/computer/door", None, Some(json!({ "agent": name(agent)?, "door": door, "nonce": nonce, "key": key }))).await?;
         Ok(())
+    }
+
+    /// `GET /api/computer/relay?host=&port=`, a WebSocket that carries raw
+    /// bytes to `host`:`port` (an XFTP server) and back, untouched. Refused
+    /// for a host or port it does not carry, or past its bounds.
+    pub async fn relay(&self, host: &str, port: u16) -> Result<ClientWs, String> {
+        net::connect_ws(&self.base, &format!("/api/computer/relay?host={}&port={port}", encode(host)), &[]).await
     }
 
     /// `GET /api/computer/keepalive`, a WebSocket held while busy.
