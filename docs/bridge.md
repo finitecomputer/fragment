@@ -73,7 +73,7 @@ Bodies are JSON. `api.rs` has one method for each.
 
 | Method and path | Body | Reads |
 |---|---|---|
-| `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute, and within a second of a change to the ready file (below) |
+| `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute, and within a second of a change to the ready file (below); `?simplex=1` when the image names a SimpleX core (below, "SimpleX") |
 | `GET /api/computer/keepalive` (no agent), WebSocket | | held while a turn waits to run, runs, or waits on its card (below, "A card keeps its computer awake"); pinged every `BRIDGE_KEEPALIVE_PING_MS` (15 s), and opened again after twice that with nothing heard, since a deploy can cut the platform's side of it with no close reaching here (#557) |
 | `GET /api/fragments` | | `{fragments: [{name, role}]}`: what the agent follows, listed at start, on a `joined` of it (as the agent the engine runs, no read of the computer first), and every 5 minutes. A listing a read of which fails with no answer, a 429 or a 5xx is asked again after a jittered backoff (from 1 s, at most 30 s) until it answers: the list, or only the fragments whose channels did not read; what was found meanwhile is followed, so one fragment that fails keeps the agent from no other. One listing an agent at a time: a newer one takes the place of one under way |
 | `GET /api/f/{f}/channels` | | `{channels: [{name, post, seq}]}`: a postable `chat` is a chat; the agent's own `tasks` |
@@ -414,7 +414,11 @@ core, `simplex-chat`, one per linked agent, as a child process, driven
 over its bot API (`-p`, loopback only) by one task, so nothing else ever
 drives it.
 
-- **Only where the image names the core** (`BRIDGE_SIMPLEX_BIN`), and
+- **Only where the image names the core** (`BRIDGE_SIMPLEX_BIN`), which
+  the bridge's reads of its computer say (`GET /api/computer?simplex=1`),
+  so its owner's Settings offer SimpleX only on an image that does it (the
+  view's `simplex`; an image whose reads never said so shows nothing of
+  it), and
   **only while the computer is always on** (its view's `alwaysOn`: the
   always-on seat; docs/billing.md). A computer that sleeps would hear
   nothing, so it runs no core at all, and its link page says why. A seat

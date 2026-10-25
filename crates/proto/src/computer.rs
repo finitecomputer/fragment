@@ -391,6 +391,11 @@ pub struct ComputerView {
     /// unless they let it sleep (docs/billing.md).
     #[serde(default)]
     pub always_on: bool,
+    /// The image it is on does SimpleX: its bridge said so
+    /// (`fragment_core::computer::does_simplex`), and its owner's Settings
+    /// offer SimpleX only then. Absent for an image that never said so.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub simplex: bool,
 }
 
 /// One save of a computer's `/data`, as its view shows it.

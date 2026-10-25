@@ -205,6 +205,8 @@ async fn the_stub_image() {
     fake.until(30_000, "the stub's bridge to follow its chat", |w| w.live_sockets() >= 2).await;
     let ready = t.elapsed();
     eprintln!("stub: docker run to following its chat: {} ms", ready.as_millis());
+    // no SimpleX core in it: its reads never say SimpleX
+    assert!(fake.with(|w| w.simplex_said == 0 && w.simplex_unsaid >= 1), "the stub's reads of its computer say no SimpleX");
     fake.say(&chat, &person("paul"), json!({ "text": "hello stub" }));
     let asked = Instant::now();
     fake.until(20_000, "the stub's reply", |w| w.bodies(&chat, "chat", "reply").len() == 1).await;
@@ -3146,6 +3148,8 @@ async fn simplex_on_the_hermes_image() {
     let servers = [("BRIDGE_SIMPLEX_SMP", lab.server.as_str()), ("BRIDGE_SIMPLEX_XFTP", xftp.as_str())];
     let c = Container::run_with(Runtime::Docker, &hermes_tag(), fake.addr.port(), model.addr.port(), &servers, &["--network", &net]);
     fake.until(180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    // its bridge's reads say the image does SimpleX (so its owner's Settings offer it)
+    assert!(fake.with(|w| w.simplex_said) >= 1, "the bridge's read of its computer says SimpleX");
     simplex_until(&c, "", 60_000, "its SimpleX, off", |v| v["phase"] == "off").await;
     assert_eq!(simplex_cores(&c), 0, "nothing linked, no core");
 
