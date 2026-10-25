@@ -854,8 +854,10 @@ expires within 30 days. The container application is the deployment's
     agent's doors"), and the model route's models'
     ids by its names (below, Models, "A model by its id").
     `?simplex=1` says the image does SimpleX (docs/bridge.md, "SimpleX"):
-    the Computer DO keeps the version it is on as one that does (written
-    only when that is news, its owner's pages told), and its owner's view
+    the Computer DO keeps the version of the image its running start came
+    up on as one that does (never while it starts: its next start's image
+    may already be another; written only when that is news, its owner's
+    pages told), and its owner's view
     says `simplex` while it is on that version, so Settings offer SimpleX
     on no other image. **They
     may change while the computer runs** (its owner assigns or unassigns

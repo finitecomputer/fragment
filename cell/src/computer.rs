@@ -50,7 +50,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{
-    alive, does_simplex, image_running, notices, valid_version, version_now, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, does_simplex, image_running, notices, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALIVE_MS, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SLEEP_DEADLINE_MS, START_DEADLINE_MS,
 };
 use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
@@ -1586,12 +1586,15 @@ impl ComputerCell {
         Ok(agents)
     }
 
-    /// Its bridge said its image does SimpleX: of the version it is on
-    /// (`version_now`), kept until another's says so, and its owner's open
-    /// pages told when that is news (their Settings offer SimpleX from then).
-    /// Its bridge says so at each read, so this writes only for news.
+    /// Its bridge said its image does SimpleX: of the image its running
+    /// start came up on (`version_running`), kept until another's says so,
+    /// and its owner's open pages told when that is news (their Settings
+    /// offer SimpleX from then). While it starts, its word is not taken: the
+    /// image its next start runs may already be another (a pin, a deploy),
+    /// and the bridge says so again at its next read, once it is up (Alex's
+    /// review). It says so at each read, so this writes only for news.
     async fn said_simplex(&self) -> CellResult<()> {
-        let Some(version) = version_now(&self.lifecycle()?, &self.saves()?, &self.images()?) else { return Ok(()) };
+        let Some(version) = version_running(&self.lifecycle()?, &self.saves()?) else { return Ok(()) };
         if self.meta(MetaKey::Simplex)?.as_deref() != Some(version.as_str()) {
             self.set_meta(MetaKey::Simplex, &version)?;
             self.tell_owner().await;
@@ -2032,6 +2035,21 @@ impl ComputerCell {
                 self.exec("UPDATE own_signins SET expires_at = ?", vec![js::now_ms().into()])?;
                 let pending = self.rows("SELECT COUNT(*) AS n FROM own_signins", vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
                 Ok(json!({ "computer": id, "expiredSignIns": pending }))
+            }
+            "simplex" => {
+                // its bridge's word that its image does SimpleX (`said_simplex`), or its forgetting
+                let on = b.on.ok_or_else(|| CellError::invalid("simplex names on: true or false"))?;
+                if on {
+                    if version_running(&self.lifecycle()?, &self.saves()?).is_none() {
+                        return Err(CellError::invalid("it is not running: wake it first"));
+                    }
+                    self.said_simplex().await?;
+                } else {
+                    self.delete_meta(MetaKey::Simplex)?;
+                    self.tell_owner().await;
+                }
+                let view = self.view()?;
+                Ok(json!({ "computer": id, "simplex": view.simplex }))
             }
             "always-on" => {
                 let on = b.on.ok_or_else(|| CellError::invalid("always-on names on: true or false"))?;

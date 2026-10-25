@@ -1441,19 +1441,39 @@ addEventListener("message", async (e) => {
 });
 // Settings' SimpleX: each agent's link, on an always-on computer. Only on
 // a computer whose image does SimpleX (its view's `simplex`: its bridge
-// said so); on any other, no section at all.
+// said so); on any other, the section is hidden, nav link and all. It
+// follows the view while Settings are shown (`refreshSimplex`), with
+// nothing else on the page redrawn.
 function simplexSection() {
   const s = section("SimpleX");
   s.id = "settings-simplex";
-  const agents = state.computer.agents ?? [];
+  fillSimplex(s);
+  return s;
+}
+const simplexKey = (c) => JSON.stringify([!!c?.simplex, !!c?.alwaysOn, (c?.agents ?? []).map((a) => a.fragment)]);
+// A computer's view read again (its list's socket told of a change): the
+// section shown, changed or hidden as the view now says.
+function refreshSimplex() {
+  const s = document.getElementById("settings-simplex");
+  if (s && s.dataset.key !== simplexKey(state.computer)) fillSimplex(s);
+}
+function fillSimplex(s) {
+  const c = state.computer;
+  s.replaceChildren(...s.querySelectorAll(":scope > h2"));
+  s.dataset.key = simplexKey(c);
+  s.hidden = !c?.simplex;
+  const jump = document.querySelector('.settings-nav-link[data-section="settings-simplex"]');
+  if (jump) jump.hidden = s.hidden;
+  if (s.hidden) return;
+  const agents = c.agents ?? [];
   s.append(el("p", "muted", "Message your agents from SimpleX Chat, a private messenger for your phone. Your messages are encrypted between your SimpleX app and your computer."));
   if (!agents.length) {
     s.append(el("p", "muted", "Make an agent first."));
-    return s;
+    return;
   }
-  if (!state.computer.alwaysOn) {
+  if (!c.alwaysOn) {
     s.append(el("p", "muted", "SimpleX works while your computer stays on, which the always-on plan does."));
-    return s;
+    return;
   }
   for (const a of agents) {
     const open = el("button", "row", "Set up");
@@ -1461,7 +1481,6 @@ function simplexSection() {
     open.onclick = () => openSimplex(a.fragment);
     s.append(actionLine(el("span", null, titleOf(a.fragment)), open));
   }
-  return s;
 }
 
 // ---- making the agent: its fragment, its computer, its chat (decision 10, 16) ----
@@ -1928,6 +1947,7 @@ function computerIs(v) {
   renderComputer();
   renderChats();
   rosterChanged();
+  refreshSimplex();
 }
 
 // ---- what the person should know of their computer (docs/computers.md,
@@ -2212,6 +2232,9 @@ function renderSettingsPage(page, sections) {
       heading.tabIndex = -1;
       const jump = el("button", "settings-nav-link", heading.textContent);
       jump.type = "button";
+      // a hidden section (SimpleX on an image without it) hides its link too
+      jump.dataset.section = section.id;
+      jump.hidden = section.hidden;
       jump.onclick = () => {
         section.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
         heading.focus({ preventScroll: true });
@@ -2225,7 +2248,7 @@ function renderSettingsPage(page, sections) {
   page.replaceChildren(layout);
   page.onscroll = () => {
     const top = page.getBoundingClientRect().top + 130;
-    const current = [...links].reverse().find(([section]) => section.getBoundingClientRect().top <= top)?.[1] ?? links[0]?.[1];
+    const current = [...links].reverse().find(([section]) => !section.hidden && section.getBoundingClientRect().top <= top)?.[1] ?? links[0]?.[1];
     for (const [, button] of links) {
       if (button === current) button.setAttribute("aria-current", "location");
       else button.removeAttribute("aria-current");
@@ -2412,7 +2435,7 @@ async function openSettings(push = true, failed = null) {
   const skills = await skillsSection();
   if (lost()) return;
   returnSaid(back);
-  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, ...(state.computer?.simplex ? [simplexSection()] : []), buildSection(), dataSection(), ...releaseLine(c)]);
+  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, simplexSection(), buildSection(), dataSection(), ...releaseLine(c)]);
   renderAgentFaces();
   tell();
 }
@@ -3913,6 +3936,7 @@ async function load(changed = false) {
   renderHeading();
   renderComputer();
   rosterChanged();
+  refreshSimplex();
   markSeen();
   renderAgentFaces();
   for (const f of chats()) if (own(f) && f.title === UNTITLED && f.preview) titleFromFirst(f.name);
