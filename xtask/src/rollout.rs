@@ -175,8 +175,16 @@ pub(crate) fn run(p: &mut impl Platform, clock: &mut impl Clock, new: &str, sche
                 Observed::Unchanged => return Ok(Outcome::Unchanged(failed)),
                 Observed::Unknown(e) => {
                     let was = before.as_ref().map_or("none".to_string(), |b| format!("{} (version {})", b.release, b.version));
+                    // the advice a person follows is held to the deploy's own rule
+                    let advice = match eligible(before.as_ref(), schema, &rollback) {
+                        Ok(()) => format!(
+                            "ask /healthz/objects, and roll back by hand (`wrangler rollback {}`) if it is live and does not answer",
+                            before.as_ref().expect("an eligible rollback has a release before").version
+                        ),
+                        Err(cannot) => format!("ask /healthz/objects, and do not roll back by hand: {cannot}"),
+                    };
                     return Ok(Outcome::Stuck(format!(
-                        "{failed}; and whether the Worker changed could not be read for {} ({e}). The release before is {was}; {new} may be live: ask /healthz/objects, and roll back by hand (`wrangler rollback <version>`) if it is live and does not answer",
+                        "{failed}; and whether the Worker changed could not be read for {} ({e}). The release before is {was}; {new} may be live: {advice}",
                         minutes(OBSERVE_LIMIT)
                     )));
                 }
@@ -307,17 +315,10 @@ fn verified(p: &mut impl Platform, clock: &mut impl Clock, release: &str, old: b
 /// The release `before` deployed again, after `why`, when it may be: the
 /// outcome either way.
 fn back(p: &mut impl Platform, clock: &mut impl Clock, before: Option<Live>, schema: &str, rollback: Result<(), String>, why: String) -> Result<Outcome> {
-    let Some(before) = before else {
-        return Ok(Outcome::Stuck(format!("{why}; and there is no release before to go back to (the Worker's first deploy)")));
-    };
-    if let Err(cannot) = rollback {
-        return Ok(Outcome::Stuck(format!("{why}; and it is not rolled back to {}: {cannot}", before.release)));
+    if let Err(cannot) = eligible(before.as_ref(), schema, &rollback) {
+        return Ok(Outcome::Stuck(format!("{why}; and {cannot}")));
     }
-    match before.schema.as_deref() {
-        Some(s) if s == schema => {}
-        Some(s) => return Ok(Outcome::Stuck(format!("{why}; and it is not rolled back: its schema ({schema}) is not {}'s ({s}), whose code an object that ran the newer steps refuses (forward only: fix it forward)", before.release))),
-        None => return Ok(Outcome::Stuck(format!("{why}; and it is not rolled back: {} names no schema, so whether its code takes these objects is unknown (forward only: fix it forward)", before.release))),
-    }
+    let before = before.expect("an eligible rollback has a release before");
     eprintln!("deploy: {why}; rolling back to {} (version {})", before.release, before.version);
     if let Err(e) = p.rollback(&before) {
         return Ok(Outcome::Stuck(format!("{why}; and the rollback to {} failed: {e:#}", before.release)));
@@ -326,6 +327,24 @@ fn back(p: &mut impl Platform, clock: &mut impl Clock, before: Option<Live>, sch
         Ok(()) => Outcome::RolledBack { to: before.release, why },
         Err(also) => Outcome::Stuck(format!("{why}; and after the rollback, {also}")),
     })
+}
+
+/// Whether the release `before` may come back, by this deploy's or a
+/// person's hand (a stuck outcome's advice): `Err` saying why not. Not
+/// when there is none, when the deploy changed what it cannot take back
+/// (`rollback`), or when its schema is not this release's or unknown.
+fn eligible(before: Option<&Live>, schema: &str, rollback: &Result<(), String>) -> Result<(), String> {
+    let Some(before) = before else {
+        return Err("there is no release before to go back to (the Worker's first deploy)".into());
+    };
+    if let Err(cannot) = rollback {
+        return Err(format!("it is not rolled back to {}: {cannot} (forward only: fix it forward)", before.release));
+    }
+    match before.schema.as_deref() {
+        Some(s) if s == schema => Ok(()),
+        Some(s) => Err(format!("it is not rolled back: its schema ({schema}) is not {}'s ({s}), whose code an object that ran the newer steps refuses (forward only: fix it forward)", before.release)),
+        None => Err(format!("it is not rolled back: {} names no schema, so whether its code takes these objects is unknown (forward only: fix it forward)", before.release)),
+    }
 }
 
 /// What a failed `wrangler deploy` said, for the outcome.
@@ -534,9 +553,28 @@ mod tests {
         let mut w = live_unfinished();
         w.version_fails = u32::MAX;
         let out = deploy(&mut w);
-        assert!(matches!(&out, Outcome::Stuck(why) if why.contains("could not be read") && why.contains(OLD) && why.contains("v-old") && why.contains(NEW)), "{out:?}");
+        assert!(matches!(&out, Outcome::Stuck(why) if why.contains("could not be read") && why.contains(OLD) && why.contains("`wrangler rollback v-old`") && why.contains(NEW)), "{out:?}");
         assert_eq!((count(&w, "deploy"), count(&w, "finish"), count(&w, "rollback")), (1, 0, 0), "nothing more done blind");
         assert!(count(&w, "version") > 1 && count(&w, "version") < 12, "asked again with backoff, bounded: {}", count(&w, "version"));
+
+        // review of #605: its advice is held to the rule a rollback is:
+        // never by hand beneath another schema, an unknown one, or over a
+        // branch's new Stripe endpoint
+        for (schema_before, rollback, said) in [
+            (Some("0000000000000000"), Ok(()), "is not"),
+            (None, Ok(()), "names no schema"),
+            (Some(SCHEMA), Err("its Stripe webhook endpoint was made anew".to_string()), "Stripe"),
+        ] {
+            let mut w = World::new(OLD, NEW, schema_before);
+            w.deploys = vec![Wrangled::Failed("could not finish applying".into())];
+            w.uploads_before_failing = true;
+            w.version_fails = u32::MAX;
+            let out = run(&mut w, &mut Fake::default(), NEW, SCHEMA, rollback).unwrap();
+            assert!(
+                matches!(&out, Outcome::Stuck(why) if why.contains("do not roll back by hand") && why.contains("forward only") && why.contains(said) && !why.contains("wrangler rollback")),
+                "{out:?}"
+            );
+        }
     }
 
     #[test]
