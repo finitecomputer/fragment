@@ -74,6 +74,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | Method and path | Body | Reads |
 |---|---|---|
 | `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute, and within a second of a change to the ready file (below) |
+| `GET /api/computer/relay?host=&port=` (no agent), WebSocket | | the XFTP relay (docs/computers.md): one per connection a SimpleX core makes to a host and port the view's `relay` names, through the cores' proxy (`src/simplex/socks.rs`), its bytes piped both ways |
 | `GET /api/computer/keepalive` (no agent), WebSocket | | held while a turn waits to run, runs, or waits on its card (below, "A card keeps its computer awake"); pinged every `BRIDGE_KEEPALIVE_PING_MS` (15 s), and opened again after twice that with nothing heard, since a deploy can cut the platform's side of it with no close reaching here (#557) |
 | `GET /api/fragments` | | `{fragments: [{name, role}]}`: what the agent follows, listed at start, on a `joined` of it (as the agent the engine runs, no read of the computer first), and every 5 minutes. A listing a read of which fails with no answer, a 429 or a 5xx is asked again after a jittered backoff (from 1 s, at most 30 s) until it answers: the list, or only the fragments whose channels did not read; what was found meanwhile is followed, so one fragment that fails keeps the agent from no other. One listing an agent at a time: a newer one takes the place of one under way |
 | `GET /api/f/{f}/channels` | | `{channels: [{name, post, seq}]}`: a postable `chat` is a chat; the agent's own `tasks` |
@@ -419,9 +420,20 @@ drives it.
   protocol only from a TLS hello that names no server (SNI), and
   Cloudflare Containers reset every such hello on 443: a core on a
   computer reaches SMP servers on 5223, and XFTP's (files: a voice note, a
-  photo), on 443 alone, not at all yet. A file not received within 3
-  minutes (`FILE_WAIT_MS`) is given up on: its message is posted with a
-  note that it did not arrive.
+  photo), on 443 alone, only through the platform's XFTP relay.
+- **The cores' way out** (`src/simplex/socks.rs`): a SOCKS5 proxy on
+  loopback, which every core connects through (`--socks-proxy`, with
+  `--host-mode public`: hosts by their names, never their onion
+  addresses). A connection to a host and port the computer's view's
+  `relay` names (SimpleX's preset XFTP servers, on 443) goes through the
+  relay (`GET /api/computer/relay`), its bytes untouched; anything else
+  (SMP, on 5223) straight out of the computer. A platform with no relay
+  offers none, and everything goes straight out. At most 64 sessions at
+  once. It logs each relay's host, bytes and time, never what is carried.
+- **A file not received within 3 minutes** (`FILE_WAIT_MS`: a server
+  outside the relay's list, or one that does not answer) is given up on:
+  cancelled at the core, and its message posted with a note that it did
+  not arrive.
 - **Only where the image names the core** (`BRIDGE_SIMPLEX_BIN`), and
   **only while the computer is always on** (its view's `alwaysOn`: the
   always-on seat; docs/billing.md). A computer that sleeps would hear

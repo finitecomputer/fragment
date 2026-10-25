@@ -880,6 +880,87 @@ async fn a_routine_is_a_turn() {
     bridge.stop().await;
 }
 
+/// Goal (the XFTP relay): the SimpleX cores' proxy sends a connection to a
+/// host the platform's relay carries through the relay, its bytes untouched
+/// both ways, and anything else straight out of the computer; a host the
+/// platform then refuses is SOCKS's "not allowed", and carries nothing.
+/// Method: the core's own handshake (a user name and password, CONNECT to
+/// a name) against the proxy in process, the fake platform's relay piping
+/// to an echo server standing for a file server.
+#[tokio::test]
+async fn the_cores_proxy_relays_what_the_platform_carries() {
+    use fragment_bridge::api::{Api, RelayOffer};
+    use fragment_bridge::simplex::socks;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("an echo server");
+    let echo_at = echo.local_addr().expect("its address");
+    tokio::spawn(async move {
+        // bounded by the test
+        loop {
+            let Ok((mut s, _)) = echo.accept().await else { return };
+            tokio::spawn(async move {
+                let (mut r, mut w) = s.split();
+                let _ = tokio::io::copy(&mut r, &mut w).await;
+            });
+        }
+    });
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    fake.with(|w| {
+        w.relay_to.insert("xftp3.simplex.im".into(), echo_at);
+    });
+    let offer = RelayOffer { hosts: vec!["xftp3.simplex.im".into(), "xftp4.simplex.im".into()], port: 443 };
+    let (_offer_tx, offer_rx) = tokio::sync::watch::channel(Some(offer));
+    let (stop_tx, stop) = tokio::sync::watch::channel(false);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("the proxy's port");
+    let proxy = listener.local_addr().expect("its address");
+    tokio::spawn(socks::serve(listener, Api::new(&fake.url()).expect("the fake's address"), offer_rx, stop));
+    // the core's handshake to `host`:`port`, then its reply code
+    async fn to(proxy: std::net::SocketAddr, host: &str, port: u16) -> (tokio::net::TcpStream, u8) {
+        let mut c = tokio::net::TcpStream::connect(proxy).await.expect("the proxy answers");
+        let mut b = vec![5, 2, 0, 2, 1, 3, b'u', b's', b'r', 2, b'p', b'w', 5, 1, 0, 3, host.len() as u8];
+        b.extend(host.as_bytes());
+        b.extend(port.to_be_bytes());
+        c.write_all(&b).await.expect("its handshake");
+        let mut said = [0u8; 2 + 2 + 10];
+        c.read_exact(&mut said).await.expect("its replies");
+        assert_eq!(said[..5], [5, 2, 1, 0, 5], "the user name method, taken, then a reply");
+        (c, said[5])
+    }
+    async fn echoed(c: &mut tokio::net::TcpStream, said: &[u8]) -> Vec<u8> {
+        c.write_all(said).await.expect("sent");
+        let mut back = vec![0u8; said.len()];
+        c.read_exact(&mut back).await.expect("echoed");
+        back
+    }
+    // relayed: carried both ways, untouched (bytes no TLS would let through a proxy that read them)
+    let (mut c, code) = to(proxy, "XFTP3.simplex.im", 443).await;
+    assert_eq!(code, socks::reply::SUCCEEDED);
+    let said: Vec<u8> = (0..=255u8).cycle().take(40_000).collect();
+    assert_eq!(echoed(&mut c, &said).await, said);
+    drop(c);
+    fake.until(WAIT, "the relay to close", |w| w.relayed.len() == 1).await;
+    fake.with(|w| assert_eq!(w.relayed, ["xftp3.simplex.im 40000 40000"], "the host the list names, every byte each way"));
+    // straight out: an address (the echo server itself), never the relay
+    let mut c = tokio::net::TcpStream::connect(proxy).await.expect("the proxy answers");
+    let mut b = vec![5, 1, 0, 5, 1, 0, 1, 127, 0, 0, 1];
+    b.extend(echo_at.port().to_be_bytes());
+    c.write_all(&b).await.expect("a plain handshake");
+    let mut said = [0u8; 2 + 10];
+    c.read_exact(&mut said).await.expect("its replies");
+    assert_eq!(said[..4], [5, 0, 5, socks::reply::SUCCEEDED]);
+    assert_eq!(echoed(&mut c, b"straight out").await, b"straight out");
+    drop(c);
+    // offered by the view, refused by the platform: not allowed, nothing carried
+    let (mut c, code) = to(proxy, "xftp4.simplex.im", 443).await;
+    assert_eq!(code, socks::reply::NOT_ALLOWED);
+    let mut rest = vec![];
+    let _ = c.read_to_end(&mut rest).await;
+    assert!(rest.is_empty(), "nothing carried after a refusal");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    fake.with(|w| assert_eq!(w.relayed.len(), 1, "neither went through the relay"));
+    let _ = stop_tx.send(true);
+}
+
 /// Goal: SIGTERM means stop now: the real binary exits within 5 s of it,
 /// even mid-turn, with its keepalive and sockets closed.
 #[tokio::test]

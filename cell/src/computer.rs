@@ -268,6 +268,9 @@ enum MetaKey {
     /// (`fragment_core::computer::Images`): the reference its pinned name
     /// stood for as it last looked, and the version its owner put off.
     Images,
+    /// What its XFTP relays carried on their UTC day (`fragment_core::relay`):
+    /// `<day> <bytes>`.
+    RelayDay,
 }
 
 impl MetaKey {
@@ -286,6 +289,7 @@ impl MetaKey {
             MetaKey::AliveCheck => "alive_check",
             MetaKey::WorkosUser => "workos_user",
             MetaKey::Images => "images",
+            MetaKey::RelayDay => "relay_day",
         }
     }
 }
@@ -355,6 +359,9 @@ pub struct ComputerCell {
     /// The start this isolate judged dead and destroys: its exit is that
     /// start's own failure, which it reports (`exit_of`).
     dead: std::cell::Cell<Option<u64>>,
+    /// Its XFTP relays open now (`fragment_core::relay::Leases`). In memory
+    /// only: a restart forgets them, and they lapse on their own bounds.
+    relays: RefCell<fragment_core::relay::Leases>,
     /// Its schema as it started (schema.rs): ready, or refused.
     schema: crate::schema::Schema,
 }
@@ -379,6 +386,7 @@ impl DurableObject for ComputerCell {
             wiped: std::cell::Cell::new(wiped),
             heard_ms: std::cell::Cell::new(None),
             dead: std::cell::Cell::new(None),
+            relays: RefCell::default(),
             schema,
         }
     }
@@ -614,6 +622,19 @@ struct Redeem {
 #[derive(Deserialize)]
 struct Exited {
     generation: u64,
+}
+
+/// `computer/relay-open`'s body: the host it is for (for its log).
+#[derive(Deserialize)]
+struct RelayAsk {
+    host: String,
+}
+
+/// `computer/relay-close`'s body: the relay's lease, and what it carried.
+#[derive(Deserialize)]
+struct RelayClosed {
+    lease: String,
+    bytes: u64,
 }
 
 /// `computer/test`'s body (a test fleet's: `POST /api/test/computer`):
@@ -1583,6 +1604,8 @@ impl ComputerCell {
         let mut view = self.view()?;
         // what its owner is told is theirs (its guest reads `restored`)
         view.notices = vec![];
+        // what its XFTP relay carries: its bridge sends its core's files through it
+        view.relay = Some(fragment_proto::computer::RelayOffer { hosts: fragment_core::relay::HOSTS.iter().map(|h| h.to_string()).collect(), port: fragment_core::relay::PORT });
         // the key each agent's fragment signs as: a door's ticket is checked with it
         for agent in &mut view.agents {
             agent.key = fragment_core::npub::parse(&agent.identity);
@@ -1845,6 +1868,7 @@ impl ComputerCell {
             rollbacks: saves.rollbacks(),
             saves: saves.views(),
             always_on: life.always_on(),
+            relay: None,
         })
     }
 
@@ -2364,6 +2388,28 @@ impl ComputerCell {
                 // its guest is alive: what a start that waits for it waits for
                 self.heard_ms.set(Some(js::now_ms()));
                 json_response(&self.guest_view().await?)
+            }
+            "computer/relay-open" => {
+                // a place for one more XFTP relay (fragment_core::relay), or why not
+                self.must(MetaKey::Id)?;
+                let b: RelayAsk = body_json(&mut req).await?;
+                let lease = js::random_hex::<16>();
+                let spent = fragment_core::relay::parse_spent(self.meta(MetaKey::RelayDay)?.as_deref());
+                let open = self.relays.borrow_mut().open(&lease, js::now_ms(), spent);
+                if let Err(refusal) = open {
+                    console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "relay": "refused", "host": b.host, "why": refusal.message() }));
+                    return Err(CellError::new(ErrorCode::RateLimited, refusal.message()));
+                }
+                json_response(&json!({ "lease": lease, "bytesMax": fragment_core::relay::BYTES_MAX, "msMax": fragment_core::relay::MS_MAX }))
+            }
+            "computer/relay-close" => {
+                let b: RelayClosed = body_json(&mut req).await?;
+                let spent = fragment_core::relay::parse_spent(self.meta(MetaKey::RelayDay)?.as_deref());
+                let kept = self.relays.borrow_mut().close(&b.lease, b.bytes, js::now_ms(), spent);
+                if kept != spent {
+                    self.set_meta(MetaKey::RelayDay, &fragment_core::relay::format_spent(kept))?;
+                }
+                json_response(&json!({ "ok": true }))
             }
             "computer/exited" => {
                 let b: Exited = body_json(&mut req).await?;
@@ -2941,8 +2987,23 @@ async fn host_answer(req: Request, env: &Env, url: &Url, id: &str, signer: Optio
 #[wasm_bindgen(wasm_bindgen = worker::wasm_bindgen)]
 pub struct ComputerEgress;
 
+/// What tells the shim's `ComputerEgress` that the platform holds a relay's
+/// place, by its lease: the answer is piped (entry.mjs `relay`), and never
+/// leaves.
+const RELAY_HEADER: &str = "x-fragment-relay";
+
 #[wasm_bindgen]
 impl ComputerEgress {
+    /// An XFTP relay of `computer`'s ended, having carried `bytes`: its
+    /// place freed and its bytes counted (fragment_core::relay). Logged on
+    /// failure, never failed: its lease lapses on its own.
+    pub async fn relay_closed(env: Env, computer: String, lease: String, bytes: f64) {
+        let bytes = if bytes.is_finite() && bytes > 0.0 { bytes as u64 } else { 0 };
+        if let Err(e) = ask(&env, &computer, "computer/relay-close", &json!({ "lease": lease, "bytes": bytes })).await {
+            console_error!("{}", json!({ "computer": computer, "relay": "close unheard", "error": e.message }));
+        }
+    }
+
     pub async fn handle(request: worker_sys::web_sys::Request, env: Env, ctx: worker_sys::Context, computer: String, route: String) -> worker_sys::web_sys::Response {
         let req = Request::from(request);
         let ctx = Context::new(ctx);
@@ -2988,6 +3049,25 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
             let agent = v["agent"].as_str().filter(|a| fragment_proto::valid_fragment_name(a)).ok_or_else(|| CellError::invalid("name the agent fragment (agent)"))?;
             let asked = json!({ "computer": computer, "door": v["door"], "nonce": v["nonce"], "key": v["key"] });
             return json_response(&crate::fragment::ask(env, agent, "computer/door-key", &asked).await?);
+        }
+        // an XFTP relay (fragment_core::relay): its host and port allowed and
+        // a place held at its computer, the shim's `ComputerEgress` pipes it
+        // (entry.mjs `relay`), told how by these headers, which it alone reads
+        "/api/computer/relay" => {
+            let q: BTreeMap<String, String> = url.query_pairs().into_owned().collect();
+            let (host, port) = fragment_core::relay::target(q.get("host").map_or("", String::as_str), q.get("port").map_or("", String::as_str)).map_err(|r| CellError::new(ErrorCode::Forbidden, r.message()))?;
+            if !req.headers().get("upgrade")?.is_some_and(|u| u.eq_ignore_ascii_case("websocket")) {
+                return Err(CellError::invalid("a relay is a WebSocket"));
+            }
+            let held = ask(env, computer, "computer/relay-open", &json!({ "host": host })).await?;
+            let lease = held["lease"].as_str().filter(|l| l.len() == 32).ok_or_else(|| CellError::host("a relay's lease"))?;
+            let headers = Headers::new();
+            headers.set(RELAY_HEADER, lease)?;
+            headers.set("x-fragment-relay-host", host)?;
+            headers.set("x-fragment-relay-port", &port.to_string())?;
+            headers.set("x-fragment-relay-bytes", &fragment_core::relay::BYTES_MAX.to_string())?;
+            headers.set("x-fragment-relay-ms", &fragment_core::relay::MS_MAX.to_string())?;
+            return Ok(Response::empty()?.with_headers(headers));
         }
         "/api/computer/keepalive" => {
             let headers = Headers::new();

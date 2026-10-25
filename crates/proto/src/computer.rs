@@ -391,6 +391,19 @@ pub struct ComputerView {
     /// unless they let it sleep (docs/billing.md).
     #[serde(default)]
     pub always_on: bool,
+    /// The guest's view only: what its XFTP relay carries
+    /// (`fragment_core::relay`; `GET /api/computer/relay`), so its bridge
+    /// sends its SimpleX core's files through it. Absent from a platform
+    /// without one, and the core then reaches no file server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<RelayOffer>,
+}
+
+/// The hosts and the port a computer's XFTP relay carries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayOffer {
+    pub hosts: Vec<String>,
+    pub port: u16,
 }
 
 /// One save of a computer's `/data`, as its view shows it.
