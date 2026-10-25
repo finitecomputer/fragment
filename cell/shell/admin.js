@@ -51,9 +51,11 @@ function when(ms) {
 // A seat's kind, shortly: the one sold, or a comp's seat that sleeps.
 const KIND = { seat_always_on: "always-on", seat: "sleeping" };
 
+// An always-on seat whose holder lets its computer sleep says so: why its
+// computer is not always on.
 function seatText(s) {
   if (!s) return "";
-  return `${KIND[s.kind]} ${s.comped ? "comped" : "paid"}${s.good ? "" : " (lapsed)"}`;
+  return `${KIND[s.kind]} ${s.comped ? "comped" : "paid"}${s.kind === "seat_always_on" && s.sleeps ? ", lets it sleep" : ""}${s.good ? "" : " (lapsed)"}`;
 }
 
 function guard(fn) {
