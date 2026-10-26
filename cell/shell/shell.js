@@ -1143,21 +1143,37 @@ function chatTitle(name) {
 // ---- an agent's home: where it reaches its person (Paul, 2026-10-26):
 // its own chat, or its SimpleX chat, as its agent.json's `home` says
 // (`"simplex"`; absent, its chat). Its routines without a chat run there,
-// and its computer tells it so (docs/api.md, "An agent's home"). Read once
-// for each agent as it is first seen, and set by Settings and by its
-// SimpleX link page; the sidebar marks the chat it names. ----
-const homesRead = new Set();
+// and its computer tells it so (docs/api.md, "An agent's home").
+// One value per agent, `state.homes`, which the sidebar's bell and
+// Settings' pick both render from (`homeIs`): read from agent.json while
+// unknown (`readHome`), and set by each write that lands (`setHome`: a pick,
+// a link's box, an unlink), each through the agent's one writer. A read is
+// let go when a write began or ended after it was asked (`homeWrites`), so
+// it never undoes one. ----
+const homeWrites = new Map();
+const homeReads = new Set();
+const wrote = (agent) => homeWrites.set(agent, (homeWrites.get(agent) ?? 0) + 1);
+function readHome(agent) {
+  if (homeReads.has(agent)) return;
+  homeReads.add(agent);
+  const asked = homeWrites.get(agent) ?? 0;
+  agentJson(agent)
+    .catch((e) => (e.status === 404 ? {} : null))
+    .then((j) => {
+      homeReads.delete(agent);
+      if (j && (homeWrites.get(agent) ?? 0) === asked) homeIs(agent, j.home);
+    });
+}
 function loadHomes() {
   for (const a of state.agents.values()) {
-    if (homesRead.has(a.fragment) || !own(byName(a.fragment) ?? {})) continue;
-    homesRead.add(a.fragment);
-    agentJson(a.fragment)
-      .then((j) => homeIs(a.fragment, j?.home), (e) => { if (e.status === 404) homeIs(a.fragment, null); else homesRead.delete(a.fragment); });
+    if (!state.homes.has(a.fragment) && own(byName(a.fragment) ?? {})) readHome(a.fragment);
   }
+  paintHomes();
 }
 function homeIs(agent, home) {
   state.homes.set(agent, home === "simplex" ? "simplex" : "chat");
   renderChats();
+  paintHomes();
 }
 // the chat an agent's home names: its SimpleX chat when picked and there,
 // else its own chat
@@ -1172,13 +1188,25 @@ function homeMark(f) {
   m.setAttribute("aria-label", m.title);
   return [m];
 }
-// Its home set on agent.json as it is now (`writeAgentJson`), and shown.
+// Its home set on agent.json as it is now, through its writer whatever is
+// shown (`writeAgentJson`: nothing written when it is so already), then
+// shown; a write that fails has it read again.
 async function setHome(agent, simplex) {
-  await writeAgentJson(agent, (next) => {
-    if (simplex) next.home = "simplex";
-    else delete next.home;
-    return `its home: ${simplex ? "its SimpleX chat" : "its chat"}`;
-  });
+  wrote(agent);
+  try {
+    await writeAgentJson(agent, (next) => {
+      if ((next.home === "simplex") === simplex) return null;
+      if (simplex) next.home = "simplex";
+      else delete next.home;
+      return `its home: ${simplex ? "its SimpleX chat" : "its chat"}`;
+    });
+  } catch (e) {
+    wrote(agent);
+    homeReads.delete(agent);
+    readHome(agent);
+    throw e;
+  }
+  wrote(agent);
   homeIs(agent, simplex ? "simplex" : null);
 }
 
@@ -1498,7 +1526,7 @@ addEventListener("message", async (e) => {
   } catch (err) {
     reply.error = err.message;
   }
-  const home = m.want === "link" ? (typeof m.home === "boolean" ? m.home : null) : state.homes.get(m.agent) === "simplex" ? false : null;
+  const home = m.want === "link" ? (typeof m.home === "boolean" ? m.home : null) : false;
   if (reply.ticket && home !== null) {
     await setHome(m.agent, home).then(() => { reply.home = home; }, (err) => { reply.homeError = err.message; });
   }
@@ -2947,6 +2975,8 @@ function writeAgentJson(agent, change) {
     });
     const next = { ...now, tier: now.tier ?? DEFAULT_AGENT_TIER };
     const message = change(next);
+    // (none: as it is already, so nothing written)
+    if (message === null) return;
     await api("POST", `/api/f/${seg(agent)}/files`, { message, files: [{ path: "agent.json", text: JSON.stringify(next, null, 2) + "\n" }] });
     await api("POST", `/api/f/${seg(agent)}/deploy`, {});
   });
@@ -2966,7 +2996,7 @@ function agentSettings(a, row, modeled) {
   // connected; whether there is one, with a single route, is the agent's
   // own tier's to say (`modelPicker`, once agent.json is read)
   const choice = modeled.length > 0 || routesOffered().length > 0;
-  const picks = [...(choice ? [modelPicker(a, modeled, read, write, said)] : []), reasoningPicker(a, read, write, said), homePicker(a, read, said)];
+  const picks = [...(choice ? [modelPicker(a, modeled, read, write, said)] : []), reasoningPicker(a, read, write, said), homePicker(a, said)];
   box.append(row, ...picks, said);
   return box;
 }
@@ -3093,26 +3123,37 @@ function reasoningPicker(a, read, write, said) {
 // ---- where an agent reaches its person (its home, above): its own chat,
 // or its SimpleX chat once it has one. Always shown, so where its
 // reminders go is never a guess. ----
-function homePicker(a, read, said) {
+function homePicker(a, said) {
   const pick = el("select", "agent-model");
   pick.dataset.homeFor = a.fragment;
   pick.setAttribute("aria-label", `Where ${titleOf(a.fragment)} reaches you`);
-  const chat = agentsOwnChat(a.fragment);
-  pick.append(modelOption("", chat ? chatTitle(chat.name) : "Its chat"));
   pick.disabled = true;
-  read
-    .then((j) => {
-      const simplex = j?.home === "simplex";
-      if (simplex || simplexChatOf(a.fragment)) pick.append(modelOption("simplex", SIMPLEX_TITLE));
-      pick.value = pick.dataset.was = simplex ? "simplex" : "";
-    })
-    .finally(() => { pick.disabled = false; pick.dataset.read = "1"; });
-  pick.onchange = () => {
+  pick.onchange = async () => {
     const value = pick.value;
-    savePick(pick, value, said, setHome(a.fragment, value === "simplex"), "Saved.");
+    pick.dataset.saving = "1";
+    await savePick(pick, value, said, setHome(a.fragment, value === "simplex"), "Saved.");
+    delete pick.dataset.saving;
+    paintHome(pick);
   };
+  paintHome(pick);
   return settingLabel("Reaches you in", pick);
 }
+// A home pick shows its agent's home as the shell knows it (`state.homes`),
+// with its own chat and, once it has one, its SimpleX chat to pick; while
+// its home is unknown it waits, and while its own pick saves it is left be.
+function paintHome(pick) {
+  const agent = pick.dataset.homeFor;
+  const home = state.homes.get(agent);
+  if (!home || pick.dataset.saving) return;
+  const chat = agentsOwnChat(agent);
+  const options = [modelOption("", chat ? chatTitle(chat.name) : "Its chat")];
+  if (home === "simplex" || simplexChatOf(agent)) options.push(modelOption("simplex", SIMPLEX_TITLE));
+  pick.replaceChildren(...options);
+  pick.value = pick.dataset.was = home === "simplex" ? "simplex" : "";
+  pick.disabled = false;
+  pick.dataset.read = "1";
+}
+const paintHomes = () => document.querySelectorAll("select[data-home-for]").forEach(paintHome);
 
 // ---- connections (decisions 22, 37 and 44): every provider the platform
 // offers, one row each: what it is, its state, which of the person's agents
