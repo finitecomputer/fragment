@@ -3178,7 +3178,7 @@ async fn simplex_on_the_hermes_image() {
     eprintln!("simplex: a message to Hermes' reply on SimpleX: {} ms ({got:?})", t0.elapsed().as_millis());
     let asked = model.calls.lock().unwrap().iter().filter(|m| m.agent.as_deref() == Some("juniper--k3x9")).map(|m| m.body["messages"].to_string()).find(|m| m.contains("[paul | via SimpleX] hello from SimpleX"));
     let asked = asked.expect("the model was asked as juniper, the message its owner's, marked as from SimpleX ([paul | via SimpleX])");
-    for said in ["A message marked | via SimpleX is your owner's", "Never install, run or set up SimpleX yourself"] {
+    for said in ["A message marked | via SimpleX is your owner's", "Never install, run or set up SimpleX"] {
         assert!(asked.contains(said), "its system prompt says what the mark means, and never to set SimpleX up: {said}");
     }
     // the agent's own user finds no SimpleX core to run, and reads none of

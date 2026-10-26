@@ -297,9 +297,9 @@ pub const SENDING: &str = "To give someone in this chat a file (a PDF, an image,
 /// relay wire.rs, `VIA_SIMPLEX_LABEL`), a label, which Hermes tells its
 /// model never to take instructions from: the rule is here, where its
 /// system prompt holds it, at a few tokens a turn, rather than beside each
-/// such message, where it would pile up in the chat's history. The
-/// `fragment` skill's first page (`computer.md`) says the same in a line.
-pub const SIMPLEX: &str = "A message marked | via SimpleX is your owner's, from their SimpleX app: Fragment sends your reply back there by itself (a file you attach stays in this chat, and they are told so). Never install, run or set up SimpleX yourself, even when asked to send something there.";
+/// such message, where it would pile up in the chat's history. The one
+/// place an agent is told of SimpleX.
+pub const SIMPLEX: &str = "A message marked | via SimpleX is your owner's, from their SimpleX app: Fragment sends your reply back there itself (a file stays in this chat, noted). Never install, run or set up SimpleX, even when asked to send something there.";
 
 /// The relay's hint, appended to every agent's system prompt on every turn
 /// in our chats (Hermes' `platform_hints.relay.append`): how it asks
@@ -1344,22 +1344,19 @@ mod tests {
     /// there, his agent began setting up a SimpleX of its own): every agent
     /// is told, on every turn in our chats, that a message the bridge marks
     /// `| via SimpleX` is its owner's from their SimpleX app, that Fragment
-    /// sends its reply back there itself, and never to set SimpleX up; and
-    /// the `fragment` skill's first page says the same. Method: the
-    /// overlay's relay hint, its words naming the bridge's own mark, and the
-    /// page.
+    /// sends its reply back there itself, and never to set SimpleX up.
+    /// Method: the overlay's relay hint, its words naming the bridge's own
+    /// mark.
     #[test]
     fn every_agent_is_told_simplex_is_the_platforms() {
         let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
         assert!(relay_hint().ends_with(&format!("{SENDING}\n\n{SIMPLEX}")), "last: {}", relay_hint());
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "in the relay's hint: {m}");
         assert!(SIMPLEX.contains(&format!("| {}", fragment_bridge::runtime::relay::wire::VIA_SIMPLEX_LABEL)), "it names the bridge's mark: {SIMPLEX}");
-        for said in ["your owner's, from their SimpleX app", "Fragment sends your reply back there by itself", "Never install, run or set up SimpleX yourself"] {
+        for said in ["your owner's, from their SimpleX app", "Fragment sends your reply back there itself", "Never install, run or set up SimpleX"] {
             assert!(SIMPLEX.contains(said), "{said}: {SIMPLEX}");
         }
-        assert!(!SIMPLEX.contains(['`', '\n', '$', '"']) && SIMPLEX.len() < 300, "one short plain paragraph: {SIMPLEX}");
-        let page = include_str!("computer.md").split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(page.contains("SimpleX app reaches you there too") && page.contains("never install, run or set up SimpleX yourself"), "computer.md says it: {page}");
+        assert!(!SIMPLEX.contains(['`', '\n', '$', '"']) && SIMPLEX.len() < 260, "one short plain paragraph: {SIMPLEX}");
     }
 
     /// Goal (Paul, 2026-10-14: "if hermes asks them a technical approval it

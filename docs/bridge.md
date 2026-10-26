@@ -524,8 +524,8 @@ drives it.
   every agent's system prompt says what the mark means: its owner wrote
   it in their SimpleX app, Fragment sends the reply back there itself,
   and it never installs, runs or sets up SimpleX (our Hermes image's relay
-  hint, hermes-boot's `SIMPLEX`; the `fragment` skill's first page says so
-  in a line). Not the message's read-only `context`: Hermes puts a voice
+  hint, hermes-boot's `SIMPLEX`: the one place it is said). Not the
+  message's read-only `context`: Hermes puts a voice
   memo's transcript before that, where it would read as no part of the
   message, and a note there would be kept in the chat's history once a
   message. The core and its state
