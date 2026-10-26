@@ -2548,6 +2548,8 @@ async function openSettings(push = true, failed = null) {
   returnSaid(back);
   renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, simplexSection(), buildSection(), dataSection(), ...releaseLine(c)]);
   renderAgentFaces();
+  // a home read that answered while these were built shown now they are in
+  paintHomes();
   tell();
 }
 // An action's reload of settings, only while they are shown: an answer that

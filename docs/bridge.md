@@ -272,7 +272,14 @@ deep (docs/chat-records.md, "An agent's reply"):
   `records::homed`), so a home changed later moves the next fire. A home
   that does not read ends the follow, which reads the routine again from
   the engine's cursor after a wait: no fire is lost to a failed read, and
-  one past the hour a missed routine is skipped after is not read for. An
+  one past the hour a missed routine is skipped after is not read for. A
+  SimpleX chat its link has named and not made yet (not in the agent's
+  own list: its making refused for now, or a restart between its naming
+  and its making) is waited for the same way, up to
+  `limits::HOME_CHAT_WAIT_MS` (10 minutes) from the routine's firing, and
+  then it runs in the agent's own chat: never dropped (`api::home_chat`;
+  `a_routine_waits_for_its_simplex_chat`: past the wait, waiting across a
+  restart, run once made, nothing twice after a restart). An
   agent with no chat with its owner at all runs it nowhere
   (`routine.homeless`). A bridge before homes passes such a routine over
   (`a_routine_with_no_chat_runs_at_home`, tests/bridge.rs: valid, a home

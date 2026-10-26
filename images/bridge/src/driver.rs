@@ -34,7 +34,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch, Notify};
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::api::{self, Api, ApiError};
+use crate::api::{self, Api, ApiError, HomeChat};
 use crate::engine::{self, ChatView, ClaimAnswer, Effect, Engine, Input, Settings, State};
 use crate::limits;
 use crate::net::Backoff;
@@ -899,8 +899,9 @@ async fn follow_once(
 /// One record into the engine, with the chat's view (fresh enough, and
 /// knowing its writer). A routine that names no chat is given the chat its
 /// agent's home names now (`home_of`; docs/api.md, "An agent's home"); one
-/// whose home could not be read ends the follow, which reads it again after
-/// a wait from the engine's cursor, so no fire is lost to a failed read
+/// whose home could not be read, or names a SimpleX chat not made yet,
+/// ends the follow, which reads it again after a wait from the engine's
+/// cursor, so no fire is lost to a failed read or a chat being made
 /// (until it is past the hour a missed routine is skipped after). What
 /// ends the follow, if anything: `Stopped` when the engine is gone.
 #[allow(clippy::too_many_arguments)]
@@ -921,16 +922,20 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
     };
     let record = if tasks && record.at >= since && records::homeless(&record.body) {
         let simplex = shared.mirrors.lock().expect("mirrors").get(&agent.fragment).cloned().flatten();
-        match home_of(api, agent, simplex.as_deref()).await {
-            Ok(Some(chat)) => {
+        let now = i64::try_from(crate::log::now_ms()).expect("ms fit");
+        let waited = now.saturating_sub(record.at) >= i64::try_from(limits::HOME_CHAT_WAIT_MS).expect("ms fit");
+        match home_of(api, agent, simplex.as_deref(), waited).await {
+            Ok(HomeChat::In(chat)) => {
                 crate::ev!("routine.home", { "agent": agent.fragment, "seq": record.seq, "chat": chat });
                 Record { body: records::homed(&record.body, &chat), ..record }
             }
             // no chat with its owner at all: passed over, said so
-            Ok(None) => {
+            Ok(HomeChat::Nowhere) => {
                 crate::ev!("routine.homeless", { "agent": agent.fragment, "seq": record.seq });
                 record
             }
+            // its SimpleX chat named and not made yet: read again from the cursor, as a failed read is
+            Ok(HomeChat::Unmade) => return Some(Ended::Again("its SimpleX chat is not made yet".into())),
             Err(e) => return Some(Ended::Again(format!("its home was not read: {e}"))),
         }
     } else {
@@ -943,12 +948,13 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
 /// The chat an agent's home names now (`api::home_chat`): its `agent.json`,
 /// its SimpleX chat while linked (the one its link mirrors: `simplex`),
 /// its owner's list and its own, read as a routine that names no chat
-/// fires (at most every 15 minutes a schedule).
-async fn home_of(api: &Api, agent: &Agent, simplex: Option<&str>) -> Result<Option<String>, ApiError> {
+/// fires (at most every 15 minutes a schedule); `waited`: the routine fired
+/// `limits::HOME_CHAT_WAIT_MS` ago or more.
+async fn home_of(api: &Api, agent: &Agent, simplex: Option<&str>, waited: bool) -> Result<HomeChat, ApiError> {
     let home = api.home(&agent.fragment).await?;
     let owners = api.fragments_for(&agent.fragment, &agent.owner).await?;
     let mine = api.fragments(&agent.fragment).await?;
-    Ok(api::home_chat(&agent.fragment, home, simplex, &owners, &mine))
+    Ok(api::home_chat(&agent.fragment, home, simplex, &owners, &mine, waited))
 }
 
 /// The agent's wake subscription on the channel: made unless it has one.

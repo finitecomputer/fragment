@@ -3405,8 +3405,10 @@ chat. One home per agent, as each agent links its own SimpleX.
   default) and says the answer in its ask for the link's ticket
   (`{fragment: "simplex", agent, want: "link", home}`): the shell sets it
   as it makes the ticket, and says so in its answer (`home`, or
-  `homeError`). Until the link has made its SimpleX chat, a `"simplex"`
-  names its own chat (above). An unlink's ticket sets it back to the
+  `homeError`). Its SimpleX chat is named as the link is bound and made
+  just after; a routine that fires before it is made waits for it, at
+  most ten minutes from its firing, then runs in the agent's own chat:
+  never dropped (docs/bridge.md). An unlink's ticket sets it back to the
   agent's own chat. Each is written as Settings writes the rest of
   `agent.json`: onto what it holds now, read just before, then deployed.
 - **The sidebar marks** the chat an agent's home names (a bell), read

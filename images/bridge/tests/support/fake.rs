@@ -123,6 +123,8 @@ pub struct World {
     /// The fragments an agent made for its owner (`POST /api/fragments?for=`),
     /// by name, in order.
     pub made: Vec<String>,
+    /// While set, making one is 503, as a platform that refused it for now.
+    pub refuse_makes: bool,
     live: Vec<LiveSock>,
     keepalives: Vec<(u64, mpsc::UnboundedSender<Message>)>,
     /// Keepalives whose platform side a deploy cut (`cut_keepalives`):
@@ -624,6 +626,9 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             return refuse(StatusCode::BAD_REQUEST, "a chat made by its name for the agent's owner");
         };
         let mut w = world.lock().unwrap();
+        if w.refuse_makes {
+            return refuse(StatusCode::SERVICE_UNAVAILABLE, "a making refused, as asked");
+        }
         if w.fragments.contains_key(name) {
             return refuse(StatusCode::CONFLICT, "that name is taken");
         }

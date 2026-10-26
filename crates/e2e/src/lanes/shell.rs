@@ -3904,6 +3904,38 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
         said && line.as_str().is_some_and(|l| l.contains("Couldn't read where it reaches you.") && l.contains("Try again")) && retried,
         second,
     );
+    // Alex's third review of #619: a home answered while Settings are still
+    // being built (their skills' read held, so nothing is in the page yet)
+    // is shown once they are: the home, or a failed read's line. Its
+    // agent.json's reads held until the case answers them
+    let skills = own_skills(api, me.session)?.into_iter().next().context("the person's skills fragment")?;
+    let holding = format!(
+        "(() => {{ const real = window.fetch; window.__homes = []; window.__homeMode = 'hold'; let held = false; \
+         const refusal = () => new Response(JSON.stringify({{ error: 'unavailable', message: 'refused for the test' }}), {{ status: 503, headers: {{ 'content-type': 'application/json' }} }}); \
+         window.fetch = (u, o) => {{ const url = String(u); const get = (o?.method ?? 'GET') === 'GET'; \
+           if (get && url.endsWith({home})) {{ if (window.__homeMode === 'hold') return new Promise((done) => window.__homes.push(() => done(window.__homeMode === 'pass' ? real(u, o) : refusal()))); \
+             if (window.__homeMode === 'refuse') return Promise.resolve(refusal()); }} \
+           if (get && !held && url.endsWith({files})) {{ held = true; return new Promise((done) => {{ window.__skills = () => done(real(u, o)); }}); }} \
+           return real(u, o); }}; }})();",
+        home = js(&format!("/api/f/{agent}/file?path=agent.json")),
+        files = js(&format!("/api/f/{skills}/files")),
+    );
+    let mut built = vec![];
+    for (mode, shown) in [("pass", painted.clone()), ("refuse", format!("{unread_of}?.checkVisibility() === true && {pick_of}.disabled"))] {
+        let p = b.open_with_script(&format!("{}/settings", api.base), &holding)?;
+        let held = b.until(&p, "typeof window.__skills === 'function' && window.__homes.length > 0 && !document.querySelector('[data-home-for]')", wait);
+        b.eval(&p, &format!("(window.__homeMode = {}, window.__homes.splice(0).forEach((answer) => answer()), true)", js(mode)))?;
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        b.eval(&p, "(window.__skills(), true)")?;
+        let ok = held && b.until(&p, &shown, wait);
+        built.push(json!({ "answer": mode, "held": held, "ok": ok, "seen": b.eval(&p, &seen)?, "line": b.eval(&p, &format!("{unread_of}?.checkVisibility() ?? null"))? }));
+        b.close(p)?;
+    }
+    s.ok(
+        "a home answered while Settings are still being built is shown once they are: its home in the pick, or, its read failed, the line with Try again",
+        built.iter().all(|c| c["ok"] == true),
+        json!(built),
+    );
     super::computers::lever_with(api, &computer, json!({ "op": "simplex", "on": false }))?;
     anyhow::ensure!(write_home(None)? == 200, "agent.json as it was");
     // as the lanes after it expect it: no SimpleX chat
