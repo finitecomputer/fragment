@@ -610,6 +610,12 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
                     if let Some(u) = w.names.get(&id) {
                         profiles.insert(id.clone(), json!({ "kind": "person", "email": u }));
                     }
+                    // an agent of the fake's (`npub1<label>`, its fragment `<label>--k3x9`):
+                    // its label as `name`, its fragment's title as it shows
+                    let label = id.trim_start_matches("npub1");
+                    if let Some(f) = w.fragments.get(&format!("{label}--k3x9")).filter(|f| f.kind == "agent") {
+                        profiles.insert(id.clone(), json!({ "kind": "agent", "name": label, "fragment": format!("{label}--k3x9"), "title": f.title }));
+                    }
                 }
                 answer(StatusCode::OK, json!({ "profiles": profiles }))
             }

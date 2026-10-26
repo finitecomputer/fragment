@@ -713,16 +713,28 @@ impl ViewCache {
         members.sort_by(|a, b| (a.added_at, &a.principal).cmp(&(b.added_at, &b.principal)));
         self.view.agents = members.iter().filter(|m| m.kind == "agent").map(|m| m.principal.clone()).collect();
         self.since = members.iter().find(|m| m.principal == agent.identity).map(|m| m.added_at).unwrap_or(0);
-        let mut ids: Vec<String> = members.iter().filter(|m| m.kind != "agent" && records::is_identity(&m.principal)).map(|m| m.principal.clone()).collect();
-        if let Some(w) = writer.filter(|w| records::is_identity(w) && !ids.iter().any(|i| i == w)) {
-            ids.push(w.to_string());
+        // Who to name, at most `PEOPLE_MAX` (one `__people`): the writer whose
+        // record asked first, then its people, then its other agents (an
+        // agent's message, a hand-off, is told by its name: its title, as
+        // `__people` says it now).
+        let mut ids: Vec<String> = writer.filter(|w| records::is_identity(w) && *w != agent.identity).map(str::to_string).into_iter().collect();
+        let (agents, people): (Vec<&api::Member>, Vec<&api::Member>) = members.iter().filter(|m| m.principal != agent.identity && records::is_identity(&m.principal)).partition(|m| m.kind == "agent");
+        for m in people.into_iter().chain(agents) {
+            if ids.len() >= api::PEOPLE_MAX {
+                break;
+            }
+            if !ids.contains(&m.principal) {
+                ids.push(m.principal.clone());
+            }
         }
         match api.people(&agent.fragment, fragment, &ids).await {
             Ok(names) => self.view.names = names,
             Err(e) => crate::ev!("people.unread", { "fragment": fragment, "error": e.to_string() }),
         }
-        // A writer no one could name is "someone" until the next read, not
-        // a reason to read again at each of its records.
+        // A writer asked of and not named is "someone" until the next read,
+        // not a reason to read again at each of its records. One past the
+        // bound was not asked: left unnamed, its first record reads the view
+        // again, with it first.
         for id in ids {
             self.view.names.entry(id).or_insert_with(|| "someone".into());
         }
@@ -912,7 +924,9 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
         let since = i64::try_from(crate::log::now_ms().saturating_sub(limits::TASKS_BACKLOG_MS)).expect("ms fit");
         (None, since)
     } else {
-        let unknown = records::is_identity(&record.principal) && !view.view.names.contains_key(&record.principal) && !view.view.agents.contains(&record.principal);
+        // a writer the view has no name for (a person or another agent past
+        // the last read's bound, or new): read again, with it first
+        let unknown = records::is_identity(&record.principal) && record.principal != agent.identity && !view.view.names.contains_key(&record.principal);
         if !view.fresh(shared.joined_at(fragment)) || unknown {
             if let Err(e) = view.read(api, agent, fragment, Some(&record.principal)).await {
                 crate::ev!("view.unread", { "fragment": fragment, "error": e.to_string() });
