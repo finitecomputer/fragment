@@ -27,6 +27,8 @@ use crate::runtime::Agent;
 
 /// The header naming the agent a request acts as.
 pub const AGENT_HEADER: &str = "x-fragment-agent";
+/// Identities one `__people` call names, at most (the platform's limit).
+pub const PEOPLE_MAX: usize = 64;
 
 /// Why a call failed, typed so callers match without reading strings.
 #[derive(Debug, Clone, PartialEq)]
@@ -539,11 +541,11 @@ impl Api {
     }
 
     /// `GET /f/{name}/__people?id=…`: what to call each identity (at most
-    /// 64): a person by their email, which a member is shown (decision 48);
+    /// `PEOPLE_MAX`): a person by their email, which a member is shown (decision 48);
     /// an agent by its name, its agent fragment's title, else its label
     /// (docs/api.md, "An agent's name and picture").
     pub async fn people(&self, agent: &str, fragment: &str, ids: &[String]) -> Result<BTreeMap<String, String>, ApiError> {
-        let ids: Vec<&String> = ids.iter().take(64).collect();
+        let ids: Vec<&String> = ids.iter().take(PEOPLE_MAX).collect();
         if ids.is_empty() {
             return Ok(BTreeMap::new());
         }

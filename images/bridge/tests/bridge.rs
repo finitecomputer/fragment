@@ -801,6 +801,39 @@ async fn a_group_mention_picks_the_agent() {
     bridge.stop().await;
 }
 
+/// Goal (Alex's review of #631): a chat's writers keep their names past
+/// one `__people` call's 64. In a chat of its owner, two agents and 63 more
+/// people (66 to name), the last person's message is told by their email,
+/// and the other agent's hand-off by its name: whoever writes is asked
+/// first, and one past the bound is left unnamed, so its first record asks.
+#[tokio::test]
+async fn names_hold_past_one_people_call() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper", "rowan"]).await;
+    let crowd = fake.chat("crowd", &["juniper", "rowan"]);
+    fake.with(|w| {
+        let f = w.fragments.get_mut(&crowd).expect("the chat");
+        for i in 0..63 {
+            f.members.push(support::fake::Member { principal: person(&format!("p{i}")), role: "editor".into(), kind: "person".into(), added_at: 100 + i });
+            w.names.insert(person(&format!("p{i}")), format!("p{i}@example.test"));
+        }
+    });
+    let dir = support::dir("crowd");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 4).await;
+    fake.say(&crowd, &person("p62"), json!({ "text": "hello from the back", "to": ["npub1juniper"] }));
+    fake.until(WAIT, "juniper's answer to the last person", |w| replies(w, &crowd).len() == 1).await;
+    // rowan's reply names juniper: a hand-off, which juniper is told by rowan's name
+    fake.say(&crowd, &person("paul"), json!({ "text": "rowan, ask @juniper too", "to": ["npub1rowan"] }));
+    fake.until(WAIT, "rowan's hand-off, and juniper's answer to it", |w| replies(w, &crowd).len() == 3).await;
+    fake.with(|w| {
+        let r = replies(w, &crowd);
+        assert!(r[0]["text"].as_str().unwrap().starts_with("echo: [p62@example.test] hello from the back"), "the 64th person, by their email: {}", r[0]["text"]);
+        assert_eq!(r[1]["to"], json!(["npub1juniper"]), "rowan's reply hands off");
+        assert!(r[2]["text"].as_str().unwrap().starts_with("echo: [Rowan]"), "the other agent, by its name: {}", r[2]["text"]);
+    });
+    bridge.stop().await;
+}
+
 /// Goal (decision 8): two scripted agents told to name each other hand off
 /// A, B, A, B and stop at the hop cap. Invalid: an agent's post made around
 /// the bridge right after (the CLI's: no `hop`, which once read as 0 and
