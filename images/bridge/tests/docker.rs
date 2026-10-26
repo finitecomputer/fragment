@@ -3119,9 +3119,13 @@ fn simplex_cores(c: &Container) -> usize {
 }
 
 /// Goal (SimpleX, decision 32, Paul's "work well across restarts and
-/// updates"): our Hermes image, always on, links its agent to a person's
-/// SimpleX app from its screen port; the person's message is a turn of
-/// Hermes' asked as its owner, answered on SimpleX; a voice note is
+/// updates"; a chat of its own since 2026-10-26): our Hermes image, always
+/// on, links its agent to a person's SimpleX app from its screen port, and
+/// makes its SimpleX chat for its owner; the person's message lands there,
+/// a turn of Hermes' asked as its owner, its session told the chat is their
+/// phone, answered on SimpleX; words typed in that chat on the web, and a
+/// routine with no chat while their home is that chat, are answered on
+/// SimpleX too, and a reply in the agent's own chat is not; a voice note is
 /// transcribed through the route and answered; a hold stops the core before
 /// the image answers it and its copies name none of the core's databases;
 /// a restart keeps the link; and a wake from a save older than the life
@@ -3138,7 +3142,7 @@ async fn simplex_on_the_hermes_image() {
     let mut person = lab.start("person", false).await;
     let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
     let model = Model::start("0.0.0.0:0").await;
-    let chat = fake.chat_named("juniper-chat--h6j7", &["juniper"]);
+    let own = fake.chat_named("juniper-chat--h6j7", &["juniper"]);
     fake.with(|w| {
         w.computer["alwaysOn"] = json!(true);
         w.computer["generation"] = json!(1);
@@ -3152,6 +3156,7 @@ async fn simplex_on_the_hermes_image() {
     assert!(fake.with(|w| w.simplex_said) >= 1, "the bridge's read of its computer says SimpleX");
     simplex_until(&c, "", 60_000, "its SimpleX, off", |v| v["phase"] == "off").await;
     assert_eq!(simplex_cores(&c), 0, "nothing linked, no core");
+    assert!(fake.with(|w| w.made.is_empty()), "nothing linked, no SimpleX chat");
 
     // linked from its screen port, as its owner's pane does: by the ticket
     // their Settings were given (none, no link: Hermes' tools reach this
@@ -3170,17 +3175,42 @@ async fn simplex_on_the_hermes_image() {
     assert!(fake.with(|w| w.doors.contains_key("juniper--k3x9")), "its door's key registered with the ticket");
     let at_person = person.wait(Duration::from_secs(60), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the agent, at the person's");
     received(&mut person, Duration::from_secs(30), |got| got.iter().any(|t| t.contains("You're linked"))).await;
+    // its SimpleX chat, made for its owner as it is linked
+    fake.until(30_000, "its SimpleX chat made", |w| w.made.len() == 1).await;
+    let chat = fake.with(|w| w.made[0].clone());
+    assert!(chat.starts_with("juniper-simplex--") && fake.with(|w| w.fragments[&chat].title == "SimpleX"), "{chat}");
 
-    // a message: Hermes' turn as its owner, answered on SimpleX
+    // a message: in its SimpleX chat, Hermes' turn as its owner, answered on SimpleX
     let t0 = Instant::now();
     say(&mut person, at_person, "hello from SimpleX").await;
     let got = received(&mut person, Duration::from_secs(180), |got| got.iter().any(|t| t.starts_with("scripted:") && t.contains("hello from SimpleX"))).await;
     eprintln!("simplex: a message to Hermes' reply on SimpleX: {} ms ({got:?})", t0.elapsed().as_millis());
-    let asked = model.calls.lock().unwrap().iter().filter(|m| m.agent.as_deref() == Some("juniper--k3x9")).map(|m| m.body["messages"].to_string()).find(|m| m.contains("[paul | via SimpleX] hello from SimpleX"));
-    let asked = asked.expect("the model was asked as juniper, the message its owner's, marked as from SimpleX ([paul | via SimpleX])");
-    for said in ["A message marked | via SimpleX is your owner's", "Never install, run or set up SimpleX"] {
-        assert!(asked.contains(said), "its system prompt says what the mark means, and never to set SimpleX up: {said}");
+    assert!(fake.with(|w| w.records(&chat, "chat").iter().any(|r| r["body"]["relayed"]["via"] == "simplex")), "its message in its SimpleX chat");
+    let asked = model.calls.lock().unwrap().iter().filter(|m| m.agent.as_deref() == Some("juniper--k3x9")).map(|m| m.body["messages"].to_string()).find(|m| m.contains("[paul] hello from SimpleX"));
+    let asked = asked.expect("the model was asked as juniper, the message its owner's ([paul])");
+    for said in [fragment_bridge::runtime::relay::wire::SIMPLEX_TOPIC, "never install, run or set up SimpleX", "Your owner's home is your chat juniper-chat"] {
+        assert!(asked.contains(said), "its session says the chat is its owner's phone, its prompt never to set SimpleX up and where home is: {said}");
     }
+    // words typed in its SimpleX chat on the web: answered on the phone too
+    fake.say(&chat, "npub1paul", json!({ "text": "typed on the web" }));
+    received(&mut person, Duration::from_secs(180), |got| got.iter().any(|t| t.starts_with("scripted:") && t.contains("typed on the web"))).await;
+    // its home that chat (agent.json, as Settings writes it): a routine with no chat answered on the phone, the agent told so
+    fake.with(|w| w.fragments.get_mut("juniper--k3x9").expect("its fragment").files.insert("agent.json".into(), bytes::Bytes::from(r#"{"tier":"cheap","home":"simplex"}"#)));
+    let told = |m: &support::model::Call| m.body["messages"].to_string().contains("Your owner's home is their SimpleX, your chat juniper-simplex");
+    let t0 = Instant::now();
+    // (its prompt rewritten from agent.json within its 10 s read, then a fire)
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1juniper", json!({ "kind": "routine", "text": "remind me to water the basil" })));
+    received(&mut person, Duration::from_secs(180), |got| got.iter().any(|t| t.starts_with("scripted:") && t.contains("remind me to water the basil"))).await;
+    eprintln!("simplex: a routine at home to its answer on SimpleX: {} ms", t0.elapsed().as_millis());
+    assert!(model.calls.lock().unwrap().iter().rev().find(|m| m.agent.as_deref() == Some("juniper--k3x9")).is_some_and(told), "its prompt says its owner's home is their SimpleX");
+    // words typed in its own chat: answered there alone
+    fake.say(&own, "npub1paul", json!({ "text": "typed in its own chat" }));
+    fake.until(180_000, "its own chat's reply", |w| w.bodies(&own, "chat", "reply").iter().any(|b| b["text"].as_str().is_some_and(|t| t.contains("typed in its own chat")))).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    person.drain(Duration::from_millis(500)).await;
+    let heard = received(&mut person, Duration::from_secs(1), |_| true).await;
+    assert!(!heard.iter().any(|t| t.contains("typed in its own chat")), "a reply in its own chat stays there: {heard:?}");
     // the agent's own user finds no SimpleX core to run, and reads none of
     // the bridge's SimpleX state (its keys, its door's key, its databases)
     let as_agent = |cmd: &str| c.exec_code(&["/command/s6-setuidgid", "hermes", "bash", "-lc", cmd]);
@@ -3276,5 +3306,6 @@ async fn simplex_on_the_hermes_image() {
     say(&mut person, at_person, "after the rollback").await;
     received(&mut person, Duration::from_secs(180), |got| got.iter().any(|t| t.starts_with("scripted:") && t.contains("after the rollback"))).await;
     let relayed = fake.with(|w| w.records(&chat, "chat").iter().filter(|r| r["body"]["relayed"]["via"] == "simplex").count());
-    eprintln!("simplex: {relayed} relayed records on its chat");
+    eprintln!("simplex: {relayed} relayed records on its SimpleX chat");
+    assert!(fake.with(|w| w.made.as_slice() == std::slice::from_ref(&chat)), "its SimpleX chat found again after the restarts, never made twice");
 }

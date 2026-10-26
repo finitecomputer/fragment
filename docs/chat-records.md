@@ -150,8 +150,9 @@ it, and a new draft may follow (the next part).
   stop handing off.
 
 **A relayed message** (SimpleX; docs/bridge.md, "SimpleX"): its owner's
-words, said in their SimpleX app, posted by the agent on its own chat with
-them (its Bot Chat):
+words, said in their SimpleX app, posted by the agent on its SimpleX chat
+with them (their chat labelled `<label>-simplex`: docs/api.md, "An agent's
+home"; before 2026-10-26, its own chat with them):
 
 ```json
 { "text": "…", "to": ["npub1<agent>"],
@@ -176,18 +177,23 @@ them (its Bot Chat):
   agent's SimpleX link is bound, a record the agent itself posted with a
   `relayed` for its owner, through its own door, is its owner's message to it, asked as its owner
   (by their name; their Stop stops it; it answers a question asked of
-  them). Its turn is marked so (`via`), as is its message to the agent
-  (docs/bridge.md, "SimpleX"), and **what it says goes back to
-  the owner's SimpleX app** once posted: its replies but the interim ones
-  (the words before a tool call stay in the chat, as its push leaves them
-  out), with their files (each a voice message, an image or a file:
-  docs/bridge.md, "SimpleX"), and a card's question with its choices (their next
-  SimpleX message answers a card that takes words). Only a SimpleX
-  message's turn does. A
+  them). A
   `relayed` from anyone else (a person, another agent), for anyone else,
   by another way, or while unlinked, is what the record would be without
   it: the agent's own words starting nothing, a person's message, a
   hand-off.
+- **What the agent says in its SimpleX chat goes to its owner's SimpleX
+  app** once posted, while linked, whatever started its turn (their
+  SimpleX message, their words typed there on the web, a routine, a
+  hand-off) or none: its replies but the interim ones (the words before a
+  tool call stay in the chat, as its push leaves them out), with their
+  files (each a voice message, an image or a file: docs/bridge.md,
+  "SimpleX"),
+  and a card's question with its choices (their next SimpleX message
+  answers a card that takes words). Nothing of it is in its records: the
+  chat is the phone, so a turn carries no mark (a bridge before
+  2026-10-26 marked a SimpleX message's turn `via` and sent back only its
+  words).
 - The page shows it as its owner's, saying "via SimpleX", once the chat's
   members say its poster is that person's agent; until then, or from any
   other poster, as its poster's.
@@ -819,7 +825,11 @@ A routine (decision 38): a scheduled record on the agent fragment's
 --routine`, which builds this body) appends it, as the fragment itself,
 at each minute its cron names, keyed by the schedule and that minute,
 which wakes the computer; the agent takes it as a turn in `chat`, asked
-by its owner. One older than an hour when its computer first reads it is
+by its owner. `chat` is optional (Paul, 2026-10-26: "everything proactive
+goes home"): one that names none runs in its owner's home as it fires
+(docs/api.md, "An agent's home": its own chat, or its SimpleX chat), read
+then, so a home changed later moves its next fire; a bridge before homes
+passes it over. One older than an hour when its computer first reads it is
 skipped, as cron skips a missed run. Whoever may edit the agent fragment
 may schedule one: its owner, the agent itself (an editor of its own
 fragment), and the owner's other agents acting for the owner, each with

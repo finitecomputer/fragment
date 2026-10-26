@@ -1783,6 +1783,16 @@ settings and state):
   route took as `low`. Settings' Agents offers it beside the model for
   every agent: Default (High), Low and High; a pick writes `reasoning` to
   `agent.json` as the model's pick is written, and the default removes it.
+  Its `home`, `"simplex"` or none (Paul, 2026-10-26; docs/api.md, "An
+  agent's home"), is where its owner is reached: its profile's
+  `agent.system_prompt` tells it, beside its name, at every turn
+  (`hermes::told_home`: "Your owner's home is your chat <label>-chat" or
+  "their SimpleX, your chat <label>-simplex, which reaches their phone",
+  and that a routine scheduled without `--chat` runs there), so a change
+  is its next turn's, read with the rest of `agent.json` every 10 s and
+  written only when it changed; a running turn keeps the prompt it
+  started with, and nothing restarts. Hermes' own home channel is set
+  nowhere (docs/hermes-relay.md, "Hermes' settings").
 
   Its work (the seam, above): each agent's is `/data/work/<profile>`.
   Its profile's config makes it the terminal's working directory

@@ -273,12 +273,6 @@ pub struct Turn {
     /// The seq on `chat` of the message its message quotes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<u64>,
-    /// How its owner said its message, when its agent relayed it
-    /// (`records::VIA_SIMPLEX`): its replies go back that way too
-    /// (simplex/run.rs). None for every other turn, which writes nothing new
-    /// into the state.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub via: Option<String>,
     #[serde(skip)]
     pub open: Option<OpenReply>,
 }
@@ -340,9 +334,11 @@ pub enum Input {
     Tick,
     /// The agent is no longer in the fragment (403 or 404 there).
     Gone { agent: String, fragment: String },
-    /// The agents whose SimpleX link is bound now (simplex/run.rs): their
-    /// relayed records alone are honored, as their owner's messages.
-    Relaying(BTreeSet<String>),
+    /// The agents whose SimpleX link is bound now (simplex/run.rs), each
+    /// with its SimpleX chat once found: their relayed records alone are
+    /// honored, as their owner's messages, and what each says in that chat
+    /// goes to its owner's phone.
+    Relaying(BTreeMap<String, Option<String>>),
 }
 
 /// What the engine asks the driver to do, in order.
@@ -425,10 +421,12 @@ pub struct Engine {
     /// turn there: `records::menu_id`). Never written to `/data`; at most
     /// one entry per followed chat of each agent.
     published: BTreeSet<(String, String)>,
-    /// The agents whose SimpleX link is bound (`Input::Relaying`): only
-    /// their own relayed records are their owner's messages. Never written
-    /// to `/data`: the bridge reads it from each link's file as it starts.
-    relaying: BTreeSet<String>,
+    /// The agents whose SimpleX link is bound (`Input::Relaying`), each with
+    /// its SimpleX chat once found: only their own relayed records are their
+    /// owner's messages, and that chat is their owner's phone (`mirror`).
+    /// Never written to `/data`: the bridge reads it from each link's file
+    /// as it starts.
+    relaying: BTreeMap<String, Option<String>>,
     /// Per agent and chat, its turn there the runtime's notices belong to
     /// (the one running, else the last this life handed there) and how many
     /// it posted, the one used last at the back (at most
@@ -495,7 +493,7 @@ impl Engine {
             forgotten: BTreeMap::new(),
             menu: &[],
             published: BTreeSet::new(),
-            relaying: BTreeSet::new(),
+            relaying: BTreeMap::new(),
             noticed: VecDeque::new(),
             out: Vec::new(),
             dirty: false,
@@ -522,6 +520,14 @@ impl Engine {
 
     pub fn agents(&self) -> &[Agent] {
         &self.agents
+    }
+
+    /// The chat that is `agent`'s owner's phone: its SimpleX chat, while its
+    /// link is bound and the chat found (`Input::Relaying`). What the agent
+    /// says there goes to their SimpleX app too, whatever started its turn
+    /// (docs/bridge.md, "SimpleX").
+    pub fn mirror(&self, agent: &str) -> Option<&str> {
+        self.relaying.get(agent)?.as_deref()
     }
 
     pub fn cursor(&self, agent: &str, fragment: &str, channel: &str) -> u64 {
@@ -663,15 +669,15 @@ impl Engine {
         }
         match record.channel.as_str() {
             // the agent's own words are not for it
-            records::CHAT if record.principal != agent.identity => self.said(&agent, fragment, &record, None),
+            records::CHAT if record.principal != agent.identity => self.said(&agent, fragment, &record),
             // but its owner's words it relays are, when it is linked
             // (docs/chat-records.md, "A relayed message"): its owner's
-            // message, as theirs, its turn's replies going back the same way
-            records::CHAT if self.relaying.contains(&agent.fragment) => {
+            // message, as theirs
+            records::CHAT if self.relaying.contains_key(&agent.fragment) => {
                 if let Some(r) = records::relayed(&record.body).filter(|r| r.for_ == agent.owner && r.agent == agent.fragment) {
                     crate::ev!("relayed", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "via": r.via });
                     let as_owner = Record { principal: agent.owner.clone(), ..record };
-                    self.said(&agent, fragment, &as_owner, Some(r.via));
+                    self.said(&agent, fragment, &as_owner);
                 }
             }
             records::TASKS if fragment == agent.fragment => {
@@ -690,10 +696,9 @@ impl Engine {
         }
     }
 
-    fn said(&mut self, agent: &Agent, fragment: &str, record: &Record, via: Option<&'static str>) {
+    fn said(&mut self, agent: &Agent, fragment: &str, record: &Record) {
         match records::said(&record.body) {
-            Said::Message(mut m) => {
-                m.via = via.map(str::to_string);
+            Said::Message(m) => {
                 let view = self.views.get(fragment).cloned().unwrap_or_default();
                 let hop = self.addressed(agent, fragment, &view, &record.principal, &m);
                 if hop == Some(0) && self.told(agent, fragment, &record.principal, &view, &m, record.seq) {
@@ -752,7 +757,8 @@ impl Engine {
                 let id = records::turn_id(&agent.fragment, &cause.fragment, &cause.channel, cause.seq);
                 let turn = running.filter(|_| item.how == How::Steer);
                 crate::ev!("command.aside", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "turn": turn });
-                self.out.push(Effect::Runtime(Command::Aside { agent: agent.fragment.clone(), fragment: fragment.to_string(), chat_name: label(fragment).to_string(), turn, id, by: record.principal.clone(), by_name: asker_name, text }));
+                let simplex = self.mirror(&agent.fragment) == Some(fragment);
+                self.out.push(Effect::Runtime(Command::Aside { agent: agent.fragment.clone(), fragment: fragment.to_string(), chat_name: label(fragment).to_string(), simplex, turn, id, by: record.principal.clone(), by_name: asker_name, text }));
             }
             _ => self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_command, 0, Ask::Command),
         }
@@ -925,7 +931,6 @@ impl Engine {
             asking: false,
             command: matches!(ask, Ask::Command | Ask::Refused(_)),
             reply_to: m.reply_to,
-            via: m.via.clone(),
             open: None,
         };
         self.dirty = true;
@@ -1097,6 +1102,8 @@ impl Engine {
         while self.noticed.len() > limits::NOTICE_CHATS_MAX {
             self.noticed.pop_front();
         }
+        // its chat its owner's phone (its SimpleX chat): the runtime is told
+        let simplex = self.mirror(&agent) == Some(self.state.turns[id].fragment.as_str());
         let t = self.state.turns.get_mut(id).expect("checked");
         t.phase = Phase::Running;
         t.last_ms = now;
@@ -1120,7 +1127,7 @@ impl Engine {
             command: t.command,
             reply_to: t.reply_to,
             quote: None,
-            via: t.via.clone(),
+            simplex,
         };
         crate::ev!("turn.handed", { "turn": id, "agent": agent, "fragment": t.fragment, "command": t.command });
         self.out.push(Effect::Runtime(Command::Start(Box::new(start))));

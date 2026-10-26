@@ -296,9 +296,10 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), answer, claims_in_flight.clone(), quiet.clone(), stop.clone()));
     // SimpleX, when the image names its core: told of the computer at each
     // read; it says which agents' links are bound (`relaying`), whose
-    // relayed records alone the engine honors. The sender lives as long as
+    // relayed records alone the engine honors, each with its SimpleX chat
+    // once found, which is its owner's phone. The sender lives as long as
     // the bridge, so the engine's watch of it never ends on its own.
-    let (relaying_tx, mut relaying_rx) = watch::channel(std::collections::BTreeSet::<String>::new());
+    let (relaying_tx, mut relaying_rx) = watch::channel(std::collections::BTreeMap::<String, Option<String>>::new());
     let simplex = cfg.simplex.clone().map(|sc| crate::simplex::run::start(sc, api.clone(), quiet.clone(), cfg.hold.clone(), relaying_tx.clone(), stop.clone()));
     if let Some(h) = &simplex {
         let _ = simplex_page.handle.set(h.clone());
@@ -365,9 +366,10 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
         for e in step.effects {
             match e {
                 Effect::Post { agent, fragment, channel, id, body, files } => {
-                    // what a turn its owner asked over SimpleX says goes back there, once posted
-                    let asked_there = |turn: &str| engine.state().turns.get(turn).is_some_and(|t| t.via.as_deref() == Some(records::VIA_SIMPLEX));
-                    let relay = simplex.as_ref().and(for_simplex(channel, &id, &body, files.len())).filter(|(turn, _)| asked_there(turn)).map(|(_, text)| text);
+                    // what an agent says in its owner's SimpleX chat goes to
+                    // their phone too, once posted, whatever started its turn
+                    let mirrored = simplex.is_some() && engine.mirror(&agent) == Some(fragment.as_str());
+                    let relay = mirrored.then(|| for_simplex(channel, &body, files.len())).flatten();
                     lanes.push(&fragment, Job::Post { agent, channel, id, body, files, relay })
                 }
                 Effect::Claim { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Claim { agent, turn, id, body }),
@@ -396,10 +398,15 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     act(&engine, s)?;
     // the agents whose SimpleX link is bound, as their files say, before any
     // record: a relayed record a cut life posted and never ran is honored
+    // (their chats as SimpleX finds them, which it may have already)
     if let Some(sc) = &cfg.simplex {
-        let linked: std::collections::BTreeSet<String> = crate::simplex::run::linked_on_disk(&sc.dir, &computer.agents).into_iter().collect();
-        relaying_tx.send_replace(linked.clone());
-        let s = engine.step(Input::Relaying(linked), crate::log::now_ms());
+        let linked = crate::simplex::run::linked_on_disk(&sc.dir, &computer.agents);
+        relaying_tx.send_modify(|now| {
+            for a in linked {
+                now.entry(a).or_insert(None);
+            }
+        });
+        let s = engine.step(Input::Relaying(relaying_tx.borrow().clone()), crate::log::now_ms());
         act(&engine, s)?;
     }
     let s = engine.recover(crate::log::now_ms());
@@ -800,8 +807,8 @@ async fn follow_once(
         let full = page.records.len() as u32 >= limits::CATCHUP_PAGE_RECORDS;
         for r in page.records {
             last = last.max(r.seq);
-            if !feed(api, agent, fragment, r, inbox, shared, view, tasks).await {
-                return Ended::Stopped;
+            if let Some(ended) = feed(api, agent, fragment, r, inbox, shared, view, tasks).await {
+                return ended;
             }
         }
         if !full {
@@ -862,8 +869,8 @@ async fn follow_once(
                             continue;
                         }
                         last = r.seq;
-                        if !feed(api, agent, fragment, r, inbox, shared, view, tasks).await {
-                            return Ended::Stopped;
+                        if let Some(ended) = feed(api, agent, fragment, r, inbox, shared, view, tasks).await {
+                            return ended;
                         }
                     }
                     Some("subscribed") if v["more"] == json!(true) => {
@@ -881,9 +888,14 @@ async fn follow_once(
 }
 
 /// One record into the engine, with the chat's view (fresh enough, and
-/// knowing its writer). False when the engine is gone.
+/// knowing its writer). A routine that names no chat is given the chat its
+/// agent's home names now (`home_of`; docs/api.md, "An agent's home"); one
+/// whose home could not be read ends the follow, which reads it again after
+/// a wait from the engine's cursor, so no fire is lost to a failed read
+/// (until it is past the hour a missed routine is skipped after). What
+/// ends the follow, if anything: `Stopped` when the engine is gone.
 #[allow(clippy::too_many_arguments)]
-async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &mpsc::Sender<Msg>, shared: &Shared, view: &mut ViewCache, tasks: bool) -> bool {
+async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &mpsc::Sender<Msg>, shared: &Shared, view: &mut ViewCache, tasks: bool) -> Option<Ended> {
     let (input_view, since) = if tasks {
         // A routine that fired while the computer was gone longer than this
         // is skipped, as cron skips a missed run.
@@ -898,7 +910,34 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
         }
         (Some(view.view.clone()), view.since)
     };
-    inbox.send(Msg::Input(Input::Record { agent: agent.fragment.clone(), fragment: fragment.to_string(), record, view: input_view, since })).await.is_ok()
+    let record = if tasks && record.at >= since && records::homeless(&record.body) {
+        match home_of(api, agent).await {
+            Ok(Some(chat)) => {
+                crate::ev!("routine.home", { "agent": agent.fragment, "seq": record.seq, "chat": chat });
+                Record { body: records::homed(&record.body, &chat), ..record }
+            }
+            // no chat with its owner at all: passed over, said so
+            Ok(None) => {
+                crate::ev!("routine.homeless", { "agent": agent.fragment, "seq": record.seq });
+                record
+            }
+            Err(e) => return Some(Ended::Again(format!("its home was not read: {e}"))),
+        }
+    } else {
+        record
+    };
+    let fed = inbox.send(Msg::Input(Input::Record { agent: agent.fragment.clone(), fragment: fragment.to_string(), record, view: input_view, since })).await;
+    fed.is_err().then_some(Ended::Stopped)
+}
+
+/// The chat an agent's home names now (`api::home_chat`): its `agent.json`,
+/// its owner's list and its own, read as a routine that names no chat
+/// fires (at most every 15 minutes a schedule).
+async fn home_of(api: &Api, agent: &Agent) -> Result<Option<String>, ApiError> {
+    let home = api.home(&agent.fragment).await?;
+    let owners = api.fragments_for(&agent.fragment, &agent.owner).await?;
+    let mine = api.fragments(&agent.fragment).await?;
+    Ok(api::home_chat(&agent.fragment, home, &owners, &mine))
 }
 
 /// The agent's wake subscription on the channel: made unless it has one.
@@ -915,23 +954,20 @@ async fn ensure_wake(api: &Api, agent: &Agent, fragment: &str, channel: &str) ->
 
 // ---- lanes: each fragment's posts, claims and drafts, in order ----
 
-/// The turn a reply's post id names (`rp:<turn>:<n>`).
-fn reply_turn(id: &str) -> Option<&str> {
-    id.strip_prefix("rp:")?.rsplit_once(':').map(|(turn, _)| turn)
-}
-
-/// What of a record a turn posts goes to its owner's SimpleX app, when
-/// that turn was asked there (the caller's to say), and the turn it is of:
-/// a reply, its text and its files (simplex/run.rs, `Handle::reply`),
-/// unless it is interim (the model's words before a tool call stay in the
-/// chat, as its push leaves them out: docs/chat-records.md, "Push"; a turn
-/// may narrate 200 of them, each a notification on the phone); and a card's
+/// What of a record an agent posts in its owner's SimpleX chat goes to
+/// their SimpleX app (the caller's to say it is that chat), its files beside
+/// it (simplex/run.rs, `Handle::reply`): a message of its own (a reply;
+/// something it says with no turn running), its text and its files, unless
+/// it is interim (the model's words before a tool call stay in the chat, as
+/// its push leaves them out: docs/chat-records.md, "Push"; a turn may
+/// narrate 200 of them, each a notification on the phone); and a card's
 /// question, its choices named, since a card shows only in the chat.
-/// Nothing else.
-fn for_simplex(channel: &str, id: &str, body: &Value, files: usize) -> Option<(String, String)> {
+/// Nothing else (a relayed message, the owner's own, is the phone's
+/// already).
+fn for_simplex(channel: &str, body: &Value, files: usize) -> Option<String> {
     let text = body["text"].as_str().unwrap_or("");
     match channel {
-        records::CHAT if body["interim"] != true => reply_turn(id).filter(|_| !text.trim().is_empty() || files > 0).map(|turn| (turn.to_string(), text.to_string())),
+        records::CHAT if body["interim"] != true && body.get("relayed").is_none() => (!text.trim().is_empty() || files > 0).then(|| text.to_string()),
         records::WORK if body["kind"] == "turn.prompt" => {
             let options = body["options"].as_array()?;
             let words = options.iter().any(|o| o["words"] == true);
@@ -942,7 +978,7 @@ fn for_simplex(channel: &str, id: &str, body: &Value, files: usize) -> Option<(S
                 (true, false) => format!("\n\n(Answer with one of: {}, or in your own words.)", labels.join(", ")),
                 (false, _) => "\n\n(This one needs a button: answer it in our chat.)".to_string(),
             };
-            Some((body["turn"].as_str()?.to_string(), format!("{text}{how}")))
+            Some(format!("{text}{how}"))
         }
         _ => None,
     }
@@ -951,7 +987,7 @@ fn for_simplex(channel: &str, id: &str, body: &Value, files: usize) -> Option<(S
 #[derive(Debug, Clone)]
 enum Job {
     /// `relay`: what of it goes to the owner's SimpleX app once posted, for
-    /// a turn asked there (`for_simplex`).
+    /// a post in its owner's SimpleX chat (`for_simplex`), with its files.
     Post { agent: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile>, relay: Option<String> },
     /// A turn's `turn.start` on `work`, whose answer the engine waits for.
     Claim { agent: String, turn: String, id: String, body: Value },
@@ -1606,25 +1642,29 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Goal (SimpleX, after #584's mid-turn replies): of what a turn asked
-    /// over SimpleX posts, its owner's app gets every reply that is not
-    /// interim (its answer, an open question), its files with it, and a
-    /// card's question with its choices; the model's words before a tool
-    /// call stay in the chat, as the chat's push leaves them out.
+    /// Goal (SimpleX, after #584's mid-turn replies; per chat since Paul's
+    /// 2026-10-26): of what an agent posts in its owner's SimpleX chat, their
+    /// app gets every reply that is not interim (its answer, an open
+    /// question, something said unasked), its files with it, and a card's
+    /// question with its choices; the model's words before a tool call stay
+    /// in the chat, as the chat's push leaves them out, and so do a turn's
+    /// work and its owner's own words from the phone.
     #[test]
     fn what_goes_back_over_simplex() {
         let reply = |interim: bool| records::reply("It'll be sunny.", "t1", &[], 0, interim);
-        assert_eq!(for_simplex(records::CHAT, "rp:t1:2", &reply(false), 0), Some(("t1".into(), "It'll be sunny.".into())));
-        assert_eq!(for_simplex(records::CHAT, "rp:t1:2", &reply(false), 2), Some(("t1".into(), "It'll be sunny.".into())), "its files go as files, not noted");
-        assert_eq!(for_simplex(records::CHAT, "rp:t1:1", &reply(true), 0), None, "interim: the chat's alone");
-        assert_eq!(for_simplex(records::CHAT, "rp:t1:2", &records::reply("", "t1", &[], 0, false), 1), Some(("t1".into(), String::new())), "a file alone goes");
-        assert_eq!(for_simplex(records::CHAT, "rp:t1:2", &records::reply(" ", "t1", &[], 0, false), 0), None, "nothing said");
+        assert_eq!(for_simplex(records::CHAT, &reply(false), 0).as_deref(), Some("It'll be sunny."));
+        assert_eq!(for_simplex(records::CHAT, &reply(false), 2).as_deref(), Some("It'll be sunny."), "its files go as files, not noted");
+        assert_eq!(for_simplex(records::CHAT, &reply(true), 0), None, "interim: the chat's alone");
+        assert_eq!(for_simplex(records::CHAT, &records::reply("", "t1", &[], 0, false), 1).as_deref(), Some(""), "a file alone goes");
+        assert_eq!(for_simplex(records::CHAT, &records::reply(" ", "t1", &[], 0, false), 0), None, "nothing said");
+        let agent = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None };
+        assert_eq!(for_simplex(records::CHAT, &records::relayed_message("hi from my phone", &agent, records::VIA_SIMPLEX, &[]), 0), None, "its owner's own, from the phone");
         let option = |id: &str, label: &str, words: bool| records::PromptOption { id: id.into(), label: label.into(), style: None, words };
         let card = records::turn_prompt("t1", "c-1", "What should I plant?", &[option("c0", "Basil", false), option("c1", "Mint", false), option("other", "Something else", true)], "npub1paul", 1);
-        assert_eq!(for_simplex(records::WORK, "wk:t1:p:c-1", &card, 0), Some(("t1".into(), "What should I plant?\n\n(Answer with one of: Basil, Mint, or in your own words.)".into())));
+        assert_eq!(for_simplex(records::WORK, &card, 0).as_deref(), Some("What should I plant?\n\n(Answer with one of: Basil, Mint, or in your own words.)"));
         let buttons = records::turn_prompt("t1", "p-1", "Run it?", &[option("once", "Allow once", false)], "npub1paul", 1);
-        assert!(for_simplex(records::WORK, "wk:t1:p:p-1", &buttons, 0).is_some_and(|(_, t)| t.ends_with("answer it in our chat.)")));
-        assert_eq!(for_simplex(records::WORK, "wk:t1:start", &json!({ "kind": "turn.start", "turn": "t1" }), 0), None, "a turn's work records stay");
+        assert!(for_simplex(records::WORK, &buttons, 0).is_some_and(|t| t.ends_with("answer it in our chat.)")));
+        assert_eq!(for_simplex(records::WORK, &json!({ "kind": "turn.start", "turn": "t1" }), 0), None, "a turn's work records stay");
     }
 
     /// Goal (Alex's review of #548): a post says how it ended, so what goes

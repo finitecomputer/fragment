@@ -531,7 +531,7 @@ impl Loop {
                 // prompt TTL) times out with the card.
                 let (Some(option), Some(f)) = (option, self.inflight.get_mut(&turn)) else { return };
                 let message_id = format!("{turn}-a{seq}");
-                let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: &by, user_name: "owner", text: "", media: &[], context: None, command: false, quote: None };
+                let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: &by, user_name: "owner", text: "", media: &[], context: None, command: false, quote: None, topic: wire::topic(f.start.simplex) };
                 let buffer = format!("a-{turn}-{seq}");
                 let frame = wire::prompt_answer(&m, &buffer, &prompt, &option);
                 // "Other" answered in words: Hermes takes the answer (and
@@ -547,13 +547,13 @@ impl Loop {
             }
             Command::Forget { turn } => self.forget(&turn),
             Command::Tell { turn, seq, by, by_name, text, .. } => self.tell(&turn, seq, &by, &by_name, &text),
-            Command::Aside { agent, fragment, chat_name, turn, id, by, by_name, text } => {
+            Command::Aside { agent, fragment, chat_name, simplex, turn, id, by, by_name, text } => {
                 // in the agent's chat, as it is, kept until Hermes acks it:
                 // Hermes takes a command mid-turn (`/steer` lands in the
                 // running turn after its next tool call) or beside none
                 let chat = wire::chat_id(&fragment, &agent);
                 let profile = wire::profile(&agent);
-                let m = wire::Inbound { chat: &chat, chat_name: &chat_name, profile: &profile, message_id: &id, user_id: &by, user_name: &by_name, text: &text, media: &[], context: None, command: true, quote: None };
+                let m = wire::Inbound { chat: &chat, chat_name: &chat_name, profile: &profile, message_id: &id, user_id: &by, user_name: &by_name, text: &text, media: &[], context: None, command: true, quote: None, topic: wire::topic(simplex) };
                 let buffer = format!("x-{id}");
                 let frame = wire::inbound(&m, &buffer);
                 crate::ev!("relay.aside", { "id": id, "turn": turn, "running": turn.as_ref().is_some_and(|t| self.inflight.contains_key(t)) });
@@ -573,7 +573,7 @@ impl Loop {
         let Some(f) = self.inflight.get_mut(turn) else { return };
         f.asking = false;
         let message_id = format!("{turn}-t{seq}");
-        let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: by, user_name: by_name, text, media: &[], context: None, command: false, quote: None };
+        let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: by, user_name: by_name, text, media: &[], context: None, command: false, quote: None, topic: wire::topic(f.start.simplex) };
         let buffer = format!("t-{turn}-{seq}");
         let frame = wire::inbound(&m, &buffer);
         crate::ev!("relay.told", { "turn": turn, "seq": seq });
@@ -611,10 +611,9 @@ impl Loop {
         // a turn after a cut one is told so, as read-only context beside
         // the message (TurnStart::note); Hermes' own session was closed at
         // boot (hermes-boot, `close_cut_turns`), so the message is a turn of
-        // its own, never folded into the cut one's. One its owner asked over
-        // SimpleX is marked so beside their name (`wire::sender_name`).
-        let user_name = wire::sender_name(&ts.asker_name, ts.via.as_deref());
-        let m = wire::Inbound { chat: &chat, chat_name: &ts.chat_name, profile: &profile, message_id: &ts.turn, user_id: &ts.asker, user_name: &user_name, text: &ts.text, media: &hosted, context: ts.note.as_deref(), command: ts.command, quote: ts.quote.as_ref() };
+        // its own, never folded into the cut one's. Its owner's SimpleX chat
+        // says so as its topic (`wire::SIMPLEX_TOPIC`).
+        let m = wire::Inbound { chat: &chat, chat_name: &ts.chat_name, profile: &profile, message_id: &ts.turn, user_id: &ts.asker, user_name: &ts.asker_name, text: &ts.text, media: &hosted, context: ts.note.as_deref(), command: ts.command, quote: ts.quote.as_ref(), topic: wire::topic(ts.simplex) };
         let frame = wire::inbound(&m, &ts.turn);
         self.next_order += 1;
         let turn = ts.turn.clone();

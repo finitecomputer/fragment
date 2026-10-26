@@ -32,6 +32,8 @@
   button.danger { color: var(--danger); }
   button:disabled { opacity: .55; cursor: default; }
   .why { margin-top: 12px; font-size: 13px; color: var(--muted); }
+  .choice { display: flex; align-items: center; gap: 8px; margin: 4px 0 2px; }
+  .choice input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
 </style>
 </head>
 <body>
@@ -75,8 +77,12 @@
     if (!r.ok) throw new Error(body.message || `${r.status}`);
     return body;
   }
+  // whether the agent is to reach its person on SimpleX (its home), asked
+  // once as a link starts, yes by default, and said in the link's ask
+  let home = true;
   // a ticket to link or unlink, from the platform's page framing this one
-  function ticketFor(want) {
+  // (a link's ask says where the agent is to reach its person)
+  function ticketFor(want, extra = {}) {
     return new Promise((resolve, reject) => {
       if (!parentOrigin) return reject(new Error("open this from your Settings"));
       const heard = (e) => {
@@ -92,20 +98,20 @@
         reject(new Error("your Settings didn't answer"));
       }, 15000);
       addEventListener("message", heard);
-      window.parent.postMessage({ fragment: "simplex", agent, want }, parentOrigin);
+      window.parent.postMessage({ fragment: "simplex", agent, want, ...extra }, parentOrigin);
     });
   }
   // each change of the link moves this on: a poll begun before it is
   // obsolete, success or failure, and changes nothing it shows
   let epoch = 0;
-  async function act(want, confirmWith) {
+  async function act(want, confirmWith, extra) {
     if (confirmWith && !window.confirm(confirmWith)) return;
     epoch++;
     clearTimeout(timer);
     busy = true;
     render();
     try {
-      const ticket = await ticketFor(want);
+      const ticket = await ticketFor(want, extra);
       if (want === "link") session = ticket.nonce;
       view = await ask("POST", want, ticket);
     } catch (e) {
@@ -155,11 +161,19 @@
       case "off": {
         main.append(
           el("h1", null, `Message ${name} from SimpleX`),
-          el("p", null, `SimpleX Chat is a private messenger for your phone. Link it once, then write to ${name} from it any time. What you say shows up in your chat with ${name} here, and ${name} answers you there.`),
+          el("p", null, `SimpleX Chat is a private messenger for your phone. Link it once, then write to ${name} from it any time. Your SimpleX chat with ${name} shows here too, and what ${name} says there reaches your phone.`),
         );
+        // asked once, as the link starts: yes unless unticked
+        const choice = el("label", "choice");
+        const box = el("input");
+        box.type = "checkbox";
+        box.checked = home;
+        box.disabled = busy;
+        box.onchange = () => { home = box.checked; };
+        choice.append(box, ` Send ${name}'s reminders here`);
         const a = el("div", "actions");
-        a.append(button("Link SimpleX", "primary", () => act("link")));
-        main.append(a, el("p", "private", PRIVATE), ...why());
+        a.append(button("Link SimpleX", "primary", () => act("link", null, { home })));
+        main.append(choice, a, el("p", "private", PRIVATE), ...why());
         break;
       }
       case "asking": {
@@ -213,7 +227,7 @@
       case "linked": {
         main.append(
           el("h1", null, `${name} is on your SimpleX`),
-          el("p", null, `Linked to ${view.name || "your SimpleX app"}. Write to ${name} there: what you say shows up in your chat with ${name} here, and ${name} answers you there. Voice messages work too.`),
+          el("p", null, `Linked to ${view.name || "your SimpleX app"}. Write to ${name} there, voice messages too. Your SimpleX chat with ${name} shows here as well, and what ${name} says in it reaches your phone.`),
         );
         if (!view.running) main.append(el("p", "muted", "Starting SimpleX…"));
         const a = el("div", "actions");

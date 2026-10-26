@@ -60,10 +60,6 @@ pub struct Message {
     pub hop: u32,
     /// The seq on `chat` of the message it quotes (a person's reply to it).
     pub reply_to: Option<u64>,
-    /// How its owner said it, when its agent relays it (`relayed`, below:
-    /// `simplex`); none for every message a person posts. Never read from
-    /// a body here: the engine sets it for the relayed records it honors.
-    pub via: Option<String>,
 }
 
 /// A command for an agent's runtime (`{kind: "command"}`), from a person:
@@ -265,7 +261,7 @@ fn message(o: &Map<String, Value>) -> Said {
             None => return Said::Other,
         },
     };
-    Said::Message(Message { text, to, attachments, turn, hop, reply_to, via: None })
+    Said::Message(Message { text, to, attachments, turn, hop, reply_to })
 }
 
 /// The one way an owner's message is relayed (docs/chat-records.md, "A
@@ -327,6 +323,23 @@ pub fn relayed_id(agent: &str, sender_id: &str) -> String {
     let id = format!("sx:{}", &hex(&digest)[..32]);
     assert!(valid_post_id(&id), "a relayed id is a post id: {id}");
     id
+}
+
+/// Whether a `tasks` record is a routine that names no chat (`{kind:
+/// "routine", text}`): its agent's home's, whichever chat that is as it
+/// fires (docs/api.md, "An agent's home"), which the bridge reads then and
+/// names (`homed`). A bridge before homes passes one over (`task`: Other).
+pub fn homeless(body: &Value) -> bool {
+    let Value::Object(o) = body else { return false };
+    o.get("kind").and_then(Value::as_str) == Some("routine") && text_field(o, "text").is_some() && matches!(o.get("chat"), None | Some(Value::Null))
+}
+
+/// A routine that names no chat, naming the one its agent's home is now.
+pub fn homed(body: &Value, chat: &str) -> Value {
+    assert!(homeless(body), "only a routine that names no chat is given one");
+    let mut named = body.clone();
+    named["chat"] = json!(chat);
+    named
 }
 
 /// Reads a `tasks` record's body.
@@ -705,7 +718,7 @@ mod tests {
         assert_eq!(body, json!({ "text": "hi from my phone", "to": ["npub1juniper"], "relayed": { "via": "simplex", "for": "npub1paul", "agent": "juniper--k3x9" } }));
         assert_eq!(relayed(&body), Some(Relayed { for_: "npub1paul".into(), via: VIA_SIMPLEX, agent: "juniper--k3x9".into() }));
         let Said::Message(m) = said(&body) else { panic!("a message") };
-        assert_eq!((m.text.as_str(), m.to.as_slice(), m.via.as_deref()), ("hi from my phone", ["npub1juniper".to_string()].as_slice(), None), "a body sets no via");
+        assert_eq!((m.text.as_str(), m.to.as_slice()), ("hi from my phone", ["npub1juniper".to_string()].as_slice()));
         for bad in [
             json!({ "text": "x", "relayed": { "via": "telegram", "for": "npub1paul", "agent": "juniper--k3x9" } }),
             json!({ "text": "x", "relayed": { "via": "simplex", "for": "paul", "agent": "juniper--k3x9" } }),
@@ -838,6 +851,27 @@ mod tests {
         assert_eq!(task(&json!({ "kind": "joined", "fragment": "" })), Task::Joined { fragment: None });
         assert_eq!(task(&json!({ "kind": "routine", "text": "water" })), Task::Other);
         assert_eq!(task(&json!("routine")), Task::Other);
+    }
+
+    /// Goal (an agent's home): a routine that names no chat is homeless,
+    /// and named its home's chat it is a routine there; anything else is
+    /// not homeless (a chat named, even empty; no text; another kind).
+    #[test]
+    fn a_routine_with_no_chat_runs_at_home() {
+        for homeless_one in [json!({ "kind": "routine", "text": "water" }), json!({ "kind": "routine", "text": "water", "chat": null })] {
+            assert!(homeless(&homeless_one), "{homeless_one}");
+            assert_eq!(task(&homed(&homeless_one, "juniper-simplex--w9x2")), Task::Routine { text: "water".into(), chat: "juniper-simplex--w9x2".into() });
+        }
+        for not in [
+            json!({ "kind": "routine", "text": "water", "chat": "c--k3x9" }),
+            json!({ "kind": "routine", "text": "water", "chat": "" }),
+            json!({ "kind": "routine" }),
+            json!({ "kind": "routine", "text": 3 }),
+            json!({ "kind": "joined", "text": "water" }),
+            json!("routine"),
+        ] {
+            assert!(!homeless(&not), "{not}");
+        }
     }
 
     #[test]

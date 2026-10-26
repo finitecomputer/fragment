@@ -723,9 +723,10 @@ async fn read_title(api: &Api, a: &Agent) -> Result<Option<String>, ()> {
 /// An agent's profile config (`hermes::profile_config`), from its
 /// `agent.json` as the platform answers for it now (its tier, its own
 /// model where its credentials hold that provider's, and its reasoning,
-/// `high` unless it names `low`) and its name (its
-/// `title`, which the config tells it at every turn), written only when it
-/// changed: Hermes reads it again at the agent's next turn and rebuilds the
+/// `high` unless it names `low`, and its owner's home) and its name (its
+/// `title`, which the config tells it at every turn, beside its home),
+/// written only when it changed: Hermes reads it again at the agent's next
+/// turn (a running turn keeps the prompt it started with) and rebuilds the
 /// agent on a new model. A tier the platform did not answer for is said,
 /// and the config last written stays, its model with it: never one the
 /// agent did not choose, but for a profile with no config yet; a title
@@ -734,7 +735,7 @@ async fn read_title(api: &Api, a: &Agent) -> Result<Option<String>, ()> {
 #[allow(clippy::too_many_arguments)]
 async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], high_on: bool, title: &Result<Option<String>, ()>) -> Option<hermes::MainModel> {
     let config = dir.join("config.yaml");
-    let answer = api.file(&a.fragment, &a.fragment, "agent.json", 64 * 1024).await;
+    let answer = api.file(&a.fragment, &a.fragment, "agent.json", fragment_bridge::api::AGENT_JSON_MAX_BYTES).await;
     let tier = hermes::Tier::read(&answer, high_on).or_else(|| {
         ev!("profile.tier_unread", { "agent": a.fragment, "error": answer.as_ref().err().map(ToString::to_string), "configKept": config.exists() });
         (!config.exists()).then_some(hermes::DEFAULT_TIER)
@@ -747,13 +748,14 @@ async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>,
     let own = answer.as_ref().ok().and_then(|b| hermes::OwnModel::of(b));
     let (main, unused) = hermes::MainModel::of(a, tier, own.as_ref());
     let reasoning = hermes::Reasoning::of(answer.as_ref().ok().map(|b| b.as_ref()));
-    let text = hermes::profile_config(a, name, &main, reasoning, route, credential_env, &dir.join(hermes::CREDENTIALS_FILE));
+    let home = fragment_bridge::api::Home::of(answer.as_ref().ok().map(|b| b.as_ref()));
+    let text = hermes::profile_config(a, name, home, &main, reasoning, route, credential_env, &dir.join(hermes::CREDENTIALS_FILE));
     if std::fs::read_to_string(&config).ok().as_deref() != Some(text.as_str()) {
         write_whole(&config, &text, ids);
         if let (Some(own), Some(why)) = (&own, &unused) {
             ev!("profile.model_unused", { "agent": a.fragment, "provider": own.provider, "id": own.id, "why": why, "model": main.name() });
         }
-        ev!("profile.model", { "agent": a.fragment, "model": main.name(), "reasoning": reasoning.name() });
+        ev!("profile.model", { "agent": a.fragment, "model": main.name(), "reasoning": reasoning.name(), "home": format!("{home:?}").to_lowercase() });
     }
     Some(main)
 }
