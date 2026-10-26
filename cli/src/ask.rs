@@ -229,12 +229,20 @@ pub const UNTITLED_CHAT: &str = "New chat";
 /// or an agent's of its owner's (`?for=`), where its owner's agents are. A
 /// list that does not read names it by its label.
 fn named(c: &Client, asker: Option<&Agent>, agent: &mut Agent) {
-    let path = match asker {
-        Some(a) if !a.owner.is_empty() => format!("/api/fragments?for={}", a.owner),
-        _ => "/api/fragments".into(),
-    };
-    let Ok(v) = c.get(&path).and_then(|r| c.call(r)) else { return };
+    let Ok(v) = c.get(&names_path(&c.signer, asker)).and_then(|r| c.call(r)) else { return };
     agent.title = v["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == agent.fragment.as_str())).and_then(|f| f["title"].as_str()).map(str::to_string);
+}
+
+/// The list that names an agent's fellow agents: its owner's, `for` named
+/// once. An agent's CLI on its computer acts for its owner already
+/// (`FRAGMENT_FOR`), which the signer adds itself (`Signer::path`), and the
+/// platform refuses `for` named twice (Alex's review of #630).
+fn names_path(signer: &crate::api::Signer, asker: Option<&Agent>) -> String {
+    match (signer, asker) {
+        (crate::api::Signer::Agent(crate::api::AgentMode { acting_for: Some(_), .. }), _) => "/api/fragments".into(),
+        (_, Some(a)) if !a.owner.is_empty() => format!("/api/fragments?for={}", a.owner),
+        _ => "/api/fragments".into(),
+    }
 }
 
 /// Asks `who` `text`, as the CLI's signer: finds or makes the chat, adds
@@ -417,6 +425,24 @@ mod tests {
         for who in ["fre", "fred--p2m4", "NPUB1FRED", "", "juniper-chat"] {
             assert_eq!(pick(&agents, who), None, "{who}");
         }
+    }
+
+    /// Goal (Alex's review of #630): the list that names an agent's fellow
+    /// agents names `for` once and its owner, whether its CLI acts for its
+    /// owner already (`FRAGMENT_FOR`, as on its computer: the platform
+    /// refuses `for` named twice) or not; a person's own list names none.
+    #[test]
+    fn the_names_list_names_for_once() {
+        use crate::api::{AgentMode, Signer};
+        let mut me = agent("juniper");
+        me.owner = "npub1paul".into();
+        for acting_for in [Some("npub1paul".to_string()), None] {
+            let signer = Signer::Agent(AgentMode { agent: me.fragment.clone(), acting_for: acting_for.clone() });
+            let sent = signer.path(&names_path(&signer, Some(&me)));
+            assert_eq!(sent, "/api/fragments?for=npub1paul", "acting for {acting_for:?}");
+        }
+        let alone = Signer::Agent(AgentMode { agent: me.fragment.clone(), acting_for: None });
+        assert_eq!(alone.path(&names_path(&alone, None)), "/api/fragments", "a person's ask (no asker) names no one");
     }
 
     /// Goal: what the CLI prints calls an agent by its name, else its label;

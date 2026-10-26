@@ -20,13 +20,16 @@ const json = (path) => fetch(path, { headers: { accept: "application/json" }, cr
 
 // Its identity: of its agent members (`__members`; once its computer took
 // it, it is an editor of its own fragment), the one made from this
-// fragment (`__people`'s `fragment`); none before a computer takes it.
+// fragment (`__people`'s `fragment`), with its face's `title` as the
+// platform keeps it (none when it has none, or only spaces); none before a
+// computer takes it.
 async function identity() {
   const here = location.hostname.match(NAME_AT)?.[0];
   const agents = ((await json("__members"))?.members ?? []).filter((m) => m.kind === "agent").map((m) => m.principal).slice(0, PEOPLE_MAX);
   if (!here || !agents.length) return null;
   const people = await json(`__people?${agents.map((id) => `id=${encodeURIComponent(id)}`).join("&")}`);
-  return agents.find((id) => people?.profiles?.[id]?.fragment === here) ?? null;
+  const id = agents.find((a) => people?.profiles?.[a]?.fragment === here);
+  return id ? { id, title: people.profiles[id].title ?? null } : null;
 }
 
 // The model it runs, by its id, as its owner's shell says their computer
@@ -48,16 +51,20 @@ function runs(settings, me, models) {
 async function main() {
   let settings = null, roster = null;
   const here = location.hostname.match(NAME_AT)?.[0];
-  // Its name (docs/api.md, "An agent's name and picture"): its fragment's
-  // title, which the platform puts on its page (Open Graph: the fragment's
-  // name in full when it has none, so then its label), then as its owner's
-  // shell says it, again on any change: a rename while it is open
+  // Its name (docs/api.md, "An agent's name and picture"): as its owner's
+  // shell says it, framing it (again on any change: a rename while it is
+  // open), else its face's title as the platform keeps it (`identity`: none
+  // when it has none, or only spaces), else its label. Until one answers,
+  // its Open Graph title, trimmed: the raw meta's, or the fragment's name in
+  // full when it has none, which says nothing then (a title that is the
+  // name in full is shown once its face answers)
+  const label = (here ?? location.hostname).split("--")[0];
+  let told = null;
   const named = (name) => {
     document.title = name;
     document.getElementById("name").textContent = name;
   };
-  const og = document.querySelector('meta[property="og:title"]')?.content;
-  const label = (here ?? location.hostname).split("--")[0];
+  const og = document.querySelector('meta[property="og:title"]')?.content?.trim();
   named((og && og !== here ? og : "") || label || "Agent");
   const model = () => {
     if (settings && roster) document.getElementById("tier").textContent = runs(settings, roster.agents.find((a) => a.fragment === here), roster.models);
@@ -68,12 +75,15 @@ async function main() {
     if (e.source === window.parent && e.data?.fragment === "agents" && Array.isArray(e.data.agents)) {
       roster = e.data;
       const me = roster.agents.find((a) => a.fragment === here);
-      if (typeof me?.title === "string" && me.title.trim()) named(me.title);
+      if (typeof me?.title === "string" && me.title.trim()) named((told = me.title.trim()));
       model();
     }
   });
   if (window.parent !== window) window.parent.postMessage({ fragment: "agents?" }, "*");
   const who = identity();
+  who.then((me) => {
+    if (me && !told) named(me.title?.trim() || label || "Agent");
+  });
   try {
     settings = JSON.parse((await text("agent.json")) || "{}");
   } catch {}
@@ -81,7 +91,7 @@ async function main() {
   if (!settings || typeof settings !== "object") settings = {};
   model();
   const avatar = document.getElementById("avatar");
-  avatar.style.setProperty("--agent-color", colorOf(await who));
+  avatar.style.setProperty("--agent-color", colorOf((await who)?.id ?? null));
   const picture = new Image();
   picture.alt = "";
   picture.onload = () => {

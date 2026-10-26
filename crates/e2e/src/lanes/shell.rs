@@ -2369,6 +2369,27 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
         chats_own == json!({ "title": "Name this chat", "value": FIRST_CHAT }) && agents_own == json!({ "title": "Name your agent", "value": "Rosalind" }),
         json!({ "chat": chats_own, "agent": agents_own }),
     );
+    // its page in a tab of its own (Open in a new tab: no shell tells it its
+    // name), by its face as the platform keeps it (Alex's review of #630):
+    // a padded title trimmed, one of only spaces or none its label, and one
+    // that is its fragment's name in full shown as it is
+    let label = label_of(&agent).to_string();
+    let standalone = format!("{}/auth/fragment?name={agent}&return=/", api.base);
+    let mut said = vec![];
+    for (title, shown) in [(Some("  Rosalind  "), "Rosalind"), (Some("   "), label.as_str()), (None, label.as_str()), (Some(agent.as_str()), agent.as_str())] {
+        let wrote = retitle(api, me.session, &agent, title)?;
+        let row = s.eventually(wait, || own_row_of(api, me.session, &agent)["title"] == json!(title.map(str::trim).filter(|t| !t.is_empty())));
+        let tab = b.open(&standalone)?;
+        let named = b.until(&tab, &format!("document.getElementById('name')?.textContent === {shown:?} && document.title === {shown:?}"), wait);
+        said.push(json!({ "title": title, "wrote": wrote, "row": row, "named": named, "page": b.eval(&tab, "({ name: document.getElementById('name')?.textContent ?? null, title: document.title })").ok() }));
+        b.close(tab)?;
+    }
+    retitle(api, me.session, &agent, Some("Rosalind"))?;
+    s.ok(
+        "its page alone, opened in a tab of its own, names it by its face: a padded title trimmed, a blank one or none its label, its fragment's name in full as it is",
+        said.iter().all(|c| c["wrote"] == true && c["row"] == true && c["named"] == true),
+        json!(said),
+    );
     // Remove: gone everywhere
     b.click(page, "#settings")?;
     let remove = js(&format!("[data-picture-remove={}]", js(&agent)));
@@ -2458,8 +2479,20 @@ fn settings_loading(b: &mut Browser, page: &Page, open: &str, wait: std::time::D
 /// `meta.title` written, then deployed (docs/api.md, "An agent's name and
 /// picture"); whether both answered.
 fn rename_elsewhere(api: &Api, session: &str, agent: &str, title: &str) -> Result<bool> {
+    retitle(api, session, agent, Some(title))
+}
+
+/// `rename_elsewhere`, or with no title (`None`: `meta.title` left out).
+fn retitle(api: &Api, session: &str, agent: &str, title: Option<&str>) -> Result<bool> {
     let mut manifest = shell(api, session, "GET", &format!("/api/f/{agent}/manifest"), None, &[])?.body;
-    manifest["meta"]["title"] = json!(title);
+    match title {
+        Some(t) => manifest["meta"]["title"] = json!(t),
+        None => {
+            if let Some(meta) = manifest["meta"].as_object_mut() {
+                meta.remove("title");
+            }
+        }
+    }
     let files = json!({ "message": "rename", "files": [{ "path": "fragment.json", "text": format!("{}\n", serde_json::to_string_pretty(&manifest)?) }] });
     let wrote = shell(api, session, "POST", &format!("/api/f/{agent}/files"), Some(&files), &[])?;
     let deployed = shell(api, session, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})), &[])?;
