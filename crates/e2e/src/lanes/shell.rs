@@ -3799,6 +3799,74 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
     let returned = b.until(page, &format!("(() => {{ const m = {seen}.marks.map((x) => x[0]); return m.includes({}) && !m.includes({}); }})()", js(&format!("chat:{own_chat}")), js(&format!("chat:{sx}"))), wait);
     let gone = agent_json();
     s.ok("settings show it again as picked; picked back, its own chat is its home again: no `home` in agent.json, the mark back on its chat", again && back && returned && gone == before, &gone);
+    // Alex's review of #619: one home a page, whatever comes in what order.
+    // A pane of its link page stands in a frame (`data-simplex`), and its
+    // asks are its messages (the shell takes a message only from such a
+    // frame, of its origin); the computer says its image does SimpleX
+    let computer = shell(api, me.session, "GET", "/api/computers", None, &[])?.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
+    super::computers::lever_with(api, &computer, json!({ "op": "simplex", "on": true }))?;
+    let write_home = |home: Option<&str>| {
+        let text = match home {
+            Some(h) => format!("{{\n  \"tier\": \"cheap\",\n  \"home\": {h:?}\n}}\n"),
+            None => "{\n  \"tier\": \"cheap\"\n}\n".to_string(),
+        };
+        shell(api, me.session, "POST", &format!("/api/f/{agent}/files"), Some(&json!({ "message": "the e2e's home", "files": [{ "path": "agent.json", "text": text }] })), &[]).map(|r| r.status)
+    };
+    let ask = |b: &mut Browser, p: &Page, want: &str, home: Option<bool>| {
+        let data = json!({ "fragment": "simplex", "agent": agent, "want": want, "home": home });
+        b.eval(p, &format!("(() => {{ if (!window.__pane) {{ const f = document.createElement('iframe'); f.dataset.simplex = {a}; f.dataset.src = location.origin + '/'; f.srcdoc = 'pane'; f.hidden = true; document.body.append(f); window.__pane = f; }} dispatchEvent(new MessageEvent('message', {{ data: {data}, origin: location.origin, source: window.__pane.contentWindow }})); return true; }})()", a = js(&agent)))
+    };
+    let shows = |b: &mut Browser, p: &Page, home: &str| {
+        let (chat, value) = if home == "simplex" { (&sx, "simplex") } else { (&own_chat, "") };
+        b.until(p, &format!("(() => {{ const v = {seen}; return v.value === {value:?} && v.marks.map((x) => x[0]).includes({}); }})()", js(&format!("chat:{chat}"))), wait)
+    };
+    let home_now = || agent_json().get("home").cloned();
+    let settled = |b: &mut Browser, p: &Page, home: &str| {
+        let ok = shows(b, p, home);
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        ok && shows(b, p, home)
+    };
+    // a link's ticked box, then an unlink, with Settings open: the home, the bell and the pick follow
+    b.until(page, "!!document.querySelector('#settings-simplex:not([hidden])')", wait);
+    ask(b, page, "link", Some(true))?;
+    let linked = shows(b, page, "simplex") && home_now() == Some(json!("simplex"));
+    ask(b, page, "unlink", None)?;
+    let unlinked = shows(b, page, "") && home_now().is_none();
+    s.ok("with Settings open, a link's ticked box makes its SimpleX chat its home and an unlink its own chat again: agent.json, the bell and the pick each time", linked && unlinked, json!({ "seen": b.eval(page, &seen)?, "agentJson": agent_json() }));
+    // an unlink while a pick of SimpleX is still saving: queued after it, so its own chat is the home
+    b.eval(page, &format!("(() => {{ const real = window.fetch; window.fetch = (u, o) => {{ if (o?.method === 'POST' && String(u).endsWith({})) {{ window.fetch = real; return new Promise((done) => {{ window.__save = () => done(real(u, o)); }}); }} return real(u, o); }}; return true; }})()", js(&format!("/api/f/{agent}/files"))))?;
+    b.eval(page, &format!("(() => {{ const p = {pick_of}; p.value = 'simplex'; p.dispatchEvent(new Event('change')); return true; }})()"))?;
+    let held = b.until(page, "typeof window.__save === 'function'", wait);
+    ask(b, page, "unlink", None)?;
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    b.eval(page, "(window.__save(), true)")?;
+    s.ok("an unlink while a pick of SimpleX is still saving is written after it: its own chat is the home, and the bell and the pick say so", held && settled(b, page, "") && home_now().is_none(), json!({ "seen": b.eval(page, &seen)?, "agentJson": agent_json() }));
+    // a read of the home asked before a write, answered after it, is let go:
+    // its old answer (or a 404) never undoes the write, as a link sets it
+    // (Settings open in a page whose first read of agent.json is held)
+    let hold = |as404: bool| {
+        let answer = if as404 { "new Response(JSON.stringify({ error: 'not_found', message: 'no such file' }), { status: 404, headers: { 'content-type': 'application/json' } })" } else { "answer" };
+        format!("(() => {{ const real = window.fetch; let held = false; window.fetch = (u, o) => {{ if (!held && (o?.method ?? 'GET') === 'GET' && String(u).endsWith({})) {{ held = true; const answer = real(u, o); return new Promise((done) => {{ window.__read = () => done({answer}); }}); }} return real(u, o); }}; }})();", js(&format!("/api/f/{agent}/file?path=agent.json")))
+    };
+    let mut stale = vec![];
+    for (as404, before, want, after) in [(false, None, Some(true), "simplex"), (true, None, Some(true), "simplex"), (false, Some("simplex"), None, "")] {
+        anyhow::ensure!(write_home(before)? == 200, "agent.json as the case starts");
+        let p = b.open_with_script(&format!("{}/settings", api.base), &hold(as404))?;
+        let read = b.until(&p, "typeof window.__read === 'function' && !!document.querySelector('#settings-simplex:not([hidden])')", wait);
+        ask(b, &p, if want.is_some() { "link" } else { "unlink" }, want)?;
+        let written = shows(b, &p, after);
+        b.eval(&p, "(window.__read(), true)")?;
+        let kept = settled(b, &p, after) && home_now() == (after == "simplex").then(|| json!("simplex"));
+        stale.push(json!({ "as404": as404, "before": before, "read": read, "written": written, "kept": kept, "seen": b.eval(&p, &seen)? }));
+        b.close(p)?;
+    }
+    s.ok(
+        "a home read asked before a write and answered after it is let go: its old answer, or a 404, never moves the bell back after a link, nor an unlink before the first read is in",
+        stale.iter().all(|c| c["read"] == true && c["written"] == true && c["kept"] == true),
+        json!(stale),
+    );
+    super::computers::lever_with(api, &computer, json!({ "op": "simplex", "on": false }))?;
+    anyhow::ensure!(write_home(None)? == 200, "agent.json as it was");
     // as the lanes after it expect it: no SimpleX chat
     let deleted = shell(api, me.session, "DELETE", &format!("/api/f/{sx}"), None, &[])?;
     anyhow::ensure!(deleted.status == 200, "its SimpleX chat deleted: {deleted}");
