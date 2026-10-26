@@ -1413,6 +1413,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     settings_race_ui(s, api, &mut b, &page, &session)?;
     notice_ui(s, &mut b, &page, &chat, &shots)?;
     reasoning_ui(s, api, &mut b, &page, &session, &shots)?;
+    home_ui(s, api, &mut b, &page, &me, &shots)?;
     one_route_ui(s, api, &mut b, &session)?;
     models_ui(s, api, &mut b, &page, &session, &chat, &shots)?;
     left_and_back_ui(s, api, &mut b, &page, &session, &chat)?;
@@ -3732,6 +3733,75 @@ fn reasoning_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     s.ok("with no agent.json (404), a pick writes one: its tier and its reasoning", fresh && made == json!({ "tier": "cheap", "reasoning": "high" }), &made);
     // as the lanes after it expect it
     anyhow::ensure!(write_json(&json!({ "tier": "cheap" }))? == 200, "agent.json put back");
+    Ok(())
+}
+
+/// An agent's home (docs/api.md, "An agent's home"): Settings' Agents says
+/// where each agent reaches its person ("Reaches you in"), its own chat by
+/// default, with nothing else to pick until it has a SimpleX chat, and the
+/// sidebar marks that chat. Its SimpleX chat (made here by its owner, as its
+/// computer's bridge makes one as SimpleX links: the stub runs no SimpleX)
+/// lists as "<agent> · SimpleX"; picked, it is the agent's `agent.json`
+/// `home`, the rest kept, and the mark moves to it; picked back, its own
+/// chat is its home again.
+fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let agent = own_named(api, me.session, me.first)?;
+    let own_chat = own_named(api, me.session, &format!("{}-chat", me.first))?;
+    let id = agent_ids(api, me.session, &[me.first])?.remove(0);
+    let pick_of = format!("document.querySelector('[data-home-for={agent:?}]')");
+    let said_of = format!("document.querySelector('.agent-setting[data-agent={agent:?}] .agent-model-said')?.textContent");
+    let seen = format!(
+        "({{ options: [...({pick_of}?.options ?? [])].map((o) => [o.value, o.textContent]), value: {pick_of}?.value ?? null, disabled: {pick_of}?.disabled ?? null, label: {pick_of}?.closest('label')?.querySelector('.settings-key')?.textContent ?? null, every: document.querySelectorAll('.agent-setting').length > 0 && document.querySelectorAll('.agent-setting').length === document.querySelectorAll('.agent-setting [data-home-for]').length, marks: [...document.querySelectorAll('#chats .home-mark')].map((m) => [m.closest('[data-key]').dataset.key, m.getAttribute('aria-label')]) }})"
+    );
+    let marked = |v: &Value, chat: &str| v["marks"].as_array().is_some_and(|m| m.iter().any(|x| x[0] == format!("chat:{chat}").as_str() && x[1] == format!("{} reaches you here", me.first_title).as_str()));
+    let agent_json = || shell(api, me.session, "GET", &format!("/api/f/{agent}/file?path=agent.json"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
+    let before = agent_json();
+    b.reload(page)?;
+    let read = b.until(page, &format!("{pick_of}?.dataset.read === '1' && {seen}.marks.some((x) => x[0] === {})", js(&format!("chat:{own_chat}"))), wait);
+    let first = b.eval(page, &seen)?;
+    s.ok(
+        "every agent says where it reaches its person (\"Reaches you in\"): its own chat, the only choice before it has a SimpleX chat, and the sidebar marks that chat",
+        read && first["label"] == "Reaches you in" && first["options"].as_array().map(Vec::len) == Some(1) && first["value"] == "" && first["disabled"] == false && first["every"] == true && marked(&first, &own_chat) && before.get("home").is_none(),
+        json!({ "seen": first, "agentJson": before }),
+    );
+    // its SimpleX chat, as its computer's bridge makes one for its person
+    let made = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": format!("{}-simplex", me.first), "template": "chat", "title": "SimpleX" })), &[])?;
+    anyhow::ensure!(made.status == 200, "its SimpleX chat: {made}");
+    let sx = made.body["name"].as_str().unwrap_or("").to_string();
+    let joined = shell(api, me.session, "PUT", &format!("/api/f/{sx}/members/{id}"), Some(&json!({ "role": "editor" })), &[])?;
+    anyhow::ensure!(joined.status == 200, "its agent in it: {joined}");
+    let row = format!("document.querySelector({})?.textContent", js(&format!("#chats [data-key={}] .label", js(&format!("chat:{sx}")))));
+    let listed = b.until(page, &format!("{row} === {}", js(&format!("{} · SimpleX", me.first_title))), wait);
+    b.reload(page)?;
+    let offered = b.until(page, &format!("{pick_of}?.dataset.read === '1' && {pick_of}.options.length === 2 && !{pick_of}.disabled"), wait);
+    let pick = |b: &mut Browser, value: &str| -> Result<bool> {
+        b.eval(page, &format!("(() => {{ const p = {pick_of}; p.value = {value:?}; p.dispatchEvent(new Event('change')); return true; }})()"))?;
+        Ok(b.until(page, &format!("{pick_of}?.dataset.saved === {value:?} && {said_of} === 'Saved.'"), wait))
+    };
+    let saved = pick(b, "simplex")?;
+    let moved = b.until(page, &format!("(() => {{ const m = {seen}.marks.map((x) => x[0]); return m.includes({}) && !m.includes({}); }})()", js(&format!("chat:{sx}")), js(&format!("chat:{own_chat}"))), wait);
+    let after = agent_json();
+    let mut home = before.clone();
+    home["home"] = json!("simplex");
+    let picked = b.eval(page, &seen)?;
+    b.eval(page, &format!("({pick_of}?.scrollIntoView({{ block: 'center' }}), true)"))?;
+    let _ = b.screenshot(page, &shots.join("desktop-agent-home.png"));
+    s.ok(
+        "its SimpleX chat lists as \"<agent> · SimpleX\"; Settings then offer it, and picked it is the agent's agent.json `home` (the rest kept), said as saved, and the sidebar's mark moves to it",
+        listed && offered && saved && moved && after == home && picked["options"].as_array().map(Vec::len) == Some(2) && picked["options"][1] == json!(["simplex", "SimpleX"]) && marked(&picked, &sx),
+        json!({ "seen": picked, "agentJson": after }),
+    );
+    // shown again as picked; picked back, its own chat is its home again
+    b.reload(page)?;
+    let again = b.until(page, &format!("{pick_of}?.dataset.read === '1' && {pick_of}.value === 'simplex'"), wait);
+    let back = pick(b, "")?;
+    let returned = b.until(page, &format!("(() => {{ const m = {seen}.marks.map((x) => x[0]); return m.includes({}) && !m.includes({}); }})()", js(&format!("chat:{own_chat}")), js(&format!("chat:{sx}"))), wait);
+    let gone = agent_json();
+    s.ok("settings show it again as picked; picked back, its own chat is its home again: no `home` in agent.json, the mark back on its chat", again && back && returned && gone == before, &gone);
+    // as the lanes after it expect it: no SimpleX chat
+    let deleted = shell(api, me.session, "DELETE", &format!("/api/f/{sx}"), None, &[])?;
+    anyhow::ensure!(deleted.status == 200, "its SimpleX chat deleted: {deleted}");
     Ok(())
 }
 
