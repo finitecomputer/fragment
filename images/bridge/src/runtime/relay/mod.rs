@@ -611,8 +611,10 @@ impl Loop {
         // a turn after a cut one is told so, as read-only context beside
         // the message (TurnStart::note); Hermes' own session was closed at
         // boot (hermes-boot, `close_cut_turns`), so the message is a turn of
-        // its own, never folded into the cut one's
-        let m = wire::Inbound { chat: &chat, chat_name: &ts.chat_name, profile: &profile, message_id: &ts.turn, user_id: &ts.asker, user_name: &ts.asker_name, text: &ts.text, media: &hosted, context: ts.note.as_deref(), command: ts.command, quote: ts.quote.as_ref() };
+        // its own, never folded into the cut one's. One its owner asked over
+        // SimpleX is marked so beside their name (`wire::sender_name`).
+        let user_name = wire::sender_name(&ts.asker_name, ts.via.as_deref());
+        let m = wire::Inbound { chat: &chat, chat_name: &ts.chat_name, profile: &profile, message_id: &ts.turn, user_id: &ts.asker, user_name: &user_name, text: &ts.text, media: &hosted, context: ts.note.as_deref(), command: ts.command, quote: ts.quote.as_ref() };
         let frame = wire::inbound(&m, &ts.turn);
         self.next_order += 1;
         let turn = ts.turn.clone();

@@ -2431,6 +2431,10 @@ persisted)".
   person's VM with no secret in it (decisions 13, 43), and one person's
   agents are not fenced from each other (decision 44), so root inside it
   opens nothing of anyone else's.
+- **What sudo reaches.** The bridge runs as root, and keeps SimpleX's
+  core and its state its own (`simplex-chat` 0700, on no PATH;
+  `/data/simplex` 0700: docs/bridge.md, "SimpleX"), so the agent's own
+  user and its file tools read none of it; its sudo does.
 - **How long an install lasts.** `/data` is the only place a computer
   keeps; an install outside it lasts until the computer's next start from
   its image (a crash, or an image update), and a wake from a snapshot

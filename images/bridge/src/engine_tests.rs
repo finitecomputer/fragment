@@ -2617,6 +2617,7 @@ fn a_relayed_message_is_its_owners() {
     let t = started(&s).expect("a turn, handed to the runtime");
     assert_eq!((t.text.as_str(), t.asker.as_str(), t.asker_name.as_str()), ("hi from my phone", "npub1paul", "paul"));
     assert_eq!(e.state().turns[&t.turn].via.as_deref(), Some(records::VIA_SIMPLEX));
+    assert_eq!(t.via.as_deref(), Some(records::VIA_SIMPLEX), "handed to the runtime as from SimpleX (Relay marks its sender so: wire::sender_name)");
     assert_eq!(said(&mut e, &a, &v, 1, &a.identity, body, T0 + 1), Step::default(), "read again: nothing");
     let written = serde_json::to_string(e.state()).expect("a state serializes");
     let back: State = serde_json::from_str(&written).expect("and reads back");
@@ -2652,7 +2653,7 @@ fn a_relayed_record_is_honored_only_from_a_linked_agent_for_its_owner() {
     // posted by its owner with the mark: their own message, sent no other way
     let s = said(&mut e, &a, &v, 4, "npub1paul", mine("paul typed this"), T0);
     let t = started(&s).expect("their message, a turn");
-    assert_eq!(e.state().turns[&t.turn].via, None, "a person's mark is no relay");
+    assert_eq!((&e.state().turns[&t.turn].via, &t.via), (&None, &None), "a person's mark is no relay");
     ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, T0 + 1);
     // posted by another agent of the computer: a hand-off at most, never its owner's
     assert!(started(&said(&mut e, &b, &v, 5, &a.identity, mine("juniper's, not maple's"), T0 + 2)).is_none(), "not to maple at all");
@@ -2660,7 +2661,7 @@ fn a_relayed_record_is_honored_only_from_a_linked_agent_for_its_owner() {
     let s = said(&mut e, &a, &v, 6, &b.identity, from_maple, T0 + 2);
     let t = started(&s).expect("from maple to juniper: a hand-off");
     assert_eq!(t.asker, b.identity, "asked by maple, never as its owner");
-    assert_eq!(e.state().turns[&t.turn].via, None);
+    assert_eq!((&e.state().turns[&t.turn].via, &t.via), (&None, &None));
     // let go: nothing more
     e.step(Input::Relaying(BTreeSet::new()), T0 + 3);
     assert!(started(&said(&mut e, &a, &v, 7, &a.identity, mine("unlinked"), T0 + 3)).is_none());

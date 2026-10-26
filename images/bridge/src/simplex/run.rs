@@ -472,6 +472,18 @@ fn set_aside(dir: &Path, why: &str) {
     }
 }
 
+/// The cores' state is the bridge's alone: `dir` (`/data/simplex`) made, and
+/// made 0700, at every start (a save from before this restores it as it
+/// was). The bridge runs as root and an agent as a user of its own (our
+/// Hermes image's `hermes`), so the agent's tools read nothing under it: no
+/// core's keys or databases, no door's key. Its passwordless sudo still
+/// reaches root (docs/computers.md, "Root in our Hermes image").
+pub fn keep_private(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
 /// Writes an agent's `link.json` whole (a temporary file, synced, renamed).
 pub fn store(dir: &Path, saved: &Saved) -> std::io::Result<()> {
     use std::io::Write;
@@ -598,6 +610,9 @@ struct Manager {
 /// (the bridge's answer to a hold waits on it); `hold` is the platform's
 /// hold file.
 pub fn start(cfg: Config, api: Api, quiet: Arc<AtomicBool>, hold: PathBuf, relaying: watch::Sender<BTreeSet<String>>, stop: watch::Receiver<bool>) -> Handle {
+    if let Err(e) = keep_private(&cfg.dir) {
+        crate::ev!("simplex.dir_unkept", { "dir": cfg.dir.display().to_string(), "error": e.to_string() });
+    }
     let (tx, rx) = mpsc::channel(INBOX_MAX);
     let (pulse, pulse_rx) = watch::channel(false);
     // held for a moment at a link's change, at the pace the bridge's own pings by default
@@ -2124,6 +2139,24 @@ mod tests {
         std::fs::write(dir.join(LINK_FILE), r#"{"identity":"npub1juniper","phase":"off","syncing":true}"#).expect("written");
         assert_eq!(load(&dir, &agent()), None, "one that contradicts itself");
         assert!(linked_on_disk(&root, &[agent()]).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Goal: the cores' state is the bridge's alone, 0700: made so when it is
+    /// missing, and made so again when a save from before the rule restored
+    /// it open (the Docker lane: the agent's own user reads none of it).
+    #[test]
+    fn the_cores_state_is_the_bridges_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("simplex-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mode = |p: &Path| std::fs::metadata(p).expect("there").permissions().mode() & 0o777;
+        let dir = root.join("simplex");
+        keep_private(&dir).expect("made");
+        assert_eq!(mode(&dir), 0o700, "made private");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("opened");
+        keep_private(&dir).expect("kept");
+        assert_eq!(mode(&dir), 0o700, "a restored open one is closed again");
         let _ = std::fs::remove_dir_all(&root);
     }
 

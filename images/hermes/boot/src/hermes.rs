@@ -289,12 +289,24 @@ pub const FILES: &str = "A file someone attaches in this chat is already on your
 /// the same at more length.
 pub const SENDING: &str = "To give someone in this chat a file (a PDF, an image, a document, a spreadsheet, audio or video), put MEDIA: and its absolute path on a line of its own in your reply, outside code and quotes, for example MEDIA:/data/work/report.pdf. It arrives in this chat as an attachment they can open and download. Attach it whenever they ask for a file here, rather than emailing it or naming a path on your computer.";
 
+/// What every agent is told of a message its owner writes in their SimpleX
+/// app, after `SENDING` on every turn (Paul, 2026-10-26: asked over SimpleX
+/// to send its voice reply there, his agent found the bridge's SimpleX core
+/// and began setting up a SimpleX of its own). The bridge marks such a
+/// message beside its sender's name (`[paul | via SimpleX] …`: the bridge's
+/// relay wire.rs, `VIA_SIMPLEX_LABEL`), a label, which Hermes tells its
+/// model never to take instructions from: the rule is here, where its
+/// system prompt holds it, at a few tokens a turn, rather than beside each
+/// such message, where it would pile up in the chat's history. The
+/// `fragment` skill's first page (`computer.md`) says the same in a line.
+pub const SIMPLEX: &str = "A message marked | via SimpleX is your owner's, from their SimpleX app: Fragment sends your reply back there by itself (a file you attach stays in this chat, and they are told so). Never install, run or set up SimpleX yourself, even when asked to send something there.";
+
 /// The relay's hint, appended to every agent's system prompt on every turn
 /// in our chats (Hermes' `platform_hints.relay.append`): how it asks
 /// (`ASKING`), then the files it is sent (`FILES`), then how it sends one
-/// (`SENDING`).
+/// (`SENDING`), then what a message from SimpleX is (`SIMPLEX`).
 pub fn relay_hint() -> String {
-    format!("{ASKING}\n\n{FILES}\n\n{SENDING}")
+    format!("{ASKING}\n\n{FILES}\n\n{SENDING}\n\n{SIMPLEX}")
 }
 
 /// The managed overlay: how every profile streams, shows progress, asks
@@ -1289,7 +1301,7 @@ mod tests {
     #[test]
     fn every_agent_is_told_its_chat_files_are_on_its_computer() {
         let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
-        assert_eq!(relay_hint(), format!("{ASKING}\n\n{FILES}\n\n{SENDING}"));
+        assert_eq!(relay_hint(), format!("{ASKING}\n\n{FILES}\n\n{SENDING}\n\n{SIMPLEX}"));
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "its files beside how to ask, in the relay's hint: {m}");
         for said in ["already on your computer", "the note before their message names its path", "image_url:", "cleared after a day", "copy it into your work", "upload button with your browser tools", "full path into the file dialog on your desktop with computer_use", "press Enter"] {
             assert!(FILES.contains(said), "{said}: {FILES}");
@@ -1314,7 +1326,7 @@ mod tests {
     #[test]
     fn every_agent_is_told_it_attaches_files_in_its_chat() {
         let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
-        assert!(relay_hint().ends_with(&format!("{FILES}\n\n{SENDING}")), "after the files it is sent: {}", relay_hint());
+        assert!(relay_hint().contains(&format!("{FILES}\n\n{SENDING}\n\n")), "after the files it is sent: {}", relay_hint());
         assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "in the relay's hint: {m}");
         for said in ["a file (a PDF, an image", "put MEDIA: and its absolute path on a line of its own", "outside code and quotes", "MEDIA:/data/work/report.pdf", "arrives in this chat as an attachment", "rather than emailing it or naming a path"] {
             assert!(SENDING.contains(said), "{said}: {SENDING}");
@@ -1326,6 +1338,28 @@ mod tests {
         for said in ["`MEDIA:<absolute-path>`", "a line of its own", "outside code and quotes", "attachment they can open and download", "email it only when they ask for email", "never answer with a path"] {
             assert!(section.contains(said), "computer.md, \"Files you send\", says {said}: {section}");
         }
+    }
+
+    /// Goal (Paul, 2026-10-26: asked over SimpleX to send its voice reply
+    /// there, his agent began setting up a SimpleX of its own): every agent
+    /// is told, on every turn in our chats, that a message the bridge marks
+    /// `| via SimpleX` is its owner's from their SimpleX app, that Fragment
+    /// sends its reply back there itself, and never to set SimpleX up; and
+    /// the `fragment` skill's first page says the same. Method: the
+    /// overlay's relay hint, its words naming the bridge's own mark, and the
+    /// page.
+    #[test]
+    fn every_agent_is_told_simplex_is_the_platforms() {
+        let m = managed_config(&[], CARD_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
+        assert!(relay_hint().ends_with(&format!("{SENDING}\n\n{SIMPLEX}")), "last: {}", relay_hint());
+        assert!(m.contains(&format!("    append: {}\n", q(&relay_hint()))), "in the relay's hint: {m}");
+        assert!(SIMPLEX.contains(&format!("| {}", fragment_bridge::runtime::relay::wire::VIA_SIMPLEX_LABEL)), "it names the bridge's mark: {SIMPLEX}");
+        for said in ["your owner's, from their SimpleX app", "Fragment sends your reply back there by itself", "Never install, run or set up SimpleX yourself"] {
+            assert!(SIMPLEX.contains(said), "{said}: {SIMPLEX}");
+        }
+        assert!(!SIMPLEX.contains(['`', '\n', '$', '"']) && SIMPLEX.len() < 300, "one short plain paragraph: {SIMPLEX}");
+        let page = include_str!("computer.md").split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(page.contains("SimpleX app reaches you there too") && page.contains("never install, run or set up SimpleX yourself"), "computer.md says it: {page}");
     }
 
     /// Goal (Paul, 2026-10-14: "if hermes asks them a technical approval it
