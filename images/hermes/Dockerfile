@@ -364,9 +364,13 @@ RUN env | sort > /tmp/env.now \
  && lost="$(grep -Ev '^(HOME|HOSTNAME|PWD|SHLVL|_|HERMES_HOME|HERMES_WRITE_SAFE_ROOT)=' /opt/fragment/upstream.env | sed '/^PATH=/s#/opt/data#/data/hermes#' | grep -vxFf /tmp/env.now || true)" \
  && rm /tmp/env.now \
  && if [ -n "$lost" ]; then printf 'upstream sets what the flatten does not:\n%s\n' "$lost"; exit 1; fi
-# SimpleX's core (layer 1b), before ours: a change of ours pulls none of it
-COPY --from=simplex /simplex-chat /usr/local/bin/simplex-chat
-RUN /usr/local/bin/simplex-chat --version | grep -q 'v7\.0\.0\.12'
+# SimpleX's core (layer 1b), before ours: a change of ours pulls none of it.
+# The bridge's alone (root's, 0700, on no PATH): an agent asked to send
+# something over SimpleX found it in /usr/local/bin and began setting up a
+# SimpleX of its own (2026-10-26). Its turns from SimpleX are told the
+# platform carries their replies (the bridge's note.rs, VIA_SIMPLEX).
+COPY --from=simplex --chmod=0700 /simplex-chat /opt/fragment/bin/simplex-chat
+RUN /opt/fragment/bin/simplex-chat --version | grep -q 'v7\.0\.0\.12'
 COPY --from=ours / /
 # What the boot reads instead of finding it each time: the lean plugin list;
 # the image's Chromium, /opt/fragment/bin/chromium

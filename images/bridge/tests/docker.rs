@@ -3176,8 +3176,23 @@ async fn simplex_on_the_hermes_image() {
     say(&mut person, at_person, "hello from SimpleX").await;
     let got = received(&mut person, Duration::from_secs(180), |got| got.iter().any(|t| t.starts_with("scripted:") && t.contains("hello from SimpleX"))).await;
     eprintln!("simplex: a message to Hermes' reply on SimpleX: {} ms ({got:?})", t0.elapsed().as_millis());
-    let asked = model.calls.lock().unwrap().iter().any(|m| m.agent.as_deref() == Some("juniper--k3x9") && m.body["messages"].to_string().contains("[paul] hello from SimpleX"));
-    assert!(asked, "the model was asked as juniper, the message its owner's ([paul])");
+    let asked = model.calls.lock().unwrap().iter().filter(|m| m.agent.as_deref() == Some("juniper--k3x9")).map(|m| m.body["messages"].to_string()).find(|m| m.contains("[paul | via SimpleX] hello from SimpleX"));
+    let asked = asked.expect("the model was asked as juniper, the message its owner's, marked as from SimpleX ([paul | via SimpleX])");
+    for said in ["A message marked | via SimpleX is your owner's", "Never install, run or set up SimpleX"] {
+        assert!(asked.contains(said), "its system prompt says what the mark means, and never to set SimpleX up: {said}");
+    }
+    // the agent's own user finds no SimpleX core to run, and reads none of
+    // the bridge's SimpleX state (its keys, its door's key, its databases)
+    let as_agent = |cmd: &str| c.exec_code(&["/command/s6-setuidgid", "hermes", "bash", "-lc", cmd]);
+    let (code, said) = as_agent("command -v simplex-chat");
+    assert_ne!(code, 0, "simplex-chat is on no PATH of the agent's: {said}");
+    let (code, said) = as_agent("/opt/fragment/bin/simplex-chat --version");
+    assert_ne!(code, 0, "nor runs as the agent: {said}");
+    for path in ["/data/simplex", "/data/simplex/juniper--k3x9/door.key", "/data/simplex/juniper--k3x9/sx_chat.db"] {
+        let (code, said) = as_agent(&format!("ls {path} || cat {path}"));
+        assert!(code != 0 && said.contains("Permission denied"), "{path} is the bridge's alone: {said}");
+    }
+    assert!(simplex_cores(&c) >= 1, "while the bridge's own core runs");
 
     // a voice note: transcribed through the route, its words the turn's, answered there
     let words = "please water the basil";

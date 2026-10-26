@@ -129,8 +129,8 @@ on a computer.
 | `BRIDGE_SCREEN_DIR` | `/opt/fragment/screen` | its page |
 | `BRIDGE_SCREENS_FILE` | | each agent's screen (`screens.rs`): `{"screens": [{agent, rfb, lease?, activity?}]}`, `rfb` as `unix:<path>` or `tcp:<host:port>`, written whole and renamed into place, read again when it changes. Unset, no agent has a display (the stub); set, an agent it does not name has no screen. While someone watches a screen its `activity` file's time is set every 10 s (`ACTIVITY_EVERY_MS`), so the image's idle stop leaves a watched desktop up. Our Hermes image's is `/var/lib/fragment-run/screens.json` (docs/computers.md) |
 | `BRIDGE_SCREEN_START` | | the command that starts an agent's display, run with the agent's fragment as its last argument by a viewer that finds it down: at once when it answered since the last start (it stopped or restarted under its viewers, whose streams end with it), else at most once a minute while it stays down |
-| `BRIDGE_SIMPLEX_BIN` | | SimpleX's core, `simplex-chat` (below, "SimpleX"): set, each linked agent's core runs while the computer is always on; unset (the stub), nothing of SimpleX runs, and `/simplex/…` is 404. Our Hermes image's is `/usr/local/bin/simplex-chat` |
-| `BRIDGE_SIMPLEX_DIR` | `/data/simplex` | each agent's SimpleX state, `<dir>/<agent fragment>/` |
+| `BRIDGE_SIMPLEX_BIN` | | SimpleX's core, `simplex-chat` (below, "SimpleX"): set, each linked agent's core runs while the computer is always on; unset (the stub), nothing of SimpleX runs, and `/simplex/…` is 404. Our Hermes image's is `/opt/fragment/bin/simplex-chat`: root's, 0700, on no PATH of its agents' |
+| `BRIDGE_SIMPLEX_DIR` | `/data/simplex` | each agent's SimpleX state, `<dir>/<agent fragment>/`; made 0700 at every start, the bridge's alone |
 | `BRIDGE_SIMPLEX_SMP`, `BRIDGE_SIMPLEX_XFTP` | | servers its cores use (a test's lab); unset, the core's own presets (SimpleX Chat's and Flux's) |
 
 ## State, and what it never does twice
@@ -518,6 +518,24 @@ drives it.
   stops in 10 minutes and it waits for its owner to link again.
 - **What a core prints is not logged**: it echoes the commands it is sent,
   message text among them.
+- **The agent is told, and kept out.** A turn its owner asked over
+  SimpleX is marked beside their name, as Hermes marks a Slack user's
+  (`[paul | via SimpleX] …`: relay `wire.rs`, `VIA_SIMPLEX_LABEL`), and
+  every agent's system prompt says what the mark means: its owner wrote
+  it in their SimpleX app, Fragment sends the reply back there itself,
+  and it never installs, runs or sets up SimpleX (our Hermes image's relay
+  hint, hermes-boot's `SIMPLEX`: the one place it is said). Not the
+  message's read-only `context`: Hermes puts a voice
+  memo's transcript before that, where it would read as no part of the
+  message, and a note there would be kept in the chat's history once a
+  message. The core and its state
+  are the bridge's: our Hermes image keeps `simplex-chat` root's, 0700 and
+  on no PATH, and the bridge makes `BRIDGE_SIMPLEX_DIR` 0700 at every
+  start, so the agent's own user (Hermes runs as `hermes`, the bridge as
+  root) reads no core's keys or databases and no door's key. Its
+  passwordless sudo still reaches root (docs/computers.md, "Root in our
+  Hermes image"), and a core's bot API listens on loopback, which any
+  user of the computer reaches.
 
 Proven by the Docker lane's `simplex_on_the_hermes_image` (the real image,
 a lab of a local SMP and XFTP server and the person's simplex-chat on a

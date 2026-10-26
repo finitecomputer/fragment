@@ -231,6 +231,12 @@ pub struct TurnStart {
     /// `None` when it could not be read, or is no message).
     pub reply_to: Option<u64>,
     pub quote: Option<Quote>,
+    /// How its message came, when its agent relayed it from its owner
+    /// (`records::VIA_SIMPLEX`: written in their SimpleX app), as the turn
+    /// is marked (engine.rs `said`); `None` for one said in the chat. Relay
+    /// marks the message so beside its sender's name
+    /// (`relay::wire::sender_name`).
+    pub via: Option<String>,
 }
 
 /// What the bridge asks of a runtime.

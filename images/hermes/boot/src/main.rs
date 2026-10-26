@@ -47,8 +47,9 @@ const FRAGMENT_CLI: &str = "/usr/local/bin/fragment";
 /// at every start, since a container started from a snapshot carries the
 /// last boot's (S3b).
 const RUN: &str = "/var/lib/fragment-run";
-/// The SimpleX core the image carries (images/hermes/Dockerfile).
-const SIMPLEX_CHAT: &str = "/usr/local/bin/simplex-chat";
+/// The SimpleX core the image carries (images/hermes/Dockerfile): the
+/// bridge's alone, root's and on no PATH of the agents'.
+const SIMPLEX_CHAT: &str = "/opt/fragment/bin/simplex-chat";
 /// The relay's port, on loopback only: Hermes dials it, nothing else can.
 const RELAY_LISTEN: &str = "127.0.0.1:8650";
 /// The gateway id both sides name.

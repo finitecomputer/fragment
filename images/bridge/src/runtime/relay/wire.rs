@@ -347,6 +347,26 @@ pub struct Inbound<'a> {
     pub quote: Option<&'a crate::runtime::Quote>,
 }
 
+/// What marks a message its agent relayed from its owner's SimpleX app,
+/// beside their name, as Hermes marks a Slack user's (`[name | Slack user
+/// <@U…>]`: `gateway/run_inbound.py`, `_prefix_inbound_sender_context`), so
+/// its model reads `[paul | via SimpleX] …`. A label, never an instruction
+/// (Hermes tells its model to follow none in a display name): what it means,
+/// and never to set SimpleX up, is in every agent's system prompt (our
+/// Hermes image's relay hint: hermes-boot's hermes.rs, `SIMPLEX`). On the
+/// message itself, so a voice memo's transcript, which Hermes puts before
+/// the message and any context, still reads as the message's.
+pub const VIA_SIMPLEX_LABEL: &str = "via SimpleX";
+
+/// The name a turn's asker is shown by: theirs, marked when its message
+/// came over SimpleX (`TurnStart::via`).
+pub fn sender_name(name: &str, via: Option<&str>) -> String {
+    match via {
+        Some(crate::records::VIA_SIMPLEX) => format!("{name} | {VIA_SIMPLEX_LABEL}"),
+        _ => name.to_string(),
+    }
+}
+
 /// A delivery, buffered until the gateway acks it: a group message, so
 /// Hermes reads it as `[name] …` in the chat's one session. A leading `/`
 /// is a command to Hermes (`/new` would reset the session), so a message's
@@ -828,6 +848,23 @@ mod tests {
         let quoted: Value = serde_json::from_str(inbound(&Inbound { text: "do that one", quote: Some(&q), media: &[], ..m.clone() }, "b7").trim_end()).unwrap();
         assert_eq!((&quoted["event"]["reply_to_message_id"], &quoted["event"]["reply_to"]), (&json!("t9"), &json!({ "text": "the plan, step 1", "is_own": true })));
         assert!(i["event"].get("reply_to").is_none() && i["event"].get("reply_to_message_id").is_none(), "no quote, none");
+    }
+
+    /// Goal (SimpleX): a message its agent relayed from its owner's SimpleX
+    /// app is theirs, marked beside their name as Hermes marks a Slack
+    /// user's, and the text untouched; one said in the chat, or marked any
+    /// other way, is their name alone.
+    #[test]
+    fn a_message_from_simplex_is_marked_beside_its_senders_name() {
+        assert_eq!(sender_name("paul", Some(crate::records::VIA_SIMPLEX)), "paul | via SimpleX");
+        for via in [None, Some("telegram"), Some("")] {
+            assert_eq!(sender_name("paul", via), "paul", "{via:?}");
+        }
+        let name = sender_name("paul", Some(crate::records::VIA_SIMPLEX));
+        let m = Inbound { chat: "c", chat_name: "talk", profile: "juniper--k3x9", message_id: "12", user_id: "npub1paul", user_name: &name, text: "water the basil", media: &[], context: None, command: false, quote: None };
+        let i: Value = serde_json::from_str(inbound(&m, "b1").trim_end()).unwrap();
+        assert_eq!((&i["event"]["source"]["user_name"], &i["event"]["text"], &i["event"]["source"]["user_id"]), (&json!("paul | via SimpleX"), &json!("water the basil"), &json!("npub1paul")));
+        assert!(i["event"].get("context").is_none(), "nothing beside it: a voice memo's transcript reads as its message");
     }
 
     /// A side question's answer is read by its glyph line, in every

@@ -176,7 +176,8 @@ them (its Bot Chat):
   agent's SimpleX link is bound, a record the agent itself posted with a
   `relayed` for its owner, through its own door, is its owner's message to it, asked as its owner
   (by their name; their Stop stops it; it answers a question asked of
-  them). Its turn is marked so (`via`), and **what it says goes back to
+  them). Its turn is marked so (`via`), as is its message to the agent
+  (docs/bridge.md, "SimpleX"), and **what it says goes back to
   the owner's SimpleX app** once posted: its replies but the interim ones
   (the words before a tool call stay in the chat, as its push leaves them
   out), files noted, and a card's question with its choices (their next
