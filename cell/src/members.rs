@@ -1187,7 +1187,8 @@ fn secret_hosts(given: &[String]) -> CellResult<Vec<String>> {
 /// fallback a newer platform's kind reads as is never stored as one.
 pub(crate) fn face(kind: FragmentKind, title: Option<&str>, picture: Option<&str>) -> String {
     assert_ne!(kind, FragmentKind::Other, "a face's kind is its manifest's, one this release knows");
-    let mut face = json!({ "kind": kind, "title": title });
+    // a title of nothing but spaces is none: every reader then falls back alike
+    let mut face = json!({ "kind": kind, "title": fragment_core::face::title(title) });
     if let Some(p) = picture {
         face["picture"] = json!(p);
     }
