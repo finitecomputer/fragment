@@ -17,7 +17,7 @@ file is the newer word, and decision 18 points here.
 |---|---|---|
 | What was said | the chat's `chat` channel | Hermes' session transcript, derived |
 | Which turns started, what they did, how they ended, each prompt's answer | the chat's `work` channel (the journal) | the bridge's `state.json`, a cache of where to resume |
-| The agent's self (`SOUL.md`, memories, skills) | the agent fragment's repo | the profile's checkout, a working copy synced every minute |
+| The agent's self (`SOUL.md`, memories, skills) | the agent fragment's repo | the profile's checkout, a working copy synced after Hermes' native memory/skill tools change it, with a minute's fallback |
 | The model's context and the agent's working files | `/data`, as of its newest save | the snapshot, a cache of that save for one image |
 | Which save is current, and what a wake restored | the Computer DO | |
 | Usage | the ledger | |

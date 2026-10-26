@@ -248,10 +248,11 @@ RUN mkdir -p /tmp/rh \
  && install -d -m 1777 /tmp/node-compile-cache \
  && test "$(stat -c '%a %u:%g' / /opt /opt/fragment /opt/hermes /opt/hermes/plugins /usr /usr/local /usr/local/bin | sort -u)" = '755 0:0'
 
-# Our Hermes plugin, compiled as the base's bytecode is; it goes in layer 2.
+# Our Hermes plugins, compiled as the base's bytecode is; they go in layer 2.
 FROM hermes AS plugin
 COPY images/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
-RUN /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash /opt/hermes/plugins/fragment-skill-fork > /dev/null
+COPY images/hermes/plugins/fragment-self-sync /opt/hermes/plugins/fragment-self-sync
+RUN /opt/hermes/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash /opt/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-self-sync > /dev/null
 
 # Ours (layer 2): each of our files at its place in the image, root's, as
 # the base's directories they land in are.
@@ -292,6 +293,7 @@ COPY images/hermes/preload.py /opt/fragment/preload.py
 COPY images/hermes/tool_keys.py /opt/fragment/tool_keys.py
 COPY images/hermes/hooks /opt/fragment/hooks
 COPY --from=plugin /opt/hermes/plugins/fragment-skill-fork /opt/hermes/plugins/fragment-skill-fork
+COPY --from=plugin /opt/hermes/plugins/fragment-self-sync /opt/hermes/plugins/fragment-self-sync
 COPY images/hermes/botmode.py /opt/fragment/botmode.py
 COPY images/hermes/screen /opt/fragment/screen
 COPY --from=novnc /novnc/core /opt/fragment/screen/novnc/core
