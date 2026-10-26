@@ -880,8 +880,11 @@ impl Manager {
     }
 
     /// `id`'s receive asked of its core (`on`), or ended, in its link's file:
-    /// whether its file holds it. One that could not be written is undone,
-    /// so the same change asked again writes it (Alex's review).
+    /// whether its file holds it. A reservation that could not be written is
+    /// undone, so asking again writes it, and no receive goes without one; a
+    /// release stays done, and the link's next write (its delivered mark's,
+    /// or any other) carries it, so no stale reservation outlives its
+    /// transfer (Alex's reviews).
     fn reserve(&mut self, f: &str, id: FileId, on: bool) -> bool {
         let Some(s) = self.slots.get_mut(f) else { return false };
         let changed = if on { s.saved.receiving.insert(id) } else { s.saved.receiving.remove(&id) };
@@ -894,8 +897,6 @@ impl Manager {
                 crate::ev!("simplex.store_failed", { "agent": f, "error": e.to_string() });
                 if on {
                     s.saved.receiving.remove(&id);
-                } else {
-                    s.saved.receiving.insert(id);
                 }
                 false
             }
@@ -2010,6 +2011,46 @@ mod tests {
         let read = load(&link_dir, &agent()).expect("its file");
         assert!(read.abandoned.contains_key(&5) && read.receiving.is_empty(), "no place held by one given up on");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Goal (Alex's review of 880ef4b2): a reservation released while the
+    /// disk refuses is released for good. Through each way a receive ends
+    /// (its file done, its file failed, a catch-up finding it received), the
+    /// release stays done, and the link's next write (here, its delivered
+    /// mark's, as its post is acknowledged) carries it: read back after a
+    /// restart, no reservation is left without a transfer.
+    #[tokio::test]
+    async fn a_release_the_disk_refused_is_released_for_good() {
+        for case in ["done", "failed", "caught up"] {
+            let dir = std::env::temp_dir().join(format!("simplex-release-{}-{}", std::process::id(), case.replace(' ', "-")));
+            let (mut m, mut sent, mut posts) = captured(&dir, 16);
+            let f = "juniper--k3x9";
+            let link_dir = m.slots[f].dir.clone();
+            m.slots.get_mut(f).expect("its slot").outstanding.insert(7);
+            m.forward(f, voice(7, None));
+            assert!(load(&link_dir, &agent()).expect("its file").receiving.contains(&7));
+            drop(sent_lines(&mut sent));
+            // the disk refuses as the receive ends
+            let blocker = link_dir.join(format!("{LINK_FILE}.tmp"));
+            std::fs::create_dir_all(&blocker).expect("a directory where its file goes");
+            match case {
+                "done" => m.file_event(f, &Resp::FileDone { file: 7, path: "voice_7.m4a".into() }),
+                "failed" => m.file_event(f, &Resp::FileFailed { file: 7 }),
+                _ => {
+                    m.slots.get_mut(f).expect("its slot").files.clear();
+                    m.forward(f, voice(7, Some("voice_7.m4a")));
+                }
+            }
+            assert!(posts.try_recv().is_ok_and(|p| p.inbound.item == 7), "{case}: posted");
+            assert!(!m.slots[f].saved.receiving.contains(&7), "{case}: released in memory");
+            // the disk takes writes again: its post acknowledged, its mark written
+            std::fs::remove_dir_all(&blocker).expect("its place back");
+            m.delivered(f, 7, true);
+            let read = load(&link_dir, &agent()).expect("its file");
+            assert_eq!(read.link.delivered, 7, "{case}: its mark written");
+            assert!(read.receiving.is_empty(), "{case}: and its release with it: no stale reservation after a restart");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     /// Goal: what settles a cancel. The core took it, or refused it for
