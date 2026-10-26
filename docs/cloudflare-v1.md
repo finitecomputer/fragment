@@ -656,6 +656,20 @@ speaking Cloudflare's APIs) returns once this product works.
     posts (docs/api.md, "An agent's doors"). Root in the container can
     still read the door key; the fix later is running the agent as a
     non-root user.
+    A chat of its own, and one home, Paul, 2026-10-26 ("it has to be
+    clear obvious and reliable where notifications will go … why hermes
+    has a 'home' concept"; a simplification): linking makes the agent's
+    SimpleX chat, its owner's chat labelled `<label>-simplex`, which
+    mirrors their app both ways while linked: what they send lands there,
+    and everything the agent says there goes to their phone, whatever
+    started its turn. The per-turn rule (only a SimpleX message's turn
+    answered there) is gone. Each agent has one home, its own chat or its
+    SimpleX chat (`agent.json`'s `home`), set in Settings and asked once
+    as a link starts (yes by default): a routine with no chat runs there,
+    and the agent is told where it is. Web push is unchanged; no
+    suppression. Hermes' own home channel stays unset: in its multiplexed
+    gateway it reaches nothing of ours (docs/hermes-relay.md, "Hermes'
+    settings"). docs/api.md, "An agent's home"; docs/bridge.md, "SimpleX".
 
 ### The cut
 

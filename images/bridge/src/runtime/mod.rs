@@ -231,12 +231,11 @@ pub struct TurnStart {
     /// `None` when it could not be read, or is no message).
     pub reply_to: Option<u64>,
     pub quote: Option<Quote>,
-    /// How its message came, when its agent relayed it from its owner
-    /// (`records::VIA_SIMPLEX`: written in their SimpleX app), as the turn
-    /// is marked (engine.rs `said`); `None` for one said in the chat. Relay
-    /// marks the message so beside its sender's name
-    /// (`relay::wire::sender_name`).
-    pub via: Option<String>,
+    /// Its chat is its owner's SimpleX chat while linked (`Engine::mirror`):
+    /// what the agent says there reaches their phone, whatever started the
+    /// turn. Relay tells its agent so in that chat's session
+    /// (`relay::wire::SIMPLEX_TOPIC`).
+    pub simplex: bool,
 }
 
 /// What the bridge asks of a runtime.
@@ -267,7 +266,9 @@ pub enum Command {
     /// running turn `turn`, `How::Aside`): `/<name> <args>`, its id the
     /// record's (a turn id, as if it were one). What the runtime answers it
     /// with is a message of its own (`Event::Say`).
-    Aside { agent: String, fragment: String, chat_name: String, turn: Option<String>, id: String, by: String, by_name: String, text: String },
+    /// `simplex`: its chat is its owner's SimpleX chat, as a turn's is
+    /// (`TurnStart::simplex`).
+    Aside { agent: String, fragment: String, chat_name: String, simplex: bool, turn: Option<String>, id: String, by: String, by_name: String, text: String },
 }
 
 /// What a runtime tells the bridge. Every event but `Connected`, `Say` and

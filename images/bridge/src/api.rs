@@ -190,7 +190,7 @@ pub fn label(name: &str) -> &str {
 /// shell makes with it (cell/shell/shell.js, `makeAgent`: labelled
 /// `<label>-chat` beside the agent's `<label>`), which `fragment ask` finds
 /// as a person's direct chat with it too (cli/src/ask.rs, `direct_label`),
-/// and SimpleX carries its owner's messages into (simplex/run.rs). A
+/// and its owner's home unless they chose its SimpleX chat (`home_chat`). A
 /// chat's name has a random suffix of its own, so it is found, never
 /// derived: in the agent's list for its owner (`fragments`), the chat its
 /// owner owns with that label. None until there is one: an agent made some
@@ -201,6 +201,70 @@ pub fn label(name: &str) -> &str {
 pub fn bot_chat(agent_fragment: &str, fragments: &[FragmentEntry]) -> Option<String> {
     let want = format!("{}-chat", label(agent_fragment));
     fragments.iter().find(|f| f.kind == "chat" && f.owned && label(&f.name) == want).map(|f| f.name.clone())
+}
+
+/// What an agent's SimpleX chat is titled as its bridge makes it: the
+/// shell shows it as "<agent> · SimpleX" while it keeps the title (a chat's
+/// title is its own, never its agent's name, which a rename changes).
+pub const SIMPLEX_CHAT_TITLE: &str = "SimpleX";
+
+/// An agent's `agent.json` is read at most this long (its settings: a few
+/// hundred bytes; hermes-boot reads it as large).
+pub const AGENT_JSON_MAX_BYTES: usize = 64 * 1024;
+
+/// The label of an agent's SimpleX chat: its own, then `-simplex`.
+pub fn simplex_label(agent_fragment: &str) -> String {
+    format!("{}-simplex", label(agent_fragment))
+}
+
+/// What a fragment's name's suffix is drawn from (docs/api.md, "Names":
+/// lowercase letters and digits less `l`, `o`, `0` and `1`).
+const SUFFIX_ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
+
+/// An agent's SimpleX chat's name in full (docs/api.md, "An agent's home"):
+/// its label (`simplex_label`) and a suffix drawn from `random`, chosen
+/// before the chat is made and kept with its link (simplex/run.rs,
+/// `Saved::chat`), so the chat is made by that name once, whatever restarts.
+pub fn simplex_chat_name(agent_fragment: &str, random: [u8; 4]) -> String {
+    let suffix: String = random.iter().map(|b| SUFFIX_ALPHABET[usize::from(*b) % SUFFIX_ALPHABET.len()] as char).collect();
+    format!("{}--{suffix}", simplex_label(agent_fragment))
+}
+
+/// Where an agent reaches its owner when no one asked (docs/api.md, "An
+/// agent's home"): its `agent.json`'s `home`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Home {
+    /// Its own chat with its owner (`bot_chat`): absent, or anything but
+    /// `"simplex"`.
+    Chat,
+    /// Its SimpleX chat, while its link is bound.
+    Simplex,
+}
+
+impl Home {
+    /// From `agent.json`'s bytes as the platform answered them (none: there
+    /// is no file).
+    pub fn of(agent_json: Option<&[u8]>) -> Home {
+        let simplex = agent_json.and_then(|b| serde_json::from_slice::<Value>(b).ok()).is_some_and(|v| v["home"] == "simplex");
+        if simplex {
+            Home::Simplex
+        } else {
+            Home::Chat
+        }
+    }
+}
+
+/// The chat an agent's home names: its SimpleX chat (`simplex`, the one its
+/// link mirrors, while bound) when its home is SimpleX, else its own chat,
+/// one of its owner's (`owners`: the agent's list for them) that the agent
+/// is in (`mine`: its own list), so one an earlier agent of its label left,
+/// or one it has left, is none; none when it has neither.
+pub fn home_chat(agent_fragment: &str, home: Home, simplex: Option<&str>, owners: &[FragmentEntry], mine: &[FragmentEntry]) -> Option<String> {
+    if let (Home::Simplex, Some(chat)) = (home, simplex) {
+        return Some(chat.to_string());
+    }
+    let theirs: Vec<FragmentEntry> = owners.iter().filter(|f| mine.iter().any(|m| m.name == f.name)).cloned().collect();
+    bot_chat(agent_fragment, &theirs)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -549,6 +613,25 @@ impl Api {
         Ok(a.fragments)
     }
 
+    /// `POST /api/fragments?for= {name, template, title}`: a fragment made
+    /// by its name in full for `person` (the agent's owner: theirs, billed to
+    /// them, the agent its maker and an editor, which the platform tells it
+    /// as a `joined`); a name taken is 409.
+    pub async fn create_named_for(&self, agent: &str, person: &str, fragment: &str, template: &str, title: &str) -> Result<(), ApiError> {
+        let _: Value = self.json(Method::POST, &format!("/api/fragments?for={}", encode(person)), Some(agent), Some(json!({ "name": name(fragment)?, "template": template, "title": title }))).await?;
+        Ok(())
+    }
+
+    /// An agent's home (`Home`), as its `agent.json` says now: none when it
+    /// could not be read (a 404, no file, is `Home::Chat`).
+    pub async fn home(&self, agent: &str) -> Result<Home, ApiError> {
+        match self.file(agent, agent, "agent.json", AGENT_JSON_MAX_BYTES).await {
+            Ok(b) => Ok(Home::of(Some(&b))),
+            Err(e) if e.status() == Some(404) => Ok(Home::of(None)),
+            Err(e) => Err(e),
+        }
+    }
+
     /// `GET /api/f/{name}/files?for=`: the files at main, a blessed
     /// template's data among them.
     pub async fn files_for(&self, agent: &str, fragment: &str, person: &str) -> Result<Vec<FileEntry>, ApiError> {
@@ -607,6 +690,40 @@ pub fn rate_limited(e: &ApiError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn listed(name: &str, kind: &str, owned: bool) -> FragmentEntry {
+        FragmentEntry { name: name.into(), role: "editor".into(), kind: kind.into(), owned, title: String::new() }
+    }
+
+    /// Goal (Paul, 2026-10-26): an agent's SimpleX chat has one name, its
+    /// label's, chosen once (a valid name, its suffix the platform's
+    /// alphabet), and its home is that chat only while its agent.json says
+    /// `simplex` and its link names it, else its own chat. Valid: either
+    /// way. Invalid: agent.json naming anything else or not JSON; `simplex`
+    /// with no SimpleX chat (its own chat); its own chat one it is not in,
+    /// or another agent's, or someone else's (none).
+    #[test]
+    fn an_agents_home_is_its_simplex_chat_or_its_own() {
+        assert_eq!(simplex_label("juniper--k3x9"), "juniper-simplex");
+        assert_eq!(simplex_chat_name("juniper--k3x9", [0, 31, 32, 255]), "juniper-simplex--a9a9");
+        let made = simplex_chat_name("juniper--k3x9", [7, 100, 200, 13]);
+        assert!(made.starts_with("juniper-simplex--") && made.len() == "juniper-simplex--".len() + 4 && name(&made).is_ok(), "{made}");
+        assert!(made[17..].bytes().all(|b| SUFFIX_ALPHABET.contains(&b)), "{made}");
+        let simplex = br#"{"tier":"cheap","home":"simplex"}"#.as_slice();
+        assert_eq!(Home::of(Some(simplex)), Home::Simplex);
+        for chat in [None, Some(br#"{"tier":"cheap"}"#.as_slice()), Some(br#"{"home":"chat"}"#), Some(br#"{"home":"telegram"}"#), Some(br#"{"home":true}"#), Some(b"not json")] {
+            assert_eq!(Home::of(chat), Home::Chat, "{chat:?}");
+        }
+        let list = [listed("juniper-chat--p2m4", "app", true), listed("juniper-chat--r7t5", "chat", false), listed("maple-chat--z8w6", "chat", true), listed("juniper-chat--h6j7", "chat", true)];
+        let sx = Some("juniper-simplex--w9x2");
+        assert_eq!(home_chat("juniper--k3x9", Home::Simplex, sx, &list, &list).as_deref(), sx);
+        assert_eq!(home_chat("juniper--k3x9", Home::Chat, sx, &list, &list).as_deref(), Some("juniper-chat--h6j7"));
+        assert_eq!(home_chat("juniper--k3x9", Home::Simplex, None, &list, &list).as_deref(), Some("juniper-chat--h6j7"), "no SimpleX chat: its own");
+        assert_eq!(home_chat("juniper--k3x9", Home::Chat, None, &list, &list[..3]), None, "its own chat, left: none");
+        assert_eq!(home_chat("juniper--k3x9", Home::Chat, None, &list[..3], &list), None, "only its owner's chat of that label");
+        assert_eq!(home_chat("maple-2--q4w5", Home::Chat, None, &list, &list), None);
+        assert_eq!(home_chat("loner--k3x9", Home::Simplex, None, &[], &[]), None);
+    }
 
     #[test]
     fn names_and_queries_stay_in_their_route() {

@@ -570,8 +570,9 @@ enum ScheduleCmd {
     /// Add one: at each minute --cron names (UTC), the fragment appends
     /// --record to --channel, as itself; or, an agent's routine, it asks
     /// the agent --routine in --chat, as its owner (the record `{kind:
-    /// "routine", text, chat}` on its `tasks`). The same one added again
-    /// is that one
+    /// "routine", text, chat}` on its `tasks`), or, with no --chat, in its
+    /// owner's home: the chat where it reaches them as it fires (their
+    /// SimpleX when they chose it). The same one added again is that one
     Add {
         /// The fragment (on an agent's computer, the agent's own unless named)
         fragment: Option<String>,
@@ -587,9 +588,10 @@ enum ScheduleCmd {
         #[arg(long, requires = "channel")]
         record: Option<String>,
         /// An agent's routine: what it is to do each time
-        #[arg(long, requires = "chat")]
+        #[arg(long)]
         routine: Option<String>,
-        /// An agent's routine: the chat it is done in, one the agent is in
+        /// An agent's routine: the chat it is done in, one the agent is in;
+        /// none, its owner's home (where it reaches them as it fires)
         #[arg(long, requires = "routine")]
         chat: Option<String>,
     },
@@ -637,8 +639,9 @@ fn fragment_and(agent: Option<&api::AgentMode>, mut args: Vec<String>, verb: &st
 }
 
 /// What `fragment schedule add` appends, and where: `--channel` and
-/// `--record` as given, or an agent's routine (`--routine` and `--chat`)
-/// on its `tasks` (docs/chat-records.md).
+/// `--record` as given, or an agent's routine (`--routine`, and `--chat`
+/// or none: its owner's home's, read by its computer as it fires) on its
+/// `tasks` (docs/chat-records.md).
 fn scheduled_record(channel: Option<String>, record: Option<String>, routine: Option<String>, chat: Option<String>) -> Result<(String, Value)> {
     match (channel, record, routine, chat) {
         (Some(channel), Some(record), None, None) => {
@@ -646,7 +649,8 @@ fn scheduled_record(channel: Option<String>, record: Option<String>, routine: Op
             Ok((channel, record))
         }
         (None, None, Some(text), Some(chat)) => Ok(("tasks".to_string(), json!({ "kind": "routine", "text": text, "chat": chat }))),
-        _ => Err(usage("say what to append: --channel <channel> --record '<json>', or an agent's --routine '<what to do>' --chat <chat>")),
+        (None, None, Some(text), None) => Ok(("tasks".to_string(), json!({ "kind": "routine", "text": text }))),
+        _ => Err(usage("say what to append: --channel <channel> --record '<json>', or an agent's --routine '<what to do>' [--chat <chat>]")),
     }
 }
 
@@ -2408,6 +2412,12 @@ mod tests {
             scheduled_record(None, None, some("water the plants"), some("talk--k3x9")).unwrap(),
             ("tasks".into(), json!({ "kind": "routine", "text": "water the plants", "chat": "talk--k3x9" }))
         );
+        assert_eq!(
+            scheduled_record(None, None, some("remind me to call mom"), None).unwrap(),
+            ("tasks".into(), json!({ "kind": "routine", "text": "remind me to call mom" })),
+            "no --chat: its owner's home, as it fires"
+        );
+        assert_eq!(code_of(scheduled_record(some("pings"), some(r#"{"n":1}"#), some("both"), None)), Code::InvalidUsage, "a record and a routine at once");
         let alone = schedule_fragment(None, None, "list");
         assert!(alone.as_ref().is_err_and(|e| e.to_string().contains("name the fragment")), "{alone:?}");
         assert_eq!(code_of(alone), Code::InvalidUsage);

@@ -43,15 +43,18 @@ kept through every restart and sleep: never a loop, `sleep`, crontab or
 `hermes cron`.
 
 ```
-fragment schedule add --routine "Tell me if the shelf is in stock" --chat <chat> --cron "0 * * * *"
+fragment schedule add --routine "Tell me if the shelf is in stock" --cron "0 * * * *"
 fragment schedule list
 fragment schedule pause|resume|rm <id>
 ```
 
 `--cron` is five fields in UTC (weekdays by name: `mon-fri`), at most
-every 15 minutes; `<chat>`, this chat (your session's source). It comes
-to you there, from your owner. What should run without you (frequent
-checks, or for others) is an app with a cron trigger and a job.
+every 15 minutes. It comes to you from your owner in their home, where
+you reach them (your system prompt says which chat; their SimpleX when
+they chose it): leave `--chat` out for a reminder or anything to tell
+them. `--chat <chat>` keeps it in that chat (this one is your session's
+source). What should run without you (frequent checks, or for others) is
+an app with a cron trigger and a job.
 
 ## Your name and picture
 

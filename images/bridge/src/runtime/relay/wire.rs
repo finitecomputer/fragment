@@ -345,26 +345,26 @@ pub struct Inbound<'a> {
     /// for its own; `gateway/run_inbound.py`,
     /// `_prepend_inbound_reply_context`).
     pub quote: Option<&'a crate::runtime::Quote>,
+    /// What its chat is, said as the chat's topic (`source.chat_topic`):
+    /// Hermes renders it in that chat's session context, in its system
+    /// prompt (`**Channel Topic:** …`, `gateway/session.py`,
+    /// `build_session_context_prompt`), pinned per session and rendered
+    /// again only when it changes. Its owner's SimpleX chat alone has one
+    /// (`SIMPLEX_TOPIC`), on every inbound there, so the pin holds.
+    pub topic: Option<&'a str>,
 }
 
-/// What marks a message its agent relayed from its owner's SimpleX app,
-/// beside their name, as Hermes marks a Slack user's (`[name | Slack user
-/// <@U…>]`: `gateway/run_inbound.py`, `_prefix_inbound_sender_context`), so
-/// its model reads `[paul | via SimpleX] …`. A label, never an instruction
-/// (Hermes tells its model to follow none in a display name): what it means,
-/// and never to set SimpleX up, is in every agent's system prompt (our
-/// Hermes image's relay hint: hermes-boot's hermes.rs, `SIMPLEX`). On the
-/// message itself, so a voice memo's transcript, which Hermes puts before
-/// the message and any context, still reads as the message's.
-pub const VIA_SIMPLEX_LABEL: &str = "via SimpleX";
+/// What an agent is told of its owner's SimpleX chat, in that chat alone
+/// (`TurnStart::simplex`): a fact, which Hermes' session context reads as
+/// a label (never an instruction; the rule never to set SimpleX up is the
+/// relay hint's, hermes-boot's `SIMPLEX`). Once in that chat's system
+/// prompt, never beside each message (a voice memo's transcript, which
+/// Hermes puts before the message and its context, stays the message's).
+pub const SIMPLEX_TOPIC: &str = "Your owner's SimpleX: what you say here reaches their phone.";
 
-/// The name a turn's asker is shown by: theirs, marked when its message
-/// came over SimpleX (`TurnStart::via`).
-pub fn sender_name(name: &str, via: Option<&str>) -> String {
-    match via {
-        Some(crate::records::VIA_SIMPLEX) => format!("{name} | {VIA_SIMPLEX_LABEL}"),
-        _ => name.to_string(),
-    }
+/// The topic of a chat that is (or is not) its owner's SimpleX chat.
+pub fn topic(simplex: bool) -> Option<&'static str> {
+    simplex.then_some(SIMPLEX_TOPIC)
 }
 
 /// A delivery, buffered until the gateway acks it: a group message, so
@@ -412,6 +412,9 @@ fn event(m: &Inbound, buffer_id: &str, text: &str, prompt_response: Option<Value
             "message_id": m.message_id,
         },
     });
+    if let Some(t) = m.topic {
+        event["source"]["chat_topic"] = json!(t);
+    }
     if !m.media.is_empty() {
         event["media_urls"] = json!(m.media.iter().map(|(u, _)| u).collect::<Vec<_>>());
         event["media"] = json!(m.media.iter().map(|(u, t)| json!({ "url": u, "mime": t })).collect::<Vec<_>>());
@@ -821,7 +824,7 @@ mod tests {
         }
         assert_eq!(v["descriptor"]["supported_ops"], json!(SUPPORTED_OPS));
         let media = vec![("http://127.0.0.1:1/relay/media/m1".to_string(), "image/png".to_string())];
-        let m = Inbound { chat: "talk--k3x9/juniper--k3x9", chat_name: "talk", profile: "juniper--k3x9", message_id: "12", user_id: "npub1bob", user_name: "bob", text: "/new please", media: &media, context: None, command: false, quote: None };
+        let m = Inbound { chat: "talk--k3x9/juniper--k3x9", chat_name: "talk", profile: "juniper--k3x9", message_id: "12", user_id: "npub1bob", user_name: "bob", text: "/new please", media: &media, context: None, command: false, quote: None, topic: None };
         let i: Value = serde_json::from_str(inbound(&m, "b4").trim_end()).unwrap();
         assert_eq!(i["bufferId"], "b4");
         assert_eq!(i["event"]["message_id"], "12");
@@ -850,21 +853,24 @@ mod tests {
         assert!(i["event"].get("reply_to").is_none() && i["event"].get("reply_to_message_id").is_none(), "no quote, none");
     }
 
-    /// Goal (SimpleX): a message its agent relayed from its owner's SimpleX
-    /// app is theirs, marked beside their name as Hermes marks a Slack
-    /// user's, and the text untouched; one said in the chat, or marked any
-    /// other way, is their name alone.
+    /// Goal (Paul, 2026-10-26): in its owner's SimpleX chat the agent is
+    /// told, once in that chat's session, that what it says there reaches
+    /// their phone: the chat's topic, on every inbound there (a turn's, an
+    /// answer's, an aside's), its sender and text untouched; any other chat
+    /// has none.
     #[test]
-    fn a_message_from_simplex_is_marked_beside_its_senders_name() {
-        assert_eq!(sender_name("paul", Some(crate::records::VIA_SIMPLEX)), "paul | via SimpleX");
-        for via in [None, Some("telegram"), Some("")] {
-            assert_eq!(sender_name("paul", via), "paul", "{via:?}");
-        }
-        let name = sender_name("paul", Some(crate::records::VIA_SIMPLEX));
-        let m = Inbound { chat: "c", chat_name: "talk", profile: "juniper--k3x9", message_id: "12", user_id: "npub1paul", user_name: &name, text: "water the basil", media: &[], context: None, command: false, quote: None };
+    fn its_owners_simplex_chat_says_so_as_its_topic() {
+        assert_eq!(topic(true), Some(SIMPLEX_TOPIC));
+        assert_eq!(topic(false), None);
+        let m = Inbound { chat: "c", chat_name: "juniper-simplex", profile: "juniper--k3x9", message_id: "12", user_id: "npub1paul", user_name: "paul", text: "water the basil", media: &[], context: None, command: false, quote: None, topic: topic(true) };
         let i: Value = serde_json::from_str(inbound(&m, "b1").trim_end()).unwrap();
-        assert_eq!((&i["event"]["source"]["user_name"], &i["event"]["text"], &i["event"]["source"]["user_id"]), (&json!("paul | via SimpleX"), &json!("water the basil"), &json!("npub1paul")));
-        assert!(i["event"].get("context").is_none(), "nothing beside it: a voice memo's transcript reads as its message");
+        assert_eq!((&i["event"]["source"]["chat_topic"], &i["event"]["source"]["user_name"], &i["event"]["text"]), (&json!(SIMPLEX_TOPIC), &json!("paul"), &json!("water the basil")));
+        assert!(i["event"].get("context").is_none(), "nothing beside the message: a voice memo's transcript reads as its message");
+        let a: Value = serde_json::from_str(prompt_answer(&m, "a1", "ab.12", "c0").trim_end()).unwrap();
+        assert_eq!(a["event"]["source"]["chat_topic"], json!(SIMPLEX_TOPIC), "an answer's too: the session's pin holds");
+        let plain: Value = serde_json::from_str(inbound(&Inbound { topic: topic(false), ..m.clone() }, "b2").trim_end()).unwrap();
+        assert!(plain["event"]["source"].get("chat_topic").is_none(), "any other chat: none");
+        assert!(SIMPLEX_TOPIC.len() < 80 && !SIMPLEX_TOPIC.contains(['\n', '`', '"']), "one short plain line: {SIMPLEX_TOPIC}");
     }
 
     /// A side question's answer is read by its glyph line, in every

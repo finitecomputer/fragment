@@ -2407,7 +2407,7 @@ A page reads them at `__schedules` (Serving).
 **CLI**
 
 - `fragment schedule add <fragment> --cron "<m h dom mon dow>" --channel <channel> --record '<json>'`.
-- `fragment schedule add [<fragment>] --routine "<what to do>" --chat <chat> --cron "…"`: the CLI's sugar for an agent's routine, the routine record on `tasks`.
+- `fragment schedule add [<fragment>] --routine "<what to do>" [--chat <chat>] --cron "…"`: the CLI's sugar for an agent's routine, the routine record on `tasks`; with no `--chat` it names none, and runs in its owner's home as it fires (An agent's home, below).
 - `fragment schedule list [<fragment>]`.
 - `fragment schedule pause|resume|rm [<fragment>] <id>`.
 
@@ -3317,7 +3317,8 @@ An agent's routines are scheduled records on its own agent fragment's
 itself as that fragment's editor (`fragment schedule add --routine`, which
 its platform skill teaches: docs/computers.md). Each fire appends the
 routine record, which wakes the computer (above), and the bridge runs it
-as a turn in its chat, asked by its owner (docs/chat-records.md). The
+as a turn in its chat, or, naming none, in its owner's home (An agent's
+home, below), asked by its owner (docs/chat-records.md). The
 computer keeps none, so no restart, upgrade or sleep of it loses one
 (Paul, 2026-10-20: asked to "check it every hour and ping me if ikea gets
 back", an agent found no scheduler, and the loop it started in its
@@ -3384,11 +3385,20 @@ chat. One home per agent, as each agent links its own SimpleX.
   (the agent's label), titled "SimpleX", the agent a member (one of its
   label an earlier agent left, which it is not in, is none; the shell
   gives a new agent no label whose `-chat` or `-simplex` is taken): the
-  chat its SimpleX link mirrors both ways (docs/bridge.md, "SimpleX"). The
-  shell shows it as "<agent> · SimpleX" while it keeps that title.
+  chat its SimpleX link mirrors both ways, which its computer makes for
+  its owner by one name, chosen as the link is first bound, and keeps
+  through an unlink, a link again the same chat (docs/bridge.md,
+  "SimpleX"). The shell shows it as "<agent> · SimpleX" while it keeps
+  that title.
 - **Its home** is its `agent.json`'s `home`: `"simplex"`, its SimpleX
   chat; absent (or anything else), its own chat. A `"simplex"` while it
-  has no SimpleX chat names its own chat.
+  has no SimpleX chat, or while its link is let go, names its own chat.
+- **What goes there**: a routine that names no chat (`fragment schedule
+  add --routine` without `--chat`, which the agent's own skill teaches for
+  a reminder) runs there, the home read as it fires (docs/chat-records.md,
+  `tasks`); and its computer tells the agent where its owner's home is,
+  beside its name, at every turn (docs/computers.md, "Our images"), so a
+  change is its next turn's.
 - **Its owner sets it** in Settings' Agents ("Reaches you in", shown for
   every agent; SimpleX offered once the agent has a SimpleX chat), and
   from the SimpleX link page, which asks once as a link starts (yes by

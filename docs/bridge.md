@@ -76,6 +76,9 @@ Bodies are JSON. `api.rs` has one method for each.
 | `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute, and within a second of a change to the ready file (below); `?simplex=1` when the image names a SimpleX core (below, "SimpleX") |
 | `GET /api/computer/relay?host=&port=` (no agent), WebSocket | | the XFTP relay (docs/computers.md): one per connection a SimpleX core makes to a host and port the view's `relay` names, through the cores' proxy (`src/simplex/socks.rs`), its bytes piped both ways |
 | `GET /api/computer/keepalive` (no agent), WebSocket | | held while a turn waits to run, runs, or waits on its card (below, "A card keeps its computer awake"); pinged every `BRIDGE_KEEPALIVE_PING_MS` (15 s), and opened again after twice that with nothing heard, since a deploy can cut the platform's side of it with no close reaching here (#557) |
+| `GET /api/fragments?for=<owner>` | | `{fragments: [{name, kind, owned, title}]}`: its owner's, as the agent reaches them: its own chat with them found by its label (`api::bot_chat`), as a routine with no chat fires |
+| `POST /api/fragments?for=<owner>` | `{name, template: "chat", title}` | the agent's SimpleX chat, made for its owner by the name its link chose, when its link is bound; 409, made already (then `GET /api/f/{chat}/members` says whether it is the agent's and its owner's: below, "SimpleX") |
+| `GET /api/f/{agent}/file?path=agent.json` | | its home (`api::Home`), read as a routine with no chat fires (docs/api.md, "An agent's home"); none (404) is its own chat |
 | `GET /api/fragments` | | `{fragments: [{name, role}]}`: what the agent follows, listed at start, on a `joined` of it (as the agent the engine runs, no read of the computer first), and every 5 minutes. A listing a read of which fails with no answer, a 429 or a 5xx is asked again after a jittered backoff (from 1 s, at most 30 s) until it answers: the list, or only the fragments whose channels did not read; what was found meanwhile is followed, so one fragment that fails keeps the agent from no other. One listing an agent at a time: a newer one takes the place of one under way |
 | `GET /api/f/{f}/channels` | | `{channels: [{name, post, seq}]}`: a postable `chat` is a chat; the agent's own `tasks` |
 | `GET /api/f/{f}/members` | | `{members: [{principal, kind, addedAt}]}`: the lead (first `kind: agent` by `addedAt`), and when this agent joined; read again after 30 s, and at once after a `joined` of one of the computer's agents to that fragment (so its lead never answers an `@mention` of an agent that just joined) |
@@ -261,6 +264,19 @@ deep (docs/chat-records.md, "An agent's reply"):
   only from the agent fragment's own key (not an identity: its cron, the
   platform) or its owner; another agent acting for the owner, who may post
   there, is passed over (`tasks_hear_only_the_owner_and_the_fragment`).
+- **A routine that names no chat runs at home**: as it is read, its
+  follower reads the agent's home (its `agent.json`; for SimpleX, the chat its
+  link names while bound; else its own chat, from its owner's list and
+  its own: a chat it is not in is no home)
+  and names that chat in it before the engine sees it (`driver::home_of`,
+  `records::homed`), so a home changed later moves the next fire. A home
+  that does not read ends the follow, which reads the routine again from
+  the engine's cursor after a wait: no fire is lost to a failed read, and
+  one past the hour a missed routine is skipped after is not read for. An
+  agent with no chat with its owner at all runs it nowhere
+  (`routine.homeless`). A bridge before homes passes such a routine over
+  (`a_routine_with_no_chat_runs_at_home`, tests/bridge.rs: valid, a home
+  changed, a failed read, no home, a restart).
 
 Why here: the platform holds no chat record (docs/cloudflare-v1.md, the
 rule), and the bridge is the one place that knows which turn an agent is
@@ -415,6 +431,46 @@ core, `simplex-chat`, one per linked agent, as a child process, driven
 over its bot API (`-p`, loopback only) by one task, so nothing else ever
 drives it.
 
+- **SimpleX is a chat of its own** (Paul, 2026-10-26): the agent's
+  SimpleX chat, its owner's chat labelled `<label>-simplex` and titled
+  SimpleX (docs/api.md, "An agent's home"). Its name in full is chosen
+  once, as the link is first bound, and written to `link.json` before
+  anything makes it (`Saved::chat`: write-ahead); the agent's poster then
+  makes it for them by that name (`POST /api/fragments?for= {name}`, the
+  agent its maker and an editor, told so as a `joined`), or, the name
+  taken (409), finds it made when the agent is in it and its owner owns
+  it, from its members, never from a list that may lag its making
+  (`run::ensure_chat`). So every life makes that one chat, once, whatever
+  restarts, and it shows among their chats before anything is said; a
+  name someone else holds is chosen again. It mirrors their app both ways
+  while linked:
+  everything their linked contact sends is posted there, a relayed record
+  as before; everything the agent says there goes to their app once
+  posted, whatever started its turn (a SimpleX message, words typed in
+  that chat on the web, a routine, a hand-off, something it says with no
+  turn): its replies but the interim ones, with their files (below), and a card's
+  question with its choices (`driver::for_simplex`). The chat is the
+  engine's to know (`Input::Relaying`: each linked agent with its chat's
+  name, read from `link.json` as the bridge starts, before any record, and
+  named before it is made: so a post there is known to be the phone's
+  from the first; `Engine::mirror`), so nothing of it is kept per turn and
+  `state.json` holds nothing of SimpleX. An unlink stops the mirror and
+  keeps the chat, its history and its name; a link again is that chat. A
+  post refused there (the chat deleted meanwhile) has it made again by its
+  name before the next. Until 2026-10-26 its messages went to the
+  agent's own chat with its owner, and only a turn a SimpleX message
+  started answered there (`via`, a turn's mark): gone, with the mark.
+- **The agent is told in that chat alone**, as the chat's topic, on every
+  inbound there (`TurnStart::simplex`, `Command::Aside`'s; relay
+  `wire.rs`, `SIMPLEX_TOPIC`): "Your owner's SimpleX: what you say here
+  reaches their phone." Hermes renders a topic in that chat's session
+  context, in its system prompt, pinned per session and rendered again
+  only when it changes: a few tokens, once, in that session. Not beside
+  each message (a voice memo's transcript, which Hermes puts before the
+  message and its context, would no longer read as the message's), and
+  never as an instruction: Hermes reads a topic as a label. Where its
+  owner's home is, it is told beside its name (docs/computers.md).
+
 - **SMP on port 5223, never 443** (`--smp-web-port-servers off`,
   `simplex/run.rs` `core_args`). A SimpleX server on 443 takes its
   protocol only from a TLS hello that names no server (SNI), and
@@ -537,17 +593,10 @@ drives it.
   stops in 10 minutes and it waits for its owner to link again.
 - **What a core prints is not logged**: it echoes the commands it is sent,
   message text among them.
-- **The agent is told, and kept out.** A turn its owner asked over
-  SimpleX is marked beside their name, as Hermes marks a Slack user's
-  (`[paul | via SimpleX] …`: relay `wire.rs`, `VIA_SIMPLEX_LABEL`), and
-  every agent's system prompt says what the mark means: its owner wrote
-  it in their SimpleX app, Fragment sends the reply back there itself,
-  and it never installs, runs or sets up SimpleX (our Hermes image's relay
-  hint, hermes-boot's `SIMPLEX`: the one place it is said). Not the
-  message's read-only `context`: Hermes puts a voice
-  memo's transcript before that, where it would read as no part of the
-  message, and a note there would be kept in the chat's history once a
-  message. The core and its state
+- **The agent is kept out.** Every agent's system prompt says Fragment
+  carries its owner's SimpleX, and never to install, run or set up
+  SimpleX (our Hermes image's relay hint, hermes-boot's `SIMPLEX`, a line;
+  which chat is the SimpleX one is that chat's topic, above). The core and its state
   are the bridge's: our Hermes image keeps `simplex-chat` root's, 0700 and
   on no PATH, and the bridge makes `BRIDGE_SIMPLEX_DIR` 0700 at every
   start, so the agent's own user (Hermes runs as `hermes`, the bridge as
@@ -560,8 +609,11 @@ Proven by the Docker lane's `simplex_on_the_hermes_image` (the real image,
 a lab of a local SMP and XFTP server and the person's simplex-chat on a
 network it joins): linked from the screen port by its owner's ticket
 alone (none is 403), the invitation hidden from any other page, its door's
-key registered with the ticket; a message a turn of
-Hermes' asked as its owner, answered on SimpleX (1.2 s); a voice note
+key registered with the ticket, its SimpleX chat made for its owner; a
+message posted there, a turn of Hermes' asked as its owner, its session
+told the chat is their phone, answered on SimpleX (1.2 s); words typed in
+that chat on the web, answered on SimpleX too; a routine with no chat, its
+home that chat, answered on SimpleX; a reply in its own chat, not; a voice note
 transcribed through the route and answered (0.4 s); a hold that stops the
 core first, its copies naming none of the core's databases; a restart; and
 a wake from a save older than the life before it, healed, the person told
@@ -595,6 +647,9 @@ get_chat_info`.
   renders it before the message, reference only and never as the person's
   words:
   `[Recent channel messages]\n<note>\n\n[New message]\n[paul] good morning`.
+  In its owner's SimpleX chat every inbound's source carries
+  `chat_topic` (`wire::SIMPLEX_TOPIC`), which Hermes renders in that
+  session's context as `**Channel Topic:**` (above, "SimpleX").
 - A reply streams as `draft` frames (the chat's draft), and arrives as a
   `send` answering the turn's message; tool progress is a `send`
   answering nothing whose lines grow by `edit`, each new line a step.

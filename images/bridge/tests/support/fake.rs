@@ -120,6 +120,9 @@ pub struct World {
     pub simplex_said: u32,
     pub simplex_unsaid: u32,
     pub doors: BTreeMap<String, String>,
+    /// The fragments an agent made for its owner (`POST /api/fragments?for=`),
+    /// by name, in order.
+    pub made: Vec<String>,
     live: Vec<LiveSock>,
     keepalives: Vec<(u64, mpsc::UnboundedSender<Message>)>,
     /// Keepalives whose platform side a deploy cut (`cut_keepalives`):
@@ -612,6 +615,29 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         };
     }
 
+    // a chat an agent makes for its owner, as the platform makes one: theirs,
+    // the agent its maker and an editor, told so on its own `tasks`
+    if p.as_slice() == ["api", "fragments"] && method == Method::POST {
+        let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+        let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        let (Some(owner), Some(name), Some("chat")) = (acting_for.clone(), v["name"].as_str(), v["template"].as_str()) else {
+            return refuse(StatusCode::BAD_REQUEST, "a chat made by its name for the agent's owner");
+        };
+        let mut w = world.lock().unwrap();
+        if w.fragments.contains_key(name) {
+            return refuse(StatusCode::CONFLICT, "that name is taken");
+        }
+        let at = w.now();
+        let mut f = Frag { kind: "chat".into(), title: v["title"].as_str().unwrap_or("").to_string(), ..Frag::default() };
+        f.members.push(Member { principal: owner.clone(), role: "owner".into(), kind: "person".into(), added_at: at });
+        f.members.push(Member { principal: me.clone(), role: "editor".into(), kind: "agent".into(), added_at: at });
+        f.channels.insert("chat".into(), Chan { post: Some("viewer".into()), ..Chan::default() });
+        f.channels.insert("work".into(), Chan { post: Some("editor".into()), ..Chan::default() });
+        w.fragments.insert(name.to_string(), f);
+        w.made.push(name.to_string());
+        w.append(&agent, "tasks", &me, json!({ "kind": "joined", "fragment": name }));
+        return answer(StatusCode::OK, json!({ "name": name, "owner": owner }));
+    }
     if p.as_slice() == ["api", "fragments"] {
         let mut w = world.lock().unwrap();
         if w.fail_lists > 0 {

@@ -880,6 +880,113 @@ async fn a_routine_is_a_turn() {
     bridge.stop().await;
 }
 
+/// Goal (Paul, 2026-10-26: "everything proactive goes home"): a routine
+/// that names no chat runs in its agent's home as it fires: its own chat
+/// (`<label>-chat`) with no agent.json; its SimpleX chat, the one its link
+/// names (its `link.json`), once agent.json's `home` says `simplex`. A home
+/// that cannot be read (its owner's list refused) loses no fire: it is read
+/// again, and the routine runs once. A restart reads the fires again and
+/// runs none twice; its link let go, `simplex` is its own chat; one with no
+/// chat of its own at all runs nowhere.
+#[tokio::test]
+async fn a_routine_with_no_chat_runs_at_home() {
+    use fragment_bridge::simplex::{link, run};
+    let fake = Fake::start("127.0.0.1:0", &["juniper", "maple"]).await;
+    let own = fake.chat_named("juniper-chat--h6j7", &["juniper"]);
+    let simplex = fake.chat_named("juniper-simplex--w9x2", &["juniper"]);
+    let dir = support::dir("routine-home");
+    // its link, bound, naming its SimpleX chat (no core runs here)
+    let linked = |phase: link::Phase| {
+        let l = link::Link { phase, ..Default::default() };
+        let saved = run::Saved { identity: "npub1juniper".into(), generation: 1, link: l, used: Default::default(), abandoned: Default::default(), receiving: Default::default(), sending: Default::default(), chat: Some(simplex.clone()) };
+        run::store(&dir.join("simplex").join("juniper--k3x9"), &saved).expect("its link's file");
+    };
+    linked(link::Phase::Linked { contact: 3, name: "paul".into() });
+    let config = || {
+        let mut cfg = support::config(&fake.url(), &dir, support::settings());
+        cfg.simplex = Some(run::Config { bin: dir.join("no-core"), dir: dir.join("simplex"), smp: None, xftp: None });
+        cfg
+    };
+    let bridge = support::start(config(), support::script());
+    following(&fake, 4).await;
+    let home = |text: &str| json!({ "kind": "routine", "text": text });
+    let said = |w: &World, chat: &str| replies(w, chat).iter().filter_map(|r| r["text"].as_str().map(str::to_string)).collect::<Vec<_>>();
+    // no agent.json: its own chat
+    fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1juniper", home("water the plants")));
+    fake.until(WAIT, "the routine in its own chat", |w| said(w, &own).len() == 1).await;
+    // its home its SimpleX chat: the one its link names
+    fake.with(|w| w.fragments.get_mut("juniper--k3x9").expect("its fragment").files.insert("agent.json".into(), bytes::Bytes::from(r#"{"tier":"cheap","home":"simplex"}"#)));
+    fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1paul", home("call mom")));
+    fake.until(WAIT, "the routine in its SimpleX chat", |w| said(w, &simplex).len() == 1).await;
+    // its home unread at first: read again, and run once
+    fake.with(|w| {
+        w.fail_lists = 2;
+        w.append("juniper--k3x9", "tasks", "npub1paul", home("check the shelf"));
+    });
+    fake.until(WAIT * 2, "the routine whose home was read again", |w| said(w, &simplex).len() == 2).await;
+    // maple has no chat of its own: its routine runs nowhere
+    fake.with(|w| w.append("maple--k3x9", "tasks", "npub1paul", home("nowhere to go")));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    bridge.stop().await;
+    // a restart, its link let go: the fires read again run nothing twice, and `simplex` is its own chat
+    linked(link::Phase::Off);
+    let bridge = support::start(config(), support::script());
+    following(&fake, 4).await;
+    fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1paul", home("feed the cat")));
+    fake.until(WAIT, "the routine back in its own chat", |w| said(w, &own).len() == 2).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    bridge.stop().await;
+    fake.with(|w| {
+        assert_eq!(said(w, &own), ["echo: [your routine] water the plants", "echo: [your routine] feed the cat"]);
+        assert_eq!(said(w, &simplex), ["echo: [your routine] call mom", "echo: [your routine] check the shelf"], "nothing again after a restart");
+        let maples: Vec<Value> = w.fragments.values().flat_map(|f| f.channels.get("work").map(|c| c.records.clone()).unwrap_or_default()).filter(|r| r["body"]["kind"] == "turn.start" && r["body"]["agent"] == "npub1maple").collect();
+        assert!(maples.is_empty(), "maple's routine ran nowhere: {maples:?}");
+    });
+}
+
+/// Goal (Paul, 2026-10-26: "SimpleX is a chat of its own"; Alex's review
+/// of #620): an agent's SimpleX chat is made by the name its link chose,
+/// once, for its owner: theirs, titled SimpleX, the agent its maker and an
+/// editor (told so on its `tasks`). Made again by that name after a
+/// restart, its owner's and its own lists stale (they show none of it), it
+/// is found made, never a second; a name that is a chat someone else owns,
+/// or one the agent is not in, is taken; a platform that does not answer
+/// is tried again.
+#[tokio::test]
+async fn its_simplex_chat_is_made_once_by_its_name() {
+    use fragment_bridge::simplex::run::{ensure_chat, ChatNot};
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let theirs = fake.chat_named("juniper-simplex--r7t5", &["juniper"]);
+    fake.with(|w| w.fragments.get_mut(&theirs).expect("a chat").members.retain(|m| m.principal != "npub1paul"));
+    fake.add_member(&theirs, "npub1skyler", "owner");
+    let left = fake.chat_named("juniper-simplex--s5t6", &[]);
+    let api = fragment_bridge::api::Api::new(&fake.url()).expect("an address");
+    let juniper = fragment_bridge::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None };
+    let chat = "juniper-simplex--w9x2";
+    ensure_chat(&api, &juniper, chat).await.expect("made");
+    fake.with(|w| {
+        let f = &w.fragments[chat];
+        assert_eq!((f.kind.as_str(), f.title.as_str()), ("chat", "SimpleX"));
+        assert!(f.members.iter().any(|m| m.principal == "npub1paul" && m.role == "owner") && f.members.iter().any(|m| m.principal == "npub1juniper" && m.role == "editor"));
+        assert_eq!(w.bodies("juniper--k3x9", "tasks", "joined").last().map(|b| b["fragment"].clone()), Some(json!(chat)), "told as a join");
+    });
+    // a restart before the lists catch up: they show none of it, and the same name is found made
+    fake.with(|w| w.fail_lists = 10);
+    ensure_chat(&api, &juniper, chat).await.expect("found made");
+    fake.with(|w| {
+        assert_eq!(w.made, [chat.to_string()], "made once");
+        w.fail_lists = 0;
+    });
+    // someone else's, and one it is not in: taken
+    assert!(matches!(ensure_chat(&api, &juniper, &theirs).await, Err(ChatNot::Taken)), "someone else's");
+    assert!(matches!(ensure_chat(&api, &juniper, &left).await, Err(ChatNot::Taken)), "one it is not in");
+    // the platform down: tried again
+    fake.with(|w| w.down = true);
+    assert!(matches!(ensure_chat(&api, &juniper, "juniper-simplex--x3y4").await, Err(ChatNot::Made(_))));
+    fake.with(|w| w.down = false);
+    fake.with(|w| assert_eq!(w.made, [chat.to_string()], "nothing else made"));
+}
+
 /// Goal (the XFTP relay): the SimpleX cores' proxy sends a connection to a
 /// host the platform's relay carries through the relay, its bytes untouched
 /// both ways, and anything else straight out of the computer; a host the

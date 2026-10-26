@@ -1115,7 +1115,7 @@ fn steer_queue_and_btw() {
     let running = started(&said(&mut e, &a, &v, 1, "npub1skyler", json!({ "text": "long" }), T0)).expect("started").turn;
     let s = said(&mut e, &a, &v, 2, "npub1paul", cmd("steer", "use blue"), T0 + 1);
     let id = records::turn_id(&a.fragment, "talk--k3x9", "chat", 2);
-    let aside = |turn: Option<String>, id: &str, text: &str| Command::Aside { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), chat_name: "talk--k3x9".into(), turn, id: id.to_string(), by: "npub1paul".into(), by_name: "paul".into(), text: text.into() };
+    let aside = |turn: Option<String>, id: &str, text: &str| Command::Aside { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), chat_name: "talk--k3x9".into(), simplex: false, turn, id: id.to_string(), by: "npub1paul".into(), by_name: "paul".into(), text: text.into() };
     assert_eq!(commands(&s), vec![aside(Some(running.clone()), &id, "/steer use blue")]);
     assert!(posts(&s).is_empty() && !e.state().turns.contains_key(&id), "no turn of its own");
     let s = said(&mut e, &a, &v, 3, "npub1paul", cmd("btw", "which file?"), T0 + 2);
@@ -2598,14 +2598,17 @@ fn a_crash_that_drops_a_turns_end_leaves_nothing_open() {
     w.check().unwrap();
 }
 
+/// The agents linked, each with `talk--k3x9` (the chat `said` posts in) as
+/// its SimpleX chat.
 fn relaying(e: &mut Engine, agents: &[&Agent]) {
-    e.step(Input::Relaying(agents.iter().map(|a| a.fragment.clone()).collect()), T0);
+    e.step(Input::Relaying(agents.iter().map(|a| (a.fragment.clone(), Some("talk--k3x9".to_string()))).collect()), T0);
 }
 
 /// Goal (SimpleX, valid): a linked agent's own relayed record is its
-/// owner's message: one turn, asked as its owner and by their name, marked
-/// `via` so its replies go back that way; read again, nothing; and its
-/// state, written and read back (a restart), keeps the mark.
+/// owner's message: one turn, asked as its owner and by their name, in its
+/// SimpleX chat (`simplex`, so its runtime is told what you say there
+/// reaches their phone); read again, nothing; its state, written and read
+/// back (a restart), holds nothing of SimpleX; their Stop stops it.
 #[test]
 fn a_relayed_message_is_its_owners() {
     let a = agent("juniper");
@@ -2615,13 +2618,11 @@ fn a_relayed_message_is_its_owners() {
     let body = records::relayed_message("hi from my phone", &a, records::VIA_SIMPLEX, &[]);
     let s = said(&mut e, &a, &v, 1, &a.identity, body.clone(), T0);
     let t = started(&s).expect("a turn, handed to the runtime");
-    assert_eq!((t.text.as_str(), t.asker.as_str(), t.asker_name.as_str()), ("hi from my phone", "npub1paul", "paul"));
-    assert_eq!(e.state().turns[&t.turn].via.as_deref(), Some(records::VIA_SIMPLEX));
-    assert_eq!(t.via.as_deref(), Some(records::VIA_SIMPLEX), "handed to the runtime as from SimpleX (Relay marks its sender so: wire::sender_name)");
+    assert_eq!((t.text.as_str(), t.asker.as_str(), t.asker_name.as_str(), t.simplex), ("hi from my phone", "npub1paul", "paul", true));
     assert_eq!(said(&mut e, &a, &v, 1, &a.identity, body, T0 + 1), Step::default(), "read again: nothing");
     let written = serde_json::to_string(e.state()).expect("a state serializes");
     let back: State = serde_json::from_str(&written).expect("and reads back");
-    assert_eq!(back.turns[&t.turn].via.as_deref(), Some(records::VIA_SIMPLEX));
+    assert!(back.turns.contains_key(&t.turn) && !written.contains("simplex") && !written.contains("via"), "a restart reads it back, nothing of SimpleX in it: {written}");
     // its owner's Stop stops it, as a turn they asked
     let s = said(&mut e, &a, &v, 2, "npub1paul", json!({ "kind": "stop", "turn": t.turn }), T0 + 2);
     assert!(commands(&s).iter().any(|c| matches!(c, Command::Stop { turn } if *turn == t.turn)), "{:?}", commands(&s));
@@ -2630,7 +2631,8 @@ fn a_relayed_message_is_its_owners() {
 /// Goal (SimpleX, invalid): a relayed record is honored only from the
 /// agent itself, only while its link is bound, only for its owner, and
 /// only by `simplex`: from anyone else it is what it would be without the
-/// mark, and no turn of it goes back over SimpleX.
+/// mark (a message its owner typed in the chat is still theirs, in that
+/// chat, as any).
 #[test]
 fn a_relayed_record_is_honored_only_from_a_linked_agent_for_its_owner() {
     let (a, b) = (agent("juniper"), agent("maple"));
@@ -2653,7 +2655,7 @@ fn a_relayed_record_is_honored_only_from_a_linked_agent_for_its_owner() {
     // posted by its owner with the mark: their own message, sent no other way
     let s = said(&mut e, &a, &v, 4, "npub1paul", mine("paul typed this"), T0);
     let t = started(&s).expect("their message, a turn");
-    assert_eq!((&e.state().turns[&t.turn].via, &t.via), (&None, &None), "a person's mark is no relay");
+    assert_eq!(t.asker, "npub1paul");
     ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, T0 + 1);
     // posted by another agent of the computer: a hand-off at most, never its owner's
     assert!(started(&said(&mut e, &b, &v, 5, &a.identity, mine("juniper's, not maple's"), T0 + 2)).is_none(), "not to maple at all");
@@ -2661,19 +2663,78 @@ fn a_relayed_record_is_honored_only_from_a_linked_agent_for_its_owner() {
     let s = said(&mut e, &a, &v, 6, &b.identity, from_maple, T0 + 2);
     let t = started(&s).expect("from maple to juniper: a hand-off");
     assert_eq!(t.asker, b.identity, "asked by maple, never as its owner");
-    assert_eq!((&e.state().turns[&t.turn].via, &t.via), (&None, &None));
     // let go: nothing more
-    e.step(Input::Relaying(BTreeSet::new()), T0 + 3);
+    e.step(Input::Relaying(BTreeMap::new()), T0 + 3);
     assert!(started(&said(&mut e, &a, &v, 7, &a.identity, mine("unlinked"), T0 + 3)).is_none());
 }
 
-/// Goal: a turn of no relayed record writes nothing new into the state: a
-/// computer without SimpleX keeps its `state.json` as it was.
+/// Goal (Paul, 2026-10-26: SimpleX is a chat of its own): every turn in
+/// an agent's SimpleX chat while linked is handed as that chat's
+/// (`TurnStart::simplex`), whatever started it (its owner's phone, their
+/// words typed there, a routine), and so is an aside said there; a turn in
+/// any other chat, or while its chat is not found yet, or once unlinked, is
+/// not; `mirror` names the chat exactly then.
+#[test]
+fn turns_in_its_simplex_chat_are_its_owners_phone() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a)).with_menu(crate::runtime::script::MENU);
+    let in_chat = |e: &mut Engine, chat: &str, seq: u64, principal: &str, body: Value, now: u64| {
+        let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: chat.into(), record: rec(seq, principal, body), view: Some(v.clone()), since: 0 }, now);
+        let s = answered(e, s, now);
+        let t = started(&s);
+        if let Some(t) = &t {
+            ev(e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, now);
+        }
+        t
+    };
+    // linked, its chat not found yet: no chat is its phone
+    e.step(Input::Relaying(BTreeMap::from([(a.fragment.clone(), None)])), T0);
+    assert_eq!(e.mirror(&a.fragment), None);
+    assert!(!in_chat(&mut e, "talk--k3x9", 1, "npub1paul", json!({ "text": "early" }), T0).expect("a turn").simplex);
+    // found: there, every turn, whatever started it; elsewhere, none
+    relaying(&mut e, &[&a]);
+    assert_eq!(e.mirror(&a.fragment), Some("talk--k3x9"));
+    assert!(in_chat(&mut e, "talk--k3x9", 2, &a.identity, records::relayed_message("from my phone", &a, records::VIA_SIMPLEX, &[]), T0 + 1).expect("a turn").simplex);
+    assert!(in_chat(&mut e, "talk--k3x9", 3, "npub1paul", json!({ "text": "typed on the web" }), T0 + 2).expect("a turn").simplex);
+    let routine = rec(1, &a.identity, json!({ "kind": "routine", "text": "water the plants", "chat": "talk--k3x9" }));
+    let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: a.fragment.clone(), record: Record { channel: records::TASKS.into(), ..routine }, view: None, since: 0 }, T0 + 3);
+    let t = started(&answered(&mut e, s, T0 + 3)).expect("its routine, a turn");
+    assert!(t.simplex && t.routine, "a routine there too");
+    ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, T0 + 3);
+    assert!(!in_chat(&mut e, "other--k3x9", 1, "npub1paul", json!({ "text": "another chat" }), T0 + 4).expect("a turn").simplex);
+    // an aside said there is that chat's too
+    let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), record: rec(4, "npub1paul", json!({ "kind": "command", "command": "btw", "args": "how is it going?" })), view: Some(v.clone()), since: 0 }, T0 + 5);
+    assert!(commands(&s).iter().any(|c| matches!(c, Command::Aside { simplex: true, .. })), "{:?}", commands(&s));
+    // unlinked: no more
+    e.step(Input::Relaying(BTreeMap::new()), T0 + 6);
+    assert_eq!(e.mirror(&a.fragment), None);
+    assert!(!in_chat(&mut e, "talk--k3x9", 5, "npub1paul", json!({ "text": "after the unlink" }), T0 + 6).expect("a turn").simplex);
+}
+
+/// Goal: a turn writes nothing of SimpleX into the state: a computer
+/// without SimpleX keeps its `state.json` as it was, and so does one with.
 #[test]
 fn a_plain_turn_writes_no_via() {
     let a = agent("juniper");
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "hi" }), T0)).expect("a turn");
-    assert!(!serde_json::to_string(e.state()).expect("a state serializes").contains("via"));
+    let written = serde_json::to_string(e.state()).expect("a state serializes");
+    assert!(!written.contains("via") && !written.contains("simplex"), "{written}");
+}
+
+/// Goal (never break agents): a state an older bridge wrote, a turn in it
+/// marked `via` (the per-turn rule, gone), reads as before, the mark let go.
+#[test]
+fn an_older_states_via_is_let_go() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let t = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "hi" }), T0)).expect("a turn");
+    let mut older: Value = serde_json::to_value(e.state()).expect("a state serializes");
+    older["turns"][&t.turn]["via"] = json!("simplex");
+    let back: State = serde_json::from_value(older).expect("an older state reads");
+    assert!(back.turns.contains_key(&t.turn));
+    assert!(!serde_json::to_string(&back).expect("serializes").contains("via"), "written again without it");
 }
