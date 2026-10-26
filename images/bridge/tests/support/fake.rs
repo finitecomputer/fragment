@@ -111,6 +111,10 @@ pub struct World {
     /// other is 403. Each relay's `host up down` once it closes.
     pub relay_to: BTreeMap<String, std::net::SocketAddr>,
     pub relayed: Vec<String>,
+    /// Bytes every relay carried so far, up (from the computer) and down,
+    /// as they pass: a relay the core keeps open is counted too.
+    pub relay_up: u64,
+    pub relay_down: u64,
     /// `GET /api/computer` reads that said the image does SimpleX
     /// (`?simplex=1`), and those that did not.
     pub simplex_said: u32,
@@ -511,10 +515,10 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
                     tokio::select! {
                         n = tokio::io::AsyncReadExt::read(&mut rd, &mut buf) => match n {
                             Ok(0) | Err(_) => { let _ = sink.send(Message::Close(None)).await; break; }
-                            Ok(n) => { down += n; if sink.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() { break; } }
+                            Ok(n) => { down += n; world.lock().unwrap().relay_down += n as u64; if sink.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() { break; } }
                         },
                         m = stream.next() => match m {
-                            Some(Ok(Message::Binary(b))) => { up += b.len(); if tokio::io::AsyncWriteExt::write_all(&mut wr, &b).await.is_err() { break; } }
+                            Some(Ok(Message::Binary(b))) => { up += b.len(); world.lock().unwrap().relay_up += b.len() as u64; if tokio::io::AsyncWriteExt::write_all(&mut wr, &b).await.is_err() { break; } }
                             Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                             _ => {}
                         },

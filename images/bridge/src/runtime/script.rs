@@ -23,6 +23,8 @@
 //! - `fail`: the turn ends as an error;
 //! - `silent`: the turn ends with no reply;
 //! - `draw`: the reply carries a file (`drawing.txt`);
+//! - `speak`: the reply carries a voice reply (`speech.mp3`, `SPOKEN_SECS`
+//!   of silence as an MP3, as Hermes' `text_to_speech` makes one);
 //! - `notice`: a notice before the reply (`info`, "Compressing context"),
 //!   and one after the turn's end (`memory`, "Self-improvement review:
 //!   Memory updated"), as Hermes sends its review once its turn is done;
@@ -107,6 +109,9 @@ use tokio::sync::mpsc;
 
 use crate::records::{Category, NoticeCategory, Outcome, PromptOption, Step};
 use crate::runtime::{Command, Event, How, LocalFile, MenuItem, Runtime, RuntimeFuture, RuntimeIo, TurnStart};
+
+/// How long `speak`'s voice reply plays.
+pub const SPOKEN_SECS: u32 = 3;
 
 /// The scripted agent's commands: one of each way the bridge carries one
 /// (`How`), so the platform's lanes run each with no agent runtime.
@@ -854,6 +859,14 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         let body = format!("a drawing for {}\n", ts.asker_name);
         if tokio::fs::write(&path, &body).await.is_ok() {
             let file = LocalFile { path, media_type: "text/plain".into(), name: "drawing.txt".into(), size: body.len() as u64 };
+            emit(Event::Attachment { turn: id.clone(), part, file }).await;
+        }
+    }
+    if text.split_whitespace().any(|w| w == "speak") {
+        let path = cfg.scratch.join(format!("{id}-speech.mp3"));
+        let body = crate::simplex::audio::silence_mp3(SPOKEN_SECS);
+        if tokio::fs::write(&path, &body).await.is_ok() {
+            let file = LocalFile { path, media_type: "audio/mpeg".into(), name: "speech.mp3".into(), size: body.len() as u64 };
             emit(Event::Attachment { turn: id.clone(), part, file }).await;
         }
     }

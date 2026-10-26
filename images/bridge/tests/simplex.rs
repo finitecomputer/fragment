@@ -236,6 +236,34 @@ fn voice_item<'a>(seen: impl Iterator<Item = &'a Value>, name: &str) -> Option<(
     })
 }
 
+/// Goal (a reply's voice message): the length the bridge reads of a real
+/// encoder's audio is what ffprobe reads, to the second: MP3s as Hermes'
+/// voices make them (constant and variable bit rates, MPEG-1 at 44.1 kHz
+/// and MPEG-2 at 24 kHz) and MPEG-4 AAC as SimpleX's apps record. Needs the
+/// host's ffmpeg.
+#[test]
+#[ignore = "needs ffmpeg; run by hand"]
+fn real_encoders_lengths_read() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("voice-lengths");
+    std::fs::create_dir_all(&dir).expect("a directory");
+    for (name, secs, args, media_type) in [
+        ("cbr.mp3", 7, vec!["-ar", "44100", "-b:a", "128k"], "audio/mpeg"),
+        ("vbr.mp3", 12, vec!["-ar", "44100", "-q:a", "4"], "audio/mpeg"),
+        ("tts.mp3", 5, vec!["-ar", "24000", "-ac", "1", "-b:a", "48k"], "audio/mpeg"),
+        ("app.m4a", 9, vec!["-ar", "16000", "-ac", "1", "-c:a", "aac", "-b:a", "32k"], "audio/mp4"),
+    ] {
+        let path = dir.join(name);
+        let src = format!("sine=frequency=330:duration={secs}");
+        let out = Command::new("ffmpeg").args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", &src]).args(&args).arg(&path).output().expect("the host has ffmpeg");
+        assert!(out.status.success(), "{name}: {}", String::from_utf8_lossy(&out.stderr));
+        let read = fragment_bridge::simplex::audio::secs(media_type, &std::fs::read(&path).expect("made"));
+        let probed = Command::new("ffprobe").args(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"]).arg(&path).output().expect("ffprobe");
+        let probed: f64 = String::from_utf8_lossy(&probed.stdout).trim().parse().expect("a length");
+        println!("{name}: read {read:?} s, ffprobe {probed:.3} s");
+        assert_eq!(read, Some(probed.round() as u32), "{name}");
+    }
+}
+
 /// Receives file `id` at a core whose events go to `events`: `/freceive`,
 /// then its `rcvFileComplete`, within `within`; how long it took.
 async fn freceive(api: &mut Api, id: i64, within: Duration) -> Duration {
@@ -321,17 +349,26 @@ struct Computer {
 
 impl Computer {
     fn start(lab: &Lab, fake: &support::fake::Fake, data: &Path) -> Computer {
+        let smp = format!("BRIDGE_SIMPLEX_SMP={}", lab.server);
+        let xftp = format!("BRIDGE_SIMPLEX_XFTP={}", lab.xftp.as_deref().expect("a lab with files"));
+        Computer::start_with(lab, fake, data, &["-e", &smp, "-e", &xftp])
+    }
+
+    /// `start`, its cores on SimpleX's preset servers, as a computer's are.
+    fn start_on_presets(lab: &Lab, fake: &support::fake::Fake, data: &Path) -> Computer {
+        Computer::start_with(lab, fake, data, &[])
+    }
+
+    fn start_with(lab: &Lab, fake: &support::fake::Fake, data: &Path, servers: &[&str]) -> Computer {
         let name = lab.container("computer");
         let _ = docker(&["rm", "-f", &name]);
         std::fs::create_dir_all(data).expect("its /data");
         let (net, ids, vol) = (format!("{}-net", lab.prefix), uid_gid(), format!("{}:/data", data.display()));
         let api = format!("FRAGMENT_API=http://api.fragment.internal:{}", fake.addr.port());
-        let smp = format!("BRIDGE_SIMPLEX_SMP={}", lab.server);
-        let xftp = format!("BRIDGE_SIMPLEX_XFTP={}", lab.xftp.as_deref().expect("a lab with files"));
-        docker(&[
-            "run", "-d", "--name", &name, "--network", &net, "--add-host", "api.fragment.internal:host-gateway", "--user", &ids, "-e", "HOME=/data", "-e", &api, "-e", &smp, "-e", &xftp, "-e", "FRAGMENT_COMPUTER=computer:00aa", "-v", &vol, "-p", "127.0.0.1::6080", BRIDGE_IMAGE,
-        ])
-        .expect("the computer starts");
+        let mut args = vec!["run", "-d", "--name", &name, "--network", &net, "--add-host", "api.fragment.internal:host-gateway", "--user", &ids, "-e", "HOME=/data", "-e", &api];
+        args.extend(servers);
+        args.extend(["-e", "FRAGMENT_COMPUTER=computer:00aa", "-v", &vol, "-p", "127.0.0.1::6080", BRIDGE_IMAGE]);
+        docker(&args).expect("the computer starts");
         let port = docker(&["port", &name, "6080/tcp"]).expect("its port").lines().next().and_then(|l| l.rsplit_once(':')).and_then(|(_, p)| p.parse().ok()).expect("a port");
         Computer { name, port, session: std::sync::Mutex::new(String::new()) }
     }
@@ -671,6 +708,13 @@ async fn messages_go_both_ways_through_the_chat() {
     println!("the voice message answered on SimpleX: {got:?} (the runtime was handed its file)");
     assert!(c.exec("ls /data/simplex/juniper--k3x9/files").trim().is_empty(), "its file let go once carried");
 
+    // a reply's files: its text, then a voice message and a file in the
+    // person's app, each the chat's own attachment, whole
+    let t0 = Instant::now();
+    say(&mut person, at_person, "speak and draw").await;
+    reply_files_arrive(&lab, &mut person, &fake, &chat, &c).await;
+    println!("a reply's voice message and file, whole in the person's app: {} ms after they asked", t0.elapsed().as_millis());
+
     // a start again (SIGTERM, a save, a start): its catch-up posts nothing twice
     let before = relayed_on(&fake, &chat).len();
     c.stop();
@@ -681,6 +725,83 @@ async fn messages_go_both_ways_through_the_chat() {
     assert_eq!(relayed_on(&fake, &chat).len(), before, "the catch-up's forwards are replays");
     say(&mut person, at_person, "after the restart").await;
     received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t == "echo: [paul] after the restart")).await;
+}
+
+/// The scripted agent's answer to "speak and draw", in the person's app: its
+/// text, then a voice message (its length, playable: the host's ffprobe
+/// decodes it) and a file, each the chat's own attachment byte for byte;
+/// and the computer's copies of them let go once uploaded.
+async fn reply_files_arrive(lab: &Lab, person: &mut Api, fake: &support::fake::Fake, chat: &str, c: &Computer) {
+    use fragment_bridge::runtime::script::SPOKEN_SECS;
+    let files = lab.db_dir("person").join("files");
+    let within = Duration::from_secs(180);
+    let (voice, heard) = received_file(person, &files, "voice", within).await;
+    let (file, drawn) = received_file(person, &files, "file", within).await;
+    received(person, within, |got| got.iter().any(|t| t == "echo: [paul] speak and draw")).await;
+    println!("  a voice message {voice} ({} bytes) and a file {file} ({} bytes)", std::fs::metadata(&heard).map_or(0, |m| m.len()), std::fs::metadata(&drawn).map_or(0, |m| m.len()));
+    assert_eq!((voice["type"].as_str(), voice["duration"].as_u64()), (Some("voice"), Some(u64::from(SPOKEN_SECS))), "a voice message, its length: {voice}");
+    assert_eq!(file["type"], "file", "{file}");
+    let reply = fake.with(|w| w.bodies(chat, "chat", "reply").into_iter().find(|b| b["text"] == "echo: [paul] speak and draw")).expect("the chat's reply");
+    let shas: Vec<&str> = reply["attachments"].as_array().expect("its files").iter().filter_map(|a| a["sha256"].as_str()).collect();
+    for got in [&heard, &drawn] {
+        assert!(shas.contains(&sha256_of(got).as_str()), "{} is the chat's own attachment, whole: {shas:?}", got.display());
+    }
+    assert_eq!(std::fs::read(&heard).expect("the voice"), fragment_bridge::simplex::audio::silence_mp3(SPOKEN_SECS));
+    let probe = Command::new("ffprobe").args(["-v", "error", "-show_entries", "format=duration:stream=codec_name", "-of", "csv=p=0"]).arg(&heard).output().expect("the host has ffprobe");
+    let probed = String::from_utf8_lossy(&probe.stdout).to_string();
+    assert!(probe.status.success() && probed.contains("mp3"), "it plays: {probed}");
+    println!("  ffprobe: {}", probed.split_whitespace().collect::<Vec<_>>().join(" "));
+    let t0 = Instant::now();
+    // bounded: a minute, the uploads' ends having come already
+    while !c.exec("ls -A /data/simplex/juniper--k3x9/out 2>/dev/null").trim().is_empty() {
+        assert!(t0.elapsed() < Duration::from_secs(60), "the copies let go: {}", c.exec("ls -R /data/simplex/juniper--k3x9/out"));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Goal (a reply's files, through the relay): a reply's voice message and
+/// file reach a person on SimpleX's own preset servers, uploaded by the
+/// agent's core through the bridge's proxy and a relay that pipes bytes to
+/// the real XFTP servers on 443, as a computer on Cloudflare must (never
+/// straight out); its SMP straight out on 5223. Lower rung, labeled so: the
+/// fake platform's relay (a byte pipe), not the cell's; the internet's
+/// servers, SimpleX Chat's and Flux's.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker, ffprobe and the internet; run by hand"]
+async fn reply_files_go_out_through_the_relay() {
+    build_bridge_image();
+    let mut lab = Lab::up("relay");
+    let mut person = lab.start_on_presets("person").await;
+    let fake = support::fake::Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let chat = fake.chat_named("juniper-chat--h6j7", &["juniper"]);
+    let hosts: Vec<String> = ["simplex.im", "simplexonflux.com"].iter().flat_map(|d| (1..=6).map(move |n| format!("xftp{n}.{d}"))).collect();
+    let mut to = std::collections::BTreeMap::new();
+    for h in &hosts {
+        let addr = tokio::net::lookup_host((h.as_str(), 443)).await.ok().and_then(|mut a| a.find(|a| a.is_ipv4())).unwrap_or_else(|| panic!("{h} resolves"));
+        to.insert(h.clone(), addr);
+    }
+    fake.with(|w| {
+        w.computer["alwaysOn"] = json!(true);
+        w.computer["generation"] = json!(1);
+        w.computer["relay"] = json!({ "hosts": hosts, "port": 443 });
+        w.relay_to = to;
+    });
+    let data = lab.dir.join("computer-data");
+    let c = Computer::start_on_presets(&lab, &fake, &data);
+    c.state_until(Duration::from_secs(60), "its state", |v| v["phase"] == "off").await;
+    c.link(&fake);
+    let v = c.state_until(Duration::from_secs(120), "an invitation", |v| v["phase"] == "inviting").await;
+    person.cmd(&format!("/connect {}", v["link"].as_str().expect("its link"))).await;
+    c.state_until(Duration::from_secs(180), "linked", |v| v["phase"] == "linked").await;
+    let at_person = person.wait(Duration::from_secs(120), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the agent, at the person's");
+    received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t.contains("You're linked"))).await;
+    let t0 = Instant::now();
+    say(&mut person, at_person, "speak and draw").await;
+    reply_files_arrive(&lab, &mut person, &fake, &chat, &c).await;
+    let (up, down, closed) = fake.with(|w| (w.relay_up, w.relay_down, w.relayed.clone()));
+    println!("a reply's files through the relay to SimpleX's XFTP servers, whole in the person's app: {} ms; relayed {up} bytes up, {down} down; closed {closed:?}", t0.elapsed().as_millis());
+    let sent = fragment_bridge::simplex::audio::silence_mp3(fragment_bridge::runtime::script::SPOKEN_SECS).len() as u64;
+    assert!(up > sent, "the upload went through the relay: {up} bytes up, the voice alone {sent}");
 }
 
 /// What a QR code `svg` says, as the host's zbar reads it from its picture.

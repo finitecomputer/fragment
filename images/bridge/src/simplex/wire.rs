@@ -10,6 +10,7 @@
 //! core sends much more than is read here (each contact's whole profile and
 //! preferences, the user, its servers): what is not named is ignored.
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// A contact's id in the core's own database (`contactId`).
@@ -41,6 +42,34 @@ const ERROR_MAX_BYTES: usize = 300;
 
 const _: () = assert!(SEND_JSON_MAX_BYTES < 15_400 && TEXT_MAX_BYTES <= FRAME_MAX_BYTES, "a part is under the size the core took");
 
+/// An image's preview, which SimpleX's image content carries and its apps
+/// show until the image itself is received: SimpleX's own CLI's (its
+/// `/image` sends every image with this one, a 64-pixel PNG), read from
+/// v7.0.3 in the lab. A preview of the image itself would need it decoded
+/// and scaled here.
+pub const IMAGE_PREVIEW: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAAKVJREFUeF7t1kENACEUQ0FQhnVQ9lfGO+xggITQdvbMzArPey+8fa3tAfwAEdABZQspQStgBssEcgAIkSAJkiAJljtEgiRIgmUCSZAESZAESZAEyx0iQRIkwTKBJEiCv5fgvTd1wDmn7QAP4AeIgA4oW0gJWgEzWCZwbQ7gAA7ggLKFOIADOKBMIAeAEAmSIAmSYLlDJEiCJFgmkARJkARJ8N8S/ADTZUewBvnTOQAAAABJRU5ErkJggg==";
+
+/// What a file the link sends is, as SimpleX's apps show it: a voice
+/// message (its length, which they show), an image, or any other file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Kind {
+    Voice { secs: u32 },
+    Image,
+    File,
+}
+
+impl Kind {
+    /// What it is, in the words a note says.
+    pub fn words(self) -> &'static str {
+        match self {
+            Kind::Voice { .. } => "a voice message",
+            Kind::Image => "an image",
+            Kind::File => "a file",
+        }
+    }
+}
+
 /// A command to the core.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cmd {
@@ -66,6 +95,14 @@ pub enum Cmd {
     Receive { file: FileId },
     /// Give up on receiving it (`/fcancel`): one waited for too long.
     CancelFile { file: FileId },
+    /// A file to a contact, from `path` (absolute): its message goes at
+    /// once, its file is uploaded over XFTP after (`FileSent`, or
+    /// `FileUnsent`). The core sends it as a voice message, an image or a
+    /// file (`kind`), with no caption.
+    SendFile { contact: ContactId, path: String, kind: Kind },
+    /// Give up on sending it (`/fcancel`): one not sent in time. Its answer
+    /// settles nothing: the link let go of the file before it asked.
+    CancelSend { file: FileId },
 }
 
 impl Cmd {
@@ -105,9 +142,22 @@ impl Cmd {
                 assert!(*file > 0, "a receive names a file");
                 format!("/freceive {file}")
             }
-            Cmd::CancelFile { file } => {
+            Cmd::CancelFile { file } | Cmd::CancelSend { file } => {
                 assert!(*file > 0, "a cancel names a file");
                 format!("/fcancel {file}")
+            }
+            Cmd::SendFile { contact, path, kind } => {
+                assert!(*contact > 0 && path.starts_with('/'), "a file's send names a contact and a path of its own");
+                let content = match kind {
+                    Kind::Voice { secs } => {
+                        assert!(*secs > 0, "a voice message plays for a while");
+                        json!({ "type": "voice", "text": "", "duration": secs })
+                    }
+                    Kind::Image => json!({ "type": "image", "text": "", "image": IMAGE_PREVIEW }),
+                    Kind::File => json!({ "type": "file", "text": "" }),
+                };
+                let body = json!([{ "filePath": path, "msgContent": content }]);
+                format!("/_send @{contact} json {body}")
             }
         }
     }
@@ -196,6 +246,12 @@ pub enum Resp {
     FileDone { file: FileId, path: String },
     /// A file that will not arrive (`rcvFileError`, its sender's cancel).
     FileFailed { file: FileId },
+    /// A file the link sent, uploaded whole (`sndFileCompleteXFTP`): its
+    /// receiver can fetch it now.
+    FileSent { file: FileId },
+    /// A file the link sent that will not be (`sndFileError`, or the core's
+    /// own cancel, `sndFileCancelledXFTP`).
+    FileUnsent { file: FileId },
     /// A command failed (`chatCmdError`), or the core reports an error of
     /// its own (`chatError`): what it said, cut.
     Error { what: String },
@@ -359,6 +415,9 @@ fn read_resp(r: &Value) -> Result<Resp, WireError> {
             Resp::FileDone { file: id(&file["fileId"], "a file with no id")?, path: path.into() }
         }
         "rcvFileError" | "rcvFileSndCancelled" | "rcvFileAcceptedSndCancelled" => Resp::FileFailed { file: id(&r["chatItem"]["chatItem"]["file"]["fileId"], "a file with no id")? },
+        // a sent file's events all carry its transfer (`chatItem_` may be none)
+        "sndFileCompleteXFTP" => Resp::FileSent { file: id(&r["fileTransferMeta"]["fileId"], "a sent file with no id")? },
+        "sndFileError" | "sndFileCancelledXFTP" => Resp::FileUnsent { file: id(&r["fileTransferMeta"]["fileId"], "a sent file with no id")? },
         "chatCmdError" | "chatError" => Resp::Error { what: error_of(&r["chatError"]) },
         other => Resp::Other(cut(other, 64).into()),
     })
@@ -448,6 +507,9 @@ mod tests {
             "voiceItem" => include_str!("fixtures/voiceItem.json"),
             "fileReady" => include_str!("fixtures/fileReady.json"),
             "fileDone" => include_str!("fixtures/fileDone.json"),
+            "sentVoice" => include_str!("fixtures/sentVoice.json"),
+            "fileSent" => include_str!("fixtures/fileSent.json"),
+            "sendCancelled" => include_str!("fixtures/sendCancelled.json"),
             other => panic!("no fixture {other}"),
         };
         parse(text).unwrap_or_else(|e| panic!("{name}: {e}")).resp
@@ -493,6 +555,23 @@ mod tests {
         assert!(voice[0].shared.is_some());
         assert_eq!(fixture("fileReady"), Resp::FileReady { file: 1 });
         assert_eq!(fixture("fileDone"), Resp::FileDone { file: 1, path: "short.m4a".into() });
+        // a voice reply sent (the lab's exploration of v7.0.3's sends): its
+        // item at once, its file's id, then the upload's end
+        let Resp::Items(sent) = fixture("sentVoice") else { panic!("a send's answer") };
+        assert!(matches!(&sent[..], [Item { received: false, content: Content::Message { kind, .. }, file: Some(FileRef { id: 1, size: 47_647, path: None, .. }), .. }] if kind == "voice"), "{sent:?}");
+        assert_eq!(fixture("fileSent"), Resp::FileSent { file: 1 });
+        // the answer to a send's cancel settles nothing of the link's
+        assert_eq!(fixture("sendCancelled"), Resp::Other("sndFileCancelled".into()));
+        // a sent file that fails, as v7.0.3's source names it (hand-made: the
+        // lab's servers never failed one), and one the core cancels itself
+        let failed = r#"{"resp":{"type":"sndFileError","user":{},"chatItem_":null,"fileTransferMeta":{"fileId":4,"fileName":"a.mp3","filePath":"/x/a.mp3","fileSize":9,"chunkSize":9,"cancelled":false},"errorMessage":"XFTP error"}}"#;
+        assert_eq!(parse(failed).expect("a frame").resp, Resp::FileUnsent { file: 4 });
+        let theirs = r#"{"resp":{"type":"sndFileCancelledXFTP","user":{},"fileTransferMeta":{"fileId":5}}}"#;
+        assert_eq!(parse(theirs).expect("a frame").resp, Resp::FileUnsent { file: 5 });
+        // a warning is the core retrying: nothing ends
+        let warned = r#"{"resp":{"type":"sndFileWarning","user":{},"fileTransferMeta":{"fileId":4},"errorMessage":"retrying"}}"#;
+        assert_eq!(parse(warned).expect("a frame").resp, Resp::Other("sndFileWarning".into()));
+        assert!(matches!(parse(r#"{"resp":{"type":"sndFileCompleteXFTP","fileTransferMeta":{}}}"#), Err(WireError::Shape(_))), "a sent file with no id");
     }
 
     /// Goal: a command's line is what the lab's core took.
@@ -518,6 +597,18 @@ mod tests {
         assert_eq!(v[0]["msgContent"]["text"], "hi\" json [] /_delete @3\nthere");
         let f: Value = serde_json::from_str(&Cmd::Invite.frame(7)).expect("a frame is JSON");
         assert_eq!(f, json!({ "corrId": "7", "cmd": "/connect" }));
+        // a file: as a voice message with its length, an image with SimpleX
+        // CLI's preview, or a file, its path JSON (the lab took each)
+        let sent = |kind: Kind| -> Value {
+            let line = Cmd::SendFile { contact: 3, path: "/data/simplex/j/out/1-0/a \"b\".mp3".into(), kind }.line();
+            serde_json::from_str(line.strip_prefix("/_send @3 json ").expect("its prefix")).expect("its body is JSON")
+        };
+        assert_eq!(sent(Kind::Voice { secs: 7 }), json!([{ "filePath": "/data/simplex/j/out/1-0/a \"b\".mp3", "msgContent": { "type": "voice", "text": "", "duration": 7 } }]));
+        assert_eq!(sent(Kind::Image)[0]["msgContent"], json!({ "type": "image", "text": "", "image": IMAGE_PREVIEW }));
+        assert_eq!(sent(Kind::File)[0]["msgContent"], json!({ "type": "file", "text": "" }));
+        assert!(IMAGE_PREVIEW.starts_with("data:image/png;base64,") && IMAGE_PREVIEW.len() == 338, "the CLI's own");
+        assert_eq!(Cmd::CancelSend { file: 9 }.line(), "/fcancel 9");
+        assert_eq!(serde_json::to_value(Kind::Voice { secs: 3 }).expect("a kind"), json!({ "kind": "voice", "secs": 3 }));
     }
 
     /// Goal: a reply of any length goes in parts the core takes, which say

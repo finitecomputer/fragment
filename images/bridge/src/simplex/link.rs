@@ -388,7 +388,7 @@ impl Link {
             }
             // a file's own events are the bridge's to act on (it receives the
             // file a forwarded message carries), never the link's
-            Resp::Sync { .. } | Resp::SyncStarted { .. } | Resp::Deleted { .. } | Resp::ConnDeleted { .. } | Resp::FileReady { .. } | Resp::FileDone { .. } | Resp::FileFailed { .. } | Resp::Error { .. } | Resp::Other(_) => {}
+            Resp::Sync { .. } | Resp::SyncStarted { .. } | Resp::Deleted { .. } | Resp::ConnDeleted { .. } | Resp::FileReady { .. } | Resp::FileDone { .. } | Resp::FileFailed { .. } | Resp::FileSent { .. } | Resp::FileUnsent { .. } | Resp::Error { .. } | Resp::Other(_) => {}
         }
     }
 

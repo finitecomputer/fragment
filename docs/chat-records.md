@@ -180,7 +180,8 @@ them (its Bot Chat):
   (docs/bridge.md, "SimpleX"), and **what it says goes back to
   the owner's SimpleX app** once posted: its replies but the interim ones
   (the words before a tool call stay in the chat, as its push leaves them
-  out), files noted, and a card's question with its choices (their next
+  out), with their files (each a voice message, an image or a file:
+  docs/bridge.md, "SimpleX"), and a card's question with its choices (their next
   SimpleX message answers a card that takes words). Only a SimpleX
   message's turn does. A
   `relayed` from anyone else (a person, another agent), for anyone else,

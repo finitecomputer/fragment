@@ -922,18 +922,16 @@ fn reply_turn(id: &str) -> Option<&str> {
 
 /// What of a record a turn posts goes to its owner's SimpleX app, when
 /// that turn was asked there (the caller's to say), and the turn it is of:
-/// a reply, its files noted, unless it is interim (the model's words
-/// before a tool call stay in the chat, as its push leaves them out:
-/// docs/chat-records.md, "Push"; a turn may narrate 200 of them, each a
-/// notification on the phone); and a card's question, its choices named,
-/// since a card shows only in the chat. Nothing else.
+/// a reply, its text and its files (simplex/run.rs, `Handle::reply`),
+/// unless it is interim (the model's words before a tool call stay in the
+/// chat, as its push leaves them out: docs/chat-records.md, "Push"; a turn
+/// may narrate 200 of them, each a notification on the phone); and a card's
+/// question, its choices named, since a card shows only in the chat.
+/// Nothing else.
 fn for_simplex(channel: &str, id: &str, body: &Value, files: usize) -> Option<(String, String)> {
     let text = body["text"].as_str().unwrap_or("");
     match channel {
-        records::CHAT if body["interim"] != true => {
-            let said = with_files_noted(text, files);
-            reply_turn(id).filter(|_| !said.trim().is_empty()).map(|turn| (turn.to_string(), said))
-        }
+        records::CHAT if body["interim"] != true => reply_turn(id).filter(|_| !text.trim().is_empty() || files > 0).map(|turn| (turn.to_string(), text.to_string())),
         records::WORK if body["kind"] == "turn.prompt" => {
             let options = body["options"].as_array()?;
             let words = options.iter().any(|o| o["words"] == true);
@@ -947,22 +945,6 @@ fn for_simplex(channel: &str, id: &str, body: &Value, files: usize) -> Option<(S
             Some((body["turn"].as_str()?.to_string(), format!("{text}{how}")))
         }
         _ => None,
-    }
-}
-
-/// What the owner's SimpleX app is told of a reply's files, which go only
-/// to the chat.
-fn with_files_noted(text: &str, files: usize) -> String {
-    match files {
-        0 => text.to_string(),
-        n => {
-            let note = if n == 1 { "(I sent a file, in our chat.)".to_string() } else { format!("(I sent {n} files, in our chat.)") };
-            if text.trim().is_empty() {
-                note
-            } else {
-                format!("{text}\n\n{note}")
-            }
-        }
     }
 }
 
@@ -1104,7 +1086,7 @@ async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut s
                 // what goes back over SimpleX goes only once it is on the chat
                 let sent = post(&api, &fragment, &agent, channel, &id, body, &files, None, stop.clone()).await;
                 if let (Some(text), Sent::Posted, Some(sx)) = (relay, sent, claims.simplex.as_ref()) {
-                    sx.reply(&agent, &text);
+                    sx.reply(&agent, &text, &files).await;
                 }
             }
             Job::Owed { agent, turn, id, body } => {
@@ -1626,15 +1608,16 @@ mod tests {
 
     /// Goal (SimpleX, after #584's mid-turn replies): of what a turn asked
     /// over SimpleX posts, its owner's app gets every reply that is not
-    /// interim (its answer, an open question), files noted, and a card's
-    /// question with its choices; the model's words before a tool call
-    /// stay in the chat, as the chat's push leaves them out.
+    /// interim (its answer, an open question), its files with it, and a
+    /// card's question with its choices; the model's words before a tool
+    /// call stay in the chat, as the chat's push leaves them out.
     #[test]
     fn what_goes_back_over_simplex() {
         let reply = |interim: bool| records::reply("It'll be sunny.", "t1", &[], 0, interim);
         assert_eq!(for_simplex(records::CHAT, "rp:t1:2", &reply(false), 0), Some(("t1".into(), "It'll be sunny.".into())));
+        assert_eq!(for_simplex(records::CHAT, "rp:t1:2", &reply(false), 2), Some(("t1".into(), "It'll be sunny.".into())), "its files go as files, not noted");
         assert_eq!(for_simplex(records::CHAT, "rp:t1:1", &reply(true), 0), None, "interim: the chat's alone");
-        assert_eq!(for_simplex(records::CHAT, "rp:t1:2", &records::reply("", "t1", &[], 0, false), 1), Some(("t1".into(), "(I sent a file, in our chat.)".into())));
+        assert_eq!(for_simplex(records::CHAT, "rp:t1:2", &records::reply("", "t1", &[], 0, false), 1), Some(("t1".into(), String::new())), "a file alone goes");
         assert_eq!(for_simplex(records::CHAT, "rp:t1:2", &records::reply(" ", "t1", &[], 0, false), 0), None, "nothing said");
         let option = |id: &str, label: &str, words: bool| records::PromptOption { id: id.into(), label: label.into(), style: None, words };
         let card = records::turn_prompt("t1", "c-1", "What should I plant?", &[option("c0", "Basil", false), option("c1", "Mint", false), option("other", "Something else", true)], "npub1paul", 1);

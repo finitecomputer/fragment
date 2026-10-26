@@ -14,12 +14,14 @@
 //! - `door`: only its owner links or unlinks it (a ticket the platform
 //!   signs), and only the link's door key speaks for them (Paul's design of
 //!   2026-10-23).
+//! - `audio`: how long a voice reply plays, from its file.
 //! - `socks`: the cores' way out: SimpleX's file servers through the
 //!   platform's XFTP relay, everything else straight out of the computer.
 //!
 //! What it adds to the platform, entry by entry, is
 //! docs/explorations/simplex-complexity.md.
 
+pub mod audio;
 pub mod door;
 pub mod http;
 pub mod link;

@@ -299,7 +299,7 @@ pub const SENDING: &str = "To give someone in this chat a file (a PDF, an image,
 /// system prompt holds it, at a few tokens a turn, rather than beside each
 /// such message, where it would pile up in the chat's history. The one
 /// place an agent is told of SimpleX.
-pub const SIMPLEX: &str = "A message marked | via SimpleX is your owner's, from their SimpleX app: Fragment sends your reply back there itself (a file stays in this chat, noted). Never install, run or set up SimpleX, even when asked to send something there.";
+pub const SIMPLEX: &str = "A message marked | via SimpleX is your owner's, from their SimpleX app: Fragment sends your reply back there itself, with any file you attach. Never install, run or set up SimpleX, even when asked to send something there.";
 
 /// The relay's hint, appended to every agent's system prompt on every turn
 /// in our chats (Hermes' `platform_hints.relay.append`): how it asks
