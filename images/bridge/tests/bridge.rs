@@ -796,7 +796,7 @@ async fn a_group_mention_picks_the_agent() {
         let r = replies(w, &group);
         assert_eq!(r[2]["to"], json!(["npub1rowan"]), "juniper's reply hands off");
         assert_eq!(r[2]["hop"], 1);
-        assert!(r[3]["text"].as_str().unwrap().starts_with("echo: [someone]"), "rowan answers juniper's message");
+        assert!(r[3]["text"].as_str().unwrap().starts_with("echo: [Juniper]"), "rowan answers juniper's message, told it by its name: {}", r[3]["text"]);
     });
     bridge.stop().await;
 }

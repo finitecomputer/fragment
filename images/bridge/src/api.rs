@@ -538,7 +538,10 @@ impl Api {
         Ok(a.members)
     }
 
-    /// `GET /f/{name}/__people?id=…`: what to call each identity (at most 64).
+    /// `GET /f/{name}/__people?id=…`: what to call each identity (at most
+    /// 64): a person by their email, which a member is shown (decision 48);
+    /// an agent by its name, its agent fragment's title, else its label
+    /// (docs/api.md, "An agent's name and picture").
     pub async fn people(&self, agent: &str, fragment: &str, ids: &[String]) -> Result<BTreeMap<String, String>, ApiError> {
         let ids: Vec<&String> = ids.iter().take(64).collect();
         if ids.is_empty() {
@@ -549,9 +552,13 @@ impl Api {
         let mut out = BTreeMap::new();
         if let Some(profiles) = v["profiles"].as_object() {
             for (id, p) in profiles {
-                // a person by their email, which a member is shown (decision 48)
-                if let Some(e) = p["email"].as_str() {
-                    out.insert(id.clone(), e.to_string());
+                let title = p["title"].as_str().map(str::trim).filter(|t| !t.is_empty());
+                let named = match p["kind"].as_str() {
+                    Some("agent") => title.or_else(|| p["name"].as_str()),
+                    _ => p["email"].as_str(),
+                };
+                if let Some(n) = named {
+                    out.insert(id.clone(), n.to_string());
                 }
             }
         }

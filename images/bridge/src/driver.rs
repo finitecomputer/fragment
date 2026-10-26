@@ -713,7 +713,9 @@ impl ViewCache {
         members.sort_by(|a, b| (a.added_at, &a.principal).cmp(&(b.added_at, &b.principal)));
         self.view.agents = members.iter().filter(|m| m.kind == "agent").map(|m| m.principal.clone()).collect();
         self.since = members.iter().find(|m| m.principal == agent.identity).map(|m| m.added_at).unwrap_or(0);
-        let mut ids: Vec<String> = members.iter().filter(|m| m.kind != "agent" && records::is_identity(&m.principal)).map(|m| m.principal.clone()).collect();
+        // its people and its other agents (an agent's message, a hand-off,
+        // is told by its name: its title, as `__people` says it now)
+        let mut ids: Vec<String> = members.iter().filter(|m| m.principal != agent.identity && records::is_identity(&m.principal)).map(|m| m.principal.clone()).collect();
         if let Some(w) = writer.filter(|w| records::is_identity(w) && !ids.iter().any(|i| i == w)) {
             ids.push(w.to_string());
         }
