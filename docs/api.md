@@ -3374,6 +3374,36 @@ through one (`fragment_core::door`):
 The door's key lives on the agent fragment (its `meta`), its ticket
 beside it; a fragment deleted takes them with it.
 
+### An agent's home (Paul, 2026-10-26)
+
+Where an agent reaches its owner when no one asked: its own chat with
+them (`<label>-chat`, the chat the shell makes with it), or its SimpleX
+chat. One home per agent, as each agent links its own SimpleX.
+
+- **Its SimpleX chat** is its owner's chat labelled `<label>-simplex`
+  (the agent's label), titled "SimpleX", the agent a member (one of its
+  label an earlier agent left, which it is not in, is none; the shell
+  gives a new agent no label whose `-chat` or `-simplex` is taken): the
+  chat its SimpleX link mirrors both ways (docs/bridge.md, "SimpleX"). The
+  shell shows it as "<agent> · SimpleX" while it keeps that title.
+- **Its home** is its `agent.json`'s `home`: `"simplex"`, its SimpleX
+  chat; absent (or anything else), its own chat. A `"simplex"` while it
+  has no SimpleX chat names its own chat.
+- **Its owner sets it** in Settings' Agents ("Reaches you in", shown for
+  every agent; SimpleX offered once the agent has a SimpleX chat), and
+  from the SimpleX link page, which asks once as a link starts (yes by
+  default) and says the answer in its ask for the link's ticket
+  (`{fragment: "simplex", agent, want: "link", home}`): the shell sets it
+  as it makes the ticket, and says so in its answer (`home`, or
+  `homeError`). Until the link has made its SimpleX chat, a `"simplex"`
+  names its own chat (above). An unlink's ticket sets it back to the
+  agent's own chat. Each is written as Settings writes the rest of
+  `agent.json`: onto what it holds now, read just before, then deployed.
+- **The sidebar marks** the chat an agent's home names (a bell), read
+  from `agent.json` once a page for each agent.
+- Web push is as before, whatever the home (docs/chat-records.md,
+  "Push").
+
 ### A chat's records
 
 A chat's records (its `chat` and `work` channels: turns, steps,

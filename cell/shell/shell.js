@@ -66,7 +66,7 @@ const promptDeck = { hand: APP_PROMPTS.map((_, i) => i).slice(0, PROMPT_HAND), d
 // failed (what an earlier one said stays: a failure is not "none");
 // invites: those waiting on their emails, theirs to answer (`GET /api/invites`);
 // seat: theirs, as Settings last read it (`GET /api/seat`'s; none unread)
-const state = { me: null, guest: false, fragments: [], invites: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null };
+const state = { me: null, guest: false, fragments: [], invites: [], computer: null, agents: new Map(), computerFailed: false, current: store.get(CURRENT, null), frames: new Map(), page: null, seat: null, homes: new Map() };
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -811,7 +811,7 @@ function renderHeading() {
   $("new-chat").hidden = !open || state.guest || !primaryAgent()?.identity;
   $("chat-options").hidden = !open;
   if (!open) return;
-  const title = titleOf(state.current);
+  const title = chatTitle(state.current);
   $("chat-title").textContent = title;
   $("chat-title").title = title;
   const frame = state.frames.get(state.current);
@@ -943,7 +943,7 @@ function renderChats() {
     row.type = "button";
     row.dataset.key = `chat:${f.name}`;
     row.setAttribute("aria-current", active ? "page" : "false");
-    row.append(el("span", "label", titleOf(f.name)), ...unreadMark(f));
+    row.append(el("span", "label", chatTitle(f.name)), ...homeMark(f), ...unreadMark(f));
     row.onclick = () => { openChat(f.name); leaveSidebar(); };
     return row;
   });
@@ -1124,6 +1124,97 @@ const agentOfChat = (name) => state.agents.get(chatAgentOf(name))?.fragment ?? n
 // is titled on its own, as any chat ("Your first chat": FIRST_CHAT), and
 // never by its agent: the agent's name is its fragment's alone.
 const agentsOwnChat = (agent) => chats().find((f) => own(f) && labelOf(f.name) === `${labelOf(agent)}-chat`) ?? null;
+// An agent's SimpleX chat: the person's chat labelled `<label>-simplex`,
+// which the agent's computer makes for them as its SimpleX is linked, and
+// which mirrors their SimpleX app both ways (docs/bridge.md, "SimpleX").
+// Titled "SimpleX" (`SIMPLEX_TITLE`), it is shown as "<agent> · SimpleX":
+// its title is its own, never the agent's name, which a rename changes.
+const SIMPLEX_TITLE = "SimpleX";
+// (with the agent in it: a chat of its label an earlier agent left is none)
+const simplexChatOf = (agent) => {
+  const id = [...state.agents.values()].find((a) => a.fragment === agent)?.identity;
+  return chats().find((f) => own(f) && labelOf(f.name) === `${labelOf(agent)}-simplex` && !!id && (f.agents ?? []).includes(id)) ?? null;
+};
+const simplexAgentOf = (name) => [...state.agents.values()].find((a) => simplexChatOf(a.fragment)?.name === name)?.fragment ?? null;
+function chatTitle(name) {
+  const agent = byName(name)?.title === SIMPLEX_TITLE ? simplexAgentOf(name) : null;
+  return agent ? `${titleOf(agent)} · ${SIMPLEX_TITLE}` : titleOf(name);
+}
+// ---- an agent's home: where it reaches its person (Paul, 2026-10-26):
+// its own chat, or its SimpleX chat, as its agent.json's `home` says
+// (`"simplex"`; absent, its chat). Its routines without a chat run there,
+// and its computer tells it so (docs/api.md, "An agent's home").
+// One value per agent, `state.homes`, which the sidebar's bell and
+// Settings' pick both render from (`homeIs`): read from agent.json while
+// unknown (`readHome`), and set by each write that lands (`setHome`: a pick,
+// a link's box, an unlink), each through the agent's one writer. A read is
+// let go when a write began or ended after it was asked (`homeWrites`), so
+// it never undoes one. One that fails leaves it unknown and says so in
+// Settings, with Try again (`homeUnread`); Settings shown read it again. ----
+const homeWrites = new Map();
+const homeReads = new Set();
+const homeUnread = new Set();
+const wrote = (agent) => homeWrites.set(agent, (homeWrites.get(agent) ?? 0) + 1);
+function readHome(agent) {
+  if (homeReads.has(agent)) return;
+  homeReads.add(agent);
+  if (homeUnread.delete(agent)) paintHomes();
+  const asked = homeWrites.get(agent) ?? 0;
+  agentJson(agent)
+    .catch((e) => (e.status === 404 ? {} : null))
+    .then((j) => {
+      homeReads.delete(agent);
+      if ((homeWrites.get(agent) ?? 0) !== asked) return;
+      if (j) return homeIs(agent, j.home);
+      homeUnread.add(agent);
+      paintHomes();
+    });
+}
+function loadHomes() {
+  for (const a of state.agents.values()) {
+    if (!state.homes.has(a.fragment) && own(byName(a.fragment) ?? {})) readHome(a.fragment);
+  }
+  paintHomes();
+}
+function homeIs(agent, home) {
+  state.homes.set(agent, home === "simplex" ? "simplex" : "chat");
+  renderChats();
+  paintHomes();
+}
+// the chat an agent's home names: its SimpleX chat when picked and there,
+// else its own chat
+const homeChatOf = (agent) => (state.homes.get(agent) === "simplex" && simplexChatOf(agent)) || agentsOwnChat(agent);
+function homeMark(f) {
+  const agent = [...state.agents.values()].find((a) => state.homes.has(a.fragment) && homeChatOf(a.fragment)?.name === f.name)?.fragment;
+  if (!agent) return [];
+  const m = el("span", "home-mark");
+  m.replaceChildren(icon("bell"));
+  m.title = `${titleOf(agent)} reaches you here`;
+  m.setAttribute("role", "img");
+  m.setAttribute("aria-label", m.title);
+  return [m];
+}
+// Its home set on agent.json as it is now, through its writer whatever is
+// shown (`writeAgentJson`: nothing written when it is so already), then
+// shown; a write that fails has it read again.
+async function setHome(agent, simplex) {
+  wrote(agent);
+  try {
+    await writeAgentJson(agent, (next) => {
+      if ((next.home === "simplex") === simplex) return null;
+      if (simplex) next.home = "simplex";
+      else delete next.home;
+      return `its home: ${simplex ? "its SimpleX chat" : "its chat"}`;
+    });
+  } catch (e) {
+    wrote(agent);
+    homeReads.delete(agent);
+    readHome(agent);
+    throw e;
+  }
+  wrote(agent);
+  homeIs(agent, simplex ? "simplex" : null);
+}
 
 function openChat(name, push = true) {
   if (!byName(name)) return;
@@ -1426,7 +1517,10 @@ async function openSimplex(agent) {
 // port, for its own agent. The platform makes it for the agent's owner
 // alone, signed (an unlink's closes the agent's door at once), and the
 // page hands it to the computer, which takes nothing else (docs/api.md,
-// "An agent's doors").
+// "An agent's doors"). A link's ask may say whether the agent is to reach
+// its person there (`home`: the page asks as the link starts, yes by
+// default), which sets its home as the ticket is made (`setHome`); an
+// unlink's takes its home back to its own chat.
 addEventListener("message", async (e) => {
   const m = e.data;
   if (m?.fragment !== "simplex" || !["link", "unlink"].includes(m.want) || !state.computer?.simplex) return;
@@ -1437,6 +1531,10 @@ addEventListener("message", async (e) => {
     reply.ticket = await api("POST", `/api/computers/${seg(state.computer.computer)}/agents/${seg(m.agent)}/door`, { door: "simplex", act: m.want });
   } catch (err) {
     reply.error = err.message;
+  }
+  const home = m.want === "link" ? (typeof m.home === "boolean" ? m.home : null) : false;
+  if (reply.ticket && home !== null) {
+    await setHome(m.agent, home).then(() => { reply.home = home; }, (err) => { reply.homeError = err.message; });
   }
   frame.contentWindow?.postMessage(reply, e.origin);
 });
@@ -1505,7 +1603,8 @@ function freeLabel(base) {
   const taken = new Set(state.fragments.map((f) => labelOf(f.name)));
   for (let i = 1; ; i++) {
     const l = i === 1 ? base : `${base}-${i}`;
-    if (!taken.has(l) && !taken.has(`${l}-chat`)) return l;
+    // an agent's chats are its label's: none an earlier agent left is taken over
+    if (!taken.has(l) && !taken.has(`${l}-chat`) && !taken.has(`${l}-simplex`)) return l;
   }
 }
 function pickName() {
@@ -1729,7 +1828,7 @@ function foundRow(name, preview, extra) {
   row.type = "button";
   row.dataset.fragment = name;
   const text = el("span", "agent-copy");
-  text.append(el("span", "label", titleOf(name)));
+  text.append(el("span", "label", chatTitle(name)));
   if (preview) text.append(el("span", "agent-preview", preview));
   row.append(isChat(name) ? mark(name, "small") : iconOf(name), text);
   if (f?.archived) row.append(el("span", "meta", "Archived"));
@@ -2870,6 +2969,26 @@ function dataSection() {
 // says so, so no other setting of the agent (its tier, its model) is lost.
 const agentJson = (agent) => api("GET", `/api/f/${seg(agent)}/file?path=agent.json`);
 const UNREAD_SETTINGS = "Couldn't read this agent's settings, so nothing was changed. Try again.";
+// One write of an agent's agent.json at a time, each on what the one before
+// wrote: `change` sets its pick on what agent.json holds now (its tier
+// kept), and says what changed.
+const agentJsonWrites = new Map();
+function writeAgentJson(agent, change) {
+  const written = (agentJsonWrites.get(agent) ?? Promise.resolve()).catch(() => {}).then(async () => {
+    const now = await agentJson(agent).catch((e) => {
+      if (e.status === 404) return {};
+      throw new Error(UNREAD_SETTINGS);
+    });
+    const next = { ...now, tier: now.tier ?? DEFAULT_AGENT_TIER };
+    const message = change(next);
+    // (none: as it is already, so nothing written)
+    if (message === null) return;
+    await api("POST", `/api/f/${seg(agent)}/files`, { message, files: [{ path: "agent.json", text: JSON.stringify(next, null, 2) + "\n" }] });
+    await api("POST", `/api/f/${seg(agent)}/deploy`, {});
+  });
+  agentJsonWrites.set(agent, written);
+  return written;
+}
 function agentSettings(a, row, modeled) {
   const box = el("div", "agent-setting");
   box.dataset.agent = a.fragment;
@@ -2877,36 +2996,24 @@ function agentSettings(a, row, modeled) {
   // what the picks show: agent.json, none (404: the defaults), or unread (null)
   const read = agentJson(a.fragment).catch((e) => (e.status === 404 ? {} : null));
   read.then((j) => { if (j === null) said.textContent = "Couldn't read this agent's settings: reload to see them."; });
-  let last = Promise.resolve();
-  // `change` sets its pick on what agent.json holds now (its tier kept),
-  // and says what changed
-  const write = (change) => (last = last.catch(() => {}).then(async () => {
-    const now = await agentJson(a.fragment).catch((e) => {
-      if (e.status === 404) return {};
-      throw new Error(UNREAD_SETTINGS);
-    });
-    const next = { ...now, tier: now.tier ?? DEFAULT_AGENT_TIER };
-    const message = change(next);
-    await api("POST", `/api/f/${seg(a.fragment)}/files`, { message, files: [{ path: "agent.json", text: JSON.stringify(next, null, 2) + "\n" }] });
-    await api("POST", `/api/f/${seg(a.fragment)}/deploy`, {});
-  }));
+  const write = (change) => writeAgentJson(a.fragment, change);
   // the model pick: when there may be a choice, a route the deployment
   // names (Private, Standard) or a model of a provider the person
   // connected; whether there is one, with a single route, is the agent's
   // own tier's to say (`modelPicker`, once agent.json is read)
   const choice = modeled.length > 0 || routesOffered().length > 0;
-  const picks = [...(choice ? [modelPicker(a, modeled, read, write, said)] : []), reasoningPicker(a, read, write, said)];
+  const picks = [...(choice ? [modelPicker(a, modeled, read, write, said)] : []), reasoningPicker(a, read, write, said), ...homePicker(a, said)];
   box.append(row, ...picks, said);
   return box;
 }
 // a pick (`value`) being written (`written`), said under its agent's
 // settings; one not written shows again what agent.json holds (`was`)
-async function savePick(pick, value, said, written) {
+async function savePick(pick, value, said, written, saved = "Saved: its next message uses it.") {
   pick.disabled = true;
   said.textContent = "Saving…";
   try {
     await written;
-    said.textContent = "Saved: its next message uses it.";
+    said.textContent = saved;
     pick.dataset.saved = value;
     pick.dataset.was = value;
   } catch (e) {
@@ -3018,6 +3125,53 @@ function reasoningPicker(a, read, write, said) {
   };
   return settingLabel("Reasoning", pick);
 }
+
+// ---- where an agent reaches its person (its home, above): its own chat,
+// or its SimpleX chat once it has one. Always shown, so where its
+// reminders go is never a guess: read again while unknown, and a read that
+// failed says so under it, with Try again. ----
+const homeUnreadLines = new WeakMap();
+function homePicker(a, said) {
+  const pick = el("select", "agent-model");
+  pick.dataset.homeFor = a.fragment;
+  pick.setAttribute("aria-label", `Where ${titleOf(a.fragment)} reaches you`);
+  pick.disabled = true;
+  pick.onchange = async () => {
+    const value = pick.value;
+    pick.dataset.saving = "1";
+    await savePick(pick, value, said, setHome(a.fragment, value === "simplex"), "Saved.");
+    delete pick.dataset.saving;
+    paintHome(pick);
+  };
+  const again = el("button", "quiet", "Try again");
+  again.type = "button";
+  again.onclick = () => readHome(a.fragment);
+  const unread = actionLine(el("span", "muted", "Couldn't read where it reaches you."), again);
+  unread.dataset.homeUnread = a.fragment;
+  homeUnreadLines.set(pick, unread);
+  paintHome(pick);
+  if (!state.homes.has(a.fragment)) readHome(a.fragment);
+  return [settingLabel("Reaches you in", pick), unread];
+}
+// A home pick shows its agent's home as the shell knows it (`state.homes`),
+// with its own chat and, once it has one, its SimpleX chat to pick; while
+// its home is unknown it waits (or says its read failed), and while its own
+// pick saves it is left be.
+function paintHome(pick) {
+  const agent = pick.dataset.homeFor;
+  const home = state.homes.get(agent);
+  const unread = homeUnreadLines.get(pick);
+  if (unread) unread.hidden = Boolean(home) || !homeUnread.has(agent);
+  if (!home || pick.dataset.saving) return;
+  const chat = agentsOwnChat(agent);
+  const options = [modelOption("", chat ? chatTitle(chat.name) : "Its chat")];
+  if (home === "simplex" || simplexChatOf(agent)) options.push(modelOption("simplex", SIMPLEX_TITLE));
+  pick.replaceChildren(...options);
+  pick.value = pick.dataset.was = home === "simplex" ? "simplex" : "";
+  pick.disabled = false;
+  pick.dataset.read = "1";
+}
+const paintHomes = () => document.querySelectorAll("select[data-home-for]").forEach(paintHome);
 
 // ---- connections (decisions 22, 37 and 44): every provider the platform
 // offers, one row each: what it is, its state, which of the person's agents
@@ -3951,6 +4105,7 @@ async function load(changed = false) {
   refreshSimplex();
   markSeen();
   renderAgentFaces();
+  loadHomes();
   for (const f of chats()) if (own(f) && f.title === UNTITLED && f.preview) titleFromFirst(f.name);
   // answered, it goes on with what a failure put off, whoever asked
   if (computers && unknown) reopenSettings().catch(() => {});
