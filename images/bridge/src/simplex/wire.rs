@@ -123,6 +123,16 @@ pub fn name_ok(name: &str) -> bool {
 
 /// Chars no display name holds.
 const NAME_PROHIBITED: &str = ".,;/\\#@'\"`~";
+/// The Unicode the pinned core's categories are (v7.0.3, built with GHC
+/// 9.6, whose base is Unicode 15.0.0: the lab's core takes a char 15.0
+/// assigned, and refuses one of 15.1, as unassigned). A char newer than
+/// that is no letter or symbol to the core, so `valid_name` must not know
+/// it either (Alex's review of #628: 🫩 of 16.0).
+const CORE_UNICODE: (u64, u64, u64) = (15, 0, 0);
+const _: () = assert!(
+    unicode_properties::UNICODE_VERSION.0 == CORE_UNICODE.0 && unicode_properties::UNICODE_VERSION.1 == CORE_UNICODE.1 && unicode_properties::UNICODE_VERSION.2 == CORE_UNICODE.2,
+    "a display name's categories are the core's Unicode's"
+);
 /// Chars a display name holds at most (`take 50`).
 const NAME_CHARS_MAX: usize = 50;
 
@@ -772,6 +782,11 @@ mod tests {
             (&format!("{} extra", &long[..49]), &long[..49]),
         ];
         for (given, kept) in core {
+            assert_eq!(valid_name(given), kept, "{given:?}");
+        }
+        // the core's Unicode, 15.0 (Alex's review): a letter or a symbol it
+        // assigned is kept; one of 15.1 or later is none to it, so dropped
+        for (given, kept) in [("a\u{870}", "a\u{870}"), ("a\u{11f04}", "a\u{11f04}"), ("🩵", "🩵"), ("a\u{2ebf0}", "a"), ("a\u{2ffc}", "a"), ("a\u{1c89}", "a"), ("Bot 🫩", "Bot"), ("🫩", ""), ("a\u{1faea}", "a")] {
             assert_eq!(valid_name(given), kept, "{given:?}");
         }
         // combining marks: only after a letter (a Devanagari vowel sign, an acute)

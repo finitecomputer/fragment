@@ -494,7 +494,9 @@ drives it.
   label: the core makes no profile of a name it refuses, and then does not
   start. A name is what the core keeps of the title, so it takes it as it
   is: `wire::valid_name` is v7.0.3's `mkValidName` ported char for char
-  (by Unicode's general categories, `unicode-properties`; never
+  (by Unicode's general categories, `unicode-properties` pinned at
+  Unicode 15.0, the core's own: a char of 15.1 or later is none to it,
+  so dropped; never
   `.,;/\#@'"`~`, a combining mark only after a letter, at most 50
   chars), held to the core's own tests (its tests/ValidNames.hs) and, in
   the lab, to the real core with 200 seeded titles of every kind of char

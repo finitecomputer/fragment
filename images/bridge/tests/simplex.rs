@@ -924,7 +924,7 @@ async fn a_rename_reaches_the_owners_app() {
     // marks, symbols of each kind, punctuation of each kind, the prohibited
     // ones, spaces of several kinds, controls), seeded: each the core takes
     // as `display_name` makes it
-    let pool: Vec<char> = "aZé日ボалж7٣Ⅻ²½\u{301}\u{93e}\u{20dd}🧇©€±^.,;/\\#@'\"`~-_!?:()[]{}«»&*% \u{a0}\u{2003}\t\n\u{1}\u{200b}".chars().collect();
+    let pool: Vec<char> = "aZé日ボалж7٣Ⅻ²½\u{11f04}\u{1c89}\u{2ebf0}🫩\u{301}\u{93e}\u{20dd}🧇©€±^.,;/\\#@'\"`~-_!?:()[]{}«»&*% \u{a0}\u{2003}\t\n\u{1}\u{200b}".chars().collect();
     let mut seed: u64 = 0x5eed_f0a9;
     for i in 0..200 {
         let title: String = (0..1 + i % 24)
@@ -937,8 +937,16 @@ async fn a_rename_reaches_the_owners_app() {
         let said = rename(&mut agent, &name).await;
         assert!(matches!(&said, Resp::Profile { name: n, .. } if *n == name), "{title:?} as {name:?}: {said:?}");
     }
-    // what it refuses (the bridge's old names kept `.` and `'`, and a mark anywhere)
-    for refused in ["Dr. Who", "Pauls.Bot", "\u{93e}Bot", "a-\u{93e}b"] {
+    // its Unicode (Alex's review): 15.0's chars are letters and symbols to it,
+    // and kept; 15.1's, 16.0's and 17.0's are none, and dropped as it drops them
+    for (title, kept) in [("a\u{870}", "a\u{870}"), ("a\u{11f04}", "a\u{11f04}"), ("a\u{1e4d0}", "a\u{1e4d0}"), ("a🩵", "a🩵"), ("Bot \u{2ebf0}", "Bot"), ("Bot \u{2ffc}", "Bot"), ("Bot \u{1c89}", "Bot"), ("Bot 🫩", "Bot"), ("Bot \u{1faea}", "Bot")] {
+        let name = display_name(Some(title), "agent");
+        let said = rename(&mut agent, &name).await;
+        assert!(name == kept && matches!(&said, Resp::Profile { name: n, .. } if *n == name), "{title:?} as {name:?}: {said:?}");
+    }
+    // what it refuses: the bridge's old names kept `.` and `'`, a mark
+    // anywhere, and its newest chars
+    for refused in ["Dr. Who", "Pauls.Bot", "\u{93e}Bot", "a-\u{93e}b", "a\u{2ebf0}", "Bot 🫩", "🫩", "a\u{1c89}"] {
         let r = agent.api.cmd(&format!("/p '{refused}'")).await;
         assert!(r.to_string().contains("invalidDisplayName") && !wire::name_ok(refused), "{refused}: {r}");
     }
