@@ -105,12 +105,16 @@ each is inert without a link):
    an unlink (a ticket the platform signs, which the bridge checks and
    takes once, and the invitation shown only to that page), and only the
    link's door key makes a record that speaks for the owner (the platform
-   refuses one the agent's own key posts). **What remains:** root in the
-   container can still read the door key's file (and the core's
-   databases), and the agent's tools run as root today, so a
-   prompt-injected agent with a shell could read the key and sign as the
-   door. The real fix, later, is running the agent as a non-root user that
-   cannot read `/data/simplex`.
+   refuses one the agent's own key posts). **What remains:** the agent
+   runs as its own user (`hermes`), and `/data/simplex` is root's alone
+   (0700, made so at every start) and `simplex-chat` root's and on no
+   PATH (#615), so the agent's tools read neither the door key nor the
+   core's databases. But its passwordless sudo (docs/computers.md, "Root
+   in our Hermes image") reaches root, so a prompt-injected agent with a
+   shell could still read the key and sign as the door, or drive a core
+   over its bot API on loopback (no authentication). Closing that needs
+   the agent without sudo, or the bridge and its cores out of its root's
+   reach.
 2. **A rollback past the linking itself** leaves the person's app talking
    to a contact that no longer exists. Their messages go unanswered until
    the owner links again. Linking asks for a save at once to keep the
