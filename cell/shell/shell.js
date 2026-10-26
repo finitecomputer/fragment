@@ -1149,19 +1149,25 @@ function chatTitle(name) {
 // unknown (`readHome`), and set by each write that lands (`setHome`: a pick,
 // a link's box, an unlink), each through the agent's one writer. A read is
 // let go when a write began or ended after it was asked (`homeWrites`), so
-// it never undoes one. ----
+// it never undoes one. One that fails leaves it unknown and says so in
+// Settings, with Try again (`homeUnread`); Settings shown read it again. ----
 const homeWrites = new Map();
 const homeReads = new Set();
+const homeUnread = new Set();
 const wrote = (agent) => homeWrites.set(agent, (homeWrites.get(agent) ?? 0) + 1);
 function readHome(agent) {
   if (homeReads.has(agent)) return;
   homeReads.add(agent);
+  if (homeUnread.delete(agent)) paintHomes();
   const asked = homeWrites.get(agent) ?? 0;
   agentJson(agent)
     .catch((e) => (e.status === 404 ? {} : null))
     .then((j) => {
       homeReads.delete(agent);
-      if (j && (homeWrites.get(agent) ?? 0) === asked) homeIs(agent, j.home);
+      if ((homeWrites.get(agent) ?? 0) !== asked) return;
+      if (j) return homeIs(agent, j.home);
+      homeUnread.add(agent);
+      paintHomes();
     });
 }
 function loadHomes() {
@@ -2996,7 +3002,7 @@ function agentSettings(a, row, modeled) {
   // connected; whether there is one, with a single route, is the agent's
   // own tier's to say (`modelPicker`, once agent.json is read)
   const choice = modeled.length > 0 || routesOffered().length > 0;
-  const picks = [...(choice ? [modelPicker(a, modeled, read, write, said)] : []), reasoningPicker(a, read, write, said), homePicker(a, said)];
+  const picks = [...(choice ? [modelPicker(a, modeled, read, write, said)] : []), reasoningPicker(a, read, write, said), ...homePicker(a, said)];
   box.append(row, ...picks, said);
   return box;
 }
@@ -3122,7 +3128,9 @@ function reasoningPicker(a, read, write, said) {
 
 // ---- where an agent reaches its person (its home, above): its own chat,
 // or its SimpleX chat once it has one. Always shown, so where its
-// reminders go is never a guess. ----
+// reminders go is never a guess: read again while unknown, and a read that
+// failed says so under it, with Try again. ----
+const homeUnreadLines = new WeakMap();
 function homePicker(a, said) {
   const pick = el("select", "agent-model");
   pick.dataset.homeFor = a.fragment;
@@ -3135,15 +3143,25 @@ function homePicker(a, said) {
     delete pick.dataset.saving;
     paintHome(pick);
   };
+  const again = el("button", "quiet", "Try again");
+  again.type = "button";
+  again.onclick = () => readHome(a.fragment);
+  const unread = actionLine(el("span", "muted", "Couldn't read where it reaches you."), again);
+  unread.dataset.homeUnread = a.fragment;
+  homeUnreadLines.set(pick, unread);
   paintHome(pick);
-  return settingLabel("Reaches you in", pick);
+  if (!state.homes.has(a.fragment)) readHome(a.fragment);
+  return [settingLabel("Reaches you in", pick), unread];
 }
 // A home pick shows its agent's home as the shell knows it (`state.homes`),
 // with its own chat and, once it has one, its SimpleX chat to pick; while
-// its home is unknown it waits, and while its own pick saves it is left be.
+// its home is unknown it waits (or says its read failed), and while its own
+// pick saves it is left be.
 function paintHome(pick) {
   const agent = pick.dataset.homeFor;
   const home = state.homes.get(agent);
+  const unread = homeUnreadLines.get(pick);
+  if (unread) unread.hidden = Boolean(home) || !homeUnread.has(agent);
   if (!home || pick.dataset.saving) return;
   const chat = agentsOwnChat(agent);
   const options = [modelOption("", chat ? chatTitle(chat.name) : "Its chat")];
