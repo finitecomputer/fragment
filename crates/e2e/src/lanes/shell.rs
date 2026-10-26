@@ -3865,6 +3865,45 @@ fn home_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, 
         stale.iter().all(|c| c["read"] == true && c["written"] == true && c["kept"] == true),
         json!(stale),
     );
+    // Alex's second review of #619: a home read that fails (a 503, as a
+    // deploy answers) leaves it unknown, never stuck. Its agent.json's reads
+    // refused while `__refuse` is not false
+    let refusing = format!(
+        "(() => {{ const real = window.fetch; window.__refused = 0; window.fetch = (u, o) => {{ if (window.__refuse !== false && (o?.method ?? 'GET') === 'GET' && String(u).endsWith({})) {{ window.__refused++; \
+         return Promise.resolve(new Response(JSON.stringify({{ error: 'unavailable', message: 'refused for the test' }}), {{ status: 503, headers: {{ 'content-type': 'application/json' }} }})); }} return real(u, o); }}; }})();",
+        js(&format!("/api/f/{agent}/file?path=agent.json"))
+    );
+    let unread_of = format!("document.querySelector('[data-home-unread={agent:?}]')");
+    let painted = format!("(() => {{ const v = {seen}; return {pick_of}?.dataset.read === '1' && v.value === '' && !v.disabled && v.options.length === 2 && !{unread_of}?.checkVisibility(); }})()");
+    // its first read refused, then Settings opened once reads answer: read again there
+    let p = b.open_with_script(&format!("{}/", api.base), &refusing)?;
+    let refused = b.until(&p, "window.__refused > 0 && location.pathname === '/'", wait);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    b.eval(&p, "(window.__refuse = false, true)")?;
+    // (Settings' button pressed as the page has it: its sidebar may be folded)
+    b.eval(&p, "(document.getElementById('settings').click(), true)")?;
+    let reopened = b.until(&p, &painted, wait);
+    let first = json!({ "refused": refused, "seen": b.eval(&p, &seen)? });
+    b.close(p)?;
+    s.ok("a home whose first read fails (a 503) is read again when Settings open, and the pick shows it", refused && reopened, first);
+    // its read refused with Settings open: said under the pick, which waits; Try again reads it
+    let p = b.open_with_script(&format!("{}/settings", api.base), &refusing)?;
+    let said = b.until(&p, &format!("{unread_of}?.checkVisibility() === true && {pick_of}.disabled && {pick_of}.options.length === 0"), wait);
+    let line = b.eval(&p, &format!("{unread_of}?.innerText ?? null"))?;
+    b.eval(&p, &format!("({unread_of}?.scrollIntoView({{ block: 'center' }}), true)"))?;
+    let _ = b.screenshot(&p, &shots.join("desktop-agent-home-unread.png"));
+    b.eval(&p, "(window.__refuse = false, true)")?;
+    if said {
+        b.click(&p, &format!("[data-home-unread={agent:?}] button"))?;
+    }
+    let retried = said && b.until(&p, &painted, wait);
+    let second = json!({ "line": line, "seen": b.eval(&p, &seen)? });
+    b.close(p)?;
+    s.ok(
+        "a home read that fails with Settings open says so under its pick in one line, with Try again, which reads it again and shows it",
+        said && line.as_str().is_some_and(|l| l.contains("Couldn't read where it reaches you.") && l.contains("Try again")) && retried,
+        second,
+    );
     super::computers::lever_with(api, &computer, json!({ "op": "simplex", "on": false }))?;
     anyhow::ensure!(write_home(None)? == 200, "agent.json as it was");
     // as the lanes after it expect it: no SimpleX chat
