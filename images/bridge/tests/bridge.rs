@@ -944,6 +944,81 @@ async fn a_routine_with_no_chat_runs_at_home() {
     });
 }
 
+/// Goal (Alex's review of #620): a routine whose home is its SimpleX chat,
+/// named by its link and not made yet (its making refused for now, or a
+/// restart between its naming and its making), waits for it: it is neither
+/// dropped nor run elsewhere, a restart between, and runs there once it is
+/// made, once. One that has waited its most (`limits::HOME_CHAT_WAIT_MS`
+/// after it fired: here, a computer off meanwhile) runs in its own chat.
+#[tokio::test]
+async fn a_routine_waits_for_its_simplex_chat() {
+    use fragment_bridge::simplex::{link, run};
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let own = fake.chat_named("juniper-chat--h6j7", &["juniper"]);
+    let simplex = "juniper-simplex--w9x2".to_string();
+    let dir = support::dir("routine-waits");
+    // its link, bound, naming its SimpleX chat (no core runs here), whose making the platform refuses for now
+    let l = link::Link { phase: link::Phase::Linked { contact: 3, name: "paul".into() }, ..Default::default() };
+    let saved = run::Saved { identity: "npub1juniper".into(), generation: 1, link: l, used: Default::default(), abandoned: Default::default(), receiving: Default::default(), sending: Default::default(), chat: Some(simplex.clone()) };
+    run::store(&dir.join("simplex").join("juniper--k3x9"), &saved).expect("its link's file");
+    fake.with(|w| {
+        w.refuse_makes = true;
+        w.fragments.get_mut("juniper--k3x9").expect("its fragment").files.insert("agent.json".into(), bytes::Bytes::from(r#"{"tier":"cheap","home":"simplex"}"#));
+    });
+    let config = || {
+        let mut cfg = support::config(&fake.url(), &dir, support::settings());
+        cfg.simplex = Some(run::Config { bin: dir.join("no-core"), dir: dir.join("simplex"), smp: None, xftp: None });
+        cfg
+    };
+    let home = |text: &str| json!({ "kind": "routine", "text": text });
+    let said = |w: &World, chat: &str| replies(w, chat).iter().filter_map(|r| r["text"].as_str().map(str::to_string)).collect::<Vec<_>>();
+    // a first life, so what fires next is read from its cursor
+    let bridge = support::start(config(), support::script());
+    following(&fake, 2).await;
+    bridge.stop().await;
+    // fired 11 minutes ago, the computer off and its chat not made since: its own chat
+    fake.with(|w| {
+        w.append("juniper--k3x9", "tasks", "npub1paul", home("water the plants"));
+        let fired = i64::try_from(fragment_bridge::log::now_ms()).expect("ms") - 11 * 60 * 1000;
+        w.fragments.get_mut("juniper--k3x9").expect("its fragment").channels.get_mut("tasks").expect("its tasks").records.last_mut().expect("the routine")["at"] = json!(fired);
+    });
+    let bridge = support::start(config(), support::script());
+    following(&fake, 2).await;
+    fake.until(WAIT, "the routine that waited its most, in its own chat", |w| said(w, &own).len() == 1).await;
+    // fired now, its chat's making refused: it waits, run nowhere
+    fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1paul", home("call mom")));
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    bridge.stop().await;
+    // a restart, its making still refused: it still waits (its home read again, its routine run nowhere)
+    let home_reads = |w: &World| w.requests.iter().filter(|r| r.0 == "GET /api/f/juniper--k3x9/file" && r.1.contains("agent.json")).count();
+    let asked = fake.with(|w| home_reads(w));
+    let bridge = support::start(config(), support::script());
+    fake.until(WAIT, "its home read again after the restart", |w| home_reads(w) > asked).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    bridge.stop().await;
+    fake.with(|w| {
+        assert_eq!(said(w, &own), ["echo: [your routine] water the plants"], "nothing else in its own chat");
+        assert!(w.made.is_empty() && !w.fragments.contains_key(&simplex), "its SimpleX chat not made");
+        w.refuse_makes = false;
+    });
+    // its chat made by its name (its poster's `ensure_chat`; no core runs here to start one): the routine runs there
+    let bridge = support::start(config(), support::script());
+    let api = fragment_bridge::api::Api::new(&fake.url()).expect("an address");
+    let juniper = fragment_bridge::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None };
+    run::ensure_chat(&api, &juniper, &simplex).await.expect("made");
+    fake.until(WAIT, "the routine in its SimpleX chat", |w| said(w, &simplex).len() == 1).await;
+    bridge.stop().await;
+    // a restart: the fires read again, nothing runs twice
+    let bridge = support::start(config(), support::script());
+    following(&fake, 3).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    bridge.stop().await;
+    fake.with(|w| {
+        assert_eq!(said(w, &own), ["echo: [your routine] water the plants"]);
+        assert_eq!(said(w, &simplex), ["echo: [your routine] call mom"], "once, there");
+        assert_eq!(w.made, std::slice::from_ref(&simplex), "made once");
+    });
+}
 /// Goal (Paul, 2026-10-26: "SimpleX is a chat of its own"; Alex's review
 /// of #620): an agent's SimpleX chat is made by the name its link chose,
 /// once, for its owner: theirs, titled SimpleX, the agent its maker and an

@@ -254,17 +254,38 @@ impl Home {
     }
 }
 
+/// Where a routine that names no chat runs (`home_chat`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HomeChat {
+    In(String),
+    /// Not yet: its home is its SimpleX chat, which its link has named and
+    /// not made yet.
+    Unmade,
+    /// Nowhere: it has no chat with its owner.
+    Nowhere,
+}
+
 /// The chat an agent's home names: its SimpleX chat (`simplex`, the one its
 /// link mirrors, while bound) when its home is SimpleX, else its own chat,
 /// one of its owner's (`owners`: the agent's list for them) that the agent
 /// is in (`mine`: its own list), so one an earlier agent of its label left,
-/// or one it has left, is none; none when it has neither.
-pub fn home_chat(agent_fragment: &str, home: Home, simplex: Option<&str>, owners: &[FragmentEntry], mine: &[FragmentEntry]) -> Option<String> {
+/// or one it has left, is none; none when it has neither. Its SimpleX chat
+/// is named before it is made (simplex/run.rs, `Saved::chat`), so it is the
+/// home once it is in `mine`; until then a routine waits for it (Alex's
+/// review of #620: its making refused for now, or a restart between its
+/// naming and its making), unless it has `waited` its most
+/// (`limits::HOME_CHAT_WAIT_MS`): then its own chat, never dropped.
+pub fn home_chat(agent_fragment: &str, home: Home, simplex: Option<&str>, owners: &[FragmentEntry], mine: &[FragmentEntry], waited: bool) -> HomeChat {
     if let (Home::Simplex, Some(chat)) = (home, simplex) {
-        return Some(chat.to_string());
+        if mine.iter().any(|m| m.name == chat) {
+            return HomeChat::In(chat.to_string());
+        }
+        if !waited {
+            return HomeChat::Unmade;
+        }
     }
     let theirs: Vec<FragmentEntry> = owners.iter().filter(|f| mine.iter().any(|m| m.name == f.name)).cloned().collect();
-    bot_chat(agent_fragment, &theirs)
+    bot_chat(agent_fragment, &theirs).map_or(HomeChat::Nowhere, HomeChat::In)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -700,8 +721,9 @@ mod tests {
     /// alphabet), and its home is that chat only while its agent.json says
     /// `simplex` and its link names it, else its own chat. Valid: either
     /// way. Invalid: agent.json naming anything else or not JSON; `simplex`
-    /// with no SimpleX chat (its own chat); its own chat one it is not in,
-    /// or another agent's, or someone else's (none).
+    /// with no SimpleX chat (its own chat); its SimpleX chat named and not
+    /// made yet (waited for, then its own chat); its own chat one it is not
+    /// in, or another agent's, or someone else's (none).
     #[test]
     fn an_agents_home_is_its_simplex_chat_or_its_own() {
         assert_eq!(simplex_label("juniper--k3x9"), "juniper-simplex");
@@ -716,13 +738,22 @@ mod tests {
         }
         let list = [listed("juniper-chat--p2m4", "app", true), listed("juniper-chat--r7t5", "chat", false), listed("maple-chat--z8w6", "chat", true), listed("juniper-chat--h6j7", "chat", true)];
         let sx = Some("juniper-simplex--w9x2");
-        assert_eq!(home_chat("juniper--k3x9", Home::Simplex, sx, &list, &list).as_deref(), sx);
-        assert_eq!(home_chat("juniper--k3x9", Home::Chat, sx, &list, &list).as_deref(), Some("juniper-chat--h6j7"));
-        assert_eq!(home_chat("juniper--k3x9", Home::Simplex, None, &list, &list).as_deref(), Some("juniper-chat--h6j7"), "no SimpleX chat: its own");
-        assert_eq!(home_chat("juniper--k3x9", Home::Chat, None, &list, &list[..3]), None, "its own chat, left: none");
-        assert_eq!(home_chat("juniper--k3x9", Home::Chat, None, &list[..3], &list), None, "only its owner's chat of that label");
-        assert_eq!(home_chat("maple-2--q4w5", Home::Chat, None, &list, &list), None);
-        assert_eq!(home_chat("loner--k3x9", Home::Simplex, None, &[], &[]), None);
+        let own = HomeChat::In("juniper-chat--h6j7".into());
+        // its SimpleX chat made (in its own list): its home, waited or not
+        let made: Vec<FragmentEntry> = list.iter().cloned().chain([listed("juniper-simplex--w9x2", "chat", true)]).collect();
+        for waited in [false, true] {
+            assert_eq!(home_chat("juniper--k3x9", Home::Simplex, sx, &made, &made, waited), HomeChat::In("juniper-simplex--w9x2".into()));
+        }
+        // named and not made yet (Alex's review of #620): waited for, then its own chat; none of its own, nowhere
+        assert_eq!(home_chat("juniper--k3x9", Home::Simplex, sx, &list, &list, false), HomeChat::Unmade);
+        assert_eq!(home_chat("juniper--k3x9", Home::Simplex, sx, &list, &list, true), own, "waited its most: its own chat");
+        assert_eq!(home_chat("loner--k3x9", Home::Simplex, sx, &[], &[], true), HomeChat::Nowhere);
+        assert_eq!(home_chat("juniper--k3x9", Home::Chat, sx, &list, &list, false), own, "its home its own chat: no wait");
+        assert_eq!(home_chat("juniper--k3x9", Home::Simplex, None, &list, &list, false), own, "no SimpleX chat: its own");
+        assert_eq!(home_chat("juniper--k3x9", Home::Chat, None, &list, &list[..3], false), HomeChat::Nowhere, "its own chat, left: none");
+        assert_eq!(home_chat("juniper--k3x9", Home::Chat, None, &list[..3], &list, false), HomeChat::Nowhere, "only its owner's chat of that label");
+        assert_eq!(home_chat("maple-2--q4w5", Home::Chat, None, &list, &list, false), HomeChat::Nowhere);
+        assert_eq!(home_chat("loner--k3x9", Home::Simplex, None, &[], &[], false), HomeChat::Nowhere);
     }
 
     #[test]

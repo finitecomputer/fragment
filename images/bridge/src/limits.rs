@@ -243,6 +243,13 @@ pub const JOINS_HELD_MAX: usize = 1024;
 /// as cron skips a missed run.
 pub const TASKS_BACKLOG_MS: u64 = 60 * 60 * 1000;
 
+/// A routine whose home is its agent's SimpleX chat, named and not made yet
+/// (api.rs, `home_chat`), waits for it at most this long after it fired,
+/// then runs in the agent's own chat. Its making is tried every 30 s
+/// (simplex/run.rs, `CHAT_LOOK_MS`), and at once as a computer starts.
+pub const HOME_CHAT_WAIT_MS: u64 = 10 * 60 * 1000;
+const _: () = assert!(HOME_CHAT_WAIT_MS < TASKS_BACKLOG_MS);
+
 /// `GET /api/computer` is read again this often while awake, so an agent
 /// assigned to the computer meanwhile is followed within it.
 pub const COMPUTER_EVERY_MS: u64 = 60 * 1000;
