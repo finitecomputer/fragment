@@ -434,6 +434,22 @@ drives it.
   outside the relay's list, or one that does not answer) is given up on:
   cancelled at the core, and its message posted with a note that it did
   not arrive.
+- **A reply's files go to the owner's app too**, after its text, each as
+  SimpleX's apps show it (`run.rs`, `Handle::reply`: the one way anything
+  goes out over SimpleX). Audio whose length reads goes as a voice
+  message of that length (MP3, as Hermes speaks; MPEG-4, as the apps
+  record: `audio.rs`), a JPEG, PNG or GIF as an image (with the preview
+  SimpleX's own CLI sends), anything else as a file. Each is copied first
+  to the link's `out/<folder>/<its name>`, the core uploads it over XFTP
+  (through the relay, on a computer), and the copy goes once the core
+  says it is sent (`sndFileCompleteXFTP`) or failed (`sndFileError`), or
+  after `SEND_WAIT_MS` (5 minutes: cancelled at the core). At most 25 MiB
+  a file (the chat's own bound: padded into XFTP's chunks, one relay's
+  worth) and `SENDING_MAX` (8) under way. A file past either, empty or
+  unread, or one the link cannot send now (unlinked, its core down, its
+  ratchet out of step) stays in the chat alone, and the text says so:
+  "(I sent a voice message, in our chat.)"; one that fails later is told
+  as "(A voice message I sent didn't arrive here: it's in our chat.)".
 - **Only where the image names the core** (`BRIDGE_SIMPLEX_BIN`), which
   the bridge's reads of its computer say (`GET /api/computer?simplex=1`),
   so its owner's Settings offer SimpleX only on an image that does it (the
@@ -495,10 +511,13 @@ drives it.
   name), whether it runs, and why not.
 - **Its state** is `<dir>/<agent>/`: the core's two databases, its files
   and temp folders (one device: a received file is renamed from one into
-  the other), `door.key`, and `link.json` (the link, the agent it is of,
-  the start it last ran in, the tickets it took), written whole before
-  what it causes. One of another agent (a fragment's name made again) or
-  that does not read is set aside, renamed, never guessed.
+  the other), `door.key`, `out/` (the copies of the files it sends), and
+  `link.json` (the link, the agent it is of, the start it last ran in, the
+  tickets it took, the files it receives and sends: the core resumes both
+  after a restart, and a folder in `out/` it names no send of goes as the
+  bridge starts), written whole before what it causes. One of another
+  agent (a fragment's name made again) or that does not read is set
+  aside, renamed, never guessed.
 - **The hold stops every core** before the bridge answers it (`BRIDGE_HELD`
   waits for them), and none starts while it lasts: a save takes the cores'
   databases whole, as they are (`/_start` after `/_stop` crashes v7.0.3, so

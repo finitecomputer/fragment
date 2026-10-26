@@ -112,6 +112,16 @@ impl Lab {
     /// to its bot API. `bot`: `--create-bot-display-name`, else a person's
     /// `--user-display-name`.
     pub async fn start(&mut self, name: &str, bot: bool) -> Api {
+        self.start_client(name, bot, false).await
+    }
+
+    /// A person's client on SimpleX's preset servers, the internet's, not
+    /// the lab's (a phone's app, as it comes), with a files folder.
+    pub async fn start_on_presets(&mut self, name: &str) -> Api {
+        self.start_client(name, false, true).await
+    }
+
+    async fn start_client(&mut self, name: &str, bot: bool, presets: bool) -> Api {
         let data = self.db_dir(name);
         std::fs::create_dir_all(&data).expect("its directory");
         let ctr = self.container(name);
@@ -121,15 +131,21 @@ impl Lab {
         let (net, ids) = (format!("{}-net", self.prefix), uid_gid());
         let mut args = vec![
             "run", "-d", "--name", &ctr, "--network", &net, "--user", &ids, "-e", "HOME=/data", "-e", "LAB_API_PORT=5226", "-p", "127.0.0.1::5226", "-v", &vol,
-            LAB_IMAGE, "-d", "/data/sx", "-s", &self.server, "-p", "5225", who, name, "-y",
+            LAB_IMAGE, "-d", "/data/sx", "-p", "5225", who, name, "-y",
         ];
-        if let Some(xftp) = &self.xftp {
+        if !presets {
+            args.extend(["-s", self.server.as_str()]);
+        }
+        if let Some(xftp) = self.xftp.as_deref().filter(|_| !presets) {
+            args.extend(["--xftp-server", xftp]);
+        }
+        if self.xftp.is_some() || presets {
             std::fs::create_dir_all(data.join("files")).expect("its files folder");
             std::fs::create_dir_all(data.join("tmp")).expect("its temp folder");
             // its temp folder on the files' device: a received file is renamed
             // from one into the other ("Invalid cross-device link" otherwise,
             // as /tmp and /data are on a computer too)
-            args.extend(["--xftp-server", xftp.as_str(), "--files-folder", "/data/files", "--temp-folder", "/data/tmp"]);
+            args.extend(["--files-folder", "/data/files", "--temp-folder", "/data/tmp"]);
             if bot {
                 args.push("--create-bot-allow-files");
             }
@@ -312,6 +328,24 @@ pub async fn received(person: &mut Api, within: Duration, done: impl Fn(&[String
         assert!(t0.elapsed() < within, "the person received only {:?} within {within:?}", got.iter().map(|t| fragment_bridge::simplex::wire::cut(t, 40)).collect::<Vec<_>>());
         person.drain(Duration::from_millis(200)).await;
     }
+}
+
+/// A file the person's app received from the agent as `kind` (`voice`,
+/// `image`, `file`): its message's content, and the file itself, fetched
+/// whole as an app fetches one (`/freceive`, once its description is ready:
+/// the agent's upload done), at its path under `files` (the person's files
+/// folder, on the host). Other events stay queued.
+pub async fn received_file(person: &mut Api, files: &Path, kind: &str, within: Duration) -> (Value, PathBuf) {
+    let is = |ci: &Value| ci["chatItem"]["chatDir"]["type"] == "directRcv" && ci["chatItem"]["content"]["msgContent"]["type"] == kind && ci["chatItem"]["file"]["fileId"].is_i64();
+    let e = person.wait(within, |e| tag(e) == "newChatItems" && e["chatItems"].as_array().is_some_and(|cs| cs.iter().any(is))).await;
+    let ci = e["chatItems"].as_array().and_then(|cs| cs.iter().find(|c| is(c))).cloned().expect("its item");
+    let id = ci["chatItem"]["file"]["fileId"].as_i64().expect("its file");
+    person.wait(within, |e| tag(e) == "rcvFileDescrReady" && e["chatItem"]["chatItem"]["file"]["fileId"] == id).await;
+    let r = person.cmd(&format!("/freceive {id}")).await;
+    assert!(!tag(&r).contains("rror"), "/freceive {id}: {r}");
+    let done = person.wait(within, |e| tag(e) == "rcvFileComplete" && e["chatItem"]["chatItem"]["file"]["fileId"] == id).await;
+    let path = done["chatItem"]["chatItem"]["file"]["fileSource"]["filePath"].as_str().expect("where it is").to_string();
+    (ci["chatItem"]["content"]["msgContent"].clone(), files.join(path))
 }
 
 /// The person writes to the agent; the id their app gave the message.

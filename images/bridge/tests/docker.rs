@@ -3206,6 +3206,32 @@ async fn simplex_on_the_hermes_image() {
     let heard = model.calls.lock().unwrap().iter().filter(|m| m.path.ends_with("/audio/transcriptions")).count();
     assert!(heard >= 1, "transcribed through the route");
 
+    // a reply's files, which Hermes attaches (MEDIA:): an MP3 a real encoder
+    // made, in the person's app as a voice message of its length, and a PNG
+    // as an image, each the chat's own attachment, whole
+    let files = lab.db_dir("person").join("files");
+    let attached = |w: &support::fake::World, file: &str| w.bodies(&chat, "chat", "reply").into_iter().filter_map(|r| r["attachments"].as_array().cloned()).flatten().find(|a| a["name"].as_str().is_some_and(|n| n.ends_with(file)));
+    for (asked, kind, file) in [
+        ("send: ffmpeg -loglevel error -f lavfi -i sine=frequency=440:duration=2 -ac 1 -y /tmp/hello.mp3 && echo made=/tmp/hello.mp3", "voice", "hello.mp3"),
+        ("send: echo iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg== | base64 -d > /tmp/dot.png && echo made=/tmp/dot.png", "image", "dot.png"),
+    ] {
+        let t0 = Instant::now();
+        say(&mut person, at_person, asked).await;
+        let (content, got) = support::simplex::received_file(&mut person, &files, kind, Duration::from_secs(180)).await;
+        eprintln!("simplex: {file} as {content} in the person's app {} ms after it was asked", t0.elapsed().as_millis());
+        let a = fake.with(|w| attached(w, file)).unwrap_or_else(|| panic!("{file} is the chat's reply's attachment"));
+        assert_eq!(a["sha256"].as_str(), Some(support::simplex::sha256_of(&got).as_str()), "{file}, whole");
+        if kind == "voice" {
+            assert_eq!(content["duration"], json!(2), "its length, as the encoder made it: {content}");
+        }
+    }
+    let t0 = Instant::now();
+    // bounded: a minute, the uploads' ends having come already
+    while !c.exec_out(&["sh", "-c", "ls -A /data/simplex/juniper--k3x9/out"]).trim().is_empty() {
+        assert!(t0.elapsed() < Duration::from_secs(60), "their copies let go once uploaded");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
     // the hold: the core stopped before the image answers, none of its databases copied
     let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold\n{}", c.logs().lines().filter(|l| l.contains("simplex") || l.contains("held")).collect::<Vec<_>>().join("\n")));
     assert_eq!(simplex_cores(&c), 0, "no core under the hold");

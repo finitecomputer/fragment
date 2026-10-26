@@ -52,7 +52,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::door::{self, Key, Ticket};
 use super::link::{Action, Inbound, Input, Link, Notice, Phase};
-use super::wire::{self, Cmd, FileId, Resp};
+use super::wire::{self, Cmd, FileId, Kind, Resp};
 use crate::api::{self, Api};
 use crate::records;
 use crate::runtime::{Agent, LocalFile};
@@ -107,6 +107,32 @@ const CHAT_LOOK_MS: u64 = 30_000;
 /// The tickets an agent's link took, kept until they would have run out
 /// anyway, at most (each holds 10 minutes; its owner makes them by hand).
 const USED_MAX: usize = 64;
+/// A reply's file sent over SimpleX, at most: the chat's own bound on an
+/// attachment, so every file a reply carries can go (the chat takes none
+/// bigger). XFTP takes up to 1 GB; the platform's relay carries 32 MiB a
+/// connection both ways, four at once, 2 GiB a computer a day
+/// (`fragment_core::relay`), so this, padded into XFTP's 4 MB chunks (28
+/// MB), is one connection's worth: about four minutes at 100 KB/s.
+const SEND_BYTES_MAX: u64 = crate::limits::ATTACHMENT_MAX_BYTES;
+/// `fragment_core::relay::BYTES_MAX`, which the cell holds a relay to (its
+/// own workspace: a copy, for the assertion below).
+const RELAY_BYTES_MAX: u64 = 32 << 20;
+/// Files a link sends at once, at most (asked of its core, or uploading):
+/// a reply's most. Past it, a file's note goes in its place.
+const SENDING_MAX: usize = crate::limits::ATTACHMENTS_MAX;
+/// A file not uploaded this long after its send was answered is given up
+/// on: its send cancelled at the core, its copy let go, and its note sent.
+/// The core retries a server it cannot reach for good, saying nothing (as
+/// for a receive, `FILE_WAIT_MS`); `SEND_BYTES_MAX` at 100 KB/s is about
+/// four minutes.
+const SEND_WAIT_MS: u64 = 5 * 60 * 1000;
+/// Entries of a link's `OUT_DIR` one sweep reads, at most.
+const OUT_SWEEP_MAX: usize = 1024;
+/// Where a link's copies of the files it sends wait, in its directory: a
+/// folder each (`<life>-<n>`), so its receiver sees the file's own name.
+pub const OUT_DIR: &str = "out";
+
+const _: () = assert!(SEND_BYTES_MAX.div_ceil(4_000_000) * 4_000_000 < RELAY_BYTES_MAX && SENDING_MAX <= OUT_SWEEP_MAX, "a file, padded into chunks, is one relay's worth, and the sweep sees every send");
 
 /// What the image gives the bridge for SimpleX (main.rs reads it).
 #[derive(Debug, Clone)]
@@ -189,8 +215,8 @@ pub enum Msg {
     /// A core's bot API closed while its process may live on.
     Lost { agent: String, epoch: u64 },
     /// The agent's reply to a message relayed from SimpleX, posted: to
-    /// its owner's app.
-    Reply { agent: String, text: String },
+    /// its owner's app, its text, then its files (copied, `outgoing`).
+    Reply { agent: String, text: String, files: Vec<Outgoing> },
     /// A message of its owner's, of this item, is on their chat (`ok`), or
     /// was refused there (its poster's word).
     Delivered { agent: String, item: i64, ok: bool },
@@ -201,6 +227,8 @@ pub enum Msg {
 pub struct Handle {
     tx: mpsc::Sender<Msg>,
     api: Api,
+    /// `Config::dir`: where a reply's files are copied (`outgoing`).
+    dir: PathBuf,
 }
 
 impl Handle {
@@ -251,13 +279,152 @@ impl Handle {
         self.answered(|reply| Msg::Unlink { agent: agent.to_string(), ticket: Box::new(ticket), reply }).await
     }
 
-    /// `agent`'s reply to a message its owner sent over SimpleX, posted on
-    /// its chat: sent to their app too. Never waits (a lane calls it).
-    pub fn reply(&self, agent: &str, text: &str) {
-        if self.tx.try_send(Msg::Reply { agent: agent.to_string(), text: text.to_string() }).is_err() {
+    /// What `agent` posted that its owner's SimpleX app is to get too: its
+    /// text, then its files, each copied first to where its core sends it
+    /// from (`outgoing`), and one that cannot go noted in the text. The one
+    /// way anything goes out over SimpleX, whatever started it: today a
+    /// turn asked there (driver.rs, `for_simplex`). Never waits on the
+    /// manager (a lane calls it).
+    pub async fn reply(&self, agent: &str, text: &str, files: &[LocalFile]) {
+        if !dir_name_ok(agent) {
+            return;
+        }
+        let (files, kept) = outgoing(&self.dir.join(agent).join(OUT_DIR), files).await;
+        let text = noted(text, &kept);
+        if let Err(e) = self.tx.try_send(Msg::Reply { agent: agent.to_string(), text, files }) {
             crate::ev!("simplex.busy", { "dropped": "reply", "agent": agent });
+            if let Msg::Reply { files, .. } = e.into_inner() {
+                for o in &files {
+                    let_go(&o.path);
+                }
+            }
         }
     }
+}
+
+/// A file of a reply's, copied where its link's core sends it from (a
+/// folder of its own in the link's `OUT_DIR`), and what it goes as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outgoing {
+    pub path: PathBuf,
+    pub kind: Kind,
+}
+
+/// A send under way (`Saved::sending`): its copy's folder in `OUT_DIR`, and
+/// what it went as (what its note says, if it fails).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sending {
+    pub folder: String,
+    pub kind: Kind,
+}
+
+/// What a file goes to SimpleX as: a voice message when it is audio whose
+/// length reads (`audio::secs`: MP3 or MPEG-4, as its apps play them), an
+/// image when it is one of SimpleX's own image types, else a file.
+pub fn file_kind(media_type: &str, bytes: &[u8]) -> Kind {
+    let t = media_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    if let Some(secs) = super::audio::secs(&t, bytes) {
+        return Kind::Voice { secs };
+    }
+    match t.as_str() {
+        "image/jpeg" | "image/png" | "image/gif" => Kind::Image,
+        _ => Kind::File,
+    }
+}
+
+/// What a file is, in a note's words, by its type alone (one never read).
+fn words_of(media_type: &str) -> &'static str {
+    match media_type.split('/').next().unwrap_or("") {
+        "audio" => "a voice message",
+        "image" => "an image",
+        _ => "a file",
+    }
+}
+
+/// A file's name as its receiver sees it: its own, of letters, digits,
+/// spaces and `-_.()`, at most 100 bytes, never hidden; else `file`.
+pub fn file_name(name: &str) -> String {
+    let kept: String = name.chars().filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '(' | ')')).collect();
+    let kept = wire::cut(kept.trim().trim_start_matches('.'), 100).trim().to_string();
+    if kept.is_empty() {
+        "file".into()
+    } else {
+        kept
+    }
+}
+
+/// A reply's files, each copied into a folder of its own in `out` (a
+/// link's `OUT_DIR`) under its own name made safe (`file_name`), with what
+/// it goes as (`file_kind`); and, in a note's words, those that cannot go
+/// (empty, past `SEND_BYTES_MAX`, unread, or not written), which stay in
+/// the chat alone. At most a reply's files (`limits::ATTACHMENTS_MAX`).
+pub async fn outgoing(out: &Path, files: &[LocalFile]) -> (Vec<Outgoing>, Vec<&'static str>) {
+    // a folder's name is this life's start and a count: never another's,
+    // whatever replies run at once (the sweep lets go another life's)
+    static COPIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static LIFE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let life = *LIFE.get_or_init(crate::log::now_ms);
+    let (mut sent, mut kept) = (vec![], vec![]);
+    for f in files.iter().take(crate::limits::ATTACHMENTS_MAX) {
+        let fits = tokio::fs::metadata(&f.path).await.is_ok_and(|m| m.len() > 0 && m.len() <= SEND_BYTES_MAX);
+        let read = if fits { tokio::fs::read(&f.path).await.ok() } else { None };
+        let Some(bytes) = read.filter(|b| !b.is_empty() && b.len() as u64 <= SEND_BYTES_MAX) else {
+            crate::ev!("simplex.file_kept", { "name": wire::cut(&f.name, 100), "why": "empty, unread, or past the bound" });
+            kept.push(words_of(&f.media_type));
+            continue;
+        };
+        let kind = file_kind(&f.media_type, &bytes);
+        let folder = out.join(format!("{life}-{}", COPIES.fetch_add(1, Ordering::Relaxed)));
+        let path = folder.join(file_name(&f.name));
+        let written = async {
+            tokio::fs::create_dir_all(&folder).await?;
+            tokio::fs::write(&path, &bytes).await
+        };
+        match written.await {
+            Ok(()) => sent.push(Outgoing { path, kind }),
+            Err(e) => {
+                crate::ev!("simplex.file_kept", { "name": wire::cut(&f.name, 100), "why": e.to_string() });
+                let _ = tokio::fs::remove_dir_all(&folder).await;
+                kept.push(kind.words());
+            }
+        }
+    }
+    (sent, kept)
+}
+
+/// A send's copy let go, by its folder in the link `dir`'s `OUT_DIR`: one
+/// name, never a path out of it (a `link.json` that says otherwise is no
+/// one's to follow).
+fn remove_copy(dir: &Path, folder: &str) {
+    if !folder.is_empty() && folder != "." && folder != ".." && !folder.contains(['/', '\\', '\0']) {
+        let _ = std::fs::remove_dir_all(dir.join(OUT_DIR).join(folder));
+    }
+}
+
+/// A file's copy let go: its folder in `OUT_DIR`, whole.
+fn let_go(path: &Path) {
+    if let Some(folder) = path.parent().filter(|p| p.parent().is_some_and(|o| o.ends_with(OUT_DIR))) {
+        let _ = std::fs::remove_dir_all(folder);
+    }
+}
+
+/// What the owner's app is told of a file of a reply's that stays in the
+/// chat alone.
+fn kept_note(words: &str) -> String {
+    format!("(I sent {words}, in our chat.)")
+}
+
+/// What it is told of one whose upload failed, or was given up on.
+fn unsent_note(words: &str) -> String {
+    let mut w = words.chars();
+    let words = w.next().map(|c| c.to_uppercase().chain(w).collect::<String>()).unwrap_or_default();
+    format!("({words} I sent didn't arrive here: it's in our chat.)")
+}
+
+/// A reply's text, and a note of each of its files that stays in the chat.
+pub fn noted(text: &str, kept: &[&str]) -> String {
+    let notes = kept.iter().map(|w| kept_note(w));
+    std::iter::once(text.trim_end().to_string()).filter(|t| !t.is_empty()).chain(notes).collect::<Vec<_>>().join("\n\n")
 }
 
 /// A message of the owner's, to post on the agent's chat: with the file it
@@ -335,6 +502,14 @@ pub struct Saved {
     /// its catch-up and a newer message arrive (Alex's review of #612).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub receiving: BTreeSet<FileId>,
+    /// The files it sent whose upload has not ended, by the core's id for
+    /// each (its send's answer named it): each one's copy is let go once the
+    /// core says it is sent or failed, or it is given up on
+    /// (`SEND_WAIT_MS`), at most `SENDING_MAX`. Kept across restarts, as the
+    /// core resumes an upload from its own database; a folder in `OUT_DIR`
+    /// that none names is let go as the bridge starts (`sweep_out`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sending: BTreeMap<FileId, Sending>,
 }
 
 /// A file given up on: its cancel still to be taken by the core, or taken.
@@ -484,6 +659,27 @@ pub fn keep_private(dir: &Path) -> std::io::Result<()> {
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
 }
 
+/// The copies in a link's `OUT_DIR` that none of its sends under way names
+/// let go (one asked as the last life ended, its answer never read), at
+/// most `OUT_SWEEP_MAX` a sweep: run as the link's slot is made, before any
+/// send of this life.
+pub fn sweep_out(dir: &Path, saved: &Saved) {
+    let keep: BTreeSet<&str> = saved.sending.values().map(|s| s.folder.as_str()).collect();
+    let Ok(entries) = std::fs::read_dir(dir.join(OUT_DIR)) else { return };
+    let mut gone = 0;
+    for e in entries.flatten().take(OUT_SWEEP_MAX) {
+        if keep.contains(e.file_name().to_string_lossy().as_ref()) {
+            continue;
+        }
+        let path = e.path();
+        let removed = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+        gone += usize::from(removed.is_ok());
+    }
+    if gone > 0 {
+        crate::ev!("simplex.out_swept", { "dir": dir.display().to_string(), "gone": gone, "kept": keep.len() });
+    }
+}
+
 /// Writes an agent's `link.json` whole (a temporary file, synced, renamed).
 pub fn store(dir: &Path, saved: &Saved) -> std::io::Result<()> {
     use std::io::Write;
@@ -543,6 +739,9 @@ struct Slot {
     cancel_at: Option<Instant>,
     /// Messages whose file it waits to receive, by the file, and since when.
     files: BTreeMap<FileId, (Inbound, Instant)>,
+    /// Since when each of its sends under way (`Saved::sending`) has
+    /// waited: since its send's answer, or this life's start.
+    sends: BTreeMap<FileId, Instant>,
     /// Its poster: its messages, posted in order on its chat.
     poster: Option<mpsc::Sender<Post>>,
     /// A message of this life was not posted (refused, or dropped past a
@@ -630,9 +829,10 @@ pub fn start(cfg: Config, api: Api, quiet: Arc<AtomicBool>, hold: PathBuf, relay
             None
         }
     };
+    let dir = cfg.dir.clone();
     let m = Manager { cfg, api: api.clone(), quiet, hold, tx: tx.clone(), slots: BTreeMap::new(), computer: None, held: false, pulse, pulse_until: None, relaying, socks, offer, stop: stop.clone() };
     tokio::spawn(m.run(rx, stop));
-    Handle { tx, api }
+    Handle { tx, api, dir }
 }
 
 impl Manager {
@@ -688,7 +888,14 @@ impl Manager {
             Msg::Frame { agent, epoch, text } => self.frame(&agent, epoch, &text),
             Msg::Exited { agent, epoch, why } => self.exited(&agent, epoch, &why),
             Msg::Lost { agent, epoch } => self.lost(&agent, epoch).await,
-            Msg::Reply { agent, text } => self.apply(&agent, Input::Reply(&text)),
+            Msg::Reply { agent, text, files } => {
+                if !text.trim().is_empty() {
+                    self.apply(&agent, Input::Reply(&text));
+                }
+                for o in files {
+                    self.send_file(&agent, o);
+                }
+            }
             Msg::Delivered { agent, item, ok } => self.delivered(&agent, item, ok),
         }
     }
@@ -786,8 +993,12 @@ impl Manager {
                 continue;
             }
             let dir = self.cfg.dir.join(&a.fragment);
-            let saved = load(&dir, a).unwrap_or_else(|| Saved { identity: a.identity.clone(), generation: 0, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new() });
+            let saved = load(&dir, a).unwrap_or_else(|| Saved { identity: a.identity.clone(), generation: 0, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new() });
             let door = Key::load(&dir);
+            // before any send of this life: what the last one left unnamed goes,
+            // and what it sent waits again from now
+            sweep_out(&dir, &saved);
+            let sends = saved.sending.keys().map(|id| (*id, Instant::now())).collect();
             self.slots.insert(a.fragment.clone(), Slot {
                 agent: a.clone(),
                 dir,
@@ -807,6 +1018,7 @@ impl Manager {
                 draining_since: None,
                 cancel_at: None,
                 files: BTreeMap::new(),
+                sends,
                 poster: None,
                 gap: false,
                 outstanding: Default::default(),
@@ -849,7 +1061,89 @@ impl Manager {
         self.reconcile().await;
         self.resync();
         self.files_overdue(Instant::now());
+        self.sends_overdue(Instant::now());
         self.quiet.store(self.running() == 0, Ordering::SeqCst);
+    }
+
+    /// A reply's file, to its owner's app: asked of the core while its link
+    /// is bound and in step, its core up, and fewer than `SENDING_MAX` are
+    /// under way; else its copy let go and its note sent in its place (held
+    /// with the replies while the ratchet synchronizes, as text is).
+    fn send_file(&mut self, f: &str, o: Outgoing) {
+        let Some(s) = self.slots.get(f) else { return let_go(&o.path) };
+        let asked = s.pending.values().filter(|c| matches!(c, Cmd::SendFile { .. })).count();
+        let ready = s.up && s.core.is_some() && !s.saved.link.syncing && o.path.is_absolute() && asked + s.saved.sending.len() < SENDING_MAX;
+        let Some(contact) = s.saved.link.contact().filter(|_| ready) else {
+            crate::ev!("simplex.file_kept", { "agent": f, "why": "its link cannot send it now", "sending": s.saved.sending.len() + asked });
+            return self.kept(f, &o.path, o.kind);
+        };
+        let path = o.path.to_string_lossy().to_string();
+        self.act(f, Action::Ask(Cmd::SendFile { contact, path: path.clone(), kind: o.kind }));
+        let taken = self.slots.get(f).is_some_and(|s| s.pending.values().any(|c| matches!(c, Cmd::SendFile { path: p, .. } if *p == path)));
+        if !taken {
+            self.kept(f, &o.path, o.kind);
+        }
+    }
+
+    /// A file of a reply's that does not go: its copy let go, its note sent.
+    fn kept(&mut self, f: &str, path: &Path, kind: Kind) {
+        let_go(path);
+        self.apply(f, Input::Reply(&kept_note(kind.words())));
+    }
+
+    /// The core's answer to a file's send: the file it made of it, kept
+    /// (`Saved::sending`) until its upload ends; or, none (refused), its
+    /// copy let go and its note sent.
+    fn sent(&mut self, f: &str, path: &str, kind: Kind, resp: &Resp) {
+        let path = Path::new(path);
+        let folder = path.parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string());
+        let file = match resp {
+            Resp::Items(items) => items.iter().find(|i| !i.received).and_then(|i| i.file.as_ref()).map(|r| r.id),
+            _ => None,
+        };
+        let Some(s) = self.slots.get_mut(f) else { return let_go(path) };
+        let (Some(id), Some(folder)) = (file, folder) else {
+            crate::ev!("simplex.file_unsendable", { "agent": f });
+            return self.kept(f, path, kind);
+        };
+        s.saved.sending.insert(id, Sending { folder, kind });
+        s.sends.insert(id, Instant::now());
+        assert!(s.saved.sending.len() <= SENDING_MAX, "the sends under way are bounded");
+        if let Err(e) = store(&s.dir, &s.saved) {
+            crate::ev!("simplex.store_failed", { "agent": f, "error": e.to_string() });
+        }
+        crate::ev!("simplex.file_sending", { "agent": f, "file": id, "kind": kind.words() });
+    }
+
+    /// A send under way, ended: sent (`ok`), failed, or given up on. Its
+    /// copy let go and it is forgotten; one that did not arrive is said so.
+    /// One it does not name (ended already, or another life's it let go)
+    /// is nothing.
+    fn send_ended(&mut self, f: &str, id: FileId, ok: bool) {
+        let Some(s) = self.slots.get_mut(f) else { return };
+        s.sends.remove(&id);
+        let Some(sending) = s.saved.sending.remove(&id) else { return };
+        remove_copy(&s.dir, &sending.folder);
+        if let Err(e) = store(&s.dir, &s.saved) {
+            crate::ev!("simplex.store_failed", { "agent": f, "error": e.to_string() });
+        }
+        crate::ev!("simplex.file_sent", { "agent": f, "file": id, "ok": ok });
+        if !ok {
+            self.apply(f, Input::Reply(&unsent_note(sending.kind.words())));
+        }
+    }
+
+    /// Each send under way past `SEND_WAIT_MS`: cancelled at the core
+    /// (asked once: its answer settles nothing), its copy let go, its note
+    /// sent. One the core sends anyway arrives after its note.
+    fn sends_overdue(&mut self, now: Instant) {
+        let wait = Duration::from_millis(SEND_WAIT_MS);
+        let overdue: Vec<(String, FileId)> = self.slots.iter().flat_map(|(f, s)| s.sends.iter().filter(|(_, since)| now.duration_since(**since) >= wait).map(|(id, _)| (f.clone(), *id))).collect();
+        for (f, id) in overdue {
+            crate::ev!("simplex.send_overdue", { "agent": f, "file": id, "waitMs": SEND_WAIT_MS });
+            self.act(&f, Action::Ask(Cmd::CancelSend { file: id }));
+            self.send_ended(&f, id, false);
+        }
     }
 
     /// A forced sync still waiting (one the core refused), asked again every
@@ -1214,6 +1508,9 @@ impl Manager {
                 self.abandon(f, *file, Abandoned::Settled);
             }
         }
+        if let Some(Cmd::SendFile { path, kind, .. }) = &asked {
+            self.sent(f, path, *kind, &frame.resp);
+        }
         match asked {
             Some(cmd) => match &frame.resp {
                 Resp::Error { what } => {
@@ -1231,6 +1528,10 @@ impl Manager {
     /// is ready, posted with its message once whole, or the message posted
     /// with a note once it will not arrive.
     fn file_event(&mut self, f: &str, resp: &Resp) {
+        // a file the link sent: its upload's end
+        if let Resp::FileSent { file } | Resp::FileUnsent { file } = resp {
+            return self.send_ended(f, *file, matches!(resp, Resp::FileSent { .. }));
+        }
         if let Resp::FileDone { file, .. } | Resp::FileFailed { file } = resp {
             self.reserve(f, *file, false);
         }
@@ -1429,6 +1730,13 @@ impl Manager {
         let Some(s) = self.slots.get_mut(f) else { return };
         let before = s.saved.clone();
         let actions = s.saved.link.apply(input);
+        // a link let go sends nothing more: its uploads' copies go with it
+        if s.saved.link.phase == Phase::Off && !s.saved.sending.is_empty() {
+            for sending in std::mem::take(&mut s.saved.sending).into_values() {
+                remove_copy(&s.dir, &sending.folder);
+            }
+            s.sends.clear();
+        }
         if s.saved != before {
             if let Err(e) = store(&s.dir, &s.saved) {
                 // the link moves on; a restart before it is written may go back
@@ -1651,6 +1959,8 @@ fn kind_of(cmd: &Cmd) -> &'static str {
         Cmd::Chat { .. } => "chat",
         Cmd::Receive { .. } => "receive",
         Cmd::CancelFile { .. } => "cancel_file",
+        Cmd::SendFile { .. } => "send_file",
+        Cmd::CancelSend { .. } => "cancel_send",
     }
 }
 
@@ -1810,6 +2120,224 @@ mod tests {
         assert_eq!(load(&m.slots[f].dir, &agent()).expect("its file").abandoned.get(&7), Some(&Abandoned::Settled), "kept in its link's file");
         drop(sent_lines(&mut sent));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reply's file on disk, as the runtime hands one.
+    fn reply_file(dir: &Path, name: &str, media_type: &str, bytes: &[u8]) -> LocalFile {
+        std::fs::create_dir_all(dir).expect("its directory");
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).expect("written");
+        LocalFile { path, media_type: media_type.into(), name: name.into(), size: bytes.len() as u64 }
+    }
+
+    /// One file's reply (a PDF named `name`), handed to the manager: its
+    /// copy's path.
+    async fn reply_one(m: &mut Manager, src: &Path, name: &str) -> PathBuf {
+        let out = m.slots["juniper--k3x9"].dir.join(OUT_DIR);
+        let (files, kept) = outgoing(&out, &[reply_file(src, name, "application/pdf", b"%PDF")]).await;
+        assert!(kept.is_empty(), "{kept:?}");
+        let path = files[0].path.clone();
+        m.on(Msg::Reply { agent: "juniper--k3x9".into(), text: String::new(), files }).await;
+        path
+    }
+
+    /// The core's answer to the send under `corr`: its item, carrying file `id`.
+    fn sent_answer(corr: &str, id: i64) -> String {
+        json!({ "corrId": corr, "resp": { "type": "newChatItems", "chatItems": [{ "chatInfo": { "type": "direct", "contact": { "contactId": 3 } }, "chatItem": { "chatDir": { "type": "directSnd" }, "content": { "type": "sndMsgContent", "msgContent": { "type": "file", "text": "" } }, "meta": { "itemId": 50 + id, "itemSharedMsgId": format!("s{id}") }, "file": { "fileId": id, "fileName": "x", "fileSize": 9, "fileStatus": { "type": "sndStored" } } } }] } }).to_string()
+    }
+
+    /// The core's event: file `id`'s upload ended, sent or not.
+    fn upload_ended(id: i64, ok: bool) -> String {
+        json!({ "resp": { "type": if ok { "sndFileCompleteXFTP" } else { "sndFileError" }, "fileTransferMeta": { "fileId": id }, "errorMessage": "x" } }).to_string()
+    }
+
+    /// The texts the core was asked to send, in order.
+    fn texts(lines: &[(String, String)]) -> Vec<String> {
+        lines.iter().filter_map(|(_, l)| l.strip_prefix("/_send @3 json ")).map(|b| serde_json::from_str::<serde_json::Value>(b).expect("a body")).filter(|b| b[0]["msgContent"]["type"] == "text").map(|b| b[0]["msgContent"]["text"].as_str().expect("its text").to_string()).collect()
+    }
+
+    /// The files the core was asked to send: (corrId, path, kind).
+    fn file_sends(lines: &[(String, String)]) -> Vec<(String, String, String)> {
+        lines.iter().filter_map(|(c, l)| Some((c, serde_json::from_str::<serde_json::Value>(l.strip_prefix("/_send @3 json ")?).ok()?))).filter(|(_, b)| b[0]["filePath"].is_string()).map(|(c, b)| (c.clone(), b[0]["filePath"].as_str().expect("a path").to_string(), b[0]["msgContent"]["type"].as_str().expect("a type").to_string())).collect()
+    }
+
+    /// Goal (B, valid and invalid): a reply's files go to its owner's app
+    /// after its text, an MP3 as a voice message with its length, a PNG as
+    /// an image, anything else as a file, each from a copy of its own under
+    /// its own name; one too large, empty or unread stays in the chat,
+    /// noted in the text. Each copy is let go once its upload ends: sent,
+    /// nothing said; refused or failed, its note sent. An end said again,
+    /// or of a send the link does not know, is nothing.
+    #[tokio::test]
+    async fn a_replys_files_go_and_their_copies_are_let_go() {
+        let dir = std::env::temp_dir().join(format!("simplex-sends-{}", std::process::id()));
+        let (mut m, mut sent, _posts) = captured(&dir, 32);
+        let f = "juniper--k3x9";
+        let src = dir.join("media");
+        let big = reply_file(&src, "huge.bin", "application/octet-stream", b"");
+        std::fs::File::options().write(true).open(&big.path).expect("it").set_len(SEND_BYTES_MAX + 1).expect("sparse");
+        let files = vec![
+            reply_file(&src, "tts_1.mp3", "audio/mpeg", &super::super::audio::silence_mp3(3)),
+            reply_file(&src, "../a pic.png", "image/png", b"\x89PNG not really"),
+            reply_file(&src, "report.pdf", "application/pdf; charset=binary", b"%PDF-1.7"),
+            reply_file(&src, "empty.txt", "text/plain", b""),
+            big,
+            LocalFile { path: src.join("gone.ogg"), media_type: "audio/ogg".into(), name: "gone.ogg".into(), size: 3 },
+        ];
+        let out = m.slots[f].dir.join(OUT_DIR);
+        let (outgoing, kept) = outgoing(&out, &files).await;
+        assert_eq!(outgoing.iter().map(|o| o.kind).collect::<Vec<_>>(), [Kind::Voice { secs: 3 }, Kind::Image, Kind::File]);
+        assert_eq!(kept, ["a file", "a file", "a voice message"], "empty, past the bound, unread: noted by their type");
+        let names: Vec<String> = outgoing.iter().map(|o| o.path.file_name().expect("a name").to_string_lossy().to_string()).collect();
+        assert_eq!(names, ["tts_1.mp3", "a pic.png", "report.pdf"], "their own names, made safe");
+        assert!(outgoing.iter().all(|o| o.path.parent().and_then(|p| p.parent()) == Some(out.as_path()) && o.path.exists()), "each a copy in a folder of its own");
+        m.on(Msg::Reply { agent: f.into(), text: noted("Here you go.", &kept), files: outgoing.clone() }).await;
+        let lines = sent_lines(&mut sent);
+        assert_eq!(texts(&lines), ["Here you go.\n\n(I sent a file, in our chat.)\n\n(I sent a file, in our chat.)\n\n(I sent a voice message, in our chat.)"], "its text first, what stays noted");
+        let sends = file_sends(&lines);
+        assert_eq!(sends.iter().map(|(_, p, k)| (p.clone(), k.clone())).collect::<Vec<_>>(), outgoing.iter().zip(["voice", "image", "file"]).map(|(o, k)| (o.path.to_string_lossy().to_string(), k.to_string())).collect::<Vec<_>>());
+        // the voice answered with its file: kept until its upload ends, in the link's file too
+        m.frame(f, 1, &sent_answer(&sends[0].0, 21));
+        assert_eq!(m.slots[f].saved.sending.get(&21).map(|s| s.kind), Some(Kind::Voice { secs: 3 }));
+        assert!(load(&m.slots[f].dir, &agent()).expect("its file").sending.contains_key(&21), "written");
+        // the image refused: its copy let go, its note sent
+        m.frame(f, 1, &json!({ "corrId": sends[1].0, "resp": { "type": "chatCmdError", "chatError": { "type": "error", "errorType": { "type": "fileNotFound" } } } }).to_string());
+        assert!(!outgoing[1].path.exists() && texts(&sent_lines(&mut sent)) == ["(I sent an image, in our chat.)"]);
+        // the file answered, then failed: its copy let go, said so
+        m.frame(f, 1, &sent_answer(&sends[2].0, 23));
+        m.frame(f, 1, &upload_ended(23, false));
+        assert!(!outgoing[2].path.exists() && texts(&sent_lines(&mut sent)) == ["(A file I sent didn't arrive here: it's in our chat.)"]);
+        // the voice sent: its copy let go, nothing said; said again, nothing
+        m.frame(f, 1, &upload_ended(21, true));
+        assert!(!outgoing[0].path.exists() && m.slots[f].saved.sending.is_empty() && m.slots[f].sends.is_empty());
+        for again in [upload_ended(21, true), upload_ended(21, false), upload_ended(99, false)] {
+            m.frame(f, 1, &again);
+        }
+        assert!(sent_lines(&mut sent).is_empty(), "an end it does not know is nothing");
+        assert!(load(&m.slots[f].dir, &agent()).expect("its file").sending.is_empty());
+        assert_eq!(std::fs::read_dir(&out).expect("its out").count(), 0, "no copy left");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Goal (B, bounds): a file goes only while its link can send it (bound,
+    /// in step, its core up) and fewer than `SENDING_MAX` are under way;
+    /// else its copy is let go and its note goes in its place, held with
+    /// the replies while the ratchet synchronizes. One not uploaded within
+    /// `SEND_WAIT_MS` is cancelled at the core and said so; an unlink lets
+    /// every send go.
+    #[tokio::test]
+    async fn a_file_goes_only_while_it_can_and_never_waits_for_good() {
+        let dir = std::env::temp_dir().join(format!("simplex-sends-bound-{}", std::process::id()));
+        let (mut m, mut sent, _posts) = captured(&dir, 64);
+        let f = "juniper--k3x9";
+        let out = m.slots[f].dir.join(OUT_DIR);
+        let src = dir.join("media");
+        // SENDING_MAX under way: the next is noted, its copy let go
+        for i in 0..SENDING_MAX {
+            reply_one(&mut m, &src, &format!("{i}.pdf")).await;
+        }
+        let sends = file_sends(&sent_lines(&mut sent));
+        assert_eq!(sends.len(), SENDING_MAX);
+        for (i, (corr, _, _)) in sends.iter().enumerate() {
+            m.frame(f, 1, &sent_answer(corr, 100 + i as i64));
+        }
+        let past = reply_one(&mut m, &src, "past.pdf").await;
+        assert!(!past.exists() && texts(&sent_lines(&mut sent)) == ["(I sent a file, in our chat.)"], "past the bound: noted");
+        // given up on past SEND_WAIT_MS: cancelled once, its copy let go, said so
+        m.sends_overdue(Instant::now() + Duration::from_millis(SEND_WAIT_MS));
+        let lines = sent_lines(&mut sent);
+        assert_eq!(lines.iter().filter(|(_, l)| l.starts_with("/fcancel ")).count(), SENDING_MAX);
+        assert_eq!(texts(&lines).len(), SENDING_MAX);
+        assert!(texts(&lines).iter().all(|t| t == "(A file I sent didn't arrive here: it's in our chat.)"));
+        assert!(m.slots[f].saved.sending.is_empty() && std::fs::read_dir(&out).expect("its out").count() == 0);
+        // its cancel's answer settles nothing: no receive is given up on
+        m.frame(f, 1, &json!({ "corrId": lines[0].0, "resp": { "type": "chatCmdError", "chatError": { "type": "error", "errorType": { "type": "fileCancel" } } } }).to_string());
+        assert!(m.slots[f].saved.abandoned.is_empty());
+        // syncing: noted, the note held with the replies
+        m.slots.get_mut(f).expect("its slot").saved.link.syncing = true;
+        let held = reply_one(&mut m, &src, "held.pdf").await;
+        assert!(!held.exists() && sent_lines(&mut sent).is_empty());
+        assert_eq!(m.slots[f].saved.link.outbox, ["(I sent a file, in our chat.)"]);
+        m.slots.get_mut(f).expect("its slot").saved.link.syncing = false;
+        m.slots.get_mut(f).expect("its slot").saved.link.outbox.clear();
+        // its core down: noted (as a text is, unsent)
+        m.slots.get_mut(f).expect("its slot").up = false;
+        let down = reply_one(&mut m, &src, "down.pdf").await;
+        assert!(!down.exists() && file_sends(&sent_lines(&mut sent)).is_empty());
+        m.slots.get_mut(f).expect("its slot").up = true;
+        // an unlink lets every send under way go
+        let going = reply_one(&mut m, &src, "going.pdf").await;
+        let corr = file_sends(&sent_lines(&mut sent))[0].0.clone();
+        m.frame(f, 1, &sent_answer(&corr, 300));
+        m.apply(f, Input::Unlink);
+        assert!(!going.exists() && m.slots[f].saved.sending.is_empty() && m.slots[f].sends.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Goal (B, restart): the sends under way are kept across a restart (the
+    /// core resumes their uploads) and waited for again from the start;
+    /// any other copy (a send asked as the last life ended, never answered)
+    /// is let go before anything of this life is sent.
+    #[tokio::test]
+    async fn a_restart_keeps_the_sends_under_way_and_no_other_copy() {
+        let dir = std::env::temp_dir().join(format!("simplex-sends-restart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let key = agent_key(&dir.join("key"));
+        let mut m = manager(&dir, &key, Phase::Linked { contact: 3, name: "paul".into() });
+        let f = "juniper--k3x9";
+        let adir = m.slots[f].dir.clone();
+        let out = adir.join(OUT_DIR);
+        for (folder, name) in [("1-0", "kept.mp3"), ("1-1", "orphan.pdf"), ("2-0", "orphan.png")] {
+            std::fs::create_dir_all(out.join(folder)).expect("a folder");
+            std::fs::write(out.join(folder).join(name), b"x").expect("a copy");
+        }
+        std::fs::write(out.join("stray"), b"x").expect("a stray file");
+        let s = m.slots.get_mut(f).expect("its slot");
+        s.saved.sending.insert(41, Sending { folder: "1-0".into(), kind: Kind::Voice { secs: 2 } });
+        store(&adir, &s.saved).expect("written");
+        // the bridge again: its slot made anew from the link's file
+        m.slots.clear();
+        m.computer(computer(true, 1, None), vec![agent()]).await;
+        let s = &m.slots[f];
+        assert_eq!(s.saved.sending.keys().copied().collect::<Vec<_>>(), [41]);
+        assert!(s.sends.contains_key(&41), "waited for again");
+        let left: BTreeSet<String> = std::fs::read_dir(&out).expect("its out").map(|e| e.expect("an entry").file_name().to_string_lossy().to_string()).collect();
+        assert_eq!(left, BTreeSet::from(["1-0".to_string()]), "the send under way's copy alone");
+        // its upload ends in this life: let go
+        m.slots.get_mut(f).expect("its slot").core = Some(Core { pid: 0, writer: mpsc::channel(4).0, exited: watch::channel(false).1, planned: false });
+        m.slots.get_mut(f).expect("its slot").epoch = 1;
+        m.frame(f, 1, &upload_ended(41, true));
+        assert!(!out.join("1-0").exists() && m.slots[f].saved.sending.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Goal: a file's name is its own, made safe for a path and its
+    /// receiver's eyes; a note is short and true.
+    #[test]
+    fn a_files_name_and_its_notes() {
+        assert_eq!(file_name("tts_20261026.mp3"), "tts_20261026.mp3");
+        assert_eq!(file_name("../../etc/passwd"), "etcpasswd");
+        assert_eq!(file_name("..."), "file");
+        assert_eq!(file_name(".hidden.txt"), "hidden.txt");
+        assert_eq!(file_name("a\u{0}b/c\nd.pdf"), "abcd.pdf");
+        assert_eq!(file_name(&"é".repeat(200)).len(), 100);
+        assert_eq!(file_kind("audio/mpeg", &super::super::audio::silence_mp3(4)), Kind::Voice { secs: 4 });
+        assert_eq!(file_kind("audio/mpeg", b"not an mp3"), Kind::File, "audio whose length does not read goes as a file");
+        assert_eq!(file_kind("audio/ogg", b"OggS"), Kind::File, "SimpleX's apps play no Ogg voice");
+        assert_eq!(file_kind("IMAGE/JPEG", b"x"), Kind::Image);
+        assert_eq!(file_kind("image/webp", b"x"), Kind::File);
+        assert_eq!(noted("", &[]), "");
+        assert_eq!(noted("hi  \n", &["an image"]), "hi\n\n(I sent an image, in our chat.)");
+        assert_eq!(unsent_note("a voice message"), "(A voice message I sent didn't arrive here: it's in our chat.)");
+        let outside = std::env::temp_dir().join(format!("simplex-letgo-{}", std::process::id()));
+        std::fs::create_dir_all(outside.join("keep")).expect("a folder");
+        std::fs::create_dir_all(outside.join("link").join(OUT_DIR)).expect("its out");
+        let_go(&outside.join("keep").join("x"));
+        for folder in ["..", "../../keep", ".", ""] {
+            remove_copy(&outside.join("link"), folder);
+        }
+        assert!(outside.join("keep").exists() && outside.join("link").join(OUT_DIR).exists(), "only a folder in an out directory is ever let go");
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     /// Goal (Alex's review of #610): a file's cancel is kept until its core
@@ -2111,7 +2639,7 @@ mod tests {
     /// says nothing (an old one) forces nothing.
     #[test]
     fn a_rollback_is_this_starts_and_once() {
-        let saved = |generation| Saved { identity: "npub1juniper".into(), generation, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new() };
+        let saved = |generation| Saved { identity: "npub1juniper".into(), generation, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new() };
         assert!(rolled_back(&computer(true, 5, Some((5, true))), &saved(4)));
         assert!(!rolled_back(&computer(true, 5, Some((5, true))), &saved(5)), "this start's, handled already");
         assert!(!rolled_back(&computer(true, 5, Some((4, true))), &saved(3)), "an older start's restore");
@@ -2127,7 +2655,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("juniper--k3x9");
         assert_eq!(load(&dir, &agent()), None, "none yet");
-        let saved = Saved { identity: "npub1juniper".into(), generation: 7, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::from([("0f".repeat(16), 5)]), abandoned: BTreeMap::from([(7, Abandoned::Cancelling)]), receiving: BTreeSet::from([9]) };
+        let saved = Saved { identity: "npub1juniper".into(), generation: 7, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::from([("0f".repeat(16), 5)]), abandoned: BTreeMap::from([(7, Abandoned::Cancelling)]), receiving: BTreeSet::from([9]), sending: BTreeMap::from([(11, Sending { folder: "1-0".into(), kind: Kind::Voice { secs: 3 } })]) };
         store(&dir, &saved).expect("written");
         assert_eq!(load(&dir, &agent()), Some(saved.clone()));
         assert_eq!(linked_on_disk(&root, &[agent()]), vec!["juniper--k3x9".to_string()]);
@@ -2192,7 +2720,7 @@ mod tests {
         Slot {
             agent: agent(),
             dir,
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new() },
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new() },
             title: None,
             epoch: 0,
             core: None,
@@ -2208,6 +2736,7 @@ mod tests {
             draining_since: None,
             cancel_at: None,
             files: BTreeMap::new(),
+            sends: BTreeMap::new(),
             poster: None,
             gap: false,
             outstanding: Default::default(),
@@ -2403,7 +2932,7 @@ mod tests {
         let (writer, _writes) = mpsc::channel(1);
         let (tx, _rx) = mpsc::channel(4);
         let (pulse, _) = watch::channel(false);
-        let saved = Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new() };
+        let saved = Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new() };
         let slot = Slot {
             agent: agent(),
             dir: PathBuf::from("/nowhere"),
@@ -2423,6 +2952,7 @@ mod tests {
             draining_since: None,
             cancel_at: None,
             files: BTreeMap::new(),
+            sends: BTreeMap::new(),
             poster: None,
             gap: false,
             outstanding: Default::default(),
@@ -2496,7 +3026,7 @@ mod tests {
         let mut slot = Slot {
             agent: agent(),
             dir: PathBuf::from("/nowhere"),
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new() },
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new() },
             title: None,
             epoch: 1,
             core: None,
@@ -2512,6 +3042,7 @@ mod tests {
             draining_since: None,
             cancel_at: None,
             files: BTreeMap::new(),
+            sends: BTreeMap::new(),
             poster: None,
             gap: false,
             outstanding: Default::default(),
@@ -2545,7 +3076,7 @@ mod tests {
         let slot = Slot {
             agent: agent(),
             dir: std::env::temp_dir().join(format!("simplex-ack-{}", std::process::id())),
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new() },
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new() },
             title: None,
             epoch: 1,
             core: None,
@@ -2561,6 +3092,7 @@ mod tests {
             draining_since: None,
             cancel_at: None,
             files: BTreeMap::new(),
+            sends: BTreeMap::new(),
             poster: None,
             gap: false,
             outstanding: Default::default(),
