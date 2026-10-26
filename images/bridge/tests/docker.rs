@@ -1919,6 +1919,53 @@ async fn an_image_sent_by_url_is_the_replys_file() {
     });
 }
 
+/// Goal (Skyler's agent on production, 2026-10-26: its routine every 15
+/// minutes, which had nothing to tell, posted "⚠️ The model returned only a
+/// silence marker for a message that needed a reply" at each fire): on the
+/// real Hermes, a routine whose model answers exactly `[SILENT]` says
+/// nothing in its chat (no reply, no notice) and ends idle, as Hermes' own
+/// cron delivers nothing for it. A person's message answered so gets
+/// Hermes' warning, its reply, in the words the bridge knows it by
+/// (`wire::UNEXPECTED_SILENCE`: a Hermes that says it otherwise fails here);
+/// a routine with something to say says it. Method: the scripted model
+/// answers `[SILENT]` to a message telling it to end its turn with exactly
+/// that.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_routine_may_say_nothing() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    let routine = |text: &str| {
+        let fired = fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1juniper", json!({ "kind": "routine", "text": text, "chat": chat })));
+        fragment_bridge::records::turn_id("juniper--k3x9", "juniper--k3x9", "tasks", fired["seq"].as_u64().unwrap())
+    };
+    let said = |w: &support::fake::World, turn: &str| w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).filter_map(|r| r["text"].as_str().map(str::to_string)).collect::<Vec<_>>();
+    let end = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").into_iter().find(|e| e["turn"] == turn);
+
+    let t0 = Instant::now();
+    let quiet = routine("check the shelf; if it has not changed, end this turn with exactly [SILENT]");
+    within(&fake, &chat, &c, 180_000, "the silent routine's end", |w| end(w, &quiet).is_some()).await;
+    eprintln!("silent: a routine with nothing to tell ended in {} ms", t0.elapsed().as_millis());
+    let theirs = asked(&fake, &chat, &c, "end this turn with exactly [SILENT]", |w, turn| end(w, turn).is_some()).await;
+    let tells = routine("water the plants");
+    within(&fake, &chat, &c, 180_000, "the routine's reply", |w| end(w, &tells).is_some()).await;
+    // what Hermes would say after a turn's end (a notice, a late reply), said by now
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let detail = told(&fake, &chat, &c);
+    fake.with(|w| {
+        assert_eq!(end(w, &quiet).unwrap()["outcome"], "idle", "{detail}");
+        assert!(said(w, &quiet).is_empty(), "the silent routine says nothing: {detail}");
+        assert!(!w.bodies(&chat, "work", "turn.notice").iter().any(|n| n["turn"] == quiet.as_str()), "nor a notice: {detail}");
+        assert_eq!(said(w, &theirs), vec![fragment_bridge::runtime::relay::wire::UNEXPECTED_SILENCE.to_string()], "a person's message answered with silence gets Hermes' warning, in these words: {detail}");
+        assert_eq!(end(w, &theirs).unwrap()["outcome"], "idle");
+        let reply = said(w, &tells);
+        assert!(reply.len() == 1 && reply[0].starts_with("scripted:") && reply[0].contains("water the plants"), "the routine with something to tell says it: {detail}");
+    });
+    let logs = c.logs();
+    let ops: Vec<&str> = logs.lines().filter(|l| l.contains(&quiet) && (l.contains("\"relay.op\"") || l.contains("\"relay.silent\""))).collect();
+    eprintln!("silent: what Hermes sent for the routine {ops:#?}");
+    assert!(ops.iter().any(|l| l.contains("\"relay.silent\"")), "the bridge said why it said nothing: {ops:?}");
+}
+
 /// Goal (the finite-mono parity audit, 2026-10-09: a question in words left
 /// the page saying "Juniper is working"): real Hermes' open clarify (no
 /// choices: `❓ <question>`) is the turn's reply, then a `turn.asked` naming
@@ -3127,7 +3174,8 @@ fn simplex_cores(c: &Container) -> usize {
 /// a turn of Hermes' asked as its owner, its session told the chat is their
 /// phone, answered on SimpleX; words typed in that chat on the web, and a
 /// routine with no chat while their home is that chat, are answered on
-/// SimpleX too, and a reply in the agent's own chat is not; a voice note is
+/// SimpleX too (one with nothing to tell, its `[SILENT]`, sends nothing),
+/// and a reply in the agent's own chat is not; a voice note is
 /// transcribed through the route and answered; a hold stops the core before
 /// the image answers it and its copies name none of the core's databases;
 /// a restart keeps the link; and a wake from a save older than the life
@@ -3221,6 +3269,12 @@ async fn simplex_on_the_hermes_image() {
     received(&mut person, Duration::from_secs(180), |got| got.iter().any(|t| t.starts_with("scripted:") && t.contains("remind me to water the basil"))).await;
     eprintln!("simplex: a routine at home to its answer on SimpleX: {} ms", t0.elapsed().as_millis());
     assert!(model.calls.lock().unwrap().iter().rev().find(|m| m.agent.as_deref() == Some("juniper--k3x9")).is_some_and(told), "its prompt says its owner's home is their SimpleX");
+    // a routine at home with nothing to tell, its answer `[SILENT]`: nothing
+    // in its SimpleX chat, so nothing on the phone (below, with what it heard)
+    let fired = fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1juniper", json!({ "kind": "routine", "text": "check the basil; if it is fine, end this turn with exactly [SILENT]" })));
+    let quiet = fragment_bridge::records::turn_id("juniper--k3x9", "juniper--k3x9", "tasks", fired["seq"].as_u64().expect("its seq"));
+    fake.until(180_000, "the silent routine's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == quiet)).await;
+    assert!(fake.with(|w| !w.bodies(&chat, "chat", "reply").iter().any(|r| r["turn"] == quiet)), "the silent routine says nothing in its SimpleX chat");
     // words typed in its own chat: answered there alone
     fake.say(&own, "npub1paul", json!({ "text": "typed in its own chat" }));
     fake.until(180_000, "its own chat's reply", |w| w.bodies(&own, "chat", "reply").iter().any(|b| b["text"].as_str().is_some_and(|t| t.contains("typed in its own chat")))).await;
@@ -3228,6 +3282,7 @@ async fn simplex_on_the_hermes_image() {
     person.drain(Duration::from_millis(500)).await;
     let heard = received(&mut person, Duration::from_secs(1), |_| true).await;
     assert!(!heard.iter().any(|t| t.contains("typed in its own chat")), "a reply in its own chat stays there: {heard:?}");
+    assert!(!heard.iter().any(|t| t.contains("silence marker") || t.contains("SILENT") || t.contains("check the basil")), "nor did the silent routine send the phone anything: {heard:?}");
     // the agent's own user finds no SimpleX core to run, and reads none of
     // the bridge's SimpleX state (its keys, its door's key, its databases)
     let as_agent = |cmd: &str| c.exec_code(&["/command/s6-setuidgid", "hermes", "bash", "-lc", cmd]);

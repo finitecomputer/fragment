@@ -1044,6 +1044,29 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** Hermes' Relay sends a turn's end and its questions as
   structure, proven by the real-Hermes lane.
 
+## A routine's silence is read from Hermes' English warning
+
+- **Observed:** production, 2026-10-26 (Skyler's agent: a routine every
+  15 minutes posted Hermes' "⚠️ The model returned only a silence marker
+  for a message that needed a reply" at each fire). Relay carries no
+  `reply_expected` (v0.21.7, and upstream's main that day), so Hermes
+  answers a routine's bare `[SILENT]` with that warning; the relay runtime
+  drops it for a routine's turn alone, matched whole in its English words
+  (`wire::UNEXPECTED_SILENCE`; docs/bridge.md, "A routine with nothing to
+  tell says nothing").
+- **Risk:** a Hermes release that rewords it, or a profile whose
+  `display.language` is not English (the image sets none; an agent may
+  set its own), posts the warning at every fire again. A model that
+  brackets the marker with words (`[SILENT] nothing changed`), which
+  Hermes' cron's looser rule would deliver nothing for, posts them.
+- **First proof:** a routine's chat showing "The model returned only a
+  silence marker"; on a rewording, the Docker lane's
+  `a_routine_may_say_nothing` fails first.
+- **Delete when:** Relay carries `reply_expected` (or a turn's end as
+  structure, the entry above): the bridge then marks a routine's inbound
+  as expecting no reply, and Hermes' own silence ends a turn the bridge
+  can read; proven by the real-Hermes lane.
+
 ## Hermes' tool steps are its progress text
 
 - **Observed:** phase 4. v0.21.5 sends `task_card` only for Slack chats,

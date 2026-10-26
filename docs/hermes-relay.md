@@ -136,7 +136,18 @@ upgrade re-reads it, and the real-Hermes lane
   turn always says something before its `✅`: an empty answer becomes
   `EMPTY_RESPONSE_EXPLANATION` and a bare silence marker
   `_UNEXPECTED_SILENCE_REPLY` (`gateway/run_turn.py`); a handler that
-  raises sends `❌`, then its notice (`_notify_turn_error`).
+  raises sends `❌`, then its notice (`_notify_turn_error`). Read from
+  v0.21.7: a bare `[SILENT]` may stay silent only on a turn of Hermes'
+  own machinery (an `internal` event, a heartbeat: `display_kind_for_event`)
+  or one whose event has `reply_expected: false` (a message meant for
+  someone else: `silence_allowed`, `gateway/response_filters.py`), and
+  Relay's `_event_from_wire` sets neither (only Slack's own adapter sets
+  `reply_expected`; the same on upstream's main, 2026-10-26), so over
+  Relay every message is a person's, a routine's too. Its native cron is
+  outside the gateway and delivers nothing for a `[SILENT]`
+  (`cron/scheduler.py`, the looser `is_autonomous_silence_response`). The
+  bridge drops that warning for a routine's turn (docs/bridge.md, "A
+  routine with nothing to tell says nothing").
 
 What Relay does not carry (v0.21.5, and upstream's main on 2026-10-06):
 a turn's start or end as a frame of its own (the gateway's frames are

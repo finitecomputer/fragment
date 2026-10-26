@@ -106,6 +106,67 @@ async fn a_failed_turn_ends_at_its_cross() {
     bridge.stop().await;
 }
 
+/// Goal (Skyler's agent on production, 2026-10-26: its routine every 15
+/// minutes, which had nothing to tell, posted "⚠️ The model returned only a
+/// silence marker for a message that needed a reply" each time): a routine
+/// whose model answers exactly `[SILENT]` says nothing in its chat (no
+/// reply, no notice; its tool's steps are still its steps) and ends idle,
+/// as Hermes' own cron delivers nothing for it. A person's message answered
+/// so still gets Hermes' warning, as its reply; a routine with something to
+/// say says it. A restart runs the silent routine no more, whatever it did
+/// not say.
+#[tokio::test]
+async fn a_routine_may_say_nothing() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("relay-silent");
+    let listen = free_port();
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let bridge = support::start(cfg.clone(), relay(listen, &dir));
+    let hermes = Hermes::spawn(listen, "computer-test", SECRET);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let routine = |text: &str| {
+        let fired = fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1juniper", json!({ "kind": "routine", "text": text, "chat": chat })));
+        records::turn_id("juniper--k3x9", "juniper--k3x9", "tasks", fired["seq"].as_u64().unwrap())
+    };
+    let said = |text: &str| records::turn_id("juniper--k3x9", &chat, "chat", fake.say(&chat, &person("paul"), json!({ "text": text }))["seq"].as_u64().unwrap());
+    let ended = |w: &World, turn: &str| !work_of(w, &chat, turn, "turn.end").is_empty();
+    let answer = |w: &World, turn: &str| replies(w, &chat).into_iter().filter(|r| r["turn"] == turn).map(|r| r["text"].clone()).collect::<Vec<_>>();
+
+    // valid: a routine with nothing to tell, after a tool
+    let quiet = routine("use a tool to check the shelf, silent unless it changed");
+    fake.until(WAIT, "the silent routine's end", |w| ended(w, &quiet)).await;
+    // invalid: a person's message answered with bare silence
+    let asked = said("be silent");
+    fake.until(WAIT, "the person's turn's end", |w| ended(w, &asked)).await;
+    // a routine with something to tell
+    let told = routine("water the plants");
+    fake.until(WAIT, "the routine's reply", |w| !answer(w, &told).is_empty()).await;
+    fake.with(|w| {
+        assert_eq!(work_of(w, &chat, &quiet, "turn.end")[0]["outcome"], "idle", "it ends idle, at its ✅");
+        assert!(answer(w, &quiet).is_empty(), "the silent routine says nothing: {:?}", replies(w, &chat));
+        assert!(work_of(w, &chat, &quiet, "turn.notice").is_empty(), "nor a notice");
+        assert_eq!(work_of(w, &chat, &quiet, "turn.step").len(), 2, "its tool's steps are its own still");
+        assert_eq!(answer(w, &asked), vec![json!(wire::UNEXPECTED_SILENCE)], "a person's message answered with silence gets Hermes' warning");
+        assert_eq!(work_of(w, &chat, &asked, "turn.end")[0]["outcome"], "idle");
+        assert_eq!(answer(w, &told), vec![json!("echo: [your routine] water the plants")]);
+    });
+    bridge.stop().await;
+
+    // restart: the next life runs the silent routine no more
+    let bridge = support::start(cfg, relay(listen, &dir));
+    let after = hermes.after(listen, "computer-test", SECRET);
+    let next = routine("feed the cat");
+    fake.until(WAIT, "the next routine's reply", |w| !answer(w, &next).is_empty()).await;
+    fake.with(|w| {
+        let starts = |t: &str| work_of(w, &chat, t, "turn.start").len();
+        assert_eq!((starts(&quiet), starts(&asked), starts(&told), starts(&next)), (1, 1, 1, 1), "each ran once");
+        assert!(answer(w, &quiet).is_empty());
+    });
+    after.with(|s| assert!(s.heard.iter().all(|e| e["message_id"] == next.as_str()), "the next life's Hermes heard the next routine alone: {:?}", s.heard));
+    bridge.stop().await;
+}
+
 /// Goal (the finite-mono parity audit, 2026-10-09: Hermes' notices read as
 /// steps named after their first word): a message Hermes sends that starts
 /// with one of its notice glyphs is a `turn.notice` of its turn, never a

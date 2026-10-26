@@ -825,7 +825,10 @@ A routine (decision 38): a scheduled record on the agent fragment's
 --routine`, which builds this body) appends it, as the fragment itself,
 at each minute its cron names, keyed by the schedule and that minute,
 which wakes the computer; the agent takes it as a turn in `chat`, asked
-by its owner. `chat` is optional (Paul, 2026-10-26: "everything proactive
+by its owner. One with nothing to tell may say nothing: its turn's
+records in `work`, and no reply (our Hermes image: its model's exact
+`[SILENT]`; docs/bridge.md, "A routine with nothing to tell says
+nothing"). `chat` is optional (Paul, 2026-10-26: "everything proactive
 goes home"): one that names none runs in its owner's home as it fires
 (docs/api.md, "An agent's home": its own chat, or its SimpleX chat), read
 then, so a home changed later moves its next fire; a bridge before homes
