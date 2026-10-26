@@ -41,6 +41,12 @@
 //!   (docs/chat-records.md, "A relayed message"), each by its sender's id,
 //!   so a message read again is one record; a file it carries (a voice
 //!   message's) is received first and carried as its attachment.
+//! - **Its name in the owner's app** is the agent's title as its status
+//!   says it now, read every `TITLE_EVERY_MS` while its core runs; the core
+//!   is asked to show it (`Cmd::Profile`) once each time it comes up and once
+//!   a rename. Its first start makes the profile with the agent's label,
+//!   which the core always takes: `--create-bot-display-name` names no
+//!   profile it already has, which is why a rename asks.
 //! - **What the agent says in that chat** comes back here once posted
 //!   (`Handle::reply`), whatever started its turn, and goes to the owner's
 //!   app: the chat is their phone while linked (`Engine::mirror`).
@@ -94,6 +100,10 @@ const WRITER_MAX: usize = 64;
 const STDERR_TAIL_BYTES: usize = 2_048;
 /// An agent's name, as its SimpleX profile shows it, at most.
 const DISPLAY_NAME_MAX: usize = 32;
+/// A running core's agent's name is read again this often (its title, as
+/// our Hermes image reads it as often: docs/api.md, "An agent's name and
+/// picture"), so a rename reaches its owner's app within it.
+const TITLE_EVERY_MS: u64 = 10_000;
 /// Messages waiting to be posted for one agent, at most; past it the
 /// oldest wait for the next start's catch-up.
 const POSTS_MAX: usize = 64;
@@ -140,6 +150,7 @@ const OUT_SWEEP_MAX: usize = 1024;
 pub const OUT_DIR: &str = "out";
 
 const _: () = assert!(SEND_BYTES_MAX.div_ceil(4_000_000) * 4_000_000 < RELAY_BYTES_MAX && SENDING_MAX <= OUT_SWEEP_MAX, "a file, padded into chunks, is one relay's worth, and the sweep sees every send");
+const _: () = assert!(DISPLAY_NAME_MAX <= wire::NAME_MAX_BYTES, "an agent's name is one the wire takes");
 
 /// What the image gives the bridge for SimpleX (main.rs reads it).
 #[derive(Debug, Clone)]
@@ -211,8 +222,9 @@ pub enum Msg {
     Want { agent: String, key: Box<Key>, session: String, reply: Answer },
     /// Its owner's unlink, by an unlink's ticket.
     Unlink { agent: String, ticket: Box<Ticket>, reply: Answer },
-    /// An agent's name, as its owner titled it (looked up off the loop).
-    Titled { agent: String, title: String },
+    /// An agent's title, as its status said it (read off the loop,
+    /// `read_names`): none when it has none; an error when it did not answer.
+    Titled { agent: String, title: Result<Option<String>, String> },
     /// A core's bot API answered.
     Up { agent: String, epoch: u64 },
     /// A frame its core sent.
@@ -591,23 +603,17 @@ fn core_args(cfg: &Config, dir: &Path, port: u16, name: &str, socks: Option<u16>
     args
 }
 
-/// The name an agent's SimpleX profile shows: its title, of letters, digits,
-/// spaces and `-_.'`, at most `DISPLAY_NAME_MAX` bytes; else its label.
+/// The name an agent's SimpleX profile shows: its title, else (it has none,
+/// or none of it is kept) its label, else "Agent"; as the core keeps it
+/// (`wire::valid_name`, its own rule), cut to at most `DISPLAY_NAME_MAX`
+/// bytes (a name's start is a name the core keeps too), so one it takes as
+/// it is (`wire::name_ok`). A label is always one (lowercase letters,
+/// digits and single dashes inside).
 pub fn display_name(title: Option<&str>, label: &str) -> String {
-    let clean = |s: &str| -> String {
-        let kept: String = s.chars().filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '\'')).collect();
-        wire::cut(kept.trim(), DISPLAY_NAME_MAX).trim().to_string()
-    };
-    let named = title.map(clean).unwrap_or_default();
-    if !named.is_empty() {
-        return named;
-    }
-    let label = clean(label);
-    if label.is_empty() {
-        "Agent".into()
-    } else {
-        label
-    }
+    let clean = |s: &str| -> String { wire::cut(&wire::valid_name(s), DISPLAY_NAME_MAX).trim_end_matches(' ').to_string() };
+    let name = [title.map(clean).unwrap_or_default(), clean(label)].into_iter().find(|n| !n.is_empty()).unwrap_or_else(|| "Agent".into());
+    assert!(wire::name_ok(&name), "an agent's SimpleX name is one the core takes: {name:?}");
+    name
 }
 
 /// What the owner's SimpleX app is told as the link is made.
@@ -739,7 +745,19 @@ struct Slot {
     agent: Agent,
     dir: PathBuf,
     saved: Saved,
-    title: Option<String>,
+    /// Its name, as its profile is to show it (`display_name` of its
+    /// title), as its status last said: none until a read answers, its
+    /// label standing in till then; a read that fails keeps it.
+    name: Option<String>,
+    /// When its name was last asked for, and whether that read is under
+    /// way: read every `TITLE_EVERY_MS` while its core runs, one at a time.
+    named_at: Option<Instant>,
+    naming: bool,
+    /// The name its core was asked to show (`Cmd::Profile`) since it came
+    /// up: asked once a name, so a rename is one command. Each core that
+    /// comes up is asked again: its database keeps the profile its first
+    /// start made (`--create-bot-display-name` names only a new one).
+    profiled: Option<String>,
     epoch: u64,
     core: Option<Core>,
     up: bool,
@@ -788,6 +806,12 @@ struct Slot {
 }
 
 impl Slot {
+    /// Its name as its profile and its greeting say it: as last read, else
+    /// its label's.
+    fn shown_name(&self) -> String {
+        self.name.clone().unwrap_or_else(|| display_name(None, &self.agent.name))
+    }
+
     fn view(&self, always_on: bool, session: Option<&str>) -> View {
         let shown = session.is_some() && session == self.session.as_deref();
         let (phase, link, short, name, hidden) = match &self.saved.link.phase {
@@ -903,11 +927,7 @@ impl Manager {
                 });
                 let _ = reply.send(answer);
             }
-            Msg::Titled { agent, title } => {
-                if let Some(s) = self.slots.get_mut(&agent) {
-                    s.title = Some(title);
-                }
-            }
+            Msg::Titled { agent, title } => self.titled(&agent, title),
             Msg::Up { agent, epoch } => self.up(&agent, epoch),
             Msg::Frame { agent, epoch, text } => self.frame(&agent, epoch, &text),
             Msg::Exited { agent, epoch, why } => self.exited(&agent, epoch, &why),
@@ -1035,7 +1055,10 @@ impl Manager {
                 agent: a.clone(),
                 dir,
                 saved,
-                title: None,
+                name: None,
+                named_at: None,
+                naming: false,
+                profiled: None,
                 epoch: 0,
                 core: None,
                 up: false,
@@ -1059,21 +1082,71 @@ impl Manager {
                 session: None,
                 linking: None,
             });
-            self.look_up_title(a.clone());
         }
         self.computer = Some(computer);
         self.reconcile().await;
     }
 
-    /// The agent's title, as its owner's list says it, read off the loop.
-    fn look_up_title(&self, agent: Agent) {
-        let (api, tx) = (self.api.clone(), self.tx.clone());
-        tokio::spawn(async move {
-            let Ok(list) = api.fragments_for(&agent.fragment, &agent.owner).await else { return };
-            if let Some(title) = list.into_iter().find(|f| f.name == agent.fragment && !f.title.is_empty()).map(|f| f.title) {
-                let _ = tx.send(Msg::Titled { agent: agent.fragment, title }).await;
+    /// The agents whose name is due a read: each whose core runs, its last
+    /// read `TITLE_EVERY_MS` ago or never, none under way; marked under way.
+    fn names_due(&mut self, now: Instant) -> Vec<String> {
+        let due = |s: &Slot| s.core.is_some() && !s.naming && s.named_at.is_none_or(|t| now.duration_since(t) >= Duration::from_millis(TITLE_EVERY_MS));
+        let mut out = vec![];
+        for (f, s) in self.slots.iter_mut().filter(|(_, s)| due(s)) {
+            s.naming = true;
+            s.named_at = Some(now);
+            out.push(f.clone());
+        }
+        out
+    }
+
+    /// Each running core's agent's name, read again off the loop: its agent
+    /// fragment's title, as its status says it now (the one way an image
+    /// reads it: hermes-boot's `read_title` too), never a list's copy.
+    fn read_names(&mut self, now: Instant) {
+        for agent in self.names_due(now) {
+            let (api, tx) = (self.api.clone(), self.tx.clone());
+            // bounded: one call, within the API's own timeout
+            tokio::spawn(async move {
+                let title = api.title(&agent, &agent).await.map_err(|e| e.to_string());
+                let _ = tx.send(Msg::Titled { agent, title }).await;
+            });
+        }
+    }
+
+    /// A read of an agent's name answered: kept (its label for a fragment
+    /// with no title), and its core's profile named so. One that failed
+    /// changes nothing: a name is never taken back to the label for an
+    /// answer that did not come.
+    fn titled(&mut self, f: &str, title: Result<Option<String>, String>) {
+        let Some(s) = self.slots.get_mut(f) else { return };
+        s.naming = false;
+        match title {
+            Ok(title) => {
+                let name = display_name(title.as_deref(), &s.agent.name);
+                if s.name.as_ref() != Some(&name) {
+                    crate::ev!("simplex.named", { "agent": f, "name": name, "was": s.name });
+                    s.name = Some(name);
+                }
+                self.profile(f);
             }
-        });
+            Err(e) => crate::ev!("simplex.title_unread", { "agent": f, "error": wire::cut(&e, 200) }),
+        }
+    }
+
+    /// Its core's profile named as the agent is, once its name is read and
+    /// while it was asked for another (or none, since it came up): one
+    /// command a start and a rename, which the core sends on to the owner's
+    /// app (and answers `userProfileNoChange` for the name it holds). A
+    /// refusal is logged, and not asked again until the name changes or the
+    /// core comes up again; a core taking no commands now is asked at the
+    /// next read.
+    fn profile(&mut self, f: &str) {
+        let Some(s) = self.slots.get_mut(f) else { return };
+        let taking = s.up && s.core.as_ref().is_some_and(|c| c.writer.capacity() > 0);
+        let Some(name) = s.name.clone().filter(|n| taking && s.profiled.as_ref() != Some(n)) else { return };
+        s.profiled = Some(name.clone());
+        self.act(f, Action::Ask(Cmd::Profile { name }));
     }
 
     async fn tick(&mut self) {
@@ -1091,6 +1164,7 @@ impl Manager {
             let _ = self.pulse.send(false);
         }
         self.reconcile().await;
+        self.read_names(Instant::now());
         self.resync();
         self.files_overdue(Instant::now());
         self.sends_overdue(Instant::now());
@@ -1351,7 +1425,10 @@ impl Manager {
                 return;
             }
         };
-        let name = display_name(s.title.as_deref(), &s.agent.name);
+        // a profile its database lacks (its first start) is made with its
+        // label, which the core always takes (it makes none of a name it
+        // refuses, and would not start), and named once it is up (`profile`)
+        let name = display_name(None, &s.agent.name);
         let mut cmd = tokio::process::Command::new(&cfg.bin);
         // it dies with the bridge, however the bridge dies (a SIGKILL runs no
         // handler of ours): no core outlives it to run beside the next one's
@@ -1519,7 +1596,10 @@ impl Manager {
             s.saved.generation = c.generation;
         }
         s.started = true;
+        s.profiled = None;
         crate::ev!("simplex.core_up", { "agent": f, "epoch": epoch, "rollback": rollback, "phase": s.view(c.always_on, None).phase });
+        // its name first, so an invitation this start makes is the new name's
+        self.profile(f);
         self.apply(f, Input::Started { rollback });
     }
 
@@ -1542,6 +1622,9 @@ impl Manager {
         }
         if let Some(Cmd::SendFile { path, kind, .. }) = &asked {
             self.sent(f, path, *kind, &frame.resp);
+        }
+        if let (Some(Cmd::Profile { .. }), Resp::Profile { name, changed }) = (&asked, &frame.resp) {
+            crate::ev!("simplex.profile", { "agent": f, "name": name, "changed": changed });
         }
         match asked {
             Some(cmd) => match &frame.resp {
@@ -1863,7 +1946,7 @@ impl Manager {
                     Notice::Failed { what } => s.note = Some(format!("SimpleX said: {what}")),
                 }
                 crate::ev!("simplex.told", { "agent": f, "notice": format!("{n:?}") });
-                let name = display_name(s.title.as_deref(), &s.agent.name);
+                let name = s.shown_name();
                 match n {
                     Notice::Linked { .. } => self.apply(f, Input::Reply(&greeting(&name))),
                     Notice::MaybeLost => self.apply(f, Input::Reply(MAYBE_LOST)),
@@ -2080,6 +2163,7 @@ fn kind_of(cmd: &Cmd) -> &'static str {
         Cmd::CancelFile { .. } => "cancel_file",
         Cmd::SendFile { .. } => "send_file",
         Cmd::CancelSend { .. } => "cancel_send",
+        Cmd::Profile { .. } => "profile",
     }
 }
 
@@ -2243,6 +2327,73 @@ mod tests {
         assert_eq!(*m.relaying.borrow(), BTreeMap::from([(f.to_string(), Some(other))]));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Goal (Paul, 2026-10-26: his SimpleX app showed his agent by the name
+    /// it had before he renamed it): the core's profile shows the agent's
+    /// name as its title says it now. Valid: once the name is read, its
+    /// running core is asked for it, once, and its greeting says it; a
+    /// rename is one command more. Replay: the same name again asks
+    /// nothing, nor does the core's answer. Invalid: a read that fails
+    /// changes nothing (never back to the label); no title, or one of
+    /// nothing the core takes, is its label. Restart: each core that comes
+    /// up is asked again (its database keeps the profile its first start
+    /// made); one that is down is asked nothing until it is up. Bounded:
+    /// read only while its core runs, one read at a time, every
+    /// `TITLE_EVERY_MS`.
+    #[tokio::test]
+    async fn a_rename_names_the_cores_profile() {
+        let dir = std::env::temp_dir().join(format!("simplex-named-{}", std::process::id()));
+        let (mut m, mut sent, _posts) = captured(&dir, 64);
+        let f = "juniper--k3x9";
+        let profiles = |sent: &mut mpsc::Receiver<String>| sent_lines(sent).into_iter().map(|(_, l)| l).filter(|l| l.starts_with("/p ")).collect::<Vec<_>>();
+        let titled = |t: Result<Option<&str>, &str>| Msg::Titled { agent: f.into(), title: t.map(|t| t.map(str::to_string)).map_err(str::to_string) };
+        let t0 = Instant::now();
+        assert_eq!(m.names_due(t0), [f], "its core runs: its name is read");
+        assert!(m.names_due(t0 + Duration::from_millis(2 * TITLE_EVERY_MS)).is_empty(), "one read at a time");
+        m.on(titled(Ok(Some("Juniper")))).await;
+        let asked = sent_lines(&mut sent);
+        assert_eq!(asked.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>(), ["/p 'Juniper'"]);
+        assert!(m.names_due(t0 + Duration::from_millis(TITLE_EVERY_MS - 1)).is_empty(), "not again within its wait");
+        assert_eq!(m.names_due(t0 + Duration::from_millis(TITLE_EVERY_MS)), [f]);
+        // replay: the same name, and the core's answer, ask nothing
+        m.on(titled(Ok(Some("Juniper")))).await;
+        let answer = json!({ "corrId": asked[0].0, "resp": { "type": "userProfileUpdated", "toProfile": { "displayName": "Juniper" } } });
+        m.frame(f, 1, &answer.to_string());
+        assert!(sent_lines(&mut sent).is_empty(), "asked once a name");
+        // a rename: one command, and the greeting says it
+        m.on(titled(Ok(Some("Waffle. Bot")))).await;
+        assert_eq!(profiles(&mut sent), ["/p 'Waffle Bot'"]);
+        m.act(f, Action::Tell(Notice::Linked { name: "paul".into() }));
+        assert!(sent_lines(&mut sent).iter().any(|(_, l)| l.contains("Hi, it's Waffle Bot.")), "its greeting says its name");
+        // invalid: a read that fails keeps it; no title is its label
+        m.on(titled(Err("no answer in 15000 ms"))).await;
+        assert!(profiles(&mut sent).is_empty());
+        assert_eq!(m.slots[f].name.as_deref(), Some("Waffle Bot"), "never back to the label for a read that failed");
+        m.on(titled(Ok(None))).await;
+        assert_eq!(profiles(&mut sent), ["/p 'juniper'"], "no title: its label");
+        m.on(titled(Ok(Some("<<>>")))).await;
+        assert!(profiles(&mut sent).is_empty(), "nothing the core takes: its label, as it is already");
+        // restart: down, asked nothing; each core that comes up, asked once
+        m.slots.get_mut(f).expect("its slot").up = false;
+        m.on(titled(Ok(Some("Basil")))).await;
+        assert!(profiles(&mut sent).is_empty(), "a core that is down is asked nothing");
+        m.up(f, 1);
+        assert_eq!(profiles(&mut sent), ["/p 'Basil'"]);
+        m.up(f, 1);
+        assert_eq!(profiles(&mut sent), ["/p 'Basil'"], "a core that came up again is asked again: its database keeps its first start's profile");
+        // no core: no read
+        m.slots.get_mut(f).expect("its slot").core = None;
+        assert!(m.names_due(t0 + Duration::from_millis(10 * TITLE_EVERY_MS)).is_empty(), "no core, no read");
+        // a core taking no commands now (its writer full): asked at the next read
+        let (mut m, mut sent, _posts) = captured(&dir, 1);
+        m.act(f, Action::Ask(Cmd::Invite));
+        m.on(titled(Ok(Some("Juniper")))).await;
+        assert_eq!(sent_lines(&mut sent).len(), 1, "the writer was full: only what filled it");
+        m.on(titled(Ok(Some("Juniper")))).await;
+        assert_eq!(profiles(&mut sent), ["/p 'Juniper'"], "asked once there is room");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Goal (Alex's review of #610): only a file the bridge gave up on is
     /// ever deleted. A transfer a restart resumed, completing before its
     /// message's catch-up, keeps its file, and the catch-up carries it; a
@@ -2865,15 +3016,24 @@ mod tests {
         assert_eq!(file_note("voice", "did not arrive"), "(I sent a voice message over SimpleX that did not arrive.)");
     }
 
-    /// Goal: an agent's SimpleX name is its title, cleaned and cut, else its
-    /// label; a fragment's name is a directory only in its own shape.
+    /// Goal: an agent's SimpleX name is its title, cleaned and cut to a name
+    /// the core takes as it is (`display_name` asserts `wire::name_ok`), else
+    /// its label; a fragment's name is a directory only in its own shape.
     #[test]
     fn names_are_clean() {
         assert_eq!(display_name(Some("Waffle"), "pulsar-360"), "Waffle");
-        assert_eq!(display_name(Some("  Wa<ff>le! 🧇 "), "x"), "Waffle");
+        assert_eq!(display_name(Some("  Wa<ff>le! 🧇 "), "x"), "Wa<ff>le! 🧇", "a symbol and punctuation the core keeps");
         assert_eq!(display_name(Some("<<>>"), "pulsar-360"), "pulsar-360");
+        assert_eq!(display_name(None, "pulsar-360"), "pulsar-360");
         assert_eq!(display_name(None, ""), "Agent");
         assert_eq!(display_name(Some(&"a".repeat(80)), "x").len(), DISPLAY_NAME_MAX);
+        // what the core refuses or changes (`'` and `.` are invalidDisplayName)
+        assert_eq!(display_name(Some("Paul's Bot"), "x"), "Pauls Bot");
+        assert_eq!(display_name(Some("  Dr.   Who\t"), "x"), "Dr Who");
+        assert_eq!(display_name(Some("--x a--b _c @d #e f-_g"), "x"), "x a-b _c d e f-g");
+        assert_eq!(display_name(Some("\u{93e}Bot a-\u{93e}b"), "x"), "Bot a-b", "a combining mark only after a letter");
+        assert_eq!(display_name(Some("日本語 ボット R2-D2 x² Ⅻ"), "x"), "日本語 ボット R2-D2 x");
+        assert_eq!(display_name(Some(&format!("{} b", "a".repeat(DISPLAY_NAME_MAX - 1))), "x"), "a".repeat(DISPLAY_NAME_MAX - 1), "no space left at its end");
         assert!(dir_name_ok("juniper--k3x9"));
         for bad in ["", "../x", "a/b", "Juniper", "a.b"] {
             assert!(!dir_name_ok(bad), "{bad}");
@@ -2885,7 +3045,10 @@ mod tests {
             agent: agent(),
             dir,
             saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None },
-            title: None,
+            name: None,
+            named_at: None,
+            naming: false,
+            profiled: None,
             epoch: 0,
             core: None,
             up: false,
@@ -3101,7 +3264,10 @@ mod tests {
             agent: agent(),
             dir: PathBuf::from("/nowhere"),
             saved,
-            title: None,
+            name: None,
+            named_at: None,
+            naming: false,
+            profiled: None,
             epoch: 4,
             core: Some(Core { pid, writer, exited: exited.clone(), planned: false }),
             up: true,
@@ -3191,7 +3357,10 @@ mod tests {
             agent: agent(),
             dir: PathBuf::from("/nowhere"),
             saved: Saved { identity: "npub1juniper".into(), generation: 1, link, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None },
-            title: None,
+            name: None,
+            named_at: None,
+            naming: false,
+            profiled: None,
             epoch: 1,
             core: None,
             up: true,
@@ -3241,7 +3410,10 @@ mod tests {
             agent: agent(),
             dir: std::env::temp_dir().join(format!("simplex-ack-{}", std::process::id())),
             saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None },
-            title: None,
+            name: None,
+            named_at: None,
+            naming: false,
+            profiled: None,
             epoch: 1,
             core: None,
             up: true,

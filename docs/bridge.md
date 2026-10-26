@@ -79,6 +79,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | `GET /api/fragments?for=<owner>` | | `{fragments: [{name, kind, owned, title}]}`: its owner's, as the agent reaches them: its own chat with them found by its label (`api::bot_chat`), as a routine with no chat fires |
 | `POST /api/fragments?for=<owner>` | `{name, template: "chat", title}` | the agent's SimpleX chat, made for its owner by the name its link chose, when its link is bound; 409, made already (then `GET /api/f/{chat}/members` says whether it is the agent's and its owner's: below, "SimpleX") |
 | `GET /api/f/{agent}/file?path=agent.json` | | its home (`api::Home`), read as a routine with no chat fires (docs/api.md, "An agent's home"); none (404) is its own chat |
+| `GET /api/f/{agent}/status` | | `{title}`: the agent's name (docs/api.md, "An agent's name and picture"), read every 10 s while its SimpleX core runs (below, "SimpleX") |
 | `GET /api/fragments` | | `{fragments: [{name, role}]}`: what the agent follows, listed at start, on a `joined` of it (as the agent the engine runs, no read of the computer first), and every 5 minutes. A listing a read of which fails with no answer, a 429 or a 5xx is asked again after a jittered backoff (from 1 s, at most 30 s) until it answers: the list, or only the fragments whose channels did not read; what was found meanwhile is followed, so one fragment that fails keeps the agent from no other. One listing an agent at a time: a newer one takes the place of one under way |
 | `GET /api/f/{f}/channels` | | `{channels: [{name, post, seq}]}`: a postable `chat` is a chat; the agent's own `tasks` |
 | `GET /api/f/{f}/members` | | `{members: [{principal, kind, addedAt}]}`: the lead (first `kind: agent` by `addedAt`), and when this agent joined; read again after 30 s, and at once after a `joined` of one of the computer's agents to that fragment (so its lead never answers an `@mention` of an agent that just joined) |
@@ -478,6 +479,30 @@ drives it.
   never as an instruction: Hermes reads a topic as a label. Where its
   owner's home is, it is told beside its name (docs/computers.md).
 
+- **Its name in the owner's app is the agent's name** (its title, docs/
+  api.md, "An agent's name and picture"; `run::display_name`), and follows
+  a rename (Paul, 2026-10-26: his app showed the name his agent had when
+  its bridge started, which the bridge read once, and the core's profile,
+  made at its first start, was never named again). The bridge reads the
+  title from the agent's status every 10 s while its core runs
+  (`TITLE_EVERY_MS`, as our Hermes image does), and asks the core to show
+  it (`/p '<name>'`, `wire::Cmd::Profile`) once each time it comes up and
+  once a rename: the core keeps the rest of the profile (a bot's), sends
+  the name to the linked contact, and answers `userProfileNoChange` for the
+  name it holds, so asking again changes nothing. `--create-bot-display-
+  name` names only the profile a first start makes, which is the agent's
+  label: the core makes no profile of a name it refuses, and then does not
+  start. A name is what the core keeps of the title, so it takes it as it
+  is: `wire::valid_name` is v7.0.3's `mkValidName` ported char for char
+  (by Unicode's general categories, `unicode-properties` pinned at
+  Unicode 15.0, the core's own: a char of 15.1 or later is none to it,
+  so dropped; never
+  `.,;/\#@'"`~`, a combining mark only after a letter, at most 50
+  chars), held to the core's own tests (its tests/ValidNames.hs) and, in
+  the lab, to the real core with 200 seeded titles of every kind of char
+  (Alex's review of #628). A title read that fails changes nothing; no
+  title, or none of it kept, is the label. The greeting says the name
+  too.
 - **SMP on port 5223, never 443** (`--smp-web-port-servers off`,
   `simplex/run.rs` `core_args`). A SimpleX server on 443 takes its
   protocol only from a TLS hello that names no server (SNI), and
@@ -616,7 +641,9 @@ Proven by the Docker lane's `simplex_on_the_hermes_image` (the real image,
 a lab of a local SMP and XFTP server and the person's simplex-chat on a
 network it joins): linked from the screen port by its owner's ticket
 alone (none is 403), the invitation hidden from any other page, its door's
-key registered with the ticket, its SimpleX chat made for its owner; a
+key registered with the ticket, by the name it was given after its bridge
+started, and renamed while linked (the person's app follows within 10 s),
+its SimpleX chat made for its owner; a
 message posted there, a turn of Hermes' asked as its owner, its session
 told the chat is their phone, answered on SimpleX (1.2 s); words typed in
 that chat on the web, answered on SimpleX too; a routine with no chat, its
@@ -625,7 +652,9 @@ transcribed through the route and answered (0.4 s); a hold that stops the
 core first, its copies naming none of the core's databases; a restart; and
 a wake from a save older than the life before it, healed, the person told
 (1.0 s after the gate). By hand, `tests/simplex.rs` holds the rest against
-the real core: the link's rules, voice both ways, the lifecycle (a forged
+the real core: the link's rules, voice both ways, the profile's name (a
+start keeps the profile its first made; `/p` renames it, idempotent;
+every name `display_name` makes taken as it is), the lifecycle (a forged
 ticket refused, the door key's file 0600 and in no environment, the unlink
 closing the door at the fake platform), messages through the chat, and the
 page's code, which another page cannot fetch. The platform's half (the

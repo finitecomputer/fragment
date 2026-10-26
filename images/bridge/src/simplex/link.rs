@@ -387,8 +387,9 @@ impl Link {
                 out.push(Action::Save);
             }
             // a file's own events are the bridge's to act on (it receives the
-            // file a forwarded message carries), never the link's
-            Resp::Sync { .. } | Resp::SyncStarted { .. } | Resp::Deleted { .. } | Resp::ConnDeleted { .. } | Resp::FileReady { .. } | Resp::FileDone { .. } | Resp::FileFailed { .. } | Resp::FileSent { .. } | Resp::FileUnsent { .. } | Resp::Error { .. } | Resp::Other(_) => {}
+            // file a forwarded message carries), never the link's, as is the
+            // agent's profile (its name)
+            Resp::Sync { .. } | Resp::SyncStarted { .. } | Resp::Deleted { .. } | Resp::ConnDeleted { .. } | Resp::FileReady { .. } | Resp::FileDone { .. } | Resp::FileFailed { .. } | Resp::FileSent { .. } | Resp::FileUnsent { .. } | Resp::Profile { .. } | Resp::Error { .. } | Resp::Other(_) => {}
         }
     }
 

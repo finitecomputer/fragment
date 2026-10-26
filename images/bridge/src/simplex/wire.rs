@@ -103,6 +103,92 @@ pub enum Cmd {
     /// Give up on sending it (`/fcancel`): one not sent in time. Its answer
     /// settles nothing: the link let go of the file before it asked.
     CancelSend { file: FileId },
+    /// The agent's own profile's display name (`/p '<name>'`), the rest of
+    /// it (a bot's, its preferences) kept: the core sends it to its
+    /// contacts (the owner's app shows it), and answers `userProfileUpdated`,
+    /// or `userProfileNoChange` for the name it holds. `name` is one
+    /// `name_ok` takes.
+    Profile { name: String },
+}
+
+/// A display name the core takes as it is: one `valid_name` leaves as it
+/// is, of at most `NAME_MAX_BYTES`. The core holds a new profile and a
+/// rename to that (`invalidDisplayName` otherwise, fixtures/
+/// invalidDisplayName.json; a first start's profile that fails it is never
+/// made, and the core does not start). It has no `'`, so `/p` reads it
+/// quoted, as a name with a space must be.
+pub fn name_ok(name: &str) -> bool {
+    !name.is_empty() && name.len() <= NAME_MAX_BYTES && valid_name(name) == name
+}
+
+/// Chars no display name holds.
+const NAME_PROHIBITED: &str = ".,;/\\#@'\"`~";
+/// The Unicode the pinned core's categories are (v7.0.3, built with GHC
+/// 9.6, whose base is Unicode 15.0.0: the lab's core takes a char 15.0
+/// assigned, and refuses one of 15.1, as unassigned). A char newer than
+/// that is no letter or symbol to the core, so `valid_name` must not know
+/// it either (Alex's review of #628: 🫩 of 16.0).
+const CORE_UNICODE: (u64, u64, u64) = (15, 0, 0);
+const _: () = assert!(
+    unicode_properties::UNICODE_VERSION.0 == CORE_UNICODE.0 && unicode_properties::UNICODE_VERSION.1 == CORE_UNICODE.1 && unicode_properties::UNICODE_VERSION.2 == CORE_UNICODE.2,
+    "a display name's categories are the core's Unicode's"
+);
+/// Chars a display name holds at most (`take 50`).
+const NAME_CHARS_MAX: usize = 50;
+
+/// What v7.0.3's core makes of a display name: its `mkValidName`
+/// (src/Simplex/Chat/Library/Commands.hs, lines 6035 to 6061), ported char
+/// for char, so the bridge never asks for a name the core would change or
+/// refuse. Each char is kept or dropped by its Unicode general category
+/// and what was kept before it: none of `NAME_PROHIBITED`; a name starts
+/// with a letter, a decimal digit or a symbol, and a word may start with a
+/// currency or math sign too, or with one punctuation mark; a combining
+/// mark only after a letter or the like; no two marks of punctuation in a
+/// row; spaces as one; at most `NAME_CHARS_MAX` chars, none trailing
+/// spaces. Its own tests are the core's (tests/ValidNames.hs).
+pub fn valid_name(name: &str) -> String {
+    use unicode_properties::{GeneralCategory as G, GeneralCategoryGroup as Group, UnicodeGeneralCategory};
+    let mut kept: Vec<char> = Vec::new();
+    let (mut prev, mut punct) = ('\0', 0usize);
+    for c in name.chars() {
+        let c = if name_space(c) { ' ' } else { c };
+        let cat = c.general_category();
+        let is_punct = matches!(cat, G::ConnectorPunctuation | G::DashPunctuation | G::OtherPunctuation);
+        let first_name_char = c.general_category_group() == Group::Letter || matches!(cat, G::DecimalNumber | G::OtherSymbol);
+        let first_char = first_name_char || matches!(cat, G::CurrencySymbol | G::MathSymbol);
+        let valid = if NAME_PROHIBITED.contains(c) {
+            false
+        } else if prev == '\0' {
+            c > ' ' && first_name_char
+        } else if prev == ' ' {
+            first_char || (punct == 0 && is_punct)
+        } else if punct > 0 {
+            first_char || c == ' '
+        } else {
+            first_char || c == ' ' || c.general_category_group() == Group::Mark || is_punct
+        };
+        if valid {
+            kept.push(c);
+            prev = c;
+            punct = if is_punct {
+                punct + 1
+            } else if c == ' ' {
+                punct
+            } else {
+                0
+            };
+        }
+    }
+    kept.truncate(NAME_CHARS_MAX);
+    let out: String = kept.into_iter().collect();
+    out.trim_end_matches(' ').to_string()
+}
+
+/// Haskell's `isSpace`, as the core reads a name: the ASCII white space
+/// chars, no-break space, and Unicode's space separators.
+fn name_space(c: char) -> bool {
+    use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
+    matches!(c, '\t'..='\r' | ' ' | '\u{a0}') || c.general_category() == GeneralCategory::SpaceSeparator
 }
 
 impl Cmd {
@@ -158,6 +244,10 @@ impl Cmd {
                 };
                 let body = json!([{ "filePath": path, "msgContent": content }]);
                 format!("/_send @{contact} json {body}")
+            }
+            Cmd::Profile { name } => {
+                assert!(name_ok(name), "a profile's name the core takes as it is");
+                format!("/p '{name}'")
             }
         }
     }
@@ -252,6 +342,10 @@ pub enum Resp {
     /// A file the link sent that will not be (`sndFileError`, or the core's
     /// own cancel, `sndFileCancelledXFTP`).
     FileUnsent { file: FileId },
+    /// The agent's profile after a `Profile`: the display name it shows now,
+    /// and whether that changed it (`userProfileUpdated`, sent on to its
+    /// contacts) or it was the name already (`userProfileNoChange`).
+    Profile { name: String, changed: bool },
     /// A command failed (`chatCmdError`), or the core reports an error of
     /// its own (`chatError`): what it said, cut.
     Error { what: String },
@@ -418,6 +512,12 @@ fn read_resp(r: &Value) -> Result<Resp, WireError> {
         // a sent file's events all carry its transfer (`chatItem_` may be none)
         "sndFileCompleteXFTP" => Resp::FileSent { file: id(&r["fileTransferMeta"]["fileId"], "a sent file with no id")? },
         "sndFileError" | "sndFileCancelledXFTP" => Resp::FileUnsent { file: id(&r["fileTransferMeta"]["fileId"], "a sent file with no id")? },
+        "userProfileUpdated" | "userProfileNoChange" => {
+            let changed = t == "userProfileUpdated";
+            let p = if changed { &r["toProfile"] } else { &r["user"]["profile"] };
+            let name = p["displayName"].as_str().ok_or_else(|| shape("a profile with no name"))?;
+            Resp::Profile { name: cut(name, NAME_MAX_BYTES).into(), changed }
+        }
         "chatCmdError" | "chatError" => Resp::Error { what: error_of(&r["chatError"]) },
         other => Resp::Other(cut(other, 64).into()),
     })
@@ -510,6 +610,9 @@ mod tests {
             "sentVoice" => include_str!("fixtures/sentVoice.json"),
             "fileSent" => include_str!("fixtures/fileSent.json"),
             "sendCancelled" => include_str!("fixtures/sendCancelled.json"),
+            "profileUpdated" => include_str!("fixtures/profileUpdated.json"),
+            "profileNoChange" => include_str!("fixtures/profileNoChange.json"),
+            "invalidDisplayName" => include_str!("fixtures/invalidDisplayName.json"),
             other => panic!("no fixture {other}"),
         };
         parse(text).unwrap_or_else(|e| panic!("{name}: {e}")).resp
@@ -572,6 +675,12 @@ mod tests {
         let warned = r#"{"resp":{"type":"sndFileWarning","user":{},"fileTransferMeta":{"fileId":4},"errorMessage":"retrying"}}"#;
         assert_eq!(parse(warned).expect("a frame").resp, Resp::Other("sndFileWarning".into()));
         assert!(matches!(parse(r#"{"resp":{"type":"sndFileCompleteXFTP","fileTransferMeta":{}}}"#), Err(WireError::Shape(_))), "a sent file with no id");
+        // the agent's profile renamed (the lab's `a_rename_reaches_the_owners_app`):
+        // changed, then asked again for the name it holds
+        assert_eq!(fixture("profileUpdated"), Resp::Profile { name: "Waffle Bot".into(), changed: true });
+        assert_eq!(fixture("profileNoChange"), Resp::Profile { name: "Waffle Bot".into(), changed: false });
+        assert_eq!(fixture("invalidDisplayName"), Resp::Error { what: "error invalidDisplayName".into() });
+        assert!(matches!(parse(r#"{"resp":{"type":"userProfileUpdated","toProfile":{}}}"#), Err(WireError::Shape(_))), "a profile with no name");
     }
 
     /// Goal: a command's line is what the lab's core took.
@@ -609,6 +718,88 @@ mod tests {
         assert!(IMAGE_PREVIEW.starts_with("data:image/png;base64,") && IMAGE_PREVIEW.len() == 338, "the CLI's own");
         assert_eq!(Cmd::CancelSend { file: 9 }.line(), "/fcancel 9");
         assert_eq!(serde_json::to_value(Kind::Voice { secs: 3 }).expect("a kind"), json!({ "kind": "voice", "secs": 3 }));
+        // a profile's name, quoted: one with a space reads whole
+        assert_eq!(Cmd::Profile { name: "Waffle Bot".into() }.line(), "/p 'Waffle Bot'");
+        assert_eq!(Cmd::Profile { name: "Waffle".into() }.line(), "/p 'Waffle'");
+    }
+
+    /// Goal: `valid_name` is the core's `mkValidName`, by the core's own
+    /// tests (v7.0.3's tests/ValidNames.hs, every case), and combining marks
+    /// by where they stand (Alex's review of #628: refused at a name's or a
+    /// word's start and after punctuation, kept after a letter). A
+    /// profile's name is asked only as the core keeps it: anything that
+    /// would end the quote, or that the core refuses or changes, never is.
+    #[test]
+    fn a_profiles_name_is_one_the_core_takes() {
+        let long = "01234567890123456789012345678901234567890123456789";
+        let core = [
+            ("alice", "alice"),
+            (" alice", "alice"),
+            ("?alice", "alice"),
+            ("алиса", "алиса"),
+            ("John Doe", "John Doe"),
+            ("J.Doe", "JDoe"),
+            ("J. Doe", "J Doe"),
+            ("J..Doe", "JDoe"),
+            ("J ..Doe", "J Doe"),
+            ("J ... Doe", "J Doe"),
+            ("J .... Doe", "J Doe"),
+            ("J . . Doe", "J Doe"),
+            ("@alice", "alice"),
+            ("#alice", "alice"),
+            ("'alice", "alice"),
+            ("alice ", "alice"),
+            ("John  Doe", "John Doe"),
+            ("'John Doe'", "John Doe"),
+            ("\"John Doe\"", "John Doe"),
+            ("`John Doe`", "John Doe"),
+            ("John \"Doe\"", "John Doe"),
+            ("John `Doe`", "John Doe"),
+            ("alice/bob", "alicebob"),
+            ("alice / bob", "alice bob"),
+            ("alice /// bob", "alice bob"),
+            ("alice //// bob", "alice bob"),
+            ("alice >>= bob", "alice >>= bob"),
+            ("alice@example.com", "aliceexamplecom"),
+            ("alice <> bob", "alice <> bob"),
+            ("alice -> bob", "alice -> bob"),
+            ("alice & bob", "alice & bob"),
+            ("alice && bob", "alice & bob"),
+            ("alice & & bob", "alice & bob"),
+            ("alice-bob", "alice-bob"),
+            ("alice--bob", "alice-bob"),
+            ("alice -- bob", "alice - bob"),
+            ("alice \\ bob", "alice bob"),
+            ("alice (bob)", "alice bob"),
+            ("alice: bob", "alice: bob"),
+            ("alice 👍", "alice 👍"),
+            ("👍", "👍"),
+            ("alice >", "alice >"),
+            ("> alice", "alice"),
+            ("123", "123"),
+            ("123 alice", "123 alice"),
+            (&format!("{long}extra"), long),
+            (&format!("{} extra", &long[..49]), &long[..49]),
+        ];
+        for (given, kept) in core {
+            assert_eq!(valid_name(given), kept, "{given:?}");
+        }
+        // the core's Unicode, 15.0 (Alex's review): a letter or a symbol it
+        // assigned is kept; one of 15.1 or later is none to it, so dropped
+        for (given, kept) in [("a\u{870}", "a\u{870}"), ("a\u{11f04}", "a\u{11f04}"), ("🩵", "🩵"), ("a\u{2ebf0}", "a"), ("a\u{2ffc}", "a"), ("a\u{1c89}", "a"), ("Bot 🫩", "Bot"), ("🫩", ""), ("a\u{1faea}", "a")] {
+            assert_eq!(valid_name(given), kept, "{given:?}");
+        }
+        // combining marks: only after a letter (a Devanagari vowel sign, an acute)
+        for (given, kept) in [("\u{93e}Bot", "Bot"), ("Bot \u{93e}", "Bot"), ("a-\u{93e}b", "a-b"), ("a\u{93e}", "a\u{93e}"), ("Zoe\u{301}", "Zoe\u{301}"), ("\u{301}", "")] {
+            assert_eq!(valid_name(given), kept, "{given:?}");
+        }
+        for ok in ["Waffle", "Waffle Bot", "pulsar-360", "Zoë", "алиса", "日本語 ボット", "a_b-c", "a- b", "a -b", "Waffle 🧇!", "a\u{93e}", &"a".repeat(NAME_CHARS_MAX)] {
+            assert!(name_ok(ok), "{ok}");
+        }
+        for bad in ["", "Paul's Bot", "Dr. Bot", "a.b", "'", "a  b", " a", "a ", "-a", "a--b", "a-_b", "#a", "@a", "a#b", "a,b", "x²", "Ⅻ", "a\tb", "\u{93e}Bot", "a-\u{93e}b", &"a".repeat(NAME_MAX_BYTES + 1)] {
+            assert!(!name_ok(bad), "{bad:?}");
+            assert!(std::panic::catch_unwind(|| Cmd::Profile { name: bad.into() }.line()).is_err(), "never asked: {bad:?}");
+        }
     }
 
     /// Goal: a reply of any length goes in parts the core takes, which say
