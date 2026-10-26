@@ -901,7 +901,7 @@ async fn a_rename_reaches_the_owners_app() {
     let shown = |e: &Value| e["toContact"]["profile"].clone();
 
     // renamed: the person's app is told, and it is a bot's profile still
-    let name = display_name(Some("Waffle Bot!"), "agent");
+    let name = display_name(Some("Waffle. Bot"), "agent");
     assert_eq!(rename(&mut agent, &name).await, Resp::Profile { name: "Waffle Bot".into(), changed: true });
     let told = person.wait(Duration::from_secs(30), |e| tag(e) == "contactUpdated").await;
     assert_eq!((shown(&told)["displayName"].as_str(), shown(&told)["peerType"].as_str()), (Some("Waffle Bot"), Some("bot")), "{told}");
@@ -910,15 +910,37 @@ async fn a_rename_reaches_the_owners_app() {
     person.drain(Duration::from_secs(3)).await;
     assert!(!person.events.iter().any(|e| tag(e) == "contactUpdated"), "no second update: {:?}", person.events.iter().map(tag).collect::<Vec<_>>());
 
-    // whatever its title, a name the core takes as it is
-    for title in ["Paul's Bot", "  Dr.   Who  ", "--x a--b _c @d #e f-_g", "日本語 ボット R2-D2 x² Ⅻ", "Zoë the 2nd", "алиса", "Waffle 🧇!", &"long ".repeat(20)] {
+    // whatever its title, what the core keeps of it (`wire::valid_name`),
+    // asked as it is, is taken as it is: never refused, never changed
+    // (Alex's review: a combining mark only after a letter)
+    let titles = ["Paul's Bot", "  Dr.   Who  ", "--x a--b _c @d #e f-_g", "日本語 ボット R2-D2 x² Ⅻ", "Zoë the 2nd", "алиса", "Waffle 🧇!", "Wa<ff>le >= 2 & co", "\u{93e}Bot", "Bot \u{93e}x", "a-\u{93e}b", "a\u{93e}", "Zoe\u{301}", "J ... Doe", &"long ".repeat(20)];
+    for title in titles {
         let name = display_name(Some(title), "agent");
-        assert_eq!(rename(&mut agent, &name).await, Resp::Profile { name: name.clone(), changed: true }, "{title:?}");
+        let said = rename(&mut agent, &name).await;
+        assert!(matches!(&said, Resp::Profile { name: n, .. } if *n == name), "{title:?} as {name:?}: {said:?}");
     }
-    // what it refuses (the bridge's old names kept `.` and `'`)
-    for refused in ["Dr. Who", "Pauls.Bot"] {
+    // and 200 titles drawn from every kind of char the rule tells apart
+    // (letters of several scripts, digits, letter numbers and others,
+    // marks, symbols of each kind, punctuation of each kind, the prohibited
+    // ones, spaces of several kinds, controls), seeded: each the core takes
+    // as `display_name` makes it
+    let pool: Vec<char> = "aZé日ボалж7٣Ⅻ²½\u{301}\u{93e}\u{20dd}🧇©€±^.,;/\\#@'\"`~-_!?:()[]{}«»&*% \u{a0}\u{2003}\t\n\u{1}\u{200b}".chars().collect();
+    let mut seed: u64 = 0x5eed_f0a9;
+    for i in 0..200 {
+        let title: String = (0..1 + i % 24)
+            .map(|_| {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                pool[(seed >> 33) as usize % pool.len()]
+            })
+            .collect();
+        let name = display_name(Some(&title), "agent");
+        let said = rename(&mut agent, &name).await;
+        assert!(matches!(&said, Resp::Profile { name: n, .. } if *n == name), "{title:?} as {name:?}: {said:?}");
+    }
+    // what it refuses (the bridge's old names kept `.` and `'`, and a mark anywhere)
+    for refused in ["Dr. Who", "Pauls.Bot", "\u{93e}Bot", "a-\u{93e}b"] {
         let r = agent.api.cmd(&format!("/p '{refused}'")).await;
-        assert!(r.to_string().contains("invalidDisplayName"), "{refused}: {r}");
+        assert!(r.to_string().contains("invalidDisplayName") && !wire::name_ok(refused), "{refused}: {r}");
     }
     assert_eq!(rename(&mut agent, "Waffle Bot").await, Resp::Profile { name: "Waffle Bot".into(), changed: true });
 

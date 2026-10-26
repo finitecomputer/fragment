@@ -3189,7 +3189,7 @@ async fn simplex_on_the_hermes_image() {
     received(&mut person, Duration::from_secs(30), |got| got.iter().any(|t| t.contains("Hi, it's Basil. You're linked"))).await;
     // renamed while linked: its profile follows, within its read (10 s)
     let t0 = Instant::now();
-    rename("Waffle Bot!");
+    rename("Waffle. Bot");
     person.wait(Duration::from_secs(30), renamed("Waffle Bot")).await;
     eprintln!("simplex: a rename in the person's app {} ms after it", t0.elapsed().as_millis());
     // its SimpleX chat, made for its owner as it is linked

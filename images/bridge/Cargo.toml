@@ -31,6 +31,9 @@ sha2.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 tokio-rustls.workspace = true
+# Unicode's general categories, which SimpleX's core keeps a display name
+# by (simplex/wire.rs, `valid_name`: its `mkValidName`, ported)
+unicode-properties.workspace = true
 webpki-roots.workspace = true
 
 [dev-dependencies]

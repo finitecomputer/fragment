@@ -604,30 +604,13 @@ fn core_args(cfg: &Config, dir: &Path, port: u16, name: &str, socks: Option<u16>
 }
 
 /// The name an agent's SimpleX profile shows: its title, else (it has none,
-/// or none of it is kept) its label, else "Agent"; as a name the core takes
-/// as it is (`wire::name_ok`): each word's letters and digits
-/// (`wire::name_char`), and a `-` or `_` just after one of them, one space
-/// between words, at most `DISPLAY_NAME_MAX` bytes. A label is always one
-/// (lowercase letters, digits and single dashes inside).
+/// or none of it is kept) its label, else "Agent"; as the core keeps it
+/// (`wire::valid_name`, its own rule), cut to at most `DISPLAY_NAME_MAX`
+/// bytes (a name's start is a name the core keeps too), so one it takes as
+/// it is (`wire::name_ok`). A label is always one (lowercase letters,
+/// digits and single dashes inside).
 pub fn display_name(title: Option<&str>, label: &str) -> String {
-    let clean = |s: &str| -> String {
-        let mut out = String::new();
-        for word in s.split_whitespace() {
-            let mut w = String::new();
-            for c in word.chars() {
-                if wire::name_char(c) || (matches!(c, '-' | '_') && w.chars().last().is_some_and(wire::name_char)) {
-                    w.push(c);
-                }
-            }
-            if !w.is_empty() {
-                if !out.is_empty() {
-                    out.push(' ');
-                }
-                out.push_str(&w);
-            }
-        }
-        wire::cut(&out, DISPLAY_NAME_MAX).trim_end().to_string()
-    };
+    let clean = |s: &str| -> String { wire::cut(&wire::valid_name(s), DISPLAY_NAME_MAX).trim_end_matches(' ').to_string() };
     let name = [title.map(clean).unwrap_or_default(), clean(label)].into_iter().find(|n| !n.is_empty()).unwrap_or_else(|| "Agent".into());
     assert!(wire::name_ok(&name), "an agent's SimpleX name is one the core takes: {name:?}");
     name
@@ -2378,7 +2361,7 @@ mod tests {
         m.frame(f, 1, &answer.to_string());
         assert!(sent_lines(&mut sent).is_empty(), "asked once a name");
         // a rename: one command, and the greeting says it
-        m.on(titled(Ok(Some("Waffle Bot!")))).await;
+        m.on(titled(Ok(Some("Waffle. Bot")))).await;
         assert_eq!(profiles(&mut sent), ["/p 'Waffle Bot'"]);
         m.act(f, Action::Tell(Notice::Linked { name: "paul".into() }));
         assert!(sent_lines(&mut sent).iter().any(|(_, l)| l.contains("Hi, it's Waffle Bot.")), "its greeting says its name");
@@ -2388,7 +2371,7 @@ mod tests {
         assert_eq!(m.slots[f].name.as_deref(), Some("Waffle Bot"), "never back to the label for a read that failed");
         m.on(titled(Ok(None))).await;
         assert_eq!(profiles(&mut sent), ["/p 'juniper'"], "no title: its label");
-        m.on(titled(Ok(Some("🧇")))).await;
+        m.on(titled(Ok(Some("<<>>")))).await;
         assert!(profiles(&mut sent).is_empty(), "nothing the core takes: its label, as it is already");
         // restart: down, asked nothing; each core that comes up, asked once
         m.slots.get_mut(f).expect("its slot").up = false;
@@ -3039,7 +3022,7 @@ mod tests {
     #[test]
     fn names_are_clean() {
         assert_eq!(display_name(Some("Waffle"), "pulsar-360"), "Waffle");
-        assert_eq!(display_name(Some("  Wa<ff>le! 🧇 "), "x"), "Waffle");
+        assert_eq!(display_name(Some("  Wa<ff>le! 🧇 "), "x"), "Wa<ff>le! 🧇", "a symbol and punctuation the core keeps");
         assert_eq!(display_name(Some("<<>>"), "pulsar-360"), "pulsar-360");
         assert_eq!(display_name(None, "pulsar-360"), "pulsar-360");
         assert_eq!(display_name(None, ""), "Agent");
@@ -3047,7 +3030,8 @@ mod tests {
         // what the core refuses or changes (`'` and `.` are invalidDisplayName)
         assert_eq!(display_name(Some("Paul's Bot"), "x"), "Pauls Bot");
         assert_eq!(display_name(Some("  Dr.   Who\t"), "x"), "Dr Who");
-        assert_eq!(display_name(Some("--x a--b _c @d #e f-_g"), "x"), "x a-b c d e f-g");
+        assert_eq!(display_name(Some("--x a--b _c @d #e f-_g"), "x"), "x a-b _c d e f-g");
+        assert_eq!(display_name(Some("\u{93e}Bot a-\u{93e}b"), "x"), "Bot a-b", "a combining mark only after a letter");
         assert_eq!(display_name(Some("日本語 ボット R2-D2 x² Ⅻ"), "x"), "日本語 ボット R2-D2 x");
         assert_eq!(display_name(Some(&format!("{} b", "a".repeat(DISPLAY_NAME_MAX - 1))), "x"), "a".repeat(DISPLAY_NAME_MAX - 1), "no space left at its end");
         assert!(dir_name_ok("juniper--k3x9"));

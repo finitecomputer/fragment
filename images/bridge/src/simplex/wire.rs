@@ -111,35 +111,74 @@ pub enum Cmd {
     Profile { name: String },
 }
 
-/// A display name the core takes as it is: a subset of what v7.0.3's
-/// `mkValidName` (src/Simplex/Chat/Library/Commands.hs) leaves unchanged,
-/// which it holds a new profile and a rename to (`invalidDisplayName`
-/// otherwise, fixtures/invalidDisplayName.json; a first start's profile
-/// that fails it is never made). Words of `name_char`s, one space between,
-/// a `-` or `_` only just after one of them, at most `NAME_MAX_BYTES`. The
-/// core never takes `.,;/\#@'"`~`, and `/p` reads a name with a space only
-/// quoted, by `'`.
+/// A display name the core takes as it is: one `valid_name` leaves as it
+/// is, of at most `NAME_MAX_BYTES`. The core holds a new profile and a
+/// rename to that (`invalidDisplayName` otherwise, fixtures/
+/// invalidDisplayName.json; a first start's profile that fails it is never
+/// made, and the core does not start). It has no `'`, so `/p` reads it
+/// quoted, as a name with a space must be.
 pub fn name_ok(name: &str) -> bool {
-    let word_ok = |w: &str| {
-        let mut after_char = false;
-        !w.is_empty()
-            && w.chars().all(|c| {
-                let ok = name_char(c) || (matches!(c, '-' | '_') && after_char);
-                after_char = name_char(c);
-                ok
-            })
-    };
-    !name.is_empty() && name.len() <= NAME_MAX_BYTES && name.split(' ').all(word_ok)
+    !name.is_empty() && name.len() <= NAME_MAX_BYTES && valid_name(name) == name
 }
 
-/// A char a display name may hold anywhere: an ASCII letter or digit, or
-/// another letter, as Rust tells one without Unicode's categories: its
-/// alphabetic chars less its numeric ones (letter numbers, which the core
-/// drops). Those are letters and a few symbols, which the core takes
-/// anywhere, and some combining signs, which it takes only after a letter,
-/// as they come in any word.
-pub fn name_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || (!c.is_ascii() && c.is_alphabetic() && !c.is_numeric())
+/// Chars no display name holds.
+const NAME_PROHIBITED: &str = ".,;/\\#@'\"`~";
+/// Chars a display name holds at most (`take 50`).
+const NAME_CHARS_MAX: usize = 50;
+
+/// What v7.0.3's core makes of a display name: its `mkValidName`
+/// (src/Simplex/Chat/Library/Commands.hs, lines 6035 to 6061), ported char
+/// for char, so the bridge never asks for a name the core would change or
+/// refuse. Each char is kept or dropped by its Unicode general category
+/// and what was kept before it: none of `NAME_PROHIBITED`; a name starts
+/// with a letter, a decimal digit or a symbol, and a word may start with a
+/// currency or math sign too, or with one punctuation mark; a combining
+/// mark only after a letter or the like; no two marks of punctuation in a
+/// row; spaces as one; at most `NAME_CHARS_MAX` chars, none trailing
+/// spaces. Its own tests are the core's (tests/ValidNames.hs).
+pub fn valid_name(name: &str) -> String {
+    use unicode_properties::{GeneralCategory as G, GeneralCategoryGroup as Group, UnicodeGeneralCategory};
+    let mut kept: Vec<char> = Vec::new();
+    let (mut prev, mut punct) = ('\0', 0usize);
+    for c in name.chars() {
+        let c = if name_space(c) { ' ' } else { c };
+        let cat = c.general_category();
+        let is_punct = matches!(cat, G::ConnectorPunctuation | G::DashPunctuation | G::OtherPunctuation);
+        let first_name_char = c.general_category_group() == Group::Letter || matches!(cat, G::DecimalNumber | G::OtherSymbol);
+        let first_char = first_name_char || matches!(cat, G::CurrencySymbol | G::MathSymbol);
+        let valid = if NAME_PROHIBITED.contains(c) {
+            false
+        } else if prev == '\0' {
+            c > ' ' && first_name_char
+        } else if prev == ' ' {
+            first_char || (punct == 0 && is_punct)
+        } else if punct > 0 {
+            first_char || c == ' '
+        } else {
+            first_char || c == ' ' || c.general_category_group() == Group::Mark || is_punct
+        };
+        if valid {
+            kept.push(c);
+            prev = c;
+            punct = if is_punct {
+                punct + 1
+            } else if c == ' ' {
+                punct
+            } else {
+                0
+            };
+        }
+    }
+    kept.truncate(NAME_CHARS_MAX);
+    let out: String = kept.into_iter().collect();
+    out.trim_end_matches(' ').to_string()
+}
+
+/// Haskell's `isSpace`, as the core reads a name: the ASCII white space
+/// chars, no-break space, and Unicode's space separators.
+fn name_space(c: char) -> bool {
+    use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
+    matches!(c, '\t'..='\r' | ' ' | '\u{a0}') || c.general_category() == GeneralCategory::SpaceSeparator
 }
 
 impl Cmd {
@@ -674,15 +713,75 @@ mod tests {
         assert_eq!(Cmd::Profile { name: "Waffle".into() }.line(), "/p 'Waffle'");
     }
 
-    /// Goal: a profile's name is asked only in a shape the core takes as it
-    /// is; anything that would end the quote, or that the core refuses or
-    /// changes, never is.
+    /// Goal: `valid_name` is the core's `mkValidName`, by the core's own
+    /// tests (v7.0.3's tests/ValidNames.hs, every case), and combining marks
+    /// by where they stand (Alex's review of #628: refused at a name's or a
+    /// word's start and after punctuation, kept after a letter). A
+    /// profile's name is asked only as the core keeps it: anything that
+    /// would end the quote, or that the core refuses or changes, never is.
     #[test]
     fn a_profiles_name_is_one_the_core_takes() {
-        for ok in ["Waffle", "Waffle Bot", "pulsar-360", "Zoë", "алиса", "日本語 ボット", "a_b-c", "a- b", &"a".repeat(NAME_MAX_BYTES)] {
+        let long = "01234567890123456789012345678901234567890123456789";
+        let core = [
+            ("alice", "alice"),
+            (" alice", "alice"),
+            ("?alice", "alice"),
+            ("алиса", "алиса"),
+            ("John Doe", "John Doe"),
+            ("J.Doe", "JDoe"),
+            ("J. Doe", "J Doe"),
+            ("J..Doe", "JDoe"),
+            ("J ..Doe", "J Doe"),
+            ("J ... Doe", "J Doe"),
+            ("J .... Doe", "J Doe"),
+            ("J . . Doe", "J Doe"),
+            ("@alice", "alice"),
+            ("#alice", "alice"),
+            ("'alice", "alice"),
+            ("alice ", "alice"),
+            ("John  Doe", "John Doe"),
+            ("'John Doe'", "John Doe"),
+            ("\"John Doe\"", "John Doe"),
+            ("`John Doe`", "John Doe"),
+            ("John \"Doe\"", "John Doe"),
+            ("John `Doe`", "John Doe"),
+            ("alice/bob", "alicebob"),
+            ("alice / bob", "alice bob"),
+            ("alice /// bob", "alice bob"),
+            ("alice //// bob", "alice bob"),
+            ("alice >>= bob", "alice >>= bob"),
+            ("alice@example.com", "aliceexamplecom"),
+            ("alice <> bob", "alice <> bob"),
+            ("alice -> bob", "alice -> bob"),
+            ("alice & bob", "alice & bob"),
+            ("alice && bob", "alice & bob"),
+            ("alice & & bob", "alice & bob"),
+            ("alice-bob", "alice-bob"),
+            ("alice--bob", "alice-bob"),
+            ("alice -- bob", "alice - bob"),
+            ("alice \\ bob", "alice bob"),
+            ("alice (bob)", "alice bob"),
+            ("alice: bob", "alice: bob"),
+            ("alice 👍", "alice 👍"),
+            ("👍", "👍"),
+            ("alice >", "alice >"),
+            ("> alice", "alice"),
+            ("123", "123"),
+            ("123 alice", "123 alice"),
+            (&format!("{long}extra"), long),
+            (&format!("{} extra", &long[..49]), &long[..49]),
+        ];
+        for (given, kept) in core {
+            assert_eq!(valid_name(given), kept, "{given:?}");
+        }
+        // combining marks: only after a letter (a Devanagari vowel sign, an acute)
+        for (given, kept) in [("\u{93e}Bot", "Bot"), ("Bot \u{93e}", "Bot"), ("a-\u{93e}b", "a-b"), ("a\u{93e}", "a\u{93e}"), ("Zoe\u{301}", "Zoe\u{301}"), ("\u{301}", "")] {
+            assert_eq!(valid_name(given), kept, "{given:?}");
+        }
+        for ok in ["Waffle", "Waffle Bot", "pulsar-360", "Zoë", "алиса", "日本語 ボット", "a_b-c", "a- b", "a -b", "Waffle 🧇!", "a\u{93e}", &"a".repeat(NAME_CHARS_MAX)] {
             assert!(name_ok(ok), "{ok}");
         }
-        for bad in ["", "Paul's Bot", "Dr. Bot", "a.b", "'", "a  b", " a", "a ", "-a", "a--b", "a-_b", "a -b", "#a", "@a", "a#b", "a,b", "🧇", "x²", "Ⅻ", "a\tb", &"a".repeat(NAME_MAX_BYTES + 1)] {
+        for bad in ["", "Paul's Bot", "Dr. Bot", "a.b", "'", "a  b", " a", "a ", "-a", "a--b", "a-_b", "#a", "@a", "a#b", "a,b", "x²", "Ⅻ", "a\tb", "\u{93e}Bot", "a-\u{93e}b", &"a".repeat(NAME_MAX_BYTES + 1)] {
             assert!(!name_ok(bad), "{bad:?}");
             assert!(std::panic::catch_unwind(|| Cmd::Profile { name: bad.into() }.line()).is_err(), "never asked: {bad:?}");
         }

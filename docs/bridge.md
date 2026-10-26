@@ -492,11 +492,15 @@ drives it.
   name it holds, so asking again changes nothing. `--create-bot-display-
   name` names only the profile a first start makes, which is the agent's
   label: the core makes no profile of a name it refuses, and then does not
-  start. A name is one the core takes as it is (`wire::name_ok`: its
-  letters and digits, a `-` or `_` after one, single spaces; never
-  `.,;/\#@'"`~`, which v7.0.3's `mkValidName` refuses). A title read
-  that fails changes nothing; no title, or none of it kept, is the label.
-  The greeting says the name too.
+  start. A name is what the core keeps of the title, so it takes it as it
+  is: `wire::valid_name` is v7.0.3's `mkValidName` ported char for char
+  (by Unicode's general categories, `unicode-properties`; never
+  `.,;/\#@'"`~`, a combining mark only after a letter, at most 50
+  chars), held to the core's own tests (its tests/ValidNames.hs) and, in
+  the lab, to the real core with 200 seeded titles of every kind of char
+  (Alex's review of #628). A title read that fails changes nothing; no
+  title, or none of it kept, is the label. The greeting says the name
+  too.
 - **SMP on port 5223, never 443** (`--smp-web-port-servers off`,
   `simplex/run.rs` `core_args`). A SimpleX server on 443 takes its
   protocol only from a TLS hello that names no server (SNI), and
