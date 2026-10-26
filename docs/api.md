@@ -363,7 +363,10 @@ address it is served at, below), and that face is what is shown:
 - its computer's runtime: our Hermes image tells the agent its name at
   every turn, and names it in Bot Mode by its title (docs/computers.md,
   "Its name, in our Hermes image" and "Bot Mode in our Hermes image").
-  Bot Mode has no picture.
+  Bot Mode has no picture;
+- its owner's SimpleX app: the bridge names the agent's SimpleX profile
+  by its title, which the core sends to the linked app (docs/bridge.md,
+  "SimpleX"). It has no picture either.
 
 Its label (`juniper` of `juniper--k3x9`) stays its `name` in a profile
 and its computer's view: the word that `@mentions` it, and its runtime's
@@ -386,7 +389,8 @@ and says why in `code.error`, as `fragment deploy` prints it. A title
 past 120 characters is refused the same way. Nothing restarts: the shell
 follows its person's list (its watch), a chat's page reads its owner's
 roster as it changes and asks `__people` again as each of an agent's
-turns ends, and our Hermes image reads the title again every 10 s. A
+turns ends, our Hermes image reads the title again every 10 s, and so
+does the bridge while the agent's SimpleX core runs. A
 runtime's own files never hold either (Hermes' `profile.yaml`, and the
 line of its profile's config that tells it its name, are written from
 the title, and written again), nor does the agent's job: its `SOUL.md`

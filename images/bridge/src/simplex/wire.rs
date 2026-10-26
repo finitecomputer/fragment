@@ -103,6 +103,43 @@ pub enum Cmd {
     /// Give up on sending it (`/fcancel`): one not sent in time. Its answer
     /// settles nothing: the link let go of the file before it asked.
     CancelSend { file: FileId },
+    /// The agent's own profile's display name (`/p '<name>'`), the rest of
+    /// it (a bot's, its preferences) kept: the core sends it to its
+    /// contacts (the owner's app shows it), and answers `userProfileUpdated`,
+    /// or `userProfileNoChange` for the name it holds. `name` is one
+    /// `name_ok` takes.
+    Profile { name: String },
+}
+
+/// A display name the core takes as it is: a subset of what v7.0.3's
+/// `mkValidName` (src/Simplex/Chat/Library/Commands.hs) leaves unchanged,
+/// which it holds a new profile and a rename to (`invalidDisplayName`
+/// otherwise, fixtures/invalidDisplayName.json; a first start's profile
+/// that fails it is never made). Words of `name_char`s, one space between,
+/// a `-` or `_` only just after one of them, at most `NAME_MAX_BYTES`. The
+/// core never takes `.,;/\#@'"`~`, and `/p` reads a name with a space only
+/// quoted, by `'`.
+pub fn name_ok(name: &str) -> bool {
+    let word_ok = |w: &str| {
+        let mut after_char = false;
+        !w.is_empty()
+            && w.chars().all(|c| {
+                let ok = name_char(c) || (matches!(c, '-' | '_') && after_char);
+                after_char = name_char(c);
+                ok
+            })
+    };
+    !name.is_empty() && name.len() <= NAME_MAX_BYTES && name.split(' ').all(word_ok)
+}
+
+/// A char a display name may hold anywhere: an ASCII letter or digit, or
+/// another letter, as Rust tells one without Unicode's categories: its
+/// alphabetic chars less its numeric ones (letter numbers, which the core
+/// drops). Those are letters and a few symbols, which the core takes
+/// anywhere, and some combining signs, which it takes only after a letter,
+/// as they come in any word.
+pub fn name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || (!c.is_ascii() && c.is_alphabetic() && !c.is_numeric())
 }
 
 impl Cmd {
@@ -158,6 +195,10 @@ impl Cmd {
                 };
                 let body = json!([{ "filePath": path, "msgContent": content }]);
                 format!("/_send @{contact} json {body}")
+            }
+            Cmd::Profile { name } => {
+                assert!(name_ok(name), "a profile's name the core takes as it is");
+                format!("/p '{name}'")
             }
         }
     }
@@ -252,6 +293,10 @@ pub enum Resp {
     /// A file the link sent that will not be (`sndFileError`, or the core's
     /// own cancel, `sndFileCancelledXFTP`).
     FileUnsent { file: FileId },
+    /// The agent's profile after a `Profile`: the display name it shows now,
+    /// and whether that changed it (`userProfileUpdated`, sent on to its
+    /// contacts) or it was the name already (`userProfileNoChange`).
+    Profile { name: String, changed: bool },
     /// A command failed (`chatCmdError`), or the core reports an error of
     /// its own (`chatError`): what it said, cut.
     Error { what: String },
@@ -418,6 +463,12 @@ fn read_resp(r: &Value) -> Result<Resp, WireError> {
         // a sent file's events all carry its transfer (`chatItem_` may be none)
         "sndFileCompleteXFTP" => Resp::FileSent { file: id(&r["fileTransferMeta"]["fileId"], "a sent file with no id")? },
         "sndFileError" | "sndFileCancelledXFTP" => Resp::FileUnsent { file: id(&r["fileTransferMeta"]["fileId"], "a sent file with no id")? },
+        "userProfileUpdated" | "userProfileNoChange" => {
+            let changed = t == "userProfileUpdated";
+            let p = if changed { &r["toProfile"] } else { &r["user"]["profile"] };
+            let name = p["displayName"].as_str().ok_or_else(|| shape("a profile with no name"))?;
+            Resp::Profile { name: cut(name, NAME_MAX_BYTES).into(), changed }
+        }
         "chatCmdError" | "chatError" => Resp::Error { what: error_of(&r["chatError"]) },
         other => Resp::Other(cut(other, 64).into()),
     })
@@ -510,6 +561,9 @@ mod tests {
             "sentVoice" => include_str!("fixtures/sentVoice.json"),
             "fileSent" => include_str!("fixtures/fileSent.json"),
             "sendCancelled" => include_str!("fixtures/sendCancelled.json"),
+            "profileUpdated" => include_str!("fixtures/profileUpdated.json"),
+            "profileNoChange" => include_str!("fixtures/profileNoChange.json"),
+            "invalidDisplayName" => include_str!("fixtures/invalidDisplayName.json"),
             other => panic!("no fixture {other}"),
         };
         parse(text).unwrap_or_else(|e| panic!("{name}: {e}")).resp
@@ -572,6 +626,12 @@ mod tests {
         let warned = r#"{"resp":{"type":"sndFileWarning","user":{},"fileTransferMeta":{"fileId":4},"errorMessage":"retrying"}}"#;
         assert_eq!(parse(warned).expect("a frame").resp, Resp::Other("sndFileWarning".into()));
         assert!(matches!(parse(r#"{"resp":{"type":"sndFileCompleteXFTP","fileTransferMeta":{}}}"#), Err(WireError::Shape(_))), "a sent file with no id");
+        // the agent's profile renamed (the lab's `a_rename_reaches_the_owners_app`):
+        // changed, then asked again for the name it holds
+        assert_eq!(fixture("profileUpdated"), Resp::Profile { name: "Waffle Bot".into(), changed: true });
+        assert_eq!(fixture("profileNoChange"), Resp::Profile { name: "Waffle Bot".into(), changed: false });
+        assert_eq!(fixture("invalidDisplayName"), Resp::Error { what: "error invalidDisplayName".into() });
+        assert!(matches!(parse(r#"{"resp":{"type":"userProfileUpdated","toProfile":{}}}"#), Err(WireError::Shape(_))), "a profile with no name");
     }
 
     /// Goal: a command's line is what the lab's core took.
@@ -609,6 +669,23 @@ mod tests {
         assert!(IMAGE_PREVIEW.starts_with("data:image/png;base64,") && IMAGE_PREVIEW.len() == 338, "the CLI's own");
         assert_eq!(Cmd::CancelSend { file: 9 }.line(), "/fcancel 9");
         assert_eq!(serde_json::to_value(Kind::Voice { secs: 3 }).expect("a kind"), json!({ "kind": "voice", "secs": 3 }));
+        // a profile's name, quoted: one with a space reads whole
+        assert_eq!(Cmd::Profile { name: "Waffle Bot".into() }.line(), "/p 'Waffle Bot'");
+        assert_eq!(Cmd::Profile { name: "Waffle".into() }.line(), "/p 'Waffle'");
+    }
+
+    /// Goal: a profile's name is asked only in a shape the core takes as it
+    /// is; anything that would end the quote, or that the core refuses or
+    /// changes, never is.
+    #[test]
+    fn a_profiles_name_is_one_the_core_takes() {
+        for ok in ["Waffle", "Waffle Bot", "pulsar-360", "Zoë", "алиса", "日本語 ボット", "a_b-c", "a- b", &"a".repeat(NAME_MAX_BYTES)] {
+            assert!(name_ok(ok), "{ok}");
+        }
+        for bad in ["", "Paul's Bot", "Dr. Bot", "a.b", "'", "a  b", " a", "a ", "-a", "a--b", "a-_b", "a -b", "#a", "@a", "a#b", "a,b", "🧇", "x²", "Ⅻ", "a\tb", &"a".repeat(NAME_MAX_BYTES + 1)] {
+            assert!(!name_ok(bad), "{bad:?}");
+            assert!(std::panic::catch_unwind(|| Cmd::Profile { name: bad.into() }.line()).is_err(), "never asked: {bad:?}");
+        }
     }
 
     /// Goal: a reply of any length goes in parts the core takes, which say

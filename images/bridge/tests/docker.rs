@@ -3120,8 +3120,10 @@ fn simplex_cores(c: &Container) -> usize {
 
 /// Goal (SimpleX, decision 32, Paul's "work well across restarts and
 /// updates"; a chat of its own since 2026-10-26): our Hermes image, always
-/// on, links its agent to a person's SimpleX app from its screen port, and
-/// makes its SimpleX chat for its owner; the person's message lands there,
+/// on, links its agent to a person's SimpleX app from its screen port, by
+/// its name as its title says it now (renamed before the link, and again
+/// after it: the person's app follows), and makes its SimpleX chat for its
+/// owner; the person's message lands there,
 /// a turn of Hermes' asked as its owner, its session told the chat is their
 /// phone, answered on SimpleX; words typed in that chat on the web, and a
 /// routine with no chat while their home is that chat, are answered on
@@ -3163,6 +3165,10 @@ async fn simplex_on_the_hermes_image() {
     // port, and hold none)
     let (code, _) = screen_call(&c, "POST", "/simplex/link?agent=juniper--k3x9", None);
     assert_eq!(code, 403, "no ticket, no link");
+    // renamed while its bridge runs, before it is linked (Paul's, 2026-10-26:
+    // his app showed the name it had when its bridge started)
+    let rename = |title: &str| fake.with(|w| w.fragments.get_mut("juniper--k3x9").expect("its fragment").title = title.into());
+    rename("Basil");
     let ticket = fake.ticket("juniper", "link");
     let session = ticket["nonce"].as_str().expect("a nonce").to_string();
     let (code, _) = screen_call(&c, "POST", "/simplex/link?agent=juniper--k3x9", Some(&ticket));
@@ -3173,8 +3179,19 @@ async fn simplex_on_the_hermes_image() {
     person.cmd(&format!("/connect {}", v["link"].as_str().expect("its link"))).await;
     simplex_until(&c, "", 90_000, "linked", |v| v["phase"] == "linked").await;
     assert!(fake.with(|w| w.doors.contains_key("juniper--k3x9")), "its door's key registered with the ticket");
-    let at_person = person.wait(Duration::from_secs(60), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the agent, at the person's");
-    received(&mut person, Duration::from_secs(30), |got| got.iter().any(|t| t.contains("You're linked"))).await;
+    let met = person.wait(Duration::from_secs(60), |e| tag(e) == "contactConnected").await;
+    let at_person = met["contact"]["contactId"].as_i64().expect("the agent, at the person's");
+    // its name in the person's app: its title now, as it connected or just after
+    let renamed = |name: &'static str| move |e: &serde_json::Value| tag(e) == "contactUpdated" && e["toContact"]["profile"]["displayName"] == name;
+    if met["contact"]["profile"]["displayName"] != "Basil" {
+        person.wait(Duration::from_secs(30), renamed("Basil")).await;
+    }
+    received(&mut person, Duration::from_secs(30), |got| got.iter().any(|t| t.contains("Hi, it's Basil. You're linked"))).await;
+    // renamed while linked: its profile follows, within its read (10 s)
+    let t0 = Instant::now();
+    rename("Waffle Bot!");
+    person.wait(Duration::from_secs(30), renamed("Waffle Bot")).await;
+    eprintln!("simplex: a rename in the person's app {} ms after it", t0.elapsed().as_millis());
     // its SimpleX chat, made for its owner as it is linked
     fake.until(30_000, "its SimpleX chat made", |w| w.made.len() == 1).await;
     let chat = fake.with(|w| w.made[0].clone());

@@ -869,3 +869,68 @@ async fn the_link_pages_code_links() {
     assert_eq!(v["name"], "person");
     received(&mut person, Duration::from_secs(30), |got| got.iter().any(|t| t.contains("You're linked"))).await;
 }
+
+/// The agent's profile renamed to `name`, as the bridge asks it
+/// (`Cmd::Profile`): the core's answer, read through the wire.
+async fn rename(agent: &mut Agent, name: &str) -> Resp {
+    let r = agent.api.cmd(&wire::Cmd::Profile { name: name.into() }.line()).await;
+    wire::parse(&json!({ "corrId": "1", "resp": r }).to_string()).expect("the core's answer reads").resp
+}
+
+/// Goal (Paul, 2026-10-26: his SimpleX app showed his agent by the name it
+/// had before he renamed it): why, and the cure, against the real core. A
+/// profile is made once, by `--create-bot-display-name` at the core's first
+/// start, and a start with another name keeps it; the bridge's `/p` renames
+/// it, keeping it a bot's, and the core sends the new name to the linked
+/// contact's app; asked again, it changes nothing and sends nothing. Every
+/// name `display_name` makes of a title, however odd, the core takes as it
+/// is (it refuses a `'`: invalidDisplayName).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run by hand"]
+async fn a_rename_reaches_the_owners_app() {
+    use fragment_bridge::simplex::run::display_name;
+    let mut lab = Lab::up("rename");
+    let mut agent = Agent::new(lab.start("agent", true).await);
+    let mut person = lab.start("person", false).await;
+    agent.apply(Input::Want).await;
+    let Phase::Inviting { link, .. } = agent.link.phase.clone() else { panic!("an invitation: {:?}", agent.link) };
+    person.cmd(&format!("/connect {link}")).await;
+    agent.until(Duration::from_secs(90), |a| a.link.contact().is_some()).await;
+    let met = person.wait(Duration::from_secs(90), |e| tag(e) == "contactConnected").await;
+    assert_eq!(met["contact"]["profile"]["displayName"], "agent", "the name its first start made");
+    let shown = |e: &Value| e["toContact"]["profile"].clone();
+
+    // renamed: the person's app is told, and it is a bot's profile still
+    let name = display_name(Some("Waffle Bot!"), "agent");
+    assert_eq!(rename(&mut agent, &name).await, Resp::Profile { name: "Waffle Bot".into(), changed: true });
+    let told = person.wait(Duration::from_secs(30), |e| tag(e) == "contactUpdated").await;
+    assert_eq!((shown(&told)["displayName"].as_str(), shown(&told)["peerType"].as_str()), (Some("Waffle Bot"), Some("bot")), "{told}");
+    // asked again: nothing changes, nothing is sent
+    assert_eq!(rename(&mut agent, &name).await, Resp::Profile { name: "Waffle Bot".into(), changed: false });
+    person.drain(Duration::from_secs(3)).await;
+    assert!(!person.events.iter().any(|e| tag(e) == "contactUpdated"), "no second update: {:?}", person.events.iter().map(tag).collect::<Vec<_>>());
+
+    // whatever its title, a name the core takes as it is
+    for title in ["Paul's Bot", "  Dr.   Who  ", "--x a--b _c @d #e f-_g", "日本語 ボット R2-D2 x² Ⅻ", "Zoë the 2nd", "алиса", "Waffle 🧇!", &"long ".repeat(20)] {
+        let name = display_name(Some(title), "agent");
+        assert_eq!(rename(&mut agent, &name).await, Resp::Profile { name: name.clone(), changed: true }, "{title:?}");
+    }
+    // what it refuses (the bridge's old names kept `.` and `'`)
+    for refused in ["Dr. Who", "Pauls.Bot"] {
+        let r = agent.api.cmd(&format!("/p '{refused}'")).await;
+        assert!(r.to_string().contains("invalidDisplayName"), "{refused}: {r}");
+    }
+    assert_eq!(rename(&mut agent, "Waffle Bot").await, Resp::Profile { name: "Waffle Bot".into(), changed: true });
+
+    // a start with its first name keeps the profile it has: why a rename needs `/p`
+    drop(agent);
+    lab.stop("agent");
+    let mut agent = Agent::new(lab.start("agent", true).await);
+    let r = agent.api.cmd("/u").await;
+    assert_eq!(r["user"]["profile"]["displayName"], "Waffle Bot", "--create-bot-display-name names only a new profile: {r}");
+    assert_eq!(rename(&mut agent, "Waffle Bot").await, Resp::Profile { name: "Waffle Bot".into(), changed: false }, "a start's ask, idempotent");
+    person.drain(Duration::from_secs(1)).await;
+    let last = person.events.iter().rev().find(|e| tag(e) == "contactUpdated").map(shown);
+    assert_eq!(last.as_ref().and_then(|p| p["displayName"].as_str()), Some("Waffle Bot"), "the person's app shows its name now");
+    println!("frames in {}", lab.dir.display());
+}
