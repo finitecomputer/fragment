@@ -1589,7 +1589,7 @@ impl ComputerCell {
         }
         for r in rows {
             let fragment = r["fragment"].as_str().unwrap_or_default().to_string();
-            let name = fragment_proto::split_fragment_name(&fragment).map(|(label, _)| label.to_string()).unwrap_or_default();
+            let label = fragment_proto::split_fragment_name(&fragment).map(|(label, _)| label.to_string()).unwrap_or_default();
             // a stored value that does not read is a host fault, never "all"
             let connections = stored_connections(r["connections"].as_str().unwrap_or_default(), &fragment)?;
             agents.push(ComputerAgent {
@@ -1598,7 +1598,7 @@ impl ComputerCell {
                 model_providers: self.cfg.providers.model_providers(&own, connections.as_deref()),
                 accounts: picks.remove(&fragment).unwrap_or_default(),
                 fragment,
-                name,
+                label,
                 connections,
                 credentials: vec![],
                 key: None,

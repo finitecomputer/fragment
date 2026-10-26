@@ -1496,7 +1496,8 @@ fn run(cli: Cli) -> Result<()> {
                     continue;
                 };
                 for m in members {
-                    let who = m.email.as_deref().or(m.name.as_deref()).unwrap_or(&m.principal);
+                    // an agent by its name (its fragment's title), else its label
+                    let who = m.email.as_deref().or(fragment_core::face::title(m.title.as_deref())).or(m.name.as_deref()).unwrap_or(&m.principal);
                     let whose = match (&m.owner, &m.owner_email) {
                         (Some(_), Some(e)) => format!("\tagent of {e}"),
                         (Some(o), None) => format!("\tagent of {o}"),
@@ -1505,7 +1506,7 @@ fn run(cli: Cli) -> Result<()> {
                     println!("  {}\t{who}{whose}", m.role.as_str());
                     // a person's agents reach what they do
                     for a in &m.agents {
-                        println!("  {}\t  their agent {}", m.role.as_str(), a.name.as_deref().unwrap_or(&a.principal));
+                        println!("  {}\t  their agent {}", m.role.as_str(), fragment_core::face::title(a.title.as_deref()).or(a.name.as_deref()).unwrap_or(&a.principal));
                     }
                 }
                 if f.more > 0 {
@@ -2123,7 +2124,7 @@ fn run(cli: Cli) -> Result<()> {
             let id = id.unwrap_or_else(|| format!("ask-{:016x}", rand::random::<u64>()));
             let v = ask::ask(&c, &agent, &text, chat.as_deref(), wait, id)?;
             json_exit(j, &v);
-            println!("asked {} in {} (record {})", v.asked.name, v.chat, v.record["seq"]);
+            println!("asked {} in {} (record {})", v.asked.shown(), v.chat, v.record["seq"]);
             for who in &v.added {
                 println!("  added {who} to {} as an editor", v.chat);
             }
@@ -2133,9 +2134,9 @@ fn run(cli: Cli) -> Result<()> {
             match (&v.answer, v.waited_s) {
                 (Some(a), _) => {
                     match (a.outcome.as_str(), &a.error) {
-                        ("idle", _) => println!("{} answered:", v.asked.name),
-                        (outcome, Some(why)) => println!("{} could not answer ({outcome}): {why}", v.asked.name),
-                        (outcome, None) => println!("{}'s turn ended {outcome}:", v.asked.name),
+                        ("idle", _) => println!("{} answered:", v.asked.shown()),
+                        (outcome, Some(why)) => println!("{} could not answer ({outcome}): {why}", v.asked.shown()),
+                        (outcome, None) => println!("{}'s turn ended {outcome}:", v.asked.shown()),
                     }
                     for r in &a.replies {
                         println!("{}", r.text);
@@ -2188,7 +2189,7 @@ fn run(cli: Cli) -> Result<()> {
             // as its list says it: the platform's face of it, a moment after a change
             let list: FragmentList = c.call_as(c.get("/api/fragments")?)?;
             let row = list.fragments.into_iter().find(|f| f.name == agent);
-            let shown_name = name.or_else(|| row.as_ref().and_then(|r| r.title.clone())).unwrap_or_else(|| agent.clone());
+            let shown_name = name.unwrap_or_else(|| fragment_core::face::agent_name(row.as_ref().and_then(|r| r.title.as_deref()), &agent).to_string());
             let shown_picture = if files.is_empty() { row.and_then(|r| r.picture) } else { None };
             json_exit(j, &json!({ "agent": agent, "name": shown_name, "picture": shown_picture, "changed": !files.is_empty() }));
             println!("{agent}: {shown_name}");

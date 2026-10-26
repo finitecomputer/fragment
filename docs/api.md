@@ -372,6 +372,31 @@ named by it no more (a profile without `name` or `fragment`: a page shows
 an agent), so a life made again under the name never lends its face, nor
 its `@` word, to the agent that was.
 
+**No copy of a name, and no name it was not given** (Paul, 2026-10-26:
+"be systematic about referring to the user's chosen name"). An agent
+made with no title has none (the agent template gives none), and a title
+of only spaces is none (`fragment_core::face::title`): every reader then
+shows its label alike, never a blank or "Agent". Whatever shows a name
+reads it where it is shown, and again on a rename:
+- the shell draws every name of a fragment it shows outside the sidebar
+  (Settings' rows, labels and buttons, a window's title, a dialog) through
+  `named` (cell/shell/shell.js), made again at every change of the
+  person's list, and tells the pages it frames (their roster, a screen's
+  and a SimpleX link page's `name`);
+- the agent's own page takes its name from its owner's roster as it
+  changes;
+- the CLI says an agent's name, else its label
+  (`fragment_core::face::agent_name`: `fragment agent`, `fragment ask`,
+  `fragment access`), and a chat `fragment ask` makes is titled as the
+  shell titles a new one, never by its agents' names;
+- a computer's view names an agent by its label alone
+  (`ComputerAgent::label`, `name` on the wire), which nothing shows for
+  its name.
+
+The shell-ui lane renames an agent with Settings drawn and its windows
+open, then finds no old name anywhere in the shell or the pages it
+frames (`OLD_NAME_SWEEP`, crates/e2e/src/lanes/shell.rs).
+
 **Changing them** is writing those two files and putting them live, as
 any of its files: `POST /api/f/{agent}/files` (`fragment.json` with the
 new `meta.title`; `avatar.png` as `base64`, or `{path, delete: true}` to

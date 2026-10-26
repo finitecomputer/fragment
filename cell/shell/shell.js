@@ -111,6 +111,38 @@ const own = (f) => f.role === "owner";
 // (docs/api.md, "An agent's name and picture"); a chat's is its own,
 // whoever is in it.
 const titleOf = (name) => byName(name)?.title || labelOf(name);
+// What names a fragment (an agent above all) is drawn through `named`: the
+// node's text, or one of its attributes, made from the fragment's title as
+// the list says now (`make`), and made again at every change of the list
+// (`renderNames`, from `load`), wherever the node is (a sheet, a pane, a
+// dialog). So no copy of a name outlives a rename, whatever draws it once.
+// Its fragment's name stays on the node (`data-named`), for a reader.
+const namers = new WeakMap();
+function named(node, fragment, make = (t) => t, attr = "text") {
+  const each = namers.get(node) ?? new Map();
+  each.set(attr, { fragment, make });
+  namers.set(node, each);
+  node.dataset.named = fragment;
+  nameNode(node, attr, each.get(attr));
+  return node;
+}
+function nameNode(node, attr, { fragment, make }) {
+  const said = make(titleOf(fragment));
+  if (attr === "text") {
+    if (node.textContent !== said) node.textContent = said;
+  } else if (node.getAttribute(attr) !== said) node.setAttribute(attr, said);
+}
+function renderNames() {
+  for (const node of document.querySelectorAll("[data-named]")) for (const [attr, n] of namers.get(node) ?? []) nameNode(node, attr, n);
+  // a pane's title, whatever opened it: an app's (an agent's own page), its
+  // files, an agent's screen or its SimpleX
+  for (const pane of document.querySelectorAll("#stack .pane[data-key]")) {
+    const of = pane.dataset.key.match(/^(?:app|tree|screen|simplex):(.+)$/)?.[1];
+    const title = of && pane.querySelector(".pane-title");
+    if (title && title.textContent !== titleOf(of)) title.textContent = titleOf(of);
+  }
+  for (const f of document.querySelectorAll("iframe[data-simplex]")) nameSimplex(f);
+}
 const chats = () => state.fragments.filter((f) => f.kind === "chat");
 const apps = () => state.fragments.filter((f) => f.kind === "app" || f.kind === "brain");
 // the sidebar's: what the person has not archived (search still finds the rest)
@@ -475,9 +507,8 @@ let adding = null; // { resolve, timer, arm, outcome }
 function confirmAdd(agent, name) {
   if (adding) return Promise.resolve("busy");
   return new Promise((resolve) => {
-    const who = titleOf(agent.fragment);
-    $("add-agent-title").textContent = `Add ${who}?`;
-    $("add-agent-text").textContent = `Add ${who} to ${titleOf(name)}? ${who} will be able to read and edit it.`;
+    named($("add-agent-title"), agent.fragment, (who) => `Add ${who}?`);
+    named($("add-agent-text"), agent.fragment, (who) => `Add ${who} to ${titleOf(name)}? ${who} will be able to read and edit it.`);
     addDialog.dataset.agent = agent.identity;
     addDialog.dataset.fragment = name;
     $("add-agent-go").disabled = true;
@@ -666,7 +697,7 @@ const someoneElses = (name) => !!byName(name) && !own(byName(name));
 const shareItem = (name) => (someoneElses(name) ? { icon: "people", text: "People…", onClick: () => share(name) } : { icon: "invite", text: "Invite…", onClick: () => share(name) });
 function share(name) {
   const frame = el("iframe");
-  frame.setAttribute("aria-label", someoneElses(name) ? `Who has access to ${titleOf(name)}` : `Share ${titleOf(name)}`);
+  named(frame, name, (t) => (someoneElses(name) ? `Who has access to ${t}` : `Share ${t}`), "aria-label");
   frame.allow = "clipboard-write";
   frame.src = `/share/${encodeURIComponent(name)}`;
   sheet.replaceChildren(frame);
@@ -1367,7 +1398,7 @@ function openApp(name, path = "/") {
   const f = byName(name);
   const shown = document.querySelector(`#stack .pane[data-key="${CSS.escape(`app:${name}`)}"] iframe`);
   if (shown && path !== "/") go(shown, framed(name, path));
-  const frame = frameOf(framed(name, path), titleOf(name), name);
+  const frame = named(frameOf(framed(name, path), titleOf(name), name), name, (t) => t, "aria-label");
   const status = el("span", "pane-sharing");
   if (f) status.append(...badges(f));
   // its own URL, for a tab of its own or the clipboard
@@ -1377,7 +1408,7 @@ function openApp(name, path = "/") {
     key: `app:${name}`, title: titleOf(name), subtitle: !f || own(f) ? undefined : f.role, icon: iconOf(name), body: frame, status,
     actions: [
       ...(f && own(f) ? [{ icon: "share", title: "Share…", onClick: () => share(name) }] : []),
-      { icon: "folder", title: "Files", onClick: () => show({ key: `tree:${name}`, title: titleOf(name), subtitle: "files", icon: paneIcon("folder"), body: frameOf(framed(name, "/__files"), `${titleOf(name)} files`, name) }) },
+      { icon: "folder", title: "Files", onClick: () => show({ key: `tree:${name}`, title: titleOf(name), subtitle: "files", icon: paneIcon("folder"), body: named(frameOf(framed(name, "/__files"), `${titleOf(name)} files`, name), name, (t) => `${t} files`, "aria-label") }) },
       { icon: "reload", title: "Reload", onClick: () => go(frame, framed(name, path)) },
       { icon: "external", title: "Open in a new tab", onClick: () => window.open(`/auth/fragment?name=${encodeURIComponent(name)}&return=${encodeURIComponent(path)}`, "_blank", "noopener") },
       {
@@ -1499,18 +1530,21 @@ async function openSimplex(agent) {
   if (!state.computer?.simplex || !agent) return;
   try {
     const t = await api("POST", `/api/computers/${seg(state.computer.computer)}/ports/6080/ticket`, { path: `/simplex/?agent=${encodeURIComponent(agent)}` });
-    const frame = frameOf(t.url, `${titleOf(agent)} on SimpleX`);
+    const frame = named(frameOf(t.url, `${titleOf(agent)} on SimpleX`), agent, (n) => `${n} on SimpleX`, "aria-label");
     frame.dataset.simplex = agent;
-    // its page knows the agent by its label: told its name, as a screen is
-    frame.addEventListener("load", () => {
-      try {
-        frame.contentWindow?.postMessage({ fragment: "simplex", agent, name: titleOf(agent) }, new URL(frame.dataset.src).origin);
-      } catch {}
-    });
+    frame.addEventListener("load", () => nameSimplex(frame));
     show({ key: `simplex:${agent}`, title: titleOf(agent), subtitle: "SimpleX", icon: paneIcon("link"), body: frame, persist: false });
   } catch (e) {
     notice("SimpleX did not open", e.message);
   }
+}
+// Its page knows the agent by its label: told its name as it loads, and
+// again on a rename (`renderNames`), as a screen is (`nameScreen`).
+function nameSimplex(frame) {
+  const agent = frame.dataset.simplex;
+  try {
+    frame.contentWindow?.postMessage({ fragment: "simplex", agent, name: titleOf(agent) }, new URL(frame.dataset.src).origin);
+  } catch {}
 }
 // The link page asks for a ticket to link or unlink its agent (`{fragment:
 // "simplex", agent, want}`): only a pane of Settings' onto its computer's
@@ -1588,7 +1622,7 @@ function fillSimplex(s) {
     const open = el("button", "row", "Set up");
     open.type = "button";
     open.onclick = () => openSimplex(a.fragment);
-    s.append(actionLine(el("span", null, titleOf(a.fragment)), open));
+    s.append(actionLine(named(el("span"), a.fragment), open));
   }
 }
 
@@ -1731,7 +1765,8 @@ function rollPrompts() {
 function showPrompts() {
   const primary = primaryAgent();
   const box = el("div", "app-prompts");
-  box.append(el("p", "app-prompts-lede", `${primary ? titleOf(primary.fragment) : "Your agent"} makes an app from a message. Say who it's for and what it does: start from one of these, make it yours, then send it.`));
+  const lede = (who) => `${who} makes an app from a message. Say who it's for and what it does: start from one of these, make it yours, then send it.`;
+  box.append(primary ? named(el("p", "app-prompts-lede"), primary.fragment, lede) : el("p", "app-prompts-lede", lede("Your agent")));
   box.append(...promptHand("app-prompt-list", "app-prompt"));
   show({ key: "prompts", title: "Ask for an app", icon: paneIcon("plus"), body: box, persist: false });
 }
@@ -2500,7 +2535,7 @@ async function openSettings(push = true, failed = null) {
   // each agent's own desktop
   const screens = [];
   for (const a of c ? state.agents.values() : []) {
-    const screen = el("button", "quiet", `Open ${titleOf(a.fragment)}'s screen`);
+    const screen = named(el("button", "quiet"), a.fragment, (t) => `Open ${t}'s screen`);
     screen.type = "button";
     screen.dataset.screenFor = a.fragment;
     screen.onclick = () => openScreen(a.fragment);
@@ -2710,12 +2745,10 @@ function faceControls(a) {
   return [actions, said];
 }
 // Settings' agent rows as the list says now: each one's face and name, and
-// whether it has a picture to change or remove; and the names its other
-// controls carry (each agent's screen, its model), and its open screens.
+// whether it has a picture to change or remove; and its open screens. The
+// names its other controls carry are `named`'s.
 function renderAgentFaces() {
-  for (const b of document.querySelectorAll("[data-screen-for]")) b.textContent = `Open ${titleOf(b.dataset.screenFor)}'s screen`;
   for (const f of document.querySelectorAll("iframe[data-screen]")) nameScreen(f);
-  for (const pick of document.querySelectorAll("[data-model-for]")) pick.setAttribute("aria-label", `${titleOf(pick.dataset.modelFor)}'s model`);
   for (const name of document.querySelectorAll("[data-agent-face]")) {
     const fragment = name.dataset.agentFace;
     const id = [...state.agents.values()].find((a) => a.fragment === fragment)?.identity ?? null;
@@ -2727,6 +2760,7 @@ function renderAgentFaces() {
   }
   for (const label of document.querySelectorAll("[data-picture-label]")) label.textContent = byName(label.dataset.pictureLabel)?.picture ? "Change picture" : "Add a picture";
   for (const remove of document.querySelectorAll("[data-picture-remove]")) remove.hidden = !byName(remove.dataset.pictureRemove)?.picture;
+  renderNames();
 }
 
 // ---- settings' Sharing: who has access to what the person owns (GET
@@ -2750,15 +2784,17 @@ function accessWho(m) {
   if (m.kind !== "agent") return { name: m.email ?? shortId(m.principal), about: "" };
   if (m.owner === state.me.id) {
     const mine = state.agents.get(m.principal);
-    return { name: mine ? titleOf(mine.fragment) : m.title ?? m.name ?? shortId(m.principal), about: "your agent" };
+    return { name: mine ? titleOf(mine.fragment) : m.title ?? m.name ?? shortId(m.principal), fragment: mine?.fragment, about: "your agent" };
   }
   const whose = m.ownerEmail ?? (m.owner ? shortId(m.owner) : null);
   return { name: m.title ?? m.name ?? shortId(m.principal), about: whose ? `${whose}'s agent: they read what it reads` : "an agent" };
 }
+// a fragment's name, as the person's list says it (followed), else the view
+const accessName = (row) => (byName(row.name) ? named(el("button", "access-name"), row.name) : el("button", "access-name", row.title || labelOf(row.name)));
 // a fragment's own line: its title (its sheet), what it is, and who may open it
 function accessHead(row) {
   const head = el("div", "access-head");
-  const open = el("button", "access-name", byName(row.name) ? titleOf(row.name) : row.title || labelOf(row.name));
+  const open = accessName(row);
   open.type = "button";
   open.title = "Open its share sheet";
   open.dataset.share = row.name;
@@ -2783,7 +2819,7 @@ function accessByFragment(rows) {
     for (const m of row.members ?? []) {
       const who = accessWho(m);
       const li = el("li");
-      li.append(el("span", "access-who", who.name), el("span", "muted", [who.about, ROLE[m.role] ?? m.role].filter(Boolean).join(" · ")));
+      li.append(who.fragment ? named(el("span", "access-who"), who.fragment) : el("span", "access-who", who.name), el("span", "muted", [who.about, ROLE[m.role] ?? m.role].filter(Boolean).join(" · ")));
       people.append(li);
     }
     for (const i of row.invites ?? []) {
@@ -2840,7 +2876,7 @@ function accessByPerson(rows) {
     const ul = el("ul", "access-people");
     for (const { row, role } of entries) {
       const li = el("li");
-      const open = el("button", "access-name", byName(row.name) ? titleOf(row.name) : row.title || labelOf(row.name));
+      const open = accessName(row);
       open.type = "button";
       open.onclick = () => share(row.name);
       li.append(open, el("span", "muted", role));
@@ -3064,7 +3100,7 @@ const modelValue = (provider, id) => `${provider} ${id}`;
 function modelPicker(a, modeled, read, write, said) {
   const pick = el("select", "agent-model");
   pick.dataset.modelFor = a.fragment;
-  pick.setAttribute("aria-label", `${titleOf(a.fragment)}'s model`);
+  named(pick, a.fragment, (t) => `${t}'s model`, "aria-label");
   const offered = routesOffered();
   const tiered = modelOption("", tierName());
   pick.append(...(offered.length ? offered.map((t) => modelOption(routeValue(t), tierName(t))) : [tiered]));
@@ -3111,7 +3147,7 @@ const REASONING = [["", "Default (High)"], ["low", "Low"], ["high", "High"]];
 function reasoningPicker(a, read, write, said) {
   const pick = el("select", "agent-model");
   pick.dataset.reasoningFor = a.fragment;
-  pick.setAttribute("aria-label", `${titleOf(a.fragment)}'s reasoning`);
+  named(pick, a.fragment, (t) => `${t}'s reasoning`, "aria-label");
   for (const [value, text] of REASONING) pick.append(modelOption(value, text));
   pick.disabled = true;
   read
@@ -3136,7 +3172,7 @@ const homeUnreadLines = new WeakMap();
 function homePicker(a, said) {
   const pick = el("select", "agent-model");
   pick.dataset.homeFor = a.fragment;
-  pick.setAttribute("aria-label", `Where ${titleOf(a.fragment)} reaches you`);
+  named(pick, a.fragment, (t) => `Where ${t} reaches you`, "aria-label");
   pick.disabled = true;
   pick.onchange = async () => {
     const value = pick.value;
@@ -3327,7 +3363,7 @@ function accountsList(p) {
 function accountPick(p, a, theirs) {
   const pick = el("select", "provider-account-pick");
   pick.dataset.agent = a.fragment;
-  pick.setAttribute("aria-label", `${titleOf(a.fragment)}'s ${providerName(p.provider)} account`);
+  named(pick, a.fragment, (t) => `${t}'s ${providerName(p.provider)} account`, "aria-label");
   const option = (value, text) => {
     const o = el("option", "", text);
     o.value = value;
@@ -3502,11 +3538,11 @@ function connectionsSection(linked, uses) {
       who.append(el("span", "settings-key", "Agents"));
       for (const a of agents) {
         const allowed = a.connections == null || a.connections.includes(p.provider);
-        const chip = el("button", "chip", titleOf(a.fragment));
+        const chip = named(el("button", "chip"), a.fragment);
         chip.type = "button";
         chip.dataset.agent = a.fragment;
         chip.setAttribute("aria-pressed", String(allowed));
-        chip.title = allowed ? `${titleOf(a.fragment)} may use it: press to take it away` : `${titleOf(a.fragment)} may not use it: press to let it`;
+        named(chip, a.fragment, (t) => (allowed ? `${t} may use it: press to take it away` : `${t} may not use it: press to let it`), "title");
         chip.onclick = async () => {
           const visit = visits;
           chip.disabled = true;
@@ -3540,7 +3576,7 @@ function connectionsSection(linked, uses) {
     if (!mine.length) used.append(el("span", "muted", "No calls yet"));
     for (const u of mine) {
       const calls = `${u.calls} ${u.calls === 1 ? "call" : "calls"}`;
-      const item = el("span", "use", `${titleOf(u.agent)}: ${p.kind === "operator" ? `${calls}, ${money(u.micros)}` : calls}`);
+      const item = named(el("span", "use"), u.agent, (t) => `${t}: ${p.kind === "operator" ? `${calls}, ${money(u.micros)}` : calls}`);
       item.dataset.use = u.agent;
       item.dataset.calls = String(u.calls);
       item.dataset.micros = String(u.micros);
@@ -3624,7 +3660,7 @@ async function skillsSection() {
     const row = el("p", "settings-line");
     row.dataset.agent = a.name;
     const list = skillsIn(owns[i] ?? []);
-    row.append(el("span", "settings-key", `${titleOf(a.name)}'s own`), list.length ? skillNames(list) : el("span", "settings-value muted", owns[i] ? "None yet" : "Not read"));
+    row.append(named(el("span", "settings-key"), a.name, (t) => `${t}'s own`), list.length ? skillNames(list) : el("span", "settings-value muted", owns[i] ? "None yet" : "Not read"));
     s.append(row);
   });
   return s;
@@ -3869,7 +3905,9 @@ let setupRun = null;
 // and what failed.
 function setupFor(name) {
   if (!setup || setup.chat !== name) return null;
-  const t = setup.title;
+  // its name as the list says it once it is made (renamed meanwhile, the new one)
+  const made = state.fragments.find((f) => f.kind === "agent" && own(f) && labelOf(f.name) === setup.label);
+  const t = made ? titleOf(made.name) : setup.title;
   const step = (text, done, now) => ({ text, state: done ? "done" : !now ? "todo" : setup.error ? "failed" : "doing" });
   return {
     steps: [

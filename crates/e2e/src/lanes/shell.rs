@@ -2277,18 +2277,14 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     // renamed elsewhere, as `fragment agent --name` does (its files, then a
     // deploy): the sidebar and the chat's page follow; the chat's own title
     // is the chat's, and stays
-    let mut manifest = shell(api, me.session, "GET", &format!("/api/f/{agent}/manifest"), None, &[])?.body;
-    manifest["meta"]["title"] = json!("Frankie");
-    let files = json!({ "message": "rename", "files": [{ "path": "fragment.json", "text": format!("{}\n", serde_json::to_string_pretty(&manifest)?) }] });
-    let wrote = shell(api, me.session, "POST", &format!("/api/f/{agent}/files"), Some(&files), &[])?;
-    let deployed = shell(api, me.session, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})), &[])?;
+    let wrote = rename_elsewhere(api, me.session, &agent, "Frankie")?;
     let followed = b.until(page, "document.querySelector('#sidebar-agent .title')?.textContent === 'Frankie'", wait);
     let in_frame = s.eventually(wait, || b.eval_in_frame(page, chat, "document.getElementById('head-label')?.textContent === 'Frankie'").ok() == Some(Value::Bool(true)));
     let kept = b.eval(page, &format!("({{ row: document.querySelector({own_row})?.textContent ?? null, header: document.getElementById('chat-title').textContent }})"))?;
     let listed = own_row_of(api, me.session, chat);
     s.ok(
         "renamed elsewhere (its files and a deploy, as the CLI does), the sidebar and the chat's page follow with no reload, and its first chat keeps its own title: its row, its header and its fragment's",
-        wrote.status == 200 && deployed.status == 200 && followed && in_frame && kept["row"] == FIRST_CHAT && kept["header"] == FIRST_CHAT && listed["title"] == FIRST_CHAT,
+        wrote && followed && in_frame && kept["row"] == FIRST_CHAT && kept["header"] == FIRST_CHAT && listed["title"] == FIRST_CHAT,
         json!({ "shown": kept, "chat": listed }),
     );
     let renamed = screen_named(s, b, "Frankie");
@@ -2318,6 +2314,43 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
         named && seen["title"] == "Frankie" && !text.contains(me.first_title) && !seen["soul"].as_str().unwrap_or("").contains("Frank") && !cheap.is_empty() && cheap != "cheap" && !text.contains("cheap model"),
         json!({ "was": me.first_title, "seen": seen, "cheap": cheap }),
     );
+    // Every surface follows a rename (Paul, 2026-10-26: "be systematic about
+    // referring to the user's chosen name"): with Settings drawn (Agents,
+    // Computer, Skills, Sharing, …) and its page, its files and its screen
+    // open, renamed elsewhere; then nothing the shell draws, nor any page it
+    // frames, says a name it had, in its text, its labels or its titles. A
+    // surface that copies a name once fails here, wherever it is.
+    b.eval(page, &format!("(document.querySelector({})?.click(), true)", js(&format!("#stack .pane[data-key={}] button[aria-label=Files]", js(&format!("app:{agent}"))))))?;
+    let files_open = b.until(page, &format!("!!document.querySelector({})", js(&format!("#stack .pane[data-key={}]", js(&format!("tree:{agent}"))))), wait);
+    b.click(page, "#sidebar-agent")?;
+    let screen_open = menu_item(b, page, "Its screen")? && screen_named(s, b, "Frankie");
+    b.click(page, "#settings")?;
+    let drawn = b.until(page, &format!("location.pathname === '/settings' && document.querySelector({face})?.textContent === 'Frankie' && !!document.querySelector('#settings-page .access-list')"), wait);
+    let wrote = rename_elsewhere(api, me.session, &agent, "Rosalind")?;
+    let followed = b.until(page, &format!("document.querySelector({face})?.textContent === 'Rosalind'"), wait)
+        && screen_named(s, b, "Rosalind")
+        && s.eventually(wait, || b.eval_in_frame(page, &its_page, "document.getElementById('name')?.textContent").ok() == Some(json!("Rosalind")));
+    let swept = |b: &mut Browser, frame: Option<&str>| -> Value {
+        let expr = format!("({OLD_NAME_SWEEP})({})", js("Frank"));
+        match frame {
+            None => b.eval(page, &expr),
+            Some(f) => b.eval_in_frame(page, f, &expr),
+        }
+        .unwrap_or_else(|e| json!([format!("unswept: {e}")]))
+    };
+    let mut hits = json!({ "shell": swept(b, None), "page": swept(b, Some(&its_page)), "screen": swept(b, Some(&screen_at)) });
+    let _ = b.screenshot(page, &shots.join("settings-renamed.png"));
+    // its chat, hidden under Settings (its page draws as it is shown), seen again
+    b.eval(page, &format!("(document.querySelector({screen_pane})?.closest('.pane')?.querySelector('button[aria-label=Close]')?.click(), true)"))?;
+    open_row(b, page, chat, wait)?;
+    let in_chat = s.eventually(wait, || b.eval_in_frame(page, chat, "document.getElementById('head-label')?.textContent").ok() == Some(json!("Rosalind")));
+    hits["chat"] = swept(b, Some(chat));
+    let clean = hits.as_object().is_some_and(|o| o.values().all(|v| v.as_array().is_some_and(Vec::is_empty)));
+    s.ok(
+        "renamed elsewhere with Settings drawn and its page, its files and its screen open: Settings, its windows and every page the shell frames follow, and nothing anywhere says a name it had (text, labels, titles)",
+        files_open && screen_open && drawn && wrote && followed && in_chat && clean,
+        json!({ "files": files_open, "screen": screen_open, "drawn": drawn, "followed": followed, "chat": in_chat, "hits": hits }),
+    );
     // Rename asks for what it renames: the chat's name in the chat's ⋯, the
     // agent's in its menu, each alone
     let asked_for = |b: &mut Browser, open: &str| -> Result<Value> {
@@ -2333,7 +2366,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     let agents_own = asked_for(b, "#sidebar-agent")?;
     s.ok(
         "Rename… in the first chat's ⋯ names the chat (\"Name this chat\", its own title), and in the agent's menu the agent (\"Name your agent\", its name)",
-        chats_own == json!({ "title": "Name this chat", "value": FIRST_CHAT }) && agents_own == json!({ "title": "Name your agent", "value": "Frankie" }),
+        chats_own == json!({ "title": "Name this chat", "value": FIRST_CHAT }) && agents_own == json!({ "title": "Name your agent", "value": "Rosalind" }),
         json!({ "chat": chats_own, "agent": agents_own }),
     );
     // Remove: gone everywhere
@@ -2421,6 +2454,38 @@ fn settings_loading(b: &mut Browser, page: &Page, open: &str, wait: std::time::D
 
 /// Opens `chat` from its row in the sidebar, as a person picks it (a
 /// reload, or /, opens the newest chat: maybe another).
+/// An agent renamed as `fragment agent --name` does it: its `fragment.json`'s
+/// `meta.title` written, then deployed (docs/api.md, "An agent's name and
+/// picture"); whether both answered.
+fn rename_elsewhere(api: &Api, session: &str, agent: &str, title: &str) -> Result<bool> {
+    let mut manifest = shell(api, session, "GET", &format!("/api/f/{agent}/manifest"), None, &[])?.body;
+    manifest["meta"]["title"] = json!(title);
+    let files = json!({ "message": "rename", "files": [{ "path": "fragment.json", "text": format!("{}\n", serde_json::to_string_pretty(&manifest)?) }] });
+    let wrote = shell(api, session, "POST", &format!("/api/f/{agent}/files"), Some(&files), &[])?;
+    let deployed = shell(api, session, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})), &[])?;
+    Ok(wrote.status == 200 && deployed.status == 200)
+}
+
+/// Where a document says `old` (a name an agent had), as a person or a
+/// screen reader meets it: its text (but scripts' and styles'), the labels,
+/// titles, alt texts and placeholders of its elements, and its own title.
+/// None: it says it nowhere.
+const OLD_NAME_SWEEP: &str = r#"(old) => {
+  const hits = [];
+  const walk = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_TEXT);
+  while (walk.nextNode()) {
+    const n = walk.currentNode;
+    if (n.nodeValue.includes(old) && !n.parentElement?.closest("script, style")) hits.push(`text: ${(n.parentElement?.outerHTML ?? n.nodeValue).slice(0, 200)}`);
+  }
+  for (const e of document.querySelectorAll("*")) {
+    for (const a of ["aria-label", "title", "alt", "placeholder", "aria-description"]) {
+      if (e.getAttribute(a)?.includes(old)) hits.push(`${a}: ${e.outerHTML.slice(0, 200)}`);
+    }
+  }
+  if (document.title.includes(old)) hits.push(`document.title: ${document.title}`);
+  return hits;
+}"#;
+
 fn open_row(b: &mut Browser, page: &Page, chat: &str, wait: std::time::Duration) -> Result<()> {
     let row = format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{chat}")))));
     let open = format!("location.pathname === '/' && [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment === {}", js(chat));
@@ -5240,7 +5305,7 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
 
 /// A CLI home in the run's scratch (`name`), its key approved for the
 /// person `session` signs in, as `fragment login` leaves one.
-fn cli_home(s: &mut Suite, api: &Api, session: &str, name: &str) -> Result<std::path::PathBuf> {
+pub(super) fn cli_home(s: &mut Suite, api: &Api, session: &str, name: &str) -> Result<std::path::PathBuf> {
     let home = s.dir(name);
     let keys = fragment_nip98::Keys::generate();
     api.approve(session, &keys)?;
@@ -5439,6 +5504,13 @@ fn ask_cli(s: &mut Suite, api: &Api, me: &Person) -> Result<()> {
         "fragment ask, as a person: their direct chat with the agent, the question to it, its answer waited for",
         r["chat"] == own_named(api, me.session, "reader-chat")?.as_str() && r["asked"]["identity"] == reader.as_str() && r["record"]["body"]["to"] == json!([reader]) && r["answer"]["outcome"] == "idle" && answer(&r).contains(said) && answer(&r).starts_with("echo:"),
         &r,
+    );
+    let reader_row = own_row_of(api, me.session, r["asked"]["fragment"].as_str().unwrap_or(""));
+    let chat_row = own_row_of(api, me.session, r["chat"].as_str().unwrap_or(""));
+    s.ok(
+        "it calls the agent by its name (its fragment's title), its JSON keeping its label as `name`; the chat is never titled by the agent's name",
+        reader_row["title"].is_string() && r["asked"]["title"] == reader_row["title"] && r["asked"]["name"] == "reader" && (r["created"] != true || chat_row["title"] != reader_row["title"]),
+        json!({ "asked": r["asked"], "agent": reader_row, "chat": chat_row }),
     );
     let again = s.cli_json(api, &home, &args)?;
     s.ok(
