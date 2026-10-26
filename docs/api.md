@@ -384,7 +384,10 @@ reads it where it is shown, and again on a rename:
   person's list, and tells the pages it frames (their roster, a screen's
   and a SimpleX link page's `name`);
 - the agent's own page takes its name from its owner's roster as it
-  changes;
+  changes, and alone from its Open Graph title, which says any
+  fragment's name as every reader shows it (its title, trimmed, else its
+  label: `site::inject_og`), so a title that is its name in full is told
+  apart from none;
 - the CLI says an agent's name, else its label
   (`fragment_core::face::agent_name`: `fragment agent`, `fragment ask`,
   `fragment access`), and a chat `fragment ask` makes is titled as the

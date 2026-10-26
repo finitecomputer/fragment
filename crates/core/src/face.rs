@@ -60,9 +60,10 @@ pub fn title(title: Option<&str>) -> Option<&str> {
     title.map(str::trim).filter(|t| !t.is_empty())
 }
 
-/// What an agent is called in the platform's own words (the CLI's): its
-/// name (`title`), else its fragment's label, which `@mentions` it. Never a
-/// word it was not given ("Agent").
+/// What an agent is called in the platform's own words (the CLI's, and any
+/// fragment's Open Graph title, `site::inject_og`, which its page reads):
+/// its name (`title`), else its fragment's label, which `@mentions` it.
+/// Never a word it was not given ("Agent").
 pub fn agent_name<'a>(title: Option<&'a str>, fragment: &'a str) -> &'a str {
     self::title(title).unwrap_or_else(|| fragment_proto::split_fragment_name(fragment).map_or(fragment, |(label, _)| label))
 }

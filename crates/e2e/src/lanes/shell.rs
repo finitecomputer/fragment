@@ -2370,24 +2370,32 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
         json!({ "chat": chats_own, "agent": agents_own }),
     );
     // its page in a tab of its own (Open in a new tab: no shell tells it its
-    // name), by its face as the platform keeps it (Alex's review of #630):
-    // a padded title trimmed, one of only spaces or none its label, and one
-    // that is its fragment's name in full shown as it is
-    let label = label_of(&agent).to_string();
-    let standalone = format!("{}/auth/fragment?name={agent}&return=/", api.base);
+    // name), as every reader shows it (Alex's review of #630): a padded
+    // title trimmed, one of only spaces or none its label, and one that is
+    // its fragment's name in full shown as it is; on a computer, and fresh,
+    // on none yet
+    let fresh = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": "standalone", "template": "agent" })), &[])?;
+    let fresh = fresh.body["name"].as_str().unwrap_or("").to_string();
     let mut said = vec![];
-    for (title, shown) in [(Some("  Rosalind  "), "Rosalind"), (Some("   "), label.as_str()), (None, label.as_str()), (Some(agent.as_str()), agent.as_str())] {
-        let wrote = retitle(api, me.session, &agent, title)?;
-        let row = s.eventually(wait, || own_row_of(api, me.session, &agent)["title"] == json!(title.map(str::trim).filter(|t| !t.is_empty())));
-        let tab = b.open(&standalone)?;
-        let named = b.until(&tab, &format!("document.getElementById('name')?.textContent === {shown:?} && document.title === {shown:?}"), wait);
-        said.push(json!({ "title": title, "wrote": wrote, "row": row, "named": named, "page": b.eval(&tab, "({ name: document.getElementById('name')?.textContent ?? null, title: document.title })").ok() }));
-        b.close(tab)?;
+    for one in [agent.clone(), fresh.clone()] {
+        let label = label_of(&one).to_string();
+        let standalone = format!("{}/auth/fragment?name={one}&return=/", api.base);
+        for (title, shown) in [(Some("  Rosalind  "), "Rosalind"), (Some("   "), label.as_str()), (None, label.as_str()), (Some(one.as_str()), one.as_str())] {
+            let wrote = retitle(api, me.session, &one, title)?;
+            let row = s.eventually(wait, || own_row_of(api, me.session, &one)["title"] == json!(title.map(str::trim).filter(|t| !t.is_empty())));
+            let tab = b.open(&standalone)?;
+            let named = b.until(&tab, &format!("document.getElementById('name')?.textContent === {shown:?} && document.title === {shown:?}"), wait);
+            said.push(json!({ "agent": one, "title": title, "wrote": wrote, "row": row, "named": named, "page": b.eval(&tab, "({ name: document.getElementById('name')?.textContent ?? null, title: document.title })").ok() }));
+            b.close(tab)?;
+        }
     }
     retitle(api, me.session, &agent, Some("Rosalind"))?;
+    // the fresh one goes, so the person's agents are as the rest expects
+    let gone = shell(api, me.session, "DELETE", &format!("/api/f/{fresh}"), None, &[])?;
+    anyhow::ensure!(gone.status == 200, "the fresh agent's fragment deleted: {gone}");
     s.ok(
-        "its page alone, opened in a tab of its own, names it by its face: a padded title trimmed, a blank one or none its label, its fragment's name in full as it is",
-        said.iter().all(|c| c["wrote"] == true && c["row"] == true && c["named"] == true),
+        "its page alone, opened in a tab of its own, names it as every reader does: a padded title trimmed, a blank one or none its label, its fragment's name in full as it is; on its computer, and fresh on none",
+        !fresh.is_empty() && said.len() == 8 && said.iter().all(|c| c["wrote"] == true && c["row"] == true && c["named"] == true),
         json!(said),
     );
     // Remove: gone everywhere
