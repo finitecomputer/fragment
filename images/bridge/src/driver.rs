@@ -228,6 +228,9 @@ enum Msg {
 struct Shared {
     cursors: Mutex<BTreeMap<String, u64>>,
     joins: Mutex<HashMap<String, Instant>>,
+    /// Each linked agent's SimpleX chat, as the engine is told it
+    /// (`Input::Relaying`): the one a routine at home runs in.
+    mirrors: Mutex<BTreeMap<String, Option<String>>>,
 }
 
 impl Shared {
@@ -396,17 +399,22 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
 
     let s = engine.step(Input::Agents(computer.agents.clone()), crate::log::now_ms());
     act(&engine, s)?;
-    // the agents whose SimpleX link is bound, as their files say, before any
-    // record: a relayed record a cut life posted and never ran is honored
-    // (their chats as SimpleX finds them, which it may have already)
+    // the agents whose SimpleX link is bound, and their chats, as their files
+    // say, before any record: a relayed record a cut life posted and never
+    // ran is honored, and what is said in their chat goes to the phone
     if let Some(sc) = &cfg.simplex {
         let linked = crate::simplex::run::linked_on_disk(&sc.dir, &computer.agents);
         relaying_tx.send_modify(|now| {
-            for a in linked {
-                now.entry(a).or_insert(None);
+            for (a, chat) in linked {
+                let known = now.entry(a).or_insert(None);
+                if known.is_none() {
+                    *known = chat;
+                }
             }
         });
-        let s = engine.step(Input::Relaying(relaying_tx.borrow().clone()), crate::log::now_ms());
+        let linked = relaying_tx.borrow().clone();
+        *shared.mirrors.lock().expect("mirrors") = linked.clone();
+        let s = engine.step(Input::Relaying(linked), crate::log::now_ms());
         act(&engine, s)?;
     }
     let s = engine.recover(crate::log::now_ms());
@@ -451,6 +459,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                     break Ok(());
                 }
                 let linked = relaying_rx.borrow_and_update().clone();
+                *shared.mirrors.lock().expect("mirrors") = linked.clone();
                 let s = engine.step(Input::Relaying(linked), crate::log::now_ms());
                 if let Err(e) = act(&engine, s) {
                     break Err(e);
@@ -911,7 +920,8 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
         (Some(view.view.clone()), view.since)
     };
     let record = if tasks && record.at >= since && records::homeless(&record.body) {
-        match home_of(api, agent).await {
+        let simplex = shared.mirrors.lock().expect("mirrors").get(&agent.fragment).cloned().flatten();
+        match home_of(api, agent, simplex.as_deref()).await {
             Ok(Some(chat)) => {
                 crate::ev!("routine.home", { "agent": agent.fragment, "seq": record.seq, "chat": chat });
                 Record { body: records::homed(&record.body, &chat), ..record }
@@ -931,13 +941,14 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
 }
 
 /// The chat an agent's home names now (`api::home_chat`): its `agent.json`,
+/// its SimpleX chat while linked (the one its link mirrors: `simplex`),
 /// its owner's list and its own, read as a routine that names no chat
 /// fires (at most every 15 minutes a schedule).
-async fn home_of(api: &Api, agent: &Agent) -> Result<Option<String>, ApiError> {
+async fn home_of(api: &Api, agent: &Agent, simplex: Option<&str>) -> Result<Option<String>, ApiError> {
     let home = api.home(&agent.fragment).await?;
     let owners = api.fragments_for(&agent.fragment, &agent.owner).await?;
     let mine = api.fragments(&agent.fragment).await?;
-    Ok(api::home_chat(&agent.fragment, home, &owners, &mine))
+    Ok(api::home_chat(&agent.fragment, home, simplex, &owners, &mine))
 }
 
 /// The agent's wake subscription on the channel: made unless it has one.

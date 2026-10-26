@@ -1254,10 +1254,10 @@ fn routine_checks(s: &mut Suite, api: &Api, c: &Routined, say: &dyn Fn(u32, &str
     );
 
     // its owner's home (docs/api.md, "An agent's home"): a routine with no
-    // chat runs, as it fires, in its own chat (`<label>-chat`), then, its
-    // agent.json saying `simplex`, in its SimpleX chat (`<label>-simplex`,
-    // made here by its owner as its bridge makes one: the stub runs no
-    // SimpleX), the same schedule
+    // chat runs, as it fires, in its own chat (`<label>-chat`); its
+    // agent.json saying `simplex` with no SimpleX link (the stub runs none:
+    // the Docker lane's real image runs one), still there, a chat of its
+    // SimpleX label beside it notwithstanding, the same schedule
     let label = fragment_proto::split_fragment_name(c.agent).map_or("", |(label, _)| label).to_string();
     let chat_of = |suffix: &str, title: &str| -> Result<String> {
         let r = api.signed(c.owner, "POST", "/api/fragments", Some(&json!({ "label": format!("{label}-{suffix}"), "template": "chat", "title": title })))?;
@@ -1286,11 +1286,11 @@ fn routine_checks(s: &mut Suite, api: &Api, c: &Routined, say: &dyn Fn(u32, &str
     let written = api.signed(c.owner, "POST", &format!("/api/f/{}/files", c.agent), Some(&json!({ "message": "its home: its SimpleX chat", "files": [{ "path": "agent.json", "text": "{\n  \"tier\": \"cheap\",\n  \"home\": \"simplex\"\n}\n" }] })))?;
     let before_own = agent_replies(&records(api, c.owner, &own, "chat"), c.identity).len();
     let lever = cron_now(api, c.agent)?;
-    let ran = at_home(s, &sx, 0);
+    let ran = at_home(s, &own, before_own);
     s.ok(
-        "its agent.json's home its SimpleX chat, the same schedule's next fire runs there, and not in its own chat",
-        written.status == 200 && lever.body["records"] == 1 && ran && agent_replies(&records(api, c.owner, &own, "chat"), c.identity).len() == before_own,
-        json!({ "written": written.status, "simplex": agent_replies(&records(api, c.owner, &sx, "chat"), c.identity) }),
+        "its agent.json's home SimpleX with no SimpleX link: the same schedule's next fire runs in its own chat still, never in a chat of its SimpleX label its link does not name",
+        written.status == 200 && lever.body["records"] == 1 && ran && agent_replies(&records(api, c.owner, &sx, "chat"), c.identity).is_empty(),
+        json!({ "written": written.status, "own": agent_replies(&records(api, c.owner, &own, "chat"), c.identity), "simplex": agent_replies(&records(api, c.owner, &sx, "chat"), c.identity) }),
     );
     let (exit, _) = cli(s, &["schedule", "rm", c.agent, &home["id"].to_string(), "--json"]);
     anyhow::ensure!(exit == Some(0) && list(api).is_empty(), "the home routine removed");

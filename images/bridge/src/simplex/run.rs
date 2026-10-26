@@ -32,10 +32,11 @@
 //!   platform before any invitation exists; the invitation is shown only to
 //!   the page whose ticket made it (`View`'s `session`).
 //! - **Its SimpleX chat** (Paul, 2026-10-26): a chat of its own with its
-//!   owner, labelled `<label>-simplex` (`api::simplex_chat`), which its
-//!   poster finds in its owner's list, or makes for them, as soon as the
-//!   link is bound (`chat_of`). An unlink leaves it, its history kept; a
-//!   link again finds it.
+//!   owner, labelled `<label>-simplex`, its name in full chosen once as the
+//!   link is first bound and written to `link.json` before the chat is made
+//!   (`Saved::chat`), which its poster then makes for them by that name, or
+//!   finds made (`ensure_chat`). An unlink leaves it, its history kept; a
+//!   link again is that chat again.
 //! - **The owner's messages** go to that chat as relayed records
 //!   (docs/chat-records.md, "A relayed message"), each by its sender's id,
 //!   so a message read again is one record; a file it carries (a voice
@@ -226,8 +227,9 @@ pub enum Msg {
     /// A message of its owner's, of this item, is on their chat (`ok`), or
     /// was refused there (its poster's word).
     Delivered { agent: String, item: i64, ok: bool },
-    /// Its SimpleX chat, as its poster found or made it (`chat_of`).
-    Chat { agent: String, chat: String },
+    /// Its SimpleX chat's name is someone else's (`ensure_chat`): another is
+    /// chosen.
+    ChatTaken { agent: String, chat: String },
 }
 
 /// How the rest of the bridge reaches the manager.
@@ -518,6 +520,13 @@ pub struct Saved {
     /// that none names is let go as the bridge starts (`sweep_out`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sending: BTreeMap<FileId, Sending>,
+    /// Its SimpleX chat's name in full (`chat_name`), chosen as its link is
+    /// first bound and written here before the chat is made (`ensure_chat`),
+    /// so a restart makes that same name, never a second chat, and the
+    /// chat is its owner's phone from the first record that could be in it.
+    /// Kept through an unlink: a link again is that chat again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<String>,
 }
 
 /// A file given up on: its cancel still to be taken by the core, or taken.
@@ -699,14 +708,20 @@ pub fn store(dir: &Path, saved: &Saved) -> std::io::Result<()> {
     std::fs::rename(&tmp, dir.join(LINK_FILE))
 }
 
-/// The agents whose link is bound, as their files say (read at the
-/// bridge's start, before any record: the engine honors their relayed
-/// records from the first).
-pub fn linked_on_disk(dir: &Path, agents: &[Agent]) -> Vec<String> {
-    agents.iter().filter(|a| dir_name_ok(&a.fragment)).filter(|a| {
-        let text = std::fs::read_to_string(dir.join(&a.fragment).join(LINK_FILE)).unwrap_or_default();
-        serde_json::from_str::<Saved>(&text).is_ok_and(|s| s.identity == a.identity && matches!(s.link.phase, Phase::Linked { .. }))
-    }).map(|a| a.fragment.clone()).collect()
+/// The agents whose link is bound, as their files say, each with its
+/// SimpleX chat's name when chosen (read at the bridge's start, before any
+/// record: the engine honors their relayed records, and knows their phone,
+/// from the first).
+pub fn linked_on_disk(dir: &Path, agents: &[Agent]) -> Vec<(String, Option<String>)> {
+    agents
+        .iter()
+        .filter(|a| dir_name_ok(&a.fragment))
+        .filter_map(|a| {
+            let text = std::fs::read_to_string(dir.join(&a.fragment).join(LINK_FILE)).unwrap_or_default();
+            let s = serde_json::from_str::<Saved>(&text).ok().filter(|s| s.identity == a.identity && matches!(s.link.phase, Phase::Linked { .. }))?;
+            Some((a.fragment.clone(), s.chat))
+        })
+        .collect()
 }
 
 /// A running core.
@@ -752,8 +767,6 @@ struct Slot {
     sends: BTreeMap<FileId, Instant>,
     /// Its poster: its messages, posted in order on its SimpleX chat.
     poster: Option<mpsc::Sender<Post>>,
-    /// Its SimpleX chat, once its poster found or made it (`Msg::Chat`).
-    chat: Option<String>,
     /// A message of this life was not posted (refused, or dropped past a
     /// bound): nothing more is acknowledged, so the next start reads back
     /// to before it and carries it then.
@@ -908,9 +921,11 @@ impl Manager {
                 }
             }
             Msg::Delivered { agent, item, ok } => self.delivered(&agent, item, ok),
-            Msg::Chat { agent, chat } => {
-                if let Some(s) = self.slots.get_mut(&agent) {
-                    s.chat = Some(chat);
+            Msg::ChatTaken { agent, chat } => {
+                if let Some(s) = self.slots.get_mut(&agent).filter(|s| s.saved.chat.as_deref() == Some(chat.as_str())) {
+                    crate::ev!("simplex.chat_taken", { "agent": agent, "chat": chat });
+                    s.saved.chat = None;
+                    s.poster = None;
                 }
                 self.publish_relaying();
             }
@@ -1010,7 +1025,7 @@ impl Manager {
                 continue;
             }
             let dir = self.cfg.dir.join(&a.fragment);
-            let saved = load(&dir, a).unwrap_or_else(|| Saved { identity: a.identity.clone(), generation: 0, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new() });
+            let saved = load(&dir, a).unwrap_or_else(|| Saved { identity: a.identity.clone(), generation: 0, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None });
             let door = Key::load(&dir);
             // before any send of this life: what the last one left unnamed goes,
             // and what it sent waits again from now
@@ -1037,7 +1052,6 @@ impl Manager {
                 files: BTreeMap::new(),
                 sends,
                 poster: None,
-                chat: None,
                 gap: false,
                 outstanding: Default::default(),
                 acked: 0,
@@ -1691,27 +1705,55 @@ impl Manager {
         }
     }
 
-    /// The agent's poster, started when it has none running: it finds or
-    /// makes the agent's SimpleX chat at once (`chat_of`), then posts.
-    fn poster(&mut self, f: &str) -> Option<mpsc::Sender<Post>> {
+    /// The agent's SimpleX chat's name (`Saved::chat`), chosen once and
+    /// written to its link's file before anything makes that chat
+    /// (write-ahead), so every life makes and mirrors the one name; none
+    /// while it cannot be written (chosen again at the next look).
+    fn chat_name(&mut self, f: &str) -> Option<String> {
+        use std::io::Read as _;
         let s = self.slots.get_mut(f)?;
-        if s.poster.as_ref().is_none_or(|tx| tx.is_closed()) {
-            let (tx, rx) = mpsc::channel(POSTS_MAX);
-            tokio::spawn(poster(self.api.clone(), s.agent.clone(), rx, self.tx.clone(), self.stop.clone()));
-            s.poster = Some(tx);
+        if s.saved.chat.is_none() {
+            let mut random = [0u8; 4];
+            if let Err(e) = std::fs::File::open("/dev/urandom").and_then(|mut r| r.read_exact(&mut random)) {
+                crate::ev!("simplex.chat_unnamed", { "agent": f, "error": e.to_string() });
+                return None;
+            }
+            s.saved.chat = Some(api::simplex_chat_name(&s.agent.fragment, random));
+            if let Err(e) = store(&s.dir, &s.saved) {
+                crate::ev!("simplex.store_failed", { "agent": f, "error": e.to_string() });
+                s.saved.chat = None;
+                return None;
+            }
+            crate::ev!("simplex.chat_named", { "agent": f, "chat": s.saved.chat });
         }
-        s.poster.clone()
+        s.saved.chat.clone()
     }
 
-    /// The agents whose link is bound, each with its SimpleX chat once
-    /// found, for the bridge's engine; each one's poster started, so its
-    /// chat is found or made as the link is bound, before anything is said.
+    /// The agent's poster on its SimpleX chat (`chat_name`), started when it
+    /// has none running: it makes that chat unless it is there
+    /// (`ensure_chat`), then posts. None while its chat has no name.
+    fn poster(&mut self, f: &str) -> Option<mpsc::Sender<Post>> {
+        if self.slots.get(f)?.poster.as_ref().is_none_or(|tx| tx.is_closed()) {
+            let chat = self.chat_name(f)?;
+            let s = self.slots.get_mut(f)?;
+            let (tx, rx) = mpsc::channel(POSTS_MAX);
+            tokio::spawn(poster(self.api.clone(), s.agent.clone(), chat, rx, self.tx.clone(), self.stop.clone()));
+            s.poster = Some(tx);
+        }
+        self.slots.get(f)?.poster.clone()
+    }
+
+    /// The agents whose link is bound, each with its SimpleX chat's name,
+    /// for the bridge's engine: named before the chat is made, so any record
+    /// that could be in it is known to be its owner's phone. Each one's
+    /// poster started, so its chat is made as the link is bound, before
+    /// anything is said.
     fn publish_relaying(&mut self) {
         let linked: Vec<String> = self.slots.iter().filter(|(_, s)| matches!(s.saved.link.phase, Phase::Linked { .. })).map(|(f, _)| f.clone()).collect();
         for f in &linked {
             self.poster(f);
         }
-        let now: BTreeMap<String, Option<String>> = linked.into_iter().map(|f| (f.clone(), self.slots[&f].chat.clone())).collect();
+        let now: BTreeMap<String, Option<String>> = linked.into_iter().map(|f| (f.clone(), self.slots[&f].saved.chat.clone())).collect();
         self.relaying.send_if_modified(|was| {
             if *was == now {
                 false
@@ -1914,56 +1956,72 @@ pub fn kill_cores() {
     }
 }
 
-/// An agent's SimpleX chat (`api::simplex_chats`): found in its owner's
-/// list, the agent in it (a chat of that label an earlier agent of the
-/// same label left, which this one is not in, is passed over), else made
-/// for them (a chat titled `api::SIMPLEX_CHAT_TITLE`, the agent in it as
-/// its maker, an editor, which the platform tells it as a `joined`, so its
-/// bridge follows it at once). Made at most once a look: a list that has
-/// not caught up with one just made (its owner's list is fed from the
-/// chat's outbox, in about a second) could make a second only for a look a
-/// restart starts within that.
-pub async fn chat_of(api: &Api, agent: &Agent) -> Result<String, ApiError> {
-    let list = api.fragments_for(&agent.fragment, &agent.owner).await?;
-    let mine = api.fragments(&agent.fragment).await?;
-    if let Some(chat) = api::simplex_chats(&agent.fragment, &list).find(|c| mine.iter().any(|f| f.name == *c)) {
-        return Ok(chat.to_string());
-    }
-    let chat = api.create_for(&agent.fragment, &agent.owner, &api::simplex_label(&agent.fragment), "chat", api::SIMPLEX_CHAT_TITLE).await?;
-    crate::ev!("simplex.chat_made", { "agent": agent.fragment, "chat": chat });
-    Ok(chat)
+/// Why an agent's SimpleX chat is not there to post in (`ensure_chat`).
+#[derive(Debug)]
+pub enum ChatNot {
+    /// Its name is a chat of someone else's (or one the agent is not in):
+    /// another name is chosen.
+    Taken,
+    /// The platform did not answer, or refused the making: tried again.
+    Made(ApiError),
 }
 
-/// Its SimpleX chat, found or made (`chat_of`), looked for every
-/// `CHAT_LOOK_MS` until it is, and told to its manager; none once the
-/// bridge stops.
-async fn find_chat(api: &Api, agent: &Agent, manager: &mpsc::Sender<Msg>, stop: &watch::Receiver<bool>) -> Option<String> {
+/// An agent's SimpleX chat, by the name its link chose (`Saved::chat`),
+/// made for its owner unless it is there: made by that name in full (a
+/// chat titled `api::SIMPLEX_CHAT_TITLE`, the agent its maker and an editor,
+/// told so as a `joined`, so its bridge follows it at once), or, that name
+/// taken (409), the one it made before (a restart, a try again) when the
+/// agent is in it and its owner owns it, read from its members, never from
+/// a list that may lag its making. Each life makes the one name, once.
+pub async fn ensure_chat(api: &Api, agent: &Agent, chat: &str) -> Result<(), ChatNot> {
+    match api.create_named_for(&agent.fragment, &agent.owner, chat, "chat", api::SIMPLEX_CHAT_TITLE).await {
+        Ok(()) => {
+            crate::ev!("simplex.chat_made", { "agent": agent.fragment, "chat": chat });
+            Ok(())
+        }
+        Err(e) if e.status() == Some(409) => match api.members(&agent.fragment, chat).await {
+            Ok(m) if m.iter().any(|m| m.principal == agent.identity) && m.iter().any(|m| m.principal == agent.owner && m.role == "owner") => Ok(()),
+            Ok(_) => Err(ChatNot::Taken),
+            Err(e) if matches!(e.status(), Some(403 | 404)) => Err(ChatNot::Taken),
+            Err(e) => Err(ChatNot::Made(e)),
+        },
+        Err(e) => Err(ChatNot::Made(e)),
+    }
+}
+
+/// Its SimpleX chat made or found by its name (`ensure_chat`), tried every
+/// `CHAT_LOOK_MS` until it is; false once the bridge stops, or its name is
+/// someone else's (its manager told, which names another).
+async fn ensure_until(api: &Api, agent: &Agent, chat: &str, manager: &mpsc::Sender<Msg>, stop: &watch::Receiver<bool>) -> bool {
     let t0 = Instant::now();
-    // bounded: a look every CHAT_LOOK_MS until found or made, or the bridge stops
+    // bounded: a try every CHAT_LOOK_MS until there, or the bridge stops
     loop {
-        match chat_of(api, agent).await {
-            Ok(chat) => {
-                let _ = manager.send(Msg::Chat { agent: agent.fragment.clone(), chat: chat.clone() }).await;
-                return Some(chat);
+        match ensure_chat(api, agent, chat).await {
+            Ok(()) => return true,
+            Err(ChatNot::Taken) => {
+                let _ = manager.send(Msg::ChatTaken { agent: agent.fragment.clone(), chat: chat.to_string() }).await;
+                return false;
             }
-            Err(e) => crate::ev!("simplex.no_chat", { "agent": agent.fragment, "error": e.to_string(), "waitedMs": t0.elapsed().as_millis() as u64 }),
+            Err(ChatNot::Made(e)) => crate::ev!("simplex.no_chat", { "agent": agent.fragment, "chat": chat, "error": e.to_string(), "waitedMs": t0.elapsed().as_millis() as u64 }),
         }
         let mut stop = stop.clone();
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(CHAT_LOOK_MS)) => {}
-            _ = crate::net::stopped(&mut stop) => return None,
+            _ = crate::net::stopped(&mut stop) => return false,
         }
     }
 }
 
-/// One agent's poster: its SimpleX chat found or made first (as its link
-/// is bound, so the chat shows in its owner's chats before anything is
-/// said), then each of its owner's messages, in order, as a relayed record
-/// there, its file uploaded first and let go once posted. A post refused
-/// (the chat deleted meanwhile, among others) has the chat looked for again
-/// before the next.
-async fn poster(api: Api, agent: Agent, mut rx: mpsc::Receiver<Post>, manager: mpsc::Sender<Msg>, stop: watch::Receiver<bool>) {
-    let Some(mut chat) = find_chat(&api, &agent, &manager, &stop).await else { return };
+/// One agent's poster on its SimpleX chat (`chat`): that chat made first,
+/// unless it is there (as its link is bound, so it shows in its owner's
+/// chats before anything is said), then each of its owner's messages, in
+/// order, as a relayed record there, its file uploaded first and let go
+/// once posted. A post refused (the chat deleted meanwhile, among others)
+/// has the chat made again, unless it is there, before the next.
+async fn poster(api: Api, agent: Agent, chat: String, mut rx: mpsc::Receiver<Post>, manager: mpsc::Sender<Msg>, stop: watch::Receiver<bool>) {
+    if !ensure_until(&api, &agent, &chat, &manager, &stop).await {
+        return;
+    }
     // bounded by the bridge's life: one message per pass
     while let Some(p) = rx.recv().await {
         let text = match &p.note {
@@ -1981,8 +2039,9 @@ async fn poster(api: Api, agent: Agent, mut rx: mpsc::Receiver<Post>, manager: m
             crate::driver::Sent::Refused => {
                 crate::ev!("simplex.unposted", { "agent": agent.fragment, "chat": chat, "id": id, "kind": p.inbound.kind, "file": p.file.is_some() });
                 let _ = manager.send(Msg::Delivered { agent: agent.fragment.clone(), item: p.inbound.item, ok: false }).await;
-                let Some(again) = find_chat(&api, &agent, &manager, &stop).await else { return };
-                chat = again;
+                if !ensure_until(&api, &agent, &chat, &manager, &stop).await {
+                    return;
+                }
             }
             crate::driver::Sent::Posted => {
                 crate::ev!("simplex.posted", { "agent": agent.fragment, "chat": chat, "id": id, "kind": p.inbound.kind, "file": p.file.is_some() });
@@ -2139,33 +2198,51 @@ mod tests {
             .collect()
     }
 
-    /// Goal (Paul, 2026-10-26: SimpleX is a chat of its own): a linked
-    /// agent's poster starts as the link is bound, so its SimpleX chat is
-    /// found or made before anything is said; once found, the chat is what
-    /// the engine is told is its owner's phone, and only while linked; an
-    /// unlink keeps the chat known (a link again finds the same one) and
-    /// tells the engine none.
+    /// Goal (Paul, 2026-10-26: SimpleX is a chat of its own; Alex's review
+    /// of #620): a linked agent's SimpleX chat has one name, chosen as the
+    /// link is bound and written to its link's file before anything makes
+    /// it (write-ahead), so the engine knows its owner's phone before any
+    /// record could be in it, and a restart, its lists stale or not, reads
+    /// the same name back (the bridge's start, `linked_on_disk`, too) and
+    /// makes no second; its poster starts on it. Only while linked is it the
+    /// phone; an unlink keeps the name, a link again is that chat again; a
+    /// name someone else holds is chosen again, written too.
     #[tokio::test]
-    async fn a_linked_agents_simplex_chat_is_its_owners_phone() {
+    async fn a_linked_agents_simplex_chat_is_named_once() {
         let dir = std::env::temp_dir().join(format!("simplex-phone-{}", std::process::id()));
         let (mut m, _sent, _posts) = captured(&dir, 16);
         let f = "juniper--k3x9";
         m.slots.get_mut(f).expect("its slot").poster = None;
         m.publish_relaying();
-        assert!(m.slots[f].poster.as_ref().is_some_and(|p| !p.is_closed()), "its poster started as it is linked");
-        assert_eq!(*m.relaying.borrow(), BTreeMap::from([(f.to_string(), None)]), "linked, its chat not found yet");
-        m.on(Msg::Chat { agent: f.into(), chat: "juniper-simplex--w9x2".into() }).await;
-        assert_eq!(*m.relaying.borrow(), BTreeMap::from([(f.to_string(), Some("juniper-simplex--w9x2".to_string()))]), "found: its owner's phone");
+        let chat = m.slots[f].saved.chat.clone().expect("named");
+        assert!(chat.starts_with("juniper-simplex--") && chat.len() == "juniper-simplex--".len() + 4, "{chat}");
+        assert_eq!(load(&m.slots[f].dir, &agent()).and_then(|s| s.chat).as_deref(), Some(chat.as_str()), "written before it is made");
+        assert!(m.slots[f].poster.as_ref().is_some_and(|p| !p.is_closed()), "its poster started on it");
+        assert_eq!(*m.relaying.borrow(), BTreeMap::from([(f.to_string(), Some(chat.clone()))]), "its owner's phone, at once");
+        // a restart: the same name, from the start
+        assert_eq!(linked_on_disk(&dir, &[agent()]), [(f.to_string(), Some(chat.clone()))]);
+        let mut again = manager(&dir, &agent_key(&dir.join("key2")), Phase::Linked { contact: 3, name: "paul".into() });
+        again.slots.get_mut(f).expect("its slot").saved = load(&m.slots[f].dir, &agent()).expect("its file");
+        again.publish_relaying();
+        assert_eq!(again.slots[f].saved.chat.as_deref(), Some(chat.as_str()), "a restart names it the same");
+        // unlinked, then linked again
         m.slots.get_mut(f).expect("its slot").saved.link.phase = Phase::Off;
         m.publish_relaying();
         assert!(m.relaying.borrow().is_empty(), "unlinked: none");
-        assert_eq!(m.slots[f].chat.as_deref(), Some("juniper-simplex--w9x2"), "kept for a link again");
+        assert_eq!(m.slots[f].saved.chat.as_deref(), Some(chat.as_str()), "kept for a link again");
         m.slots.get_mut(f).expect("its slot").saved.link.phase = Phase::Linked { contact: 4, name: "paul".into() };
         m.publish_relaying();
-        assert_eq!(*m.relaying.borrow(), BTreeMap::from([(f.to_string(), Some("juniper-simplex--w9x2".to_string()))]), "linked again: the same chat");
+        assert_eq!(*m.relaying.borrow(), BTreeMap::from([(f.to_string(), Some(chat.clone()))]), "linked again: the same chat");
+        // someone else's name: another, written
+        m.on(Msg::ChatTaken { agent: f.into(), chat: "juniper-simplex--zzzz".into() }).await;
+        assert_eq!(m.slots[f].saved.chat.as_deref(), Some(chat.as_str()), "a word of another name changes nothing");
+        m.on(Msg::ChatTaken { agent: f.into(), chat: chat.clone() }).await;
+        let other = m.slots[f].saved.chat.clone().expect("named again");
+        assert!(other != chat && other.starts_with("juniper-simplex--"), "{other}");
+        assert_eq!(load(&m.slots[f].dir, &agent()).and_then(|s| s.chat), Some(other.clone()));
+        assert_eq!(*m.relaying.borrow(), BTreeMap::from([(f.to_string(), Some(other))]));
         let _ = std::fs::remove_dir_all(&dir);
     }
-
     /// Goal (Alex's review of #610): only a file the bridge gave up on is
     /// ever deleted. A transfer a restart resumed, completing before its
     /// message's catch-up, keeps its file, and the catch-up carries it; a
@@ -2726,7 +2803,7 @@ mod tests {
     /// says nothing (an old one) forces nothing.
     #[test]
     fn a_rollback_is_this_starts_and_once() {
-        let saved = |generation| Saved { identity: "npub1juniper".into(), generation, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new() };
+        let saved = |generation| Saved { identity: "npub1juniper".into(), generation, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None };
         assert!(rolled_back(&computer(true, 5, Some((5, true))), &saved(4)));
         assert!(!rolled_back(&computer(true, 5, Some((5, true))), &saved(5)), "this start's, handled already");
         assert!(!rolled_back(&computer(true, 5, Some((4, true))), &saved(3)), "an older start's restore");
@@ -2742,10 +2819,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("juniper--k3x9");
         assert_eq!(load(&dir, &agent()), None, "none yet");
-        let saved = Saved { identity: "npub1juniper".into(), generation: 7, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::from([("0f".repeat(16), 5)]), abandoned: BTreeMap::from([(7, Abandoned::Cancelling)]), receiving: BTreeSet::from([9]), sending: BTreeMap::from([(11, Sending { folder: "1-0".into(), kind: Kind::Voice { secs: 3 } })]) };
+        let saved = Saved { identity: "npub1juniper".into(), generation: 7, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::from([("0f".repeat(16), 5)]), abandoned: BTreeMap::from([(7, Abandoned::Cancelling)]), receiving: BTreeSet::from([9]), sending: BTreeMap::from([(11, Sending { folder: "1-0".into(), kind: Kind::Voice { secs: 3 } })]), chat: Some("juniper-simplex--w9x2".into()) };
         store(&dir, &saved).expect("written");
         assert_eq!(load(&dir, &agent()), Some(saved.clone()));
-        assert_eq!(linked_on_disk(&root, &[agent()]), vec!["juniper--k3x9".to_string()]);
+        assert_eq!(linked_on_disk(&root, &[agent()]), vec![("juniper--k3x9".to_string(), Some("juniper-simplex--w9x2".to_string()))]);
         let other = Agent { identity: "npub1other".into(), ..agent() };
         assert_eq!(load(&dir, &other), None, "another agent's");
         assert!(!dir.exists(), "set aside");
@@ -2807,7 +2884,7 @@ mod tests {
         Slot {
             agent: agent(),
             dir,
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new() },
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None },
             title: None,
             epoch: 0,
             core: None,
@@ -2825,7 +2902,6 @@ mod tests {
             files: BTreeMap::new(),
             sends: BTreeMap::new(),
             poster: None,
-            chat: None,
             gap: false,
             outstanding: Default::default(),
             acked: 0,
@@ -3020,7 +3096,7 @@ mod tests {
         let (writer, _writes) = mpsc::channel(1);
         let (tx, _rx) = mpsc::channel(4);
         let (pulse, _) = watch::channel(false);
-        let saved = Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new() };
+        let saved = Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None };
         let slot = Slot {
             agent: agent(),
             dir: PathBuf::from("/nowhere"),
@@ -3042,7 +3118,6 @@ mod tests {
             files: BTreeMap::new(),
             sends: BTreeMap::new(),
             poster: None,
-            chat: None,
             gap: false,
             outstanding: Default::default(),
             acked: 0,
@@ -3115,7 +3190,7 @@ mod tests {
         let mut slot = Slot {
             agent: agent(),
             dir: PathBuf::from("/nowhere"),
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new() },
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None },
             title: None,
             epoch: 1,
             core: None,
@@ -3133,7 +3208,6 @@ mod tests {
             files: BTreeMap::new(),
             sends: BTreeMap::new(),
             poster: None,
-            chat: None,
             gap: false,
             outstanding: Default::default(),
             acked: 0,
@@ -3166,7 +3240,7 @@ mod tests {
         let slot = Slot {
             agent: agent(),
             dir: std::env::temp_dir().join(format!("simplex-ack-{}", std::process::id())),
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new() },
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None },
             title: None,
             epoch: 1,
             core: None,
@@ -3184,7 +3258,6 @@ mod tests {
             files: BTreeMap::new(),
             sends: BTreeMap::new(),
             poster: None,
-            chat: None,
             gap: false,
             outstanding: Default::default(),
             acked: 0,

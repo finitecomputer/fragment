@@ -76,8 +76,8 @@ Bodies are JSON. `api.rs` has one method for each.
 | `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute, and within a second of a change to the ready file (below); `?simplex=1` when the image names a SimpleX core (below, "SimpleX") |
 | `GET /api/computer/relay?host=&port=` (no agent), WebSocket | | the XFTP relay (docs/computers.md): one per connection a SimpleX core makes to a host and port the view's `relay` names, through the cores' proxy (`src/simplex/socks.rs`), its bytes piped both ways |
 | `GET /api/computer/keepalive` (no agent), WebSocket | | held while a turn waits to run, runs, or waits on its card (below, "A card keeps its computer awake"); pinged every `BRIDGE_KEEPALIVE_PING_MS` (15 s), and opened again after twice that with nothing heard, since a deploy can cut the platform's side of it with no close reaching here (#557) |
-| `GET /api/fragments?for=<owner>` | | `{fragments: [{name, kind, owned, title}]}`: its owner's, as the agent reaches them: its own chat with them and its SimpleX chat found by their labels (`api::bot_chat`, `api::simplex_chat`), as a routine with no chat fires and as SimpleX links |
-| `POST /api/fragments?for=<owner>` | `{label, template: "chat", title}` | `{name}`: the agent's SimpleX chat, made for its owner when its link is bound and their list holds none (below, "SimpleX") |
+| `GET /api/fragments?for=<owner>` | | `{fragments: [{name, kind, owned, title}]}`: its owner's, as the agent reaches them: its own chat with them found by its label (`api::bot_chat`), as a routine with no chat fires |
+| `POST /api/fragments?for=<owner>` | `{name, template: "chat", title}` | the agent's SimpleX chat, made for its owner by the name its link chose, when its link is bound; 409, made already (then `GET /api/f/{chat}/members` says whether it is the agent's and its owner's: below, "SimpleX") |
 | `GET /api/f/{agent}/file?path=agent.json` | | its home (`api::Home`), read as a routine with no chat fires (docs/api.md, "An agent's home"); none (404) is its own chat |
 | `GET /api/fragments` | | `{fragments: [{name, role}]}`: what the agent follows, listed at start, on a `joined` of it (as the agent the engine runs, no read of the computer first), and every 5 minutes. A listing a read of which fails with no answer, a 429 or a 5xx is asked again after a jittered backoff (from 1 s, at most 30 s) until it answers: the list, or only the fragments whose channels did not read; what was found meanwhile is followed, so one fragment that fails keeps the agent from no other. One listing an agent at a time: a newer one takes the place of one under way |
 | `GET /api/f/{f}/channels` | | `{channels: [{name, post, seq}]}`: a postable `chat` is a chat; the agent's own `tasks` |
@@ -265,7 +265,8 @@ deep (docs/chat-records.md, "An agent's reply"):
   platform) or its owner; another agent acting for the owner, who may post
   there, is passed over (`tasks_hear_only_the_owner_and_the_fragment`).
 - **A routine that names no chat runs at home**: as it is read, its
-  follower reads the agent's home (its `agent.json`, its owner's list, and
+  follower reads the agent's home (its `agent.json`; for SimpleX, the chat its
+  link names while bound; else its own chat, from its owner's list and
   its own: a chat it is not in is no home)
   and names that chat in it before the engine sees it (`driver::home_of`,
   `records::homed`), so a home changed later moves the next fire. A home
@@ -432,25 +433,31 @@ drives it.
 
 - **SimpleX is a chat of its own** (Paul, 2026-10-26): the agent's
   SimpleX chat, its owner's chat labelled `<label>-simplex` and titled
-  SimpleX (docs/api.md, "An agent's home"), which the agent's poster finds
-  in its owner's list, the agent in it (one of its label an earlier agent
-  of the same label left is passed over), or makes for them (`POST
-  /api/fragments?for=`, the agent its maker and an editor, told so as a
-  `joined`), as soon as the
-  link is bound (`run::chat_of`), so it shows among their chats before
-  anything is said. It mirrors their app both ways while linked:
+  SimpleX (docs/api.md, "An agent's home"). Its name in full is chosen
+  once, as the link is first bound, and written to `link.json` before
+  anything makes it (`Saved::chat`: write-ahead); the agent's poster then
+  makes it for them by that name (`POST /api/fragments?for= {name}`, the
+  agent its maker and an editor, told so as a `joined`), or, the name
+  taken (409), finds it made when the agent is in it and its owner owns
+  it, from its members, never from a list that may lag its making
+  (`run::ensure_chat`). So every life makes that one chat, once, whatever
+  restarts, and it shows among their chats before anything is said; a
+  name someone else holds is chosen again. It mirrors their app both ways
+  while linked:
   everything their linked contact sends is posted there, a relayed record
   as before; everything the agent says there goes to their app once
   posted, whatever started its turn (a SimpleX message, words typed in
   that chat on the web, a routine, a hand-off, something it says with no
   turn): its replies but the interim ones, with their files (below), and a card's
   question with its choices (`driver::for_simplex`). The chat is the
-  engine's to know (`Input::Relaying`: each linked agent with its chat
-  once found; `Engine::mirror`), so nothing of it is kept per turn and
+  engine's to know (`Input::Relaying`: each linked agent with its chat's
+  name, read from `link.json` as the bridge starts, before any record, and
+  named before it is made: so a post there is known to be the phone's
+  from the first; `Engine::mirror`), so nothing of it is kept per turn and
   `state.json` holds nothing of SimpleX. An unlink stops the mirror and
-  keeps the chat and its history; a link again finds the same chat. A
-  post refused there (the chat deleted meanwhile) has it looked for, or
-  made, again before the next. Until 2026-10-26 its messages went to the
+  keeps the chat, its history and its name; a link again is that chat. A
+  post refused there (the chat deleted meanwhile) has it made again by its
+  name before the next. Until 2026-10-26 its messages went to the
   agent's own chat with its owner, and only a turn a SimpleX message
   started answered there (`via`, a turn's mark): gone, with the mark.
 - **The agent is told in that chat alone**, as the chat's topic, on every

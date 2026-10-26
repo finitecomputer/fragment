@@ -3386,12 +3386,13 @@ chat. One home per agent, as each agent links its own SimpleX.
   label an earlier agent left, which it is not in, is none; the shell
   gives a new agent no label whose `-chat` or `-simplex` is taken): the
   chat its SimpleX link mirrors both ways, which its computer makes for
-  its owner as the link is bound, and finds again at a link after an
-  unlink (docs/bridge.md, "SimpleX"). The shell shows it as "<agent> ·
-  SimpleX" while it keeps that title.
+  its owner by one name, chosen as the link is first bound, and keeps
+  through an unlink, a link again the same chat (docs/bridge.md,
+  "SimpleX"). The shell shows it as "<agent> · SimpleX" while it keeps
+  that title.
 - **Its home** is its `agent.json`'s `home`: `"simplex"`, its SimpleX
   chat; absent (or anything else), its own chat. A `"simplex"` while it
-  has no SimpleX chat names its own chat.
+  has no SimpleX chat, or while its link is let go, names its own chat.
 - **What goes there**: a routine that names no chat (`fragment schedule
   add --routine` without `--chat`, which the agent's own skill teaches for
   a reminder) runs there, the home read as it fires (docs/chat-records.md,
