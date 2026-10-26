@@ -1,0 +1,52 @@
+{
+  "name": "Finite.Computer",
+  "id": "computer.finite.desktop",
+  "version": "0.1.0",
+  "build": 1,
+  "rust": ".",
+  "appearance": "system",
+  "theme": {
+    "cssVars": {
+      "theme": {
+        "font-sans": "Funnel Sans, sans-serif",
+        "font-mono": "JetBrains Mono, monospace"
+      },
+      "light": {
+        "window": "#f7f6f3",
+        "sidebar": "#ebe9e5",
+        "hover": "#1414140e",
+        "active": "#e3e0db",
+        "card": "#fffdfa",
+        "muted": "#e9e6df",
+        "primary": "#171717",
+        "primary-foreground": "#f7f6f3",
+        "secondary": "#66615b",
+        "tertiary": "#918a82",
+        "icon": "#5d5954",
+        "accent": "#315fbd",
+        "on-accent": "#ffffff",
+        "border": "#1414141b",
+        "border-strong": "#1414142e",
+        "scrim": "#00000077"
+      },
+      "dark": {
+        "window": "#212121",
+        "sidebar": "#181818",
+        "hover": "#ffffff0e",
+        "active": "#2f2f2f",
+        "card": "#171615",
+        "muted": "#2b2b2a",
+        "primary": "#ececec",
+        "primary-foreground": "#212121",
+        "secondary": "#a6a19d",
+        "tertiary": "#706d69",
+        "icon": "#bfbfbf",
+        "accent": "#8ab4ff",
+        "on-accent": "#212121",
+        "border": "#ffffff16",
+        "border-strong": "#ffffff29",
+        "scrim": "#00000088"
+      }
+    }
+  }
+}
