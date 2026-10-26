@@ -647,7 +647,8 @@ its SimpleX chat made for its owner; a
 message posted there, a turn of Hermes' asked as its owner, its session
 told the chat is their phone, answered on SimpleX (1.2 s); words typed in
 that chat on the web, answered on SimpleX too; a routine with no chat, its
-home that chat, answered on SimpleX; a reply in its own chat, not; a voice note
+home that chat, answered on SimpleX, and one with nothing to tell (its
+`[SILENT]`), nothing; a reply in its own chat, not; a voice note
 transcribed through the route and answered (0.4 s); a hold that stops the
 core first, its copies naming none of the core's databases; a restart; and
 a wake from a save older than the life before it, healed, the person told
@@ -860,6 +861,26 @@ get_chat_info`.
   turn without saying something, so an empty bracket's `✅` ends
   nothing. No clock: a turn whose bracket never ends is the idle
   bound's (`BRIDGE_TURN_IDLE_MS`: "the agent stopped answering").
+- **A routine with nothing to tell says nothing.** A model that answers
+  exactly `[SILENT]` (Hermes' silence marker, its own cron's "nothing to
+  report", for which that cron delivers nothing) is answered by v0.21.7's
+  gateway with its warning instead (`⚠️ The model returned only a silence
+  marker for a message that needed a reply. …`, `wire::UNEXPECTED_SILENCE`),
+  for every message Relay hands it: Relay carries no `reply_expected`
+  (only Slack's own adapter sets it) nor anything that makes a message
+  Hermes' machinery, so each is one that needed a reply. For a routine's
+  turn alone the bridge drops that warning, whole and in those words
+  (`relay.silent`), and its `✅` ends the turn idle with no reply, so
+  nothing reaches the chat, its push or its SimpleX; a person's message
+  answered so still gets it, from Hermes as it says it. Why here, not
+  in Hermes: a turn Hermes kept silent would end in an empty bracket,
+  which the bridge cannot tell from the startup gate's (and a routine
+  is what fires as a computer wakes), so its end would be the idle
+  bound's; the warning is the end's sign. Proven by
+  `a_routine_may_say_nothing` (tests/relay.rs, against the scripted
+  Hermes, a restart included; tests/docker.rs, against the real one,
+  whose words the constant must be) and `simplex_on_the_hermes_image`
+  (a silent routine at home sends the phone nothing).
 
 Of decision 21's list, v0.21.5 has every op, but sends `task_card` only
 for Slack chats (`gateway/run_turn.py`), so steps come from progress

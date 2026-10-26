@@ -41,6 +41,11 @@
 //!   its startup restore, then run): that `✅` ends nothing, and Hermes
 //!   ends no person's turn without saying something. No clock: a bracket
 //!   that never ends is the engine's idle bound's;
+//! - a routine whose model answers exactly `[SILENT]` (nothing to tell)
+//!   says nothing: Hermes' warning in its place (`wire::UNEXPECTED_SILENCE`,
+//!   sent for every Relay message, as none says it needs no reply) is
+//!   dropped for a routine's turn alone, and ends it as its words would; a
+//!   person's message answered so gets it, as Hermes says it;
 //! - a file is uploaded to `/relay/media`, then sent by `send_media`, or
 //!   sent by a URL of its provider's, which the bridge fetches (`fetch`),
 //!   answering once it has it; a reply's image links (which Hermes sends as
@@ -778,6 +783,16 @@ impl Loop {
                     return json!({ "success": true, "message_id": id });
                 };
                 let f = self.inflight.get_mut(&turn).expect("by_chat names a held turn");
+                if f.start.routine && wire::unexpected_silence(&text) {
+                    // a routine with nothing to tell, its answer exactly
+                    // `[SILENT]`: nothing said, as Hermes' own cron delivers
+                    // nothing for it; Hermes' warning in its place (Relay
+                    // tells it no message needs no reply) is no reply nor
+                    // notice, and its `✅` (it spoke) ends the turn
+                    f.take_message(id.clone());
+                    crate::ev!("relay.silent", { "turn": turn });
+                    return json!({ "success": true, "message_id": id });
+                }
                 let notice = if reply { None } else { wire::notice(&text) };
                 if let Some((category, text)) = notice {
                     // neither a reply nor a step: its edits change nothing

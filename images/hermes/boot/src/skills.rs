@@ -723,7 +723,7 @@ mod tests {
         assert!(body.contains(cli_body), "the CLI's skill, whole");
         let page = body.find("# Your computer").unwrap();
         assert!(page < body.find("# fragment").unwrap(), "the computer's page first");
-        for said in ["FRAGMENT_AS_AGENT", "skip its Install and Pair", "apps-finite", "brain-finite", "GOOGLE_OAUTH_ACCESS_TOKEN", "google-workspace-finite", "\"Its screen\"", "take over", "human_has_control", "another agent's desktop", "fragment create", "fragment write", "fragment deploy", "fragment call", "fragment list", "fragment schedule add --routine", "`hermes cron`", "every 15 minutes", "a cron trigger and a job"] {
+        for said in ["FRAGMENT_AS_AGENT", "skip its Install and Pair", "apps-finite", "brain-finite", "GOOGLE_OAUTH_ACCESS_TOKEN", "google-workspace-finite", "\"Its screen\"", "take over", "human_has_control", "another agent's desktop", "fragment create", "fragment write", "fragment deploy", "fragment call", "fragment list", "fragment schedule add --routine", "`hermes cron`", "every 15 minutes", "a cron trigger and a job", "A routine may end with exactly `[SILENT]` when there is nothing to tell"] {
             assert!(body.contains(said), "it says {said:?}");
         }
         // Paul, 2026-10-20: an agent asked to check something hourly found no

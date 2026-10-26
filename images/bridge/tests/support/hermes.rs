@@ -26,6 +26,12 @@
 //!   once an answer lets the clarify go;
 //! - `fail` fails as Hermes' handler does when it raises: `👀` off, `❌`
 //!   with nothing said, then its notice as a send answering nothing;
+//! - `silent` is a turn whose model answered exactly `[SILENT]`: no draft
+//!   (Hermes' stream consumer holds back what may still be a silence
+//!   marker), and in its place v0.21.7's warning (`wire::
+//!   UNEXPECTED_SILENCE`), a send answering the message, as it sends one
+//!   for every Relay message; then `👀` off, `✅` (after its tool's
+//!   progress, with `tool`);
 //! - `narrate` says text beside a tool call as Hermes' stream consumer
 //!   does: drafts, then a send answering the message at the tool boundary,
 //!   and the tool's progress after it (`late`: before it; `stalled`: before
@@ -599,6 +605,15 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
     }
     if gw.seen.lock().unwrap().dead {
         // cut with its container: its message stays its session's last
+        return;
+    }
+    if text.contains("silent") {
+        // its model answered exactly `[SILENT]`: v0.21.7 judges every Relay
+        // message one that needed a reply, so its warning is the reply
+        gw.act(json!({ "op": "send", "chat_id": chat, "content": wire::UNEXPECTED_SILENCE, "reply_to": mid, "metadata": { "reply_to_message_id": mid, "notify": true } })).await;
+        done();
+        gw.act(react("👀", true)).await;
+        gw.act(react("✅", false)).await;
         return;
     }
     if let Some(url) = text.split_whitespace().find_map(|w| w.strip_prefix("picture:")) {

@@ -56,6 +56,10 @@ them. `--chat <chat>` keeps it in that chat (this one is your session's
 source). What should run without you (frequent checks, or for others) is
 an app with a cron trigger and a job.
 
+A routine may end with exactly `[SILENT]` when there is nothing to tell:
+nothing is posted. Say so in its text ("…; if nothing changed, answer
+exactly [SILENT]").
+
 ## Your name and picture
 
 Your name is your agent fragment's title and your picture is its

@@ -503,6 +503,27 @@ pub fn notice(text: &str) -> Option<(NoticeCategory, String)> {
     (!words.is_empty()).then(|| (*category, words.to_string()))
 }
 
+/// What Hermes v0.21.7 says in place of a reply when its model answered
+/// only a silence marker (exactly `[SILENT]`, `gateway/response_filters.py`)
+/// for a message it judges needed one: `_unexpected_silence_reply`
+/// (`gateway/run_turn.py`), `gateway.errors.unexpected_silence` in its
+/// `locales/en.yaml` (the image sets no language). A turn may stay silent
+/// only when the message was addressed to someone else (an event's
+/// `reply_expected: false`) or is Hermes' own machinery; Relay carries
+/// neither (its `_event_from_wire` reads no `reply_expected`, which only
+/// Slack's own adapter sets, nor `internal`: v0.21.7, and upstream's main on
+/// 2026-10-26), so every message it hands Hermes is one that needed a
+/// reply, a routine's too. The bridge says nothing of it for a routine
+/// (relay/mod.rs, `act`). The real-Hermes lane checks these words
+/// (tests/docker.rs, `a_routine_may_say_nothing`).
+pub const UNEXPECTED_SILENCE: &str = "⚠️ The model returned only a silence marker for a message that needed a reply. Try again or rephrase.";
+
+/// Whether a message of Hermes' is its `UNEXPECTED_SILENCE`, whole: words
+/// of the model's that merely quote it are not.
+pub fn unexpected_silence(text: &str) -> bool {
+    text.trim() == UNEXPECTED_SILENCE
+}
+
 /// What in an image link's URL says it is an image, as Hermes reads one
 /// (`extract_images`): an image's extension, or FAL's or Replicate's CDN.
 const IMAGE_MARKERS: [&str; 8] = [".png", ".jpg", ".jpeg", ".gif", ".webp", "fal.media", "fal-cdn", "replicate.delivery"];
@@ -740,6 +761,25 @@ mod tests {
         // a steer's word, a redirect's, a side question's answer: messages of their own (asides)
         for not in ["💻 terminal: `ls`", "🔍 Searching the web for x", "⚙️ computer_use...", "⚡ some_tool", "📝 Updating skill x", "💬 thinking", "❓ Which one?", "✏️ Type your answer:", "Here is the answer.", "💾", "⚠️  ", "", "⏩ Steer queued into current run — arrives after the next tool call: 'x'", "↪ Redirected current run", "💬 /btw: \"why\"\n\nbecause"] {
             assert_eq!(n(not), None, "{not}");
+        }
+    }
+
+    /// Hermes' words for a bare silence marker are known whole (around
+    /// whitespace), and only whole: a reply that quotes them, another
+    /// warning, or a model's own `[SILENT]` is not them.
+    #[test]
+    fn hermes_words_for_a_bare_silence() {
+        assert!(unexpected_silence(UNEXPECTED_SILENCE));
+        assert!(unexpected_silence(&format!("\n{UNEXPECTED_SILENCE}  ")));
+        for not in [
+            "[SILENT]",
+            "",
+            "⚠️ I seem to be stuck (no activity for 1 min).",
+            "⚠️ The model returned only a silence marker",
+            &format!("Hermes said: {UNEXPECTED_SILENCE}"),
+            &format!("{UNEXPECTED_SILENCE}\n\nThe shelf is in stock."),
+        ] {
+            assert!(!unexpected_silence(not), "{not:?}");
         }
     }
 
