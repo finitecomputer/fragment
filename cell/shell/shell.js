@@ -2392,11 +2392,19 @@ function renderSettingsPage(page, sections) {
   layout.append(nav, content);
   page.replaceChildren(layout);
   page.onscroll = () => {
+    const visible = links.filter(([section]) => !section.hidden);
     const top = page.getBoundingClientRect().top + 130;
-    const current = [...links].reverse().find(([section]) => !section.hidden && section.getBoundingClientRect().top <= top)?.[1] ?? links[0]?.[1];
+    const current = [...visible].reverse().find(([section]) => section.getBoundingClientRect().top <= top)?.[1] ?? visible[0]?.[1];
+    if (current === nav.querySelector('[aria-current="location"]')) return;
     for (const [, button] of links) {
       if (button === current) button.setAttribute("aria-current", "location");
       else button.removeAttribute("aria-current");
+    }
+    if (current) {
+      const button = current.getBoundingClientRect();
+      const bounds = nav.getBoundingClientRect();
+      if (button.left < bounds.left) nav.scrollLeft -= bounds.left - button.left;
+      else if (button.right > bounds.right) nav.scrollLeft += button.right - bounds.right;
     }
   };
   page.onscroll();
