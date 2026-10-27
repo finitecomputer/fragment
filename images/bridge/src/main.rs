@@ -90,6 +90,20 @@ fn screen_config() -> Option<screen::ScreenConfig> {
     Some(screen::ScreenConfig { listen, dir: PathBuf::from(env_or("BRIDGE_SCREEN_DIR", "/opt/fragment/screen")), screens_file, start })
 }
 
+/// `BRIDGE_SIMPLEX_BIN` and the rest: SimpleX, when the image names its
+/// core (simplex/run.rs); unset, none, and nothing of it runs.
+fn simplex_config() -> Option<fragment_bridge::simplex::run::Config> {
+    let bin = PathBuf::from(env("BRIDGE_SIMPLEX_BIN")?);
+    if !bin.is_absolute() {
+        fail("BRIDGE_SIMPLEX_BIN is the core's absolute path");
+    }
+    let dir = PathBuf::from(env_or("BRIDGE_SIMPLEX_DIR", "/data/simplex"));
+    if !dir.is_absolute() {
+        fail("BRIDGE_SIMPLEX_DIR is an absolute path");
+    }
+    Some(fragment_bridge::simplex::run::Config { bin, dir, smp: env("BRIDGE_SIMPLEX_SMP"), xftp: env("BRIDGE_SIMPLEX_XFTP") })
+}
+
 /// SIGTERM (or SIGINT) turns `stop` true; the process is gone within
 /// `SHUTDOWN_MS_MAX` of it, whatever is left (docs/computers.md).
 fn on_signal(stop: tokio::sync::watch::Sender<bool>) {
@@ -105,6 +119,8 @@ fn on_signal(stop: tokio::sync::watch::Sender<bool>) {
         let _ = stop.send(true);
         tokio::time::sleep(Duration::from_millis(limits::SHUTDOWN_MS_MAX)).await;
         ev!("bridge.forced_exit");
+        // no SimpleX core outlives the bridge, even now
+        fragment_bridge::simplex::run::kill_cores();
         std::process::exit(0);
     });
 }
@@ -136,9 +152,13 @@ async fn main() {
                     0 => fail("BRIDGE_KEEPALIVE_PING_MS is more than 0"),
                     ms => ms,
                 }),
+                simplex: simplex_config(),
             };
-            ev!("bridge.boot", { "computer": env("FRAGMENT_COMPUTER"), "image": env("FRAGMENT_IMAGE"), "restorePending": cfg.restore_pending, "agentsFile": cfg.agents_file.as_ref().map(|p| p.display().to_string()) });
-            match driver::run(cfg, runtime(), stop).await {
+            ev!("bridge.boot", { "computer": env("FRAGMENT_COMPUTER"), "image": env("FRAGMENT_IMAGE"), "restorePending": cfg.restore_pending, "agentsFile": cfg.agents_file.as_ref().map(|p| p.display().to_string()), "simplex": cfg.simplex.is_some() });
+            let ran = driver::run(cfg, runtime(), stop).await;
+            // its SimpleX cores stopped and reaped first, within the shutdown's bound
+            fragment_bridge::simplex::run::stop_cores(Duration::from_millis(limits::SHUTDOWN_MS_MAX / 2)).await;
+            match ran {
                 Ok(()) => std::process::exit(0),
                 Err(e) => {
                     ev!("bridge.failed", { "error": e.to_string() });

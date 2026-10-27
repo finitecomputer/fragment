@@ -17,6 +17,12 @@
 //!   byte, so its digest is the one the round proved. The source's
 //!   account and token are `FROM_CLOUDFLARE_ACCOUNT_ID` and
 //!   `FROM_CLOUDFLARE_API_TOKEN` (Containers on that account).
+//!
+//! Either waits, before its summary names the image, until Cloudflare has
+//! prepared it on the account's network (prepare.rs, `IMAGE_LIMIT`): a
+//! copy is not prepared until something asks, and production's copy of
+//! round 11 (2026-10-24) was still pending 50 minutes on, at its
+//! promotion's deploy.
 
 use std::fs;
 use std::io::Write;
@@ -158,13 +164,20 @@ fn parse(rest: &[String], env: impl Fn(&str) -> Option<String>) -> Result<Reques
 /// `cargo xtask image …`.
 pub fn image(rest: &[String]) -> Result<()> {
     let req = parse(rest, |name| std::env::var(name).ok())?;
-    // the pinned Node and wrangler first: one that cannot be had stops the
-    // run before a build or a copy of minutes
+    // the pinned Node and wrangler first, and the API the image is prepared
+    // through: one that cannot be had stops the run before a build or a
+    // copy of minutes
     let tools = devstack::Tools::locate()?;
+    let mut api = crate::cloudflare::Api::from_env(&req.account)?;
     let reference = match &req.from {
         None => push(&req, &tools)?,
         Some(source) => copy(&req, source, &tools)?,
     };
+    // ready on the account's network before the summary names it, so the
+    // deploy that pins it finds it ready (prepare.rs): the one that would
+    // wait is a promotion's, production's
+    crate::prepare::until_ready(&mut api, &mut crate::prepare::Wall::new(), &[&reference], crate::prepare::IMAGE_LIMIT)
+        .with_context(|| format!("{reference} is in the registry, and not yet ready to run: a deploy that pins it waits for it (prepare.rs), or run this again"))?;
     let text = summary(&req, &reference);
     println!("\n{text}");
     if let Some(file) = &req.summary {

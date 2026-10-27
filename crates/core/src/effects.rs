@@ -83,6 +83,9 @@ pub fn check_record(channel: &str, kind: &str, body: &Value, declared: &BTreeMap
     if !valid_kind(kind) {
         return Err("kind must match ^[a-z][a-z0-9._-]{0,63}$".into());
     }
+    if crate::door::relays(body) {
+        return Err("a record that relays its agent's owner (`relayed`) is posted through that agent's door, never published by an app".into());
+    }
     let size = body.to_string().len();
     if size > limits::RECORD_BODY_MAX_BYTES {
         return Err(format!("a record's body is at most {} bytes", limits::RECORD_BODY_MAX_BYTES));
@@ -233,6 +236,10 @@ mod tests {
         assert!(refused.contains("agent members only"), "{refused}");
         assert!(decode(&json!([{ "channel": "work", "kind": "turn.step", "body": {} }]), &channels).is_err(), "a mutation's effect is refused there");
         assert!(check_record("notes", "note", &json!({}), &channels).is_ok(), "a channel without from takes an app's record");
+        // nor does an app relay an agent's owner: that is a door's post alone (door.rs)
+        let relayed = json!({ "text": "yes", "relayed": { "via": "simplex", "for": "npub1paul" } });
+        assert!(check_record("notes", "note", &relayed, &channels).is_err_and(|e| e.contains("door")), "a job step's record that relays");
+        assert!(decode(&json!([{ "channel": "notes", "kind": "message", "body": relayed }]), &channels).is_err(), "a mutation's effect that relays");
     }
 
     #[test]

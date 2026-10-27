@@ -32,6 +32,7 @@ use crate::assets;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{as_themselves, decide, decode_segment, json_response, Caller, Facts, FragmentCell, MetaKey};
 use crate::js;
+use crate::routed::Credential;
 
 /// The browser library pages import as `./__fragment.js`.
 const CLIENT_JS: &str = include_str!("../client.mjs");
@@ -329,11 +330,20 @@ impl FragmentCell {
                     anon_principal(&fresh)
                 }
             };
-            let resp = self.live(&req, caller, credential, &principal, link)?;
-            // a page following this fragment may soon post to a computer's
-            // channel (an agent's own socket wakes no computer it runs on)
-            self.prewake(&principal);
-            resp
+            // a browser's page names itself on its upgrade (`Origin`: the
+            // router took only this fragment's own, lib.rs `own_page_socket`);
+            // the CLI's and a computer's sign, and read a refusal's status
+            let page = req.headers().get("origin")?.is_some() && !matches!(credential, Some(Credential::Key(_)));
+            match self.live(&req, caller, credential, &principal, link) {
+                Ok(resp) => {
+                    // a page following this fragment may soon post to a computer's
+                    // channel (an agent's own socket wakes no computer it runs on)
+                    self.prewake(&principal);
+                    resp
+                }
+                Err(e) if page && crate::auth::is_refusal(e.code) => crate::live::refused_page(&e.message)?,
+                Err(e) => return Err(e),
+            }
         } else {
             match req.method() {
                 Method::Get | Method::Head => self.site(&mut req, caller, &mut facts, &path, &url, link, anon).await?,

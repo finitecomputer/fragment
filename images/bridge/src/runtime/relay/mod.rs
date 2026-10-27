@@ -12,11 +12,15 @@
 //!   `⚠️`, `⏳`, …: `wire::NOTICES`) is a notice (`Event::Notice`), with a
 //!   turn running or not (its review comes after its turn's `✅`);
 //! - the model's text beside a tool call arrives as a reply too (Hermes
-//!   ends a draft segment at every tool boundary with such a `send`): the
-//!   step that follows takes it back (`Event::Retract`) as its words, and
-//!   one whose drafts began before a step is that step's words when it
-//!   comes. A turn that ends idle having said nothing since says the last
-//!   words a step took as its reply;
+//!   ends a draft segment at every tool boundary with such a `send`), and is
+//!   one, whole: the engine posts it before the step that follows (Paul,
+//!   2026-10-24: everything the agent says is a reply in the chat). A step
+//!   that reaches the bridge while those words still stream waits for them
+//!   (at most `limits::STEP_HOLD_MS`), so they post before it; and while a
+//!   reply's image links are fetched, everything of its turn after it (its
+//!   steps, a later reply, a card, a file, its end) waits in order, so the
+//!   reply keeps its files and no later part is sealed out of turn
+//!   (`Inflight::queue`);
 //! - an approval is a `prompt` frame; the owner's answer goes back as an
 //!   inbound `prompt_response`, at once, mid-turn;
 //! - a question to answer in words (an open `clarify`, `❓ …`, or the
@@ -37,6 +41,11 @@
 //!   its startup restore, then run): that `✅` ends nothing, and Hermes
 //!   ends no person's turn without saying something. No clock: a bracket
 //!   that never ends is the engine's idle bound's;
+//! - a routine whose model answers exactly `[SILENT]` (nothing to tell)
+//!   says nothing: Hermes' warning in its place (`wire::UNEXPECTED_SILENCE`,
+//!   sent for every Relay message, as none says it needs no reply) is
+//!   dropped for a routine's turn alone, and ends it as its words would; a
+//!   person's message answered so gets it, as Hermes says it;
 //! - a file is uploaded to `/relay/media`, then sent by `send_media`, or
 //!   sent by a URL of its provider's, which the bridge fetches (`fetch`),
 //!   answering once it has it; a reply's image links (which Hermes sends as
@@ -83,8 +92,9 @@ use wire::{Action, FromGateway};
 /// Files kept for Hermes (uploads and re-hosted attachments), at most; past
 /// it the oldest go.
 pub const MEDIA_KEPT_MAX: usize = 256;
-/// Messages of a turn taken as its steps' words that the bridge remembers,
-/// at most (only so their edits change nothing; Hermes edits none once sent).
+/// Messages of a turn that are neither a reply nor its progress (a notice,
+/// "Other"'s ask for words) that the bridge remembers, at most (only so
+/// their edits change nothing; Hermes edits none once sent).
 pub const TAKEN_KEPT_MAX: usize = 64;
 /// Commands said beside a turn (`Command::Aside`) whose answers the bridge
 /// still knows, at most: the oldest go (Hermes answers one at once).
@@ -176,34 +186,52 @@ struct Inflight {
     /// Hermes with the answer: its `✏️ Type your answer:` that follows asks
     /// nothing.
     worded: bool,
-    /// The reply part last emitted, while the engine holds it open (no
-    /// step, part, prompt or end since): its message id, part and text.
-    /// Hermes ends a draft segment at every tool boundary with a `send`
-    /// answering the turn, so the model's text before a tool call arrives
-    /// as a reply; a step that follows takes it back as its words.
-    open_reply: Option<(String, u32, String)>,
-    /// Draft frames came since its last reply `send`, and whether a step
-    /// came meanwhile: the `send` ending those drafts is then that step's
-    /// words, not a reply (its tool progress can reach the bridge before
-    /// the `send` that ends the segment before it).
-    drafting: Option<bool>,
-    /// The words a step took, while nothing was said after them: a turn
-    /// that ends idle having said nothing since says them as its reply
-    /// (Hermes' answer beside a housekeeping tool, which it sends once).
-    narration: Option<String>,
-    /// Messages taken as a step's words: an edit of one changes nothing.
+    /// Draft frames came since its last reply `send`: words stream, and the
+    /// `send` that ends them is still to come (Hermes ends a draft segment
+    /// at every tool boundary with one, so the model's words before a tool
+    /// call arrive as a reply, which its tool's progress can come before).
+    drafting: bool,
+    /// The turn's events (steps, replies and their files, cards, its end)
+    /// that wait, in the order they came, behind what is not whole yet: a
+    /// reply's image links being fetched (nothing after a reply may seal
+    /// it before its files are on it), or the words a draft segment
+    /// streams after its tool's progress came first (`words_at`: where in
+    /// the queue those words go when their `send` comes, before the steps
+    /// that came meanwhile; `held_at`, since when). Let go in order once
+    /// nothing is awaited (`drain`); the words are waited for at most
+    /// `limits::STEP_HOLD_MS`, the files within the fetch's own bound.
+    queue: VecDeque<Event>,
+    words_at: Option<usize>,
+    held_at: Option<tokio::time::Instant>,
+    /// Its end is said (queued behind what waits, or posted): another
+    /// says nothing more.
+    ending: bool,
+    /// Messages that are neither a reply nor its progress (a notice,
+    /// "Other"'s ask for words): an edit of one changes nothing.
     taken: Vec<String>,
-    /// Its replies' image links being fetched (`picture`), the reply parts
-    /// they are in with their text as it stands, and its end, held while any
-    /// is (an idle end alone: a stop or a failure ends it at once).
+    /// Its replies' image links being fetched (`picture`), and the reply
+    /// parts they are in with their text as it stands.
     pictures: usize,
     pictured: HashMap<u32, String>,
-    pending_end: Option<Outcome>,
 }
 
 impl Inflight {
-    /// A message taken as a step's words (its edits change nothing), the
-    /// oldest let go past `TAKEN_KEPT_MAX`.
+    /// Something of the turn is not whole yet, so what comes after it waits.
+    fn waits(&self) -> bool {
+        self.pictures > 0 || self.words_at.is_some()
+    }
+
+    /// The words a draft segment streamed are not waited for any more (a
+    /// question, a card, a file or the end came instead, or their wait is
+    /// out): the steps that waited for them go once nothing else waits.
+    fn stop_waiting_for_words(&mut self) {
+        self.drafting = false;
+        self.words_at = None;
+        self.held_at = None;
+    }
+
+    /// A message that is neither a reply nor progress (its edits change
+    /// nothing), the oldest let go past `TAKEN_KEPT_MAX`.
     fn take_message(&mut self, id: String) {
         if self.taken.len() >= TAKEN_KEPT_MAX {
             self.taken.remove(0);
@@ -263,7 +291,15 @@ async fn run(cfg: RelayConfig, mut io: RuntimeIo) -> Result<(), RuntimeError> {
     let mut shutdown = io.shutdown.clone();
     // bounded by the bridge's life: one input per pass, ended by shutdown
     loop {
+        let due = st.hold_due();
+        let held_out = async move {
+            match due {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
+            () = held_out => st.held_out().await,
             c = io.commands.recv() => match c {
                 Some(c) => st.command(c).await,
                 None => return Ok(()),
@@ -352,6 +388,14 @@ async fn handle(mut req: Request<Incoming>, cfg: RelayConfig, media: Arc<Mutex<M
         };
     }
     net::refusal(StatusCode::NOT_FOUND, "not_found", "the relay answers /relay and /relay/media")
+}
+
+/// The reply part an event is about, if any.
+fn part_of(e: &Event) -> Option<u32> {
+    match e {
+        Event::Reply { part, .. } | Event::Attachment { part, .. } | Event::Retract { part, .. } => Some(*part),
+        _ => None,
+    }
 }
 
 /// A fetched file, kept with the uploads (`up-<n>` in the media directory,
@@ -492,7 +536,7 @@ impl Loop {
                 // prompt TTL) times out with the card.
                 let (Some(option), Some(f)) = (option, self.inflight.get_mut(&turn)) else { return };
                 let message_id = format!("{turn}-a{seq}");
-                let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: &by, user_name: "owner", text: "", media: &[], context: None, command: false, quote: None };
+                let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: &by, user_name: "owner", text: "", media: &[], context: None, command: false, quote: None, topic: wire::topic(f.start.simplex) };
                 let buffer = format!("a-{turn}-{seq}");
                 let frame = wire::prompt_answer(&m, &buffer, &prompt, &option);
                 // "Other" answered in words: Hermes takes the answer (and
@@ -508,13 +552,13 @@ impl Loop {
             }
             Command::Forget { turn } => self.forget(&turn),
             Command::Tell { turn, seq, by, by_name, text, .. } => self.tell(&turn, seq, &by, &by_name, &text),
-            Command::Aside { agent, fragment, chat_name, turn, id, by, by_name, text } => {
+            Command::Aside { agent, fragment, chat_name, simplex, turn, id, by, by_name, text } => {
                 // in the agent's chat, as it is, kept until Hermes acks it:
                 // Hermes takes a command mid-turn (`/steer` lands in the
                 // running turn after its next tool call) or beside none
                 let chat = wire::chat_id(&fragment, &agent);
                 let profile = wire::profile(&agent);
-                let m = wire::Inbound { chat: &chat, chat_name: &chat_name, profile: &profile, message_id: &id, user_id: &by, user_name: &by_name, text: &text, media: &[], context: None, command: true, quote: None };
+                let m = wire::Inbound { chat: &chat, chat_name: &chat_name, profile: &profile, message_id: &id, user_id: &by, user_name: &by_name, text: &text, media: &[], context: None, command: true, quote: None, topic: wire::topic(simplex) };
                 let buffer = format!("x-{id}");
                 let frame = wire::inbound(&m, &buffer);
                 crate::ev!("relay.aside", { "id": id, "turn": turn, "running": turn.as_ref().is_some_and(|t| self.inflight.contains_key(t)) });
@@ -534,7 +578,7 @@ impl Loop {
         let Some(f) = self.inflight.get_mut(turn) else { return };
         f.asking = false;
         let message_id = format!("{turn}-t{seq}");
-        let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: by, user_name: by_name, text, media: &[], context: None, command: false, quote: None };
+        let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: by, user_name: by_name, text, media: &[], context: None, command: false, quote: None, topic: wire::topic(f.start.simplex) };
         let buffer = format!("t-{turn}-{seq}");
         let frame = wire::inbound(&m, &buffer);
         crate::ev!("relay.told", { "turn": turn, "seq": seq });
@@ -572,13 +616,14 @@ impl Loop {
         // a turn after a cut one is told so, as read-only context beside
         // the message (TurnStart::note); Hermes' own session was closed at
         // boot (hermes-boot, `close_cut_turns`), so the message is a turn of
-        // its own, never folded into the cut one's
-        let m = wire::Inbound { chat: &chat, chat_name: &ts.chat_name, profile: &profile, message_id: &ts.turn, user_id: &ts.asker, user_name: &ts.asker_name, text: &ts.text, media: &hosted, context: ts.note.as_deref(), command: ts.command, quote: ts.quote.as_ref() };
+        // its own, never folded into the cut one's. Its owner's SimpleX chat
+        // says so as its topic (`wire::SIMPLEX_TOPIC`).
+        let m = wire::Inbound { chat: &chat, chat_name: &ts.chat_name, profile: &profile, message_id: &ts.turn, user_id: &ts.asker, user_name: &ts.asker_name, text: &ts.text, media: &hosted, context: ts.note.as_deref(), command: ts.command, quote: ts.quote.as_ref(), topic: wire::topic(ts.simplex) };
         let frame = wire::inbound(&m, &ts.turn);
         self.next_order += 1;
         let turn = ts.turn.clone();
         let sent = self.send(frame.clone());
-        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), progress: HashMap::new(), next_part: 1, said: false, stopped: false, asking: false, carded: false, worded: false, open_reply: None, drafting: None, narration: None, taken: Vec::new(), pictures: 0, pictured: HashMap::new(), pending_end: None });
+        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), progress: HashMap::new(), next_part: 1, said: false, stopped: false, asking: false, carded: false, worded: false, drafting: false, queue: VecDeque::new(), words_at: None, held_at: None, ending: false, taken: Vec::new(), pictures: 0, pictured: HashMap::new() });
         self.by_chat.insert(chat, turn.clone());
         crate::ev!("relay.inbound", { "turn": turn, "sent": sent });
     }
@@ -738,6 +783,16 @@ impl Loop {
                     return json!({ "success": true, "message_id": id });
                 };
                 let f = self.inflight.get_mut(&turn).expect("by_chat names a held turn");
+                if f.start.routine && wire::unexpected_silence(&text) {
+                    // a routine with nothing to tell, its answer exactly
+                    // `[SILENT]`: nothing said, as Hermes' own cron delivers
+                    // nothing for it; Hermes' warning in its place (Relay
+                    // tells it no message needs no reply) is no reply nor
+                    // notice, and its `✅` (it spoke) ends the turn
+                    f.take_message(id.clone());
+                    crate::ev!("relay.silent", { "turn": turn });
+                    return json!({ "success": true, "message_id": id });
+                }
                 let notice = if reply { None } else { wire::notice(&text) };
                 if let Some((category, text)) = notice {
                     // neither a reply nor a step: its edits change nothing
@@ -751,35 +806,45 @@ impl Loop {
                     f.take_message(id.clone());
                     crate::ev!("relay.worded", { "turn": turn });
                 } else if let Some(question) = wire::question(&text) {
-                    // asked in words: the question shows as the agent's,
-                    // and the asker's next message is its answer
+                    // asked in words: the question shows as the agent's
+                    // (after any step before it), and the asker's next
+                    // message is its answer
                     let part = f.next_part;
                     f.next_part += 1;
                     f.parts.insert(id.clone(), part);
                     f.asking = true;
-                    (f.open_reply, f.drafting, f.narration) = (None, None, None);
-                    self.emit(Event::Reply { turn: turn.clone(), part, text: question }).await;
-                    self.emit(Event::Asked { turn }).await;
-                } else if reply && f.drafting.take() == Some(true) {
-                    // its drafts began before a step: the send ending them
-                    // is that step's words, already posted, never a reply
-                    f.take_message(id.clone());
-                    f.narration = Some(text);
-                    crate::ev!("relay.narration", { "turn": turn, "after_step": true });
+                    // no words to wait for: the steps before it go first
+                    f.stop_waiting_for_words();
+                    self.drain(&turn, false).await;
+                    self.out(&turn, Event::Reply { turn: turn.clone(), part, text: question }).await;
+                    self.out(&turn, Event::Asked { turn: turn.clone() }).await;
                 } else if reply {
+                    // the model's words, whole (its answer, or what it said
+                    // before a tool call): a reply part, which the engine
+                    // posts at the next step, part, card or end. Words its
+                    // steps waited for go before them; any other, in order.
                     let part = f.next_part;
                     f.next_part += 1;
                     f.parts.insert(id.clone(), part);
-                    f.open_reply = Some((id.clone(), part, text.clone()));
-                    f.narration = None;
-                    // its image links are its files, once fetched
-                    let links = wire::image_links(&text);
-                    if !links.is_empty() {
-                        f.pictures += links.len();
-                        f.pictured.insert(part, text.clone());
+                    f.drafting = false;
+                    let said = Event::Reply { turn: turn.clone(), part, text: text.clone() };
+                    match f.words_at.take() {
+                        Some(at) => {
+                            f.held_at = None;
+                            let at = at.min(f.queue.len());
+                            f.queue.insert(at, said);
+                        }
+                        None => self.out(&turn, said).await,
                     }
-                    self.emit(Event::Reply { turn: turn.clone(), part, text }).await;
+                    // its image links are its files, once fetched: what
+                    // comes after it waits for them
+                    let links = wire::image_links(&text);
+                    if let Some(f) = self.inflight.get_mut(&turn).filter(|_| !links.is_empty()) {
+                        f.pictures += links.len();
+                        f.pictured.insert(part, text);
+                    }
                     self.picture(&turn, part, links);
+                    self.drain(&turn, false).await;
                 } else {
                     let steps = wire::new_steps(&content, 0);
                     f.progress.insert(id.clone(), steps.len());
@@ -791,11 +856,10 @@ impl Loop {
                 let Some(turn) = turn_of(&chat, &self.by_chat) else { return ok };
                 let f = self.inflight.get_mut(&turn).expect("by_chat names a held turn");
                 if let Some(part) = f.parts.get(&message_id).copied() {
+                    // the engine takes it while the part is open, and no
+                    // later (posted, a reply is whole)
                     let (text, _) = wire::uncursored(&content);
-                    if let Some(open) = f.open_reply.as_mut().filter(|o| o.0 == message_id) {
-                        open.2 = text.to_string();
-                    }
-                    self.emit(Event::Reply { turn, part, text: text.to_string() }).await;
+                    self.out(&turn, Event::Reply { turn: turn.clone(), part, text: text.to_string() }).await;
                 } else if let Some(seen) = f.progress.get(&message_id).copied() {
                     let steps = wire::new_steps(&content, seen);
                     f.progress.insert(message_id, seen + steps.len());
@@ -809,9 +873,14 @@ impl Loop {
             }
             Action::Delete { chat, message_id } => {
                 if let Some(turn) = turn_of(&chat, &self.by_chat) {
-                    let part = self.inflight.get(&turn).and_then(|f| f.parts.get(&message_id).copied());
+                    // taken back, its image links are no reply's files
+                    let part = self.inflight.get_mut(&turn).and_then(|f| {
+                        let part = f.parts.get(&message_id).copied()?;
+                        f.pictured.remove(&part);
+                        Some(part)
+                    });
                     if let Some(part) = part {
-                        self.emit(Event::Retract { turn, part }).await;
+                        self.out(&turn, Event::Retract { turn: turn.clone(), part }).await;
                     }
                 }
                 ok
@@ -823,19 +892,15 @@ impl Loop {
                     return ok;
                 }
                 let f = self.inflight.get_mut(&turn).expect("held");
-                match f.ended_by(&emoji, remove) {
-                    // done, with its reply's images still coming: it ends
-                    // once they are in hand (`pictured`)
-                    Some(Outcome::Idle) if f.pictures > 0 => f.pending_end = Some(Outcome::Idle),
-                    Some(outcome) => self.end(&turn, outcome).await,
-                    None => {}
+                if let Some(outcome) = f.ended_by(&emoji, remove) {
+                    self.end(&turn, outcome).await;
                 }
                 ok
             }
             Action::Draft { chat, content, .. } => {
                 if let Some(turn) = turn_of(&chat, &self.by_chat) {
                     let f = self.inflight.get_mut(&turn).expect("by_chat names a held turn");
-                    f.drafting.get_or_insert(false);
+                    f.drafting = true;
                     let (text, _) = wire::uncursored(&content);
                     self.emit(Event::Draft { turn, text: text.to_string() }).await;
                 }
@@ -845,10 +910,12 @@ impl Loop {
                 let Some(turn) = turn_of(&chat, &self.by_chat) else { return json!({ "success": false, "error": "no turn runs in that chat" }) };
                 let id = self.message_id();
                 let f = self.inflight.get_mut(&turn).expect("by_chat names a held turn");
-                // the engine posts an open reply before the card
-                f.open_reply = None;
                 f.carded |= clarify;
-                self.emit(Event::Prompt { turn, prompt: prompt_id, text: content, options, ttl_ms: timeout_s.map(|s| s.saturating_mul(1000)) }).await;
+                // the engine posts an open reply before the card; the steps
+                // before it go first, as soon as a reply's files are in
+                f.stop_waiting_for_words();
+                self.drain(&turn, false).await;
+                self.out(&turn, Event::Prompt { turn: turn.clone(), prompt: prompt_id, text: content, options, ttl_ms: timeout_s.map(|s| s.saturating_mul(1000)) }).await;
                 json!({ "success": true, "message_id": id })
             }
             Action::SendMedia { chat, source_url, caption, filename, .. } => {
@@ -881,12 +948,14 @@ impl Loop {
         let f = self.inflight.get_mut(&turn).expect("held");
         let part = f.next_part;
         f.next_part += 1;
-        // a part of its own: the engine posts the one open before it
-        (f.open_reply, f.narration) = (None, None);
+        // a part of its own: the engine posts the one open before it; the
+        // steps before it go first, as soon as a reply's files are in
+        f.stop_waiting_for_words();
+        self.drain(&turn, false).await;
         if !caption.trim().is_empty() {
-            self.emit(Event::Reply { turn: turn.clone(), part, text: caption }).await;
+            self.out(&turn, Event::Reply { turn: turn.clone(), part, text: caption }).await;
         }
-        self.emit(Event::Attachment { turn, part, file }).await;
+        self.out(&turn, Event::Attachment { turn: turn.clone(), part, file }).await;
         json!({ "success": true, "message_id": id })
     }
 
@@ -933,13 +1002,14 @@ impl Loop {
     }
 
     /// One of a reply's image links, fetched: the reply without it, and the
-    /// file on it; refused, the link stays. The last of a turn's ends it if
-    /// its end came meanwhile.
+    /// file on it, put right after that reply's own events (before whatever
+    /// came after it, which waited); refused, the link stays. The last of a
+    /// turn's lets go what waited for it (its end among them).
     async fn pictured(&mut self, turn: &str, part: u32, link: String, file: Result<LocalFile, String>) {
         // a turn over (stopped, gone quiet) takes no file
         let Some(f) = self.inflight.get_mut(turn) else { return };
         f.pictures = f.pictures.saturating_sub(1);
-        // a part taken back since (a step's words) shows nothing of it
+        // a part taken back since (Hermes' delete) shows nothing of it
         let shown = match (&file, f.pictured.get_mut(&part)) {
             (Ok(_), Some(text)) => {
                 *text = wire::without_links(text, std::slice::from_ref(&link));
@@ -947,20 +1017,32 @@ impl Loop {
             }
             _ => None,
         };
-        if let (Some(text), Some(open)) = (&shown, f.open_reply.as_mut().filter(|o| o.1 == part)) {
-            open.2 = text.clone();
-        }
-        let done = (f.pictures == 0).then(|| {
+        if f.pictures == 0 {
             f.pictured.clear();
-            f.pending_end.take()
-        });
+        }
         if let (Some(text), Ok(file)) = (shown, file) {
-            self.emit(Event::Reply { turn: turn.to_string(), part, text }).await;
-            self.emit(Event::Attachment { turn: turn.to_string(), part, file }).await;
+            let files = [Event::Reply { turn: turn.to_string(), part, text }, Event::Attachment { turn: turn.to_string(), part, file }];
+            match f.queue.iter().rposition(|e| part_of(e) == Some(part)) {
+                // its reply still waits in the queue: just after it (words
+                // awaited at or past there keep their place behind it)
+                Some(at) => {
+                    for (i, e) in files.into_iter().enumerate() {
+                        let here = at + 1 + i;
+                        f.queue.insert(here, e);
+                        if let Some(w) = f.words_at.as_mut().filter(|w| **w >= here) {
+                            *w += 1;
+                        }
+                    }
+                }
+                // its reply went out, and all that came after it waits: now
+                None => {
+                    for e in files {
+                        self.emit(e).await;
+                    }
+                }
+            }
         }
-        if let Some(Some(outcome)) = done {
-            self.end(turn, outcome).await;
-        }
+        self.drain(turn, false).await;
     }
 
     /// A file sent by URL, fetched or refused: attached to the chat's turn
@@ -972,54 +1054,104 @@ impl Loop {
         }
     }
 
-    /// New lines of a turn's tool progress, each a step. The first takes
-    /// the reply part still open before it as its words (Hermes' text
-    /// before the call: a reply taken back, never posted); a step while
-    /// drafts stream makes the `send` ending them its words too.
+    /// New lines of a turn's tool progress, each a step, after the model's
+    /// words before the call: those are a reply part the engine posts
+    /// before the step. Steps that come while their draft segment still
+    /// streams (its `send` to come) wait for those words, which go before
+    /// them (`Inflight::words_at`); any that come while something before
+    /// them is not whole wait in order (`out`).
     async fn steps(&mut self, turn: &str, steps: Vec<Step>) {
         if steps.is_empty() {
             return;
         }
         let Some(f) = self.inflight.get_mut(turn) else { return };
-        if let Some(stepped) = f.drafting.as_mut() {
-            *stepped = true;
-        }
-        let mut words = String::new();
-        let mut retract = None;
-        if let Some((id, part, text)) = f.open_reply.take() {
-            f.parts.remove(&id);
-            f.take_message(id);
-            // taken back, its image links are no reply's files
-            f.pictured.remove(&part);
-            f.narration = Some(text.clone());
-            (words, retract) = (text, Some(part));
-        }
-        if let Some(part) = retract {
-            crate::ev!("relay.narration", { "turn": turn, "after_step": false });
-            self.emit(Event::Retract { turn: turn.to_string(), part }).await;
+        if f.drafting && f.words_at.is_none() {
+            f.words_at = Some(f.queue.len());
+            f.held_at = Some(tokio::time::Instant::now());
+            crate::ev!("relay.steps_wait", { "turn": turn, "for": "words" });
         }
         for step in steps {
-            let text = std::mem::take(&mut words);
-            self.emit(Event::Step { turn: turn.to_string(), step: Step { text, ..step } }).await;
+            self.out(turn, Event::Step { turn: turn.to_string(), step }).await;
         }
     }
 
-    /// A turn that ends idle having said nothing since a step took its
-    /// words says them as its reply: Hermes, its answer written beside a
-    /// housekeeping call (`memory`), takes it as said and sends it once.
-    async fn end(&mut self, turn: &str, outcome: Outcome) {
-        let last = self.inflight.get_mut(turn).and_then(|f| {
-            let words = f.narration.take().filter(|_| outcome == Outcome::Idle)?;
-            let part = f.next_part;
-            f.next_part += 1;
-            Some((part, words))
-        });
-        self.forget(turn);
-        if let Some((part, text)) = last {
-            crate::ev!("relay.narration_said", { "turn": turn });
-            self.emit(Event::Reply { turn: turn.to_string(), part, text }).await;
+    /// An event of the turn, in its order: at once, or, while something
+    /// before it is not whole (`Inflight::waits`) or others wait, behind
+    /// them. Bounded: past `limits::QUEUED_EVENTS_MAX` waiting, all go at
+    /// once (a file still coming is then too late for its reply).
+    async fn out(&mut self, turn: &str, e: Event) {
+        let Some(f) = self.inflight.get_mut(turn) else { return };
+        if !f.waits() && f.queue.is_empty() {
+            self.emit(e).await;
+            return;
         }
-        self.emit(Event::End { turn: turn.to_string(), outcome }).await;
+        f.queue.push_back(e);
+        if f.queue.len() >= limits::QUEUED_EVENTS_MAX {
+            crate::ev!("relay.queue_full", { "turn": turn, "events": f.queue.len() });
+            self.drain(turn, true).await;
+        }
+    }
+
+    /// What waits goes, in order, once nothing is awaited; or at once
+    /// (`force`: an end that is no idle one, a queue past its bound). Its
+    /// end among them lets the turn go.
+    async fn drain(&mut self, turn: &str, force: bool) {
+        let Some(f) = self.inflight.get_mut(turn) else { return };
+        if f.queue.is_empty() || (!force && f.waits()) {
+            return;
+        }
+        if force {
+            f.stop_waiting_for_words();
+        }
+        let waited: Vec<Event> = f.queue.drain(..).collect();
+        crate::ev!("relay.released", { "turn": turn, "events": waited.len(), "force": force });
+        if waited.iter().any(|e| matches!(e, Event::End { .. })) {
+            self.forget(turn);
+        }
+        for e in waited {
+            self.emit(e).await;
+        }
+    }
+
+    /// When the soonest wait for words alone runs out (a wait on image
+    /// links is the fetch's, which answers within its own bound).
+    fn hold_due(&self) -> Option<tokio::time::Instant> {
+        let wait = std::time::Duration::from_millis(limits::STEP_HOLD_MS);
+        self.inflight.values().filter(|f| f.pictures == 0).filter_map(|f| f.held_at).map(|at| at + wait).min()
+    }
+
+    /// Steps whose wait for the words before them ran out post now: the
+    /// words, should their `send` still come, are a reply after them.
+    async fn held_out(&mut self) {
+        let now = tokio::time::Instant::now();
+        let wait = std::time::Duration::from_millis(limits::STEP_HOLD_MS);
+        let due: Vec<String> = self.inflight.iter().filter(|(_, f)| f.pictures == 0 && f.held_at.is_some_and(|at| at + wait <= now)).map(|(id, _)| id.clone()).collect();
+        for turn in due {
+            if let Some(f) = self.inflight.get_mut(&turn) {
+                f.stop_waiting_for_words();
+            }
+            crate::ev!("relay.steps_held_out", { "turn": turn, "ms": limits::STEP_HOLD_MS });
+            self.drain(&turn, false).await;
+        }
+    }
+
+    /// The turn's end, after all that waits: done with a reply's images
+    /// still coming, once they are in hand; stopped or failed, at once (a
+    /// file still coming is let go).
+    async fn end(&mut self, turn: &str, outcome: Outcome) {
+        let Some(f) = self.inflight.get_mut(turn) else { return };
+        let idle = outcome == Outcome::Idle;
+        if f.ending {
+            // its idle end waits for a file; a stop or failure now ends it
+            if !idle {
+                self.drain(turn, true).await;
+            }
+            return;
+        }
+        f.ending = true;
+        f.stop_waiting_for_words();
+        f.queue.push_back(Event::End { turn: turn.to_string(), outcome });
+        self.drain(turn, !idle).await;
     }
 
     /// The chat's turn said something (so its next `✅` is its end).

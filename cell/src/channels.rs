@@ -58,7 +58,7 @@ pub(crate) fn page_query(url: &url::Url) -> CellResult<(i64, Option<i64>, usize)
 
 use fragment_core::access::{Purpose, Standing};
 use fragment_core::effects::{self, Effect};
-use fragment_core::npub;
+use fragment_core::{door, npub};
 use fragment_proto::{
     limits, valid_channel_name, valid_op_id, ChannelDecl, ChannelPage, ChannelRecord, ErrorCode, IdentityKind, PostRecord, Posted, PutDraft, Role,
     BUILTIN_CHANNELS, POST_KIND,
@@ -368,6 +368,7 @@ impl FragmentCell {
         if size > limits::RECORD_BODY_MAX_BYTES {
             return Err(CellError::too_large("a record's body", size, limits::RECORD_BODY_MAX_BYTES));
         }
+        self.door_checked(caller, &facts.name, channel, id, body).await?;
         // where the post waited, step by step: one line a post
         let mut laps = js::Laps::start();
         // a post is a write: past its owner's overdraft the fragment takes none
@@ -388,6 +389,33 @@ impl FragmentCell {
         }
         laps.log("post", json!({ "fragment": facts.name, "channel": channel, "seq": record.seq, "replayed": !appended }));
         Ok((record, !appended))
+    }
+
+    /// A post that says it relays its agent's owner (`relayed`: docs/api.md,
+    /// "An agent's doors"): taken only from that agent, acting as itself,
+    /// for its owner, signed lately by the door its owner opened, which its
+    /// agent fragment checks. The agent's own key signs no such record: a
+    /// post without its door's signature is refused, never its owner's.
+    async fn door_checked(&self, caller: &Caller, fragment: &str, channel: &str, id: &str, body: &Value) -> CellResult<()> {
+        let Some(read) = door::relayed(body) else { return Ok(()) };
+        let refused = |why: &str| CellError::new(ErrorCode::Forbidden, format!("a relayed record {why}"));
+        // one that is not a door's (unsigned, say) speaks for no one
+        let r = read.map_err(|why| refused(&format!("`relayed` {why}")))?;
+        let Some(signed) = caller.signed.as_ref().filter(|s| s.kind == IdentityKind::Agent && s.acting_for.is_none()) else {
+            return Err(refused("is posted by an agent, as itself"));
+        };
+        if signed.owner.as_deref() != Some(r.for_.as_str()) {
+            return Err(refused("speaks for its agent's owner alone"));
+        }
+        if r.at.abs_diff(js::now_ms()) > door::SKEW_MS.unsigned_abs() {
+            return Err(refused("is posted as its door signs it, and this one was signed long ago"));
+        }
+        let digest = hex::encode(door::record_digest(&r.via, fragment, channel, id, body));
+        let check = json!({ "identity": signed.id, "door": r.via, "digest": digest, "sig": r.sig });
+        match crate::fragment::ask(&self.env, &r.agent, "computer/door-check", &check).await {
+            Err(e) if e.code == ErrorCode::NotFound => Err(refused("names an agent fragment there is not")),
+            other => other.map(|_| ()),
+        }
     }
 
     /// Whether the caller may write to `channel`, for both of its writers:

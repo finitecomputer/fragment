@@ -33,3 +33,17 @@ fragment-templates = { path = "../crates/templates" }
 lto = true
 codegen-units = 1
 opt-level = "s"
+
+# `cargo xtask dev`'s build alone (xtask/src/build.rs, `Profile::Dev`): the
+# release's profile (its opt-level, panics, overflow checks and debug
+# assertions), less what makes it slow to rebuild: fat LTO into one
+# codegen unit, and wasm-opt, which worker-build skips (`--no-opt`).
+# Incremental, so a change to a file of the release, which moves only the
+# index crates/templates generates, rebuilds in seconds, not minutes. Its
+# Wasm is about 7.7 MB to the release's 5.5, held to no budget; deploys and the
+# e2e build the release's, and refuse any other (crates/devstack/src/built.rs).
+[profile.devstack]
+inherits = "release"
+lto = false
+codegen-units = 256
+incremental = true

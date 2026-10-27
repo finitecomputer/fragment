@@ -47,9 +47,13 @@ upgrade re-reads it, and the real-Hermes lane
 - The connector: `inbound {event, bufferId}` → Hermes: `inbound_ack
   {bufferId}` once its handler has taken the event. The event:
   `{text, message_id, source: {platform, chat_id, chat_type, chat_name,
-  user_id, user_name, profile, message_id}, media_urls?, media?,
+  chat_topic?, user_id, user_name, profile, message_id}, media_urls?, media?,
   prompt_response?, context?}`. `source.profile` routes it to a profile of the
-  multiplexed gateway. Hermes drops an event it saw by
+  multiplexed gateway. `source.chat_topic` is rendered in the session's
+  context, in its system prompt (`**Channel Topic:** "…"`, as an
+  untrusted label: `gateway/session.py`, `build_session_context_prompt`),
+  pinned per session and rendered again only when it changes; the bridge
+  sends one in an owner's SimpleX chat alone (docs/bridge.md, "SimpleX"). Hermes drops an event it saw by
   `(platform, chat_id, message_id)`, so a replay is harmless. `context`
   (`[{text, source?}]`, read-only channel context: "it never triggers the
   agent") is rendered before the message as `[Recent channel
@@ -97,7 +101,8 @@ upgrade re-reads it, and the real-Hermes lane
     `send` too (`gateway/stream_consumer.py`, `_send_or_edit` with
     `finalize`), so the model's text before a tool call arrives as a
     reply like any other, whatever `display.interim_assistant_messages`
-    says; the bridge takes it back as the step's words (docs/bridge.md);
+    says; the bridge posts it as a reply of its own, before the step
+    (docs/bridge.md);
   - `prompt {prompt_kind, prompt_id, content, options: [{id, label,
     style?}], timeout_s?}`: buttons; exec approvals offer `once`,
     `session`, `always`, `deny` (fewer after a smart deny);
@@ -131,7 +136,18 @@ upgrade re-reads it, and the real-Hermes lane
   turn always says something before its `✅`: an empty answer becomes
   `EMPTY_RESPONSE_EXPLANATION` and a bare silence marker
   `_UNEXPECTED_SILENCE_REPLY` (`gateway/run_turn.py`); a handler that
-  raises sends `❌`, then its notice (`_notify_turn_error`).
+  raises sends `❌`, then its notice (`_notify_turn_error`). Read from
+  v0.21.7: a bare `[SILENT]` may stay silent only on a turn of Hermes'
+  own machinery (an `internal` event, a heartbeat: `display_kind_for_event`)
+  or one whose event has `reply_expected: false` (a message meant for
+  someone else: `silence_allowed`, `gateway/response_filters.py`), and
+  Relay's `_event_from_wire` sets neither (only Slack's own adapter sets
+  `reply_expected`; the same on upstream's main, 2026-10-26), so over
+  Relay every message is a person's, a routine's too. Its native cron is
+  outside the gateway and delivers nothing for a `[SILENT]`
+  (`cron/scheduler.py`, the looser `is_autonomous_silence_response`). The
+  bridge drops that warning for a routine's turn (docs/bridge.md, "A
+  routine with nothing to tell says nothing").
 
 What Relay does not carry (v0.21.5, and upstream's main on 2026-10-06):
 a turn's start or end as a frame of its own (the gateway's frames are
@@ -168,8 +184,33 @@ plugins: {disabled: [platforms/…, dashboard_auth/…]}
 and in the gateway's environment `GATEWAY_MULTIPLEX_PROFILES=true`
 (left to its default, Hermes stays standalone in an s6 container with no
 per-profile gateway slots), `RELAY_HOME_CHANNEL=none` (otherwise it asks
-each new chat to become its home), `HERMES_GATEWAY_BUSY_INPUT_MODE=queue`
+each new session's first message to `/sethome`), `HERMES_GATEWAY_BUSY_INPUT_MODE=queue`
 and `HERMES_GATEWAY_NO_SUPERVISE=1`.
+
+**Hermes' own home channel is set nowhere** (read from v0.21.7,
+2026-10-26). An agent's home is the platform's (its `agent.json`'s
+`home`: docs/api.md, "An agent's home"), told to it beside its name at
+every turn (docs/computers.md). Hermes' home would reach nothing of ours:
+
+- `RELAY_HOME_CHANNEL` sets no home: none of `gateway/config_env.py`'s
+  steps is relay's; any value only stops the `/sethome` ask
+  (`_hmwa_first_contact_notes`, which a profile's YAML home stops too).
+  A relay home is YAML alone (`platforms.relay.home_channel: {platform,
+  chat_id, name}`), and `/sethome` is refused for relay.
+- Its consumers are none an agent's turn reaches: `send_message` is no
+  model tool (its tool says so; it is the `hermes send` CLI's, cron's and
+  the MCP server's, and relay has no sender outside the gateway); a
+  background process's notice goes to the session that started it;
+  restart and shutdown notices skip a secondary profile's relay home (only
+  the launch profile, ours with no agent, has the relay adapter); its cron
+  is off (decision 38).
+- Its session context's "Home Channels" lines are the launch profile's
+  (`build_session_context(source, self.config, …)`, the gateway's
+  boot-time config), whichever profile runs, so a profile's home would
+  not even reach its own prompt.
+
+The chat a SimpleX link mirrors says so as its topic instead
+(`source.chat_topic`: docs/bridge.md, "SimpleX").
 
 Hermes reads `display` for a turn from the profile's own `config.yaml`
 with the overlay merged over it (`_load_gateway_config` under the

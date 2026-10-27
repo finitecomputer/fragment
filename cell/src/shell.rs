@@ -91,14 +91,15 @@ fn frame_src(cfg: &Config, url: &Url) -> String {
 
 /// `GET /`, `GET /settings` and `GET /welcome`: the shell's page, for
 /// anyone (signed out, it asks them to sign in; the shell opens the view
-/// its path names), naming the release that answers it
-/// (`fragment_templates::shell_page`): its script reloads at a safe moment
-/// once a later answer names another (docs/api.md, The shell). A few KiB,
-/// read whole to fill it.
+/// its path names), naming the release that answers it and when it was
+/// deployed (`fragment_templates::shell_page`): its script reloads at a
+/// safe moment once a later answer names another, and Settings ends with
+/// both (docs/api.md, The shell). A few KiB, read whole to fill it.
 pub async fn page(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
     // its bytes are checked against their hash as they are read: UTF-8, as the release's index.html is
     let bytes = crate::assets::read(env, page_file("index.html")).await?;
-    let filled = fragment_templates::shell_page(std::str::from_utf8(&bytes).map_err(|_| CellError::host("the release's shell page is not UTF-8"))?, &crate::levers::answered_release(cfg, req));
+    let text = std::str::from_utf8(&bytes).map_err(|_| CellError::host("the release's shell page is not UTF-8"))?;
+    let filled = fragment_templates::shell_page(text, &crate::levers::answered_release(cfg, req), cfg.deployed_at);
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;
     h.set("cache-control", "no-store")?;
