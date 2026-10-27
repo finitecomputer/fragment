@@ -67,8 +67,38 @@ const PAGE_READ_BATCH: usize = 50;
 /// identity is checked again: not final, so the page reconnects and hears
 /// who it is now.
 const ROLE_CHANGED: u16 = 4001;
+/// The close code for a socket whose page may no longer see the fragment
+/// (a member removed, the share link rotated, a page signed out): final,
+/// so the browser library dials no more and tells its page.
+pub(crate) const ACCESS_ENDED: u16 = 4003;
+/// A close frame's reason, at most (RFC 6455 5.5: a control frame's 125
+/// bytes, less the code's two).
+const CLOSE_REASON_MAX_BYTES: usize = 123;
 /// Every live socket's tag.
 const LIVE_TAG: &str = "live";
+
+/// A page's socket this fragment refuses (401 or 403: its person signed
+/// out, or may no longer see it), opened and closed at once, for good
+/// (4003), not refused as an HTTP answer. A browser shows no page a
+/// refused upgrade's status, only a failed connection, so the page's
+/// library dialled again as after a network failure: every half minute,
+/// for as long as the page stayed open. And Firefox counts each refused
+/// handshake against every socket to that address and path (RFC 6455
+/// 7.2.3; its `FailDelayManager` keys an address, a path and a port), and
+/// every fragment's socket is `/__live` on the platform's addresses: it
+/// held each next one back for up to a minute, one at a time, so one
+/// signed-out page left open in a tab kept a new chat's socket in that
+/// browser from opening for minutes (Austin, 2026-10-25: an empty chat
+/// on the web, even after a reload, that his phone opened). A handshake
+/// that completes clears that count, and 4003 is final to the library,
+/// pages already open included, which says so to its page (`closed`).
+pub(crate) fn refused_page(why: &str) -> CellResult<Response> {
+    let reason = &why[..why.floor_char_boundary(CLOSE_REASON_MAX_BYTES)];
+    let pair = WebSocketPair::new()?;
+    pair.server.accept()?;
+    pair.server.close(Some(ACCESS_ENDED), Some(reason))?;
+    Ok(Response::from_websocket(pair.client)?)
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct LiveState {

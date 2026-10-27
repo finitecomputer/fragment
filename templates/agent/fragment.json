@@ -1,7 +1,6 @@
 {
   "kind": "agent",
   "meta": {
-    "title": "Agent",
     "description": "An agent of yours: its job, its memory and skills, the chats it is in."
   },
   "channels": {

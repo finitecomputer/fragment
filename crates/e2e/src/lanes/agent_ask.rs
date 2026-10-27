@@ -62,7 +62,7 @@ fn within<T>(bound: Duration, mut f: impl FnMut() -> Option<T>) -> Option<T> {
 
 /// An agent of the person's: its fragment, made with its SOUL, and assigned
 /// to the computer; its identity.
-fn agent(api: &Api, keys: &Keys, computer: &str, label: &str, title: &str, soul: &str) -> Result<(String, String)> {
+pub(super) fn agent(api: &Api, keys: &Keys, computer: &str, label: &str, title: &str, soul: &str) -> Result<(String, String)> {
     let made = api.create_with(keys, json!({ "label": label, "template": "agent", "title": title }))?;
     anyhow::ensure!(made.status == 200, "the agent {label}: {made}");
     let name = made.body["name"].as_str().context("a fragment's name")?.to_string();

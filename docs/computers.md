@@ -547,7 +547,10 @@ group is pinned to `hermes-canary`.
    with production's `PREVIEW_REGISTRY_TOKEN` and push credentials for
    production's with its own token, copies the image registry to
    registry, and refuses a copy whose manifest is not the source's
-   digest; its summary names
+   digest, then waits until Cloudflare has prepared it on production's
+   network (a copy is prepared only when asked: round 11's was still
+   pending 50 minutes on, at its deploy; xtask/src/prepare.rs); its
+   summary names
    `registry.cloudflare.com/<account>/fragment-computer-hermes@sha256:…`,
    the same digest, and the line
    `"hermes": { "image": "…" }`, which becomes stable's in
@@ -842,12 +845,22 @@ expires within 30 days. The container application is the deployment's
 - Without the header only the computer's own routes answer:
   - `GET /api/computer` → `{computer, owner, image, agents: [{fragment,
     identity, name, owner, connections, modelProviders?, credentials:
-    [{provider, kind, env, placeholder, hosts, modelBase?}]}],
-    credentialEnv, models: {cheap, medium, fallback, vision}}`: the agents
+    [{provider, kind, env, placeholder, hosts, modelBase?}], key}],
+    credentialEnv, models: {cheap, medium, fallback, vision}, relay?:
+    {hosts, port}}`: the agents
     to run, each one's credentials (below, Connections and operator keys;
     `modelProviders` names those of them with a `modelBase`, as its owner's
-    view does: "An agent's own model"), and the model route's models'
-    ids by its names (below, Models, "A model by its id"). **They
+    view does: "An agent's own model"), the key its fragment signs as
+    (`key`, 64 hex: what a door's ticket is checked with, docs/api.md, "An
+    agent's doors"), and the model route's models'
+    ids by its names (below, Models, "A model by its id").
+    `?simplex=1` says the image does SimpleX (docs/bridge.md, "SimpleX"):
+    the Computer DO keeps the version of the image its running start came
+    up on as one that does (never while it starts: its next start's image
+    may already be another; written only when that is news, its owner's
+    pages told), and its owner's view
+    says `simplex` while it is on that version, so Settings offer SimpleX
+    on no other image. **They
     may change while the computer runs** (its owner assigns or unassigns
     an agent, connects an account, narrows an agent): the guest reads them
     again while awake and runs the new set, with nothing restarted. The
@@ -864,6 +877,40 @@ expires within 30 days. The container application is the deployment's
     and the platform then counts it closed, so a guest still busy pings
     it and opens it again when it goes silent (our bridge: every 15 s,
     silent after 30).
+  - `POST /api/computer/door {agent, door, nonce, key}`: the link ticket
+    its agent's owner made last (its `nonce`, within its ten minutes),
+    redeemed once with the public key of that link's door (docs/api.md,
+    "An agent's doors"); 403 for any other.
+  - `GET /api/computer/relay?host=&port=` (a WebSocket): **the XFTP
+    relay** (`fragment_core::relay`), raw TCP to `host`:`port` and back,
+    each binary frame bytes passed untouched. Containers reset a TLS hello
+    on 443 that names no server (SNI), and a SimpleX server on 443 takes
+    its protocol only from one (measured on a preview computer,
+    2026-10-25), so a computer reaches SimpleX's file servers only through
+    this: the Worker's `connect()`, which nothing inspects, carries them
+    (the shim's `ComputerEgress`, entry.mjs `relay`). Only the hosts and
+    port the guest view's `relay` names (SimpleX's and Flux's preset XFTP
+    servers, `relay::HOSTS`, on 443; 403 for any other, and 400 without
+    an upgrade), at most `relay::OPEN_MAX` (4) open at once per computer
+    and `relay::DAY_BYTES_MAX` (2 GiB) a UTC day (429 past either), each
+    closed with code 4008 past its allowance (`relay::BYTES_MAX`, 32 MiB
+    both ways together, or what is left of the day's budget past what the
+    open ones hold, reserved as it opens), past `relay::MS_MAX` (5
+    minutes), or when what waits to be written toward the server passes
+    1 MiB. The Computer DO holds each one's place and reservation by a
+    lease in its memory (a restart forgets them; one whose close is never
+    heard lapses on its own bound, counting all it was allowed) and counts
+    its bytes in its `meta` `relay_day`. Only the relay route's own answer
+    can make the shim pipe: it pipes only an answer to that route's GET
+    with an upgrade, and the egress strips every `x-fragment-relay…`
+    header from every other answer (a fragment's or an app's passed
+    through among them). **What the platform sees:** the host, the port,
+    the byte counts and the times, which it logs at each open and close;
+    never what is carried, which is the core's TLS, end to end to the
+    server's own certificate (its fingerprint is in the server's address),
+    around XFTP's own encryption of each file's chunks. Any process in the
+    computer may use it, within the same hosts and bounds: no secret in a
+    container its agent is root in tells the bridge from its tools.
 - A subscription with `{channel, wake: true}` (in place of `url`), sent
   as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
   computer on each new record (the fragment asks the computer itself just
@@ -1705,12 +1752,15 @@ settings and state):
   Python, Node 26.7, npm 12, uv, ffmpeg, ripgrep, Chromium 145) in PM's
   store at `/opt/hermes/tools`. Its layers go by how often each changes:
   the base, one layer (Hermes' image flattened, with everything pinned
-  on it: 4.3 GB, 1.4 GB compressed), then ours (the bridge, `hermes-boot`,
-  the fragment CLI and the image's own files: about 21 MB, 9 MB
-  compressed), then a few KB `hermes-boot build-info` writes and the
-  image's version. A deploy that changes only our code pushes the small
-  ones; the base changes only with a pin, `document-requirements.txt` or
-  one of its steps (or when the deploying machine's build cache has lost
+  on it: 4.3 GB, 1.4 GB compressed), then SimpleX's core (`simplex-chat`
+  v7.0.3 by checksum, 79.5 MB, 18.8 MB compressed: a layer of its own,
+  changed only with its pin; it runs only for an agent its owner linked,
+  on an always-on computer: docs/bridge.md, "SimpleX"), then ours (the
+  bridge, `hermes-boot`, the fragment CLI and the image's own files: about
+  21 MB, 9 MB compressed), then a few KB `hermes-boot build-info` writes
+  and the image's version. A deploy that changes only our code pushes the
+  small ones; the base changes only with a pin, `document-requirements.txt`
+  or one of its steps (or when the deploying machine's build cache has lost
   it). One Hermes
   profile per agent (named as its agent fragment, `juniper--k3x9`), its agent
   fragment's `SOUL.md`, `memories/` and `skills/` checked out into it and
@@ -1756,6 +1806,16 @@ settings and state):
   route took as `low`. Settings' Agents offers it beside the model for
   every agent: Default (High), Low and High; a pick writes `reasoning` to
   `agent.json` as the model's pick is written, and the default removes it.
+  Its `home`, `"simplex"` or none (Paul, 2026-10-26; docs/api.md, "An
+  agent's home"), is where its owner is reached: its profile's
+  `agent.system_prompt` tells it, beside its name, at every turn
+  (`hermes::told_home`: "Your owner's home is your chat <label>-chat" or
+  "their SimpleX, your chat <label>-simplex, which reaches their phone",
+  and that a routine scheduled without `--chat` runs there), so a change
+  is its next turn's, read with the rest of `agent.json` every 10 s and
+  written only when it changed; a running turn keeps the prompt it
+  started with, and nothing restarts. Hermes' own home channel is set
+  nowhere (docs/hermes-relay.md, "Hermes' settings").
 
   Its work (the seam, above): each agent's is `/data/work/<profile>`.
   Its profile's config makes it the terminal's working directory
@@ -2404,6 +2464,10 @@ persisted)".
   person's VM with no secret in it (decisions 13, 43), and one person's
   agents are not fenced from each other (decision 44), so root inside it
   opens nothing of anyone else's.
+- **What sudo reaches.** The bridge runs as root, and keeps SimpleX's
+  core and its state its own (`simplex-chat` 0700, on no PATH;
+  `/data/simplex` 0700: docs/bridge.md, "SimpleX"), so the agent's own
+  user and its file tools read none of it; its sudo does.
 - **How long an install lasts.** `/data` is the only place a computer
   keeps; an install outside it lasts until the computer's next start from
   its image (a crash, or an image update), and a wake from a snapshot

@@ -16,9 +16,11 @@
 //! a card of choices whose last is answered in words, typed on the card
 //! and sent with Enter;
 //! Stop, which ends a slow turn; a picture they attach, in their message
-//! and as the chat's blob; a reply's file; a voice memo recorded from
-//! Chrome's fake microphone, sent as an audio attachment and shown as a
-//! player, which the agent receives. At a phone's width nothing scrolls
+//! and as the chat's blob; a reply's file; the mic's card before the
+//! browser asks, and the one a refused microphone shows; a voice memo
+//! recorded from Chrome's fake microphone, sent as an audio attachment and
+//! shown as a player, which the agent receives; the mic in the shell's
+//! frame, which names the chat's origin. At a phone's width nothing scrolls
 //! sideways. Screenshots (desktop light and dark, phone) stay in the run's
 //! scratch (`chat/`).
 //!
@@ -28,7 +30,9 @@
 //! person's record does; while the owner's page is on screen nothing is
 //! pushed to them, and once it is closed a reply reaches each of the
 //! chat's people's subscriptions once (the push fake decrypts it), never
-//! a tag that names no one; no one subscribes for another identity.
+//! a tag that names no one; no one subscribes for another identity. In
+//! the shell's frame its bell turns on alerts the shell holds, which a
+//! reply reaches, and turns them off.
 
 use std::path::Path;
 use std::time::Duration;
@@ -40,7 +44,7 @@ use sha2::{Digest, Sha256};
 use super::computers::{agent_replies, turn_of, work_of, AGENT_JSON};
 use super::jobs::{records, settle, started};
 use super::signin::site_cookie;
-use crate::api::{Api, Call, Reply};
+use crate::api::{Api, Call, Reply, Socket};
 use fragment_nip98::Keys;
 use crate::browser::{Browser, Page};
 use crate::Suite;
@@ -144,6 +148,185 @@ fn still_loading_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: 
     chrome.detach(frame)?;
     chrome.close(shell)?;
     Ok(())
+}
+
+/// The chat's mic in the shell's frame, which the platform's mint
+/// (`/auth/frame`) sends on to the chat's own origin. A bare
+/// `allow="microphone"` names the frame's `src`'s origin, the platform's,
+/// and the browser refused the chat's page the microphone without asking
+/// ("The microphone is off for this chat", PR 582). Valid: the shell's
+/// frame names the chat's origin, and there, the microphone allowed
+/// (Chrome's fake, as a person's Allow), the chat is told it may record,
+/// and a press records at once, with no card.
+fn mic_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let shell = chrome.open(&format!("{}/", api.base))?;
+    chrome.viewport(&shell, 1280, 860, false)?;
+    let row = format!("#chats [data-key={}]", js(&format!("chat:{chat}")));
+    let listed = chrome.until(&shell, &format!("!document.getElementById('layout').hidden && !!document.querySelector({})", js(&row)), wait);
+    chrome.eval(&shell, &format!("(document.querySelector({})?.click(), true)", js(&row)))?;
+    let ready = "document.getElementById('say')?.dataset.ready === '1'";
+    let framed = listed && s.eventually(wait, || chrome.eval_in_frame(&shell, chat, ready).ok() == Some(Value::Bool(true)));
+    let allow = chrome.eval(&shell, &format!("document.querySelector({})?.allow ?? null", js(&format!("iframe[data-fragment=\"{chat}\"]"))))?;
+    if !framed {
+        s.ok("in the shell's frame, which names the chat's own origin, the chat may use the microphone, and its mic records at once", false, json!({ "framed": false, "allow": allow }));
+        return chrome.close(shell);
+    }
+    let frame = chrome.frame(chat)?;
+    let told = chrome.eval(&frame, "navigator.permissions.query({ name: 'microphone' }).then((p) => p.state)")?;
+    let mic = "document.getElementById('record')";
+    chrome.eval(&frame, &format!("({mic}.click(), true)"))?;
+    let on = chrome.until(&frame, &format!("{mic}.classList.contains('on') && document.getElementById('mic-card').hidden && !document.getElementById('recording').hidden"), wait);
+    let card = chrome.eval(&frame, "document.getElementById('mic-card').hidden ? null : document.getElementById('mic-card-title').textContent")?;
+    chrome.eval(&frame, "(document.getElementById('discard').click(), true)")?;
+    let off = chrome.until(&frame, &format!("!{mic}.classList.contains('on')"), wait);
+    s.ok(
+        "in the shell's frame, which names the chat's own origin, the chat may use the microphone, and its mic records at once",
+        framed && told == "granted" && on && off,
+        json!({ "framed": framed, "allow": allow, "told": told, "on": on, "card": card, "off": off }),
+    );
+    chrome.detach(frame)?;
+    chrome.close(shell)?;
+    Ok(())
+}
+
+/// The mic once the chat's access ends (Alex's review of PR 582): a
+/// person's page whose access is taken away (4003) while the mic's card is
+/// open, and one whose chat is deleted (4004) while the browser is still
+/// asked whether it may record. Valid: neither asks for the microphone nor
+/// records after: the card goes, its Continue (pressed as a script would,
+/// though hidden) starts nothing, and an answer that comes after starts
+/// nothing.
+fn mic_after_access_ends(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, member: &Keys, member_session: &str) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let name = s.named(api, owner, "chat-mic-ends")?;
+    let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "making the chat whose access ends: {made}");
+    s.owned(&made.body, owner);
+    let member_id = api.identity(member)?;
+    let shared = api.share(&name, &member_id, "editor")?;
+    anyhow::ensure!(shared.status == 200, "sharing it with the member: {shared}");
+    let ready = "document.getElementById('say')?.dataset.ready === '1' && !document.getElementById('record').hidden && !document.getElementById('record').disabled";
+    // the page's asks for the microphone, counted
+    let counted = "(() => { window.__asked = 0; const real = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices); navigator.mediaDevices.getUserMedia = (c) => { window.__asked += 1; return real(c); }; return true; })()";
+    let after = "({ card: !document.getElementById('mic-card').hidden, asked: window.__asked, on: document.getElementById('record').classList.contains('on'), said: document.getElementById('banner').hidden ? null : document.getElementById('banner-text').textContent })";
+
+    // the member's page, the card open, their access taken away
+    let elsewhere = chrome.another_context()?;
+    chrome.set_cookie_in(&elsewhere, &format!("{}/", api.base), "fragment_session", member_session)?;
+    let theirs = chrome.open_in(&elsewhere, &api.site_url(&name, "__signin?return=/"))?;
+    let up = chrome.until(&theirs, ready, wait);
+    chrome.eval(&theirs, counted)?;
+    chrome.eval(&theirs, "(navigator.permissions.query = async () => ({ state: 'prompt' }), true)")?;
+    chrome.eval(&theirs, "(document.getElementById('record').click(), true)")?;
+    let carded = chrome.until(&theirs, "!document.getElementById('mic-card').hidden && document.getElementById('mic-card').dataset.kind === 'ask'", wait);
+    let gone = api.signed(owner, "DELETE", &format!("/api/f/{name}/members/{member_id}"), None)?;
+    let closed = chrome.until(&theirs, "document.getElementById('banner-text')?.textContent === 'Your access to this chat changed: reload the page.'", wait);
+    chrome.eval(&theirs, "(document.getElementById('mic-card-go').click(), true)")?;
+    std::thread::sleep(Duration::from_secs(1));
+    let seen = chrome.eval(&theirs, after)?;
+    s.ok(
+        "their access taken away (4003) while the mic's card is open, the card goes and its Continue asks for nothing: no microphone, no memo",
+        up && carded && gone.status == 200 && closed && seen["card"] == false && seen["asked"] == 0 && seen["on"] == false,
+        json!({ "up": up, "carded": carded, "removed": gone.status, "closed": closed, "seen": seen }),
+    );
+    chrome.close(theirs)?;
+
+    // the owner's page, the browser still asked, the chat deleted
+    let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
+    let up = chrome.until(&page, ready, wait);
+    chrome.eval(&page, counted)?;
+    chrome.eval(&page, "(navigator.permissions.query = () => new Promise((answer) => { window.__answer = answer; }), true)")?;
+    chrome.eval(&page, "(document.getElementById('record').click(), true)")?;
+    let asking = chrome.until(&page, "typeof window.__answer === 'function'", wait);
+    let deleted = api.signed(owner, "DELETE", &format!("/api/f/{name}"), None)?;
+    let closed = chrome.until(&page, "document.getElementById('banner-text')?.textContent === 'This chat was deleted.'", wait);
+    chrome.eval(&page, "(window.__answer?.({ state: 'granted' }), true)")?;
+    std::thread::sleep(Duration::from_secs(1));
+    let seen = chrome.eval(&page, after)?;
+    s.ok(
+        "its chat deleted (4004) while the browser is asked whether it may record, the answer that comes after starts nothing: no microphone, no memo",
+        up && asking && deleted.status == 200 && closed && seen["card"] == false && seen["asked"] == 0 && seen["on"] == false,
+        json!({ "up": up, "asking": asking, "deleted": deleted.status, "closed": closed, "seen": seen }),
+    );
+    chrome.close(page)?;
+    Ok(())
+}
+
+/// A chat page left open whose person signed out elsewhere (Austin,
+/// 2026-10-25: in Firefox a new chat's page stayed empty for minutes, even
+/// after a reload, while his phone opened it; a page in another tab whose
+/// session had ended dialled its socket again every half minute, each
+/// refused (401), and Firefox holds back every socket to the same address
+/// and path, `/__live` for every fragment, for up to a minute after each
+/// refusal). Its socket, asked again who it is, is closed to reconnect
+/// (4001), and the one it dials then names no one who may see the chat.
+/// Valid: that socket is opened and closed at once, for good (4003), not
+/// refused by a status the page cannot read: the page says its access
+/// changed and dials no more. A socket that names no page (the CLI's) is
+/// still refused by its status (401).
+fn signed_out_page(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let name = s.named(api, owner, "chat-signed-out")?;
+    let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "making the chat whose page signs out: {made}");
+    s.owned(&made.body, owner);
+    let member = api.person()?;
+    let shared = api.share(&name, &api.identity(&member)?, "editor")?;
+    anyhow::ensure!(shared.status == 200, "sharing it with the member: {shared}");
+    let session = api.sign_in(&Api::email_of(&member))?;
+    let site = format!("fragment_site={}", site_cookie(api, &session, &name)?);
+
+    // the member's page, open, its dials of `__live` counted from here
+    let elsewhere = chrome.another_context()?;
+    chrome.set_cookie_in(&elsewhere, &format!("{}/", api.base), "fragment_session", &session)?;
+    let page = chrome.open_in(&elsewhere, &api.site_url(&name, "__signin?return=/"))?;
+    let up = chrome.until(&page, "document.getElementById('say')?.dataset.ready === '1'", wait);
+    let counted = "(() => { window.__dials = 0; const Real = WebSocket; window.WebSocket = class extends Real { constructor(url, ...rest) { super(url, ...rest); if (String(url).includes('/__live')) window.__dials += 1; } }; return true; })()";
+    chrome.eval(&page, counted)?;
+
+    // signed out elsewhere: the platform session ends, and every site session made from it
+    let ended = api.unsigned("POST", "/api/test/registry", Some(&json!({ "signins": { "expireSession": session } })))?;
+    anyhow::ensure!(ended.status == 200, "ending the member's session: {ended}");
+    let own_page = match Socket::on_host(api, &name, "__live", None, Some(&site), Some(&api.site_origin(&name))) {
+        Ok(mut socket) => match socket.next() {
+            Ok(frame) => format!("opened: {frame}"),
+            Err(e) => format!("{e:#}"),
+        },
+        Err(e) => format!("refused: {e:#}"),
+    };
+    s.ok("a page's socket whose person signed out is opened and closed for good (4003), not refused by a status its page cannot read", own_page == "closed 4003", &own_page);
+    let unnamed = match Socket::on_host(api, &name, "__live", None, Some(&site), None) {
+        Ok(_) => "opened".to_string(),
+        Err(e) => format!("refused: {e:#}"),
+    };
+    s.ok("a socket that names no page is still refused by its status (members only: 401)", unnamed.contains("401"), &unnamed);
+
+    // the open page's socket asked again who it is (a test lever ages the
+    // check), at its next frame: the member typing
+    let aged = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "age-live", "ms": fragment_proto::limits::LIVE_IDENTITY_MS })))?;
+    chrome.eval(&page, "(() => { const t = document.getElementById('text'); t.value = 'still here?'; t.dispatchEvent(new Event('input')); return true; })()")?;
+    let told = chrome.until(&page, "document.getElementById('banner-text')?.textContent === 'Your access to this chat changed: reload the page.'", wait);
+    // past the library's first waits (half to one and a half of 1 s, then 2 s): it would have dialled again
+    std::thread::sleep(Duration::from_secs(5));
+    let seen = chrome.eval(&page, "({ dials: window.__dials, said: document.getElementById('banner').hidden ? null : document.getElementById('banner-text').textContent })")?;
+    s.ok(
+        "the open page, asked again who it is, dials once more, is closed for good (4003), says its access changed, and dials no more",
+        up && aged.status == 200 && told && seen["dials"] == 1,
+        json!({ "up": up, "aged": aged.status, "told": told, "seen": seen }),
+    );
+    chrome.close(page)?;
+    Ok(())
+}
+
+/// The mic's card as shown (`kind`, "ask" or "denied"), light and dark,
+/// into the run's screenshots; the page left light, as it starts.
+fn mic_card_shots(chrome: &mut Browser, page: &Page, shots: &Path, kind: &str) -> Result<()> {
+    for scheme in ["light", "dark"] {
+        chrome.color_scheme(page, scheme)?;
+        chrome.screenshot(page, &shots.join(format!("mic-card-{kind}-{scheme}.png")))?;
+    }
+    chrome.color_scheme(page, "light")
 }
 
 /// A JSON array's strings.
@@ -363,11 +546,13 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the agent's reply is under its name", chrome.eval(&page, &format!("[...document.querySelectorAll('.msg.agent .who')].every((w) => w.textContent === {})", js(&capital(&label))))? == true, "");
 
     // a tool step, as a card: what it does (its category's icon, its verb
-    // the icon's name), then its arguments and what came of it
+    // the icon's name), then its arguments and what came of it; the words
+    // the agent said before it are its reply, before the card and not in it
     say(&mut chrome, "tool please")?;
     let step = "[...document.querySelectorAll('details.tools .step[data-category=\"web\"]')].find((s) => s.querySelector('.step-args')?.textContent === 'tool please')";
-    let stepped = shows(&mut chrome, &page, &format!("!!{step} && !{step}.querySelector('.step-verb') && {step}.querySelector('.step-name > svg[role=\"img\"]')?.getAttribute('aria-label') === 'Searching the web' && {step}.textContent.includes('3 results') && {}", replied("tool please")));
-    s.ok("a tool step shows as a card before the reply, saying what it does by its icon (named \"Searching the web\") and its arguments (\"tool please\")", stepped, chrome.eval(&page, "document.getElementById('messages').innerText")?);
+    let words = "[...document.querySelectorAll('.msg.agent .md')].find((m) => m.textContent === 'Let me look.')?.closest('.msg')";
+    let stepped = shows(&mut chrome, &page, &format!("!!{step} && !{step}.querySelector('.step-verb') && ['Searching the web', 'Searched the web'].includes({step}.querySelector('.step-name > svg[role=\"img\"]')?.getAttribute('aria-label')) && {step}.querySelector('.step-result')?.textContent.includes('3 results') && !!{words} && !{words}.closest('details') && !!({words}.compareDocumentPosition({step}) & Node.DOCUMENT_POSITION_FOLLOWING) && !{step}.closest('details').textContent.includes('Let me look.') && {}", replied("tool please")));
+    s.ok("a tool step shows as a card before the reply, saying what it does by its icon (named \"Searched the web\") and its arguments (\"tool please\"), its result kept; the agent's words before it (\"Let me look.\") are its reply before the card, never in it", stepped, chrome.eval(&page, "document.getElementById('messages').innerText")?);
     // every card open, for the screenshots: what each step says
     let open_cards = "(() => { const cards = [...document.querySelectorAll('details.tools')]; cards.forEach((d) => (d.open = true)); cards.at(-1)?.scrollIntoView({ block: 'center' }); return true; })()";
     chrome.eval(&page, open_cards)?;
@@ -546,7 +731,18 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an editor's composer has a mic", chrome.eval(&page, &format!("!{mic}.hidden && !{mic}.disabled"))? == true, "");
     let bubbles = |chrome: &mut Browser| chrome.eval(&page, "document.querySelectorAll('.msg.user.mine').length").ok().and_then(|v| v.as_u64()).unwrap_or(0);
     let before = bubbles(&mut chrome);
+    // Chrome's fake microphone is allowed from its start (run 40070388501:
+    // the page told `granted` recorded at once, and showed no card); a
+    // person's browser would ask, so the page is told `prompt` (the fake
+    // still answers the request yes, as a person's Allow)
+    let origin = chrome.eval(&page, "location.origin")?.as_str().context("the chat's origin")?.to_string();
+    chrome.set_permission(&origin, "microphone", "prompt")?;
     chrome.click(&page, "#record")?;
+    // the first press says what the mic is for, and asks the browser only on Continue
+    let card = "(() => { const c = document.getElementById('mic-card'); return !c.hidden && c.dataset.kind === 'ask' && !document.getElementById('record').classList.contains('on'); })()";
+    s.ok("the first press shows the microphone's card, asking nothing of the browser yet", shows(&mut chrome, &page, card), "");
+    mic_card_shots(&mut chrome, &page, &shots, "ask")?;
+    chrome.click(&page, "#mic-card-go")?;
     let recording = format!("{mic}.classList.contains('on') && !document.getElementById('recording').hidden && !document.getElementById('discard').hidden");
     let on = shows(&mut chrome, &page, &recording);
     std::thread::sleep(Duration::from_millis(800));
@@ -560,8 +756,23 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.eval(&page, "Promise.race([navigator.mediaDevices.getUserMedia({ audio: true }).then((s) => { s.getTracks().forEach((t) => t.stop()); return 'granted'; }, (e) => e.name), new Promise((r) => setTimeout(() => r('no answer in 5 s'), 5000))]).then((mic) => ({ mic, focused: document.hasFocus(), visible: document.visibilityState, banner: document.getElementById('banner').hidden ? null : document.getElementById('banner-text').textContent, record: document.getElementById('record').outerHTML.slice(0, 200) }))")?
     };
     s.ok("pressed, it records, quietly (the mic is its Stop, beside a clock); the x lets the memo go, sending nothing", on && off && bubbles(&mut chrome) == before, json!({ "on": on, "off": off, "why": why }));
+    // a microphone the browser refused: the card says where to allow it,
+    // and its Okay closes it, recording nothing
+    chrome.set_permission(&origin, "microphone", "denied")?;
     chrome.click(&page, "#record")?;
-    let ticking = shows(&mut chrome, &page, &format!("{recording} && document.getElementById('recording-time').textContent !== '0:00'"));
+    let refused = format!(
+        "(() => {{ const c = document.getElementById('mic-card'); return !c.hidden && c.dataset.kind === 'denied' && document.getElementById('mic-card-title').textContent === 'Your browser needs microphone permissions' && !{mic}.classList.contains('on'); }})()"
+    );
+    let said = shows(&mut chrome, &page, &refused);
+    mic_card_shots(&mut chrome, &page, &shots, "denied")?;
+    chrome.click(&page, "#mic-card-go")?;
+    let closed = shows(&mut chrome, &page, &format!("document.getElementById('mic-card').hidden && !{mic}.classList.contains('on')"));
+    s.ok("a microphone the browser refused shows a card saying where to allow it, which Okay closes, recording nothing", said && closed, json!({ "said": said, "closed": closed }));
+    // allowed, a press records at once
+    chrome.set_permission(&origin, "microphone", "granted")?;
+    chrome.click(&page, "#record")?;
+    let ticking = shows(&mut chrome, &page, &format!("{recording} && document.getElementById('mic-card').hidden && document.getElementById('recording-time').textContent !== '0:00'"));
+    s.ok("the microphone allowed, a press records at once, with no card", ticking, "");
     chrome.click(&page, "#text")?;
     chrome.type_text(&page, "a voice memo")?;
     chrome.click(&page, "#record")?;
@@ -721,14 +932,40 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         by_hand["status"] == "succeeded" && by_hand["output"]["pushed"] == 0 && s.push.received(&owner_push).len() == 1,
         &by_hand,
     );
+    // its words before a tool call, said while it works, are a reply that
+    // is not pushed (`interim`); its answer is
+    let said = "tool please, while I am away";
+    let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": "away-2", "body": { "text": said } })))?;
+    anyhow::ensure!(r.status == 200, "posting a tool turn while away: {r}");
+    let answered = s.eventually(TURN, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|x| x["body"]["text"].as_str().is_some_and(|t| t.contains(said))));
+    // every reply's run done (and the one by hand), the interim one's too
+    let settled = s.eventually(TURN, || {
+        let runs = notify_runs(api, &owner, &chat_name);
+        runs.len() == agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() + 1 && runs.iter().all(|r| r["status"] == "succeeded")
+    });
+    std::thread::sleep(super::computers::QUEUE_DRAIN);
+    let replies = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity);
+    let interim = replies.iter().filter(|x| x["body"]["interim"] == true).count();
+    let bodies = |to: &str| s.push.received(to).iter().map(|p| p["body"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
+    let (to_owner, to_member) = (bodies(&owner_push), bodies(&member_push));
+    s.ok(
+        "away, the agent's words before a tool call (an interim reply) are not pushed; its answer is, once to each of the chat's people",
+        answered && settled && interim >= 1 && to_owner.len() == 2 && to_owner[1].contains(said) && to_member == to_owner,
+        json!({ "owner": to_owner, "member": to_member, "interim": interim }),
+    );
     // (a tab of its own, in front: after the push checks, which ask whether
     // the owner's page is on screen)
     held_socket(s, api, &mut chrome, &owner, &chat_name)?;
     still_loading_in_frame(s, api, &mut chrome, &chat_name)?;
+    mic_in_frame(s, api, &mut chrome, &chat_name)?;
+    mic_after_access_ends(s, api, &mut chrome, &owner, &member, &member_session)?;
+    signed_out_page(s, api, &mut chrome, &owner)?;
 
     polish::check(s, api, &owner, &owner_session, &mut chrome, &label)?;
     polish::working_card(s, api, &owner, &mut chrome, &identity, &agent_name)?;
     polish::record_shapes(s, api, &owner, &owner_session, &mut chrome)?;
+    polish::finished_card_times(s, api, &owner, &mut chrome)?;
+    alerts_in_frame(s, api, &mut chrome, &owner, &owner_session, &member_session, &owner_site, &chat_name, &identity)?;
 
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;
@@ -920,6 +1157,242 @@ fn commands_queued_and_quotes(s: &mut Suite, api: &Api, chrome: &mut Browser, pa
     s.ok("on a desktop Enter sends (enterkeyhint send), and Shift+Enter adds a line", labelled && held["value"] == "first of two\nsecond of two" && posted, json!({ "held": held, "posted": posted }));
     let _ = shows(chrome, &replied("first of two"));
     Ok(())
+}
+
+/// The shell, the browser's push service's fake on each of its documents,
+/// with `chat` open in its frame and ready: the shell, and its frame's own
+/// target; `None` when it never was.
+fn framing_shell(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str, script: &str) -> Result<Option<(Page, Page)>> {
+    let wait = Duration::from_secs(30);
+    let shell = chrome.open_with_script(&format!("{}/", api.base), script)?;
+    chrome.viewport(&shell, 1280, 860, false)?;
+    let row = format!("#chats [data-key={}]", js(&format!("chat:{chat}")));
+    let listed = chrome.until(&shell, &format!("!document.getElementById('layout').hidden && !!document.querySelector({})", js(&row)), wait);
+    chrome.eval(&shell, &format!("(document.querySelector({})?.click(), true)", js(&row)))?;
+    let ready = "document.getElementById('say')?.dataset.ready === '1'";
+    if !(listed && s.eventually(wait, || chrome.eval_in_frame(&shell, chat, ready).ok() == Some(Value::Bool(true)))) {
+        chrome.close(shell)?;
+        return Ok(None);
+    }
+    let frame = chrome.frame(chat)?;
+    Ok(Some((shell, frame)))
+}
+
+/// The browser's push service at the shell's subscribe (`PushManager`, the
+/// vendor's boundary: headless Chrome reaches none), on each of the shell's
+/// documents: a registration's subscription is the push fake's `sub`, kept
+/// by its scope with the key it was made with, in the shell's storage
+/// (`e2e-push`), so a page loaded again reads it.
+fn push_service_fake(sub: &fragment_fakes::push::Subscribed) -> String {
+    let sub = json!({ "endpoint": sub.endpoint, "p256dh": sub.p256dh, "auth": sub.auth });
+    format!(
+        "(() => {{ const SUB = {sub}; const kept = () => JSON.parse(localStorage.getItem('e2e-push') || '{{}}'); const keep = (all) => localStorage.setItem('e2e-push', JSON.stringify(all)); \
+         const bytes = (s) => Uint8Array.from(atob(s.replaceAll('-', '+').replaceAll('_', '/')), (c) => c.charCodeAt(0)).buffer; \
+         const made = (scope) => ({{ endpoint: SUB.endpoint, getKey: (k) => bytes(SUB[k]), unsubscribe: async () => {{ const all = kept(); delete all[scope]; keep(all); return true; }} }}); \
+         Object.defineProperty(ServiceWorkerRegistration.prototype, 'pushManager', {{ configurable: true, get() {{ const scope = this.scope; return {{ \
+           subscribe: async (o) => {{ const all = kept(); all[scope] = btoa(String.fromCharCode(...new Uint8Array(o.applicationServerKey))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', ''); keep(all); return made(scope); }}, \
+           getSubscription: async () => (kept()[scope] ? made(scope) : null) }}; }} }}); }})();"
+    )
+}
+
+/// A chat's alerts, from its bell in the shell's frame (docs/api.md, The
+/// shell, "A chat's alerts are the shell's"). A browser lets no
+/// cross-origin frame ask for notifications, so the bell of a chat the
+/// shell framed only said to open the chat in a tab of its own (Paul,
+/// 2026-10-24: alerts should not take a tab). Valid: framed, the bell
+/// reads off; pressed, with the browser's notifications allowed to the
+/// platform, it says on, and the shell holds a registration of its alerts
+/// worker for that person and chat alone, subscribed with the chat's own
+/// key; a push delivered to it (DevTools, as a push service would) shows
+/// under the chat, whatever its tag said; away, an agent's reply is pushed
+/// to that subscription once; a shell opened again reads it on, and
+/// pressed, off: the registration gone, and the next reply pushed there
+/// nothing. Turned on again and the person gone from the browser (signed
+/// out, or another signed in: however the session ended, its cookie alone
+/// changed here; Alex's review), a push shows nothing and the worker lets
+/// itself go.
+#[allow(clippy::too_many_arguments)]
+fn alerts_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, owner_session: &str, member_session: &str, owner_site: &str, chat: &str, identity: &str) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let id = s.name("chat-shell-alerts");
+    let fake = push_service_fake(&s.push.subscribe(&id, 37));
+    let platform = api.base.trim_end_matches('/').to_string();
+    let base = format!("{platform}/");
+    chrome.set_permission(&platform, "notifications", "granted")?;
+    let key = api.call(Call { method: "GET", url: api.site_url(chat, "__push-key"), cookie: Some(owner_site.to_string()), ..Call::default() })?.body["key"].clone();
+    let scope = format!("{platform}/__shell/alerts/{}/{chat}/", api.identity(owner)?);
+    let bell = "document.getElementById('notify')";
+    let held = format!(
+        "navigator.serviceWorker.getRegistration({scope}).then((r) => ({{ scope: r?.scope ?? null, worker: (r?.active ?? r?.waiting ?? r?.installing)?.scriptURL ?? null, key: JSON.parse(localStorage.getItem('e2e-push') || '{{}}')[{scope}] ?? null }}))",
+        scope = js(&scope)
+    );
+    let gone_now = format!("navigator.serviceWorker.getRegistration({}).then((r) => !r || r.scope !== {})", js(&scope), js(&scope));
+    let push = json!({ "title": "Juniper", "body": "a reply", "tag": "another-chat", "url": "./" }).to_string();
+    let Some((shell, frame)) = framing_shell(s, api, chrome, chat, &fake)? else {
+        s.ok("framed by the shell, the chat's bell reads off; pressed, on: the shell holds the chat's registration of its alerts worker, subscribed with the chat's own key", false, "the chat never framed");
+        return Ok(());
+    };
+    let read = chrome.until(&frame, &format!("!{bell}.hidden && {bell}.dataset.state === 'off'"), wait);
+    let was = chrome.eval(&frame, &format!("{bell}.dataset.state ?? null"))?;
+    chrome.eval(&frame, &format!("({bell}.click(), true)"))?;
+    let on = chrome.until(&frame, &format!("{bell}.dataset.state === 'on'"), wait);
+    let holds = chrome.eval(&shell, &held)?;
+    let banner = chrome.eval(&frame, "document.getElementById('banner').hidden ? null : document.getElementById('banner-text').textContent")?;
+    s.ok(
+        "framed by the shell, the chat's bell reads off; pressed, on: the shell holds the chat's registration of its alerts worker, subscribed with the chat's own key",
+        read && on && holds == json!({ "scope": scope, "worker": format!("{platform}/__shell/alerts-sw.js"), "key": key }),
+        json!({ "was": was, "holds": holds, "key": key, "banner": banner }),
+    );
+    // its worker, as a push service would reach it
+    let notified = format!("navigator.serviceWorker.getRegistration({}).then((r) => (r ? r.getNotifications() : [])).then((l) => l.map((n) => ({{ title: n.title, body: n.body, tag: n.tag }})))", js(&scope));
+    let registration = chrome.registration_id(&shell, &scope)?;
+    chrome.deliver_push(&shell, &platform, &registration, &push)?;
+    let shown = s.eventually(wait, || chrome.eval(&shell, &notified).ok().is_some_and(|v| v.as_array().is_some_and(|l| !l.is_empty())));
+    let seen = chrome.eval(&shell, &notified)?;
+    s.ok(
+        "a push to it, its person signed in, shows under the chat: its title and words, its tag the chat's, whatever the push said",
+        shown && seen == json!([{ "title": "Juniper", "body": "a reply", "tag": chat }]),
+        &seen,
+    );
+    let closing = format!("navigator.serviceWorker.getRegistration({}).then((r) => r.getNotifications()).then((l) => (l.forEach((n) => n.close()), true))", js(&scope));
+    chrome.eval(&shell, &closing)?;
+    // the platform unable to say who is signed in (its answer refused to
+    // the worker): only that something came, and the alerts stay
+    let worker = chrome.worker("/__shell/alerts-sw.js")?;
+    chrome.block(&worker, &["*/api/identities/me*"])?;
+    chrome.deliver_push(&shell, &platform, &registration, &push)?;
+    let unsure = json!([{ "title": "Finite", "body": "Something new in one of your chats", "tag": chat }]);
+    let kept_back = s.eventually(wait, || chrome.eval(&shell, &notified).ok().as_ref() == Some(&unsure));
+    let seen = chrome.eval(&shell, &notified)?;
+    let stays = chrome.eval(&shell, &held)?["scope"] == scope.as_str();
+    chrome.block(&worker, &[])?;
+    chrome.detach(worker)?;
+    chrome.eval(&shell, &closing)?;
+    s.ok(
+        "the platform unable to say who is signed in, a push shows only that something came in a chat, its title and words kept back, and the alerts stay",
+        kept_back && stays,
+        json!({ "seen": seen, "stays": stays }),
+    );
+    chrome.detach(frame)?;
+    chrome.close(shell)?;
+
+    // away (the shell closed): a reply comes to the shell's subscription
+    let said = "alerts while the shell is closed";
+    let reply = said_away(s, api, owner, chat, identity, said)?;
+    let pushed = s.eventually(TURN, || !s.push.received(&id).is_empty());
+    std::thread::sleep(super::computers::QUEUE_DRAIN);
+    let got = s.push.received(&id);
+    s.ok(
+        "away, the agent's reply is pushed once to the subscription the shell holds: its words, the chat",
+        pushed && got.len() == 1 && got[0]["body"] == reply && got[0]["tag"] == chat,
+        json!({ "reply": reply, "received": got }),
+    );
+
+    // a shell opened again reads it on; pressed, off
+    let Some((shell, frame)) = framing_shell(s, api, chrome, chat, &fake)? else {
+        s.ok("a shell opened again reads it on; pressed, off: the registration gone, and the next reply pushed there nothing", false, "the chat never framed");
+        return Ok(());
+    };
+    let again = chrome.until(&frame, &format!("{bell}.dataset.state === 'on'"), wait);
+    chrome.eval(&frame, &format!("({bell}.click(), true)"))?;
+    let off = chrome.until(&frame, &format!("{bell}.dataset.state === 'off'"), wait);
+    let gone = chrome.eval(&shell, &held)?;
+    chrome.detach(frame)?;
+    chrome.close(shell)?;
+    let reply = said_away(s, api, owner, chat, identity, "and once alerts are off")?;
+    std::thread::sleep(super::computers::QUEUE_DRAIN);
+    let got = s.push.received(&id);
+    s.ok(
+        "a shell opened again reads it on; pressed, off: the registration gone, and the next reply pushed there nothing",
+        again && off && gone == json!({ "scope": null, "worker": null, "key": null }) && !reply.is_null() && got.len() == 1,
+        json!({ "again": again, "off": off, "gone": gone, "received": got.len() }),
+    );
+
+    // on again, then the person gone from this browser (the shell closed
+    // first, so nothing of its own answers the change): nothing shown
+    let mut left = vec![];
+    for (how, session) in [("signed out", ""), ("another person signed in", member_session)] {
+        chrome.set_cookie(&base, "fragment_session", owner_session)?;
+        let Some((shell, frame)) = framing_shell(s, api, chrome, chat, &fake)? else {
+            left.push(json!({ "how": how, "framed": false }));
+            continue;
+        };
+        let read = chrome.until(&frame, &format!("!{bell}.hidden && {bell}.dataset.state === 'off'"), wait);
+        let before = chrome.eval(&frame, &format!("({{ state: {bell}.dataset.state ?? null, hidden: {bell}.hidden }})"))?;
+        let held_before = chrome.eval(&shell, &held)?;
+        if read {
+            chrome.eval(&frame, &format!("({bell}.click(), true)"))?;
+        }
+        let on = read && chrome.until(&frame, &format!("{bell}.dataset.state === 'on'"), wait);
+        chrome.detach(frame)?;
+        chrome.close(shell)?;
+        if !on {
+            left.push(json!({ "how": how, "on": false, "read": read, "before": before, "held": held_before }));
+            continue;
+        }
+        chrome.set_cookie(&base, "fragment_session", session)?;
+        let quiet = chrome.open(&format!("{platform}/about"))?;
+        let registration = chrome.registration_id(&quiet, &scope)?;
+        chrome.deliver_push(&quiet, &platform, &registration, &push)?;
+        let let_go = chrome.until(&quiet, &gone_now, wait);
+        left.push(json!({ "how": how, "on": on, "letGo": let_go }));
+        chrome.close(quiet)?;
+        chrome.set_cookie(&base, "fragment_session", owner_session)?;
+    }
+    s.ok(
+        "on again, and its person gone from the browser (signed out, or another signed in), a push shows nothing and the worker lets itself go",
+        left.len() == 2 && left.iter().all(|l| l["on"] == true && l["letGo"] == true),
+        json!(left),
+    );
+
+    // a chat that leaves the release's code (Alex's review): its alerts
+    // on, then code of its own deployed in the release's place (its
+    // manifest naming no template): a push shows nothing, and the worker
+    // lets itself go
+    let forked = s.named(api, owner, "chat-alerts-fork")?;
+    let made = api.create_with(owner, json!({ "name": forked, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "making the chat that leaves the release: {made}");
+    s.owned(&made.body, owner);
+    let fork_scope = format!("{platform}/__shell/alerts/{}/{forked}/", api.identity(owner)?);
+    let fork_gone = format!("navigator.serviceWorker.getRegistration({}).then((r) => !r || r.scope !== {})", js(&fork_scope), js(&fork_scope));
+    let mut on = false;
+    if let Some((shell, frame)) = framing_shell(s, api, chrome, &forked, &fake)? {
+        let read = chrome.until(&frame, &format!("!{bell}.hidden && {bell}.dataset.state === 'off'"), wait);
+        if read {
+            chrome.eval(&frame, &format!("({bell}.click(), true)"))?;
+        }
+        on = read && chrome.until(&frame, &format!("{bell}.dataset.state === 'on'"), wait);
+        chrome.detach(frame)?;
+        chrome.close(shell)?;
+    }
+    s.commit(&made.body, &[("fragment.json", Some(br#"{ "kind": "chat" }"#.as_slice())), ("app.mjs", Some(b"export class App {}\n".as_slice()))]);
+    s.deploy(&made.body);
+    let own = s.eventually(wait, || api.status(owner, &forked).ok().and_then(|r| r.body["code"]["id"].as_str().map(|id| id.starts_with("app:"))).unwrap_or(false));
+    let mut let_go = false;
+    if on && own {
+        let quiet = chrome.open(&format!("{platform}/about"))?;
+        let registration = chrome.registration_id(&quiet, &fork_scope)?;
+        chrome.deliver_push(&quiet, &platform, &registration, &push)?;
+        let_go = chrome.until(&quiet, &fork_gone, wait);
+        chrome.close(quiet)?;
+    }
+    s.ok(
+        "a chat that leaves the release's code (its own deployed in the release's place), a push to the alerts it had shows nothing, and the worker lets itself go",
+        on && own && let_go,
+        json!({ "on": on, "own": own, "letGo": let_go }),
+    );
+    Ok(())
+}
+
+/// The owner's message posted by the API (no page of theirs open), and
+/// the agent's reply's words once it comes (null when none did).
+fn said_away(s: &mut Suite, api: &Api, owner: &Keys, chat: &str, identity: &str, said: &str) -> Result<Value> {
+    let id = format!("away-{}", Sha256::digest(said.as_bytes()).iter().take(4).map(|b| format!("{b:02x}")).collect::<String>());
+    let r = api.signed(owner, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": id, "body": { "text": said } })))?;
+    anyhow::ensure!(r.status == 200, "posting while away: {r}");
+    let mine = |x: &Value| x["body"]["text"].as_str().is_some_and(|t| t.contains(said));
+    let _ = s.eventually(WAKE, || agent_replies(&records(api, owner, chat, "chat"), identity).iter().any(mine));
+    Ok(agent_replies(&records(api, owner, chat, "chat"), identity).into_iter().find(mine).map(|x| x["body"]["text"].clone()).unwrap_or(Value::Null))
 }
 
 /// A browser's push subscription at the push fake (`id`), stored by the

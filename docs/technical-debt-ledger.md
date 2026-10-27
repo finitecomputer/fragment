@@ -137,6 +137,29 @@ fragment.club until cutover (decisions 34–35).
   (its output's tokens counted, its input's bytes), and a failed send is
   kept and sent again.
 
+## Dev's cell is not the release's build
+
+- **Observed:** 2026-10-24. A change to one of the release's files (a
+  CSS rule in cell/shell) moves the index the cell carries, so the cell
+  recompiled to wasm32 under fat LTO and wasm-opt: about 115 s on an M-series
+  Mac per edit under `cargo xtask dev`.
+- **Shortcut:** `cargo xtask dev` builds the cell in cell/Cargo.toml's
+  `devstack` profile (the release's less fat LTO and one codegen unit,
+  incremental) without wasm-opt (`cargo xtask build --dev`,
+  xtask/src/build.rs `Profile`): about 13 s for such an edit, 8 of them the cell's. Same
+  source, same flags, same files, same router and asset code; its Wasm
+  is about 7.7 MB and held to no budget. Deploys and the e2e build the
+  release's and refuse dev's (crates/devstack/src/built.rs).
+- **Risk:** what only the release's code generation shows (a size
+  regression, a miscompile under LTO, wasm-opt's rewriting, a slower
+  cold start) is not seen in dev; it is seen by `cargo xtask e2e`, CI
+  and the preview, which run the release's.
+- **First proof:** a behaviour the e2e or the preview shows that the
+  same tree under `cargo xtask dev` does not.
+- **Delete when:** the release's build rebuilds a change to one of its
+  files in seconds (its index supplied without recompiling the cell),
+  and dev builds the release's again.
+
 ## The cell's Wasm budget was raised for launch
 
 - **Observed:** 2026-10-14. The cell diet (#305) set the budget at
@@ -371,7 +394,11 @@ fragment.club until cutover (decisions 34–35).
   old runtime's (checked once by hand). `fragment.push.register` and
   `__sw.js` run only in a real browser with a real push service. The
   chat's push (docs/chat-records.md, Push) is the same: its chat lane
-  subscribes the push fake by `__push-sub`, as the page's bell would.
+  subscribes the push fake by `__push-sub`, as the page's bell would, and
+  the shell's alerts (docs/api.md, The shell) subscribe through a fake of
+  the browser's `PushManager` that hands over the push fake's
+  subscription, and `alerts-sw.js` takes pushes DevTools delivers; its
+  click is not driven.
 - **Risk:** a page's subscribe or the service worker's display breaks
   unnoticed.
 - **First proof:** subscribing from a phone or desktop browser to a
@@ -379,23 +406,21 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** a manual check on a hosted fleet (phase 3) is recorded,
   or a browser test can run with a local push service.
 
-## A chat the shell frames is "looked at" while the shell is, and asks for notifications in a tab
+## A chat the shell frames is "looked at" while the shell is
 
 - **Observed:** 2026-10-03, the chat's push (docs/chat-records.md, Push).
   A chat's page says it is `looking` while its document is visible, so a
   chat open in a tab of the shell that is not shown (its frame is still
-  in a visible page) keeps its person from being pushed. And a browser
-  does not let a cross-origin frame ask for notifications, so the bell of
-  a chat the shell frames opens the chat in a tab of its own, where it may
-  ask.
+  in a visible page) keeps its person from being pushed. (Its other half,
+  the bell of a chat the shell frames sending its person to a tab of the
+  chat's own to ask for notifications, went 2026-10-24: the shell holds a
+  chat's alerts, docs/api.md, The shell.)
 - **Risk:** a person with the shell open on another chat misses a
-  reply's push; turning notifications on from the shell takes a detour.
+  reply's push.
 - **First proof:** a person who keeps the shell open says a reply came
   without a notification.
 - **Delete when:** the shell tells each frame whether it is shown (a
-  message the chat's page reads, beside its theme), and asks for
-  notifications on the platform's origin for the fragments it frames, or
-  browsers let a frame ask.
+  message the chat's page reads, beside its theme).
 
 ## A chat's unread count counts its person's own messages
 
@@ -420,8 +445,13 @@ fragment.club until cutover (decisions 34–35).
   (`"from": "agent"`), so each agent reply is a triggered run, and an
   operation's triggers pause themselves after 120 triggered runs in an
   hour (`limits::TRIGGERED_RUNS_PER_HOUR`). Nothing unpauses a chat's.
+  Since 2026-10-24 an agent's words before each tool call are a reply of
+  their own (`interim`, docs/chat-records.md): the job pushes none of
+  them, but each is a triggered run, so a chatty agent's turns count many.
 - **Risk:** a chat whose agents reply more than about twice a minute for
-  an hour stops pushing, for good, until someone runs `fragment unpause`.
+  an hour stops pushing, for good, until someone runs `fragment unpause`;
+  an agent that narrates every tool call of a long task gets there in a
+  few turns.
 - **First proof:** an `op.auto-paused` event for `notify_reply` on a
   chat.
 - **Delete when:** a trigger's breaker counts runs that fail or loop
@@ -1013,6 +1043,29 @@ fragment.club until cutover (decisions 34–35).
   or a reply posted under a `said` turn rather than its message's.
 - **Delete when:** Hermes' Relay sends a turn's end and its questions as
   structure, proven by the real-Hermes lane.
+
+## A routine's silence is read from Hermes' English warning
+
+- **Observed:** production, 2026-10-26 (Skyler's agent: a routine every
+  15 minutes posted Hermes' "⚠️ The model returned only a silence marker
+  for a message that needed a reply" at each fire). Relay carries no
+  `reply_expected` (v0.21.7, and upstream's main that day), so Hermes
+  answers a routine's bare `[SILENT]` with that warning; the relay runtime
+  drops it for a routine's turn alone, matched whole in its English words
+  (`wire::UNEXPECTED_SILENCE`; docs/bridge.md, "A routine with nothing to
+  tell says nothing").
+- **Risk:** a Hermes release that rewords it, or a profile whose
+  `display.language` is not English (the image sets none; an agent may
+  set its own), posts the warning at every fire again. A model that
+  brackets the marker with words (`[SILENT] nothing changed`), which
+  Hermes' cron's looser rule would deliver nothing for, posts them.
+- **First proof:** a routine's chat showing "The model returned only a
+  silence marker"; on a rewording, the Docker lane's
+  `a_routine_may_say_nothing` fails first.
+- **Delete when:** Relay carries `reply_expected` (or a turn's end as
+  structure, the entry above): the bridge then marks a routine's inbound
+  as expecting no reply, and Hermes' own silence ends a turn the bridge
+  can read; proven by the real-Hermes lane.
 
 ## Hermes' tool steps are its progress text
 

@@ -420,6 +420,12 @@ impl Suite {
         self.hosted_rules
     }
 
+    /// Whether the node's vendors are the fakes: a local run, or its
+    /// rehearsal (whose fakes no lane reaches, but which answer the node).
+    pub fn on_fakes(&self) -> bool {
+        self.preview.is_none()
+    }
+
     /// A heavy section runs only when `--only` names it (the real-Hermes
     /// lane builds a 3.8 GB image); otherwise it is a skip that says how.
     pub fn section_by_name(&mut self, name: &str, needs: &[Need], why: &str) -> bool {

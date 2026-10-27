@@ -706,13 +706,20 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url, 
     drop(body);
     let mut charge = gate(env, &owner, Some(&agent.id), None, transcribe::TRANSCRIBE_MODEL, transcribe::WHISPER).await?;
     let meta = Metadata { user_id: opaque(&owner), agent_id: Some(opaque(&agent.id)) };
+    let (answer, calls) = whispered(env, Config::from_env(env), &bounded.input, &meta).await;
+    charge.calls = calls;
     // not reached: it used nothing, and nothing is charged
-    let mut upstream = workers_ai(env, Config::from_env(env), transcribe::TRANSCRIBE_MODEL, &bounded.input, &meta).await?;
+    let mut upstream = answer?;
     charge.first_ms = Some(js::now_ms() - charge.t0);
     let status = upstream.status_code();
     let log_id = upstream.headers().get("cf-aig-log-id")?;
     if status != 200 {
-        return passed(status, bounded_text(&mut upstream).await);
+        let mut refused = passed(status, bounded_text(&mut upstream).await)?;
+        if status == 429 {
+            // its client's own retry waits for capacity, not half a second
+            refused.headers_mut().set("retry-after", &transcribe::RETRY_AFTER_S.to_string())?;
+        }
+        return Ok(refused);
     }
     let answer = match read_whole(&mut upstream).await {
         Ok(b) => b,
@@ -735,6 +742,38 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url, 
     resp.headers_mut().set("content-type", kind)?;
     resp.headers_mut().set(ANSWER_SHAPE_HEADER, &shape.to_string())?;
     Ok(resp)
+}
+
+/// Whisper's answer to a transcription, and the tries it took: a first try
+/// that failed fast for want of capacity (`transcribe::again`: a 429, a 5xx,
+/// a 408 or no answer, within `AGAIN_WITHIN_MS`) is made once more after
+/// `AGAIN_AFTER_MS`, and the second's answer is final. A failed try used
+/// nothing and is charged nothing. Workers AI's speech recognition takes 720
+/// calls a minute an account (developers.cloudflare.com/workers-ai/platform/
+/// limits, read 2026-10-22); what it refuses past that, or when short of
+/// capacity, is a passing 429. Not AI Gateway's own retries: its Retry
+/// Requests setting is the gateway's, so it would hold back a chat call's
+/// fallback too, and the binding's options name no retry, nor its docs
+/// which failures it retries.
+async fn whispered(env: &Env, cfg: &Config, input: &Value, meta: &Metadata) -> (CellResult<Response>, u32) {
+    let t0 = js::now_ms();
+    let first = workers_ai(env, cfg, transcribe::TRANSCRIBE_MODEL, input, meta).await;
+    let status = first.as_ref().ok().map(Response::status_code);
+    let ms = js::now_ms() - t0;
+    if !transcribe::again(status, ms) {
+        return (first, 1);
+    }
+    // where Workers AI's error is (the gateway's log of the call), never
+    // its body: an answer whose headers came fast can still stall its body,
+    // and a read of it would hold back the second try past what its client
+    // waits (Alex's review of #520)
+    let why = match first {
+        Ok(failed) => failed.headers().get("cf-aig-log-id").ok().flatten().map(|id| format!("cf-aig-log-id {id}")).unwrap_or_default(),
+        Err(e) => e.message,
+    };
+    console_log!("{}", json!({ "event": "model.transcribe-again", "model": transcribe::TRANSCRIBE_MODEL, "status": status, "ms": ms, "why": why }));
+    Delay::from(std::time::Duration::from_millis(transcribe::AGAIN_AFTER_MS)).await;
+    (workers_ai(env, cfg, transcribe::TRANSCRIBE_MODEL, input, meta).await, 2)
 }
 
 /// A transcription's answer names the shape of the model's own (its

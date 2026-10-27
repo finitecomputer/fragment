@@ -156,6 +156,9 @@ impl DurableObject for FragmentCell {
         if let Some(refused) = crate::routed::refused(&req, crate::routed::Own::of(self.cfg), &self.raw)? {
             return Ok(refused);
         }
+        if let Some(probed) = crate::routed::probed(&req, &self.schema)? {
+            return Ok(probed);
+        }
         match self.route(req).await {
             Ok(resp) => Ok(resp),
             Err(e) => e.response(),
@@ -362,6 +365,12 @@ pub(crate) enum MetaKey {
     Computer,
     /// The agent identity its own key holds, once it ran on a computer.
     AgentIdentity,
+    /// Its door's public key (`<door> <64 hex>`), registered by a link its
+    /// owner started, gone once they unlink (fragment_core::door).
+    Door,
+    /// The link ticket made last, until redeemed or past its time
+    /// (`<door> <nonce> <exp>`).
+    DoorTicket,
     /// The next time a page may pre-wake the computers its channels wake.
     PrewakeAt,
     /// Test fleets only: how many more paid AI steps fail just after their
@@ -426,6 +435,8 @@ impl MetaKey {
             MetaKey::TestAdvanceHeld => "test_advance_held",
             MetaKey::Computer => "computer",
             MetaKey::AgentIdentity => "agent_identity",
+            MetaKey::Door => "door",
+            MetaKey::DoorTicket => "door_ticket",
             MetaKey::PrewakeAt => "prewake_at",
             MetaKey::TestFailAfterPaid => "test_fail_after_paid",
             MetaKey::TestFailMeterAcks => "test_fail_meter_acks",
@@ -1409,7 +1420,7 @@ impl FragmentCell {
     /// every share-link holder (`view`).
     pub(crate) fn close_sockets(&self, tag: &str, reason: &str) {
         for ws in self.state.get_websockets_with_tag(tag) {
-            let _ = ws.close(Some(4003), Some(reason));
+            let _ = ws.close(Some(crate::live::ACCESS_ENDED), Some(reason));
         }
     }
 }
