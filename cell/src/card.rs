@@ -265,15 +265,15 @@ impl FragmentCell {
     }
 
     /// `PUT /api/f/{name}/card` (editors and up): `bytes`, a JPEG of the
-    /// card's size within its cap (`card::check_image`), is the card until a
+    /// card's size within its cap and whole (`card::check_upload`), is the card until a
     /// shot is asked for again or another is uploaded (`card::Cards::upload`).
     /// An app's alone, members-only or not: an upload needs no visitor.
     pub(crate) async fn upload_card(&self, caller: &Caller, bytes: Vec<u8>) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
         card::is_app(self.kind()?).map_err(|skip| CellError::invalid(skip.message()))?;
-        card::check_image(&bytes).map_err(|f| match f {
+        card::check_upload(&bytes).map_err(|f| match f {
             card::ImageFault::TooLarge { .. } => CellError::new(ErrorCode::TooLarge, f.message()),
-            card::ImageFault::Empty | card::ImageFault::NotJpeg | card::ImageFault::Size { .. } => CellError::invalid(f.message()),
+            card::ImageFault::Empty | card::ImageFault::NotJpeg | card::ImageFault::Size { .. } | card::ImageFault::NotWhole => CellError::invalid(f.message()),
         })?;
         self.writable().await?;
         let (blob, size) = (hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes)), bytes.len() as u64);

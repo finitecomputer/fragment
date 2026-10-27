@@ -170,6 +170,9 @@ pub enum ImageFault {
     TooLarge { size: usize },
     NotJpeg,
     Size { width: u16, height: u16 },
+    /// An upload whose JPEG is cut short or has a part missing
+    /// (`media::jpeg_whole`).
+    NotWhole,
 }
 
 impl ImageFault {
@@ -179,7 +182,21 @@ impl ImageFault {
             ImageFault::TooLarge { size } => format!("the image is {size} bytes, over the {BYTES_MAX} a card holds"),
             ImageFault::NotJpeg => "the image is no JPEG: a card is one".into(),
             ImageFault::Size { width, height } => format!("the image is {width}×{height}, not the card's {WIDTH}×{HEIGHT}"),
+            ImageFault::NotWhole => "the image is no whole JPEG: it is cut short, or a part of it is missing".into(),
         }
+    }
+}
+
+/// Whether an upload's `bytes` are a card: a card's image (`check_image`)
+/// that is a whole JPEG too (`media::jpeg_whole`), so one cut short never
+/// replaces the card. A shot is Chrome's own encoding, held to
+/// `check_image` alone; an upload is anyone's bytes.
+pub fn check_upload(bytes: &[u8]) -> Result<(), ImageFault> {
+    check_image(bytes)?;
+    if crate::media::jpeg_whole(bytes) {
+        Ok(())
+    } else {
+        Err(ImageFault::NotWhole)
     }
 }
 
@@ -1102,6 +1119,28 @@ mod tests {
         assert_eq!(check_image(&big), Err(ImageFault::TooLarge { size: BYTES_MAX + 1 }));
         big.truncate(BYTES_MAX);
         assert_eq!(check_image(&big), Ok(()), "exactly the cap is a card");
+    }
+
+    /// Goal: an upload is a card's image that is a whole JPEG too: one cut
+    /// short (Alex's frame header that ends early, a header and no image)
+    /// is refused, as is anything `check_image` refuses, first.
+    #[test]
+    fn an_upload_is_a_whole_jpeg() {
+        let truncated = [0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x03, 0x20, 0x05, 0x00];
+        assert_eq!(check_image(&truncated), Ok(()), "which its size alone takes");
+        assert_eq!(check_upload(&truncated), Err(ImageFault::NotWhole));
+        assert_eq!(check_upload(&jpeg(WIDTH, HEIGHT)), Err(ImageFault::NotWhole), "a header and its end");
+        assert_eq!(check_upload(&jpeg(640, 400)), Err(ImageFault::Size { width: 640, height: 400 }), "the size said first");
+        assert_eq!(check_upload(&[]), Err(ImageFault::Empty));
+        // a whole one of the card's size
+        let mut whole = vec![0xFF, 0xD8, 0xFF, 0xDB, 0x00, 0x43, 0x00];
+        whole.extend([1u8; 64]);
+        whole.extend(&jpeg(WIDTH, HEIGHT)[2..21]);
+        whole.extend([0xFF, 0xC4, 0x00, 0x13, 0x00]);
+        whole.extend([0u8; 16]);
+        whole.extend([0xFF, 0xDA, 0x00, 0x0C, 3, 1, 0x00, 2, 0x11, 3, 0x11, 0x00, 0x3F, 0x00, 0x12, 0x34, 0xFF, 0xD9]);
+        assert_eq!(check_upload(&whole), Ok(()));
+        assert!(ImageFault::NotWhole.message().contains("no whole JPEG"));
     }
 
     fn heard(msgs: &[Value]) -> Heard {

@@ -537,8 +537,23 @@ fn card_asks(s: &mut Suite, api: &Api, owner: &Keys, members: &str) -> Result<()
     s.ok("one over 512 KiB is refused, 413", r.status == 413 && r.message().contains("over the 524288"), &r);
     let r = put(owner, &name, vec![])?;
     s.ok("an empty one is refused, 400", r.status == 400 && r.message().contains("empty"), &r);
+    // cut short: a frame header that ends early (Alex's 11 bytes), a
+    // header and its end with no image, a real card's first half
+    let sof = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x03, 0x20, 0x05, 0x00];
+    let half = mine.get(..mine.len() / 2).unwrap_or_default().to_vec();
+    let short: Vec<Reply> = [sof, jpeg_header(1280, 800), half].into_iter().map(|body| put(&editor, &name, body)).collect::<Result<_>>()?;
+    s.ok(
+        "a JPEG of 1280×800 cut short (a frame header that ends early, a header with no image, a card's first half) is refused, 400, saying so",
+        short.iter().all(|r| r.status == 400 && r.message().contains("no whole JPEG")),
+        short.iter().map(Reply::to_string).collect::<Vec<_>>().join(" | "),
+    );
     let after = cards(api, &name);
-    s.ok("and a refused upload changes nothing", after["cards"] == before["cards"], json!({ "before": before, "after": after }));
+    let shown = get(&viewer, &name)?;
+    s.ok(
+        "and a refused upload changes nothing: the card is still its deploy's shot",
+        after["cards"] == before["cards"] && shown.bytes == shot,
+        json!({ "before": before, "after": after, "shown": card_detail(&Some(shown)) }),
+    );
     let r = put(&editor, &name, mine.clone())?;
     s.ok("an editor uploads a card: a JPEG of 1280×800, its blob named", r.status == 200 && r.body["blob"] == sha.as_str() && r.body["size"] == mine.len(), &r);
     let r = get(&viewer, &name)?;

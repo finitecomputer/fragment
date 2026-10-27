@@ -1266,7 +1266,7 @@ title opening its share sheet.
 | `GET`, `HEAD /api/f/{name}/blobs/{sha256}` | viewer | → the bytes (ranges answer 206) |
 | `GET /api/f/{name}/card` | viewer | → the fragment's preview card (Cards, below): a 1280×800 JPEG, `ETag` its blob's SHA-256, `Cache-Control: private, no-cache`, `X-Fragment-Ref` the live commit it shows (a shot's: an upload shows none, and has none); `If-None-Match` naming the tag is 304. Before the first is made, 404 `not_found` |
 | `POST /api/f/{name}/card` | editor | → `{ok, live, since, joined}`: a shot of the live again, which the fragment's alarm takes as it takes a deploy's and which replaces the card, an upload too (Cards, below: Asked for again); `joined` when a shot of that live was wanted already (that one is it). 400 for a chat, an agent or a members-only fragment, or with nothing deployed; 402 when its owner pays for nothing now; 429 within a minute of the last ask, saying how long is left |
-| `PUT /api/f/{name}/card` | editor | a JPEG of 1280×800, at most 512 KiB, as the body → `{ok, blob, size}`: the card from now until a shot is asked for again or another is uploaded; deploys are still shot, for the page's report, and leave it (Cards, below: Uploaded). 400 for anything else (empty, not a JPEG, another size) and for a chat or an agent, 413 over 512 KiB, 402 past its owner's overdraft |
+| `PUT /api/f/{name}/card` | editor | a JPEG of 1280×800, at most 512 KiB, as the body → `{ok, blob, size}`: the card from now until a shot is asked for again or another is uploaded; deploys are still shot, for the page's report, and leave it (Cards, below: Uploaded). 400 for anything else (empty, not a JPEG, another size, a JPEG cut short or with a part missing: `card::check_upload`) and for a chat or an agent, 413 over 512 KiB, 402 past its owner's overdraft |
 | `GET /api/f/{name}/events?since=` or `?tail=` | viewer | → `{events: [{id, at, kind, summary, data}]}`, oldest first: the page after `since`, or the newest `tail` (1-500; 400 otherwise, or with `since`) (500 a page; 10 000 kept, as for `ops`: `limits::AUDIT_KEPT`) |
 | `POST /api/f/{name}/ops/{op}` | the operation's role | `{id, input}` → `{result, replayed}`; for a job, `result` is `{run, status}` (the same id answers the same run) |
 | `GET /api/f/{name}/runs?status=&op=&limit=` | viewer | → `{runs: [{id, op, via, trigger, principal, status, attempt, depth, createdAt, finishedAt, error}], counts: {<status>: n}, paused}` newest first (30, at most 200) |
@@ -1584,8 +1584,12 @@ cell/src/card.rs runs them.
 - **Uploaded.** An editor's `PUT /api/f/{name}/card` makes their image
   the card at once. It is held to what a shot is held to (a JPEG of
   1280×800, at most 512 KiB: every card is one shape, which the shell
-  lays out without asking, so a client resizes first), stored as one of
-  the fragment's blobs (`image/jpeg`, kept while it is the card) and
+  lays out without asking, so a client resizes first), and whole too: its
+  structure read through to its end, so a JPEG cut short (a header and
+  no image, a frame header that ends early) is 400 and the card stays
+  (`media::jpeg_whole`; its compressed data is not decoded). It is
+  stored as one of the fragment's blobs (`image/jpeg`, kept while it is
+  the card) and
   served as a shot is, with no `X-Fragment-Ref`: it shows no commit.
   **It stays until a shot is asked for again or another image is
   uploaded.** A later deploy is still shot, for the page's report (and
