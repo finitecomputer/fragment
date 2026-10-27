@@ -264,6 +264,84 @@ fn message(o: &Map<String, Value>) -> Said {
     Said::Message(Message { text, to, attachments, turn, hop, reply_to })
 }
 
+/// The one way an owner's message is relayed (docs/chat-records.md, "A
+/// relayed message").
+pub const VIA_SIMPLEX: &str = "simplex";
+
+/// What a relayed message says it relays: the person it speaks for, how
+/// they said it, and whose door it came through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relayed {
+    /// The person whose message it is (an agent relays only its owner's).
+    pub for_: String,
+    pub via: &'static str,
+    /// The agent fragment whose door signed it.
+    pub agent: String,
+}
+
+/// A relayed message's `relayed` (docs/chat-records.md): a message an agent
+/// posts on its own chat with its owner carrying what its owner said
+/// elsewhere (`{"via": "simplex", "for": <owner>, "agent": <its fragment>,
+/// "at", "sig"}`: its door's signature, which the platform checked before
+/// it took the post, and it takes none without). None for any other body,
+/// a message of another shape, or another `via`. Whether it is honored (by
+/// whom, for whom) is the engine's.
+pub fn relayed(body: &Value) -> Option<Relayed> {
+    let Value::Object(o) = body else { return None };
+    if !matches!(o.get("kind"), None | Some(Value::Null)) && o.get("kind") != Some(&Value::String("message".into())) {
+        return None;
+    }
+    let r = o.get("relayed")?.as_object()?;
+    let via = match r.get("via")?.as_str()? {
+        VIA_SIMPLEX => VIA_SIMPLEX,
+        _ => return None,
+    };
+    let for_ = r.get("for")?.as_str().filter(|p| is_identity(p) && p.len() <= 128)?.to_string();
+    let agent = r.get("agent")?.as_str().filter(|a| crate::simplex::run::dir_name_ok(a))?.to_string();
+    matches!(message(o), Said::Message(_)).then_some(Relayed { for_, via, agent })
+}
+
+/// A relayed message's body: `text` (cut as a person's is), `to` its agent
+/// alone, what it relays (for its owner, through its door), and its files
+/// (`attachments`, uploaded first). Its door signs it as it is posted
+/// (simplex/door.rs `Key::seal`).
+pub fn relayed_message(text: &str, agent: &crate::runtime::Agent, via: &'static str, attachments: &[AttachmentRef]) -> Value {
+    assert!(is_identity(&agent.identity) && is_identity(&agent.owner), "a relayed message is an agent's, for a person");
+    let relayed = json!({ "via": via, "for": agent.owner, "agent": agent.fragment });
+    let mut body = json!({ "text": cut_bytes(text, limits::MESSAGE_TEXT_MAX_BYTES), "to": [agent.identity], "relayed": relayed });
+    if !attachments.is_empty() {
+        body["attachments"] = json!(attachments);
+    }
+    body
+}
+
+/// A relayed message's post id: `sx:` and 32 hex of SHA-256 of `<agent
+/// fragment>|<its sender's id for it>`: the same however often the agent's
+/// SimpleX core reads it, a catch-up or a rollback's included.
+pub fn relayed_id(agent: &str, sender_id: &str) -> String {
+    let digest = Sha256::digest(format!("{agent}|{sender_id}").as_bytes());
+    let id = format!("sx:{}", &hex(&digest)[..32]);
+    assert!(valid_post_id(&id), "a relayed id is a post id: {id}");
+    id
+}
+
+/// Whether a `tasks` record is a routine that names no chat (`{kind:
+/// "routine", text}`): its agent's home's, whichever chat that is as it
+/// fires (docs/api.md, "An agent's home"), which the bridge reads then and
+/// names (`homed`). A bridge before homes passes one over (`task`: Other).
+pub fn homeless(body: &Value) -> bool {
+    let Value::Object(o) = body else { return false };
+    o.get("kind").and_then(Value::as_str) == Some("routine") && text_field(o, "text").is_some() && matches!(o.get("chat"), None | Some(Value::Null))
+}
+
+/// A routine that names no chat, naming the one its agent's home is now.
+pub fn homed(body: &Value, chat: &str) -> Value {
+    assert!(homeless(body), "only a routine that names no chat is given one");
+    let mut named = body.clone();
+    named["chat"] = json!(chat);
+    named
+}
+
 /// Reads a `tasks` record's body.
 pub fn task(body: &Value) -> Task {
     let Value::Object(o) = body else { return Task::Other };
@@ -441,21 +519,22 @@ impl Category {
     }
 }
 
-/// One step of a turn (a tool call), numbered from 1.
+/// One step of a turn (a tool call), numbered from 1. The model's words
+/// before the call are no part of it: they are a reply of their own,
+/// posted before it (docs/chat-records.md; an older bridge's step kept
+/// them as its `text`, which pages still read).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Step {
     pub tool: String,
     pub args: String,
     pub ok: bool,
     pub excerpt: String,
-    /// The model's text before the call, if any.
-    pub text: String,
     pub category: Category,
 }
 
 pub fn turn_step(turn: &str, n: u32, s: &Step) -> Value {
     assert!(n >= 1, "steps number from 1");
-    let mut body = json!({
+    json!({
         "kind": "turn.step",
         "turn": turn,
         "step": n,
@@ -464,12 +543,7 @@ pub fn turn_step(turn: &str, n: u32, s: &Step) -> Value {
         "args": cut_or_empty(&s.args, limits::STEP_ARGS_MAX_CHARS),
         "ok": s.ok,
         "excerpt": cut_or_empty(&s.excerpt, limits::STEP_EXCERPT_MAX_CHARS),
-    });
-    let text = cut_or_empty(&s.text, limits::STEP_EXCERPT_MAX_CHARS);
-    if !text.is_empty() {
-        body["text"] = json!(text);
-    }
-    body
+    })
 }
 
 /// A turn asking `asks` something to answer in words: their next message
@@ -614,12 +688,18 @@ pub fn menu_id(life: &str) -> String {
 }
 
 /// An agent's reply on `chat`: its text and turn; `to` and `hop` when it
-/// hands off to another agent. Attachments are added by whoever uploads them.
-pub fn reply(text: &str, turn: &str, to: &[String], hop: u32) -> Value {
+/// hands off to another agent; `interim` when its turn went on working
+/// after it (its words before a tool call: docs/chat-records.md), which
+/// the chat's push leaves out. Attachments are added by whoever uploads
+/// them.
+pub fn reply(text: &str, turn: &str, to: &[String], hop: u32, interim: bool) -> Value {
     let mut body = json!({ "text": cut_bytes(text, limits::REPLY_TEXT_MAX_BYTES), "turn": turn });
     if !to.is_empty() {
         body["to"] = json!(to);
         body["hop"] = json!(hop);
+    }
+    if interim {
+        body["interim"] = json!(true);
     }
     body
 }
@@ -627,6 +707,41 @@ pub fn reply(text: &str, turn: &str, to: &[String], hop: u32) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal: a relayed message is a message that names `simplex` and a
+    /// person, nothing else; its body round-trips through `said` as a
+    /// message to its agent; its id is the same for the same message.
+    #[test]
+    fn a_relayed_message_reads_strictly() {
+        let juniper = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None };
+        let body = relayed_message("hi from my phone", &juniper, VIA_SIMPLEX, &[]);
+        assert_eq!(body, json!({ "text": "hi from my phone", "to": ["npub1juniper"], "relayed": { "via": "simplex", "for": "npub1paul", "agent": "juniper--k3x9" } }));
+        assert_eq!(relayed(&body), Some(Relayed { for_: "npub1paul".into(), via: VIA_SIMPLEX, agent: "juniper--k3x9".into() }));
+        let Said::Message(m) = said(&body) else { panic!("a message") };
+        assert_eq!((m.text.as_str(), m.to.as_slice()), ("hi from my phone", ["npub1juniper".to_string()].as_slice()));
+        for bad in [
+            json!({ "text": "x", "relayed": { "via": "telegram", "for": "npub1paul", "agent": "juniper--k3x9" } }),
+            json!({ "text": "x", "relayed": { "via": "simplex", "for": "paul", "agent": "juniper--k3x9" } }),
+            json!({ "text": "x", "relayed": { "via": "simplex", "for": "npub1paul" } }),
+            json!({ "text": "x", "relayed": { "via": "simplex", "for": "npub1paul", "agent": "../x" } }),
+            json!({ "text": "x", "relayed": { "via": "simplex" } }),
+            json!({ "text": "x", "relayed": "simplex" }),
+            json!({ "kind": "stop", "relayed": { "via": "simplex", "for": "npub1paul", "agent": "juniper--k3x9" } }),
+            json!({ "text": 3, "relayed": { "via": "simplex", "for": "npub1paul", "agent": "juniper--k3x9" } }),
+            json!({ "text": "x" }),
+            json!("x"),
+        ] {
+            assert_eq!(relayed(&bad), None, "{bad}");
+        }
+        let voice = AttachmentRef { sha256: "a".repeat(64), size: 10, media_type: "audio/mp4".into(), name: "voice.m4a".into() };
+        let with = relayed_message("", &juniper, VIA_SIMPLEX, std::slice::from_ref(&voice));
+        assert!(relayed(&with).is_some(), "a voice message, its words none");
+        let Said::Message(m) = said(&with) else { panic!("a message") };
+        assert_eq!(m.attachments, vec![voice]);
+        assert_eq!(relayed_id("juniper--k3x9", "RlBFOStpcVFyc1VrNDJyZQ=="), relayed_id("juniper--k3x9", "RlBFOStpcVFyc1VrNDJyZQ=="));
+        assert_ne!(relayed_id("juniper--k3x9", "a"), relayed_id("maple--k3x9", "a"), "each agent's own");
+        assert_eq!(relayed_id("juniper--k3x9", "a").len(), 35);
+    }
 
     #[test]
     fn messages_read_strictly() {
@@ -738,6 +853,27 @@ mod tests {
         assert_eq!(task(&json!("routine")), Task::Other);
     }
 
+    /// Goal (an agent's home): a routine that names no chat is homeless,
+    /// and named its home's chat it is a routine there; anything else is
+    /// not homeless (a chat named, even empty; no text; another kind).
+    #[test]
+    fn a_routine_with_no_chat_runs_at_home() {
+        for homeless_one in [json!({ "kind": "routine", "text": "water" }), json!({ "kind": "routine", "text": "water", "chat": null })] {
+            assert!(homeless(&homeless_one), "{homeless_one}");
+            assert_eq!(task(&homed(&homeless_one, "juniper-simplex--w9x2")), Task::Routine { text: "water".into(), chat: "juniper-simplex--w9x2".into() });
+        }
+        for not in [
+            json!({ "kind": "routine", "text": "water", "chat": "c--k3x9" }),
+            json!({ "kind": "routine", "text": "water", "chat": "" }),
+            json!({ "kind": "routine" }),
+            json!({ "kind": "routine", "text": 3 }),
+            json!({ "kind": "joined", "text": "water" }),
+            json!("routine"),
+        ] {
+            assert!(!homeless(&not), "{not}");
+        }
+    }
+
     #[test]
     fn mentions_are_words_after_an_at() {
         assert_eq!(mentions("@Juniper can you, @bob-2?"), vec!["juniper", "bob-2"]);
@@ -771,8 +907,13 @@ mod tests {
         let c = Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 4 };
         let life = "0123456789abcdef0123456789abcdef";
         assert_eq!(turn_start("t", "npub1p", "npub1a", &c, life), json!({ "kind": "turn.start", "turn": "t", "asker": "npub1p", "agent": "npub1a", "cause": { "fragment": "talk--k3x9", "channel": "chat", "seq": 4 }, "life": life }));
-        let s = Step { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), text: String::new(), category: Category::Shell };
-        assert_eq!(turn_step("t", 1, &s), json!({ "kind": "turn.step", "turn": "t", "step": 1, "tool": "terminal", "category": "shell", "args": "ls", "ok": true, "excerpt": "" }));
+        let s = Step { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), category: Category::Shell };
+        assert_eq!(turn_step("t", 1, &s), json!({ "kind": "turn.step", "turn": "t", "step": 1, "tool": "terminal", "category": "shell", "args": "ls", "ok": true, "excerpt": "" }), "no words: they are a reply");
+        assert_eq!(reply("Let me look.", "t", &[], 1, false), json!({ "text": "Let me look.", "turn": "t" }));
+        assert_eq!(reply("Let me look.", "t", &[], 1, true), json!({ "text": "Let me look.", "turn": "t", "interim": true }));
+        assert_eq!(reply("@rowan yours", "t", &["npub1r".into()], 2, true), json!({ "text": "@rowan yours", "turn": "t", "to": ["npub1r"], "hop": 2, "interim": true }));
+        let long = "w".repeat(limits::REPLY_TEXT_MAX_BYTES + 9);
+        assert_eq!(reply(&long, "t", &[], 1, true)["text"].as_str().map(str::len), Some(limits::REPLY_TEXT_MAX_BYTES), "a reply's own bound, never a step's 300");
         assert_eq!(turn_asked("t", "npub1p"), json!({ "kind": "turn.asked", "turn": "t", "asks": "npub1p" }));
         assert_eq!(turn_notice("t", NoticeCategory::Memory, " Memory updated "), json!({ "kind": "turn.notice", "turn": "t", "category": "memory", "text": "Memory updated" }));
         assert_eq!(turn_notice("t", NoticeCategory::Warning, &"x".repeat(400))["text"].as_str().map(|t| t.chars().count()), Some(limits::NOTICE_TEXT_MAX_CHARS));
@@ -786,8 +927,8 @@ mod tests {
         let once = PromptOption { id: "once".into(), label: "Allow once".into(), style: None, words: false };
         assert_eq!(turn_prompt("t", "p", "Which?", &[once, other], "npub1p", 9)["options"], json!([{ "id": "once", "label": "Allow once" }, { "id": "other", "label": "Other", "words": true }]));
         assert_eq!(turn_prompt_closed("t", "p", Closed::Expired, None)["outcome"], "expired");
-        assert_eq!(reply("hi", "t", &[], 0), json!({ "text": "hi", "turn": "t" }));
-        assert_eq!(reply("hi @b", "t", &["npub1b".to_string()], 1), json!({ "text": "hi @b", "turn": "t", "to": ["npub1b"], "hop": 1 }));
+        assert_eq!(reply("hi", "t", &[], 0, false), json!({ "text": "hi", "turn": "t" }));
+        assert_eq!(reply("hi @b", "t", &["npub1b".to_string()], 1, false), json!({ "text": "hi @b", "turn": "t", "to": ["npub1b"], "hop": 1 }));
     }
 
     #[test]

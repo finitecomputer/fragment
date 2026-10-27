@@ -97,7 +97,13 @@ jobs:
     name: docker (real Hermes)
     needs: changes
     if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.docker == 'true'
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 (Docker 28), not ubuntu-latest: since 2026-10-25,
+    # ubuntu-latest is 26.04 with Docker 29, whose containerd image store
+    # names `containerd` in every container's root mount, so Hermes takes
+    # even the Containers-shaped run (no /.dockerenv) for a container, and
+    # `an_agents_home_is_the_same_on_either_runtime` proves nothing (it says
+    # so). Containers on Cloudflare show no such mount.
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     defaults:
       run:

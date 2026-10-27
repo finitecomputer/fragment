@@ -3,9 +3,10 @@
 // on one trigger (fragment.json): each record an agent of the chat posts on
 // `chat` (its replies: `rp:<turn>:<n>`, each whole, never a draft) starts
 // `notify_reply`, which pushes the reply to the chat's people who are not
-// looking at it. A person's page subscribes for its person (`fragment.push.
-// register(<their identity>)`), and says in its presence whether the
-// chat is on screen (`looking`).
+// looking at it, unless it is interim (`interim: true`: the agent's words
+// before a tool call, said while it works). A person's page subscribes for
+// its person (`fragment.push.register(<their identity>)`), and says in its
+// presence whether the chat is on screen (`looking`).
 import { DurableObject } from "cloudflare:workers";
 
 // A push's body: the reply's first characters.
@@ -35,6 +36,9 @@ export class App extends DurableObject {
     // its trigger's runs alone (as the chat itself): a member who calls it pushes nothing
     if (job.via !== "channel") return { pushed: 0, why: "only the chat's trigger pushes" };
     if (!isReply(record?.body)) return { pushed: 0, why: "not a reply" };
+    // the agent's words before a tool call, said while it works: its
+    // answer, a question or the words before a card are pushed, not these
+    if (record.body.interim === true) return { pushed: 0, why: "an interim reply" };
     const members = await job.members();
     // the trigger takes only an agent's records; asked again of who it is now
     if (members.find((m) => m.principal === record.principal)?.kind !== "agent") return { pushed: 0, why: "not an agent's" };

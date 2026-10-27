@@ -95,7 +95,8 @@ and runs its npm ([docs/pinned-node.md](docs/pinned-node.md), which also says ho
 Then:
 
 ```
-cargo xtask dev            # the cell on :8790 under wrangler dev, the code.storage and WorkOS fakes
+cargo xtask dev            # the cell on :8790 under wrangler dev, the code.storage and WorkOS fakes;
+                           # an edit to cell/shell or templates/ is served on reload seconds later
 cargo xtask try todo       # in another terminal: todo | inbox | notes
 ```
 

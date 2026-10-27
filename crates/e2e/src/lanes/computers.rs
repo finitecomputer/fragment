@@ -818,6 +818,95 @@ fn intercept_names_by_key(s: &mut Suite, api: &Api, owner_id: &str, agent: &str,
     Ok(8)
 }
 
+/// What the door checks act on: the lane's computer, its agent and chat.
+struct Doors<'a> {
+    owner: &'a crate::Keys,
+    owner_id: &'a str,
+    stranger: &'a crate::Keys,
+    id: &'a str,
+    agent: &'a str,
+    chat: &'a str,
+    identity: &'a str,
+}
+
+/// The XFTP relay (fragment_core::relay), through the stub's `relay`
+/// commands: a host it does not carry is refused before anything is
+/// opened, and an app's answer that carries the relay's own headers (an
+/// open proxy's way in, were they believed) comes back through the
+/// computer's egress as itself, stripped of them, never piped (the
+/// coordinator's review of #611). The replies it adds.
+fn relay_checks(s: &mut Suite, api: &Api, owner: &crate::Keys, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+    let refused = fetched(s, 420, "relay to example.com")?;
+    s.ok("a relay to a host it does not carry is refused (403), before anything is opened", refused.starts_with("relay refused") && refused.contains("403"), &refused);
+    let (name, _) = super::author::chat(s, api, owner, "relayforge")?;
+    let plain = api.page(&name, "forged", None)?;
+    s.ok(
+        "an app's own route answers with whatever headers it likes, the relay's among them (so the egress's guard is tested, not assumed)",
+        plain.status == 200 && plain.header("x-fragment-relay-host") == "example.com",
+        json!({ "status": plain.status, "host": plain.header("x-fragment-relay-host") }),
+    );
+    let forged = fetched(s, 421, &format!("relay forged /f/{name}/forged"))?;
+    s.ok(
+        "that answer, asked through the computer's egress as an upgrade, comes back as itself (200, its body), every relay header stripped: never piped to the host it names",
+        forged == "relay answered 200, its headers 0: an app's own answer",
+        &forged,
+    );
+    Ok(2)
+}
+
+/// An agent's door (fragment_core::door; Paul's design of 2026-10-23),
+/// through the stub's `door` commands, which do what the bridge's SimpleX
+/// does: a link starts only from its owner's ticket, which the platform
+/// signs as the agent fragment's key for this computer and the bridge
+/// checks, and redeems once with the door's key; the platform takes a
+/// relayed record (one that speaks for the owner) only signed by that
+/// door's key, never by the agent's own, which signs every request its
+/// tools make; the owner's unlink closes the door at once. The replies it
+/// adds.
+fn door_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+    let path = format!("/api/computers/{}/agents/{}/door", c.id, c.agent);
+    let ticket = |who: &crate::Keys, act: &str| api.signed(who, "POST", &path, Some(&json!({ "door": "simplex", "act": act })));
+    let r = ticket(c.stranger, "link")?;
+    s.ok("no one but its owner is given a ticket to the agent's door", r.status == 404, &r);
+    let t = ticket(c.owner, "link")?;
+    let key = fragment_core::npub::parse(c.identity).unwrap_or_default();
+    let read = serde_json::from_value::<fragment_core::door::Ticket>(t.body.clone()).ok().filter(fragment_core::door::Ticket::well_formed);
+    let signed = read.as_ref().is_some_and(|x| fragment_nip98::verify_digest(&key, &x.digest(), &x.sig));
+    let within = read.as_ref().is_some_and(|x| (x.exp - now_ms() - fragment_core::door::TICKET_MS).abs() < 60_000);
+    s.ok(
+        "its owner's link ticket is for that agent on this computer, for ten minutes, signed by the agent fragment's own key",
+        t.status == 200 && t.body["act"] == "link" && t.body["agent"] == c.agent && t.body["computer"] == c.id && signed && within,
+        &t,
+    );
+    let forged = fetched(s, 400, "door forge yes, go ahead")?;
+    s.ok(
+        "a record that relays its owner with no door's signature, posted with the agent's own key, is refused: never its owner's",
+        forged.starts_with("door refused: 403") && forged.contains("relayed record"),
+        &forged,
+    );
+    let shut = fetched(s, 401, "door other before any link")?;
+    s.ok("one signed by a key that is no open door's is refused", shut.starts_with("door refused: 403"), &shut);
+    let linked = fetched(s, 402, &format!("door link {}", t.body))?;
+    s.ok("the computer checks the ticket as the bridge does (the agent's key, this computer), and redeems it with a door key it made", linked == "door linked", &linked);
+    let again = fetched(s, 403, &format!("door link {}", t.body))?;
+    s.ok("the same ticket again is refused: a replay redeems nothing", again.starts_with("door refused: 403"), &again);
+    let said = fetched(s, 404, "door say hi from my phone")?;
+    let recs = records(api, c.owner, c.chat, "chat");
+    let relayed = recs.iter().find(|r| r["principal"] == c.identity && r["body"]["text"] == "hi from my phone").cloned().unwrap_or_default();
+    s.ok(
+        "a record its door's key signs is taken: the agent's post on the chat, relaying its owner, signed",
+        said.starts_with("door said ") && relayed["body"]["relayed"]["via"] == "simplex" && relayed["body"]["relayed"]["for"] == c.owner_id && relayed["body"]["relayed"]["sig"].is_string(),
+        json!({ "said": said, "record": relayed }),
+    );
+    let other = fetched(s, 405, "door other signed by another key")?;
+    s.ok("with its door open, one signed by any other key is still refused", other.starts_with("door refused: 403"), &other);
+    let r = ticket(c.owner, "unlink")?;
+    s.ok("its owner's unlink ticket", r.status == 200 && r.body["act"] == "unlink" && r.body["agent"] == c.agent, &r);
+    let closed = fetched(s, 406, "door say after the unlink")?;
+    s.ok("unlinked, the door is closed at once: what its key signs is refused", closed.starts_with("door refused: 403"), &closed);
+    Ok(7)
+}
+
 /// The route's models by their ids, through the intercept (Paul,
 /// 2026-10-16: "be able to run `/model` with hermes and see the real
 /// model"): `GET /v1/models` lists the ids the route takes, naming no agent
@@ -1163,6 +1252,52 @@ fn routine_checks(s: &mut Suite, api: &Api, c: &Routined, say: &dyn Fn(u32, &str
         exit == Some(0) && rm["data"]["removed"] == r1 && lever.body["records"] == 0 && fired(api, c.owner, c.agent).len() == before && list(api).is_empty(),
         json!({ "removed": rm, "lever": lever.body }),
     );
+
+    // its owner's home (docs/api.md, "An agent's home"): a routine with no
+    // chat runs, as it fires, in its own chat (`<label>-chat`); its
+    // agent.json saying `simplex` with no SimpleX link (the stub runs none:
+    // the Docker lane's real image runs one), still there, a chat of its
+    // SimpleX label beside it notwithstanding, the same schedule
+    let label = fragment_proto::split_fragment_name(c.agent).map_or("", |(label, _)| label).to_string();
+    let chat_of = |suffix: &str, title: &str| -> Result<String> {
+        let r = api.signed(c.owner, "POST", "/api/fragments", Some(&json!({ "label": format!("{label}-{suffix}"), "template": "chat", "title": title })))?;
+        anyhow::ensure!(r.status == 200, "its {suffix}: {r}");
+        let name = r.body["name"].as_str().unwrap_or("").to_string();
+        let joined = api.signed(c.owner, "PUT", &format!("/api/f/{name}/members/{}", c.identity), Some(&json!({ "role": "editor" })))?;
+        anyhow::ensure!(joined.status == 200, "its agent in its {suffix}: {joined}");
+        Ok(name)
+    };
+    let own = chat_of("chat", "Its chat")?;
+    let (exit, r) = cli(s, &["schedule", "add", c.agent, "--routine", "say hi at home", "--cron", "0 0 1 1 *", "--json"]);
+    let home = r["data"]["schedule"].clone();
+    s.ok(
+        "its owner schedules a routine with no chat (`fragment schedule add --routine` without `--chat`): the routine names none, so it runs in their home as it fires",
+        exit == Some(0) && home["record"] == json!({ "kind": "routine", "text": "say hi at home" }),
+        &r,
+    );
+    let at_home = |s: &Suite, chat: &str, after: usize| {
+        let done = |recs: &[Value]| agent_replies(recs, c.identity).iter().skip(after).any(|r| !c.scripted || r["body"]["text"].as_str().is_some_and(|t| t.contains("[your routine] say hi at home")));
+        s.eventually(c.wake + Duration::from_secs(60), || done(&records(api, c.owner, chat, "chat")))
+    };
+    let lever = cron_now(api, c.agent)?;
+    let ran = at_home(s, &own, 0);
+    s.ok("due, it runs in its own chat, its home while its agent.json names none", lever.body["records"] == 1 && ran, json!(agent_replies(&records(api, c.owner, &own, "chat"), c.identity)));
+    let sx = chat_of("simplex", "SimpleX")?;
+    let written = api.signed(c.owner, "POST", &format!("/api/f/{}/files", c.agent), Some(&json!({ "message": "its home: its SimpleX chat", "files": [{ "path": "agent.json", "text": "{\n  \"tier\": \"cheap\",\n  \"home\": \"simplex\"\n}\n" }] })))?;
+    let before_own = agent_replies(&records(api, c.owner, &own, "chat"), c.identity).len();
+    let lever = cron_now(api, c.agent)?;
+    let ran = at_home(s, &own, before_own);
+    s.ok(
+        "its agent.json's home SimpleX with no SimpleX link: the same schedule's next fire runs in its own chat still, never in a chat of its SimpleX label its link does not name",
+        written.status == 200 && lever.body["records"] == 1 && ran && agent_replies(&records(api, c.owner, &sx, "chat"), c.identity).is_empty(),
+        json!({ "written": written.status, "own": agent_replies(&records(api, c.owner, &own, "chat"), c.identity), "simplex": agent_replies(&records(api, c.owner, &sx, "chat"), c.identity) }),
+    );
+    let (exit, _) = cli(s, &["schedule", "rm", c.agent, &home["id"].to_string(), "--json"]);
+    anyhow::ensure!(exit == Some(0) && list(api).is_empty(), "the home routine removed");
+    for chat in [&own, &sx] {
+        let r = api.signed(c.owner, "DELETE", &format!("/api/f/{chat}"), None)?;
+        anyhow::ensure!(r.status == 200, "{chat} deleted: {r}");
+    }
     Ok(())
 }
 
@@ -1287,8 +1422,12 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     } else {
         say(2, "tool please")?;
         let stepped = s.eventually(wake, || records(api, &owner, &chat_name, "work").iter().any(|r| r["body"]["kind"] == "turn.step"));
-        s.ok("a tool step is a record on work", stepped && s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == 2), "");
-        replies_so_far = 2;
+        // its words before the call are a reply of their own, then its answer
+        let answered = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == 3);
+        let said: Vec<Value> = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().skip(1).collect();
+        let words = said.first().is_some_and(|r| r["body"]["text"] == "Let me look." && r["body"]["interim"] == true) && said.get(1).is_some_and(|r| echoed(r, "tool please") && r["body"].get("interim").is_none());
+        s.ok("a tool step is a record on work, the agent's words before it a reply of their own (interim), then its answer", stepped && answered && words, json!(said));
+        replies_so_far = 3;
 
         // a page sees the reply's draft live, then the reply that replaces it
         let mut page = Socket::open(api, &chat_name, "__live", Some(&owner), None)?;
@@ -1429,6 +1568,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             replies_so_far += intercept_takes_model_ids(s, api, &owner_id, &fetched)?;
             replies_so_far += codestorage_through_egress(s, api, &owner, &agent, &fetched)?;
         }
+        let doors = Doors { owner: &owner, owner_id: &owner_id, stranger: &stranger, id: &id, agent: &agent_name, chat: &chat_name, identity: &identity };
+        replies_so_far += door_checks(s, api, &doors, &fetched)?;
+        replies_so_far += relay_checks(s, api, &owner, &fetched)?;
     } else {
         // a real runtime called its model to answer at all: each call went
         // through the intercept, charged on its owner's ledger after it.

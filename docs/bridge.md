@@ -50,9 +50,9 @@ A runtime gets commands and sends events, each naming its turn
 |---|---|
 | `Connected(bool)` | the runtime can take turns now, or cannot: the bridge claims a turn only while it can (Relay: Hermes on its socket, greeted; `script`: from its start) |
 | `Draft {text}` | the reply so far, shown live |
-| `Reply {part, text}` | reply `part` (from 1) whole; posted at the next part, step, prompt, or end |
+| `Reply {part, text}` | reply `part` (from 1) whole; posted at the next part, step, prompt, or end (at a step, `interim`: the turn works on after it, unless the step only updates memory) |
 | `Attachment {part, file}` · `Retract {part}` | a file on a reply; a reply taken back |
-| `Step {tool, args, ok, excerpt, text, category}` | a tool call, and what it does (docs/chat-records.md, `turn.step`) |
+| `Step {tool, args, ok, excerpt, category}` | a tool call, and what it does (docs/chat-records.md, `turn.step`); the model's words before it are a reply part of their own, sent before it |
 | `Prompt {prompt, text, options, ttl?}` | a card; the turn waits, its computer kept awake until the card is answered (a press, or, for a card that takes words, its owner's message in the chat: `Answer`) or expires |
 | `Asked` | the turn asked its asker something to answer in words (the question is a reply part before it): their next message to the agent in that chat is its answer (`Tell`); it waits, running, as long as a prompt's life, and the chat is told (`turn.asked`) |
 | `End {outcome}` | `idle`, `stopped`, or `error` |
@@ -73,12 +73,17 @@ Bodies are JSON. `api.rs` has one method for each.
 
 | Method and path | Body | Reads |
 |---|---|---|
-| `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute, and within a second of a change to the ready file (below) |
+| `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute, and within a second of a change to the ready file (below); `?simplex=1` when the image names a SimpleX core (below, "SimpleX") |
+| `GET /api/computer/relay?host=&port=` (no agent), WebSocket | | the XFTP relay (docs/computers.md): one per connection a SimpleX core makes to a host and port the view's `relay` names, through the cores' proxy (`src/simplex/socks.rs`), its bytes piped both ways |
 | `GET /api/computer/keepalive` (no agent), WebSocket | | held while a turn waits to run, runs, or waits on its card (below, "A card keeps its computer awake"); pinged every `BRIDGE_KEEPALIVE_PING_MS` (15 s), and opened again after twice that with nothing heard, since a deploy can cut the platform's side of it with no close reaching here (#557) |
+| `GET /api/fragments?for=<owner>` | | `{fragments: [{name, kind, owned, title}]}`: its owner's, as the agent reaches them: its own chat with them found by its label (`api::bot_chat`), as a routine with no chat fires |
+| `POST /api/fragments?for=<owner>` | `{name, template: "chat", title}` | the agent's SimpleX chat, made for its owner by the name its link chose, when its link is bound; 409, made already (then `GET /api/f/{chat}/members` says whether it is the agent's and its owner's: below, "SimpleX") |
+| `GET /api/f/{agent}/file?path=agent.json` | | its home (`api::Home`), read as a routine with no chat fires (docs/api.md, "An agent's home"); none (404) is its own chat |
+| `GET /api/f/{agent}/status` | | `{title}`: the agent's name (docs/api.md, "An agent's name and picture"), read every 10 s while its SimpleX core runs (below, "SimpleX") |
 | `GET /api/fragments` | | `{fragments: [{name, role}]}`: what the agent follows, listed at start, on a `joined` of it (as the agent the engine runs, no read of the computer first), and every 5 minutes. A listing a read of which fails with no answer, a 429 or a 5xx is asked again after a jittered backoff (from 1 s, at most 30 s) until it answers: the list, or only the fragments whose channels did not read; what was found meanwhile is followed, so one fragment that fails keeps the agent from no other. One listing an agent at a time: a newer one takes the place of one under way |
 | `GET /api/f/{f}/channels` | | `{channels: [{name, post, seq}]}`: a postable `chat` is a chat; the agent's own `tasks` |
 | `GET /api/f/{f}/members` | | `{members: [{principal, kind, addedAt}]}`: the lead (first `kind: agent` by `addedAt`), and when this agent joined; read again after 30 s, and at once after a `joined` of one of the computer's agents to that fragment (so its lead never answers an `@mention` of an agent that just joined) |
-| `GET /f/{f}/__people?id=…` | | `{profiles: {id: {email}}}`: what to call a writer (a member's email, which its agent, a member, is shown) |
+| `GET /f/{f}/__people?id=…` | | `{profiles: {id: {kind, email?, name?, title?}}}`: what to call a writer: a person by their email (which its agent, a member, is shown), another agent by its name (`title`, its agent fragment's), else its label (`name`), read again with the chat's members (30 s), so a rename reaches it; none is "someone" |
 | `GET /api/f/{f}/subscriptions` | | `{subscriptions: [{id, principal, channel, wake}]}` |
 | `POST /api/f/{f}/subscriptions` | `{channel, wake: true}` | `{id, channel, wake}`; only when the list has none |
 | `GET /api/f/{f}/channels/{c}?after=&limit=1000` | | `{records: [{channel, seq, at, principal, kind, body}], next}`: the catch-up, at most 20 pages; a turn's note, read back from its claim on `work` (and from `chat`'s tail) in pages of 100, at most 1000 records each; and the message a turn's message quotes (`reply_to`: `after=<seq − 1>&limit=1`, within 5 s or none) |
@@ -128,6 +133,9 @@ on a computer.
 | `BRIDGE_SCREEN_DIR` | `/opt/fragment/screen` | its page |
 | `BRIDGE_SCREENS_FILE` | | each agent's screen (`screens.rs`): `{"screens": [{agent, rfb, lease?, activity?}]}`, `rfb` as `unix:<path>` or `tcp:<host:port>`, written whole and renamed into place, read again when it changes. Unset, no agent has a display (the stub); set, an agent it does not name has no screen. While someone watches a screen its `activity` file's time is set every 10 s (`ACTIVITY_EVERY_MS`), so the image's idle stop leaves a watched desktop up. Our Hermes image's is `/var/lib/fragment-run/screens.json` (docs/computers.md) |
 | `BRIDGE_SCREEN_START` | | the command that starts an agent's display, run with the agent's fragment as its last argument by a viewer that finds it down: at once when it answered since the last start (it stopped or restarted under its viewers, whose streams end with it), else at most once a minute while it stays down |
+| `BRIDGE_SIMPLEX_BIN` | | SimpleX's core, `simplex-chat` (below, "SimpleX"): set, each linked agent's core runs while the computer is always on; unset (the stub), nothing of SimpleX runs, and `/simplex/…` is 404. Our Hermes image's is `/opt/fragment/bin/simplex-chat`: root's, 0700, on no PATH of its agents' |
+| `BRIDGE_SIMPLEX_DIR` | `/data/simplex` | each agent's SimpleX state, `<dir>/<agent fragment>/`; made 0700 at every start, the bridge's alone |
+| `BRIDGE_SIMPLEX_SMP`, `BRIDGE_SIMPLEX_XFTP` | | servers its cores use (a test's lab); unset, the core's own presets (SimpleX Chat's and Flux's) |
 
 ## State, and what it never does twice
 
@@ -257,6 +265,26 @@ deep (docs/chat-records.md, "An agent's reply"):
   only from the agent fragment's own key (not an identity: its cron, the
   platform) or its owner; another agent acting for the owner, who may post
   there, is passed over (`tasks_hear_only_the_owner_and_the_fragment`).
+- **A routine that names no chat runs at home**: as it is read, its
+  follower reads the agent's home (its `agent.json`; for SimpleX, the chat its
+  link names while bound; else its own chat, from its owner's list and
+  its own: a chat it is not in is no home)
+  and names that chat in it before the engine sees it (`driver::home_of`,
+  `records::homed`), so a home changed later moves the next fire. A home
+  that does not read ends the follow, which reads the routine again from
+  the engine's cursor after a wait: no fire is lost to a failed read, and
+  one past the hour a missed routine is skipped after is not read for. A
+  SimpleX chat its link has named and not made yet (not in the agent's
+  own list: its making refused for now, or a restart between its naming
+  and its making) is waited for the same way, up to
+  `limits::HOME_CHAT_WAIT_MS` (10 minutes) from the routine's firing, and
+  then it runs in the agent's own chat: never dropped (`api::home_chat`;
+  `a_routine_waits_for_its_simplex_chat`: past the wait, waiting across a
+  restart, run once made, nothing twice after a restart). An
+  agent with no chat with its owner at all runs it nowhere
+  (`routine.homeless`). A bridge before homes passes such a routine over
+  (`a_routine_with_no_chat_runs_at_home`, tests/bridge.rs: valid, a home
+  changed, a failed read, no home, a restart).
 
 Why here: the platform holds no chat record (docs/cloudflare-v1.md, the
 rule), and the bridge is the one place that knows which turn an agent is
@@ -402,6 +430,239 @@ told twice), the two together at most 8 KiB. Said once in a life; a life that re
 `forgotten_turns_are_told_from_the_journal` (note.rs), and on the platform
 by the `computers` lane's recovery checks, where the stub echoes it.
 
+## SimpleX
+
+An agent's owner may link the agent to their SimpleX app (decision 32;
+`src/simplex/`; what it adds to the platform, entry by entry:
+docs/explorations/simplex-complexity.md). The bridge runs SimpleX's own
+core, `simplex-chat`, one per linked agent, as a child process, driven
+over its bot API (`-p`, loopback only) by one task, so nothing else ever
+drives it.
+
+- **SimpleX is a chat of its own** (Paul, 2026-10-26): the agent's
+  SimpleX chat, its owner's chat labelled `<label>-simplex` and titled
+  SimpleX (docs/api.md, "An agent's home"). Its name in full is chosen
+  once, as the link is first bound, and written to `link.json` before
+  anything makes it (`Saved::chat`: write-ahead); the agent's poster then
+  makes it for them by that name (`POST /api/fragments?for= {name}`, the
+  agent its maker and an editor, told so as a `joined`), or, the name
+  taken (409), finds it made when the agent is in it and its owner owns
+  it, from its members, never from a list that may lag its making
+  (`run::ensure_chat`). So every life makes that one chat, once, whatever
+  restarts, and it shows among their chats before anything is said; a
+  name someone else holds is chosen again. It mirrors their app both ways
+  while linked:
+  everything their linked contact sends is posted there, a relayed record
+  as before; everything the agent says there goes to their app once
+  posted, whatever started its turn (a SimpleX message, words typed in
+  that chat on the web, a routine, a hand-off, something it says with no
+  turn): its replies but the interim ones, with their files (below), and a card's
+  question with its choices (`driver::for_simplex`). The chat is the
+  engine's to know (`Input::Relaying`: each linked agent with its chat's
+  name, read from `link.json` as the bridge starts, before any record, and
+  named before it is made: so a post there is known to be the phone's
+  from the first; `Engine::mirror`), so nothing of it is kept per turn and
+  `state.json` holds nothing of SimpleX. An unlink stops the mirror and
+  keeps the chat, its history and its name; a link again is that chat. A
+  post refused there (the chat deleted meanwhile) has it made again by its
+  name before the next. Until 2026-10-26 its messages went to the
+  agent's own chat with its owner, and only a turn a SimpleX message
+  started answered there (`via`, a turn's mark): gone, with the mark.
+- **The agent is told in that chat alone**, as the chat's topic, on every
+  inbound there (`TurnStart::simplex`, `Command::Aside`'s; relay
+  `wire.rs`, `SIMPLEX_TOPIC`): "Your owner's SimpleX: what you say here
+  reaches their phone." Hermes renders a topic in that chat's session
+  context, in its system prompt, pinned per session and rendered again
+  only when it changes: a few tokens, once, in that session. Not beside
+  each message (a voice memo's transcript, which Hermes puts before the
+  message and its context, would no longer read as the message's), and
+  never as an instruction: Hermes reads a topic as a label. Where its
+  owner's home is, it is told beside its name (docs/computers.md).
+
+- **Its name in the owner's app is the agent's name** (its title, docs/
+  api.md, "An agent's name and picture"; `run::display_name`), and follows
+  a rename (Paul, 2026-10-26: his app showed the name his agent had when
+  its bridge started, which the bridge read once, and the core's profile,
+  made at its first start, was never named again). The bridge reads the
+  title from the agent's status every 10 s while its core runs
+  (`TITLE_EVERY_MS`, as our Hermes image does), and asks the core to show
+  it (`/p '<name>'`, `wire::Cmd::Profile`) once each time it comes up and
+  once a rename: the core keeps the rest of the profile (a bot's), sends
+  the name to the linked contact, and answers `userProfileNoChange` for the
+  name it holds, so asking again changes nothing. `--create-bot-display-
+  name` names only the profile a first start makes, which is the agent's
+  label: the core makes no profile of a name it refuses, and then does not
+  start. A name is what the core keeps of the title, so it takes it as it
+  is: `wire::valid_name` is v7.0.3's `mkValidName` ported char for char
+  (by Unicode's general categories, `unicode-properties` pinned at
+  Unicode 15.0, the core's own: a char of 15.1 or later is none to it,
+  so dropped; never
+  `.,;/\#@'"`~`, a combining mark only after a letter, at most 50
+  chars), held to the core's own tests (its tests/ValidNames.hs) and, in
+  the lab, to the real core with 200 seeded titles of every kind of char
+  (Alex's review of #628). A title read that fails changes nothing; no
+  title, or none of it kept, is the label. The greeting says the name
+  too.
+- **SMP on port 5223, never 443** (`--smp-web-port-servers off`,
+  `simplex/run.rs` `core_args`). A SimpleX server on 443 takes its
+  protocol only from a TLS hello that names no server (SNI), and
+  Cloudflare Containers reset every such hello on 443: a core on a
+  computer reaches SMP servers on 5223, and XFTP's (files: a voice note, a
+  photo), on 443 alone, only through the platform's XFTP relay.
+- **The cores' way out** (`src/simplex/socks.rs`): a SOCKS5 proxy on
+  loopback, which every core connects through (`--socks-proxy`, with
+  `--host-mode public`: hosts by their names, never their onion
+  addresses). A connection to a host and port the computer's view's
+  `relay` names (SimpleX's preset XFTP servers, on 443) goes through the
+  relay (`GET /api/computer/relay`), its bytes untouched; anything else
+  (SMP, on 5223) straight out of the computer. A platform with no relay
+  offers none, and everything goes straight out. At most 64 sessions at
+  once. It logs each relay's host, bytes and time, never what is carried.
+- **A file not received within 3 minutes** (`FILE_WAIT_MS`: a server
+  outside the relay's list, or one that does not answer) is given up on:
+  cancelled at the core, and its message posted with a note that it did
+  not arrive.
+- **A reply's files go to the owner's app too**, after its text, each as
+  SimpleX's apps show it (`run.rs`, `Handle::reply`: the one way anything
+  goes out over SimpleX). Audio whose length reads goes as a voice
+  message of that length (MP3, as Hermes speaks; MPEG-4, as the apps
+  record: `audio.rs`), a JPEG, PNG or GIF as an image (with the preview
+  SimpleX's own CLI sends), anything else as a file. Each is copied first
+  to the link's `out/<folder>/<its name>`, the core uploads it over XFTP
+  (through the relay, on a computer), and the copy goes once the core
+  says it is sent (`sndFileCompleteXFTP`) or failed (`sndFileError`), or
+  after `SEND_WAIT_MS` (5 minutes: cancelled at the core). At most 25 MiB
+  a file (the chat's own bound: padded into XFTP's chunks, one relay's
+  worth) and `SENDING_MAX` (8) under way. A file past either, empty or
+  unread, or one the link cannot send now (unlinked, its core down, its
+  ratchet out of step) stays in the chat alone, and the text says so:
+  "(I sent a voice message, in our chat.)"; one that fails later is told
+  as "(A voice message I sent didn't arrive here: it's in our chat.)".
+- **Only where the image names the core** (`BRIDGE_SIMPLEX_BIN`), which
+  the bridge's reads of its computer say (`GET /api/computer?simplex=1`),
+  so its owner's Settings offer SimpleX only on an image that does it (the
+  view's `simplex`; an image whose reads never said so shows nothing of
+  it), and
+  **only while the computer is always on** (its view's `alwaysOn`: the
+  always-on seat; docs/billing.md). A computer that sleeps would hear
+  nothing, so it runs no core at all, and its link page says why. A seat
+  that lapses turns always-on off: the cores stop, and the computer sleeps
+  when idle, its links kept for when it is on again.
+- **The link page**, `GET /simplex/?agent=` on the screen port (in the
+  bridge, `src/simplex/page.html`, so every image serves the same one),
+  is what the shell opens from Settings' SimpleX, in a pane through a port
+  ticket as a screen is, telling it the agent's name (`{fragment:
+  "simplex", agent, name}`). It shows the one-time invitation as a QR code
+  the bridge draws (`GET /simplex/qr.svg?agent=&s=`: the server's short link
+  when it made one, which SimpleX's apps open, else the full link), with
+  Open in SimpleX and Copy link; then whom it is linked to, and Unlink. Its
+  words are for someone who has never heard of SimpleX, and it says
+  plainly: encrypted between your SimpleX app and your computer.
+- **Only its owner links or unlinks it, from their Settings** (Paul's
+  design of 2026-10-23; docs/api.md, "An agent's doors"; `src/simplex/
+  door.rs`). The agent's tools reach the screen port too, so the page's
+  Link and Unlink ask the platform's page framing it for a ticket
+  (`{fragment: "simplex", agent, want}`), which asks the platform for the
+  agent's owner alone and hands back `{fragment: "simplex", agent, for,
+  ticket}`; the page posts it as the body of `POST /simplex/link?agent=`
+  or `/simplex/unlink?agent=`. The bridge takes one only signed by the
+  agent's key (its view's `key`), for this computer and that agent, within
+  its ten minutes, once (the nonces it took kept in `link.json` until
+  they would have run out); a link's only while unlinked (else 409). With
+  none, or with any other, it is 403 and nothing moves.
+- **A link's door key**: before any invitation exists, the bridge makes a
+  key for the link (`door.key` in the agent's directory: 0600, the
+  directory 0700, in no process's environment) and redeems the ticket with
+  its public half at the platform (`POST /api/computer/door`), which
+  takes only the link ticket the owner made last, once. Every message the
+  link carries to the agent's chat is a relayed record that key signs
+  (`Key::seal`, at each try), and the platform takes no relayed record
+  without its door's signature, so nothing the agent's own key posts
+  speaks for its owner. The unlink's ticket closes the door at the
+  platform as it is made; the bridge forgets the key when the link goes
+  (an unlink, or the contact's own delete). A link with no key (one that
+  went back in time to before its key) tells the owner's app to link
+  again rather than carry what the platform would refuse.
+- **The invitation is shown to the page whose ticket made it** (its
+  nonce, `s`): `state` and `qr.svg` give anyone else no link (`hidden`),
+  and that page's ticket's nonce is held in memory only, so after a
+  restart, or from another window, the page asks for the code again with
+  a new link ticket (the same invitation).
+- **Linking** is a one-time invitation the core makes once its door's
+  key is registered; the contact that connects through it is the owner's,
+  and the spent link is refused to anyone after (the SMP server's
+  `AUTH`). Any other contact is deleted, and nothing of theirs is
+  carried. Linked, the core greets the owner's app. Unlinking lets the
+  contact go (told in their app); their own delete in their app lets it go
+  here. `GET /simplex/state?agent=` says where it is (`off`, `asking`,
+  `inviting` with its link for the page that asked, `linked` with their
+  name), whether it runs, and why not.
+- **Its state** is `<dir>/<agent>/`: the core's two databases, its files
+  and temp folders (one device: a received file is renamed from one into
+  the other), `door.key`, `out/` (the copies of the files it sends), and
+  `link.json` (the link, the agent it is of, the start it last ran in, the
+  tickets it took, the files it receives and sends: the core resumes both
+  after a restart, and a folder in `out/` it names no send of goes as the
+  bridge starts), written whole before what it causes. One of another
+  agent (a fragment's name made again) or that does not read is set
+  aside, renamed, never guessed.
+- **The hold stops every core** before the bridge answers it (`BRIDGE_HELD`
+  waits for them), and none starts while it lasts: a save takes the cores'
+  databases whole, as they are (`/_start` after `/_stop` crashes v7.0.3, so
+  the process stops: SIGTERM, then SIGKILL past 3 s). Our Hermes image's
+  copy of the databases under a hold passes `/data/simplex` over (held.rs,
+  `SIMPLEX`). An awake save starts them again as the hold goes.
+- **A start that went back in time** (the view's `restored.rollback`, for a
+  link last run in an earlier start) forces a ratchet sync before anything
+  is sent, holds replies through it, and tells the owner's app a message
+  may have been lost: the core cannot see a rollback itself
+  (docs/explorations/simplex-connector.md, "The lab"). Every start reads
+  back the newest items, and forwards are by the sender's message id, so
+  a core killed mid-burst loses nothing it committed.
+- **A link's change asks for a save**: the keepalive held for 3 s, so the
+  platform saves as that ends rather than after the next turn.
+- **A core that stops on its own** is started again (2 s, doubled); three
+  stops in 10 minutes and it waits for its owner to link again.
+- **What a core prints is not logged**: it echoes the commands it is sent,
+  message text among them.
+- **The agent is kept out.** Every agent's system prompt says Fragment
+  carries its owner's SimpleX, and never to install, run or set up
+  SimpleX (our Hermes image's relay hint, hermes-boot's `SIMPLEX`, a line;
+  which chat is the SimpleX one is that chat's topic, above). The core and its state
+  are the bridge's: our Hermes image keeps `simplex-chat` root's, 0700 and
+  on no PATH, and the bridge makes `BRIDGE_SIMPLEX_DIR` 0700 at every
+  start, so the agent's own user (Hermes runs as `hermes`, the bridge as
+  root) reads no core's keys or databases and no door's key. Its
+  passwordless sudo still reaches root (docs/computers.md, "Root in our
+  Hermes image"), and a core's bot API listens on loopback, which any
+  user of the computer reaches.
+
+Proven by the Docker lane's `simplex_on_the_hermes_image` (the real image,
+a lab of a local SMP and XFTP server and the person's simplex-chat on a
+network it joins): linked from the screen port by its owner's ticket
+alone (none is 403), the invitation hidden from any other page, its door's
+key registered with the ticket, by the name it was given after its bridge
+started, and renamed while linked (the person's app follows within 10 s),
+its SimpleX chat made for its owner; a
+message posted there, a turn of Hermes' asked as its owner, its session
+told the chat is their phone, answered on SimpleX (1.2 s); words typed in
+that chat on the web, answered on SimpleX too; a routine with no chat, its
+home that chat, answered on SimpleX, and one with nothing to tell (its
+`[SILENT]`), nothing; a reply in its own chat, not; a voice note
+transcribed through the route and answered (0.4 s); a hold that stops the
+core first, its copies naming none of the core's databases; a restart; and
+a wake from a save older than the life before it, healed, the person told
+(1.0 s after the gate). By hand, `tests/simplex.rs` holds the rest against
+the real core: the link's rules, voice both ways, the profile's name (a
+start keeps the profile its first made; `/p` renames it, idempotent;
+every name `display_name` makes taken as it is), the lifecycle (a forged
+ticket refused, the door key's file 0600 and in no environment, the unlink
+closing the door at the fake platform), messages through the chat, and the
+page's code, which another page cannot fetch. The platform's half (the
+ticket's signature, its one redeeming, refusing a relayed record the
+agent's own key or any other signs, and the unlink closing the door) is
+the `computers` lane's door checks, through the stub's `door` commands.
+
 ## Hermes' Relay, as the bridge speaks it
 
 Hermes v0.21.7 (tag `v0.21.7`, 2026-10-12; read first from v0.21.5,
@@ -423,6 +684,9 @@ get_chat_info`.
   renders it before the message, reference only and never as the person's
   words:
   `[Recent channel messages]\n<note>\n\n[New message]\n[paul] good morning`.
+  In its owner's SimpleX chat every inbound's source carries
+  `chat_topic` (`wire::SIMPLEX_TOPIC`), which Hermes renders in that
+  session's context as `**Channel Topic:**` (above, "SimpleX").
 - A reply streams as `draft` frames (the chat's draft), and arrives as a
   `send` answering the turn's message; tool progress is a `send`
   answering nothing whose lines grow by `edit`, each new line a step.
@@ -440,17 +704,37 @@ get_chat_info`.
   there is `other`, but for its browser's (`browser_…`). Hermes cuts a
   preview at its `display.tool_preview_length`, 40 unless set: our image
   sets it to 140, the most a step's `args` keeps (`hermes-boot`).
-- One reply a turn, its answer (Paul, 2026-10-05). Hermes ends a draft
-  segment at every tool boundary with a `send` answering the message, so
-  the model's text beside a tool call ("Let me check that.") arrives as
-  a reply, whatever its `display.interim_assistant_messages` (off in our
-  image: docs/hermes-relay.md, "Hermes' settings"). The step that follows
-  takes it back (`Retract`) as its words, the step's `text`; when the
-  step reaches the bridge first, the `send` ending drafts that began
-  before it is its words, never a reply. A turn that ends idle having
-  said nothing since says the last words a step took as its reply:
-  Hermes' answer written beside a housekeeping call (`memory`), which it
-  sends once.
+- Everything the agent says is a reply (Paul, 2026-10-24, in place of
+  2026-10-05's one reply a turn). Hermes ends a draft segment at every
+  tool boundary with a `send` answering the message, so the model's text
+  beside a tool call ("Let me check that.") arrives as a reply, whatever
+  its `display.interim_assistant_messages` (off in our image:
+  docs/hermes-relay.md, "Hermes' settings"), and is one: whole (a
+  reply's bound, never a step's 300 characters), with the safe markdown
+  of any reply, posted before the step that follows, its draft put away
+  as it posts. The engine marks it `interim` (the chat's push leaves it
+  out: docs/chat-records.md, "Push") unless that step only updates
+  memory: Hermes' answer written beside a housekeeping call, which it
+  sends once and says nothing after, is the turn's answer. Interim
+  replies have a bound of their own (`INTERIM_REPLIES_PER_TURN_MAX`, one
+  a posted step), apart from `REPLIES_PER_TURN_MAX`, so narration never
+  costs the turn its answer (`narration_never_costs_the_answer`). The
+  tool's progress can reach the bridge before that `send`: a step that
+  comes while a draft segment streams waits for it, at most
+  `STEP_HOLD_MS` (3 s), the words then going before it; a question, a
+  card, a file or the end stops the wait. And while a reply's image links
+  are fetched (within the fetch's own 20 s) everything of its turn after
+  it waits in order (`Inflight::queue`: its steps, a later reply, a card,
+  a file, its end), so the reply keeps its files and the answer after it
+  is never sealed by a step that waited (`later_parts_wait_for_a_replys_
+  image`). A step whose words do not come in time posts, and the words
+  after it, a reply of their own. Until 2026-10-24 the step took the
+  words back as its `text`, at most 300 characters, which the page showed
+  folded into the steps (Paul on production: "I can't read it all").
+  Proven with the scripted gateway in every order (tests/relay.rs,
+  `text_beside_a_tool_call_is_a_reply_of_its_own`, `many_narrated_calls_
+  keep_the_answer`) and with the real Hermes (tests/docker.rs,
+  `words_before_a_tool_call_are_a_reply`).
 - An approval is a `prompt` op (`once`, `session`, `always`, `deny`);
   the owner's answer goes back at once as an inbound `prompt_response`.
   What asks at all is the image's (docs/computers.md, "Approvals in our
@@ -577,6 +861,26 @@ get_chat_info`.
   turn without saying something, so an empty bracket's `✅` ends
   nothing. No clock: a turn whose bracket never ends is the idle
   bound's (`BRIDGE_TURN_IDLE_MS`: "the agent stopped answering").
+- **A routine with nothing to tell says nothing.** A model that answers
+  exactly `[SILENT]` (Hermes' silence marker, its own cron's "nothing to
+  report", for which that cron delivers nothing) is answered by v0.21.7's
+  gateway with its warning instead (`⚠️ The model returned only a silence
+  marker for a message that needed a reply. …`, `wire::UNEXPECTED_SILENCE`),
+  for every message Relay hands it: Relay carries no `reply_expected`
+  (only Slack's own adapter sets it) nor anything that makes a message
+  Hermes' machinery, so each is one that needed a reply. For a routine's
+  turn alone the bridge drops that warning, whole and in those words
+  (`relay.silent`), and its `✅` ends the turn idle with no reply, so
+  nothing reaches the chat, its push or its SimpleX; a person's message
+  answered so still gets it, from Hermes as it says it. Why here, not
+  in Hermes: a turn Hermes kept silent would end in an empty bracket,
+  which the bridge cannot tell from the startup gate's (and a routine
+  is what fires as a computer wakes), so its end would be the idle
+  bound's; the warning is the end's sign. Proven by
+  `a_routine_may_say_nothing` (tests/relay.rs, against the scripted
+  Hermes, a restart included; tests/docker.rs, against the real one,
+  whose words the constant must be) and `simplex_on_the_hermes_image`
+  (a silent routine at home sends the phone nothing).
 
 Of decision 21's list, v0.21.5 has every op, but sends `task_card` only
 for Slack chats (`gateway/run_turn.py`), so steps come from progress

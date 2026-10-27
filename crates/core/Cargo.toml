@@ -38,3 +38,5 @@ p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
 tar = { version = "0.4", default-features = false }
 # a real SQLite (the bundled one) for `migrate`'s tests, as images/hermes/boot pins it
 rusqlite = { version = "0.40", default-features = false, features = ["bundled", "hooks"] }
+# signs the door vectors (door.rs) as the cell and the bridge do
+fragment-nip98 = { path = "../nip98", features = ["signer"] }

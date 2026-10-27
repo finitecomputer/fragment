@@ -283,6 +283,9 @@ body.reordering iframe { pointer-events: none; }
 .agent-preview { font-size: 13px; line-height: 1.3; color: var(--text-secondary); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 #chats .row.active { background: var(--bg-active); }
 /* a chat's unread (shell.js `unreadMark`): a count */
+/* the chat an agent reaches its person in, its home (shell.js `homeMark`) */
+.row .home-mark { flex: none; display: inline-grid; place-items: center; color: var(--text-tertiary); }
+.row .home-mark svg { width: 14px; height: 14px; stroke-width: 1.8; }
 .row .unread { flex: none; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--accent-blue); color: var(--bg-window); font: 700 11px/20px var(--font-sans); text-align: center; }
 .topbar { min-height: 76px; gap: 10px; }
 .agent-heading { display: flex; align-items: center; gap: 10px; min-width: 0; max-width: 60%; padding: 8px 13px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-primary); background: var(--bg-sidebar); }
@@ -627,6 +630,8 @@ iframe[data-blocked] { display: none; }
 /* One agent, a quiet list of conversations, and an app dock on the desktop. */
 .sidebar-agent-toolbar { --edge-light: 0; display: flex; align-items: center; flex: none; margin: 6px 0 8px; }
 #primary-agent { flex: 1; min-width: 0; }
+.sidebar-start-chat { flex: none; margin: 0 0 8px; color: var(--text-secondary); }
+.sidebar-start-chat:hover { color: var(--text-primary); }
 #primary-agent .sidebar-agent { flex-direction: row; justify-content: flex-start; gap: 10px; width: 100%; max-width: 100%; height: 48px; font-size: 14px; padding: 8px 13px; border-radius: 999px; background: var(--bg-sidebar); }
 #primary-agent .sidebar-agent:hover { background: var(--bg-active); }
 #primary-agent .sidebar-agent[aria-expanded="true"] { border-radius: 24px 24px 0 0; background: var(--bg-sidebar); }
@@ -716,6 +721,9 @@ iframe[data-blocked] { display: none; }
    first run's footer is platform-pages.css's .page-footer) */
 .legal-links, .settings-section > p.legal-links { font-size: 12.5px; }
 .legal-links a { color: inherit; }
+/* the release and the computer's version, under Settings' last section (shell.js releaseLine) */
+.settings-release { margin: 28px 2px 0; font-size: 12.5px; }
+.settings-release a { color: inherit; }
 
 /* an app's own icon (app-icon.js): an object on nothing, never on a tile */
 .app-picture { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: none; }

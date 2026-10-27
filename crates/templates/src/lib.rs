@@ -80,20 +80,32 @@ pub fn shell(name: &str) -> Option<&'static File> {
     SHELL.binary_search_by(|f| f.path.cmp(name)).ok().map(|i| &SHELL[i])
 }
 
-/// The shell's page's one blank (cell/shell/index.html, its
+/// The shell's page's release blank (cell/shell/index.html, its
 /// `<meta name="fragment-release">`): the release that answers it, which
 /// its script compares with the release every later answer names, to
-/// reload once the platform under it changed (docs/api.md, The shell).
+/// reload once the platform under it changed (docs/api.md, The shell),
+/// and Settings shows.
 #[cfg(feature = "platform")]
 pub const RELEASE_BLANK: &str = "{{release}}";
 
-/// The shell's page (`index.html`'s text) as `release` answers it: its
-/// blank filled once. `release` is a release's id
-/// (`fragment_core::release::valid`), which an attribute holds as it is.
+/// Its other blank (`<meta name="fragment-release-deployed">`): when that
+/// release was deployed (`FRAGMENT_DEPLOYED_AT`, seconds), which Settings
+/// shows beside it; empty where a fleet names none.
 #[cfg(feature = "platform")]
-pub fn shell_page(text: &str, release: &str) -> String {
-    assert!(fragment_core::release::valid(release) && text.matches(RELEASE_BLANK).count() == 1, "the shell's page has its release's blank once, for a release's id");
-    text.replacen(RELEASE_BLANK, release, 1)
+pub const DEPLOYED_BLANK: &str = "{{deployed}}";
+
+/// The shell's page (`index.html`'s text) as `release` answers it, deployed
+/// at `deployed`: each blank filled once. `release` is a release's id
+/// (`fragment_core::release::valid`), which an attribute holds as it is,
+/// as it does digits.
+#[cfg(feature = "platform")]
+pub fn shell_page(text: &str, release: &str, deployed: Option<u64>) -> String {
+    assert!(
+        fragment_core::release::valid(release) && text.matches(RELEASE_BLANK).count() == 1 && text.matches(DEPLOYED_BLANK).count() == 1,
+        "the shell's page has each of its blanks once, for a release's id"
+    );
+    let deployed = deployed.map(|d| d.to_string()).unwrap_or_default();
+    text.replacen(RELEASE_BLANK, release, 1).replacen(DEPLOYED_BLANK, &deployed, 1)
 }
 
 /// The shell's files it publishes at `/__shell/<name>` (cell/src/shell.rs),
@@ -116,6 +128,9 @@ const SHELL_PUBLISHED: [(&str, &str); 32] = [
     ("funnel-sans-600.ttf", "font/ttf"),
     ("funnel-sans-700.ttf", "font/ttf"),
     ("shell.js", "text/javascript; charset=utf-8"),
+    // a chat's alerts: the service worker the shell registers for each
+    // chat whose alerts are on (shell.js, "a chat's alerts")
+    ("alerts-sw.js", "text/javascript; charset=utf-8"),
     ("shell.css", "text/css; charset=utf-8"),
     ("layout.js", "text/javascript; charset=utf-8"),
     ("viewer.js", "text/javascript; charset=utf-8"),
@@ -319,23 +334,30 @@ pub(crate) mod tests {
         assert!(shell_published("nope.js").is_none() && shell_published("../templates/chat/app.mjs").is_none());
     }
 
-    /// Goal: the shell's page names the release that answered it, in the
-    /// one place its script reads (shell.js `RELEASE`). Valid: index.html
-    /// has the blank once, in that meta; filled, the meta names the id and
+    /// Goal: the shell's page names the release that answered it, and when
+    /// it was deployed, in the one place its script reads each (shell.js
+    /// `RELEASE`, `DEPLOYED`). Valid: index.html has each blank once, in
+    /// its meta; filled, the metas name the id and the time (or none) and
     /// no blank is left. Invalid: an id that is none (an attribute's quote,
-    /// a space), or a page without its blank or with two.
+    /// a space), or a page without a blank or with two.
     #[test]
     fn the_shell_page_names_its_release() {
         let page = std::fs::read_to_string(repo().join("cell/shell/index.html")).unwrap();
         assert!(page.contains(&format!(r#"<meta name="fragment-release" content="{RELEASE_BLANK}">"#)), "its meta holds the blank");
-        let filled = shell_page(&page, "bc8b87e7a1b2-dirty-1760918400");
+        assert!(page.contains(&format!(r#"<meta name="fragment-release-deployed" content="{DEPLOYED_BLANK}">"#)), "and its time's");
+        let filled = shell_page(&page, "bc8b87e7a1b2-dirty-1760918400", Some(1_792_615_843));
         assert!(filled.contains(r#"<meta name="fragment-release" content="bc8b87e7a1b2-dirty-1760918400">"#) && !filled.contains(RELEASE_BLANK));
-        assert_eq!(filled.len(), page.len() - RELEASE_BLANK.len() + "bc8b87e7a1b2-dirty-1760918400".len(), "nothing else changes");
+        assert!(filled.contains(r#"<meta name="fragment-release-deployed" content="1792615843">"#) && !filled.contains(DEPLOYED_BLANK));
+        let blanks = RELEASE_BLANK.len() + DEPLOYED_BLANK.len();
+        assert_eq!(filled.len(), page.len() - blanks + "bc8b87e7a1b2-dirty-1760918400".len() + "1792615843".len(), "nothing else changes");
+        assert!(shell_page(&page, "dev", None).contains(r#"<meta name="fragment-release-deployed" content="">"#), "no time: empty");
         for bad in [r#"x" onload="y"#, "a b", ""] {
-            assert!(std::panic::catch_unwind(|| shell_page(&page, bad)).is_err(), "{bad:?}");
+            assert!(std::panic::catch_unwind(|| shell_page(&page, bad, None)).is_err(), "{bad:?}");
         }
-        assert!(std::panic::catch_unwind(|| shell_page("<html>", "dev")).is_err(), "no blank");
-        assert!(std::panic::catch_unwind(|| shell_page(&format!("{RELEASE_BLANK}{RELEASE_BLANK}"), "dev")).is_err(), "two");
+        assert!(std::panic::catch_unwind(|| shell_page("<html>", "dev", None)).is_err(), "no blank");
+        assert!(std::panic::catch_unwind(|| shell_page(RELEASE_BLANK, "dev", None)).is_err(), "no time's blank");
+        assert!(std::panic::catch_unwind(|| shell_page(&format!("{RELEASE_BLANK}{RELEASE_BLANK}{DEPLOYED_BLANK}"), "dev", None)).is_err(), "two");
+        assert!(std::panic::catch_unwind(|| shell_page(&format!("{RELEASE_BLANK}{DEPLOYED_BLANK}{DEPLOYED_BLANK}"), "dev", None)).is_err(), "two times");
     }
 
     fn walkdir(dir: &std::path::Path) -> usize {

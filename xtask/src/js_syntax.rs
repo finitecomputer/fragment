@@ -38,8 +38,9 @@ use fragment_devstack::node::{Node, NODE_VERSION};
 pub const VENDORED: [(&str, &str); 1] = [("cell/shell/vendor/", "split-grid, vendored unmodified (cell/shell/CREDITS.md)")];
 
 /// The `.js` files loaded as classic scripts, not modules.
-pub const CLASSIC: [(&str, &str); 1] = [
+pub const CLASSIC: [(&str, &str); 2] = [
     ("cell/sw.js", "the service worker client.mjs registers without `type: \"module\"` (served as __sw.js, cell/src/push.rs)"),
+    ("cell/shell/alerts-sw.js", "the service worker the shell registers without `type: \"module\"` for a chat's alerts (shell.js)"),
 ];
 
 /// More files than this means the walk reached something it should not
@@ -224,6 +225,7 @@ mod tests {
             ("cell/client.mjs", Some(InputType::Module)),
             ("templates/chat/site/chat.js", Some(InputType::Module)),
             ("cell/sw.js", Some(InputType::CommonJs)),
+            ("cell/shell/alerts-sw.js", Some(InputType::CommonJs)),
             ("templates/x/sw.js", Some(InputType::Module)),
             ("tools/config.cjs", Some(InputType::CommonJs)),
             ("cell/src/lib.rs", None),
@@ -248,6 +250,7 @@ mod tests {
         assert_eq!(kind("templates/notes/site/assets/viewer.js"), Some(InputType::Module));
         assert_eq!(kind("cell/markdown.mjs"), Some(InputType::Module));
         assert_eq!(kind("cell/sw.js"), Some(InputType::CommonJs));
+        assert_eq!(kind("cell/shell/alerts-sw.js"), Some(InputType::CommonJs));
         assert!(found.iter().all(|(p, _)| !vendored(p)), "nothing vendored is checked");
         assert!(found.iter().all(|(p, _)| !p.split('/').any(|c| c == "node_modules" || c == "target")));
         assert!(found.windows(2).all(|w| w[0].0 < w[1].0), "sorted, each once");
@@ -258,14 +261,15 @@ mod tests {
     #[test]
     fn a_stale_list_or_a_walk_without_the_shell_is_refused() {
         let paths = |extra: &[&str]| {
-            let mut all: Vec<String> = ["cell/shell/shell.js", "cell/sw.js", "cell/shell/vendor/split-grid.js"].map(String::from).to_vec();
+            let mut all: Vec<String> = ["cell/shell/alerts-sw.js", "cell/shell/shell.js", "cell/sw.js", "cell/shell/vendor/split-grid.js"].map(String::from).to_vec();
             all.extend(extra.iter().map(|p| p.to_string()));
             all
         };
         let selected = select(paths(&["templates/todo/app.mjs", "README.md"]).into_iter()).expect("a whole list");
-        assert_eq!(selected.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["cell/shell/shell.js", "cell/sw.js", "templates/todo/app.mjs"]);
+        assert_eq!(selected.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["cell/shell/alerts-sw.js", "cell/shell/shell.js", "cell/sw.js", "templates/todo/app.mjs"]);
         let without = |gone: &str| select(paths(&[]).into_iter().filter(|p| p != gone));
         assert!(without("cell/sw.js").is_err(), "CLASSIC names a file that is gone");
+        assert!(without("cell/shell/alerts-sw.js").is_err(), "CLASSIC names a file that is gone");
         assert!(without("cell/shell/vendor/split-grid.js").is_err(), "VENDORED names a directory with no JavaScript");
         assert!(without("cell/shell/shell.js").is_err(), "the walk missed the shell");
         let many = (0..=FILES_MAX).map(|i| format!("gen/{i}.js"));

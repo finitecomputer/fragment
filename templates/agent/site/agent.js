@@ -48,6 +48,18 @@ function runs(settings, me, models) {
 async function main() {
   let settings = null, roster = null;
   const here = location.hostname.match(NAME_AT)?.[0];
+  // Its name (docs/api.md, "An agent's name and picture"): the Open Graph
+  // title the platform puts on its page, its name as every reader shows it
+  // (its title, trimmed; none, or only spaces, its label:
+  // `fragment_core::face::agent_name`), whether it runs on a computer yet
+  // or not; then, framed by its owner's shell, as the shell says it, again
+  // on any change (a rename while it is open)
+  const named = (name) => {
+    document.title = name;
+    document.getElementById("name").textContent = name;
+  };
+  const og = document.querySelector('meta[property="og:title"]')?.content?.trim();
+  named(og || (here ?? location.hostname).split("--")[0] || "Agent");
   const model = () => {
     if (settings && roster) document.getElementById("tier").textContent = runs(settings, roster.agents.find((a) => a.fragment === here), roster.models);
   };
@@ -56,15 +68,13 @@ async function main() {
     // its owner's shell, framing it: their agents, again on any change
     if (e.source === window.parent && e.data?.fragment === "agents" && Array.isArray(e.data.agents)) {
       roster = e.data;
+      const me = roster.agents.find((a) => a.fragment === here);
+      if (typeof me?.title === "string" && me.title.trim()) named(me.title.trim());
       model();
     }
   });
   if (window.parent !== window) window.parent.postMessage({ fragment: "agents?" }, "*");
   const who = identity();
-  // the platform puts the fragment's own title on its page (Open Graph)
-  const name = document.querySelector('meta[property="og:title"]')?.content || location.hostname.split("--")[0] || "Agent";
-  document.title = name;
-  document.getElementById("name").textContent = name;
   try {
     settings = JSON.parse((await text("agent.json")) || "{}");
   } catch {}
@@ -93,7 +103,8 @@ async function main() {
 }
 
 // Its routines: the scheduled records on its own `tasks` that ask it
-// something (`{kind: "routine", text, chat}`: docs/chat-records.md), as
+// something (`{kind: "routine", text, chat?}`: docs/chat-records.md; no
+// chat, its owner's home as it fires), as
 // the platform keeps them (`__schedules`, docs/api.md "Scheduled records":
 // its viewers', as every fragment's). Each says when in words, the next
 // time in this page's own clock, the chat it is done in, and what it is
@@ -104,7 +115,8 @@ async function routines() {
   if (!list.length) return;
   const rows = list.map((s) => {
     const next = s.nextAt ? `next ${new Date(s.nextAt).toLocaleString()}` : "paused";
-    const when = Object.assign(document.createElement("p"), { className: "when", textContent: `${s.said} · in ${s.record.chat} · ${next}` });
+    const where = typeof s.record.chat === "string" && s.record.chat ? `in ${s.record.chat}` : "at home";
+    const when = Object.assign(document.createElement("p"), { className: "when", textContent: `${s.said} · ${where} · ${next}` });
     const item = document.createElement("li");
     item.append(when, Object.assign(document.createElement("p"), { textContent: s.record.text }));
     return item;

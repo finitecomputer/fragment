@@ -608,8 +608,11 @@ Checked against finite-mono's code (2026-10-08):
     person).
 - **People.**
   - **The list:** email, npub, joined, last sign-in, plan, org, seat
-    kind, paid or comped, and standing. It searches by email and pages
-    by cursor, 100 at a time. It reads the registry alone, in one query.
+    kind, paid or comped, standing, and whether its holder lets their
+    always-on computer sleep (Settings' "Let my computer sleep when
+    nothing is open": why a good `seat_always_on` seat's computer is not
+    always on). It searches by email and pages by cursor, 100 at a time.
+    It reads the registry alone, in one query.
   - **A person's page** adds their ledger status (usage this month,
     credit), their computer, and their fragments' count.
   - **Its actions:** comp a seat, end a comp, and grant credit (built
