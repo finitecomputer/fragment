@@ -141,7 +141,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200 && seq_before == 2, "channel setup: {r} (feed at {seq_before})");
     let code_before = api.status(&owner, &stored)?.body["code"].clone();
     anyhow::ensure!(code_before["operations"]["save"]["kind"] == "mutation" && code_before["operations"]["save"]["description"] == "Save texts to the feed.", "code setup: {code_before}");
-    // a person's search and archiving (principal.rs), and a chat's search outbox (search.rs)
+    // a person's search, archiving and dock (principal.rs), and a chat's search outbox (search.rs)
     let talk = s.named(&api, &owner, "restart-talk")?;
     let r = api.create_with(&owner, json!({ "name": talk, "template": "chat" }))?;
     anyhow::ensure!(r.status == 200, "chat setup: {r}");
@@ -152,8 +152,10 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     };
     let said = s.eventually(Duration::from_secs(30), || say(&api, "k1", "kale outlives restarts").is_ok_and(|r| r.status == 200));
     let r = api.signed(&owner, "PUT", &format!("/api/fragments/{talk}/archived"), Some(&json!({ "archived": true })))?;
+    // and their dock (#587): an app of theirs taken off it
+    let docked = api.signed(&owner, "PUT", &format!("/api/fragments/{stored}/dock"), Some(&json!({ "dock": false })))?;
     let searched = s.eventually(Duration::from_secs(30), || found(&api, "kale") == 1);
-    anyhow::ensure!(said && r.status == 200 && searched, "search setup: {r}");
+    anyhow::ensure!(said && r.status == 200 && docked.status == 200 && searched, "search setup: {r} {docked}");
     // sharing: an invite waiting, and who has access as the access view says it
     let invitee = format!("restart-invitee-{}@e2e.test", &Keys::generate().pubkey_hex()[..8]);
     let r = api.signed(&owner, "POST", &format!("/api/f/{name}/invites"), Some(&json!({ "email": invitee, "role": "viewer" })))?;
@@ -362,6 +364,8 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let r = api.signed(&owner, "GET", "/api/fragments", None)?;
     let held = r.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == talk.as_str() && f["archived"] == true));
     s.ok("and their archiving holds", held, &r);
+    let off = r.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == stored.as_str() && f["dock"] == false));
+    s.ok("and the app they took off their dock is off it still", off, &r);
     let r = say(&api, "k2", "kale and chard")?;
     let next = s.eventually(Duration::from_secs(30), || found(&api, "kale") == 2);
     s.ok("and a chat's new message reaches it: its search outbox goes on", r.status == 200 && next, &r);

@@ -1924,7 +1924,7 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
     );
     b.reload(&page)?;
     let home = view(&mut b, &page, "location.pathname === '/' && !document.getElementById('layout').hidden && !!document.querySelector('#frames iframe[data-fragment]') && document.getElementById('sidebar-new-chat')?.getAttribute('aria-label') === 'Search chats and apps'", wait);
-    let makes = b.eval(&page, "[!document.getElementById('new-chat').hidden && 'new-chat', document.getElementById('add-app') && 'add-app'].filter(Boolean)")?;
+    let makes = b.eval(&page, "[!document.getElementById('new-chat').hidden && 'new-chat', !document.getElementById('sidebar-start-chat').hidden && 'sidebar-start-chat', document.getElementById('add-app') && 'add-app'].filter(Boolean)")?;
     b.eval(&page, "(location.assign('/settings'), true)")?;
     let billed = view(&mut b, &page, "location.pathname === '/settings' && /You are a guest/.test(document.getElementById('settings-page')?.innerText ?? '')", wait);
     let headings = b.eval(&page, "[...document.querySelectorAll('#settings-page h2')].map((h) => h.textContent)")?;

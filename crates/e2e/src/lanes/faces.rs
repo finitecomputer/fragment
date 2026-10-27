@@ -263,5 +263,53 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
         gone.status == 200 && removed && asked["picture"].is_null() && asked["title"] == "Frank" && none.status == 404,
         json!({ "row": row(api, &paul, &agent), "people": asked, "picture": none.status }),
     );
+
+    // the CLI, as its person uses it (cli/GUIDE.md): `fragment agent
+    // --name` renames it and says its new name; every reader follows, its
+    // status's title too (what its computer's image reads it by), and
+    // `fragment access` names it by its name, never its label
+    let home = super::shell::cli_home(s, api, &session, "faces-cli")?;
+    let said = s.cli_json(api, &home, &["agent", &agent, "--name", "Frances", "--json"]);
+    let followed = s.eventually(WAIT, || row(api, &paul, &agent)["title"] == "Frances");
+    let status = api.status(&paul, &agent)?.body["title"].clone();
+    let asked = people(api, &chat, &cookie, &agent_id);
+    s.ok(
+        "`fragment agent --name` renames it, saying its new name; its list row, its status (what its image reads) and a chat's page follow",
+        said.as_ref().is_ok_and(|v| v["name"] == "Frances" && v["changed"] == true) && followed && status == "Frances" && asked["title"] == "Frances" && asked["name"] == label.as_str(),
+        json!({ "cli": said.map_err(|e| e.to_string()), "status": status, "people": asked }),
+    );
+    let r = api.share(&agent, &bob_id, "viewer")?;
+    anyhow::ensure!(r.status == 200, "Bob, a viewer again: {r}");
+    let out = s.cli(api, &home, &["access"]);
+    let printed = String::from_utf8_lossy(&out.stdout).to_string();
+    let r = api.signed(&paul, "DELETE", &format!("/api/f/{agent}/members/{bob_id}"), None)?;
+    anyhow::ensure!(r.status == 200, "Bob, out again: {r}");
+    let line = printed.lines().find(|l| l.contains("Frances") || l.split('\t').any(|w| w.trim() == label));
+    s.ok("`fragment access` names it by its name, never its label", out.status.success() && line.is_some_and(|l| l.contains("Frances")), &printed);
+    // invalid: a title of only spaces is no name: every reader falls back to
+    // its label alike, never a blank; and an agent made with no title is
+    // untitled, never a word it was not given ("Agent")
+    let (_, blank) = set_face(api, &paul, &agent, Some("   "), None, None)?;
+    let untitled = s.eventually(WAIT, || row(api, &paul, &agent).get("title").is_none_or(Value::is_null));
+    let status = api.status(&paul, &agent)?.body["title"].clone();
+    let asked = people(api, &chat, &cookie, &agent_id);
+    let said = s.cli_json(api, &home, &["agent", &agent, "--json"]);
+    s.ok(
+        "a title of only spaces is none: no list row, status or page says a blank, and `fragment agent` says its label",
+        blank.is_some_and(|d| d.status == 200) && untitled && status.is_null() && asked["title"].is_null() && asked["name"] == label.as_str() && said.as_ref().is_ok_and(|v| v["name"] == label.as_str()),
+        json!({ "row": row(api, &paul, &agent), "status": status, "people": asked, "cli": said.map_err(|e| e.to_string()) }),
+    );
+    let bare = s.named(api, &paul, "faces-bare")?;
+    let r = api.create_with(&paul, json!({ "name": bare, "template": "agent" }))?;
+    anyhow::ensure!(r.status == 200, "an agent with no title: {r}");
+    s.owned(&r.body, &paul);
+    let made = s.eventually(WAIT, || row(api, &paul, &bare)["kind"] == "agent");
+    let shown = row(api, &paul, &bare);
+    let status = api.status(&paul, &bare)?.body["title"].clone();
+    s.ok(
+        "an agent made with no title is untitled (its label shows), never called by the template's word",
+        made && shown.get("title").is_none_or(Value::is_null) && status.is_null(),
+        json!({ "row": shown, "status": status }),
+    );
     Ok(())
 }

@@ -123,7 +123,8 @@ impl Skip {
 /// no visitor, so a members-only app takes one.
 pub fn is_app(kind: FragmentKind) -> Result<(), Skip> {
     match kind {
-        FragmentKind::Chat | FragmentKind::Agent | FragmentKind::Skills => Err(Skip::NotAnApp),
+        // a kind this build does not know (a newer platform's) has none
+        FragmentKind::Chat | FragmentKind::Agent | FragmentKind::Skills | FragmentKind::Other => Err(Skip::NotAnApp),
         FragmentKind::App | FragmentKind::Brain => Ok(()),
     }
 }
@@ -1052,13 +1053,14 @@ mod tests {
         assert_eq!(serde_json::to_value(&old).unwrap().as_object().map(|o| o.len()), Some(3));
     }
 
-    /// Goal: chats and agents are not shot, members-only fragments are not
-    /// shot, and the others are shot as their visitors see them.
+    /// Goal: chats and agents are not shot, nor a kind this build does not
+    /// know, members-only fragments are not shot, and the others are shot
+    /// as their visitors see them.
     #[test]
     fn who_is_shot_and_as_whom() {
         use FragmentKind::*;
         use Visibility::*;
-        for kind in [Chat, Agent, Skills] {
+        for kind in [Chat, Agent, Skills, Other] {
             assert_eq!(is_app(kind), Err(Skip::NotAnApp));
             for v in [Public, Link, Members] {
                 assert_eq!(visitor(kind, v), Err(Skip::NotAnApp));

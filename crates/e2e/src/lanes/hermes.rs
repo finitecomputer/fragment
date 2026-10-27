@@ -546,6 +546,17 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         said(&live, &format!("link-view={token}")) && !token.is_empty(),
         json!({ "reply": live, "token": !token.is_empty() }),
     );
+    // its owner opens it, members-only still, in two tabs: the app is fixed,
+    // so what fails is the platform's (agent_app.rs: the check agent-app
+    // runs on what a real agent made)
+    match s.browser()? {
+        None => s.ok("Chrome is installed to open the app Hermes made (set CHROME_BIN)", false, "no Chrome found"),
+        Some(mut chrome) => {
+            let session = api.sign_in(&Api::email_of(&owner))?;
+            let evidence = s.dir("hermes-app");
+            super::agent_app::app_works(s, api, &mut chrome, &session, &owner, &app, super::agent_app::Made::Fixed, &evidence)?;
+        }
+    }
     // it shares as its owner would (Paul, 2026-10-04): it makes the app
     // public, and invites another person to it as a viewer, by email, who
     // is in once they accept it (decision 63)

@@ -411,8 +411,9 @@ fn forged_turn(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut Browser, nam
     Ok(())
 }
 
-// Real work records, including an older bridge's step, on a quiet chat:
-// no computer joins it, so the eight-step turn stays open for inspection.
+// Real work records, including an older bridge's step and the words older
+// bridges kept on steps (`text`), on a quiet chat: no computer joins it, so
+// the eight-step turn stays open for inspection.
 pub(super) fn working_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut Browser, agent: &str, agent_name: &str) -> Result<()> {
     let name = s.named(api, owner, "working-card")?;
     let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
@@ -446,33 +447,87 @@ pub(super) fn working_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut 
     }
     let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
     super::fit(chrome, &page, 1000, 1100, false)?;
-    anyhow::ensure!(super::shows(chrome, &page, "document.querySelectorAll('details.tools[open] .step').length === 8"), "eight-step working card rendered");
-    s.ok("commentary renders bold, code, quotes, lists and safe links with the reply renderer", chrome.eval(&page, "(() => { const n = document.querySelector('.step-text'); return n.querySelector('strong').textContent === 'partially.' && n.querySelector('code').textContent === 'apps-finite' && !!n.querySelector('blockquote strong') && n.querySelectorAll('li').length === 2 && n.querySelector('a').getAttribute('href') === 'https://example.com/docs' && n.querySelector('a').rel === 'noopener noreferrer'; })()")? == true, "");
-    s.ok("HTML in commentary is escaped, including after expanding it", chrome.eval(&page, "(() => { const n = document.querySelector('.step-text'); n.querySelector('.note-expand').click(); return !n.querySelector('img,script') && !window.__noteInjected && n.innerText.includes('<img src=x onerror=') && n.querySelector('.note-expand').getAttribute('aria-expanded') === 'true'; })()")? == true, "");
-    s.ok("a step's icon says what it does, its verb the icon's name for assistive technology and not in words beside it", chrome.eval(&page, "(() => { const steps = document.querySelectorAll('.step'); return [[0, 'Reading'], [1, 'Writing'], [6, 'Searching the web']].every(([i, verb]) => { const g = steps[i].querySelector('.step-name > svg'); return !steps[i].querySelector('.step-verb') && g.getAttribute('role') === 'img' && g.getAttribute('aria-label') === verb && !g.hasAttribute('aria-hidden') && !!steps[i].querySelector('.step-label > .step-args:only-child'); }); })()")? == true, chrome.eval(&page, "[...document.querySelectorAll('.step')].slice(0, 2).map((s) => s.querySelector('.step-name').outerHTML)")?);
-    s.ok("every commentary has even room above and below, a short one with no fold too", chrome.eval(&page, "(() => { const notes = [...document.querySelectorAll('details.tools .step-text')]; return notes.length === 3 && !notes[2].querySelector('.note-expand') && notes.every((n) => { const shown = [...n.children].filter((c) => !c.hidden); const r = n.getBoundingClientRect(); const above = shown[0].getBoundingClientRect().top - r.top - n.clientTop; const below = r.bottom - shown.at(-1).getBoundingClientRect().bottom; return above >= 8 && Math.abs(above - below) < 1; }); })()")? == true, chrome.eval(&page, "[...document.querySelectorAll('details.tools .step-text')].map((n) => { const shown = [...n.children].filter((c) => !c.hidden); const r = n.getBoundingClientRect(); return [shown[0].getBoundingClientRect().top - r.top - n.clientTop, r.bottom - shown.at(-1).getBoundingClientRect().bottom]; })")?);
-    s.ok("done steps have a check on the tool line and no separate done result", chrome.eval(&page, "(() => { const s = document.querySelector('.step'); const m = s.querySelector('.step-name .step-status.done'); return !!m?.querySelector('svg') && m.getAttribute('aria-label') === 'done' && !s.querySelector('pre') && !s.innerText.includes('done'); })()")? == true, "");
+    // the words an older bridge kept on steps 1, 3 and 4 are the agent's
+    // replies, between the turn's cards: three cards, the live one last
+    let card = "[...document.querySelectorAll('details.tools')].at(-1)";
+    let lines = format!("[...{card}.querySelectorAll(':scope > .step')]");
+    let shown = format!("{lines}.filter((n) => n.getClientRects().length)");
+    let said = "[...document.querySelectorAll('.msg.agent[data-step]')]";
+    anyhow::ensure!(super::shows(chrome, &page, &format!("document.querySelectorAll('details.tools .step').length === 8 && document.querySelectorAll('details.tools').length === 3 && {card}.matches('.rolling[open]') && {lines}.length === 5 && {said}.length === 3")), "eight-step working turn rendered");
+    s.ok(
+        "the agent's words before a step show as its reply, whole, just before that step's card (no Reply: no record holds them), and no card holds any of its words",
+        chrome.eval(&page, &format!("(() => {{ const said = {said}; const cards = [...document.querySelectorAll('details.tools')]; return said.map((m) => m.dataset.step).join() === '1,3,4' && said.every((m, i) => m.nextElementSibling === cards[i] && !m.closest('details') && !!m.querySelector('.who') && !!m.querySelector('.copy') && !m.querySelector('.reply')) && said[1].querySelector('.md').textContent.includes('This sentence is deliberately long') && said[1].querySelector('.md strong')?.textContent === 'The final sentence stays available.' && said[2].querySelector('.md').textContent === 'Installed cleanly. Now listing the app:' && cards.every((d) => !d.querySelector('.md')); }})()"))? == true,
+        chrome.eval(&page, "[...document.querySelectorAll('#messages > *')].map((n) => `${n.tagName} ${n.className} ${n.dataset.step ?? ''}`)")?,
+    );
+    s.ok(
+        "the cards before it are folded, each to one line: how long it worked and how many steps",
+        chrome.eval(&page, "(() => { const [a, b] = document.querySelectorAll('details.tools'); return !a.open && !b.open && /^Worked for \\d+(s|m \\d\\ds|h \\d+m)· 2 steps$/.test(a.querySelector('summary').textContent) && /^Worked for \\d+(s|m \\d\\ds|h \\d+m)· 1 step$/.test(b.querySelector('summary').textContent); })()")? == true,
+        chrome.eval(&page, "[...document.querySelectorAll('details.tools summary')].map((h) => h.textContent)")?,
+    );
+    s.ok(
+        "while its turn works, its last card's head says for how long and how many steps, and no working line shows under it",
+        super::shows(chrome, &page, &format!("(() => {{ const h = {card}.querySelector('summary'); return !!h.querySelector('.step-dot') && /^Working for \\d+(s|m \\d\\ds|h \\d+m)· 5 steps$/.test(h.textContent) && !document.querySelector('.msg.working'); }})()")),
+        chrome.eval(&page, &format!("{card}?.querySelector('summary')?.textContent ?? ''"))?,
+    );
+    s.ok(
+        "only its last three steps show, the newest whole and each older one fainter (.6, then .3)",
+        super::shows(chrome, &page, &format!("(() => {{ const n = {shown}; return n.length === 3 && n.map((x) => getComputedStyle(x).opacity).join() === '0.3,0.6,1' && n[2] === {lines}.at(-1); }})()")),
+        chrome.eval(&page, &format!("{shown}.map((x) => [x.textContent, getComputedStyle(x).opacity])"))?,
+    );
+    s.ok(
+        "the step it is doing now shimmers, its icon named for it in the present tense, its verb not in words",
+        chrome.eval(&page, "(() => { const s = [...document.querySelectorAll('.step')].at(-1); return s.classList.contains('running') && !s.querySelector('.step-verb') && s.querySelector('.step-name > svg[role=\"img\"]')?.getAttribute('aria-label') === 'Running' && s.querySelector('.step-args').textContent === 'cargo check' && s.querySelector('.step-args').classList.contains('shimmer'); })()")? == true,
+        chrome.eval(&page, "[...document.querySelectorAll('.step')].at(-1)?.outerHTML ?? ''")?,
+    );
+    chrome.eval(&page, &format!("(() => {{ {card}.dispatchEvent(new MouseEvent('click', {{ bubbles: true }})); return true; }})()"))?;
+    s.ok(
+        "clicking its steps opens the card whole: every step, at full strength",
+        super::shows(chrome, &page, &format!("(() => {{ const d = {card}; const n = {shown}; return d.open && !d.classList.contains('rolling') && n.length === 5 && n.every((x) => getComputedStyle(x).opacity === '1'); }})()")),
+        "",
+    );
+    s.ok("the agent's words render bold, code, quotes, lists and safe links with the reply renderer", chrome.eval(&page, "(() => { const n = document.querySelector('.msg.agent[data-step=\"1\"] .md'); return n.querySelector('strong').textContent === 'partially.' && n.querySelector('code').textContent === 'apps-finite' && !!n.querySelector('blockquote strong') && n.querySelectorAll('li').length === 2 && n.querySelector('a').getAttribute('href') === 'https://example.com/docs' && n.querySelector('a').rel === 'noopener noreferrer'; })()")? == true, "");
+    s.ok("HTML in the agent's words is escaped", chrome.eval(&page, "(() => { const n = document.querySelector('.msg.agent[data-step=\"1\"]'); return !n.querySelector('.md img, .md script') && !window.__noteInjected && n.innerText.includes('<img src=x onerror='); })()")? == true, "");
+    s.ok(
+        "a done step's icon says what it did, its verb in the past tense the icon's name for assistive technology and not in words beside it",
+        chrome.eval(&page, "(() => { const steps = document.querySelectorAll('.step'); return [[0, 'Read'], [1, 'Wrote'], [3, 'Ran'], [6, 'Searched the web']].every(([i, verb]) => { const g = steps[i].querySelector('.step-name > svg'); return !steps[i].querySelector('.step-verb') && g.getAttribute('role') === 'img' && g.getAttribute('aria-label') === verb && !g.hasAttribute('aria-hidden') && !!steps[i].querySelector('.step-label > .step-args:only-child') && !steps[i].querySelector('.shimmer'); }); })()")? == true,
+        chrome.eval(&page, "[...document.querySelectorAll('.step')].map((s) => s.querySelector('.step-name').outerHTML)")?,
+    );
+    // (the agent's profile read first: its paths shorten once it is known)
     let full = format!("{home}apps-finite/README.md");
     s.ok("the agent's own home becomes ~/ with the full original path in its title", super::shows(chrome, &page, &format!("document.querySelector('.step-args')?.textContent === '~/apps-finite/README.md' && document.querySelector('.step-args').title === {}", super::js(&full))), &full);
-    s.ok("workspace and managed-skill prefixes shorten, including an older bridge's tool fallback, named in words (its wrench names no tool)", chrome.eval(&page, "(() => { const steps = document.querySelectorAll('.step'); return steps[2].dataset.category === 'other' && steps[2].querySelector('.step-verb').textContent === 'terminal:' && steps[2].querySelector('.step-name > svg').getAttribute('aria-hidden') === 'true' && steps[2].querySelector('.step-args').textContent === 'ls -R skills/software-development/references/engineering-style.md' && !!steps[2].querySelector('.step-status.done') && steps[3].querySelector('.step-args').textContent === 'ls work/apps-finite' && steps[5].querySelector('.step-args').textContent.startsWith('/data/work/another-agent/home/'); })()")? == true, "");
-    s.ok("a failed step has a red error mark and its result excerpt", chrome.eval(&page, "(() => { const s = document.querySelector('.step.error'); const m = s.querySelector('.step-status.failed'); return m?.getAttribute('aria-label') === 'failed' && !!m.querySelector('svg') && s.querySelector('.step-result').textContent === 'error: expected a closing delimiter' && getComputedStyle(m.querySelector('svg')).color === getComputedStyle(s.querySelector('.step-result')).color; })()")? == true, "");
-    s.ok("a step without its result has a running spinner", chrome.eval(&page, "!!document.querySelector('.step:last-child .step-status.running .spin')")? == true, "");
-    s.ok("long commentary folds at a complete sentence and expands its full markdown", chrome.eval(&page, "(() => { const n = document.querySelectorAll('.step-text')[1]; const p = n.querySelector('.note-preview'); const b = n.querySelector('.note-expand'); const folded = p.innerText === 'I’ll keep the filename visible and shorten the directories.' && b.textContent === '…' && b.getAttribute('aria-expanded') === 'false'; b.click(); return folded && p.hidden && n.innerText.includes('The final sentence stays available.') && n.querySelector('.md:not([hidden]) strong')?.textContent === 'The final sentence stays available.'; })()")? == true, "");
-    chrome.eval(&page, "(() => { document.querySelectorAll('.step-text')[1].querySelector('.note-expand').click(); return true; })()")?;
-    chrome.eval(&page, "(() => { document.querySelector('details.tools').scrollIntoView({block:'start'}); return true; })()")?;
+    let opened = chrome.eval(&page, "(() => { const s = document.querySelectorAll('.step')[3]; const line = s.querySelector('.step-name'); const d = s.querySelector('.step-detail'); const folded = d.hidden && line.getAttribute('aria-expanded') === 'false'; line.click(); const open = !d.hidden && line.getAttribute('aria-expanded') === 'true'; const call = d.querySelector('.step-call')?.textContent ?? null; const result = d.querySelector('.step-result')?.textContent ?? null; line.click(); return { folded, open, call, result, closed: d.hidden }; })()")?;
+    s.ok(
+        "a step's result stays folded until its line is opened: then its whole arguments, and what came of it",
+        opened == json!({ "folded": true, "open": true, "call": "ls work/apps-finite", "result": "README.md\nsrc", "closed": true }),
+        &opened,
+    );
+    s.ok("workspace and managed-skill prefixes shorten, including an older bridge's tool fallback, named in words by its tool (its wrench names none)", chrome.eval(&page, "(() => { const steps = document.querySelectorAll('.step'); return steps[2].dataset.category === 'other' && steps[2].querySelector('.step-verb').textContent === 'terminal:' && steps[2].querySelector('.step-name > svg').getAttribute('aria-hidden') === 'true' && steps[2].querySelector('.step-args').textContent === 'ls -R skills/software-development/references/engineering-style.md' && steps[3].querySelector('.step-args').textContent === 'ls work/apps-finite' && steps[5].querySelector('.step-args').textContent.startsWith('/data/work/another-agent/home/'); })()")? == true, "");
+    s.ok("a failed step says so in words, alone in colour, its result in that colour too", chrome.eval(&page, "(() => { const s = document.querySelector('.step.error'); const done = getComputedStyle(document.querySelector('.step:not(.error):not(.running) .step-name')).color; const red = getComputedStyle(s.querySelector('.step-name')).color; return s.querySelector('.step-verb').textContent === 'Failed running' && s.querySelector('.step-name > svg').getAttribute('aria-hidden') === 'true' && s.querySelector('.step-result').textContent === 'error: expected a closing delimiter' && red !== done && getComputedStyle(s.querySelector('.step-result')).color === red; })()")? == true, "");
+    chrome.eval(&page, "(() => { document.querySelector('.msg.agent[data-step]').scrollIntoView({block:'start'}); return true; })()")?;
     let shots = s.dir("working-card");
     chrome.screenshot(&page, &shots.join("desktop.png"))?;
+    // the folded cards opened, as a person opens one: their steps are measured once shown
+    chrome.eval(&page, "(() => { const [a, b] = document.querySelectorAll('details.tools'); a.querySelector('summary').click(); b.querySelector('summary').click(); return true; })()")?;
     super::fit(chrome, &page, 375, 1000, true)?;
-    s.ok("a narrow step wraps to two lines, shortening directories in the middle while keeping the filename", super::shows(chrome, &page, "(() => { const a = document.querySelectorAll('.step-args')[1]; const h = Number.parseFloat(getComputedStyle(a).lineHeight); return a.textContent.startsWith('~/') && a.textContent.includes('…/') && a.textContent.endsWith('/WorkingCard.tsx') && a.clientHeight > h && a.scrollHeight <= 2*h + 1 && a.title.endsWith('/layout/WorkingCard.tsx'); })()"), chrome.eval(&page, "document.querySelectorAll('.step-args')[1].textContent")?);
-    s.ok("the older bridge's path also keeps its filename visible when shortened on a phone", super::shows(chrome, &page, "(() => { const a = document.querySelectorAll('.step-args')[2]; const r = document.createRange(); r.setStart(a.firstChild, a.textContent.length - 20); r.setEnd(a.firstChild, a.textContent.length); return a.textContent.startsWith('ls -R skills/') && a.textContent.includes('…/') && a.textContent.endsWith('/engineering-style.md') && a.title.startsWith('ls -R /data/hermes/managed-skills/') && a.scrollHeight <= 2*Number.parseFloat(getComputedStyle(a).lineHeight)+1 && r.getBoundingClientRect().bottom <= a.getBoundingClientRect().bottom + 1; })()"), "");
-    s.ok("the working card fits the phone without horizontal page scrolling", chrome.eval(&page, "document.documentElement.scrollWidth <= innerWidth && document.getElementById('scroll').scrollWidth === document.getElementById('scroll').clientWidth")? == true, "");
-    chrome.eval(&page, "(() => { document.querySelector('details.tools').scrollIntoView({block:'start'}); return true; })()")?;
+    s.ok("a narrow step stays one line, shortening directories in the middle while keeping the filename", super::shows(chrome, &page, "(() => { const a = document.querySelectorAll('.step-args')[1]; const h = Number.parseFloat(getComputedStyle(a).lineHeight); return a.textContent.startsWith('~/') && a.textContent.includes('…/') && a.textContent.endsWith('/WorkingCard.tsx') && a.scrollWidth <= a.clientWidth && a.clientHeight <= h + 1 && a.title.endsWith('/layout/WorkingCard.tsx'); })()"), chrome.eval(&page, "document.querySelectorAll('.step-args')[1].textContent")?);
+    s.ok("the older bridge's path also keeps its filename visible when shortened on a phone", super::shows(chrome, &page, "(() => { const a = document.querySelectorAll('.step-args')[2]; return a.textContent.startsWith('ls -R skills/') && a.textContent.includes('…/') && a.textContent.endsWith('/engineering-style.md') && a.title.startsWith('ls -R /data/hermes/managed-skills/') && a.scrollWidth <= a.clientWidth; })()"), chrome.eval(&page, "document.querySelectorAll('.step-args')[2].textContent")?);
+    s.ok("the working turn fits the phone without horizontal page scrolling", chrome.eval(&page, "document.documentElement.scrollWidth <= innerWidth && document.getElementById('scroll').scrollWidth === document.getElementById('scroll').clientWidth")? == true, "");
+    chrome.eval(&page, "(() => { document.querySelector('.msg.agent[data-step]').scrollIntoView({block:'start'}); return true; })()")?;
     chrome.screenshot(&page, &shots.join("phone.png"))?;
     super::fit(chrome, &page, 1000, 1100, false)?;
-    s.ok("resizing back restores the full shortened path when two lines fit", super::shows(chrome, &page, "document.querySelectorAll('.step-args')[1].textContent === '~/apps-finite/src/components/chat/working-card/variants/desktop/theme/layout/WorkingCard.tsx'"), "");
+    s.ok("resizing back restores the full shortened path when one line fits", super::shows(chrome, &page, "document.querySelectorAll('.step-args')[1].textContent === '~/apps-finite/src/components/chat/working-card/variants/desktop/theme/layout/WorkingCard.tsx'"), chrome.eval(&page, "document.querySelectorAll('.step-args')[1].textContent")?);
+    // a step opened before its turn ends is open when its card is opened again
+    chrome.eval(&page, "(() => { document.querySelectorAll('.step')[3].querySelector('.step-name').click(); return true; })()")?;
+    chrome.eval(&page, &format!("(() => {{ {card}.querySelector('summary').click(); return true; }})()"))?;
+    s.ok("its head closes it back to the last three steps while its turn works", super::shows(chrome, &page, &format!("{card}.classList.contains('rolling') && {shown}.length === 3")), "");
     let ended = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": "fixture-end", "body": { "kind": "turn.end", "turn": "working-card", "outcome": "idle" } })))?;
     anyhow::ensure!(ended.status == 200, "ending working-card fixture: {ended}");
-    s.ok("a completed card folds and remembers expanded commentary when opened again", super::shows(chrome, &page, "(() => { const d = document.querySelector('details.tools'); if (d.open || !d.innerText.includes('Worked through 8 steps')) return false; d.open = true; return d.querySelector('.note-expand').getAttribute('aria-expanded') === 'true'; })()"), "");
+    s.ok(
+        "once its turn ends its last card folds to one line, how long it worked and an icon for each kind of work, and opened again keeps a step opened before",
+        super::shows(chrome, &page, &format!("(() => {{ const d = {card}; const h = d.querySelector('summary'); if (d.open || !/^Worked for \\d+(s|m \\d\\ds|h \\d+m)· 5 steps$/.test(h.textContent) || h.querySelectorAll('.step-kinds svg').length !== 3 || h.querySelector('.step-dot')) return false; h.click(); return d.open && !d.classList.contains('rolling') && !document.querySelectorAll('.step')[3].querySelector('.step-detail').hidden; }})()")),
+        chrome.eval(&page, &format!("{card}?.querySelector('summary')?.textContent ?? ''"))?,
+    );
+    s.ok("cards opened while the turn worked stay open once it ends", chrome.eval(&page, "(() => { const [a, b] = document.querySelectorAll('details.tools'); return a.open && b.open; })()")? == true, "");
     println!("      (working-card screenshots in {})", shots.display());
     chrome.close(page)?;
     let r = api.signed(owner, "DELETE", &format!("{add}/{}", fragment_core::npub::encode(hand.pubkey_hex())), None)?;
@@ -484,14 +539,17 @@ pub(super) fn working_card(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut 
 /// not load in the shell): prompt answers from before answers named their
 /// card (`{kind: "prompt_response", option, prompt}`, no agent, no turn),
 /// messages whose files' blobs are not here, an owner's `steer`, a step
-/// with long commentary; and an agent's reply whose markdown made the
+/// with long commentary (an older bridge's `text`), a turn whose answer was
+/// both a step's words and its reply (an older bridge's answer said beside a
+/// housekeeping call); and an agent's reply whose markdown made the
 /// renderer throw (a row of one cell over a separator with no pipe: `a |`,
 /// then `---`), which kept every redraw of its chat from drawing anything.
-/// Goal: the page draws every one of them, and an item it cannot draw (here
-/// the commentary's fold, in a browser without `Intl.Segmenter`, as Firefox
-/// before 125) is a quiet line in its place, said to the console, the rest
+/// Goal: the page draws every one of them, the commentary as the agent's
+/// reply before its step and the answer once, and an item it cannot draw
+/// (here a card of steps, in a browser without `Object.hasOwn`, as Safari
+/// before 15.4) is a quiet line in its place, said to the console, the rest
 /// of the chat drawn. Method: a quiet chat's owner and agent post them; the
-/// owner's page read, then read again with `Intl.Segmenter` taken away.
+/// owner's page read, then read again with `Object.hasOwn` taken away.
 pub(super) fn record_shapes(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrome: &mut Browser) -> Result<()> {
     use sha2::{Digest, Sha256};
     let name = s.named(api, owner, "chat-shapes")?;
@@ -519,6 +577,14 @@ pub(super) fn record_shapes(s: &mut Suite, api: &Api, owner: &Keys, session: &st
     }
     post(&hand, "chat", "rp:t1:1", json!({ "text": "Your new address |\n---\nIt is on file now.", "turn": "t1" }))?;
     post(&hand, "work", "end", json!({ "kind": "turn.end", "turn": "t1", "outcome": "idle" }))?;
+    // an older bridge's answer said beside a housekeeping call: its step's
+    // words (cut at 300 characters) and then its reply, whole
+    let answer = "Your claim is filed, and the store will call you to book the delivery. ".repeat(5);
+    let cut = format!("{}…", answer.trim().chars().take(299).collect::<String>().trim_end());
+    post(&hand, "work", "start-2", json!({ "kind": "turn.start", "turn": "t2", "asker": me, "agent": agent }))?;
+    post(&hand, "work", "step-2", json!({ "kind": "turn.step", "turn": "t2", "step": 1, "category": "memory", "tool": "memory", "args": "the claim", "ok": true, "text": cut }))?;
+    post(&hand, "chat", "rp:t2:1", json!({ "text": answer, "turn": "t2" }))?;
+    post(&hand, "work", "end-2", json!({ "kind": "turn.end", "turn": "t2", "outcome": "idle" }))?;
     post(owner, "chat", "photos", json!({ "text": "", "attachments": [missing("IMG_1.jpeg", "image/jpeg", 4_628_527), missing("IMG_2.jpeg", "image/jpeg", 3_153_194)] }))?;
     post(owner, "chat", "screenshot", json!({ "text": "My address has changed", "attachments": [missing("IMG_3.png", "image/png", 793_981)] }))?;
     post(owner, "chat", "steer", json!({ "kind": "command", "command": "steer", "args": "Or you could move them to your computer", "to": [agent] }))?;
@@ -530,27 +596,100 @@ pub(super) fn record_shapes(s: &mut Suite, api: &Api, owner: &Keys, session: &st
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", session)?;
     let page = chrome.open_with_script(&api.site_url(&name, "__signin?return=/"), probe)?;
     super::fit(chrome, &page, 1280, 860, false)?;
-    let drew = super::shows(chrome, &page, rest) && super::shows(chrome, &page, "!!document.querySelector('details.tools .step-text .note-preview')");
+    // the commentary as the agent's reply before its step's card; t2's answer once, as its reply
+    let words = format!("(() => {{ const said = [...document.querySelectorAll('.msg.agent[data-step]')]; return said.length === 1 && said[0].dataset.turn === 't1' && said[0].querySelector('.md').textContent === {} && !!said[0].nextElementSibling?.matches('details.tools') && [...document.querySelectorAll('.msg.agent[data-turn=\"t2\"]')].length === 1; }})()", super::js(commentary));
+    let drew = super::shows(chrome, &page, rest) && super::shows(chrome, &page, &words);
     let seen = chrome.eval(&page, "({ errors: window.__errors, unshown: document.querySelectorAll('.unshown').length, items: [...document.querySelectorAll('#messages > *')].map((n) => n.className) })")?;
     s.ok(
-        "a chat of production's record shapes draws whole: legacy prompt answers, files with no blobs, a steer, long commentary, and a one-cell table over a rule",
+        "a chat of production's record shapes draws whole: legacy prompt answers, files with no blobs, a steer, long commentary as the agent's reply before its step, an answer that was a step's words too shown once, and a one-cell table over a rule",
         drew && seen["errors"] == json!([]) && seen["unshown"] == 0,
         &seen,
     );
     chrome.screenshot(&page, &s.dir("chat-polish").join("record-shapes.png"))?;
     chrome.close(page)?;
-    let page = chrome.open_with_script(&api.site_url(&name, ""), &format!("delete Intl.Segmenter; {probe}"))?;
+    let page = chrome.open_with_script(&api.site_url(&name, ""), &format!("delete Object.hasOwn; {probe}"))?;
     super::fit(chrome, &page, 1280, 860, false)?;
-    let quiet = "(() => { const n = document.querySelector('#messages > :nth-child(2)'); return !!n?.matches('.msg.notice.unshown') && n.textContent === 'This part of the chat could not be shown.' && !document.querySelector('details.tools'); })()";
+    let quiet = "(() => { const n = [...document.querySelectorAll('#messages > .msg.notice.unshown')]; return n.length === 2 && n.every((x) => x.textContent === 'This part of the chat could not be shown.') && !!n[0].previousElementSibling?.matches('.msg.agent[data-step=\"1\"]') && !document.querySelector('details.tools'); })()";
     let drew = super::shows(chrome, &page, rest) && super::shows(chrome, &page, quiet);
     let seen = chrome.eval(&page, "({ errors: window.__errors, said: window.__said, items: [...document.querySelectorAll('#messages > *')].map((n) => n.className) })")?;
     let said = seen["said"].as_array().is_some_and(|l| l.iter().any(|x| x.as_str().is_some_and(|x| x.contains("could not be shown"))));
     s.ok(
-        "an item the page cannot draw (its commentary's fold, with no Intl.Segmenter) is a quiet line in its place, said to the console, and everything after it draws",
+        "an item the page cannot draw (a card of steps, with no Object.hasOwn) is a quiet line in its place, said to the console, and everything after it draws",
         drew && said && seen["errors"] == json!([]),
         &seen,
     );
     chrome.screenshot(&page, &s.dir("chat-polish").join("record-shapes-unshown.png"))?;
+    chrome.close(page)?;
+    Ok(())
+}
+
+/// Alex's review of #580: a finished card said how long its turn worked up
+/// to the next thing the chat showed (an idle end shows nothing of its
+/// own), so a turn's "Worked for 3s" became "Worked for 1h 0m" once
+/// someone spoke an hour later. Goal: a finished card's time runs from its
+/// turn's start (a later card's, its first step) to its own turn's next
+/// record, else its end, whatever comes after: a person's message, another
+/// agent's turn, a reload. Both shapes: steps, then an idle end; an answer,
+/// a housekeeping (memory) step, then an idle end. Method: a quiet chat's
+/// agents post them, each end seconds after its last step, and the owner's
+/// message and another agent's turn seconds after each end; the heads read
+/// the times the records give, live and after a reload.
+pub(super) fn finished_card_times(s: &mut Suite, api: &Api, owner: &Keys, chrome: &mut Browser) -> Result<()> {
+    let name = s.named(api, owner, "card-times")?;
+    let made = api.create_with(owner, json!({ "name": name, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "making the card-times chat: {made}");
+    s.owned(&made.body, owner);
+    let (hand, agent) = quiet_agent(api, owner, &name)?;
+    let (other, other_id) = quiet_agent(api, owner, &name)?;
+    let me = api.identity(owner)?;
+    // a record posted, and the time the platform gave it
+    let post = |by: &Keys, channel: &str, id: &str, body: Value| -> Result<i64> {
+        let r = api.signed(by, "POST", &format!("/api/f/{name}/channels/{channel}"), Some(&json!({ "id": id, "body": body })))?;
+        anyhow::ensure!(r.status == 200, "posting {id} on {channel}: {r}");
+        r.body["record"]["at"].as_i64().ok_or_else(|| anyhow::anyhow!("{id}: no time in {r}"))
+    };
+    let pause = |ms: u64| std::thread::sleep(Duration::from_millis(ms));
+    let step = |turn: &str, n: u32, category: &str, tool: &str, args: &str| json!({ "kind": "turn.step", "turn": turn, "step": n, "category": category, "tool": tool, "args": args, "ok": true });
+    // the head's words for a time, as the page says it (`took`)
+    let took = |ms: i64| {
+        let s = ((ms as f64) / 1000.0).round().max(1.0) as i64;
+        if s < 60 { format!("{s}s") } else { format!("{}m {:02}s", s / 60, s % 60) }
+    };
+    let page = chrome.open(&api.site_url(&name, "__signin?return=/"))?;
+    super::fit(chrome, &page, 1000, 1100, false)?;
+    // steps, then an idle end
+    let start1 = post(&hand, "work", "a-start", json!({ "kind": "turn.start", "turn": "t1", "asker": me, "agent": agent }))?;
+    post(&hand, "work", "a-1", step("t1", 1, "shell", "terminal", "ls"))?;
+    pause(1_000);
+    post(&hand, "work", "a-2", step("t1", 2, "shell", "terminal", "cargo check"))?;
+    pause(1_500);
+    let end1 = post(&hand, "work", "a-end", json!({ "kind": "turn.end", "turn": "t1", "outcome": "idle" }))?;
+    pause(3_000);
+    post(owner, "chat", "later-1", json!({ "text": "Thanks!" }))?;
+    // an answer, a housekeeping step, then an idle end
+    let start2 = post(&hand, "work", "b-start", json!({ "kind": "turn.start", "turn": "t2", "asker": me, "agent": agent }))?;
+    post(&hand, "chat", "rp:t2:1", json!({ "text": "Noted: you like tomatoes.", "turn": "t2" }))?;
+    post(&hand, "work", "b-1", step("t2", 1, "memory", "memory", "tomatoes"))?;
+    pause(1_500);
+    let end2 = post(&hand, "work", "b-end", json!({ "kind": "turn.end", "turn": "t2", "outcome": "idle" }))?;
+    pause(3_000);
+    // later: the owner speaks, and another agent works
+    post(owner, "chat", "later-2", json!({ "text": "And one more thing." }))?;
+    post(&other, "work", "c-start", json!({ "kind": "turn.start", "turn": "t3", "asker": me, "agent": other_id }))?;
+    post(&other, "work", "c-1", step("t3", 1, "web", "web_search", "tomato varieties"))?;
+    post(&other, "work", "c-end", json!({ "kind": "turn.end", "turn": "t3", "outcome": "idle" }))?;
+    let want = json!([format!("Worked for {}· 2 steps", took(end1 - start1)), format!("Worked for {}· 1 step", took(end2 - start2))]);
+    let heads = "[...document.querySelectorAll('details.tools summary')].slice(0, 2).map((h) => h.textContent)";
+    let three = "document.querySelectorAll('details.tools').length === 3 && [...document.querySelectorAll('.bubble')].some((b) => b.textContent === 'And one more thing.')";
+    let live = super::shows(chrome, &page, three) && chrome.eval(&page, heads)? == want;
+    let seen = chrome.eval(&page, heads)?;
+    chrome.reload(&page)?;
+    let reloaded = super::shows(chrome, &page, three) && chrome.eval(&page, heads)? == want;
+    s.ok(
+        "a finished card says how long its own turn worked, to its own end (steps then an idle end; an answer, a memory step, an idle end), not to what comes after: a later message, another agent's turn, a reload",
+        live && reloaded,
+        json!({ "want": want, "live": seen, "reloaded": chrome.eval(&page, heads)? }),
+    );
     chrome.close(page)?;
     Ok(())
 }

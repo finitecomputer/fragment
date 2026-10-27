@@ -284,9 +284,9 @@ def bot_name(bot):
 
         data = hermes_yaml.safe_load((Path(bot["home"]) / "profile.yaml").read_text(encoding="utf-8")) or {}
         title = ((data.get("ui_meta") or {}).get("hermes-bots") or {}).get("title") or data.get("display_name")
-        return str(title).strip() or bot["agent"].split(".")[0]
+        return str(title).strip() or bot["agent"].split("--")[0]
     except Exception:
-        return bot["agent"].split(".")[0]
+        return bot["agent"].split("--")[0]
 
 
 def deliver(bot, sender, owner, claimed):
@@ -298,7 +298,7 @@ def deliver(bot, sender, owner, claimed):
         if sender is None:
             error = "the sender is no agent of this computer"
         else:
-            them = name_of(claimed["message"], sender["agent"].split(".")[0])
+            them = name_of(claimed["message"], sender["agent"].split("--")[0])
             text, failed = hand_off(bot, sender, claimed["message"] + ANSWER_HERE.format(name=them), "dm-" + delivery[:32])
             if failed is None or text:
                 status, reply = "settled", (text or "")[:REPLY_MAX_CHARS]

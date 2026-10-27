@@ -49,6 +49,22 @@ pub struct Agent {
     pub identity: String,
     /// Its label (`fred`): how it is @mentioned.
     pub name: String,
+    /// Its name (its agent fragment's title), as the signer's list says it
+    /// (`named`): what the CLI calls it (`shown`). None when the list does
+    /// not say, or it has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Its owner, whose list names it for an agent asking (never printed).
+    #[serde(default, skip_serializing)]
+    pub owner: String,
+}
+
+impl Agent {
+    /// What it is called: its name, else its label (docs/api.md, "An
+    /// agent's name and picture").
+    pub fn shown(&self) -> &str {
+        fragment_core::face::agent_name(self.title.as_deref(), &self.fragment)
+    }
 }
 
 fn label(name: &str) -> &str {
@@ -204,20 +220,29 @@ fn members(c: &Client, chat: &str) -> Result<Option<MemberList>> {
     c.call_as(r).map(Some)
 }
 
-/// The fragments' titles, by name: a new chat is titled by its agents'.
-fn titles(c: &Client) -> Vec<(String, String)> {
-    let Ok(v) = c.get("/api/fragments").and_then(|r| c.call(r)) else { return Vec::new() };
-    v["fragments"].as_array().map(|l| l.iter().filter_map(|f| Some((f["name"].as_str()?.to_string(), f["title"].as_str()?.to_string()))).collect()).unwrap_or_default()
+/// A chat this makes is titled as the shell titles a new one: its own
+/// title, never its agents' names, which a rename would leave behind (the
+/// owner's shell titles it from its first message).
+pub const UNTITLED_CHAT: &str = "New chat";
+
+/// `agent`'s name, as the signer's list says it now: a person's own list,
+/// or an agent's of its owner's (`?for=`), where its owner's agents are. A
+/// list that does not read names it by its label.
+fn named(c: &Client, asker: Option<&Agent>, agent: &mut Agent) {
+    let Ok(v) = c.get(&names_path(&c.signer, asker)).and_then(|r| c.call(r)) else { return };
+    agent.title = v["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == agent.fragment.as_str())).and_then(|f| f["title"].as_str()).map(str::to_string);
 }
 
-fn title_of(titles: &[(String, String)], a: &Agent) -> String {
-    titles.iter().find(|(n, _)| *n == a.fragment).map(|(_, t)| t.clone()).unwrap_or_else(|| {
-        let mut l = a.name.clone();
-        if let Some(first) = l.get_mut(0..1) {
-            first.make_ascii_uppercase();
-        }
-        l
-    })
+/// The list that names an agent's fellow agents: its owner's, `for` named
+/// once. An agent's CLI on its computer acts for its owner already
+/// (`FRAGMENT_FOR`), which the signer adds itself (`Signer::path`), and the
+/// platform refuses `for` named twice (Alex's review of #630).
+fn names_path(signer: &crate::api::Signer, asker: Option<&Agent>) -> String {
+    match (signer, asker) {
+        (crate::api::Signer::Agent(crate::api::AgentMode { acting_for: Some(_), .. }), _) => "/api/fragments".into(),
+        (_, Some(a)) if !a.owner.is_empty() => format!("/api/fragments?for={}", a.owner),
+        _ => "/api/fragments".into(),
+    }
 }
 
 /// Asks `who` `text`, as the CLI's signer: finds or makes the chat, adds
@@ -234,13 +259,14 @@ pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u
         }
     }
     let (asker, agents) = roster(c)?;
-    let asked = pick(&agents, who).cloned().ok_or_else(|| {
+    let mut asked = pick(&agents, who).cloned().ok_or_else(|| {
         let names: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
         coded(Code::NotFound, format!("{who:?} is none of the agents that may be asked here ({})", if names.is_empty() { "none".into() } else { names.join(", ") }))
     })?;
     if asker.as_ref().is_some_and(|a| a.identity == asked.identity) {
         return Err(coded(Code::InvalidUsage, "an agent asks another agent, not itself"));
     }
+    named(c, asker.as_ref(), &mut asked);
     // the chat: one named (--chat), the two agents' (named in full), or a
     // person's direct chat with the agent (by its label, as the shell's)
     let (found, make) = match (chat, &asker) {
@@ -264,13 +290,8 @@ pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u
     let (full, mut list) = match (existing, make) {
         (Some(found), _) => found,
         (None, Some(mut make)) => {
-            let all = titles(c);
-            let title = match &asker {
-                Some(a) => format!("{} and {}", title_of(&all, a), title_of(&all, &asked)),
-                None => title_of(&all, &asked),
-            };
             make["template"] = json!("chat");
-            make["title"] = json!(title);
+            make["title"] = json!(UNTITLED_CHAT);
             let made = c.post_json("/api/fragments", &make)?;
             let full = if made.status == 409 {
                 // made meanwhile (the other agent asking at once): the same chat
@@ -297,7 +318,7 @@ pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u
     for (who, must) in asker.iter().map(|a| (a, false)).chain([(&asked, true)]) {
         match list.members.iter().find(|m| m.principal == who.identity) {
             Some(m) if must && m.role < Role::Editor => {
-                return Err(coded(Code::Forbidden, format!("{} is a viewer in {full}, so it cannot answer there (its turns are an editor's): ask it in another chat", who.name)));
+                return Err(coded(Code::Forbidden, format!("{} is a viewer in {full}, so it cannot answer there (its turns are an editor's): ask it in another chat", who.shown())));
             }
             Some(_) => {}
             None => {
@@ -306,7 +327,7 @@ pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u
                     added.push(who.identity.clone());
                 } else if must {
                     let e = r.refusal();
-                    return Err(coded(e.code, format!("{} is not in {full}, and adding it was refused ({}): only the chat's owner, or their agent, adds agents to it", who.name, e.msg)));
+                    return Err(coded(e.code, format!("{} is not in {full}, and adding it was refused ({}): only the chat's owner, or their agent, adds agents to it", who.shown(), e.msg)));
                 }
                 // the asker not added (a chat its owner only edits): it posts acting for them
             }
@@ -390,7 +411,7 @@ mod tests {
     use super::*;
 
     fn agent(label: &str) -> Agent {
-        Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.into() }
+        Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.into(), title: None, owner: String::new() }
     }
 
     /// Goal: an agent is named as a person would name it. Invalid: a name
@@ -404,6 +425,40 @@ mod tests {
         for who in ["fre", "fred--p2m4", "NPUB1FRED", "", "juniper-chat"] {
             assert_eq!(pick(&agents, who), None, "{who}");
         }
+    }
+
+    /// Goal (Alex's review of #630): the list that names an agent's fellow
+    /// agents names `for` once and its owner, whether its CLI acts for its
+    /// owner already (`FRAGMENT_FOR`, as on its computer: the platform
+    /// refuses `for` named twice) or not; a person's own list names none.
+    #[test]
+    fn the_names_list_names_for_once() {
+        use crate::api::{AgentMode, Signer};
+        let mut me = agent("juniper");
+        me.owner = "npub1paul".into();
+        for acting_for in [Some("npub1paul".to_string()), None] {
+            let signer = Signer::Agent(AgentMode { agent: me.fragment.clone(), acting_for: acting_for.clone() });
+            let sent = signer.path(&names_path(&signer, Some(&me)));
+            assert_eq!(sent, "/api/fragments?for=npub1paul", "acting for {acting_for:?}");
+        }
+        let alone = Signer::Agent(AgentMode { agent: me.fragment.clone(), acting_for: None });
+        assert_eq!(alone.path(&names_path(&alone, None)), "/api/fragments", "a person's ask (no asker) names no one");
+    }
+
+    /// Goal: what the CLI prints calls an agent by its name, else its label;
+    /// its JSON keeps its label as `name` (how it is @mentioned), and its
+    /// owner, read for an agent's ask, is never printed.
+    #[test]
+    fn an_agent_is_called_by_its_name() {
+        let mut fred = agent("fred");
+        assert_eq!(fred.shown(), "fred");
+        fred.title = Some("Frederick".into());
+        fred.owner = "npub1paul".into();
+        assert_eq!(fred.shown(), "Frederick");
+        let v = serde_json::to_value(&fred).expect("an agent");
+        assert_eq!((v["name"].as_str(), v["title"].as_str(), v.get("owner")), (Some("fred"), Some("Frederick"), None));
+        fred.title = Some("  ".into());
+        assert_eq!(fred.shown(), "fred", "a blank title is none");
     }
 
     /// Goal: two agents name one chat, whichever asks: a label that leaves

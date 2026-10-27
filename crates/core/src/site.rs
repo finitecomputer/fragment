@@ -317,7 +317,10 @@ pub fn inject_og(html: &str, name: &str, meta: &Meta, image_url: &str) -> String
     if html.contains("og:title") {
         return html.to_string();
     }
-    let title = html_escape(meta.title.as_deref().unwrap_or(name));
+    // its title as every reader shows it (trimmed; none, or only spaces, its
+    // label), so a page reads its name here unambiguously: a title that is
+    // the fragment's name in full is said as such, never mistaken for none
+    let title = html_escape(crate::face::agent_name(meta.title.as_deref(), name));
     let page_title = if html.contains("<title") { String::new() } else { format!("<title>{title}</title>") };
     let tags = format!(
         r#"<meta property="og:title" content="{title}"><meta property="og:description" content="{}"><meta property="og:image" content="{}"><meta name="twitter:card" content="summary_large_image">{page_title}"#,
@@ -525,6 +528,14 @@ mod tests {
         assert!(out.contains("<title>T&lt;x&gt;</title>"));
         let titled = inject_og("<head><title>Own</title></head>", "n", &meta, "x");
         assert_eq!(titled.matches("<title>").count(), 1, "a page's own title stays the only one");
+        // its title as every reader shows it: trimmed; none, or only spaces,
+        // its label; its name in full, when that is its title, as such
+        let og = |title: Option<&str>| {
+            let meta = Meta { title: title.map(str::to_string), description: None, image: None };
+            let out = inject_og("<head></head>", "juniper--k3x9", &meta, "x");
+            out.split(r#"og:title" content=""#).nth(1).and_then(|r| r.split('"').next()).unwrap_or("").to_string()
+        };
+        assert_eq!([og(Some("  Fred ")), og(Some("   ")), og(None), og(Some("juniper--k3x9"))], ["Fred", "juniper", "juniper", "juniper--k3x9"]);
         assert!(preview_svg("todo").starts_with("<svg"));
     }
 

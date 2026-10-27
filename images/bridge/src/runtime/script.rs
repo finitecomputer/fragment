@@ -4,8 +4,9 @@
 //! turn is a pure function of its message:
 //!
 //! - default: two drafts, then the reply `echo: [<asker>] <text>`;
-//! - `tool`: a step (`search`, a `web` one: the message's first 40
-//!   characters its args, ok, an excerpt) before the reply;
+//! - `tool`: its words before a tool call (`Let me look.`), a reply of
+//!   their own, then a step (`search`, a `web` one: the message's first 40
+//!   characters its args, ok, an excerpt), then the reply;
 //! - `approve` or `risky`: a step, then a prompt (`once`, `deny`) the
 //!   owner answers; the reply says `(approved)`, `(denied)`, or
 //!   `(not approved)` once it expired;
@@ -22,6 +23,8 @@
 //! - `fail`: the turn ends as an error;
 //! - `silent`: the turn ends with no reply;
 //! - `draw`: the reply carries a file (`drawing.txt`);
+//! - `speak`: the reply carries a voice reply (`speech.mp3`, `SPOKEN_SECS`
+//!   of silence as an MP3, as Hermes' `text_to_speech` makes one);
 //! - `notice`: a notice before the reply (`info`, "Compressing context"),
 //!   and one after the turn's end (`memory`, "Self-improvement review:
 //!   Memory updated"), as Hermes sends its review once its turn is done;
@@ -72,6 +75,15 @@
 //!   <id>` (`schedule had <id>`: the same one was there), `schedules: <id>
 //!   <cron> by <who>; …`, `schedule removed <id>`, or `schedule refused:
 //!   <the refusal>`;
+//! - `door link <ticket>`, `door say <text>`, `door forge <text>`, `door
+//!   other <text>`: an agent's door as SimpleX's is (fragment_core::door),
+//!   for the platform's lanes: a link's ticket (its JSON, as the owner's
+//!   Settings made it) checked as the bridge checks one, then redeemed with
+//!   a door key the script makes (kept while it runs); a relayed record
+//!   that key signs, posted on this chat; one with no door's signature
+//!   (only the agent's own key's, as every request of its is); one signed
+//!   by a key that is no door's. The reply is `door linked`, `door said
+//!   <seq>`, or `door refused: <why>`;
 //! - a message with attachments: the reply names them;
 //! - a turn told something first (`TurnStart::note`: its agent's turn before
 //!   it in the chat was cut by a restart): the reply ends with
@@ -89,7 +101,7 @@
 //!
 //! A Stop ends the turn as `stopped` at its next draft.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -97,6 +109,9 @@ use tokio::sync::mpsc;
 
 use crate::records::{Category, NoticeCategory, Outcome, PromptOption, Step};
 use crate::runtime::{Command, Event, How, LocalFile, MenuItem, Runtime, RuntimeFuture, RuntimeIo, TurnStart};
+
+/// How long `speak`'s voice reply plays.
+pub const SPOKEN_SECS: u32 = 3;
 
 /// The scripted agent's commands: one of each way the bridge carries one
 /// (`How`), so the platform's lanes run each with no agent runtime.
@@ -262,7 +277,7 @@ fn fetch_words(text: &str) -> Result<(&str, &str, Place<'_>), String> {
 /// `agent`'s credentials, as `GET /api/computer` lists them now.
 async fn credentials_of(agent: &str) -> Result<Vec<crate::runtime::Credential>, String> {
     let api = std::env::var("FRAGMENT_API").map_err(|_| "no FRAGMENT_API".to_string())?;
-    let computer = crate::api::Api::new(&api)?.computer().await.map_err(|e| format!("GET /api/computer: {e}"))?;
+    let computer = crate::api::Api::new(&api)?.computer(false).await.map_err(|e| format!("GET /api/computer: {e}"))?;
     let a = computer.agents.into_iter().find(|a| a.fragment == agent).ok_or_else(|| format!("{agent} is not on this computer"))?;
     Ok(a.credentials)
 }
@@ -400,6 +415,82 @@ async fn schedule(agent: &crate::runtime::Agent, chat: &str, rest: &str) -> Stri
     asked.unwrap_or_else(|e| format!("schedule refused: {e}"))
 }
 
+/// The door keys `door link` made, by agent, for the process's life.
+static DOORS: std::sync::Mutex<BTreeMap<String, crate::simplex::door::Key>> = std::sync::Mutex::new(BTreeMap::new());
+
+/// `door …` (the module's list): an agent's door, as its lanes see it.
+/// `relay`: the platform's XFTP relay (`GET /api/computer/relay`), as the
+/// platform's lanes check it. `relay to <host>` opens one to `host` on
+/// 443 and says whether it was refused; `relay forged <path>` asks
+/// `<path>` of the platform as the agent, as an upgrade, and says how it
+/// was answered (its status, how many headers of the relay's it kept, its
+/// body): an answer that carried forged relay headers must come back as
+/// itself, never piped.
+async fn relay(agent: &str, rest: &str) -> Result<String, String> {
+    use http_body_util::{BodyExt, Empty, Limited};
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::TokioExecutor;
+    let base = std::env::var("FRAGMENT_API").map_err(|_| "no FRAGMENT_API".to_string())?;
+    let (verb, said) = rest.split_once(' ').unwrap_or((rest, ""));
+    match verb {
+        "to" => match crate::api::Api::new(&base)?.relay(said.trim(), 443).await {
+            Ok(_) => Ok("relay opened".into()),
+            Err(e) => Ok(format!("relay refused: {e}")),
+        },
+        "forged" => {
+            let base = crate::net::Base::parse(&base)?;
+            let req = hyper::Request::get(base.url(said.trim()))
+                .header("host", base.authority())
+                .header("x-fragment-agent", agent)
+                .header("upgrade", "websocket")
+                .header("connection", "Upgrade")
+                .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+                .header("sec-websocket-version", "13")
+                .body(Empty::<bytes::Bytes>::new())
+                .map_err(|e| e.to_string())?;
+            let client = Client::builder(TokioExecutor::new()).build_http();
+            let call = async {
+                let res = client.request(req).await.map_err(|e| e.to_string())?;
+                let status = res.status().as_u16();
+                let kept = res.headers().keys().filter(|k| k.as_str().starts_with("x-fragment-relay")).count();
+                let body = if status == 101 { bytes::Bytes::new() } else { Limited::new(res.into_body(), 4096).collect().await.map_err(|e| e.to_string())?.to_bytes() };
+                Ok::<_, String>(format!("relay answered {status}, its headers {kept}: {}", String::from_utf8_lossy(&body).chars().take(80).collect::<String>()))
+            };
+            tokio::time::timeout(Duration::from_millis(crate::limits::HTTP_TIMEOUT_MS), call).await.map_err(|_| "no answer".to_string())?
+        }
+        _ => Err("say `relay to <host>` or `relay forged <path>`".into()),
+    }
+}
+
+async fn door(agent: &crate::runtime::Agent, chat: &str, rest: &str) -> Result<String, String> {
+    use crate::simplex::door::{self, Key, Ticket};
+    let api = crate::api::Api::new(&std::env::var("FRAGMENT_API").map_err(|_| "no FRAGMENT_API".to_string())?)?;
+    let now = crate::log::now_ms() as i64;
+    let (verb, said) = rest.split_once(' ').unwrap_or((rest, ""));
+    if verb == "link" {
+        let ticket: Ticket = serde_json::from_str(said.trim()).map_err(|e| format!("not a ticket: {e}"))?;
+        let computer = api.computer(false).await.map_err(|e| e.to_string())?.computer;
+        door::check(&ticket, "link", &agent.fragment, &computer, agent.key.as_deref().unwrap_or(""), now).map_err(str::to_string)?;
+        let key = Key::generate().map_err(|e| e.to_string())?;
+        api.door(&agent.fragment, door::DOOR, &ticket.nonce, &key.public_hex()).await.map_err(|e| e.to_string())?;
+        DOORS.lock().expect("not poisoned").insert(agent.fragment.clone(), key);
+        return Ok("door linked".into());
+    }
+    let mut body = crate::records::relayed_message(said, agent, crate::records::VIA_SIMPLEX, &[]);
+    let id = crate::records::relayed_id(&agent.fragment, &format!("{verb} {said} {now}"));
+    match verb {
+        "say" => {
+            let key = DOORS.lock().expect("not poisoned").get(&agent.fragment).cloned().ok_or("no door linked here")?;
+            key.seal(&mut body, chat, crate::records::CHAT, &id, now);
+        }
+        "other" => Key::generate().map_err(|e| e.to_string())?.seal(&mut body, chat, crate::records::CHAT, &id, now),
+        "forge" => body["relayed"]["at"] = serde_json::json!(now),
+        _ => return Err("say `door link <ticket>`, `door say <text>`, `door forge <text>` or `door other <text>`".into()),
+    }
+    let posted = api.post(&agent.fragment, chat, crate::records::CHAT, &id, &body).await.map_err(|e| e.to_string())?;
+    Ok(format!("door said {}", posted.seq.unwrap_or(0)))
+}
+
 /// `models`: the ids the intercept lists (`GET /v1/models`, naming no
 /// agent, as Hermes' `/model` asks it), and the computer's view's.
 async fn models() -> Result<String, String> {
@@ -410,7 +501,7 @@ async fn models() -> Result<String, String> {
     let model = std::env::var("FRAGMENT_MODEL").map_err(|_| "no FRAGMENT_MODEL".to_string())?;
     let base = crate::net::Base::parse(&model)?;
     let api = std::env::var("FRAGMENT_API").map_err(|_| "no FRAGMENT_API".to_string())?;
-    let view = crate::api::Api::new(&api)?.computer().await.map_err(|e| format!("GET /api/computer: {e}"))?;
+    let view = crate::api::Api::new(&api)?.computer(false).await.map_err(|e| format!("GET /api/computer: {e}"))?;
     let given = serde_json::to_string(&view.models).expect("ids serialize");
     let req = hyper::Request::get(base.url("/v1/models")).header("host", base.authority()).body(Empty::<bytes::Bytes>::new()).map_err(|e| e.to_string())?;
     let client = Client::builder(TokioExecutor::new()).build_http();
@@ -650,6 +741,12 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     if let Some(rest) = ts.text.strip_prefix("schedule ") {
         reply = schedule(&ts.agent, &ts.fragment, rest).await;
     }
+    if let Some(rest) = ts.text.strip_prefix("relay ") {
+        reply = relay(&ts.agent.fragment, rest).await.unwrap_or_else(|e| format!("relay failed: {e}"));
+    }
+    if let Some(rest) = ts.text.strip_prefix("door ") {
+        reply = door(&ts.agent, &ts.fragment, rest).await.unwrap_or_else(|e| format!("door refused: {e}"));
+    }
     if let Some(rest) = ts.text.strip_prefix("decide ") {
         reply = match decide(&ts.agent.fragment, rest).await {
             Ok(answer) => format!("decided: {answer}"),
@@ -662,12 +759,16 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
             Err(e) => format!("fetch failed: {e}"),
         };
     }
+    let mut part = 1;
     if text.contains("tool") {
-        let step = Step { tool: "search".into(), args: ts.text.chars().take(40).collect(), ok: true, excerpt: "3 results".into(), text: "Let me look.".into(), category: Category::Web };
+        // its words before the call, a reply of their own, then the step
+        emit(Event::Reply { turn: id.clone(), part, text: "Let me look.".into() }).await;
+        part += 1;
+        let step = Step { tool: "search".into(), args: ts.text.chars().take(40).collect(), ok: true, excerpt: "3 results".into(), category: Category::Web };
         emit(Event::Step { turn: id.clone(), step }).await;
     }
     if text.contains("approve") || text.contains("risky") {
-        emit(Event::Step { turn: id.clone(), step: Step { tool: "terminal".into(), args: "rm -rf ./scratch".into(), ok: true, excerpt: String::new(), text: String::new(), category: Category::Shell } }).await;
+        emit(Event::Step { turn: id.clone(), step: Step { tool: "terminal".into(), args: "rm -rf ./scratch".into(), ok: true, excerpt: String::new(), category: Category::Shell } }).await;
         let options = vec![
             PromptOption { id: "once".into(), label: "Allow once".into(), style: Some("primary".into()), words: false },
             PromptOption { id: "deny".into(), label: "Deny".into(), style: Some("danger".into()), words: false },
@@ -685,7 +786,6 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         };
         reply = format!("{reply} ({said})");
     }
-    let mut part = 1;
     if text.split_whitespace().any(|w| w == "choose") {
         let options = [("c0", "Basil", false), ("c1", "Mint", false), ("other", "Something else", true)].map(|(id, label, words)| PromptOption { id: id.into(), label: label.into(), style: None, words });
         let prompt = format!("c-{}", &id[..12]);
@@ -759,6 +859,14 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         let body = format!("a drawing for {}\n", ts.asker_name);
         if tokio::fs::write(&path, &body).await.is_ok() {
             let file = LocalFile { path, media_type: "text/plain".into(), name: "drawing.txt".into(), size: body.len() as u64 };
+            emit(Event::Attachment { turn: id.clone(), part, file }).await;
+        }
+    }
+    if text.split_whitespace().any(|w| w == "speak") {
+        let path = cfg.scratch.join(format!("{id}-speech.mp3"));
+        let body = crate::simplex::audio::silence_mp3(SPOKEN_SECS);
+        if tokio::fs::write(&path, &body).await.is_ok() {
+            let file = LocalFile { path, media_type: "audio/mpeg".into(), name: "speech.mp3".into(), size: body.len() as u64 };
             emit(Event::Attachment { turn: id.clone(), part, file }).await;
         }
     }

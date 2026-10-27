@@ -53,6 +53,21 @@ pub fn check_picture(bytes: &[u8]) -> Result<&'static str, Refused> {
     picture_type(bytes).ok_or(Refused::NotAnImage)
 }
 
+/// An agent's name as its face keeps it: its title, trimmed, when it says
+/// anything; none when it says nothing (no title, or only spaces), so every
+/// reader falls back to the label alike, and none shows a blank.
+pub fn title(title: Option<&str>) -> Option<&str> {
+    title.map(str::trim).filter(|t| !t.is_empty())
+}
+
+/// What an agent is called in the platform's own words (the CLI's, and any
+/// fragment's Open Graph title, `site::inject_og`, which its page reads):
+/// its name (`title`), else its fragment's label, which `@mentions` it.
+/// Never a word it was not given ("Agent").
+pub fn agent_name<'a>(title: Option<&'a str>, fragment: &'a str) -> &'a str {
+    self::title(title).unwrap_or_else(|| fragment_proto::split_fragment_name(fragment).map_or(fragment, |(label, _)| label))
+}
+
 /// Where an identity's picture is served, on the platform's origin: its
 /// address names the picture's SHA-256 (its first 12 digits), so a new
 /// picture is a new address.
@@ -87,6 +102,20 @@ mod tests {
             assert_eq!(check_picture(bytes), Err(Refused::NotAnImage), "{bytes:?}");
         }
         assert!(Refused::NotAnImage.message(AGENT_PICTURE).contains("PNG, JPEG, WebP or GIF"));
+    }
+
+    /// Valid: a title is its name, trimmed. Invalid: none, or one of only
+    /// spaces, is no name: the label stands in, never a blank or a word it
+    /// was not given.
+    #[test]
+    fn an_agent_is_called_by_its_title_else_its_label() {
+        assert_eq!(title(Some("  Juniper ")), Some("Juniper"));
+        assert_eq!(title(Some(" \t ")), None);
+        assert_eq!(title(None), None);
+        assert_eq!(agent_name(Some("Waffle"), "pulsar-360--k3x9"), "Waffle");
+        assert_eq!(agent_name(Some("  "), "pulsar-360--k3x9"), "pulsar-360");
+        assert_eq!(agent_name(None, "pulsar-360--k3x9"), "pulsar-360");
+        assert_eq!(agent_name(None, "not a name"), "not a name", "what is no fragment's name is said as it is");
     }
 
     /// The address names the picture's hash, so a new one is a new address.
