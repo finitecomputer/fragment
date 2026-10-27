@@ -1514,6 +1514,8 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // last: it renames the person's first agent, which the checks above name
     faces_ui(s, api, &mut b, &page, &me, &chat, &shots)?;
     b.close(page)?;
+    first_chat_release_ui(s, api, &mut b)?;
+    b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
     // their computer unread from the page's start: theirs, then a new person's
     refresh_failed_start_ui(s, api, &mut b, &shots)?;
     first_run_put_off_ui(s, api, &mut b, &shots)?;
@@ -5158,6 +5160,72 @@ fn first_chat_late_ui(s: &mut Suite, b: &mut Browser, page: &Page, chat: &str) -
     Ok(())
 }
 
+/// A pending release may not discard a first-chat draft retained when Back
+/// wins the handoff. Once the next launcher opening consumes it and the
+/// person closes that opening, nothing of it remains to hold the release.
+fn first_chat_release_ui(s: &mut Suite, api: &Api, b: &mut Browser) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let home = format!("{}/", api.base);
+    let email = format!("shell-ui-first-chat-release-{}@e2e.test", crate::api::now_s());
+    let session = api.sign_in(&email)?;
+    b.set_cookie(&home, "fragment_session", &session)?;
+    b.set_cookie(&home, RELEASE_COOKIE, "")?;
+    let page = b.open_with_script(&home, r#"
+      if (window === window.top) {
+        const real = window.fetch.bind(window);
+        window.fetch = async (url, options) => {
+          if (url === '/api/computers' && options?.method === 'POST') {
+            window.__computerRefused = true;
+            return new Response(JSON.stringify({ message: 'setup refused for the test' }), { status: 503, headers: { 'content-type': 'application/json' } });
+          }
+          return real(url, options);
+        };
+      }
+    "#)?;
+    b.viewport(&page, 1280, 800, false)?;
+    let made = b.until(&page, "document.querySelectorAll('#chats .chat-row').length === 1 && !!document.querySelector('#frames iframe') && window.__computerRefused === true", wait);
+    let key = b.eval(&page, "document.querySelector('#chats .chat-row')?.dataset.key ?? ''")?;
+    let chat = key.as_str().and_then(|k| k.strip_prefix("chat:")).unwrap_or("").to_string();
+    let setup = s.eventually(wait, || b.eval_in_frame(&page, &chat, "!!document.querySelector('.setup-error')").ok() == Some(Value::Bool(true)));
+    b.eval(&page, "(document.getElementById('settings').click(), true)")?;
+    b.until(&page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden", wait);
+    open_row(b, &page, &chat, wait)?;
+    b.eval(&page, "(window.__release = 1, true)")?;
+    b.eval(&page, SLOW_MOTION)?;
+    b.click(&page, "#sidebar-new-chat")?;
+    b.until(&page, "document.getElementById('search-dialog').open", wait);
+    let said = "An interrupted first-chat draft holds the pending release";
+    b.eval(&page, &fill("#workspace-search", said))?;
+    let offered = b.until(&page, &format!("document.querySelector('#search-results .search-start')?.textContent.includes({})", js(&format!("Say it in {FIRST_CHAT}"))), wait);
+    b.eval(&page, "(document.getElementById('search-form').requestSubmit(), true)")?;
+    b.eval(&page, "(history.back(), true)")?;
+    let back = b.until(&page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden", wait);
+    let closed = b.until(&page, "!document.getElementById('search-dialog').open", wait);
+    b.eval(&page, NORMAL_MOTION)?;
+
+    let next = format!("e2e-first-chat-draft-{}", crate::api::now_s());
+    b.set_cookie(&home, RELEASE_COOKIE, &next)?;
+    b.eval(&page, &visibility("hidden"))?;
+    let heard = b.until(&page, &format!("document.documentElement.dataset.releaseNext === {}", js(&next)), wait);
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let held = b.eval(&page, &format!("window.__release === 1 && document.querySelector('meta[name=fragment-release]')?.content !== {} && location.pathname === '/settings' && !document.getElementById('search-dialog').open", js(&next)))? == true;
+    b.eval(&page, &visibility("visible"))?;
+    b.click(&page, "#sidebar-new-chat")?;
+    let consumed = b.until(&page, &format!("document.getElementById('search-dialog').open && document.getElementById('workspace-search').value === {}", js(said)), wait);
+    b.eval(&page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
+    let discarded = b.until(&page, "!document.getElementById('search-dialog').open", wait);
+    b.eval(&page, &visibility("hidden"))?;
+    let reloaded = b.until(&page, &format!("!window.__release && document.querySelector('meta[name=fragment-release]')?.content === {} && !document.getElementById('layout').hidden", js(&next)), wait);
+    s.ok(
+        "a pending release waits for an interrupted first-chat handoff's retained words; its next opening consumes them, closing that opening discards them, and the release then reloads",
+        made && setup && offered && back && closed && heard && held && consumed && discarded && reloaded,
+        json!({ "setup": setup, "back": back, "heard": heard, "held": held, "consumed": consumed, "discarded": discarded, "reloaded": reloaded }),
+    );
+    b.close(page)?;
+    b.set_cookie(&home, RELEASE_COOKIE, "")?;
+    Ok(())
+}
+
 /// A file pasted into the launcher's input, as the clipboard hands it
 /// over: how many files the launcher holds then.
 const PASTE_FILE: &str = "(() => { const d = new DataTransfer(); d.items.add(new File(['a list of atlases'], 'launch.txt', { type: 'text/plain' })); \
@@ -5509,6 +5577,11 @@ const LAUNCHER_GEOMETRY: &str = "(() => { const panel = document.querySelector('
     return { ok: inside(p) && inside(s) && s.top >= p.top && s.bottom <= p.bottom && (at === send || send.contains(at)) && input.scrollHeight > input.clientHeight, panel: [p.left, p.top, p.right, p.bottom], send: [s.left, s.top, s.right, s.bottom], \
       input: { height: input.getBoundingClientRect().height, client: input.clientHeight, scroll: input.scrollHeight, max: getComputedStyle(input).maxHeight }, files: files.hidden ? null : { client: files.clientHeight, scroll: files.scrollHeight }, viewport: [innerWidth, innerHeight, visualViewport.height] }; })()";
 
+/// A launcher's status, wholly inside its panel and the visual viewport,
+/// with what a look at its middle reaches.
+const LAUNCHER_STATUS_GEOMETRY: &str = "(() => { const status = document.getElementById('search-status'); const p = document.querySelector('.search-panel').getBoundingClientRect(); const r = status.getBoundingClientRect(); const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); \
+    return { ok: status.checkVisibility() && r.width > 0 && r.height > 0 && r.left >= p.left && r.right <= p.right + 1 && r.top >= p.top && r.bottom <= p.bottom + 1 && r.top >= 0 && r.bottom <= innerHeight + 1 && (at === status || status.contains(at)), text: status.textContent, status: [r.left, r.top, r.right, r.bottom], panel: [p.left, p.top, p.right, p.bottom], hit: at?.tagName ?? null }; })()";
+
 /// A keyboard-height visual viewport bounds an already-grown prompt, so its
 /// Send stays on screen and hit-testable. At 320×800, eight long filenames
 /// shrink their own region and scroll: every removal can be brought on
@@ -5532,8 +5605,38 @@ fn launch_geometry_ui(s: &mut Suite, b: &mut Browser, page: &Page, shots: &std::
         &keyboard,
     );
 
+    b.eval(page, &refuse_once("POST", "^/api/fragments$"))?;
+    b.eval(page, "(document.getElementById('search-form').requestSubmit(), true)")?;
+    let failed = b.until(page, &format!("{opened} && document.getElementById('search-status').textContent.includes(\"wasn't sent\")"), wait);
+    let failed_send = b.eval(page, LAUNCHER_GEOMETRY)?;
+    let failed_status = b.eval(page, LAUNCHER_STATUS_GEOMETRY)?;
+    let _ = b.screenshot(page, &shots.join("phone-300-launcher-send-failed.png"));
+    s.ok(
+        "at a 300 px visual viewport, a long prompt's failed send keeps its whole error and Send inside the panel, both hit-testable",
+        failed && failed_send["ok"] == true && failed_status["ok"] == true,
+        json!({ "send": failed_send, "status": failed_status }),
+    );
+    b.eval(
+        page,
+        "(() => { const d = new DataTransfer(); d.items.add(new File([new Uint8Array(26 * 1024 * 1024)], 'atlas.tiff', { type: 'image/tiff' })); \
+          document.getElementById('workspace-search').dispatchEvent(new ClipboardEvent('paste', { clipboardData: d, bubbles: true, cancelable: true })); return true; })()",
+    )?;
+    let rejected = b.until(page, "document.getElementById('search-status').textContent === 'atlas.tiff is over 25 MB.'", wait);
+    let rejected_send = b.eval(page, LAUNCHER_GEOMETRY)?;
+    let rejected_status = b.eval(page, LAUNCHER_STATUS_GEOMETRY)?;
+    let _ = b.screenshot(page, &shots.join("phone-300-launcher-file-rejected.png"));
+    s.ok(
+        "at a 300 px visual viewport, an attachment rejection over a long prompt keeps its whole error and Send inside the panel, both hit-testable",
+        rejected && rejected_send["ok"] == true && rejected_status["ok"] == true,
+        json!({ "send": rejected_send, "status": rejected_status }),
+    );
+
     b.viewport(page, 320, 800, true)?;
-    let grown = b.until(page, "visualViewport.height === 800 && document.documentElement.style.getPropertyValue('--viewport-height') === '800px'", wait);
+    b.reload(page)?;
+    let grown = b.until(page, &format!("visualViewport.height === 800 && document.documentElement.style.getPropertyValue('--viewport-height') === '800px' && {closed} && !!document.querySelector('#frames iframe:not([hidden])')"), wait);
+    b.eval(page, "(document.getElementById('sidebar-new-chat').click(), true)")?;
+    let reopened = b.until(page, opened, wait);
+    b.eval(page, &fill("#workspace-search", &"one line of a long prompt\n".repeat(20)))?;
     let names: Vec<String> = (0..8).map(|i| format!("atlas-{i}-with-a-very-long-filename-that-still-leaves-its-removal-reachable.txt")).collect();
     let pasted = b.eval(
         page,
@@ -5545,7 +5648,7 @@ fn launch_geometry_ui(s: &mut Suite, b: &mut Browser, page: &Page, shots: &std::
     let _ = b.screenshot(page, &shots.join("phone-320-launcher-eight-files.png"));
     s.ok(
         "at 320×800, eight long filenames leave Send visible and hit-testable, and their own region shrinks and scrolls instead of putting removals beyond the panel",
-        grown && pasted && many["ok"] == true && scrolls,
+        grown && reopened && pasted && many["ok"] == true && scrolls,
         &many,
     );
     let mut reachable = true;

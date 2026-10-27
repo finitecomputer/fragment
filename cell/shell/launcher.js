@@ -140,6 +140,7 @@ export function createLauncher(shell) {
       results.append(el("h3", null, heading), ...rows);
     }
     $("search-status").textContent = [launchError, count || canLaunch() || waiting ? "" : "Nothing found."].filter(Boolean).join(" ");
+    fitSearch();
   }
 
   // The person's agent, asked again each time (their computer's agents may
@@ -256,7 +257,10 @@ export function createLauncher(shell) {
       // a slower answer to an older query never replaces a newer one's
       if (mine === asked) renderFound(found.fragments ?? [], found.messages ?? []);
     } catch (e) {
-      if (mine === asked) $("search-status").textContent = e.message;
+      if (mine === asked) {
+        $("search-status").textContent = e.message;
+        fitSearch();
+      }
     }
   }
   // `text`: what a suggestion asks, in place of the last unsent one
@@ -385,16 +389,20 @@ export function createLauncher(shell) {
   // One line at rest, whatever its placeholder; a long prompt grows it.
   function fitSearch() {
     if (!input.offsetParent) return;
+    const status = $("search-status").offsetHeight;
+    // Nonempty results keep their 16px padding and 1px border beside a status.
+    const results = status && $("search-results").children.length ? 17 : 0;
+    dialog.style.setProperty("--search-status-room", `${status + results}px`);
     input.style.height = "";
     if (!input.value) return;
     input.style.height = "auto";
     input.style.height = `${Math.min(input.scrollHeight, INPUT_MAX_PX)}px`;
   }
   function updateSearch() {
-    fitSearch();
     ++asked; // Invalidate in-flight responses immediately, before the debounce.
     clearTimeout(typing);
     $("search-status").textContent = launchError;
+    fitSearch();
     $("search-send").disabled = !sendable();
     renderFound([], []);
     if (input.value.trim()) typing = setTimeout(search, 150);
@@ -497,6 +505,6 @@ export function createLauncher(shell) {
     agentsRead() {
       if (dialog.open && !launching) $("search-send").disabled = !sendable();
     },
-    holds: () => !!pendingLaunch,
+    holds: () => !!(pendingLaunch || firstChatDraft),
   };
 }
