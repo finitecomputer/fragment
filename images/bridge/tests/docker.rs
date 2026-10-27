@@ -100,7 +100,13 @@ impl Container {
     }
 
     fn run_on(runtime: Runtime, tag: &str, api: u16, model: u16, extra: &[(&str, &str)]) -> Container {
+        Container::run_with(runtime, tag, api, model, extra, &[])
+    }
+
+    /// As `run_on`, with more of `docker run`'s own arguments (`--network`).
+    fn run_with(runtime: Runtime, tag: &str, api: u16, model: u16, extra: &[(&str, &str)], docker_args: &[&str]) -> Container {
         let mut args: Vec<String> = ["run", "-d", "--platform", "linux/amd64", "--add-host", "api.fragment.internal:host-gateway", "--add-host", "model.fragment.internal:host-gateway"].iter().map(|s| s.to_string()).collect();
+        args.extend(docker_args.iter().map(|s| s.to_string()));
         if runtime == Runtime::Hosted {
             // the marker goes before the image's own entrypoint runs, as PID 1
             args.extend(["--ipc=none", "--entrypoint", "/bin/sh"].map(String::from));
@@ -199,6 +205,8 @@ async fn the_stub_image() {
     fake.until(30_000, "the stub's bridge to follow its chat", |w| w.live_sockets() >= 2).await;
     let ready = t.elapsed();
     eprintln!("stub: docker run to following its chat: {} ms", ready.as_millis());
+    // no SimpleX core in it: its reads never say SimpleX
+    assert!(fake.with(|w| w.simplex_said == 0 && w.simplex_unsaid >= 1), "the stub's reads of its computer say no SimpleX");
     fake.say(&chat, &person("paul"), json!({ "text": "hello stub" }));
     let asked = Instant::now();
     fake.until(20_000, "the stub's reply", |w| w.bodies(&chat, "chat", "reply").len() == 1).await;
@@ -1912,6 +1920,53 @@ async fn an_image_sent_by_url_is_the_replys_file() {
     });
 }
 
+/// Goal (Skyler's agent on production, 2026-10-26: its routine every 15
+/// minutes, which had nothing to tell, posted "⚠️ The model returned only a
+/// silence marker for a message that needed a reply" at each fire): on the
+/// real Hermes, a routine whose model answers exactly `[SILENT]` says
+/// nothing in its chat (no reply, no notice) and ends idle, as Hermes' own
+/// cron delivers nothing for it. A person's message answered so gets
+/// Hermes' warning, its reply, in the words the bridge knows it by
+/// (`wire::UNEXPECTED_SILENCE`: a Hermes that says it otherwise fails here);
+/// a routine with something to say says it. Method: the scripted model
+/// answers `[SILENT]` to a message telling it to end its turn with exactly
+/// that.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_routine_may_say_nothing() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    let routine = |text: &str| {
+        let fired = fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1juniper", json!({ "kind": "routine", "text": text, "chat": chat })));
+        fragment_bridge::records::turn_id("juniper--k3x9", "juniper--k3x9", "tasks", fired["seq"].as_u64().unwrap())
+    };
+    let said = |w: &support::fake::World, turn: &str| w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == turn).filter_map(|r| r["text"].as_str().map(str::to_string)).collect::<Vec<_>>();
+    let end = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").into_iter().find(|e| e["turn"] == turn);
+
+    let t0 = Instant::now();
+    let quiet = routine("check the shelf; if it has not changed, end this turn with exactly [SILENT]");
+    within(&fake, &chat, &c, 180_000, "the silent routine's end", |w| end(w, &quiet).is_some()).await;
+    eprintln!("silent: a routine with nothing to tell ended in {} ms", t0.elapsed().as_millis());
+    let theirs = asked(&fake, &chat, &c, "end this turn with exactly [SILENT]", |w, turn| end(w, turn).is_some()).await;
+    let tells = routine("water the plants");
+    within(&fake, &chat, &c, 180_000, "the routine's reply", |w| end(w, &tells).is_some()).await;
+    // what Hermes would say after a turn's end (a notice, a late reply), said by now
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let detail = told(&fake, &chat, &c);
+    fake.with(|w| {
+        assert_eq!(end(w, &quiet).unwrap()["outcome"], "idle", "{detail}");
+        assert!(said(w, &quiet).is_empty(), "the silent routine says nothing: {detail}");
+        assert!(!w.bodies(&chat, "work", "turn.notice").iter().any(|n| n["turn"] == quiet.as_str()), "nor a notice: {detail}");
+        assert_eq!(said(w, &theirs), vec![fragment_bridge::runtime::relay::wire::UNEXPECTED_SILENCE.to_string()], "a person's message answered with silence gets Hermes' warning, in these words: {detail}");
+        assert_eq!(end(w, &theirs).unwrap()["outcome"], "idle");
+        let reply = said(w, &tells);
+        assert!(reply.len() == 1 && reply[0].starts_with("scripted:") && reply[0].contains("water the plants"), "the routine with something to tell says it: {detail}");
+    });
+    let logs = c.logs();
+    let ops: Vec<&str> = logs.lines().filter(|l| l.contains(&quiet) && (l.contains("\"relay.op\"") || l.contains("\"relay.silent\""))).collect();
+    eprintln!("silent: what Hermes sent for the routine {ops:#?}");
+    assert!(ops.iter().any(|l| l.contains("\"relay.silent\"")), "the bridge said why it said nothing: {ops:?}");
+}
+
 /// Goal (the finite-mono parity audit, 2026-10-09: a question in words left
 /// the page saying "Juniper is working"): real Hermes' open clarify (no
 /// choices: `❓ <question>`) is the turn's reply, then a `turn.asked` naming
@@ -1966,6 +2021,40 @@ async fn steps_say_what_they_do() {
         eprintln!("steps: {said:?} is {got:?}");
         assert!(got.iter().any(|(tool, category, args)| (tool.as_str(), category.as_str(), args.as_str()) == want), "{said:?}: a step {want:?}, its preview whole; got {got:?}");
     }
+}
+
+/// Goal (Paul on production, 2026-10-24: an agent's words mid-turn were
+/// cut to a step's 300 characters and folded into its steps, "I can't read
+/// it all"; everything the agent says is a reply in the chat): real
+/// Hermes' words before a tool call, said in the response that calls it,
+/// are a reply of their own, whole, posted before the step and marked
+/// `interim`; the step carries no words; the turn's answer is a reply after
+/// it. Two full replies, one step. Method: the scripted model says a long
+/// answer before its terminal call (`narrate:`), its command slow enough
+/// that Hermes sends the step (the debt ledger, "A quick tool's step can be
+/// lost in Hermes").
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn words_before_a_tool_call_are_a_reply() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    let ended = |w: &support::fake::World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
+    let turn = asked(&fake, &chat, &c, "narrate: sleep 2 && echo narrated-ran", ended).await;
+    fake.with(|w| {
+        let replies: Vec<serde_json::Value> = w.records(&chat, "chat").into_iter().filter(|r| r["body"]["turn"] == turn).collect();
+        let steps: Vec<serde_json::Value> = w.records(&chat, "work").into_iter().filter(|r| r["body"]["turn"] == turn && r["body"]["kind"] == "turn.step").collect();
+        let said: Vec<serde_json::Value> = replies.iter().map(|r| r["body"].clone()).collect();
+        eprintln!("words: replies {said:?}; steps {:?}", steps.iter().map(|s| s["body"].clone()).collect::<Vec<_>>());
+        assert_eq!(said.len(), 2, "its words and its answer: {said:?}");
+        let words = support::model::narrated();
+        assert!(words.chars().count() > 1000);
+        assert_eq!(said[0], json!({ "text": words, "turn": turn, "interim": true }), "the words before the call, whole (never cut to 300), interim");
+        assert!(said[1]["text"].as_str().is_some_and(|t| t.contains("narrated-ran")) && said[1].get("interim").is_none(), "the answer after: {said:?}");
+        assert_eq!(steps.len(), 1, "one step: {steps:?}");
+        assert_eq!((&steps[0]["body"]["tool"], &steps[0]["body"]["category"]), (&json!("terminal"), &json!("shell")));
+        assert!(steps[0]["body"].get("text").is_none(), "the step carries no words: {steps:?}");
+        let at = |r: &serde_json::Value| r["at"].as_i64().expect("a record's time");
+        assert!(at(&replies[0]) < at(&steps[0]) && at(&steps[0]) < at(&replies[1]), "the words, the step, then the answer");
+    });
 }
 
 /// Goal (the finite-mono parity audit, 2026-10-09: Hermes' notices read as
@@ -3039,4 +3128,257 @@ async fn model_shown(fake: &Fake, chat: &str, c: &Container) -> String {
     let t = fragment_bridge::records::turn_id("juniper--k3x9", chat, "chat", said["seq"].as_u64().unwrap());
     within(fake, chat, c, 120_000, "/model's end", ended_turn(chat, &t)).await;
     fake.with(|w| w.bodies(chat, "chat", "reply").into_iter().find(|r| r["turn"] == t.as_str())).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default()
+}
+
+// ---- SimpleX on our Hermes image (docs/bridge.md, "SimpleX") ----
+
+/// What `c`'s screen port answers `method path` (with `body`, JSON) with:
+/// its status and JSON.
+fn screen_call(c: &Container, method: &str, path: &str, body: Option<&serde_json::Value>) -> (u16, serde_json::Value) {
+    let (url, sent) = (format!("http://127.0.0.1:{}{path}", c.port(6080)), body.map(|b| b.to_string()).unwrap_or_default());
+    let mut args = vec!["-s", "-X", method, "-w", "\n%{http_code}", url.as_str()];
+    if body.is_some() {
+        args.extend(["-H", "content-type: application/json", "--data-binary", sent.as_str()]);
+    }
+    let out = Command::new("curl").args(&args).output().expect("curl runs");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let (body, code) = text.rsplit_once('\n').unwrap_or(("", "0"));
+    (code.trim().parse().unwrap_or(0), serde_json::from_str(body).unwrap_or(serde_json::Value::Null))
+}
+
+/// `c`'s SimpleX link, as the page of `session` (its link ticket's nonce)
+/// sees it, once `done` holds.
+async fn simplex_until(c: &Container, session: &str, ms: u64, what: &str, done: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+    let t = Instant::now();
+    // bounded by `ms`
+    loop {
+        let (code, v) = screen_call(c, "GET", &format!("/simplex/state?agent=juniper--k3x9&s={session}"), None);
+        if code == 200 && done(&v) {
+            return v;
+        }
+        assert!(t.elapsed() < Duration::from_millis(ms), "{what}: not within {ms} ms; last {code} {v}\n{}", c.logs().lines().filter(|l| l.contains("simplex")).collect::<Vec<_>>().join("\n"));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// How many SimpleX cores run in `c`.
+fn simplex_cores(c: &Container) -> usize {
+    c.exec_out(&["sh", "-c", "for p in /proc/[0-9]*/comm; do cat $p 2>/dev/null; done"]).lines().filter(|l| l.trim() == "simplex-chat").count()
+}
+
+/// Goal (SimpleX, decision 32, Paul's "work well across restarts and
+/// updates"; a chat of its own since 2026-10-26): our Hermes image, always
+/// on, links its agent to a person's SimpleX app from its screen port, by
+/// its name as its title says it now (renamed before the link, and again
+/// after it: the person's app follows), and makes its SimpleX chat for its
+/// owner; the person's message lands there,
+/// a turn of Hermes' asked as its owner, its session told the chat is their
+/// phone, answered on SimpleX; words typed in that chat on the web, and a
+/// routine with no chat while their home is that chat, are answered on
+/// SimpleX too (one with nothing to tell, its `[SILENT]`, sends nothing),
+/// and a reply in the agent's own chat is not; a voice note is
+/// transcribed through the route and answered; a hold stops the core before
+/// the image answers it and its copies name none of the core's databases;
+/// a restart keeps the link; and a wake from a save older than the life
+/// before it (a crash) heals the link with the forced sync, the person told,
+/// and both ways work. Method: a lab (a local SMP and XFTP server, and the
+/// person's simplex-chat) on a Docker network the image joins; the fake API
+/// and the scripted model as every case here.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn simplex_on_the_hermes_image() {
+    use support::simplex::{received, say, tag, Lab};
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let mut lab = Lab::up_with("hermes", true);
+    let mut person = lab.start("person", false).await;
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let own = fake.chat_named("juniper-chat--h6j7", &["juniper"]);
+    fake.with(|w| {
+        w.computer["alwaysOn"] = json!(true);
+        w.computer["generation"] = json!(1);
+    });
+    let net = format!("{}-net", lab.prefix);
+    let xftp = lab.xftp.clone().expect("a lab with files");
+    let servers = [("BRIDGE_SIMPLEX_SMP", lab.server.as_str()), ("BRIDGE_SIMPLEX_XFTP", xftp.as_str())];
+    let c = Container::run_with(Runtime::Docker, &hermes_tag(), fake.addr.port(), model.addr.port(), &servers, &["--network", &net]);
+    fake.until(180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    // its bridge's reads say the image does SimpleX (so its owner's Settings offer it)
+    assert!(fake.with(|w| w.simplex_said) >= 1, "the bridge's read of its computer says SimpleX");
+    simplex_until(&c, "", 60_000, "its SimpleX, off", |v| v["phase"] == "off").await;
+    assert_eq!(simplex_cores(&c), 0, "nothing linked, no core");
+    assert!(fake.with(|w| w.made.is_empty()), "nothing linked, no SimpleX chat");
+
+    // linked from its screen port, as its owner's pane does: by the ticket
+    // their Settings were given (none, no link: Hermes' tools reach this
+    // port, and hold none)
+    let (code, _) = screen_call(&c, "POST", "/simplex/link?agent=juniper--k3x9", None);
+    assert_eq!(code, 403, "no ticket, no link");
+    // renamed while its bridge runs, before it is linked (Paul's, 2026-10-26:
+    // his app showed the name it had when its bridge started)
+    let rename = |title: &str| fake.with(|w| w.fragments.get_mut("juniper--k3x9").expect("its fragment").title = title.into());
+    rename("Basil");
+    let ticket = fake.ticket("juniper", "link");
+    let session = ticket["nonce"].as_str().expect("a nonce").to_string();
+    let (code, _) = screen_call(&c, "POST", "/simplex/link?agent=juniper--k3x9", Some(&ticket));
+    assert_eq!(code, 200, "its owner's ticket links it");
+    let v = simplex_until(&c, &session, 60_000, "an invitation", |v| v["phase"] == "inviting").await;
+    let hidden = simplex_until(&c, "", 1_000, "another page's view", |v| v["phase"] == "inviting").await;
+    assert!(hidden.get("link").is_none() && hidden["hidden"] == true, "the invitation is the page's that asked alone: {hidden}");
+    person.cmd(&format!("/connect {}", v["link"].as_str().expect("its link"))).await;
+    simplex_until(&c, "", 90_000, "linked", |v| v["phase"] == "linked").await;
+    assert!(fake.with(|w| w.doors.contains_key("juniper--k3x9")), "its door's key registered with the ticket");
+    let met = person.wait(Duration::from_secs(60), |e| tag(e) == "contactConnected").await;
+    let at_person = met["contact"]["contactId"].as_i64().expect("the agent, at the person's");
+    // its name in the person's app: its title now, as it connected or just after
+    let renamed = |name: &'static str| move |e: &serde_json::Value| tag(e) == "contactUpdated" && e["toContact"]["profile"]["displayName"] == name;
+    if met["contact"]["profile"]["displayName"] != "Basil" {
+        person.wait(Duration::from_secs(30), renamed("Basil")).await;
+    }
+    received(&mut person, Duration::from_secs(30), |got| got.iter().any(|t| t.contains("Hi, it's Basil. You're linked"))).await;
+    // renamed while linked: its profile follows, within its read (10 s)
+    let t0 = Instant::now();
+    rename("Waffle. Bot");
+    person.wait(Duration::from_secs(30), renamed("Waffle Bot")).await;
+    eprintln!("simplex: a rename in the person's app {} ms after it", t0.elapsed().as_millis());
+    // its SimpleX chat, made for its owner as it is linked
+    fake.until(30_000, "its SimpleX chat made", |w| w.made.len() == 1).await;
+    let chat = fake.with(|w| w.made[0].clone());
+    assert!(chat.starts_with("juniper-simplex--") && fake.with(|w| w.fragments[&chat].title == "SimpleX"), "{chat}");
+
+    // a message: in its SimpleX chat, Hermes' turn as its owner, answered on SimpleX
+    let t0 = Instant::now();
+    say(&mut person, at_person, "hello from SimpleX").await;
+    let got = received(&mut person, Duration::from_secs(180), |got| got.iter().any(|t| t.starts_with("scripted:") && t.contains("hello from SimpleX"))).await;
+    eprintln!("simplex: a message to Hermes' reply on SimpleX: {} ms ({got:?})", t0.elapsed().as_millis());
+    assert!(fake.with(|w| w.records(&chat, "chat").iter().any(|r| r["body"]["relayed"]["via"] == "simplex")), "its message in its SimpleX chat");
+    let asked = model.calls.lock().unwrap().iter().filter(|m| m.agent.as_deref() == Some("juniper--k3x9")).map(|m| m.body["messages"].to_string()).find(|m| m.contains("[paul] hello from SimpleX"));
+    let asked = asked.expect("the model was asked as juniper, the message its owner's ([paul])");
+    for said in [fragment_bridge::runtime::relay::wire::SIMPLEX_TOPIC, "never install, run or set up SimpleX", "Your owner's home is your chat juniper-chat"] {
+        assert!(asked.contains(said), "its session says the chat is its owner's phone, its prompt never to set SimpleX up and where home is: {said}");
+    }
+    // words typed in its SimpleX chat on the web: answered on the phone too
+    fake.say(&chat, "npub1paul", json!({ "text": "typed on the web" }));
+    received(&mut person, Duration::from_secs(180), |got| got.iter().any(|t| t.starts_with("scripted:") && t.contains("typed on the web"))).await;
+    // its home that chat (agent.json, as Settings writes it): a routine with no chat answered on the phone, the agent told so
+    fake.with(|w| w.fragments.get_mut("juniper--k3x9").expect("its fragment").files.insert("agent.json".into(), bytes::Bytes::from(r#"{"tier":"cheap","home":"simplex"}"#)));
+    let told = |m: &support::model::Call| m.body["messages"].to_string().contains("Your owner's home is their SimpleX, your chat juniper-simplex");
+    let t0 = Instant::now();
+    // (its prompt rewritten from agent.json within its 10 s read, then a fire)
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1juniper", json!({ "kind": "routine", "text": "remind me to water the basil" })));
+    received(&mut person, Duration::from_secs(180), |got| got.iter().any(|t| t.starts_with("scripted:") && t.contains("remind me to water the basil"))).await;
+    eprintln!("simplex: a routine at home to its answer on SimpleX: {} ms", t0.elapsed().as_millis());
+    assert!(model.calls.lock().unwrap().iter().rev().find(|m| m.agent.as_deref() == Some("juniper--k3x9")).is_some_and(told), "its prompt says its owner's home is their SimpleX");
+    // a routine at home with nothing to tell, its answer `[SILENT]`: nothing
+    // in its SimpleX chat, so nothing on the phone (below, with what it heard)
+    let fired = fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1juniper", json!({ "kind": "routine", "text": "check the basil; if it is fine, end this turn with exactly [SILENT]" })));
+    let quiet = fragment_bridge::records::turn_id("juniper--k3x9", "juniper--k3x9", "tasks", fired["seq"].as_u64().expect("its seq"));
+    fake.until(180_000, "the silent routine's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == quiet)).await;
+    assert!(fake.with(|w| !w.bodies(&chat, "chat", "reply").iter().any(|r| r["turn"] == quiet)), "the silent routine says nothing in its SimpleX chat");
+    // words typed in its own chat: answered there alone
+    fake.say(&own, "npub1paul", json!({ "text": "typed in its own chat" }));
+    fake.until(180_000, "its own chat's reply", |w| w.bodies(&own, "chat", "reply").iter().any(|b| b["text"].as_str().is_some_and(|t| t.contains("typed in its own chat")))).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    person.drain(Duration::from_millis(500)).await;
+    let heard = received(&mut person, Duration::from_secs(1), |_| true).await;
+    assert!(!heard.iter().any(|t| t.contains("typed in its own chat")), "a reply in its own chat stays there: {heard:?}");
+    assert!(!heard.iter().any(|t| t.contains("silence marker") || t.contains("SILENT") || t.contains("check the basil")), "nor did the silent routine send the phone anything: {heard:?}");
+    // the agent's own user finds no SimpleX core to run, and reads none of
+    // the bridge's SimpleX state (its keys, its door's key, its databases)
+    let as_agent = |cmd: &str| c.exec_code(&["/command/s6-setuidgid", "hermes", "bash", "-lc", cmd]);
+    let (code, said) = as_agent("command -v simplex-chat");
+    assert_ne!(code, 0, "simplex-chat is on no PATH of the agent's: {said}");
+    let (code, said) = as_agent("/opt/fragment/bin/simplex-chat --version");
+    assert_ne!(code, 0, "nor runs as the agent: {said}");
+    for path in ["/data/simplex", "/data/simplex/juniper--k3x9/door.key", "/data/simplex/juniper--k3x9/sx_chat.db"] {
+        let (code, said) = as_agent(&format!("ls {path} || cat {path}"));
+        assert!(code != 0 && said.contains("Permission denied"), "{path} is the bridge's alone: {said}");
+    }
+    assert!(simplex_cores(&c) >= 1, "while the bridge's own core runs");
+
+    // a voice note: transcribed through the route, its words the turn's, answered there
+    let words = "please water the basil";
+    let memo = lab.db_dir("person").join("files").join("memo.wav");
+    std::fs::write(&memo, support::model::memo(words)).expect("the memo");
+    let body = json!([{ "filePath": "/data/files/memo.wav", "msgContent": { "type": "voice", "text": "", "duration": 3 } }]);
+    assert_eq!(tag(&person.cmd(&format!("/_send @{at_person} json {body}")).await), "newChatItems");
+    let t0 = Instant::now();
+    received(&mut person, Duration::from_secs(180), |got| got.iter().any(|t| t.starts_with("scripted:") && t.contains(words))).await;
+    eprintln!("simplex: a voice note to its answer on SimpleX: {} ms", t0.elapsed().as_millis());
+    let heard = model.calls.lock().unwrap().iter().filter(|m| m.path.ends_with("/audio/transcriptions")).count();
+    assert!(heard >= 1, "transcribed through the route");
+
+    // a reply's files, which Hermes attaches (MEDIA:): an MP3 a real encoder
+    // made, in the person's app as a voice message of its length, and a PNG
+    // as an image, each the chat's own attachment, whole
+    let files = lab.db_dir("person").join("files");
+    let attached = |w: &support::fake::World, file: &str| w.bodies(&chat, "chat", "reply").into_iter().filter_map(|r| r["attachments"].as_array().cloned()).flatten().find(|a| a["name"].as_str().is_some_and(|n| n.ends_with(file)));
+    for (asked, kind, file) in [
+        ("send: ffmpeg -loglevel error -f lavfi -i sine=frequency=440:duration=2 -ac 1 -y /tmp/hello.mp3 && echo made=/tmp/hello.mp3", "voice", "hello.mp3"),
+        ("send: echo iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg== | base64 -d > /tmp/dot.png && echo made=/tmp/dot.png", "image", "dot.png"),
+    ] {
+        let t0 = Instant::now();
+        say(&mut person, at_person, asked).await;
+        let (content, got) = support::simplex::received_file(&mut person, &files, kind, Duration::from_secs(180)).await;
+        eprintln!("simplex: {file} as {content} in the person's app {} ms after it was asked", t0.elapsed().as_millis());
+        let a = fake.with(|w| attached(w, file)).unwrap_or_else(|| panic!("{file} is the chat's reply's attachment"));
+        assert_eq!(a["sha256"].as_str(), Some(support::simplex::sha256_of(&got).as_str()), "{file}, whole");
+        if kind == "voice" {
+            assert_eq!(content["duration"], json!(2), "its length, as the encoder made it: {content}");
+        }
+    }
+    let t0 = Instant::now();
+    // bounded: a minute, the uploads' ends having come already
+    while !c.exec_out(&["sh", "-c", "ls -A /data/simplex/juniper--k3x9/out"]).trim().is_empty() {
+        assert!(t0.elapsed() < Duration::from_secs(60), "their copies let go once uploaded");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    // the hold: the core stopped before the image answers, none of its databases copied
+    let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold\n{}", c.logs().lines().filter(|l| l.contains("simplex") || l.contains("held")).collect::<Vec<_>>().join("\n")));
+    assert_eq!(simplex_cores(&c), 0, "no core under the hold");
+    assert!(!left_out.iter().any(|l| l.contains("simplex")), "its copies name none of the core's databases: {left_out:?}");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simplex-hermes");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let save = dir.join("save.tar");
+    save_data(&c, &left_out, &save);
+    unhold(&c);
+    simplex_until(&c, "", 30_000, "its core again", |v| v["running"] == true).await;
+
+    // after the save: an exchange the save does not hold
+    say(&mut person, at_person, "said after the save").await;
+    received(&mut person, Duration::from_secs(180), |got| got.iter().any(|t| t.contains("said after the save"))).await;
+
+    // a restart, its disk kept: linked still, and answering
+    c.restart();
+    simplex_until(&c, "", 180_000, "linked and running after a restart", |v| v["phase"] == "linked" && v["running"] == true).await;
+    say(&mut person, at_person, "after the restart").await;
+    received(&mut person, Duration::from_secs(180), |got| got.iter().any(|t| t.contains("after the restart"))).await;
+
+    // a crash: the next start wakes from the save before the exchange
+    let (took, _) = c.sigterm();
+    eprintln!("simplex: stopped ({} ms)", took.as_millis());
+    drop(c);
+    fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+    fake.with(|w| {
+        w.computer["generation"] = json!(3);
+        w.computer["restored"] = json!({ "generation": 3, "rollback": true, "from": "backup", "at": 1 });
+    });
+    let c = Container::run_with(Runtime::Docker, &hermes_tag(), fake.addr.port(), model.addr.port(), &[servers[0], servers[1], ("RESTORE_PENDING", "1")], &["--network", &net]);
+    let tar = std::fs::File::open(&save).expect("the save");
+    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
+    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    let (code, said) = c.exec_code(&["/usr/local/bin/computer-check"]);
+    assert_eq!(code, 0, "the save checks: {said}");
+    let t0 = Instant::now();
+    assert!(c.exec(&["touch", "/run/computer/restored"]));
+    let told = received(&mut person, Duration::from_secs(240), |got| got.iter().any(|t| t.contains("may have missed a message"))).await;
+    eprintln!("simplex: woken from an older save, the person told {} ms after the gate: {told:?}", t0.elapsed().as_millis());
+    say(&mut person, at_person, "after the rollback").await;
+    received(&mut person, Duration::from_secs(180), |got| got.iter().any(|t| t.starts_with("scripted:") && t.contains("after the rollback"))).await;
+    let relayed = fake.with(|w| w.records(&chat, "chat").iter().filter(|r| r["body"]["relayed"]["via"] == "simplex").count());
+    eprintln!("simplex: {relayed} relayed records on its SimpleX chat");
+    assert!(fake.with(|w| w.made.as_slice() == std::slice::from_ref(&chat)), "its SimpleX chat found again after the restarts, never made twice");
 }

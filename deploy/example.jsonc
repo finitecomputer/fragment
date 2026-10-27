@@ -114,8 +114,12 @@
   // alone, as before. A tier may name its route's `"fallback"` and
   // `"vision"` (a slot's name: `fallback` and `vision` unless it names
   // others, or a slot of the deployment's own beside them, any name of a-z,
-  // 0-9 and _, at most 4, each some tier's): its call falls back there, and
-  // its agents' images go there. A slot left out is on
+  // 0-9 and _, at most 4, each some slot's): its call falls back there, and
+  // its agents' images go there. Any other slot may name its own
+  // `"fallback"` (none unless it does; `vision`'s is `fallback` when that
+  // reads images), one that reads images behind a slot images go to: a
+  // call falls back as the slot it runs does, however it named it. A slot
+  // left out is on
   // Workers AI: cheap GLM-5.3 Flash, medium GLM-5.3, fallback DeepSeek V4
   // Flash, vision GLM-5.3 Flash. Every model is one the price book prices
   // (fragment_core::price), one its slot names a price for, or one on

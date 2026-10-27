@@ -434,7 +434,8 @@ enum OperatorCmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
-    /// One person: their seat, org, ledger and computer
+    /// One person: their seat (and whether they let its computer sleep),
+    /// org, ledger and computer
     Person {
         npub: String,
         #[arg(long)]
@@ -569,8 +570,9 @@ enum ScheduleCmd {
     /// Add one: at each minute --cron names (UTC), the fragment appends
     /// --record to --channel, as itself; or, an agent's routine, it asks
     /// the agent --routine in --chat, as its owner (the record `{kind:
-    /// "routine", text, chat}` on its `tasks`). The same one added again
-    /// is that one
+    /// "routine", text, chat}` on its `tasks`), or, with no --chat, in its
+    /// owner's home: the chat where it reaches them as it fires (their
+    /// SimpleX when they chose it). The same one added again is that one
     Add {
         /// The fragment (on an agent's computer, the agent's own unless named)
         fragment: Option<String>,
@@ -586,9 +588,10 @@ enum ScheduleCmd {
         #[arg(long, requires = "channel")]
         record: Option<String>,
         /// An agent's routine: what it is to do each time
-        #[arg(long, requires = "chat")]
+        #[arg(long)]
         routine: Option<String>,
-        /// An agent's routine: the chat it is done in, one the agent is in
+        /// An agent's routine: the chat it is done in, one the agent is in;
+        /// none, its owner's home (where it reaches them as it fires)
         #[arg(long, requires = "routine")]
         chat: Option<String>,
     },
@@ -636,8 +639,9 @@ fn fragment_and(agent: Option<&api::AgentMode>, mut args: Vec<String>, verb: &st
 }
 
 /// What `fragment schedule add` appends, and where: `--channel` and
-/// `--record` as given, or an agent's routine (`--routine` and `--chat`)
-/// on its `tasks` (docs/chat-records.md).
+/// `--record` as given, or an agent's routine (`--routine`, and `--chat`
+/// or none: its owner's home's, read by its computer as it fires) on its
+/// `tasks` (docs/chat-records.md).
 fn scheduled_record(channel: Option<String>, record: Option<String>, routine: Option<String>, chat: Option<String>) -> Result<(String, Value)> {
     match (channel, record, routine, chat) {
         (Some(channel), Some(record), None, None) => {
@@ -645,7 +649,8 @@ fn scheduled_record(channel: Option<String>, record: Option<String>, routine: Op
             Ok((channel, record))
         }
         (None, None, Some(text), Some(chat)) => Ok(("tasks".to_string(), json!({ "kind": "routine", "text": text, "chat": chat }))),
-        _ => Err(usage("say what to append: --channel <channel> --record '<json>', or an agent's --routine '<what to do>' --chat <chat>")),
+        (None, None, Some(text), None) => Ok(("tasks".to_string(), json!({ "kind": "routine", "text": text }))),
+        _ => Err(usage("say what to append: --channel <channel> --record '<json>', or an agent's --routine '<what to do>' [--chat <chat>]")),
     }
 }
 
@@ -1236,7 +1241,14 @@ fn run(cli: Cli) -> Result<()> {
             for p in v["people"].as_array().into_iter().flatten() {
                 let seat = match &p["seat"] {
                     Value::Null => "no seat".to_string(),
-                    s => format!("{} {}{}", s["kind"].as_str().unwrap_or("?"), if s["comped"] == true { "comped" } else { "paid" }, if s["good"] == true { "" } else { " (lapsed)" }),
+                    s => format!(
+                        "{} {}{}{}",
+                        s["kind"].as_str().unwrap_or("?"),
+                        if s["comped"] == true { "comped" } else { "paid" },
+                        // why a good always-on seat's computer is not always on
+                        if s["kind"] == "seat_always_on" && s["sleeps"] == true { ", lets it sleep" } else { "" },
+                        if s["good"] == true { "" } else { " (lapsed)" }
+                    ),
                 };
                 println!("{}  {}  {seat}  {}", p["npub"].as_str().unwrap_or("?"), p["email"].as_str().unwrap_or("-"), p["org"]["name"].as_str().unwrap_or(""));
             }
@@ -1484,7 +1496,8 @@ fn run(cli: Cli) -> Result<()> {
                     continue;
                 };
                 for m in members {
-                    let who = m.email.as_deref().or(m.name.as_deref()).unwrap_or(&m.principal);
+                    // an agent by its name (its fragment's title), else its label
+                    let who = m.email.as_deref().or(fragment_core::face::title(m.title.as_deref())).or(m.name.as_deref()).unwrap_or(&m.principal);
                     let whose = match (&m.owner, &m.owner_email) {
                         (Some(_), Some(e)) => format!("\tagent of {e}"),
                         (Some(o), None) => format!("\tagent of {o}"),
@@ -1493,7 +1506,7 @@ fn run(cli: Cli) -> Result<()> {
                     println!("  {}\t{who}{whose}", m.role.as_str());
                     // a person's agents reach what they do
                     for a in &m.agents {
-                        println!("  {}\t  their agent {}", m.role.as_str(), a.name.as_deref().unwrap_or(&a.principal));
+                        println!("  {}\t  their agent {}", m.role.as_str(), fragment_core::face::title(a.title.as_deref()).or(a.name.as_deref()).unwrap_or(&a.principal));
                     }
                 }
                 if f.more > 0 {
@@ -2111,7 +2124,7 @@ fn run(cli: Cli) -> Result<()> {
             let id = id.unwrap_or_else(|| format!("ask-{:016x}", rand::random::<u64>()));
             let v = ask::ask(&c, &agent, &text, chat.as_deref(), wait, id)?;
             json_exit(j, &v);
-            println!("asked {} in {} (record {})", v.asked.name, v.chat, v.record["seq"]);
+            println!("asked {} in {} (record {})", v.asked.shown(), v.chat, v.record["seq"]);
             for who in &v.added {
                 println!("  added {who} to {} as an editor", v.chat);
             }
@@ -2121,9 +2134,9 @@ fn run(cli: Cli) -> Result<()> {
             match (&v.answer, v.waited_s) {
                 (Some(a), _) => {
                     match (a.outcome.as_str(), &a.error) {
-                        ("idle", _) => println!("{} answered:", v.asked.name),
-                        (outcome, Some(why)) => println!("{} could not answer ({outcome}): {why}", v.asked.name),
-                        (outcome, None) => println!("{}'s turn ended {outcome}:", v.asked.name),
+                        ("idle", _) => println!("{} answered:", v.asked.shown()),
+                        (outcome, Some(why)) => println!("{} could not answer ({outcome}): {why}", v.asked.shown()),
+                        (outcome, None) => println!("{}'s turn ended {outcome}:", v.asked.shown()),
                     }
                     for r in &a.replies {
                         println!("{}", r.text);
@@ -2176,7 +2189,7 @@ fn run(cli: Cli) -> Result<()> {
             // as its list says it: the platform's face of it, a moment after a change
             let list: FragmentList = c.call_as(c.get("/api/fragments")?)?;
             let row = list.fragments.into_iter().find(|f| f.name == agent);
-            let shown_name = name.or_else(|| row.as_ref().and_then(|r| r.title.clone())).unwrap_or_else(|| agent.clone());
+            let shown_name = name.unwrap_or_else(|| fragment_core::face::agent_name(row.as_ref().and_then(|r| r.title.as_deref()), &agent).to_string());
             let shown_picture = if files.is_empty() { row.and_then(|r| r.picture) } else { None };
             json_exit(j, &json!({ "agent": agent, "name": shown_name, "picture": shown_picture, "changed": !files.is_empty() }));
             println!("{agent}: {shown_name}");
@@ -2400,6 +2413,12 @@ mod tests {
             scheduled_record(None, None, some("water the plants"), some("talk--k3x9")).unwrap(),
             ("tasks".into(), json!({ "kind": "routine", "text": "water the plants", "chat": "talk--k3x9" }))
         );
+        assert_eq!(
+            scheduled_record(None, None, some("remind me to call mom"), None).unwrap(),
+            ("tasks".into(), json!({ "kind": "routine", "text": "remind me to call mom" })),
+            "no --chat: its owner's home, as it fires"
+        );
+        assert_eq!(code_of(scheduled_record(some("pings"), some(r#"{"n":1}"#), some("both"), None)), Code::InvalidUsage, "a record and a routine at once");
         let alone = schedule_fragment(None, None, "list");
         assert!(alone.as_ref().is_err_and(|e| e.to_string().contains("name the fragment")), "{alone:?}");
         assert_eq!(code_of(alone), Code::InvalidUsage);

@@ -21,7 +21,7 @@
 //!   own. A row that fails for a passing reason is tried again from the
 //!   alarm; an agent that runs on no computer is told nothing.
 
-use fragment_core::npub;
+use fragment_core::{door, npub};
 use fragment_proto::{valid_channel_name, valid_fragment_name, ErrorCode, IdentityKind, Role};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -165,19 +165,79 @@ impl FragmentCell {
             "sign" => {
                 let b: Sign = serde_json::from_value(body.clone()).map_err(|e| CellError::invalid(format!("body: {e}")))?;
                 self.assigned_to(&b.computer)?;
-                let sealed = self.must(MetaKey::FragmentSecret)?;
-                let opened = crate::keys::open(&self.env, &self.scope(), &sealed).await?;
-                if let Some(fresh) = opened.resealed {
-                    // only over the value opened (the store's read may yield)
-                    self.exec(
-                        "UPDATE meta SET value = ? WHERE key = ? AND value = ?",
-                        vec![fresh.into(), MetaKey::FragmentSecret.key().into(), sealed.as_str().into()],
-                    )?;
-                }
-                let secret = std::str::from_utf8(&opened.plaintext).map_err(|_| CellError::host("the fragment's key is not text"))?;
-                let keys = fragment_nip98::Keys::from_secret_hex(secret).ok_or_else(|| CellError::host("the fragment's sealed key is not a nostr key"))?;
-                let header = keys.header_for_payload(&b.method, &b.url, b.payload.as_deref(), crate::js::now_ms() / 1000);
+                let header = self.own_keys().await?.header_for_payload(&b.method, &b.url, b.payload.as_deref(), crate::js::now_ms() / 1000);
                 Ok(json!({ "header": header }))
+            }
+            // an agent's door (fragment_core::door): its owner's ticket, the
+            // guest's redeeming of a link's, and a relayed record's check.
+            // Their bodies are read field by field, with no derive: the
+            // cell's wasm budget (xtask/src/build.rs)
+            "door-ticket" => {
+                let text = |k: &str| body[k].as_str().unwrap_or("");
+                if self.must(MetaKey::Owner)? != text("owner") {
+                    return Err(CellError::new(ErrorCode::Forbidden, "only the agent's owner opens or closes its door"));
+                }
+                self.assigned_to(text("computer"))?;
+                let act = match text("act") {
+                    "link" => door::Act::Link,
+                    "unlink" => door::Act::Unlink,
+                    _ => return Err(CellError::invalid("act: link or unlink")),
+                };
+                if !door::known(text("door")) {
+                    return Err(CellError::invalid("door: simplex"));
+                }
+                let nonce = hex::encode(js::random_bytes::<16>());
+                let ticket = door::Ticket { door: text("door").into(), act, agent: self.name()?, computer: text("computer").into(), nonce, exp: js::now_ms() + door::TICKET_MS, sig: String::new() };
+                assert!(ticket.well_formed(), "a ticket the platform makes is well formed");
+                match act {
+                    door::Act::Link => self.set_meta(MetaKey::DoorTicket, &format!("{} {} {}", ticket.door, ticket.nonce, ticket.exp))?,
+                    // closed the moment its owner asks: its door signs nothing more
+                    door::Act::Unlink => {
+                        self.del_meta(MetaKey::DoorTicket)?;
+                        if self.meta(MetaKey::Door)?.is_some() {
+                            self.del_meta(MetaKey::Door)?;
+                            self.event("door.closed", "its door closed by its owner", json!({ "door": ticket.door }));
+                        }
+                    }
+                }
+                let sig = self.own_keys().await?.sign_digest(&ticket.digest());
+                Ok(json!({ "door": ticket.door, "act": act.as_str(), "agent": ticket.agent, "computer": ticket.computer, "nonce": ticket.nonce, "exp": ticket.exp, "sig": sig }))
+            }
+            "door-key" => {
+                let text = |k: &str| body[k].as_str().unwrap_or("");
+                self.assigned_to(text("computer"))?;
+                let (door, key) = (text("door"), text("key"));
+                if !npub::is_hex_key(key) {
+                    return Err(CellError::invalid("a door's key is 64 hex"));
+                }
+                // its owner's latest link ticket, once, while it holds
+                let pending = self.meta(MetaKey::DoorTicket)?.unwrap_or_default();
+                let mut parts = pending.splitn(3, ' ');
+                let (was, nonce, exp) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().and_then(|e| e.parse::<i64>().ok()).unwrap_or(0));
+                if was != door || nonce.is_empty() || nonce != text("nonce") || exp < js::now_ms() {
+                    return Err(CellError::new(ErrorCode::Forbidden, "that ticket is not the link its owner started last, or it is past its time: they start one from Settings"));
+                }
+                self.del_meta(MetaKey::DoorTicket)?;
+                self.set_meta(MetaKey::Door, &format!("{door} {key}"))?;
+                self.event("door.opened", "its door opened by its owner", json!({ "door": door, "key": key }));
+                Ok(json!({ "door": door, "key": key }))
+            }
+            "door-check" => {
+                let text = |k: &str| body[k].as_str().unwrap_or("");
+                let refused = |why: &str| CellError::new(ErrorCode::Forbidden, format!("a relayed record {why}"));
+                if self.meta(MetaKey::AgentIdentity)?.as_deref() != Some(text("identity")) {
+                    return Err(refused("is posted by the agent whose door it came through"));
+                }
+                let open = self.meta(MetaKey::Door)?.unwrap_or_default();
+                let Some(key) = open.strip_prefix(text("door")).and_then(|k| k.strip_prefix(' ')).filter(|_| door::known(text("door"))) else {
+                    return Err(refused("came through a door its owner has not opened, or closed"));
+                };
+                let mut digest = [0u8; 32];
+                hex::decode_to_slice(text("digest"), &mut digest).map_err(|_| CellError::invalid("a digest is 64 hex"))?;
+                if !fragment_nip98::verify_digest(key, &digest, text("sig")) {
+                    return Err(refused("is signed by its door's key, and this one is not"));
+                }
+                Ok(json!({ "ok": true }))
             }
             "subscribe" => {
                 let b: Subscribe = serde_json::from_value(body.clone()).map_err(|e| CellError::invalid(format!("body: {e}")))?;
@@ -316,6 +376,19 @@ impl FragmentCell {
         let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, held: None };
         let signed = crate::routed::Signed::new(identity, None);
         Ok(crate::fragment::Caller { signed: Some(signed), unresolved: None, url: url::Url::parse("https://fragment.internal/").expect("a URL"), site: false })
+    }
+
+    /// Its own key, opened from its seal (resealed in place when the seal
+    /// moved on).
+    async fn own_keys(&self) -> CellResult<fragment_nip98::Keys> {
+        let sealed = self.must(MetaKey::FragmentSecret)?;
+        let opened = crate::keys::open(&self.env, &self.scope(), &sealed).await?;
+        if let Some(fresh) = opened.resealed {
+            // only over the value opened (the store's read may yield)
+            self.exec("UPDATE meta SET value = ? WHERE key = ? AND value = ?", vec![fresh.into(), MetaKey::FragmentSecret.key().into(), sealed.as_str().into()])?;
+        }
+        let secret = std::str::from_utf8(&opened.plaintext).map_err(|_| CellError::host("the fragment's key is not text"))?;
+        fragment_nip98::Keys::from_secret_hex(secret).ok_or_else(|| CellError::host("the fragment's sealed key is not a nostr key"))
     }
 
     /// This agent fragment runs on `computer`, or refuses.

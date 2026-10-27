@@ -38,12 +38,14 @@
 //! A call that its model fails before answering anything (it is not
 //! reached, or it answers 429 or a 5xx; on an OpenAI-compatible API, whose
 //! key is the platform's, also 401, 402, 403 or 404) is made once more, the
-//! same, on the deployment's fallback model (`Tries`, `falls_back`; Paul,
-//! 2026-10-08: "we def need fallback models"): a tier's call always, a
-//! `vision` call only when the fallback's slot says its model reads images
-//! (`Models::vision_fallback`). Not a race: the second call is made only
-//! after the first has failed. An answer that began is final, and the
-//! fallback's failure is the call's.
+//! same, on its slot's own fallback (`Tries`, `falls_back`,
+//! `Models::fallback_of`; Paul, 2026-10-08: "we def need fallback
+//! models"): a tier's its route's fallback, `vision`'s the deployment's
+//! fallback when that slot says its model reads images, any slot's the one
+//! it names, whether the call named the slot by its name or by its model's
+//! id. Not a race: the second call is made only after the first has
+//! failed. An answer that began is final, and the fallback's failure is
+//! the call's.
 //!
 //! What a call cost is read from its answer's usage (`usage_of`), priced
 //! as the model that answered it, and charged after it (decision 62). A streamed answer
@@ -125,13 +127,13 @@ pub const VISION_MODEL_DEFAULT: &str = GLM_FLASH;
 /// own beside the cheap tier's GLM (its own replicas, and its own rate
 /// limit, 50 calls a minute per account on Unified Billing). It reads no
 /// images, so the route's `vision` has no fallback unless a deployment's
-/// fallback says its model reads them (`Models::vision_fallback`).
+/// fallback says its model reads them (`Models::fallback_of`).
 pub const FALLBACK_MODEL_DEFAULT: &str = DEEPSEEK_FLASH;
 /// The route's four names, as a deployment's `models` names them, each
 /// where one of its models runs (`Models`).
 pub const SLOTS: [&str; 4] = ["cheap", "medium", FALLBACK, VISION];
 /// The slots a deployment may name beyond the route's four (`Models::extra`):
-/// a route's own fallback or vision model.
+/// a route's own fallback or vision model, or another slot's fallback.
 pub const EXTRA_SLOTS_MAX: usize = 4;
 /// Every slot a deployment's `models` may name: one key binding each, at most.
 pub const SLOTS_MAX: usize = SLOTS.len() + EXTRA_SLOTS_MAX;
@@ -389,7 +391,7 @@ pub struct Models {
     pub vision: Upstream,
     /// Which slots say their model reads images (a slot's `"images":
     /// true`), in `SLOTS`' order: a `vision` call falls back only to a
-    /// fallback that does (`vision_fallback`). Unsaid, a slot reads none.
+    /// fallback that does (`fallback_of`). Unsaid, a slot reads none.
     /// Read off each slot before it is parsed as an `Upstream`
     /// (`images_of`): what a model reads is not where it runs, and a field
     /// of the upstream's own would cost the cell's wasm 10 KB of serde.
@@ -411,26 +413,33 @@ pub struct Models {
     pub labels: [Option<String>; 2],
     /// The slots a deployment names beyond the route's four, in its
     /// config's order: a route's own fallback or vision model (Standard's
-    /// Cloudflare), each named by a route (`routes`); at most
-    /// `EXTRA_SLOTS_MAX`.
+    /// Cloudflare), or another slot's fallback, each named by one
+    /// (`routes`, `fallbacks`, `Extra::fallback`); at most `EXTRA_SLOTS_MAX`.
     pub extra: Vec<Extra>,
     /// Each tier's route, in `Tier::Cheap`, `Tier::Medium` order: the slot
-    /// its calls fall back to, and the slot its images go to (a tier slot's
-    /// `"fallback"` and `"vision"`, by slot name; `fallback` and `vision`
-    /// unless it names others). Paul, 2026-10-24: "A fallback on private
-    /// should fall back to something private, a fallback on normal should
-    /// fall back to something normal."
+    /// its calls fall back to (its own fallback: `fallback_of`), and the
+    /// slot its images go to (a tier slot's `"fallback"` and `"vision"`, by
+    /// slot name; `fallback` and `vision` unless it names others). Paul,
+    /// 2026-10-24: "A fallback on private should fall back to something
+    /// private, a fallback on normal should fall back to something normal."
     pub routes: [RouteSlots; 2],
+    /// The slot the route's four's `fallback` and `vision` each fall back
+    /// to when it names one (its `"fallback"`), in that order: unnamed,
+    /// `fallback` has none and `vision` falls back to `fallback` when that
+    /// slot says its model reads images, as before (`fallback_of`).
+    pub fallbacks: [Option<String>; 2],
 }
 
 /// A slot beyond the route's four (`Models::extra`): its name, where it
-/// runs, and whether it reads images and is private.
+/// runs, whether it reads images and is private, and the slot its calls
+/// fall back to, when it names one (its `"fallback"`; none otherwise).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Extra {
     pub name: String,
     pub upstream: Upstream,
     pub images: bool,
     pub private: bool,
+    pub fallback: Option<String>,
 }
 
 /// A tier's route (`Models::routes`): its fallback's and its vision model's
@@ -468,11 +477,37 @@ fn routes_of(models: &mut Value) -> Result<[RouteSlots; 2], String> {
     Ok(routes)
 }
 
+/// A slot's own `"fallback"`, taken off it (`slot`, its name; `o`, its
+/// object): the name of the slot its calls are made on once more, checked
+/// once every slot is read (`Models::parse`). Refused, saying why: one
+/// that is no name.
+fn fallback_named(slot: &str, o: &mut Map<String, Value>) -> Result<Option<String>, String> {
+    match o.remove(FALLBACK) {
+        None => Ok(None),
+        Some(Value::String(name)) => Ok(Some(name)),
+        Some(other) => Err(format!("models.{slot}: fallback names the slot its calls fall back to, not {other}")),
+    }
+}
+
+/// The route's four's `fallback` and `vision`'s own `"fallback"`, taken off
+/// them (`Models::fallbacks`).
+fn fallbacks_of(models: &mut Value) -> Result<[Option<String>; 2], String> {
+    let mut fallbacks = [None, None];
+    let Some(slots) = models.as_object_mut() else { return Ok(fallbacks) };
+    for (at, slot) in [FALLBACK, VISION].into_iter().enumerate() {
+        if let Some(o) = slots.get_mut(slot).and_then(Value::as_object_mut) {
+            fallbacks[at] = fallback_named(slot, o)?;
+        }
+    }
+    Ok(fallbacks)
+}
+
 /// The slots a deployment names beyond the route's four (`Models::extra`),
-/// taken out of its `models`, each with its flags. Refused, saying why: a
-/// name that is no slot's (`valid_slot_name`), more than
-/// `EXTRA_SLOTS_MAX`, a label (only a tier is offered), a route of its own
-/// (only a tier has one), a slot out of shape (`Upstream`'s refusals).
+/// taken out of its `models`, each with its flags and its own fallback.
+/// Refused, saying why: a name that is no slot's (`valid_slot_name`), more
+/// than `EXTRA_SLOTS_MAX`, a label (only a tier is offered), a vision of
+/// its own (only a tier's route has one), a slot out of shape (`Upstream`'s
+/// refusals).
 fn extras_of(models: &mut Value) -> Result<Vec<Extra>, String> {
     let Some(slots) = models.as_object_mut() else { return Ok(vec![]) };
     let names: Vec<String> = slots.keys().filter(|k| !SLOTS.contains(&k.as_str())).cloned().collect();
@@ -489,11 +524,12 @@ fn extras_of(models: &mut Value) -> Result<Vec<Extra>, String> {
             return Err(format!("models: {name:?} is no slot's name: cheap, medium, fallback, vision, or 1 to {SLOT_NAME_MAX_BYTES} of a-z, 0-9 and _, a letter first"));
         }
         let o = row.as_object_mut().ok_or_else(|| format!("models.{name}: a slot is where a model runs, an object"))?;
-        for key in ["label", FALLBACK, VISION] {
+        for key in ["label", VISION] {
             if o.contains_key(key) {
                 return Err(format!("models.{name}: only a tier (cheap, medium) names its {key}"));
             }
         }
+        let fallback = fallback_named(&name, o)?;
         let mut flag = |key: &str, means: &str| match o.remove(key) {
             None => Ok(false),
             Some(Value::Bool(b)) => Ok(b),
@@ -502,7 +538,7 @@ fn extras_of(models: &mut Value) -> Result<Vec<Extra>, String> {
         let images = flag("images", "its model reads images")?;
         let private = flag("private", "its model is private: confidential inference that keeps nothing")?;
         let upstream: Upstream = serde_json::from_str(&row.to_string()).map_err(|e| format!("models.{name}: {e}"))?;
-        extra.push(Extra { name, upstream, images, private });
+        extra.push(Extra { name, upstream, images, private, fallback });
     }
     Ok(extra)
 }
@@ -594,6 +630,7 @@ impl Models {
             labels: [None, None],
             extra: vec![],
             routes: [RouteSlots::defaults(), RouteSlots::defaults()],
+            fallbacks: [None, None],
         }
     }
 
@@ -620,6 +657,7 @@ impl Models {
             models.private = flags_of(&mut v, "private", "its model is private: confidential inference that keeps nothing")?;
             models.labels = labels_of(&mut v)?;
             models.routes = routes_of(&mut v)?;
+            models.fallbacks = fallbacks_of(&mut v)?;
             models.extra = extras_of(&mut v)?;
             let n: Slots = serde_json::from_str(&v.to_string()).map_err(|e| format!("models: {e}"))?;
             for (slot, upstream) in [(&mut models.cheap, n.cheap), (&mut models.medium, n.medium), (&mut models.fallback, n.fallback), (&mut models.vision, n.vision)] {
@@ -628,17 +666,27 @@ impl Models {
                 }
             }
         }
-        // each route names slots that are there, and each extra is some route's
+        // each route's vision is a slot that is there; each slot's fallback
+        // another slot, one that reads images behind a slot that sees; and
+        // each extra some route's or some slot's
         for (tier, route) in [Tier::Cheap, Tier::Medium].iter().zip(&models.routes) {
-            for (key, name) in [(FALLBACK, &route.fallback), (VISION, &route.vision)] {
-                let theirs = name == FALLBACK || name == VISION || models.extra.iter().any(|e| &e.name == name);
-                if !theirs {
-                    return Err(format!("models.{}: its {key} is {name:?}, which is no slot it may name: fallback, vision, or a slot of its own beside them", tier.as_str()));
-                }
+            let theirs = route.vision == FALLBACK || route.vision == VISION || models.extra.iter().any(|e| e.name == route.vision);
+            if !theirs {
+                return Err(format!("models.{}: its vision is {:?}, which is no slot it may name: fallback, vision, or a slot of its own beside them", tier.as_str(), route.vision));
             }
         }
-        if let Some(e) = models.extra.iter().find(|e| !models.routes.iter().any(|r| r.fallback == e.name || r.vision == e.name)) {
-            return Err(format!("models.{}: no tier names it as its fallback or vision (\"fallback\": {:?} on cheap or medium)", e.name, e.name));
+        for (slot, _) in models.all_slots() {
+            let Some(to) = models.fallback_named_by(slot) else { continue };
+            if to == slot || models.slot(to).is_none() {
+                return Err(format!("models.{slot}: its fallback is {to:?}, which is no other slot of the deployment's"));
+            }
+            if models.sees(slot) && !models.slot_images(to) {
+                return Err(format!("models.{slot}: images go to {slot}, so its fallback reads them too: {to} says no \"images\": true"));
+            }
+        }
+        let named_by = |name: &str| models.routes.iter().any(|r| r.fallback == name || r.vision == name) || models.all_slots().iter().any(|(s, _)| models.fallback_named_by(s) == Some(name));
+        if let Some(e) = models.extra.iter().find(|e| !named_by(&e.name)) {
+            return Err(format!("models.{}: no slot names it, as its fallback or a tier's vision (\"fallback\": {:?} on another slot)", e.name, e.name));
         }
         let slots = models.all_slots();
         for (i, (slot, upstream)) in slots.iter().enumerate() {
@@ -694,10 +742,11 @@ impl Models {
     }
 
     /// Each slot as a call naming its model's id names it, in `all_slots`'
-    /// order, and where it runs: a tier's as that tier (its route's fallback
-    /// behind it), any other as itself (`Named::Slot`, by its place in
-    /// `all_slots`), never through a caller's route: an id is a model (#589's
-    /// review, P2; only the aliases `fallback` and `vision` follow a route).
+    /// order, and where it runs: a tier's as that tier, any other as itself
+    /// (`Named::Slot`, by its place in `all_slots`), never through a
+    /// caller's route: an id is a model (#589's review, P2; only the aliases
+    /// `fallback` and `vision` follow a route). Either way the call falls
+    /// back as its slot does (`fallback_of`).
     fn named_slots(&self) -> Vec<(Named, &Upstream)> {
         let at = |i: usize| Named::Slot(u8::try_from(i).expect("at most SLOTS_MAX slots"));
         let mut all = vec![(Named::Tier(Tier::Cheap), &self.cheap), (Named::Tier(Tier::Medium), &self.medium), (at(2), &self.fallback), (at(3), &self.vision)];
@@ -798,15 +847,43 @@ impl Models {
         })
     }
 
-    /// The deployment's fallback model, the route's four's (`Tries`).
+    /// The deployment's fallback model, the route's four's.
     pub fn fallback(&self) -> Model<'_> {
         self.model_of(FALLBACK, Named::Fallback)
     }
 
-    /// `tier`'s route's fallback model: what its call is made on once more
-    /// when its own fails (`Tries`). None for `high`, which has no route.
-    pub fn fallback_for(&self, tier: Tier) -> Option<Model<'_>> {
-        self.route_of(tier).map(|r| self.model_of(&r.fallback, Named::Fallback))
+    /// The slot that the slot named `slot` names as its fallback: a tier's,
+    /// its route's (`routes`); the route's four's `fallback` and `vision`'s,
+    /// and an extra's, its own `"fallback"`, when it names one.
+    fn fallback_named_by(&self, slot: &str) -> Option<&str> {
+        if let Some(route) = Tier::parse(slot).and_then(|t| self.route_of(t)) {
+            return Some(&route.fallback);
+        }
+        match slot {
+            FALLBACK => self.fallbacks[0].as_deref(),
+            VISION => self.fallbacks[1].as_deref(),
+            _ => self.extra.iter().find(|e| e.name == slot).and_then(|e| e.fallback.as_deref()),
+        }
+    }
+
+    /// The model a call that the slot named `slot` fails before answering is
+    /// made on once more (`Tries`), whoever called and however it named the
+    /// slot (its name, an alias, its model's id: #589's review): the slot
+    /// it names (`fallback_named_by`), or, for the route's four's `vision`
+    /// that names none, `fallback` when that slot says its model reads
+    /// images (the default, DeepSeek V4 Flash, reads none, and an image sent
+    /// to a model that reads none is its refusal, which no fallback answers
+    /// better). None for any other slot: `fallback`'s, an extra's that
+    /// names none, `high`'s.
+    pub fn fallback_of(&self, slot: &str) -> Option<Model<'_>> {
+        let to = self.fallback_named_by(slot).or_else(|| (slot == VISION && self.slot_images(FALLBACK)).then_some(FALLBACK))?;
+        Some(self.model_of(to, Named::Fallback))
+    }
+
+    /// Whether images go to the slot named `slot`: the route's four's
+    /// `vision`, or a tier's route's vision.
+    fn sees(&self, slot: &str) -> bool {
+        slot == VISION || self.routes.iter().any(|r| r.vision == slot)
     }
 
     /// Whether the slot named `slot` (one `all_slots` names) says its model is private.
@@ -829,44 +906,43 @@ impl Models {
     /// and the route send its calls: its tier (its turns; and Hermes'
     /// recovery of an auxiliary call to the main model, a vision call's
     /// included, after that call and its fallback fail:
-    /// `agent/auxiliary_client.py`, `_try_main_agent_model_fallback`), the
-    /// fallback (the route's on a failure, Hermes' own switch on a stall,
-    /// an auxiliary call's `fallback_providers`) and `vision` (Hermes'
-    /// auxiliary vision, whatever the tier, which falls back to the
-    /// fallback). A private tier's are all private (`private_closed`); the
-    /// high tier, off, reaches none.
+    /// `agent/auxiliary_client.py`, `_try_main_agent_model_fallback`), its
+    /// route's fallback (Hermes' own switch on a stall, an auxiliary call's
+    /// `fallback_providers`) and its route's vision (Hermes' auxiliary
+    /// vision, whatever the tier). A private tier's are all private
+    /// (`private_closed`); the high tier, off, reaches none.
     ///
     /// And the route's four's `fallback`, whatever the tier's route names:
     /// an image before its route was read (#590) names the deployment's
     /// fallback by its id for its stall, its tier unsaid (#589's review,
     /// P1), so that slot is a private tier's too until every image reads
-    /// its route.
+    /// its route. A stall's call, its tier unsaid, runs the first slot that
+    /// runs the id it names (`named`), which is reached too; and a call to
+    /// any slot reached is made once more on that slot's own fallback
+    /// (`fallback_of`), which is reached too, and so on.
     pub fn reached(&self, tier: Tier) -> Vec<(&str, &'static str)> {
-        match self.route_of(tier) {
-            Some(r) => {
-                let mut reached = vec![(tier.as_str(), "turns and recovered calls"), (r.fallback.as_str(), "failures and stalls"), (r.vision.as_str(), "images")];
-                if r.fallback != FALLBACK {
-                    reached.push((FALLBACK, "stalls on an older image (its tier unsaid)"));
-                }
-                reached
-            }
-            None => vec![],
+        let Some(r) = self.route_of(tier) else { return vec![] };
+        let mut reached = vec![(tier.as_str(), "turns and recovered calls"), (r.fallback.as_str(), "failures and stalls"), (r.vision.as_str(), "images")];
+        if r.fallback != FALLBACK {
+            reached.push((FALLBACK, "stalls on an older image (its tier unsaid)"));
         }
-    }
-
-    /// A `vision` call's fallback, for a caller on `tier` (none said: the
-    /// route's four's): its route's fallback model when that slot says it
-    /// reads images (`images`), else none (the default fallback, DeepSeek
-    /// V4 Flash, reads none, and an image sent to a model that reads none
-    /// is its refusal, which no fallback answers better).
-    pub fn vision_fallback_for(&self, tier: Option<Tier>) -> Option<Model<'_>> {
-        let name = tier.and_then(|t| self.route_of(t)).map_or(FALLBACK, |r| r.fallback.as_str());
-        self.slot_images(name).then(|| self.model_of(name, Named::Fallback))
-    }
-
-    /// `vision_fallback_for` a caller that says no tier.
-    pub fn vision_fallback(&self) -> Option<Model<'_>> {
-        self.vision_fallback_for(None)
+        let by_id = |slot: &str| self.slot(slot).and_then(|u| self.named(Some(u.model()), None).ok()).and_then(|n| self.route(n).ok()).map(|m| m.slot);
+        let stalled = [by_id(&r.fallback), by_id(FALLBACK)];
+        fn add<'a>(reached: &mut Vec<(&'a str, &'static str)>, slot: Option<&'a str>, why: &'static str) {
+            if let Some(slot) = slot.filter(|s| !reached.iter().any(|(r, _)| r == s)) {
+                reached.push((slot, why));
+            }
+        }
+        for slot in stalled {
+            add(&mut reached, slot, "stalls (by its model's id)");
+        }
+        let mut at = 0;
+        while at < reached.len() {
+            let next = self.fallback_of(reached[at].0).map(|m| m.slot);
+            add(&mut reached, next, "failures");
+            at += 1;
+        }
+        reached
     }
 
     /// `route`'s model, and the most one call of it writes.
@@ -976,8 +1052,8 @@ pub struct Capped<'a> {
 /// its model's id; `vision` or `fallback`, named by those aliases, which
 /// follow the caller's route (`Models::route_for`); or a slot named by its
 /// model's id (`Slot`, its place in `Models::all_slots`: the route's four's
-/// `fallback` and `vision`, then the extras), which runs that slot exactly,
-/// with no fallback of its own.
+/// `fallback` and `vision`, then the extras), which runs that slot exactly.
+/// Each call falls back as the slot it runs does (`Models::fallback_of`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Named {
     Tier(Tier),
@@ -1825,7 +1901,7 @@ mod tests {
         assert!(d.slots().iter().all(|(_, u)| matches!(u, Upstream::WorkersAi { .. })));
         let finite = finite();
         let private = openai("https://finite-private.finite.containers.tinfoil.dev/v1", FINITE_PRIVATE_FLASH);
-        assert_eq!(finite, Models { cheap: private.clone(), medium: private.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH), images: [false; 4], private: [false; 4], labels: [None, None], extra: vec![], routes: [RouteSlots::defaults(), RouteSlots::defaults()] });
+        assert_eq!(finite, Models { cheap: private.clone(), medium: private.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH), images: [false; 4], private: [false; 4], labels: [None, None], extra: vec![], routes: [RouteSlots::defaults(), RouteSlots::defaults()], fallbacks: [None, None] });
         assert_eq!(finite.route(Named::Tier(Tier::Cheap)).unwrap(), Model { named: Named::Tier(Tier::Cheap), upstream: &private, slot: "cheap" });
         assert_eq!(finite.route(Named::Tier(Tier::Medium)).unwrap().id(), "glm-5-3-flash");
         assert_eq!(finite.route(Named::Tier(Tier::High)), Err(Refusal::HighOff), "high stays off wherever the tiers run");
@@ -1837,7 +1913,7 @@ mod tests {
         assert_eq!(serde_json::to_value(workers_ai(GLM_FLASH)).unwrap(), json!({ "provider": "workers_ai", "model": GLM_FLASH }));
         // OpenRouter's (Finite's since 2026-10-15): its tiers routed by their body, the rest on Workers AI
         let routed = Upstream::Openai { base_url: "https://openrouter.ai/api/v1".into(), model: OPENROUTER_FLASH.into(), body: routing().as_object().cloned(), price: None };
-        assert_eq!(openrouter(), Models { cheap: routed.clone(), medium: routed.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH), images: [false; 4], private: [false; 4], labels: [None, None], extra: vec![], routes: [RouteSlots::defaults(), RouteSlots::defaults()] });
+        assert_eq!(openrouter(), Models { cheap: routed.clone(), medium: routed.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH), images: [false; 4], private: [false; 4], labels: [None, None], extra: vec![], routes: [RouteSlots::defaults(), RouteSlots::defaults()], fallbacks: [None, None] });
         assert_eq!(serde_json::to_value(&routed).unwrap(), json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": "z-ai/glm-5.3-flash", "body": routing() }));
         let empty = Models::parse(Some(&json!({ "cheap": { "provider": "openai", "base_url": "https://a.example/v1", "model": FINITE_PRIVATE_FLASH, "body": {} } }).to_string()), &book, false).unwrap();
         assert_eq!(empty.cheap, Upstream::Openai { base_url: "https://a.example/v1".into(), model: FINITE_PRIVATE_FLASH.into(), body: Some(Map::new()), price: None }, "an empty body adds nothing");
@@ -1861,7 +1937,7 @@ mod tests {
             assert!(e.contains(says), "{text}: {e}");
         };
         refused(r#"{"high": {"provider": "workers_ai", "model": "@cf/zai-org/glm-5.3"}}"#, "models.high: the high tier is off (decision 23)");
-        refused(r#"{"cheapest": {"provider": "workers_ai", "model": "@cf/zai-org/glm-5.3"}}"#, "models.cheapest: no tier names it as its fallback or vision");
+        refused(r#"{"cheapest": {"provider": "workers_ai", "model": "@cf/zai-org/glm-5.3"}}"#, "models.cheapest: no slot names it, as its fallback or a tier's vision");
         refused(&slot(json!({ "provider": "anthropic", "model": "glm-5-3-flash" })), "unknown variant `anthropic`");
         refused(&slot(json!({ "model": "glm-5-3-flash" })), "missing field `provider`");
         refused(&slot(json!({ "provider": "openai", "model": "glm-5-3-flash" })), "missing field `base_url`");
@@ -2097,7 +2173,7 @@ mod tests {
     fn vision_falls_back_only_to_a_model_that_reads_images() {
         let book = PriceBook::defaults();
         let parse = |models: Value| Models::parse(Some(&models.to_string()), &book, false);
-        assert_eq!(DEFAULTS.vision_fallback(), None, "DeepSeek V4 Flash, the default fallback, reads no images");
+        assert_eq!(DEFAULTS.fallback_of(VISION), None, "DeepSeek V4 Flash, the default fallback, reads no images");
         assert_eq!(DEFAULTS.images, [false; 4], "unsaid, no slot reads images");
         let private = json!({ "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1", "model": FINITE_PRIVATE_FLASH });
         let listed = json!({ "input": 0.65, "cached_input": 0.13, "output": 1.45 });
@@ -2106,22 +2182,22 @@ mod tests {
         let tier = parse(json!({ "cheap": private, "medium": private, "fallback": seeing, "vision": private })).unwrap();
         assert_eq!(tier.images, [false, false, true, false]);
         assert_eq!(tier.fallback, parse(json!({ "fallback": tinfoil(listed.clone()) })).unwrap().fallback, "where it runs is as before: images is the slot's");
-        assert_eq!(tier.vision_fallback(), Some(tier.fallback()));
+        assert_eq!(tier.fallback_of(VISION), Some(tier.fallback()));
         // a vision call on Finite Private, failed before answering: once more on Tinfoil
-        let mut tries = Tries::new(tier.route(Named::Vision).unwrap(), tier.vision_fallback());
+        let mut tries = Tries::new(tier.route(Named::Vision).unwrap(), tier.fallback_of(VISION));
         assert_eq!(tries.after(Tried::Answered(503)).map(|m| m.id()), Some("deepseek-v4-1-flash"));
         assert_eq!(tries.after(Tried::Answered(503)), None, "and no third try");
         // a fallback that says nothing: a vision call has none, a tier's call falls back as ever
         let unsaid = parse(json!({ "cheap": private, "medium": private, "fallback": tinfoil(listed.clone()), "vision": private })).unwrap();
-        assert_eq!(unsaid.vision_fallback(), None);
-        assert_eq!(Tries::new(unsaid.route(Named::Vision).unwrap(), unsaid.vision_fallback()).after(Tried::Answered(503)), None, "its failure is the call's");
+        assert_eq!(unsaid.fallback_of(VISION), None);
+        assert_eq!(Tries::new(unsaid.route(Named::Vision).unwrap(), unsaid.fallback_of(VISION)).after(Tried::Answered(503)), None, "its failure is the call's");
         assert!(Tries::new(unsaid.route(Named::Tier(Tier::Cheap)).unwrap(), Some(unsaid.fallback())).after(Tried::Answered(503)).is_some());
         let false_said = parse(json!({ "fallback": { "provider": "workers_ai", "model": GLM_FLASH, "images": false } })).unwrap();
-        assert_eq!(false_said.vision_fallback(), None, "false is unsaid");
+        assert_eq!(false_said.fallback_of(VISION), None, "false is unsaid");
         // on Workers AI too; and GLM-5.3 Flash behind GLM-5.3 Flash's own vision call is no fallback
         let both = parse(json!({ "fallback": { "provider": "workers_ai", "model": GLM_FLASH, "images": true } })).unwrap();
-        assert_eq!((both.fallback.clone(), both.vision_fallback().map(|m| m.id())), (workers_ai(GLM_FLASH), Some(GLM_FLASH)));
-        assert_eq!(Tries::new(both.route(Named::Vision).unwrap(), both.vision_fallback()).after(Tried::Answered(503)), None, "the same model again is no fallback");
+        assert_eq!((both.fallback.clone(), both.fallback_of(VISION).map(|m| m.id())), (workers_ai(GLM_FLASH), Some(GLM_FLASH)));
+        assert_eq!(Tries::new(both.route(Named::Vision).unwrap(), both.fallback_of(VISION)).after(Tried::Answered(503)), None, "the same model again is no fallback");
         // refused, saying why
         for bad in [json!("yes"), json!(1), json!(null)] {
             let e = parse(json!({ "fallback": { "provider": "workers_ai", "model": GLM_FLASH, "images": bad } })).unwrap_err();
@@ -2183,7 +2259,7 @@ mod tests {
         let recovered: Vec<&str> = behind.reached(Tier::Cheap).iter().map(|(slot, _)| *slot).collect();
         assert_eq!(recovered, ["cheap", super::FALLBACK, VISION]);
         assert!(!behind.slot_private("cheap") && !behind.slot_private("medium"), "no private route: its agents chose none");
-        let mut tries = Tries::new(behind.route(Named::Vision).unwrap(), behind.vision_fallback());
+        let mut tries = Tries::new(behind.route(Named::Vision).unwrap(), behind.fallback_of(VISION));
         assert_eq!(tries.after(Tried::Answered(429)).map(|m| m.id()), Some("deepseek-v4-1-flash"), "vision's 429: its fallback");
         assert_eq!(tries.after(Tried::Answered(429)), None, "the fallback's 429 too: the call's, for Hermes to recover to the main model");
         // refused, saying which slot to change and why the private tier reaches it
@@ -2279,17 +2355,17 @@ mod tests {
         let book = PriceBook::defaults();
         let parse = |models: Value| Models::parse(Some(&models.to_string()), &book, false);
         let m = parse(per_route()).unwrap();
-        assert_eq!(m.extra, [Extra { name: "cloudflare".into(), upstream: workers_ai(GLM_FLASH), images: true, private: false }]);
+        assert_eq!(m.extra, [Extra { name: "cloudflare".into(), upstream: workers_ai(GLM_FLASH), images: true, private: false, fallback: None }]);
         assert_eq!(m.routes, [RouteSlots::defaults(), RouteSlots { fallback: "cloudflare".into(), vision: "cloudflare".into() }]);
         let (cheap, medium) = (Some(Tier::Cheap), Some(Tier::Medium));
         let at = |model: Model<'_>| (model.slot.to_string(), model.id().to_string());
         // each tier's call falls back within its route
-        assert_eq!(m.fallback_for(Tier::Cheap).map(at), Some(("fallback".into(), "deepseek-v4-1-flash".into())));
-        assert_eq!(m.fallback_for(Tier::Medium).map(at), Some(("cloudflare".into(), GLM_FLASH.into())));
-        assert_eq!(m.fallback_for(Tier::High), None, "high has no route");
-        let mut private = Tries::new(m.route(Named::Tier(Tier::Cheap)).unwrap(), m.fallback_for(Tier::Cheap));
+        assert_eq!(m.fallback_of("cheap").map(at), Some(("fallback".into(), "deepseek-v4-1-flash".into())));
+        assert_eq!(m.fallback_of("medium").map(at), Some(("cloudflare".into(), GLM_FLASH.into())));
+        assert_eq!(m.fallback_of("high"), None, "high has no route");
+        let mut private = Tries::new(m.route(Named::Tier(Tier::Cheap)).unwrap(), m.fallback_of("cheap"));
         assert_eq!(private.after(Tried::Answered(429)).map(at), Some(("fallback".into(), "deepseek-v4-1-flash".into())));
-        let mut standard = Tries::new(m.route(Named::Tier(Tier::Medium)).unwrap(), m.fallback_for(Tier::Medium));
+        let mut standard = Tries::new(m.route(Named::Tier(Tier::Medium)).unwrap(), m.fallback_of("medium"));
         assert_eq!(standard.after(Tried::Answered(502)).map(at), Some(("cloudflare".into(), GLM_FLASH.into())), "Standard's to Cloudflare, never Tinfoil");
         // a caller's vision and fallback are its route's; one that says no tier, the four's
         assert_eq!(at(m.route_for(Named::Vision, cheap).unwrap()), ("vision".into(), FINITE_PRIVATE_FLASH.into()));
@@ -2298,10 +2374,11 @@ mod tests {
         assert_eq!(at(m.route_for(Named::Fallback, medium).unwrap()), ("cloudflare".into(), GLM_FLASH.into()));
         assert_eq!(at(m.route_for(Named::Fallback, None).unwrap()), ("fallback".into(), "deepseek-v4-1-flash".into()));
         assert_eq!(m.capped_for(Named::Vision, medium).unwrap().model.slot, "cloudflare");
-        // a vision call falls back to its route's fallback when it reads images, and never to itself
-        assert_eq!(m.vision_fallback_for(cheap).map(at), Some(("fallback".into(), "deepseek-v4-1-flash".into())));
+        // a vision call falls back as its slot does: the four's vision to the fallback that reads images;
+        // Standard's, an extra naming none, has none
+        assert_eq!(m.fallback_of(m.route_for(Named::Vision, cheap).unwrap().slot).map(at), Some(("fallback".into(), "deepseek-v4-1-flash".into())));
         let seen = m.route_for(Named::Vision, medium).unwrap();
-        assert_eq!(Tries::new(seen, m.vision_fallback_for(medium)).after(Tried::Answered(503)), None, "Standard's vision is its fallback: no second try");
+        assert_eq!(m.fallback_of(seen.slot), None, "Standard's vision, cloudflare, names no fallback");
         // an extra is named by its model's id, and listed
         assert_eq!(m.named(Some(GLM_FLASH), None), Ok(Named::Slot(4)));
         assert_eq!(at(m.route(Named::Slot(4)).unwrap()), ("cloudflare".into(), GLM_FLASH.into()));
@@ -2333,7 +2410,7 @@ mod tests {
         // today's configs name no routes, and run as before
         assert_eq!(openrouter().routes, [RouteSlots::defaults(), RouteSlots::defaults()]);
         assert!(openrouter().extra.is_empty());
-        assert_eq!(openrouter().fallback_for(Tier::Medium), Some(openrouter().fallback()));
+        assert_eq!(openrouter().fallback_of("medium"), Some(openrouter().fallback()));
         // refused, saying why
         let refused = |models: Value, says: &str| {
             let e = parse(models.clone()).unwrap_err();
@@ -2344,14 +2421,14 @@ mod tests {
             edit(&mut v);
             v
         };
-        refused(with(&|v| v["medium"]["fallback"] = json!("cloudflair")), "models.medium: its fallback is \"cloudflair\", which is no slot it may name");
+        refused(with(&|v| v["medium"]["fallback"] = json!("cloudflair")), "models.medium: its fallback is \"cloudflair\", which is no other slot of the deployment's");
         refused(with(&|v| v["medium"]["vision"] = json!("cheap")), "models.medium: its vision is \"cheap\", which is no slot it may name");
         refused(with(&|v| v["medium"]["fallback"] = json!(7)), "models.medium: fallback names the slot its route's fallback runs on, not 7");
-        refused(with(&|v| v["spare"] = json!({ "provider": "workers_ai", "model": GLM_FLASH })), "models.spare: no tier names it as its fallback or vision");
+        refused(with(&|v| v["spare"] = json!({ "provider": "workers_ai", "model": GLM_FLASH })), "models.spare: no slot names it, as its fallback or a tier's vision");
         refused(with(&|v| v["high"] = json!({ "provider": "workers_ai", "model": GLM_FLASH })), "models.high: the high tier is off");
         refused(with(&|v| v["Cloud"] = json!({ "provider": "workers_ai", "model": GLM_FLASH })), "models: \"Cloud\" is no slot's name");
         refused(with(&|v| v["cloudflare"]["label"] = json!("Cloudflare")), "models.cloudflare: only a tier (cheap, medium) names its label");
-        refused(with(&|v| v["cloudflare"]["fallback"] = json!("fallback")), "models.cloudflare: only a tier (cheap, medium) names its fallback");
+        refused(with(&|v| v["cloudflare"]["vision"] = json!("fallback")), "models.cloudflare: only a tier (cheap, medium) names its vision");
         refused(with(&|v| v["cloudflare"]["images"] = json!("yes")), "models.cloudflare: images is true (its model reads images) or false, not \"yes\"");
         refused(with(&|v| v["cloudflare"]["private"] = json!(true)), "models.cloudflare: Workers AI and OpenRouter are not private");
         refused(with(&|v| v["cloudflare"]["provider"] = json!("anthropic")), "models.cloudflare: unknown variant `anthropic`");
@@ -2380,7 +2457,90 @@ mod tests {
         let tinfoil_slot = |price: Value| json!({ "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "model": "deepseek-v4-1-flash", "price": price });
         let twice = parse(json!({ "cheap": tinfoil_slot(json!({ "input": 0.65, "output": 1.45 })), "fallback": tinfoil_slot(json!({ "input": 0.65, "cached_input": 0.65, "output": 1.45 })) })).unwrap();
         assert_ne!(twice.cheap, twice.fallback, "spelled two ways");
-        assert_eq!(Tries::new(twice.route(Named::Tier(Tier::Cheap)).unwrap(), twice.fallback_for(Tier::Cheap)).after(Tried::Answered(429)), None, "the same call again is no fallback");
+        assert_eq!(Tries::new(twice.route(Named::Tier(Tier::Cheap)).unwrap(), twice.fallback_of("cheap")).after(Tried::Answered(429)), None, "the same call again is no fallback");
+    }
+
+    /// Goal (#589's review, P2): a call falls back as the slot it runs does,
+    /// whether it named the slot by its name, an alias or its model's id;
+    /// and any slot may name its own fallback (`"fallback"`), which the
+    /// private guard follows. Valid: the four's `vision` named by its own id
+    /// falls back as the alias does, to a fallback that reads images, and
+    /// neither does when that fallback reads none; an extra naming its
+    /// fallback, by its name and by its id; the four's `fallback` and
+    /// `vision` naming theirs. Invalid: a fallback that is the slot itself,
+    /// no slot, no name, or reads no images behind a slot images go to; a
+    /// private tier whose slots' own fallbacks, or whose stall's id, reach a
+    /// slot that is not private.
+    #[test]
+    fn each_slot_falls_back_as_itself_however_named() {
+        let book = PriceBook::defaults();
+        let parse = |models: Value| Models::parse(Some(&models.to_string()), &book, false);
+        let at = |model: Model<'_>| (model.slot.to_string(), model.id().to_string());
+        let gemma = json!({ "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "model": "gemma4-31b", "price": { "input": 0.4, "output": 1 } });
+        let listed = json!({ "input": 0.65, "cached_input": 0.13, "output": 1.45 });
+        let mut seeing = tinfoil(listed.clone());
+        seeing["images"] = json!(true);
+        // the four's vision on a model of its own, a fallback that reads images behind it
+        let m = parse(json!({ "vision": gemma, "fallback": seeing })).unwrap();
+        let by_id = m.named(Some("gemma4-31b"), None).unwrap();
+        assert_eq!(by_id, Named::Slot(3), "its id names its slot");
+        for named in [by_id, Named::Vision] {
+            let model = m.route(named).unwrap();
+            assert_eq!(m.fallback_of(model.slot).map(at), Some(("fallback".into(), "deepseek-v4-1-flash".into())), "{named:?}");
+            let mut tries = Tries::new(model, m.fallback_of(model.slot));
+            assert_eq!(tries.after(Tried::Answered(429)).map(|f| f.id()), Some("deepseek-v4-1-flash"), "{named:?}: a 429, once more on the fallback");
+            assert_eq!(tries.after(Tried::Answered(429)), None, "and no third try");
+        }
+        // control: a fallback that reads no images is neither's
+        let blind = parse(json!({ "vision": gemma, "fallback": tinfoil(listed.clone()) })).unwrap();
+        for named in [blind.named(Some("gemma4-31b"), None).unwrap(), Named::Vision] {
+            assert_eq!(blind.fallback_of(blind.route(named).unwrap().slot), None, "{named:?}");
+        }
+        // the four's fallback has none, by its alias or its id; a tier's, its route's
+        assert_eq!(m.fallback_of(m.route(Named::Fallback).unwrap().slot), None);
+        assert_eq!(m.fallback_of(m.route(m.named(Some("deepseek-v4-1-flash"), None).unwrap()).unwrap().slot), None);
+        assert_eq!(m.fallback_of("cheap").map(at), Some(("fallback".into(), "deepseek-v4-1-flash".into())));
+        // an extra names its own: Standard's vision, Cloudflare, behind it the fallback, which reads images
+        let mut own = per_route();
+        own["cloudflare"]["fallback"] = json!("fallback");
+        let own = parse(own).unwrap();
+        assert_eq!(own.extra[0].fallback.as_deref(), Some("fallback"));
+        for named in [Named::Vision, own.named(Some(GLM_FLASH), None).unwrap()] {
+            let model = own.route_for(named, Some(Tier::Medium)).unwrap();
+            assert_eq!((model.slot, own.fallback_of(model.slot).map(at)), ("cloudflare", Some(("fallback".into(), "deepseek-v4-1-flash".into()))), "{named:?}");
+        }
+        assert_eq!(own.fallback_of("medium").map(at), Some(("cloudflare".into(), GLM_FLASH.into())), "a tier's call is made once more on its route's fallback, and no third time");
+        // the four's fallback and vision name theirs
+        let named = parse(json!({ "fallback": { "provider": "workers_ai", "model": DEEPSEEK_FLASH, "fallback": "medium" }, "vision": { "provider": "workers_ai", "model": GLM_FLASH, "fallback": "spare" }, "spare": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3", "images": true } })).unwrap();
+        assert_eq!(named.fallbacks, [Some("medium".to_string()), Some("spare".to_string())]);
+        assert_eq!((named.fallback_of(super::FALLBACK).map(at), named.fallback_of(VISION).map(at)), (Some(("medium".into(), MEDIUM_MODEL.into())), Some(("spare".into(), MEDIUM_MODEL.into()))));
+        assert_eq!(DEFAULTS.fallbacks, [None, None], "unnamed, as before");
+        // refused, saying why
+        let refused = |models: Value, says: &str| {
+            let e = parse(models.clone()).unwrap_err();
+            assert!(e.contains(says), "{models}: {e}");
+        };
+        let with = |edit: &dyn Fn(&mut Value)| {
+            let mut v = per_route();
+            edit(&mut v);
+            v
+        };
+        refused(with(&|v| v["cloudflare"]["fallback"] = json!("cloudflare")), "models.cloudflare: its fallback is \"cloudflare\", which is no other slot of the deployment's");
+        refused(with(&|v| v["vision"]["fallback"] = json!("nowhere")), "models.vision: its fallback is \"nowhere\", which is no other slot of the deployment's");
+        refused(with(&|v| v["fallback"]["fallback"] = json!(3)), "models.fallback: fallback names the slot its calls fall back to, not 3");
+        refused(with(&|v| v["cloudflare"]["fallback"] = json!("medium")), "models.cloudflare: images go to cloudflare, so its fallback reads them too: medium says no \"images\": true");
+        refused(with(&|v| v["vision"]["fallback"] = json!("cheap")), "models.vision: images go to vision, so its fallback reads them too: cheap says no \"images\": true");
+        // the private guard follows a slot's own fallback: Private's fallback, Tinfoil, behind it Cloudflare
+        refused(with(&|v| v["fallback"]["fallback"] = json!("cloudflare")), "models.cloudflare: models.cheap is private, and its agents' failures reach cloudflare");
+        // and a stall's call, by its fallback's id with its tier unsaid, to the first slot running that id
+        let stalled = json!({
+            "cheap": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1", "model": FINITE_PRIVATE_FLASH, "private": true, "fallback": "private_fallback", "vision": "private_vision" },
+            "fallback": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1", "model": FINITE_PRIVATE_FLASH, "private": true },
+            "vision": tinfoil(listed.clone()),
+            "private_fallback": { "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "model": "deepseek-v4-1-flash", "price": listed, "private": true },
+            "private_vision": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1", "model": FINITE_PRIVATE_FLASH, "private": true }
+        });
+        refused(stalled, "models.vision: models.cheap is private, and its agents' stalls (by its model's id) reach vision");
     }
 
     /// Goal: one rule names the agent a guest's model call is for, chat and

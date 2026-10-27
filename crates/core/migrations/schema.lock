@@ -15,6 +15,7 @@ step Registry 5 invites_answered 189ad3c09884ab61
 step Registry 6 connection_accounts 05c1285d594517cb
 step Principal 1 baseline 28b4d4bf3f8cdb71
 step Principal 2 listed 09e5aab70c4f7f61
+step Principal 3 memberships_dock 607987fd7686be8b
 step Ledger 1 baseline 6d5c6ebad64a53b2
 step Computer 1 baseline 0f429c07654198e6
 step Computer 2 agent_accounts 55b329a8b0da4bbd
@@ -147,7 +148,7 @@ Principal table export_parts: CREATE TABLE export_parts (export TEXT NOT NULL, p
 Principal table export_tail: CREATE TABLE export_tail (export TEXT NOT NULL, n INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (export, n))
 Principal table exports: CREATE TABLE exports ( id TEXT PRIMARY KEY, person TEXT NOT NULL, state TEXT NOT NULL, started_at INTEGER NOT NULL, ready_at INTEGER, expires_at INTEGER, size INTEGER, error TEXT, job TEXT, upload TEXT, requests INTEGER NOT NULL DEFAULT 0, downloads INTEGER NOT NULL DEFAULT 0, gone_at INTEGER, metered INTEGER NOT NULL DEFAULT 0)
 Principal table listed: CREATE TABLE listed (fragment TEXT PRIMARY KEY, records TEXT NOT NULL)
-Principal table memberships: CREATE TABLE memberships ( fragment TEXT PRIMARY KEY, role TEXT, incarnation INTEGER NOT NULL, version INTEGER NOT NULL, sharing TEXT, face TEXT, archived INTEGER NOT NULL DEFAULT 0, searched TEXT)
+Principal table memberships: CREATE TABLE memberships ( fragment TEXT PRIMARY KEY, role TEXT, incarnation INTEGER NOT NULL, version INTEGER NOT NULL, sharing TEXT, face TEXT, archived INTEGER NOT NULL DEFAULT 0, searched TEXT, dock INTEGER NOT NULL DEFAULT 1)
 Principal table search_entries: CREATE TABLE search_entries ( id INTEGER PRIMARY KEY, fragment TEXT NOT NULL, n INTEGER NOT NULL, channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, text TEXT NOT NULL, UNIQUE (fragment, n))
 Principal index search_entries_at: CREATE INDEX search_entries_at ON search_entries (at, id)
 Principal trigger search_entries_added: CREATE TRIGGER search_entries_added AFTER INSERT ON search_entries BEGIN INSERT INTO search_text (rowid, text) VALUES (new.id, new.text); END

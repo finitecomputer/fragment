@@ -48,6 +48,11 @@ pub struct Agent {
     /// none itself.
     #[serde(default)]
     pub credentials: Vec<Credential>,
+    /// Its identity's key (64 hex), which its fragment signs as: a door's
+    /// ticket is checked with it (simplex/door.rs). None from a platform
+    /// before doors, which starts no link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 /// One credential of an agent's (`GET /api/computer`'s `agents[].credentials`).
@@ -226,6 +231,11 @@ pub struct TurnStart {
     /// `None` when it could not be read, or is no message).
     pub reply_to: Option<u64>,
     pub quote: Option<Quote>,
+    /// Its chat is its owner's SimpleX chat while linked (`Engine::mirror`):
+    /// what the agent says there reaches their phone, whatever started the
+    /// turn. Relay tells its agent so in that chat's session
+    /// (`relay::wire::SIMPLEX_TOPIC`).
+    pub simplex: bool,
 }
 
 /// What the bridge asks of a runtime.
@@ -256,7 +266,9 @@ pub enum Command {
     /// running turn `turn`, `How::Aside`): `/<name> <args>`, its id the
     /// record's (a turn id, as if it were one). What the runtime answers it
     /// with is a message of its own (`Event::Say`).
-    Aside { agent: String, fragment: String, chat_name: String, turn: Option<String>, id: String, by: String, by_name: String, text: String },
+    /// `simplex`: its chat is its owner's SimpleX chat, as a turn's is
+    /// (`TurnStart::simplex`).
+    Aside { agent: String, fragment: String, chat_name: String, simplex: bool, turn: Option<String>, id: String, by: String, by_name: String, text: String },
 }
 
 /// What a runtime tells the bridge. Every event but `Connected`, `Say` and

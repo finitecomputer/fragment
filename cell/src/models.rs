@@ -23,16 +23,17 @@
 //! A tier's call whose model fails before answering anything (not reached,
 //! 429, or a 5xx; on an OpenAI-compatible API, where the key is the
 //! platform's, also 401, 402, 403 or 404: `fragment_core::models::falls_back`,
-//! a 401 or 402 logged aloud as `model.platform-key`) is made once more, the same, on the deployment's fallback
-//! model (its `models.fallback`: DeepSeek V4 Flash unless named, behind the
-//! cheap tier's GLM-5.3 Flash; Workers AI's GLM-5.3 Flash behind
-//! OpenRouter on Finite's own; `fragment_core::models::Tries`), logged as
-//! `model.fallback`, and charged as the fallback's.
-//! Not a race: the fallback is called only after the model failed. An
-//! answer that began is final, and the fallback's failure is passed
-//! through as any. `vision` has one only when the fallback's slot says its
-//! model reads images (`images: true`: `Models::vision_fallback`; the
-//! default fallback, DeepSeek, reads none), and a transcription none.
+//! a 401 or 402 logged aloud as `model.platform-key`) is made once more, the
+//! same, on its slot's own fallback (`fragment_core::models::Models::
+//! fallback_of`, `Tries`), however the call named the slot: a tier's, its
+//! route's (the deployment's `models.fallback` unless it names another:
+//! DeepSeek V4 Flash unless named, behind the cheap tier's GLM-5.3 Flash);
+//! `vision`'s, `fallback` only when that slot says its model reads images
+//! (`images: true`; the default fallback, DeepSeek, reads none); any other
+//! slot's, the one it names, if any. It is logged as `model.fallback`, and
+//! charged as the fallback's. Not a race: the fallback is called only
+//! after the model failed. An answer that began is final, and the
+//! fallback's failure is passed through as any. A transcription has none.
 //!
 //! Where a model runs is the deployment's (`FRAGMENT_MODELS`, config.rs;
 //! decision 61), on one of two kinds of upstream, one input:
@@ -265,14 +266,8 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     let bounded = bounds::bound(model, call.body, call.stream).map_err(refused)?;
     let mut charge = gate(env, call.payer, call.agent, call.fragment.as_ref(), bounded.model.id(), call.named.as_str()).await?;
     let meta = Metadata { user_id: opaque(call.payer), agent_id: call.agent.map(opaque) };
-    // a tier's call falls back within its route; a `vision` call only to
-    // its route's fallback, when that slot says it reads images; `fallback`
-    // (and an extra slot named by its id) is a fallback already
-    let fallback = match call.named {
-        Named::Tier(t) => cfg.models.fallback_for(t),
-        Named::Vision => cfg.models.vision_fallback_for(call.tier),
-        Named::Fallback | Named::Slot(_) => None,
-    };
+    // as its slot falls back, however the call named it (#589's review)
+    let fallback = cfg.models.fallback_of(bounded.model.slot);
     let (answer, model, calls) = tried(env, cfg, &bounded, fallback, &meta).await;
     charge.model = model.id();
     charge.calls = calls;
@@ -375,10 +370,7 @@ pub(crate) async fn streamed(env: &Env, bounded: &Bounded<'static>, payer: &str,
     let cfg = Config::from_env(env);
     let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
     // a step names its tier: it falls back within that tier's route
-    let fallback = match bounded.model.named {
-        Named::Tier(t) => cfg.models.fallback_for(t),
-        _ => Some(cfg.models.fallback()),
-    };
+    let fallback = cfg.models.fallback_of(bounded.model.slot);
     let (answer, model, calls) = tried(env, cfg, bounded, fallback, &meta).await;
     let answer = answer?;
     let log_id = answer.headers().get("cf-aig-log-id")?;
@@ -706,13 +698,20 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url, 
     drop(body);
     let mut charge = gate(env, &owner, Some(&agent.id), None, transcribe::TRANSCRIBE_MODEL, transcribe::WHISPER).await?;
     let meta = Metadata { user_id: opaque(&owner), agent_id: Some(opaque(&agent.id)) };
+    let (answer, calls) = whispered(env, Config::from_env(env), &bounded.input, &meta).await;
+    charge.calls = calls;
     // not reached: it used nothing, and nothing is charged
-    let mut upstream = workers_ai(env, Config::from_env(env), transcribe::TRANSCRIBE_MODEL, &bounded.input, &meta).await?;
+    let mut upstream = answer?;
     charge.first_ms = Some(js::now_ms() - charge.t0);
     let status = upstream.status_code();
     let log_id = upstream.headers().get("cf-aig-log-id")?;
     if status != 200 {
-        return passed(status, bounded_text(&mut upstream).await);
+        let mut refused = passed(status, bounded_text(&mut upstream).await)?;
+        if status == 429 {
+            // its client's own retry waits for capacity, not half a second
+            refused.headers_mut().set("retry-after", &transcribe::RETRY_AFTER_S.to_string())?;
+        }
+        return Ok(refused);
     }
     let answer = match read_whole(&mut upstream).await {
         Ok(b) => b,
@@ -735,6 +734,38 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url, 
     resp.headers_mut().set("content-type", kind)?;
     resp.headers_mut().set(ANSWER_SHAPE_HEADER, &shape.to_string())?;
     Ok(resp)
+}
+
+/// Whisper's answer to a transcription, and the tries it took: a first try
+/// that failed fast for want of capacity (`transcribe::again`: a 429, a 5xx,
+/// a 408 or no answer, within `AGAIN_WITHIN_MS`) is made once more after
+/// `AGAIN_AFTER_MS`, and the second's answer is final. A failed try used
+/// nothing and is charged nothing. Workers AI's speech recognition takes 720
+/// calls a minute an account (developers.cloudflare.com/workers-ai/platform/
+/// limits, read 2026-10-22); what it refuses past that, or when short of
+/// capacity, is a passing 429. Not AI Gateway's own retries: its Retry
+/// Requests setting is the gateway's, so it would hold back a chat call's
+/// fallback too, and the binding's options name no retry, nor its docs
+/// which failures it retries.
+async fn whispered(env: &Env, cfg: &Config, input: &Value, meta: &Metadata) -> (CellResult<Response>, u32) {
+    let t0 = js::now_ms();
+    let first = workers_ai(env, cfg, transcribe::TRANSCRIBE_MODEL, input, meta).await;
+    let status = first.as_ref().ok().map(Response::status_code);
+    let ms = js::now_ms() - t0;
+    if !transcribe::again(status, ms) {
+        return (first, 1);
+    }
+    // where Workers AI's error is (the gateway's log of the call), never
+    // its body: an answer whose headers came fast can still stall its body,
+    // and a read of it would hold back the second try past what its client
+    // waits (Alex's review of #520)
+    let why = match first {
+        Ok(failed) => failed.headers().get("cf-aig-log-id").ok().flatten().map(|id| format!("cf-aig-log-id {id}")).unwrap_or_default(),
+        Err(e) => e.message,
+    };
+    console_log!("{}", json!({ "event": "model.transcribe-again", "model": transcribe::TRANSCRIBE_MODEL, "status": status, "ms": ms, "why": why }));
+    Delay::from(std::time::Duration::from_millis(transcribe::AGAIN_AFTER_MS)).await;
+    (workers_ai(env, cfg, transcribe::TRANSCRIBE_MODEL, input, meta).await, 2)
 }
 
 /// A transcription's answer names the shape of the model's own (its

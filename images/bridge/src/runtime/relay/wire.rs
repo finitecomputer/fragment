@@ -345,6 +345,26 @@ pub struct Inbound<'a> {
     /// for its own; `gateway/run_inbound.py`,
     /// `_prepend_inbound_reply_context`).
     pub quote: Option<&'a crate::runtime::Quote>,
+    /// What its chat is, said as the chat's topic (`source.chat_topic`):
+    /// Hermes renders it in that chat's session context, in its system
+    /// prompt (`**Channel Topic:** …`, `gateway/session.py`,
+    /// `build_session_context_prompt`), pinned per session and rendered
+    /// again only when it changes. Its owner's SimpleX chat alone has one
+    /// (`SIMPLEX_TOPIC`), on every inbound there, so the pin holds.
+    pub topic: Option<&'a str>,
+}
+
+/// What an agent is told of its owner's SimpleX chat, in that chat alone
+/// (`TurnStart::simplex`): a fact, which Hermes' session context reads as
+/// a label (never an instruction; the rule never to set SimpleX up is the
+/// relay hint's, hermes-boot's `SIMPLEX`). Once in that chat's system
+/// prompt, never beside each message (a voice memo's transcript, which
+/// Hermes puts before the message and its context, stays the message's).
+pub const SIMPLEX_TOPIC: &str = "Your owner's SimpleX: what you say here reaches their phone.";
+
+/// The topic of a chat that is (or is not) its owner's SimpleX chat.
+pub fn topic(simplex: bool) -> Option<&'static str> {
+    simplex.then_some(SIMPLEX_TOPIC)
 }
 
 /// A delivery, buffered until the gateway acks it: a group message, so
@@ -392,6 +412,9 @@ fn event(m: &Inbound, buffer_id: &str, text: &str, prompt_response: Option<Value
             "message_id": m.message_id,
         },
     });
+    if let Some(t) = m.topic {
+        event["source"]["chat_topic"] = json!(t);
+    }
     if !m.media.is_empty() {
         event["media_urls"] = json!(m.media.iter().map(|(u, _)| u).collect::<Vec<_>>());
         event["media"] = json!(m.media.iter().map(|(u, t)| json!({ "url": u, "mime": t })).collect::<Vec<_>>());
@@ -480,6 +503,27 @@ pub fn notice(text: &str) -> Option<(NoticeCategory, String)> {
     (!words.is_empty()).then(|| (*category, words.to_string()))
 }
 
+/// What Hermes v0.21.7 says in place of a reply when its model answered
+/// only a silence marker (exactly `[SILENT]`, `gateway/response_filters.py`)
+/// for a message it judges needed one: `_unexpected_silence_reply`
+/// (`gateway/run_turn.py`), `gateway.errors.unexpected_silence` in its
+/// `locales/en.yaml` (the image sets no language). A turn may stay silent
+/// only when the message was addressed to someone else (an event's
+/// `reply_expected: false`) or is Hermes' own machinery; Relay carries
+/// neither (its `_event_from_wire` reads no `reply_expected`, which only
+/// Slack's own adapter sets, nor `internal`: v0.21.7, and upstream's main on
+/// 2026-10-26), so every message it hands Hermes is one that needed a
+/// reply, a routine's too. The bridge says nothing of it for a routine
+/// (relay/mod.rs, `act`). The real-Hermes lane checks these words
+/// (tests/docker.rs, `a_routine_may_say_nothing`).
+pub const UNEXPECTED_SILENCE: &str = "⚠️ The model returned only a silence marker for a message that needed a reply. Try again or rephrase.";
+
+/// Whether a message of Hermes' is its `UNEXPECTED_SILENCE`, whole: words
+/// of the model's that merely quote it are not.
+pub fn unexpected_silence(text: &str) -> bool {
+    text.trim() == UNEXPECTED_SILENCE
+}
+
 /// What in an image link's URL says it is an image, as Hermes reads one
 /// (`extract_images`): an image's extension, or FAL's or Replicate's CDN.
 const IMAGE_MARKERS: [&str; 8] = [".png", ".jpg", ".jpeg", ".gif", ".webp", "fal.media", "fal-cdn", "replicate.delivery"];
@@ -551,8 +595,8 @@ pub fn uncursored(content: &str) -> (&str, bool) {
 /// step's arguments, never a step of its own. Back to back, a command's
 /// header is dropped, and its block is a step of the tool before it. A
 /// header whose block has not closed yet (an edit cut inside it) is no
-/// step until it has. Each step is said `ok`, with no excerpt nor words:
-/// progress says neither.
+/// step until it has. Each step is said `ok`, with no excerpt: progress
+/// says none (the model's words before it are a reply of their own).
 pub fn new_steps(content: &str, seen: usize) -> Vec<Step> {
     let (text, _) = uncursored(content);
     let mut steps: Vec<Step> = Vec::new();
@@ -591,7 +635,7 @@ pub fn new_steps(content: &str, seen: usize) -> Vec<Step> {
 
 fn step(tool: String, args: String) -> Step {
     let category = category_of(&tool);
-    Step { tool, args, ok: true, excerpt: String::new(), text: String::new(), category }
+    Step { tool, args, ok: true, excerpt: String::new(), category }
 }
 
 /// Hermes' tools, as v0.21.6 registers them (`tools/`): what each does (a
@@ -720,6 +764,25 @@ mod tests {
         }
     }
 
+    /// Hermes' words for a bare silence marker are known whole (around
+    /// whitespace), and only whole: a reply that quotes them, another
+    /// warning, or a model's own `[SILENT]` is not them.
+    #[test]
+    fn hermes_words_for_a_bare_silence() {
+        assert!(unexpected_silence(UNEXPECTED_SILENCE));
+        assert!(unexpected_silence(&format!("\n{UNEXPECTED_SILENCE}  ")));
+        for not in [
+            "[SILENT]",
+            "",
+            "⚠️ I seem to be stuck (no activity for 1 min).",
+            "⚠️ The model returned only a silence marker",
+            &format!("Hermes said: {UNEXPECTED_SILENCE}"),
+            &format!("{UNEXPECTED_SILENCE}\n\nThe shelf is in stock."),
+        ] {
+            assert!(!unexpected_silence(not), "{not:?}");
+        }
+    }
+
     /// A reply's image links are Hermes': markdown images whose URL says it
     /// is one (an extension, FAL's CDN), http(s) only; a link, a page, a
     /// relative image, a broken one is none. Taken out, the text keeps the
@@ -801,7 +864,7 @@ mod tests {
         }
         assert_eq!(v["descriptor"]["supported_ops"], json!(SUPPORTED_OPS));
         let media = vec![("http://127.0.0.1:1/relay/media/m1".to_string(), "image/png".to_string())];
-        let m = Inbound { chat: "talk--k3x9/juniper--k3x9", chat_name: "talk", profile: "juniper--k3x9", message_id: "12", user_id: "npub1bob", user_name: "bob", text: "/new please", media: &media, context: None, command: false, quote: None };
+        let m = Inbound { chat: "talk--k3x9/juniper--k3x9", chat_name: "talk", profile: "juniper--k3x9", message_id: "12", user_id: "npub1bob", user_name: "bob", text: "/new please", media: &media, context: None, command: false, quote: None, topic: None };
         let i: Value = serde_json::from_str(inbound(&m, "b4").trim_end()).unwrap();
         assert_eq!(i["bufferId"], "b4");
         assert_eq!(i["event"]["message_id"], "12");
@@ -828,6 +891,26 @@ mod tests {
         let quoted: Value = serde_json::from_str(inbound(&Inbound { text: "do that one", quote: Some(&q), media: &[], ..m.clone() }, "b7").trim_end()).unwrap();
         assert_eq!((&quoted["event"]["reply_to_message_id"], &quoted["event"]["reply_to"]), (&json!("t9"), &json!({ "text": "the plan, step 1", "is_own": true })));
         assert!(i["event"].get("reply_to").is_none() && i["event"].get("reply_to_message_id").is_none(), "no quote, none");
+    }
+
+    /// Goal (Paul, 2026-10-26): in its owner's SimpleX chat the agent is
+    /// told, once in that chat's session, that what it says there reaches
+    /// their phone: the chat's topic, on every inbound there (a turn's, an
+    /// answer's, an aside's), its sender and text untouched; any other chat
+    /// has none.
+    #[test]
+    fn its_owners_simplex_chat_says_so_as_its_topic() {
+        assert_eq!(topic(true), Some(SIMPLEX_TOPIC));
+        assert_eq!(topic(false), None);
+        let m = Inbound { chat: "c", chat_name: "juniper-simplex", profile: "juniper--k3x9", message_id: "12", user_id: "npub1paul", user_name: "paul", text: "water the basil", media: &[], context: None, command: false, quote: None, topic: topic(true) };
+        let i: Value = serde_json::from_str(inbound(&m, "b1").trim_end()).unwrap();
+        assert_eq!((&i["event"]["source"]["chat_topic"], &i["event"]["source"]["user_name"], &i["event"]["text"]), (&json!(SIMPLEX_TOPIC), &json!("paul"), &json!("water the basil")));
+        assert!(i["event"].get("context").is_none(), "nothing beside the message: a voice memo's transcript reads as its message");
+        let a: Value = serde_json::from_str(prompt_answer(&m, "a1", "ab.12", "c0").trim_end()).unwrap();
+        assert_eq!(a["event"]["source"]["chat_topic"], json!(SIMPLEX_TOPIC), "an answer's too: the session's pin holds");
+        let plain: Value = serde_json::from_str(inbound(&Inbound { topic: topic(false), ..m.clone() }, "b2").trim_end()).unwrap();
+        assert!(plain["event"]["source"].get("chat_topic").is_none(), "any other chat: none");
+        assert!(SIMPLEX_TOPIC.len() < 80 && !SIMPLEX_TOPIC.contains(['\n', '`', '"']), "one short plain line: {SIMPLEX_TOPIC}");
     }
 
     /// A side question's answer is read by its glyph line, in every
@@ -883,7 +966,7 @@ mod tests {
         assert_eq!(all("💻 terminal: `ls`\n✍️ Writing /data/hermes/notes.md\n⚙️ thinking...", 0), vec![step("terminal", "`ls`", "shell"), step("write_file", "/data/hermes/notes.md", "write"), step("thinking", "", "other")]);
         assert_eq!(all("💻 terminal\n```\nls\n``` (×2)", 0), vec![step("terminal", "ls", "shell")]);
         assert!(all("", 0).is_empty());
-        assert!(new_steps("💻 terminal: `ls`", 0).iter().all(|s| s.ok && s.excerpt.is_empty() && s.text.is_empty()));
+        assert!(new_steps("💻 terminal: `ls`", 0).iter().all(|s| s.ok && s.excerpt.is_empty()));
     }
 
     /// Hermes' progress lines, each read as its tool, its preview and what

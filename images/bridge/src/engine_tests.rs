@@ -17,7 +17,7 @@ const T0: u64 = 1_000_000;
 const LIFE: &str = "0123456789abcdef0123456789abcdef";
 
 fn agent(label: &str) -> Agent {
-    Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.to_string(), owner: "npub1paul".into(), credentials: vec![] }
+    Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.to_string(), owner: "npub1paul".into(), credentials: vec![], key: None }
 }
 
 /// A fresh engine whose runtime can take turns.
@@ -216,32 +216,96 @@ fn notices_belong_to_the_chats_turn() {
     assert!(posts(&e2.step(Input::Runtime(mine("late")), T0 + 9)).is_empty(), "no turn of this life's there");
 }
 
-/// Goal: text, then a tool call, then text: the first reply posts before the
-/// step, steps number from 1, and a late edit of a posted part is dropped.
+/// Goal (Paul, 2026-10-24: everything the agent says is a reply in the
+/// chat): text, then a tool call, then text: the first reply posts before
+/// the step, whole (a mid-turn answer past a step's old 300 characters is
+/// never cut), marked `interim` (the turn worked on after it), the chat's
+/// draft of it put away; steps number from 1, carry no words, and a late
+/// edit of a posted part is dropped. The last reply is no interim one, nor
+/// is an answer said beside a call that only updates memory.
 #[test]
 fn steps_split_replies() {
     let a = agent("juniper");
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "look it up" }), T0)).expect("started").turn;
-    ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: "Looking.".into() }, T0 + 1);
-    let step = ToolStep { tool: "web_search".into(), args: "{\"q\":\"x\"}".into(), ok: true, excerpt: "3 results".into(), text: String::new(), category: crate::records::Category::Web };
+    let looking = format!("Looking. {}", "I will read every page of the docs first, then the code, so nothing I change breaks what works. ".repeat(20));
+    assert!(looking.chars().count() > 1000);
+    ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: looking.clone() }, T0 + 1);
+    let step = ToolStep { tool: "web_search".into(), args: "{\"q\":\"x\"}".into(), ok: true, excerpt: "3 results".into(), category: crate::records::Category::Web };
     let s = ev(&mut e, Event::Step { turn: turn.clone(), step: step.clone() }, T0 + 2);
     assert_eq!(kinds(&s), vec!["reply", "turn.step"]);
+    assert_eq!(posts(&s)[0], (records::reply_id(&turn, 1), json!({ "text": looking, "turn": turn, "interim": true })), "whole, before the step, interim");
+    assert!(s.effects.iter().any(|x| matches!(x, Effect::Draft { turn: t, text: None, .. } if *t == turn)), "its draft put away as it posts: {:?}", s.effects);
     assert_eq!(posts(&s)[1].0, records::work_id(&turn, "1"));
     assert_eq!(posts(&s)[1].1["step"], 1);
+    assert!(posts(&s)[1].1.get("text").is_none(), "a step carries no words: {}", posts(&s)[1].1);
     let late = ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: "Looking!".into() }, T0 + 3);
     assert!(posts(&late).is_empty() && late.effects.is_empty(), "part 1 was posted");
     ev(&mut e, Event::Step { turn: turn.clone(), step }, T0 + 4);
     ev(&mut e, Event::Reply { turn: turn.clone(), part: 2, text: "Found it.".into() }, T0 + 5);
     let end = ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 6);
-    assert_eq!(posts(&end)[0].0, records::reply_id(&turn, 2));
+    assert_eq!(posts(&end)[0], (records::reply_id(&turn, 2), json!({ "text": "Found it.", "turn": turn })), "the answer, no interim one");
+    // an answer said beside a call that only updates memory (Hermes sends
+    // nothing after it) is the turn's answer, not interim
+    let t3 = started(&said(&mut e, &a, &v, 3, "npub1paul", json!({ "text": "remember this" }), T0 + 7)).expect("started").turn;
+    ev(&mut e, Event::Reply { turn: t3.clone(), part: 1, text: "Noted: you like tomatoes.".into() }, T0 + 8);
+    let memory = ToolStep { tool: "memory".into(), args: "tomatoes".into(), ok: true, excerpt: String::new(), category: crate::records::Category::Memory };
+    let m = ev(&mut e, Event::Step { turn: t3.clone(), step: memory }, T0 + 9);
+    assert_eq!(posts(&m)[0], (records::reply_id(&t3, 1), json!({ "text": "Noted: you like tomatoes.", "turn": t3 })));
+    let end3 = ev(&mut e, Event::End { turn: t3.clone(), outcome: Outcome::Idle }, T0 + 10);
+    assert_eq!(kinds(&end3), vec!["turn.end"], "nothing said again");
     // a retracted part never posts
-    let t2 = started(&said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "again" }), T0 + 7)).expect("started").turn;
-    ev(&mut e, Event::Reply { turn: t2.clone(), part: 1, text: "oops".into() }, T0 + 8);
-    ev(&mut e, Event::Retract { turn: t2.clone(), part: 1 }, T0 + 9);
-    let end2 = ev(&mut e, Event::End { turn: t2.clone(), outcome: Outcome::Stopped }, T0 + 10);
+    let t2 = started(&said(&mut e, &a, &v, 4, "npub1paul", json!({ "text": "again" }), T0 + 11)).expect("started").turn;
+    ev(&mut e, Event::Reply { turn: t2.clone(), part: 1, text: "oops".into() }, T0 + 12);
+    ev(&mut e, Event::Retract { turn: t2.clone(), part: 1 }, T0 + 13);
+    let end2 = ev(&mut e, Event::End { turn: t2.clone(), outcome: Outcome::Stopped }, T0 + 14);
     assert_eq!(kinds(&end2), vec!["turn.end"]);
+}
+
+/// Goal (Alex's review of #584: 64 narrated tool calls spent the turn's
+/// replies, and its answer was dropped): the words before a tool call have
+/// a bound of their own (`INTERIM_REPLIES_PER_TURN_MAX`, one a posted
+/// step), so narration never costs the answer. A turn that narrates past
+/// `REPLIES_PER_TURN_MAX`, and past its own bound, still posts its answer,
+/// whole and not interim (so it is pushed), numbered after the words; the
+/// words past their bound go unposted. The answer's own bound still holds
+/// for a turn that replies without end. Restart: the counts are the state's.
+#[test]
+fn narration_never_costs_the_answer() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "fix everything" }), T0)).expect("started").turn;
+    let step = || ToolStep { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), category: crate::records::Category::Shell };
+    let narrated = limits::INTERIM_REPLIES_PER_TURN_MAX + 5;
+    assert!(narrated > limits::REPLIES_PER_TURN_MAX && limits::REPLIES_PER_TURN_MAX >= 64);
+    let mut posted = Vec::new();
+    for part in 1..=narrated {
+        ev(&mut e, Event::Reply { turn: turn.clone(), part, text: format!("Checking part {part}.") }, T0 + 1);
+        let s = ev(&mut e, Event::Step { turn: turn.clone(), step: step() }, T0 + 1);
+        posted.extend(posts(&s).into_iter().filter(|(id, _)| id.starts_with("rp:")));
+    }
+    assert_eq!(posted.len(), limits::INTERIM_REPLIES_PER_TURN_MAX as usize, "the words, up to their own bound, past the replies' 64");
+    assert!(posted.iter().all(|(_, b)| b["interim"] == true));
+    assert_eq!(posted[64], (records::reply_id(&turn, 65), json!({ "text": "Checking part 65.", "turn": turn, "interim": true })), "the 65th words post");
+    // a restart in the middle keeps the counts (the state's)
+    let saved: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
+    assert_eq!(saved.turns[&turn].interim, limits::INTERIM_REPLIES_PER_TURN_MAX);
+    ev(&mut e, Event::Reply { turn: turn.clone(), part: narrated + 1, text: "Final answer: all fixed.".into() }, T0 + 2);
+    let end = ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 3);
+    let n = limits::INTERIM_REPLIES_PER_TURN_MAX + 1;
+    assert_eq!(posts(&end)[0], (records::reply_id(&turn, n), json!({ "text": "Final answer: all fixed.", "turn": turn })), "the answer, whole and not interim");
+    // the answer's own bound: a runtime that replies without end
+    let t2 = started(&said(&mut e, &a, &v, 2, "npub1paul", json!({ "text": "talk" }), T0 + 4)).expect("started").turn;
+    let mut said_parts = 0;
+    for part in 1..=limits::REPLIES_PER_TURN_MAX + 3 {
+        let s = ev(&mut e, Event::Reply { turn: t2.clone(), part, text: format!("part {part}") }, T0 + 5);
+        said_parts += posts(&s).len();
+    }
+    let end2 = ev(&mut e, Event::End { turn: t2.clone(), outcome: Outcome::Idle }, T0 + 6);
+    said_parts += posts(&end2).iter().filter(|(id, _)| id.starts_with("rp:")).count();
+    assert_eq!(said_parts, limits::REPLIES_PER_TURN_MAX as usize, "at most so many, interim ones apart");
 }
 
 /// Goal: one turn of an agent runs in a chat at a time, the rest in order;
@@ -1051,7 +1115,7 @@ fn steer_queue_and_btw() {
     let running = started(&said(&mut e, &a, &v, 1, "npub1skyler", json!({ "text": "long" }), T0)).expect("started").turn;
     let s = said(&mut e, &a, &v, 2, "npub1paul", cmd("steer", "use blue"), T0 + 1);
     let id = records::turn_id(&a.fragment, "talk--k3x9", "chat", 2);
-    let aside = |turn: Option<String>, id: &str, text: &str| Command::Aside { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), chat_name: "talk--k3x9".into(), turn, id: id.to_string(), by: "npub1paul".into(), by_name: "paul".into(), text: text.into() };
+    let aside = |turn: Option<String>, id: &str, text: &str| Command::Aside { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), chat_name: "talk--k3x9".into(), simplex: false, turn, id: id.to_string(), by: "npub1paul".into(), by_name: "paul".into(), text: text.into() };
     assert_eq!(commands(&s), vec![aside(Some(running.clone()), &id, "/steer use blue")]);
     assert!(posts(&s).is_empty() && !e.state().turns.contains_key(&id), "no turn of its own");
     let s = said(&mut e, &a, &v, 3, "npub1paul", cmd("btw", "which file?"), T0 + 2);
@@ -1847,7 +1911,7 @@ impl World {
 
     /// A step of a turn the runtime holds, as the runtime reports it.
     fn did(&mut self, turn: &str, tool: &str, args: &str) {
-        self.step(Input::Runtime(Event::Step { turn: turn.into(), step: ToolStep { tool: tool.into(), args: args.into(), ok: true, excerpt: String::new(), text: String::new(), category: crate::records::Category::Shell } }));
+        self.step(Input::Runtime(Event::Step { turn: turn.into(), step: ToolStep { tool: tool.into(), args: args.into(), ok: true, excerpt: String::new(), category: crate::records::Category::Shell } }));
     }
 
     /// The turns whose `turn.start` the lane holds, in order.
@@ -2532,4 +2596,145 @@ fn a_crash_that_drops_a_turns_end_leaves_nothing_open() {
     }
     assert_eq!(w.ends(&running)[0]["error"], LOST, "the one the crash cut is lost");
     w.check().unwrap();
+}
+
+/// The agents linked, each with `talk--k3x9` (the chat `said` posts in) as
+/// its SimpleX chat.
+fn relaying(e: &mut Engine, agents: &[&Agent]) {
+    e.step(Input::Relaying(agents.iter().map(|a| (a.fragment.clone(), Some("talk--k3x9".to_string()))).collect()), T0);
+}
+
+/// Goal (SimpleX, valid): a linked agent's own relayed record is its
+/// owner's message: one turn, asked as its owner and by their name, in its
+/// SimpleX chat (`simplex`, so its runtime is told what you say there
+/// reaches their phone); read again, nothing; its state, written and read
+/// back (a restart), holds nothing of SimpleX; their Stop stops it.
+#[test]
+fn a_relayed_message_is_its_owners() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    relaying(&mut e, &[&a]);
+    let body = records::relayed_message("hi from my phone", &a, records::VIA_SIMPLEX, &[]);
+    let s = said(&mut e, &a, &v, 1, &a.identity, body.clone(), T0);
+    let t = started(&s).expect("a turn, handed to the runtime");
+    assert_eq!((t.text.as_str(), t.asker.as_str(), t.asker_name.as_str(), t.simplex), ("hi from my phone", "npub1paul", "paul", true));
+    assert_eq!(said(&mut e, &a, &v, 1, &a.identity, body, T0 + 1), Step::default(), "read again: nothing");
+    let written = serde_json::to_string(e.state()).expect("a state serializes");
+    let back: State = serde_json::from_str(&written).expect("and reads back");
+    assert!(back.turns.contains_key(&t.turn) && !written.contains("simplex") && !written.contains("via"), "a restart reads it back, nothing of SimpleX in it: {written}");
+    // its owner's Stop stops it, as a turn they asked
+    let s = said(&mut e, &a, &v, 2, "npub1paul", json!({ "kind": "stop", "turn": t.turn }), T0 + 2);
+    assert!(commands(&s).iter().any(|c| matches!(c, Command::Stop { turn } if *turn == t.turn)), "{:?}", commands(&s));
+}
+
+/// Goal (SimpleX, invalid): a relayed record is honored only from the
+/// agent itself, only while its link is bound, only for its owner, and
+/// only by `simplex`: from anyone else it is what it would be without the
+/// mark (a message its owner typed in the chat is still theirs, in that
+/// chat, as any).
+#[test]
+fn a_relayed_record_is_honored_only_from_a_linked_agent_for_its_owner() {
+    let (a, b) = (agent("juniper"), agent("maple"));
+    let v = view(&[&a, &b]);
+    let mut e = engine(&[a.clone(), b.clone()]);
+    let mine = |text: &str| records::relayed_message(text, &a, records::VIA_SIMPLEX, &[]);
+    // not linked: the agent's own words, as ever
+    assert!(started(&said(&mut e, &a, &v, 1, &a.identity, mine("not linked"), T0)).is_none());
+    relaying(&mut e, &[&a]);
+    // for someone not its owner
+    let skyler = records::relayed_message("for skyler", &Agent { owner: "npub1skyler".into(), ..a.clone() }, records::VIA_SIMPLEX, &[]);
+    assert!(started(&said(&mut e, &a, &v, 2, &a.identity, skyler, T0)).is_none());
+    // through another agent's door
+    let maples = records::relayed_message("maple's door", &Agent { fragment: b.fragment.clone(), ..a.clone() }, records::VIA_SIMPLEX, &[]);
+    assert!(started(&said(&mut e, &a, &v, 2, &a.identity, maples, T0)).is_none());
+    // by another way than SimpleX
+    let mut other = mine("telegram");
+    other["relayed"]["via"] = json!("telegram");
+    assert!(started(&said(&mut e, &a, &v, 3, &a.identity, other, T0)).is_none());
+    // posted by its owner with the mark: their own message, sent no other way
+    let s = said(&mut e, &a, &v, 4, "npub1paul", mine("paul typed this"), T0);
+    let t = started(&s).expect("their message, a turn");
+    assert_eq!(t.asker, "npub1paul");
+    ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, T0 + 1);
+    // posted by another agent of the computer: a hand-off at most, never its owner's
+    assert!(started(&said(&mut e, &b, &v, 5, &a.identity, mine("juniper's, not maple's"), T0 + 2)).is_none(), "not to maple at all");
+    let from_maple = records::relayed_message("a hand-off", &a, records::VIA_SIMPLEX, &[]);
+    let s = said(&mut e, &a, &v, 6, &b.identity, from_maple, T0 + 2);
+    let t = started(&s).expect("from maple to juniper: a hand-off");
+    assert_eq!(t.asker, b.identity, "asked by maple, never as its owner");
+    // let go: nothing more
+    e.step(Input::Relaying(BTreeMap::new()), T0 + 3);
+    assert!(started(&said(&mut e, &a, &v, 7, &a.identity, mine("unlinked"), T0 + 3)).is_none());
+}
+
+/// Goal (Paul, 2026-10-26: SimpleX is a chat of its own): every turn in
+/// an agent's SimpleX chat while linked is handed as that chat's
+/// (`TurnStart::simplex`), whatever started it (its owner's phone, their
+/// words typed there, a routine), and so is an aside said there; a turn in
+/// any other chat, or while its chat is not found yet, or once unlinked, is
+/// not; `mirror` names the chat exactly then.
+#[test]
+fn turns_in_its_simplex_chat_are_its_owners_phone() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a)).with_menu(crate::runtime::script::MENU);
+    let in_chat = |e: &mut Engine, chat: &str, seq: u64, principal: &str, body: Value, now: u64| {
+        let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: chat.into(), record: rec(seq, principal, body), view: Some(v.clone()), since: 0 }, now);
+        let s = answered(e, s, now);
+        let t = started(&s);
+        if let Some(t) = &t {
+            ev(e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, now);
+        }
+        t
+    };
+    // linked, its chat not found yet: no chat is its phone
+    e.step(Input::Relaying(BTreeMap::from([(a.fragment.clone(), None)])), T0);
+    assert_eq!(e.mirror(&a.fragment), None);
+    assert!(!in_chat(&mut e, "talk--k3x9", 1, "npub1paul", json!({ "text": "early" }), T0).expect("a turn").simplex);
+    // found: there, every turn, whatever started it; elsewhere, none
+    relaying(&mut e, &[&a]);
+    assert_eq!(e.mirror(&a.fragment), Some("talk--k3x9"));
+    assert!(in_chat(&mut e, "talk--k3x9", 2, &a.identity, records::relayed_message("from my phone", &a, records::VIA_SIMPLEX, &[]), T0 + 1).expect("a turn").simplex);
+    assert!(in_chat(&mut e, "talk--k3x9", 3, "npub1paul", json!({ "text": "typed on the web" }), T0 + 2).expect("a turn").simplex);
+    let routine = rec(1, &a.identity, json!({ "kind": "routine", "text": "water the plants", "chat": "talk--k3x9" }));
+    let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: a.fragment.clone(), record: Record { channel: records::TASKS.into(), ..routine }, view: None, since: 0 }, T0 + 3);
+    let t = started(&answered(&mut e, s, T0 + 3)).expect("its routine, a turn");
+    assert!(t.simplex && t.routine, "a routine there too");
+    ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, T0 + 3);
+    assert!(!in_chat(&mut e, "other--k3x9", 1, "npub1paul", json!({ "text": "another chat" }), T0 + 4).expect("a turn").simplex);
+    // an aside said there is that chat's too
+    let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), record: rec(4, "npub1paul", json!({ "kind": "command", "command": "btw", "args": "how is it going?" })), view: Some(v.clone()), since: 0 }, T0 + 5);
+    assert!(commands(&s).iter().any(|c| matches!(c, Command::Aside { simplex: true, .. })), "{:?}", commands(&s));
+    // unlinked: no more
+    e.step(Input::Relaying(BTreeMap::new()), T0 + 6);
+    assert_eq!(e.mirror(&a.fragment), None);
+    assert!(!in_chat(&mut e, "talk--k3x9", 5, "npub1paul", json!({ "text": "after the unlink" }), T0 + 6).expect("a turn").simplex);
+}
+
+/// Goal: a turn writes nothing of SimpleX into the state: a computer
+/// without SimpleX keeps its `state.json` as it was, and so does one with.
+#[test]
+fn a_plain_turn_writes_no_via() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "hi" }), T0)).expect("a turn");
+    let written = serde_json::to_string(e.state()).expect("a state serializes");
+    assert!(!written.contains("via") && !written.contains("simplex"), "{written}");
+}
+
+/// Goal (never break agents): a state an older bridge wrote, a turn in it
+/// marked `via` (the per-turn rule, gone), reads as before, the mark let go.
+#[test]
+fn an_older_states_via_is_let_go() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let t = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "hi" }), T0)).expect("a turn");
+    let mut older: Value = serde_json::to_value(e.state()).expect("a state serializes");
+    older["turns"][&t.turn]["via"] = json!("simplex");
+    let back: State = serde_json::from_value(older).expect("an older state reads");
+    assert!(back.turns.contains_key(&t.turn));
+    assert!(!serde_json::to_string(&back).expect("serializes").contains("via"), "written again without it");
 }

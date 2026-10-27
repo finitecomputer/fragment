@@ -634,6 +634,42 @@ speaking Cloudflare's APIs) returns once this product works.
     the always-on computer, and Hermes' SimpleX adapter runs next to the
     bridge. A wake service for sleeping computers comes later. Telegram
     is dropped. Finite Chat is out of scope.
+    Status, 2026-10-22 (Paul: "simplex … for the $200 tier (requires
+    always on agent). Needs to work well across restarts and updates";
+    then "go ahead and build SimpleX with the bridge"): built as a
+    stack of drafts, not merged. The bridge, not Hermes' adapter, drives
+    `simplex-chat` (one core per linked agent, only while always on), and
+    SimpleX is another door into the agent's own chat with its owner
+    (docs/bridge.md, "SimpleX"; docs/chat-records.md, "A relayed
+    message"). The lab found a rollback the core cannot see, cured by a
+    forced sync at a rollback's start (docs/explorations/simplex-connector.md,
+    "The lab, 2026-10-22"). What it adds to the platform is
+    docs/explorations/simplex-complexity.md. Its image change ships only
+    through an image round.
+    Securing the link, Paul, 2026-10-23: once the owner has linked their
+    SimpleX app from their own Settings, what it sends is the owner, with
+    what the shell can do (questions and word-cards answered); the threat
+    is only the agent forging either end. So a link starts only from a
+    ticket the owner's Settings get, which the platform signs and the
+    bridge takes once, and only the link's door key makes a record that
+    speaks for the owner: the platform refuses one the agent's own key
+    posts (docs/api.md, "An agent's doors"). Root in the container can
+    still read the door key; the fix later is running the agent as a
+    non-root user.
+    A chat of its own, and one home, Paul, 2026-10-26 ("it has to be
+    clear obvious and reliable where notifications will go … why hermes
+    has a 'home' concept"; a simplification): linking makes the agent's
+    SimpleX chat, its owner's chat labelled `<label>-simplex`, which
+    mirrors their app both ways while linked: what they send lands there,
+    and everything the agent says there goes to their phone, whatever
+    started its turn. The per-turn rule (only a SimpleX message's turn
+    answered there) is gone. Each agent has one home, its own chat or its
+    SimpleX chat (`agent.json`'s `home`), set in Settings and asked once
+    as a link starts (yes by default): a routine with no chat runs there,
+    and the agent is told where it is. Web push is unchanged; no
+    suppression. Hermes' own home channel stays unset: in its multiplexed
+    gateway it reaches nothing of ours (docs/hermes-relay.md, "Hermes'
+    settings"). docs/api.md, "An agent's home"; docs/bridge.md, "SimpleX".
 
 ### The cut
 
