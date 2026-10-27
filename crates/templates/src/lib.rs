@@ -112,7 +112,7 @@ pub fn shell_page(text: &str, release: &str, deployed: Option<u64>) -> String {
 /// each with its content type: of the rest of cell/shell/, its pages are
 /// served at their own paths, and its credits and licenses not at all.
 #[cfg(feature = "platform")]
-const SHELL_PUBLISHED: [(&str, &str); 34] = [
+const SHELL_PUBLISHED: [(&str, &str); 35] = [
     // the cell's server-rendered pages' base look (share.rs `sheet_html`),
     // on the platform's origin and, as /__sheet.css, on a fragment's
     ("sheet.css", "text/css; charset=utf-8"),

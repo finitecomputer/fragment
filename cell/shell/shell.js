@@ -1428,7 +1428,7 @@ function openApp(name, path = "/") {
 }
 
 // the icon sheet's (app-icon.js): the list again, which takes a new icon to the dock
-const iconHelpers = { api, notice, reload: async () => { await load(); return state.fragments; } };
+const iconHelpers = { api, reload: () => load() };
 
 // ---- archiving: the person's own view (their list's row), not the fragment's ----
 function archiveItem(name) {
