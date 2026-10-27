@@ -24,11 +24,11 @@
 //! 2026-10-15; decision 61), or, by config, on Finite Private. What the
 //! platform sends is the client's OpenAI-shaped chat completion with only
 //! these changes (`bound`): no `model` (the tier's is the call's),
-//! `max_tokens` at most the tier's cap, `reasoning_effort` clamped to `low`
-//! or `high` (GLM takes a missing or unknown one as `max`, the dearest;
-//! DeepSeek V4 Flash takes both, as does Finite Private's limiter, which
-//! fills in `high` only when none is sent), and usage asked for when it
-//! streams. On an OpenAI-compatible API, only the client's chat completion
+//! `max_tokens` at most the tier's cap, `reasoning_effort` one of
+//! `EFFORTS`, `low`, `high` or `max`, and any other `low` (GLM takes a
+//! missing or unknown one as `max`, the dearest, which a call buys only by
+//! its name; Finite Private's limiter fills in `high` only when none is
+//! sent), and usage asked for when it streams. On an OpenAI-compatible API, only the client's chat completion
 //! fields of `CLIENT_KEYS` go (`plugins`, `provider` and the like are
 //! dropped), and the deployment's own fields for it over them
 //! (`Upstream::Openai`'s `body`: OpenRouter's provider routing;
@@ -171,10 +171,13 @@ const _: () = assert!(MODEL_BODY_MAX_BYTES > IMAGE_DATA_URL_MAX_BYTES && MODEL_B
 /// It bounds what one call can cost: GLM-5.3's is $0.11 of output at
 /// list price, before its input.
 pub const MAX_TOKENS: u32 = 16_384;
-/// The reasoning efforts GLM takes that are not its dearest: anything else
-/// asked for is `low` (GLM maps `none`, `minimal`, `medium` and `xhigh` to
-/// `max`, its default, so passing them on would buy the most expensive).
-pub const EFFORTS: [&str; 2] = ["low", "high"];
+/// The reasoning efforts a call is sent as it asked: `low`, `high`, and
+/// `max`, the dearest, by its name alone (a mode thinks at it: Deep, Paul,
+/// 2026-10-27). Anything else asked for is `low`: GLM maps `none`,
+/// `minimal`, `medium` and `xhigh` to `max`, its default, so passing them
+/// on would buy the most expensive unasked (Hermes' custom provider sends
+/// `medium` when its config names none).
+pub const EFFORTS: [&str; 3] = ["low", "high", "max"];
 /// One line of a streamed answer: Workers AI's chunks are a few hundred
 /// bytes. A longer line is passed through unread, and the call reports no
 /// usage (its usage cannot be trusted): charged nothing, said aloud.
@@ -2671,7 +2674,7 @@ mod tests {
             }
             body
         };
-        for (asked, sent) in [(Some("low"), "low"), (Some("high"), "high"), (None, "low"), (Some("medium"), "low"), (Some("max"), "low"), (Some("none"), "low")] {
+        for (asked, sent) in [(Some("low"), "low"), (Some("high"), "high"), (Some("max"), "max"), (None, "low"), (Some("medium"), "low"), (Some("xhigh"), "low"), (Some("none"), "low"), (Some("MAX"), "low")] {
             let workers_ai = bound(tier(Tier::Cheap), call(asked), true).unwrap();
             assert_eq!(workers_ai.input["reasoning_effort"], sent, "Workers AI, asked {asked:?}");
             let capped = routed.capped(Named::Tier(Tier::Cheap)).unwrap();
@@ -3166,7 +3169,7 @@ mod tests {
             "transforms": ["middle-out"], "models": ["anthropic/claude-opus-5.5"], "route": "fallback", "n": 4, "user": "paul@example.com",
             "reasoning": { "effort": "high" }, "prompt_cache_key": "k", "metadata": { "a": "b" }, "service_tier": "priority", "logprobs": true,
         });
-        let mut asked = json!({ "model": "cheap", "max_tokens": 99, "max_completion_tokens": 120, "reasoning_effort": "max" });
+        let mut asked = json!({ "model": "cheap", "max_tokens": 99, "max_completion_tokens": 120, "reasoning_effort": "xhigh" });
         for part in [&kept, &dropped] {
             asked.as_object_mut().unwrap().extend(part.as_object().unwrap().clone());
         }
