@@ -68,6 +68,61 @@ pub fn agent_name<'a>(title: Option<&'a str>, fragment: &'a str) -> &'a str {
     self::title(title).unwrap_or_else(|| fragment_proto::split_fragment_name(fragment).map_or(fragment, |(label, _)| label))
 }
 
+/// An agent's job (`SOUL.md`) a rename rewrites, at most: bigger, or
+/// bigger once rewritten, and it is left as it is (a job is a few lines).
+pub const JOB_RENAME_MAX_BYTES: usize = 64 * 1024;
+/// Where an agent's job lives in its fragment.
+pub const JOB: &str = "SOUL.md";
+
+/// The name the shell's first job gave its agent, from 2026-10-03 until
+/// 2026-10-16, when a job stopped naming its agent: "You are <name>,
+/// <owner>'s default agent: …" on its first line (the owner an email or a
+/// username, with no ", "). None for any other first line: a name is read
+/// only where that template wrote it, never guessed.
+pub fn job_first_name(job: &str) -> Option<&str> {
+    let line = job.lines().next()?.strip_prefix("You are ")?;
+    let said = &line[..line.find("'s default agent: ")?];
+    let name = &said[..said.rfind(", ")?];
+    (!name.trim().is_empty() && name.chars().count() <= fragment_proto::limits::TITLE_MAX_CHARS).then_some(name)
+}
+
+/// An agent's job as its owner's rename leaves it (the shell's Rename and
+/// `fragment agent --name`, in the commit that renames it; docs/api.md, "An
+/// agent's name and picture"): each whole-word mention of one of `olds`
+/// (case and all; a mention is whole when no letter, digit or `_` touches
+/// it) said as `name` instead, in one pass, the longest old name first.
+/// None when there is nothing to rewrite: no old name but `name` itself,
+/// none mentioned, or a job past `JOB_RENAME_MAX_BYTES` before or after.
+/// So asking again, with the name it has now, changes nothing.
+pub fn job_renamed(job: &str, olds: &[&str], name: &str) -> Option<String> {
+    let name = name.trim();
+    let mut olds: Vec<&str> = olds.iter().map(|o| o.trim()).filter(|o| !o.is_empty() && *o != name).collect();
+    if name.is_empty() || olds.is_empty() || job.len() > JOB_RENAME_MAX_BYTES {
+        return None;
+    }
+    olds.sort_by_key(|o| std::cmp::Reverse(o.len()));
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let (mut out, mut at, mut changed) = (String::with_capacity(job.len()), 0, false);
+    // bounded by the job: each pass takes at least one char of it
+    while at < job.len() {
+        let rest = &job[at..];
+        let whole = |o: &str| rest.starts_with(o) && !word(job[..at].chars().next_back()) && !word(rest[o.len()..].chars().next());
+        match olds.iter().copied().find(|o| whole(o)) {
+            Some(o) => {
+                out.push_str(name);
+                at += o.len();
+                changed = true;
+            }
+            None => {
+                let c = rest.chars().next().expect("not at its end");
+                out.push(c);
+                at += c.len_utf8();
+            }
+        }
+    }
+    (changed && out.len() <= JOB_RENAME_MAX_BYTES).then_some(out)
+}
+
 /// Where an identity's picture is served, on the platform's origin: its
 /// address names the picture's SHA-256 (its first 12 digits), so a new
 /// picture is a new address.
@@ -116,6 +171,42 @@ mod tests {
         assert_eq!(agent_name(Some("  "), "pulsar-360--k3x9"), "pulsar-360");
         assert_eq!(agent_name(None, "pulsar-360--k3x9"), "pulsar-360");
         assert_eq!(agent_name(None, "not a name"), "not a name", "what is no fragment's name is said as it is");
+    }
+
+    /// Goal (Paul, 2026-10-27: Skyler's XP, once Bliss, still said Bliss
+    /// in "Its job"): a rename says the new name wherever the job said the
+    /// old one as a word. Valid: each whole mention, the legacy first
+    /// line's name too, longest first, in one pass. Invalid: a part of a
+    /// word, another case, no old name, a job past its bound. Replay: the
+    /// same rename again, its old name now the new one, changes nothing.
+    #[test]
+    fn a_rename_says_the_new_name_in_its_job() {
+        let job = "You are Bliss, skyler@example.com's default agent: the first one they talk to.\nBliss keeps notes. Blissful, bliss_x and Bliss2 are not it; (Bliss) is.\n";
+        assert_eq!(job_first_name(job), Some("Bliss"));
+        let renamed = job_renamed(job, &["XP", "Bliss"], "XP").expect("rewritten");
+        assert_eq!(renamed, "You are XP, skyler@example.com's default agent: the first one they talk to.\nXP keeps notes. Blissful, bliss_x and Bliss2 are not it; (XP) is.\n");
+        // replay: the old name is the new one now, and the first line says it
+        assert_eq!(job_first_name(&renamed), Some("XP"));
+        assert_eq!(job_renamed(&renamed, &["XP", "XP"], "XP"), None, "asked again, nothing to rewrite");
+        // a name with spaces, a longer old one first, the new one holding the old
+        let two = "Waffle Bot and Waffle are friends.";
+        assert_eq!(job_renamed(two, &["Waffle", "Waffle Bot"], "Waffle Bot II").as_deref(), Some("Waffle Bot II and Waffle Bot II are friends."));
+        assert_eq!(job_renamed("Waffle Bots", &["Waffle Bot", "Waffle"], "X").as_deref(), Some("X Bots"), "a longer one not whole: the shorter");
+        assert_eq!(job_renamed("$& and a.b (x)", &["a.b", "(x)"], "$1").as_deref(), Some("$& and $1 $1"), "said literally");
+        assert_eq!(job_renamed("Ünï here", &["Ünï"], "Zoë").as_deref(), Some("Zoë here"));
+        assert_eq!(job_renamed("aÜnï", &["Ünï"], "Zoë"), None, "a part of a word");
+        // invalid: nothing to do
+        assert_eq!(job_renamed(job, &[], "XP"), None);
+        assert_eq!(job_renamed(job, &["  ", "Nova"], "Nova"), None, "no old name but the new one");
+        assert_eq!(job_renamed("You keep the garden.\n", &["Bliss"], "XP"), None, "a job that names no one is left as it is");
+        assert_eq!(job_renamed("BLISS and bliss", &["Bliss"], "XP"), None, "another case is another word");
+        assert_eq!(job_renamed(&"Bliss ".repeat(JOB_RENAME_MAX_BYTES / 6 + 1), &["Bliss"], "XP"), None, "past its bound");
+        assert_eq!(job_renamed(&"B ".repeat(JOB_RENAME_MAX_BYTES / 2 - 1), &["B"], &"N".repeat(100)), None, "past its bound once rewritten");
+        // the legacy line only where the template wrote it
+        for other in ["You keep the garden.", "Hello Bliss, skyler's default agent: x", "You are , x's default agent: y", "You are Bliss's default agent: y", ""] {
+            assert_eq!(job_first_name(other), None, "{other:?}");
+        }
+        assert_eq!(job_first_name("You are Bliss, the Great, paul's default agent: x"), Some("Bliss, the Great"), "the owner holds no \", \"");
     }
 
     /// The address names the picture's hash, so a new one is a new address.

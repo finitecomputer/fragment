@@ -54,7 +54,19 @@ async function main() {
   // `fragment_core::face::agent_name`), whether it runs on a computer yet
   // or not; then, framed by its owner's shell, as the shell says it, again
   // on any change (a rename while it is open)
+  let shown = null;
+  // Its job (SOUL.md), read again on a rename while it is open: its owner's
+  // rename says the new name there too (docs/api.md, "An agent's name and
+  // picture"), so the job shown never names it by an old one
+  const showJob = async () => {
+    const soul = await text("SOUL.md");
+    const box = document.getElementById("soul");
+    box.textContent = soul?.trim() || "No job written down yet.";
+    box.classList.toggle("muted", !soul);
+  };
   const named = (name) => {
+    if (shown !== null && shown !== name) showJob();
+    shown = name;
     document.title = name;
     document.getElementById("name").textContent = name;
   };
@@ -90,10 +102,7 @@ async function main() {
     avatar.replaceChildren(picture);
   };
   picture.src = "__file?path=avatar.png";
-  const soul = await text("SOUL.md");
-  const box = document.getElementById("soul");
-  box.textContent = soul?.trim() || "No job written down yet.";
-  if (!soul) box.classList.add("muted");
+  await showJob();
   const files = (await json("__files")) ?? { files: [] };
   const skills = [...new Set(files.files.map((f) => f.path).filter((p) => p.startsWith("skills/") && p.endsWith("/SKILL.md")).map((p) => p.split("/")[1]))];
   if (skills.length) {

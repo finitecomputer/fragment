@@ -423,7 +423,24 @@ runtime's own files never hold either (Hermes' `profile.yaml`, and the
 line of its profile's config that tells it its name, are written from
 the title, and written again), nor does the agent's job: its `SOUL.md`
 says what it does, never who it is (the shell's first agent's names
-none; one an owner or agent wrote may).
+none; one an owner or agent wrote may, as the shell's first did from
+2026-10-03 to 2026-10-16: "You are <name>, <owner>'s default agent: …").
+
+**A rename by its owner says the new name in its job too** (Paul,
+2026-10-27: an agent's page showed its old name under "Its job"):
+Settings' Rename and `fragment agent --name` write the job again in the
+same commit as the title, each whole-word mention of an old name (case
+and all; whole when no letter, digit or `_` touches it) said as the new
+one, longest first, in one pass (`fragment_core::face::job_renamed`,
+which the shell's `jobRenamed` matches). The old names are the title at
+main and the one the shell's first job named it by (its first line, as
+that template wrote it: `job_first_name`), so an agent renamed before
+this, whose job still names it so, is told its name there by its owner's
+next rename, even to the name it has. A job past 64 KiB, before or after
+(`JOB_RENAME_MAX_BYTES`), or one that names no old name, is left as it
+is, and asked again the rename changes nothing. No old name is guessed:
+one the job says some other way stays until its owner or the agent edits
+it.
 
 **Served** at `GET /api/identities/{npub}/picture`, `{npub}` the agent's
 (its fragment's own npub): the bytes of the commit whose install checked
