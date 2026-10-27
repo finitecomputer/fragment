@@ -497,6 +497,20 @@ the batch, so a guest's fragments are billed nothing.
   spent. A guest's or a read-only owner's deploys are not shot, and an
   ask for a shot again is refused (402). An uploaded card is a blob,
   stored as any is.
+- **Icons** (docs/api.md, Icons): a making's calls, each a row in the
+  fragment's outbox as it answers
+  (`icon:<fragment>@<incarnation>:<op>:<call>`, `op` when the making or
+  upload started and a nonce of its own), to its owner: the
+  subject (`tokens`, GLM-5.3 Flash), each drawing (`neurons`, FLUX.2
+  [klein] 4B, what Workers AI said it cost, 104.2 when it says none: its
+  pricing page's 26.05 a 512×512 output tile, four times, as it said in
+  the spike), each check (`tokens`, Clef-flash), and each Images
+  transformation (`images`: a cutout, a fit, a flattening; an upload
+  fitted). A drawing refused after its call was bought. The owner's ledger
+  is asked first, as for a job's AI step: capped (with the fragment's
+  cap) when the one asking is neither its owner nor an agent of theirs.
+  An upload is a write: refused while the owner is read-only, before
+  anything is fitted.
 - **Images** (the deploy path): `images` rows to the fragment's owner,
   when a transformation is made.
 - **An export** (a person's list, export.rs; docs/api.md, Export): one

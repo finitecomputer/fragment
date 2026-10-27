@@ -24,3 +24,6 @@ url = "2.5"
 # the client half of src/http.rs (`post`): plain HTTP, no TLS
 reqwest = { version = "0.12", default-features = false, features = ["blocking"] }
 fragment-nip98 = { path = "../nip98", features = ["sign"] }
+# the icon model's drawings (`workers_ai::icon_drawing`): PNGs with alpha,
+# which the cell reads as Images' cutouts (local Images cuts nothing out)
+png = "0.18"
