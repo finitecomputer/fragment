@@ -1966,7 +1966,12 @@ others): a tier's call falls back to its route's fallback, and a caller
 that says its tier (`x-fragment-tier`) runs `vision` and `fallback` as
 its route's. Any slot may name its own `"fallback"` instead, and every
 call falls back as the slot it runs does, however it named it
-(docs/computers.md, "A slot's own fallback"). A job's text step falls
+(docs/computers.md, "A slot's own fallback"). Each tier may name its
+Deep (`"deep"`, a slot), which its agents' delegates run on by its
+model's id, their tier said; a slot may name the effort its mode thinks
+at (`"reasoning"`) and the most one call of it writes (`"max_tokens"`,
+up to 65,536), and the computer's view carries each tier's modes
+(docs/computers.md, "Fast and Deep"). A job's text step falls
 back the same, and its output's `model` names the model that answered.
 
 `fallback` names the deployment's fallback model itself: a runtime's own
@@ -1980,7 +1985,8 @@ A call may name one of those four by its model's own id instead (Paul,
 model"; `fragment_core::models::Models::named`; docs/computers.md, "A
 model by its id"): the slot of the caller's tier when that slot runs it
 (`x-fragment-tier: cheap` or `medium`, optional; any other value is
-refused, 400), else the first slot that does, in the order `cheap`,
+refused, 400), else that tier's Deep when it runs it, else the first slot
+that does, in the order `cheap`,
 `medium`, `fallback`, `vision`. The call is that slot's, as if it named
 the slot: its model, its key, its `body`, its fallback and its price.
 An id no slot runs is refused, 400, nothing charged or sent, the message
@@ -2048,7 +2054,8 @@ memo is one the agent transcribes itself, through this route):
   nothing.
 
 What the model is sent is the body bounded: no `model` (the tier's),
-its images as they came, `max_tokens` at most 16384, `reasoning_effort`
+its images as they came, `max_tokens` at most 16384 (or its slot's own
+`"max_tokens"`), `reasoning_effort`
 clamped (above), usage asked for when it streams, and none of the
 client's headers. The payer is the agent's owner (decision 36); `fragment`, one the agent is a
 member of (403 otherwise), is where the turn is: when its owner pays,

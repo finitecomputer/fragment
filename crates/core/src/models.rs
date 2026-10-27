@@ -169,8 +169,14 @@ const _: () = assert!(MODEL_BODY_MAX_BYTES > IMAGE_DATA_URL_MAX_BYTES && MODEL_B
 /// The most one call may write, reasoning included: a job's text step may
 /// ask for up to this.
 /// It bounds what one call can cost: GLM-5.3's is $0.11 of output at
-/// list price, before its input.
+/// list price, before its input. A slot may name its own (`"max_tokens"`,
+/// at most `MAX_TOKENS_MAX`): Deep's, which thinks at `max` (Paul,
+/// 2026-10-27: 32,768).
 pub const MAX_TOKENS: u32 = 16_384;
+/// The most a slot's own cap may be (`SlotOpts::max_tokens`): DeepSeek V4.1
+/// Flash's 65,536 tokens of output at Tinfoil's $1.45 a million is $0.095
+/// at list, before its input.
+pub const MAX_TOKENS_MAX: u32 = 65_536;
 /// The reasoning efforts a call is sent as it asked: `low`, `high`, and
 /// `max`, the dearest, by its name alone (a mode thinks at it: Deep, Paul,
 /// 2026-10-27). Anything else asked for is `low`: GLM maps `none`,
@@ -431,6 +437,47 @@ pub struct Models {
     /// `fallback` has none and `vision` falls back to `fallback` when that
     /// slot says its model reads images, as before (`fallback_of`).
     pub fallbacks: [Option<String>; 2],
+    /// What each of the route's four says of the calls run on it
+    /// (`SlotOpts`), in `SLOTS`' order; an extra's is its own.
+    pub opts: [SlotOpts; 4],
+}
+
+/// What a slot says of the calls run on it, beside where it runs: the
+/// effort a mode on it thinks at (`"reasoning"`, one of `EFFORTS`: a
+/// tier's, Fast's, and its Deep's; Paul, 2026-10-27), which the computer's
+/// view carries for its runtime to send; and the most one call of it
+/// writes (`"max_tokens"`, 1 to `MAX_TOKENS_MAX`; `MAX_TOKENS` unnamed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SlotOpts {
+    pub reasoning: Option<&'static str>,
+    pub max_tokens: Option<u32>,
+}
+
+/// A slot's `"reasoning"` and `"max_tokens"`, taken off it (`slot`, its
+/// name; `o`, its object). Refused, saying why: an effort the route does
+/// not pass (`EFFORTS`), a cap that is no count of 1 to `MAX_TOKENS_MAX`.
+fn opts_named(slot: &str, o: &mut Map<String, Value>) -> Result<SlotOpts, String> {
+    let reasoning = match o.remove("reasoning") {
+        None => None,
+        Some(v) => Some(EFFORTS.into_iter().find(|e| v.as_str() == Some(e)).ok_or_else(|| format!("models.{slot}: reasoning is {}, not {v}", EFFORTS.join(", ")))?),
+    };
+    let max_tokens = match o.remove("max_tokens") {
+        None => None,
+        Some(v) => Some(v.as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| (1..=MAX_TOKENS_MAX).contains(n)).ok_or_else(|| format!("models.{slot}: max_tokens is the most one call of it writes, 1 to {MAX_TOKENS_MAX}, not {v}"))?),
+    };
+    Ok(SlotOpts { reasoning, max_tokens })
+}
+
+/// The route's four's `SlotOpts`, taken off them (`Models::opts`).
+fn opts_of(models: &mut Value) -> Result<[SlotOpts; 4], String> {
+    let mut opts = [SlotOpts::default(); 4];
+    let Some(slots) = models.as_object_mut() else { return Ok(opts) };
+    for (at, slot) in SLOTS.into_iter().enumerate() {
+        if let Some(o) = slots.get_mut(slot).and_then(Value::as_object_mut) {
+            opts[at] = opts_named(slot, o)?;
+        }
+    }
+    Ok(opts)
 }
 
 /// A slot beyond the route's four (`Models::extra`): its name, where it
@@ -443,6 +490,7 @@ pub struct Extra {
     pub images: bool,
     pub private: bool,
     pub fallback: Option<String>,
+    pub opts: SlotOpts,
 }
 
 /// A tier's route (`Models::routes`): its fallback's and its vision model's
@@ -451,19 +499,23 @@ pub struct Extra {
 pub struct RouteSlots {
     pub fallback: String,
     pub vision: String,
+    /// Its Deep (a tier slot's `"deep"`, a slot's name): the model its
+    /// agents' delegates run on (Paul, 2026-10-27), when it names one. Its
+    /// turns are its Fast, the tier's own slot.
+    pub deep: Option<String>,
 }
 
 impl RouteSlots {
-    /// The route's four's own: `fallback` and `vision`.
+    /// The route's four's own: `fallback` and `vision`, and no Deep.
     fn defaults() -> RouteSlots {
-        RouteSlots { fallback: FALLBACK.into(), vision: VISION.into() }
+        RouteSlots { fallback: FALLBACK.into(), vision: VISION.into(), deep: None }
     }
 }
 
-/// Each tier slot's `"fallback"` and `"vision"`, taken off it (`Models::
-/// routes`): a slot's name, `fallback`, `vision` or an extra's (checked
-/// once the extras are read: `Models::parse`). Refused, saying why: one
-/// that is no name.
+/// Each tier slot's `"fallback"`, `"vision"` and `"deep"`, taken off it
+/// (`Models::routes`): a slot's name, `fallback`, `vision` or an extra's
+/// (checked once the extras are read: `Models::parse`). Refused, saying
+/// why: one that is no name.
 fn routes_of(models: &mut Value) -> Result<[RouteSlots; 2], String> {
     let mut routes = [RouteSlots::defaults(), RouteSlots::defaults()];
     let Some(slots) = models.as_object_mut() else { return Ok(routes) };
@@ -476,6 +528,11 @@ fn routes_of(models: &mut Value) -> Result<[RouteSlots; 2], String> {
                 Some(other) => return Err(format!("models.{}: {key} names the slot its route's {key} runs on, not {other}", tier.as_str())),
             }
         }
+        routes[at].deep = match slot.remove("deep") {
+            None => None,
+            Some(Value::String(name)) => Some(name),
+            Some(other) => return Err(format!("models.{}: deep names the slot its route's Deep runs on, not {other}", tier.as_str())),
+        };
     }
     Ok(routes)
 }
@@ -533,6 +590,7 @@ fn extras_of(models: &mut Value) -> Result<Vec<Extra>, String> {
             }
         }
         let fallback = fallback_named(&name, o)?;
+        let opts = opts_named(&name, o)?;
         let mut flag = |key: &str, means: &str| match o.remove(key) {
             None => Ok(false),
             Some(Value::Bool(b)) => Ok(b),
@@ -541,7 +599,7 @@ fn extras_of(models: &mut Value) -> Result<Vec<Extra>, String> {
         let images = flag("images", "its model reads images")?;
         let private = flag("private", "its model is private: confidential inference that keeps nothing")?;
         let upstream: Upstream = serde_json::from_str(&row.to_string()).map_err(|e| format!("models.{name}: {e}"))?;
-        extra.push(Extra { name, upstream, images, private, fallback });
+        extra.push(Extra { name, upstream, images, private, fallback, opts });
     }
     Ok(extra)
 }
@@ -634,6 +692,7 @@ impl Models {
             extra: vec![],
             routes: [RouteSlots::defaults(), RouteSlots::defaults()],
             fallbacks: [None, None],
+            opts: [SlotOpts::default(); 4],
         }
     }
 
@@ -661,6 +720,7 @@ impl Models {
             models.labels = labels_of(&mut v)?;
             models.routes = routes_of(&mut v)?;
             models.fallbacks = fallbacks_of(&mut v)?;
+            models.opts = opts_of(&mut v)?;
             models.extra = extras_of(&mut v)?;
             let n: Slots = serde_json::from_str(&v.to_string()).map_err(|e| format!("models: {e}"))?;
             for (slot, upstream) in [(&mut models.cheap, n.cheap), (&mut models.medium, n.medium), (&mut models.fallback, n.fallback), (&mut models.vision, n.vision)] {
@@ -678,6 +738,16 @@ impl Models {
                 return Err(format!("models.{}: its vision is {:?}, which is no slot it may name: fallback, vision, or a slot of its own beside them", tier.as_str(), route.vision));
             }
         }
+        for (tier, route) in [Tier::Cheap, Tier::Medium].iter().zip(&models.routes) {
+            if let Some(deep) = route.deep.as_deref().filter(|d| *d == tier.as_str() || models.slot(d).is_none()) {
+                return Err(format!("models.{}: its deep is {deep:?}, which is no other slot of the deployment's", tier.as_str()));
+            }
+        }
+        for (slot, _) in models.all_slots() {
+            if models.opts(slot).reasoning.is_some() && !models.is_mode(slot) {
+                return Err(format!("models.{slot}: reasoning is a mode's, its tier's own or the slot a tier names as its deep"));
+            }
+        }
         for (slot, _) in models.all_slots() {
             let Some(to) = models.fallback_named_by(slot) else { continue };
             if to == slot || models.slot(to).is_none() {
@@ -687,9 +757,9 @@ impl Models {
                 return Err(format!("models.{slot}: images go to {slot}, so its fallback reads them too: {to} says no \"images\": true"));
             }
         }
-        let named_by = |name: &str| models.routes.iter().any(|r| r.fallback == name || r.vision == name) || models.all_slots().iter().any(|(s, _)| models.fallback_named_by(s) == Some(name));
+        let named_by = |name: &str| models.routes.iter().any(|r| r.fallback == name || r.vision == name || r.deep.as_deref() == Some(name)) || models.all_slots().iter().any(|(s, _)| models.fallback_named_by(s) == Some(name));
         if let Some(e) = models.extra.iter().find(|e| !named_by(&e.name)) {
-            return Err(format!("models.{}: no slot names it, as its fallback or a tier's vision (\"fallback\": {:?} on another slot)", e.name, e.name));
+            return Err(format!("models.{}: no slot names it, as its fallback or a tier's vision or deep (\"fallback\": {:?} on another slot)", e.name, e.name));
         }
         let slots = models.all_slots();
         for (i, (slot, upstream)) in slots.iter().enumerate() {
@@ -788,16 +858,20 @@ impl Models {
     }
 
     /// Each slot's model id by its name, and each tier's route (its label,
-    /// whether it is private, its fallback's and vision model's ids), as a
+    /// whether it is private, its fallback's and vision model's ids, the
+    /// effort its turns think at, and its Deep: its id, effort and
+    /// fallback's id), as a
     /// computer's guest and its owner's Settings read them in its view
     /// (`GET /api/computer`'s and `GET /api/computers`' `models`).
     pub fn ids_by_name(&self) -> fragment_proto::computer::ModelIds {
-        use fragment_proto::computer::{ModelIds, TierRoute, TierRoutes};
+        use fragment_proto::computer::{ModelIds, RouteMode, TierRoute, TierRoutes};
         let id = |u: &Upstream| u.model().to_string();
         let route = |tier: Tier, label: &Option<String>| {
             let slots = self.route_of(tier).expect("a tier with a route");
             let of = |name: &str| self.slot(name).map(Upstream::model).unwrap_or_default().to_string();
-            TierRoute { label: label.clone(), private: self.slot_private(tier.as_str()), fallback: of(&slots.fallback), vision: of(&slots.vision) }
+            let reasoning = |slot: &str| self.opts(slot).reasoning.map(str::to_string);
+            let deep = self.deep_of(tier).map(|d| RouteMode { id: d.id().to_string(), reasoning: reasoning(d.slot), fallback: self.fallback_of(d.slot).map(|f| f.id().to_string()) });
+            TierRoute { label: label.clone(), private: self.slot_private(tier.as_str()), fallback: of(&slots.fallback), vision: of(&slots.vision), reasoning: reasoning(tier.as_str()), deep }
         };
         let routes = TierRoutes { cheap: route(Tier::Cheap, &self.labels[0]), medium: route(Tier::Medium, &self.labels[1]) };
         ModelIds { cheap: id(&self.cheap), medium: id(&self.medium), fallback: id(&self.fallback), vision: id(&self.vision), routes: Some(routes) }
@@ -806,10 +880,11 @@ impl Models {
     /// What a call naming `model` runs, as the route reads its body's
     /// `model` and its caller's `tier` (`TIER_HEADER`): none named, the
     /// default tier; one of the route's names (`route_name`), that slot; a
-    /// model's id, the slot of `tier` when that slot runs it, else the first
-    /// slot that does (`SLOTS`' order: a tier's before `fallback` and
-    /// `vision`). Anything else names none (`UnknownModel`). `high` is a
-    /// tier here, refused by `capped`.
+    /// model's id, the slot of `tier` when that slot runs it, else its Deep
+    /// when that runs it (`deep_of`), else the first slot that does
+    /// (`all_slots`' order: a tier's before `fallback` and `vision`).
+    /// Anything else names none (`UnknownModel`). `high` is a tier here,
+    /// refused by `capped`.
     pub fn named(&self, model: Option<&str>, tier: Option<Tier>) -> Result<Named, UnknownModel> {
         let Some(name) = model else { return Ok(Named::Tier(fragment_proto::DEFAULT_TIER)) };
         if let Some(named) = route_name(name) {
@@ -817,7 +892,8 @@ impl Models {
         }
         let slots = self.named_slots();
         let theirs = tier.map(Named::Tier).filter(|t| slots.iter().any(|(n, u)| n == t && u.model() == name));
-        theirs.or_else(|| slots.iter().find(|(_, u)| u.model() == name).map(|(n, _)| *n)).ok_or_else(|| self.unknown())
+        let their_deep = || tier.and_then(|t| self.deep_of(t)).filter(|d| d.id() == name).map(|d| d.named);
+        theirs.or_else(their_deep).or_else(|| slots.iter().find(|(_, u)| u.model() == name).map(|(n, _)| *n)).ok_or_else(|| self.unknown())
     }
 
     /// The refusal of a `model` that names none of the route's models.
@@ -889,6 +965,29 @@ impl Models {
         slot == VISION || self.routes.iter().any(|r| r.vision == slot)
     }
 
+    /// What the slot named `slot` says of the calls run on it.
+    pub fn opts(&self, slot: &str) -> SlotOpts {
+        match SLOTS.iter().position(|s| *s == slot) {
+            Some(at) => self.opts[at],
+            None => self.extra.iter().find(|e| e.name == slot).map(|e| e.opts).unwrap_or_default(),
+        }
+    }
+
+    /// Whether the slot named `slot` is a mode, one an agent's runtime runs
+    /// a kind of work on (Paul, 2026-10-27): a tier's own (Fast, its turns),
+    /// or one a tier names as its Deep (its delegates).
+    fn is_mode(&self, slot: &str) -> bool {
+        Tier::parse(slot).is_some_and(|t| self.route_of(t).is_some()) || self.routes.iter().any(|r| r.deep.as_deref() == Some(slot))
+    }
+
+    /// `tier`'s Deep: the slot its agents' delegates run on, when its route
+    /// names one (`RouteSlots::deep`).
+    pub fn deep_of(&self, tier: Tier) -> Option<Model<'_>> {
+        let name = self.route_of(tier)?.deep.as_deref()?;
+        let at = self.all_slots().iter().position(|(n, _)| *n == name).expect("a route's deep is a slot that is there (`parse`)");
+        Some(self.model_of(name, self.named_slots()[at].0))
+    }
+
     /// Whether the slot named `slot` (one `all_slots` names) says its model is private.
     pub fn slot_private(&self, slot: &str) -> bool {
         match SLOTS.iter().position(|s| *s == slot) {
@@ -926,11 +1025,15 @@ impl Models {
     pub fn reached(&self, tier: Tier) -> Vec<(&str, &'static str)> {
         let Some(r) = self.route_of(tier) else { return vec![] };
         let mut reached = vec![(tier.as_str(), "turns and recovered calls"), (r.fallback.as_str(), "failures and stalls"), (r.vision.as_str(), "images")];
+        if let Some(deep) = r.deep.as_deref() {
+            reached.push((deep, "delegates"));
+        }
         if r.fallback != FALLBACK {
             reached.push((FALLBACK, "stalls on an older image (its tier unsaid)"));
         }
         let by_id = |slot: &str| self.slot(slot).and_then(|u| self.named(Some(u.model()), None).ok()).and_then(|n| self.route(n).ok()).map(|m| m.slot);
-        let stalled = [by_id(&r.fallback), by_id(FALLBACK)];
+        let deep_stall = r.deep.as_deref().and_then(|d| self.fallback_of(d)).and_then(|f| by_id(f.slot));
+        let stalled = [by_id(&r.fallback), by_id(FALLBACK), deep_stall];
         fn add<'a>(reached: &mut Vec<(&'a str, &'static str)>, slot: Option<&'a str>, why: &'static str) {
             if let Some(slot) = slot.filter(|s| !reached.iter().any(|(r, _)| r == s)) {
                 reached.push((slot, why));
@@ -955,7 +1058,8 @@ impl Models {
 
     /// `route_for`'s model, and the most one call of it writes.
     pub fn capped_for(&self, named: Named, tier: Option<Tier>) -> Result<Capped<'_>, Refusal> {
-        Ok(Capped { model: self.route_for(named, tier)?, max_tokens: MAX_TOKENS })
+        let model = self.route_for(named, tier)?;
+        Ok(Capped { model, max_tokens: self.opts(model.slot).max_tokens.unwrap_or(MAX_TOKENS) })
     }
 }
 
@@ -1904,7 +2008,7 @@ mod tests {
         assert!(d.slots().iter().all(|(_, u)| matches!(u, Upstream::WorkersAi { .. })));
         let finite = finite();
         let private = openai("https://finite-private.finite.containers.tinfoil.dev/v1", FINITE_PRIVATE_FLASH);
-        assert_eq!(finite, Models { cheap: private.clone(), medium: private.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH), images: [false; 4], private: [false; 4], labels: [None, None], extra: vec![], routes: [RouteSlots::defaults(), RouteSlots::defaults()], fallbacks: [None, None] });
+        assert_eq!(finite, Models { cheap: private.clone(), medium: private.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH), images: [false; 4], private: [false; 4], labels: [None, None], extra: vec![], routes: [RouteSlots::defaults(), RouteSlots::defaults()], fallbacks: [None, None], opts: [SlotOpts::default(); 4] });
         assert_eq!(finite.route(Named::Tier(Tier::Cheap)).unwrap(), Model { named: Named::Tier(Tier::Cheap), upstream: &private, slot: "cheap" });
         assert_eq!(finite.route(Named::Tier(Tier::Medium)).unwrap().id(), "glm-5-3-flash");
         assert_eq!(finite.route(Named::Tier(Tier::High)), Err(Refusal::HighOff), "high stays off wherever the tiers run");
@@ -1916,7 +2020,7 @@ mod tests {
         assert_eq!(serde_json::to_value(workers_ai(GLM_FLASH)).unwrap(), json!({ "provider": "workers_ai", "model": GLM_FLASH }));
         // OpenRouter's (Finite's since 2026-10-15): its tiers routed by their body, the rest on Workers AI
         let routed = Upstream::Openai { base_url: "https://openrouter.ai/api/v1".into(), model: OPENROUTER_FLASH.into(), body: routing().as_object().cloned(), price: None };
-        assert_eq!(openrouter(), Models { cheap: routed.clone(), medium: routed.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH), images: [false; 4], private: [false; 4], labels: [None, None], extra: vec![], routes: [RouteSlots::defaults(), RouteSlots::defaults()], fallbacks: [None, None] });
+        assert_eq!(openrouter(), Models { cheap: routed.clone(), medium: routed.clone(), fallback: workers_ai(GLM_FLASH), vision: workers_ai(GLM_FLASH), images: [false; 4], private: [false; 4], labels: [None, None], extra: vec![], routes: [RouteSlots::defaults(), RouteSlots::defaults()], fallbacks: [None, None], opts: [SlotOpts::default(); 4] });
         assert_eq!(serde_json::to_value(&routed).unwrap(), json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": "z-ai/glm-5.3-flash", "body": routing() }));
         let empty = Models::parse(Some(&json!({ "cheap": { "provider": "openai", "base_url": "https://a.example/v1", "model": FINITE_PRIVATE_FLASH, "body": {} } }).to_string()), &book, false).unwrap();
         assert_eq!(empty.cheap, Upstream::Openai { base_url: "https://a.example/v1".into(), model: FINITE_PRIVATE_FLASH.into(), body: Some(Map::new()), price: None }, "an empty body adds nothing");
@@ -2358,8 +2462,8 @@ mod tests {
         let book = PriceBook::defaults();
         let parse = |models: Value| Models::parse(Some(&models.to_string()), &book, false);
         let m = parse(per_route()).unwrap();
-        assert_eq!(m.extra, [Extra { name: "cloudflare".into(), upstream: workers_ai(GLM_FLASH), images: true, private: false, fallback: None }]);
-        assert_eq!(m.routes, [RouteSlots::defaults(), RouteSlots { fallback: "cloudflare".into(), vision: "cloudflare".into() }]);
+        assert_eq!(m.extra, [Extra { name: "cloudflare".into(), upstream: workers_ai(GLM_FLASH), images: true, private: false, fallback: None, opts: SlotOpts::default() }]);
+        assert_eq!(m.routes, [RouteSlots::defaults(), RouteSlots { fallback: "cloudflare".into(), vision: "cloudflare".into(), deep: None }]);
         let (cheap, medium) = (Some(Tier::Cheap), Some(Tier::Medium));
         let at = |model: Model<'_>| (model.slot.to_string(), model.id().to_string());
         // each tier's call falls back within its route
@@ -2544,6 +2648,116 @@ mod tests {
             "private_vision": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1", "model": FINITE_PRIVATE_FLASH, "private": true }
         });
         refused(stalled, "models.vision: models.cheap is private, and its agents' stalls (by its model's id) reach vision");
+    }
+
+    /// Private and Standard as Fast and Deep (Paul, 2026-10-27): each tier's
+    /// own slot its Fast (GLM-5.3 Flash at `high`), the slot its `"deep"`
+    /// names its Deep (DeepSeek V4.1 Flash at `max`, 32,768 tokens a call);
+    /// within Private the two fall back to each other, Standard's both to
+    /// Cloudflare's GLM-5.3 Flash.
+    fn fast_and_deep() -> Value {
+        let tinfoil = |extra: Value| {
+            let mut slot = json!({ "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "model": "deepseek-v4-1-flash", "price": { "input": 0.65, "cached_input": 0.13, "output": 1.45 }, "images": true, "private": true });
+            slot.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            slot
+        };
+        let deep_routing = json!({ "provider": { "zdr": true, "sort": "throughput", "require_parameters": true, "quantizations": ["fp8", "bf16"], "max_price": { "prompt": 0.3, "completion": 1.2 } } });
+        json!({
+            "cheap": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1", "model": FINITE_PRIVATE_FLASH, "private": true, "label": "Private (recommended)",
+                       "reasoning": "high", "deep": "private_deep", "fallback": "private_deep" },
+            "private_deep": tinfoil(json!({ "reasoning": "max", "max_tokens": 32_768, "fallback": "cheap" })),
+            "fallback": tinfoil(json!({})),
+            "vision": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1", "model": FINITE_PRIVATE_FLASH, "private": true },
+            "medium": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": OPENROUTER_FLASH, "body": routing(), "label": "Standard",
+                        "reasoning": "high", "deep": "standard_deep", "fallback": "cloudflare", "vision": "cloudflare" },
+            "standard_deep": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": "deepseek/deepseek-v4.1-flash", "body": deep_routing,
+                               "reasoning": "max", "max_tokens": 32_768, "fallback": "cloudflare" },
+            "cloudflare": { "provider": "workers_ai", "model": GLM_FLASH, "images": true }
+        })
+    }
+
+    /// Goal (Paul, 2026-10-27: two modes, Fast and Deep, the same models
+    /// and thinking in both tiers): a tier's own slot is its Fast and the
+    /// slot its `"deep"` names its Deep, each with its effort
+    /// (`"reasoning"`), its cap (`"max_tokens"`) and its own fallback; a
+    /// caller on a tier naming its Deep's id runs its Deep, a caller that
+    /// says none the first slot running it; the view carries each tier's
+    /// modes; the private guard walks Deep, its fallback and its stall.
+    /// Valid: Private and Standard as Fast and Deep; today's configs, no
+    /// modes. Invalid: a deep that is no other slot or no name, an effort
+    /// the route does not pass, an effort on a slot that is no mode, a cap
+    /// out of 1 to `MAX_TOKENS_MAX`, a private tier whose Deep (or its
+    /// fallback) is not private.
+    #[test]
+    fn each_tier_runs_fast_and_deep() {
+        let book = PriceBook::defaults();
+        let parse = |models: Value| Models::parse(Some(&models.to_string()), &book, false);
+        let at = |model: Model<'_>| (model.slot.to_string(), model.id().to_string());
+        let m = parse(fast_and_deep()).unwrap();
+        let (cheap, medium) = (Some(Tier::Cheap), Some(Tier::Medium));
+        // each tier's Deep, and the effort each mode thinks at
+        assert_eq!((m.deep_of(Tier::Cheap).map(at), m.deep_of(Tier::Medium).map(at)), (Some(("private_deep".into(), "deepseek-v4-1-flash".into())), Some(("standard_deep".into(), "deepseek/deepseek-v4.1-flash".into()))));
+        assert_eq!(m.deep_of(Tier::High), None);
+        assert_eq!((m.opts("cheap"), m.opts("private_deep")), (SlotOpts { reasoning: Some("high"), max_tokens: None }, SlotOpts { reasoning: Some("max"), max_tokens: Some(32_768) }));
+        // a delegate on Private names its Deep's id: its Deep, at its cap, falling back to Private's Fast
+        let named = m.named(Some("deepseek-v4-1-flash"), cheap).unwrap();
+        let capped = m.capped_for(named, cheap).unwrap();
+        assert_eq!((at(capped.model), capped.max_tokens), (("private_deep".into(), "deepseek-v4-1-flash".into()), 32_768));
+        assert_eq!(m.fallback_of(capped.model.slot).map(at), Some(("cheap".into(), FINITE_PRIVATE_FLASH.into())), "Deep falls back to Fast");
+        assert_eq!(m.fallback_of("cheap").map(at), Some(("private_deep".into(), "deepseek-v4-1-flash".into())), "and Fast to Deep");
+        let b = bound(capped, json!({ "model": "deepseek-v4-1-flash", "messages": [{ "role": "user", "content": "build it" }], "reasoning_effort": "max", "max_tokens": 60_000 }), true).unwrap();
+        assert_eq!((b.input["reasoning_effort"].clone(), b.max_tokens), (json!("max"), 32_768), "max as sent, at Deep's cap");
+        let mut tries = Tries::new(capped.model, m.fallback_of(capped.model.slot));
+        assert_eq!(tries.after(Tried::Answered(503)).map(at), Some(("cheap".into(), FINITE_PRIVATE_FLASH.into())));
+        // the same id, tier unsaid (an older image's stall): the first slot running it, the four's fallback
+        assert_eq!(m.named(Some("deepseek-v4-1-flash"), None), Ok(Named::Slot(2)));
+        // a delegate on Standard: its Deep on OpenRouter, falling back to Cloudflare
+        let named = m.named(Some("deepseek/deepseek-v4.1-flash"), medium).unwrap();
+        let capped = m.capped_for(named, medium).unwrap();
+        assert_eq!((at(capped.model), capped.max_tokens, m.fallback_of(capped.model.slot).map(at)), (("standard_deep".into(), "deepseek/deepseek-v4.1-flash".into()), 32_768, Some(("cloudflare".into(), GLM_FLASH.into()))));
+        // Fast's turns as before: the tier, at the cap of every call
+        assert_eq!(m.capped_for(Named::Tier(Tier::Medium), medium).unwrap().max_tokens, MAX_TOKENS);
+        assert!(m.ids().contains(&"deepseek/deepseek-v4.1-flash"));
+        // the view: each tier's modes
+        let view = serde_json::to_value(m.ids_by_name()).unwrap();
+        assert_eq!(view["routes"]["cheap"], json!({ "label": "Private (recommended)", "private": true, "fallback": "deepseek-v4-1-flash", "vision": FINITE_PRIVATE_FLASH, "reasoning": "high", "deep": { "id": "deepseek-v4-1-flash", "reasoning": "max", "fallback": FINITE_PRIVATE_FLASH } }));
+        assert_eq!(view["routes"]["medium"], json!({ "label": "Standard", "private": false, "fallback": GLM_FLASH, "vision": GLM_FLASH, "reasoning": "high", "deep": { "id": "deepseek/deepseek-v4.1-flash", "reasoning": "max", "fallback": GLM_FLASH } }));
+        // today's configs: no modes, nothing new in the view
+        assert_eq!((DEFAULTS.deep_of(Tier::Cheap), DEFAULTS.opts("cheap")), (None, SlotOpts::default()));
+        let plain = serde_json::to_value(DEFAULTS.ids_by_name()).unwrap();
+        assert!(plain["routes"]["cheap"].get("deep").is_none() && plain["routes"]["cheap"].get("reasoning").is_none());
+        // the guard walks Private's Deep
+        assert!(m.reached(Tier::Cheap).iter().any(|(slot, why)| *slot == "private_deep" && *why == "delegates"));
+        assert!(m.reached(Tier::Cheap).iter().all(|(slot, _)| m.slot_private(slot)));
+        // refused, saying why
+        let refused = |models: Value, says: &str| {
+            let e = parse(models.clone()).unwrap_err();
+            assert!(e.contains(says), "{models}: {e}");
+        };
+        let with = |edit: &dyn Fn(&mut Value)| {
+            let mut v = fast_and_deep();
+            edit(&mut v);
+            v
+        };
+        refused(with(&|v| v["medium"]["deep"] = json!("nowhere")), "models.medium: its deep is \"nowhere\", which is no other slot of the deployment's");
+        refused(with(&|v| v["medium"]["deep"] = json!("medium")), "models.medium: its deep is \"medium\", which is no other slot");
+        refused(with(&|v| v["medium"]["deep"] = json!(true)), "models.medium: deep names the slot its route's Deep runs on, not true");
+        refused(with(&|v| v["cheap"]["reasoning"] = json!("medium")), "models.cheap: reasoning is low, high, max, not \"medium\"");
+        refused(with(&|v| v["vision"]["reasoning"] = json!("high")), "models.vision: reasoning is a mode's, its tier's own or the slot a tier names as its deep");
+        refused(with(&|v| v["cloudflare"]["reasoning"] = json!("max")), "models.cloudflare: reasoning is a mode's");
+        for bad in [json!(0), json!(MAX_TOKENS_MAX + 1), json!("lots"), json!(-1)] {
+            refused(with(&|v| v["standard_deep"]["max_tokens"] = bad.clone()), &format!("models.standard_deep: max_tokens is the most one call of it writes, 1 to {MAX_TOKENS_MAX}, not {bad}"));
+        }
+        refused(with(&|v| v["private_deep"]["private"] = json!(false)), "models.private_deep: models.cheap is private, and its agents' failures and stalls reach private_deep");
+        refused(with(&|v| v["private_deep"]["fallback"] = json!("cloudflare")), "models.cheap is private, and its agents' stalls (by its model's id) reach cloudflare");
+        refused(
+            with(&|v| {
+                v["cheap"]["deep"] = json!("standard_deep");
+                v["private_deep"].as_object_mut().unwrap().remove("reasoning");
+            }),
+            "models.standard_deep: models.cheap is private, and its agents' delegates reach standard_deep",
+        );
+        assert!(parse(with(&|v| v["cheap"]["max_tokens"] = json!(MAX_TOKENS_MAX))).is_ok(), "a cap of {MAX_TOKENS_MAX} at most, on any slot");
     }
 
     /// Goal: one rule names the agent a guest's model call is for, chat and

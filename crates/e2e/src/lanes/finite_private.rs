@@ -73,6 +73,8 @@ const ROUTED: &str = fragment_core::models::OPENROUTER_FLASH;
 const FLASH: &str = fragment_core::models::GLM_FLASH;
 /// Tinfoil's DeepSeek V4.1 Flash, the private tier's fallback.
 const TINFOIL: &str = fragment_fakes::workers_ai::TINFOIL_FLASH;
+/// DeepSeek V4.1 Flash as OpenRouter names it: Standard's Deep here.
+const ROUTED_DEEP: &str = fragment_fakes::workers_ai::OPENROUTER_DEEPSEEK;
 /// How long a call the fake holds back hangs: past the impatient caller's
 /// wait, as a stalled stream is past Hermes' 20 s.
 const HANG: Duration = Duration::from_secs(15);
@@ -194,7 +196,7 @@ fn tier_checks(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let r = api.signed(&hand, "GET", "/api/models/v1/models", None)?;
     let listed: Vec<&str> = r.body["data"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str()).collect();
-    s.ok("the route lists the routes' ids, each once, and nothing of their prices", r.status == 200 && listed == [PRIVATE, ROUTED, TINFOIL, FLASH] && !r.text.contains("price"), &r);
+    s.ok("the route lists the routes' ids, each once, and nothing of their prices", r.status == 200 && listed == [PRIVATE, ROUTED, TINFOIL, FLASH, ROUTED_DEEP] && !r.text.contains("price"), &r);
 
     // ---- Standard (the medium tier): within its own route, never Tinfoil
     let as_standard = |body: Value| Call {
@@ -234,6 +236,69 @@ fn tier_checks(s: &mut Suite, api: &Api) -> Result<()> {
         "a Standard agent naming Tinfoil's model by its id runs that model, with Tinfoil's key, not its route's fallback: an id is a model, only the aliases follow a route",
         r.status == 200 && tried(s, calls) == [(Face::OpenAi, TINFOIL.to_string())] && settled,
         format!("{} {:?}", r.status, tried(s, calls)),
+    );
+
+    // ---- Deep (Paul, 2026-10-27): a delegate names its tier's Deep by its id, thinking at `max`
+    let as_tier = |tier: &'static str, body: Value| Call {
+        method: "POST",
+        url: format!("{}{ROUTE}", api.base),
+        body: Some(body.to_string().into_bytes()),
+        content_type: Some("application/json"),
+        keys: Some(&hand),
+        extra: vec![("x-fragment-tier", tier.into())],
+        ..Call::default()
+    };
+    let delegated = |model: &str| json!({ "model": model, "stream": false, "reasoning_effort": "max", "max_tokens": 60_000, "messages": [{ "role": "user", "content": "build it" }] });
+    let deep_cap = u64::from(crate::DEEP_MAX_TOKENS);
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    s.ai.set_usage(&[Used { prompt: 400, cached: 100, completion: 300 }]);
+    let r = api.call(as_tier("cheap", delegated(TINFOIL)))?;
+    let call = s.ai.calls().get(calls).cloned();
+    let settled = s.eventually(wait, || settled_as(before, TINFOIL, charge(&cached(TINFOIL, 300, 100, 300))));
+    s.ok(
+        "a Private delegate naming its Deep's id runs Tinfoil's DeepSeek V4.1 Flash with Tinfoil's key, at `max` and Deep's cap of 32,768 tokens, charged at Tinfoil's price",
+        r.status == 200
+            && tried(s, calls) == [(Face::OpenAi, TINFOIL.to_string())]
+            && call.as_ref().is_some_and(|c| c.authorization.as_deref() == Some(tinfoil_key.as_str()) && c.body["reasoning_effort"] == "max" && c.body["max_tokens"] == deep_cap)
+            && settled,
+        json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "body": call.map(|c| c.body) }),
+    );
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    s.ai.fail_next(&[503]);
+    s.ai.set_usage(&[Used { prompt: 400, cached: 0, completion: 300 }]);
+    let r = api.call(as_tier("cheap", delegated(TINFOIL)))?;
+    let made = s.ai.calls()[calls..].to_vec();
+    let settled = s.eventually(wait, || settled_as(before, PRIVATE, charge(&tokens(PRIVATE, 400, 300))));
+    s.ok(
+        "Private's Deep answering 503 is made once more on Private's Fast, Finite Private, with its key: within Private, never out of it",
+        r.status == 200
+            && tried(s, calls) == [(Face::OpenAi, TINFOIL.to_string()), (Face::OpenAi, PRIVATE.to_string())]
+            && made.get(1).is_some_and(|c| c.authorization.as_deref() == Some(private_key.as_str()) && c.body["reasoning_effort"] == "max")
+            && settled,
+        json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)) }),
+    );
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    s.ai.set_usage(&[Used { prompt: 400, cached: 100, completion: 300 }]);
+    let r = api.call(as_tier("medium", delegated(ROUTED_DEEP)))?;
+    let call = s.ai.calls().get(calls).cloned();
+    let settled = s.eventually(wait, || settled_as(before, ROUTED_DEEP, charge(&cached(ROUTED_DEEP, 300, 100, 300))));
+    s.ok(
+        "a Standard delegate naming its Deep's id runs OpenRouter's DeepSeek V4.1 Flash under its own routing, at `max` and Deep's cap, charged at its slot's ceiling",
+        r.status == 200
+            && tried(s, calls) == [(Face::OpenAi, ROUTED_DEEP.to_string())]
+            && call.as_ref().is_some_and(|c| c.body["provider"] == crate::openrouter_deep_routing()["provider"] && c.body["reasoning_effort"] == "max" && c.body["max_tokens"] == deep_cap && c.authorization.as_deref() == Some(private_key.as_str()))
+            && settled,
+        json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "body": call.map(|c| c.body) }),
+    );
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    s.ai.fail_next(&[429]);
+    s.ai.set_usage(&[Used { prompt: 400, cached: 0, completion: 300 }]);
+    let r = api.call(as_tier("medium", delegated(ROUTED_DEEP)))?;
+    let settled = s.eventually(wait, || settled_as(before, FLASH, charge(&tokens(FLASH, 400, 300))));
+    s.ok(
+        "Standard's Deep answering 429 is made once more on Standard's Cloudflare, never Tinfoil",
+        r.status == 200 && tried(s, calls) == [(Face::OpenAi, ROUTED_DEEP.to_string()), (Face::WorkersAi, FLASH.to_string())] && settled,
+        json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)) }),
     );
 
     // ---- `vision` on Finite Private, falling back to Tinfoil's, which reads images

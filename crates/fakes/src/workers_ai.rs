@@ -94,7 +94,8 @@
 //! Private's among them, is its 401.
 //!
 //! It also serves GLM-5.3 Flash by OpenRouter's id (`OPENROUTER_FLASH`, a
-//! Finite deployment's tiers since 2026-10-15), answered as OpenRouter
+//! Finite deployment's tiers since 2026-10-15), and DeepSeek V4.1 Flash by
+//! its (`OPENROUTER_DEEPSEEK`, Standard's Deep), answered as OpenRouter
 //! answers: its usage tells cached tokens and a `cost`, and a stream's
 //! comes on OpenRouter's accounting frame, a last chunk that keeps one
 //! content-free choice repeating the finish reason
@@ -139,10 +140,19 @@ pub const TAKES_IMAGES: [&str; 3] = [fragment_core::models::VISION_MODEL_DEFAULT
 /// a model only a deployment's config names (deploy/example.jsonc), so its
 /// id is the fake's and the e2e's, not the cell's.
 pub const TINFOIL_FLASH: &str = "deepseek-v4-1-flash";
+/// DeepSeek V4.1 Flash as OpenRouter names it: Standard's Deep by config
+/// (Paul, 2026-10-27), answered as OpenRouter answers.
+pub const OPENROUTER_DEEPSEEK: &str = "deepseek/deepseek-v4.1-flash";
 /// The models the OpenAI-compatible face serves: Finite Private's GLM-5.3
 /// Flash, by the id its limiter takes (its aliases are not the route's),
-/// OpenRouter's, and Tinfoil's DeepSeek V4.1 Flash.
-pub const OPENAI_MODELS: [&str; 3] = [fragment_core::models::FINITE_PRIVATE_FLASH, fragment_core::models::OPENROUTER_FLASH, TINFOIL_FLASH];
+/// OpenRouter's GLM-5.3 Flash and DeepSeek V4.1 Flash, and Tinfoil's
+/// DeepSeek V4.1 Flash.
+pub const OPENAI_MODELS: [&str; 4] = [fragment_core::models::FINITE_PRIVATE_FLASH, fragment_core::models::OPENROUTER_FLASH, OPENROUTER_DEEPSEEK, TINFOIL_FLASH];
+
+/// Whether `model` is one the fake answers as OpenRouter does.
+fn on_openrouter(model: &str) -> bool {
+    [fragment_core::models::OPENROUTER_FLASH, OPENROUTER_DEEPSEEK].contains(&model)
+}
 /// The largest request the OpenAI-compatible face takes: Finite Private's
 /// limiter's (axum's default body limit, 2 MiB).
 pub const OPENAI_BODY_MAX_BYTES: usize = 2 * 1024 * 1024;
@@ -456,7 +466,7 @@ fn delta_usage(prompt: u64, completion: u64) -> Value {
 /// tokens and what it cost in credits; as Tinfoil's vLLM reports it, its
 /// cached tokens (Tinfoil bills them at a price of their own).
 fn openai_usage(model: &str, u: Used) -> Value {
-    if model == fragment_core::models::OPENROUTER_FLASH {
+    if on_openrouter(model) {
         return json!({
             "prompt_tokens": u.prompt, "completion_tokens": u.completion, "total_tokens": u.prompt + u.completion,
             "cost": 0.0, "prompt_tokens_details": { "cached_tokens": u.cached, "cache_write_tokens": 0 },
@@ -562,7 +572,7 @@ fn stream(face: Face, model: &str, reply: &Reply, ids: &mut u64, used: Used, mut
     }
     let finish = if cut { "length" } else { finish };
     out += &chunk(&id, model, json!({}), Some(finish), delta(0, 0));
-    if face == Face::OpenAi && model == fragment_core::models::OPENROUTER_FLASH {
+    if face == Face::OpenAi && on_openrouter(model) {
         out += &chunk(&id, model, json!({ "role": "assistant", "content": "" }), Some(finish), openai_usage(model, used));
         return out + "data: [DONE]\n\n";
     }

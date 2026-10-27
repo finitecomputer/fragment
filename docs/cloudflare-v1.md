@@ -1489,6 +1489,38 @@ Paul:
       owner); a rollback reads the rows as agent members, as before.
     - Status (2026-10-23): built on `claude/member-with-agents`.
 
+### Fast and Deep (Paul, 2026-10-27)
+
+65. **Every tier runs two modes, Fast and Deep, on the same models and
+    thinking in both tiers.** Fast is GLM-5.3 Flash at reasoning `high`;
+    Deep is DeepSeek V4.1 Flash at `max`. Private runs them on Finite
+    Private and Tinfoil, and never falls back to anything that is not
+    private; Standard runs them on OpenRouter, Cloudflare's GLM-5.3 Flash
+    behind both. Within Private the two fall back to each other.
+    - **Who runs which.** An agent's chat turns (and its routines, and
+      Hermes' own tasks, which follow its main model) run Fast; its
+      delegates (Hermes' `delegate_task`) run Deep, and Hermes is taught
+      to delegate long builds. Jobs' AI steps name a tier and run its
+      Fast.
+    - **Where each is defined.** The deployment's `models`: a tier's own
+      slot is its Fast, the slot its `"deep"` names its Deep, each with
+      its `"reasoning"` and its own `"fallback"`, Deep with a
+      `"max_tokens"` of 32,768 a call (`fragment_core::models::SlotOpts`,
+      at most 65,536). The computer's view carries each tier's modes
+      (`models.routes`: `reasoning`, `deep`), which its image copies into
+      each profile (docs/computers.md, "Fast and Deep").
+    - **A person's own models.** One who connects OpenRouter (later
+      Claude or Codex) picks a model and a reasoning level for each mode,
+      per agent, in its `agent.json`.
+    - **What goes.** Settings' reasoning picker: an agent on a tier
+      thinks as its mode does, and a Low picked before becomes High at
+      its image's round.
+    - **Settled with it.** Patience: Fast 20 s, Deep 180 s (#527 closes).
+      At most 3 subagents at once. A model that reads images sees them
+      itself, in either mode: `vision` is for a model that reads none (and
+      older images). Background delegation stays if the Docker lane shows
+      it clean, else the bridge carries a turn Hermes starts first.
+
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 
 `docs/ROADMAP.md` (2026-09-23, before this plan) is gone; it is in git

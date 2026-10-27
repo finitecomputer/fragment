@@ -108,8 +108,10 @@ pub struct TierRoutes {
 
 /// A tier's route: what Settings names it (the deployment's `label` for
 /// it; none, it is offered by its tier's name alone, as before), whether
-/// it is private (every model its agents reach is), and the ids of its
-/// fallback and its vision model.
+/// it is private (every model its agents reach is), the ids of its
+/// fallback and its vision model, and its modes (Paul, 2026-10-27; both
+/// add-only): the effort its turns think at, its Fast's, when the
+/// deployment names one, and its Deep, which its agents' delegates run on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TierRoute {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,6 +120,22 @@ pub struct TierRoute {
     pub private: bool,
     pub fallback: String,
     pub vision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deep: Option<RouteMode>,
+}
+
+/// A route's mode beside its tier's own (`TierRoute::deep`): its model's
+/// id, the effort it thinks at when the deployment names one, and its
+/// fallback's id, when it has one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteMode {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<String>,
 }
 
 /// What a provider's credential is (docs/computers.md, "Connections and
