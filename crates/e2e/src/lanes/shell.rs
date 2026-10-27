@@ -2370,6 +2370,28 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
         files_open && screen_open && drawn && wrote && followed && in_chat && clean,
         json!({ "files": files_open, "screen": screen_open, "drawn": drawn, "followed": followed, "chat": in_chat, "hits": hits }),
     );
+    // its job edited on main alone (as its computer's sync leaves the
+    // agent's own edits: no deploy) shows on its page, open, with no
+    // reload; and an agent renamed before, whose job names it as the first
+    // job did (Skyler's XP, once Bliss), is told its name there by its
+    // owner's rename again, to the name it has, the open page following
+    let edited = shell(api, me.session, "POST", &format!("/api/f/{agent}/files"), Some(&json!({ "message": "its job, as it was", "files": [{ "path": "SOUL.md", "text": job_of("Bliss") }] })), &[])?.status == 200;
+    let shows = |b: &mut Browser, job: &str| s.eventually(wait, || job_shown(b).trim() == job.trim());
+    let edit_shown = edited && shows(b, &job_of("Bliss"));
+    b.click(page, "#settings")?;
+    b.until(page, &format!("!!document.querySelector({rename})"), wait);
+    b.eval(page, &format!("(document.querySelector({rename}).click(), true)"))?;
+    b.until(page, "document.getElementById('rename-agent').open", wait);
+    b.eval(page, &fill("#agent-name", "Rosalind"))?;
+    b.eval(page, "(document.getElementById('rename-form').requestSubmit(), true)")?;
+    let closed = b.until(page, "!document.getElementById('rename-agent').open", wait);
+    let repaired = closed && shows(b, &job_of("Rosalind")) && job_now() == job_of("Rosalind");
+    s.ok(
+        "its job edited on main alone shows on its open page with no deploy; renamed again to the name it has, an agent whose job named it by its first name is told its name there, and its open page follows",
+        edit_shown && repaired,
+        json!({ "edited": edited, "shown": job_shown(b), "stored": job_now() }),
+    );
+    open_row(b, page, chat, wait)?;
     // Rename asks for what it renames: the chat's name in the chat's ⋯, the
     // agent's in its menu, each alone
     let asked_for = |b: &mut Browser, open: &str| -> Result<Value> {
