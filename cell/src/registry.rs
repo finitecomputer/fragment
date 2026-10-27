@@ -90,6 +90,11 @@ pub struct RegistryCell {
     /// Dev fleets' test hook: how many more runs of the alarm's deletes
     /// of feedback fail before deleting a thing; for this cell's life.
     pub(crate) feedback_fails: Cell<u32>,
+    /// Dev fleets' test hook: the path whose next call acts, then waits
+    /// this many ms before it is answered; once.
+    hold_after: RefCell<Option<(String, u32)>>,
+    /// How many of those waits have begun since this cell started.
+    holds_started: Cell<u32>,
     /// Dev fleets' test hook: the path whose next calls this cell answers as
     /// one of another release (`calls::SKEWED`), refusing them as a deploy
     /// going out does, and how many more; for this cell's life, as `down` is.
@@ -146,6 +151,8 @@ impl DurableObject for RegistryCell {
             down_for: RefCell::new(None),
             drop_for: RefCell::new(None),
             feedback_fails: Cell::new(0),
+            hold_after: RefCell::new(None),
+            holds_started: Cell::new(0),
             skew_for: RefCell::new(None),
             skew_deployed: Cell::new(None),
             calls: Cell::new(0),
@@ -168,6 +175,13 @@ impl DurableObject for RegistryCell {
         }
         let path = req.path();
         let answer = self.route(req).await;
+        // the test hook's hold: the call acted, and its caller waits
+        let hold = self.hold_after.borrow().as_ref().filter(|(p, _)| *p == path).map(|(_, ms)| *ms);
+        if let Some(ms) = hold {
+            *self.hold_after.borrow_mut() = None;
+            self.holds_started.set(self.holds_started.get() + 1);
+            Delay::from(std::time::Duration::from_millis(ms.into())).await;
+        }
         // the test hook's lost answer: the call acted, its caller hears 503
         if one_more(&self.drop_for, &path) {
             return CellError::new(ErrorCode::RegistryUnavailable, format!("the answer to {path} was lost (a test hook)")).response();
@@ -784,7 +798,20 @@ impl RegistryCell {
                 *self.down_for.borrow_mut() = (times > 0).then(|| (path.clone(), times));
                 Ok(json!({ "downFor": { "path": path, "times": times } }))
             }
-            TestHook::FeedbackAge(id) => Ok(json!({ "aged": self.feedback_age(&id).await? })),
+            TestHook::FeedbackAge(calls::FeedbackAge { id, ms }) => Ok(json!({ "aged": self.feedback_age(&id, ms).await? })),
+            TestHook::Restart => {
+                crate::routed::abort_soon(&self.raw).map_err(|e| CellError::host(format!("the restart: {e:?}")))?;
+                Ok(json!({ "restarting": true }))
+            }
+            TestHook::HoldAfter(hold) => {
+                if let Some(calls::HoldAfter { path, ms }) = hold {
+                    if ms > TEST_HOLD_MAX_MS || !path.starts_with('/') || path == TestHook::PATH {
+                        return Err(CellError::invalid(format!("hold after a call's path (not /test's), at most {TEST_HOLD_MAX_MS} ms")));
+                    }
+                    *self.hold_after.borrow_mut() = Some((path, ms));
+                }
+                Ok(json!({ "started": self.holds_started.get() }))
+            }
             TestHook::FeedbackSweepFails(n) => {
                 if n.is_some_and(|n| n > TEST_DOWN_FOR_MAX) {
                     return Err(CellError::invalid(format!("fail at most {TEST_DOWN_FOR_MAX} runs")));

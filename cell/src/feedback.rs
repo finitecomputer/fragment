@@ -15,8 +15,12 @@
 //! A send costs two registry turns, each idempotent on its id (the
 //! sender's, else made here): the first begins it, a row `sending`, so no
 //! one the registry does not know, or who sent their day's, stores bytes,
-//! and none is put that no row records; its screenshots go to BLOBS
-//! (`feedback/<person>/<id>/<place>`); the second keeps it. Nothing here
+//! and none is put that no row records; it names the try, under whose own
+//! keys its screenshots go to BLOBS (`feedback/<person>/<id>/<try>/<place>`),
+//! so two tries at once never share one; the second keeps it, if it is
+//! still the latest try. A try starts no put past `WRITE_WINDOW_MS` from
+//! when it asked to begin, so the registry knows when none of its bytes
+//! can land, and deletes none before. Nothing here
 //! deletes on a failure, as a call that failed may have acted (its answer
 //! lost): a send that stops anywhere is the registry's to finish, asked
 //! again with the same id, or to delete with its bytes once it has waited
@@ -35,7 +39,7 @@ use worker::*;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::registry::calls::By;
-use crate::registry::feedback::{FeedbackBegin, FeedbackDelete, FeedbackGet, FeedbackKeep, FeedbackList, FeedbackMailed, FeedbackResolve, Kept};
+use crate::registry::feedback::{FeedbackBegin, FeedbackDelete, FeedbackGet, FeedbackKeep, FeedbackList, FeedbackMailed, FeedbackResolve, Got, Kept};
 use crate::{acting_for, ask_registry, caller, js, json_answer, read_body, Caller};
 use fragment_nip98::Payload;
 
@@ -63,23 +67,25 @@ pub(crate) async fn send(mut req: Request, env: &Env, cfg: &Config, url: &Url) -
     let id = sent.id.clone().unwrap_or_else(js::random_hex::<16>);
     let screenshots: Vec<Screenshot> = sent.screenshots.iter().map(|s| Screenshot { mime: s.mime.to_string(), size: s.bytes.len() as u64 }).collect();
     let begin = FeedbackBegin { by: by(), id: id.clone(), kind: sent.kind, message: sent.message.clone(), page: sent.page.clone(), user_agent, release: cfg.deploy_id.clone(), screenshots };
+    // its window opens before it asks: none of its puts starts past it,
+    // so none lands past the fence the registry keeps from its beginning
+    let deadline = js::now_ms() + rules::WRITE_WINDOW_MS;
     let began = ask_again(env, &begin).await?;
-    let Kept { feedback: kept, mailed } = match began.kept {
+    let Kept { feedback: kept, mailed } = match (began.kept, began.attempt) {
         // kept already: a send asked again whose answer was lost
-        Some(kept) => kept,
-        None => {
+        (Some(kept), _) => kept,
+        (None, Some(attempt)) => {
+            assert!(rules::valid_attempt(&attempt), "the registry names a try by 16 hex digits");
+            // under this try's own keys: another try's, at once, are its own
             for (place, shot) in sent.screenshots.iter().enumerate() {
-                js::blob_put_bytes(env, &rules::screenshot_key(&began.person, &id, place), shot.bytes).await?;
-            }
-            if began.again {
-                // a try before may have put more than this one holds
-                let past: Vec<String> = (sent.screenshots.len()..rules::SCREENSHOTS_MAX).map(|place| rules::screenshot_key(&began.person, &id, place)).collect();
-                if !past.is_empty() {
-                    js::blob_delete(env, &past).await?;
+                if js::now_ms() > deadline {
+                    return Err(CellError::new(ErrorCode::UpstreamFailed, "your screenshots took too long to store: send it again"));
                 }
+                js::blob_put_bytes(env, &rules::screenshot_key(&began.person, &id, &attempt, place), shot.bytes).await?;
             }
-            ask_again(env, &FeedbackKeep { by: by(), id: id.clone() }).await?
+            ask_again(env, &FeedbackKeep { by: by(), id: id.clone(), attempt }).await?
         }
+        (None, None) => return Err(CellError::host(format!("the registry began feedback {id} as no try"))),
     };
     assert!(kept.person == began.person && kept.id == id, "the registry keeps a send as its sender's");
     // the notice goes from whichever try learns it is kept and not yet
@@ -144,9 +150,9 @@ pub(crate) async fn admin(env: &Env, url: &Url, by: String, method: Method, rest
         }
         (Method::Get, [id, "screenshots", place]) => {
             let place: usize = place.parse().map_err(|_| CellError::new(ErrorCode::NotFound, format!("no screenshot {place:?}")))?;
-            let f = ask_registry(env, &FeedbackGet { id: id.to_string() }).await?;
+            let Got { feedback: f, attempt } = ask_registry(env, &FeedbackGet { id: id.to_string() }).await?;
             let shot = f.screenshots.get(place).ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("feedback {id} has {} screenshots", f.screenshots.len())))?;
-            let blob = js::blob_get(env, &rules::screenshot_key(&f.person, &f.id, place), None).await?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("screenshot {place} of feedback {id} is gone")))?;
+            let blob = js::blob_get(env, &rules::screenshot_key(&f.person, &f.id, &attempt, place), None).await?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("screenshot {place} of feedback {id} is gone")))?;
             let h = Headers::new();
             // its type was read from its bytes as it came: an image, never markup
             h.set("content-type", &shot.mime)?;

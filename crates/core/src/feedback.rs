@@ -40,6 +40,21 @@ pub const SENDING_TTL_MS: i64 = 3600 * 1000;
 /// Feedback one run of the registry's alarm deletes, at most (each its
 /// screenshots' bytes, then its row); more are the next run's, soon.
 pub const SWEEP_BATCH: u32 = 16;
+/// Tries one send is begun with, at most (each `FeedbackBegin`: a try of
+/// its sender's, or the router's again after a lost answer); past them its
+/// id is refused, and the shell sends it anew under another.
+pub const ATTEMPTS_MAX: u32 = 8;
+/// How long after it asked to begin a try may start a put: the router
+/// starts none later, and stops the send instead.
+pub const WRITE_WINDOW_MS: i64 = 60 * 1000;
+/// How long a put begun inside its window may take to land, at most: a
+/// screenshot is 5 MiB, seconds to BLOBS, and this leaves minutes over.
+pub const PUT_MAX_MS: i64 = 9 * 60 * 1000;
+/// From a try's beginning, the time after which no byte of it can land:
+/// a row's bytes are deleted, or an earlier try's pruned, only past it,
+/// so no late writer puts a key that no row records.
+pub const FENCE_MS: i64 = WRITE_WINDOW_MS + PUT_MAX_MS;
+const _: () = assert!(SENDING_TTL_MS > FENCE_MS && ATTEMPTS_MAX >= 2);
 
 /// A feedback's id: 32 lowercase hex digits, its sender's for one send
 /// (the shell's dialog makes one each time it opens), or the router's.
@@ -73,11 +88,24 @@ impl State {
     }
 }
 
-/// Where a feedback's screenshots are kept in BLOBS: under its person's
-/// prefix (a wipe deletes it whole), each by its place.
-pub fn screenshot_key(person: &str, id: &str, place: usize) -> String {
-    assert!(valid_id(id) && place < SCREENSHOTS_MAX, "a screenshot is one of a feedback's few");
-    format!("{}{id}/{place}", person_prefix(person))
+/// A try of a send: 16 lowercase hex digits, the registry's for each
+/// `FeedbackBegin`.
+pub fn valid_attempt(attempt: &str) -> bool {
+    attempt.len() == 16 && attempt.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Where a try of a feedback puts its screenshots in BLOBS: under its
+/// person's prefix (a wipe deletes it whole), its feedback's (deleted with
+/// it), then its try's own, so a try's bytes are never another's: only
+/// the try that kept it is served.
+pub fn screenshot_key(person: &str, id: &str, attempt: &str, place: usize) -> String {
+    assert!(valid_id(id) && valid_attempt(attempt) && place < SCREENSHOTS_MAX, "a screenshot is one of a try's few");
+    format!("{}{place}", attempt_prefix(person, id, attempt))
+}
+
+/// One try's screenshots are under this.
+pub fn attempt_prefix(person: &str, id: &str, attempt: &str) -> String {
+    format!("{}{attempt}/", feedback_prefix(person, id))
 }
 
 /// Every screenshot a person sent is under this.
@@ -373,6 +401,22 @@ mod tests {
         assert_eq!(State::parse("Kept"), None);
         assert_eq!(State::parse(""), None);
         const { assert!(SENDING_TTL_MS >= 10 * 60 * 1000 && SWEEP_BATCH >= 1) };
+    }
+
+    /// A try's screenshots are under its own prefix, inside its feedback's,
+    /// inside its person's: a delete of either takes them, and no two
+    /// tries share a key.
+    #[test]
+    fn a_tries_screenshots_are_its_own() {
+        let person = crate::npub::identity_of(&"ab".repeat(32));
+        let (id, a, b) = ("0123456789abcdef0123456789abcdef", "00000000000000aa", "00000000000000bb");
+        let key = screenshot_key(&person, id, a, 2);
+        assert_eq!(key, format!("feedback/{person}/{id}/{a}/2"));
+        assert!(key.starts_with(&attempt_prefix(&person, id, a)) && key.starts_with(&feedback_prefix(&person, id)) && key.starts_with(&person_prefix(&person)));
+        assert!(!screenshot_key(&person, id, b, 2).starts_with(&attempt_prefix(&person, id, a)));
+        for bad in ["", "00000000000000AA", "000000000000000", "../../000000000a"] {
+            assert!(!valid_attempt(bad), "{bad:?}");
+        }
     }
 
     /// The body's limit holds the most screenshots at their most, with room.
