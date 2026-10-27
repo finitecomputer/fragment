@@ -307,9 +307,8 @@ fn checks(s: &mut Suite, api: &Api) -> Result<()> {
     let mut asked = chat("medium", false);
     asked["provider"] = json!({ "zdr": false, "order": ["somewhere-dear"] });
     asked["temperature"] = json!(0.3);
-    // how hard it thinks, as its owner picked it (agent.json's `reasoning`,
-    // which its Hermes sends as each call's `reasoning_effort`)
-    asked["reasoning_effort"] = json!("high");
+    // how hard it thinks: `max`, the dearest, passes as sent (a Deep call's)
+    asked["reasoning_effort"] = json!("max");
     asked["plugins"] = json!([{ "id": "web" }]);
     asked["web_search_options"] = json!({ "search_context_size": "high" });
     asked["models"] = json!(["anthropic/claude-opus-5.5"]);
@@ -318,13 +317,13 @@ fn checks(s: &mut Suite, api: &Api) -> Result<()> {
     let priced = charge(&cached(ROUTED, 30, 40, 20));
     let settled = s.eventually(wait, || settled_as(before, ROUTED, priced));
     s.ok(
-        "a medium call runs on OpenRouter's GLM-5.3 Flash with the platform's key, carrying its slot's provider routing in place of the agent's, the agent's temperature and reasoning effort as it sent them and none of its extras (plugins, web search, other models), and is charged at OpenRouter's price, its cached tokens told",
+        "a medium call runs on OpenRouter's GLM-5.3 Flash with the platform's key, carrying its slot's provider routing in place of the agent's, the agent's temperature and reasoning effort as it sent them (max, the dearest) and none of its extras (plugins, web search, other models), and is charged at OpenRouter's price, its cached tokens told",
         r.status == 200
             && tried(s, calls) == routed(1)
             && call.as_ref().is_some_and(|c| {
                 c.body["provider"] == routing["provider"]
                     && c.body["temperature"] == 0.3
-                    && c.body["reasoning_effort"] == "high"
+                    && c.body["reasoning_effort"] == "max"
                     && ["plugins", "web_search_options", "models"].iter().all(|k| c.body.get(*k).is_none())
                     && c.body["model"] == ROUTED
                     && c.authorization.as_deref() == Some(platform_key.as_str())
