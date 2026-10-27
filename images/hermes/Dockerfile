@@ -15,6 +15,9 @@
 #   1. The base (4.3 GB, 1.4 GB compressed): Hermes' image flattened, with
 #      everything pinned on it and our edits to it. It changes when a pin,
 #      document-requirements.txt or one of its steps changes.
+#   1b. SimpleX's core, `simplex-chat` (79.5 MB, 18.8 MB compressed), pinned
+#      by checksum: a layer of its own, so it changes only with its pin and
+#      a computer pulls it once.
 #   2. Ours (about 21 MB): the bridge, hermes-boot, the fragment CLI, and
 #      the image's own files. Most changes are only here.
 #   3. What `hermes-boot build-info` writes, then the image's version: a
@@ -98,6 +101,16 @@ RUN --mount=type=cache,id=cli-registry,target=/usr/local/cargo/registry \
  && find cli crates templates -type f -exec touch {} + \
  && cargo build --release --locked -p fragment-cli \
  && mkdir -p /out && cp target/release/fragment /out/
+
+# SimpleX's core (the bridge's simplex/run.rs: one per agent its owner
+# links, run only while the computer is always on): simplex-chat v7.0.3,
+# the latest stable release on 2026-10-22, its Ubuntu 24.04 x86_64 binary
+# by the release's own SHA-256. It runs on the base's Debian trixie with the
+# libraries the base already has (libgmp, libffi, libssl, zlib: the
+# bridge's SimpleX lab, tests/simplex.rs). It reports itself as v7.0.0.12.
+FROM alpine:3.20 AS simplex
+ADD --checksum=sha256:895fb14cfaa662d1c0947f2f871141fc89680fe3e70bff64c366cbe9e59aa4f0 https://github.com/simplex-chat/simplex-chat/releases/download/v7.0.3/simplex-chat-ubuntu-24_04-x86_64 /simplex-chat
+RUN chmod 0755 /simplex-chat
 
 # noVNC, the screen page's RFB client (pinned by hash).
 FROM alpine:3.20 AS novnc
@@ -352,6 +365,13 @@ RUN env | sort > /tmp/env.now \
  && lost="$(grep -Ev '^(HOME|HOSTNAME|PWD|SHLVL|_|HERMES_HOME|HERMES_WRITE_SAFE_ROOT)=' /opt/fragment/upstream.env | sed '/^PATH=/s#/opt/data#/data/hermes#' | grep -vxFf /tmp/env.now || true)" \
  && rm /tmp/env.now \
  && if [ -n "$lost" ]; then printf 'upstream sets what the flatten does not:\n%s\n' "$lost"; exit 1; fi
+# SimpleX's core (layer 1b), before ours: a change of ours pulls none of it.
+# The bridge's alone (root's, 0700, on no PATH): an agent asked to send
+# something over SimpleX found it in /usr/local/bin and began setting up a
+# SimpleX of its own (2026-10-26). Its turns from SimpleX are told the
+# platform carries their replies (the bridge's note.rs, VIA_SIMPLEX).
+COPY --from=simplex --chmod=0700 /simplex-chat /opt/fragment/bin/simplex-chat
+RUN /opt/fragment/bin/simplex-chat --version | grep -q 'v7\.0\.0\.12'
 COPY --from=ours / /
 # What the boot reads instead of finding it each time: the lean plugin list;
 # the image's Chromium, /opt/fragment/bin/chromium

@@ -118,18 +118,30 @@ pub const FRAGMENT: Class = Class {
     kept: &["ended", "ended_index", "ended_repos", "ended_agents", "ended_errors"],
 };
 
-pub const REGISTRY: Class = Class { name: "Registry", steps: &[step!("baseline", "registry/0001_baseline.sql"), step!("connection_signins", "registry/0002_connection_signins.sql"), step!("trial_hold_attempts", "registry/0003_trial_hold_attempts.sql"), step!("connection_fences", "registry/0004_connection_fences.sql")], variants: &[], kept: &[] };
+pub const REGISTRY: Class = Class {
+    name: "Registry",
+    steps: &[
+        step!("baseline", "registry/0001_baseline.sql"),
+        step!("connection_signins", "registry/0002_connection_signins.sql"),
+        step!("trial_hold_attempts", "registry/0003_trial_hold_attempts.sql"),
+        step!("connection_fences", "registry/0004_connection_fences.sql"),
+        step!("invites_answered", "registry/0005_invites_answered.sql"),
+        step!("connection_accounts", "registry/0006_connection_accounts.sql"),
+    ],
+    variants: &[],
+    kept: &[],
+};
 
 pub const PRINCIPAL: Class = Class {
     name: "Principal",
-    steps: &[step!("baseline", "principal/0001_baseline.sql"), step!("listed", "principal/0002_listed.sql")],
+    steps: &[step!("baseline", "principal/0001_baseline.sql"), step!("listed", "principal/0002_listed.sql"), step!("memberships_dock", "principal/0003_memberships_dock.sql")],
     variants: &[],
     kept: &["wiped"],
 };
 
 pub const LEDGER: Class = Class { name: "Ledger", steps: &[step!("baseline", "ledger/0001_baseline.sql")], variants: &[], kept: &["wiped"] };
 
-pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql")], variants: &[], kept: &["wiped"] };
+pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql"), step!("agent_accounts", "computer/0002_agent_accounts.sql")], variants: &[], kept: &["wiped"] };
 
 /// Every platform class, as the lock lists them.
 pub const CLASSES: [&Class; 5] = [&FRAGMENT, &REGISTRY, &PRINCIPAL, &LEDGER, &COMPUTER];
@@ -594,11 +606,12 @@ mod tests {
         assert_eq!(migrated(&list, &baseline, 1), Ok(Ran::Made { version: 1 }));
         list.exec("INSERT INTO memberships (fragment, role, incarnation, version) VALUES ('chat--k3x9', 'owner', 1, 1)").expect("a row");
         assert_eq!(PRINCIPAL.steps[1].name, "listed");
-        assert_eq!(migrated(&list, &PRINCIPAL, 2), Ok(Ran::Migrated { from: 1, version: 2 }));
+        let to_two = Class { steps: &PRINCIPAL.steps[..2], ..PRINCIPAL };
+        assert_eq!(migrated(&list, &to_two, 2), Ok(Ran::Migrated { from: 1, version: 2 }));
         list.exec("INSERT INTO listed (fragment, records) VALUES ('chat--k3x9', '[]')").expect("a row's listed records");
         assert_eq!(list.count("SELECT COUNT(*) FROM memberships m JOIN listed l ON l.fragment = m.fragment"), 1, "its row stays, beside its listed records");
-        assert_eq!(migrated(&list, &PRINCIPAL, 3), Ok(Ran::Current { version: 2 }));
-        let remade = remake(&list, &PRINCIPAL).expect("a wipe's remake");
+        assert_eq!(migrated(&list, &to_two, 3), Ok(Ran::Current { version: 2 }));
+        let remade = remake(&list, &to_two).expect("a wipe's remake");
         assert!(remade.contains(&"listed".to_string()), "a wipe empties step 2's table too: {remade:?}");
         assert_eq!(list.count("SELECT COUNT(*) FROM listed"), 0);
     }
@@ -635,6 +648,34 @@ mod tests {
         assert_eq!(fragment.count("SELECT COUNT(*) FROM record_schedules"), 0);
     }
 
+    /// Goal: the person's dock is step 3 of the Principal's (#587;
+    /// cell/src/principal.rs): a list at version 2 with rows migrates to
+    /// 3, keeps them, and puts every one on the dock, so no app leaves
+    /// anyone's dock by the step; a row the cell writes as it does (no
+    /// `dock` named) is on it too, and one taken off reads so; the restart
+    /// after runs nothing; a wipe's `remake` keeps the column. Method: the
+    /// list's first two steps alone, an archived row and one not written,
+    /// then its class as declared.
+    #[test]
+    fn the_dock_is_step_three_of_a_list() {
+        let list = Lite::new();
+        let known = PRINCIPAL.steps.len() as u32;
+        assert_eq!(migrated(&list, &Class { steps: &PRINCIPAL.steps[..2], ..PRINCIPAL }, 1), Ok(Ran::Made { version: 2 }));
+        list.exec("INSERT INTO memberships (fragment, role, incarnation, version, archived) VALUES ('todo--k3x9', 'owner', 1, 1, 0), ('old--k3x9', 'viewer', 1, 1, 1)").expect("two rows");
+        assert_eq!(PRINCIPAL.steps[2].name, "memberships_dock");
+        assert_eq!(migrated(&list, &PRINCIPAL, 2), Ok(Ran::Migrated { from: 2, version: known }));
+        assert_eq!(list.count("SELECT COUNT(*) FROM memberships WHERE dock = 1"), 2, "every row is on the dock, the archived one too: its archiving is its own");
+        assert_eq!(list.count("SELECT COUNT(*) FROM memberships WHERE fragment = 'old--k3x9' AND archived = 1"), 1, "its archiving stays as it was");
+        list.exec("INSERT INTO memberships (fragment, role, incarnation, version, archived, searched) VALUES ('new--k3x9', 'owner', 2, 1, 0, '[]')").expect("a row as the cell writes one");
+        list.exec("UPDATE memberships SET dock = 0 WHERE fragment = 'todo--k3x9'").expect("taken off");
+        assert_eq!(list.count("SELECT COUNT(*) FROM memberships WHERE dock = 1"), 2, "a new row is on it; one taken off is not");
+        assert_eq!(migrated(&list, &PRINCIPAL, 3), Ok(Ran::Current { version: known }), "a restart runs nothing");
+        assert_eq!(list.count("SELECT COUNT(*) FROM memberships WHERE fragment = 'todo--k3x9' AND dock = 0"), 1, "and the choice holds");
+        remake(&list, &PRINCIPAL).expect("a wipe's remake");
+        assert!(list.columns("memberships").contains(&"dock".to_string()), "a wiped list's rows have the column still");
+        assert_eq!(list.count("SELECT COUNT(*) FROM memberships"), 0);
+    }
+
     /// Goal: #369's `fenced` columns (its `columns.rs` adds them if missing
     /// as objects start) are ordinary steps, as the module doc shows: a
     /// Registry and a Computer at their baseline, rows in them, take them
@@ -653,7 +694,7 @@ mod tests {
         assert_eq!(registry.count("SELECT COUNT(*) FROM identities WHERE id = 'npub1a' AND fenced = 0"), 1);
 
         let computer = Lite::new();
-        migrated(&computer, &COMPUTER, 1).expect("a computer");
+        migrated(&computer, &Class { steps: &COMPUTER.steps[..1], ..COMPUTER }, 1).expect("a computer at its baseline");
         computer.exec("INSERT INTO agents (fragment, identity, owner, added_at) VALUES ('f', 'npub1a', 'npub1o', 1)").expect("an agent");
         let fenced = Class { steps: COMPUTER_FENCED, ..COMPUTER };
         assert_eq!(migrated(&computer, &fenced, 2), Ok(Ran::Migrated { from: 1, version: 2 }));

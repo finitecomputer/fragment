@@ -65,6 +65,11 @@ enum Shape {
     /// one key a test value), the fallback and vision on Workers AI's
     /// GLM-5.3 Flash.
     FinitePrivate,
+    /// As `Plain`, its model route shaped as the private tier
+    /// (`private_tier_models`): its tiers and vision on Finite Private, its
+    /// fallback Tinfoil's DeepSeek V4.1 Flash on a key of its own, priced by
+    /// its slot, reading images (each the model fake's OpenAI-compatible face).
+    PrivateTier,
     /// As `Plain`, with no Stripe (no `stripe` in its config): billing
     /// off, as finite.chat launched, every seat an operator's comp.
     SellsNothing,
@@ -77,6 +82,43 @@ enum Shape {
 /// Finite Private's key on a node shaped as Finite's (`Shape::FinitePrivate`):
 /// a test value, in `fpk_live_`'s shape, which the model fake asks for.
 pub const FINITE_PRIVATE_KEY: &str = "fpk_live_e2e0c0ffee";
+
+/// The labels a plain node gives its tiers (`plain_models`): the routes its
+/// Settings offers.
+pub const RECOMMENDED_LABEL: &str = "Recommended";
+pub const STANDARD_LABEL: &str = "Standard";
+
+/// `FRAGMENT_MODELS` on a plain node: every slot on Workers AI as unnamed
+/// (`fragment_core::models::Models::defaults`), each tier labelled, so its
+/// Settings offers two routes (Paul, 2026-10-24).
+pub fn plain_models() -> Value {
+    json!({
+        "cheap": { "provider": "workers_ai", "model": fragment_core::models::CHEAP_MODEL, "label": RECOMMENDED_LABEL },
+        "medium": { "provider": "workers_ai", "model": fragment_core::models::MEDIUM_MODEL, "label": STANDARD_LABEL }
+    })
+}
+
+/// Tinfoil's key on a node shaped as the private tier (`Shape::PrivateTier`):
+/// a test value, which the model fake asks for of Tinfoil's model alone.
+pub const TINFOIL_KEY: &str = "tk_e2e0c0ffee";
+
+/// `FRAGMENT_MODELS` on a node shaped as the private tier
+/// (deploy/example.jsonc's third alternative), less its keys, each API's
+/// base URL the model fake's: `cheap`, `medium` and `vision` on Finite
+/// Private, `fallback` on Tinfoil's DeepSeek V4.1 Flash at the list price
+/// its slot names (`tinfoil_price`), saying it reads images; every slot
+/// private.
+pub fn private_tier_models(fake: &str) -> Value {
+    let private = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::FINITE_PRIVATE_FLASH, "private": true });
+    let tinfoil = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::TINFOIL_FLASH, "price": tinfoil_price(), "images": true, "private": true });
+    json!({ "cheap": private, "medium": private, "fallback": tinfoil, "vision": private })
+}
+
+/// The `price` of Tinfoil's slot on a node shaped as the private tier: its
+/// list on 2026-10-22, dollars a million tokens.
+pub fn tinfoil_price() -> Value {
+    json!({ "input": 0.65, "cached_input": 0.13, "output": 1.45 })
+}
 
 /// `FRAGMENT_MODELS` on a node shaped as Finite's: deploy/example.jsonc's
 /// two alternatives at once, less their keys, each API's base URL the model
@@ -162,6 +204,13 @@ pub fn added_key_row() -> Value {
     let (name, _, env) = ADDED_KEY;
     json!({ "name": name, "kind": "operator", "hosts": ["api.added.test"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [env], "price": { "micros": 20_000, "per": 1 } })
 }
+/// A connection a person connects several accounts at (its row's
+/// `accounts_max`), through the WorkOS fake's stand-in provider as
+/// `e2e-oauth` is, which stays one account a person: both paths run.
+pub const SEVERAL: &str = "e2e-several";
+pub const SEVERAL_MAX: u8 = 3;
+pub const SEVERAL_HOST: &str = "several.test";
+pub const SEVERAL_ENV: &str = "E2E_SEVERAL_TOKEN";
 pub const SWAP_OWN: &str = "e2e-mail";
 pub const SWAP_OWN_HOST: &str = "api.mail.test";
 pub const SWAP_OWN_ENV: &str = "E2E_MAIL_KEY";
@@ -365,6 +414,12 @@ impl Suite {
         self.hosted_rules
     }
 
+    /// Whether the node's vendors are the fakes: a local run, or its
+    /// rehearsal (whose fakes no lane reaches, but which answer the node).
+    pub fn on_fakes(&self) -> bool {
+        self.preview.is_none()
+    }
+
     /// A heavy section runs only when `--only` names it (the real-Hermes
     /// lane builds a 3.8 GB image); otherwise it is a skip that says how.
     pub fn section_by_name(&mut self, name: &str, needs: &[Need], why: &str) -> bool {
@@ -533,6 +588,15 @@ impl Suite {
         started
     }
 
+    /// Starts the node with its model route shaped as the private tier
+    /// (`Shape::PrivateTier`): its tiers on Finite Private, Tinfoil behind them.
+    pub fn start_as_private_tier(&mut self) -> Result<Api> {
+        self.shape = Shape::PrivateTier;
+        let started = self.start(false);
+        self.shape = Shape::Plain;
+        started
+    }
+
     /// Starts the node with no Stripe (`Shape::SellsNothing`): billing off.
     pub fn start_selling_nothing(&mut self) -> Result<Api> {
         self.shape = Shape::SellsNothing;
@@ -586,12 +650,25 @@ impl Suite {
             // OpenAI-compatible face as Finite Private (lanes/upstream.rs)
             ai_url: Some(self.ai.node().url.clone()),
             ai_gateway: None,
-            models: matches!(self.shape, Shape::FinitePrivate).then(|| finite_private_models(&self.ai.node().url).to_string()),
-            model_key_slots: match self.shape {
-                Shape::FinitePrivate => vec!["cheap".into(), "medium".into()],
-                _ => vec![],
+            models: match self.shape {
+                Shape::FinitePrivate => Some(finite_private_models(&self.ai.node().url).to_string()),
+                Shape::PrivateTier => Some(private_tier_models(&self.ai.node().url).to_string()),
+                Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore => Some(plain_models().to_string()),
             },
-            model_key_value: matches!(self.shape, Shape::FinitePrivate).then(|| FINITE_PRIVATE_KEY.to_string()),
+            model_keys: {
+                let key = |slot: &str, name: &str, value: &str| devstack::ModelKey { slot: slot.into(), name: name.into(), value: value.into() };
+                match self.shape {
+                    // one key for both tiers, as deploy/example.jsonc names it
+                    Shape::FinitePrivate => vec![key("cheap", "fragment-openrouter-key", FINITE_PRIVATE_KEY), key("medium", "fragment-openrouter-key", FINITE_PRIVATE_KEY)],
+                    Shape::PrivateTier => vec![
+                        key("cheap", "fragment-finite-private-key", FINITE_PRIVATE_KEY),
+                        key("medium", "fragment-finite-private-key", FINITE_PRIVATE_KEY),
+                        key("fallback", "fragment-tinfoil-api-key", TINFOIL_KEY),
+                        key("vision", "fragment-finite-private-key", FINITE_PRIVATE_KEY),
+                    ],
+                    _ => vec![],
+                }
+            },
             mail_url: Some(self.mail.node().url.clone()),
             mail_from: Some(MAIL_FROM.into()),
             default_plan: Some(DEFAULT_PLAN.into()),
@@ -610,7 +687,7 @@ impl Suite {
             }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
-                Shape::Plain | Shape::FinitePrivate | Shape::SellsNothing | Shape::OneKeyMore => format!("http://127.0.0.1:{}", self.port),
+                Shape::Plain | Shape::FinitePrivate | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore => format!("http://127.0.0.1:{}", self.port),
             },
             operators: Some(
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
@@ -620,18 +697,20 @@ impl Suite {
             // the levers, as a preview has them: each request carries the secret
             test_secret: Some(self.test_secret.clone()),
             computer_image: Some("stub".into()),
+            images: vec![],
             computer_snapshots: false,
             computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
             providers: Some({
                 let mut rows = swap_providers(Some(self.openrouter.node().oauth()))?;
                 rows.as_array_mut().expect("catalog").push(json!({ "name": "e2e-oauth", "kind": "connection", "hosts": ["oauth.test"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["E2E_OAUTH_TOKEN"], "connection_oauth": self.workos.node().connection_oauth() }));
+                rows.as_array_mut().expect("catalog").push(json!({ "name": SEVERAL, "kind": "connection", "hosts": [SEVERAL_HOST], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": [SEVERAL_ENV], "connection_oauth": self.workos.node().connection_oauth(), "accounts_max": SEVERAL_MAX }));
                 if self.shape == Shape::OneKeyMore {
                     rows.as_array_mut().expect("catalog").push(added_key_row());
                 }
                 rows.to_string()
             }),
             operator_key_values: SWAP_KEYS.iter().chain((self.shape == Shape::OneKeyMore).then_some(&ADDED_KEY)).map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
-            connection_secret_values: vec![("e2e-oauth".into(), "mock-connection-secret".into())],
+            connection_secret_values: vec![("e2e-oauth".into(), "mock-connection-secret".into()), (SEVERAL.into(), "mock-connection-secret".into())],
             swap_upstream: Some(self.upstream.node().url.clone()),
         };
         // its secrets go to wrangler's local store in the node's own state
@@ -658,7 +737,7 @@ impl Suite {
     fn suffix(&self) -> &'static str {
         match self.shape {
             Shape::TwoSites => BOATS,
-            Shape::Plain | Shape::FinitePrivate | Shape::SellsNothing | Shape::OneKeyMore => SUFFIX,
+            Shape::Plain | Shape::FinitePrivate | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore => SUFFIX,
         }
     }
 
@@ -670,6 +749,26 @@ impl Suite {
     pub fn crash(&mut self) -> Result<()> {
         anyhow::ensure!(!self.hosted_rules, "the hosted lane crashes no node: a section that does declares Need::Node");
         self.node.take().expect("a running node").crash()
+    }
+
+    /// Reloads the node's Worker as a deploy does: a new build of its shim
+    /// (a comment more), which `wrangler dev` runs as a new version, every
+    /// Durable Object starting again; back once wrangler says it is ready.
+    pub fn reload(&mut self) -> Result<()> {
+        anyhow::ensure!(!self.hosted_rules, "the hosted lane reloads no node: a section that does declares Need::Node");
+        let log = self.node.as_ref().context("a running node")?.log.clone();
+        let ready = || std::fs::read_to_string(&log).map(|t| t.matches("Local server updated and ready").count()).unwrap_or(0);
+        let before = ready();
+        let entry = self.project.join("entry.mjs");
+        let mut text = std::fs::read_to_string(&entry)?;
+        text.push_str(&format!("// reloaded at {}\n", api::now_ms()));
+        std::fs::write(&entry, text)?;
+        let t0 = Instant::now();
+        while ready() == before {
+            anyhow::ensure!(t0.elapsed() < Duration::from_secs(90), "the node did not reload within 90 s ({})", log.display());
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        Ok(())
     }
 
     /// Removes the containers the run's nodes left (devstack::containers),

@@ -43,8 +43,11 @@ pub fn delegation(s: &mut Suite, api: &Api) -> Result<()> {
     api.signed(&paul, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
     let r = api.signed(&paul, "PUT", &format!("/api/f/{name}/members/{skyler_id}"), Some(&json!({ "role": "editor", "peopleOnly": true })))?;
     s.ok("a share is the person's and their agents': one that asks otherwise is refused (400)", r.status == 400, &r);
-    let r = api.signed(&paul, "PUT", &format!("/api/f/{name}/members/{skyler_id}"), Some(&json!({ "role": "editor" })))?;
-    s.ok("Paul shares it with Skyler as an editor", r.status == 200 && r.body["role"] == "editor" && r.body.get("peopleOnly").is_none(), &r);
+    // an invite is to a person and their agents (decision 63): Skyler's yes
+    // reaches Skyler's agent, acting for them, unnamed
+    let invited = api.signed(&paul, "POST", &format!("/api/f/{name}/invites"), Some(&json!({ "email": Api::email_of(&skyler), "role": "editor" })))?;
+    let r = api.signed(&skyler, "POST", &format!("/api/invites/{name}/accept"), Some(&json!({})))?;
+    s.ok("Paul invites Skyler as an editor, and Skyler accepts", invited.status == 200 && r.status == 200 && r.body["role"] == "editor", format!("{invited} {r}"));
     let mut n = 0;
     let mut add = |for_skyler: bool| {
         n += 1;
@@ -56,26 +59,109 @@ pub fn delegation(s: &mut Suite, api: &Api) -> Result<()> {
     };
     let r = add(true)?;
     s.ok("Skyler's agent edits it, acting for Skyler", r.status == 200, &r);
+    // a person's membership is their agents' (decision 64: "when they
+    // accept they add their agent... treat them as one entity")
     let r = add(false)?;
-    s.ok("but alone, as itself, it reaches nothing (it is no member)", r.status == 403, &r);
+    let members = api.signed(&paul, "GET", &format!("/api/f/{name}/members"), None)?;
+    let row_of = |members: &crate::api::Reply, id: &str| members.body["members"].as_array().and_then(|m| m.iter().find(|m| m["principal"] == id).cloned()).unwrap_or_default();
+    let junipers = row_of(&members, &juniper_id);
+    let their_list = api.signed(&juniper, "GET", "/api/fragments", None)?;
+    let listed_there = their_list.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == name.as_str() && f["role"] == "editor"));
+    s.ok(
+        "Skyler's yes brought Skyler's agent in with them, at their role: it edits as itself, is a member (an agent, Skyler's), and its own list names the fragment",
+        r.status == 200 && junipers["kind"] == "agent" && junipers["owner"] == skyler_id.as_str() && junipers["role"] == "editor" && listed_there,
+        format!("{r} {junipers} {their_list}"),
+    );
 
     let r = api.op(&skyler, &name, "add_todo", "s1", json!({ "text": "from Skyler" }))?;
     s.ok("as Skyler does", r.status == 200, &r);
+    // Paul shared with Skyler and his agents, not "Skyler and his agent
+    // Juniper": none of Paul's views names it (the API's members list, the
+    // fragment's truth, has its row)
+    let access = api.signed(&paul, "GET", "/api/access", None)?;
+    let paul_session = api.sign_in(&Api::email_of(&paul))?;
+    let sheet = super::signin::with_session(api, "GET", &format!("/share/{name}"), &paul_session)?;
+    let row = access.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == name.as_str()).cloned()).unwrap_or_default();
+    s.ok(
+        "Paul sees Skyler, never Skyler's agent: the access view and the share sheet show Skyler as one entry, \"with their agents\", and neither names it",
+        access.status == 200
+            && sheet.status == 200
+            && sheet.text.contains(&Api::email_of(&skyler))
+            && sheet.text.contains("With their agents")
+            && row["members"].as_array().is_some_and(|m| m.len() == 1)
+            && row["sharing"]["guests"] == 1
+            && [&access.text, &sheet.text].iter().all(|t| !t.contains(&juniper_id)),
+        format!("{row} {}", sheet.status),
+    );
+    // its role is its person's: it follows theirs, and is set no other way
+    let own_role = api.signed(&paul, "PUT", &format!("/api/f/{name}/members/{juniper_id}"), Some(&json!({ "role": "viewer" })))?;
+    let lowered = api.signed(&paul, "PUT", &format!("/api/f/{name}/members/{skyler_id}"), Some(&json!({ "role": "viewer" })))?;
+    let after = row_of(&api.signed(&paul, "GET", &format!("/api/f/{name}/members"), None)?, &juniper_id);
+    let raised = api.signed(&paul, "PUT", &format!("/api/f/{name}/members/{skyler_id}"), Some(&json!({ "role": "editor" })))?;
+    s.ok(
+        "an agent in with its person holds their role: set on its own it is 400, saying so; Skyler lowered to viewer, it follows",
+        own_role.status == 400 && own_role.message().contains("its person") && lowered.status == 200 && after["role"] == "viewer" && raised.status == 200,
+        format!("{own_role} {lowered} {after}"),
+    );
 
     let held = |by: &Keys, held: serde_json::Value| api.signed(by, "PUT", &format!("/api/identities/{juniper_id}/held"), Some(&json!({ "held": held })));
     let r = held(&paul, json!("viewer"))?;
     s.ok("no one but its owner holds an agent", r.status == 403, &r);
     let r = held(&skyler, json!("owner"))?;
     s.ok("an agent is held at viewer or editor, never owner", r.status == 400, &r);
+    // a membership of its own elsewhere (one of before decision 64, no
+    // person of its in there: a lever makes it), which a hold never caps
+    let solo = s.named(api, &paul, "solo")?;
+    s.create(api, &paul, &solo)?;
+    let r = api.share(&solo, &juniper_id, "editor")?;
+    anyhow::ensure!(r.status == 200, "Skyler's agent on its own in {solo}: {r}");
     let r = held(&skyler, json!("viewer"))?;
     s.ok("Skyler holds the agent at viewer", r.status == 200, &r);
     let r = add(true)?;
-    s.ok("held below Skyler, it no longer edits", r.status == 403, &r);
+    let alone = add(false)?;
+    s.ok("held below Skyler, it no longer edits: acting for them, nor as itself, in with them (the hold secures the whole entity)", r.status == 403 && alone.status == 403, format!("{r} {alone}"));
+    let (with_person, on_its_own) = (api.status(&juniper, &name)?, api.status(&juniper, &solo)?);
+    s.ok(
+        "the hold caps it only where it is in with Skyler (a viewer there), never a membership of its own (an editor still, where Skyler is not)",
+        with_person.body["role"] == "viewer" && on_its_own.body["role"] == "editor",
+        format!("{} / {}", with_person.body["role"], on_its_own.body["role"]),
+    );
     let q = api.signed(&juniper, "POST", &format!("/api/f/{name}/ops/count?for={skyler_id}"), Some(&json!({ "id": "q1", "input": {} })))?;
     s.ok("and still reads", q.status == 200, &q);
     held(&skyler, Value::Null)?;
     let r = add(true)?;
     s.ok("let go, it edits again", r.status == 200, &r);
+
+    // an agent Skyler makes after their yes comes in beside them
+    let (later, later_id) = agent_of(api, &skyler)?;
+    let row = row_of(&api.signed(&paul, "GET", &format!("/api/f/{name}/members"), None)?, &later_id);
+    let r = api.signed(&later, "POST", &format!("/api/f/{name}/ops/add_todo"), Some(&json!({ "id": "later1", "input": { "text": "from Skyler's newer agent" } })))?;
+    s.ok(
+        "an agent Skyler makes after their yes comes in beside them, at their role, and edits as itself",
+        row["kind"] == "agent" && row["owner"] == skyler_id.as_str() && row["role"] == "editor" && r.status == 200,
+        format!("{row} {r}"),
+    );
+    // leaving, and removing, are the whole entity's
+    let in_now = |id: &str| -> Result<bool> { Ok(!row_of(&api.signed(&paul, "GET", &format!("/api/f/{name}/members"), None)?, id).is_null()) };
+    let left = api.signed(&juniper, "DELETE", &format!("/api/f/{name}/members/me"), None)?;
+    let (skyler_in, juniper_in, later_in) = (in_now(&skyler_id)?, in_now(&juniper_id)?, in_now(&later_id)?);
+    let alone = add(false)?;
+    let theirs = api.op(&skyler, &name, "add_todo", "s2", json!({ "text": "from Skyler, gone" }))?;
+    s.ok(
+        "one agent of Skyler's leaving takes the whole entity out: Skyler, it and their other agent; none edits now",
+        left.status == 200 && !skyler_in && !juniper_in && !later_in && alone.status == 403 && theirs.status == 403,
+        format!("{left} {alone} {theirs}"),
+    );
+    let invited = api.signed(&paul, "POST", &format!("/api/f/{name}/invites"), Some(&json!({ "email": Api::email_of(&skyler), "role": "viewer" })))?;
+    let yes = api.signed(&skyler, "POST", &format!("/api/invites/{name}/accept"), Some(&json!({})))?;
+    let back = (in_now(&skyler_id)?, in_now(&juniper_id)?, in_now(&later_id)?);
+    let removed = api.signed(&paul, "DELETE", &format!("/api/f/{name}/members/{skyler_id}"), None)?;
+    let out = (in_now(&skyler_id)?, in_now(&juniper_id)?, in_now(&later_id)?);
+    s.ok(
+        "invited again, Skyler's yes brings every agent of theirs back; Paul removing Skyler removes them all",
+        invited.status == 200 && yes.status == 200 && back == (true, true, true) && removed.status == 200 && out == (false, false, false),
+        format!("{yes} {removed} {back:?} {out:?}"),
+    );
     sharing(s, api)
 }
 
@@ -131,18 +217,26 @@ fn sharing(s: &mut Suite, api: &Api) -> Result<()> {
     let viewer = json!({ "role": "viewer" });
 
     // valid: Paul's agent, for Paul, shares Paul's app as Paul would
-    let added = hand_for_paul("PUT", &format!("members/{bob_id}"), Some(viewer.clone()))?;
+    let direct = hand_for_paul("PUT", &format!("members/{bob_id}"), Some(viewer.clone()))?;
     s.ok(
-        "Paul's agent, for Paul, adds Bob to Paul's app as a viewer, and the member names the agent as who added him",
+        "Paul's agent, for Paul, adding Bob directly is refused (403), as Paul's own would be, saying to invite him by email",
+        direct.status == 403 && direct.message().contains("invite them by email") && listed(api, &bob, &app)?.is_none(),
+        &direct,
+    );
+    let (_, spare_id) = agent_of(api, &paul)?;
+    let added = hand_for_paul("PUT", &format!("members/{spare_id}"), Some(viewer.clone()))?;
+    s.ok(
+        "it adds another agent of Paul's at once, and the member names the agent as who added it",
         added.status == 200 && added.body["role"] == "viewer" && added.body["addedBy"] == hand_id.as_str(),
         &added,
     );
-    let again = hand_for_paul("PUT", &format!("members/{bob_id}"), Some(viewer.clone()))?;
+    let again = hand_for_paul("PUT", &format!("members/{spare_id}"), Some(viewer.clone()))?;
     s.ok("the same PUT again is the same member (a replay)", again.status == 200 && again.body == added.body, json!({ "first": added.body, "again": again.body }));
+    let shared = api.share(&app, &bob_id, "viewer")?;
     let bobs = listed(api, &bob, &app)?;
-    s.ok("Bob sees it in his list, as a viewer", bobs.as_deref() == Some("viewer"), json!(bobs));
+    anyhow::ensure!(shared.status == 200 && bobs.as_deref() == Some("viewer"), "Bob shared with by a lever: {shared}");
     let r = hand_for_paul("PUT", &format!("members/{bob_id}"), Some(json!({ "role": "editor" })))?;
-    s.ok("it changes Bob's role", r.status == 200 && r.body["role"] == "editor" && r.body["addedBy"] == hand_id.as_str(), &r);
+    s.ok("it changes Bob's role", r.status == 200 && r.body["role"] == "editor", &r);
     let invited = format!("d-{}@e2e.test", &Keys::generate().pubkey_hex()[..12]);
     let r = hand_for_paul("POST", "invites", Some(json!({ "email": invited, "role": "viewer" })))?;
     s.ok(
@@ -154,6 +248,27 @@ fn sharing(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("lists the invites waiting", r.status == 200 && r.body["invites"].as_array().is_some_and(|a| a.iter().any(|i| i["email"] == invited.as_str())), &r);
     let r = hand_for_paul("DELETE", &format!("invites/{invited}"), None)?;
     s.ok("and revokes one", r.status == 200 && r.body["revoked"] == invited.as_str(), &r);
+    // an agent's invite to someone who signs in already waits for their
+    // yes too (decision 63): from Paul, as they see it; made by the agent
+    let cleo = api.person()?;
+    let r = hand_for_paul("POST", "invites", Some(json!({ "email": Api::email_of(&cleo), "role": "editor" })))?;
+    let theirs = api.signed(&cleo, "GET", "/api/invites", None)?;
+    let shown = theirs.body["invites"].as_array().and_then(|l| l.iter().find(|i| i["fragment"] == app.as_str()).cloned()).unwrap_or_default();
+    let yes = api.signed(&cleo, "POST", &format!("/api/invites/{app}/accept"), Some(&json!({})))?;
+    let cleo_id = api.identity(&cleo)?;
+    let members = api.signed(&paul, "GET", &format!("/api/f/{app}/members"), None)?;
+    let row = members.body["members"].as_array().and_then(|m| m.iter().find(|m| m["principal"] == cleo_id.as_str()).cloned()).unwrap_or_default();
+    s.ok(
+        "it invites someone who signs in already: the invite waits for their yes, theirs to see as from Paul; accepted, they are a member the agent added",
+        r.status == 200
+            && r.body["invited"]["createdBy"] == hand_id.as_str()
+            && shown["from"] == Api::email_of(&paul).as_str()
+            && shown["role"] == "editor"
+            && yes.status == 200
+            && row["role"] == "editor"
+            && row["addedBy"] == hand_id.as_str(),
+        json!([r.body, shown, yes.body, row]),
+    );
     let r = hand_for_paul("POST", "invites", Some(json!({ "email": Api::email_of(&paul), "role": "viewer" })))?;
     s.ok("an invite to Paul's own email is 400: Paul owns it", r.status == 400 && r.message().contains("owns it"), &r);
     let closed = api.page(&app, "", None)?;
@@ -203,14 +318,15 @@ fn sharing(s: &mut Suite, api: &Api) -> Result<()> {
         itself.status == 400 && paul_row.status == 400 && paul_out.status == 400,
         json!({ "itself": itself.body, "paulsRole": paul_row.body, "paulOut": paul_out.body }),
     );
-    let r = hand_for_paul("PUT", &format!("members/{skyler_id}"), Some(json!({ "role": "editor" })))?;
+    let r = hand_for_paul("POST", "invites", Some(json!({ "email": Api::email_of(&skyler), "role": "editor" })))?;
+    let yes = api.signed(&skyler, "POST", &format!("/api/invites/{app}/accept"), Some(&json!({})))?;
     hand_for_paul("PUT", "visibility", Some(json!({ "visibility": "members" })))?;
     let junipers = ask(&juniper, Some(&skyler_id), "GET", &app, "status", None)?;
     let skylers = api.status(&skyler, &app)?;
     s.ok(
-        "a share it makes is Skyler's and their agents': Skyler edits, and Skyler's agent, acting for them, reaches it too",
-        r.status == 200 && junipers.status == 200 && junipers.body["role"] == "editor" && skylers.status == 200 && skylers.body["role"] == "editor",
-        json!({ "share": r.body, "agent": junipers.status, "skyler": skylers.body["role"] }),
+        "an invite it makes is Skyler's and their agents': accepted, Skyler edits, and Skyler's agent, acting for them, reaches it too",
+        r.status == 200 && yes.status == 200 && junipers.status == 200 && junipers.body["role"] == "editor" && skylers.status == 200 && skylers.body["role"] == "editor",
+        json!({ "invite": r.body, "yes": yes.body, "agent": junipers.status, "skyler": skylers.body["role"] }),
     );
 
     // invalid: no one else's authority, and nothing that is the owner's own
@@ -227,7 +343,7 @@ fn sharing(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let theirs = s.named(api, &skyler, "shares-theirs")?;
     s.create(api, &skyler, &theirs)?;
-    api.signed(&skyler, "PUT", &format!("/api/f/{theirs}/members/{paul_id}"), Some(&json!({ "role": "editor" })))?;
+    api.share(&theirs, &paul_id, "editor")?;
     let add = ask(&hand, Some(&paul_id), "PUT", &theirs, &format!("members/{bob_id}"), Some(viewer.clone()))?;
     let open = ask(&hand, Some(&paul_id), "PUT", &theirs, "visibility", Some(json!({ "visibility": "public" })))?;
     s.ok("on a fragment Paul only edits (Skyler's), Paul's agent shares nothing", refused(&add) && refused(&open), json!({ "add": add.body, "visibility": open.body }));
@@ -241,8 +357,52 @@ fn sharing(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "add": add.body, "rotate": rotate.body }),
     );
     hold(Value::Null)?;
-    let r = hand_for_paul("PUT", &format!("members/{bob_id}"), Some(viewer.clone()))?;
+    let r = hand_for_paul("PUT", &format!("members/{spare_id}"), Some(json!({ "role": "editor" })))?;
     s.ok("let go, it shares again", r.status == 200, &r);
+
+    // it reads and answers the invites waiting for Paul's yes, acting for
+    // him (Paul, 2026-10-22: "skyler invited me to edit a fragment, do you
+    // see it?"), and no other agent does, nor it as itself, nor held
+    let (yes_to, no_to) = (s.named(api, &skyler, "asks-paul")?, s.named(api, &skyler, "asks-paul-too")?);
+    for f in [&yes_to, &no_to] {
+        s.create(api, &skyler, f)?;
+        let r = api.signed(&skyler, "POST", &format!("/api/f/{f}/invites"), Some(&json!({ "email": Api::email_of(&paul), "role": "editor" })))?;
+        anyhow::ensure!(r.status == 200, "Skyler invites Paul to {f}: {r}");
+    }
+    let waiting = |keys: &Keys, asker: Option<&str>| api.signed(keys, "GET", &asker.map_or("/api/invites".to_string(), |a| format!("/api/invites?for={a}")), None);
+    let seen = waiting(&hand, Some(&paul_id))?;
+    let names: Vec<&str> = seen.body["invites"].as_array().into_iter().flatten().filter(|i| i["from"] == Api::email_of(&skyler).as_str()).filter_map(|i| i["fragment"].as_str()).collect();
+    let (alone, theirs, as_person) = (waiting(&hand, None)?, waiting(&juniper, Some(&paul_id))?, waiting(&paul, Some(&paul_id))?);
+    s.ok(
+        "acting for Paul, it lists the invites waiting for his yes (from Skyler, to his email); as itself it is 403, so is Skyler's agent naming Paul, and a person naming `for` is 400",
+        seen.status == 200 && names.contains(&yes_to.as_str()) && names.contains(&no_to.as_str()) && alone.status == 403 && theirs.status == 403 && as_person.status == 400,
+        format!("{seen} {alone} {theirs} {as_person}"),
+    );
+    hold(json!("editor"))?;
+    let held_seen = waiting(&hand, Some(&paul_id))?;
+    let held_yes = api.signed(&hand, "POST", &format!("/api/invites/{yes_to}/accept?for={paul_id}"), Some(&json!({})))?;
+    hold(Value::Null)?;
+    s.ok("held below Paul, it neither reads nor answers them (403)", held_seen.status == 403 && held_yes.status == 403 && listed(api, &paul, &yes_to)?.is_none(), format!("{held_seen} {held_yes}"));
+    let yes = api.signed(&hand, "POST", &format!("/api/invites/{yes_to}/accept?for={paul_id}"), Some(&json!({})))?;
+    let no = api.signed(&hand, "POST", &format!("/api/invites/{no_to}/decline?for={paul_id}"), Some(&json!({})))?;
+    let after = waiting(&paul, None)?;
+    let left = after.body["invites"].as_array().into_iter().flatten().filter(|i| i["from"] == Api::email_of(&skyler).as_str()).count();
+    let joined = api.signed(&skyler, "GET", &format!("/api/f/{yes_to}/members"), None)?;
+    let row_in = |id: &str| joined.body["members"].as_array().into_iter().flatten().find(|m| m["principal"] == id).cloned().unwrap_or_default();
+    let (paul_row, hand_row) = (row_in(&paul_id), row_in(&hand_id));
+    s.ok(
+        "its yes makes Paul a member, in his list, and his agents with him (decision 64), it among them; its no takes the other back; neither waits for him now",
+        yes.status == 200
+            && yes.body["role"] == "editor"
+            && no.status == 200
+            && listed(api, &paul, &yes_to)?.as_deref() == Some("editor")
+            && listed(api, &paul, &no_to)?.is_none()
+            && left == 0
+            && paul_row["kind"] == "person"
+            && hand_row["kind"] == "agent"
+            && hand_row["owner"] == paul_id.as_str(),
+        format!("{yes} {no} {after} {joined}"),
+    );
     let deleted = hand_for_paul("DELETE", "", None)?;
     let capped = hand_for_paul("PUT", "cap", Some(json!({ "id": "agent-cap", "micros": 1 })))?;
     let still = api.status(&paul, &app)?;

@@ -116,7 +116,11 @@ async fn streaming_drafts_then_the_final() {
     bridge.stop().await;
 }
 
-/// Goal: a tool call is a step on `work`, before the reply.
+/// Goal (Paul, 2026-10-24: everything the agent says is a reply in the
+/// chat): a tool call is a step on `work`; the words the agent said before
+/// it are a reply of their own, posted before the step and marked
+/// `interim` (its turn worked on after them), never the step's; the turn's
+/// answer is a reply after it.
 #[tokio::test]
 async fn tool_steps() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
@@ -131,10 +135,15 @@ async fn tool_steps() {
         let steps = w.bodies(&chat, "work", "turn.step");
         assert_eq!(steps.len(), 1);
         assert_eq!((steps[0]["tool"].as_str(), steps[0]["step"].as_u64(), steps[0]["ok"].as_bool(), steps[0]["turn"].as_str()), (Some("search"), Some(1), Some(true), Some(turn.as_str())));
-        assert_eq!(steps[0]["text"], "Let me look.");
+        assert!(steps[0].get("text").is_none(), "the words are no part of the step: {}", steps[0]);
         assert_eq!((&steps[0]["category"], &steps[0]["args"]), (&json!("web"), &json!("use a tool")), "what it does, and its preview");
         let ids: Vec<String> = w.records(&chat, "work").iter().map(|r| r["body"]["kind"].as_str().unwrap_or("").to_string()).collect();
         assert_eq!(ids, vec!["turn.start", "commands", "turn.step", "turn.end"]);
+        let replies: Vec<Value> = w.records(&chat, "chat").into_iter().filter(|r| r["body"]["turn"] == turn).collect();
+        let bodies: Vec<Value> = replies.iter().map(|r| r["body"].clone()).collect();
+        assert_eq!(bodies, vec![json!({ "text": "Let me look.", "turn": turn, "interim": true }), json!({ "text": "echo: [paul] use a tool", "turn": turn })], "its words, then its answer");
+        let step_at = w.records(&chat, "work").into_iter().find(|r| r["body"]["kind"] == "turn.step").and_then(|r| r["at"].as_i64());
+        assert!(replies[0]["at"].as_i64() < step_at && step_at < replies[1]["at"].as_i64(), "the words, the step, then the answer: {replies:?} {step_at:?}");
     });
     bridge.stop().await;
 }
@@ -787,7 +796,40 @@ async fn a_group_mention_picks_the_agent() {
         let r = replies(w, &group);
         assert_eq!(r[2]["to"], json!(["npub1rowan"]), "juniper's reply hands off");
         assert_eq!(r[2]["hop"], 1);
-        assert!(r[3]["text"].as_str().unwrap().starts_with("echo: [someone]"), "rowan answers juniper's message");
+        assert!(r[3]["text"].as_str().unwrap().starts_with("echo: [Juniper]"), "rowan answers juniper's message, told it by its name: {}", r[3]["text"]);
+    });
+    bridge.stop().await;
+}
+
+/// Goal (Alex's review of #631): a chat's writers keep their names past
+/// one `__people` call's 64. In a chat of its owner, two agents and 63 more
+/// people (66 to name), the last person's message is told by their email,
+/// and the other agent's hand-off by its name: whoever writes is asked
+/// first, and one past the bound is left unnamed, so its first record asks.
+#[tokio::test]
+async fn names_hold_past_one_people_call() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper", "rowan"]).await;
+    let crowd = fake.chat("crowd", &["juniper", "rowan"]);
+    fake.with(|w| {
+        let f = w.fragments.get_mut(&crowd).expect("the chat");
+        for i in 0..63 {
+            f.members.push(support::fake::Member { principal: person(&format!("p{i}")), role: "editor".into(), kind: "person".into(), added_at: 100 + i });
+            w.names.insert(person(&format!("p{i}")), format!("p{i}@example.test"));
+        }
+    });
+    let dir = support::dir("crowd");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 4).await;
+    fake.say(&crowd, &person("p62"), json!({ "text": "hello from the back", "to": ["npub1juniper"] }));
+    fake.until(WAIT, "juniper's answer to the last person", |w| replies(w, &crowd).len() == 1).await;
+    // rowan's reply names juniper: a hand-off, which juniper is told by rowan's name
+    fake.say(&crowd, &person("paul"), json!({ "text": "rowan, ask @juniper too", "to": ["npub1rowan"] }));
+    fake.until(WAIT, "rowan's hand-off, and juniper's answer to it", |w| replies(w, &crowd).len() == 3).await;
+    fake.with(|w| {
+        let r = replies(w, &crowd);
+        assert!(r[0]["text"].as_str().unwrap().starts_with("echo: [p62@example.test] hello from the back"), "the 64th person, by their email: {}", r[0]["text"]);
+        assert_eq!(r[1]["to"], json!(["npub1juniper"]), "rowan's reply hands off");
+        assert!(r[2]["text"].as_str().unwrap().starts_with("echo: [Rowan]"), "the other agent, by its name: {}", r[2]["text"]);
     });
     bridge.stop().await;
 }
@@ -871,6 +913,391 @@ async fn a_routine_is_a_turn() {
     bridge.stop().await;
 }
 
+/// Goal (Paul, 2026-10-26: "everything proactive goes home"): a routine
+/// that names no chat runs in its agent's home as it fires: its own chat
+/// (`<label>-chat`) with no agent.json; its SimpleX chat, the one its link
+/// names (its `link.json`), once agent.json's `home` says `simplex`. A home
+/// that cannot be read (its owner's list refused) loses no fire: it is read
+/// again, and the routine runs once. A restart reads the fires again and
+/// runs none twice; its link let go, `simplex` is its own chat; one with no
+/// chat of its own at all runs nowhere.
+#[tokio::test]
+async fn a_routine_with_no_chat_runs_at_home() {
+    use fragment_bridge::simplex::{link, run};
+    let fake = Fake::start("127.0.0.1:0", &["juniper", "maple"]).await;
+    let own = fake.chat_named("juniper-chat--h6j7", &["juniper"]);
+    let simplex = fake.chat_named("juniper-simplex--w9x2", &["juniper"]);
+    let dir = support::dir("routine-home");
+    // its link, bound, naming its SimpleX chat (no core runs here)
+    let linked = |phase: link::Phase| {
+        let l = link::Link { phase, ..Default::default() };
+        let saved = run::Saved { identity: "npub1juniper".into(), generation: 1, link: l, used: Default::default(), abandoned: Default::default(), receiving: Default::default(), sending: Default::default(), chat: Some(simplex.clone()) };
+        run::store(&dir.join("simplex").join("juniper--k3x9"), &saved).expect("its link's file");
+    };
+    linked(link::Phase::Linked { contact: 3, name: "paul".into() });
+    let config = || {
+        let mut cfg = support::config(&fake.url(), &dir, support::settings());
+        cfg.simplex = Some(run::Config { bin: dir.join("no-core"), dir: dir.join("simplex"), smp: None, xftp: None });
+        cfg
+    };
+    let bridge = support::start(config(), support::script());
+    following(&fake, 4).await;
+    let home = |text: &str| json!({ "kind": "routine", "text": text });
+    let said = |w: &World, chat: &str| replies(w, chat).iter().filter_map(|r| r["text"].as_str().map(str::to_string)).collect::<Vec<_>>();
+    // no agent.json: its own chat
+    fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1juniper", home("water the plants")));
+    fake.until(WAIT, "the routine in its own chat", |w| said(w, &own).len() == 1).await;
+    // its home its SimpleX chat: the one its link names
+    fake.with(|w| w.fragments.get_mut("juniper--k3x9").expect("its fragment").files.insert("agent.json".into(), bytes::Bytes::from(r#"{"tier":"cheap","home":"simplex"}"#)));
+    fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1paul", home("call mom")));
+    fake.until(WAIT, "the routine in its SimpleX chat", |w| said(w, &simplex).len() == 1).await;
+    // its home unread at first: read again, and run once
+    fake.with(|w| {
+        w.fail_lists = 2;
+        w.append("juniper--k3x9", "tasks", "npub1paul", home("check the shelf"));
+    });
+    fake.until(WAIT * 2, "the routine whose home was read again", |w| said(w, &simplex).len() == 2).await;
+    // maple has no chat of its own: its routine runs nowhere
+    fake.with(|w| w.append("maple--k3x9", "tasks", "npub1paul", home("nowhere to go")));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    bridge.stop().await;
+    // a restart, its link let go: the fires read again run nothing twice, and `simplex` is its own chat
+    linked(link::Phase::Off);
+    let bridge = support::start(config(), support::script());
+    following(&fake, 4).await;
+    fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1paul", home("feed the cat")));
+    fake.until(WAIT, "the routine back in its own chat", |w| said(w, &own).len() == 2).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    bridge.stop().await;
+    fake.with(|w| {
+        assert_eq!(said(w, &own), ["echo: [your routine] water the plants", "echo: [your routine] feed the cat"]);
+        assert_eq!(said(w, &simplex), ["echo: [your routine] call mom", "echo: [your routine] check the shelf"], "nothing again after a restart");
+        let maples: Vec<Value> = w.fragments.values().flat_map(|f| f.channels.get("work").map(|c| c.records.clone()).unwrap_or_default()).filter(|r| r["body"]["kind"] == "turn.start" && r["body"]["agent"] == "npub1maple").collect();
+        assert!(maples.is_empty(), "maple's routine ran nowhere: {maples:?}");
+    });
+}
+
+/// Goal (Alex's review of #620): a routine whose home is its SimpleX chat,
+/// named by its link and not made yet (its making refused for now, or a
+/// restart between its naming and its making), waits for it: it is neither
+/// dropped nor run elsewhere, a restart between, and runs there once it is
+/// made, once. One that has waited its most (`limits::HOME_CHAT_WAIT_MS`
+/// after it fired: here, a computer off meanwhile) runs in its own chat.
+#[tokio::test]
+async fn a_routine_waits_for_its_simplex_chat() {
+    use fragment_bridge::simplex::{link, run};
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let own = fake.chat_named("juniper-chat--h6j7", &["juniper"]);
+    let simplex = "juniper-simplex--w9x2".to_string();
+    let dir = support::dir("routine-waits");
+    // its link, bound, naming its SimpleX chat (no core runs here), whose making the platform refuses for now
+    let l = link::Link { phase: link::Phase::Linked { contact: 3, name: "paul".into() }, ..Default::default() };
+    let saved = run::Saved { identity: "npub1juniper".into(), generation: 1, link: l, used: Default::default(), abandoned: Default::default(), receiving: Default::default(), sending: Default::default(), chat: Some(simplex.clone()) };
+    run::store(&dir.join("simplex").join("juniper--k3x9"), &saved).expect("its link's file");
+    fake.with(|w| {
+        w.refuse_makes = true;
+        w.fragments.get_mut("juniper--k3x9").expect("its fragment").files.insert("agent.json".into(), bytes::Bytes::from(r#"{"tier":"cheap","home":"simplex"}"#));
+    });
+    let config = || {
+        let mut cfg = support::config(&fake.url(), &dir, support::settings());
+        cfg.simplex = Some(run::Config { bin: dir.join("no-core"), dir: dir.join("simplex"), smp: None, xftp: None });
+        cfg
+    };
+    let home = |text: &str| json!({ "kind": "routine", "text": text });
+    let said = |w: &World, chat: &str| replies(w, chat).iter().filter_map(|r| r["text"].as_str().map(str::to_string)).collect::<Vec<_>>();
+    // a first life, so what fires next is read from its cursor
+    let bridge = support::start(config(), support::script());
+    following(&fake, 2).await;
+    bridge.stop().await;
+    // fired 11 minutes ago, the computer off and its chat not made since: its own chat
+    fake.with(|w| {
+        w.append("juniper--k3x9", "tasks", "npub1paul", home("water the plants"));
+        let fired = i64::try_from(fragment_bridge::log::now_ms()).expect("ms") - 11 * 60 * 1000;
+        w.fragments.get_mut("juniper--k3x9").expect("its fragment").channels.get_mut("tasks").expect("its tasks").records.last_mut().expect("the routine")["at"] = json!(fired);
+    });
+    let bridge = support::start(config(), support::script());
+    following(&fake, 2).await;
+    fake.until(WAIT, "the routine that waited its most, in its own chat", |w| said(w, &own).len() == 1).await;
+    // fired now, its chat's making refused: it waits, run nowhere
+    fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1paul", home("call mom")));
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    bridge.stop().await;
+    // a restart, its making still refused: it still waits (its home read again, its routine run nowhere)
+    let home_reads = |w: &World| w.requests.iter().filter(|r| r.0 == "GET /api/f/juniper--k3x9/file" && r.1.contains("agent.json")).count();
+    let asked = fake.with(|w| home_reads(w));
+    let bridge = support::start(config(), support::script());
+    fake.until(WAIT, "its home read again after the restart", |w| home_reads(w) > asked).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    bridge.stop().await;
+    fake.with(|w| {
+        assert_eq!(said(w, &own), ["echo: [your routine] water the plants"], "nothing else in its own chat");
+        assert!(w.made.is_empty() && !w.fragments.contains_key(&simplex), "its SimpleX chat not made");
+        w.refuse_makes = false;
+    });
+    // its chat made by its name (its poster's `ensure_chat`; no core runs here to start one): the routine runs there
+    let bridge = support::start(config(), support::script());
+    let api = fragment_bridge::api::Api::new(&fake.url()).expect("an address");
+    let juniper = fragment_bridge::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None };
+    run::ensure_chat(&api, &juniper, &simplex).await.expect("made");
+    fake.until(WAIT, "the routine in its SimpleX chat", |w| said(w, &simplex).len() == 1).await;
+    bridge.stop().await;
+    // a restart: the fires read again, nothing runs twice
+    let bridge = support::start(config(), support::script());
+    following(&fake, 3).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    bridge.stop().await;
+    fake.with(|w| {
+        assert_eq!(said(w, &own), ["echo: [your routine] water the plants"]);
+        assert_eq!(said(w, &simplex), ["echo: [your routine] call mom"], "once, there");
+        assert_eq!(w.made, std::slice::from_ref(&simplex), "made once");
+    });
+}
+/// Goal (Paul, 2026-10-26: "SimpleX is a chat of its own"; Alex's review
+/// of #620): an agent's SimpleX chat is made by the name its link chose,
+/// once, for its owner: theirs, titled SimpleX, the agent its maker and an
+/// editor (told so on its `tasks`). Made again by that name after a
+/// restart, its owner's and its own lists stale (they show none of it), it
+/// is found made, never a second; a name that is a chat someone else owns,
+/// or one the agent is not in, is taken; a platform that does not answer
+/// is tried again.
+#[tokio::test]
+async fn its_simplex_chat_is_made_once_by_its_name() {
+    use fragment_bridge::simplex::run::{ensure_chat, ChatNot};
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let theirs = fake.chat_named("juniper-simplex--r7t5", &["juniper"]);
+    fake.with(|w| w.fragments.get_mut(&theirs).expect("a chat").members.retain(|m| m.principal != "npub1paul"));
+    fake.add_member(&theirs, "npub1skyler", "owner");
+    let left = fake.chat_named("juniper-simplex--s5t6", &[]);
+    let api = fragment_bridge::api::Api::new(&fake.url()).expect("an address");
+    let juniper = fragment_bridge::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None };
+    let chat = "juniper-simplex--w9x2";
+    ensure_chat(&api, &juniper, chat).await.expect("made");
+    fake.with(|w| {
+        let f = &w.fragments[chat];
+        assert_eq!((f.kind.as_str(), f.title.as_str()), ("chat", "SimpleX"));
+        assert!(f.members.iter().any(|m| m.principal == "npub1paul" && m.role == "owner") && f.members.iter().any(|m| m.principal == "npub1juniper" && m.role == "editor"));
+        assert_eq!(w.bodies("juniper--k3x9", "tasks", "joined").last().map(|b| b["fragment"].clone()), Some(json!(chat)), "told as a join");
+    });
+    // a restart before the lists catch up: they show none of it, and the same name is found made
+    fake.with(|w| w.fail_lists = 10);
+    ensure_chat(&api, &juniper, chat).await.expect("found made");
+    fake.with(|w| {
+        assert_eq!(w.made, [chat.to_string()], "made once");
+        w.fail_lists = 0;
+    });
+    // someone else's, and one it is not in: taken
+    assert!(matches!(ensure_chat(&api, &juniper, &theirs).await, Err(ChatNot::Taken)), "someone else's");
+    assert!(matches!(ensure_chat(&api, &juniper, &left).await, Err(ChatNot::Taken)), "one it is not in");
+    // the platform down: tried again
+    fake.with(|w| w.down = true);
+    assert!(matches!(ensure_chat(&api, &juniper, "juniper-simplex--x3y4").await, Err(ChatNot::Made(_))));
+    fake.with(|w| w.down = false);
+    fake.with(|w| assert_eq!(w.made, [chat.to_string()], "nothing else made"));
+}
+
+/// Goal (the XFTP relay): the SimpleX cores' proxy sends a connection to a
+/// host the platform's relay carries through the relay, its bytes untouched
+/// both ways, and anything else straight out of the computer; a host the
+/// platform then refuses is SOCKS's "not allowed", and carries nothing.
+/// Method: the core's own handshake (a user name and password, CONNECT to
+/// a name) against the proxy in process, the fake platform's relay piping
+/// to an echo server standing for a file server.
+#[tokio::test]
+async fn the_cores_proxy_relays_what_the_platform_carries() {
+    use fragment_bridge::api::{Api, RelayOffer};
+    use fragment_bridge::simplex::socks;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("an echo server");
+    let echo_at = echo.local_addr().expect("its address");
+    tokio::spawn(async move {
+        // bounded by the test
+        loop {
+            let Ok((mut s, _)) = echo.accept().await else { return };
+            tokio::spawn(async move {
+                let (mut r, mut w) = s.split();
+                let _ = tokio::io::copy(&mut r, &mut w).await;
+            });
+        }
+    });
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    fake.with(|w| {
+        w.relay_to.insert("xftp3.simplex.im".into(), echo_at);
+    });
+    let offer = RelayOffer { hosts: vec!["xftp3.simplex.im".into(), "xftp4.simplex.im".into()], port: 443 };
+    let (_offer_tx, offer_rx) = tokio::sync::watch::channel(Some(offer));
+    let (stop_tx, stop) = tokio::sync::watch::channel(false);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("the proxy's port");
+    let proxy = listener.local_addr().expect("its address");
+    tokio::spawn(socks::serve(listener, Api::new(&fake.url()).expect("the fake's address"), offer_rx, stop));
+    // the core's handshake to `host`:`port`, then its reply code
+    async fn to(proxy: std::net::SocketAddr, host: &str, port: u16) -> (tokio::net::TcpStream, u8) {
+        let mut c = tokio::net::TcpStream::connect(proxy).await.expect("the proxy answers");
+        let mut b = vec![5, 2, 0, 2, 1, 3, b'u', b's', b'r', 2, b'p', b'w', 5, 1, 0, 3, host.len() as u8];
+        b.extend(host.as_bytes());
+        b.extend(port.to_be_bytes());
+        c.write_all(&b).await.expect("its handshake");
+        let mut said = [0u8; 2 + 2 + 10];
+        c.read_exact(&mut said).await.expect("its replies");
+        assert_eq!(said[..5], [5, 2, 1, 0, 5], "the user name method, taken, then a reply");
+        (c, said[5])
+    }
+    async fn echoed(c: &mut tokio::net::TcpStream, said: &[u8]) -> Vec<u8> {
+        c.write_all(said).await.expect("sent");
+        let mut back = vec![0u8; said.len()];
+        c.read_exact(&mut back).await.expect("echoed");
+        back
+    }
+    // relayed: carried both ways, untouched (bytes no TLS would let through a proxy that read them)
+    let (mut c, code) = to(proxy, "XFTP3.simplex.im", 443).await;
+    assert_eq!(code, socks::reply::SUCCEEDED);
+    let said: Vec<u8> = (0..=255u8).cycle().take(40_000).collect();
+    assert_eq!(echoed(&mut c, &said).await, said);
+    drop(c);
+    fake.until(WAIT, "the relay to close", |w| w.relayed.len() == 1).await;
+    fake.with(|w| assert_eq!(w.relayed, ["xftp3.simplex.im 40000 40000"], "the host the list names, every byte each way"));
+    // straight out: an address (the echo server itself), never the relay
+    let mut c = tokio::net::TcpStream::connect(proxy).await.expect("the proxy answers");
+    let mut b = vec![5, 1, 0, 5, 1, 0, 1, 127, 0, 0, 1];
+    b.extend(echo_at.port().to_be_bytes());
+    c.write_all(&b).await.expect("a plain handshake");
+    let mut said = [0u8; 2 + 10];
+    c.read_exact(&mut said).await.expect("its replies");
+    assert_eq!(said[..4], [5, 0, 5, socks::reply::SUCCEEDED]);
+    assert_eq!(echoed(&mut c, b"straight out").await, b"straight out");
+    drop(c);
+    // offered by the view, refused by the platform: not allowed, nothing carried
+    let (mut c, code) = to(proxy, "xftp4.simplex.im", 443).await;
+    assert_eq!(code, socks::reply::NOT_ALLOWED);
+    let mut rest = vec![];
+    let _ = c.read_to_end(&mut rest).await;
+    assert!(rest.is_empty(), "nothing carried after a refusal");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    fake.with(|w| assert_eq!(w.relayed.len(), 1, "neither went through the relay"));
+    let _ = stop_tx.send(true);
+}
+
+/// Goal (Alex's review of #611): a stalled peer on either side never holds
+/// a relayed session. A core that stops reading still sends its own bytes
+/// up, and its session ends by itself once what waits for it passes its
+/// bound, closing the relay; a server that stops reading leaves the session
+/// to end at `stop` at once. Method: the proxy in process, the fake
+/// platform's relay piping to a server that floods, then to one that never
+/// reads.
+#[tokio::test]
+async fn a_stalled_peer_never_holds_the_relay() {
+    use fragment_bridge::api::{Api, RelayOffer};
+    use fragment_bridge::simplex::socks;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // a server that floods what it sends, and says what it heard
+    let flood = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a flood");
+    let flood_at = flood.local_addr().expect("its address");
+    let (heard_tx, mut heard) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    tokio::spawn(async move {
+        let Ok((s, _)) = flood.accept().await else { return };
+        let (mut r, mut w) = s.into_split();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            // bounded by its peer's end
+            while let Ok(n) = r.read(&mut buf).await {
+                if n == 0 || heard_tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        let chunk = vec![7u8; 64 * 1024];
+        for _ in 0..512 {
+            if w.write_all(&chunk).await.is_err() {
+                break;
+            }
+        }
+    });
+    // a server that takes the connection and never reads it
+    let deaf = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a deaf one");
+    let deaf_at = deaf.local_addr().expect("its address");
+    tokio::spawn(async move {
+        let mut held = vec![];
+        // bounded by the test
+        while let Ok((s, _)) = deaf.accept().await {
+            held.push(s);
+        }
+    });
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    fake.with(|w| {
+        w.relay_to.insert("xftp1.simplex.im".into(), flood_at);
+        w.relay_to.insert("xftp2.simplex.im".into(), deaf_at);
+    });
+    let offer = RelayOffer { hosts: vec!["xftp1.simplex.im".into(), "xftp2.simplex.im".into()], port: 443 };
+    let (_offer_tx, offer_rx) = tokio::sync::watch::channel(Some(offer));
+    let (stop_tx, stop) = tokio::sync::watch::channel(false);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("the proxy's port");
+    let proxy = listener.local_addr().expect("its address");
+    tokio::spawn(socks::serve(listener, Api::new(&fake.url()).expect("the fake's address"), offer_rx, stop));
+    async fn to(proxy: std::net::SocketAddr, host: &str) -> tokio::net::TcpStream {
+        let mut c = tokio::net::TcpStream::connect(proxy).await.expect("the proxy answers");
+        let mut b = vec![5, 1, 0, 5, 1, 0, 3, host.len() as u8];
+        b.extend(host.as_bytes());
+        b.extend(443u16.to_be_bytes());
+        c.write_all(&b).await.expect("its handshake");
+        let mut said = [0u8; 2 + 10];
+        c.read_exact(&mut said).await.expect("its replies");
+        assert_eq!(said[..4], [5, 0, 5, socks::reply::SUCCEEDED]);
+        c
+    }
+
+    // a core that never reads: its own bytes still go up, and its session ends by itself
+    let mut core = to(proxy, "xftp1.simplex.im").await;
+    core.write_all(b"upstream marker").await.expect("sent up");
+    let mut got = vec![];
+    let up = tokio::time::timeout(Duration::from_secs(5), async {
+        // bounded by the timeout
+        while !got.ends_with(b"upstream marker") {
+            match heard.recv().await {
+                Some(b) => got.extend(b),
+                None => break,
+            }
+        }
+    })
+    .await;
+    assert!(up.is_ok() && got.ends_with(b"upstream marker"), "its bytes up arrive while what comes down waits for it: {got:?}");
+    fake.until(10_000, "the stalled core's relay to close by itself", |w| w.relayed.iter().any(|r| r.starts_with("xftp1.simplex.im "))).await;
+
+    // a server that never reads: the core's writes back up, and `stop` ends the session at once
+    let deafened = to(proxy, "xftp2.simplex.im").await;
+    let (mut r, mut w) = deafened.into_split();
+    tokio::spawn(async move {
+        let chunk = vec![1u8; 64 * 1024];
+        // bounded by its session's end
+        while w.write_all(&chunk).await.is_ok() {}
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let t0 = Instant::now();
+    let _ = stop_tx.send(true);
+    let mut buf = [0u8; 16];
+    let ended = tokio::time::timeout(Duration::from_secs(3), r.read(&mut buf)).await;
+    assert!(matches!(ended, Ok(Ok(0)) | Ok(Err(_))), "its session ended at `stop`: {ended:?}");
+    assert!(t0.elapsed() < Duration::from_secs(3), "at once, not at a write's stall: {:?}", t0.elapsed());
+}
+
+/// Goal: a bridge whose image names a SimpleX core says so at its reads
+/// of its computer (`?simplex=1`), so its owner's Settings offer SimpleX;
+/// one whose image names none (production's before SimpleX, the stub)
+/// never does, and Settings offer nothing.
+#[tokio::test]
+async fn its_reads_say_whether_its_image_does_simplex() {
+    for simplex in [false, true] {
+        let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+        fake.chat("talk", &["juniper"]);
+        let dir = support::dir(if simplex { "simplex-said" } else { "simplex-unsaid" });
+        let mut cfg = support::config(&fake.url(), &dir, support::settings());
+        // nothing linked: no core is run, so none need be there
+        cfg.simplex = simplex.then(|| fragment_bridge::simplex::run::Config { bin: dir.join("no-core"), dir: dir.join("simplex"), smp: None, xftp: None });
+        let bridge = support::start(cfg, support::script());
+        following(&fake, 2).await;
+        fake.with(|w| assert_eq!((w.simplex_said > 0, w.simplex_unsaid > 0), (simplex, !simplex), "simplex {simplex}"));
+        bridge.stop().await;
+    }
+}
+
 /// Goal: SIGTERM means stop now: the real binary exits within 5 s of it,
 /// even mid-turn, with its keepalive and sockets closed.
 #[tokio::test]
@@ -907,6 +1334,34 @@ async fn sigterm_exits_within_five_seconds() {
     assert!(took < Duration::from_secs(5), "exited in {took:?}");
     eprintln!("sigterm: exited in {} ms", took.as_millis());
     fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0 && w.keepalive_open == 0).await;
+}
+
+/// Goal (#557): a keepalive whose platform side a deploy cut, with no
+/// close reaching the bridge, is opened again while its turn still runs:
+/// silent twice its ping, it is dropped and opened afresh, so the platform
+/// holds the computer awake for that turn again. One that answers its
+/// pings is never dropped, however many pings long its turn runs.
+#[tokio::test]
+async fn a_keepalive_a_deploy_cut_is_opened_again() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("keepalive-cut");
+    let mut cfg = support::config(&fake.url(), &dir, support::settings());
+    cfg.keepalive_ping = Duration::from_millis(250);
+    // `slow` is twenty drafts: four seconds, sixteen pings
+    let bridge = support::start(cfg, support::script_paced(Duration::from_millis(200)));
+    following(&fake, 2).await;
+    fake.say(&chat, &person("paul"), json!({ "text": "slow, its pings answered" }));
+    fake.until(WAIT, "held, then let go at its end, once", |w| w.keepalive_log == [true, false]).await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "slow, then cut" }));
+    fake.until(WAIT, "its turn running", |w| w.keepalive_open == 1 && w.keepalive_log.len() == 3).await;
+    fake.cut_keepalives();
+    fake.until(WAIT, "opened again as it runs", |w| w.keepalive_open == 1 && keepalive_opens(w) == 3).await;
+    let turn = turn_of("juniper", &chat, seq(&said));
+    fake.with(|w| assert!(ends_of(w, &chat, &turn).is_empty(), "still running as it was opened again"));
+    fake.until(WAIT, "let go at its end", |w| !ends_of(w, &chat, &turn).is_empty() && w.keepalive_open == 0).await;
+    fake.with(|w| assert_eq!(w.keepalive_log, [true, false, true, false, true, false]));
+    bridge.stop().await;
 }
 
 /// Invalid: a corrupt state file is refused, not repaired, and not run on.

@@ -28,6 +28,18 @@
 //! and the route lists those ids; a call that hangs is the caller's to give
 //! up on (the route never tries again on its own); and a job's `ai.text`
 //! runs there too, falling back the same, a tool loop among its steps.
+//!
+//! Then the private tier (deploy/example.jsonc's third alternative), on a
+//! node of its own shape: its tiers and `vision` on Finite Private and its
+//! fallback on Tinfoil's DeepSeek V4.1 Flash, a model only the config
+//! names, on a key of its own, at the list price its slot names, saying it
+//! reads images. What it proves: a call Finite Private fails before
+//! answering is made once more on Tinfoil with Tinfoil's key (never Finite
+//! Private's), streamed or not, a job's step too, and charged at that
+//! price, its cached tokens at theirs; a `vision` call runs on Finite
+//! Private and falls back the same, its image sent on as it came; the
+//! route's `fallback` runs there; and Tinfoil's key refused is the call's
+//! failure, charged nothing and logged aloud.
 
 use std::time::Duration;
 
@@ -43,7 +55,7 @@ use super::app::ship;
 use super::jobs::{settle, started};
 use super::ledger::{charged, entries, logged, quiet, usage};
 use crate::api::{Api, Call};
-use crate::{Suite, FINITE_PRIVATE_KEY};
+use crate::{Suite, FINITE_PRIVATE_KEY, TINFOIL_KEY};
 
 const LEDGER_APP: &[u8] = include_bytes!("../../fixtures/ledger.mjs");
 const LEDGER_JSON: &[u8] = include_bytes!("../../fixtures/ledger.json");
@@ -55,6 +67,8 @@ const PRIVATE: &str = fragment_core::models::FINITE_PRIVATE_FLASH;
 const ROUTED: &str = fragment_core::models::OPENROUTER_FLASH;
 /// Workers AI's GLM-5.3 Flash: the fallback and the vision model here.
 const FLASH: &str = fragment_core::models::GLM_FLASH;
+/// Tinfoil's DeepSeek V4.1 Flash, the private tier's fallback.
+const TINFOIL: &str = fragment_fakes::workers_ai::TINFOIL_FLASH;
 /// How long a call the fake holds back hangs: past the impatient caller's
 /// wait, as a stalled stream is past Hermes' 20 s.
 const HANG: Duration = Duration::from_secs(15);
@@ -86,13 +100,159 @@ pub fn finite_private(s: &mut Suite, _: &Api) -> Result<()> {
     s.ai.accept_key(FINITE_PRIVATE_KEY);
     s.ai.clear_script();
     let checked = checks(s, &api);
+    s.ai.clear_script();
+    s.ai.down(&[]);
+    s.ai.transcripts(false);
+    s.stop()?;
+    let tiered = match s.start_as_private_tier() {
+        Ok(api) => {
+            s.ai.accept_key_for(TINFOIL, TINFOIL_KEY);
+            tier_checks(s, &api)
+        }
+        Err(e) => Err(e),
+    };
     // the node as the lanes after it expect it: every tier on Workers AI
     s.ai.clear_script();
     s.ai.down(&[]);
     s.ai.transcripts(false);
     s.stop()?;
     s.start(false)?;
-    checked
+    checked.and(tiered)
+}
+
+/// The private tier's checks (the module's doc), on a node of its shape.
+fn tier_checks(s: &mut Suite, api: &Api) -> Result<()> {
+    let wait = Duration::from_secs(40);
+    let owner = api.person()?;
+    let owner_id = api.identity(&owner)?;
+    let hand = Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &owner) })))?;
+    anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
+    let aig = || entries(api, &owner_id, "aig:");
+    let tried = |s: &Suite, from: usize| s.ai.calls()[from..].iter().map(|c| (c.face, c.model.clone())).collect::<Vec<_>>();
+    let fell = || vec![(Face::OpenAi, PRIVATE.to_string()), (Face::OpenAi, TINFOIL.to_string())];
+    // the node's book: the defaults, and Tinfoil's slot at the price it names
+    let models = crate::private_tier_models(&s.ai.node().url).to_string();
+    let book = Models::parse(Some(&models), &PriceBook::defaults(), true).expect("the node's models").priced(PriceBook::defaults());
+    let charge = |usage: &Usage| book.price(usage).expect("the node's book prices its models").charge;
+    let (private_key, tinfoil_key) = (format!("Bearer {FINITE_PRIVATE_KEY}"), format!("Bearer {TINFOIL_KEY}"));
+    let settled_as = |before: usize, model: &str, micros: i64| {
+        let now = aig();
+        now.len() == before + 1 && now.iter().any(|e| charged(e) == Some(micros) && usage(e)["model"] == model)
+    };
+
+    // ---- Finite Private's failure before answering: once more on Tinfoil, with Tinfoil's key
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    s.ai.fail_next(&[429]);
+    s.ai.set_usage(&[Used { prompt: 60, cached: 0, completion: 25 }]);
+    let r = api.signed(&hand, "POST", ROUTE, Some(&chat("cheap", false)))?;
+    let made = s.ai.calls()[calls..].to_vec();
+    let priced = charge(&tokens(TINFOIL, 60, 25));
+    let settled = s.eventually(wait, || settled_as(before, TINFOIL, priced));
+    s.ok(
+        "a call Finite Private answers 429 is made once more, the same, on Tinfoil's DeepSeek V4.1 Flash, carrying Tinfoil's key and not Finite Private's",
+        r.status == 200
+            && r.body["choices"][0]["message"]["content"] == "echo: hello"
+            && tried(s, calls) == fell()
+            && made.len() == 2
+            && made[0].authorization.as_deref() == Some(private_key.as_str())
+            && made[1].authorization.as_deref() == Some(tinfoil_key.as_str())
+            && made[0].body["messages"] == made[1].body["messages"]
+            && made[1].body["model"] == TINFOIL,
+        json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "keys": made.iter().map(|c| c.authorization.as_ref().map(String::len)).collect::<Vec<_>>() }),
+    );
+    s.ok("charged once, at the list price Tinfoil's slot names (the book's fee and margin on it)", settled, json!({ "charge": priced, "entries": aig() }));
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    s.ai.down(&[PRIVATE]);
+    s.ai.set_usage(&[Used { prompt: 70, cached: 40, completion: 12 }]);
+    let r = api.signed(&hand, "POST", ROUTE, Some(&chat("medium", true)))?;
+    s.ai.down(&[]);
+    let last = lines(&r.text).last().cloned().unwrap_or_default();
+    let priced = charge(&cached(TINFOIL, 30, 40, 12));
+    let settled = s.eventually(wait, || settled_as(before, TINFOIL, priced));
+    s.ok(
+        "a streamed medium call whose Finite Private model is down falls back the same, streamed in OpenAI's shape, its cached tokens charged at Tinfoil's cached price",
+        r.status == 200 && last["choices"] == json!([]) && last["usage"]["completion_tokens"] == 12 && tried(s, calls) == fell() && settled,
+        json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "last": last, "charge": priced, "entries": aig() }),
+    );
+
+    // ---- the route's `fallback` (Hermes' own switch): on Tinfoil
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    s.ai.set_usage(&[Used { prompt: 30, cached: 0, completion: 10 }]);
+    let r = api.signed(&hand, "POST", ROUTE, Some(&chat("fallback", false)))?;
+    let call = s.ai.calls().get(calls).cloned();
+    let settled = s.eventually(wait, || settled_as(before, TINFOIL, charge(&tokens(TINFOIL, 30, 10))));
+    s.ok(
+        "`fallback` runs on Tinfoil's DeepSeek V4.1 Flash with Tinfoil's key, charged at its price",
+        r.status == 200 && tried(s, calls) == [(Face::OpenAi, TINFOIL.to_string())] && call.is_some_and(|c| c.authorization.as_deref() == Some(tinfoil_key.as_str())) && settled,
+        format!("{} {:?}", r.status, tried(s, calls)),
+    );
+    let r = api.signed(&hand, "GET", "/api/models/v1/models", None)?;
+    let listed: Vec<&str> = r.body["data"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str()).collect();
+    s.ok("the route lists the tier's ids, each once, and nothing of their prices", r.status == 200 && listed == [PRIVATE, TINFOIL] && !r.text.contains("price"), &r);
+
+    // ---- `vision` on Finite Private, falling back to Tinfoil's, which reads images
+    let png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    let look = json!({ "model": "vision", "messages": [{ "role": "user", "content": [{ "type": "text", "text": "what is this?" }, { "type": "image_url", "image_url": { "url": png } }] }] });
+    let image_of = |c: &fragment_fakes::workers_ai::AiCall| c.body["messages"][0]["content"][1]["image_url"]["url"].as_str() == Some(png);
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    s.ai.set_usage(&[Used { prompt: 900, cached: 0, completion: 40 }]);
+    let r = api.signed(&hand, "POST", ROUTE, Some(&look))?;
+    let call = s.ai.calls().get(calls).cloned();
+    let settled = s.eventually(wait, || settled_as(before, PRIVATE, charge(&tokens(PRIVATE, 900, 40))));
+    s.ok(
+        "`vision` runs on Finite Private with its key, the image sent as it came, charged at its price",
+        r.status == 200 && tried(s, calls) == [(Face::OpenAi, PRIVATE.to_string())] && call.is_some_and(|c| image_of(&c) && c.authorization.as_deref() == Some(private_key.as_str())) && settled,
+        json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "answer": r.body }),
+    );
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    s.ai.fail_next(&[503]);
+    s.ai.set_usage(&[Used { prompt: 900, cached: 0, completion: 40 }]);
+    let r = api.signed(&hand, "POST", ROUTE, Some(&look))?;
+    let made = s.ai.calls()[calls..].to_vec();
+    let settled = s.eventually(wait, || settled_as(before, TINFOIL, charge(&tokens(TINFOIL, 900, 40))));
+    s.ok(
+        "a `vision` call Finite Private answers 503 is made once more on Tinfoil's DeepSeek V4.1 Flash, whose slot says it reads images: the same image, Tinfoil's key, charged at its price",
+        r.status == 200 && tried(s, calls) == fell() && made.iter().all(image_of) && made.get(1).is_some_and(|c| c.authorization.as_deref() == Some(tinfoil_key.as_str())) && settled,
+        json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "entries": aig().len() - before }),
+    );
+
+    // ---- Tinfoil's key refused: the call's failure, charged nothing, said aloud
+    let (calls, before, alarms) = (s.ai.calls().len(), aig().len(), logged(s, "model.platform-key"));
+    s.ai.accept_key_for(TINFOIL, "tk_another");
+    s.ai.fail_next(&[503]);
+    let r = api.signed(&hand, "POST", ROUTE, Some(&chat("cheap", false)))?;
+    s.ai.accept_key_for(TINFOIL, TINFOIL_KEY);
+    let loud = s.eventually(wait, || logged(s, "model.platform-key") > alarms);
+    s.ok(
+        "when Finite Private answers 503 and Tinfoil refuses its key (401), Tinfoil's refusal is the call's, after two tries and no more, nothing is charged, and its key's trouble is logged aloud",
+        r.status == 401 && tried(s, calls) == fell() && loud && aig().len() == before,
+        json!({ "status": r.status, "tried": format!("{:?}", tried(s, calls)), "loud": loud, "answer": r.text }),
+    );
+
+    // ---- a job's text step: on Finite Private, falling back to Tinfoil
+    let name = s.named(api, &owner, "tier")?;
+    let c = s.create(api, &owner, &name)?;
+    ship(s, &c, LEDGER_APP, LEDGER_JSON);
+    s.eventually(wait, || api.op(&owner, &name, "notes", "q", json!({})).is_ok_and(|r| r.status == 200));
+    let calls = s.ai.calls().len();
+    s.ai.fail_next(&[502]);
+    s.ai.set_usage(&[Used { prompt: 1_000, cached: 0, completion: 500 }]);
+    let r = api.op(&owner, &name, "summarize", "tier-1", json!({ "text": "the notes", "tier": "cheap" }))?;
+    let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    let made = s.ai.calls()[calls..].to_vec();
+    s.ok(
+        "a job's `ai.text` whose Finite Private answers 502 is answered by Tinfoil's DeepSeek V4.1 Flash with Tinfoil's key, once, and costs that call at its price",
+        run["status"] == "succeeded"
+            && run["output"]["text"] == "echo: the notes"
+            && run["output"]["model"] == TINFOIL
+            && tried(s, calls) == fell()
+            && made.get(1).is_some_and(|c| c.authorization.as_deref() == Some(tinfoil_key.as_str()))
+            && run["costMicros"] == charge(&tokens(TINFOIL, 1_000, 500)),
+        json!({ "run": run, "tried": format!("{:?}", tried(s, calls)) }),
+    );
+    Ok(())
 }
 
 fn checks(s: &mut Suite, api: &Api) -> Result<()> {

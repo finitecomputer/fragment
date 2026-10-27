@@ -6,6 +6,7 @@
 // container calls are here too; they only call and call back: every
 // decision is Rust's (jobs.rs, computer.rs).
 import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:workers";
+import { connect } from "cloudflare:sockets";
 import { DirectoryBackup, SandboxBackupError } from "@cloudflare/sandbox";
 import * as rs from "./build/index.js";
 
@@ -275,12 +276,15 @@ class ContainerHost {
   // them again. `swapHosts` are the connections' and operator keys' hosts,
   // caught on HTTPS and on plain HTTP alike: the swap always sends on over
   // HTTPS, so a credential never crosses the internet in the clear.
-  async arm(generation, computer, idleMs, swapHosts) {
+  // `codestorage`: a local fleet's code.storage, at a loopback address the
+  // container cannot reach, is reached through the egress too.
+  async arm(generation, computer, idleMs, swapHosts, codestorage) {
     if (generation !== this.#generation) return false;
     const c = this.#c;
     const egress = (route) => this.#ctx.exports.ComputerEgress({ props: { computer, route } });
     await this.#settled(() => c.interceptOutboundHttp("api.fragment.internal", egress("api")));
     await this.#settled(() => c.interceptOutboundHttp("model.fragment.internal", egress("model")));
+    if (codestorage) await this.#settled(() => c.interceptOutboundHttp("codestorage.fragment.internal", egress("codestorage")));
     for (const host of swapHosts) {
       await this.#settled(() => c.interceptOutboundHttp(host, egress("swap")));
       await this.#settled(() => c.interceptOutboundHttps(host, egress("swap")));
@@ -491,10 +495,96 @@ export class Computer extends DurableObject {
 // Every intercepted request a computer's guest makes (docs/computers.md):
 // `props.route` is the host it asked for, and `props.computer` the
 // computer, both set by the Computer DO, never by the guest. Rust answers
-// it (`ComputerEgress.handle`).
+// it (`ComputerEgress.handle`); an XFTP relay it holds a place for is piped
+// here (`relay`).
 export class ComputerEgress extends WorkerEntrypoint {
-  fetch(request) {
+  async fetch(request) {
     const { computer, route } = this.ctx.props;
-    return rs.ComputerEgress.handle(request, this.env, this.ctx, computer, route);
+    // a relay only where one was asked for: its route, a GET that upgrades
+    // (Rust strips the relay's headers from every other answer besides)
+    const asked = route === "api" && request.method === "GET" && new URL(request.url).pathname === "/api/computer/relay" && (request.headers.get("upgrade") ?? "").toLowerCase() === "websocket";
+    const answer = await rs.ComputerEgress.handle(request, this.env, this.ctx, computer, route);
+    const lease = asked ? answer.headers.get("x-fragment-relay") : null;
+    return lease ? relay(this.ctx, this.env, computer, lease, answer.headers) : answer;
   }
+}
+
+// An XFTP relay (fragment_core::relay; docs/computers.md, "The XFTP
+// relay"): the guest's WebSocket piped to raw TCP to the host Rust allowed
+// (`connect()`, which nothing inspects: Containers reset a TLS hello on 443
+// that names no server, and SimpleX's servers take their protocol only from
+// one). Bytes pass untouched both ways, the core's TLS end to end; this sees
+// their count and times alone, and logs its open and close, never what is
+// carried. It ends at its bounds (bytes, time), on either side's close or
+// error, and once: its place freed and its bytes counted at the computer.
+// Not piped through Rust: a stream of bytes, nothing in it to decide.
+// A frame from the computer is at most this (the bridge sends 16 KiB), and
+// what waits to be written toward the server at most this, at once.
+const RELAY_FRAME_MAX = 256 * 1024;
+const RELAY_QUEUE_MAX = 1024 * 1024;
+function relay(ctx, env, computer, lease, headers) {
+  const host = headers.get("x-fragment-relay-host");
+  const port = Number(headers.get("x-fragment-relay-port"));
+  const bytesMax = Number(headers.get("x-fragment-relay-bytes"));
+  const msMax = Number(headers.get("x-fragment-relay-ms"));
+  const [client, server] = Object.values(new WebSocketPair());
+  server.accept();
+  const t0 = Date.now();
+  let bytes = 0;
+  // what waits to be written toward the server: bounded on its own, apart
+  // from the relay's total (Alex's review): a server that stops reading
+  // closes the relay, never piles the computer's bytes up in memory
+  let queued = 0;
+  let ended = false;
+  const socket = connect({ hostname: host, port }, { secureTransport: "off", allowHalfOpen: false });
+  const writer = socket.writable.getWriter();
+  const end = (why, code) => {
+    if (ended) return;
+    ended = true;
+    clearTimeout(timer);
+    try { server.close(code, why); } catch {}
+    socket.close().catch(() => {});
+    console.log(JSON.stringify({ relay: "close", computer, host, port, bytes, ms: Date.now() - t0, why }));
+    ctx.waitUntil(rs.ComputerEgress.relay_closed(env, computer, lease, bytes));
+  };
+  const timer = setTimeout(() => end("its time is up", 4008), msMax);
+  const counted = (n) => {
+    bytes += n;
+    if (bytes <= bytesMax) return true;
+    end("its bytes are spent", 4008);
+    return false;
+  };
+  server.addEventListener("message", (e) => {
+    if (ended) return;
+    const data = typeof e.data === "string" ? new TextEncoder().encode(e.data) : new Uint8Array(e.data);
+    // an empty frame carries nothing: no write is queued for it
+    if (data.byteLength === 0) return;
+    if (data.byteLength > RELAY_FRAME_MAX) return end("a frame past its bound", 4008);
+    if (!counted(data.byteLength)) return;
+    queued += data.byteLength;
+    if (queued > RELAY_QUEUE_MAX) return end("the server is not taking what it is sent", 4008);
+    // writes queue in order on the stream; each one written frees its bytes
+    writer.write(data).then(() => { queued -= data.byteLength; }, () => end("the server's side failed", 1011));
+  });
+  server.addEventListener("close", () => end("the computer closed it", 1000));
+  server.addEventListener("error", () => end("the computer's side failed", 1011));
+  socket.opened.then(
+    () => console.log(JSON.stringify({ relay: "open", computer, host, port })),
+    () => end("the server did not answer", 1011),
+  );
+  ctx.waitUntil((async () => {
+    const reader = socket.readable.getReader();
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done || ended) break;
+        if (!counted(value.byteLength)) break;
+        server.send(value);
+      }
+      end("the server closed it", 1000);
+    } catch {
+      end("the server's side failed", 1011);
+    }
+  })());
+  return new Response(null, { status: 101, webSocket: client });
 }

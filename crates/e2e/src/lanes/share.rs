@@ -5,11 +5,14 @@
 //! Chrome where the browser is the point.
 //!
 //! The owner shares a todo list by email with someone who has never signed
-//! in: they are mailed its address, their first sign-in as that email makes
-//! them a member, and the mailed link opens it for them; they see it live,
-//! and add to it; the owner removes them, and their socket closes and the
-//! list answers them 403. Someone who signs in already is in at once; a
-//! revoked invite admits no one. A member sees who is in and changes
+//! in: they are mailed the platform's page, their sign-in as that email
+//! shows them the invite and makes them no member, and their yes does
+//! (decision 63: valid, someone else's, an agent's, with a body, replayed);
+//! its address then opens it for them; they see it live, and add to it;
+//! the owner removes them, and their socket closes and the list answers
+//! them 403. Someone who signs in already is invited the same way, and
+//! accepts it in their shell's sidebar; a revoked invite admits no one,
+//! and a declined one waits no more. A member sees who is in and changes
 //! nothing. A fragment's page (its author's code, or an agent's)
 //! cannot share: not by fetching the sheet or the API, not by framing the
 //! sheet, not with a signed call (it holds no key), and not by scripting
@@ -67,6 +70,14 @@ fn framed_by_platform(r: &Reply) -> bool {
     let csp = r.header("content-security-policy");
     csp.split(';').map(str::trim).filter(|d| d.starts_with("frame-ancestors")).eq(["frame-ancestors 'self'"]) && r.header("x-frame-options") == "SAMEORIGIN"
 }
+
+/// The shell's share sheet is open and has sized its frame: the sheet's own
+/// script told the shell its height, so its buttons are wired too. Its
+/// frame's DOM comes before that: the script waits on the platform's
+/// stylesheet, which the page links ahead of its content (share.rs
+/// `platform_html`; kept once read, shell.rs `versioned`, but a first open
+/// fetches it), and a Done clicked meanwhile does nothing.
+const SHEET_SIZED: &str = "document.getElementById('sheet').open && !!document.querySelector('#sheet iframe')?.style.height";
 
 /// Whether a page severs a window that opened it.
 fn unopened(r: &Reply) -> bool {
@@ -157,10 +168,48 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
             && r.text.contains("General access"),
         &r,
     );
+    // whoever the owner lets into a chat can talk to their agent in it: the
+    // sheet says so by the invite, on a chat their agent is in and nowhere
+    // else (Paul, 2026-10-23 and 10-24): not on an app it is in (no agent
+    // hears one: this list), nor an app or a chat without it
+    let warning = fragment_core::access::TRUST_WARNING;
+    let plain = make(&s.name("plain"), "blank")?;
+    let without = with_session(api, "GET", &format!("/share/{plain}"), &owner_session)?;
+    let talk = make(&s.name("talk"), "chat")?;
+    let bare = with_session(api, "GET", &format!("/share/{talk}"), &owner_session)?;
+    let joined = api.signed(&owner, "PUT", &format!("/api/f/{talk}/members/{agent}"), Some(&json!({ "role": "editor" })))?;
+    let warned = with_session(api, "GET", &format!("/share/{talk}"), &owner_session)?;
+    let invites = |r: &Reply| r.status == 200 && r.text.contains("name=\"email\"");
+    s.ok(
+        "beside its invite, the sheet of a chat the owner's agent is in says people in it can talk to their agent; an app it is in, an app without it, and a chat without it do not",
+        joined.status == 200
+            && invites(&warned)
+            && warned.text.contains(&format!("<p class=\"hint trust\">{warning}</p>"))
+            && [&r, &without, &bare].iter().all(|r| invites(r) && !r.text.contains(warning)),
+        json!([joined.status, warned.status, bare.status, without.status]),
+    );
     s.ok(
         "only the platform's own pages may frame it (`frame-ancestors 'self'` alone: every fragment is another origin), and it severs a window that opened it",
         framed_by_platform(&r) && unopened(&r),
         headers(&r),
+    );
+    // its look and its script are the release's files, linked by their
+    // versions, which a browser keeps: opening the sheet again waits on no
+    // round trip for them (shell.rs `versioned`); none is inline
+    let linked = |prefix: &str| r.text.split(['"', '\'']).find(|u| u.starts_with(prefix)).unwrap_or("").to_string();
+    let files = [linked("/__shell/sheet.css?v="), linked("/__shell/platform-pages.css?v="), linked("/__shell/platform-pages.js?v=")];
+    let kept = files.iter().map(|f| api.unsigned("GET", f, None)).collect::<Result<Vec<_>>>()?;
+    let other = api.unsigned("GET", "/__shell/platform-pages.css?v=0000", None)?;
+    let named = api.unsigned("GET", "/__shell/platform-pages.css", None)?;
+    s.ok(
+        "the sheet links its stylesheets and its script (a module) by their versions, each kept for good (immutable), and holds no style of its own; by another version, or by name alone, a file is revalidated",
+        files.iter().all(|f| !f.is_empty())
+            && r.text.contains(&format!("<script type=\"module\" src=\"{}\">", files[2]))
+            && !r.text.contains("<style")
+            && r.header("content-security-policy").contains("script-src 'self' 'unsafe-inline'")
+            && kept.iter().all(|k| k.status == 200 && k.header("cache-control") == "public, max-age=31536000, immutable")
+            && [&other, &named].iter().all(|r| r.status == 200 && r.header("cache-control") == "no-cache"),
+        json!([files, kept.iter().map(|k| k.header("cache-control")).collect::<Vec<_>>(), other.header("cache-control"), named.header("cache-control")]),
     );
     s.ok(
         "every choice on it is a button, none a select (which an arrow key changes in passing), and they come disabled: they arm a moment after the page shows",
@@ -214,13 +263,14 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let mailed = s.mail.sent_to(&guest_name);
     let link = api.site_url(&chat, "");
     s.ok(
-        "they are mailed, from the deployment's address: who shares it, on the platform the shell names, and the fragment's own address, which holds no secret",
+        "they are mailed, from the deployment's address: who invites them to what, on the platform the shell names, and the platform's own page to accept it on (never the fragment's address), which holds no secret",
         mailed.len() == 1
             && mailed[0].from == json!({ "email": "mail@fragment.localhost", "name": "fragment" })
-            && mailed[0].subject.starts_with(&format!("{owner_name} shared "))
+            && mailed[0].subject.starts_with(&format!("{owner_name} invited you to "))
             && mailed[0].text.contains(&format!(" on {}.\n", fragment_core::mail::PRODUCT))
-            && mailed[0].text.contains(&format!("Open it: {link}\n"))
-            && mailed[0].text.contains(&format!("Sign in as {guest_name}"))
+            && mailed[0].text.contains(&format!("Accept it: {platform}/\n"))
+            && mailed[0].text.contains(&format!("Sign in as {guest_name}, then accept or decline it"))
+            && !mailed[0].text.contains(&link)
             && !mailed[0].text.contains("?view=")
             && !mailed[0].text.contains("token"),
         mailed.first().map(|m| format!("{} / {}", m.subject, m.text)).unwrap_or_default(),
@@ -243,19 +293,67 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     api.sign_in(&stranger_name)?;
     s.ok("someone else's sign-in meets none of it", role_of(&stranger_id)?.is_none() && invites_for(&guest_name)?.len() == 1, "");
 
-    // ---- their first sign-in as that email makes them a member
+    // ---- their sign-in shows them the invite; their yes makes them a member (decision 63)
     let guest_session = api.sign_in(&guest_name)?;
     api.approve(&guest_session, &guest)?;
     let guest_id = api.identity(&guest)?;
     s.ok(
-        "their first sign-in as that email makes them a member, at the role it said, and spends the invite",
-        role_of(&guest_id)?.as_deref() == Some("editor") && invites_for(&guest_name)?.is_empty(),
+        "their first sign-in as that email makes them no member: the invite waits for their yes",
+        role_of(&guest_id)?.is_none() && invites_for(&guest_name)?.len() == 1,
         json!({ "role": role_of(&guest_id)?, "waiting": invites_for(&guest_name)? }),
     );
+    let theirs = api.signed(&guest, "GET", "/api/invites", None)?;
+    let shown = theirs.body["invites"].as_array().cloned().unwrap_or_default();
+    // the registry answers its rows as read: the wire is proto's type
+    let typed = serde_json::from_value::<fragment_proto::InvitesWaiting>(theirs.body.clone());
+    s.ok(
+        "they see it waiting (GET /api/invites, proto's InvitesWaiting): what it shares, as its title, as what, from whom, on which email",
+        theirs.status == 200
+            && typed.is_ok_and(|t| t.invites.len() == 1 && t.invites[0].role == fragment_proto::Role::Editor)
+            && shown.len() == 1
+            && shown[0]["fragment"] == chat.as_str()
+            && shown[0]["title"] == title.as_str()
+            && shown[0]["role"] == "editor"
+            && shown[0]["from"] == owner_name.as_str()
+            && shown[0]["email"] == guest_name.as_str()
+            && shown[0]["expiresAt"].as_i64().is_some_and(|t| t > now_ms()),
+        &theirs,
+    );
+    let others = api.signed(&stranger, "GET", "/api/invites", None)?;
+    let agents = api.signed(&hand, "GET", "/api/invites", None)?;
+    let said_for = api.signed(&guest, "GET", &format!("/api/invites?for={guest_id}"), None)?;
+    s.ok(
+        "no one else sees it: another person's are theirs (none), an agent's is 403 (it has no email), and `for` is 400",
+        others.status == 200 && others.body["invites"] == json!([]) && agents.status == 403 && said_for.status == 400,
+        format!("{others} {agents} {said_for}"),
+    );
+    let accept = format!("/api/invites/{chat}/accept");
+    let foreign = api.signed(&stranger, "POST", &accept, Some(&json!({})))?;
+    let bodied = api.signed(&guest, "POST", &accept, Some(&json!({ "role": "owner" })))?;
+    let by_agent = api.signed(&hand, "POST", &accept, Some(&json!({})))?;
+    s.ok(
+        "someone else's yes is 404 (it waits on no email of theirs), a yes with a body is 400 (it says nothing but yes), and an agent's 403; none makes anyone a member",
+        foreign.status == 404 && foreign.body["reason"] == "gone" && bodied.status == 400 && by_agent.status == 403 && role_of(&stranger_id)?.is_none() && role_of(&guest_id)?.is_none() && invites_for(&guest_name)?.len() == 1,
+        format!("{foreign} {bodied} {by_agent}"),
+    );
+    let r = api.signed(&guest, "POST", &accept, Some(&json!({})))?;
+    let listed_theirs = api.signed(&guest, "GET", "/api/fragments", None)?;
+    let in_list = listed_theirs.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == chat.as_str() && f["role"] == "editor"));
+    s.ok(
+        "their yes makes them a member, at the role it said: the invite is spent, and it is in their list as it answers",
+        r.status == 200 && r.body == json!({ "fragment": chat, "role": "editor" }) && role_of(&guest_id)?.as_deref() == Some("editor") && invites_for(&guest_name)?.is_empty() && in_list,
+        format!("{r} {listed_theirs}"),
+    );
     let members_before = api.signed(&owner, "GET", &format!("/api/f/{chat}/members"), None)?.body["members"].as_array().map_or(0, Vec::len);
+    let again = api.signed(&guest, "POST", &accept, Some(&json!({})))?;
+    let after = api.signed(&guest, "GET", "/api/invites", None)?;
     api.sign_in(&guest_name)?;
     let members_after = api.signed(&owner, "GET", &format!("/api/f/{chat}/members"), None)?.body["members"].as_array().map_or(0, Vec::len);
-    s.ok("signing in again meets nothing more", members_after == members_before && role_of(&guest_id)?.as_deref() == Some("editor"), format!("{members_before} → {members_after}"));
+    s.ok(
+        "their yes again (a replay) is 404, gone, and changes nothing; nothing waits for them now, and signing in again meets nothing",
+        again.status == 404 && again.body["reason"] == "gone" && after.body["invites"] == json!([]) && members_after == members_before && role_of(&guest_id)?.as_deref() == Some("editor"),
+        format!("{again} {after} {members_before} → {members_after}"),
+    );
     let r = api.signed(&owner, "GET", &format!("/api/f/{chat}/events?tail=50"), None)?;
     s.ok(
         "the events say an invite was made and they joined, by npub, and name no email (a link's viewers read them)",
@@ -268,7 +366,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.unsigned("GET", &format!("/join/{chat}?token={}", "0".repeat(48)), None)?;
     s.ok("nor does the platform: invites by link are gone (an unguessable link is `link` visibility)", r.status == 404, &r);
 
-    // ---- in Chrome: the mailed link opens the chat; they see it live, and post in it
+    // ---- in Chrome: its address opens the chat; they see it live, and post in it
     let Some(mut chrome) = s.browser()? else {
         s.ok("Chrome is installed for the share lane (set CHROME_BIN)", false, "no Chrome found");
         return Ok(());
@@ -276,9 +374,9 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.set_cookie(&format!("{platform}/"), "fragment_session", &guest_session)?;
     let page = chrome.open(&link)?;
     let landed = chrome.until(&page, &format!("location.host.startsWith({chat:?}) && document.title === 'Todo'"), wait);
-    chrome.screenshot(&page, &s.scratch.join("share-mailed-link.png"))?;
+    chrome.screenshot(&page, &s.scratch.join("share-accepted-link.png"))?;
     s.ok(
-        "the mailed link opens the chat for them, signed in on its origin, asking nothing: it is shared with them",
+        "its address opens the chat for them, signed in on its origin, asking nothing: it is shared with them, accepted",
         landed,
         chrome.eval(&page, "location.href + ' ' + document.title").unwrap_or_default(),
     );
@@ -349,15 +447,24 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and the chat answers them 403: their reload, a page saying they have no access", r.status == 403 && refused, &r);
     drop(chrome);
 
-    // ---- someone who signs in already is in at once, and mailed nothing
+    // ---- someone who signs in already is invited too: mailed, and in once they accept (decision 63)
     let member_id = api.identity(&member)?;
     let form = armed(api, &sheet, &owner_session)?;
+    let mails_before = s.mail.sent_to(&member_name).len();
     let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "invite"), ("email", &member_name.to_uppercase()), ("role", "viewer")])?;
+    let theirs = api.signed(&member, "GET", "/api/invites", None)?;
     s.ok(
-        "an email someone signs in as already makes them a member at once (as typed, in any case), and mails them nothing about it",
-        r.status == 200 && r.text.contains(&format!("Added <b>{member_name}</b>")) && role_of(&member_id)?.as_deref() == Some("viewer") && invites_for(&member_name)?.is_empty() && s.mail.sent_to(&member_name).iter().all(|m| !m.text.contains(&chat)),
-        &r,
+        "an email someone signs in as already (as typed, in any case) makes them no member: it waits for their yes, mailed, and they see it",
+        r.status == 200
+            && r.text.contains(&format!("Invited <b>{member_name}</b>"))
+            && role_of(&member_id)?.is_none()
+            && invites_for(&member_name)?.len() == 1
+            && s.mail.sent_to(&member_name).len() == mails_before + 1
+            && theirs.body["invites"].as_array().is_some_and(|l| l.iter().any(|i| i["fragment"] == chat.as_str() && i["role"] == "viewer")),
+        format!("{r} {theirs}"),
     );
+    let r = api.signed(&member, "POST", &format!("/api/invites/{chat}/accept"), Some(&json!({})))?;
+    anyhow::ensure!(r.status == 200 && role_of(&member_id)?.as_deref() == Some("viewer"), "{member_name} accepts: {r}");
     // Add is for adding: someone in already keeps their role (an Add at
     // the default, Viewer, once lowered an editor without a word)
     let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "invite"), ("email", &member_name), ("role", "editor")])?;
@@ -377,15 +484,25 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
             && own.status == 400 && own.message().contains("owns it"),
         format!("{r} {own}"),
     );
-    // a share is the person's and their agents' (Paul, 2026-10-13): the sheet names them
-    let theirs = Keys::generate();
+    // a person's membership is their agents' (decision 64): one they make
+    // now comes in beside them, and the sheet names the person, one entry
+    // "with their agents", never the agent (decision 63: "I invite Skyler
+    // and his agents, not Skyler and his agent Agent123")
+    let member_agent = Keys::generate();
     let reg = "/api/identities";
-    let made = api.signed(&member, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&theirs, "POST", reg, &member) })))?;
+    let made = api.signed(&member, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&member_agent, "POST", reg, &member) })))?;
+    let theirs_id = made.body["id"].as_str().unwrap_or("-").to_string();
     let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "role"), ("member", &member_id), ("role", "editor")])?;
     let shown = with_session(api, "GET", &sheet, &owner_session)?;
     s.ok(
-        "the owner changes a role on the sheet; a person's agents are named beside them, with the same access",
-        made.status == 200 && r.status == 303 && role_of(&member_id)?.as_deref() == Some("editor") && shown.text.contains("With their agent"),
+        "an agent the member makes comes in beside them; the owner changes their role on the sheet, and it follows; the person is one entry there, \"with their agents\", the agent never named (no name, no npub)",
+        made.status == 200
+            && r.status == 303
+            && role_of(&member_id)?.as_deref() == Some("editor")
+            && role_of(&theirs_id)?.as_deref() == Some("editor")
+            && shown.text.contains(&member_name)
+            && shown.text.contains("With their agents")
+            && !shown.text.contains(&theirs_id),
         format!("{r} {made}"),
     );
     let r = api.signed(&owner, "PUT", &format!("/api/f/{chat}/members/{member_id}"), Some(&json!({ "role": "viewer" })))?;
@@ -400,10 +517,41 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let late_session = api.sign_in(&late_name)?;
     api.approve(&late_session, &late)?;
     let late_id = api.identity(&late)?;
+    let theirs = api.signed(&late, "GET", "/api/invites", None)?;
+    let yes = api.signed(&late, "POST", &format!("/api/invites/{chat}/accept"), Some(&json!({})))?;
     s.ok(
-        "the owner revokes an invite from the sheet: it waits no more, and their sign-in after makes them no member",
-        waited && r.status == 303 && invites_for(&late_name)?.is_empty() && role_of(&late_id)?.is_none(),
-        &r,
+        "the owner revokes an invite from the sheet: it waits no more, they see none after their sign-in, and their yes is 404, making them no member",
+        waited && r.status == 303 && invites_for(&late_name)?.is_empty() && theirs.body["invites"] == json!([]) && yes.status == 404 && role_of(&late_id)?.is_none(),
+        format!("{r} {theirs} {yes}"),
+    );
+
+    // ---- their no: the invite goes, there and in the owner's list, and a yes after it is 404
+    let (decliner, _) = person(api)?;
+    let decliner_name = email_of(&decliner);
+    let r = api.signed(&owner, "POST", &format!("/api/f/{chat}/invites"), Some(&json!({ "email": decliner_name, "role": "editor" })))?;
+    let counted = listed(&chat)?["sharing"]["invites"].clone();
+    let decline = format!("/api/invites/{chat}/decline");
+    let no = api.signed(&decliner, "POST", &decline, Some(&json!({})))?;
+    let decliner_id = api.identity(&decliner)?;
+    let yes = api.signed(&decliner, "POST", &format!("/api/invites/{chat}/accept"), Some(&json!({})))?;
+    let no_again = api.signed(&decliner, "POST", &decline, Some(&json!({})))?;
+    let events = api.signed(&owner, "GET", &format!("/api/f/{chat}/events?tail=20"), None)?;
+    s.ok(
+        "they decline it: it waits no more (the owner's list counts it no more), their yes after is 404 and their no again 404, and its event names no one",
+        r.status == 200
+            && !r.body["invited"].is_null()
+            && counted == 1
+            && no.status == 200
+            && no.body == json!({ "ok": true, "declined": chat })
+            && invites_for(&decliner_name)?.is_empty()
+            && listed(&chat)?["sharing"]["invites"] == 0
+            && yes.status == 404
+            && no_again.status == 404
+            && role_of(&decliner_id)?.is_none()
+            && events.text.contains("invite.declined")
+            && !events.text.contains(&decliner_id)
+            && !events.text.contains(&decliner_name),
+        format!("{r} {no} {yes} {no_again}"),
     );
 
     // ---- a member sees who is in, and changes nothing
@@ -467,6 +615,27 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && r.text.contains("This chat's own agent") && controls == 0 && r.text.contains("value=\"members\" aria-pressed=\"true\""),
         &r,
     );
+    // a person who accepts brings their agents into its roster, after its
+    // own agent, its lead (decision 64): each takes part as itself
+    let r = api.signed(&owner, "POST", &format!("/api/f/{talk}/invites"), Some(&json!({ "email": member_name, "role": "editor" })))?;
+    let yes = api.signed(&member, "POST", &format!("/api/invites/{talk}/accept"), Some(&json!({})))?;
+    let roster = api.signed(&member, "GET", &format!("/api/f/{talk}/members"), None)?;
+    let agents: Vec<&str> = roster.body["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").filter_map(|m| m["principal"].as_str()).collect();
+    let its_list = api.signed(&member_agent, "GET", "/api/fragments", None)?;
+    let listed_there = its_list.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == talk.as_str()));
+    let said = api.signed(&member_agent, "POST", &format!("/api/f/{talk}/channels/chat"), Some(&json!({ "id": "theirs-1", "body": { "text": "hello from the member's agent" } })))?;
+    let sheet_now = with_session(api, "GET", &format!("/share/{talk}"), &owner_session)?;
+    s.ok(
+        "a member who accepts a chat's invite brings their agent into its roster after its own (the lead stays first), in the agent's own list; it speaks there as itself; the sheet shows the member once, \"with their agents\", never naming it",
+        r.status == 200
+            && yes.status == 200
+            && agents == vec![agent.as_str(), theirs_id.as_str()]
+            && listed_there
+            && said.status == 200
+            && sheet_now.text.contains("With their agents")
+            && !sheet_now.text.contains(&theirs_id),
+        format!("{yes} {roster} {said}"),
+    );
 
     // ---- the owner sets who can open it, and makes a new link
     let form = armed(api, &sheet, &owner_session)?;
@@ -507,7 +676,8 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let r = post(api, &sheet, &member_session, &platform, &[("form", &leaving), ("action", "leave")])?;
     s.ok("leaving again (the same form sent twice) changes nothing: the sheet is not theirs now (403)", r.status == 403 && r.text.contains("Not yours to share") && role_of(&member_id)?.is_none(), &r);
     let r = api.signed(&owner, "POST", &format!("/api/f/{chat}/invites"), Some(&json!({ "email": member_name, "role": "viewer" })))?;
-    anyhow::ensure!(r.status == 200 && r.body["member"]["role"] == "viewer", "{member_name} shared with again: {r}");
+    let yes = api.signed(&member, "POST", &format!("/api/invites/{chat}/accept"), Some(&json!({})))?;
+    anyhow::ensure!(r.status == 200 && yes.status == 200 && role_of(&member_id)?.as_deref() == Some("viewer"), "{member_name} shared with again: {r} {yes}");
 
     // ---- a fragment's page cannot share: its code (its author's, or an
     // agent's) runs in the owner's browser, with the platform's session
@@ -637,7 +807,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.click(&home, share)?;
     }
     let inside = |chrome: &mut Browser| chrome.eval_in_frame(&home, "/share/", "document.body?.innerText ?? ''").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
-    let shown = windowed && chrome.until(&home, "document.getElementById('sheet').open", wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
+    let shown = windowed && chrome.until(&home, SHEET_SIZED, wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
     chrome.screenshot(&home, &s.scratch.join("share-dialog.png"))?;
     let done = shown && chrome.eval_in_frame(&home, "/share/", "(document.querySelector('button[data-done]').click(), true)").is_ok();
     let closed = done && chrome.until(&home, &format!("!document.getElementById('sheet').open && !document.querySelector('#sheet iframe') && !!document.querySelector({row:?})"), wait);
@@ -645,6 +815,68 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         "the shell opens an app's share sheet in a dialog (a frame on its own origin), and its Done closes it (the shell reads the list again)",
         shown && closed,
         format!("listed {listed} windowed {windowed} shown {shown} done {done}: {}", inside(&mut chrome)),
+    );
+
+    // ---- at a short window and a tall one: the dialog is as tall as the
+    // sheet says, all of it in view when it fits and scrolling when it does
+    // not, and its Done, clicked where it is drawn, closes it
+    let (mut all, mut seen) = (true, vec![]);
+    for (height, fits) in [(700, false), (1440, true)] {
+        chrome.viewport(&home, 1280, height, false)?;
+        // (two frames for the desktop to lay itself out at the new size)
+        chrome.eval(&home, "new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))")?;
+        let ready = chrome.until(&home, &format!("innerHeight === {height} && {}", settled(share)), wait);
+        if ready {
+            chrome.click(&home, share)?;
+        }
+        let sized = ready && chrome.until(&home, SHEET_SIZED, wait);
+        // the sheet's own height, and the frame and dialog the shell gave it
+        let mut laid = Value::Null;
+        let fitted = sized
+            && s.eventually(wait, || {
+                let own = chrome.eval_in_frame(&home, "/share/", "document.body.offsetHeight").ok().and_then(|v| v.as_f64());
+                laid = chrome
+                    .eval(
+                        &home,
+                        "(() => { const d = document.getElementById('sheet'), r = d.getBoundingClientRect(); \
+                         return { frame: d.querySelector('iframe').getBoundingClientRect().height, dialog: r.height, inView: r.top >= 0 && r.bottom <= innerHeight, scrolls: d.scrollHeight > d.clientHeight }; })()",
+                    )
+                    .unwrap_or_default();
+                laid["own"] = json!(own);
+                own.is_some()
+                    && laid["frame"].as_f64() == own
+                    && laid["inView"] == json!(true)
+                    && laid["scrolls"] == json!(!fits)
+                    && (!fits || laid["dialog"].as_f64() == own)
+            });
+        chrome.screenshot(&home, &s.scratch.join(format!("share-dialog-{height}.png")))?;
+        // Done where it is drawn: the dialog scrolled to it, and the point
+        // the frame's place in the page plus the button's in the frame,
+        // the button what is there
+        chrome.eval(&home, "(() => { const d = document.getElementById('sheet'); d.scrollTop = d.scrollHeight; return true; })()")?;
+        let frame = chrome.eval(&home, "(() => { const r = document.querySelector('#sheet iframe')?.getBoundingClientRect(); return r ? [r.left, r.top] : []; })()")?;
+        let done = chrome
+            .eval_in_frame(&home, "/share/", "(() => { const r = document.querySelector('button[data-done]').getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2; return document.elementFromPoint(x, y)?.closest('button[data-done]') ? [x, y] : []; })()")
+            .unwrap_or_default();
+        let at = match (frame.as_array().map(Vec::as_slice), done.as_array().map(Vec::as_slice)) {
+            (Some([fx, fy]), Some([x, y])) => fx.as_f64().zip(fy.as_f64()).zip(x.as_f64().zip(y.as_f64())).map(|((fx, fy), (x, y))| (fx + x, fy + y)),
+            _ => None,
+        };
+        if let Some(at) = at {
+            chrome.click_at(&home, at)?;
+        }
+        let closed = at.is_some() && chrome.until(&home, "!document.getElementById('sheet').open && !document.querySelector('#sheet iframe')", wait);
+        seen.push(format!("{height}: sized {sized} {laid} Done at {at:?} closed {closed}"));
+        all &= sized && fitted && closed;
+        if !all {
+            break;
+        }
+    }
+    chrome.viewport(&home, 1280, 800, false)?;
+    s.ok(
+        "at a short window and a tall one the dialog is as tall as the sheet says, in view (scrolling only when the sheet does not fit), and its Done, clicked where it is drawn, closes it",
+        all,
+        seen.join("; "),
     );
 
     // ---- settings' Sharing: who has access to what of the owner's, by
@@ -660,6 +892,9 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         drawn && text.contains(&title) && text.contains("Anyone with the link") && text.contains(&member_name) && text.contains("Viewer") && text.contains(&waiting),
         text,
     );
+    // At this width Settings has a sticky nav. A nearest-edge scroll can
+    // put the view buttons behind it; center them before the real clicks.
+    chrome.eval(&home, "document.querySelector('#settings-access button[data-by=person]').scrollIntoView({block:'center'})")?;
     chrome.click(&home, "#settings-access button[data-by=person]")?;
     let by_person = chrome.until(
         &home,
@@ -668,9 +903,10 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     );
     chrome.screenshot(&home, &s.scratch.join("share-settings-by-person.png"))?;
     s.ok("and by person: what each of them can open of the owner's", by_person, chrome.eval(&home, "document.getElementById('settings-access').innerText")?);
+    chrome.eval(&home, "document.querySelector('#settings-access button[data-by=fragment]').scrollIntoView({block:'center'})")?;
     chrome.click(&home, "#settings-access button[data-by=fragment]")?;
     chrome.click(&home, &format!("#settings-access .access-name[data-share={chat:?}]"))?;
-    let opened = chrome.until(&home, "document.getElementById('sheet').open", wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
+    let opened = chrome.until(&home, SHEET_SIZED, wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
     let _ = chrome.eval_in_frame(&home, "/share/", "(document.querySelector('button[data-done]').click(), true)");
     let closed = opened && chrome.until(&home, "!document.getElementById('sheet').open && !!document.querySelector('#settings-access')", wait);
     s.ok("a fragment's title there opens its share sheet, and closing it draws the section again", opened && closed, inside(&mut chrome));
@@ -715,26 +951,36 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let gone = s.eventually(wait, || role_of(&member_id).is_ok_and(|r| r.is_none()));
     s.ok("and the second removes them", gone, "");
     let r = api.signed(&owner, "POST", &format!("/api/f/{chat}/invites"), Some(&json!({ "email": member_name, "role": "viewer" })))?;
-    anyhow::ensure!(r.status == 200 && r.body["member"]["role"] == "viewer", "{member_name} shared with again: {r}");
+    anyhow::ensure!(r.status == 200 && !r.body["invited"].is_null(), "{member_name} invited again: {r}");
     chrome.close(shown)?;
 
-    // ---- the member's shell: someone else's app offers People…, its sheet
-    // read-only, with Leave
+    // ---- the member's shell: the invite waits in their sidebar, with
+    // Accept and Decline (decision 63); their Accept opens it
     chrome.set_cookie(&format!("{platform}/"), "fragment_session", &member_session)?;
     let theirs = chrome.open(&format!("{platform}/settings"))?;
     chrome.viewport(&theirs, 1280, 800, false)?;
-    // (the launcher finds it from settings, and opens its window on the desktop)
-    let mut listed = chrome.until(&theirs, &format!("{} && {} && document.getElementById('layout').classList.contains('left-open')", settled("#sidebar-new-chat"), settled(&row)), wait);
-    if listed {
-        chrome.click(&theirs, "#sidebar-new-chat")?;
-        chrome.eval(&theirs, "(() => { const i = document.getElementById('workspace-search'); i.value = 'Todo'; i.dispatchEvent(new Event('input')); return true; })()")?;
-        listed = chrome.until(&theirs, &settled(&found), wait);
+    let invite = format!("#invites .invite[data-invite={chat:?}]");
+    let waits = chrome.until(&theirs, &format!("{} && !document.getElementById('invites').hidden && !document.querySelector({row:?})", settled(&format!("{invite} .invite-accept"))), wait);
+    let said = chrome.eval(&theirs, &format!("document.querySelector({invite:?})?.innerText ?? ''"))?;
+    chrome.screenshot(&theirs, &s.scratch.join("share-invite-sidebar.png"))?;
+    s.ok(
+        "their shell shows the invite in the sidebar, above their chats: its title, who invited them and as what, with Accept and Decline; it is in no list yet",
+        waits && said.as_str().is_some_and(|t| t.contains(&title) && t.contains(&format!("{owner_name} invited you to view it")) && t.contains("Accept") && t.contains("Decline")),
+        &said,
+    );
+    if waits {
+        chrome.click(&theirs, &format!("{invite} .invite-accept"))?;
     }
-    if listed {
-        chrome.click(&theirs, &found)?;
-    }
+    // (their Accept opens its window on the desktop)
     let more = "#stack button[aria-label='More']";
-    let windowed = listed && chrome.until(&theirs, &settled(more), wait);
+    let listed = waits && chrome.until(&theirs, &format!("{} && {} && !document.querySelector({invite:?})", settled(&row), settled(more)), wait);
+    s.ok(
+        "their Accept makes them a member, and opens it: it is in their dock, its window open, and the invite gone from the sidebar",
+        listed && role_of(&member_id)?.as_deref() == Some("viewer") && invites_for(&member_name)?.is_empty(),
+        chrome.eval(&theirs, "document.getElementById('sidebar').innerText")?,
+    );
+    // ---- someone else's app offers People…, its sheet read-only, with Leave
+    let windowed = listed;
     if windowed {
         chrome.click(&theirs, more)?;
     }
@@ -744,7 +990,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.eval(&theirs, "([...document.querySelectorAll('#menu button')].find(b => b.textContent === 'People…').click(), true)")?;
     }
     let inside = |chrome: &mut Browser| chrome.eval_in_frame(&theirs, "/share/", "document.body?.innerText ?? ''").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
-    let shown = offered && chrome.until(&theirs, "document.getElementById('sheet').open", wait) && s.eventually(wait, || inside(&mut chrome).contains("Who has access to"));
+    let shown = offered && chrome.until(&theirs, SHEET_SIZED, wait) && s.eventually(wait, || inside(&mut chrome).contains("Who has access to"));
     chrome.screenshot(&theirs, &s.scratch.join("share-people-member.png"))?;
     let text = inside(&mut chrome);
     s.ok(

@@ -17,7 +17,9 @@
 //!   note read from its chat's journal: what a restart cut of the agent's
 //!   turn before it, note.rs) and events;
 //! - the keepalive socket, held while the engine says so (decision 39);
-//! - the screen (screen.rs), told which agents it runs.
+//! - the screen (screen.rs), told which agents it runs;
+//! - SimpleX, when the image names its core (simplex/run.rs): told each
+//!   read of the computer, and waited for by the answer to a hold.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -32,7 +34,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch, Notify};
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::api::{self, Api, ApiError};
+use crate::api::{self, Api, ApiError, HomeChat};
 use crate::engine::{self, ChatView, ClaimAnswer, Effect, Engine, Input, Settings, State};
 use crate::limits;
 use crate::net::Backoff;
@@ -73,6 +75,12 @@ pub struct Config {
     /// `BRIDGE_SCREEN_LISTEN` and the rest: the screen of each agent it runs
     /// (screen.rs); none, no screen.
     pub screen: Option<ScreenConfig>,
+    /// `BRIDGE_KEEPALIVE_PING_MS`: how often the keepalive pings; silent
+    /// twice that, it is opened again (`limits::KEEPALIVE_PING_MS`).
+    pub keepalive_ping: Duration,
+    /// `BRIDGE_SIMPLEX_BIN` and the rest: each linked agent's SimpleX core
+    /// (simplex/run.rs); none, no SimpleX, and nothing of it runs.
+    pub simplex: Option<crate::simplex::run::Config>,
 }
 
 /// Why the bridge stopped.
@@ -220,6 +228,9 @@ enum Msg {
 struct Shared {
     cursors: Mutex<BTreeMap<String, u64>>,
     joins: Mutex<HashMap<String, Instant>>,
+    /// Each linked agent's SimpleX chat, as the engine is told it
+    /// (`Input::Relaying`): the one a routine at home runs in.
+    mirrors: Mutex<BTreeMap<String, Option<String>>>,
 }
 
 impl Shared {
@@ -256,10 +267,11 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     // are told only past the restore gate, so no lease under `/data` is
     // touched before the restore.
     let (screen_agents, screen_rx) = watch::channel::<Option<Vec<Named>>>(None);
+    let simplex_page = crate::simplex::http::Simplex { configured: cfg.simplex.is_some(), ..Default::default() };
     if let Some(sc) = cfg.screen.clone() {
-        let stop = stop.clone();
+        let (stop, simplex_page) = (stop.clone(), simplex_page.clone());
         tokio::spawn(async move {
-            if let Err(e) = screen::serve(sc, screen_rx, stop).await {
+            if let Err(e) = screen::serve(sc, screen_rx, simplex_page, stop).await {
                 crate::ev!("screen.failed", { "error": e });
             }
         });
@@ -275,10 +287,26 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     std::fs::create_dir_all(&cfg.state_dir).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.state_dir.display())))?;
     let api = Api::new(&cfg.api).map_err(BridgeError::Runtime)?;
     std::fs::create_dir_all(&cfg.media_dir).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.media_dir.display())))?;
-    // its answer to the platform's holds, for its whole life (none claims yet)
+    // its answer to the platform's holds, for its whole life (none claims
+    // yet, and no SimpleX core runs: `quiet` is false only while one does)
     let claims_in_flight = Arc::new(AtomicUsize::new(0));
+    let quiet = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let answer: String = cfg.left_out.iter().map(|p| format!("{p}\n")).collect();
-    tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), answer, claims_in_flight.clone(), stop.clone()));
+    // a core a bridge before this one left running is gone before any hold is answered
+    if let Some(sc) = &cfg.simplex {
+        crate::simplex::run::kill_strays(sc).await;
+    }
+    tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), answer, claims_in_flight.clone(), quiet.clone(), stop.clone()));
+    // SimpleX, when the image names its core: told of the computer at each
+    // read; it says which agents' links are bound (`relaying`), whose
+    // relayed records alone the engine honors, each with its SimpleX chat
+    // once found, which is its owner's phone. The sender lives as long as
+    // the bridge, so the engine's watch of it never ends on its own.
+    let (relaying_tx, mut relaying_rx) = watch::channel(std::collections::BTreeMap::<String, Option<String>>::new());
+    let simplex = cfg.simplex.clone().map(|sc| crate::simplex::run::start(sc, api.clone(), quiet.clone(), cfg.hold.clone(), relaying_tx.clone(), stop.clone()));
+    if let Some(h) = &simplex {
+        let _ = simplex_page.handle.set(h.clone());
+    }
     let state = load(&cfg.state_dir)?;
     let life = new_life()?;
     let mut engine = Engine::new(state, cfg.settings, &life).map_err(|c| BridgeError::Corrupt(c.0))?.with_menu(runtime.menu());
@@ -316,18 +344,21 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
         None => agents,
     };
     let computer = tokio::select! {
-        c = ask_until(&api, stop.clone()) => c,
+        c = ask_until(&api, cfg.simplex.is_some(), stop.clone()) => c,
         r = &mut runtime_task => return runtime_result(r, name),
     };
     let Some(mut computer) = computer else { return Ok(()) };
     let listed = computer.agents.len();
     computer.agents = gated(computer.agents, &ready);
     screen_agents.send_replace(Some(named(&computer.agents)));
+    if let Some(h) = &simplex {
+        h.computer(computer.clone(), computer.agents.clone());
+    }
     crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtime": name, "boot": engine.state().boot + 1, "life": life });
 
-    let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight });
+    let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight, simplex: simplex.clone() });
     let runtime_lane = RuntimeLane::spawn(api.clone(), cmd_tx, cfg.media_dir.clone());
-    tokio::spawn(keepalive(api.clone(), keep_rx, stop.clone()));
+    tokio::spawn(keepalive(api.clone(), keep_rx, cfg.keepalive_ping, stop.clone()));
     let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), discovering: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()) };
 
     let act = |engine: &Engine, step: engine::Step| -> Result<(), BridgeError> {
@@ -337,7 +368,13 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
         }
         for e in step.effects {
             match e {
-                Effect::Post { agent, fragment, channel, id, body, files } => lanes.push(&fragment, Job::Post { agent, channel, id, body, files }),
+                Effect::Post { agent, fragment, channel, id, body, files } => {
+                    // what an agent says in its owner's SimpleX chat goes to
+                    // their phone too, once posted, whatever started its turn
+                    let mirrored = simplex.is_some() && engine.mirror(&agent) == Some(fragment.as_str());
+                    let relay = mirrored.then(|| for_simplex(channel, &body, files.len())).flatten();
+                    lanes.push(&fragment, Job::Post { agent, channel, id, body, files, relay })
+                }
                 Effect::Claim { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Claim { agent, turn, id, body }),
                 Effect::Owed { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Owed { agent, turn, id, body }),
                 Effect::Draft { agent, fragment, turn, text } => lanes.push(&fragment, Job::Draft { agent, turn, text }),
@@ -362,6 +399,24 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
 
     let s = engine.step(Input::Agents(computer.agents.clone()), crate::log::now_ms());
     act(&engine, s)?;
+    // the agents whose SimpleX link is bound, and their chats, as their files
+    // say, before any record: a relayed record a cut life posted and never
+    // ran is honored, and what is said in their chat goes to the phone
+    if let Some(sc) = &cfg.simplex {
+        let linked = crate::simplex::run::linked_on_disk(&sc.dir, &computer.agents);
+        relaying_tx.send_modify(|now| {
+            for (a, chat) in linked {
+                let known = now.entry(a).or_insert(None);
+                if known.is_none() {
+                    *known = chat;
+                }
+            }
+        });
+        let linked = relaying_tx.borrow().clone();
+        *shared.mirrors.lock().expect("mirrors") = linked.clone();
+        let s = engine.step(Input::Relaying(linked), crate::log::now_ms());
+        act(&engine, s)?;
+    }
     let s = engine.recover(crate::log::now_ms());
     act(&engine, s)?;
     for a in &computer.agents {
@@ -382,7 +437,10 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                 let step = match m {
                     Msg::Input(input) => engine.step(input, crate::log::now_ms()),
                     Msg::Computer(c) => {
-                        let agents = gated(c.agents, &ready);
+                        let agents = gated(c.agents.clone(), &ready);
+                        if let Some(h) = &simplex {
+                            h.computer(c, agents.clone());
+                        }
                         let now = Some(named(&agents));
                         screen_agents.send_if_modified(|was| if *was == now { false } else { *was = now; true });
                         let s = engine.step(Input::Agents(agents.clone()), crate::log::now_ms());
@@ -393,6 +451,17 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                     }
                 };
                 if let Err(e) = act(&engine, step) {
+                    break Err(e);
+                }
+            }
+            r = relaying_rx.changed() => {
+                if r.is_err() {
+                    break Ok(());
+                }
+                let linked = relaying_rx.borrow_and_update().clone();
+                *shared.mirrors.lock().expect("mirrors") = linked.clone();
+                let s = engine.step(Input::Relaying(linked), crate::log::now_ms());
+                if let Err(e) = act(&engine, s) {
                     break Err(e);
                 }
             }
@@ -408,7 +477,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                 let ready_changed = ready.as_mut().is_some_and(Ready::refresh);
                 if ready_changed || computer_read.elapsed() >= Duration::from_millis(limits::COMPUTER_EVERY_MS) {
                     computer_read = Instant::now();
-                    reread(&api, &inbox_tx);
+                    reread(&api, cfg.simplex.is_some(), &inbox_tx);
                 }
             }
             r = &mut runtime_task => break runtime_result(r, name),
@@ -428,17 +497,17 @@ fn runtime_result(r: Result<Result<(), crate::runtime::RuntimeError>, tokio::tas
 
 /// Reads `GET /api/computer` in a task of its own (a slow platform never
 /// holds the engine), into the inbox.
-fn reread(api: &Api, inbox: &mpsc::Sender<Msg>) {
+fn reread(api: &Api, simplex: bool, inbox: &mpsc::Sender<Msg>) {
     let (api, inbox) = (api.clone(), inbox.clone());
     tokio::spawn(async move {
-        if let Some(c) = ask_once(&api).await {
+        if let Some(c) = ask_once(&api, simplex).await {
             let _ = inbox.send(Msg::Computer(c)).await;
         }
     });
 }
 
-async fn ask_once(api: &Api) -> Option<api::Computer> {
-    match api.computer().await {
+async fn ask_once(api: &Api, simplex: bool) -> Option<api::Computer> {
+    match api.computer(simplex).await {
         Ok(c) => Some(c),
         Err(e) => {
             crate::ev!("computer.unread", { "error": e.to_string() });
@@ -448,11 +517,11 @@ async fn ask_once(api: &Api) -> Option<api::Computer> {
 }
 
 /// `GET /api/computer` until it answers.
-async fn ask_until(api: &Api, stop: watch::Receiver<bool>) -> Option<api::Computer> {
+async fn ask_until(api: &Api, simplex: bool, stop: watch::Receiver<bool>) -> Option<api::Computer> {
     let mut backoff = Backoff::default();
     // bounded by the platform's answer, or `stop`
     loop {
-        if let Some(c) = ask_once(api).await {
+        if let Some(c) = ask_once(api, simplex).await {
             return Some(c);
         }
         if !backoff.wait(stop.clone()).await {
@@ -644,16 +713,28 @@ impl ViewCache {
         members.sort_by(|a, b| (a.added_at, &a.principal).cmp(&(b.added_at, &b.principal)));
         self.view.agents = members.iter().filter(|m| m.kind == "agent").map(|m| m.principal.clone()).collect();
         self.since = members.iter().find(|m| m.principal == agent.identity).map(|m| m.added_at).unwrap_or(0);
-        let mut ids: Vec<String> = members.iter().filter(|m| m.kind != "agent" && records::is_identity(&m.principal)).map(|m| m.principal.clone()).collect();
-        if let Some(w) = writer.filter(|w| records::is_identity(w) && !ids.iter().any(|i| i == w)) {
-            ids.push(w.to_string());
+        // Who to name, at most `PEOPLE_MAX` (one `__people`): the writer whose
+        // record asked first, then its people, then its other agents (an
+        // agent's message, a hand-off, is told by its name: its title, as
+        // `__people` says it now).
+        let mut ids: Vec<String> = writer.filter(|w| records::is_identity(w) && *w != agent.identity).map(str::to_string).into_iter().collect();
+        let (agents, people): (Vec<&api::Member>, Vec<&api::Member>) = members.iter().filter(|m| m.principal != agent.identity && records::is_identity(&m.principal)).partition(|m| m.kind == "agent");
+        for m in people.into_iter().chain(agents) {
+            if ids.len() >= api::PEOPLE_MAX {
+                break;
+            }
+            if !ids.contains(&m.principal) {
+                ids.push(m.principal.clone());
+            }
         }
         match api.people(&agent.fragment, fragment, &ids).await {
             Ok(names) => self.view.names = names,
             Err(e) => crate::ev!("people.unread", { "fragment": fragment, "error": e.to_string() }),
         }
-        // A writer no one could name is "someone" until the next read, not
-        // a reason to read again at each of its records.
+        // A writer asked of and not named is "someone" until the next read,
+        // not a reason to read again at each of its records. One past the
+        // bound was not asked: left unnamed, its first record reads the view
+        // again, with it first.
         for id in ids {
             self.view.names.entry(id).or_insert_with(|| "someone".into());
         }
@@ -747,8 +828,8 @@ async fn follow_once(
         let full = page.records.len() as u32 >= limits::CATCHUP_PAGE_RECORDS;
         for r in page.records {
             last = last.max(r.seq);
-            if !feed(api, agent, fragment, r, inbox, shared, view, tasks).await {
-                return Ended::Stopped;
+            if let Some(ended) = feed(api, agent, fragment, r, inbox, shared, view, tasks).await {
+                return ended;
             }
         }
         if !full {
@@ -809,8 +890,8 @@ async fn follow_once(
                             continue;
                         }
                         last = r.seq;
-                        if !feed(api, agent, fragment, r, inbox, shared, view, tasks).await {
-                            return Ended::Stopped;
+                        if let Some(ended) = feed(api, agent, fragment, r, inbox, shared, view, tasks).await {
+                            return ended;
                         }
                     }
                     Some("subscribed") if v["more"] == json!(true) => {
@@ -828,16 +909,24 @@ async fn follow_once(
 }
 
 /// One record into the engine, with the chat's view (fresh enough, and
-/// knowing its writer). False when the engine is gone.
+/// knowing its writer). A routine that names no chat is given the chat its
+/// agent's home names now (`home_of`; docs/api.md, "An agent's home"); one
+/// whose home could not be read, or names a SimpleX chat not made yet,
+/// ends the follow, which reads it again after a wait from the engine's
+/// cursor, so no fire is lost to a failed read or a chat being made
+/// (until it is past the hour a missed routine is skipped after). What
+/// ends the follow, if anything: `Stopped` when the engine is gone.
 #[allow(clippy::too_many_arguments)]
-async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &mpsc::Sender<Msg>, shared: &Shared, view: &mut ViewCache, tasks: bool) -> bool {
+async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &mpsc::Sender<Msg>, shared: &Shared, view: &mut ViewCache, tasks: bool) -> Option<Ended> {
     let (input_view, since) = if tasks {
         // A routine that fired while the computer was gone longer than this
         // is skipped, as cron skips a missed run.
         let since = i64::try_from(crate::log::now_ms().saturating_sub(limits::TASKS_BACKLOG_MS)).expect("ms fit");
         (None, since)
     } else {
-        let unknown = records::is_identity(&record.principal) && !view.view.names.contains_key(&record.principal) && !view.view.agents.contains(&record.principal);
+        // a writer the view has no name for (a person or another agent past
+        // the last read's bound, or new): read again, with it first
+        let unknown = records::is_identity(&record.principal) && record.principal != agent.identity && !view.view.names.contains_key(&record.principal);
         if !view.fresh(shared.joined_at(fragment)) || unknown {
             if let Err(e) = view.read(api, agent, fragment, Some(&record.principal)).await {
                 crate::ev!("view.unread", { "fragment": fragment, "error": e.to_string() });
@@ -845,7 +934,41 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
         }
         (Some(view.view.clone()), view.since)
     };
-    inbox.send(Msg::Input(Input::Record { agent: agent.fragment.clone(), fragment: fragment.to_string(), record, view: input_view, since })).await.is_ok()
+    let record = if tasks && record.at >= since && records::homeless(&record.body) {
+        let simplex = shared.mirrors.lock().expect("mirrors").get(&agent.fragment).cloned().flatten();
+        let now = i64::try_from(crate::log::now_ms()).expect("ms fit");
+        let waited = now.saturating_sub(record.at) >= i64::try_from(limits::HOME_CHAT_WAIT_MS).expect("ms fit");
+        match home_of(api, agent, simplex.as_deref(), waited).await {
+            Ok(HomeChat::In(chat)) => {
+                crate::ev!("routine.home", { "agent": agent.fragment, "seq": record.seq, "chat": chat });
+                Record { body: records::homed(&record.body, &chat), ..record }
+            }
+            // no chat with its owner at all: passed over, said so
+            Ok(HomeChat::Nowhere) => {
+                crate::ev!("routine.homeless", { "agent": agent.fragment, "seq": record.seq });
+                record
+            }
+            // its SimpleX chat named and not made yet: read again from the cursor, as a failed read is
+            Ok(HomeChat::Unmade) => return Some(Ended::Again("its SimpleX chat is not made yet".into())),
+            Err(e) => return Some(Ended::Again(format!("its home was not read: {e}"))),
+        }
+    } else {
+        record
+    };
+    let fed = inbox.send(Msg::Input(Input::Record { agent: agent.fragment.clone(), fragment: fragment.to_string(), record, view: input_view, since })).await;
+    fed.is_err().then_some(Ended::Stopped)
+}
+
+/// The chat an agent's home names now (`api::home_chat`): its `agent.json`,
+/// its SimpleX chat while linked (the one its link mirrors: `simplex`),
+/// its owner's list and its own, read as a routine that names no chat
+/// fires (at most every 15 minutes a schedule); `waited`: the routine fired
+/// `limits::HOME_CHAT_WAIT_MS` ago or more.
+async fn home_of(api: &Api, agent: &Agent, simplex: Option<&str>, waited: bool) -> Result<HomeChat, ApiError> {
+    let home = api.home(&agent.fragment).await?;
+    let owners = api.fragments_for(&agent.fragment, &agent.owner).await?;
+    let mine = api.fragments(&agent.fragment).await?;
+    Ok(api::home_chat(&agent.fragment, home, simplex, &owners, &mine, waited))
 }
 
 /// The agent's wake subscription on the channel: made unless it has one.
@@ -862,9 +985,41 @@ async fn ensure_wake(api: &Api, agent: &Agent, fragment: &str, channel: &str) ->
 
 // ---- lanes: each fragment's posts, claims and drafts, in order ----
 
+/// What of a record an agent posts in its owner's SimpleX chat goes to
+/// their SimpleX app (the caller's to say it is that chat), its files beside
+/// it (simplex/run.rs, `Handle::reply`): a message of its own (a reply;
+/// something it says with no turn running), its text and its files, unless
+/// it is interim (the model's words before a tool call stay in the chat, as
+/// its push leaves them out: docs/chat-records.md, "Push"; a turn may
+/// narrate 200 of them, each a notification on the phone); and a card's
+/// question, its choices named, since a card shows only in the chat.
+/// Nothing else (a relayed message, the owner's own, is the phone's
+/// already).
+fn for_simplex(channel: &str, body: &Value, files: usize) -> Option<String> {
+    let text = body["text"].as_str().unwrap_or("");
+    match channel {
+        records::CHAT if body["interim"] != true && body.get("relayed").is_none() => (!text.trim().is_empty() || files > 0).then(|| text.to_string()),
+        records::WORK if body["kind"] == "turn.prompt" => {
+            let options = body["options"].as_array()?;
+            let words = options.iter().any(|o| o["words"] == true);
+            let labels: Vec<&str> = options.iter().filter(|o| o["words"] != true).filter_map(|o| o["label"].as_str()).collect();
+            // the owner's next message answers a card that takes words (engine.rs `told`)
+            let how = match (words, labels.is_empty()) {
+                (true, true) => String::new(),
+                (true, false) => format!("\n\n(Answer with one of: {}, or in your own words.)", labels.join(", ")),
+                (false, _) => "\n\n(This one needs a button: answer it in our chat.)".to_string(),
+            };
+            Some(format!("{text}{how}"))
+        }
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Job {
-    Post { agent: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile> },
+    /// `relay`: what of it goes to the owner's SimpleX app once posted, for
+    /// a post in its owner's SimpleX chat (`for_simplex`), with its files.
+    Post { agent: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile>, relay: Option<String> },
     /// A turn's `turn.start` on `work`, whose answer the engine waits for.
     Claim { agent: String, turn: String, id: String, body: Value },
     /// One of a turn's last records on `work`: the engine hears when the
@@ -887,6 +1042,8 @@ struct Claims {
     inbox: mpsc::Sender<Msg>,
     hold: PathBuf,
     in_flight: Arc<AtomicUsize>,
+    /// Where a SimpleX turn's posted reply goes (none without SimpleX).
+    simplex: Option<crate::simplex::run::Handle>,
 }
 
 /// One claim's try in flight, counted while it lives.
@@ -992,14 +1149,18 @@ async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut s
                     Err(e) => crate::ev!("draft.failed", { "fragment": fragment, "turn": turn, "error": e.to_string() }),
                 }
             }
-            Job::Post { agent, channel, id, body, files } => {
-                post(&api, &fragment, &agent, channel, &id, body, &files, stop.clone()).await;
+            Job::Post { agent, channel, id, body, files, relay } => {
+                // what goes back over SimpleX goes only once it is on the chat
+                let sent = post(&api, &fragment, &agent, channel, &id, body, &files, None, stop.clone()).await;
+                if let (Some(text), Sent::Posted, Some(sx)) = (relay, sent, claims.simplex.as_ref()) {
+                    sx.reply(&agent, &text, &files).await;
+                }
             }
             Job::Owed { agent, turn, id, body } => {
                 // Done (answered, or given up after its tries) unless the
                 // bridge is stopping: then the turn keeps owing it, and the
                 // next life posts it again.
-                if post(&api, &fragment, &agent, records::WORK, &id, body, &[], stop.clone()).await {
+                if post(&api, &fragment, &agent, records::WORK, &id, body, &[], None, stop.clone()).await.ended() {
                     let _ = claims.inbox.send(Msg::Input(Input::Posted { turn, id })).await;
                 }
             }
@@ -1061,12 +1222,29 @@ async fn claim(api: &Api, fragment: &str, agent: &str, id: &str, body: &Value, c
     unreachable!("the last try returns")
 }
 
+/// How a post ended: on the chat (this try's, or an earlier life's under
+/// its id), refused for good (out of tries, or no longer the agent's to
+/// post in), or not ended, the bridge stopping first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Sent {
+    Posted,
+    Refused,
+    Stopped,
+}
+
+impl Sent {
+    /// Done with, either way: what a turn's owed records wait for.
+    pub(crate) fn ended(self) -> bool {
+        self != Sent::Stopped
+    }
+}
+
 /// A post, tried until the platform answers it, or `POST_TRIES_MAX` times
 /// on a transport error, 429 or 5xx (a jittered backoff between: lesson 5),
-/// or refused at once: true when done so, false when the bridge stopped
-/// first.
+/// or refused at once. A relayed record is signed by its `door` at each
+/// try, its files' refs in it (simplex/door.rs).
 #[allow(clippy::too_many_arguments)]
-async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, mut body: Value, files: &[LocalFile], stop: watch::Receiver<bool>) -> bool {
+pub(crate) async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, mut body: Value, files: &[LocalFile], door: Option<&crate::simplex::door::Key>, stop: watch::Receiver<bool>) -> Sent {
     let mut backoff = Backoff::default();
     for attempt in 1..=limits::POST_TRIES_MAX {
         let uploaded = upload(api, fragment, agent, files).await;
@@ -1075,6 +1253,9 @@ async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, m
                 if !refs.is_empty() {
                     body["attachments"] = json!(refs);
                 }
+                if let Some(door) = door {
+                    door.seal(&mut body, fragment, channel, id, crate::log::now_ms() as i64);
+                }
                 api.post(agent, fragment, channel, id, &body).await
             }
             Err(e) => Err(e),
@@ -1082,12 +1263,12 @@ async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, m
         match result {
             Ok(posted) => {
                 crate::ev!("posted", { "fragment": fragment, "channel": channel, "id": id, "replayed": posted.replayed, "attempt": attempt });
-                return true;
+                return Sent::Posted;
             }
             Err(e) if e.retryable() && attempt < limits::POST_TRIES_MAX => {
                 crate::ev!("post.retry", { "fragment": fragment, "id": id, "attempt": attempt, "error": e.to_string() });
                 if !backoff.wait(stop.clone()).await {
-                    return false;
+                    return Sent::Stopped;
                 }
             }
             Err(e) if e.status() == Some(409) => {
@@ -1095,13 +1276,13 @@ async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, m
                 // turn that life ended, or the records of one it claimed
                 // (one life per turn). Never retried.
                 crate::ev!("post.taken", { "fragment": fragment, "channel": channel, "id": id });
-                return true;
+                return Sent::Posted;
             }
             Err(e) => {
                 // Out of tries, or a 403/404: it is no longer the agent's to
                 // post in.
                 crate::ev!("post.failed", { "fragment": fragment, "channel": channel, "id": id, "error": e.to_string() });
-                return true;
+                return Sent::Refused;
             }
         }
     }
@@ -1218,7 +1399,15 @@ async fn quote_of(api: &Api, ts: &TurnStart, seq: u64) -> Option<Quote> {
         return None;
     }
     let id = records::turn_id(&ts.agent.fragment, &ts.fragment, records::CHAT, seq);
-    Some(Quote { id, text: records::cut_bytes(&text, limits::QUOTE_TEXT_MAX_BYTES), own: r.principal == ts.agent.identity })
+    Some(Quote { id, text: records::cut_bytes(&text, limits::QUOTE_TEXT_MAX_BYTES), own: own_words(&r.principal, &r.body, &ts.agent) })
+}
+
+/// Whether a record `principal` posted is `agent`'s own words (a quote of
+/// it is `reply_to.is_own`): what it posted, but for a message it relays
+/// from its owner (docs/chat-records.md, "A relayed message"), which are
+/// its owner's.
+fn own_words(principal: &str, body: &Value, agent: &crate::runtime::Agent) -> bool {
+    principal == agent.identity && records::relayed(body).is_none_or(|r| r.for_ != agent.owner)
 }
 
 /// A message's attachments, from the chat's blobs to scratch files.
@@ -1369,18 +1558,20 @@ async fn cut_note(api: &Api, ts: &TurnStart) -> Option<String> {
 // ---- the hold ----
 
 /// The bridge's answer to the platform's hold (docs/computers.md, "The
-/// hold"): `held` exists while `hold` does and no claim is in flight (a
-/// claim looks at the hold before each try, so none starts once it holds),
-/// and not otherwise. The platform clears `held` before each hold, so an
+/// hold"): `held` exists while `hold` does, no claim is in flight (a claim
+/// looks at the hold before each try, so none starts once it holds), and no
+/// SimpleX core runs (`cores_quiet`: SimpleX stops them all as it sees the
+/// hold, and starts none while it lasts; always true with no SimpleX), and
+/// not otherwise. The platform clears `held` before each hold, so an
 /// answer is always to the hold it finds. The answer is `answer`: what the
 /// save may leave out, one per line (none, empty). Looked at every
 /// `HOLD_POLL_MS`, for the bridge's life.
-async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: Arc<AtomicUsize>, mut stop: watch::Receiver<bool>) {
+async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: Arc<AtomicUsize>, cores_quiet: Arc<std::sync::atomic::AtomicBool>, mut stop: watch::Receiver<bool>) {
     assert!(hold != held, "a hold and its answer are two files");
     assert!(answer.len() <= limits::HELD_ANSWER_MAX_BYTES, "an answer the platform reads whole");
     // bounded by the bridge's life: one look per `HOLD_POLL_MS`, ended by `stop`
     loop {
-        let quiet = hold.exists() && in_flight.load(Ordering::SeqCst) == 0;
+        let quiet = hold.exists() && in_flight.load(Ordering::SeqCst) == 0 && cores_quiet.load(Ordering::SeqCst);
         match (quiet, held.exists()) {
             // written whole, then renamed: the platform never reads half
             (true, false) => match write_whole(&held, answer.as_bytes()) {
@@ -1402,8 +1593,13 @@ async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: A
 // ---- keepalive ----
 
 /// Holds `GET /api/computer/keepalive` open while `hold` is true, and only
-/// then (decision 39: the computer stays awake while it is open).
-async fn keepalive(api: Api, mut hold: watch::Receiver<bool>, stop: watch::Receiver<bool>) {
+/// then (decision 39: the computer stays awake while it is open). It pings
+/// every `every`, as a `__live` socket does: one silent twice that is
+/// opened again, since a deploy can cut the platform's side of it with no
+/// close reaching here (#557), and the platform, holding no socket, counts
+/// it closed.
+pub(crate) async fn keepalive(api: Api, mut hold: watch::Receiver<bool>, every: Duration, stop: watch::Receiver<bool>) {
+    assert!(!every.is_zero(), "the keepalive pings at an interval");
     let mut backoff = Backoff::default();
     // bounded by the bridge's life: one connection per pass
     loop {
@@ -1432,7 +1628,10 @@ async fn keepalive(api: Api, mut hold: watch::Receiver<bool>, stop: watch::Recei
         crate::ev!("keepalive.held");
         let (mut sink, mut stream) = ws.split();
         let mut stop2 = stop.clone();
-        // bounded by the socket, `hold`, or `stop`
+        let mut ping = tokio::time::interval(every);
+        ping.tick().await;
+        let mut heard = Instant::now();
+        // bounded by the socket, its silence, `hold`, or `stop`
         loop {
             tokio::select! {
                 r = hold.changed() => {
@@ -1442,12 +1641,23 @@ async fn keepalive(api: Api, mut hold: watch::Receiver<bool>, stop: watch::Recei
                         break;
                     }
                 }
+                _ = ping.tick() => {
+                    // dropped, not closed: its far side may hear nothing
+                    if heard.elapsed() > 2 * every {
+                        crate::ev!("keepalive.quiet", { "ms": heard.elapsed().as_millis() as u64 });
+                        break;
+                    }
+                    if sink.send(Message::text(json!({ "type": "ping" }).to_string())).await.is_err() {
+                        crate::ev!("keepalive.lost");
+                        break;
+                    }
+                }
                 m = stream.next() => match m {
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
                         crate::ev!("keepalive.lost");
                         break;
                     }
-                    Some(Ok(_)) => {}
+                    Some(Ok(_)) => heard = Instant::now(),
                 },
                 _ = crate::net::stopped(&mut stop2) => {
                     let _ = sink.close().await;
@@ -1455,5 +1665,72 @@ async fn keepalive(api: Api, mut hold: watch::Receiver<bool>, stop: watch::Recei
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Goal (SimpleX, after #584's mid-turn replies; per chat since Paul's
+    /// 2026-10-26): of what an agent posts in its owner's SimpleX chat, their
+    /// app gets every reply that is not interim (its answer, an open
+    /// question, something said unasked), its files with it, and a card's
+    /// question with its choices; the model's words before a tool call stay
+    /// in the chat, as the chat's push leaves them out, and so do a turn's
+    /// work and its owner's own words from the phone.
+    #[test]
+    fn what_goes_back_over_simplex() {
+        let reply = |interim: bool| records::reply("It'll be sunny.", "t1", &[], 0, interim);
+        assert_eq!(for_simplex(records::CHAT, &reply(false), 0).as_deref(), Some("It'll be sunny."));
+        assert_eq!(for_simplex(records::CHAT, &reply(false), 2).as_deref(), Some("It'll be sunny."), "its files go as files, not noted");
+        assert_eq!(for_simplex(records::CHAT, &reply(true), 0), None, "interim: the chat's alone");
+        assert_eq!(for_simplex(records::CHAT, &records::reply("", "t1", &[], 0, false), 1).as_deref(), Some(""), "a file alone goes");
+        assert_eq!(for_simplex(records::CHAT, &records::reply(" ", "t1", &[], 0, false), 0), None, "nothing said");
+        let agent = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None };
+        assert_eq!(for_simplex(records::CHAT, &records::relayed_message("hi from my phone", &agent, records::VIA_SIMPLEX, &[]), 0), None, "its owner's own, from the phone");
+        let option = |id: &str, label: &str, words: bool| records::PromptOption { id: id.into(), label: label.into(), style: None, words };
+        let card = records::turn_prompt("t1", "c-1", "What should I plant?", &[option("c0", "Basil", false), option("c1", "Mint", false), option("other", "Something else", true)], "npub1paul", 1);
+        assert_eq!(for_simplex(records::WORK, &card, 0).as_deref(), Some("What should I plant?\n\n(Answer with one of: Basil, Mint, or in your own words.)"));
+        let buttons = records::turn_prompt("t1", "p-1", "Run it?", &[option("once", "Allow once", false)], "npub1paul", 1);
+        assert!(for_simplex(records::WORK, &buttons, 0).is_some_and(|t| t.ends_with("answer it in our chat.)")));
+        assert_eq!(for_simplex(records::WORK, &json!({ "kind": "turn.start", "turn": "t1" }), 0), None, "a turn's work records stay");
+    }
+
+    /// Goal (Alex's review of #548): a post says how it ended, so what goes
+    /// back over SimpleX, and an inbound file's deletion, wait for one on
+    /// the chat: a refusal (403, 404) is no post; another life's under the
+    /// same id (409) is.
+    #[tokio::test]
+    async fn a_post_says_how_it_ended() {
+        for (status, want) in [(200u16, Sent::Posted), (409, Sent::Posted), (403, Sent::Refused), (404, Sent::Refused)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a port");
+            let addr = listener.local_addr().expect("its address");
+            let (_stop_tx, stop) = watch::channel(false);
+            let answer = move |_req: hyper::Request<hyper::body::Incoming>, _peer: std::net::SocketAddr| async move {
+                let code = hyper::StatusCode::from_u16(status).expect("a status");
+                if status == 200 { crate::net::json_answer(code, &json!({ "record": { "seq": 1 }, "replayed": false })) } else { crate::net::refusal(code, "refused", "as asked") }
+            };
+            tokio::spawn(crate::net::serve(listener, answer, stop.clone()));
+            let api = Api::new(&format!("http://{addr}")).expect("an address");
+            let sent = post(&api, "chat--a1b2", "juniper--k3x9", records::CHAT, "sx:1", json!({ "text": "hi" }), &[], None, stop).await;
+            assert_eq!(sent, want, "{status}");
+            assert!(sent.ended());
+        }
+    }
+
+    /// Goal (Alex's review of #548): a message its agent relays from its
+    /// owner, quoted, is its owner's words to the runtime, not the agent's
+    /// own; anything else the agent posted is its own.
+    #[test]
+    fn a_relayed_message_quoted_is_its_owners() {
+        let agent = crate::runtime::Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None };
+        let relayed = records::relayed_message("hi from my phone", &agent, records::VIA_SIMPLEX, &[]);
+        assert!(!own_words("npub1juniper", &relayed, &agent), "its owner's, relayed");
+        assert!(own_words("npub1juniper", &json!({ "text": "a reply", "turn": "t1" }), &agent));
+        assert!(!own_words("npub1paul", &json!({ "text": "hi" }), &agent));
+        let for_someone_else = records::relayed_message("x", &crate::runtime::Agent { owner: "npub1skyler".into(), ..agent.clone() }, records::VIA_SIMPLEX, &[]);
+        assert!(own_words("npub1juniper", &for_someone_else, &agent), "a relay for anyone else is no owner's");
     }
 }

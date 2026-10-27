@@ -12,16 +12,21 @@
   <meta name="apple-mobile-web-app-title" content="Finite">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="format-detection" content="telephone=no">
-  <!-- the release that answered this page, filled in as it is served
-       (cell/src/shell.rs): its script reloads once the platform's answers
-       name another (shell.js, "a new release"; docs/api.md, The shell) -->
+  <!-- the release that answered this page, and when it was deployed,
+       filled in as it is served (cell/src/shell.rs): its script reloads
+       once the platform's answers name another (shell.js, "a new
+       release"; docs/api.md, The shell), and Settings ends with both -->
   <meta name="fragment-release" content="{{release}}">
+  <meta name="fragment-release-deployed" content="{{deployed}}">
   <title>Finite.Computer</title>
   <link rel="manifest" href="/__shell/manifest.webmanifest">
   <link rel="icon" href="/__shell/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/__shell/apple-touch-icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Funnel+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+  <!-- Funnel Sans is the release's own (platform-pages.css, with the
+       onboarding design's tokens and card); JetBrains Mono, Google's -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="/__shell/platform-pages.css">
   <link rel="stylesheet" href="/__shell/shell.css">
 </head>
 <body>
@@ -45,6 +50,10 @@
       <div class="sidebar-agent-toolbar">
         <div id="primary-agent"></div>
       </div>
+      <button class="row sidebar-start-chat" id="sidebar-start-chat" type="button" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.4 2.6a1 1 0 0 1 3 3l-9 9a2 2 0 0 1-.85.5l-2.87.84a.5.5 0 0 1-.62-.62l.84-2.87a2 2 0 0 1 .5-.85z"/></svg><span class="label">New chat</span></button>
+      <!-- the invites waiting on the person's emails, each theirs to accept
+           or decline (shell.js renderInvites; docs/api.md, Invites by email) -->
+      <section class="invites" id="invites" aria-label="Invites" hidden></section>
       <nav class="rows" id="chats" aria-label="Chats"></nav>
       <div class="spacer"></div>
       <button class="row settings" id="settings" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span class="label">Settings</span></button>
@@ -92,12 +101,24 @@
     </section>
   </div>
 
-  <!-- first run: sign in, the welcome (a seat), then the first agent (decision 10) -->
+  <!-- first run: sign in, the welcome (a seat), then the first agent
+       (decision 10), as the platform's pages are (platform-pages.css:
+       Skyler's onboarding design, 2026-10-22): Finite's logo, one card,
+       and Finite's footer, its year shell.js's (firstRun) -->
   <main class="first-run" id="first-run" hidden>
     <div class="wallpaper" aria-hidden="true"></div>
     <div class="first-run-content">
-      <img class="first-run-logo" src="/__shell/finite-logo.svg" alt="Finite" width="88" height="88">
+      <div class="platform-brand"><img class="first-run-logo" src="/__shell/finite-logo.svg" alt="Finite" width="44" height="46"></div>
       <div class="first-run-card" id="first-run-card"></div>
+      <footer class="page-footer">
+        <span><span id="first-run-year"></span> © Finite Computer LLC</span>
+        <nav aria-label="Finite">
+          <a href="/about" target="_blank" rel="noopener">About</a>
+          <a href="mailto:support@finite.computer">Contact</a>
+          <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>
+          <a href="/terms" target="_blank" rel="noopener">Terms</a>
+        </nav>
+      </footer>
     </div>
   </main>
 

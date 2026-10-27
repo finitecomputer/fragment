@@ -57,7 +57,16 @@ container starts until someone asks again).
 - **Awake while:** a port tab is open, or the guest holds the keepalive
   socket (below). Traffic from the container does not count (spike S3).
   Twenty minutes after neither holds, it sleeps. A $200 seat's computer
-  never sleeps (decision 25).
+  never sleeps (decision 25). A keepalive counts as long as the runtime
+  holds its socket: before each event the DO closes those it counts that
+  the runtime no longer holds open for the running start
+  (`Lifecycle::keepalives_lost`, `getWebSockets`), never one it holds
+  (#557). A deploy restarts every Durable Object and disconnects every
+  socket, and the guest's close after it reaches no release: on the
+  preview (2026-10-22) one stayed counted open for 14 hours, so its
+  computer never slept, took a busy save every 15 minutes and was
+  metered. Closed so, it is held as any closed one is (the 20 minutes),
+  and the guest opens it again if its turn still runs (below).
 - **Saved** (below, "Saves and what a wake restores"): when its work
   ends (the guest's last keepalive closes, and 30 s pass with none opened
   again), every 15 minutes while a keepalive stays open, and at every
@@ -144,10 +153,10 @@ the bridge), what its person saw before 2026-10-08, and what they see now:
 | **Its owner's sleep**, saved (the shell's update is one) | `POST …/sleep` | the same | the same |
 | **A sleep whose save fails** | any sleep; it is kept awake (I5) and tried again after 1, 2, 4, 8, 15 minutes | Settings' `why`, read only when Settings was opened after it / nothing; its owner charged for the time it was kept | an `unsaved` notice at once, over every chat and Settings, pushed to open pages: since when its work is in no save, the save a stop goes back to, the time the bound stops it, and Restart; the time it is kept, from its failing try's start to the bound, is free |
 | **Awake saves that keep failing** (a turn's end, every 15 minutes busy) | tried again after a growing pause, unbounded while awake | nothing anywhere: no `why` for an awake save | the `unsaved` notice once two fail in a row (no stop time: none is due until it would sleep) |
-| **The bound runs out**: put to sleep unsaved | the sleep tried at `unsaved_since + unsaved_max_ms` (exactly: the last try is the bound's), only when nothing holds it | Settings' `why` ("slept unsaved"), which then stayed for good (only a save of the same life cleared it) / nothing | a `went_back` notice (pending) while it is asleep: what it will go back to; the `why` goes at the next save that works |
-| **A crash**: the container stops on its own (out of memory, a host restart, the runtime's idle stop, or dying while its sleep held or saved it) | `Exited`; it starts again at once while anything wants it, else at its next wake | nothing (`restored` and `rollbacks` were in the API only) / a turn it cut ends quietly as "lost when the computer restarted"; the agent's next turn there is told what was cut (docs/bridge.md) | a `went_back` notice: stopped unexpectedly, back to its save of `HH:MM`, how much before it stopped; the chat and the agent as before |
+| **The bound runs out**: put to sleep unsaved | the sleep tried at `unsaved_since + unsaved_max_ms` (exactly: the last try is the bound's), only when nothing holds it | Settings' `why` ("slept unsaved"), which then stayed for good (only a save of the same life cleared it) / nothing | a `went_back` notice (pending) while it is asleep: since when changes on it won't be there; the `why` goes at the next save that works; nothing when nothing was done on it since that save |
+| **A crash**: the container stops on its own (out of memory, a host restart, the runtime's idle stop, or dying while its sleep held or saved it) | `Exited`; it starts again at once while anything wants it, else at its next wake | nothing (`restored` and `rollbacks` were in the API only) / a turn it cut ends quietly as "lost when the computer restarted"; the agent's next turn there is told what was cut (docs/bridge.md) | a `went_back` notice, only when something was done on it since the save it went back to (below): "Your computer restarted. Changes on it since `HH:MM` weren't kept. Your chats are all here."; the chat and the agent as before |
 | **A wake past an unusable save** (its archive gone, or the image's check failed) | `RestoreFailed`, the save before it at once | nothing | a `went_back` notice: the newest save could not be restored |
-| **Its owner's restart** | `POST …/restart` | (no restart) | saved first: nothing to tell; its save failing, a `went_back` notice for the restart |
+| **Its owner's restart** | `POST …/restart` | (no restart) | saved first: nothing to tell; its save failing, a `went_back` notice for the restart, when something was done on it since its last save |
 | **A wake whose snapshot will not start** | the image and the same save, in the same wake | nothing | nothing: nothing is lost |
 | **A wake from a snapshot that comes up dead** (#362: started, then no exec answered and its guest never read its view) | unheard 45 s after its start; the image and the same save, in the same wake | it was awake and answered no one: messages unanswered, and its sleep's save hung for good (r4, r6) | nothing: nothing is lost, its wake 45 s slower |
 | **A sleep whose backups never answer** (a sick container's) | its save fails at its bound (8 minutes), as one that fails | it stayed `sleeping`, held, answering no one, and owed as awake, for good; its owner's sleep never answered (r4, r6) | as a sleep whose save fails: kept, the `unsaved` notice, tried again, and the bound ends it |
@@ -174,7 +183,19 @@ whoever reads it:
   went back to an older save (`crash`, `unsaved`, `restart`, `unusable`),
   or will as it next starts (`pending`). Told until its owner says they
   saw it (`POST …/notices/seen {life}`), whatever starts come after; the
-  newest loss only.
+  newest loss only. None for a loss that lost nothing (Paul, 2026-10-23:
+  "if the user had no activity between last good save and stop I don't
+  know if we even need the notice at all"): nothing was done on that life
+  after the save it goes back to (its newest save that worked, or, with
+  none, the one it came up from). Done means what the Computer DO hears:
+  its guest's keepalive or a port tab opened or closed, or a record or a
+  join woke it, after that save's hold began (`Ended::quiet`). A socket
+  that only stays open across the save is not: the DO can count a
+  keepalive open that its guest let go of (on the preview, 2026-10-23, one
+  whose close was lost across a deploy stayed counted open for 14 hours,
+  so the computer took a busy save every 15 minutes all night and never
+  slept), and a turn really running at a stop is ended as lost in its own
+  chat. Its guest still reads such a start as a rollback (`restored`).
 - `update {version}`: it is awake on another version than its next start
   runs (`version`, the view's `latest`; the view's `version` is the one it
   runs), and no turn runs (no keepalive open). Told until a restart or a
@@ -526,7 +547,10 @@ group is pinned to `hermes-canary`.
    with production's `PREVIEW_REGISTRY_TOKEN` and push credentials for
    production's with its own token, copies the image registry to
    registry, and refuses a copy whose manifest is not the source's
-   digest; its summary names
+   digest, then waits until Cloudflare has prepared it on production's
+   network (a copy is prepared only when asked: round 11's was still
+   pending 50 minutes on, at its deploy; xtask/src/prepare.rs); its
+   summary names
    `registry.cloudflare.com/<account>/fragment-computer-hermes@sha256:…`,
    the same digest, and the line
    `"hermes": { "image": "…" }`, which becomes stable's in
@@ -722,7 +746,9 @@ docs/durable-computers.md. A computer keeps its newest three saves of
   included), or its start fell back to a save older than that life's
   newest, so what that life did since some save is in none. A start from
   the save its life's sleep took is none. Its owner is told of the newest
-  until they say they saw it (`went_back`: "What its owner is told").
+  until they say they saw it, when something was done on the life it
+  lost after the save it went back to (`went_back`: "What its owner is
+  told").
   Nothing's correctness depends on the guest reading either.
 
 ### Bounds
@@ -803,6 +829,14 @@ expires within 30 days. The container application is the deployment's
 - `http://api.fragment.internal/<path>` is the platform's API
   (`docs/api.md`), and `http://api.fragment.internal/f/<fragment>/<path>`
   is a fragment's own routes (`__live` sockets included), as on its host.
+- On a local fleet, whose code.storage is the dev stack's fake at the
+  machine's loopback (which a container's loopback is not), a storage
+  token minted through the egress (`GET …/storage-token`, as `fragment
+  sync` and `deploy` ask it) names `http://codestorage.fragment.internal`
+  as its `api`, which the egress sends on to the fake as it came, the
+  guest's token with it. On a deployment the guest reaches code.storage
+  itself (docs/technical-debt-ledger.md, "An agent's sync and deploy
+  reach code.storage directly").
 - `x-fragment-agent: <agent fragment name>` says which of its agents the
   request acts as. The intercept refuses an agent not assigned to this
   computer, then signs the request (NIP-98) as that agent's identity.
@@ -811,12 +845,22 @@ expires within 30 days. The container application is the deployment's
 - Without the header only the computer's own routes answer:
   - `GET /api/computer` → `{computer, owner, image, agents: [{fragment,
     identity, name, owner, connections, modelProviders?, credentials:
-    [{provider, kind, env, placeholder, hosts, modelBase?}]}],
-    credentialEnv, models: {cheap, medium, fallback, vision}}`: the agents
+    [{provider, kind, env, placeholder, hosts, modelBase?}], key}],
+    credentialEnv, models: {cheap, medium, fallback, vision}, relay?:
+    {hosts, port}}`: the agents
     to run, each one's credentials (below, Connections and operator keys;
     `modelProviders` names those of them with a `modelBase`, as its owner's
-    view does: "An agent's own model"), and the model route's models'
-    ids by its names (below, Models, "A model by its id"). **They
+    view does: "An agent's own model"), the key its fragment signs as
+    (`key`, 64 hex: what a door's ticket is checked with, docs/api.md, "An
+    agent's doors"), and the model route's models'
+    ids by its names (below, Models, "A model by its id").
+    `?simplex=1` says the image does SimpleX (docs/bridge.md, "SimpleX"):
+    the Computer DO keeps the version of the image its running start came
+    up on as one that does (never while it starts: its next start's image
+    may already be another; written only when that is news, its owner's
+    pages told), and its owner's view
+    says `simplex` while it is on that version, so Settings offer SimpleX
+    on no other image. **They
     may change while the computer runs** (its owner assigns or unassigns
     an agent, connects an account, narrows an agent): the guest reads them
     again while awake and runs the new set, with nothing restarted. The
@@ -827,7 +871,46 @@ expires within 30 days. The container application is the deployment's
   - `GET /api/computer/keepalive` (a WebSocket): while it is open the
     computer stays awake. Hold it while busy, and while a turn waits on
     its card, until the card is answered or expires (decision 42 as
-    amended; docs/bridge.md, "A card keeps its computer awake").
+    amended; docs/bridge.md, "A card keeps its computer awake"). It
+    answers `{"type":"ping"}` with `{"type":"pong"}`: a deploy can cut
+    the platform's side of it with no close reaching the guest (#557),
+    and the platform then counts it closed, so a guest still busy pings
+    it and opens it again when it goes silent (our bridge: every 15 s,
+    silent after 30).
+  - `POST /api/computer/door {agent, door, nonce, key}`: the link ticket
+    its agent's owner made last (its `nonce`, within its ten minutes),
+    redeemed once with the public key of that link's door (docs/api.md,
+    "An agent's doors"); 403 for any other.
+  - `GET /api/computer/relay?host=&port=` (a WebSocket): **the XFTP
+    relay** (`fragment_core::relay`), raw TCP to `host`:`port` and back,
+    each binary frame bytes passed untouched. Containers reset a TLS hello
+    on 443 that names no server (SNI), and a SimpleX server on 443 takes
+    its protocol only from one (measured on a preview computer,
+    2026-10-25), so a computer reaches SimpleX's file servers only through
+    this: the Worker's `connect()`, which nothing inspects, carries them
+    (the shim's `ComputerEgress`, entry.mjs `relay`). Only the hosts and
+    port the guest view's `relay` names (SimpleX's and Flux's preset XFTP
+    servers, `relay::HOSTS`, on 443; 403 for any other, and 400 without
+    an upgrade), at most `relay::OPEN_MAX` (4) open at once per computer
+    and `relay::DAY_BYTES_MAX` (2 GiB) a UTC day (429 past either), each
+    closed with code 4008 past its allowance (`relay::BYTES_MAX`, 32 MiB
+    both ways together, or what is left of the day's budget past what the
+    open ones hold, reserved as it opens), past `relay::MS_MAX` (5
+    minutes), or when what waits to be written toward the server passes
+    1 MiB. The Computer DO holds each one's place and reservation by a
+    lease in its memory (a restart forgets them; one whose close is never
+    heard lapses on its own bound, counting all it was allowed) and counts
+    its bytes in its `meta` `relay_day`. Only the relay route's own answer
+    can make the shim pipe: it pipes only an answer to that route's GET
+    with an upgrade, and the egress strips every `x-fragment-relay…`
+    header from every other answer (a fragment's or an app's passed
+    through among them). **What the platform sees:** the host, the port,
+    the byte counts and the times, which it logs at each open and close;
+    never what is carried, which is the core's TLS, end to end to the
+    server's own certificate (its fingerprint is in the server's address),
+    around XFTP's own encryption of each file's chunks. Any process in the
+    computer may use it, within the same hosts and bounds: no secret in a
+    container its agent is root in tells the bridge from its tools.
 - A subscription with `{channel, wake: true}` (in place of `url`), sent
   as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
   computer on each new record (the fragment asks the computer itself just
@@ -1046,9 +1129,12 @@ expires within 30 days. The container application is the deployment's
     `glm47` tool-call parser, streamed tool calls included) and GLM's
     reasoning (`reasoning_effort`; the limiter fills in `high` only when
     none is sent, and the route always sends one). Images: finite.computer
-    declares it vision-capable, but nothing tests it and its limiter takes
-    at most 2 MiB a request, so `vision` stays on Workers AI. It reports
-    no cached tokens.
+    declares it vision-capable (finite-agentd's Hermes sends it images
+    natively), but no call of ours has qualified them and its limiter
+    takes at most 2 MiB a request (a screenshot's call is up to 6 MiB), so
+    Finite's alternatives keep `vision` on Workers AI but the private
+    tier's, which puts it there with Tinfoil's behind it. It reports no
+    cached tokens.
   - **Its refusals.** Past 2 MiB, 413; a model it does not serve, 400;
     each the call's. A key missing, unknown or revoked, 401 (the
     platform's key: logged aloud); its key's window spent, 429;
@@ -1058,6 +1144,84 @@ expires within 30 days. The container application is the deployment's
   - **Its limit** is its key's grant's: weighted tokens in a 5-hour
     window, no rate in calls, shared by every call the deployment makes
     (cloudflare-v1.md, decision 61, sizes it).
+
+  **A slot's `images`.** Either kind of slot may say `"images": true`:
+  its model reads images. Only the fallback's is read, for now: a
+  `vision` call falls back to the fallback when it says so, and has no
+  fallback otherwise (an image sent to a model that reads none is its
+  refusal). A slot that says nothing reads none.
+
+  **A slot's `private`** (Paul, 2026-10-22: "When a user has private
+  selected, it's not appropriate to fall back to a non-private model").
+  Either kind of slot may say `"private": true`: its model is
+  confidential inference that keeps nothing (Finite Private's, Tinfoil's;
+  never Workers AI or OpenRouter, which the deploy and the cell refuse to
+  see marked). The promise is per route, the tier an agent runs on: a
+  private tier is a private route, every slot its agents' calls reach is
+  private, and a config that breaks that is refused, naming the slot
+  (`Models::reached`): the tier itself, `vision` (Hermes sends it every
+  image, whatever the tier) and `fallback` (the route's on a failure,
+  Hermes' own on a stall). A slot marked private promises nothing to the
+  agents of a tier that is not: theirs is their route. What a private
+  tier's agent reaches, read from Hermes v0.21.7 (`agent/
+  auxiliary_client.py`, `hermes_cli/config_defaults.py`):
+  - **Private:** its turns, its failures and stalls (`fallback`), its
+    screenshots and attachments (`auxiliary.vision`: `vision`, then
+    `fallback`, and when both fail, Hermes' recovery to the main model,
+    `_try_main_agent_model_fallback`: the private tier itself), and
+    Hermes' other model tasks (compression, titles, memory review, the
+    skills hub, MCP, approvals, the curator, the goal judge and the
+    rest), each `provider: auto`, which inherits the main model, then
+    the main `fallback_providers` on a failure. Hermes' discovery chain
+    (OpenRouter, Nous, any API key in the environment) runs only when no
+    main provider is selected (`_discovery_chain_allowed`), and ours is
+    always `custom`. Delegated subagents inherit the parent's provider
+    and fallbacks.
+  - **Not private yet:** voice notes' transcription (`whisper`: Workers
+    AI's Whisper), decisions (`/v1/decide`: the Clef family on Workers
+    AI), Hermes' speech (ElevenLabs when the catalog offers it, else
+    Hermes' default, Microsoft Edge's online voices), and the tools that
+    send a query to a vendor (web search on Firecrawl or Perplexity,
+    xAI's `x_search`, FAL's images). An agent on its owner's own model
+    (Settings) has left private by that pick; its images stay on the
+    platform's `vision`.
+
+  **A tier's `label`: the routes Settings offers** (Paul, 2026-10-24:
+  Private the default for the $200 seat, Standard one pick away, beside
+  an owner's own models). A tier slot may name `"label"`, 1 to 40
+  characters (`"Private (recommended)"`, `"Standard"`): Settings offers
+  each labelled tier, by its label and its model's id, as a route an
+  agent runs on, and picked it is the agent's `agent.json` `tier` (its
+  own model gone), which its Hermes reads within seconds. A deployment
+  that labels none offers the agent's tier by its name, as before. New
+  agents start on `cheap`, so the cheap tier is the default route (the
+  private tier's, Private). The computer's view carries each tier's route
+  (`models.routes`: its label, whether it is private, its fallback's and
+  vision model's ids).
+
+  **A slot's `price`.** A slot on an OpenAI-compatible API that is not
+  OpenRouter may name its model's list price there, dollars a million
+  tokens as its vendor lists them: `{"input": <$>, "cached_input"?: <$>,
+  "output": <$>}` (cached input at `input` when unnamed, a cache write
+  at `input`). The ledger charges that list, with the book's fee and
+  margin as on any model (docs/ledger.md, "A slot's own price"), so a
+  model the book does not price runs priced from the config alone. A
+  slot on OpenRouter names its ceiling instead (`max_price`, above); one
+  naming both, or a price that is not 0 to 1,000 dollars, is refused.
+
+  Tinfoil (tinfoil.sh; the private tier's fallback, deploy/example.jsonc's
+  third alternative) is confidential inference on open models:
+  `https://inference.tinfoil.sh/v1`, OpenAI's chat completions, one key
+  of the platform's Tinfoil account (`fragment-tinfoil-api-key`). Its
+  DeepSeek V4.1 Flash, `deepseek-v4-1-flash` (`GET /v1/models`, read
+  2026-10-22: 1,048,576 tokens of context, tools, reasoning, image input,
+  marked experimental), lists at $0.65 in, $0.13 cached, $1.45 out a
+  million tokens, and its slot names that price. Its router maps
+  `reasoning_effort` `low` and `high` onto the model's own `low` and
+  `xhigh`. Its refusals are OpenAI's: a key refused, 401; the account's
+  balance spent, 402; a key's own cap, or the account's rate, 429. A
+  fallback's refusal is the call's (there is no third try), and a 401 or
+  402 there is logged aloud as any platform key's (`model.platform-key`).
 - A call that answers nothing (no first byte, a stream that stalls) is
   the runtime's own to give up on. Our Hermes image's text-tier profiles
   (cheap and medium) use Hermes' own mechanism (Paul, 2026-10-09: a
@@ -1101,7 +1265,9 @@ expires within 30 days. The container application is the deployment's
   model's id, since a deployment may run vision on a tier's model (every
   preview: GLM-5.3 Flash), and an id a tier runs names the tier's slot,
   whose call falls back to the fallback model, which may read no images
-  (DeepSeek V4 Flash); `vision` has no fallback. Hermes describes each
+  (DeepSeek V4 Flash). `vision` falls back only when the fallback's slot
+  says its model reads images (`"images": true`: the private tier's,
+  Tinfoil's DeepSeek V4.1 Flash), on the tiers' rule. Hermes describes each
   `computer_use` screenshot with it and hands the main model the words
   (named outright, Hermes routes every capture so: its
   `tools/computer_use/vision_routing.py`), and an image a person attaches
@@ -1213,6 +1379,19 @@ Settings names what is missing, with a Reconnect to add it; an agent's call
 outside the grant gets the provider's own 403, which the Google skill explains
 to the person.
 
+Where a row takes several accounts (`accounts_max` above 1;
+pipes-browser-binding.md, Several accounts), a person connects a personal and a
+work Google account side by side, and each agent uses one of them: the one its
+owner picked for it in Settings, which its computer keeps (`agent_accounts`),
+else the default, the oldest connected. The computer holds the owner's accounts
+there in their list's order, believed with the states (each read of the
+person's connections and each disconnect tells it them), and a swap asks Pipes
+for the chosen account's token by its id, never one the owner's list did not
+name. A pick whose account needs authorizing again is refused (`connect … again`),
+never swapped for another account; one whose account is gone falls back to the
+default. The placeholder names the agent, as with one account, so the image
+needs nothing new.
+
 Paul, 2026-10-04 (decisions 22, 37 and 44): every credential a guest uses
 is a per-agent placeholder in the environment variable its provider's own
 SDK reads, so any SDK or CLI works unmodified, with no header of ours. The
@@ -1256,7 +1435,7 @@ the provider's own hosts.
 
   | Provider | Kind | Hosts | Placement | Environment variable | Price per call (list) |
   |---|---|---|---|---|---|
-  | `google` | connection | `gmail`, `www`, `people`, `sheets`, `docs` `.googleapis.com` | `Authorization: Bearer {}` | `GOOGLE_OAUTH_ACCESS_TOKEN` (Terraform's Google provider reads it; Google's client libraries take a token as given) | none |
+  | `google` | connection | `gmail`, `www`, `people`, `sheets`, `docs`, `slides` `.googleapis.com` | `Authorization: Bearer {}` | `GOOGLE_OAUTH_ACCESS_TOKEN` (Terraform's Google provider reads it; Google's client libraries take a token as given) | none |
   | `firecrawl` | operator | `api.firecrawl.dev` | `Authorization: Bearer {}` | `FIRECRAWL_API_KEY` | $0.01 (10-result search, Hobby PAYG) |
   | `fal` | operator | `queue.fal.run`, `fal.run`, `rest.fal.ai` | `Authorization: Key {}` | `FAL_KEY` | $0.006 (1 MP Klein 9B image) |
   | `browser-use` | operator | `api.browser-use.com` | `X-Browser-Use-API-Key: {}` | `BROWSER_USE_API_KEY` | $0.02/12 (five browser minutes per control call) |
@@ -1555,12 +1734,15 @@ settings and state):
   Python, Node 26.7, npm 12, uv, ffmpeg, ripgrep, Chromium 145) in PM's
   store at `/opt/hermes/tools`. Its layers go by how often each changes:
   the base, one layer (Hermes' image flattened, with everything pinned
-  on it: 4.3 GB, 1.4 GB compressed), then ours (the bridge, `hermes-boot`,
-  the fragment CLI and the image's own files: about 21 MB, 9 MB
-  compressed), then a few KB `hermes-boot build-info` writes and the
-  image's version. A deploy that changes only our code pushes the small
-  ones; the base changes only with a pin, `document-requirements.txt` or
-  one of its steps (or when the deploying machine's build cache has lost
+  on it: 4.3 GB, 1.4 GB compressed), then SimpleX's core (`simplex-chat`
+  v7.0.3 by checksum, 79.5 MB, 18.8 MB compressed: a layer of its own,
+  changed only with its pin; it runs only for an agent its owner linked,
+  on an always-on computer: docs/bridge.md, "SimpleX"), then ours (the
+  bridge, `hermes-boot`, the fragment CLI and the image's own files: about
+  21 MB, 9 MB compressed), then a few KB `hermes-boot build-info` writes
+  and the image's version. A deploy that changes only our code pushes the
+  small ones; the base changes only with a pin, `document-requirements.txt`
+  or one of its steps (or when the deploying machine's build cache has lost
   it). One Hermes
   profile per agent (named as its agent fragment, `juniper--k3x9`), its agent
   fragment's `SOUL.md`, `memories/` and `skills/` checked out into it and
@@ -1606,6 +1788,16 @@ settings and state):
   route took as `low`. Settings' Agents offers it beside the model for
   every agent: Default (High), Low and High; a pick writes `reasoning` to
   `agent.json` as the model's pick is written, and the default removes it.
+  Its `home`, `"simplex"` or none (Paul, 2026-10-26; docs/api.md, "An
+  agent's home"), is where its owner is reached: its profile's
+  `agent.system_prompt` tells it, beside its name, at every turn
+  (`hermes::told_home`: "Your owner's home is your chat <label>-chat" or
+  "their SimpleX, your chat <label>-simplex, which reaches their phone",
+  and that a routine scheduled without `--chat` runs there), so a change
+  is its next turn's, read with the rest of `agent.json` every 10 s and
+  written only when it changed; a running turn keeps the prompt it
+  started with, and nothing restarts. Hermes' own home channel is set
+  nowhere (docs/hermes-relay.md, "Hermes' settings").
 
   Its work (the seam, above): each agent's is `/data/work/<profile>`.
   Its profile's config makes it the terminal's working directory
@@ -1894,6 +2086,17 @@ the file dialog on its desktop with `computer_use`. The `fragment`
 skill's first page says the same (`computer.md`, "Files your owner sends
 you").
 
+And every agent is told, after that, how it sends one (`hermes::SENDING`;
+2026-10-23: asked for a PDF in the chat, Paul's agent named a path on
+its computer, then emailed it): a line of its reply that is `MEDIA:` and
+the file's absolute path, outside code and quotes (Hermes delivers no
+other tag), puts the file in the chat as the reply's attachment (the
+bridge uploads it: docs/bridge.md), and a file asked for in the chat is
+attached there rather than emailed or named by its path. Hermes tells
+every platform it knows the same (its `_MEDIA_NATIVE` hint), but has no
+hint for `relay`. The `fragment` skill's first page says it too
+(`computer.md`, "Files you send").
+
 ### Its name, in our Hermes image
 
 An agent's name is its agent fragment's title (docs/api.md, "An agent's
@@ -2119,9 +2322,10 @@ and how a runtime finds them, is the image's.
   platform skill by the platform skill leaving the view. An agent's profile has
   its own, the managed set, which is what the shell's Skills section
   lists, the platform skill, and Hermes' pinned bundled skills. The managed
-  release has twelve workflows: apps, git, brains, connected Google,
-  image steps and model tiers, plus Cashu, Nostr CLI, X API, direct music,
-  market analysis and Polymarket (templates/skills/README.md). Generic skills
+  release has sixteen workflows: apps, git, brains, connected Google,
+  image steps, model tiers and a chat's attachments, plus Cashu, Nostr CLI, X API, direct music,
+  market analysis, Polymarket and design, and the upstream `gws-docs` and
+  `gws-slides` command guides alongside connected Google (templates/skills/README.md). Generic skills
   come from Hermes; optional ones remain in its hub. At build, the image
   moves Hermes' bundled tree to `/opt/fragment/bundled-skills`, so stage2
   and the gateway sync nothing into a saved profile. The boot copies each
@@ -2242,6 +2446,10 @@ persisted)".
   person's VM with no secret in it (decisions 13, 43), and one person's
   agents are not fenced from each other (decision 44), so root inside it
   opens nothing of anyone else's.
+- **What sudo reaches.** The bridge runs as root, and keeps SimpleX's
+  core and its state its own (`simplex-chat` 0700, on no PATH;
+  `/data/simplex` 0700: docs/bridge.md, "SimpleX"), so the agent's own
+  user and its file tools read none of it; its sudo does.
 - **How long an install lasts.** `/data` is the only place a computer
   keeps; an install outside it lasts until the computer's next start from
   its image (a crash, or an image update), and a wake from a snapshot
@@ -2352,7 +2560,9 @@ for a host) and finds the same `HOME`, `~` and modes.
   sleep's first, with the stop at the bound itself, later while a record
   holds it, never while in use or always on; a start that went back told
   with its cause and save, pending while asleep, once until seen, a seen
-  older one hiding only itself, across a restart of the DO; won't wake
+  older one hiding only itself, across a restart of the DO, and none for
+  one that lost nothing (nothing done since its save; a keepalive only
+  counted open across it), an unseen older one still told; won't wake
   told until a restart; an update told while awake on another version
   than its next start runs, between turns, never asleep or starting,
   taken by a restart or a sleep and a wake, put off for that version only,
@@ -2398,19 +2608,29 @@ for a host) and finds the same `HOME`, `~` and modes.
   same wake starts it again from the save (#362). A check of
   what ran counts runs (the model fake's calls, the ledger's rows, the
   computer's `uses`), never records, which a second run replays. The
+  A turn's keepalive across a reload of the node's Worker (`Suite::reload`,
+  which restarts every Durable Object and disconnects every socket, as a
+  deploy does) is counted open with none held, and at the computer's next
+  event only those held; nothing stays counted once the turn answers
+  (#557). Its bridge opening it again is the bridge's own test, against
+  its fake API (`a_keepalive_a_deploy_cut_is_opened_again`): after a local
+  reload, workerd destroys every keepalive the computer's egress upgrades
+  at once, which a deploy on Cloudflare does not. The
   e2e's bound is 45 s (`crate::UNSAVED_MAX_MS`), so the `computers`
   lane's recovery checks see it run out: a failed sleep told at once with
   its stop time, a restart asked twice (its save failing too) going back
   once and saying so until seen, the unsaved stop at the time it said and
   the wake after told once, a restart of a sleeping computer, one
-  refused at zero credit, and no awake time on its owner's ledger in
-  either free window. Its image pin, which is what a deploy that changed
+  refused at zero credit, no awake time on its owner's ledger in
+  either free window, and a restart with nothing done since the save its
+  life came up from going back and telling nothing. Its image pin, which is what a deploy that changed
   the image is to a computer: the update told awake, not while a turn
   waits on its card, again when it ends, put off by Later (again the
   same; another version, or none, refused), taken by a restart (the next
   build served), and not told asleep. The `shell-ui` lane sees the same in
-  Chrome: the warning on Settings with no reload, its Restart, the notice
-  of what it went back to and its OK (gone after a reload), Settings'
+  Chrome: the warning on Settings with no reload, its Restart (after its
+  agent answered a message no save keeps), the notice of since when
+  changes weren't kept and its OK (gone after a reload), Settings'
   Restart computer, and an update: shown with no reload, Settings' version
   and the latest, its Restart taking it, its Later holding after a
   reload. On a preview, the hosted `agent-restart` section (by name)

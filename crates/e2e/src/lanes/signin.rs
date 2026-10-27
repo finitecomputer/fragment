@@ -265,6 +265,36 @@ fn restart_cases(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
+/// A deploy's probe, `GET /healthz/objects` (docs/api.md, Health), which
+/// `cargo xtask deploy` asks until every object class answers its release:
+/// the Registry's skew hook stands in for an object of another release.
+fn probe_cases(s: &mut Suite, api: &Api) -> Result<()> {
+    let classes = ["Registry", "Principal", "Ledger", "Fragment", "Computer"];
+    let probe = || api.unsigned("GET", "/healthz/objects", None);
+    // valid: every class's probe object admits the Worker's release, its schema ready
+    let r = probe()?;
+    let answered = |r: &Reply, of: &[&str]| of.iter().all(|c| r.body["objects"][c]["release"] == r.body["release"]);
+    s.ok(
+        "a deploy's probe is answered to anyone: every object class admits the Worker's release (200), the release every answer names",
+        r.status == 200 && answered(&r, &classes) && r.body["release"] == r.header("x-fragment-deploy"),
+        &r,
+    );
+    // invalid: an object of another release refuses it, and the probe names
+    // that object and its release, the others answering as before
+    let skew = api.unsigned("POST", "/api/test/registry", Some(&json!({ "skewFor": { "path": "/__probe", "times": 1, "deployed": u64::MAX } })))?;
+    anyhow::ensure!(skew.status == 200, "the skewFor test hook: {skew}");
+    let r = probe()?;
+    s.ok(
+        "an object of another release fails the probe (503), named with the release it runs: the deploy is not done",
+        r.status == 503 && r.body["objects"]["Registry"]["refusedBy"] == "another-release-a-test-hook" && answered(&r, &classes[1..]),
+        &r,
+    );
+    // replay: once that object runs the Worker's release, the probe is 200 again
+    let r = probe()?;
+    s.ok("and asked again, that object now of the Worker's release, it is 200", r.status == 200 && answered(&r, &classes), &r);
+    Ok(())
+}
+
 /// What `f` answered, and the registry calls it made.
 pub(super) fn calls_of<T>(api: &Api, f: impl FnOnce() -> Result<T>) -> Result<(T, u64)> {
     let before = registry_calls(api)?;
@@ -464,6 +494,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     );
     deploying_cases(s, api)?;
     restart_cases(s, api)?;
+    probe_cases(s, api)?;
     let r = api.unsigned("GET", "/auth/login?invitation_token=Z1uX3Rbw_cIl-5fIG", None)?;
     s.ok("an invitation's token rides along to WorkOS (it lets its invitee sign up)", r.header("location").contains("&invitation_token=Z1uX3Rbw_cIl-5fIG"), &r);
     let r = api.unsigned("GET", "/auth/login?invitation_token=%22%3E%3Cscript%3E", None)?;
@@ -775,6 +806,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         codes.iter().all(|c| cli_code::normalize(c).is_some()) && oldest.status == 400 && newest.status == 200 && newest.text.contains(&many_tail),
         json!({ "oldest": oldest.to_string(), "newest": newest.status }),
     );
+    s.ok("the confirmation tells you to return to the terminal", added_page.text.contains("You can return to your terminal."), &added_page);
     // every platform page refuses frames; its redirects need not (a
     // redirect shows nothing)
     let pages = [
@@ -791,6 +823,8 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     // a page that opens one of them in a window of its own keeps no hold on it
     let held: Vec<&str> = pages.iter().filter(|(_, _, r)| r.header("cross-origin-opener-policy") != "same-origin").map(|(page, _, _)| *page).collect();
     s.ok("and every one severs a window that opened it (Cross-Origin-Opener-Policy: same-origin)", held.is_empty(), format!("{held:?}"));
+    let plain: Vec<&str> = pages.iter().skip(3).filter(|(_, _, r)| !r.text.contains("<main><h1>") || r.header("cache-control") != "no-store").map(|(page, _, _)| *page).collect();
+    s.ok("confirmation, sign-out and expired-link pages use the shared sheet and are never cached", plain.is_empty(), format!("{plain:?}"));
     // a person who signs in may hold no key at all
     let lone = api.sign_in("lone@e2e.test")?;
     let lone_key = Keys::generate();
@@ -822,7 +856,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         );
         ship(s, &c, CHAT_APP, CHAT_JSON);
         api.signed(&owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
-        api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", member.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;
+        api.share(name, member.pubkey_hex(), "viewer")?;
     }
     let r = api.page(&f, "__signin?return=/", None)?;
     s.ok("a fragment's sign-in starts at the platform", r.status == 302 && r.header("location").starts_with(&format!("{}/auth/fragment?name={f}", api.base)), &r);
@@ -1063,6 +1097,28 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("(the browser's other sessions, and its platform session, stay)", other == 200 && platform.to_string().contains("member@e2e.test"), other);
     let r = signout(api, &g, &format!("fragment_site={newest}"))?;
     s.ok("signing out again is no error", r.status == 303, &r);
+
+    // the platform's notices on a fragment's origin (its sign-out page
+    // here) link their look from that origin, kept by its version, the
+    // same bytes as the platform's: nothing from the platform's origin
+    let page = api.call(Call { method: "GET", url: api.site_url(&g, "__signout"), ..Call::default() })?;
+    let href = page.text.split("href=\"").find_map(|h| h.split('"').next().filter(|u| u.starts_with("/__sheet.css?v="))).unwrap_or("").to_string();
+    let theirs = api.call(Call { method: "GET", url: api.site_url(&g, href.trim_start_matches('/')), ..Call::default() })?;
+    let platform_sheet = api.unsigned("GET", "/__shell/sheet.css", None)?;
+    s.ok(
+        "a notice on a fragment's origin links its stylesheet from that origin, by its version (immutable there, the platform's own bytes), and nothing from the platform's",
+        page.status == 200
+            && !href.is_empty()
+            && !page.text.contains("/__shell/")
+            && !page.text.contains(&api.base)
+            && !page.text.contains("<style")
+            && theirs.status == 200
+            && theirs.header("content-type").starts_with("text/css")
+            && theirs.header("cache-control") == "public, max-age=31536000, immutable"
+            && platform_sheet.status == 200
+            && theirs.text == platform_sheet.text,
+        json!([href, page.status, theirs.status, theirs.header("cache-control"), platform_sheet.status]),
+    );
 
     // the registry down: the browser is signed out all the same
     let kept = site_cookie(api, &member_session, &g)?;

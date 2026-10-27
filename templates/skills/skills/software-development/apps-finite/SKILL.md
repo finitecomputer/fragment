@@ -49,7 +49,7 @@ an aesthetic direction the human has not seen or approved.
 For a new app or substantial redesign:
 
 1. Infer a credible initial direction from the prompt and existing brand context.
-   Use Hermes' design skills for art direction when useful. Ask a question first
+   Load `design-finite` for art direction. Ask a question first
    only when the answer is truly blocking.
 2. Build the smallest coherent draft that makes the direction tangible. Prefer a
    strong above-the-fold experience plus one representative section or state over
@@ -178,12 +178,37 @@ fragment open garden                                   # its link, and its share
 fragment visibility garden link                        # anyone with the share link (the default)
 fragment visibility garden members                     # members only
 fragment members add garden bea@example.com --role editor  # a person, by email (their agents act for them, too)
-fragment members add garden <npub> --role viewer       # an agent, or anyone, by npub
-fragment invite list garden                            # emails no one signs in as yet: mailed, waiting
+fragment members add garden <npub> --role viewer       # one of your owner's own agents, by npub
+fragment invite list garden                            # emails invited: mailed, waiting for their yes
 ```
 
-- An email no one signs in as yet is mailed a link; they are in once they
-  sign in as it (30 days). A person's agent has no email: name it by npub.
+- An email is mailed an invite; its person (and their agents) are in once
+  they accept it, signed in as it (within 30 days). Until then they are
+  not a member: say they were invited, not that they are in. By npub you
+  add only your owner's own agents; anyone else is refused: invite them
+  by email.
+- Inviting someone to a chat an agent of your owner's is in (you
+  included), pass on the warning the CLI prints, in its words: "People in
+  this chat can talk to your agent." An app or a doc has no such warning:
+  agents hear only chats.
+
+## Invites to your owner
+
+Someone may invite your owner to their app or chat ("skyler invited me to
+edit a fragment, do you see it?"). Acting for your owner, you see and
+answer the invites waiting for their yes:
+
+```sh
+fragment invites                                       # each: its name, role, title, who invited them
+fragment invites accept their-garden--k3x9             # yes: it is shared with your owner now
+fragment invites decline their-garden--k3x9            # no: it waits no more
+```
+
+- Accept or decline only when your owner asked you to, and say which you
+  did. Accepted, it is in their list (`fragment list`), and you and their
+  other agents are in it with them, as yourselves, at their role: in a
+  chat you are in its `@` roster. Leaving it (`fragment members leave`)
+  takes your owner and all their agents out.
 
 - Send the person the links the CLI prints; never construct one.
 - `public` makes it anyone's to open, no share link needed. Before it, say plainly
@@ -202,10 +227,9 @@ fragment invite list garden                            # emails no one signs in 
 
 ## Design and platform references
 
-Hermes' `popular-web-designs` and `design-md` skills cover design research
-and visual systems. Use them when useful; this skill supplies the Fragment
-publishing and state contract. For a design audit, Hermes' hub offers
-`impeccable` as an optional skill.
+Load `design-finite` for art direction, critique and polish; this skill
+supplies the Fragment publishing and state contract. Hermes' design skills
+remain available for additional references.
 
 Read `fragment guide` for the build and publish loop, operations, SQLite,
 channels, jobs, AI steps and outbound fetches. Check the live page with

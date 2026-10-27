@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use super::ledger::{charged, entries, forget_gate, usage};
 use crate::api::Api;
-use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_ENV, SWAP_CONNECTION_HOST, SWAP_KEYS, SWAP_OWN, SWAP_OWN_ENV, SWAP_OWN_HOST, SWAP_ROUTER, SWAP_ROUTER_ENV, SWAP_ROUTER_HOST};
+use crate::{Suite, SEVERAL, SEVERAL_HOST, SWAP_CONNECTION, SWAP_CONNECTION_ENV, SWAP_CONNECTION_HOST, SWAP_KEYS, SWAP_OWN, SWAP_OWN_ENV, SWAP_OWN_HOST, SWAP_ROUTER, SWAP_ROUTER_ENV, SWAP_ROUTER_HOST};
 
 /// Who the swap's checks act as, and on what.
 pub(super) struct Swapping<'a> {
@@ -59,6 +59,9 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "xai: its SDK header is swapped only at its catalog host",
     "x: its SDK header is swapped only at its catalog host",
     "disconnected, an account Pipes holds again with no connect known to have imported it (an import landed late) is not its owner's: read as not connected, its swaps refused, no token asked",
+    "of several accounts at a connection, an agent that picked none is swapped its owner's default, the oldest connected: Pipes' token for that account",
+    "its owner picks another account for it: its next request is swapped that account's token",
+    "the account it picked disconnected, it falls back to the default, its pick kept until it is next written",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -74,7 +77,7 @@ fn charge_of(key: &str) -> i64 {
 /// `provider`: a local run holds the node's host secret, so it makes one
 /// as the platform does (a forgery needs the secret; a guest has none).
 pub(super) fn placeholder(s: &Suite, id: &str, agent: &str, provider: &str) -> String {
-    let kind = if provider == SWAP_CONNECTION { fragment_core::catalog::Kind::Connection } else { fragment_core::catalog::Kind::Operator };
+    let kind = if [SWAP_CONNECTION, SEVERAL].contains(&provider) { fragment_core::catalog::Kind::Connection } else { fragment_core::catalog::Kind::Operator };
     let tag = fragment_core::swap::TagKey::derive(&s.host_secret).tag(id, agent, provider);
     fragment_core::swap::Placeholder::new(kind, provider, &tag).text()
 }
@@ -179,6 +182,32 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     anyhow::ensure!(hook.status == 200, "lift the fence: {hook}");
     let again = api.signed(w.owner, "GET", "/api/connections", None)?;
     anyhow::ensure!(state_of(&again, SWAP_CONNECTION) == "connected", "connected again after the fence: {again}");
+
+    // several accounts at one connection: the agent's pick says whose token
+    s.workos.connect(&email, SEVERAL, true);
+    s.workos.label(&email, SEVERAL, "work@oauth.test");
+    let home = s.workos.add_account(&email, SEVERAL, "home", "home@oauth.test");
+    let r = api.signed(w.owner, "GET", "/api/connections", None)?;
+    let listed: Vec<String> = r.body["providers"].as_array().and_then(|l| l.iter().find(|x| x["provider"] == SEVERAL)).and_then(|x| x["accounts"].as_array()).map(|l| l.iter().filter_map(|a| a["id"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let work = listed.first().cloned().unwrap_or_default();
+    let fetch = |s: &Suite| format!("fetch http://{SEVERAL_HOST}/v1/me with {}", placeholder(s, w.id, w.agent, SEVERAL));
+    let whose = |s: &Suite| s.workos.tokens(SEVERAL).last().and_then(|t| s.workos.token_account(t));
+    let swapped = |s: &Suite| s.workos.tokens(SEVERAL).last().is_some_and(|t| s.upstream.seen().last().is_some_and(|seen| seen["host"] == SEVERAL_HOST && seen["auth"]["authorization"] == format!("Bearer {t}")));
+    let said = say(s, 121, &fetch(s))?;
+    s.ok(SWAP_CHECKS[28], listed == [work.clone(), home.clone()] && said.starts_with("fetched 200") && whose(s).as_deref() == Some(work.as_str()) && swapped(s), json!({ "listed": listed, "said": said }));
+    let picked = format!("/api/computers/{}/agents/{}/accounts/{SEVERAL}", w.id, w.agent);
+    let pick = api.signed(w.owner, "PUT", &picked, Some(&json!({ "account": home })))?;
+    let shown = pick.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == w.agent)).map(|a| a["accounts"][SEVERAL].clone()).unwrap_or(Value::Null);
+    let said = say(s, 122, &fetch(s))?;
+    s.ok(SWAP_CHECKS[29], pick.status == 200 && shown == home.as_str() && said.starts_with("fetched 200") && whose(s).as_deref() == Some(home.as_str()) && swapped(s), json!({ "pick": pick.body, "said": said }));
+    let off = api.signed(w.owner, "DELETE", &format!("/api/connections/{SEVERAL}?account={home}"), None)?;
+    let said = say(s, 123, &fetch(s))?;
+    let view = api.signed(w.owner, "GET", &format!("/api/computers/{}", w.id), None)?;
+    let kept = view.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == w.agent)).map(|a| a["accounts"][SEVERAL].clone()).unwrap_or(Value::Null);
+    s.ok(SWAP_CHECKS[30], off.status == 200 && said.starts_with("fetched 200") && whose(s).as_deref() == Some(work.as_str()) && swapped(s) && kept == home.as_str(), json!({ "off": off.body, "said": said, "kept": kept }));
+    let cleared = api.signed(w.owner, "PUT", &picked, Some(&json!({ "account": null })))?;
+    let gone = api.signed(w.owner, "DELETE", &format!("/api/connections/{SEVERAL}"), None)?;
+    anyhow::ensure!(cleared.status == 200 && gone.status == 200, "the several accounts' checks cleared: {cleared}; {gone}");
 
     // the operator's keys: a bearer token, a header of the provider's own, a query parameter
     let said = say(s, 107, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;

@@ -243,11 +243,12 @@ pub struct AgentMode {
 pub const AGENT_HEADER: &str = "x-fragment-agent";
 
 /// Whether the platform honors `for` on `path`: a fragment's routes
-/// (`/api/f/…`, and its own at `/f/…`) and the fragment list; it refuses it
-/// on every other route (cell/src/lib.rs `signer`).
+/// (`/api/f/…`, and its own at `/f/…`), the fragment list, and the invites
+/// waiting (`/api/invites…`, an agent's for its owner); it refuses it on
+/// every other route (cell/src/lib.rs `signer`).
 pub fn honors_for(path: &str) -> bool {
     let p = path.split('?').next().unwrap_or(path);
-    p.starts_with("/api/f/") || p.starts_with("/f/") || p == "/api/fragments"
+    p.starts_with("/api/f/") || p.starts_with("/f/") || p == "/api/fragments" || p == "/api/invites" || p.starts_with("/api/invites/")
 }
 
 impl From<Identity> for Signer {
@@ -808,11 +809,11 @@ mod tests {
     }
 
     #[test]
-    fn for_is_named_on_a_fragments_routes_and_the_list_only() {
-        for yes in ["/api/f/x--k3x9.paul/status", "/api/f/x--k3x9.paul/ops/add", "/f/x.paul/__live", "/api/fragments", "/api/fragments?x=1"] {
+    fn for_is_named_on_a_fragments_routes_the_list_and_the_invites_only() {
+        for yes in ["/api/f/x--k3x9.paul/status", "/api/f/x--k3x9.paul/ops/add", "/f/x.paul/__live", "/api/fragments", "/api/fragments?x=1", "/api/invites", "/api/invites/x--k3x9/accept"] {
             assert!(honors_for(yes), "{yes}");
         }
-        for no in ["/api/identities/me", "/api/ledger", "/api/search?q=a", "/api/fragments/x.paul/archived", "/api/computers", "/api/fx"] {
+        for no in ["/api/identities/me", "/api/ledger", "/api/search?q=a", "/api/fragments/x.paul/archived", "/api/computers", "/api/fx", "/api/invitesx"] {
             assert!(!honors_for(no), "{no}");
         }
     }
@@ -828,6 +829,25 @@ mod tests {
         names.sort();
         names.dedup();
         assert_eq!(names.len(), Code::ALL.len());
+    }
+
+    /// Goal: a label still resolves when the caller's list, from a newer
+    /// platform, holds a fragment of a kind this CLI does not know (#587):
+    /// one new kind breaks no lookup. Method: a host whose list holds a
+    /// `site` beside a chat; each label resolves to its fragment, the
+    /// site's too, through the list the CLI reads (`Client::fragment`).
+    #[test]
+    fn a_label_resolves_over_a_list_with_a_kind_this_cli_does_not_know() {
+        let list = serde_json::json!({ "fragments": [
+            { "name": "home--k3x9", "role": "owner", "kind": "site", "title": "Home" },
+            { "name": "talk--m4pq", "role": "editor", "kind": "chat" },
+        ] });
+        let server = Server::start(0, Arc::new(move |_: &fragment_fakes::http::Request| FakeResponse::json(200, &list))).expect("start the host");
+        let c = Client::new(&server.url, crate::auth::fixed(7));
+        assert_eq!(c.fragment("talk").unwrap(), "talk--m4pq");
+        assert_eq!(c.fragment("home").unwrap(), "home--k3x9");
+        let missing = c.fragment("garden").unwrap_err();
+        assert_eq!(missing.downcast_ref::<CodedError>().map(|e| e.code), Some(Code::NotFound), "a label on no row is still not found");
     }
 
     /// A success decodes into its type at the door, and one in another

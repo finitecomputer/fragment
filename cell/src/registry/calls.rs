@@ -83,9 +83,9 @@ impl Call for Lookup {
 }
 
 /// `POST /invite`: a fragment shared with whoever signs in as `email`
-/// (decision 48): the person who holds it, or, when no one does yet, the
-/// invite kept against the email and mailed to it, counted in the
-/// sharer's day (429 past `limits::INVITE_MAILS_DAILY_MAX`).
+/// (decisions 48 and 63): the invite kept against the email for its
+/// person's yes, and mailed to it, counted in the sharer's day (429 past
+/// `limits::INVITE_MAILS_DAILY_MAX`).
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct InviteEmail {
@@ -95,37 +95,29 @@ pub(crate) struct InviteEmail {
     /// The person whose day it counts in (an agent's owner).
     pub sharer: String,
     pub role: Role,
-    /// What the mail calls the fragment: its title, or its label.
+    /// What the mail, and the invite's person's list of them, call the
+    /// fragment: its title, or its label.
     pub title: String,
     pub expires_at: i64,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum Invited {
-    /// The person who holds the email: the fragment makes them a member.
-    Holder(Identity),
-    /// No one does: the invite waits on it, and the mail went.
-    Mailed,
-}
-
+/// Answered, the invite waits on the email, and its mail went.
 impl Call for InviteEmail {
     const PATH: &'static str = "/invite";
-    type Answer = Invited;
-    fn checked(answer: Invited) -> CellResult<Invited> {
-        match answer {
-            Invited::Holder(person) => Ok(Invited::Holder(identity_checked(person)?)),
-            Invited::Mailed => Ok(Invited::Mailed),
-        }
-    }
+    type Answer = ();
 }
 
-/// A fragment's `invites/claim`: the person `identity` signed in as
-/// `email`, verified, and meets the invite waiting on it there.
+/// A fragment's `invites/claim` (and `invites/decline`): the person
+/// `identity`, who signs in as `email`, verified, accepts (declines) the
+/// invite waiting on it there; or, for an invite from before invites
+/// waited for a yes, signed in as it and meets it. `agents` are theirs,
+/// which come in with them (decision 64), at most `AGENTS_PER_OWNER_MAX`.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ClaimInvite {
     pub email: String,
     pub identity: String,
+    #[serde(default)]
+    pub agents: Vec<String>,
 }
 
 /// `POST /agents`: an agent its owner vouches for (the key's proof was
@@ -280,29 +272,16 @@ impl Call for PictureOf {
 /// only for those `emails_of` names: the members of the fragment that
 /// asks, when its asker is a member too (docs/cloudflare-v1.md, decision
 /// 48). The caller decides; the registry gives none unless named.
+///
+/// A person's own agents are never named to anyone else (Paul,
+/// 2026-10-22: "I invite Skyler and his agents, not Skyler and his agent
+/// Agent123"): they reach what the person does, acting for them (R17),
+/// unnamed. An agent is named only as itself, a member.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Profiles {
     pub ids: Vec<String>,
     #[serde(default)]
     pub emails_of: Vec<String>,
-    /// People whose agents to name: a share is a person's and their
-    /// agents' (Paul, 2026-10-13), so who has access says them.
-    #[serde(default)]
-    pub agents_of: Vec<String>,
-}
-
-/// A person's agent, as who has access names it.
-#[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct ProfileAgent {
-    pub id: String,
-    /// Its agent fragment's label, made from one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fragment: Option<String>,
-    /// Its agent fragment's title, filled as `Profile::title` is.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
 }
 
 /// A person's picture, and their email when the caller may show it; an
@@ -323,9 +302,6 @@ pub(crate) struct Profile {
     /// An agent's fragment's title (`XBT-2000`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// A person's agents, when the caller named them in `agents_of`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub agents: Vec<ProfileAgent>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -495,6 +471,10 @@ pub(crate) enum TestHook {
     /// The steps its schema holds (schema.rs `view`), answered by a
     /// registry that refuses its schema too.
     Schema,
+    /// Makes every invite waiting on this email one mailed before invites
+    /// waited for a yes (decision 63: no role, title or sharer kept), which
+    /// a sign-in as it still meets (`{before}`: how many).
+    InvitesBefore(String),
 }
 
 /// `TestHook::E2eSignIn`: who, and the paid calls they are lent (the
@@ -588,10 +568,16 @@ pub(crate) enum SigninsHook {
     ExpireSession(String),
     /// Expire just this local test's connection attempt (its nonce).
     ExpireConnection(String),
+    /// This local test's connection attempt (its nonce) expires `ms` from
+    /// now: a callback taking it before then finds it past its time later.
+    ExpireConnectionIn { state: String, ms: i64 },
     /// Lift the fence of the account an email signed in with, at a
     /// provider, as a connect known to import does (a test connects a row
     /// with no `connection_oauth` through the WorkOS fake, never a callback).
     UnfenceConnection { email: String, provider: String },
+    /// Every connect import whose outcome was unknown is let go, as its
+    /// while running out (`connection_accounts::Deciding`).
+    ForgetUncertainImports,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -612,10 +598,14 @@ impl Call for TestHook {
 
 // ------------------------------------------------------------- sign-in
 
+/// `POST /connection/begin`: a connect of `provider` from this session,
+/// for what its body asked (`connection_accounts::Intent`: another of
+/// several accounts, or one again), which its pending row keeps.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct BeginConnection {
     pub session: String,
     pub provider: String,
+    pub intent: fragment_core::connection_accounts::Intent,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -655,9 +645,14 @@ pub(in crate::registry) struct FinishConnectionIn {
 
 /// How a callback's attempt ended. `NoScopes`: the provider granted
 /// nothing its row asks for beyond signing in (`connection_signin::
-/// Refused::NoScopes`), and nothing was imported.
+/// Refused::NoScopes`), and nothing was imported. `OneAccount` and
+/// `AccountLimit`: another of several accounts, refused (Pipes connects one
+/// a person for now; the row's `accounts_max`, or Pipes' limit, reached),
+/// and nothing was imported. `Finishing`: of several accounts, an earlier
+/// connect of theirs there may still land (its outcome unknown), or
+/// another decided too long, and nothing was imported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum ConnectionFinished { Connected, NotUnderWay, Declined, CodeRefused, NoScopes, Failed }
+pub(crate) enum ConnectionFinished { Connected, NotUnderWay, Declined, CodeRefused, NoScopes, OneAccount, AccountLimit, Finishing, Failed }
 
 impl Call for FinishConnection {
     const PATH: &'static str = "/connection/finish";
@@ -671,11 +666,39 @@ impl Call for FinishConnection {
 /// after it. 429 while a callback imports into it (nothing ended: the
 /// disconnect is asked again). Answers their WorkOS user, whose account the
 /// disconnect then deletes (none: no account, and nothing was under way).
+/// `lasting` is what stays fenced after (`connection_accounts::lasting`):
+/// the provider whole, as with one account, or of several, the one the
+/// disconnect takes away, or nothing. `account`, of several, is the Pipes
+/// id it takes away, recorded whatever stays fenced
+/// (`connection_signin::DISCONNECTING`).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct FenceConnection {
     pub identity: String,
     pub issuer: String,
     pub provider: String,
+    pub lasting: fragment_core::connection_accounts::Lasting,
+    pub account: Option<String>,
+}
+
+/// `POST /connection/disconnected`: whether a person disconnected their
+/// account `account` (its Pipes id) at `provider`, as a disconnect of it
+/// asked again, once Pipes deleted it, asks: only theirs is ever found.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Disconnected {
+    pub identity: String,
+    pub issuer: String,
+    pub provider: String,
+    pub account: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct WasDisconnected {
+    pub disconnected: bool,
+}
+
+impl Call for Disconnected {
+    const PATH: &'static str = "/connection/disconnected";
+    type Answer = WasDisconnected;
 }
 
 impl Call for FenceConnection {
@@ -692,9 +715,19 @@ pub(crate) struct ConnectionFences {
     pub subject: String,
 }
 
-#[derive(Serialize, Deserialize)]
+/// The providers fenced whole, and each account fenced alone, at most
+/// `connection_signin::ACCOUNT_FENCES_MAX` a provider.
+#[derive(Default, Serialize, Deserialize)]
 pub(crate) struct FencedProviders {
     pub providers: Vec<String>,
+    pub accounts: Vec<FencedAccount>,
+}
+
+/// One account a disconnect fenced: its provider, and its identifier.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct FencedAccount {
+    pub provider: String,
+    pub identifier: String,
 }
 
 impl Call for ConnectionFences {

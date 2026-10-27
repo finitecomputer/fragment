@@ -826,6 +826,15 @@ pub enum FragmentKind {
     /// A person's managed skills (decision 17: the blessed `skills`
     /// template), which their agents' computers install.
     Skills,
+    /// A kind this build does not know: one a newer platform's list,
+    /// status or access view names (#587's), read as this so that one new
+    /// kind breaks no shipped CLI or pinned image. It is only ever read:
+    /// `parse` never answers it, so no `fragment.json` names it (the cell
+    /// refuses its install, as any kind it does not know), and it is
+    /// written only as `other`, a name no kind may take, never as a kind
+    /// it is not. Last: serde's `other` must be.
+    #[serde(other)]
+    Other,
 }
 
 impl FragmentKind {
@@ -836,9 +845,12 @@ impl FragmentKind {
             FragmentKind::Agent => "agent",
             FragmentKind::Brain => "brain",
             FragmentKind::Skills => "skills",
+            FragmentKind::Other => "other",
         }
     }
 
+    /// A kind this build knows, as a `fragment.json` names it; never
+    /// `Other`, which no manifest may name.
     pub fn parse(s: &str) -> Option<FragmentKind> {
         match s {
             "app" => Some(FragmentKind::App),
@@ -1095,6 +1107,13 @@ pub struct ListedFragment {
     /// shell's sidebar leaves it out; search still finds it).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,
+    /// On the signer's dock: their own choice, not the fragment's (`PUT
+    /// /api/fragments/{name}/dock`), true until they take it off (the
+    /// shell's dock shows apps and brains, less these and the archived).
+    /// Left out while true, so a row from before the choice, or from an
+    /// older platform, reads as on it.
+    #[serde(default = "on_the_dock", skip_serializing_if = "is_on_the_dock")]
+    pub dock: bool,
     /// An agent's list `for` someone: whether that someone owns it (beside
     /// the role the agent acts with there), as no name says any more.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1119,6 +1138,30 @@ pub struct SetArchived {
 pub struct Archived {
     pub name: String,
     pub archived: bool,
+}
+
+/// `PUT /api/fragments/{name}/dock`: the signer's own choice of whether
+/// their dock shows a fragment they hold a role on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetDock {
+    pub dock: bool,
+}
+
+/// Its answer: the fragment, and whether it is on their dock now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Docked {
+    pub name: String,
+    pub dock: bool,
+}
+
+/// A row's `dock` when it names none: on it.
+fn on_the_dock() -> bool {
+    true
+}
+
+/// A row on the dock leaves `dock` out.
+fn is_on_the_dock(dock: &bool) -> bool {
+    *dock
 }
 
 /// `PUT /api/fragments/{name}/seen`'s answer: the signer has seen the
@@ -1477,8 +1520,8 @@ pub struct CreateInvite {
     pub role: Role,
 }
 
-/// An invite waiting on an email: whoever signs in as it becomes a member,
-/// at its role.
+/// An invite waiting on an email: whoever signs in as it, and accepts it,
+/// becomes a member at its role.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Invite {
@@ -1488,13 +1531,49 @@ pub struct Invite {
     pub created_by: String,
 }
 
-/// The answer to `POST /api/f/<name>/invites`: the person who holds the
-/// email, a member at once; or, when no one does yet, the invite, mailed.
+/// The answer to `POST /api/f/<name>/invites`: the invite, mailed, waiting
+/// on its person's yes. `Member` is what it answered before invites waited
+/// for one (the person who held the email, a member at once): no invite
+/// answers it now, and clients still read it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Shared {
     Member(Member),
     Invited(Invite),
+}
+
+/// `GET /api/invites` (a person): the invites waiting on the emails they
+/// sign in with, theirs to accept or decline, the soonest to run out
+/// first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InvitesWaiting {
+    pub invites: Vec<WaitingInvite>,
+}
+
+/// An invite waiting on an email of the asker's: the fragment, the role
+/// it grants, what it was called as it was sent, who shared it (their
+/// email; null when no one signs in as them now), the email it waits on,
+/// and when it runs out. The cell answers it as its registry reads it
+/// (cell/src/registry/invites.rs `waiting_for`, which names each column
+/// as this names its field), not through this type.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitingInvite {
+    pub fragment: String,
+    pub role: Role,
+    pub title: String,
+    #[serde(default)]
+    pub from: Option<String>,
+    pub email: String,
+    pub expires_at: i64,
+}
+
+/// The answer to `POST /api/invites/<fragment>/accept`: the role they
+/// hold there now (a stronger one they held already is kept).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InviteAccepted {
+    pub fragment: String,
+    pub role: Role,
 }
 
 /// `GET /api/f/<name>/invites` (owner): the invites waiting.
@@ -2312,11 +2391,11 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, owned: false, listed: vec![] }] };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, dock: true, owned: false, listed: vec![] }] };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes-k3x9", "role": "owner", "kind": "app" }] }));
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1, invites: Some(2) };
         let listed = FragmentList {
-            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
+            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, dock: true, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
         };
         assert_eq!(
             value(&listed),
@@ -2324,7 +2403,20 @@ mod tests {
         );
         // a row not archived leaves the flag out, and reads back so
         let read: ListedFragment = serde_json::from_value(serde_json::json!({ "name": "notes-k3x9", "role": "viewer" })).unwrap();
+        assert_eq!(read.kind, FragmentKind::App, "a row that names no kind is an app's");
         assert!(!read.archived && read.unread == 0);
+        // a row on the person's dock leaves the choice out, and one without
+        // it (from before it, or an older platform) reads back on it; one
+        // taken off says so, and reads back so (#587)
+        assert!(read.dock);
+        let off = ListedFragment { dock: false, ..read.clone() };
+        assert_eq!(value(&off), serde_json::json!({ "name": "notes-k3x9", "role": "viewer", "kind": "app", "dock": false }));
+        assert_eq!(serde_json::from_value::<ListedFragment>(value(&off)).unwrap(), off);
+        assert_eq!(value(&SetDock { dock: false }), serde_json::json!({ "dock": false }));
+        assert_eq!(value(&Docked { name: "notes-k3x9".into(), dock: true }), serde_json::json!({ "name": "notes-k3x9", "dock": true }));
+        for refused in [serde_json::json!({}), serde_json::json!({ "dock": "no" }), serde_json::json!({ "dock": null })] {
+            assert!(serde_json::from_value::<SetDock>(refused.clone()).is_err(), "{refused}");
+        }
         // a row's sharing sent before invites were counted reads back
         // without them: someone else may be invited, so the access view asks
         let old: Sharing = serde_json::from_value(serde_json::json!({ "visibility": "link", "members": 2, "guests": 0 })).unwrap();
@@ -2355,6 +2447,44 @@ mod tests {
         assert_eq!(value(&runs), serde_json::json!({ "runs": [], "counts": { "held": 2 }, "paused": ["digest"] }));
         let page = ChannelPage { channel: "chat".into(), records: vec![], next: 7 };
         assert_eq!(value(&page), serde_json::json!({ "channel": "chat", "records": [], "next": 7 }));
+    }
+
+    /// Goal: a list from a newer platform, one of whose fragments is of a
+    /// kind this build does not know (#587's), reads whole, so one new
+    /// kind breaks no shipped client; the kinds it knows read and write as
+    /// themselves; and the fallback is never a kind. Method: each known
+    /// kind through serde and `as_str`/`parse`, both ways; a list, a search
+    /// answer and an access view naming `site`; `Other` written, read
+    /// back, and parsed as a manifest's kind.
+    #[test]
+    fn a_kind_this_build_does_not_know_reads_as_other() {
+        use FragmentKind::*;
+        for kind in [App, Chat, Agent, Brain, Skills] {
+            let wire = serde_json::to_value(kind).unwrap();
+            assert_eq!(wire, Value::String(kind.as_str().into()), "{kind:?} is written as its name");
+            assert_eq!(serde_json::from_value::<FragmentKind>(wire).unwrap(), kind, "{kind:?} reads back as itself");
+            assert_eq!(FragmentKind::parse(kind.as_str()), Some(kind), "a manifest may name {kind:?}");
+        }
+        let rows = serde_json::json!([
+            { "name": "home--k3x9", "role": "owner", "kind": "site", "title": "Home", "archived": true },
+            { "name": "todo--m4pq", "role": "editor", "kind": "chat" },
+        ]);
+        let list: FragmentList = serde_json::from_value(serde_json::json!({ "fragments": rows })).unwrap();
+        let read: Vec<_> = list.fragments.iter().map(|f| (f.name.as_str(), f.kind, f.title.as_deref(), f.archived)).collect();
+        assert_eq!(read, [("home--k3x9", Other, Some("Home"), true), ("todo--m4pq", Chat, None, false)], "the row of a kind it does not know keeps the rest of itself");
+        let found: SearchAnswer = serde_json::from_value(serde_json::json!({ "fragments": rows, "messages": [] })).unwrap();
+        assert_eq!(found.fragments.iter().map(|f| f.kind).collect::<Vec<_>>(), [Other, Chat]);
+        let access: Access = serde_json::from_value(serde_json::json!({ "fragments": [{ "name": "home--k3x9", "kind": "site" }] })).unwrap();
+        assert_eq!(access.fragments[0].kind, Other);
+        // the fallback is written as `other` alone, reads back as itself,
+        // and no manifest may name it, nor a kind this build does not know
+        assert_eq!(serde_json::to_value(Other).unwrap(), serde_json::json!("other"));
+        assert_eq!(serde_json::from_value::<FragmentKind>(serde_json::json!("other")).unwrap(), Other);
+        assert_eq!([FragmentKind::parse("other"), FragmentKind::parse("site"), FragmentKind::parse("App")], [None; 3]);
+        // a kind that is no string is still refused
+        for bad in [serde_json::json!(7), serde_json::json!(true), serde_json::json!(null)] {
+            assert!(serde_json::from_value::<FragmentKind>(bad.clone()).is_err(), "{bad} is no kind");
+        }
     }
 
     /// A rotation answers in the contract's camelCase, like every answer.

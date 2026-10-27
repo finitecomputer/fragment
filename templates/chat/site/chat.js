@@ -26,8 +26,10 @@
 // blobs (`fragment.blob`, read at `__blob/<sha256>`); a voice memo is one,
 // recorded here (MediaRecorder) and shown as a player wherever audio is.
 // "Notify me" subscribes this browser for its person, from a click
-// (`fragment.push.register`), and the page's presence says whether the chat
-// is on screen (`looking`), so its person is not pushed while it is.
+// (`fragment.push.register`; framed by the shell, the shell holds the
+// subscription, `{fragment: "alerts"}`), and the page's presence says
+// whether the chat is on screen (`looking`), so its person is not pushed
+// while it is.
 // `@` lists the chat's agents, then (when the shell framing it is its
 // owner's) the owner's other agents, which the shell hands over on asking
 // (`{fragment: "agents?"}`); a message to one of those asks the shell to
@@ -85,6 +87,11 @@ const TIMER_MAX_MS = 2 ** 31 - 1;
 const ADD_WAIT_MS = 120000;
 // The owner's agents a shell may hand over, at most (a computer runs 32).
 const ROSTER_MAX = 64;
+// The shell's answer to what this browser holds for the chat's alerts is
+// waited for this long (none: no shell frames the page), and to turning
+// them on or off this long (its person answers the browser's question first).
+const ALERTS_READ_MS = 5000;
+const ALERTS_ASK_MS = 120000;
 // A sending message's bubble's opacity (chat.css `.msg.user.sending`).
 const SENDING_OPACITY = 0.55;
 // The first run's steps a shell may show here (its `setup`), and their states.
@@ -111,28 +118,48 @@ const MEMO_BITS_PER_S = 64000;
 const MEMO_MAX_MS = 5 * 60 * 1000;
 const MEMO_EXT = { "audio/webm": "webm", "audio/ogg": "ogg", "audio/mp4": "m4a", "audio/mpeg": "mp3", "audio/wav": "wav" };
 
-// What a step does (its `category`, docs/chat-records.md): an icon and the
-// verb its line starts with. A step of any other (`other`, or one from before
-// steps said) is its tool's own name.
+// What a step does (its `category`, docs/chat-records.md): an icon, the
+// verb it is named by while it runs and once it ran (its icon's name for
+// assistive technology, and its words where the icon cannot say it), and
+// what ends the verb before its arguments. A step of any other (`other`, or
+// one from before steps said) is its tool's own name, in no tense.
 const STEP_SAYS = {
-  shell: ["terminal", "Running"],
-  web: ["globe", "Searching the web"],
-  read: ["book-open", "Reading"],
-  write: ["pencil", "Writing"],
-  browser: ["app-window", "Browsing"],
-  image: ["image", "Making an image"],
-  delegate: ["users", "Delegating"],
-  memory: ["brain", "Updating memory"],
+  shell: ["terminal", "Running", "Ran", ""],
+  web: ["globe", "Searching the web", "Searched the web", " for"],
+  read: ["book-open", "Reading", "Read", ""],
+  write: ["pencil", "Writing", "Wrote", ""],
+  browser: ["app-window", "Browsing", "Browsed", ""],
+  image: ["image", "Making an image", "Made an image", ":"],
+  delegate: ["users", "Delegating", "Delegated", ":"],
+  memory: ["brain", "Updating memory", "Updated memory", ":"],
 };
 
 // What a runtime's notice is about (its `category`): its icon. Any other is `info`.
 const NOTICE_ICON = { info: "info", warning: "alert", memory: "brain" };
 
-/// A step as a line reads it: `{icon, verb, args}` ("Running", `npm test`).
-export function stepSays(s) {
+/// A step as a line reads it: `{icon, verb, args}` ("Ran", `npm test`), as
+/// it runs (`now`) or once it ran ("Failed running", for `ok: false`); the
+/// verb ends as it joins its arguments ("Searched the web for") unless it
+/// stands alone (`joined` false: an icon's name).
+export function stepSays(s, now = false, joined = true) {
   const args = typeof s.args === "string" ? s.args : "";
-  const [icon, verb] = Object.hasOwn(STEP_SAYS, s.category) ? STEP_SAYS[s.category] : ["wrench", typeof s.tool === "string" && s.tool ? s.tool : "a tool"];
-  return { icon, verb, args };
+  const failed = s.ok === false ? "Failed " : "";
+  if (!Object.hasOwn(STEP_SAYS, s.category)) {
+    const tool = typeof s.tool === "string" && s.tool ? s.tool : "a tool";
+    return { icon: "wrench", verb: `${failed}${tool}${args && joined ? ":" : ""}`, args };
+  }
+  const [icon, doing, did, joins] = STEP_SAYS[s.category];
+  const verb = failed ? `${failed}${doing.charAt(0).toLowerCase()}${doing.slice(1)}` : now ? doing : did;
+  return { icon, verb: `${verb}${args && joined ? joins : ""}`, args };
+}
+
+// How long, as a card's head says it: "40s", "3m 05s", "1h 5m".
+function took(ms) {
+  const s = Math.max(1, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${String(s % 60).padStart(2, "0")}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
 // Only the posting agent's own workspace is home. Other agents' paths
@@ -140,6 +167,15 @@ export function stepSays(s) {
 function shortStepArgs(text, agent) {
   return text.replace(/\/data\/work\/([^/\s]+)\/(home\/)?/g, (path, owner, home) => owner === agent ? (home ? "~/" : "work/") : path)
     .replaceAll("/data/hermes/managed-skills/", "skills/");
+}
+
+/// Whether a turn's replies hold words an older bridge also kept on one of
+/// its steps (`text`, at most 300 characters, cut with "…"): the turn's
+/// answer said beside a housekeeping call was both, and shows once.
+function repliedWith(replies, said) {
+  const cut = said.endsWith("…");
+  const words = cut ? said.slice(0, -1).trimEnd() : said;
+  return replies.some((r) => (cut ? r.startsWith(words) : r === words));
 }
 
 // Keep a path's beginning and its filename, removing directories first.
@@ -155,47 +191,22 @@ function middlePaths(text, room) {
   });
 }
 
-// Fit after layout and again on resize/open. Two lines are available before
-// any directories disappear, including on phones; filenames stay at the end.
+// Fit after layout and again on resize/open: a step is one line, its
+// directories shortened in the middle before it ends in an ellipsis, so
+// its filename stays, on phones too.
 function fitStepArgs(node) {
   const text = node.dataset.short;
   node.textContent = text;
-  if (!node.clientWidth) return; // a folded card is measured when opened
-  const height = Number.parseFloat(getComputedStyle(node).lineHeight) * 2 + 1;
-  if (node.scrollHeight <= height) return;
+  if (!node.clientWidth) return; // a folded card's line, or one rolled past, is measured when shown
+  if (node.scrollWidth <= node.clientWidth) return;
   let low = 1, high = text.length;
   while (low < high) {
     const room = Math.ceil((low + high) / 2);
     node.textContent = middlePaths(text, room);
-    if (node.scrollHeight <= height) low = room;
+    if (node.scrollWidth <= node.clientWidth) low = room;
     else high = room - 1;
   }
   node.textContent = middlePaths(text, low);
-}
-
-// A complete first block or sentence, cloned from safe DOM. Range preserves
-// emphasis and code spans without slicing markdown delimiters or a sentence.
-function notePreview(body) {
-  const first = body.firstElementChild;
-  if (!first) return document.createDocumentFragment();
-  if (first.textContent.length <= 160 && body.children.length > 1) return first.cloneNode(true);
-  if (first.nodeName !== "P") return el("span", null, "Commentary");
-  const sentence = [...new Intl.Segmenter(undefined, { granularity: "sentence" }).segment(first.textContent)][0]?.segment;
-  if (!sentence || sentence.length >= body.textContent.length) return el("span", null, "Commentary");
-  const range = document.createRange();
-  range.setStart(first, 0);
-  const walker = document.createTreeWalker(first, NodeFilter.SHOW_TEXT);
-  let left = sentence.trimEnd().length;
-  for (let text = walker.nextNode(); text; text = walker.nextNode()) {
-    if (left <= text.length) {
-      range.setEnd(text, left);
-      const preview = el("p");
-      preview.append(range.cloneContents());
-      return preview;
-    }
-    left -= text.length;
-  }
-  return first.cloneNode(true);
 }
 
 /// A media type without its parameters (`audio/webm;codecs=opus` is `audio/webm`).
@@ -310,12 +321,20 @@ export function mount(root) {
   // and Safari pans it, leaving the layout viewport be, so the page follows
   // it and the composer sits just above the keyboard; the page itself never
   // scrolls under it. Framed, the frame is the viewport, as tall as the
-  // shell gives it (the shell follows the keyboard the same way).
+  // shell gives it (the shell follows the keyboard the same way). Only the
+  // page on its own, with no keyboard up, sits on the screen's bottom edge
+  // and keeps clear of its inset (the home indicator's; chat.css,
+  // --inset-bottom): framed, the shell keeps its frame off that edge, and a
+  // keyboard up covers it (what is visible is shorter than the layout
+  // viewport, whose bottom Safari may pan into view above the keyboard).
+  document.documentElement.toggleAttribute("data-framed", framed);
   const visible = window.visualViewport;
   const fitViewport = () => {
     if (!visible) return;
-    document.documentElement.style.setProperty("--viewport-height", `${Math.round(visible.height)}px`);
-    document.documentElement.style.setProperty("--viewport-top", `${Math.round(visible.offsetTop)}px`);
+    const html = document.documentElement;
+    html.style.setProperty("--viewport-height", `${Math.round(visible.height)}px`);
+    html.style.setProperty("--viewport-top", `${Math.round(visible.offsetTop)}px`);
+    html.toggleAttribute("data-keyboard", visible.height * visible.scale < html.clientHeight - 1);
   };
   visible?.addEventListener("resize", fitViewport);
   visible?.addEventListener("scroll", fitViewport);
@@ -352,8 +371,8 @@ export function mount(root) {
     stopping: new Set(), // turns this page asked to stop
     pending: null, // { seq, at, n, target }: this page's message no turn has started on yet
     here: [], // the fragment's presence: [{ id, principal, data }]
-    toggled: new Map(), // a step card's key -> open, once someone opened or closed it
-    expandedNotes: new Set(), // turn:step, a commentary someone expanded
+    toggled: new Map(), // a step card's key -> true, once someone opened it whole
+    openSteps: new Set(), // turn:step, a step someone opened to its arguments and result
     roster: [], // the owner's agents, from the shell that frames the chat: [{ identity, name, title, picture }]
     failed: new Map(), // post id -> the message and its transport error
     sending: new Map(), // post id -> a message of this page's the platform has not answered yet
@@ -622,7 +641,13 @@ export function mount(root) {
   const waiting = (t) => [...t.prompts.values()].some((p) => !t.closed.has(p.prompt) && !expired(p));
   // a turn waiting on its asker's words (`turn.asked`): until they say
   // something to the chat after it, or the turn goes on or ends
-  const waitsOnWords = (t) => running(t) && !!t.asked && !state.chat.some((m) => m.principal === t.asked.asks && !m.turn && m.at >= t.asked.at);
+  // A relayed message (docs/chat-records.md): its owner's words, said over
+  // SimpleX, posted by their agent. It is theirs, "via SimpleX", once the
+  // members say its poster is that person's agent; until then, or from any
+  // other poster, it is the poster's own.
+  const relayedOwner = (m) => (m.relayed && state.members.some((x) => x.principal === m.relayed.by && x.kind === "agent" && x.owner === m.relayed.for) ? m.relayed.for : null);
+  const speaker = (m) => relayedOwner(m) ?? m.principal;
+  const waitsOnWords = (t) => running(t) && !!t.asked && !state.chat.some((m) => speaker(m) === t.asked.asks && !m.turn && m.at >= t.asked.at);
   // a card that takes words (an option answered in words): its asker's
   // message in the chat while it is open answers it as that option, as if
   // typed on the card (docs/chat-records.md, "A person's message")
@@ -630,7 +655,7 @@ export function mount(root) {
   const cardFor = (t, principal) => running(t) && [...t.prompts.values()].some((p) => takesWords(p) && p.asks === principal && !t.closed.has(p.prompt) && !expired(p));
   // whether message `m` answered one of turn `t`'s cards: by its asker, said
   // after the card and before its close
-  const answeredCard = (t, m) => [...t.prompts.values()].some((p) => takesWords(p) && p.asks === m.principal && p.at <= m.at && t.closed.get(p.prompt)?.outcome === "answered" && t.closed.get(p.prompt).at >= m.at);
+  const answeredCard = (t, m) => [...t.prompts.values()].some((p) => takesWords(p) && p.asks === speaker(m) && p.at <= m.at && t.closed.get(p.prompt)?.outcome === "answered" && t.closed.get(p.prompt).at >= m.at);
 
   function onChat(record, historical = false) {
     if (state.seen.has(record.seq)) return;
@@ -679,7 +704,10 @@ export function mount(root) {
     if (body.kind !== undefined && body.kind !== "message") return;
     const turn = typeof body.turn === "string" ? body.turn : null;
     const replyTo = Number.isInteger(body.reply_to) && body.reply_to > 0 ? body.reply_to : null;
-    state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: sentIds.get(record.seq) ?? null });
+    // a message an agent relays from its owner's SimpleX app (shown as theirs: `speaker`)
+    const r = body.relayed;
+    const relayed = !turn && r && typeof r === "object" && r.via === "simplex" && typeof r.for === "string" && r.for.startsWith("npub1") ? { for: r.for, by: record.principal } : null;
+    state.chat.push({ seq: record.seq, at: record.at, n, principal: record.principal, text: typeof body.text === "string" ? body.text : "", command: null, turn, to, attachments: attachmentsOf(body), replyTo, post: sentIds.get(record.seq) ?? null, relayed });
     if (caughtUp && !stuck && !historical && record.seq > latestSeq) newMessages++;
     latestSeq = Math.max(latestSeq, record.seq);
     if (turn) {
@@ -786,11 +814,27 @@ export function mount(root) {
   // line) after its last record, and a turn's consecutive steps as one card ----
   function timeline() {
     const items = [];
-    for (const m of state.chat) items.push({ at: m.at, n: m.n, type: "message", m });
+    // each turn's replies, by its agent: the words an older bridge kept on a
+    // step that its turn also replied with show once, as the reply
+    const replies = new Map();
+    for (const m of state.chat) {
+      items.push({ at: m.at, n: m.n, type: "message", m });
+      if (!m.turn) continue;
+      const key = turnKey(m.principal, m.turn);
+      if (!replies.has(key)) replies.set(key, []);
+      replies.get(key).push(m.text.trim());
+    }
     for (const t of state.turns.values()) {
       // a turn its agent never began here (no turn.start of its own) shows nothing
       if (!started(t)) continue;
-      for (const s of t.steps.values()) items.push({ at: s.at, n: s.n, type: "step", t, s });
+      for (const s of t.steps.values()) {
+        // what an older bridge recorded as a step's `text`, the agent's words
+        // before the call: they are its reply, shown whole just before the
+        // step, never in the card (a bridge now posts them as a reply)
+        const said = typeof s.text === "string" ? s.text.trim() : "";
+        if (said && !repliedWith(replies.get(t.key) ?? [], said)) items.push({ at: s.at, n: s.n - 0.5, type: "said", t, s, text: said });
+        items.push({ at: s.at, n: s.n, type: "step", t, s });
+      }
       for (const p of t.prompts.values()) items.push({ at: p.at, n: p.n, type: "prompt", t, p });
       for (const x of t.notices.values()) items.push({ at: x.at, n: x.n, type: "notice", t, x });
       if (t.end && t.end.outcome !== "idle") items.push({ at: t.end.at, n: t.end.n, type: "end", t });
@@ -815,9 +859,13 @@ export function mount(root) {
     const out = [];
     for (const it of items) {
       const prev = out[out.length - 1];
-      if (it.type === "step" && prev?.type === "steps" && prev.t === it.t) prev.steps.push(it.s);
-      else if (it.type === "step") out.push({ type: "steps", t: it.t, steps: [it.s] });
-      else out.push(it);
+      if (it.type === "step" && prev?.type === "steps" && prev.t === it.t) {
+        prev.steps.push(it.s);
+        continue;
+      }
+      // a running card's head says its turn works: no working line under it
+      if (prev?.type === "steps" && it.type === "working" && prev.t === it.t) continue;
+      out.push(it.type === "step" ? { type: "steps", t: it.t, steps: [it.s] } : it);
     }
     return out;
   }
@@ -852,6 +900,8 @@ export function mount(root) {
         return messageNode(it.m);
       case "steps":
         return stepsNode(it.t, it.steps);
+      case "said":
+        return saidNode(it.t, it.s, it.text);
       case "prompt":
         return promptNode(it.t, it.p);
       case "end":
@@ -874,7 +924,7 @@ export function mount(root) {
     try {
       return itemNode(it);
     } catch (err) {
-      const key = `x:${it.type}:${it.m?.seq ?? it.key ?? it.t?.key ?? "pending"}:${it.steps?.[0].step ?? it.p?.prompt ?? it.x?.seq ?? ""}`;
+      const key = `x:${it.type}:${it.m?.seq ?? it.key ?? it.t?.key ?? "pending"}:${it.steps?.[0].step ?? it.s?.step ?? it.p?.prompt ?? it.x?.seq ?? ""}`;
       if (!nodes.has(key)) console.error("chat: a part of the chat could not be shown", it, err);
       return [key, cached(key, "", () => {
         const line = el("div", "msg notice unshown");
@@ -1069,13 +1119,16 @@ export function mount(root) {
     } else if (setup) $("note").textContent = "";
   }
 
-  function messageNode(m) {
+  function messageNode(entry) {
+    // a relayed message shows as its owner's, saying how they sent it
+    const owner = relayedOwner(entry);
+    const m = owner ? { ...entry, principal: owner, via: "SimpleX" } : entry;
     const w = who(m.principal);
     const mine = m.principal === state.me?.principal;
     const key = `m:${m.seq}`;
     const quoted = m.replyTo ? (state.chat.find((x) => x.seq === m.replyTo) ?? null) : null;
     const waits = !w.agent && queued(m);
-    const sig = [w.name, w.agent, mine, w.picture ?? "", w.color ?? "", canPost(), waits, quoted ? `${quoted.seq}:${who(quoted.principal).name}` : m.replyTo ?? "", m.error ?? "", m.retrying ?? false, m.sending ?? false, m.post ?? ""].join("|");
+    const sig = [w.name, w.agent, mine, w.picture ?? "", w.color ?? "", canPost(), waits, quoted ? `${quoted.seq}:${who(speaker(quoted)).name}` : m.replyTo ?? "", m.error ?? "", m.retrying ?? false, m.sending ?? false, m.post ?? "", m.via ?? ""].join("|");
     return [key, cached(key, sig, () => (w.agent ? agentMessage(m, w) : userMessage(m, w, mine, quoted, waits)))];
   }
 
@@ -1123,7 +1176,7 @@ export function mount(root) {
       q.disabled = true;
       return q;
     }
-    q.append(el("span", "quote-who", who(quoted.principal).name), quoteText(el("span", "quote-text"), quoted));
+    q.append(el("span", "quote-who", who(speaker(quoted)).name), quoteText(el("span", "quote-text"), quoted));
     q.onclick = () => $("messages").querySelector(`[data-seq="${quoted.seq}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
     return q;
   }
@@ -1176,6 +1229,8 @@ export function mount(root) {
       label.append("Queued");
       actions.append(label);
     }
+    // said elsewhere (its owner's SimpleX app), and relayed here
+    if (m.via) actions.append(el("span", "via", `via ${m.via}`));
     // sent once the platform has its record: until then it says so, no time
     actions.append(m.sending ? el("span", "time", "Sending…") : el("span", "time", time(m.at)));
     wrap.append(actions);
@@ -1195,9 +1250,9 @@ export function mount(root) {
     return wrap;
   }
 
-  function agentMessage(m, w) {
+  function agentMessage(m, w, quotable = true) {
     const wrap = el("div", "msg agent");
-    wrap.dataset.seq = m.seq;
+    if (m.seq !== null) wrap.dataset.seq = m.seq;
     if (m.turn) wrap.dataset.turn = m.turn;
     const body = el("div", "md");
     body.append(renderMarkdown(m.text));
@@ -1217,10 +1272,29 @@ export function mount(root) {
     shareButton.setAttribute("aria-label", "Share reply");
     shareButton.replaceChildren(icon("share"));
     shareButton.onclick = () => feedback(shareButton, () => share({ text: m.text, title: document.title }));
-    if (canPost()) actions.append(replyButton(m));
+    if (canPost() && quotable) actions.append(replyButton(m));
     actions.append(copy, shareButton, el("span", "time", time(m.at)));
     wrap.append(actions);
     return wrap;
+  }
+
+  // What an older bridge kept as a step's words (`text`, the model's words
+  // before the call): the agent said them, so they are its reply, whole as
+  // recorded, just before the step and never in its card, as a bridge now
+  // posts them (docs/chat-records.md). No Reply: no record of `chat` holds
+  // them for a message to quote.
+  function saidNode(t, s, text) {
+    const key = `c:${t.key}:${s.step}`;
+    const w = who(t.agent);
+    const sig = [w.name, w.picture ?? "", w.color ?? "", text].join("|");
+    return [
+      key,
+      cached(key, sig, () => {
+        const node = agentMessage({ seq: null, at: s.at, principal: t.agent, text, turn: t.id, attachments: [] }, w, false);
+        node.dataset.step = String(s.step);
+        return node;
+      }),
+    ];
   }
 
   const attachmentsNode = renderMessageAttachments;
@@ -1243,40 +1317,14 @@ export function mount(root) {
     }
   }
 
-  // A turn's steps, one card: open while it works, saying what it does now
-  // ("Running: npm test"), folded once done ("Worked through N steps")
-  // unless someone opened it. Each step is its icon, its verb and its
-  // arguments, with a compact status and any useful result.
-  function stepNote(t, s) {
-    const note = el("div", "step-text");
-    const body = el("div", "md");
-    body.append(renderMarkdown(s.text));
-    if (body.textContent.length <= 160) { openBeside(body); note.append(body); return note; }
-    const key = `${t.key}:${s.step}`;
-    const preview = el("div", "md note-preview");
-    preview.append(notePreview(body));
-    openBeside(preview);
-    openBeside(body);
-    const button = el("button", "note-expand");
-    button.type = "button";
-    const update = () => {
-      const expanded = state.expandedNotes.has(key);
-      body.hidden = !expanded;
-      preview.hidden = expanded;
-      button.textContent = expanded ? "Show less" : "…";
-      button.setAttribute("aria-label", expanded ? "Collapse commentary" : "Expand commentary");
-      button.setAttribute("aria-expanded", String(expanded));
-    };
-    button.onclick = () => {
-      if (state.expandedNotes.has(key)) state.expandedNotes.delete(key);
-      else state.expandedNotes.add(key);
-      update();
-    };
-    update();
-    note.append(preview, body, button);
-    return note;
-  }
-
+  // A turn's consecutive steps, one card: a quiet timeline of its tool
+  // steps alone (whatever the agent says is a reply, between its cards).
+  // While its turn works the card's head says for how long, and only its
+  // last three steps show under it (chat.css), each older one fainter; once
+  // done it folds to one line, how long it worked. Opened, it is every step
+  // on a line of its own: its icon, which names its verb in the tense it is
+  // in, and its arguments. A step opened shows its whole arguments and what
+  // came of it.
   let stepWidth = 0;
   const stepWidths = new ResizeObserver(([entry]) => {
     if (entry.contentRect.width === stepWidth) return;
@@ -1284,59 +1332,141 @@ export function mount(root) {
     for (const args of $("messages").querySelectorAll(".step-args")) fitStepArgs(args);
   });
   stepWidths.observe($("messages"));
+  // Each live card's head counts the time its turn has worked.
+  setInterval(() => {
+    for (const n of $("messages").querySelectorAll(".tools [data-since]")) n.textContent = `Working for ${took(Date.now() - Number(n.dataset.since))}`;
+  }, 1000);
+  // Where a card's work ends: the first record of its own turn after its
+  // last step (a reply, a card, a notice, its next step), else the turn's
+  // end; never anything else in the chat (a later message, another
+  // agent's turn), which says nothing of how long this turn worked. Null
+  // while its turn runs with nothing after it.
+  function cardEnd(t, steps) {
+    const last = steps[steps.length - 1];
+    let end = t.end?.at ?? null;
+    const sooner = (at) => {
+      if (end === null || at < end) end = at;
+    };
+    // `work`'s records are ordered by time, then seq; a reply on `chat`, by time
+    const after = (x) => x.at > last.at || (x.at === last.at && x.n > last.n);
+    for (const x of [...t.steps.values(), ...t.prompts.values(), ...t.notices.values()]) if (after(x)) sooner(x.at);
+    for (const m of state.chat) if (m.turn === t.id && m.principal === t.agent && m.at > last.at) sooner(m.at);
+    return end;
+  }
   function stepsNode(t, steps) {
     const key = `s:${t.key}:${steps[0].step}`;
     const live = running(t) && steps[steps.length - 1].n === t.lastN;
     const agent = profiles.get(t.agent)?.fragment ?? null;
-    const sig = JSON.stringify([steps, live, agent]);
+    const until = live ? null : cardEnd(t, steps);
+    const sig = JSON.stringify([steps, live, agent, until]);
+    const before = nodes.get(key)?.node;
     return [
       key,
       cached(key, sig, () => {
-        const d = el("details", `tools${live ? " live" : ""}`);
+        const d = el("details", "tools");
         d.dataset.turn = t.id;
-        d.open = state.toggled.has(key) ? state.toggled.get(key) : live;
-        d.ontoggle = () => {
-          if (d.open !== live) state.toggled.set(key, d.open);
-          else state.toggled.delete(key);
-          if (d.open) for (const args of d.querySelectorAll(".step-args")) fitStepArgs(args);
-        };
+        d.style.setProperty("--step-agent", colorOf(t.agent));
+        // the turn's first card counts from its start, any later one from its first step
+        const first = Math.min(...[...t.steps.values()].map((s) => s.at));
+        const from = steps[0].at === first ? t.startAt : steps[0].at;
         const summary = el("summary");
-        summary.replaceChildren(icon(live ? "loader" : "wrench", live ? "spin" : ""));
-        const now = stepSays(steps[steps.length - 1]);
-        const heading = el("span", "grow", live ? `${now.verb}${now.args ? `: ${shortStepArgs(now.args, agent)}` : ""}` : `Worked through ${plural(steps.length, "step")}`);
-        if (live && now.args) heading.title = `${now.verb}: ${now.args}`;
-        summary.append(heading);
-        summary.append(icon("chevron", "chev"));
-        d.append(summary);
-        for (const s of steps) {
-          if (s.text) d.append(stepNote(t, s));
-          const step = el("div", `step${s.ok === false ? " error" : ""}`);
-          const says = stepSays(s);
-          step.dataset.category = Object.hasOwn(STEP_SAYS, s.category) ? s.category : "other";
-          const name = el("div", "step-name");
-          name.replaceChildren(icon(says.icon));
-          const label = el("div", "step-label");
-          label.append(el("span", "step-verb", says.args ? `${says.verb}:` : says.verb));
-          if (says.args) {
-            const args = el("code", "step-args", shortStepArgs(says.args, agent));
-            args.title = says.args;
-            args.dataset.short = args.textContent;
-            label.append(args);
+        if (live) {
+          summary.append(el("span", "step-dot"));
+          const since = el("span", "shimmer", `Working for ${took(Date.now() - from)}`);
+          since.dataset.since = String(from);
+          summary.append(since);
+        } else {
+          const kinds = el("span", "step-kinds");
+          for (const name of [...new Set(steps.map((s) => stepSays(s).icon))].slice(0, 4)) {
+            const i = el("i");
+            i.append(icon(name));
+            kinds.append(i);
           }
-          const status = s.ok === false ? "failed" : s.ok === true ? "done" : "running";
-          const mark = el("span", `step-status ${status}`);
-          mark.setAttribute("role", "img");
-          mark.setAttribute("aria-label", status);
-          mark.replaceChildren(icon(status === "failed" ? "x" : status === "done" ? "check" : "loader", status === "running" ? "spin" : ""));
-          name.append(label, mark);
-          step.append(name);
-          if (s.excerpt) step.append(el("pre", "step-result", s.excerpt));
-          d.append(step);
+          summary.append(kinds, el("span", null, `Worked for ${took((until ?? t.lastAt) - from)}`));
         }
-        requestAnimationFrame(() => { for (const args of d.querySelectorAll(".step-args")) fitStepArgs(args); });
+        summary.append(el("span", null, `· ${plural(steps.length, "step")}`), icon("chevron", "chev"));
+        // the step it is on now: the last of a card its turn works in, unless
+        // it failed (a runtime's progress may say `ok` before its result)
+        const lines = steps.map((s, i) => stepLine(t, s, live && i === steps.length - 1 && s.ok !== false, agent));
+        d.dataset.lines = String(lines.length);
+        d.append(summary, ...lines);
+        // a line come since the last draw arrives as the ones before it step back
+        if (live && before && Number(before.dataset.lines) < lines.length) {
+          d.classList.add("advanced");
+          setTimeout(() => d.classList.remove("advanced"), 400);
+        }
+        const show = () => {
+          const whole = state.toggled.get(key) === true;
+          d.open = live || whole;
+          d.classList.toggle("rolling", live && !whole);
+          requestAnimationFrame(() => { for (const args of d.querySelectorAll(".step-args")) fitStepArgs(args); });
+        };
+        const toggle = () => {
+          if (state.toggled.get(key) === true) state.toggled.delete(key);
+          else state.toggled.set(key, true);
+          d.classList.remove("advanced");
+          show();
+        };
+        summary.onclick = (e) => {
+          e.preventDefault();
+          toggle();
+        };
+        // the rolling lines open the card whole too
+        d.onclick = (e) => {
+          if (d.classList.contains("rolling") && !summary.contains(e.target)) toggle();
+        };
+        show();
         return d;
       }),
     ];
+  }
+
+  // A step's line: its icon, its arguments. The icon says the verb (its
+  // accessible name, in the tense the step is in), so the verb shows in
+  // words only where the icon cannot say it: a step with no arguments,
+  // another tool's (its wrench names none), and a failed one (its colour
+  // alone would say so).
+  function stepLine(t, s, now, agent) {
+    const says = stepSays(s, now);
+    const step = el("div", `step${s.ok === false ? " error" : ""}${now ? " running" : ""}`);
+    const known = Object.hasOwn(STEP_SAYS, s.category);
+    step.dataset.category = known ? s.category : "other";
+    const opens = !!(says.args || s.excerpt);
+    const line = el(opens ? "button" : "div", "step-name");
+    const label = el("span", "step-label");
+    const glyph = icon(says.icon);
+    if (known && says.args && s.ok !== false) {
+      glyph.removeAttribute("aria-hidden");
+      glyph.setAttribute("role", "img");
+      glyph.setAttribute("aria-label", stepSays(s, now, false).verb);
+    } else label.append(el("span", `step-verb${now ? " shimmer" : ""}`, says.verb));
+    if (says.args) {
+      const args = el("span", `step-args${now ? " shimmer" : ""}`, shortStepArgs(says.args, agent));
+      args.title = says.args;
+      args.dataset.short = args.textContent;
+      label.append(args);
+    }
+    line.append(glyph, label);
+    step.append(line);
+    if (!opens) return step;
+    line.type = "button";
+    const id = `${t.key}:${s.step}`;
+    const detail = el("div", "step-detail");
+    if (says.args) detail.append(el("pre", "step-call", shortStepArgs(says.args, agent)));
+    if (s.excerpt) detail.append(el("pre", "step-result", s.excerpt));
+    const show = () => {
+      const open = state.openSteps.has(id);
+      detail.hidden = !open;
+      line.setAttribute("aria-expanded", String(open));
+    };
+    line.onclick = () => {
+      if (state.openSteps.has(id)) state.openSteps.delete(id);
+      else state.openSteps.add(id);
+      show();
+    };
+    show();
+    step.append(detail);
+    return step;
   }
 
   // An approval: the agent's question and its options, which only the
@@ -1726,6 +1856,8 @@ export function mount(root) {
   let attachments = []; // { file, name, size, type, uploading }
   let sending = false;
   let recording = null; // the voice memo being recorded (`startMemo`)
+  // the page's access ended (`fragment.closed`): nothing records after it
+  let ended = false;
   function refreshSend() {
     const typed = !!input.value.trim() || attachments.length > 0 || !!recording;
     $("send").disabled = sending || !typed || !canPost() || setupHolds();
@@ -1789,12 +1921,27 @@ export function mount(root) {
     const words = input.value.trim();
     if (words) send(`/steer ${words}`);
   };
+  // the field as tall as its lines, measured once Send, Stop and Steer are
+  // as the words have them: on a phone they share its row (chat.css)
   function grow() {
-    input.style.height = "auto";
-    input.style.height = `${Math.min(Math.max(input.scrollHeight, 27), 220)}px`;
     refreshSend();
+    fit();
     draftChanged();
   }
+  function fit() {
+    input.style.height = "auto";
+    input.style.height = `${Math.min(Math.max(input.scrollHeight, 27), 220)}px`;
+  }
+  // on a phone its width moves with the buttons beside it (recording's
+  // clock and Discard, Steer as the agent starts and stops), so its lines
+  // are measured again whenever its width changes, not only as it is typed in
+  let fieldWidth = 0;
+  new ResizeObserver(([entry]) => {
+    const width = Math.round(entry.contentRect.width);
+    if (width === fieldWidth) return;
+    fieldWidth = width;
+    fit();
+  }).observe(input);
   // ---- the composer's draft: kept in this origin's storage as its
   // person's, a moment after each change and as the page goes, and put
   // back as it loads, so words typed survive any reload of the page (the
@@ -1947,7 +2094,7 @@ export function mount(root) {
     if (recording) $("recording-time").textContent = clock(Date.now() - recording.startedAt);
   }
   async function startMemo() {
-    if (recording || !canAttach() || !recordable()) return;
+    if (ended || recording || !canAttach() || !recordable()) return;
     if (attachments.length >= ATTACHMENTS_MAX) return problem(`A message carries at most ${ATTACHMENTS_MAX} files.`);
     const memo = { recorder: null, stream: null, chunks: [], bytes: 0, startedAt: Date.now(), timer: 0, tick: 0, stopped: false, discard: false, failed: null, tooLarge: false };
     // held while the browser asks for the microphone, so a second press waits
@@ -1961,7 +2108,8 @@ export function mount(root) {
       memo.stream?.getTracks().forEach((t) => t.stop());
       recording = null;
       renderRecording();
-      return problem(err?.name === "NotAllowedError" ? "The microphone is off for this chat: allow it in your browser to record." : `Could not record: ${err?.message ?? err}`);
+      if (ended) return;
+      return err?.name === "NotAllowedError" ? showMicCard("denied") : problem(`Could not record: ${err?.message ?? err}`);
     }
     // pressed again while the browser asked: nothing was recorded to send
     if (memo.stopped) {
@@ -2016,7 +2164,53 @@ export function mount(root) {
     renderAttachments();
     send(input.value);
   }
-  $("record").onclick = () => (recording ? stopMemo(false) : startMemo());
+  // Before the browser's own prompt, a card says what the microphone is
+  // for, and asks only on Continue; one the browser refused says where it
+  // is allowed again (the page can do nothing more: Okay closes it). A
+  // browser that cannot say (Firefox) or asks every visit (Safari) shows
+  // the first card once: this browser remembers it was read.
+  const MIC_PRIMED = "fragment-chat:mic-primed";
+  const MIC_CARD = {
+    ask: ["Send voice memos to your agent", "Allow the microphone on the next step.", "Continue"],
+    denied: ["Your browser needs microphone permissions", "Turn on the microphone in your browser's settings.", "Okay"],
+  };
+  const primed = () => {
+    try { return localStorage.getItem(MIC_PRIMED) === "1"; } catch { return false; }
+  };
+  async function micPermission() {
+    try { return (await navigator.permissions.query({ name: "microphone" })).state; } catch { return null; }
+  }
+  function showMicCard(kind) {
+    const [title, text, go] = MIC_CARD[kind];
+    const card = $("mic-card");
+    card.dataset.kind = kind;
+    $("mic-card-title").textContent = title;
+    $("mic-card-text").textContent = text;
+    $("mic-card-go").textContent = go;
+    $("banner").hidden = true;
+    card.hidden = false;
+    $("mic-card-go").focus();
+  }
+  const hideMicCard = () => { $("mic-card").hidden = true; };
+  $("mic-card-close").onclick = () => {
+    hideMicCard();
+    input.focus();
+  };
+  $("mic-card-go").onclick = () => {
+    if ($("mic-card").dataset.kind === "denied") return $("mic-card-close").onclick();
+    try { localStorage.setItem(MIC_PRIMED, "1"); } catch {}
+    hideMicCard();
+    startMemo();
+  };
+  $("record").onclick = async () => {
+    if (recording) return stopMemo(false);
+    if (!canAttach() || !recordable()) return;
+    const mic = await micPermission();
+    // its access ended while the browser was asked
+    if (ended) return;
+    if (mic === "granted" || (mic !== "denied" && primed())) return startMemo();
+    showMicCard(mic === "denied" ? "denied" : "ask");
+  };
   $("discard").onclick = () => {
     stopMemo(true);
     input.focus();
@@ -2048,6 +2242,10 @@ export function mount(root) {
         b.setAttribute("aria-selected", String(i === picking.index));
         b.dataset.agent = a;
         b.append(face(a, who(a)), who(a).name);
+        // someone else's agent shows under its person, in with them
+        // (docs/cloudflare-v1.md, decision 64): "theirs", by their name
+        const whose = state.members.find((m) => m.principal === a)?.owner;
+        if (whose && whose !== state.me?.principal) b.append(el("span", "mention-note", `${who(whose).name}'s agent`));
         if (!here.includes(a)) {
           b.classList.add("outside");
           b.append(el("span", "mention-note", "adds them to this chat"));
@@ -2154,6 +2352,11 @@ export function mount(root) {
       } else setup = null;
       schedule();
       if (picking) updateMentions();
+    } else if (d?.fragment === "alerts" && typeof d.nonce === "string" && event.origin === state.me?.platform) {
+      const waiting = askingShell.get(d.nonce);
+      if (!waiting) return;
+      askingShell.delete(d.nonce);
+      waiting(d);
     } else if (d?.fragment === "agent-added" && typeof d.nonce === "string" && event.origin === rosterOrigin) {
       const waiting = adding.get(d.nonce);
       if (!waiting) return;
@@ -2398,10 +2601,15 @@ export function mount(root) {
   };
 
   // ---- "Notify me": this browser subscribes for its person, from a click
-  // only (`fragment.push.register(<their identity>)`), and the chat's code
-  // pushes an agent's reply to its people while they are away (app.mjs).
-  // A browser keeps a framed chat from asking (a cross-origin frame may not
-  // ask for notifications): it says so, and opens the chat in a tab ----
+  // only, and the chat's code pushes an agent's reply to its people while
+  // they are away (app.mjs). In a tab of its own the page subscribes
+  // (`fragment.push.register(<their identity>)`). A browser lets no
+  // cross-origin frame ask for notifications, so framed by the shell, the
+  // shell asks on the platform's origin and holds the subscription
+  // (docs/api.md, The shell, "A chat's alerts are the shell's"): the page
+  // hands it this fragment's key, and stores what it subscribed as its
+  // person, as `register` does. Framed by a page that does not answer, it
+  // says so, and opens the chat in a tab ----
   const pushable = () => "serviceWorker" in navigator && typeof PushManager !== "undefined" && typeof Notification !== "undefined";
   const canNotify = () => pushable() && canPost() && state.me.principal.startsWith("npub1");
   const NOTIFY = {
@@ -2413,6 +2621,50 @@ export function mount(root) {
     failed: ["bell", "Notifications could not be turned on: click to try again"],
   };
   let notifying = "off";
+  // the shell around this page holds its alerts (it answered `alerts?`)
+  let shellAlerts = false;
+  const askingShell = new Map(); // nonce -> its answer's resolve
+  function askShell(ask, ms) {
+    return new Promise((resolve) => {
+      const nonce = crypto.randomUUID();
+      const timer = setTimeout(() => {
+        askingShell.delete(nonce);
+        resolve(null);
+      }, ms);
+      askingShell.set(nonce, (answer) => {
+        clearTimeout(timer);
+        resolve(answer);
+      });
+      window.parent.postMessage({ ...ask, nonce }, state.me.platform);
+    });
+  }
+  async function pushPost(path, body) {
+    try {
+      const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), credentials: "same-origin" });
+      const j = await r.json().catch(() => ({}));
+      return r.ok ? j : { ok: false, reason: "server", error: j.message || `http ${r.status}` };
+    } catch (err) {
+      return { ok: false, reason: "error", error: err.message };
+    }
+  }
+  // the shell's answer that is no subscription, as `register` says it
+  const unsubscribed = (a) =>
+    a?.state === "denied" ? { ok: false, reason: "denied" } : a?.state === "off" ? { ok: false, reason: "dismissed" } : { ok: false, reason: "error", error: a?.error ?? "the page around this chat did not answer" };
+  async function alertsOn() {
+    const { key } = await fetch("./__push-key", { credentials: "same-origin" }).then((r) => r.json()).catch(() => ({}));
+    if (typeof key !== "string" || !key) return { ok: false, reason: "error", error: "this chat has no key to push with" };
+    const a = await askShell({ fragment: "alerts", on: true, key }, ALERTS_ASK_MS);
+    if (a?.state !== "on" || !a.subscription) return unsubscribed(a);
+    const stored = await pushPost("./__push-sub", { who: state.me.principal, ...a.subscription });
+    // not stored here: the shell lets it go
+    if (stored.ok === false) await askShell({ fragment: "alerts", on: false }, ALERTS_ASK_MS);
+    return stored;
+  }
+  async function alertsOff() {
+    const a = await askShell({ fragment: "alerts", on: false }, ALERTS_ASK_MS);
+    if (a?.state !== "off") return unsubscribed(a);
+    return a.endpoint ? pushPost("./__push-unsub", { endpoint: a.endpoint }) : { ok: true, removed: 0 };
+  }
   function setNotify(to) {
     notifying = to;
     const b = $("notify");
@@ -2428,7 +2680,17 @@ export function mount(root) {
   async function readNotify() {
     $("notify").hidden = !canNotify();
     if (!canNotify()) return;
-    if (Notification.permission === "denied") return setNotify(framed ? "framed" : "denied");
+    if (framed) {
+      // shown once it is known whose it is (a press before would ask the frame)
+      $("notify").hidden = true;
+      const a = await askShell({ fragment: "alerts?" }, ALERTS_READ_MS);
+      shellAlerts = !!a;
+      if (a?.state === "unsupported") return;
+      $("notify").hidden = false;
+      if (!a) return setNotify("framed");
+      return setNotify(["on", "denied"].includes(a.state) ? a.state : "off");
+    }
+    if (Notification.permission === "denied") return setNotify("denied");
     try {
       const registration = await navigator.serviceWorker.getRegistration(location.href);
       const subscribed = Notification.permission === "granted" && !!(await registration?.pushManager.getSubscription());
@@ -2442,9 +2704,11 @@ export function mount(root) {
     if (notifying === "working" || !canNotify()) return;
     const was = notifying;
     setNotify("working");
-    const answer = was === "on" ? await fragment.push.unregister() : await fragment.push.register(state.me.principal);
+    const answer = shellAlerts ? await (was === "on" ? alertsOff() : alertsOn()) : was === "on" ? await fragment.push.unregister() : await fragment.push.register(state.me.principal);
     if (answer.ok !== false) return setNotify(was === "on" ? "off" : "on");
-    if (answer.reason === "denied") return setNotify(framed ? "framed" : "denied");
+    if (answer.reason === "denied") return setNotify(framed && !shellAlerts ? "framed" : "denied");
+    // the browser's question closed unanswered: nothing changed
+    if (answer.reason === "dismissed") return setNotify(was);
     setNotify(was === "on" ? "on" : "failed");
     problem(`Notifications were not turned ${was === "on" ? "off" : "on"}: ${answer.error ?? answer.reason}`);
   };
@@ -2515,7 +2779,9 @@ export function mount(root) {
     problem(code === 4004 ? "This chat was deleted." : "Your access to this chat changed: reload the page.");
     input.disabled = true;
     $("attach").disabled = true;
+    ended = true;
     stopMemo(true);
+    hideMicCard();
     $("record").disabled = true;
   });
   render();

@@ -62,7 +62,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     api.approve(&member_session, &member)?;
     let name = s.named(&api, &owner, "restart")?;
     let c = s.create(&api, &owner, &name)?;
-    api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", member.pubkey_hex()), Some(&json!({ "role": "editor" })))?;
+    api.share(&name, member.pubkey_hex(), "editor")?;
     let live = ship(s, &c, TODO_APP, TODO_JSON);
     // a site session on the fragment, and the fragment's VAPID key (sealed like a secret)
     let member_site = site_cookie(&api, &member_session, &name)?;
@@ -141,7 +141,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200 && seq_before == 2, "channel setup: {r} (feed at {seq_before})");
     let code_before = api.status(&owner, &stored)?.body["code"].clone();
     anyhow::ensure!(code_before["operations"]["save"]["kind"] == "mutation" && code_before["operations"]["save"]["description"] == "Save texts to the feed.", "code setup: {code_before}");
-    // a person's search and archiving (principal.rs), and a chat's search outbox (search.rs)
+    // a person's search, archiving and dock (principal.rs), and a chat's search outbox (search.rs)
     let talk = s.named(&api, &owner, "restart-talk")?;
     let r = api.create_with(&owner, json!({ "name": talk, "template": "chat" }))?;
     anyhow::ensure!(r.status == 200, "chat setup: {r}");
@@ -152,12 +152,18 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     };
     let said = s.eventually(Duration::from_secs(30), || say(&api, "k1", "kale outlives restarts").is_ok_and(|r| r.status == 200));
     let r = api.signed(&owner, "PUT", &format!("/api/fragments/{talk}/archived"), Some(&json!({ "archived": true })))?;
+    // and their dock (#587): an app of theirs taken off it
+    let docked = api.signed(&owner, "PUT", &format!("/api/fragments/{stored}/dock"), Some(&json!({ "dock": false })))?;
     let searched = s.eventually(Duration::from_secs(30), || found(&api, "kale") == 1);
-    anyhow::ensure!(said && r.status == 200 && searched, "search setup: {r}");
+    anyhow::ensure!(said && r.status == 200 && docked.status == 200 && searched, "search setup: {r} {docked}");
     // sharing: an invite waiting, and who has access as the access view says it
     let invitee = format!("restart-invitee-{}@e2e.test", &Keys::generate().pubkey_hex()[..8]);
     let r = api.signed(&owner, "POST", &format!("/api/f/{name}/invites"), Some(&json!({ "email": invitee, "role": "viewer" })))?;
     anyhow::ensure!(r.status == 200 && !r.body["invited"].is_null(), "invite setup: {r}");
+    // and one to someone who signs in already, waiting for their yes (decision 63)
+    let asked_person = api.person()?;
+    let r = api.signed(&owner, "POST", &format!("/api/f/{name}/invites"), Some(&json!({ "email": Api::email_of(&asked_person), "role": "viewer" })))?;
+    anyhow::ensure!(r.status == 200 && !r.body["invited"].is_null(), "an invite waiting for a yes, setup: {r}");
     let access_row = |api: &Api| -> Value {
         let r = api.signed(&owner, "GET", "/api/access", None).ok();
         r.and_then(|r| r.body["fragments"].as_array().and_then(|a| a.iter().find(|f| f["name"] == name.as_str()).cloned())).unwrap_or_default()
@@ -246,11 +252,21 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         access_after == access_before,
         format!("{access_before} → {access_after}"),
     );
+    let waiting = api.signed(&asked_person, "GET", "/api/invites", None)?;
+    let yes = api.signed(&asked_person, "POST", &format!("/api/invites/{name}/accept"), Some(&json!({})))?;
+    let theirs = api.status(&asked_person, &name)?;
+    s.ok(
+        "after a restart an invite waiting for its person's yes still waits for them, and their yes makes them a member",
+        waiting.body["invites"].as_array().is_some_and(|l| l.iter().any(|i| i["fragment"] == name.as_str() && i["role"] == "viewer"))
+            && yes.status == 200
+            && theirs.body["role"] == "viewer",
+        format!("{waiting} {yes} {theirs}"),
+    );
     // the row a member added now gets is made from the fragment's own copy:
     // only a copy that survived the restart carries the agent's turn
     let listed_after = posts::listed_of(&api, &owner, &busy);
     let newcomer = api.person()?;
-    let r = api.signed(&owner, "PUT", &format!("/api/f/{busy}/members/{}", api.identity(&newcomer)?), Some(&json!({ "role": "viewer" })))?;
+    let r = api.share(&busy, &api.identity(&newcomer)?, "viewer")?;
     let theirs = s.eventually(Duration::from_secs(20), || posts::listed_of(&api, &newcomer, &busy) == listed_after);
     s.ok(
         "after a restart a list keeps what an agent was doing, and the fragment its own copy: a member added after it is sent the agent's turn",
@@ -348,6 +364,8 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let r = api.signed(&owner, "GET", "/api/fragments", None)?;
     let held = r.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == talk.as_str() && f["archived"] == true));
     s.ok("and their archiving holds", held, &r);
+    let off = r.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == stored.as_str() && f["dock"] == false));
+    s.ok("and the app they took off their dock is off it still", off, &r);
     let r = say(&api, "k2", "kale and chard")?;
     let next = s.eventually(Duration::from_secs(30), || found(&api, "kale") == 2);
     s.ok("and a chat's new message reaches it: its search outbox goes on", r.status == 200 && next, &r);
@@ -362,7 +380,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     // fragment's alarm finishes it after
     let ended = s.named(&api, &owner, "restart-ended")?;
     s.create(&api, &owner, &ended)?;
-    api.signed(&owner, "PUT", &format!("/api/f/{ended}/members/{}", member.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;
+    api.share(&ended, member.pubkey_hex(), "viewer")?;
     let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": ended, "op": "members", "fill": limits::MEMBERS_MAX })))?;
     anyhow::ensure!(r.status == 200, "members setup: {r}");
     let r = api.signed(&owner, "DELETE", &format!("/api/f/{ended}"), None)?;

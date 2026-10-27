@@ -248,9 +248,14 @@ pub struct Turn {
     /// When the runtime was last heard about it (or it was handed).
     pub last_ms: u64,
     pub steps: u32,
-    /// Replies posted so far, and the highest part among them.
+    /// Replies posted so far (their ids' numbers), and the highest part
+    /// among them.
     pub replies: u32,
     pub last_part: u32,
+    /// Of those, the interim ones (words before a tool call), which spend
+    /// no part of `REPLIES_PER_TURN_MAX`. A state from before holds none.
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub interim: u32,
     pub prompts: Vec<Prompt>,
     pub stop_requested: bool,
     /// What an ended turn still owes `work`, in the order posted.
@@ -329,6 +334,11 @@ pub enum Input {
     Tick,
     /// The agent is no longer in the fragment (403 or 404 there).
     Gone { agent: String, fragment: String },
+    /// The agents whose SimpleX link is bound now (simplex/run.rs), each
+    /// with its SimpleX chat once found: their relayed records alone are
+    /// honored, as their owner's messages, and what each says in that chat
+    /// goes to its owner's phone.
+    Relaying(BTreeMap<String, Option<String>>),
 }
 
 /// What the engine asks the driver to do, in order.
@@ -411,6 +421,12 @@ pub struct Engine {
     /// turn there: `records::menu_id`). Never written to `/data`; at most
     /// one entry per followed chat of each agent.
     published: BTreeSet<(String, String)>,
+    /// The agents whose SimpleX link is bound (`Input::Relaying`), each with
+    /// its SimpleX chat once found: only their own relayed records are their
+    /// owner's messages, and that chat is their owner's phone (`mirror`).
+    /// Never written to `/data`: the bridge reads it from each link's file
+    /// as it starts.
+    relaying: BTreeMap<String, Option<String>>,
     /// Per agent and chat, its turn there the runtime's notices belong to
     /// (the one running, else the last this life handed there) and how many
     /// it posted, the one used last at the back (at most
@@ -447,6 +463,12 @@ pub fn cursor_key(agent: &str, fragment: &str, channel: &str) -> String {
     format!("{agent}|{fragment}|{channel}")
 }
 
+/// A count that is nothing, kept out of the state file (so a state with
+/// none reads as an older bridge's did).
+fn u32_is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 fn label(fragment: &str) -> &str {
     fragment.split('.').next().unwrap_or(fragment)
 }
@@ -471,6 +493,7 @@ impl Engine {
             forgotten: BTreeMap::new(),
             menu: &[],
             published: BTreeSet::new(),
+            relaying: BTreeMap::new(),
             noticed: VecDeque::new(),
             out: Vec::new(),
             dirty: false,
@@ -497,6 +520,14 @@ impl Engine {
 
     pub fn agents(&self) -> &[Agent] {
         &self.agents
+    }
+
+    /// The chat that is `agent`'s owner's phone: its SimpleX chat, while its
+    /// link is bound and the chat found (`Input::Relaying`). What the agent
+    /// says there goes to their SimpleX app too, whatever started its turn
+    /// (docs/bridge.md, "SimpleX").
+    pub fn mirror(&self, agent: &str) -> Option<&str> {
+        self.relaying.get(agent)?.as_deref()
     }
 
     pub fn cursor(&self, agent: &str, fragment: &str, channel: &str) -> u64 {
@@ -545,6 +576,10 @@ impl Engine {
             Input::Posted { turn, id } => self.posted(&turn, &id),
             Input::Tick => self.tick(),
             Input::Gone { agent, fragment } => self.gone(&agent, &fragment),
+            Input::Relaying(agents) => {
+                assert!(agents.len() <= limits::AGENTS_MAX, "the bridge runs at most so many agents");
+                self.relaying = agents;
+            }
         }
         self.finish()
     }
@@ -635,6 +670,16 @@ impl Engine {
         match record.channel.as_str() {
             // the agent's own words are not for it
             records::CHAT if record.principal != agent.identity => self.said(&agent, fragment, &record),
+            // but its owner's words it relays are, when it is linked
+            // (docs/chat-records.md, "A relayed message"): its owner's
+            // message, as theirs
+            records::CHAT if self.relaying.contains_key(&agent.fragment) => {
+                if let Some(r) = records::relayed(&record.body).filter(|r| r.for_ == agent.owner && r.agent == agent.fragment) {
+                    crate::ev!("relayed", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "via": r.via });
+                    let as_owner = Record { principal: agent.owner.clone(), ..record };
+                    self.said(&agent, fragment, &as_owner);
+                }
+            }
             records::TASKS if fragment == agent.fragment => {
                 // Only the agent's own fragment (its cron, the platform's
                 // `joined`: by the fragment's key, whose npub is the agent's
@@ -712,7 +757,8 @@ impl Engine {
                 let id = records::turn_id(&agent.fragment, &cause.fragment, &cause.channel, cause.seq);
                 let turn = running.filter(|_| item.how == How::Steer);
                 crate::ev!("command.aside", { "agent": agent.fragment, "fragment": fragment, "seq": record.seq, "turn": turn });
-                self.out.push(Effect::Runtime(Command::Aside { agent: agent.fragment.clone(), fragment: fragment.to_string(), chat_name: label(fragment).to_string(), turn, id, by: record.principal.clone(), by_name: asker_name, text }));
+                let simplex = self.mirror(&agent.fragment) == Some(fragment);
+                self.out.push(Effect::Runtime(Command::Aside { agent: agent.fragment.clone(), fragment: fragment.to_string(), chat_name: label(fragment).to_string(), simplex, turn, id, by: record.principal.clone(), by_name: asker_name, text }));
             }
             _ => self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_command, 0, Ask::Command),
         }
@@ -877,6 +923,7 @@ impl Engine {
             last_ms: self.now,
             steps: 0,
             replies: 0,
+            interim: 0,
             last_part: 0,
             prompts: Vec::new(),
             stop_requested: false,
@@ -1055,6 +1102,8 @@ impl Engine {
         while self.noticed.len() > limits::NOTICE_CHATS_MAX {
             self.noticed.pop_front();
         }
+        // its chat its owner's phone (its SimpleX chat): the runtime is told
+        let simplex = self.mirror(&agent) == Some(self.state.turns[id].fragment.as_str());
         let t = self.state.turns.get_mut(id).expect("checked");
         t.phase = Phase::Running;
         t.last_ms = now;
@@ -1078,6 +1127,7 @@ impl Engine {
             command: t.command,
             reply_to: t.reply_to,
             quote: None,
+            simplex,
         };
         crate::ev!("turn.handed", { "turn": id, "agent": agent, "fragment": t.fragment, "command": t.command });
         self.out.push(Effect::Runtime(Command::Start(Box::new(start))));
@@ -1293,7 +1343,12 @@ impl Engine {
                 }
             }
             Event::Step { turn, step } => {
-                self.seal(&turn);
+                // the words before a tool call are a reply, posted before
+                // its step; the turn works on after them, so they are
+                // interim (its push leaves them out), unless the call only
+                // updates its memory: an answer said beside housekeeping is
+                // the turn's answer (Hermes sends nothing after it)
+                self.seal(&turn, step.category != records::Category::Memory);
                 let t = self.state.turns.get_mut(&turn).expect("checked");
                 t.steps = t.steps.saturating_add(1);
                 self.dirty = true;
@@ -1307,7 +1362,7 @@ impl Engine {
                 // the question shows before the answer it waits for, and the
                 // chat is told whose answer it waits for (`turn.asked`, once
                 // a question: the part asking it is in its id)
-                self.seal(&turn);
+                self.seal(&turn, false);
                 let t = self.state.turns.get_mut(&turn).expect("checked");
                 if !t.asking {
                     t.asking = true;
@@ -1326,7 +1381,7 @@ impl Engine {
                 self.dirty = true;
                 let turn = records::said_turn_id(&agent, &self.life, self.state.said);
                 crate::ev!("said", { "agent": agent, "fragment": fragment, "turn": turn });
-                self.post(&agent, &fragment, records::CHAT, records::reply_id(&turn, 1), records::reply(&text, &turn, &[], 0), Vec::new());
+                self.post(&agent, &fragment, records::CHAT, records::reply_id(&turn, 1), records::reply(&text, &turn, &[], 0, false), Vec::new());
             }
             Event::Notice { agent, fragment, category, text } => self.notice(&agent, &fragment, category, &text),
         }
@@ -1374,7 +1429,7 @@ impl Engine {
             return;
         }
         if t.open.as_ref().is_some_and(|o| o.part != part) {
-            self.seal(id);
+            self.seal(id, false);
         }
         let t = self.state.turns.get_mut(id).expect("checked");
         let open = t.open.get_or_insert_with(|| OpenReply { part, ..OpenReply::default() });
@@ -1395,24 +1450,34 @@ impl Engine {
         }
     }
 
-    /// Posts the turn's open reply, if it says anything.
-    fn seal(&mut self, id: &str) {
+    /// Posts the turn's open reply, if it says anything: `interim` when
+    /// the turn works on after it (a tool call follows its words).
+    fn seal(&mut self, id: &str, interim: bool) {
         let view = self.views.get(&self.state.turns[id].fragment).cloned().unwrap_or_default();
         let t = self.state.turns.get_mut(id).expect("sealing a held turn");
         let Some(open) = t.open.take() else { return };
         t.last_part = t.last_part.max(open.part);
         let empty = open.text.trim().is_empty() && open.files.is_empty();
-        if empty || t.replies >= limits::REPLIES_PER_TURN_MAX {
+        // interim replies have a bound of their own, so narration never
+        // spends what the turn's answer and questions may say
+        let spent = if interim { t.interim >= limits::INTERIM_REPLIES_PER_TURN_MAX } else { t.replies - t.interim >= limits::REPLIES_PER_TURN_MAX };
+        if empty || spent {
+            if spent && !empty {
+                crate::ev!("reply.dropped", { "turn": id, "interim": interim, "why": "a turn posts at most so many" });
+            }
             return;
         }
         t.replies += 1;
+        if interim {
+            t.interim += 1;
+        }
         self.dirty = true;
         let (agent, fragment, n, hop) = (t.agent.clone(), t.fragment.clone(), t.replies, t.hop);
         // A reply that names another agent of the chat hands off to it.
         let words = records::mentions(&open.text);
         let to: Vec<String> = self.agents.iter().filter(|a| a.fragment != agent && view.agents.contains(&a.identity) && words.iter().any(|w| answers_to(a, w))).map(|a| a.identity.clone()).collect();
-        let body = records::reply(&open.text, id, &to, hop + 1);
-        crate::ev!("reply.posted", { "turn": id, "n": n, "files": open.files.len(), "to": to.len() });
+        let body = records::reply(&open.text, id, &to, hop + 1, interim);
+        crate::ev!("reply.posted", { "turn": id, "n": n, "files": open.files.len(), "to": to.len(), "interim": interim });
         self.post(&agent, &fragment, records::CHAT, records::reply_id(id, n), body, open.files);
         self.draft(&agent, &fragment, id, None);
     }
@@ -1435,7 +1500,7 @@ impl Engine {
             self.out.push(Effect::Runtime(Command::Answer { turn: id.to_string(), prompt, option: None, seq: 0, by: String::new(), words: None, attached: None }));
             return;
         }
-        self.seal(id);
+        self.seal(id, false);
         // A runtime's own lifetime is held within bounds; the operator's
         // setting is theirs (tests run it short).
         let ttl = match ttl_ms {
@@ -1459,7 +1524,7 @@ impl Engine {
     /// `unanswered`, its end (owed: kept with the turn until answered), and
     /// its chat's next turn.
     fn end(&mut self, id: &str, outcome: Outcome, unanswered: Closed) {
-        self.seal(id);
+        self.seal(id, false);
         let t = self.state.turns.get_mut(id).expect("ending a held turn");
         assert!(t.active(), "a turn's run ends once: {id} is {:?}", t.phase);
         let prompts = std::mem::take(&mut t.prompts);
@@ -1571,6 +1636,9 @@ pub fn check(state: &State) -> Result<(), Corrupt> {
         }
         if t.asking && !t.active() {
             return Err(Corrupt(format!("turn {id} is {:?} and asks its asker", t.phase)));
+        }
+        if t.interim > t.replies {
+            return Err(Corrupt(format!("turn {id} posted {} interim replies of {}", t.interim, t.replies)));
         }
         let ended = t.phase == Phase::Ended;
         if ended == t.owed.is_empty() {

@@ -250,6 +250,12 @@ enum Cmd {
         #[command(subcommand)]
         sub: InviteCmd,
     },
+    /// The invites waiting for your yes (an agent: its owner's, acting for
+    /// them): list them, or accept or decline one
+    Invites {
+        #[command(subcommand)]
+        sub: Option<InvitesCmd>,
+    },
     /// Call an operation; prints its result (a retry with the same --id is a replay)
     Call {
         name: String,
@@ -428,7 +434,8 @@ enum OperatorCmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
-    /// One person: their seat, org, ledger and computer
+    /// One person: their seat (and whether they let its computer sleep),
+    /// org, ledger and computer
     Person {
         npub: String,
         #[arg(long)]
@@ -563,8 +570,9 @@ enum ScheduleCmd {
     /// Add one: at each minute --cron names (UTC), the fragment appends
     /// --record to --channel, as itself; or, an agent's routine, it asks
     /// the agent --routine in --chat, as its owner (the record `{kind:
-    /// "routine", text, chat}` on its `tasks`). The same one added again
-    /// is that one
+    /// "routine", text, chat}` on its `tasks`), or, with no --chat, in its
+    /// owner's home: the chat where it reaches them as it fires (their
+    /// SimpleX when they chose it). The same one added again is that one
     Add {
         /// The fragment (on an agent's computer, the agent's own unless named)
         fragment: Option<String>,
@@ -580,9 +588,10 @@ enum ScheduleCmd {
         #[arg(long, requires = "channel")]
         record: Option<String>,
         /// An agent's routine: what it is to do each time
-        #[arg(long, requires = "chat")]
+        #[arg(long)]
         routine: Option<String>,
-        /// An agent's routine: the chat it is done in, one the agent is in
+        /// An agent's routine: the chat it is done in, one the agent is in;
+        /// none, its owner's home (where it reaches them as it fires)
         #[arg(long, requires = "routine")]
         chat: Option<String>,
     },
@@ -630,8 +639,9 @@ fn fragment_and(agent: Option<&api::AgentMode>, mut args: Vec<String>, verb: &st
 }
 
 /// What `fragment schedule add` appends, and where: `--channel` and
-/// `--record` as given, or an agent's routine (`--routine` and `--chat`)
-/// on its `tasks` (docs/chat-records.md).
+/// `--record` as given, or an agent's routine (`--routine`, and `--chat`
+/// or none: its owner's home's, read by its computer as it fires) on its
+/// `tasks` (docs/chat-records.md).
 fn scheduled_record(channel: Option<String>, record: Option<String>, routine: Option<String>, chat: Option<String>) -> Result<(String, Value)> {
     match (channel, record, routine, chat) {
         (Some(channel), Some(record), None, None) => {
@@ -639,7 +649,8 @@ fn scheduled_record(channel: Option<String>, record: Option<String>, routine: Op
             Ok((channel, record))
         }
         (None, None, Some(text), Some(chat)) => Ok(("tasks".to_string(), json!({ "kind": "routine", "text": text, "chat": chat }))),
-        _ => Err(usage("say what to append: --channel <channel> --record '<json>', or an agent's --routine '<what to do>' --chat <chat>")),
+        (None, None, Some(text), None) => Ok(("tasks".to_string(), json!({ "kind": "routine", "text": text }))),
+        _ => Err(usage("say what to append: --channel <channel> --record '<json>', or an agent's --routine '<what to do>' [--chat <chat>]")),
     }
 }
 
@@ -689,9 +700,11 @@ enum MembersCmd {
     /// List members and their roles
     List { name: String },
     /// Add a member (the owner, or their agent for them): a person and
-    /// their agents, by email, or an identity by npub. An email no one
-    /// signs in as yet is mailed an invite: they are in once they sign in
-    /// as it. Someone in already is refused: `members role` changes a role
+    /// their agents, by email; or one of its owner's own agents, by npub,
+    /// at once. An email is mailed an invite, and its person (and their
+    /// agents) are in once they accept it, signed in as it (`invite list`
+    /// shows it waiting). Anyone else by npub is refused: invite them by
+    /// email. Someone in already is refused: `members role` changes a role
     Add {
         name: String,
         /// an email, or an identity or key (an npub, or 64 hex)
@@ -712,6 +725,15 @@ enum MembersCmd {
     Rm { name: String, who: String },
     /// Leave a fragment you are a member of
     Leave { name: String },
+}
+
+#[derive(Subcommand)]
+enum InvitesCmd {
+    /// Accept one (its name, or its label): you are a member at its role,
+    /// and it is in your list (an agent's: its owner is, and its owner's list)
+    Accept { name: String },
+    /// Decline one: it waits no more
+    Decline { name: String },
 }
 
 #[derive(Subcommand)]
@@ -1219,7 +1241,14 @@ fn run(cli: Cli) -> Result<()> {
             for p in v["people"].as_array().into_iter().flatten() {
                 let seat = match &p["seat"] {
                     Value::Null => "no seat".to_string(),
-                    s => format!("{} {}{}", s["kind"].as_str().unwrap_or("?"), if s["comped"] == true { "comped" } else { "paid" }, if s["good"] == true { "" } else { " (lapsed)" }),
+                    s => format!(
+                        "{} {}{}{}",
+                        s["kind"].as_str().unwrap_or("?"),
+                        if s["comped"] == true { "comped" } else { "paid" },
+                        // why a good always-on seat's computer is not always on
+                        if s["kind"] == "seat_always_on" && s["sleeps"] == true { ", lets it sleep" } else { "" },
+                        if s["good"] == true { "" } else { " (lapsed)" }
+                    ),
                 };
                 println!("{}  {}  {seat}  {}", p["npub"].as_str().unwrap_or("?"), p["email"].as_str().unwrap_or("-"), p["org"]["name"].as_str().unwrap_or(""));
             }
@@ -1467,7 +1496,8 @@ fn run(cli: Cli) -> Result<()> {
                     continue;
                 };
                 for m in members {
-                    let who = m.email.as_deref().or(m.name.as_deref()).unwrap_or(&m.principal);
+                    // an agent by its name (its fragment's title), else its label
+                    let who = m.email.as_deref().or(fragment_core::face::title(m.title.as_deref())).or(m.name.as_deref()).unwrap_or(&m.principal);
                     let whose = match (&m.owner, &m.owner_email) {
                         (Some(_), Some(e)) => format!("\tagent of {e}"),
                         (Some(o), None) => format!("\tagent of {o}"),
@@ -1476,7 +1506,7 @@ fn run(cli: Cli) -> Result<()> {
                     println!("  {}\t{who}{whose}", m.role.as_str());
                     // a person's agents reach what they do
                     for a in &m.agents {
-                        println!("  {}\t  their agent {}", m.role.as_str(), a.name.as_deref().unwrap_or(&a.principal));
+                        println!("  {}\t  their agent {}", m.role.as_str(), fragment_core::face::title(a.title.as_deref()).or(a.name.as_deref()).unwrap_or(&a.principal));
                     }
                 }
                 if f.more > 0 {
@@ -1939,14 +1969,28 @@ fn run(cli: Cli) -> Result<()> {
                 let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer or editor, not {role:?}")))?;
                 let v: Member = match auth::member_of(&who)? {
                     auth::Member::Email(email) => {
+                        // read before the invite, so a failed read invites no one:
+                        // whether they can talk to the owner's agent there (a chat
+                        // it is in; Paul, 2026-10-23 and 10-24)
+                        let st: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
+                        let warns = match st.kind {
+                            fragment_proto::FragmentKind::Chat => {
+                                let members: MemberList = c.call_as(c.get(&format!("/api/f/{name}/members"))?)?;
+                                fragment_core::access::talks_to_owners_agent(st.kind, &members.members)
+                            }
+                            _ => false,
+                        };
                         let body = fragment_proto::CreateInvite { email: email.clone(), role };
                         match c.call_as::<Shared>(c.post_json(&format!("/api/f/{name}/invites"), &body)?)? {
                             Shared::Member(m) => m,
                             Shared::Invited(i) => {
                                 json_exit(j, &Shared::Invited(i.clone()));
                                 let expires_s = u64::try_from(i.expires_at / 1000).unwrap_or(0);
-                                println!("invited {email} as {} on {name}: they were mailed a link, and are in once they sign in as {email}", i.role.as_str());
+                                println!("invited {email} as {} on {name}: they were mailed a link, and are in once they accept it, signed in as {email}", i.role.as_str());
                                 println!("  it waits until {}; `fragment invite revoke {name} {email}` takes it back", chrono_like(expires_s));
+                                if warns {
+                                    println!("  {}", fragment_core::access::TRUST_WARNING);
+                                }
                                 return Ok(());
                             }
                         }
@@ -1994,6 +2038,39 @@ fn run(cli: Cli) -> Result<()> {
                 println!("revoked the invite waiting on {email}");
             }
         },
+        Cmd::Invites { sub } => {
+            let waiting: fragment_proto::InvitesWaiting = c.call_as(c.get("/api/invites")?)?;
+            let Some(sub) = sub else {
+                json_exit(j, &waiting);
+                if waiting.invites.is_empty() {
+                    println!("no invites wait for a yes");
+                }
+                for i in &waiting.invites {
+                    let expires_s = u64::try_from(i.expires_at / 1000).unwrap_or(0);
+                    let from = i.from.as_deref().unwrap_or("someone");
+                    println!("{}\t{}\t{}\tfrom {from}, to {}, until {}", i.fragment, i.role.as_str(), i.title, i.email, chrono_like(expires_s));
+                }
+                return Ok(());
+            };
+            let (name, yes) = match &sub {
+                InvitesCmd::Accept { name } => (name, true),
+                InvitesCmd::Decline { name } => (name, false),
+            };
+            // a name in full, or the label of one invite waiting
+            let label = |f: &str| fragment_proto::split_fragment_name(f).map(|(l, _)| l.to_string());
+            let named: Vec<&str> = waiting.invites.iter().map(|i| i.fragment.as_str()).filter(|f| *f == name.as_str() || label(f).as_deref() == Some(name.as_str())).collect();
+            let full = match named.as_slice() {
+                [one] => one.to_string(),
+                [] => return Err(anyhow::Error::new(CodedError { code: Code::NotFound, msg: format!("no invite waits for a yes on {name} (`fragment invites` lists them)") })),
+                _ => return Err(usage(format!("several invites wait on fragments labeled {name}: name one in full ({})", named.join(", ")))),
+            };
+            let v = c.call(c.post_json(&format!("/api/invites/{full}/{}", if yes { "accept" } else { "decline" }), &serde_json::json!({}))?)?;
+            json_exit(j, &v);
+            match yes {
+                true => println!("accepted: {full} is shared with you now, as {}", v["role"].as_str().unwrap_or("?")),
+                false => println!("declined the invite to {full}"),
+            }
+        }
         Cmd::Call { name, op, input, id } => {
             let input = match (input.as_str(), input.strip_prefix('@')) {
                 ("-", _) => std::io::read_to_string(std::io::stdin()).map_err(|e| usage(format!("--input -: reading stdin: {e}")))?,
@@ -2047,7 +2124,7 @@ fn run(cli: Cli) -> Result<()> {
             let id = id.unwrap_or_else(|| format!("ask-{:016x}", rand::random::<u64>()));
             let v = ask::ask(&c, &agent, &text, chat.as_deref(), wait, id)?;
             json_exit(j, &v);
-            println!("asked {} in {} (record {})", v.asked.name, v.chat, v.record["seq"]);
+            println!("asked {} in {} (record {})", v.asked.shown(), v.chat, v.record["seq"]);
             for who in &v.added {
                 println!("  added {who} to {} as an editor", v.chat);
             }
@@ -2057,9 +2134,9 @@ fn run(cli: Cli) -> Result<()> {
             match (&v.answer, v.waited_s) {
                 (Some(a), _) => {
                     match (a.outcome.as_str(), &a.error) {
-                        ("idle", _) => println!("{} answered:", v.asked.name),
-                        (outcome, Some(why)) => println!("{} could not answer ({outcome}): {why}", v.asked.name),
-                        (outcome, None) => println!("{}'s turn ended {outcome}:", v.asked.name),
+                        ("idle", _) => println!("{} answered:", v.asked.shown()),
+                        (outcome, Some(why)) => println!("{} could not answer ({outcome}): {why}", v.asked.shown()),
+                        (outcome, None) => println!("{}'s turn ended {outcome}:", v.asked.shown()),
                     }
                     for r in &a.replies {
                         println!("{}", r.text);
@@ -2112,7 +2189,7 @@ fn run(cli: Cli) -> Result<()> {
             // as its list says it: the platform's face of it, a moment after a change
             let list: FragmentList = c.call_as(c.get("/api/fragments")?)?;
             let row = list.fragments.into_iter().find(|f| f.name == agent);
-            let shown_name = name.or_else(|| row.as_ref().and_then(|r| r.title.clone())).unwrap_or_else(|| agent.clone());
+            let shown_name = name.unwrap_or_else(|| fragment_core::face::agent_name(row.as_ref().and_then(|r| r.title.as_deref()), &agent).to_string());
             let shown_picture = if files.is_empty() { row.and_then(|r| r.picture) } else { None };
             json_exit(j, &json!({ "agent": agent, "name": shown_name, "picture": shown_picture, "changed": !files.is_empty() }));
             println!("{agent}: {shown_name}");
@@ -2336,6 +2413,12 @@ mod tests {
             scheduled_record(None, None, some("water the plants"), some("talk--k3x9")).unwrap(),
             ("tasks".into(), json!({ "kind": "routine", "text": "water the plants", "chat": "talk--k3x9" }))
         );
+        assert_eq!(
+            scheduled_record(None, None, some("remind me to call mom"), None).unwrap(),
+            ("tasks".into(), json!({ "kind": "routine", "text": "remind me to call mom" })),
+            "no --chat: its owner's home, as it fires"
+        );
+        assert_eq!(code_of(scheduled_record(some("pings"), some(r#"{"n":1}"#), some("both"), None)), Code::InvalidUsage, "a record and a routine at once");
         let alone = schedule_fragment(None, None, "list");
         assert!(alone.as_ref().is_err_and(|e| e.to_string().contains("name the fragment")), "{alone:?}");
         assert_eq!(code_of(alone), Code::InvalidUsage);

@@ -13,9 +13,10 @@
 //!
 //! Five things here are the person's own, not a fragment's:
 //!
-//! - **Archived**, a flag on their row (`PUT /api/fragments/{name}/archived`):
-//!   their view of the fragment, which no fragment's change touches. It
-//!   goes when they leave the fragment, or it is made again.
+//! - **Archived** and **on their dock**, flags on their row (`PUT
+//!   /api/fragments/{name}/archived`, `…/dock`): their view of the
+//!   fragment, which no fragment's change touches. Each goes when they
+//!   leave the fragment, or it is made again (not archived, on the dock).
 //! - **Seen** (`PUT /api/fragments/{name}/seen`): the place in a chat's
 //!   search entries (below) up to which they have seen its messages, so
 //!   its row counts the rest as `unread` (at most
@@ -44,7 +45,7 @@
 //!   the person's open shells, and any CLI, hold a socket here, hibernated
 //!   (the router decided whose list it is). Each change this list applies
 //!   (a row's, newer than the one it holds: a fragment made, shared with
-//!   them, changed, left or deleted; their archiving; or a chat's message
+//!   them, changed, left or deleted; their archiving or their dock; or a chat's message
 //!   new here, its preview) is told to every
 //!   one as `{type: "changed"}`, naming nothing: each page reads the list
 //!   again with its own credential, so a socket that outlives its session
@@ -54,7 +55,11 @@
 //!
 //!   Their computer tells the same sockets when what its owner is told of
 //!   it changes (`/changed`, from the Computer DO: `tell_changed`), so a
-//!   page reads it again with the list.
+//!   page reads it again with the list. The registry tells them when the
+//!   invites waiting on their emails change (`/invited`, `tell_invited`:
+//!   one made, renewed or taken back), as `{type: "invited"}`, naming
+//!   nothing, so a page reads those again (`GET /api/invites`), and only
+//!   those: the list is told of an invite accepted, a share like any.
 //! - **Their export** (docs/api.md, Export; export.rs): everything that is
 //!   theirs as one archive in R2, built here on this cell's alarm, which is
 //!   its only use, its place kept in its tables (`exports`, `export_tail`,
@@ -71,7 +76,7 @@ use std::cell::Cell;
 
 use fragment_core::npub;
 use fragment_core::search::{self, Query};
-use fragment_proto::{limits, valid_channel_name, Archived, ErrorCode, FragmentKind, FragmentList, ListedFragment, ListedRecord, MessageHit, Role, SearchAnswer, Seen, Sharing};
+use fragment_proto::{limits, valid_channel_name, Archived, Docked, ErrorCode, FragmentKind, FragmentList, ListedFragment, ListedRecord, MessageHit, Role, SearchAnswer, Seen, Sharing};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use worker::wasm_bindgen::{JsCast, JsValue};
@@ -88,13 +93,16 @@ const WATCH_TAG: &str = "watch";
 const HELLO: &str = r#"{"type":"hello"}"#;
 /// What a watching socket is told of a change: no more.
 const CHANGED: &str = r#"{"type":"changed"}"#;
+/// What it is told of a change to the invites waiting on its person's
+/// emails, which the registry holds: no more.
+const INVITED: &str = r#"{"type":"invited"}"#;
 
 /// The columns `/list` and a search read of a row, its listed records
 /// (`listed`), a chat's newest search
 /// entry (`said`, and when: `said_at`), read by its place in its fragment's log, and its entries
 /// after the place its person last saw (`unread`), counted up to the one
 /// bound number (`limits::LISTED_UNREAD_MAX`, `listed_binds`).
-const LISTED: &str = "SELECT fragment AS name, role, sharing, face, archived,
+const LISTED: &str = "SELECT fragment AS name, role, sharing, face, archived, dock,
   (SELECT records FROM listed l WHERE l.fragment = m.fragment) AS listed,
   CASE WHEN json_extract(face, '$.kind') = 'chat'
     THEN (SELECT text FROM search_entries e WHERE e.fragment = m.fragment ORDER BY e.n DESC LIMIT 1) END AS said,
@@ -184,6 +192,7 @@ struct Listed {
     sharing: Option<String>,
     face: Option<String>,
     archived: i64,
+    dock: i64,
     listed: Option<String>,
     said: Option<String>,
     said_at: Option<i64>,
@@ -195,6 +204,29 @@ struct Listed {
 struct SetArchived {
     fragment: String,
     archived: bool,
+}
+
+/// `PUT /dock`: the router's, for the signer (`SetDock`, named).
+#[derive(Deserialize)]
+struct SetDock {
+    fragment: String,
+    dock: bool,
+}
+
+/// The person's own flags on a row (`set_own`): its column's name.
+#[derive(Clone, Copy)]
+enum Own {
+    Archived,
+    Dock,
+}
+
+impl Own {
+    fn column(self) -> &'static str {
+        match self {
+            Own::Archived => "archived",
+            Own::Dock => "dock",
+        }
+    }
 }
 
 /// `PUT /seen`: the router's, for the signer (the fragment named).
@@ -257,6 +289,9 @@ impl DurableObject for PrincipalCell {
     async fn fetch(&self, req: Request) -> Result<Response> {
         if let Some(refused) = crate::routed::refused(&req, crate::routed::Own::of(crate::config::Config::from_env(&self.env)), &self.raw)? {
             return Ok(refused);
+        }
+        if let Some(probed) = crate::routed::probed(&req, &self.schema)? {
+            return Ok(probed);
         }
         match self.route(req).await {
             Ok(r) => Ok(r),
@@ -361,9 +396,15 @@ impl PrincipalCell {
             }
             (Method::Put, "/archived") => {
                 let s: SetArchived = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-                let archived = self.archive(s)?;
+                self.set_own(&s.fragment, Own::Archived, s.archived)?;
                 self.tell();
-                Ok(Response::from_json(&archived)?)
+                Ok(Response::from_json(&Archived { name: s.fragment, archived: s.archived })?)
+            }
+            (Method::Put, "/dock") => {
+                let s: SetDock = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                self.set_own(&s.fragment, Own::Dock, s.dock)?;
+                self.tell();
+                Ok(Response::from_json(&Docked { name: s.fragment, dock: s.dock })?)
             }
             (Method::Put, "/seen") => {
                 let s: MarkSeen = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
@@ -390,6 +431,11 @@ impl PrincipalCell {
             // again; only the Worker's own code reaches here
             (Method::Post, "/changed") => {
                 self.tell();
+                Ok(Response::from_json(&json!({ "ok": true }))?)
+            }
+            // the invites waiting on their emails changed (the registry's)
+            (Method::Post, "/invited") => {
+                self.tell_with(INVITED);
                 Ok(Response::from_json(&json!({ "ok": true }))?)
             }
             (m, p) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {p}", m.as_ref()))),
@@ -423,7 +469,7 @@ impl PrincipalCell {
     }
 
     /// What a wiped list answers: a change taken and kept nowhere, an empty
-    /// list, a search that finds nothing, and no socket, archiving or seen.
+    /// list, a search that finds nothing, and no socket, archiving, dock or seen.
     fn wiped_answer(&self, req: &Request) -> CellResult<Response> {
         assert!(self.wiped.get(), "only a wiped list answers so");
         match (req.method(), req.path().as_str()) {
@@ -495,17 +541,22 @@ impl PrincipalCell {
     /// (closing as it is told) is its page's to reconnect, which reads the
     /// list again then.
     fn tell(&self) {
+        self.tell_with(CHANGED);
+    }
+
+    /// Tells every watching socket `frame` (`CHANGED`, `INVITED`).
+    fn tell_with(&self, frame: &str) {
         let watching = self.state.get_websockets_with_tag(WATCH_TAG);
         assert!(watching.len() <= limits::LIST_WATCHERS_MAX, "a list holds at most its watchers");
         for ws in watching {
-            let _ = ws.send_with_str(CHANGED);
+            let _ = ws.send_with_str(frame);
         }
     }
 
     /// Applies a fragment's change to its row, when it is newer than the
     /// row's. A change that removes the person, or comes from a new
-    /// incarnation, drops what the row held for them: their archiving and
-    /// their search entries; one that names the channels searched drops
+    /// incarnation, drops what the row held for them: their archiving,
+    /// their dock and their search entries; one that names the channels searched drops
     /// the entries of any other.
     fn index(&self, c: IndexChange) -> CellResult<bool> {
         if c.searched.as_ref().is_some_and(|s| s.len() > limits::CHANNELS_MAX || !s.iter().all(|ch| valid_channel_name(ch))) {
@@ -546,17 +597,18 @@ impl PrincipalCell {
             None => SqlStorageValue::Null,
         };
         let gone = c.role.is_none() || reborn;
-        // the face is the change's, as every column but archiving is: a
-        // fragment sends its face on every row a role names once it has one
-        // (it is never taken back within a life), so a change without one
-        // is a life that has none yet, never the face of one before it; no
-        // change touches the person's archiving but the one that ends what
-        // it was about
+        // the face is the change's, as every column but the person's own
+        // (archiving, the dock) is: a fragment sends its face on every row
+        // a role names once it has one (it is never taken back within a
+        // life), so a change without one is a life that has none yet, never
+        // the face of one before it; no change touches the person's own
+        // but the one that ends what they were about
         self.rows(
-            "INSERT INTO memberships (fragment, role, incarnation, version, sharing, face, archived, searched) VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+            "INSERT INTO memberships (fragment, role, incarnation, version, sharing, face, archived, dock, searched) VALUES (?, ?, ?, ?, ?, ?, 0, 1, ?)
              ON CONFLICT (fragment) DO UPDATE SET role = excluded.role, incarnation = excluded.incarnation, version = excluded.version,
                sharing = excluded.sharing, face = excluded.face, searched = excluded.searched,
-               archived = CASE WHEN ? THEN 0 ELSE memberships.archived END",
+               archived = CASE WHEN ? THEN 0 ELSE memberships.archived END,
+               dock = CASE WHEN ? THEN 1 ELSE memberships.dock END",
             vec![
                 c.fragment.as_str().into(),
                 role,
@@ -565,6 +617,7 @@ impl PrincipalCell {
                 sharing,
                 face,
                 searched.clone(),
+                SqlStorageValue::Integer(i64::from(gone)),
                 SqlStorageValue::Integer(i64::from(gone)),
             ],
         )?;
@@ -592,23 +645,25 @@ impl PrincipalCell {
         Ok(true)
     }
 
-    /// The person archives a fragment of theirs, or brings it back: only a
-    /// row that names a role (404 for any other, as for a fragment they
-    /// cannot see). The same again answers the same.
-    fn archive(&self, s: SetArchived) -> CellResult<Archived> {
-        if !fragment_proto::valid_fragment_name(&s.fragment) {
-            return Err(CellError::invalid(format!("{:?} is not a fragment's name (<label>--<suffix>)", s.fragment)));
+    /// The person archives a fragment of theirs, or brings it back; takes
+    /// it off their dock, or puts it back: only a row that names a role
+    /// (404 for any other, as for a fragment they cannot see). The same
+    /// again answers the same.
+    fn set_own(&self, fragment: &str, own: Own, on: bool) -> CellResult<()> {
+        if !fragment_proto::valid_fragment_name(fragment) {
+            return Err(CellError::invalid(format!("{fragment:?} is not a fragment's name (<label>--<suffix>)")));
         }
+        let column = own.column();
         let changed = self.rows(
-            "UPDATE memberships SET archived = ? WHERE fragment = ? AND role IS NOT NULL RETURNING archived",
-            vec![SqlStorageValue::Integer(i64::from(s.archived)), s.fragment.as_str().into()],
+            &format!("UPDATE memberships SET {column} = ? WHERE fragment = ? AND role IS NOT NULL RETURNING {column}"),
+            vec![SqlStorageValue::Integer(i64::from(on)), fragment.into()],
         )?;
         let Some(row) = changed.first() else {
-            return Err(CellError::new(ErrorCode::NotFound, format!("no fragment {} of yours", s.fragment)));
+            return Err(CellError::new(ErrorCode::NotFound, format!("no fragment {fragment} of yours")));
         };
         assert_eq!(changed.len(), 1, "a fragment is one row");
-        assert_eq!(row["archived"].as_i64(), Some(i64::from(s.archived)), "the row says what was set");
-        Ok(Archived { name: s.fragment, archived: s.archived })
+        assert_eq!(row[column].as_i64(), Some(i64::from(on)), "the row says what was set");
+        Ok(())
     }
 
     /// The person has seen a fragment's messages up to its newest entry
@@ -759,9 +814,20 @@ impl PrincipalCell {
 /// reads the list, and their computer, again. A page that missed it reads
 /// again as it reconnects.
 pub(crate) async fn tell_changed(env: &Env, identity: &str) -> CellResult<()> {
+    tell_pages(env, identity, "changed").await
+}
+
+/// Tells `identity`'s open pages that the invites waiting on their emails
+/// changed (the registry's, registry/invites.rs): each reads them again. A
+/// page that missed it reads them again as it reconnects.
+pub(crate) async fn tell_invited(env: &Env, identity: &str) -> CellResult<()> {
+    tell_pages(env, identity, "invited").await
+}
+
+async fn tell_pages(env: &Env, identity: &str, route: &str) -> CellResult<()> {
     let mut init = RequestInit::new();
     init.with_method(Method::Post);
-    let req = Request::new_with_init("https://principal.internal/changed", &init)?;
+    let req = Request::new_with_init(&format!("https://principal.internal/{route}"), &init)?;
     let resp = crate::routed::send(env, "PRINCIPAL", identity, req).await?;
     if resp.status_code() != 200 {
         return Err(CellError::host(format!("{identity}'s list answered {} to a change", resp.status_code())));
@@ -793,5 +859,5 @@ fn listed(r: Listed) -> CellResult<ListedFragment> {
         None => vec![],
     };
     assert!(listed.len() <= limits::LISTED_POSTERS_MAX, "a row carries what it took, a bounded number");
-    Ok(ListedFragment { name: r.name, role: r.role, kind, title, picture, agents, preview, preview_at, unread, sharing, archived: r.archived != 0, owned: false, listed })
+    Ok(ListedFragment { name: r.name, role: r.role, kind, title, picture, agents, preview, preview_at, unread, sharing, archived: r.archived != 0, dock: r.dock != 0, owned: false, listed })
 }

@@ -21,6 +21,8 @@
 // to buy: a guest is told seats are not open (`CLOSED`). Every value is
 // text, never markup.
 
+import { icon } from "./icons.js";
+
 const KIND = { seat: "Seat whose computer sleeps when idle", seat_always_on: "Always-on seat" };
 // an offer's amount, in whole dollars where it is whole ($200, not $200.00)
 const price = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 0 });
@@ -33,7 +35,8 @@ export function seatGives(offer) {
 }
 
 /**
- * The shell's helpers this module uses: `{api, el}` for the welcome, and
+ * The shell's helpers this module uses: `{api, el, step}` for the welcome
+ * (`step(from, to)`: its card from one step to another), and
  * `{section, line, actionLine, usd, reopen}` besides for settings, with
  * `noSeatSaid` (who is signed in, said to a guest), `switchForm` (Use
  * another account) and `support` (the deployment's help link, or null).
@@ -186,39 +189,95 @@ export function returnSaid(back) {
 }
 
 /**
- * The welcome's seat for a guest (`mine`: `GET /api/seat`'s), to Stripe's
- * Checkout, and a trial code (`trial`: one a mailed link named); what
- * Checkout or a code refuses is said under them, then what more credit
- * costs. What an org offers them comes first, to accept (then on to their
- * first run, at `/`) or decline. Someone in an org whose admins give its
- * seats is told so instead of the seat.
+ * The welcome's card for a guest (`mine`: `GET /api/seat`'s), under its
+ * heading (`top`), in two steps (Skyler's onboarding design, 2026-10-22):
+ * the seat, a ticket of what it gives at its price, whose Continue goes to
+ * Stripe's Checkout; and a trial code (`trial`: one a mailed link named,
+ * which opens on it, filled in), its own step, whose Continue goes there
+ * too. What Checkout or a code refuses is said in the step that asked,
+ * then what more credit costs. What an org offers them comes first, to
+ * accept (then on to their first run, at `/`) or decline. Someone in an
+ * org whose admins give its seats is told so instead of the seat. Answers
+ * the card's steps, the seat's first.
  */
-export function seatOffer(helpers, mine, trial) {
+export function seatOffer(helpers, mine, trial, top) {
   h = helpers;
   const { el } = h;
-  if (!mine) return [el("p", "form-error", "The seat could not be read: reload to try again.")];
-  const offering = mine.offered.length ? [el("h2", null, "Offered to you"), ...offers(mine, async () => location.assign("/"))] : [];
+  const seat = el("div", "welcome-seat");
+  seat.append(...top);
+  if (!mine) {
+    seat.append(el("p", "form-error", "The seat could not be read: reload to try again."));
+    return [seat];
+  }
+  if (mine.offered.length) {
+    const boxes = offers(mine, async () => location.assign("/"));
+    for (const box of boxes) box.classList.add("ticket");
+    seat.append(el("h2", null, "Offered to you"), ...boxes);
+  }
   const { offer } = mine;
-  if (!offer) return [...offering, el("p", null, CLOSED)];
-  if (mine.org && !mine.admin) return [...offering, el("p", "muted", `You are in ${mine.org.name}: its admins give you a seat.`)];
+  if (!offer) {
+    seat.append(el("p", null, CLOSED));
+    return [seat];
+  }
+  if (mine.org && !mine.admin) {
+    seat.append(el("p", null, `You are in ${mine.org.name}: its admins give you a seat.`));
+    return [seat];
+  }
   const said = el("p", "form-error");
+  said.setAttribute("role", "alert");
   said.hidden = true;
-  const plans = el("div", "plans");
+  // the one seat sold (decision 25; docs/ledger.md, Plans), as a guest takes it
+  const ticket = el("div", "ticket ticket-plan");
+  const head = el("div", "ticket-head");
+  const amount = el("div", "price", price(offer.seatMicros));
+  amount.append(el("span", null, " / month"));
+  head.append(amount, el("span", "pill", "Always on"));
+  const gives = el("ul", "checks");
+  for (const what of ["Your personal AI agent", "Your own always-on computer", "Apps you can build and share", `${price(offer.includedMicros)} in monthly usage credit`]) gives.append(el("li", null, what));
+  // where Continue goes: Stripe's own page
+  const stripe = el("li", "lock");
+  stripe.append(icon("lock"), el("span", null, "Secure Stripe checkout"));
+  gives.append(stripe);
+  ticket.append(head, gives);
+  const b = el("button", "primary", "Continue");
+  b.type = "button";
+  b.dataset.plan = offer.kind;
+  const toTrial = el("button", "text", "Start a trial");
+  toTrial.type = "button";
+  seat.append(ticket, b, toTrial, el("p", "fine", `Monthly, before tax. With a seat, more credit is ${price(offer.packMicros)} a pack, kept until spent.`));
+  // a trial code, a step of its own
   const form = el("form", "trial-code");
   const code = el("input");
   code.placeholder = "Trial code";
-  code.setAttribute("aria-label", "Trial code");
   code.value = trial || "";
   code.autocomplete = "off";
   code.required = true;
-  const begin = el("button", "quiet", "Start a trial");
+  const field = el("label", null, "Trial code");
+  field.append(code);
+  const begin = el("button", "primary", "Continue");
   begin.type = "submit";
-  form.append(code, begin);
+  const back = el("button", "text", "Back");
+  back.type = "button";
+  form.append(el("h1", null, "Start a trial"), el("p", null, "Enter your trial code."), field, begin, back, el("p", "fine", "No card needed. To keep your seat after the trial, add one in Settings before it ends."));
+  // the step shown, and what is said put in it, above its Continue
+  const show = (step) => {
+    (step === seat ? b : begin).before(said);
+    if (step.hidden) h.step(step === seat ? form : seat, step);
+  };
+  toTrial.onclick = () => {
+    said.hidden = true;
+    show(form);
+  };
+  back.onclick = () => {
+    said.hidden = true;
+    show(seat);
+  };
   // one Checkout at a time; a refusal is said; every choice is open again
   // after, as Billing's buttons are (a page Back brings back is usable)
-  const go = async (body) => {
-    const choices = [...plans.children, begin];
-    for (const b of choices) b.disabled = true;
+  const go = async (body, step) => {
+    show(step);
+    const choices = [b, toTrial, begin, back];
+    for (const c of choices) c.disabled = true;
     said.hidden = true;
     try {
       await goCheckout(body);
@@ -237,30 +296,21 @@ export function seatOffer(helpers, mine, trial) {
       );
       said.hidden = false;
     } finally {
-      for (const b of choices) b.disabled = false;
+      for (const c of choices) c.disabled = false;
     }
   };
-  // the one seat sold (decision 25; docs/ledger.md, Plans), as a guest takes it
-  const b = el("button", "plan");
-  b.type = "button";
-  b.dataset.plan = offer.kind;
-  b.append(
-    el("strong", null, `${price(offer.seatMicros)} a month, always on`),
-    el("span", null, `Your agents, on a computer of their own that stays awake (its time is not metered), apps of your own, and ${price(offer.includedMicros)} of credit included each month.`),
-  );
-  b.onclick = () => go({ kind: offer.kind });
-  plans.append(b);
+  b.onclick = () => go({ kind: offer.kind }, seat);
   form.onsubmit = (e) => {
     e.preventDefault();
-    go({ trialCode: code.value });
+    go({ trialCode: code.value }, form);
   };
-  return [
-    ...offering,
-    plans,
-    form,
-    said,
-    el("p", "muted", `Monthly, before tax. A trial takes a card first, and charges it when the trial ends unless you cancel. With a seat, more credit is ${price(offer.packMicros)} a pack, kept until spent.`),
-  ];
+  b.before(said);
+  // a mailed trial's link opens on its code
+  if (trial) {
+    seat.hidden = true;
+    begin.before(said);
+  } else form.hidden = true;
+  return [seat, form];
 }
 
 /** The Billing section, and an admin's Org section (`mine`: `GET /api/seat`'s). */
@@ -317,6 +367,8 @@ export async function billingSections(helpers, ledger, mine, back) {
         );
     if (!alone) billing.append(line("Org", seat.org.name + (seat.admin ? " (you admin it)" : ""), leave));
     if (seat.trialEnds) billing.append(line("Trial ends", new Date(seat.trialEnds * 1000).toLocaleDateString()));
+    // a trial asks no card: one added before its end keeps the seat, else it lapses then
+    if (seat.trialEnds && mine.pays) billing.append(el("p", "muted", "To keep your seat after the trial, add a card in Payment and invoices. Without one, your seat lapses when the trial ends; nothing of yours is deleted, and Pay again here brings it back."));
     if (!seat.good) {
       billing.append(el("p", "settings-warning", "Your seat lapsed: your agents are stopped. Nothing of yours is gone."));
       // paid again at Checkout, where something is sold
@@ -328,7 +380,9 @@ export async function billingSections(helpers, ledger, mine, back) {
       sleeps.checked = seat.sleeps;
       sleeps.onchange = async () => {
         try {
-          await h.api("PUT", "/api/seat", { sleeps: sleeps.checked });
+          const mine = await h.api("PUT", "/api/seat", { sleeps: sleeps.checked });
+          // Settings' SimpleX says what this choice means: the seat as answered
+          h.seatIs(mine?.seat ?? null);
         } catch (e) {
           sleeps.checked = !sleeps.checked;
           note(billing, plainly(e, { no_seat: "You don't hold a seat any more. Open Settings again to see where it went." }, "That wasn't changed. Try again in a moment."));

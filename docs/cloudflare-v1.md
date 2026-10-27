@@ -78,9 +78,14 @@ speaking Cloudflare's APIs) returns once this product works.
    production. Only Paul updates `production`: his push, or the pull
    request he merges into it, is a production deploy's approval.
    Promoting a commit master's run has proved green deploys in minutes,
-   untested again (ci.yml's `proven`); anything else, a hotfix pushed
+   its e2e not run again (ci.yml's `proven`); anything else, a hotfix pushed
    straight there or a commit whose master run is red or still running,
-   runs the full tests first (Paul, 2026-10-20). Each
+   runs the full tests first (Paul, 2026-10-20). So does a merge to
+   master, unless its pull request's green run tested the merge's very
+   tree (master unmoved since): it deploys the preview once `check`, a
+   couple of minutes, is green (Paul, 2026-10-23; `proven` matches trees,
+   which every run records; `check` runs on every push, as it holds the
+   schema lock to what the push moved from). Each
    deploys from a GitHub environment (`preview`, `production`) that only
    its branch may use, holding its Cloudflare token and a token that
    reads its config: a file in the private repo
@@ -589,7 +594,7 @@ speaking Cloudflare's APIs) returns once this product works.
     neither its Product nor its Price. The `seat` plan stays for an
     operator's comp and a deployment's `default_plan` (dev's and the
     e2e's people are seats). Trials are a month at most, of the $200
-    seat, a card first (decision 56). SimpleX is still not built.
+    seat, no card asked (decision 56). SimpleX is still not built.
 26. **A fragment's costs bill its owner**, with a monthly cap the owner
     sets per fragment (default $5). Past it, AI steps and agent turns
     stop for everyone but the owner.
@@ -629,6 +634,42 @@ speaking Cloudflare's APIs) returns once this product works.
     the always-on computer, and Hermes' SimpleX adapter runs next to the
     bridge. A wake service for sleeping computers comes later. Telegram
     is dropped. Finite Chat is out of scope.
+    Status, 2026-10-22 (Paul: "simplex … for the $200 tier (requires
+    always on agent). Needs to work well across restarts and updates";
+    then "go ahead and build SimpleX with the bridge"): built as a
+    stack of drafts, not merged. The bridge, not Hermes' adapter, drives
+    `simplex-chat` (one core per linked agent, only while always on), and
+    SimpleX is another door into the agent's own chat with its owner
+    (docs/bridge.md, "SimpleX"; docs/chat-records.md, "A relayed
+    message"). The lab found a rollback the core cannot see, cured by a
+    forced sync at a rollback's start (docs/explorations/simplex-connector.md,
+    "The lab, 2026-10-22"). What it adds to the platform is
+    docs/explorations/simplex-complexity.md. Its image change ships only
+    through an image round.
+    Securing the link, Paul, 2026-10-23: once the owner has linked their
+    SimpleX app from their own Settings, what it sends is the owner, with
+    what the shell can do (questions and word-cards answered); the threat
+    is only the agent forging either end. So a link starts only from a
+    ticket the owner's Settings get, which the platform signs and the
+    bridge takes once, and only the link's door key makes a record that
+    speaks for the owner: the platform refuses one the agent's own key
+    posts (docs/api.md, "An agent's doors"). Root in the container can
+    still read the door key; the fix later is running the agent as a
+    non-root user.
+    A chat of its own, and one home, Paul, 2026-10-26 ("it has to be
+    clear obvious and reliable where notifications will go … why hermes
+    has a 'home' concept"; a simplification): linking makes the agent's
+    SimpleX chat, its owner's chat labelled `<label>-simplex`, which
+    mirrors their app both ways while linked: what they send lands there,
+    and everything the agent says there goes to their phone, whatever
+    started its turn. The per-turn rule (only a SimpleX message's turn
+    answered there) is gone. Each agent has one home, its own chat or its
+    SimpleX chat (`agent.json`'s `home`), set in Settings and asked once
+    as a link starts (yes by default): a routine with no chat runs there,
+    and the agent is told where it is. Web push is unchanged; no
+    suppression. Hermes' own home channel stays unset: in its multiplexed
+    gateway it reaches nothing of ours (docs/hermes-relay.md, "Hermes'
+    settings"). docs/api.md, "An agent's home"; docs/bridge.md, "SimpleX".
 
 ### The cut
 
@@ -882,7 +923,9 @@ runaround".
 48. **Sharing is by email** (Paul: shared fragments "feel like sharing
     google docs"). The share sheet and the CLI take an email and a
     role.
-    - A person who holds that verified email is a member at once.
+    - (Changed by decision 63: every invite waits for its person's yes,
+      in the shell; signing in meets nothing.) A person who holds that
+      verified email is a member at once.
     - Otherwise the invite waits on the email, and the platform mails a
       link to the fragment. Whoever signs in with that verified email
       becomes a member as the invite said, from then on by their npub.
@@ -995,8 +1038,11 @@ Paul's (its slice 10).
     on the ledger by its payment's id. Usage never goes to Stripe.
 56. **Trials are our codes on Stripe's trial**, finite-mono's shape: a
     code names a kind (since 2026-10-15, `seat_always_on` only), days
-    (1 to 30), a capacity and an expiry; a
-    card is taken first; one trial per person ever, for a seat of one.
+    (1 to 30), a capacity and an expiry; no card is asked (Alex,
+    2026-10-23: a card was taken first until then): one added before
+    the end is charged then, and with none the end cancels the
+    subscription, its person paying again with a card to go on; one
+    trial per person ever, for a seat of one.
     A place is held by a Checkout that has not expired, and freed by
     its expiry. Discounts are Stripe promotion codes, made in Stripe's
     dashboard.
@@ -1232,6 +1278,36 @@ Private stays possible by config.
     6. Nothing of fbfc's users reaches them: no user id, no header but
        the key; the route sends OpenAI's chat completion and nothing else.
 
+    *Status (2026-10-22, Paul: "For the $200 tier we are going to offer
+    finite private, on by default … Fallback should be tinfoil's
+    deepseek flash"):* a slot off OpenRouter may name its model's list
+    price (`price`; docs/ledger.md, "A slot's own price"), so Tinfoil's
+    DeepSeek V4.1 Flash (`deepseek-v4-1-flash` at
+    `https://inference.tinfoil.sh/v1`, on its own key) runs as the
+    fallback by config alone (deploy/example.jsonc's third alternative,
+    the private tier), and a fallback's own key refused is logged aloud
+    as the tiers' is. A slot may say its model reads images (`images:
+    true`), and a `vision` call falls back to a fallback that says so
+    (the private tier's `vision` on Finite Private, Tinfoil's DeepSeek
+    V4.1 Flash, which reads images, behind it): decision 23's "`vision`
+    and transcriptions do not" holds for a fallback that says nothing.
+    Paul, 2026-10-22: "When a user has private selected, it's not
+    appropriate to fall back to a non-private model" (Tinfoil counts as
+    private). A slot may say `"private": true` (never one on Workers AI
+    or OpenRouter), and a private tier is a private route: every slot its
+    agents reach (the tier, `vision`, the fallback; Hermes' recovery of a
+    failed vision call goes to the tier itself) must be private, or the
+    deploy is refused
+    (docs/computers.md, "A slot's `private`", which lists what is not
+    private yet: transcription, decisions, speech, vendors' tools).
+    Paul, 2026-10-24, on the routes a person picks: "We want to make it
+    the default for our $200 a month users. But they should also be able
+    to disable it in Settings to be routed to our OpenRouter key /
+    Cloudflare AI ... Fallbacks are GOOD." A tier slot's `label` names a
+    route Settings offers ("Private (recommended)" on the cheap tier,
+    every agent's default; "Standard" on the medium tier), picked per
+    agent as its `tier`.
+
     **Going live** (Paul's): finite-mono issues the key; `cargo xtask
     secret set fragment-finite-private-key --config <production's
     config>` (it prompts); add example.jsonc's `models` to that config
@@ -1282,6 +1358,133 @@ Paul:
       and charged from its meter outbox under `step:<step's key>`, once
       whatever attempt or replay makes the call; one that fails for good
       is charged nothing, as nothing was held.
+
+63. **An invite waits for its person's yes** (Paul, 2026-10-22: "When
+    inviting someone as an editor on a fragment it shouldn't auto add to
+    their app list, they should see the invite somewhere in shell and be
+    able to accept it"). It changes decision 48's first bullet; the rest
+    of 48 holds.
+    - An invite by email (the share sheet's Add, `fragment members add
+      <name> <email>`, an agent's for its owner) is never a membership at
+      once, whether someone signs in as the email already or not yet: it
+      waits on the email in the fragment and in the registry, which mails
+      it a link to the platform's page (never the fragment's) and keeps,
+      beside it, the role, the title it was sent with and whose day it
+      counted in.
+    - Whoever signs in with that verified email sees it at the top of
+      the shell's sidebar (`GET /api/invites`), and accepts it (`POST
+      /api/invites/<name>/accept`: the fragment's claim, as a sign-in's
+      was) or declines it (`…/decline`: taken back, as a revoke). Their
+      open pages are told as one is made, renewed, revoked, answered (in
+      another tab, or by their agent) or its fragment deleted (`{type:
+      "invited"}` on the list's socket), so it goes from every sidebar at
+      once. Signing in meets nothing.
+    - Their agent answers for them (Paul, 2026-10-22: "It can already
+      publish for you and edit your own stuff! Why shouldn't it be able
+      to handle 'skyler invited me to edit a fragment, do you see it?'"):
+      signed with `for` its owner and not held below them, an agent
+      lists, accepts and declines its owner's invites (`fragment invites`,
+      `fragment invites accept|decline <name>`); its yes makes its owner
+      a member. Any other agent is 403.
+    - An invite is to a person and their agents: accepted, their agents
+      reach it acting for them (R17, as any share of a person's), and
+      none is ever named to anyone else ("I invite Skyler and his agents,
+      not Skyler and his agent Agent123"): not in the invite, its mail,
+      the API's answers, the share sheet, the access view, nor an export.
+    - Adding someone directly (`PUT members`, by npub, key or email) works
+      only within one person (Paul: "I shouldn't be able to add someone
+      to something and then it just shows up for them. That's weird: it
+      means I could spam people that don't know me with fragments"): the
+      owner, or their agent for them, adds the owner's own agents. Anyone
+      else is 403, saying to invite them by email instead (refusing is
+      simpler than turning an npub into an invite: an npub names no email
+      to mail). A role change of someone in already is no add. The e2e's
+      setups share by a lever (`/api/test/fragment {op: "member"}`).
+    - The wire is added to, never changed: `POST invites` answers
+      `{invited}` (the shape it answered for an email no one held);
+      `{member}` stays a shape clients read, which no invite answers now;
+      the access view's `agents` is never sent. An agent's invite keeps
+      working, and its CLI says the person is in once they accept it; a
+      shipped CLI or Hermes image that adds a person by npub gets the
+      refusal, saying to invite by email.
+    - Invites mailed before it (their registry row names no role) said
+      "sign in to open it": a sign-in still meets them, until the last
+      runs out (docs/technical-debt-ledger.md, "Invites from before their
+      yes").
+    - (The open question this left, a member adding their own agent, is
+      decision 64's.)
+    - Status (2026-10-22): approved by Paul with the four changes above
+      (agents answer for their owner, direct adds within one person,
+      agents unnamed, an answer goes from every tab); merged (#536).
+
+64. **A person's membership is their agents'** (Paul, 2026-10-23: "If I
+    invite a member to a fragment, when they accept they add their agent.
+    That should be the default. It's too confusing for people to try to
+    remember what 'they' have access to vs their 'agent'. We have to
+    treat them as one entity and work to secure the whole entity").
+    - **Rows, kept in step with the person's.** Accepting an invite makes
+      the person a member and each of their agents a member beside them,
+      as itself, at the person's role (`members.rs` `agents_join`; the
+      registry's claim names their agents). An agent is then in as any
+      agent member is: it acts there as itself, a chat's roster has it
+      (after the chat's own agent, its lead, which stays first), its own
+      list names the fragment (its computer follows it) and its computer
+      hears it joined. Rows rather than a membership derived at access
+      time because everything that makes an agent take part reads rows:
+      the roster (`__members`), its list (the bridge's discovery), its
+      join, a channel's `from: agent`; a derived membership would reach
+      the fragment but take part in nothing. The person's row stays the
+      one truth: an agent's row is the person's, kept in the same
+      fragment, in the same turn, by every change to them.
+    - **One entity.** The person's role is their agents' (a role change
+      moves them all; an agent's own is refused, 400, saying so). Removing
+      or leaving, by the person or by any agent of theirs, takes the
+      person and every agent of theirs out (`remove_member`). No yes,
+      role change, removal or leaving leaves a person in without their
+      agents, nor an agent without its person (an agent made later and
+      not told, below, is the one gap).
+      Room under `MEMBERS_MAX` is for the whole entity, or the yes is
+      refused whole.
+    - **Agents made later** come in where their person is: as an agent is
+      registered (the API's `POST /api/identities`; a computer's, once
+      its agent fragment and the computer both hold it, so the computer
+      hears each join), the platform reads its person's list and asks
+      each fragment of someone else's they are in to add it
+      (`members/agent`, `members::agent_made`). Best effort, logged: one
+      not told keeps it out until its person's next yes there
+      (docs/technical-debt-ledger.md, "An agent made later joins best
+      effort").
+    - **The owner's side is unchanged and consistent.** The owner's own
+      agents reach everything the owner owns acting for them (R17;
+      Hermes always acts `for` its owner) and are members of what the
+      owner puts them in (a chat's lead, an agent fragment), each as the
+      owner chose: a chat of the owner's is not given every agent of
+      theirs. The owner is never half in: they own it whole.
+    - **Never named to the inviter.** The invite, its mail and its
+      answers name no agent; the share sheet, the access view and an
+      export show the person as one entry, "with their agents", and name
+      none (`share.rs` `with_their_person`). In a chat, an agent that
+      takes part shows as itself (it speaks), and the `@` list shows each
+      agent under its person ("Skyler's agent"). The fragment's own
+      members list (the API's, `GET members`) has every row, its truth.
+    - **Securing the whole entity.** An agent in with its person reaches
+      what they do, capped as agents are (R17: never above editor, never
+      owner, its own membership never shares). A hold now caps it there as
+      itself too (`standing`: a hold caps an agent in someone else's
+      fragment, never its own memberships, decision 36). Whoever is in a
+      chat talks to the agents in it, and a Hermes agent acts `for` its
+      owner whoever asks it: this is the design (Paul, 2026-10-23: "Yes,
+      I am aware, this is the design. The solution is a warning when
+      inviting someone to your chat ... Not making everything way more
+      complicated"). Inviting someone to a chat an agent of the
+      inviter's is in warns them: "People in this chat can talk to your
+      agent." (the share sheet, `fragment members add`, the apps skill;
+      Paul, 2026-10-24: only on a chat, as agents hear only chats, and
+      short).
+    - Storage: no new column (an agent row names its owner already: in
+      with its person when its owner is a member who is not the fragment's
+      owner); a rollback reads the rows as agent members, as before.
+    - Status (2026-10-23): built on `claude/member-with-agents`.
 
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 

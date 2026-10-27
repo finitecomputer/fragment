@@ -80,12 +80,12 @@ fn said_count(text: &str) -> Option<u32> {
 pub fn stage_images(project: &Path) -> Result<()> {
     let config = project.join("wrangler.jsonc");
     let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&config)?)?;
-    // the Hermes image builds from the repo's root: it carries the fragment CLI
-    let root = fragment_devstack::repo_root();
-    let dockerfile = root.join("images/hermes/Dockerfile");
+    let hermes = fragment_devstack::hermes_image();
+    let mut next = hermes.clone();
+    next["build_vars"] = json!({ "IMAGE_VERSION": "2" });
     let images = v["containers"][0]["images"].as_object_mut().context("the staged config's container has images")?;
-    images.insert("hermes".into(), json!({ "dockerfile": dockerfile, "build_context": root }));
-    images.insert("hermes-next".into(), json!({ "dockerfile": dockerfile, "build_context": root, "build_vars": { "IMAGE_VERSION": "2" } }));
+    images.insert("hermes".into(), hermes);
+    images.insert("hermes-next".into(), next);
     std::fs::write(&config, serde_json::to_string_pretty(&v)?)?;
     Ok(())
 }
@@ -546,13 +546,26 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         said(&live, &format!("link-view={token}")) && !token.is_empty(),
         json!({ "reply": live, "token": !token.is_empty() }),
     );
+    // its owner opens it, members-only still, in two tabs: the app is fixed,
+    // so what fails is the platform's (agent_app.rs: the check agent-app
+    // runs on what a real agent made)
+    match s.browser()? {
+        None => s.ok("Chrome is installed to open the app Hermes made (set CHROME_BIN)", false, "no Chrome found"),
+        Some(mut chrome) => {
+            let session = api.sign_in(&Api::email_of(&owner))?;
+            let evidence = s.dir("hermes-app");
+            super::agent_app::app_works(s, api, &mut chrome, &session, &owner, &app, super::agent_app::Made::Fixed, &evidence)?;
+        }
+    }
     // it shares as its owner would (Paul, 2026-10-04): it makes the app
-    // public, and adds another person to it as a viewer
+    // public, and invites another person to it as a viewer, by email, who
+    // is in once they accept it (decision 63)
     let guest = api.person()?;
-    let guest_id = api.identity(&guest)?;
+    let guest_email = Api::email_of(&guest);
     let public = run(s, 66, "fragment visibility groceries public --json | grep -c '\"ok\":true' | sed 's/^/public-/'")?;
-    let added = run(s, 67, &format!("fragment members add groceries {guest_id} --role viewer --json | grep -c '\"ok\":true' | sed 's/^/added-/'"))?;
+    let added = run(s, 67, &format!("fragment members add groceries {guest_email} --role viewer --json | grep -c '\"ok\":true' | sed 's/^/added-/'"))?;
     let anonymous = api.call(Call { method: "GET", url: api.site_url(&app, "hello.html"), ..Call::default() })?;
+    api.signed(&guest, "POST", &format!("/api/invites/{app}/accept"), Some(&json!({})))?;
     let lists = api.signed(&guest, "GET", "/api/fragments", None)?;
     let guest_role = lists.body["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == app.as_str()).map(|f| f["role"].clone());
     s.ok(
@@ -561,7 +574,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "reply": public, "page": anonymous.status }),
     );
     s.ok(
-        "and adds another person as a viewer, who sees it in their list as one",
+        "and invites another person as a viewer, by email, who sees it in their list as one once they accept it",
         said(&added, "added-1") && guest_role == Some(json!("viewer")),
         json!({ "reply": added, "role": guest_role }),
     );
@@ -590,7 +603,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let notes = s.create(api, &skyler, &notes_name)?;
     s.commit(&notes, &[("fragment.json", Some(NOTES_JSON))]);
     s.deploy(&notes);
-    api.signed(&skyler, "PUT", &format!("/api/f/{notes_name}/members/{owner_id}"), Some(&json!({ "role": "editor" })))?;
+    api.share(&notes_name, &owner_id, "editor")?;
     let post_note = |n: u32| {
         let body = json!({ "id": format!("d{n}"), "body": { "text": "from juniper" } }).to_string();
         format!("run: curl -s -o /dev/null -w 'status %{{http_code}}' -X POST 'http://api.fragment.internal/api/f/{notes_name}/channels/notes?for={owner_id}' -H 'x-fragment-agent: {agent_name}' -H 'content-type: application/json' -d '{body}'")

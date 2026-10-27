@@ -71,7 +71,7 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     let blank_cookie = format!("fragview={}", r.body["viewToken"].as_str().unwrap_or(""));
     template_pages(s, api, &todo, &todo_cookie, &blank, &blank_cookie)?;
     for (k, role) in [(&editor, "editor"), (&viewer, "viewer")] {
-        let r = api.signed(&owner, "PUT", &format!("/api/f/{blank}/members/{}", npub_of(k)), Some(&json!({ "role": role })))?;
+        let r = api.share(&blank, &npub_of(k), role)?;
         anyhow::ensure!(r.status == 200, "adding a {role}: {r}");
     }
     let page = |api: &Api| api.page(&blank, "", Some(&blank_cookie)).map(|r| r.text).unwrap_or_default();
@@ -278,9 +278,9 @@ fn skills(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     );
     let skill_names: Vec<&str> = want.iter().filter_map(|(p, _)| p.strip_suffix("/SKILL.md")).filter_map(|d| d.rsplit('/').next()).collect();
     s.ok(
-        "the managed set contains the twelve retained skills; generic skills come from Hermes",
-        skill_names.len() == 12
-            && ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite"].iter().all(|n| skill_names.contains(n)),
+        "the managed set contains sixteen skills, including design-finite, gws-docs and gws-slides",
+        skill_names.len() == 16
+            && ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite", "model-council-finite", "chat-attachments-finite", "cocod-finite", "nostr-agent-interface-cli-finite", "x-api-finite", "music-generation-finite", "trading-agent-finite", "polymarket-finite", "design-finite", "gws-docs", "gws-slides"].iter().all(|n| skill_names.contains(n)),
         format!("{skill_names:?}"),
     );
     let apps = "skills/software-development/apps-finite/SKILL.md";

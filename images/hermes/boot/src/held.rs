@@ -39,6 +39,13 @@ pub const BRIDGE_HELD: &str = "/var/lib/fragment-run/bridge-held";
 /// keeps (`<n>.sqlite`), with the manifest that names them written last.
 pub const DATA: &str = "/data";
 pub const STAGING: &str = "/data/held-copies";
+/// Each linked agent's SimpleX core (the bridge's simplex/run.rs): never
+/// copied under a hold, since the bridge answers a hold only once every
+/// core has stopped, so the save takes its databases whole as they are.
+/// A copy would need the core's databases readable as the hermes user,
+/// and in WAL mode a reader that cannot write their directory cannot open
+/// them.
+pub const SIMPLEX: &str = "/data/simplex";
 const MANIFEST: &str = "manifest.json";
 /// The live files beside a database that are its, never a copy's.
 const SIDECARS: [&str; 3] = ["-wal", "-shm", "-journal"];
@@ -461,6 +468,23 @@ mod tests {
         std::os::unix::fs::symlink(root.join("hermes/state.db"), root.join("hermes/link.db")).unwrap();
         let found = databases(&root, &[&root.join("work")]).unwrap();
         assert_eq!(found, vec![root.join("hermes/odd.db/inner.db"), root.join("hermes/profiles/a/state.db"), root.join("hermes/state.db")]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Valid: a SimpleX core's databases are passed over as the hold's copy
+    /// looks for databases (main.rs skips `SIMPLEX`): the bridge answers a
+    /// hold only once its cores have stopped, so the save takes them whole.
+    #[test]
+    fn a_simplex_cores_databases_are_not_copied() {
+        let root = dir("simplex");
+        std::fs::create_dir_all(root.join("hermes")).unwrap();
+        std::fs::create_dir_all(root.join("simplex/juniper--k3x9")).unwrap();
+        db(&root.join("hermes/state.db"), 1);
+        db(&root.join("simplex/juniper--k3x9/sx_chat.db"), 1);
+        db(&root.join("simplex/juniper--k3x9/sx_agent.db"), 1);
+        assert_eq!(databases(&root, &[&root.join("simplex")]).unwrap(), vec![root.join("hermes/state.db")]);
+        assert_eq!(databases(&root, &[]).unwrap().len(), 3, "found but for the skip");
+        assert!(SIMPLEX.starts_with(DATA) && SIMPLEX != STAGING);
         let _ = std::fs::remove_dir_all(&root);
     }
 

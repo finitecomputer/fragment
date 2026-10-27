@@ -63,7 +63,7 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
     s.create(api, &paul, &mine)?;
     let theirs = s.named(api, &friend, "theirs")?;
     s.create(api, &friend, &theirs)?;
-    api.signed(&friend, "PUT", &format!("/api/f/{theirs}/members/{}", npub::encode(paul.pubkey_hex())), Some(&json!({ "role": "editor" })))?;
+    api.share(&theirs, &npub::encode(paul.pubkey_hex()), "editor")?;
     let before = api.signed(&friend, "GET", &format!("/api/f/{theirs}/members"), None)?;
     s.ok("a key names the identity holding it as a member", before.body["members"].as_array().is_some_and(|m| m.iter().any(|m| m["principal"] == paul_id.as_str())), &before);
 
@@ -167,7 +167,7 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
     s.commit(&c, &[("applib/format.mjs", Some(FORMAT_MJS))]);
     ship(s, &c, CHAT_APP, CHAT_JSON);
     api.signed(&friend, "PUT", &format!("/api/f/{room}/visibility"), Some(&json!({ "visibility": "members" })))?;
-    let r = api.signed(&friend, "PUT", &format!("/api/f/{room}/members/{}", npub::encode(agent.pubkey_hex())), Some(&json!({ "role": "editor" })))?;
+    let r = api.share(&room, &npub::encode(agent.pubkey_hex()), "editor")?;
     s.ok("adding an agent says whose it is", r.status == 200 && r.body["kind"] == "agent" && r.body["owner"] == owner_id.as_str(), &r);
     let r = api.op(&agent, &room, "say", "a1", json!({ "text": "hello from the agent" }))?;
     s.ok("the agent acts as its membership lets it", r.status == 200, &r);

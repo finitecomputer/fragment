@@ -239,27 +239,22 @@ pub(crate) fn unopened(h: &Headers) -> worker::Result<()> {
     h.set("cross-origin-opener-policy", "same-origin")
 }
 
-/// The platform's look, shared by its pages (`page`, and share.rs's).
-pub(crate) const STYLE: &str = "body{font:16px/1.5 system-ui,sans-serif;max-width:34rem;margin:12vh auto;padding:0 16px;color:#1d2126;background:#f6f7f8}
-h1{font-size:1.4rem}code{background:#e8eaed;padding:1px 5px;border-radius:4px}button{font:inherit;padding:.5em 1.1em;border-radius:8px;border:1px solid #1d2126;background:#1d2126;color:#fff;cursor:pointer}
-a{color:#2a5bd7}pre code{display:block;padding:.6em .8em;white-space:pre-wrap;word-break:break-all}@media (prefers-color-scheme:dark){body{background:#15181b;color:#e6e8ea}code{background:#262b30}button{background:#e6e8ea;color:#15181b;border-color:#e6e8ea}a{color:#7aa2f7}}";
-
+/// A notice on a fragment's own origin, its look from that origin.
 fn html(title: &str, body: &str) -> String {
-    format!(
-        r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{t}</title>
-<style>{STYLE}</style>
-<h1>{t}</h1>{body}"#,
-        t = esc(title)
-    )
+    share::sheet_html(&crate::shell::fragment_sheet(), title, body)
 }
 
 pub(crate) fn page(status: u16, title: &str, body: &str) -> CellResult<Response> {
+    page_response(status, share::platform_html(title, body))
+}
+
+fn page_response(status: u16, html: String) -> CellResult<Response> {
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;
     h.set("cache-control", "no-store")?;
     unframed(&h)?;
     unopened(&h)?;
-    Ok(Response::ok(html(title, body))?.with_status(status).with_headers(h))
+    Ok(Response::ok(html)?.with_status(status).with_headers(h))
 }
 
 pub(crate) fn query(url: &Url, k: &str) -> Option<String> {
@@ -369,7 +364,7 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
         return page(400, "Sign-in did not finish", &format!("<p>WorkOS said <code>{}</code>: {}</p><p><a href=\"/auth/login\">Try again</a></p>", esc(&error), esc(&why)));
     }
     let Some(bound) = trip_bound(req, url, &[Trip::SignIn, Trip::Switch])? else {
-        return page(400, "Sign-in did not start here", "<p>This sign-in began in another browser, or too long ago.</p><p><a href=\"/auth/login\">Start again</a></p>");
+        return page(400, "Sign-in did not start here", "<p>This sign-in began in another browser, or too long ago.</p><form method=\"get\" action=\"/auth/login\"><button type=\"submit\">Start again</button></form>");
     };
     let spent = trip_spent(bound.trip(), url);
     let code = query(url, "code").ok_or_else(|| CellError::invalid("the callback carries no code"))?;
@@ -495,7 +490,7 @@ pub async fn platform(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, 
                     Err(e) => return cli_refused(&platform, &token, e),
                 };
                 mail_key_added(ctx, env, added.email.as_deref(), &added.key, fragment_core::mail::KeyHow::Code(&added.asked));
-                page(200, "Key added", "<p>This key is yours now. The <code>fragment login</code> waiting in your terminal finishes on its own.</p>")
+                page(200, "Key added", "<p>You can return to your terminal. <code>fragment login</code> will finish automatically.</p>")
             }
             (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
         }
@@ -745,9 +740,10 @@ fn frame_note(platform: &str, name: &str, back: &str, why: Unsigned) -> CellResu
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;
     h.set("cache-control", "no-store")?;
-    h.set("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'")?;
+    // its look from this origin, the platform's (share.rs `sheet_html`), its script inline
+    h.set("content-security-policy", "default-src 'none'; style-src 'self'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'")?;
     h.set("x-frame-options", "SAMEORIGIN")?;
-    Ok(Response::ok(html(&title, &body))?.with_headers(h))
+    Ok(Response::ok(share::sheet_html(&crate::shell::versioned("sheet.css"), &title, &body))?.with_headers(h))
 }
 
 /// "Continue to X as you?": a fragment that is not the person's, nor
@@ -901,10 +897,12 @@ pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &
             }
             redirect(&format!("{}/auth/fragment?name={name}&return={}", cfg.platform(), enc(&back)), &[])
         }
-        ("__signout", Method::Get) => page(
+        ("__signout", Method::Get) => page_response(
             200,
+            html(
             &format!("Sign out of {}", share::label(name)),
             "<form method=\"post\" action=\"__signout\"><button>Sign out</button></form><p>It also forgets that you let it know who you are: signing in again asks again.</p>",
+            ),
         ),
         ("__signout", Method::Post) => {
             same_origin(req, &cfg.origin(url, name))?;

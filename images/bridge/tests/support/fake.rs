@@ -8,7 +8,11 @@
 //! an agent's list, and break a fragment's channels.
 //!
 //! A request acts as the agent its `x-fragment-agent` names (the intercept's
-//! job, faked): one not assigned to the computer is refused.
+//! job, faked): one not assigned to the computer is refused. Each agent has
+//! a key (`key` in its view) that signs its door's tickets (`Fake::ticket`,
+//! as its owner's Settings get one); `POST /api/computer/door` redeems a
+//! link's, and a relayed record is taken only signed by the door key it
+//! registered, as the platform's rule is (fragment_core::door).
 
 #![allow(dead_code)]
 
@@ -99,8 +103,33 @@ pub struct World {
     pub work_post_delay_ms: u64,
     /// Records per `__live` page (the platform's is 1000).
     pub page: usize,
+    /// Each agent's door, by its fragment: the nonce of the link ticket its
+    /// owner was given last, and the door key its computer registered.
+    pub door_tickets: BTreeMap<String, String>,
+    /// The XFTP relay, as the platform's (`GET /api/computer/relay`): each
+    /// host it carries on 443 and the local address it stands for; any
+    /// other is 403. Each relay's `host up down` once it closes.
+    pub relay_to: BTreeMap<String, std::net::SocketAddr>,
+    pub relayed: Vec<String>,
+    /// Bytes every relay carried so far, up (from the computer) and down,
+    /// as they pass: a relay the core keeps open is counted too.
+    pub relay_up: u64,
+    pub relay_down: u64,
+    /// `GET /api/computer` reads that said the image does SimpleX
+    /// (`?simplex=1`), and those that did not.
+    pub simplex_said: u32,
+    pub simplex_unsaid: u32,
+    pub doors: BTreeMap<String, String>,
+    /// The fragments an agent made for its owner (`POST /api/fragments?for=`),
+    /// by name, in order.
+    pub made: Vec<String>,
+    /// While set, making one is 503, as a platform that refused it for now.
+    pub refuse_makes: bool,
     live: Vec<LiveSock>,
     keepalives: Vec<(u64, mpsc::UnboundedSender<Message>)>,
+    /// Keepalives whose platform side a deploy cut (`cut_keepalives`):
+    /// counted closed, their sockets left open and silent.
+    keepalives_cut: Vec<(u64, mpsc::UnboundedSender<Message>)>,
     next_sock: u64,
     clock: i64,
 }
@@ -197,12 +226,25 @@ pub fn person(name: &str) -> String {
     format!("npub1{name}")
 }
 
+/// The key agent `label`'s fragment signs as: its secret is the SHA-256 of
+/// its label (a test's; the platform's are its own).
+pub fn agent_key(label: &str) -> k256::schnorr::SigningKey {
+    let secret = <sha2::Sha256 as sha2::Digest>::digest(format!("fake agent {label}").as_bytes());
+    k256::schnorr::SigningKey::from_bytes(&secret).expect("a key")
+}
+
+/// Agent `label` as the computer's view names it.
+fn agent_view(label: &str) -> Value {
+    let key = fragment_bridge::records::hex(&agent_key(label).verifying_key().to_bytes());
+    json!({ "fragment": format!("{label}--k3x9"), "identity": format!("npub1{label}"), "name": label, "owner": "npub1paul", "key": key })
+}
+
 impl Fake {
     /// A fake with `agents` (`label`s: `<label>-k3x9`, `npub1<label>`, owned by
     /// paul) on one computer, listening on `bind` (`127.0.0.1:0` for tests;
     /// `0.0.0.0:0` for a container to reach).
     pub async fn start(bind: &str, agents: &[&str]) -> Fake {
-        let agents: Vec<Value> = agents.iter().map(|l| json!({ "fragment": format!("{l}--k3x9"), "identity": format!("npub1{l}"), "name": l, "owner": "npub1paul" })).collect();
+        let agents: Vec<Value> = agents.iter().map(|l| agent_view(l)).collect();
         let mut world = World { computer: json!({ "computer": "computer:00aa", "owner": "npub1paul", "image": "test", "agents": agents, "models": super::model::ids() }), page: 1000, ..World::default() };
         world.names.insert("npub1paul".into(), "paul".into());
         world.names.insert("npub1skyler".into(), "skyler".into());
@@ -228,6 +270,30 @@ impl Fake {
 
     pub fn with<T>(&self, f: impl FnOnce(&mut World) -> T) -> T {
         f(&mut self.world.lock().expect("the world"))
+    }
+
+    /// A ticket for `act` (`link`, `unlink`) on agent `label`, as its
+    /// owner's Settings get one: signed by the agent's key, for this
+    /// computer, for ten minutes. A link's is the one a door key redeems
+    /// next; an unlink's closes the agent's door at once.
+    pub fn ticket(&self, label: &str, act: &str) -> Value {
+        use fragment_bridge::simplex::door::Ticket;
+        let agent = format!("{label}--k3x9");
+        let now = i64::try_from(fragment_bridge::log::now_ms()).expect("ms");
+        let n = self.with(|w| w.now());
+        let nonce = fragment_bridge::records::hex(&<sha2::Sha256 as sha2::Digest>::digest(format!("{agent} {act} {n}").as_bytes()))[..32].to_string();
+        let mut t = Ticket { door: "simplex".into(), act: act.into(), agent: agent.clone(), computer: "computer:00aa".into(), nonce: nonce.clone(), exp: now + 600_000, sig: String::new() };
+        let sig = agent_key(label).sign_raw(&t.digest(), &[0u8; 32]).expect("signed");
+        t.sig = fragment_bridge::records::hex(&sig.to_bytes());
+        self.with(|w| {
+            if act == "link" {
+                w.door_tickets.insert(agent, nonce);
+            } else {
+                w.door_tickets.remove(&agent);
+                w.doors.remove(&agent);
+            }
+        });
+        serde_json::to_value(t).expect("a ticket")
     }
 
     /// A chat `<label>-k3x9` with paul and `agents` (labels, in the order
@@ -273,9 +339,8 @@ impl Fake {
     pub fn add_agent(&self, label: &str) {
         self.with(|w| {
             let (fragment, identity) = (format!("{label}--k3x9"), format!("npub1{label}"));
-            w.fragments.insert(fragment.clone(), agent_fragment(&identity));
-            let agent = json!({ "fragment": fragment, "identity": identity, "name": label, "owner": "npub1paul" });
-            w.computer["agents"].as_array_mut().expect("the computer's agents").push(agent);
+            w.fragments.insert(fragment, agent_fragment(&identity));
+            w.computer["agents"].as_array_mut().expect("the computer's agents").push(agent_view(label));
         });
     }
 
@@ -316,6 +381,19 @@ impl Fake {
             }
             for (_, k) in w.keepalives.drain(..) {
                 let _ = k.send(Message::Close(None));
+            }
+        });
+    }
+
+    /// Cuts the platform's side of every keepalive as a deploy does, with no
+    /// close reaching the bridge (#557): each is counted closed here, and its
+    /// socket stays open, answering nothing, not even a ping.
+    pub fn cut_keepalives(&self) {
+        self.with(|w| {
+            for cut in std::mem::take(&mut w.keepalives) {
+                w.keepalives_cut.push(cut);
+                w.keepalive_open -= 1;
+                w.keepalive_log.push(false);
             }
         });
     }
@@ -399,11 +477,61 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
     match (method.clone(), p.as_slice()) {
         (Method::GET, ["api", "computer"]) => {
             let mut w = world.lock().unwrap();
+            if query(&q, "simplex") == ["1"] {
+                w.simplex_said += 1;
+            } else {
+                w.simplex_unsaid += 1;
+            }
             if w.fail_computer_reads > 0 {
                 w.fail_computer_reads -= 1;
                 return refuse(StatusCode::SERVICE_UNAVAILABLE, "a failed read, as asked");
             }
             return answer(StatusCode::OK, w.computer.clone());
+        }
+        (Method::POST, ["api", "computer", "door"]) => {
+            let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+            let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            let (agent, nonce, key) = (v["agent"].as_str().unwrap_or(""), v["nonce"].as_str().unwrap_or(""), v["key"].as_str().unwrap_or(""));
+            let mut w = world.lock().unwrap();
+            if v["door"] != "simplex" || key.len() != 64 || w.door_tickets.get(agent).map(String::as_str) != Some(nonce) || nonce.is_empty() {
+                return refuse(StatusCode::FORBIDDEN, "that ticket is not the link its owner started last");
+            }
+            w.door_tickets.remove(agent);
+            w.doors.insert(agent.to_string(), key.to_string());
+            return answer(StatusCode::OK, json!({ "door": "simplex", "key": key }));
+        }
+        (Method::GET, ["api", "computer", "relay"]) => {
+            let host = query(&q, "host").into_iter().next().unwrap_or_default();
+            let to = {
+                let w = world.lock().unwrap();
+                w.relay_to.get(&host).copied().filter(|_| query(&q, "port") == ["443"])
+            };
+            let Some(to) = to else { return refuse(StatusCode::FORBIDDEN, "not relayed") };
+            let Some((response, socket)) = net::accept_ws(&mut req) else { return refuse(StatusCode::BAD_REQUEST, "a socket") };
+            let world = world.clone();
+            tokio::spawn(async move {
+                let Some(ws) = socket.await else { return };
+                let Ok(mut tcp) = tokio::net::TcpStream::connect(to).await else { return };
+                let (mut rd, mut wr) = tcp.split();
+                let (mut sink, mut stream) = ws.split();
+                let mut buf = vec![0u8; 16 * 1024];
+                let (mut up, mut down) = (0usize, 0usize);
+                loop {
+                    tokio::select! {
+                        n = tokio::io::AsyncReadExt::read(&mut rd, &mut buf) => match n {
+                            Ok(0) | Err(_) => { let _ = sink.send(Message::Close(None)).await; break; }
+                            Ok(n) => { down += n; world.lock().unwrap().relay_down += n as u64; if sink.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() { break; } }
+                        },
+                        m = stream.next() => match m {
+                            Some(Ok(Message::Binary(b))) => { up += b.len(); world.lock().unwrap().relay_up += b.len() as u64; if tokio::io::AsyncWriteExt::write_all(&mut wr, &b).await.is_err() { break; } }
+                            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                            _ => {}
+                        },
+                    }
+                }
+                world.lock().unwrap().relayed.push(format!("{host} {up} {down}"));
+            });
+            return response;
         }
         (Method::GET, ["api", "computer", "keepalive"]) => {
             let Some((response, socket)) = net::accept_ws(&mut req) else { return refuse(StatusCode::BAD_REQUEST, "a socket") };
@@ -427,10 +555,25 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
                             Some(m) => { let close = matches!(m, Message::Close(_)); let _ = sink.send(m).await; if close { break; } }
                             None => break,
                         },
-                        m = stream.next() => match m { Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break, _ => {} },
+                        m = stream.next() => match m {
+                            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                            // a ping is answered, as the Computer DO answers it; a cut one's is not
+                            Some(Ok(Message::Text(t))) => {
+                                let cut = world.lock().unwrap().keepalives_cut.iter().any(|(i, _)| *i == id);
+                                if !cut && serde_json::from_str::<Value>(&t).is_ok_and(|v| v["type"] == "ping") {
+                                    let _ = sink.send(Message::text(json!({ "type": "pong" }).to_string())).await;
+                                }
+                            }
+                            _ => {}
+                        },
                     }
                 }
                 let mut w = world.lock().unwrap();
+                // a cut one was counted closed as it was cut
+                if let Some(at) = w.keepalives_cut.iter().position(|(i, _)| *i == id) {
+                    w.keepalives_cut.remove(at);
+                    return;
+                }
                 w.keepalives.retain(|(i, _)| *i != id);
                 w.keepalive_open -= 1;
                 w.keepalive_log.push(false);
@@ -467,6 +610,12 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
                     if let Some(u) = w.names.get(&id) {
                         profiles.insert(id.clone(), json!({ "kind": "person", "email": u }));
                     }
+                    // an agent of the fake's (`npub1<label>`, its fragment `<label>--k3x9`):
+                    // its label as `name`, its fragment's title as it shows
+                    let label = id.trim_start_matches("npub1");
+                    if let Some(f) = w.fragments.get(&format!("{label}--k3x9")).filter(|f| f.kind == "agent") {
+                        profiles.insert(id.clone(), json!({ "kind": "agent", "name": label, "fragment": format!("{label}--k3x9"), "title": f.title }));
+                    }
                 }
                 answer(StatusCode::OK, json!({ "profiles": profiles }))
             }
@@ -474,6 +623,32 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         };
     }
 
+    // a chat an agent makes for its owner, as the platform makes one: theirs,
+    // the agent its maker and an editor, told so on its own `tasks`
+    if p.as_slice() == ["api", "fragments"] && method == Method::POST {
+        let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+        let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        let (Some(owner), Some(name), Some("chat")) = (acting_for.clone(), v["name"].as_str(), v["template"].as_str()) else {
+            return refuse(StatusCode::BAD_REQUEST, "a chat made by its name for the agent's owner");
+        };
+        let mut w = world.lock().unwrap();
+        if w.refuse_makes {
+            return refuse(StatusCode::SERVICE_UNAVAILABLE, "a making refused, as asked");
+        }
+        if w.fragments.contains_key(name) {
+            return refuse(StatusCode::CONFLICT, "that name is taken");
+        }
+        let at = w.now();
+        let mut f = Frag { kind: "chat".into(), title: v["title"].as_str().unwrap_or("").to_string(), ..Frag::default() };
+        f.members.push(Member { principal: owner.clone(), role: "owner".into(), kind: "person".into(), added_at: at });
+        f.members.push(Member { principal: me.clone(), role: "editor".into(), kind: "agent".into(), added_at: at });
+        f.channels.insert("chat".into(), Chan { post: Some("viewer".into()), ..Chan::default() });
+        f.channels.insert("work".into(), Chan { post: Some("editor".into()), ..Chan::default() });
+        w.fragments.insert(name.to_string(), f);
+        w.made.push(name.to_string());
+        w.append(&agent, "tasks", &me, json!({ "kind": "joined", "fragment": name }));
+        return answer(StatusCode::OK, json!({ "name": name, "owner": owner }));
+    }
     if p.as_slice() == ["api", "fragments"] {
         let mut w = world.lock().unwrap();
         if w.fail_lists > 0 {
@@ -546,6 +721,15 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             }
             let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             let (Some(id), body) = (v["id"].as_str().map(str::to_string), v["body"].clone()) else { return refuse(StatusCode::BAD_REQUEST, "{id, body}") };
+            // the platform's rule: a record that relays is its agent's door's alone
+            if let Some(r) = body.get("relayed") {
+                use fragment_bridge::simplex::door;
+                let key = w.doors.get(&agent).cloned().unwrap_or_default();
+                let digest = door::record_digest("simplex", &fragment, &channel, &id, &body);
+                if r["agent"] != agent.as_str() || !door::verify(&key, &digest, r["sig"].as_str().unwrap_or("")) {
+                    return refuse(StatusCode::FORBIDDEN, "a relayed record is signed by its agent's door");
+                }
+            }
             if let Some((seq, old)) = c.ids.get(&id) {
                 if *old == body {
                     let record = c.records[(*seq - 1) as usize].clone();

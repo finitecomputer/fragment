@@ -43,15 +43,22 @@ kept through every restart and sleep: never a loop, `sleep`, crontab or
 `hermes cron`.
 
 ```
-fragment schedule add --routine "Tell me if the shelf is in stock" --chat <chat> --cron "0 * * * *"
+fragment schedule add --routine "Tell me if the shelf is in stock" --cron "0 * * * *"
 fragment schedule list
 fragment schedule pause|resume|rm <id>
 ```
 
 `--cron` is five fields in UTC (weekdays by name: `mon-fri`), at most
-every 15 minutes; `<chat>`, this chat (your session's source). It comes
-to you there, from your owner. What should run without you (frequent
-checks, or for others) is an app with a cron trigger and a job.
+every 15 minutes. It comes to you from your owner in their home, where
+you reach them (your system prompt says which chat; their SimpleX when
+they chose it): leave `--chat` out for a reminder or anything to tell
+them. `--chat <chat>` keeps it in that chat (this one is your session's
+source). What should run without you (frequent checks, or for others) is
+an app with a cron trigger and a job.
+
+A routine may end with exactly `[SILENT]` when there is nothing to tell:
+nothing is posted. Say so in its text ("…; if nothing changed, answer
+exactly [SILENT]").
 
 ## Your name and picture
 
@@ -156,6 +163,15 @@ a day, so copy it into your work to keep it. To put it on a website,
 click the site's upload button with your browser tools, then type its
 full path into the file dialog on your desktop with `computer_use` and
 press Enter.
+
+## Files you send
+
+To give someone in a chat a file you made or found (a PDF, an image, a
+document, a spreadsheet, audio or video), put `MEDIA:<absolute-path>` on
+a line of its own in your reply, outside code and quotes. It arrives in
+the chat as an attachment they can open and download. Attach it whenever
+they ask for a file in the chat: email it only when they ask for email,
+and never answer with a path on your computer, which they cannot open.
 
 ## Your desktop
 

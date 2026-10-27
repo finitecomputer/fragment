@@ -110,8 +110,9 @@ const PASSED_HEADERS: [&str; 9] =
 /// Durable Object accepts the upgrade the client asked for.
 const WEBSOCKET_HEADERS: [&str; 4] = ["sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions"];
 
-/// `PUT /api/fragments/{name}/archived`'s body, `{archived}`, is a few bytes.
-const ARCHIVED_BODY_MAX_BYTES: usize = 1024;
+/// `PUT /api/fragments/{name}/archived`'s body, `{archived}`, and
+/// `…/dock`'s, `{dock}`, are a few bytes.
+const OWN_VIEW_BODY_MAX_BYTES: usize = 1024;
 /// `PUT /api/fragments/{name}/seen` takes no body: what is read of one, to
 /// refuse it.
 const SEEN_BODY_MAX_BYTES: usize = 1024;
@@ -406,10 +407,10 @@ pub(crate) fn fetched(req: &Request) -> CellResult<Fetched> {
 
 /// A navigation's answer: it differs by the kind of navigation (`Vary`),
 /// and a frame's (`ancestors`: `fragment_core::frames::ancestors`) shows
-/// only in the pages that names: the platform's for a frame session its
-/// mint made (`/auth/frame`), this origin's own, or, for a stranger's
-/// answer, those and the platform's. It is never reused from a cache
-/// without that. An app's own policy stays: a second one only narrows it.
+/// only in the pages that names: this origin's own, and, for a frame
+/// session its mint made (`/auth/frame`) or a stranger's answer, the
+/// platform's. It is never reused from a cache without that. An app's own
+/// policy stays: a second one only narrows it.
 fn bound(resp: Response, ancestors: Option<&str>) -> CellResult<Response> {
     let h = resp.headers().clone();
     h.append("vary", "sec-fetch-dest")?;
@@ -572,7 +573,7 @@ async fn picture(env: &Env, identity: &str) -> CellResult<Response> {
     }
     let none = || CellError::new(ErrorCode::NotFound, format!("{identity} has no picture"));
     let Some(picture) = ask_registry(env, &calls::PictureOf { identity: identity.to_string() }).await? else {
-        let named = ask_registry(env, &calls::Profiles { ids: vec![identity.to_string()], emails_of: vec![], agents_of: vec![] }).await?;
+        let named = ask_registry(env, &calls::Profiles { ids: vec![identity.to_string()], emails_of: vec![] }).await?;
         let agent = named.profiles.get(identity).filter(|p| p.kind == IdentityKind::Agent);
         let fragment = agent.and_then(|p| p.fragment.clone()).ok_or_else(none)?;
         return routed::fetch_object(env, "FRAGMENT", &fragment, "computer/picture").await;
@@ -623,10 +624,10 @@ async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<Fragmen
         .filter_map(|f| {
             let cap = access::Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied() };
             // the asker's own view (their search's preview and unread, their
-            // archiving) stays theirs, as do the listed records their role
-            // reads: the agent's capped role may read less
+            // archiving and their dock) stays theirs, as do the listed
+            // records their role reads: the agent's capped role may read less
             let owned = f.role == Role::Owner;
-            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, owned, listed: vec![], ..f })
+            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, dock: true, owned, listed: vec![], ..f })
         })
         .collect();
     Ok(FragmentList { fragments })
@@ -732,7 +733,12 @@ async fn identities(mut req: Request, env: &Env, ctx: &Context, url: &Url, rest:
                 let owner_key = authenticate(&req, url, Payload::Read(&body))?;
                 let proof = reg.proof.ok_or_else(|| CellError::invalid("registering an agent needs a proof by its key"))?;
                 let key = proven_key(&proof, &req, url, &owner_key)?;
-                json_answer(&ask_registry(env, &calls::RegisterAgent { owner: calls::By::Key(owner_key), key, fragment: None }).await?)
+                let agent = ask_registry(env, &calls::RegisterAgent { owner: calls::By::Key(owner_key), key, fragment: None }).await?;
+                // it comes in where its person is (decision 64)
+                if let Some(person) = &agent.owner {
+                    members::agent_made(env, person, &agent.id).await;
+                }
+                json_answer(&agent)
             }
         };
     }
@@ -799,7 +805,7 @@ async fn identities(mut req: Request, env: &Env, ctx: &Context, url: &Url, rest:
 /// A fragment named in an API path: its name in full (`todo--k3x9`). A
 /// bare label names nothing here: the CLI finds one among the caller's
 /// fragments (`GET /api/fragments`).
-fn named_fragment(name: &str) -> CellResult<String> {
+pub(crate) fn named_fragment(name: &str) -> CellResult<String> {
     check_name(name)?;
     Ok(name.to_string())
 }
@@ -937,6 +943,11 @@ async fn served(req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, re
 
 #[allow(clippy::too_many_arguments)]
 async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, fetched: Fetched, page: bool) -> CellResult<Response> {
+    // the platform's notices on this origin link their look from it
+    // (share.rs `sheet_html`): the release's, whoever asks
+    if shell::is_fragment_sheet(rest) && matches!(req.method(), Method::Get | Method::Head) {
+        return shell::fragment_sheet_asset(&req, env).await;
+    }
     if auth::is_fragment_route(rest) {
         return auth::fragment(&req, env, cfg, url, name, rest, fetched).await;
     }
@@ -961,10 +972,11 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
         None => Payload::Read(&body),
     };
     let mut credential = site_credential(&req, url, payload, fetched)?;
-    // a frame's page shows only in the page its session was made for: that
-    // session is asked for here, for the page's origin (`bound`). Only the
-    // platform's page has one (its mint names it): a session for any
-    // other is no one's, so no answer names another page.
+    // a frame's page shows only in the page its session was made for (and
+    // in its own frames there): that session is asked for here, for the
+    // page's origin (`bound`). Only the platform's page has one (its mint
+    // names it): a session for any other is no one's, so no answer names
+    // another page.
     let platform = cfg.platform();
     let (mut signed, mut framed) = (None, Framed::Stranger);
     if let (true, Some(Credential::Frame(token))) = (fetched.framed, &credential) {
@@ -1136,6 +1148,8 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         (Method::Get | Method::Head, ["llms-full.txt"]) => assets::agent_doc(&req, env, cfg, LLMS_FULL_TXT).await,
         // its release in `DEPLOY_HEADER`, as every answer here names it (`platform_origin`)
         (Method::Get | Method::Head, ["healthz"]) => Ok(Response::ok("ok")?),
+        // each object class answering this release, which a deploy waits for
+        (Method::Get, ["healthz", "objects"]) => routed::objects(env, cfg).await,
         (Method::Post, ["api", "fragments"]) => {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let create: CreateFragment = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
@@ -1152,6 +1166,11 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let who = signer(env, &req, &url, &[]).await?;
             json_answer(&share::access(env, &url, &who).await?)
         }
+        // the invites waiting on the signer's emails, theirs to answer (share.rs)
+        (_, ["api", "invites", rest @ ..]) => {
+            let rest = rest.to_vec();
+            share::invites(req, env, &url, &rest).await
+        }
         (Method::Get, ["api", "fragments"]) => {
             let principal = signer_for(env, &req, &url, &[]).await?;
             if let Some(asker) = &principal.acting_for {
@@ -1163,7 +1182,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         // the signer's own view of a fragment of theirs (principal.rs): it
         // changes nothing of the fragment's, nor anyone else's list
         (Method::Put, ["api", "fragments", name, "archived"]) => {
-            let body = read_body(&mut req, ARCHIVED_BODY_MAX_BYTES).await?;
+            let body = read_body(&mut req, OWN_VIEW_BODY_MAX_BYTES).await?;
             let set: fragment_proto::SetArchived = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let who = signer(env, &req, &url, &body).await?;
             let name = named_fragment(name)?;
@@ -1171,6 +1190,19 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let mut init = RequestInit::new();
             init.with_method(Method::Put).with_body(Some(inner.into()));
             let put = Request::new_with_init("https://principal.internal/archived", &init)?;
+            crate::routed::send(env, "PRINCIPAL", &who.identity.id, put).await
+        }
+        // whether the signer's dock shows a fragment of theirs (principal.rs):
+        // their own view again, as archiving is
+        (Method::Put, ["api", "fragments", name, "dock"]) => {
+            let body = read_body(&mut req, OWN_VIEW_BODY_MAX_BYTES).await?;
+            let set: fragment_proto::SetDock = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let who = signer(env, &req, &url, &body).await?;
+            let name = named_fragment(name)?;
+            let inner = json!({ "fragment": name, "dock": set.dock }).to_string();
+            let mut init = RequestInit::new();
+            init.with_method(Method::Put).with_body(Some(inner.into()));
+            let put = Request::new_with_init("https://principal.internal/dock", &init)?;
             crate::routed::send(env, "PRINCIPAL", &who.identity.id, put).await
         }
         // the signer has seen a chat's messages (principal.rs): their own

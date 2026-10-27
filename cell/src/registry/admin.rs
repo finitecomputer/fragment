@@ -101,12 +101,13 @@ struct PersonRow {
     seat: Option<String>,
     comped: Option<i64>,
     admin: Option<i64>,
+    sleeps: Option<i64>,
 }
 
 const PERSON_SELECT: &str = "SELECT i.id, i.created_at,
   (SELECT email FROM subjects WHERE identity = i.id ORDER BY signed_in_at DESC LIMIT 1) AS email,
   (SELECT MAX(signed_in_at) FROM subjects WHERE identity = i.id) AS last_sign_in,
-  m.id AS member, m.org, o.name AS org_name, o.status, m.seat, m.comped, m.admin
+  m.id AS member, m.org, o.name AS org_name, o.status, m.seat, m.comped, m.admin, m.sleeps
   FROM identities i LEFT JOIN org_members m ON m.person = i.id LEFT JOIN orgs o ON o.id = m.org";
 
 impl PersonRow {
@@ -116,7 +117,7 @@ impl PersonRow {
         let seat = match (&self.member, self.seat.as_deref()) {
             (Some(id), Some(s)) => {
                 let kind = SeatKind::parse(s).ok_or_else(|| CellError::host(format!("org_members.seat of {id} is {s:?}")))?;
-                Some(AdminSeat { id: id.clone(), kind, comped, good: comped || status.is_some_and(Status::is_good) })
+                Some(AdminSeat { id: id.clone(), kind, comped, good: comped || status.is_some_and(Status::is_good), sleeps: self.sleeps.unwrap_or(0) != 0 })
             }
             _ => None,
         };

@@ -206,7 +206,7 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
         Ok(Some((crate::computer::INTERNAL_HEADER, "1")))
     } else if path == "meter/acked" || path == "meter/whose" {
         Ok(Some((crate::meter::METER_HEADER, "1")))
-    } else if path == "invites/claim" {
+    } else if path == "invites/claim" || path == "invites/decline" || path == "members/agent" {
         Ok(Some((crate::members::CLAIM_HEADER, "1")))
     } else if path.starts_with("wipe/") {
         Ok(Some((crate::wipe::WIPE_HEADER, "1")))
@@ -339,10 +339,10 @@ fn restart_soon(ctx: &JsValue) -> Result<bool, JsValue> {
 }
 
 /// What one call into an object came to: its answer, or its refusal of
-/// this release (which did nothing).
+/// this release (which did nothing), and the release it runs.
 enum Sent {
     Answered(Response),
-    Refused(CellError),
+    Refused(CellError, String),
 }
 
 async fn sent(env: &Env, binding: &str, name: &str, req: Request) -> CellResult<Sent> {
@@ -350,14 +350,14 @@ async fn sent(env: &Env, binding: &str, name: &str, req: Request) -> CellResult<
     let mut resp = env.durable_object(binding)?.get_by_name(name)?.fetch_with_request(req).await?;
     // an app's answer passed through with the mark would only be its own
     // request's refusal, as `serve::REFUSAL`'s would
-    if resp.status_code() != 503 || !resp.headers().has(release::REFUSED)? {
+    let Some(theirs) = resp.headers().get(release::REFUSED)?.filter(|_| resp.status_code() == 503) else {
         return Ok(Sent::Answered(resp));
-    }
+    };
     let message = match resp.json::<ErrorBody>().await {
         Ok(b) if b.error == ErrorCode::Deploying => b.message,
         _ => format!("{binding} {name} runs another release: a deploy is going out; try again in a few seconds"),
     };
-    Ok(Sent::Refused(CellError::new(ErrorCode::Deploying, message)))
+    Ok(Sent::Refused(CellError::new(ErrorCode::Deploying, message), theirs))
 }
 
 /// One call into the Durable Object `name` of `binding` (the only way the
@@ -368,7 +368,7 @@ async fn sent(env: &Env, binding: &str, name: &str, req: Request) -> CellResult<
 pub(crate) async fn send(env: &Env, binding: &str, name: &str, req: Request) -> CellResult<Response> {
     match sent(env, binding, name, req).await? {
         Sent::Answered(resp) => Ok(resp),
-        Sent::Refused(e) => Err(e),
+        Sent::Refused(e, _) => Err(e),
     }
 }
 
@@ -383,7 +383,7 @@ pub(crate) async fn send_again(env: &Env, binding: &str, name: &str, make: impl 
     for refused in 1.. {
         let e = match sent(env, binding, name, make()?).await? {
             Sent::Answered(resp) => return Ok(resp),
-            Sent::Refused(e) => e,
+            Sent::Refused(e, _) => e,
         };
         match release::again_after_ms(refused) {
             Some(ms) => Delay::from(std::time::Duration::from_millis(ms)).await,
@@ -412,6 +412,79 @@ pub(crate) async fn ask_object(env: &Env, binding: &str, name: &str, path: &str,
 /// answer as it is (a picture's bytes, or its refusal).
 pub(crate) async fn fetch_object(env: &Env, binding: &str, name: &str, path: &str) -> CellResult<Response> {
     send_again(env, binding, name, || internal_request(path, "{}")).await
+}
+
+/// The path a deploy's probe of an object asks (`probed`, `objects`), with
+/// `PROBE_HEADER`: the router passes no client's header of that name
+/// (lib.rs `PASSED_HEADERS`), so only the Worker's own `/healthz/objects`
+/// meets an object's answer to it.
+const PROBE_PATH: &str = "/__probe";
+const PROBE_HEADER: &str = "x-fragment-probe";
+
+/// The probe object of each class `/healthz/objects` asks: the Registry,
+/// the deployment's one (the busiest object, held on its old code longest
+/// at a deploy), and an object of each other class named for the probe, a
+/// name no fragment, person or computer has (`__`). One that never existed
+/// is made by the probe, its schema's steps run and nothing more.
+const PROBED: [(&str, &str, &str); 5] = [
+    ("Registry", "REGISTRY", crate::registry::NAME),
+    ("Principal", "PRINCIPAL", "__probe"),
+    ("Ledger", "LEDGER", "__probe"),
+    ("Fragment", "FRAGMENT", "__probe"),
+    ("Computer", "COMPUTER", "__probe"),
+];
+
+/// An object's answer to a deploy's probe, the second thing its `fetch`
+/// does, right after its release check (`refused`): its schema ready
+/// (200), or the refusal every call of its gets (`schema_refused`).
+/// `None` for any other call, which goes on as before.
+pub(crate) fn probed(req: &Request, schema: &crate::schema::Schema) -> worker::Result<Option<Response>> {
+    if req.path() != PROBE_PATH || !req.headers().has(PROBE_HEADER)? {
+        return Ok(None);
+    }
+    match schema.ready() {
+        Ok(()) => Response::from_json(&serde_json::json!({ "ready": true })).map(Some),
+        Err(e) => e.response().map(Some),
+    }
+}
+
+/// `GET /healthz/objects` (docs/api.md, Health): this Worker's release,
+/// and what each class's probe object (`PROBED`) answered it, asked once
+/// each, at once: `{"release", "objects": {<class>: {"release"} |
+/// {"refusedBy"} | {"error"}}}`, 200 when every one admitted this release
+/// with its schema ready, else 503. A deploy asks it until it is 200
+/// (xtask/src/deploy.rs). Anyone may: each answer is a release, which
+/// every answer of the platform names already (`x-fragment-deploy`), and
+/// each ask is answered before anything else an object does, as cheaply as
+/// the refusal any call of another release gets.
+pub(crate) async fn objects(env: &Env, cfg: &Config) -> CellResult<Response> {
+    let ask = |binding: &'static str, name: &'static str| async move {
+        let headers = Headers::new();
+        headers.set(PROBE_HEADER, "1")?;
+        let mut init = RequestInit::new();
+        init.with_method(Method::Get).with_headers(headers);
+        let req = Request::new_with_init(&format!("https://probe.internal{PROBE_PATH}"), &init)?;
+        sent(env, binding, name, req).await
+    };
+    let answers = futures_util::future::join_all(PROBED.iter().map(|(_, binding, name)| ask(binding, name))).await;
+    let mut objects = serde_json::Map::new();
+    let mut all = true;
+    for ((class, _, _), answer) in PROBED.iter().zip(answers) {
+        let said = match answer {
+            Ok(Sent::Answered(resp)) if resp.status_code() == 200 => serde_json::json!({ "release": cfg.deploy_id }),
+            Ok(Sent::Answered(mut resp)) => {
+                let status = resp.status_code();
+                let v: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+                serde_json::json!({ "error": format!("{status} {}: {}", v["error"].as_str().unwrap_or("?"), v["message"].as_str().unwrap_or("")) })
+            }
+            Ok(Sent::Refused(_, theirs)) => serde_json::json!({ "refusedBy": theirs }),
+            Err(e) => serde_json::json!({ "error": e.message }),
+        };
+        all &= said.get("release").is_some();
+        objects.insert(class.to_string(), said);
+    }
+    let body = serde_json::json!({ "release": cfg.deploy_id, "objects": objects });
+    Ok(Response::from_json(&body)?.with_status(if all { 200 } else { 503 }))
 }
 
 /// `internal_request` for `entry.mjs` (the job driver, the `Files`

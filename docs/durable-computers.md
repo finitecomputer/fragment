@@ -21,7 +21,7 @@ file is the newer word, and decision 18 points here.
 | The model's context and the agent's working files | `/data`, as of its newest save | the snapshot, a cache of that save for one image |
 | Which save is current, and what a wake restored | the Computer DO | |
 | Usage | the ledger | |
-| A messenger's encryption state (Signal, SimpleX) | its connector's Durable Object (F, below; not built) | nothing |
+| A messenger's encryption state (Signal, SimpleX) | SimpleX's: its core's databases in `/data`, as of the newest save, taken whole under the hold (the core stopped); a start that went back in time heals it with a forced sync (docs/bridge.md, "SimpleX"). The end state is still F, below (a connector's Durable Object; not built) | nothing |
 
 ## Built (2026-10-05)
 
@@ -173,6 +173,15 @@ file is the newer word, and decision 18 points here.
   from a snapshot is up only once its guest reads its view: one unheard
   in 45 s is answered as a snapshot that would not start, from the image
   and the save in the same wake.
+- **A stop that lost nothing tells nothing (2026-10-23).** Paul woke to
+  "Your computer stopped unexpectedly" on the preview: Cloudflare's
+  container service dropped during a 15-minute busy save, and the start
+  after it went back to the save before, from which nothing had been done.
+  Now `went_back` is told only when its guest's keepalive or a port tab
+  opened or closed, or a record or a join woke it, after the save it goes
+  back to; its words are calmer ("Your computer restarted. Changes on it
+  since 4:04 AM weren't kept. Your chats are all here."). Its guest still
+  reads a rollback. docs/computers.md, "What its owner is told".
 - **An update is told, never forced (2026-10-09).** Paul: every deploy
   needed him to restart his computer, which a person would not know to
   do. A computer awake on another image than its next start runs (the

@@ -301,6 +301,11 @@ pub struct AdminSeat {
     pub kind: SeatKind,
     pub comped: bool,
     pub good: bool,
+    /// Whether its holder lets their `seat_always_on` computer sleep (their
+    /// choice in Settings, `PUT /api/seat`): why a good always-on seat's
+    /// computer is not always on. An older cell's answer has none: false.
+    #[serde(default)]
+    pub sleeps: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -407,6 +412,18 @@ mod tests {
         assert_eq!((none.kind, SeatKind::SOLD), (SeatKind::SeatAlwaysOn, SeatKind::SeatAlwaysOn));
         let named: NewTrialCode = serde_json::from_value(serde_json::json!({ "name": "x", "kind": "seat", "days": 30, "capacity": 1 })).unwrap();
         assert_eq!(named.kind, SeatKind::Seat, "read as named: the registry refuses it");
+    }
+
+    /// Goal: an operator sees a seat's holder's choice to let its computer
+    /// sleep, and an older cell's answer, which has none, still reads.
+    #[test]
+    fn an_admin_seat_says_whether_its_holder_lets_it_sleep() {
+        let seat = AdminSeat { id: "mem-0123456789abcdef".into(), kind: SeatKind::SeatAlwaysOn, comped: true, good: true, sleeps: true };
+        let v = serde_json::to_value(&seat).unwrap();
+        assert_eq!(v, serde_json::json!({ "id": "mem-0123456789abcdef", "kind": "seat_always_on", "comped": true, "good": true, "sleeps": true }));
+        assert_eq!(serde_json::from_value::<AdminSeat>(v).unwrap(), seat, "it round-trips");
+        let older: AdminSeat = serde_json::from_value(serde_json::json!({ "id": "mem-0123456789abcdef", "kind": "seat_always_on", "comped": true, "good": true })).unwrap();
+        assert!(!older.sleeps, "an older cell's seat, saying nothing, is read as not let sleep");
     }
 
     #[test]

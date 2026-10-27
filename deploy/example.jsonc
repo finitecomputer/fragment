@@ -97,14 +97,25 @@
   // the gateway, `{"provider": "workers_ai", "model": <catalog id>}`, or a
   // model on an OpenAI-compatible API, `{"provider": "openai", "base_url",
   // "key": <its secret's name in the store>, "model": <its id there>,
-  // "body"?: {…}}`. `body` is fields of that API's own that every call to it
-  // carries, over the agent's of the same names: at most 4 KiB of JSON,
-  // naming none of the fields the route writes (model, messages, stream,
-  // stream_options, tools, tool_choice, max_tokens, max_completion_tokens,
-  // reasoning_effort). A slot left out is on Workers AI: cheap GLM-5.3
-  // Flash, medium GLM-5.3, fallback DeepSeek V4 Flash, vision GLM-5.3 Flash.
-  // Every model is one the price book prices (fragment_core::price), or one
-  // on OpenRouter at its slot's ceiling (below), or the deploy is refused.
+  // "body"?: {…}, "price"?: {…}}`. `body` is fields of that API's own that
+  // every call to it carries, over the agent's of the same names: at most 4
+  // KiB of JSON, naming none of the fields the route writes (model,
+  // messages, stream, stream_options, tools, tool_choice, max_tokens,
+  // max_completion_tokens, reasoning_effort). `price` is its model's list
+  // price at that API, dollars a million tokens, `{"input", "cached_input"?,
+  // "output"}`, for an API that is not OpenRouter. `"images": true` (either
+  // provider) says its model reads images: a `vision` call falls back to the
+  // fallback only when the fallback's slot says so. `"private": true` says
+  // its model is private (confidential inference that keeps nothing: never
+  // Workers AI or OpenRouter); a private tier is a private route, its vision
+  // and fallback private too (what its agents reach). `"label"` on a tier
+  // names the route Settings offers for it (an agent's pick, its tier): each
+  // labelled tier is offered by its label; none labelled, the tier's name
+  // alone, as before. A slot left out is on
+  // Workers AI: cheap GLM-5.3 Flash, medium GLM-5.3, fallback DeepSeek V4
+  // Flash, vision GLM-5.3 Flash. Every model is one the price book prices
+  // (fragment_core::price), one its slot names a price for, or one on
+  // OpenRouter at its slot's ceiling (below), or the deploy is refused.
   // Leave `models` out (as a preview without a key does)
   // and every tier runs on Workers AI.
   //
@@ -143,6 +154,27 @@
   //               "key": "fragment-finite-private-key", "model": "glm-5-3-flash" },
   //   "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" },
   //   "vision": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" }
+  // },
+  // Or Private and Standard (Paul, 2026-10-22 and 10-24), the routes
+  // Settings offers: Private, the cheap tier and every agent's default, on
+  // Finite Private, Tinfoil's DeepSeek V4.1 Flash behind it, text and images,
+  // on Tinfoil's own key (tinfoil.sh's confidential inference, its list
+  // price named here); Standard, the medium tier, on our OpenRouter key. One
+  // fallback and one vision model serve both, the private ones:
+  // "models": {
+  //   "cheap": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
+  //              "key": "fragment-finite-private-key", "model": "glm-5-3-flash", "private": true,
+  //              "label": "Private (recommended)" },
+  //   "medium": { "provider": "openai", "base_url": "https://openrouter.ai/api/v1",
+  //               "key": "fragment-openrouter-key", "model": "z-ai/glm-5.3-flash", "label": "Standard",
+  //               "body": { "provider": { "zdr": true, "sort": "throughput", "require_parameters": true,
+  //                                       "quantizations": ["fp8", "bf16"],
+  //                                       "max_price": { "prompt": 0.15, "completion": 0.75 } } } },
+  //   "fallback": { "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1",
+  //                 "key": "fragment-tinfoil-api-key", "model": "deepseek-v4-1-flash",
+  //                 "price": { "input": 0.65, "cached_input": 0.13, "output": 1.45 }, "images": true, "private": true },
+  //   "vision": { "provider": "openai", "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
+  //               "key": "fragment-finite-private-key", "model": "glm-5-3-flash", "private": true }
   // },
   // A new person's plan: guest (the default), seat, or seat_always_on.
   // "default_plan": "guest",
@@ -208,7 +240,7 @@
       "placements": [{ "header": "x-browser-use-api-key" }],
       "env": ["BROWSER_USE_API_KEY"], "key": "fragment-browser-use-api-key" },
     { "name": "google", "kind": "connection",
-      "hosts": ["gmail.googleapis.com", "www.googleapis.com", "people.googleapis.com", "sheets.googleapis.com", "docs.googleapis.com"],
+      "hosts": ["gmail.googleapis.com", "www.googleapis.com", "people.googleapis.com", "sheets.googleapis.com", "docs.googleapis.com", "slides.googleapis.com"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
       // while Google reviews the app's sign-in:
       // "note": "Google is still reviewing Finite, so Google shows a warning that the app isn't verified when you connect. Your data is handled the same way either way.",
@@ -219,6 +251,12 @@
       // "connection_oauth": { "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&include_granted_scopes=true&prompt=select_account%20consent",
       //   "exchange": "https://oauth2.googleapis.com/token", "revoke": "https://oauth2.googleapis.com/revoke",
       //   "client_id": "<the client's id>", "scopes": <the Google skill's references/google-workspace-scopes.json> },
+      // several Google accounts a person (personal and work), each agent
+      // using the one picked for it in Settings, once WorkOS has enabled
+      // additional connections and a release that knows the field is
+      // deployed (docs/pipes-browser-binding.md, Several accounts): 2 to 25;
+      // absent, one, as before
+      // "accounts_max": 5,
       "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"] },
     { "name": "perplexity", "kind": "operator", "hosts": ["api.perplexity.ai"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],

@@ -4,7 +4,8 @@
 //! the runtimes; `api` every route it calls; `ready` which agents the image
 //! has made ready, when it says; `note` what a turn after a cut one is told,
 //! from the journal; `screen` each agent's screen, `screens` the image's
-//! map of their displays, `lease` who drives one.
+//! map of their displays, `lease` who drives one; `simplex` an agent's link
+//! to its owner's SimpleX app (groundwork: nothing runs it yet).
 
 pub mod api;
 pub mod driver;
@@ -19,3 +20,4 @@ pub mod records;
 pub mod runtime;
 pub mod screen;
 pub mod screens;
+pub mod simplex;

@@ -16,6 +16,7 @@
   --accent-blue:#8ab4ff; --success:#39d98a;
   --border:rgba(255,255,255,.085); --border-strong:rgba(255,255,255,.16);
   --danger-border:rgba(239,68,68,.35); --danger-bg:rgba(239,68,68,.08); --danger-text:#f3b3b3;
+  --step-text:#85817d; --step-failed:var(--danger-text);
   --primary:var(--text-primary); --primary-foreground:var(--bg-window);
   --scrollbar-thumb: rgba(180,180,180,.28); --scrollbar-hover: rgba(180,180,180,.45);
   --font-sans:"Funnel Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
@@ -35,6 +36,7 @@
     --accent-blue:#315fbd; --success:#167a52;
     --border:rgba(20,20,20,.105); --border-strong:rgba(20,20,20,.18);
     --danger-border:rgba(190,18,60,.24); --danger-bg:rgba(190,18,60,.08); --danger-text:#81112f;
+    --step-text:#726c66; --step-failed:#a8324f;
     --scrollbar-thumb: rgba(70,70,70,.25); --scrollbar-hover: rgba(70,70,70,.42);
     color-scheme: light;
   }
@@ -50,6 +52,7 @@
   --accent-blue:#315fbd; --success:#167a52;
   --border:rgba(20,20,20,.105); --border-strong:rgba(20,20,20,.18);
   --danger-border:rgba(190,18,60,.24); --danger-bg:rgba(190,18,60,.08); --danger-text:#81112f;
+  --step-text:#726c66; --step-failed:#a8324f;
   --scrollbar-thumb: rgba(70,70,70,.25); --scrollbar-hover: rgba(70,70,70,.42);
   color-scheme: light;
 }
@@ -71,6 +74,11 @@ html { -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%;
 .still-loading { position: fixed; inset: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0 8px; margin: 0; padding: 24px; font: 14px/1.5 var(--font-sans); color: var(--text-secondary); visibility: hidden; animation: still-loading 0s 9s forwards; }
 .still-loading a { color: var(--accent-blue); }
 @keyframes still-loading { to { visibility: visible; } }
+/* the screen's bottom edge's inset (the home indicator's), which only the
+   page on its own with no keyboard up sits on (chat.js `fitViewport`):
+   framed, the shell keeps its frame off that edge */
+:root { --inset-bottom: env(safe-area-inset-bottom, 0px); }
+:root:is([data-framed], [data-keyboard]) { --inset-bottom: 0px; }
 .fragment-chat { top: var(--viewport-top, 0px); bottom: auto; height: var(--viewport-height, 100%); display: flex; flex-direction: column; overflow: hidden;
   font: 14px/1.5 var(--font-sans); font-feature-settings: "ss01", "cv11", "kern"; -webkit-font-smoothing: antialiased; }
 /* no weight of their own: a component's rule below sets its color and size */
@@ -256,34 +264,63 @@ a.attachment-chip:hover { color: var(--text-primary); background: var(--bg-activ
 .message-error { display: flex; align-items: baseline; gap: 10px; max-width: 100%; font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
 .message-retry { border: 0; background: none; color: var(--accent-blue); font: inherit; padding: 2px; }
 
-/* a turn's steps */
-details.tools { margin: 18px 0; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-subtle); overflow: hidden; }
-details.tools summary { display: flex; align-items: center; gap: 8px; height: 42px; padding: 0 14px; font-size: 13px; font-weight: 700; color: var(--text-secondary); cursor: pointer; list-style: none; }
+/* a turn's steps (chat.js, stepsNode): a quiet timeline of its tool steps
+   alone (what the agent says is a reply, between its cards). No box, one
+   quiet line for its head; under it one rule, from which its steps hang,
+   each one line in --step-text (as legible in either theme, 3.7:1), a
+   failed one alone in colour. */
+details.tools { margin: 14px 0; font-size: 13px; line-height: 1.55; }
+details.tools summary { display: flex; align-items: center; gap: 8px; width: fit-content; max-width: 100%; min-height: 24px; color: var(--step-text); cursor: pointer; list-style: none; border-radius: 6px; }
+details.tools summary:hover, details.tools summary:focus-visible { color: var(--text-secondary); }
 details.tools summary::-webkit-details-marker { display: none; }
-details.tools summary .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-details.tools summary .chev { transition: transform .14s; }
-details.tools[open] summary .chev { transform: rotate(90deg); }
+details.tools summary .chev { width: 14px; height: 14px; flex: none; transition: transform .14s; }
+details.tools[open]:not(.rolling) summary .chev { transform: rotate(90deg); }
+.step-dot { width: 7px; height: 7px; margin: 0 3px 0 6px; flex: none; border-radius: 50%; background: var(--step-agent, var(--chat-agent-color)); animation: step-dot 1.8s ease-out infinite; }
+@keyframes step-dot { from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--step-agent, var(--chat-agent-color)) 55%, transparent); } to { box-shadow: 0 0 0 7px transparent; } }
+/* the kinds of work it did, once done: each kind's icon, overlapping */
+.step-kinds { display: inline-flex; }
+.step-kinds i { display: inline-grid; place-items: center; width: 20px; height: 20px; margin-left: -6px; border: 1.5px solid var(--bg-chat); border-radius: 50%; background: var(--surface-subtle); color: var(--text-secondary); }
+.step-kinds i:first-child { margin-left: 0; }
+.step-kinds svg { width: 11px; height: 11px; }
+/* what is being done now: a light that passes over its words */
+.shimmer { background: linear-gradient(90deg, var(--text-secondary) 0, var(--text-secondary) 40%, var(--text-primary) 50%, var(--text-secondary) 60%, var(--text-secondary) 100%) 0 0 / 250% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: shimmer 2.4s linear infinite; }
+@keyframes shimmer { from { background-position: 100% 0; } to { background-position: -150% 0; } }
+details.tools > .step { margin-left: 9px; padding: 3px 0 3px 16px; border-left: 1px solid var(--border-strong); }
+details.tools > summary + * { margin-top: 6px; }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.step { border-top: 1px solid var(--border); padding: 10px 14px; background: var(--chat-code); }
-.step pre { margin: 4px 0 0 21px; font: 500 12px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-tertiary); max-height: 240px; overflow-y: auto; }
-/* what it does: its icon, its verb, its arguments */
-.step-name { display: flex; align-items: baseline; gap: 7px; font-size: 13px; font-weight: 600; color: var(--text-primary); min-width: 0; }
-.step-name svg { width: 14px; height: 14px; flex: none; align-self: center; color: var(--text-icon); }
-.step-label { display: flex; align-items: baseline; gap: 7px; flex: 1; min-width: 0; }
-.step-name .step-verb { flex: none; }
-.step-name .step-args { display: block; flex: 1; min-width: 0; font: 500 12px/1.5 var(--font-mono); color: var(--text-secondary); white-space: pre-wrap; word-break: break-all; max-height: 3em; overflow: hidden; }
-.step-status { display: inline-flex; flex: none; align-self: flex-start; padding-top: 2px; }
-.step-status.done svg { color: var(--text-tertiary); }
-.step-status.running svg { color: var(--chat-agent-color); }
-.step-status.failed svg { color: var(--danger-text); }
-.step.error pre, .step.error .step-name, .step.error .step-args { color: var(--danger-text); }
-.step-text { border-top: 1px solid var(--border); padding: 10px 14px 0; font-size: 13px; line-height: 1.5; color: var(--text-secondary); overflow-wrap: anywhere; }
-.step-text .md > :last-child { margin-bottom: 0; }
-.step-text .md code { background: var(--surface-muted); }
-.note-expand { border: 0; padding: 2px 0; background: none; color: var(--text-tertiary); font: inherit; cursor: pointer; }
-.note-expand:hover, .note-expand:focus-visible { color: var(--text-primary); }
-.step-text + .step { border-top: 0; }
+/* a step: its icon (which names its verb), its arguments, on one line as
+   quiet as its words; its verb in words only where the icon cannot say it */
+.step-name { display: flex; align-items: center; gap: 7px; width: 100%; min-width: 0; padding: 0; border: 0; background: none; font: inherit; color: var(--step-text); text-align: left; }
+button.step-name { cursor: pointer; }
+button.step-name:hover, button.step-name:focus-visible { color: var(--text-secondary); }
+.step-name svg { width: 13px; height: 13px; flex: none; stroke-width: 1.6; }
+.step-label { display: flex; gap: .3em; flex: 1; min-width: 0; }
+.step-verb { flex: none; }
+.step-args { display: block; flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.step.running .step-name { color: var(--text-secondary); }
+.step.error .step-name, .step.error .step-result { color: var(--step-failed); }
+/* a step opened: its whole arguments, then what came of it */
+.step-detail { margin: 4px 0 6px 20px; padding: 10px 12px; border-radius: 8px; background: var(--chat-code); }
+.step-detail pre { margin: 0; font: 400 12px/1.6 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-tertiary); max-height: 240px; overflow-y: auto; }
+.step-detail .step-call { color: var(--text-secondary); }
+.step-detail pre + pre { margin-top: 10px; }
+/* while it works: its last three steps, each older one fainter; a step come
+   since the last draw arrives as the one past them leaves */
+details.tools.rolling { cursor: pointer; }
+details.tools.rolling > .step { pointer-events: none; }
+details.tools.rolling > .step:not(:nth-last-child(-n+3)) { display: none; }
+details.tools.rolling > .step:nth-last-child(2) { opacity: .6; }
+details.tools.rolling > .step:nth-last-child(3) { opacity: .3; }
+details.tools.rolling .step-detail { display: none; }
+details.tools.rolling.advanced > .step:last-child { animation: step-in .32s ease; }
+details.tools.rolling.advanced > .step:nth-last-child(2) { animation: step-back-60 .32s ease; }
+details.tools.rolling.advanced > .step:nth-last-child(3) { animation: step-back-30 .32s ease; }
+details.tools.rolling.advanced > .step:nth-last-child(4) { display: block; overflow: hidden; animation: step-out .32s ease forwards; }
+@keyframes step-in { from { opacity: 0; max-height: 0; } to { max-height: 3em; } }
+@keyframes step-back-60 { from { opacity: 1; } }
+@keyframes step-back-30 { from { opacity: .6; } }
+@keyframes step-out { from { opacity: .3; max-height: 3em; } to { opacity: 0; max-height: 0; padding-top: 0; padding-bottom: 0; } }
 
 /* an approval: the agent asks its owner, who answers with a button */
 .prompt { margin: 18px 0; padding: 12px 14px 14px; border: 1px solid var(--border-strong); border-radius: 14px; background: color-mix(in srgb, var(--chat-agent-color, #a88bea) 6%, var(--surface-subtle)); }
@@ -367,6 +404,19 @@ details.tools[open] summary .chev { transform: rotate(90deg); }
 .banner { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; padding: 10px 14px; border: 1px solid var(--danger-border); border-radius: 14px; background: var(--danger-bg); color: var(--danger-text); font-size: .9rem; }
 .banner span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .banner button { border: 1px solid var(--danger-border); background: none; border-radius: 999px; padding: 3px 10px; font-size: 12px; }
+.mic-card { position: relative; display: flex; flex-direction: column; align-items: center; text-align: center; margin-bottom: 10px; padding: 26px 22px 20px; border: 1px solid var(--border); border-radius: 22px; background: var(--bg-card); color: var(--text-primary); box-shadow: 0 10px 32px rgba(0,0,0,.1); animation: mic-card-in .2s ease-out; }
+.mic-card[hidden] { display: none; }
+.mic-card-icon { width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; margin-bottom: 14px; background: var(--surface-subtle); color: var(--chat-agent-color, var(--text-icon)); }
+.mic-card-icon svg { width: 24px; height: 24px; }
+.mic-card[data-kind="denied"] .mic-card-icon { color: var(--danger-text); }
+.mic-card-copy strong { display: block; font-size: 1.05rem; font-weight: 600; line-height: 1.3; }
+.mic-card-copy p { margin: 6px 0 0; font-size: .9rem; line-height: 1.45; color: var(--text-secondary); }
+#mic-card-go { width: 100%; margin-top: 20px; padding: 13px 16px; border: 0; border-radius: 999px; background: var(--primary); color: var(--primary-foreground); font-size: 1rem; font-weight: 600; }
+#mic-card-go:active { transform: scale(.98); }
+.mic-card-close { position: absolute; top: 10px; right: 10px; width: 28px; height: 28px; color: var(--text-tertiary); }
+.mic-card-close svg { width: 15px; height: 15px; }
+@keyframes mic-card-in { from { opacity: 0; transform: translateY(6px) scale(.98); } }
+@media (prefers-reduced-motion: reduce) { .mic-card { animation: none; } }
 /* @mentions: the chat's agents, then the owner's others, as the composer's word starts one */
 .mentions { position: absolute; left: 8px; bottom: calc(100% + 6px); z-index: 5; min-width: 180px; max-width: calc(100% - 16px); padding: 4px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-card); box-shadow: 0 10px 28px rgba(0,0,0,.28); }
 .mentions button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 10px; border: 0; border-radius: 6px; background: none; text-align: left; font-size: 14px; }
@@ -384,6 +434,8 @@ details.tools[open] summary .chev { transform: rotate(90deg); }
 .msg.user .actions { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
 .msg.user.mine .actions { flex-direction: row; }
 .msg.user .actions .time { margin: 0; }
+/* a message its owner said elsewhere (SimpleX), relayed by their agent */
+.msg.user .actions .via { font-size: 11px; color: var(--text-tertiary); }
 .msg .actions .reply { width: 26px; height: 26px; border-radius: 8px; }
 .msg .actions .icon-button { color: color-mix(in srgb, var(--text-icon) 70%, var(--bg-chat)); }
 .msg .actions .icon-button:hover, .msg .actions .icon-button:focus-visible { color: var(--text-icon); }
@@ -412,13 +464,27 @@ details.tools[open] summary .chev { transform: rotate(90deg); }
 /* The shell supplies its viewport mode: a narrow desktop panel is not a phone. */
 @media (max-width: 760px) {
   :root:not([data-mobile="false"]), :root:not([data-mobile="false"]) body { touch-action: pan-x pan-y; }
-  :root:not([data-mobile="false"]) .composer-wrap { width: calc(100% - 24px); padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
-  :root:not([data-mobile="false"]) .composer { border-radius: 24px; padding: 14px; }
-  :root:not([data-mobile="false"]) .composer textarea { font-size: 16px; }
+  :root:not([data-mobile="false"]) .composer-wrap { width: calc(100% - 24px); padding-bottom: calc(8px + var(--inset-bottom)); }
+  /* one line (Paul, 2026-10-22: "make the input one line high on mobile"):
+     the field between attach and voice and the bell and send, growing as its
+     text wraps, up to six lines (its placeholder stays on one, cut short);
+     a quote and files on lines above it, a note on one below, and, when
+     the row would leave the field under 6em, the buttons after it that do
+     not fit on a line below, at its end */
+  :root:not([data-mobile="false"]) .composer { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: flex-end; gap: 6px; padding: 6px; border-radius: 23px; }
+  :root:not([data-mobile="false"]) .composer-actions { display: contents; }
+  :root:not([data-mobile="false"]) .composer :is(.quoting, .attachments) { flex: 1 0 100%; }
+  :root:not([data-mobile="false"]) .composer textarea { order: 1; flex: 1 1 6em; width: auto; font-size: 16px; min-height: 32px; max-height: calc(6lh + 8px); padding: 4px; }
+  :root:not([data-mobile="false"]) .composer textarea::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  :root:not([data-mobile="false"]) .composer .recording { min-height: 32px; }
+  :root:not([data-mobile="false"]) .composer :is(#notify, .steer, .send) { order: 2; }
+  :root:not([data-mobile="false"]) .composer-actions .note { order: 3; flex: 1 0 100%; }
   /* no zoom as a field takes focus: Safari zooms in on text under 16px */
   :root:not([data-mobile="false"]) :is(input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="range"]), textarea, select) { font-size: 16px !important; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .msg.agent.streaming .cursor, .dots i, .spin, .attachment-chip.uploading svg, .recording i, .setup-steps li.doing::before { animation: none; }
+  .msg.agent.streaming .cursor, .dots i, .spin, .attachment-chip.uploading svg, .recording i, .setup-steps li.doing::before, .step-dot, details.tools.rolling.advanced > * { animation: none; }
+  .shimmer { animation: none; background: none; color: var(--text-secondary); }
+  details.tools.rolling.advanced > .step:nth-last-child(4) { display: none; }
   .composer::before, .composer::after { transition: none; }
 }

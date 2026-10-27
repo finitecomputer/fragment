@@ -8,7 +8,9 @@
 //! `cargo xtask secret` sets them), and the config names each by its store
 //! name: the deploy reads no secret's value. It first lists the store
 //! (read-only) and refuses, before anything is built or made, when a
-//! secret the config names is not there. From the config and the
+//! secret the config names is not there; then it waits for every image
+//! the config pins to be ready on Cloudflare's network (prepare.rs), and
+//! refuses, having changed nothing, when one is not. From the config and the
 //! checked-in config (`cell/wrangler.jsonc`) it renders the Worker's own
 //! wrangler config under `target/deploy/<name>/`, the store secrets bound
 //! by name (`secrets_store_secrets`), makes the bucket and queues it
@@ -159,8 +161,8 @@ struct Computers {
 /// One image computers may be pinned to, as wrangler takes a Durable
 /// Object container's named image: built from the tree at every deploy, or
 /// a digest already in the account's registry, which a deploy keeps as it
-/// is (wrangler skips its build and prepares it, and refuses the deploy
-/// when the account's registry does not have it).
+/// is (it waits for Cloudflare to prepare it before it changes anything,
+/// and refuses when the account's registry does not have it: prepare.rs).
 #[derive(Deserialize, serde::Serialize)]
 #[serde(untagged)]
 enum Image {
@@ -183,6 +185,20 @@ struct Pinned {
     /// `registry.cloudflare.com/<account>/<repository>@sha256:<64 hex>`: a
     /// reference a deploy printed, or a computer's (docs/computers.md).
     image: String,
+}
+
+/// The images the config keeps at a digest (`Image::Pinned`), by name:
+/// each one a deploy waits for on Cloudflare's network before it changes
+/// anything (prepare.rs). One built from the tree wrangler pushes and
+/// prepares itself, before it uploads the Worker.
+fn pinned_images(d: &Deployment) -> Vec<&str> {
+    let images = d.computers.iter().flat_map(|c| c.images.values());
+    images
+        .filter_map(|i| match i {
+            Image::Pinned(p) => Some(p.image.as_str()),
+            Image::Built(_) => None,
+        })
+        .collect()
 }
 
 /// The registry wrangler pushes a deployment's images to.
@@ -238,15 +254,22 @@ fn catalog_of(d: &Deployment) -> Result<(fragment_core::catalog::Catalog, Provid
 
 /// Each slot of the model route on an OpenAI-compatible API, and its key's
 /// name in the store.
-type SlotKeys = Vec<(String, String)>;
+pub(crate) type SlotKeys = Vec<(String, String)>;
 
-/// The deployment's models (`models`): the cell's (`FRAGMENT_MODELS`, each
+/// The deployment's models (`models`, `models_cell`), when it names them.
+fn models_of(d: &Deployment) -> Result<(Option<Value>, SlotKeys)> {
+    let Some(models) = &d.models else { return Ok((None, vec![])) };
+    let (cell, keys) = models_cell(models)?;
+    Ok((Some(cell), keys))
+}
+
+/// A deployment config's `models`: the cell's (`FRAGMENT_MODELS`, each
 /// slot's upstream less its key) and the store secret each slot on an
 /// OpenAI-compatible API names for its key. Such a slot names one; a
 /// Workers AI slot names none. Checked as the cell checks them
-/// (`fragment_core::models::Models::parse`), on no local address.
-fn models_of(d: &Deployment) -> Result<(Option<Value>, SlotKeys)> {
-    let Some(models) = &d.models else { return Ok((None, vec![])) };
+/// (`fragment_core::models::Models::parse`), on no local address. `cargo
+/// xtask dev --real-agent` reads one too (dev_agent.rs).
+pub(crate) fn models_cell(models: &Value) -> Result<(Value, SlotKeys)> {
     let Some(slots) = models.as_object() else { bail!("models is an object: the slots it names ({}), each where it runs", fragment_core::models::SLOTS.join(", ")) };
     let mut cell = serde_json::Map::new();
     let mut keys = vec![];
@@ -272,7 +295,7 @@ fn models_of(d: &Deployment) -> Result<(Option<Value>, SlotKeys)> {
     if text.len() > WORKER_VAR_MAX_BYTES {
         bail!("models is {} bytes as the cell's FRAGMENT_MODELS, past a Workers variable's {WORKER_VAR_MAX_BYTES}: shorten the slots' bodies", text.len());
     }
-    Ok((Some(cell), keys))
+    Ok((cell, keys))
 }
 
 /// A Workers variable's largest value: 5 KB (developers.cloudflare.com/
@@ -606,6 +629,9 @@ fn checked(d: Deployment) -> Result<Deployment> {
         if !c.images.contains_key(&c.default_image) {
             bail!("computers: the default image {:?} is not one of its images", c.default_image);
         }
+        if c.images.len() > crate::prepare::IMAGES_MAX {
+            bail!("computers: {} images, more than the {} a deploy prepares", c.images.len(), crate::prepare::IMAGES_MAX);
+        }
         for (name, image) in &c.images {
             if let Image::Pinned(p) = image {
                 if !pinned_ok(&p.image, &d.account_id) {
@@ -683,56 +709,40 @@ fn ensure(cmd: &mut Command, what: &str) -> Result<()> {
     bail!("{what}: {}", text.trim())
 }
 
-/// How many times a deploy runs `wrangler deploy` at most: again only after
-/// a failure `retryable` names (the hand deploys' loop was three tries too).
-const DEPLOY_TRIES: u32 = 3;
-/// The pause before each try after the first.
-const DEPLOY_PAUSE: Duration = Duration::from_secs(10);
 /// How much of each of a try's streams is kept to classify its failure:
 /// the end, where wrangler says what failed (an image's build before it
 /// prints a lot).
 const DEPLOY_KEPT_BYTES: usize = 1 << 20;
 
-/// wrangler's message (4.145.0, `wrangler-dist/cli.js`) when the Worker's
-/// version is deployed but its Durable Object-managed Container application
-/// settings are not, and the rest of the deploy (its routes, its crons) is
-/// not done: it says to re-run the same `wrangler deploy` to finish.
-const CONTAINER_APPLY: &str = "Wrangler could not finish applying its Durable Object-managed Container application settings";
 /// Docker's, when an image's push waits too long for the registry's answer
 /// (the hand deploys' 4 GB layer did): pushed again, the layers the
 /// registry has are skipped. Only a deploy that builds an image pushes one.
 const PUSH_TIMEOUT: &str = "timeout awaiting response headers";
 
-/// A failed `wrangler deploy` that is safe to answer by running it again.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Retryable {
-    ContainerApply,
-    PushTimeout,
-}
-
-impl Retryable {
-    fn what(self) -> &'static str {
-        match self {
-            Retryable::ContainerApply => "its Container application settings were not applied, which wrangler says to answer by running it again",
-            Retryable::PushTimeout => "an image's push to the registry timed out awaiting its answer",
-        }
+/// How a `wrangler deploy` that ended with `status` and printed `output`
+/// ended (rollout.rs): done; an image's push that timed out (Docker's words
+/// on a line that names the registry: before any upload, so worth running
+/// again); or failed, as wrangler's `[ERROR]` said it. Whether a failed one
+/// left the Worker live is read from its deployments, never from its words
+/// (on 2026-10-24 it was: "The Worker version was deployed, but Wrangler
+/// could not finish applying its Durable Object-managed Container
+/// application settings").
+fn wrangled(status: ExitStatus, output: &str) -> crate::rollout::Wrangled {
+    use crate::rollout::Wrangled;
+    if status.success() {
+        return Wrangled::Done;
     }
-}
-
-/// Whether a failed `wrangler deploy` that printed `output` is `Retryable`:
-/// wrangler's container-settings message (its words, however its colours
-/// and line breaks fall), or Docker's push timeout on a line that names the
-/// registry. Nothing else is: not a config wrangler refuses, not auth, not
-/// a deploy Cloudflare refuses, not an image that does not build.
-fn retryable(output: &str) -> Option<Retryable> {
     let plain = without_ansi(output);
-    if plain.split_whitespace().collect::<Vec<_>>().join(" ").contains(CONTAINER_APPLY) {
-        return Some(Retryable::ContainerApply);
-    }
     if plain.lines().any(|l| l.contains(PUSH_TIMEOUT) && l.contains(&format!("https://{REGISTRY}/"))) {
-        return Some(Retryable::PushTimeout);
+        return Wrangled::PushTimedOut;
     }
-    None
+    // the error's line, and the lines it wraps onto, up to a blank one
+    let lines: Vec<&str> = plain.lines().collect();
+    let said = lines.iter().rposition(|l| l.contains("[ERROR]")).map(|at| {
+        let error = lines[at..].iter().take_while(|l| !l.trim().is_empty()).map(|l| l.trim()).collect::<Vec<_>>().join(" ");
+        error.split_once("[ERROR]").map_or(error.clone(), |(_, e)| e.trim().to_string())
+    });
+    Wrangled::Failed(said.unwrap_or_else(|| format!("wrangler deploy failed: {status}")))
 }
 
 /// `text` without its terminal escapes (wrangler colours its errors where
@@ -758,33 +768,130 @@ fn without_ansi(text: &str) -> String {
     plain
 }
 
-/// Runs `wrangler deploy` (`cmd`) until it succeeds, a failure is not
-/// `retryable`, or it has failed DEPLOY_TRIES times, each try's output
-/// passed through as it comes and each failure said.
-fn deploy_with_retries(cmd: &mut Command) -> Result<()> {
-    let shown = crate::shown(cmd);
-    with_retries(&shown, DEPLOY_PAUSE, || run_teed(cmd).with_context(|| format!("could not start {shown}")))
+/// The deploy's platform as rollout.rs drives it: wrangler on the rendered
+/// config, Cloudflare's API with wrangler's token, and the platform's own
+/// `/healthz/objects`.
+struct Cloudflare<'a> {
+    api: crate::cloudflare::Api,
+    tools: &'a devstack::Tools,
+    /// The Worker's name, and its rendered config (`target/deploy/…`).
+    script: String,
+    config: PathBuf,
+    /// `wrangler deploy` with its arguments (and a branch's secrets file).
+    deploy: Command,
+    platform: String,
+    http: reqwest::blocking::Client,
 }
 
-/// `deploy_with_retries`' loop, `attempt` one try (its status and what it
-/// printed).
-fn with_retries(shown: &str, pause: Duration, mut attempt: impl FnMut() -> Result<(ExitStatus, String)>) -> Result<()> {
-    let mut tries = 0;
-    loop {
-        tries += 1;
-        let (status, output) = attempt()?;
-        if status.success() {
-            return Ok(());
+impl Cloudflare<'_> {
+    /// The version the newest deployment serves (one at 100%, as every
+    /// deploy of ours is), or `None`: no Worker.
+    fn deployed(&self) -> Result<Option<String>> {
+        let (status, body) = self.api.call(reqwest::Method::GET, &format!("/workers/scripts/{}/deployments", self.script), None).map_err(anyhow::Error::msg)?;
+        if status == 404 {
+            return Ok(None);
         }
-        match retryable(&output) {
-            None => bail!("{shown} failed: {status}"),
-            Some(r) if tries >= DEPLOY_TRIES => bail!("{shown} failed {tries} times, the last {status}: {}", r.what()),
-            Some(r) => {
-                eprintln!("deploy: wrangler deploy failed ({status}, try {tries} of {DEPLOY_TRIES}): {}; running it again in {}s", r.what(), pause.as_secs());
-                std::thread::sleep(pause);
-            }
+        anyhow::ensure!(status == 200 && body["success"] == true, "the Worker {}'s deployments: {}", self.script, crate::cloudflare::errors(status, &body));
+        let mut deployments: Vec<&Value> = body["result"]["deployments"].as_array().into_iter().flatten().collect();
+        deployments.sort_by_key(|d| std::cmp::Reverse(d["created_on"].as_str().unwrap_or_default().to_string()));
+        let Some(newest) = deployments.first() else { return Ok(None) };
+        match newest["versions"].as_array().map(Vec::as_slice) {
+            Some([one]) if one["percentage"].as_f64() == Some(100.0) => Ok(one["version_id"].as_str().map(str::to_string)),
+            _ => bail!("the Worker {}'s newest deployment is split between versions ({}): a gradual deployment is no deploy of ours; deploy it whole by hand first", self.script, newest["versions"]),
         }
     }
+
+    /// The version `id`, as Cloudflare answers it: not ready yet, just
+    /// uploaded, is an error (code 100146, what wrangler met on 2026-10-24).
+    fn read_version(&self, id: &str) -> Result<Value> {
+        let (status, body) = self.api.call(reqwest::Method::GET, &format!("/workers/scripts/{}/versions/{id}", self.script), None).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(status == 200 && body["success"] == true, "the Worker {}'s version {id}: {}", self.script, crate::cloudflare::errors(status, &body));
+        Ok(body["result"].clone())
+    }
+
+    /// wrangler with `args` on the rendered config, its output passed
+    /// through: its status and what it printed.
+    fn wrangler(&self, args: &[&str]) -> Result<(ExitStatus, String)> {
+        let mut cmd = wrangler(self.tools, &self.api.account)?;
+        cmd.args(args).arg("-c").arg(&self.config);
+        let shown = crate::shown(&cmd);
+        run_teed(&mut cmd).with_context(|| format!("could not start {shown}"))
+    }
+}
+
+/// A version's plain-text variable `name`.
+fn variable(version: &Value, name: &str) -> Option<String> {
+    let bindings = version["resources"]["bindings"].as_array()?;
+    bindings.iter().find(|b| b["type"] == "plain_text" && b["name"] == name).and_then(|b| b["text"].as_str()).map(str::to_string)
+}
+
+impl crate::rollout::Platform for Cloudflare<'_> {
+    fn live(&mut self) -> Result<Option<crate::rollout::Live>> {
+        let Some(id) = self.deployed()? else { return Ok(None) };
+        let version = self.read_version(&id)?;
+        let release = variable(&version, "FRAGMENT_DEPLOY_ID").with_context(|| format!("the live version {id} names no FRAGMENT_DEPLOY_ID: no deploy of ours"))?;
+        Ok(Some(crate::rollout::Live { version: id, release, schema: variable(&version, "FRAGMENT_SCHEMA") }))
+    }
+
+    fn version(&mut self) -> Result<Option<String>> {
+        self.deployed()
+    }
+
+    fn deploy(&mut self) -> Result<crate::rollout::Wrangled> {
+        let shown = crate::shown(&self.deploy);
+        let (status, output) = run_teed(&mut self.deploy).with_context(|| format!("could not start {shown}"))?;
+        Ok(wrangled(status, &output))
+    }
+
+    /// What `wrangler deploy` does after its upload, done for the version
+    /// live: the version read back; the Computer's container application
+    /// checked as wrangler checks it (it applies no setting of ours: the
+    /// rendered config names none, `worker_config`); the triggers deployed.
+    fn finish(&mut self, id: &str) -> Result<()> {
+        let version = self.read_version(id)?;
+        let computer = version["resources"]["bindings"].as_array().into_iter().flatten().find(|b| b["type"] == "durable_object_namespace" && b["class_name"] == "Computer");
+        if let Some(namespace) = computer.and_then(|b| b["namespace_id"].as_str()) {
+            let (status, app) = self.api.call(reqwest::Method::GET, &format!("/containers/applications/{namespace}"), None).map_err(anyhow::Error::msg)?;
+            anyhow::ensure!(status == 200, "the Computer's container application: {}", crate::cloudflare::errors(status, &app));
+            let app = &app["result"];
+            anyhow::ensure!(
+                app["scheduling_policy"] == "durable_object" && app["durable_objects"]["namespace_id"] == namespace,
+                "the Computer's container application is not its namespace's, scheduled by it ({app}): fix it by hand"
+            );
+        }
+        let (status, _) = self.wrangler(&["triggers", "deploy"])?;
+        anyhow::ensure!(status.success(), "wrangler triggers deploy: {status}");
+        Ok(())
+    }
+
+    fn probe(&mut self) -> Result<crate::rollout::Probed> {
+        let url = format!("{}/healthz/objects", self.platform);
+        let resp = self.http.get(&url).send().with_context(|| format!("GET {url}"))?;
+        let status = resp.status().as_u16();
+        let named = resp.headers().get("x-fragment-deploy").and_then(|v| v.to_str().ok()).map(str::to_string);
+        let body: Value = resp.json().unwrap_or(Value::Null);
+        Ok(crate::rollout::probe_of(status, &body, named.as_deref()))
+    }
+
+    fn rollback(&mut self, to: &crate::rollout::Live) -> Result<()> {
+        let message = format!("cargo xtask deploy: back to {}, the new release failed", to.release);
+        let (status, _) = self.wrangler(&["rollback", &to.version, "--yes", "--message", &message])?;
+        anyhow::ensure!(status.success(), "wrangler rollback {}: {status}", to.version);
+        Ok(())
+    }
+}
+
+/// The schema a release's objects run, as the deploy names it
+/// (`FRAGMENT_SCHEMA`): the first 16 hex digits of the SHA-256 of the
+/// lock the compiled steps make (`fragment_core::migrate::host::
+/// platform_lock`: every class's steps, applied to a new object), never of
+/// the lock file, which a hand deploy's tree may hold stale. The cell this
+/// deploy ships is built from the same crates. A release is rolled back
+/// only to one of the same (rollout.rs): an object that ran a newer step
+/// refuses older code (docs/MODEL.md, Schemas).
+fn schema_id() -> Result<String> {
+    let lock = fragment_core::migrate::host::platform_lock().map_err(|e| anyhow::anyhow!("the Durable Objects' steps do not apply to a new object: {e}"))?;
+    Ok(fragment_core::blob::sha256_hex(lock.as_bytes())[..16].to_string())
 }
 
 /// Runs `cmd` (no stdin) to its end, its output passed through to this
@@ -951,9 +1058,20 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     anyhow::ensure!(d.ai_gateway.as_deref() != Some("default"), "ai_gateway names the deployment's own gateway: `default` makes one that logs");
     let bound = bound_for(&d, branch.as_deref())?;
     let tools = devstack::Tools::locate()?;
+    // Cloudflare's API beside wrangler, with its token: the images, the
+    // Worker's deployments (rollout.rs)
+    let mut api = crate::cloudflare::Api::from_env(&d.account_id)?;
     // and every store secret the Worker is bound to is there (read-only)
     let store = preflight(&tools, &d, &config, &bound)?;
     println!("secrets: the {} the config names are in the account's Secrets Store {} ({})", named_secrets(&bound).len(), store.name, store.id);
+    // and every image it pins ready on Cloudflare's network, before anything
+    // is built or changed: wrangler waits 15 minutes and no longer
+    // (prepare.rs)
+    let pinned = pinned_images(&d);
+    if !pinned.is_empty() {
+        crate::prepare::until_ready(&mut api, &mut crate::prepare::Wall::new(), &pinned, crate::prepare::DEPLOY_LIMIT)
+            .context("deploy: refused before anything was built or changed; deploy again once the image is ready")?;
+    }
     crate::build()?;
     let release = this_release()?;
     let deploy_id = &release.id;
@@ -1006,15 +1124,40 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         }
         true => None,
     };
-    deploy_with_retries(&mut deploy_cell)?;
+    // the release's build, finished, as wrangler reads it: never one a
+    // `cargo xtask dev` rebuilt meanwhile, and none rebuilds it until every
+    // try has read it (devstack's built.rs)
+    let build = devstack::cell_dir().join("build");
+    let reading = devstack::built::reading(&build)?;
+    devstack::built::release(&build)?;
+    // `wrangler deploy` on: finished, verified at every object class, or
+    // the release before back (rollout.rs)
+    let mut platform = Cloudflare {
+        api,
+        tools: &tools,
+        script: n.cell.clone(),
+        config: cell_config.clone(),
+        deploy: deploy_cell,
+        platform: platform_url.clone(),
+        http: reqwest::blocking::Client::builder().timeout(Duration::from_secs(20)).build()?,
+    };
+    // a branch's Stripe endpoint made anew deleted the one before, whose
+    // signing secret the release before holds: no rollback restores it
+    let rollback = match &webhook {
+        Some(_) => Err(format!("this deploy made {}'s Stripe webhook endpoint anew and deleted the one before, whose signing secret the release before holds: rolled back, every webhook would fail its signature", crate::stripe::endpoint_url(&platform_url))),
+        None => Ok(()),
+    };
+    let outcome = crate::rollout::run(&mut platform, &mut crate::prepare::Wall::new(), deploy_id, &schema_id()?, rollback)?;
+    drop(reading);
     drop(test_secrets);
-    println!("deployed {deploy_id}:");
+    outcome.result()?;
+    println!("deployed {deploy_id}, every object class answering it:");
     println!("  the platform  {platform_url}/  (sign-in redirect: {platform_url}/auth/callback)");
     if test_secret.is_some() {
         println!("  test levers   on (test_secret_file): cargo xtask e2e --hosted --config <this config> --branch {}", branch.as_deref().unwrap_or(""));
     }
     println!("  fragments     https://<name>{}.{}/", n.label_suffix.as_deref().unwrap_or(""), n.suffix);
-    println!("  check         curl -sI {platform_url}/healthz | grep x-fragment-deploy");
+    println!("  objects       curl -s {platform_url}/healthz/objects");
     Ok(())
 }
 
@@ -1075,6 +1218,11 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
                 images.insert(name.clone(), i);
             }
             container["images"] = Value::Object(images);
+            // no setting wrangler applies to its container application after
+            // the Worker's upload (observability, ssh, flags): a deploy
+            // whose Worker is live finishes without them (rollout.rs)
+            let keys: Vec<&String> = container.as_object().context("the container is an object")?.keys().collect();
+            anyhow::ensure!(keys.iter().all(|k| ["class_name", "scheduling_policy", "images"].contains(&k.as_str())), "cell/wrangler.jsonc's container names {keys:?}: one with settings wrangler applies after the upload is no deploy rollout.rs finishes");
         }
         None => {
             c.remove("containers");
@@ -1083,6 +1231,8 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
     let mut vars = json!({
         "FRAGMENT_DEPLOY_ID": release.id,
         "FRAGMENT_DEPLOYED_AT": release.deployed_at.to_string(),
+        // read back by the next deploy, which goes back to this release only at its schema (rollout.rs)
+        "FRAGMENT_SCHEMA": schema_id()?,
         "FRAGMENT_HOST_SUFFIX": n.suffix,
         "FRAGMENT_PLATFORM_URL": platform_url,
         "CODESTORAGE_ORG": d.codestorage.org,
@@ -1248,69 +1398,72 @@ mod tests {
     /// A hand deploy's image push that timed out (2026-10-07).
     const PUSH_TIMEOUT_HAND: &str = "edd7ace4: Pushing [=====>    ] 1.2GB/4.1GB\nfailed to do request: Put \"https://registry.cloudflare.com/v2/acct/fragment-claude-smoke-computer-hermes/blobs/uploads/edd7ace4-5361-459f-9b4d-c51822ce7ada?digest=sha256%3A964fade076b4f7bfb29f8230df8d4fe482bf097ede709a00fff82a55c78391f8\": net/http: timeout awaiting response headers\n\n✘ [ERROR] Docker command exited with code: 1\n";
 
-    /// Only what wrangler or the registry says a re-run answers is run
-    /// again: the container settings not applied (in CI's colours, or
-    /// plain and wrapped as a terminal wraps it) and the registry's push
-    /// timeout. A config wrangler refuses, auth, a deploy Cloudflare
-    /// refuses, an image that does not build or a push the registry
-    /// refuses, and a timeout from any host but the registry are not.
-    #[test]
-    fn a_deploy_is_run_again_only_for_a_failure_a_rerun_answers() {
-        assert_eq!(retryable(CONTAINER_APPLY_CI), Some(Retryable::ContainerApply));
-        let wrapped = "✘ [ERROR] The Worker version was deployed, but Wrangler could not finish\n  applying its Durable Object-managed Container application settings.\n  Re-run the same `wrangler deploy` command to retry and finish deployment.\n";
-        assert_eq!(retryable(wrapped), Some(Retryable::ContainerApply));
-        assert_eq!(retryable(PUSH_TIMEOUT_HAND), Some(Retryable::PushTimeout));
-        assert_eq!(retryable(&format!("\x1b[2m{PUSH_TIMEOUT_HAND}\x1b[0m")), Some(Retryable::PushTimeout));
-        for (what, output) in [
-            ("a config wrangler refuses", "✘ [ERROR] Processing target/deploy/fragment-preview/cell.json configuration:\n\n    - \"containers[0]\" should have a string \"image\" field.\n"),
-            ("auth", "✘ [ERROR] A request to the Cloudflare API (/accounts/acct/workers/scripts/fragment-preview) failed.\n\n  Authentication error [code: 10000]\n"),
-            ("a deploy Cloudflare refuses", "✘ [ERROR] A request to the Cloudflare API (/accounts/acct/workers/scripts/fragment-preview/versions) failed.\n\n  Your Worker exceeded the size limit of 10 MiB. [code: 10027]\n"),
-            ("a container application Cloudflare refuses", "✘ [ERROR] Error creating application due to a misconfiguration:\n  the Container application settings are invalid: instance_type standard-9 does not exist\n"),
-            ("an image that does not build", "ERROR: failed to solve: process \"/bin/sh -c cargo build --release\" did not complete successfully: exit code: 101\n✘ [ERROR] Docker command exited with code: 1\n"),
-            ("a push the registry refuses", "unauthorized: authentication required: https://registry.cloudflare.com/v2/acct/fragment-computer-hermes/blobs/uploads/\n✘ [ERROR] Docker command exited with code: 1\n"),
-            ("a base image's pull timing out", "failed to do request: Head \"https://registry-1.docker.io/v2/library/debian/manifests/bookworm\": net/http: timeout awaiting response headers\n✘ [ERROR] Docker command exited with code: 1\n"),
-            ("nothing said", ""),
-        ] {
-            assert_eq!(retryable(output), None, "{what} is not run again");
-        }
-        assert_eq!(without_ansi("\x1b[41;97mERROR\x1b[0m \x1b7ok\x1b[1m"), "ERROR ok");
-    }
-
     fn exited(code: i32) -> ExitStatus {
         ExitStatus::from_raw(code << 8)
     }
 
-    /// A deploy is run again after each failure a re-run answers, up to
-    /// three tries, and never after another: the first such failure ends
-    /// it, as does one that cannot start.
+    /// How a `wrangler deploy` ended, for rollout.rs: only the registry's
+    /// push timeout is worth running again (before any upload); every
+    /// other failure is said as wrangler said it (in CI's colours, or
+    /// plain and wrapped as a terminal wraps it), and rollout.rs reads the
+    /// Worker's deployments to know whether it left the Worker live. A
+    /// timeout from any host but the registry is no push timeout.
     #[test]
-    fn a_deploy_tries_three_times_at_most_and_only_again_for_a_rerun() {
-        let tries = |script: Vec<(i32, &'static str)>| {
-            let mut script = script.into_iter();
-            let mut n = 0;
-            let r = with_retries("wrangler deploy", Duration::ZERO, || {
-                n += 1;
-                let (code, output) = script.next().expect("the script has a try for each");
-                Ok((exited(code), output.to_string()))
-            });
-            (n, r.map_err(|e| e.to_string()))
-        };
-        assert_eq!(tries(vec![(0, "")]), (1, Ok(())));
-        assert_eq!(tries(vec![(1, CONTAINER_APPLY_CI), (0, "")]), (2, Ok(())));
-        assert_eq!(tries(vec![(1, PUSH_TIMEOUT_HAND), (1, CONTAINER_APPLY_CI), (0, "")]), (3, Ok(())));
-        let (n, r) = tries(vec![(1, CONTAINER_APPLY_CI); 3]);
-        assert_eq!(n, 3, "three tries at most");
-        assert!(r.as_ref().is_err_and(|e| e.contains("failed 3 times") && e.contains("Container application settings")), "{r:?}");
-        let (n, r) = tries(vec![(1, "✘ [ERROR] Authentication error [code: 10000]")]);
-        assert_eq!((n, r), (1, Err("wrangler deploy failed: exit status: 1".into())), "another failure is not run again");
-        let (n, r) = tries(vec![(1, CONTAINER_APPLY_CI), (1, "✘ [ERROR] Authentication error [code: 10000]")]);
-        assert_eq!((n, r.is_err()), (2, true), "a retry's other failure ends it");
-        let mut n = 0;
-        let r = with_retries("wrangler deploy", Duration::ZERO, || {
-            n += 1;
-            bail!("could not start wrangler deploy")
-        });
-        assert!(r.is_err() && n == 1, "a try that cannot start is not run again");
+    fn a_deploy_s_end_is_read_as_wrangler_says_it() {
+        use crate::rollout::Wrangled;
+        assert_eq!(wrangled(exited(0), "Current Version ID: 13f90f05"), Wrangled::Done);
+        let applying = "The Worker version was deployed, but Wrangler could not finish applying its Durable Object-managed Container application settings. Re-run the same `wrangler deploy` command to retry and finish deployment.";
+        assert_eq!(wrangled(exited(1), CONTAINER_APPLY_CI), Wrangled::Failed(applying.into()));
+        let wrapped = "✘ [ERROR] The Worker version was deployed, but Wrangler could not finish\n  applying its Durable Object-managed Container application settings.\n  Re-run the same `wrangler deploy` command to retry and finish deployment.\n";
+        assert_eq!(wrangled(exited(1), wrapped), Wrangled::Failed(applying.into()));
+        let preparing = "├ Preparing hermes for Cloudflare Containers\n\n\x1b[31m✘ \x1b[41;31m[\x1b[41;97mERROR\x1b[41;31m]\x1b[0m \x1b[1mTimed out while preparing the container image on Cloudflare's network.\x1b[0m\n\n";
+        assert_eq!(wrangled(exited(1), preparing), Wrangled::Failed("Timed out while preparing the container image on Cloudflare's network.".into()));
+        assert_eq!(wrangled(exited(1), PUSH_TIMEOUT_HAND), Wrangled::PushTimedOut);
+        assert_eq!(wrangled(exited(1), &format!("\x1b[2m{PUSH_TIMEOUT_HAND}\x1b[0m")), Wrangled::PushTimedOut);
+        let pull = "failed to do request: Head \"https://registry-1.docker.io/v2/library/debian/manifests/bookworm\": net/http: timeout awaiting response headers\n✘ [ERROR] Docker command exited with code: 1\n";
+        assert_eq!(wrangled(exited(1), pull), Wrangled::Failed("Docker command exited with code: 1".into()), "a base image's pull timing out is no push's");
+        assert_eq!(wrangled(exited(1), ""), Wrangled::Failed("wrangler deploy failed: exit status: 1".into()), "nothing said");
+        assert_eq!(without_ansi("\x1b[41;97mERROR\x1b[0m \x1b7ok\x1b[1m"), "ERROR ok");
+    }
+
+    /// The release a deploy goes back to is read from a version as
+    /// Cloudflare answers it (production's 13f90f05, 2026-10-24, its
+    /// bindings cut down), and its schema is the lock's, named in the
+    /// rendered config.
+    #[test]
+    fn a_version_names_its_release_and_schema() {
+        let version = json!({ "resources": { "bindings": [
+            { "name": "COMPUTER", "class_name": "Computer", "namespace_id": "89eb26fc134141d1b2b7dee7b2ed9fd6", "type": "durable_object_namespace" },
+            { "name": "FRAGMENT_DEPLOY_ID", "text": "0e9bc7b36e5c", "type": "plain_text" },
+            { "name": "FRAGMENT_SCHEMA", "text": "5c1e3b0f2a9d4e61", "type": "plain_text" },
+            { "name": "HOST_SECRET", "type": "secrets_store_secret" }
+        ] } });
+        assert_eq!(variable(&version, "FRAGMENT_DEPLOY_ID").as_deref(), Some("0e9bc7b36e5c"));
+        assert_eq!(variable(&version, "FRAGMENT_SCHEMA").as_deref(), Some("5c1e3b0f2a9d4e61"));
+        assert_eq!(variable(&version, "HOST_SECRET"), None, "a secret is no variable");
+        assert_eq!(variable(&json!({}), "FRAGMENT_DEPLOY_ID"), None);
+        let schema = schema_id().unwrap();
+        assert!(schema.len() == 16 && schema.bytes().all(|b| b.is_ascii_hexdigit()), "{schema}");
+    }
+
+    /// Goal: the schema a version names is its code's, whatever the lock
+    /// file in a hand deploy's tree says (review of #605: a stale lock
+    /// would let a rollback go beneath steps the objects ran). Method: the
+    /// fingerprint is of the lock the compiled steps make; the tree's lock,
+    /// current, makes the same one, and a stale lock (a step's line cut
+    /// off) is drift `cargo xtask check` names, with the fingerprint unmoved.
+    #[test]
+    fn a_release_names_the_schema_its_code_runs_not_its_lock_file() {
+        use fragment_core::migrate::{host, CLASSES};
+        let made = host::platform_lock().unwrap();
+        assert_eq!(schema_id().unwrap(), fragment_core::blob::sha256_hex(made.as_bytes())[..16]);
+        let file = fs::read_to_string(devstack::repo_root().join(host::LOCK_PATH)).unwrap();
+        assert_eq!(file, made, "the tree's lock is current (cargo xtask check holds it)");
+        // the lock as a tree whose newest step was never locked holds it
+        let newest = file.lines().rfind(|l| l.starts_with("step ")).expect("a locked step").to_string();
+        let stale: String = file.lines().filter(|l| *l != newest).map(|l| format!("{l}\n")).collect();
+        assert!(!host::drift(&stale, &CLASSES).is_empty(), "a lock missing a step is drift: {newest}");
+        assert_eq!(schema_id().unwrap(), fragment_core::blob::sha256_hex(made.as_bytes())[..16], "and the fingerprint is the code's still");
     }
 
     /// A try's output is passed through whole, and only its end is kept
@@ -1327,10 +1480,11 @@ mod tests {
         assert_eq!(tee(CONTAINER_APPLY_CI.as_bytes(), &mut shown).expect("a tee of memory"), CONTAINER_APPLY_CI.as_bytes());
         // a child's two streams are both kept, as wrangler's error is on
         // stderr and Docker's push on either
-        let (status, output) = run_teed(Command::new("/bin/sh").args(["-c", "echo pushed; echo \"$0\" >&2; exit 1", CONTAINER_APPLY])).expect("run /bin/sh");
+        let said = "✘ [ERROR] Authentication error [code: 10000]";
+        let (status, output) = run_teed(Command::new("/bin/sh").args(["-c", "echo pushed; echo \"$0\" >&2; exit 1", said])).expect("run /bin/sh");
         assert_eq!(status.code(), Some(1));
-        assert_eq!(output, format!("pushed\n{CONTAINER_APPLY}\n"));
-        assert_eq!(retryable(&output), Some(Retryable::ContainerApply));
+        assert_eq!(output, format!("pushed\n{said}\n"));
+        assert_eq!(wrangled(status, &output), crate::rollout::Wrangled::Failed("Authentication error [code: 10000]".into()));
     }
 
     /// A deploy's id is its commit, which `/healthz` answers and CD checks;
@@ -1361,6 +1515,7 @@ mod tests {
         assert_eq!(vars["FRAGMENT_DEPLOY_ID"], "abc123");
         assert_eq!(vars["FRAGMENT_DEPLOYED_AT"], "1792615843", "a Worker variable is a string");
         assert_eq!(vars["FRAGMENT_DEPLOYED_AT"].as_str().and_then(fragment_core::release::deployed), Some(1_792_615_843));
+        assert_eq!(vars["FRAGMENT_SCHEMA"], schema_id().unwrap(), "the schema a rollback to it is checked against");
         let release = this_release().unwrap();
         assert!(fragment_core::release::valid(&release.id) && release.deployed_at > 1_792_615_843, "this tree's, made now");
     }
@@ -1826,6 +1981,8 @@ mod tests {
         assert_eq!(images["hermes-canary"]["dockerfile"], json!(devstack::repo_root().join("images/hermes/Dockerfile")));
         assert_eq!(images["hermes-canary"]["build_context"], json!(devstack::repo_root().join(".")));
         assert_eq!(cell["vars"]["FRAGMENT_COMPUTER_IMAGE"], "hermes", "new computers start on stable");
+        assert_eq!(pinned_images(&d), vec![stable.as_str()], "the deploy waits for the pinned image alone: wrangler prepares the one it builds");
+        assert!(pinned_images(&deployment(None, None)).is_empty(), "no computers, no image to wait for");
 
         let refused = |hermes: Value, test: &str| {
             let mut v = v.clone();
@@ -2017,6 +2174,15 @@ mod tests {
         let big = row(json!({ "body": { "x": "a".repeat(2500) } }))["cheap"].clone();
         refused(json!({ "cheap": big, "medium": big }), "past a Workers variable's 5000: shorten the slots' bodies");
         assert_eq!(with(row(json!({ "body": { "provider": { "zdr": true } } }))), "", "a body within its bounds");
+        // a model off OpenRouter at the list price its slot names (the private tier's fallback, Tinfoil's)
+        let listed = json!({ "input": 0.65, "cached_input": 0.13, "output": 1.45 });
+        let tinfoil = |price: Value| json!({ "fallback": { "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "key": "fragment-tinfoil-api-key", "model": "deepseek-v4-1-flash", "price": price } });
+        assert_eq!(with(tinfoil(listed.clone())), "", "an id the book has no row for, at the price its slot names");
+        refused(tinfoil(json!({ "input": 0.65 })), "models.fallback: price.output is the dollars a million tokens its API lists, from 0 to 1000, not nothing");
+        refused(tinfoil(json!({ "input": -1, "output": 1.45 })), "models.fallback: price.input is the dollars a million tokens its API lists, from 0 to 1000, not -1");
+        let mut priced_twice = openrouter(json!({ "prompt": 0.15, "completion": 0.5 }));
+        priced_twice["cheap"]["price"] = listed.clone();
+        refused(priced_twice, "models.cheap: a model on OpenRouter is priced at its ceiling (body.provider.max_price), not a price of its own");
         // a slot alone: rendered as named, the rest the cell's
         let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
         let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
@@ -2025,6 +2191,21 @@ mod tests {
         let n = names(&d, Some("p5")).unwrap();
         let vars = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"].clone();
         assert_eq!(vars["FRAGMENT_MODELS"], json!({ "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } }).to_string());
+        // Tinfoil's, its price in the cell's variable and its key bound for its slot alone
+        v["models"] = tinfoil(listed.clone());
+        let d = load(&config_file("models-tinfoil", &v)).unwrap();
+        let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
+        let models: Value = serde_json::from_str(cell["vars"]["FRAGMENT_MODELS"].as_str().unwrap()).unwrap();
+        assert_eq!(models, json!({ "fallback": { "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "model": "deepseek-v4-1-flash", "price": listed } }), "no key in the cell's variable, the price in it");
+        assert_eq!(bound(&d).unwrap().model_keys, [("fallback".to_string(), "fragment-tinfoil-api-key".to_string())]);
+        // a private tier whose fallback is not private is refused before anything is made (Paul, 2026-10-22)
+        let mut private = row(json!({ "private": true }));
+        private["vision"] = private["cheap"].clone();
+        private["fallback"] = json!({ "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3-flash" });
+        refused(private.clone(), "models.fallback: models.cheap is private, and its agents' failures and stalls reach fallback");
+        private["fallback"] = tinfoil(listed.clone())["fallback"].clone();
+        private["fallback"]["private"] = json!(true);
+        assert_eq!(with(private), "", "the private tier: every slot its calls reach private");
         // the fields it replaced
         for (field, now) in [("vision_model", "models.vision"), ("fallback_model", "models.fallback")] {
             let mut v = v.clone();

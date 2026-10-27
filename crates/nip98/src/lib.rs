@@ -190,6 +190,19 @@ fn signed(event: &Event) -> Result<(), AuthError> {
     key.verify_raw(&id, &sig).map_err(|_| AuthError::BadSignature)
 }
 
+/// Whether `sig_hex` (128 hex) is `pubkey_hex`'s (64 hex) BIP-340
+/// signature of `digest`: a digest the caller made, tagged for its one use
+/// (an agent's door: fragment_core::door), never a request's (NIP-98's
+/// events are digests of `[0, …]`, which no tagged digest is).
+pub fn verify_digest(pubkey_hex: &str, digest: &[u8; 32], sig_hex: &str) -> bool {
+    let (mut sig_bytes, mut key_bytes) = ([0u8; 64], [0u8; 32]);
+    if hex::decode_to_slice(sig_hex, &mut sig_bytes).is_err() || hex::decode_to_slice(pubkey_hex, &mut key_bytes).is_err() {
+        return false;
+    }
+    let (Ok(sig), Ok(key)) = (Signature::try_from(sig_bytes.as_slice()), VerifyingKey::from_bytes(&key_bytes)) else { return false };
+    key.verify_raw(digest, &sig).is_ok()
+}
+
 /// Verifies a NIP-98 header for `method url` with its `payload`: the body
 /// the router read (empty when it holds none: then the event must carry no
 /// payload tag, or the hash of nothing), or one it streams through, at
@@ -281,6 +294,13 @@ impl Keys {
     pub fn proof(&self, method: &str, url: &str, signer_hex: &str, created_at: i64) -> String {
         let tags = vec![tag("u", url), tag("method", &method.to_ascii_uppercase()), tag("p", signer_hex)];
         self.event(tags, created_at)
+    }
+
+    /// Its BIP-340 signature of `digest` (128 hex), for `verify_digest`:
+    /// with no auxiliary randomness, as its events are (BIP-340's nonce is
+    /// the key's and the message's either way).
+    pub fn sign_digest(&self, digest: &[u8; 32]) -> String {
+        hex::encode(self.key.sign_raw(digest, &[0u8; 32]).expect("BIP-340 signing a 32-byte digest").to_bytes())
     }
 
     fn event(&self, tags: Vec<Vec<String>>, created_at: i64) -> String {
@@ -515,6 +535,26 @@ mod tests {
         // an ordinary request header names no one
         let h = new.header("POST", URL, b"", NOW);
         assert_eq!(verify_proof(&h, "POST", URL, signer.pubkey_hex(), NOW, 60), Err(AuthError::NotForSigner));
+    }
+
+    /// Goal: a digest's signature verifies by its key alone, for that digest
+    /// alone; anything malformed is refused, never a panic.
+    #[test]
+    fn digests_sign_and_verify() {
+        let (k, other) = (keys(7), keys(8));
+        let digest: [u8; 32] = Sha256::digest(b"fragment door test").into();
+        let sig = k.sign_digest(&digest);
+        assert_eq!(sig.len(), 128);
+        assert_eq!(sig, k.sign_digest(&digest), "the same each time");
+        assert!(verify_digest(k.pubkey_hex(), &digest, &sig));
+        assert!(!verify_digest(other.pubkey_hex(), &digest, &sig), "another key's");
+        let mut flipped = digest;
+        flipped[0] ^= 1;
+        assert!(!verify_digest(k.pubkey_hex(), &flipped, &sig), "another digest");
+        for bad in ["", "ab", &"zz".repeat(64), &"ab".repeat(65)] {
+            assert!(!verify_digest(k.pubkey_hex(), &digest, bad), "{bad}");
+        }
+        assert!(!verify_digest("ab", &digest, &sig) && !verify_digest(&"00".repeat(32), &digest, &sig));
     }
 
     #[test]

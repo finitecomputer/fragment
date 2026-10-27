@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
+pub mod built;
 pub mod containers;
 pub mod node;
 mod node_release;
@@ -53,6 +54,15 @@ pub fn repo_root() -> PathBuf {
 
 pub fn cell_dir() -> PathBuf {
     repo_root().join("cell")
+}
+
+/// Our Hermes image as a node's config names a computer image, built from
+/// the tree: from the repo's root, since it carries the fragment CLI
+/// (docs/computers.md, "Skills and the CLI in our Hermes image"). The
+/// hermes lane's, and `cargo xtask dev --real-agent`'s.
+pub fn hermes_image() -> serde_json::Value {
+    let root = repo_root();
+    serde_json::json!({ "dockerfile": root.join("images/hermes/Dockerfile"), "build_context": root })
 }
 
 /// `text` (JSONC: JSON with `//` comments) as JSON.
@@ -97,7 +107,8 @@ pub fn read_config(project: &Path) -> Result<serde_json::Value> {
 /// A copy of the built cell project at `dir`: its config (without its
 /// `build` step: a staged copy has no source to build), its shim, and its
 /// `build/`, so a node run from it keeps its state and variables apart from
-/// the source tree, where `xtask dev` runs.
+/// the source tree, where `xtask dev` runs. Only the release's finished
+/// build is staged (built.rs): never one `xtask dev` rebuilt.
 pub fn stage_project(dir: &Path) -> Result<PathBuf> {
     fn copy_dir(from: &Path, to: &Path) -> Result<()> {
         fs::create_dir_all(to)?;
@@ -120,7 +131,12 @@ pub fn stage_project(dir: &Path) -> Result<PathBuf> {
     fs::write(dir.join("wrangler.jsonc"), serde_json::to_string_pretty(&config)?)?;
     fs::copy(from.join("entry.mjs"), dir.join("entry.mjs")).context("stage entry.mjs")?;
     let _ = fs::remove_dir_all(dir.join("build"));
+    // no build writes among the files as they are copied
+    let reading = built::reading(&from.join("build"))?;
     copy_dir(&from.join("build"), &dir.join("build")).with_context(|| format!("stage {}/build (run `cargo xtask build`)", from.display()))?;
+    drop(reading);
+    // the copy is the release's, finished, never `cargo xtask dev`'s
+    built::release(&dir.join("build"))?;
     Ok(dir.to_path_buf())
 }
 
@@ -160,11 +176,18 @@ pub fn local_config(project: &Path) -> PathBuf {
 /// The project's config as a local node runs it (`local_config`): less the
 /// remote-only bindings, its secrets bound by name (`secrets`, each a
 /// binding and its secret's name) in wrangler's local store, as a deploy
-/// binds them in the account's, and its computer images built from
-/// Dockerfiles of its own (`containers::scope_images`), so that no other
-/// stack's teardown removes its computers.
-fn write_local_config(project: &Path, secrets: &[(String, &str)]) -> Result<PathBuf> {
+/// binds them in the account's, `images` beside its own computer images,
+/// and every one built from a Dockerfile of its own
+/// (`containers::scope_images`), so that no other stack's teardown removes
+/// its computers.
+fn write_local_config(project: &Path, secrets: &[(String, &str)], images: &[(String, serde_json::Value)]) -> Result<PathBuf> {
     let mut config = read_config(project)?;
+    if !images.is_empty() {
+        let named = config["containers"][0]["images"].as_object_mut().context("the config's computer container names its images")?;
+        for (name, image) in images {
+            anyhow::ensure!(named.insert(name.clone(), image.clone()).is_none(), "the image {name} is the config's own already");
+        }
+    }
     absolute_images(&mut config, project)?;
     containers::scope_images(&mut config, project)?;
     let obj = config.as_object_mut().context("a wrangler config is an object")?;
@@ -285,12 +308,10 @@ pub struct Fleet {
     pub ai_gateway: Option<String>,
     /// Where the model route's names run (`FRAGMENT_MODELS`:
     /// `fragment_core::models::Models`' JSON, each slot an upstream; `None`:
-    /// every one on Workers AI), and, when some run on an OpenAI-compatible
-    /// API, the value of the key they name (`store::MODEL_KEY`,
-    /// bound for each slot `model_key_slots` lists).
+    /// every one on Workers AI), and the key of each that runs on an
+    /// OpenAI-compatible API (`ModelKey`).
     pub models: Option<String>,
-    pub model_key_slots: Vec<String>,
-    pub model_key_value: Option<String>,
+    pub model_keys: Vec<ModelKey>,
     /// Where the platform's mail goes (`FRAGMENT_MAIL_URL`: the mail fake in
     /// dev and the e2e; `None`: the Email Sending binding), and the address
     /// it comes from (`FRAGMENT_MAIL_FROM`).
@@ -322,8 +343,13 @@ pub struct Fleet {
     /// The e2e's, made per run; never dev's.
     pub test_secret: Option<String>,
     /// The image new computers are pinned to (a name in cell/wrangler.jsonc's
-    /// `containers` images), and whether they sleep with a snapshot.
+    /// `containers` images, or in `images`), and whether they sleep with a
+    /// snapshot.
     pub computer_image: Option<String>,
+    /// Computer images beside the project's own (its stubs), by name, each
+    /// as its config names one: dev's Hermes image (`hermes_image`), with
+    /// `cargo xtask dev --real-agent`.
+    pub images: Vec<(String, serde_json::Value)>,
     pub computer_snapshots: bool,
     /// How long a computer whose sleep's save keeps failing stays awake
     /// before it sleeps unsaved (`FRAGMENT_COMPUTER_UNSAVED_MAX_MS`; `None`:
@@ -354,6 +380,16 @@ pub struct StripeVars {
     pub tax: bool,
 }
 
+/// The key of a slot of the model route on an OpenAI-compatible API
+/// (`fragment_core::models::SLOTS`): its secret's name in the store, bound
+/// for the slot as a deploy binds the one its config names, and its value.
+/// Two slots may name one secret (Finite's tiers name one key), at one value.
+pub struct ModelKey {
+    pub slot: String,
+    pub name: String,
+    pub value: String,
+}
+
 /// A WorkOS environment as the cell reads it.
 pub struct WorkOsVars {
     pub client_id: String,
@@ -366,8 +402,8 @@ impl Fleet {
     /// The store secrets its Worker is bound to, by name.
     fn bound(&self) -> store::Bound {
         let providers: Vec<&str> = self.operator_key_values.iter().map(|(p, _)| p.as_str()).collect();
-        let slots: Vec<&str> = self.model_key_slots.iter().map(String::as_str).collect();
-        let mut bound = store::Bound::conventional(self.workos.is_some(), self.stripe.is_some(), &providers, &slots);
+        let mut bound = store::Bound::conventional(self.workos.is_some(), self.stripe.is_some(), &providers, &[]);
+        bound.model_keys = self.model_keys.iter().map(|k| (k.slot.clone(), k.name.clone())).collect();
         bound.connection_secrets = self.connection_secret_values.iter().map(|(p, _)| (p.clone(), format!("fragment-{p}-oauth-secret"))).collect();
         bound
     }
@@ -390,9 +426,12 @@ impl Fleet {
                 values.push((w.as_str(), s.webhook_secret.as_str()));
             }
         }
-        if !bound.model_keys.is_empty() {
-            let value = self.model_key_value.as_deref().context("a fleet whose models run on an OpenAI-compatible API names its key's value")?;
-            values.push((store::MODEL_KEY, value));
+        // each secret once: two slots naming one name one value
+        for key in &self.model_keys {
+            match values.iter().find(|(name, _)| *name == key.name) {
+                Some((_, value)) => anyhow::ensure!(*value == key.value, "the model key {} is one secret, at one value", key.name),
+                None => values.push((key.name.as_str(), key.value.as_str())),
+            }
         }
         for ((_, name), (_, value)) in bound.operator_keys.iter().zip(&self.operator_key_values) {
             values.push((name.as_str(), value.as_str()));
@@ -402,7 +441,7 @@ impl Fleet {
         }
         assert_eq!(values.len(), bound.secrets().len(), "every secret bound has its value, once");
         store::seed_local(tools, &state_dir(project), &values).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
-        write_local_config(project, &bound.cell())?;
+        write_local_config(project, &bound.cell(), &self.images)?;
         let poll = self.poll_interval_s.to_string();
         let retry = self.job_retry_delay_s.to_string();
         // the node's one release (`dev`) deployed as it is configured, as a

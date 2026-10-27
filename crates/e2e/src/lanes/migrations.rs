@@ -86,7 +86,7 @@ pub fn migrations(s: &mut Suite, _: &Api) -> Result<()> {
     );
 
     // ---- objects from before versions
-    api.signed(&owner, "PUT", &format!("/api/f/{adopted}/members/{}", member.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;
+    api.share(&adopted, member.pubkey_hex(), "viewer")?;
     let r = lever(&api, &adopted, "schema-unversion", None)?;
     let rerun = lever(&api, &adopted, "schema-rerun", None)?;
     let view = lever(&api, &adopted, "schema", None)?;
@@ -99,7 +99,7 @@ pub fn migrations(s: &mut Suite, _: &Api) -> Result<()> {
 
     let variant = s.named(&api, &owner, "schema-variant")?;
     s.create(&api, &owner, &variant)?;
-    api.signed(&owner, "PUT", &format!("/api/f/{variant}/members/{}", member.pubkey_hex()), Some(&json!({ "role": "editor" })))?;
+    api.share(&variant, member.pubkey_hex(), "editor")?;
     let r = lever(&api, &variant, "schema-unversion", Some(("shape", "people-only")))?;
     let planted = r.body["members"].as_array().is_some_and(|c| c.contains(&json!("people_only")));
     let rerun = lever(&api, &variant, "schema-rerun", None)?;
@@ -134,7 +134,7 @@ pub fn migrations(s: &mut Suite, _: &Api) -> Result<()> {
     // ---- steps after the newest: one that fails, one that adds a column
     let stepped = s.named(&api, &owner, "schema-stepped")?;
     s.create(&api, &owner, &stepped)?;
-    api.signed(&owner, "PUT", &format!("/api/f/{stepped}/members/{}", member.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;
+    api.share(&stepped, member.pubkey_hex(), "viewer")?;
     let r = lever(&api, &stepped, "schema-try", Some(("step", "fails")))?;
     let view = lever(&api, &stepped, "schema", None)?;
     let refused = r.body["refused"].as_str().unwrap_or_default();

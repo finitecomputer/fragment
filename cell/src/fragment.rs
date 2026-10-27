@@ -156,6 +156,9 @@ impl DurableObject for FragmentCell {
         if let Some(refused) = crate::routed::refused(&req, crate::routed::Own::of(self.cfg), &self.raw)? {
             return Ok(refused);
         }
+        if let Some(probed) = crate::routed::probed(&req, &self.schema)? {
+            return Ok(probed);
+        }
         match self.route(req).await {
             Ok(resp) => Ok(resp),
             Err(e) => e.response(),
@@ -362,6 +365,12 @@ pub(crate) enum MetaKey {
     Computer,
     /// The agent identity its own key holds, once it ran on a computer.
     AgentIdentity,
+    /// Its door's public key (`<door> <64 hex>`), registered by a link its
+    /// owner started, gone once they unlink (fragment_core::door).
+    Door,
+    /// The link ticket made last, until redeemed or past its time
+    /// (`<door> <nonce> <exp>`).
+    DoorTicket,
     /// The next time a page may pre-wake the computers its channels wake.
     PrewakeAt,
     /// Test fleets only: how many more paid AI steps fail just after their
@@ -426,6 +435,8 @@ impl MetaKey {
             MetaKey::TestAdvanceHeld => "test_advance_held",
             MetaKey::Computer => "computer",
             MetaKey::AgentIdentity => "agent_identity",
+            MetaKey::Door => "door",
+            MetaKey::DoorTicket => "door_ticket",
             MetaKey::PrewakeAt => "prewake_at",
             MetaKey::TestFailAfterPaid => "test_fail_after_paid",
             MetaKey::TestFailMeterAcks => "test_fail_meter_acks",
@@ -679,9 +690,21 @@ impl FragmentCell {
             vec![principal.into(), principal.into()],
         )?;
         let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
-        let member = row.role.as_deref().and_then(Role::parse);
-        // as itself, a hold limits nothing: it caps an agent acting for
-        // someone (`standing_for`), never its own memberships
+        let mut member = row.role.as_deref().and_then(Role::parse);
+        // as itself, a hold caps an agent in with its person here, a
+        // member who is not the owner (decision 64: the whole entity is
+        // secured; members.rs `entity_of`); never its own memberships, its
+        // owner's chats, its agent fragment, one it holds on its own
+        // (decision 36), where it answers and records its turns
+        if let Some((held, signed)) = caller.signed.as_ref().and_then(|s| Some((s.held?, s))) {
+            let in_with_person = match signed.owner.as_deref() {
+                Some(person) => self.member_role(person)?.is_some_and(|r| r != Role::Owner),
+                None => false,
+            };
+            if in_with_person {
+                member = member.map(|m| m.min(held));
+            }
+        }
         Ok(Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: None, held: None })
     }
 
@@ -857,13 +880,21 @@ impl FragmentCell {
             let body: Value = body_json(&mut req).await?;
             return self.cap_files(&op, &body).await;
         }
-        if path == "/invites/claim" {
-            // Only the registry's sign-in sets the header; the router never passes it.
+        if path == "/invites/claim" || path == "/invites/decline" || path == "/members/agent" {
+            // Only the platform sets the header (a person's yes or no; an
+            // agent of theirs made); the router never passes it.
             if req.headers().get(crate::members::CLAIM_HEADER)?.is_none() {
                 return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
             }
+            if path == "/members/agent" {
+                let body: Value = body_json(&mut req).await?;
+                return json_response(&self.agent_with_person(&body).await?);
+            }
             let claim = body_json(&mut req).await?;
-            return json_response(&self.claim_invite(&claim).await?);
+            return json_response(&match path.as_str() {
+                "/invites/claim" => self.claim_invite(&claim).await?,
+                _ => self.decline_invite(&claim).await?,
+            });
         }
         if let Some(route) = path.strip_prefix("/wipe/") {
             // Only a wipe's orchestrator sets the header; the router never passes it.
@@ -1153,6 +1184,7 @@ impl FragmentCell {
         self.require(caller, false, Role::Owner)?;
         let ended = self.end_life()?;
         self.tell_ended(Some(&ended.owner)).await;
+        self.forget_invites(&name).await;
         self.schedule().await?;
         json_response(&json!({ "ok": true, "deleted": name }))
     }
@@ -1388,7 +1420,7 @@ impl FragmentCell {
     /// every share-link holder (`view`).
     pub(crate) fn close_sockets(&self, tag: &str, reason: &str) {
         for ws in self.state.get_websockets_with_tag(tag) {
-            let _ = ws.close(Some(4003), Some(reason));
+            let _ = ws.close(Some(crate::live::ACCESS_ENDED), Some(reason));
         }
     }
 }

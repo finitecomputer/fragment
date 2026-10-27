@@ -90,7 +90,7 @@ pub fn frames(s: &mut Suite, api: &Api) -> Result<()> {
     let (owner_id, guest_id) = (api.identity(&owner)?, api.identity(&guest)?);
     let own = made(api, &owner, &s.name("fown"), "blank", who("own"), "members")?;
     let shared = made(api, &owner, &s.name("fshared"), "blank", who("shared"), "members")?;
-    let r = api.signed(&owner, "PUT", &format!("/api/f/{shared}/members/{guest_id}"), Some(&json!({ "role": "viewer" })))?;
+    let r = api.share(&shared, &guest_id, "viewer")?;
     anyhow::ensure!(r.status == 200, "sharing {shared}: {r}");
     let theirs = made(api, &stranger, &s.name("ftheirs"), "blank", who("theirs"), "members")?;
     let open = made(api, &stranger, &s.name("fopen"), "blank", who("open"), "public")?;
@@ -167,10 +167,10 @@ fn over_http(s: &mut Suite, api: &Api, owner_session: &str, n: &Names<'_>) -> Re
     let top = as_browser(api, "GET", api.site_url(n.own, ""), "document", "cross-site", &value)?;
     let fetched = as_browser(api, "GET", api.site_url(n.own, ""), "empty", "same-site", &value)?;
     s.ok(
-        "its cookie signs the fragment's frames in, shown in the platform's page alone (frame-ancestors names its exact origin); it opens no top-level page, nor counts on another page's fetch (401)",
+        "its cookie signs the fragment's frames in, shown in the platform's page and the fragment's own frames there alone (frame-ancestors names its exact origin and 'self'); it opens no top-level page, nor counts on another page's fetch (401)",
         framed.status == 200
             && framed.text.contains("inside own")
-            && framed.header("content-security-policy") == format!("frame-ancestors {platform}")
+            && framed.header("content-security-policy") == format!("frame-ancestors 'self' {platform}")
             && top.status == 401
             && fetched.status == 401,
         format!("{framed} {:?} / {top} / {fetched}", framed.header("content-security-policy")),
@@ -341,6 +341,20 @@ fn in_chrome(s: &mut Suite, api: &Api, n: &Names<'_>, (owner_id, owner_session):
     let access = chrome.eval_in_frame(&shell, &host(n.own), "document.hasStorageAccess()").unwrap_or_default();
     s.ok("(this Chrome blocks third-party cookies, as Safari does: the frame has no storage access of its own)", access == json!(false), &access);
 
+    // ---- its page there frames a page of its own (a chat's PDF in a frame
+    // of the chat's page: Paul, 2026-10-23, whose PDF showed the browser's
+    // refused frame)
+    let nest = |src: &str| format!("(() => {{ const f = document.createElement('iframe'); f.src = {src:?}; document.body.append(f); return true; }})()");
+    let inner = |mark: &str| format!("(() => {{ const f = document.querySelector('iframe[src$=\"?{mark}\"]'); if (!f) return 'none'; const d = f.contentDocument; return d ? d.body?.innerText ?? '' : 'refused'; }})()");
+    chrome.eval_in_frame(&shell, &host(n.own), &nest(&api.site_url(n.own, "?nested")))?;
+    let mine = format!("me:{owner_id}");
+    let shown = s.eventually(wait, || chrome.eval_in_frame(&shell, &host(n.own), &inner("nested")).ok().and_then(|v| v.as_str().map(|t| t.contains(&mine))).unwrap_or(false));
+    s.ok(
+        "its page there frames a page of its own, shown signed in as the owner (a frame session's answer names 'self' beside the platform)",
+        shown,
+        chrome.eval_in_frame(&shell, &host(n.own), &inner("nested")).unwrap_or_default(),
+    );
+
     // ---- a stranger's members-only fragment: a tab must ask first
     frame(&mut chrome, &shell, &mint(n.theirs))?;
     let told = frame_says(s, &mut chrome, &shell, &format!("auth/frame?name={}", n.theirs), "in a tab", wait);
@@ -361,6 +375,16 @@ fn in_chrome(s: &mut Suite, api: &Api, n: &Names<'_>, (owner_id, owner_session):
         any_partition.is_none(),
         json!(any_partition),
     );
+
+    // ---- another of the owner's fragments, framed signed in beside it,
+    // cannot show it: its frame is an ancestor of the one inside it
+    // (its frame found by its origin: the refused mint above names it too)
+    let beside = api.site_url(n.shared, "");
+    frame(&mut chrome, &shell, &mint(n.shared))?;
+    anyhow::ensure!(frame_says(s, &mut chrome, &shell, &beside, &mine, wait), "the owner's other fragment frames signed in beside it");
+    chrome.eval_in_frame(&shell, &beside, &nest(&api.site_url(n.own, "?by-another")))?;
+    let elsewhere = s.eventually(Duration::from_secs(5), || chrome.eval_in_frame(&shell, "?by-another", "(document.body?.innerText ?? '').includes('me:')").ok() == Some(json!(true)));
+    s.ok("another of the owner's fragments, framed signed in beside it, frames it and shows nothing of it", !elsewhere, "");
 
     // ---- a fragment shared with the guest, in the guest's page
     chrome.set_cookie(&format!("{platform}/"), "fragment_session", guest_session)?;

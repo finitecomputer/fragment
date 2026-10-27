@@ -22,24 +22,78 @@ pub const WORKER_BUILD_VERSION: &str = "0.8.5";
 /// budget was raised for launch").
 pub const CELL_WASM_MAX_BYTES: u64 = 6_500_000;
 
+/// Which build of the cell: the release's, which deploys upload and the
+/// e2e stages, or `cargo xtask dev`'s, which only `wrangler dev` under it
+/// runs (`cargo xtask build --dev`: cell/wrangler.jsonc's `build`, and
+/// `dev`'s first build). The two compile the same source with the same
+/// flags into the same `build/`, and write the same release's files
+/// beside it, which the cell reads by the same index through the same
+/// code; dev's compiles without fat LTO, into many codegen units,
+/// incrementally, and skips wasm-opt (cell/Cargo.toml, `[profile.devstack]`),
+/// so a change to a file of the release, which moves only the index the
+/// cell carries, rebuilds in seconds, not minutes. Its Wasm is about 7.7 MB
+/// to the release's 5.5, and no budget holds it. Each build marks what it built
+/// (devstack's built.rs), and a deploy and the e2e take the release's alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Profile {
+    Release,
+    Dev,
+}
+
+/// `Profile::Dev`'s cargo profile, in cell/Cargo.toml.
+const DEV_PROFILE: &str = "devstack";
+
+impl Profile {
+    /// Its cargo profile (cell/Cargo.toml), as its build marks it.
+    fn name(self) -> &'static str {
+        match self {
+            Profile::Release => devstack::built::RELEASE,
+            Profile::Dev => DEV_PROFILE,
+        }
+    }
+
+    fn worker_build_args(self) -> &'static [&'static str] {
+        match self {
+            Profile::Release => &["--release"],
+            Profile::Dev => &["--profile", DEV_PROFILE, "--no-opt"],
+        }
+    }
+}
+
+/// The release's cell (`Profile::Release`).
+pub fn cell() -> Result<()> {
+    cell_as(Profile::Release)
+}
+
 /// cell/ for wasm32, into its `build/`, and the release's files beside it
 /// in `build/assets`, the Worker's Static Assets (cell/wrangler.jsonc): what
 /// a deploy uploads, `wrangler dev` serves and the e2e's staged copy holds.
-pub fn cell() -> Result<()> {
+pub fn cell_as(profile: Profile) -> Result<()> {
     worker_build_installed()?;
     let t0 = Instant::now();
     let dir = devstack::cell_dir();
+    let out = dir.join("build");
+    // what `build/` holds is no finished build until this one is, and this
+    // build alone writes it, and no reader reads it, until its mark
+    let building = devstack::built::building(&out, profile.name())?;
     let local = LocalPaths::here(&dir)?;
     let given = (std::env::var("CARGO_ENCODED_RUSTFLAGS").ok(), std::env::var("RUSTFLAGS").ok());
     let flags = encoded_rustflags(given, &local.remapped());
-    run(Command::new("worker-build").arg("--release").env("CARGO_ENCODED_RUSTFLAGS", flags).current_dir(&dir))?;
-    let wasm = dir.join("build/index_bg.wasm");
-    let bytes = std::fs::read(&wasm).with_context(|| format!("{} after worker-build", wasm.display()))?;
-    local.named_in(&bytes)?;
-    let wasm_budget = within_budget(bytes.len() as u64)?;
-    let (files, bytes) = fragment_templates::write_assets(&dir.join("build/assets")).context("writing the release's files into cell/build/assets")?;
+    run(Command::new("worker-build").args(profile.worker_build_args()).env("CARGO_ENCODED_RUSTFLAGS", flags).current_dir(&dir))?;
+    let wasm = out.join(devstack::built::WASM);
+    let built = std::fs::read(&wasm).with_context(|| format!("{} after worker-build", wasm.display()))?;
+    let stripped = without_names(&built).with_context(|| format!("{} after worker-build", wasm.display()))?;
+    std::fs::write(&wasm, &stripped).with_context(|| format!("write {}", wasm.display()))?;
+    local.named_in(&stripped)?;
+    let size = match profile {
+        Profile::Release => within_budget(stripped.len() as u64)?,
+        Profile::Dev => format!("{} bytes of Wasm ({:.2} MB), dev's: no budget holds it (the release's is {CELL_WASM_MAX_BYTES} bytes)", stripped.len(), stripped.len() as f64 / 1e6),
+    };
+    let (files, bytes) = fragment_templates::write_assets(&out.join("assets")).context("writing the release's files into cell/build/assets")?;
+    building.finish()?;
     println!(
-        "built the cell for wasm32 in {:.1?}: {wasm_budget}, and {files} files of the release, {:.2} MB, in its Static Assets",
+        "built the cell ({}) for wasm32 in {:.1?}: {size}, and {files} files of the release, {:.2} MB, in its Static Assets",
+        profile.name(),
         t0.elapsed(),
         bytes as f64 / 1e6
     );
@@ -132,6 +186,57 @@ fn encoded_rustflags(given: (Option<String>, Option<String>), ours: &[String]) -
     given.into_iter().chain(ours.iter().cloned()).collect::<Vec<_>>().join("\x1f")
 }
 
+/// A Wasm module's custom section of function names (the Wasm spec's
+/// `name` section).
+const NAMES: &[u8] = b"name";
+
+/// `wasm` less its `name` section: the function names worker-build keeps
+/// (its wasm-opt runs with `--debuginfo`, which no setting turns off), 15%
+/// of the cell's Wasm, about 970 KB counted against `CELL_WASM_MAX_BYTES`
+/// and copied into every isolate. They name a stack's frames and nothing
+/// else; without them a frame reads `wasm-function[<index>]`. A panic's
+/// message, its file, line and column, is the Wasm's data, and stays. Every
+/// other section is copied as it was (no section refers to another's offset).
+fn without_names(wasm: &[u8]) -> Result<Vec<u8>> {
+    const HEADER: &[u8] = b"\0asm\x01\0\0\0";
+    anyhow::ensure!(wasm.starts_with(HEADER), "not a Wasm module (version 1)");
+    let mut out = Vec::with_capacity(wasm.len());
+    out.extend_from_slice(HEADER);
+    let mut at = HEADER.len();
+    // bounded: each turn moves past one section, and a section is at least two bytes
+    while at < wasm.len() {
+        let start = at;
+        let id = wasm[at];
+        at += 1;
+        let size = leb_u32(wasm, &mut at)? as usize;
+        let end = at.checked_add(size).filter(|&end| end <= wasm.len()).context("a section runs past the module's end")?;
+        let names = id == 0 && {
+            let mut name_at = at;
+            let len = leb_u32(wasm, &mut name_at)? as usize;
+            wasm.get(name_at..name_at + len) == Some(NAMES)
+        };
+        if !names {
+            out.extend_from_slice(&wasm[start..end]);
+        }
+        at = end;
+    }
+    Ok(out)
+}
+
+/// A LEB128 u32 at `*at`, which it moves past it.
+fn leb_u32(wasm: &[u8], at: &mut usize) -> Result<u32> {
+    let mut value = 0u32;
+    for shift in (0..35).step_by(7) {
+        let byte = *wasm.get(*at).context("a number runs past the module's end")?;
+        *at += 1;
+        value |= u32::from(byte & 0x7f).checked_shl(shift).context("a number over 32 bits")?;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+    }
+    bail!("a number over five bytes")
+}
+
 /// The checked size and exact headroom within `CELL_WASM_MAX_BYTES`, or
 /// the exact overage and why the build is refused.
 fn within_budget(size: u64) -> Result<String> {
@@ -162,8 +267,10 @@ fn worker_build_installed() -> Result<()> {
 /// `constructBuildCommand`: `docker build --load --platform linux/amd64
 /// --provenance=false [--build-arg …] -f - <context>`, the Dockerfile on
 /// stdin), so the boot's build finds every layer cached. A cold build of
-/// the stub compiles its bridge in Docker: on a CI runner, minutes that now
-/// pass beside the Rust and Wasm builds instead of after them.
+/// the stub compiles its bridge in Docker: minutes that pass beside the
+/// Rust and Wasm builds instead of after them. CI builds the stub just
+/// before, from its layers in the Actions cache unless the bridge changed
+/// (ci.yml, e2e-shard), so there every step here is cached.
 pub fn images() -> Result<()> {
     let cell = devstack::cell_dir();
     let mut config = devstack::read_config(&cell)?;
@@ -264,6 +371,40 @@ mod tests {
         let docker = super::LocalPaths { cargo_home: "/cargo".into(), ..local };
         assert!(docker.named_in(b"/cargo/registry/src/x /cargo/git/checkouts/x").is_ok());
         assert!(docker.named_in(b"/w t/fragment/crates/core/src/oidc.rs").is_err());
+    }
+
+    /// Goal: the cell's Wasm drops its function names and keeps everything
+    /// else, byte for byte. Method: a module of a type section, a custom
+    /// section that is not `name`, the `name` section (its size over one
+    /// LEB128 byte), and the code section; then modules that are not Wasm,
+    /// or end inside a section, refused.
+    #[test]
+    fn the_cell_keeps_no_function_names() {
+        let section = |id: u8, payload: &[u8]| -> Vec<u8> {
+            let mut s = vec![id];
+            let mut n = payload.len();
+            loop {
+                let byte = (n & 0x7f) as u8;
+                n >>= 7;
+                s.push(if n == 0 { byte } else { byte | 0x80 });
+                if n == 0 {
+                    break s.into_iter().chain(payload.iter().copied()).collect();
+                }
+            }
+        };
+        let custom = |name: &[u8], body: &[u8]| section(0, &[&[name.len() as u8][..], name, body].concat());
+        let header = b"\0asm\x01\0\0\0".to_vec();
+        let types = section(1, &[1, 0x60, 0, 0]);
+        let producers = custom(b"producers", b"\x00");
+        let names = custom(b"name", &[7u8; 300]);
+        let code = section(10, &[1, 2, 0, 0x0b]);
+        let module = [&header[..], &types, &producers, &names, &code].concat();
+        assert_eq!(super::without_names(&module).unwrap(), [&header[..], &types, &producers, &code].concat());
+        let kept = [&header[..], &types, &custom(b"names", b"x"), &code].concat();
+        assert_eq!(super::without_names(&kept).unwrap(), kept, "a custom section named otherwise stays");
+        assert!(super::without_names(b"\0asm\x02\0\0\0").is_err());
+        assert!(super::without_names(&module[..module.len() - 1]).is_err(), "a module cut short");
+        assert!(super::without_names(&[&header[..], &[1, 0xff, 0xff, 0xff, 0xff, 0x7f]].concat()).is_err(), "a size over 32 bits");
     }
 
     /// Goal: the Hermes image's inputs are what it runs (docs/computers.md,
