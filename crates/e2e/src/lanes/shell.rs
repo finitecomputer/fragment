@@ -4769,7 +4769,35 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     let r = shell(api, me.session, "GET", &format!("/api/f/{group}/members"), None, &[])?;
     let members: Vec<&str> = r.body["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").filter_map(|m| m["principal"].as_str()).collect();
     s.ok("its members are the two agents, the lead added first", members == [lead.as_str(), other.as_str()], &r);
+
+    // offline, a chat not loaded yet waits: no frame (it would be the
+    // browser's error page), a line in its place, and the mark by its
+    // title, "Lost connection" on hover; back online, it opens of itself
+    let framed = format!("[...document.querySelectorAll('#frames iframe')].some((f) => f.dataset.fragment === {})", js(&group));
+    b.offline(page, true)?;
     b.click(page, &row)?;
+    let held = b.until(
+        page,
+        &format!(
+            "document.getElementById('chat-title').textContent === {} && !document.getElementById('offline').hidden && !document.getElementById('offline-note').hidden && !({framed})",
+            js(&format!("Reader, {}", me.first_title))
+        ),
+        wait,
+    );
+    let _ = b.screenshot(page, &shots.join("desktop-offline.png"));
+    let said = b.eval(page, "({ note: document.getElementById('offline-note').textContent, tip: document.getElementById('offline').dataset.tooltip })")?;
+    s.ok(
+        "offline, a chat not loaded yet opens to a line saying it loads when they're back online, no frame, the mark by its title",
+        held && said["note"] == "This chat loads when you're back online." && said["tip"] == "Lost connection",
+        &said,
+    );
+    b.offline(page, false)?;
+    let back = b.until(
+        page,
+        &format!("document.getElementById('offline').hidden && document.getElementById('offline-note').hidden && [...document.querySelectorAll('#frames iframe')].some((f) => f.dataset.fragment === {} && !f.hidden)", js(&group)),
+        wait,
+    );
+    s.ok("back online, the mark goes and the chat opens of itself", back, b.eval(page, "({ mark: document.getElementById('offline').hidden, note: document.getElementById('offline-note').hidden })")?);
     b.until(page, &format!("document.getElementById('chat-title').textContent === {}", js(&format!("Reader, {}", me.first_title))), wait);
 
     // each answers its @mention; with none, the lead answers

@@ -1257,11 +1257,15 @@ function openChat(name, push = true) {
   state.current = name;
   store.set(CURRENT, name);
   hideNotice();
-  if (!state.frames.has(name)) {
+  // offline, a chat not loaded yet waits (its frame would be the
+  // browser's error page) and opens when the shell is back online
+  if (!state.frames.has(name) && net.online) {
     const frame = frameOf(framed(name, setupFor(name) ? "/?setup=1" : "/"), titleOf(name), name);
+    frame.dataset.made = Date.now();
     $("frames").append(frame);
     state.frames.set(name, frame);
   }
+  $("offline-note").hidden = state.frames.has(name);
   for (const [n, frame] of state.frames) frame.hidden = n !== name;
   renderHeading();
   renderChats();
@@ -4169,6 +4173,43 @@ async function load(changed = false) {
 // library's OPEN_WAIT_MS, cell/client.mjs, says why ten seconds).
 const LIST_SETTLE_MS = 200;
 const LIST_OPEN_WAIT_MS = 10_000;
+
+// ---- offline: the browser says so, or the list's socket stays shut ----
+// A socket that closes is offline after OFFLINE_GRACE_MS unopened (a
+// deploy drops it for a moment); the browser's `offline` is at once. Back
+// online is the socket open again: then the open chat, if it waited, opens,
+// and each chat frame made since the socket closed (perhaps the browser's
+// error page) loads again. Chats loaded before keep their page.
+const OFFLINE_GRACE_MS = 3000;
+const net = { online: true, downAt: null, grace: null };
+$("offline").replaceChildren(icon("cloudOff"));
+function setOnline(online) {
+  if (net.online === online) return;
+  net.online = online;
+  $("offline").hidden = online;
+  if (!online) return;
+  for (const frame of state.frames.values()) {
+    if (Number(frame.dataset.made) >= net.downAt) frame.src = frame.dataset.src;
+  }
+  if (state.current && !state.page && !state.frames.has(state.current)) openChat(state.current, false);
+}
+addEventListener("offline", () => {
+  net.downAt ??= Date.now();
+  setOnline(false);
+});
+// the browser back online opens the socket now, not at its next wait: one
+// that stayed open through the drop may be dead, so it is opened afresh
+addEventListener("online", () => {
+  if (!watching.on) return;
+  const old = watching.socket;
+  if (old) {
+    old.onclose = null;
+    old.close();
+    watching.socket = null;
+  }
+  watching.wait = 1000;
+  watchList();
+});
 function listChanged() {
   clearTimeout(watching.settle);
   watching.settle = setTimeout(() => load(true).catch(() => {}), LIST_SETTLE_MS);
@@ -4183,6 +4224,9 @@ function watchList() {
   ws.onopen = () => {
     clearTimeout(opening);
     watching.wait = 1000;
+    clearTimeout(net.grace);
+    setOnline(true);
+    net.downAt = null;
     listChanged();
     loadInvites().catch(() => {});
   };
@@ -4197,6 +4241,10 @@ function watchList() {
   ws.onclose = () => {
     clearTimeout(opening);
     watching.socket = null;
+    if (net.downAt === null) {
+      net.downAt = Date.now();
+      net.grace = setTimeout(() => { if (!listLive()) setOnline(false); }, OFFLINE_GRACE_MS);
+    }
     // what the agent is doing goes until the socket is back to hear it
     renderChats();
     watching.timer = setTimeout(watchList, watching.wait * (0.5 + Math.random()));
