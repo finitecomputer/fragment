@@ -1620,20 +1620,29 @@ a making or a `PUT` on one answers 400.
   are the ones kept, best first, each `png` the icon's bytes as base64;
   `flaws` counts the refused by flaw. Nothing of a making is kept: its
   asker keeps a candidate by sending its bytes to `PUT`.
-- **Bounded per fragment: 10 makings an hour**, the 11th 429.
+- **Bounded per fragment: 10 makings an hour**, the 11th 429, counted
+  as each is admitted, after the owner's ledger has answered: makings
+  asked at once each count the others'.
 - **Metered to the owner**, one row of the fragment's meter outbox per
-  call that answered, `icon:<fragment>@<incarnation>:<started>:<call>`
-  (`subject`, `draw-<n>`, `cut-<n>`, `fit-<n>`, `flat-<n>`, `check-<n>`,
-  `upload`): the subject and the checks in tokens, a drawing in the
+  call that answered, `icon:<fragment>@<incarnation>:<op>:<call>`, `op`
+  the making's or upload's own name (`<started ms>.<8 hex>`, a nonce of
+  its own: two in one millisecond are two) and `call` one of `subject`,
+  `draw-<n>`, `cut-<n>`, `fit-<n>`, `flat-<n>`, `check-<n>` and
+  `upload`: the subject and the checks in tokens, a drawing in the
   neurons Workers AI says it cost (its `cf-ai-neurons`; 104.2 when it
   says none), each Images transformation as one (docs/ledger.md). The
   owner's ledger is asked first as a job's AI step is: a guest's fragment
-  makes none. A making that fails halfway has paid for what it bought.
+  makes none, and one at its cap makes none for anyone but its owner and
+  their agents (402; docs/ledger.md, Caps). A making that fails halfway
+  has paid for what it bought.
 - **An upload** is a PNG, JPEG, WebP or GIF by its bytes, at most the
   router's 2 MiB (413 past it). A 256×256 PNG of at most 256 KiB (a
   candidate) is kept as it is; any other is fitted inside 256×256 by
   Images, its padding transparent (one transformation, metered as
   `upload`), and refused 413 when that is still over 256 KiB.
+- **Keeping and removing are writes:** while the owner's fragments are
+  read-only (past the overdraft), `PUT` and `DELETE` are 402, before
+  anything is fitted or stored, and the icon stays.
 - **Kept** as one of the fragment's blobs (`image/png`), named in its
   meta, which the blob collection keeps. Its members' lists show it as
   the fragment's `picture`, `/api/f/<name>/icon?v=<12 hex of its

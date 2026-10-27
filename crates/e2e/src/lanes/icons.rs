@@ -12,9 +12,12 @@
 //! lists; an upload is fitted; a making whose drawings are all tiles offers
 //! none and says why. Refused: a viewer's making, keeping and removing, a
 //! hint too long or not text, an upload that is no image or past the body
-//! limit, an agent fragment's icon, and the hour's eleventh making. That a
-//! node's restart keeps the icon is not checked here: it needs the node
-//! (`Need::Node`), restart.rs's.
+//! limit, an agent fragment's icon, and the hour's eleventh making, also
+//! when the makings come at once and the ledger is slow to answer. At its
+//! cap a fragment's making is its owner's and their agents' alone, and
+//! read-only (its owner past the overdraft) its icon is neither kept nor
+//! removed, nothing fitted. That a node's restart keeps the icon is not
+//! checked here: it needs the node (`Need::Node`), restart.rs's.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -23,14 +26,14 @@ use anyhow::Result;
 use base64::Engine;
 use fragment_core::icon;
 use fragment_core::price::Usage;
-use fragment_fakes::workers_ai::{icon_subject, ICON_MODEL, ICON_SUBJECT};
+use fragment_fakes::workers_ai::{icon_subject, Used, ICON_MODEL, ICON_SUBJECT};
 use fragment_nip98::Keys;
 use fragment_proto::ErrorCode;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::faces::row;
-use super::ledger::{charge, charged, entries, lever, usage};
+use super::ledger::{charge, charged, entries, forget_gate, ledger, lever, tokens_costing, usage, USD};
 use crate::api::{Api, Call, Reply};
 use crate::Suite;
 
@@ -179,8 +182,8 @@ pub fn icons(s: &mut Suite, api: &Api) -> Result<()> {
     let named: BTreeSet<String> = rows.iter().map(call_of).collect();
     let starts: BTreeSet<&str> = rows.iter().filter_map(|e| e["ref"].as_str()?.strip_prefix(prefix.as_str())?.split(':').nth(1)).collect();
     s.ok(
-        "each vendor call is one row on its owner's ledger (`icon:<name>@<life>:<started>:<call>`), priced by the book: the subject's and checks' tokens, the drawings' neurons as Workers AI said them, one Images transformation a step",
-        landed && rows.len() == wanted.len() && named == wanted && starts.len() == 1 && rows.iter().all(priced_as_its_call),
+        "each vendor call is one row on its owner's ledger (`icon:<name>@<life>:<started>.<nonce>:<call>`, the making named alike in each), priced by the book: the subject's and checks' tokens, the drawings' neurons as Workers AI said them, one Images transformation a step",
+        landed && rows.len() == wanted.len() && named == wanted && starts.len() == 1 && starts.iter().all(|op| op.split_once('.').is_some_and(|(at, nonce)| at.parse::<i64>().is_ok() && nonce.len() == 8)) && rows.iter().all(priced_as_its_call),
         json!(rows),
     );
 
@@ -334,6 +337,130 @@ pub fn icons(s: &mut Suite, api: &Api) -> Result<()> {
         "the hour's 11th making of a fragment is refused (429 rate_limited), the refusals before it counting none; keeping one is no making",
         made == icon::MAKINGS_PER_HOUR && r.status == 429 && r.code() == Some(ErrorCode::RateLimited) && kept.status == 200,
         json!({ "made": made, "stopped": last, "then": told(&r), "kept": kept.to_string() }),
+    );
+    at_once(s, api)?;
+    capped(s, api)?;
+    read_only(s, api)?;
+    Ok(())
+}
+
+/// The vendor calls since `mark` that asked for a subject: one a making.
+fn subjects_since(s: &Suite, mark: usize) -> usize {
+    s.ai.calls().get(mark..).unwrap_or_default().iter().filter(|c| c.model == icon::SUBJECT_MODEL && icon_subject(&c.body).is_some()).count()
+}
+
+/// Makings asked all at once, while the owner's ledger is slow (its gate,
+/// cold, waits its 1.5 s for it): each is admitted against the others',
+/// so the hour's limit holds, at most 10 started and the rest refused
+/// (429) before anything is called.
+fn at_once(s: &mut Suite, api: &Api) -> Result<()> {
+    let owner = api.person()?;
+    let owner_id = api.identity(&owner)?;
+    let name = s.named(api, &owner, "icons-race")?;
+    s.create(api, &owner, &name)?;
+    let slow = |ms: u64| api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": owner_id, "op": "slow", "ms": ms })));
+    let slowed = slow(3_000)?;
+    forget_gate(api, &owner_id)?;
+    let mark = s.ai.calls().len();
+    let asked = icon::MAKINGS_PER_HOUR + 2;
+    let answers = std::thread::scope(|scope| {
+        let each: Vec<_> = (0..asked).map(|_| scope.spawn(|| make(api, &owner, &name, json!({ "hint": "a square" })))).collect();
+        each.into_iter().map(|h| h.join().expect("a making's thread")).collect::<Result<Vec<_>>>()
+    });
+    let restored = slow(0)?;
+    let answers = answers?;
+    let made = answers.iter().filter(|r| r.status == 200).count();
+    let busy = answers.iter().filter(|r| r.status == 429 && r.code() == Some(ErrorCode::RateLimited)).count();
+    let subjects = subjects_since(s, mark);
+    s.ok(
+        "12 makings asked at once, the owner's ledger slow to answer: 10 are made, 2 refused (429) before anything is called (one subject a making)",
+        slowed.status == 200 && restored.status == 200 && made == icon::MAKINGS_PER_HOUR && busy == 2 && subjects == icon::MAKINGS_PER_HOUR,
+        json!({ "made": made, "busy": busy, "subjects": subjects, "statuses": answers.iter().map(|r| r.status).collect::<Vec<_>>() }),
+    );
+    Ok(())
+}
+
+/// At its cap a fragment's making is its owner's, and their agents', alone
+/// (docs/ledger.md, Caps): an editor's is refused (402) before anything is
+/// called.
+fn capped(s: &mut Suite, api: &Api) -> Result<()> {
+    let owner = api.person()?;
+    let owner_id = api.identity(&owner)?;
+    let name = s.named(api, &owner, "icons-cap")?;
+    s.create(api, &owner, &name)?;
+    let editor = api.person()?;
+    let r = api.share(&name, editor.pubkey_hex(), "editor")?;
+    anyhow::ensure!(r.status == 200, "an editor: {r}");
+    let hand = Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &owner) })))?;
+    anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
+    let r = api.share(&name, hand.pubkey_hex(), "editor")?;
+    anyhow::ensure!(r.status == 200, "the owner's agent, an editor: {r}");
+    let cap = api.signed(&owner, "PUT", &format!("/api/f/{name}/cap"), Some(&json!({ "id": "icons-cap", "micros": 0 })))?;
+    let asked = |who: &Keys| -> Result<(Reply, usize)> {
+        forget_gate(api, &owner_id)?;
+        let mark = s.ai.calls().len();
+        let r = make(api, who, &name, json!({ "hint": "a square" }))?;
+        Ok((r, subjects_since(s, mark)))
+    };
+    let (theirs, their_calls) = asked(&editor)?;
+    let (ours, our_calls) = asked(&owner)?;
+    let (agents, agent_calls) = asked(&hand)?;
+    s.ok(
+        "at its cap ($0 here) an editor's making is refused (402, saying so) before anything is called; its owner's and their agent's are made",
+        cap.status == 200
+            && theirs.status == 402
+            && theirs.code() == Some(ErrorCode::BudgetUsedUp)
+            && theirs.message().contains("cap")
+            && their_calls == 0
+            && ours.status == 200
+            && our_calls == 1
+            && agents.status == 200
+            && agent_calls == 1,
+        format!("cap {cap} / editor {theirs} / owner {} / agent {}", told(&ours), told(&agents)),
+    );
+    Ok(())
+}
+
+/// Read-only (its owner past the overdraft), a fragment's icon stays as it
+/// is: keeping one and removing it are writes, refused (402, saying why)
+/// before anything is fitted, stored or called.
+fn read_only(s: &mut Suite, api: &Api) -> Result<()> {
+    let owner = api.person()?;
+    let owner_id = api.identity(&owner)?;
+    let name = s.named(api, &owner, "icons-read-only")?;
+    s.create(api, &owner, &name)?;
+    let kept = put(api, &owner, &name, &photo())?;
+    anyhow::ensure!(kept.status == 200, "an icon first: {kept}");
+    let icon_was = get(api, &owner, &name, None)?.bytes;
+    let prefix = format!("icon:{name}@");
+    let uploads = || {
+        let _ = lever(api, &name, "meter-now", json!({ "sample": false }));
+        entries(api, &owner_id, &prefix).iter().filter(|e| call_of(e) == "upload").count()
+    };
+    let fitted_once = s.eventually(WAIT, || uploads() == 1);
+    // past the overdraft: a making whose subject costs the balance and $3 more
+    let balance = ledger(api, &owner)["balanceMicros"].as_i64().unwrap_or_default();
+    s.ai.set_usage(&[Used { prompt: 10, cached: 0, completion: tokens_costing(icon::SUBJECT_MODEL, 10, balance + 3 * USD) }]);
+    let r = make(api, &owner, &name, json!({ "hint": "a square" }))?;
+    s.ai.clear_script();
+    let over = s.eventually(WAIT, || {
+        let _ = lever(api, &name, "meter-now", json!({ "sample": false }));
+        ledger(api, &owner)["standing"]["standing"] == "read_only"
+    });
+    // what the fragment and its gate heard of the owner within the minute
+    lever(api, &name, "forget-standing", json!({}))?;
+    forget_gate(api, &owner_id)?;
+    let calls = s.ai.calls().len();
+    let p = put(api, &owner, &name, &photo())?;
+    let d = api.signed(&owner, "DELETE", &route(&name), None)?;
+    let still = get(api, &owner, &name, None)?;
+    let refused = [&p, &d].iter().all(|r| r.status == 402 && r.code() == Some(ErrorCode::BudgetUsedUp) && r.message().contains("read-only"));
+    s.ok(
+        "read-only (its owner past the overdraft), keeping an icon and removing it are refused (402, saying why); nothing is called or fitted, and the icon stays",
+        fitted_once && r.status == 200 && over && refused && s.ai.calls().len() == calls && still.status == 200 && still.bytes == icon_was && uploads() == 1 && row(api, &owner, &name)["picture"] == kept.body["icon"],
+        format!("put {p} / delete {d} / {} / {} uploads / {}", still.status, uploads(), ledger(api, &owner)["standing"]),
     );
     Ok(())
 }

@@ -9,16 +9,18 @@
 //! `icon::CANDIDATES` drawings at once, each cut out, examined, fitted and
 //! checked (a minute at most, the drawings' wait). Each vendor call that
 //! answers is charged to the fragment's owner as it answers, one meter
-//! row each (`icon::meter_ref`): a making that fails halfway has paid for
-//! what it bought. Nothing of a making is kept but what it answers: the
-//! asker keeps one by sending its bytes back (`PUT`).
+//! row each, named by its making (`icon::meter_ref`, `icon::operation`):
+//! a making that fails halfway has paid for what it bought. Nothing of a
+//! making is kept but what it answers: the asker keeps one by sending its
+//! bytes back (`PUT`). Keeping and removing one are writes, refused while
+//! the owner's fragments are read-only (`writable`).
 
 use base64::Engine;
 use fragment_core::icon::{self, Flaw, Refusal};
 use fragment_core::ledger::Spend;
 use fragment_core::price::Usage;
 use fragment_core::{blob, decide, face};
-use fragment_proto::{ErrorCode, FragmentKind, Role};
+use fragment_proto::{ErrorCode, FragmentKind, IdentityKind, Role};
 use serde_json::{json, Value};
 use worker::*;
 
@@ -37,6 +39,19 @@ fn refused(r: Refusal) -> CellError {
         Refusal::Hint | Refusal::NotAnImage | Refusal::Agent => ErrorCode::InvalidRequest,
     };
     CellError::new(code, r.message())
+}
+
+/// Whether the caller spends here as the fragment's owner: they, or an
+/// agent of theirs. Anyone else's making is held to the fragment's cap,
+/// as a job's AI step is (ai.rs `paying`; docs/ledger.md, Caps).
+fn spends_as_owner(caller: &Caller, owner: &str) -> bool {
+    caller.principal() == Some(owner) || (caller.kind() == Some(IdentityKind::Agent) && caller.owner() == Some(owner))
+}
+
+/// A making's or an upload's own name in its meter rows: when it started
+/// and four random bytes, so two in one millisecond are two.
+fn operation(started_ms: i64) -> String {
+    icon::operation(started_ms, js::random_bytes::<4>())
 }
 
 impl FragmentCell {
@@ -79,10 +94,11 @@ impl FragmentCell {
         }
     }
 
-    /// One meter row of a making, on the owner's ledger; a row not kept
-    /// is said and the making goes on (it was bought either way).
-    fn icon_charge(&self, key: &str, started: i64, call: &str, usage: Usage) {
-        let reference = icon::meter_ref(key, started, call);
+    /// One meter row of a making (`op`, `operation`), on the owner's
+    /// ledger; a row not kept is said and the making goes on (it was
+    /// bought either way).
+    fn icon_charge(&self, key: &str, op: &str, call: &str, usage: Usage) {
+        let reference = icon::meter_ref(key, op, call);
         if let Err(e) = self.outbox(&reference, usage, js::now_ms(), None) {
             console_error!("{}", json!({ "event": "ledger.unknown-usage", "ref": reference, "why": e.message }));
         }
@@ -95,17 +111,23 @@ impl FragmentCell {
         self.require(caller, false, Role::Editor)?;
         let hint = icon::hint(&body).map_err(refused)?;
         self.icon_taker()?;
-        let started: Vec<i64> = self.meta(MetaKey::IconMakings)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        let now = js::now_ms();
-        let within = icon::admit(&started, now).map_err(refused)?;
         let owner = self.must(MetaKey::Owner)?;
-        // asked as a job's AI step is: a guest's fragment makes none
-        crate::ledger::may(&self.env, &owner, &MaySpend { spend: Spend::AiStep, fragment: None, by_owner: true }).await?;
+        // asked as a job's AI step is: a guest's fragment makes none, nor
+        // one at its cap for anyone but its owner and their agents
+        let by_owner = spends_as_owner(caller, &owner);
+        let fragment = if by_owner { None } else { Some(self.name()?) };
+        crate::ledger::may(&self.env, &owner, &MaySpend { spend: Spend::AiStep, fragment, by_owner }).await?;
+        // admitted against the hour's starts as they are once the ledger
+        // has answered: read, counted and kept with no wait between, so
+        // makings asked at once each count the others'
+        let now = js::now_ms();
+        let started: Vec<i64> = self.meta(MetaKey::IconMakings)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let within = icon::admit(&started, now).map_err(refused)?;
         self.set_meta(MetaKey::IconMakings, &serde_json::to_string(&within).expect("starts serialize"))?;
-        let key = self.meter_key()?;
-        let subject = self.icon_subject(&owner, &key, now, hint.as_deref()).await?;
+        let (key, op) = (self.meter_key()?, operation(now));
+        let subject = self.icon_subject(&owner, &key, &op, hint.as_deref()).await?;
         let seeds: Vec<u32> = (0..icon::CANDIDATES).map(|_| u32::from_le_bytes(js::random_bytes::<4>())).collect();
-        let drawn = futures_util::future::join_all(seeds.iter().enumerate().map(|(n, seed)| self.icon_candidate(&owner, &key, now, n, &subject, *seed))).await;
+        let drawn = futures_util::future::join_all(seeds.iter().enumerate().map(|(n, seed)| self.icon_candidate(&owner, &key, &op, n, &subject, *seed))).await;
         let (mut candidates, mut flaws) = (Vec::new(), serde_json::Map::new());
         for d in drawn {
             match d {
@@ -125,7 +147,7 @@ impl FragmentCell {
 
     /// The making's subject: GLM's, or, when it named none, the hint or
     /// the title (the checks then judge what was drawn of it).
-    async fn icon_subject(&self, owner: &str, key: &str, started: i64, hint: Option<&str>) -> CellResult<String> {
+    async fn icon_subject(&self, owner: &str, key: &str, op: &str, hint: Option<&str>) -> CellResult<String> {
         let meta: Value = self.meta(MetaKey::MetaLive)?.and_then(|m| serde_json::from_str(&m).ok()).unwrap_or(Value::Null);
         let name = self.name()?;
         let label = fragment_proto::split_fragment_name(&name).map_or(name.as_str(), |(label, _)| label).to_string();
@@ -135,7 +157,7 @@ impl FragmentCell {
             Ok((200, bytes, _)) => {
                 let answer: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
                 if let Some(usage) = fragment_core::models::usage_of(icon::SUBJECT_MODEL, &answer["usage"]) {
-                    self.icon_charge(key, started, "subject", usage);
+                    self.icon_charge(key, op, "subject", usage);
                 }
                 icon::subject_of(&answer)
             }
@@ -153,7 +175,7 @@ impl FragmentCell {
 
     /// One candidate (`n` of the making): drawn, cut out, examined, fitted,
     /// flattened and checked; its PNG and score, or its flaw.
-    async fn icon_candidate(&self, owner: &str, key: &str, started: i64, n: usize, subject: &str, seed: u32) -> Result<(Vec<u8>, f64), Flaw> {
+    async fn icon_candidate(&self, owner: &str, key: &str, op: &str, n: usize, subject: &str, seed: u32) -> Result<(Vec<u8>, f64), Flaw> {
         let failed = |step: &str, why: String| {
             console_error!("{}", json!({ "event": "icon.step-failed", "step": step, "n": n, "why": why }));
             Flaw::Failed
@@ -162,13 +184,13 @@ impl FragmentCell {
         if status != 200 {
             return Err(failed("draw", format!("{status}: {}", String::from_utf8_lossy(&bytes[..bytes.len().min(300)]))));
         }
-        self.icon_charge(key, started, &format!("draw-{n}"), icon::neurons(neurons.as_deref()));
+        self.icon_charge(key, op, &format!("draw-{n}"), icon::neurons(neurons.as_deref()));
         let answer: Value = serde_json::from_slice(&bytes).map_err(|e| failed("draw", format!("not JSON: {e}")))?;
         drop(bytes);
         let drawing = answer["image"].as_str().and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok()).ok_or_else(|| failed("draw", "no image in its answer".into()))?;
         let images = |steps: Vec<Value>, format: &'static str, call: String, from: Vec<u8>| async move {
             let out = js::images(self.env.as_ref(), &from, &steps, format).await.map_err(|e| failed(&call, e.message))?;
-            self.icon_charge(key, started, &call, Usage::Images { count: 1 });
+            self.icon_charge(key, op, &call, Usage::Images { count: 1 });
             Ok::<Vec<u8>, Flaw>(out)
         };
         let cut = images(vec![json!({ "segment": "foreground" })], "image/png", format!("cut-{n}"), drawing).await?;
@@ -190,7 +212,7 @@ impl FragmentCell {
         }
         let response: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         if let Some(usage) = call.usage(&response) {
-            self.icon_charge(key, started, &format!("check-{n}"), usage);
+            self.icon_charge(key, op, &format!("check-{n}"), usage);
         }
         let answer = call.answer(&response).map_err(|e| failed("check", e.message().to_string()))?;
         Ok((png, icon::judged(&answer)?))
@@ -199,10 +221,12 @@ impl FragmentCell {
     /// `PUT /api/f/{name}/icon` (editors and up): the image its body is
     /// becomes the icon. A `SIZE` PNG within `ICON_MAX_BYTES` (a making's
     /// candidate) is kept as it is; any other image is fitted inside
-    /// `SIZE` by Images, its padding transparent.
+    /// `SIZE` by Images, its padding transparent. A write: refused while
+    /// the owner's fragments are read-only, before anything is fitted.
     pub(crate) async fn icon_put(&self, caller: &Caller, req: &mut Request) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
         self.icon_taker()?;
+        self.writable().await?;
         let bytes = crate::read_body(req, icon::UPLOAD_MAX_BYTES).await?;
         face::picture_type(&bytes).ok_or_else(|| refused(Refusal::NotAnImage))?;
         let whole = bytes.len() <= icon::ICON_MAX_BYTES && matches!(icon::alpha_of(&bytes), Ok((w, h, _)) if w == icon::SIZE && h == icon::SIZE);
@@ -210,7 +234,7 @@ impl FragmentCell {
             bytes
         } else {
             let fitted = js::images(self.env.as_ref(), &bytes, &icon::fit(None), icon::MEDIA_TYPE).await.map_err(|e| CellError::invalid(format!("the image could not be read: {}", e.message)))?;
-            self.icon_charge(&self.meter_key()?, js::now_ms(), "upload", Usage::Images { count: 1 });
+            self.icon_charge(&self.meter_key()?, &operation(js::now_ms()), "upload", Usage::Images { count: 1 });
             fitted
         };
         if png.len() > icon::ICON_MAX_BYTES {
@@ -226,9 +250,11 @@ impl FragmentCell {
     }
 
     /// `DELETE /api/f/{name}/icon` (editors and up): no icon; its lists
-    /// show the shell's own again. Its blob goes with the collection.
+    /// show the shell's own again. Its blob goes with the collection. A
+    /// write: refused while the owner's fragments are read-only.
     pub(crate) async fn icon_delete(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
+        self.writable().await?;
         if self.icon_sha()?.is_some() {
             self.del_meta(MetaKey::Icon)?;
             self.show_icon().await?;
