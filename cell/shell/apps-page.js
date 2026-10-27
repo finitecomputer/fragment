@@ -1,7 +1,7 @@
 // The Apps page (`/apps`; docs/api.md, The shell): every fragment in the
-// person's list but their chats and agents (apps, brains, their skills, a
-// kind this page does not know), each with what they may change of it
-// here, as the server says it is:
+// person's list but their chats, agents and skills (apps, brains, a kind
+// this page does not know), each with what they may change of it here, as
+// the server says it is:
 // - Dock: whether their own dock shows it (`PUT /api/fragments/{name}/dock`),
 //   an app's or a brain's; the switch moves only once the list says so.
 // - New preview: its card shot again (`POST /api/f/{name}/card`), an
@@ -16,12 +16,12 @@
 // `icon`, `named`, `titleOf`, `art` (an app's icon, as the dock draws it),
 // `share`, `iconSheet`, `reload` (the list again) and `state`.
 
-const KIND = { brain: "Brain", skills: "Skills", other: "Other" };
+const KIND = { brain: "Brain", other: "Other" };
 const ROLE = { viewer: "Viewer", editor: "Editor", owner: "Owner" };
 const GENERAL = { members: ["lock", "Restricted"], link: ["link", "Anyone with the link"], public: ["globe", "Public"] };
 // the list's kinds the dock shows, and a card is shot of (card::is_app)
 const dockable = (f) => f.kind === "app" || f.kind === "brain";
-const listed = (f) => f.kind !== "chat" && f.kind !== "agent";
+const listed = (f) => f.kind !== "chat" && f.kind !== "agent" && f.kind !== "skills";
 const owns = (f) => f.role === "owner";
 const edits = (f) => f.role === "owner" || f.role === "editor";
 const seg = (s) => encodeURIComponent(s).replace(/%3A/gi, ":");

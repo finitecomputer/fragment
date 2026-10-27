@@ -1403,7 +1403,8 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // sharing is the Apps page's: Settings have none
     let none = b.eval(&page, "![...document.querySelectorAll('#settings-page h2, #settings-page .settings-nav-link')].some((h) => /sharing/i.test(h.textContent)) && !document.querySelector('#settings-access, #settings-page .access-row')")?;
     s.ok("Settings have no Sharing section: who has access is the Apps page's", settings && none == true, b.eval(&page, "[...document.querySelectorAll('#settings-page h2')].map((h) => h.textContent)")?);
-    apps_ui(s, &mut b, &page, &groceries, &chat, &shots)?;
+    let skills = own_skills(api, &session)?.into_iter().next().context("the person's skills fragment")?;
+    apps_ui(s, &mut b, &page, &skills, &groceries, &chat, &shots)?;
     add_skills_ui(s, api, &mut b, &page, &session)?;
     skills_ui(s, api, &mut b, &page, &session)?;
     connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
@@ -5089,34 +5090,54 @@ fn app_policy_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, app: &s
 /// none, and a page that asks the shell to open a URL that is no
 /// fragment's opens nothing.
 /// The Apps page (docs/api.md, The shell; #587), from the sidebar's Apps:
-/// the owner's app listed (no chat), with its card and who has access;
-/// its Dock switch takes it off the dock and back, moving only as the
-/// list does; New preview has it shot again (a second ask within the
-/// minute refused under its row); Icon… makes one, which its row shows;
-/// Share… opens the sheet, whose change of who has access the row then
-/// says. Settings are open, and open again at the end.
-fn apps_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str, chat: &str, shots: &std::path::Path) -> Result<()> {
+/// the owner's app listed (no chat or skills), with its card and who has
+/// access; a kind this build does not know is listed as Other; its Dock
+/// switch takes it off the dock and back, moving only as the list does;
+/// New preview has it shot again (a second ask within the minute refused
+/// under its row); Icon… makes one, which its row shows; Share… opens the
+/// sheet, whose change of who has access the row then says. Settings are
+/// open, and open again at the end.
+fn apps_ui(s: &mut Suite, b: &mut Browser, page: &Page, skills: &str, app: &str, chat: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(60);
     let row = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{app}\"]")));
     let control = |action: &str| format!("{row}?.querySelector('[data-action={action}]')");
     let docked = format!("!!document.querySelector({})", js(&format!("#apps [data-key=\"app:{app}\"]")));
+    let absent = |name: &str| format!("!document.querySelector({})", js(&format!("#apps-page [data-fragment=\"{name}\"]")));
     b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
     let listed = b.until(
         page,
-        &format!("location.pathname === '/apps' && !!{row} && {row}.querySelector('.app-row-access')?.textContent.includes('Anyone with the link') && {row}.querySelector('.app-row-card')?.src.startsWith('blob:') && !document.querySelector({})", js(&format!("#apps-page [data-fragment=\"{chat}\"]"))),
+        &format!("location.pathname === '/apps' && !!{row} && {row}.querySelector('.app-row-access')?.textContent.includes('Anyone with the link') && {row}.querySelector('.app-row-card')?.src.startsWith('blob:') && {} && {}", absent(chat), absent(skills)),
         wait,
     );
     let _ = b.screenshot(page, &shots.join("apps-page.png"));
     s.ok(
-        "the sidebar's Apps opens the Apps page (/apps): their app with its card and who can open it (Anyone with the link), and no chat",
+        "the sidebar's Apps opens the Apps page (/apps): their app with its card and who can open it (Anyone with the link), and no chat or skills",
         listed,
         b.eval(page, "document.getElementById('apps-page')?.innerText ?? null")?,
     );
+
+    // a newer platform's kind, added to the next list's answer as the wire
+    // forwards it: unfamiliar, but not a chat, an agent or skills, so listed
+    let future = "future-app--e2e";
+    let future_row = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{future}\"]")));
+    b.eval(
+        page,
+        &format!(
+            "(() => {{ const real = window.fetch; window.__appsRealFetch = real; window.fetch = async (url, o) => {{ const r = await real(url, o); \
+             if (String(url) !== '/api/fragments' || (o?.method ?? 'GET') !== 'GET' || !r.ok) return r; \
+             const list = await r.clone().json(); list.fragments.push({{ name: {}, role: 'owner', kind: 'site', title: 'Future app', sharing: {{ visibility: 'members' }} }}); \
+             return new Response(JSON.stringify(list), {{ status: r.status, headers: {{ 'content-type': 'application/json' }} }}); }}; return true; }})()",
+            js(future)
+        ),
+    )?;
 
     // the dock: off, then on again, the switch as the list says
     let on = b.eval(page, &format!("{}?.getAttribute('aria-checked')", control("dock")))?;
     b.eval(page, &format!("({}?.click(), true)", control("dock")))?;
     let off = b.until(page, &format!("{}?.getAttribute('aria-checked') === 'false' && !{}?.disabled && !{docked}", control("dock"), control("dock")), wait);
+    let other = b.until(page, &format!("!!{future_row} && {future_row}.innerText.includes('Future app') && {future_row}.innerText.includes('Other') && !{future_row}.querySelector('[data-action=dock]')"), wait);
+    s.ok("a kind the page does not know still lists as Other, with no Dock switch", other, b.eval(page, &format!("{future_row}?.innerText ?? null"))?);
+    b.eval(page, "(window.fetch = window.__appsRealFetch, true)")?;
     b.eval(page, &format!("({}?.click(), true)", control("dock")))?;
     let back = b.until(page, &format!("{}?.getAttribute('aria-checked') === 'true' && {docked}", control("dock")), wait);
     s.ok("its Dock switch takes it off the dock and puts it back, the switch moving as the list does", on == "true" && off && back, b.eval(page, &format!("{row}?.innerText ?? null"))?);

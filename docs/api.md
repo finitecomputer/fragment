@@ -2969,8 +2969,8 @@ to ask their agent for an app (below), not templates: the templates are
 the CLI's (`fragment create --template`) and its agents'.
 **Its Apps page** (`/apps`, the sidebar's Apps, above Settings; in the
 work area as settings are; cell/shell/apps-page.js; #587) lists every
-fragment in their list but their chats and agents (apps, brains, their
-skills, a kind it does not know), as the list orders them, the archived
+fragment in their list but their chats, agents and skills (apps, brains,
+a kind it does not know), as the list orders them, the archived
 folded at the end with Unarchive. Each row is its icon, title, kind
 (when not an app), their role on one someone else owns, who has access
 to one of theirs at a glance (Restricted, Anyone with the link or
