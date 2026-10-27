@@ -1033,6 +1033,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // is labelled starfire-40k, so it is read, never guessed
     let key = b.eval(&page, "document.querySelector('#chats .chat-row')?.dataset.key ?? ''")?;
     let chat = key.as_str().and_then(|k| k.strip_prefix("chat:")).unwrap_or("").to_string();
+    first_chat_late_ui(s, &mut b, &page, &chat)?;
     let first_label = label_of(&chat).trim_end_matches("-chat").to_string();
     let host = chat.clone();
     // while its computer is held: a card of what is being made, typing, no Send, no message
@@ -1205,6 +1206,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     new_chat_ui(s, api, &mut b, &page, &me, &reader_chat, &shots)?;
     launch_late_ui(s, api, &mut b, &page, &me, &reader_chat)?;
     launch_straight_ui(s, api, &mut b, &page, &me, &reader_chat)?;
+    launch_geometry_ui(s, &mut b, &page, &shots)?;
 
     // both agents in one chat, search, and archiving, as the person uses them
     groups_ui(s, api, &mut b, &page, &me, &shots)?;
@@ -5116,6 +5118,46 @@ const SLOW_MOTION: &str = "(() => { const real = window.__animate ??= Element.pr
     Element.prototype.animate = function (k, o) { return real.call(this, k, typeof o === 'number' ? o * 30 : { ...o, duration: (o?.duration ?? 0) * 30 }); }; return true; })()";
 const NORMAL_MOTION: &str = "(Element.prototype.animate = window.__animate ?? Element.prototype.animate, true)";
 
+/// Before the first agent exists, the launcher's words go to the first
+/// chat's composer. Back to settings while its close still runs is the
+/// person's newer view: no late compose opens the chat again, and the next
+/// launcher opening keeps the words.
+fn first_chat_late_ui(s: &mut Suite, b: &mut Browser, page: &Page, chat: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let opened = "document.getElementById('search-dialog').open";
+    let closed = "!document.getElementById('search-dialog').open";
+    let settings = "location.pathname === '/settings' && !document.getElementById('settings-page').hidden";
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    let shown = b.until(page, settings, wait);
+    open_row(b, page, chat, wait)?;
+    b.eval(page, SLOW_MOTION)?;
+    b.click(page, "#sidebar-new-chat")?;
+    let open = b.until(page, opened, wait);
+    let said = "Keep these words for the first chat, but stay where Back takes me";
+    b.eval(page, &fill("#workspace-search", said))?;
+    let offered = b.until(page, &format!("document.querySelector('#search-results .search-start')?.textContent.includes({})", js(&format!("Say it in {FIRST_CHAT}"))), wait);
+    b.eval(page, "(document.getElementById('search-form').requestSubmit(), true)")?;
+    let closing = b.eval(page, &format!("{opened} && document.getElementById('search-dialog').inert"))? == true;
+    b.eval(page, "(history.back(), true)")?;
+    let back = b.until(page, settings, wait);
+    let finished = b.until(page, closed, wait);
+    b.eval(page, NORMAL_MOTION)?;
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let stayed = b.eval(page, &format!("{closed} && {settings}"))? == true;
+    let where_now = b.eval(page, "({ path: location.pathname, settings: !document.getElementById('settings-page').hidden, title: document.getElementById('chat-title').textContent })")?;
+    b.click(page, "#sidebar-new-chat")?;
+    let kept = b.until(page, &format!("{opened} && document.getElementById('workspace-search').value === {}", js(said)), wait);
+    b.eval(page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
+    let dismissed = b.until(page, closed, wait);
+    open_row(b, page, chat, wait)?;
+    s.ok(
+        "before the first agent exists, Back to settings while the launcher's first-chat handoff still closes does not reopen the chat; its next opening keeps the words",
+        shown && open && offered && closing && back && finished && stayed && kept && dismissed,
+        json!({ "closing": closing, "back": back, "stayed": stayed, "kept": kept, "where": where_now }),
+    );
+    Ok(())
+}
+
 /// A file pasted into the launcher's input, as the clipboard hands it
 /// over: how many files the launcher holds then.
 const PASTE_FILE: &str = "(() => { const d = new DataTransfer(); d.items.add(new File(['a list of atlases'], 'launch.txt', { type: 'text/plain' })); \
@@ -5456,6 +5498,75 @@ fn launch_straight_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me
 
     open_row(b, page, reader_chat, wait)?;
     b.until(page, "document.getElementById('chat-title').textContent === 'Reader'", wait);
+    Ok(())
+}
+
+/// The launcher's grown input and Send in the visual viewport, and its
+/// file region's own scroll: the panel, Send and a removal's boxes and what
+/// a press at their middles reaches.
+const LAUNCHER_GEOMETRY: &str = "(() => { const panel = document.querySelector('.search-panel'); const input = document.getElementById('workspace-search'); const send = document.getElementById('search-send'); const files = document.getElementById('search-files'); \
+    const p = panel.getBoundingClientRect(); const s = send.getBoundingClientRect(); const at = document.elementFromPoint(s.left + s.width / 2, s.top + s.height / 2); const inside = (r) => r.width > 0 && r.height > 0 && r.left >= 0 && r.top >= 0 && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1; \
+    return { ok: inside(p) && inside(s) && s.top >= p.top && s.bottom <= p.bottom && (at === send || send.contains(at)) && input.scrollHeight > input.clientHeight, panel: [p.left, p.top, p.right, p.bottom], send: [s.left, s.top, s.right, s.bottom], \
+      input: { height: input.getBoundingClientRect().height, client: input.clientHeight, scroll: input.scrollHeight, max: getComputedStyle(input).maxHeight }, files: files.hidden ? null : { client: files.clientHeight, scroll: files.scrollHeight }, viewport: [innerWidth, innerHeight, visualViewport.height] }; })()";
+
+/// A keyboard-height visual viewport bounds an already-grown prompt, so its
+/// Send stays on screen and hit-testable. At 320×800, eight long filenames
+/// shrink their own region and scroll: every removal can be brought on
+/// screen and pressed with a real mouse click.
+fn launch_geometry_ui(s: &mut Suite, b: &mut Browser, page: &Page, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let opened = "document.getElementById('search-dialog').open";
+    let closed = "!document.getElementById('search-dialog').open";
+    b.viewport(page, 320, 800, true)?;
+    anyhow::ensure!(b.until(page, closed, wait), "the launcher closed before its geometry checks");
+    b.eval(page, "(document.getElementById('sidebar-new-chat').click(), true)")?;
+    let open = b.until(page, opened, wait);
+    b.eval(page, &fill("#workspace-search", &"one line of a long prompt\n".repeat(20)))?;
+    b.viewport(page, 320, 300, true)?;
+    let shrunk = b.until(page, "visualViewport.height === 300 && document.documentElement.style.getPropertyValue('--viewport-height') === '300px'", wait);
+    let keyboard = b.eval(page, LAUNCHER_GEOMETRY)?;
+    let _ = b.screenshot(page, &shots.join("phone-300-launcher.png"));
+    s.ok(
+        "at a 300 px visual viewport, an already-grown prompt is bounded by the room above the keyboard: the panel and Send stay on screen, and a press at Send's middle reaches it",
+        open && shrunk && keyboard["ok"] == true,
+        &keyboard,
+    );
+
+    b.viewport(page, 320, 800, true)?;
+    let grown = b.until(page, "visualViewport.height === 800 && document.documentElement.style.getPropertyValue('--viewport-height') === '800px'", wait);
+    let names: Vec<String> = (0..8).map(|i| format!("atlas-{i}-with-a-very-long-filename-that-still-leaves-its-removal-reachable.txt")).collect();
+    let pasted = b.eval(
+        page,
+        &format!("(() => {{ const d = new DataTransfer(); for (const name of {}) d.items.add(new File(['atlas'], name, {{ type: 'text/plain' }})); \
+          document.getElementById('workspace-search').dispatchEvent(new ClipboardEvent('paste', {{ clipboardData: d, bubbles: true, cancelable: true }})); return document.querySelectorAll('#search-files .search-file').length; }})()", serde_json::to_string(&names)?),
+    )? == json!(8);
+    let many = b.eval(page, LAUNCHER_GEOMETRY)?;
+    let scrolls = many["files"]["client"].as_f64().zip(many["files"]["scroll"].as_f64()).is_some_and(|(client, scroll)| scroll > client);
+    let _ = b.screenshot(page, &shots.join("phone-320-launcher-eight-files.png"));
+    s.ok(
+        "at 320×800, eight long filenames leave Send visible and hit-testable, and their own region shrinks and scrolls instead of putting removals beyond the panel",
+        grown && pasted && many["ok"] == true && scrolls,
+        &many,
+    );
+    let mut reachable = true;
+    let mut removals = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        let selector = format!("#search-files .search-file-remove[aria-label={}]", js(&format!("Remove {name}")));
+        let seen = b.eval(
+            page,
+            &format!("(() => {{ const b = document.querySelector({}); if (!b) return {{ ok: false }}; b.scrollIntoView({{ block: 'nearest' }}); const f = document.getElementById('search-files').getBoundingClientRect(); const r = b.getBoundingClientRect(); const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); \
+              return {{ ok: r.left >= 0 && r.right <= innerWidth + 1 && r.top >= f.top - 1 && r.bottom <= f.bottom + 1 && (at === b || b.contains(at)), button: [r.left, r.top, r.right, r.bottom], files: [f.left, f.top, f.right, f.bottom], hit: at?.tagName ?? null }}; }})()", js(&selector)),
+        )?;
+        b.click(page, &selector)?;
+        let left = b.eval(page, "document.querySelectorAll('#search-files .search-file').length")?;
+        reachable &= seen["ok"] == true && left == json!(7 - i);
+        removals.push(json!({ "name": name, "seen": seen, "left": left }));
+    }
+    let empty = b.eval(page, "document.querySelectorAll('#search-files .search-file').length === 0 && document.getElementById('search-files').hidden")? == true;
+    s.ok("each of the eight long filenames' removals scrolls into reach and a real mouse click removes it", reachable && empty, json!(removals));
+    b.eval(page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
+    b.until(page, closed, wait);
+    b.viewport(page, 1280, 800, false)?;
     Ok(())
 }
 

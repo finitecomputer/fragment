@@ -69,6 +69,8 @@ export function createLauncher(shell) {
   // Keep the same chat and record id after an uncertain send, so retry cannot
   // duplicate the first message. This is only the current dialog's draft.
   let pendingLaunch = null;
+  // A first chat's words whose handoff lost the middle column while closing.
+  let firstChatDraft = null;
   // Why the last send failed, said until the words change.
   let launchError = "";
   // The launcher's files, dropped on it or pasted: sent with its words as
@@ -186,6 +188,7 @@ export function createLauncher(shell) {
   function renderFiles() {
     const box = $("search-files");
     box.hidden = !launchFiles.length;
+    dialog.classList.toggle("has-files", !box.hidden);
     box.replaceChildren(...launchFiles.map((f) => {
       const name = f.file.name || "a file";
       const chip = el("span", "search-file");
@@ -261,7 +264,8 @@ export function createLauncher(shell) {
     if (dialog.open || launching) return;
     closeMenu(true);
     searchTrigger = trigger;
-    input.value = text ?? pendingLaunch?.text ?? "";
+    input.value = text ?? pendingLaunch?.text ?? firstChatDraft ?? "";
+    firstChatDraft = null;
     updateSearch();
     dialog.showModal();
     // measured once shown: a closed dialog's input has no height
@@ -298,7 +302,12 @@ export function createLauncher(shell) {
     if (!canLaunch()) {
       const chat = firstChat();
       if (!chat || !text) return;
+      const view = shell.views();
       await closeSearch(true);
+      if (view !== shell.views()) {
+        firstChatDraft = text;
+        return;
+      }
       composeIn(chat, text);
       leaveSidebar();
       return;
