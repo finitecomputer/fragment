@@ -505,9 +505,55 @@ fn favicon(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     s.ok("a live with its own favicon.ico serves that, icon or not", own, ask(None)?);
     s.commit(&c, &[("site/favicon.ico", None)]);
     s.deploy(&c);
+    let head = || api.call(Call { method: "HEAD", url: api.site_url(&name, "favicon.ico"), cookie: Some(cookie.clone()), ..Call::default() });
+    let headed = s.eventually(WAIT, || {
+        head().is_ok_and(|r| r.status == 200 && r.header("content-type") == icon::MEDIA_TYPE && r.header("etag") == format!("\"{sha}\"") && r.bytes.is_empty())
+    });
+    s.ok("its own favicon.ico gone, a HEAD says the icon's headers and sends no bytes", headed, head().map(|r| format!("{r} {:?}", r.headers))?);
     api.signed(owner, "DELETE", &route(&name), None)?;
     let gone = s.eventually(WAIT, || ask(None).is_ok_and(|r| r.status == 404));
     s.ok("its icon removed, and no favicon.ico of its own, none is served (404)", gone, ask(None)?);
+    app_favicon(s, api, owner)
+}
+
+/// An app that answers `/favicon.ico` from its own route (App.fetch), its
+/// page naming it, with no such file in its live.
+const FAVICON_APP: &str = r#"import { DurableObject } from "cloudflare:workers";
+export class App extends DurableObject {
+  async fetch(request) {
+    if (new URL(request.url).pathname !== "/favicon.ico") return new Response("no such route", { status: 404 });
+    return new Response("the app's own icon", { headers: { "content-type": "image/x-icon", "etag": "\"the-app\"" } });
+  }
+}
+"#;
+
+/// An app's own favicon route wins over the fragment's icon: set, it
+/// changes nothing there (a GET, a HEAD, a GET naming the icon's hash),
+/// and removed, the app still answers.
+fn app_favicon(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let name = s.named(api, owner, "favicon-app")?;
+    let c = s.create(api, owner, &name)?;
+    let cookie = format!("fragview={}", c["viewToken"].as_str().unwrap_or(""));
+    let page: &[u8] = b"<!doctype html><html><head><link rel=\"icon\" href=\"/favicon.ico\"></head><body>hi</body></html>";
+    s.commit(&c, &[("site/index.html", Some(page)), ("app.mjs", Some(FAVICON_APP.as_bytes())), ("fragment.json", Some(br#"{ "name": "favicon-app" }"#))]);
+    s.deploy(&c);
+    let ask = |method: &'static str, etag: Option<&str>| {
+        let extra = etag.map(|e| vec![("if-none-match", e.to_string())]).unwrap_or_default();
+        api.call(Call { method, url: api.site_url(&name, "favicon.ico"), cookie: Some(cookie.clone()), extra, ..Call::default() })
+    };
+    let the_apps = |r: &Reply, head: bool| r.status == 200 && r.header("content-type") == "image/x-icon" && (head || r.bytes == b"the app's own icon");
+    let before = s.eventually(WAIT, || ask("GET", None).is_ok_and(|r| the_apps(&r, false)));
+    let kept = put(api, owner, &name, &photo())?;
+    let sha = kept.body["sha256"].as_str().unwrap_or("").to_string();
+    let (got, head, held) = (ask("GET", None)?, ask("HEAD", None)?, ask("GET", Some(&format!("\"{sha}\"")))?);
+    s.ok(
+        "an app whose own route answers favicon.ico (its page naming it) keeps it with an icon set: a GET, a HEAD and a GET naming the icon's hash are the app's",
+        before && kept.status == 200 && the_apps(&got, false) && the_apps(&head, true) && the_apps(&held, false),
+        format!("{got} / {head} / {held}"),
+    );
+    let gone = api.signed(owner, "DELETE", &route(&name), None)?;
+    let after = ask("GET", None)?;
+    s.ok("its icon removed, the app's route still answers it", gone.status == 200 && the_apps(&after, false), &after);
     Ok(())
 }
 
