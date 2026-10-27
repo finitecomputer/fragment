@@ -32,9 +32,45 @@ pub const KEPT_MAX: u64 = 10_000;
 /// admin's page (a mail's text is at most 16 KiB).
 pub const MAILED_MAX_CHARS: usize = 2_000;
 
-/// A feedback's id: 32 lowercase hex digits, the router's for each send.
+/// How long a send may take to put its screenshots and be kept: past
+/// it, one still `sending` is the registry alarm's to delete, its bytes
+/// first. A send is a Worker's request, seconds; an hour leaves a person
+/// who asks again with its id (their dialog's) room to finish it.
+pub const SENDING_TTL_MS: i64 = 3600 * 1000;
+/// Feedback one run of the registry's alarm deletes, at most (each its
+/// screenshots' bytes, then its row); more are the next run's, soon.
+pub const SWEEP_BATCH: u32 = 16;
+
+/// A feedback's id: 32 lowercase hex digits, its sender's for one send
+/// (the shell's dialog makes one each time it opens), or the router's.
 pub fn valid_id(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Where a feedback stands. A row is the record of its screenshots' bytes
+/// until they are gone, so none is ever left unrecorded: the registry
+/// keeps it `Sending` before a byte is put, `Kept` once all are, and
+/// `Deleting` once an operator deletes it, or a send was never kept in
+/// `SENDING_TTL_MS`, until its alarm has deleted the bytes, then the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    Sending,
+    Kept,
+    Deleting,
+}
+
+impl State {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            State::Sending => "sending",
+            State::Kept => "kept",
+            State::Deleting => "deleting",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<State> {
+        [State::Sending, State::Kept, State::Deleting].into_iter().find(|k| k.as_str() == s)
+    }
 }
 
 /// Where a feedback's screenshots are kept in BLOBS: under its person's
@@ -65,6 +101,9 @@ pub struct Shot<'a> {
 /// A form read: what a person sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sent<'a> {
+    /// The send's own id, when its sender named one: asked again with it,
+    /// it is the same send.
+    pub id: Option<String>,
     pub kind: FeedbackKind,
     pub message: String,
     pub page: Option<String>,
@@ -80,6 +119,8 @@ pub enum Refused {
     Twice(&'static str),
     /// No `kind`, or one that is neither.
     Kind,
+    /// An `id` that is not 32 lowercase hex digits.
+    Id,
     /// A field's bytes are not UTF-8.
     NotText(&'static str),
     /// No message, or only spaces.
@@ -102,9 +143,10 @@ impl Refused {
     /// What the sender is told.
     pub fn message(&self) -> String {
         match self {
-            Refused::Unknown(f) => format!("feedback takes the fields kind, message, page and screenshot, not {:?}", truncated(f)),
+            Refused::Unknown(f) => format!("feedback takes the fields id, kind, message, page and screenshot, not {:?}", truncated(f)),
             Refused::Twice(f) => format!("feedback takes one {f}"),
             Refused::Kind => "feedback's kind is `problem` or `message`".into(),
+            Refused::Id => "feedback's id is 32 lowercase hex digits, one for each send".into(),
             Refused::NotText(f) => format!("feedback's {f} is text (UTF-8)"),
             Refused::Empty => "write a message: say what happened, or what you want us to know".into(),
             Refused::TooLong(n) => format!("the message is {n} characters; at most {MESSAGE_MAX_CHARS}: make it shorter"),
@@ -148,14 +190,24 @@ fn message_of(raw: &str) -> Result<String, Refused> {
     Ok(m.to_string())
 }
 
-/// What a form's parts send: `kind` and `message` once, `page` at most
-/// once, and each `screenshot` an image by its bytes (its declared type
-/// and file name are not trusted).
+/// What a form's parts send: `kind` and `message` once, `id` and `page`
+/// at most once, and each `screenshot` an image by its bytes (its
+/// declared type and file name are not trusted).
 pub fn read<'a>(parts: &[Part<'a>]) -> Result<Sent<'a>, Refused> {
-    let (mut kind, mut message, mut page) = (None, None, None);
+    let (mut id, mut kind, mut message, mut page) = (None, None, None, None);
     let mut shots = Vec::new();
     for p in parts {
         match p.name.as_str() {
+            "id" => {
+                if id.is_some() {
+                    return Err(Refused::Twice("id"));
+                }
+                let v = text(p, "id")?.trim();
+                if !valid_id(v) {
+                    return Err(Refused::Id);
+                }
+                id = Some(v.to_string());
+            }
             "kind" => {
                 if kind.is_some() {
                     return Err(Refused::Twice("kind"));
@@ -193,7 +245,7 @@ pub fn read<'a>(parts: &[Part<'a>]) -> Result<Sent<'a>, Refused> {
         let mime = crate::face::picture_type(bytes).ok_or(Refused::NotAnImage(i))?;
         screenshots.push(Shot { mime, bytes });
     }
-    Ok(Sent { kind: kind.ok_or(Refused::Kind)?, message: message.ok_or(Refused::Empty)?, page: page.filter(|p| !p.is_empty()), screenshots })
+    Ok(Sent { id, kind: kind.ok_or(Refused::Kind)?, message: message.ok_or(Refused::Empty)?, page: page.filter(|p| !p.is_empty()), screenshots })
 }
 
 /// A browser's `User-Agent`, as kept: its first `USER_AGENT_MAX_CHARS`,
@@ -259,8 +311,13 @@ mod tests {
         assert_eq!((sent.kind, sent.message.as_str(), sent.page.as_deref()), (FeedbackKind::Problem, "It broke.\nTwice.", Some("/settings")));
         assert_eq!(sent.screenshots.iter().map(|s| s.mime).collect::<Vec<_>>(), ["image/png", "image/jpeg"]);
         assert_eq!(sent.screenshots[0].bytes, PNG);
+        assert_eq!(sent.id, None, "no id: the router makes one");
         let sent = read(&[part("message", b"Thanks!"), part("kind", b"message"), part("page", b"")]).unwrap();
         assert_eq!((sent.kind, sent.page, sent.screenshots.len()), (FeedbackKind::Message, None, 0));
+        let id = "0123456789abcdef0123456789abcdef";
+        let padded = format!(" {id}\r\n");
+        let sent = read(&[part("id", padded.as_bytes()), part("kind", b"message"), part("message", b"hi")]).unwrap();
+        assert_eq!(sent.id.as_deref(), Some(id), "the sender's id, its one send");
         // at the limits themselves
         let long = "é".repeat(MESSAGE_MAX_CHARS);
         let page = format!("/{}", "a".repeat(PAGE_MAX_CHARS - 1));
@@ -288,6 +345,11 @@ mod tests {
         assert_eq!(read(&ok(vec![part("kind", b"message")])), Err(Refused::Twice("kind")));
         assert_eq!(read(&ok(vec![part("message", b"again")])), Err(Refused::Twice("message")));
         assert_eq!(read(&ok(vec![part("email", b"a@b.c")])), Err(Refused::Unknown("email".into())));
+        for id in ["", "0123456789ABCDEF0123456789ABCDEF", "0123456789abcdef", "0123456789abcdef0123456789abcdef0", "../../0123456789abcdef0123456789a"] {
+            assert_eq!(read(&ok(vec![part("id", id.as_bytes())])), Err(Refused::Id), "{id:?}");
+        }
+        let id = b"0123456789abcdef0123456789abcdef";
+        assert_eq!(read(&ok(vec![part("id", id), part("id", id)])), Err(Refused::Twice("id")));
         for page in ["settings", "//evil.example/", "https://evil.example/", "/a b", "/a\nb"] {
             assert_eq!(read(&ok(vec![part("page", page.as_bytes())])), Err(Refused::Page), "{page:?}");
         }
@@ -300,6 +362,17 @@ mod tests {
         assert_eq!(read(&ok(vec![part("screenshot", &big)])), Err(Refused::TooLarge(0, SCREENSHOT_MAX_BYTES + 1)));
         assert!(Refused::TooLarge(0, 9).message().starts_with("screenshot 1 is 9 bytes"));
         assert!(Refused::Unknown("x".repeat(100)).message().len() < 120, "a field's name is cut short");
+    }
+
+    /// A row's state reads back as it was written, and nothing else is one.
+    #[test]
+    fn a_state_reads_as_written() {
+        for s in [State::Sending, State::Kept, State::Deleting] {
+            assert_eq!(State::parse(s.as_str()), Some(s));
+        }
+        assert_eq!(State::parse("Kept"), None);
+        assert_eq!(State::parse(""), None);
+        const { assert!(SENDING_TTL_MS >= 10 * 60 * 1000 && SWEEP_BATCH >= 1) };
     }
 
     /// The body's limit holds the most screenshots at their most, with room.

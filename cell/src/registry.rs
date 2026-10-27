@@ -83,6 +83,13 @@ pub struct RegistryCell {
     /// Dev fleets' test hook: the path whose next calls are 503, and how
     /// many more; for this cell's life, as `down` is.
     down_for: RefCell<Option<(String, u32)>>,
+    /// Dev fleets' test hook: the path whose next calls act, then answer
+    /// 503 as an answer lost on its way back would, and how many more; for
+    /// this cell's life, as `down` is.
+    drop_for: RefCell<Option<(String, u32)>>,
+    /// Dev fleets' test hook: how many more runs of the alarm's deletes
+    /// of feedback fail before deleting a thing; for this cell's life.
+    pub(crate) feedback_fails: Cell<u32>,
     /// Dev fleets' test hook: the path whose next calls this cell answers as
     /// one of another release (`calls::SKEWED`), refusing them as a deploy
     /// going out does, and how many more; for this cell's life, as `down` is.
@@ -137,6 +144,8 @@ impl DurableObject for RegistryCell {
             cfg,
             down: Cell::new(false),
             down_for: RefCell::new(None),
+            drop_for: RefCell::new(None),
+            feedback_fails: Cell::new(0),
             skew_for: RefCell::new(None),
             skew_deployed: Cell::new(None),
             calls: Cell::new(0),
@@ -157,7 +166,13 @@ impl DurableObject for RegistryCell {
         if let Some(probed) = crate::routed::probed(&req, &self.schema)? {
             return Ok(probed);
         }
-        match self.route(req).await {
+        let path = req.path();
+        let answer = self.route(req).await;
+        // the test hook's lost answer: the call acted, its caller hears 503
+        if one_more(&self.drop_for, &path) {
+            return CellError::new(ErrorCode::RegistryUnavailable, format!("the answer to {path} was lost (a test hook)")).response();
+        }
+        match answer {
             Ok(resp) => Ok(resp),
             Err(e) => e.response(),
         }
@@ -165,7 +180,8 @@ impl DurableObject for RegistryCell {
 
     /// Sign-in's sweep of expired rows (signin.rs), off every request, the
     /// seat holders' plans pushed (orgs.rs), and the invite claims a
-    /// sign-in could not make tried again (invites.rs). A failed run of any
+    /// sign-in could not make tried again (invites.rs), and feedback's
+    /// bytes deleted, then its rows (feedback.rs). A failed run of any
     /// is logged and arms its next itself; failing that too, the alarm
     /// fails and the node retries it.
     async fn alarm(&self) -> Result<Response> {
@@ -195,6 +211,11 @@ impl DurableObject for RegistryCell {
         if let Err(e) = self.claims_alarm().await {
             console_error!("the registry's kept invite claims failed ({:?}): {}", e.code, e.message);
             self.claims_later().await.map_err(|e| Error::RustError(e.message))?;
+        }
+        // last: it arms only sooner than what the others armed
+        if let Err(e) = self.feedback_alarm().await {
+            console_error!("the registry's deletes of feedback failed ({:?}): {}", e.code, e.message);
+            self.feedback_later().await.map_err(|e| Error::RustError(e.message))?;
         }
         Response::ok("")
     }
@@ -763,6 +784,23 @@ impl RegistryCell {
                 *self.down_for.borrow_mut() = (times > 0).then(|| (path.clone(), times));
                 Ok(json!({ "downFor": { "path": path, "times": times } }))
             }
+            TestHook::FeedbackAge(id) => Ok(json!({ "aged": self.feedback_age(&id).await? })),
+            TestHook::FeedbackSweepFails(n) => {
+                if n.is_some_and(|n| n > TEST_DOWN_FOR_MAX) {
+                    return Err(CellError::invalid(format!("fail at most {TEST_DOWN_FOR_MAX} runs")));
+                }
+                if let Some(n) = n {
+                    self.feedback_fails.set(n);
+                }
+                Ok(json!({ "left": self.feedback_fails.get() }))
+            }
+            TestHook::DropFor(DownFor { path, times }) => {
+                if times > TEST_DOWN_FOR_MAX || !path.starts_with('/') || path == TestHook::PATH {
+                    return Err(CellError::invalid(format!("drop for a call's path (not /test's), at most {TEST_DOWN_FOR_MAX} times")));
+                }
+                *self.drop_for.borrow_mut() = (times > 0).then(|| (path.clone(), times));
+                Ok(json!({ "dropFor": { "path": path, "times": times } }))
+            }
             TestHook::SkewFor(calls::SkewFor { path, times, deployed }) => {
                 if times > TEST_DOWN_FOR_MAX || !path.starts_with('/') || path == TestHook::PATH {
                     return Err(CellError::invalid(format!("skew for a call's path (not /test's), at most {TEST_DOWN_FOR_MAX} times")));
@@ -830,7 +868,7 @@ impl RegistryCell {
         if let Some(answer) = self.admin_route(&path, &bytes) {
             return answer;
         }
-        if let Some(answer) = self.feedback_route(&path, &bytes) {
+        if let Some(answer) = self.feedback_route(&path, &bytes).await {
             return answer;
         }
         match path.as_str() {

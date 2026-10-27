@@ -2609,7 +2609,12 @@ const FEEDBACK_SHOTS_MAX = 3;
 const FEEDBACK_SHOT_MAX_BYTES = 5 * 1024 * 1024;
 const FEEDBACK_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 const FEEDBACK_LABEL = { problem: ["What happened?", "What did you do, what did you expect, and what happened instead?"], message: ["Your message", "Anything you want us to know"] };
-const feedback = { shots: [], page: "/" };
+// `opened` counts the dialog's openings: an answer to a send of an earlier
+// one (sent, then closed and opened again) changes nothing of this one's.
+// `id` is the opening's one send: sent again after an error, it is the
+// same send, so one whose answer was lost is never kept twice.
+const feedback = { shots: [], page: "/", opened: 0, id: "" };
+const feedbackId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
 function helpSection() {
   const s = section("Help");
   s.id = "settings-help";
@@ -2631,6 +2636,11 @@ function openFeedback(kind) {
   form.elements.kind.value = kind;
   form.hidden = false;
   $("feedback-sent").hidden = true;
+  feedback.opened++;
+  feedback.id = feedbackId();
+  const send = $("feedback-send");
+  send.disabled = false;
+  send.textContent = "Send";
   feedback.page = location.pathname;
   feedbackShots([]);
   feedbackSaid(null);
@@ -2708,13 +2718,19 @@ $("feedback-dialog").addEventListener("drop", (e) => {
   e.preventDefault();
   addFeedbackShots([...e.dataTransfer.files]);
 });
-$("feedback-dialog").addEventListener("close", () => feedbackShots([]));
+// a close event comes after the close (a task queued), so one of an opening
+// closed and opened again at once is the earlier one's: it clears nothing
+$("feedback-dialog").addEventListener("close", () => {
+  if (!$("feedback-dialog").open) feedbackShots([]);
+});
 $("feedback-cancel").onclick = () => $("feedback-dialog").close();
 $("feedback-done").onclick = () => $("feedback-dialog").close();
 $("feedback-form").onsubmit = async (e) => {
   e.preventDefault();
   const form = $("feedback-form");
+  const opened = feedback.opened;
   const body = new FormData();
+  body.append("id", feedback.id);
   body.append("kind", form.elements.kind.value);
   body.append("message", $("feedback-message").value);
   body.append("page", feedback.page);
@@ -2732,9 +2748,13 @@ $("feedback-form").onsubmit = async (e) => {
     // no answer: said below, and Send stays to try again
   } finally {
     writing--;
-    send.disabled = false;
-    send.textContent = "Send";
   }
+  // closed, or opened again, meanwhile: the answer is an earlier opening's
+  if (opened !== feedback.opened || !$("feedback-dialog").open) return;
+  send.disabled = false;
+  send.textContent = "Send";
+  // that send is gone (taken too long, or deleted): another try is a new one
+  if (r?.status === 404 || r?.status === 409) feedback.id = feedbackId();
   if (r?.ok) {
     feedbackShots([]);
     form.hidden = true;
@@ -2742,7 +2762,8 @@ $("feedback-form").onsubmit = async (e) => {
     $("feedback-done").focus();
     return;
   }
-  feedbackSaid(r ? (await r.json().catch(() => ({}))).message || "That wasn't sent. Try again." : "We couldn't be reached. Check your connection, and try again.");
+  const said = r ? (await r.json().catch(() => ({}))).message || "That wasn't sent. Try again." : "We couldn't be reached. Check your connection, and try again.";
+  if (opened === feedback.opened) feedbackSaid(said);
 };
 // ---- your data: an export of everything that is the person's (docs/api.md,
 // Export), built in the background, which they are mailed about once it is

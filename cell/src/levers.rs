@@ -10,6 +10,7 @@
 //!   POST /api/test/fragment {fragment, op, …}: a lever on that fragment
 //!   POST /api/test/computer {computer, op, …}: a lever on that computer (kill, saves, fail-saves, hang-backups, alive-check, always-on)
 //!   POST /api/test/registry {…}: a lever on the registry (the whole deployment's)
+//!   POST /api/test/feedback {person, id}: the keys BLOBS holds for that feedback's screenshots
 //!   POST /api/test/mail     {to, subject, text}: one message, as the platform sends it
 //!
 //! And one hook no route takes: on a local fleet, a request's
@@ -219,6 +220,25 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 return Err(CellError::invalid("sign e2e people in at /api/test/signin, and list them at /api/test/people"));
             }
             json_answer(&ask_registry(env, &hook).await?)
+        }
+        (Method::Post, ["feedback"]) => {
+            /// `{person, id}`: the keys BLOBS holds under that feedback's
+            /// prefix (a page's), so a test sees its bytes there or gone.
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct TestFeedback {
+                person: String,
+                id: String,
+            }
+            let t: TestFeedback = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            if !npub::is_identity(&t.person) || !fragment_core::feedback::valid_id(&t.id) {
+                return Err(CellError::invalid("name a person's identity and a feedback's id (32 lowercase hex)"));
+            }
+            if cfg.levers_scoped && !is_e2e(env, &t.person).await? {
+                return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the feedback lever reaches e2e people's alone"));
+            }
+            let (keys, more) = crate::js::blob_list(env, &fragment_core::feedback::feedback_prefix(&t.person, &t.id)).await?;
+            json_answer(&serde_json::json!({ "keys": keys, "more": more }))
         }
         // a preview's mail goes out for real: only the fake's is a test's
         (Method::Post, ["mail"]) if cfg.levers_scoped => Err(no_route("/api/test/mail")),
