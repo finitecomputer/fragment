@@ -2314,7 +2314,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     );
     // Every surface follows a rename (Paul, 2026-10-26: "be systematic about
     // referring to the user's chosen name"): with Settings drawn (Agents,
-    // Computer, Skills, Sharing, …) and its page, its files and its screen
+    // Computer, Skills, …) and its page, its files and its screen
     // open, renamed elsewhere; then nothing the shell draws, nor any page it
     // frames, says a name it had, in its text, its labels or its titles. A
     // surface that copies a name once fails here, wherever it is.
@@ -2323,7 +2323,7 @@ fn faces_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person,
     b.click(page, "#sidebar-agent")?;
     let screen_open = menu_item(b, page, "Its screen")? && screen_named(s, b, "Frankie");
     b.click(page, "#settings")?;
-    let drawn = b.until(page, &format!("location.pathname === '/settings' && document.querySelector({face})?.textContent === 'Frankie' && !!document.querySelector('#settings-page .access-list')"), wait);
+    let drawn = b.until(page, &format!("location.pathname === '/settings' && document.querySelector({face})?.textContent === 'Frankie'"), wait);
     let wrote = rename_elsewhere(api, me.session, &agent, "Rosalind")?;
     let followed = b.until(page, &format!("document.querySelector({face})?.textContent === 'Rosalind'"), wait)
         && screen_named(s, b, "Rosalind")
