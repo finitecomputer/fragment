@@ -523,7 +523,7 @@ iframe[data-blocked] { display: none; }
   .settings-nav::-webkit-scrollbar { display: block; height: 6px; }
   .settings-nav-title { display: none; }
   .settings-nav-link { flex: none; white-space: nowrap; }
-  .settings-section { scroll-margin-top: 118px; }
+  .settings-section { scroll-margin-top: 109px; }
 }
 @container settings (max-width: 620px) {
   .settings-layout { padding: 16px 20px 60px; }

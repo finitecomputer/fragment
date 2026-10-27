@@ -2466,30 +2466,39 @@ const SETTINGS_BOX: &str = "(() => { const p = document.getElementById('settings
 const HOLD_LEDGER: &str = "(() => { const real = window.fetch; window.__ledgerHeld = null; window.fetch = async (url, o) => { \
     if (String(url) === '/api/ledger') { window.fetch = real; await new Promise((r) => { window.__ledgerHeld = r; }); } return real(url, o); }; return true; })()";
 
-/// Settings' section navigation, by mouse and by scrolling, on a wide and a
-/// narrow desktop: every section can be picked, the last one included, and a
-/// horizontal nav both scrolls and reveals the section the page scrolls to.
+/// Settings' section navigation, by mouse and by scrolling, on wide and
+/// narrow desktops and a phone: every section can be picked, the last one
+/// included, and a horizontal nav both scrolls and reveals the section the
+/// page scrolls to.
 fn settings_navigation_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
-    let listed = b.eval(page, "[...document.querySelectorAll('#settings-page .settings-nav-link:not([hidden])')].map((b) => b.dataset.section)")?;
-    let ids: Vec<String> = listed.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
-    let mut picked = Vec::new();
-    for id in ids {
-        let link = format!(".settings-nav-link[data-section={}]", js(&id));
-        b.click(page, &link)?;
-        let selected = b.until(
-            page,
-            &format!("(() => {{ const b = document.querySelector({link:?}); const s = document.getElementById({id:?}); const r = s?.getBoundingClientRect(); return b?.getAttribute('aria-current') === 'location' && !!r && r.top < innerHeight && r.bottom > 0; }})()"),
-            wait,
+    for (layout, width, height, mobile) in [("wide desktop", 1280, 800, false), ("narrow desktop", 1100, 800, false), ("phone", 390, 844, true)] {
+        b.viewport(page, width, height, mobile)?;
+        let listed = b.eval(page, "[...document.querySelectorAll('#settings-page .settings-nav-link:not([hidden])')].map((b) => b.dataset.section)")?;
+        let ids: Vec<String> = listed.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+        let mut picked = Vec::new();
+        for id in ids {
+            let link = format!(".settings-nav-link[data-section={}]", js(&id));
+            if mobile {
+                b.eval(page, &format!("(document.querySelector({link:?})?.click(), true)"))?;
+            } else {
+                b.click(page, &link)?;
+            }
+            let selected = b.until(
+                page,
+                &format!("(() => {{ const b = document.querySelector({link:?}); const s = document.getElementById({id:?}); if (!s) return false; const p = document.getElementById('settings-page'); const r = s.getBoundingClientRect(); const pr = p.getBoundingClientRect(); const top = pr.top + p.clientTop + parseFloat(getComputedStyle(p).scrollPaddingTop) + parseFloat(getComputedStyle(s).scrollMarginTop); return b?.getAttribute('aria-current') === 'location' && Math.abs(r.top - top) < 2 && r.top < innerHeight && r.bottom > 0; }})()"),
+                wait,
+            );
+            picked.push(json!({ "section": id, "selected": selected }));
+        }
+        s.ok(
+            &format!("every Settings nav item selects its section on a {layout}, including Build with Claude Code or Codex and Your data at the end"),
+            !picked.is_empty() && picked.iter().all(|p| p["selected"] == true),
+            json!(picked),
         );
-        picked.push(json!({ "section": id, "selected": selected }));
     }
-    s.ok(
-        "every Settings nav item selects its section, including Build with Claude Code or Codex and Your data at the end",
-        !picked.is_empty() && picked.iter().all(|p| p["selected"] == true),
-        json!(picked),
-    );
 
+    b.viewport(page, 1280, 800, false)?;
     b.eval(page, "document.getElementById('settings-page').scrollTo({ top: 0, behavior: 'auto' })")?;
     let account = b.until(page, "document.querySelector('.settings-nav-link[data-section=settings-section-0]')?.getAttribute('aria-current') === 'location'", wait);
     b.eval(page, "document.getElementById('settings-connections').scrollIntoView({ block: 'start', behavior: 'auto' })")?;

@@ -2393,7 +2393,7 @@ function renderSettingsPage(page, sections) {
   page.replaceChildren(layout);
   page.onscroll = () => {
     const visible = links.filter(([section]) => !section.hidden);
-    const top = page.getBoundingClientRect().top + 130;
+    const top = page.getBoundingClientRect().top + page.clientTop + 130;
     const current = [...visible].reverse().find(([section]) => section.getBoundingClientRect().top <= top)?.[1] ?? visible[0]?.[1];
     if (current === nav.querySelector('[aria-current="location"]')) return;
     for (const [, button] of links) {
