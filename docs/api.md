@@ -1683,7 +1683,9 @@ a making or a `PUT` on one answers 400.
 - **Kept** as one of the fragment's blobs (`image/png`), named in its
   meta, which the blob collection keeps. Its members' lists show it as
   the fragment's `picture`, `/api/f/<name>/icon?v=<12 hex of its
-  SHA-256>`: a new icon is a new address, so `GET` may be cached a day.
+  SHA-256>`: a new icon is a new address, so a matching `GET` may be
+  cached a day. A stale or unrelated version is 404 with `Cache-Control:
+  no-store`, never the current icon's bytes.
 - **Events:** `icon.made` (`{subject, offered, flaws}`), `icon.set`
   (`{sha256, fitted}`), `icon.removed`.
 
