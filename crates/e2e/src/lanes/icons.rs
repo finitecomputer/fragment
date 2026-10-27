@@ -247,6 +247,21 @@ pub fn icons(s: &mut Suite, api: &Api) -> Result<()> {
             && up.body["size"] == fitted.bytes.len(),
         format!("{up} / {} {:?}", fitted.status, read(&fitted.bytes)),
     );
+    let fitted_path = icon::icon_path(&name, &fitted_sha);
+    let versioned = api.signed(&owner, "GET", &fitted_path, None)?;
+    let stale = api.signed(&owner, "GET", &path, None)?;
+    let unrelated_path = icon::icon_path(&name, &"00".repeat(32));
+    let unrelated = api.signed(&owner, "GET", &unrelated_path, None)?;
+    s.ok(
+        "a versioned read serves the bytes its version names; a stale or unrelated version is 404, not cached, never the current icon",
+        versioned.status == 200
+            && versioned.bytes == fitted.bytes
+            && stale.status == 404
+            && unrelated.status == 404
+            && stale.header("cache-control") == "no-store"
+            && unrelated.header("cache-control") == "no-store",
+        format!("current {versioned} / stale {stale} / unrelated {unrelated}"),
+    );
     let paid = s.eventually(WAIT, || {
         let _ = lever(api, &name, "meter-now", json!({ "sample": false }));
         entries(api, &owner_id, &prefix).iter().any(|e| call_of(e) == "upload" && priced_as_its_call(e))

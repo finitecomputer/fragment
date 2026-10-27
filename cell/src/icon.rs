@@ -286,12 +286,18 @@ impl FragmentCell {
     }
 
     /// `GET /api/f/{name}/icon` (viewers and up): the icon's PNG, tagged by
-    /// its SHA-256, or 404 when it has none.
+    /// its SHA-256, or 404 when it has none. A versioned read whose version
+    /// is no longer current is 404 too, never the current icon's bytes.
     pub(crate) async fn icon_get(&self, caller: &Caller, req: &Request) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
         let Some(sha) = self.icon_sha()? else {
             return Err(CellError::new(ErrorCode::NotFound, "no icon: make or upload one"));
         };
+        if !caller.url.query_pairs().filter(|(k, _)| k == "v").all(|(_, v)| v.as_ref() == &sha[..12]) {
+            let mut resp = CellError::new(ErrorCode::NotFound, "no icon at that version").response()?;
+            resp.headers_mut().set("cache-control", "no-store")?;
+            return Ok(resp);
+        }
         let etag = format!("\"{sha}\"");
         if let Some(resp) = crate::serve::not_modified(req, &etag, ICON_CACHE)? {
             return Ok(resp);

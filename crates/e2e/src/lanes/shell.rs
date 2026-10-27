@@ -5096,6 +5096,22 @@ const ICON_PROBE: &str = "(window.__icons = {
   pickPx: (i) => __icons.px(__icons.picks()[i]?.querySelector('img')),
   dockPx: () => __icons.px(__icons.dockArt()?.querySelector('img')),
   currentPx: () => __icons.px(__icons.sheet()?.querySelector('.icon-current img')),
+  pixelsMatch: async (art, path) => {
+    const img = art?.querySelector('img');
+    if (!img?.complete || !img.naturalWidth) return false;
+    const r = await fetch(path, { headers: { 'x-fragment-shell': '1' }, credentials: 'same-origin', cache: 'no-store' });
+    if (!r.ok) return false;
+    const expected = document.createElement('img');
+    const url = URL.createObjectURL(await r.blob());
+    expected.src = url;
+    try {
+      await expected.decode();
+      const px = __icons.px(expected);
+      return px !== null && px === __icons.px(img);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  },
   state: () => {
     const d = __icons.sheet();
     const q = (s) => d?.querySelector(s);
@@ -5147,8 +5163,8 @@ fn icon_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str, shots: &std::
     let reads = format!("*/api/f/{app}/icon?v=*");
     let photo = shots.join("icon-photo.jpg");
     std::fs::write(&photo, super::icons::photo())?;
-    let orange = shots.join("icon-orange.png");
-    std::fs::write(&orange, super::faces::orange())?;
+    let blue = shots.join("icon-blue.png");
+    std::fs::write(&blue, super::faces::blue())?;
     let words = shots.join("icon-words.txt");
     std::fs::write(&words, "hello, I am no picture")?;
 
@@ -5266,7 +5282,7 @@ fn icon_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str, shots: &std::
     b.choose_files(page, upload_input, &[&photo])?;
     let first = b.until(page, "!!__icons.dockArt() && !__icons.dockArt().querySelector('img') && !__icons.state().upload", wait);
     let was = b.eval(page, "__icons.dockArt()?.dataset.picture ?? null")?;
-    b.choose_files(page, upload_input, &[&orange])?;
+    b.choose_files(page, upload_input, &[&blue])?;
     let moved = b.until(page, &format!("(() => {{ const a = __icons.dockArt(); return !!a && !a.querySelector('img') && a.dataset.picture !== {was}; }})()"), wait);
     b.eval(page, "(window.__liveArt = __icons.dockArt(), true)")?;
     let reading = b.held(page)?;
@@ -5282,7 +5298,10 @@ fn icon_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str, shots: &std::
         json!({ "held": reading, "state": state(b)?, "dock": b.eval(page, &format!("{dock}?.querySelector('.dock-art')?.outerHTML.slice(0, 300) ?? null"))? }),
     );
 
-    // an upload held unanswered: Remove waits, here and in the sheet reopened after Done
+    // A's delayed read was stale. After RETRY_MS, choosing A again reads
+    // it again: an upload held unanswered, with Remove waiting here and in
+    // the sheet reopened after Done.
+    std::thread::sleep(std::time::Duration::from_millis(2200));
     b.hold(page, &[&writes])?;
     b.choose_files(page, upload_input, &[&photo])?;
     let one = held(s, b, 1);
@@ -5297,13 +5316,19 @@ fn icon_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str, shots: &std::
     b.release(page, false)?;
     let after = b.until(
         page,
-        &format!("(() => {{ const s = __icons.state(); const current = __icons.sheet()?.querySelector('.icon-current .app-picture'); return !s.upload && !s.remove.hidden && !s.remove.disabled && s.said === null && current?.dataset.picture === {was} && __icons.dockArt()?.dataset.picture === {was}; }})() && __icons.currentPx() !== null && __icons.dockPx() === __icons.currentPx()"),
+        &format!("(() => {{ const s = __icons.state(); const current = __icons.sheet()?.querySelector('.icon-current .app-picture'); const dock = __icons.dockArt(); return !s.upload && !s.remove.hidden && !s.remove.disabled && s.said === null && current?.dataset.picture === {was} && dock?.dataset.picture === {was} && __icons.currentPx() !== null && __icons.dockPx() === __icons.currentPx(); }})()"),
         wait,
     );
+    let selected = b.eval(
+        page,
+        &format!("(async () => {{ const current = __icons.sheet()?.querySelector('.icon-current .app-picture'); return await __icons.pixelsMatch(current, {was}) && await __icons.pixelsMatch(__icons.dockArt(), {was}); }})()"),
+    );
+    let selected_ok = selected.as_ref().ok() == Some(&Value::Bool(true));
+    let selected = selected.unwrap_or_else(|e| json!(format!("{e:#}")));
     s.ok(
-        "while an upload goes, Remove asks nothing, in its sheet and in the sheet reopened after Done; answered, the upload is the icon in the reopened sheet and the dock",
-        one && here["upload"] == true && here["remove"]["disabled"] == true && still.len() == 1 && closed && reopened && there["upload"] == true && there["remove"]["disabled"] == true && after,
-        json!({ "here": here, "held": still, "reopened": there, "after": state(b)? }),
+        "while an upload goes, Remove asks nothing, in its sheet and in the sheet reopened after Done; after A→B→A, the selected A pixels are the icon in both",
+        one && here["upload"] == true && here["remove"]["disabled"] == true && still.len() == 1 && closed && reopened && there["upload"] == true && there["remove"]["disabled"] == true && after && selected_ok,
+        json!({ "here": here, "held": still, "reopened": there, "after": state(b)?, "selected": selected }),
     );
 
     // a removal that fails after Done
