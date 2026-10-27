@@ -683,9 +683,8 @@ pub const CHROMIUM_TMP: &str = "/tmp";
 /// appended there is curl's and Python's): it trusts its own roots and
 /// those its managed policy names (`CACertificates`, read from its
 /// branding's policy directory). Without it, every page whose host is
-/// intercepted on HTTPS (a provider's the swap catches, the platform's
-/// own: docs/computers.md, "The platform's hosts") is an interstitial in
-/// its browser.
+/// intercepted on HTTPS (a provider's the swap catches: docs/computers.md,
+/// "Connections and operator keys") is an interstitial in its browser.
 pub const CHROMIUM_CA_POLICY: &str = "/etc/opt/chrome_for_testing/policies/managed/fragment-ca.json";
 
 /// The managed policy that trusts each certificate of `pem`: a PEM's body
