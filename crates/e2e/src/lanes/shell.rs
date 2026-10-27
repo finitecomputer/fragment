@@ -1264,7 +1264,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         loading["ok"] == true,
         &loading,
     );
-    let settings = b.until(&page, "location.pathname === '/settings' && ['Account', 'Credit', 'Computer', 'Sharing', 'Connections', 'Build with Claude Code or Codex'].every(h => document.getElementById('settings-page').innerText.toUpperCase().includes(h.toUpperCase()))", wait);
+    let settings = b.until(&page, "location.pathname === '/settings' && ['Account', 'Credit', 'Computer', 'Connections', 'Build with Claude Code or Codex'].every(h => document.getElementById('settings-page').innerText.toUpperCase().includes(h.toUpperCase()))", wait);
     let text = b.eval(&page, "document.getElementById('settings-page').innerText")?;
     let text = text.as_str().unwrap_or("");
     let mut has = |q: &str| b.eval(&page, &format!("!!document.querySelector({q:?})")).ok() == Some(serde_json::json!(true));
@@ -1400,14 +1400,10 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         held && later && stands == true,
         b.eval(&page, COPY_SEEN)?,
     );
-    // Sharing: what they own, each with who can open it (GET /api/access)
-    let theirs = format!("#settings-access .access-row[data-fragment={groceries:?}]");
-    let listed = b.until(&page, &format!("!!document.querySelector({theirs:?}) && document.querySelector({theirs:?}).textContent.includes('Anyone with the link')"), wait);
-    s.ok(
-        "settings' Sharing lists what they own, with who can open each",
-        listed,
-        b.eval(&page, "document.getElementById('settings-access')?.innerText ?? 'no Sharing section'")?,
-    );
+    // sharing is the Apps page's: Settings have none
+    let none = b.eval(&page, "![...document.querySelectorAll('#settings-page h2, #settings-page .settings-nav-link')].some((h) => /sharing/i.test(h.textContent)) && !document.querySelector('#settings-access, #settings-page .access-row')")?;
+    s.ok("Settings have no Sharing section: who has access is the Apps page's", settings && none == true, b.eval(&page, "[...document.querySelectorAll('#settings-page h2')].map((h) => h.textContent)")?);
+    apps_ui(s, &mut b, &page, &groceries, &chat, &shots)?;
     add_skills_ui(s, api, &mut b, &page, &session)?;
     skills_ui(s, api, &mut b, &page, &session)?;
     connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
@@ -2638,7 +2634,7 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
         } else {
             b.eval(page, &format!("({open}, true)"))?;
         }
-        b.until(page, "location.pathname === '/settings' && !!document.querySelector('#settings-access')", wait);
+        b.until(page, "location.pathname === '/settings' && !!document.querySelector('#settings-data')", wait);
         places.push(("settings", b.eval(page, PAGE_FITS)?));
         if let Value::Array(l) = b.eval(page, SMALL_FIELDS)? { small.extend(l.into_iter().map(|f| json!({ "width": w, "in": "settings", "field": f }))); }
         if w == 320 {
@@ -2650,6 +2646,15 @@ fn phone_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &st
         places.push(("settings' Your data, an export ready", json!({ "ok": ready && data["ok"] == true, "seen": data })));
         if w == 320 {
             let _ = b.screenshot(page, &shots.join(format!("phone-{w}-your-data.png")));
+        }
+        // the Apps page, its rows stacked: from the sidebar's Apps
+        b.eval(page, "(document.getElementById('toggle-left').click(), document.getElementById('apps-link').click(), true)")?;
+        let rows = b.until(page, "location.pathname === '/apps' && !!document.querySelector('#apps-page .app-row [data-action=share]')", wait);
+        let fits = b.eval(page, PAGE_FITS)?;
+        places.push(("the Apps page", json!({ "ok": rows && fits["ok"] == true, "page": fits })));
+        if let Value::Array(l) = b.eval(page, SMALL_FIELDS)? { small.extend(l.into_iter().map(|f| json!({ "width": w, "in": "apps", "field": f }))); }
+        if w == 390 {
+            let _ = b.screenshot(page, &shots.join(format!("phone-{w}-apps.png")));
         }
         // the share sheet, over the chat
         // (the chat of theirs, from its row: at / the newest chat opens, maybe one shared with them)
@@ -5083,6 +5088,85 @@ fn app_policy_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, app: &s
 /// path, signed in as its row's window is; a link to anything else gets
 /// none, and a page that asks the shell to open a URL that is no
 /// fragment's opens nothing.
+/// The Apps page (docs/api.md, The shell; #587), from the sidebar's Apps:
+/// the owner's app listed (no chat), with its card and who has access;
+/// its Dock switch takes it off the dock and back, moving only as the
+/// list does; New preview has it shot again (a second ask within the
+/// minute refused under its row); Icon… makes one, which its row shows;
+/// Share… opens the sheet, whose change of who has access the row then
+/// says. Settings are open, and open again at the end.
+fn apps_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str, chat: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(60);
+    let row = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{app}\"]")));
+    let control = |action: &str| format!("{row}?.querySelector('[data-action={action}]')");
+    let docked = format!("!!document.querySelector({})", js(&format!("#apps [data-key=\"app:{app}\"]")));
+    b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
+    let listed = b.until(
+        page,
+        &format!("location.pathname === '/apps' && !!{row} && {row}.querySelector('.app-row-access')?.textContent.includes('Anyone with the link') && {row}.querySelector('.app-row-card')?.src.startsWith('blob:') && !document.querySelector({})", js(&format!("#apps-page [data-fragment=\"{chat}\"]"))),
+        wait,
+    );
+    let _ = b.screenshot(page, &shots.join("apps-page.png"));
+    s.ok(
+        "the sidebar's Apps opens the Apps page (/apps): their app with its card and who can open it (Anyone with the link), and no chat",
+        listed,
+        b.eval(page, "document.getElementById('apps-page')?.innerText ?? null")?,
+    );
+
+    // the dock: off, then on again, the switch as the list says
+    let on = b.eval(page, &format!("{}?.getAttribute('aria-checked')", control("dock")))?;
+    b.eval(page, &format!("({}?.click(), true)", control("dock")))?;
+    let off = b.until(page, &format!("{}?.getAttribute('aria-checked') === 'false' && !{}?.disabled && !{docked}", control("dock"), control("dock")), wait);
+    b.eval(page, &format!("({}?.click(), true)", control("dock")))?;
+    let back = b.until(page, &format!("{}?.getAttribute('aria-checked') === 'true' && {docked}", control("dock")), wait);
+    s.ok("its Dock switch takes it off the dock and puts it back, the switch moving as the list does", on == "true" && off && back, b.eval(page, &format!("{row}?.innerText ?? null"))?);
+
+    // its card shot again; asked again within the minute, refused under its row
+    let before = b.eval(page, &format!("{row}?.querySelector('.app-row-card')?.src ?? null"))?;
+    b.eval(page, &format!("({}?.click(), true)", control("card")))?;
+    let taking = b.until(page, &format!("{}?.textContent === 'Taking a new preview…' && {}?.disabled", control("card"), control("card")), wait);
+    let taken = b.until(page, &format!("{}?.textContent === 'New preview' && !{row}?.querySelector('.app-row-said')", control("card")), std::time::Duration::from_secs(120));
+    b.eval(page, &format!("({}?.click(), true)", control("card")))?;
+    let refused = b.until(page, &format!("/within the minute/.test({row}?.querySelector('.app-row-said')?.textContent ?? '') && {}?.textContent === 'New preview'", control("card")), wait);
+    s.ok(
+        "New preview has its card shot again: Taking a new preview… until the shot reports, then its card; asked again within the minute, it says so under the row",
+        taking && taken && refused,
+        json!({ "before": before, "after": b.eval(page, &format!("{row}?.querySelector('.app-row-card')?.src ?? null"))?, "row": b.eval(page, &format!("{row}?.innerText ?? null"))? }),
+    );
+
+    // an icon made from here, which its row then shows
+    b.eval(page, &format!("({}?.click(), true)", control("icon")))?;
+    let sheet = b.until(page, "!!document.querySelector('dialog.icon-sheet[open]')", wait);
+    b.eval(page, "(document.querySelector('dialog.icon-sheet .icon-make button[type=submit]')?.click(), true)")?;
+    let made = b.until(page, "document.querySelectorAll('dialog.icon-sheet .icon-pick img').length > 0", wait);
+    b.eval(page, "(document.querySelector('dialog.icon-sheet .icon-pick')?.click(), true)")?;
+    let shown = b.until(page, &format!("(() => {{ const i = {row}?.querySelector('.app-row-art img'); return !!i && i.src.startsWith('blob:') && i.complete && i.naturalWidth === 256; }})()"), wait);
+    b.eval(page, "([...document.querySelectorAll('dialog.icon-sheet .icon-actions button')].find((b) => b.textContent === 'Remove')?.click(), true)")?;
+    let removed = b.until(page, &format!("!!{row}?.querySelector('.app-row-art .app-icon') && !{row}?.querySelector('.app-row-art img')"), wait);
+    b.eval(page, "(document.querySelector('dialog.icon-sheet')?.close(), true)")?;
+    s.ok("its Icon… opens the icon sheet: one made and picked is its row's icon, and removed, its glyph is back", sheet && made && shown && removed, b.eval(page, &format!("{row}?.querySelector('.app-row-art')?.outerHTML.slice(0, 300) ?? null"))?);
+
+    // who has access, changed in its share sheet: Public, then back
+    let visibility = |b: &mut Browser, v: &str| -> Result<bool> {
+        b.eval(page, &format!("({}?.click(), true)", control("share")))?;
+        let open = b.until(page, "document.getElementById('sheet').open", wait);
+        let armed = format!("!!document.querySelector('button[name=visibility][value={v}]:not([disabled])')");
+        let ready = open && s.eventually(wait, || b.eval_in_frame(page, "/share/", &armed).ok() == Some(Value::Bool(true)));
+        let _ = b.eval_in_frame(page, "/share/", &format!("(document.querySelector('button[name=visibility][value={v}]').click(), true)"));
+        let pressed = ready && s.eventually(wait, || b.eval_in_frame(page, "/share/", &format!("!!document.querySelector('button[value={v}][aria-pressed=true]')")).ok() == Some(Value::Bool(true)));
+        let _ = b.eval_in_frame(page, "/share/", "(document.querySelector('button[data-done]').click(), true)");
+        Ok(pressed && b.until(page, "!document.getElementById('sheet').open", wait))
+    };
+    let public = visibility(b, "public")? && b.until(page, &format!("{row}?.querySelector('.app-row-access')?.textContent.includes('Public')"), wait);
+    let linked = visibility(b, "link")? && b.until(page, &format!("{row}?.querySelector('.app-row-access')?.textContent.includes('Anyone with the link')"), wait);
+    s.ok("its Share… opens its share sheet; made Public there, its row says Public, and back to Anyone with the link", public && linked, b.eval(page, &format!("{row}?.innerText ?? null"))?);
+
+    // back to settings, where the checks after these are
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    b.until(page, "location.pathname === '/settings' && !!document.querySelector('#settings-data')", wait);
+    Ok(())
+}
+
 /// An app's icon as its owner makes one in the shell (docs/api.md, Icons;
 /// the Workers AI fake draws them): its window's More, Icon…, Make icons,
 /// four to pick from; one picked is the dock's icon, the object on

@@ -114,7 +114,7 @@ const SCRIPT: &str = r#"<script>(() => {
   }
   // in the platform's dialog (only its pages may frame this one), Done or
   // Escape closes the dialog; in a window of its own, Done closes the
-  // window, or it goes to the shell's settings
+  // window, or it goes to the shell's Apps page, where sharing is
   const framed = parent !== window;
   const tell = (share) => parent.postMessage({ share, height: document.body.offsetHeight }, location.origin);
   if (framed) {
@@ -125,7 +125,7 @@ const SCRIPT: &str = r#"<script>(() => {
   for (const b of document.querySelectorAll("button[data-done]")) b.onclick = () => {
     if (framed) return tell("done");
     close();
-    if (!window.closed) location.href = "/settings";
+    if (!window.closed) location.href = "/apps";
   };
 })();</script>"#;
 
