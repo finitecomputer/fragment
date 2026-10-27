@@ -487,6 +487,8 @@ iframe[data-blocked] { display: none; }
 .settings-nav-link:hover, .settings-nav-link:focus-visible { background: var(--bg-hover); color: var(--text-primary); }
 .settings-nav-link[aria-current="location"] { background: var(--bg-active); color: var(--text-primary); font-weight: 600; }
 .settings-content { min-width: 0; }
+/* room for the last section's heading to reach the scroll handler's line */
+.settings-content:has(.settings-section) { padding-bottom: calc(100vh - 250px); }
 .settings-intro { padding: 2px 0 8px; }
 .settings-intro h1 { margin: 0 0 6px; font-size: clamp(26px, 2.5vw, 32px); font-weight: 600; line-height: 1.2; letter-spacing: -.035em; text-wrap: balance; }
 .settings-intro p { margin: 0; color: var(--text-secondary); font-size: 14px; }
@@ -536,11 +538,11 @@ iframe[data-blocked] { display: none; }
 @container settings (max-width: 880px) {
   .settings-layout { display: block; max-width: 760px; padding: 22px 24px 72px; }
   /* as tall before its links come (settings loading) as with them: a link's 36px, padded */
-  .settings-nav { position: sticky; z-index: 4; top: 0; flex-direction: row; gap: 4px; min-height: 61px; margin: -22px -24px 24px; padding: 12px 24px; border-bottom: 1px solid var(--border); background: var(--bg-sidebar); overflow-x: auto; scrollbar-width: none; }
-  .settings-nav::-webkit-scrollbar { display: none; }
+  .settings-nav { position: sticky; z-index: 4; top: 0; flex-direction: row; gap: 4px; min-height: 61px; margin: -22px -24px 24px; padding: 12px 24px; border-bottom: 1px solid var(--border); background: var(--bg-sidebar); overflow-x: auto; scrollbar-width: thin; }
+  .settings-nav::-webkit-scrollbar { display: block; height: 6px; }
   .settings-nav-title { display: none; }
   .settings-nav-link { flex: none; white-space: nowrap; }
-  .settings-section { scroll-margin-top: 118px; }
+  .settings-section { scroll-margin-top: 109px; }
 }
 @container settings (max-width: 620px) {
   .settings-layout { padding: 16px 20px 60px; }
@@ -556,6 +558,10 @@ iframe[data-blocked] { display: none; }
   .settings-stack .settings-actions { justify-content: flex-start; }
   .settings-intro { padding-bottom: 4px; }
   .settings-section { margin-top: 60px; padding: 6px 16px 12px; border-radius: 16px; }
+}
+@media (pointer: coarse) {
+  .settings-nav { scrollbar-width: none; }
+  .settings-nav::-webkit-scrollbar { display: none; }
 }
 /* settings' connections: one block per provider (shell.js connectionsSection) */
 .provider { width: 100%; display: flex; flex-direction: column; gap: 8px; padding: 16px 2px; border-bottom: 1px solid var(--border-strong); }
@@ -743,3 +749,31 @@ iframe[data-blocked] { display: none; }
 /* the release and the computer's version, under Settings' last section (shell.js releaseLine) */
 .settings-release { margin: 28px 2px 0; font-size: 12.5px; }
 .settings-release a { color: inherit; }
+
+/* an app's own icon (app-icon.js): an object on nothing, never on a tile */
+.app-picture { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: none; }
+.app-picture img { width: 100%; height: 100%; object-fit: contain; }
+.dock-art .app-picture { width: 40px; height: 40px; }
+.dock-art .app-picture .app-icon { width: 40px; height: 40px; border-radius: 11px; background: linear-gradient(155deg, color-mix(in srgb, var(--app-color), white 26%), var(--app-color)); }
+/* the icon sheet: make, pick, upload, remove */
+.icon-sheet { box-sizing: border-box; padding: 24px; width: min(420px, calc(100vw - 32px)); border: 1px solid var(--border-strong); border-radius: 18px; background: var(--bg-card); color: var(--text-primary); }
+.icon-sheet::backdrop { background: rgba(0,0,0,.5); }
+.icon-sheet h2 { margin: 0 0 14px; font-size: 19px; }
+.icon-current { display: grid; place-items: center; height: 88px; margin-bottom: 14px; border-radius: 12px; background: var(--bg-window); }
+.icon-current .app-picture, .icon-current .app-icon { width: 64px; height: 64px; border-radius: 14px; }
+.icon-make { display: flex; gap: 8px; }
+.icon-make input { flex: 1; min-width: 0; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 9px; font: inherit; color: inherit; background: var(--bg-window); }
+.icon-make button, .icon-actions button { padding: 10px 14px; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--bg-window); color: inherit; font: inherit; }
+.icon-make button[type=submit] { background: var(--text-primary); color: var(--bg-window); border-color: transparent; }
+.icon-make button:disabled, .icon-pick:disabled, .icon-actions button:disabled { opacity: .55; }
+.icon-said { margin: 12px 0 0; color: var(--text-secondary); font-size: 14px; }
+.icon-picks { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+.icon-picks:empty { display: none; }
+.icon-pick { min-width: 0; aspect-ratio: 1; padding: 6px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--bg-window); }
+.icon-pick img { display: block; width: 100%; height: 100%; min-width: 0; object-fit: contain; }
+.icon-pick.picked { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+/* what is being kept or removed, until the platform answers (the rest wait, disabled) */
+.icon-sheet button[aria-busy=true] { opacity: 1; }
+.icon-pick[aria-busy=true] { outline: 2px dashed var(--border-strong); outline-offset: 2px; }
+.icon-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
+.icon-actions button:first-child { margin-right: auto; }

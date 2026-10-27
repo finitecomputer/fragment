@@ -44,6 +44,7 @@ mod error;
 mod export;
 mod files;
 mod fragment;
+mod icon;
 mod jobs;
 mod json_response;
 mod js;

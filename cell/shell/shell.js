@@ -12,7 +12,8 @@
 import "./tooltips.js";
 import { avatar } from "./agent-identity.js";
 import { colorOf } from "./agent-color.js";
-import { appIcon, icon } from "./icons.js";
+import { icon } from "./icons.js";
+import { appArt, openIconSheet } from "./app-icon.js";
 import { createLayout, store, reducedMotion, springFrames } from "./layout.js";
 import { createViewer } from "./viewer.js";
 import { billingSections, returnSaid, returning, seatGives, seatOffer } from "./billing.js";
@@ -1288,7 +1289,7 @@ function paneIcon(name) {
   i.replaceChildren(icon(name));
   return i;
 }
-const iconOf = (name) => appIcon(labelOf(name));
+const iconOf = (name) => appArt(byName(name), labelOf(name));
 // An app's card: its page as the platform shot it after its last deploy
 // (`GET /api/f/<name>/card`, read with this page's session and shown as a
 // blob URL), shown larger over its dock icon (`showPeek`).
@@ -1426,6 +1427,7 @@ function openApp(name, path = "/") {
           { icon: "link", text: "Copy link", onClick: () => at.then((u) => navigator.clipboard.writeText(u)).catch((err) => notice("The link was not copied", err.message)) },
           // someone else's: who else is in it, and leaving it
           ...(f && !own(f) ? [shareItem(name)] : []),
+          ...(f && (own(f) || f.role === "editor") ? [{ icon: "image", text: "Icon…", onClick: () => openIconSheet(iconHelpers, name, titleOf(name), byName(name)) }] : []),
           ...(f ? [archiveItem(name)] : []),
         ]),
       },
@@ -1433,6 +1435,9 @@ function openApp(name, path = "/") {
   });
   navigated();
 }
+
+// the icon sheet's (app-icon.js): the list again, which takes a new icon to the dock
+const iconHelpers = { api, reload: () => load() };
 
 // ---- archiving: the person's own view (their list's row), not the fragment's ----
 function archiveItem(name) {
@@ -2198,11 +2203,19 @@ function renderSettingsPage(page, sections) {
   layout.append(nav, content);
   page.replaceChildren(layout);
   page.onscroll = () => {
-    const top = page.getBoundingClientRect().top + 130;
-    const current = [...links].reverse().find(([section]) => !section.hidden && section.getBoundingClientRect().top <= top)?.[1] ?? links[0]?.[1];
+    const visible = links.filter(([section]) => !section.hidden);
+    const top = page.getBoundingClientRect().top + page.clientTop + 130;
+    const current = [...visible].reverse().find(([section]) => section.getBoundingClientRect().top <= top)?.[1] ?? visible[0]?.[1];
+    if (current === nav.querySelector('[aria-current="location"]')) return;
     for (const [, button] of links) {
       if (button === current) button.setAttribute("aria-current", "location");
       else button.removeAttribute("aria-current");
+    }
+    if (current) {
+      const button = current.getBoundingClientRect();
+      const bounds = nav.getBoundingClientRect();
+      if (button.left < bounds.left) nav.scrollLeft -= bounds.left - button.left;
+      else if (button.right > bounds.right) nav.scrollLeft += button.right - bounds.right;
     }
   };
   page.onscroll();

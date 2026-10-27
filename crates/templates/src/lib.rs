@@ -139,6 +139,8 @@ const SHELL_PUBLISHED: [(&str, &str); 33] = [
     ("agent-color.js", "text/javascript; charset=utf-8"),
     // its icons (Lucide's among them: vendor/lucide-LICENSE) and an app's
     ("icons.js", "text/javascript; charset=utf-8"),
+    // an app's own icon in the dock, and the sheet that makes one (docs/api.md, Icons)
+    ("app-icon.js", "text/javascript; charset=utf-8"),
     ("tooltips.js", "text/javascript; charset=utf-8"),
     // Settings' Billing: a seat, credit, an org (docs/billing.md)
     ("billing.js", "text/javascript; charset=utf-8"),
