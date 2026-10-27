@@ -724,3 +724,28 @@ iframe[data-blocked] { display: none; }
 /* the release and the computer's version, under Settings' last section (shell.js releaseLine) */
 .settings-release { margin: 28px 2px 0; font-size: 12.5px; }
 .settings-release a { color: inherit; }
+
+/* an app's own icon (app-icon.js): an object on nothing, never on a tile */
+.app-picture { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: none; }
+.app-picture img { width: 100%; height: 100%; object-fit: contain; }
+.dock-art .app-picture { width: 40px; height: 40px; }
+.dock-art .app-picture .app-icon { width: 40px; height: 40px; border-radius: 11px; background: linear-gradient(155deg, color-mix(in srgb, var(--app-color), white 26%), var(--app-color)); }
+/* the icon sheet: make, pick, upload, remove */
+.icon-sheet { box-sizing: border-box; padding: 24px; width: min(420px, calc(100vw - 32px)); border: 1px solid var(--border-strong); border-radius: 18px; background: var(--bg-card); color: var(--text-primary); }
+.icon-sheet::backdrop { background: rgba(0,0,0,.5); }
+.icon-sheet h2 { margin: 0 0 14px; font-size: 19px; }
+.icon-current { display: grid; place-items: center; height: 88px; margin-bottom: 14px; border-radius: 12px; background: var(--bg-window); }
+.icon-current .app-picture, .icon-current .app-icon { width: 64px; height: 64px; border-radius: 14px; }
+.icon-make { display: flex; gap: 8px; }
+.icon-make input { flex: 1; min-width: 0; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 9px; font: inherit; color: inherit; background: var(--bg-window); }
+.icon-make button, .icon-actions button { padding: 10px 14px; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--bg-window); color: inherit; font: inherit; }
+.icon-make button[type=submit] { background: var(--text-primary); color: var(--bg-window); border-color: transparent; }
+.icon-make button:disabled { opacity: .55; }
+.icon-said { margin: 12px 0 0; color: var(--text-secondary); font-size: 14px; }
+.icon-picks { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+.icon-picks:empty { display: none; }
+.icon-pick { min-width: 0; aspect-ratio: 1; padding: 6px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--bg-window); }
+.icon-pick img { display: block; width: 100%; height: 100%; min-width: 0; object-fit: contain; }
+.icon-pick.picked { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+.icon-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
+.icon-actions button:first-child { margin-right: auto; }
