@@ -39,6 +39,11 @@ pub(super) fn orange() -> Vec<u8> {
     picture(ORANGE)
 }
 
+/// The blue picture, distinct from the icon lane's orange photograph.
+pub(super) fn blue() -> Vec<u8> {
+    picture(BLUE)
+}
+
 /// Where an identity's picture of `bytes` is served (fragment_core::face).
 pub(super) fn picture_path(identity: &str, bytes: &[u8]) -> String {
     fragment_core::face::picture_path(identity, &hex::encode(Sha256::digest(bytes)))

@@ -47,7 +47,7 @@ fn b64() -> base64::engine::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
 }
 
-fn photo() -> Vec<u8> {
+pub(super) fn photo() -> Vec<u8> {
     b64().decode(PHOTO).expect("a fixture JPEG")
 }
 
@@ -246,6 +246,21 @@ pub fn icons(s: &mut Suite, api: &Api) -> Result<()> {
             && up.body["icon"] == icon::icon_path(&name, &fitted_sha).as_str()
             && up.body["size"] == fitted.bytes.len(),
         format!("{up} / {} {:?}", fitted.status, read(&fitted.bytes)),
+    );
+    let fitted_path = icon::icon_path(&name, &fitted_sha);
+    let versioned = api.signed(&owner, "GET", &fitted_path, None)?;
+    let stale = api.signed(&owner, "GET", &path, None)?;
+    let unrelated_path = icon::icon_path(&name, &"00".repeat(32));
+    let unrelated = api.signed(&owner, "GET", &unrelated_path, None)?;
+    s.ok(
+        "a versioned read serves the bytes its version names; a stale or unrelated version is 404, not cached, never the current icon",
+        versioned.status == 200
+            && versioned.bytes == fitted.bytes
+            && stale.status == 404
+            && unrelated.status == 404
+            && stale.header("cache-control") == "no-store"
+            && unrelated.header("cache-control") == "no-store",
+        format!("current {versioned} / stale {stale} / unrelated {unrelated}"),
     );
     let paid = s.eventually(WAIT, || {
         let _ = lever(api, &name, "meter-now", json!({ "sample": false }));
