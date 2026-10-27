@@ -237,7 +237,7 @@ impl FragmentCell {
                WHERE json_valid(r.body) AND json_type(r.body, '$.attachments') = 'array' AND a.type = 'object')",
             vec![now_v.clone()],
         )?;
-        // the preview card and the icon are named by the fragment itself (card.rs, icon.rs)
+        // the preview card (a shot or an upload) and the icon are named by the fragment itself (card.rs, icon.rs)
         for named in [self.cards()?.card.map(|c| c.blob), self.meta(MetaKey::Icon)?].into_iter().flatten() {
             self.exec("UPDATE blobs SET seen_at = ? WHERE sha = ?", vec![now_v.clone(), named.as_str().into()])?;
         }

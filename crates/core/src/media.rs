@@ -190,6 +190,92 @@ pub fn jpeg_size(b: &[u8]) -> Option<(u16, u16)> {
     None
 }
 
+/// Whether a JPEG is whole, read by its structure: its start, every
+/// segment within the bytes and at its stated length, one frame header
+/// (SOFn) whose components it holds, quantization and Huffman tables,
+/// at least one scan whose header is whole and which carries data, and
+/// its end (EOI) as its last two bytes. Its compressed data is not
+/// decoded: that is a decoder's (and the cell's Wasm budget's), and what
+/// it would refuse is an image someone made broken on purpose, no worse
+/// to its viewers than any other image they chose. What it refuses is a
+/// JPEG cut short (a header and no image, a frame header that ends
+/// early, a scan with nothing after it), which no browser shows.
+pub fn jpeg_whole(b: &[u8]) -> bool {
+    if !b.starts_with(&[0xFF, 0xD8]) {
+        return false;
+    }
+    let (mut frame, mut quantized, mut huffman, mut scans) = (false, false, false, 0usize);
+    let mut i = 2;
+    // bounded: each pass moves `i` forward at least one byte
+    while i + 2 <= b.len() {
+        if b[i] != 0xFF {
+            return false;
+        }
+        let marker = b[i + 1];
+        match marker {
+            // a fill byte before a marker
+            0xFF => {
+                i += 1;
+                continue;
+            }
+            // the end: whole when it is the last of the bytes, after a scan
+            0xD9 => return i + 2 == b.len() && frame && quantized && huffman && scans > 0,
+            // markers that stand alone, with no length
+            0x01 | 0xD0..=0xD7 => {
+                i += 2;
+                continue;
+            }
+            // a second start
+            0xD8 => return false,
+            _ => {}
+        }
+        let Some(&[hi, lo]) = b.get(i + 2..i + 4) else { return false };
+        let len = usize::from(u16::from_be_bytes([hi, lo]));
+        let Some(segment) = b.get(i + 4..i + 2 + len.max(2)) else { return false };
+        if len < 2 {
+            return false;
+        }
+        match marker {
+            // SOF0 to SOF15, less DHT (C4), JPG (C8) and DAC (CC): its
+            // precision, height, width, and three bytes a component
+            0xC0..=0xCF if !matches!(marker, 0xC4 | 0xC8 | 0xCC) => {
+                let n = usize::from(segment.get(5).copied().unwrap_or(0));
+                let sized = segment.get(1..5).is_some_and(|s| s[0..2] != [0, 0] && s[2..4] != [0, 0]);
+                if frame || n == 0 || segment.len() != 6 + 3 * n || !sized {
+                    return false;
+                }
+                frame = true;
+            }
+            0xDB => quantized = true,
+            0xC4 => huffman = true,
+            // a scan: its components, two bytes each, three more, then its
+            // data up to the next marker (0xFF00 is a data byte; restarts
+            // are inside it)
+            0xDA => {
+                let n = usize::from(segment.first().copied().unwrap_or(0));
+                if !frame || n == 0 || segment.len() != 4 + 2 * n {
+                    return false;
+                }
+                let start = i + 2 + len;
+                let mut j = start;
+                // bounded: `j` moves forward each pass
+                while j + 1 < b.len() && !(b[j] == 0xFF && b[j + 1] != 0x00 && !(0xD0..=0xD7).contains(&b[j + 1])) {
+                    j += 1;
+                }
+                if j == start || j + 1 >= b.len() {
+                    return false;
+                }
+                scans += 1;
+                i = j;
+                continue;
+            }
+            _ => {}
+        }
+        i += 2 + len;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +293,79 @@ mod tests {
         b.extend([3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);
         b.extend([0xFF, 0xDA, 0x00, 0x0C]);
         b
+    }
+
+    /// A whole baseline JPEG's structure, of `width` × `height`: SOI, DQT,
+    /// SOF0 (three components), DHT, SOS, data (a stuffed 0xFF and a
+    /// restart among it), EOI.
+    fn whole(width: u16, height: u16) -> Vec<u8> {
+        let mut b = vec![0xFF, 0xD8];
+        b.extend([0xFF, 0xDB, 0x00, 0x43, 0x00]);
+        b.extend([1u8; 64]);
+        b.extend([0xFF, 0xC0, 0x00, 0x11, 8]);
+        b.extend(height.to_be_bytes());
+        b.extend(width.to_be_bytes());
+        b.extend([3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);
+        b.extend([0xFF, 0xC4, 0x00, 0x13, 0x00]);
+        b.extend([0u8; 16]);
+        b.extend([0xFF, 0xDA, 0x00, 0x0C, 3, 1, 0x00, 2, 0x11, 3, 0x11, 0x00, 0x3F, 0x00]);
+        b.extend([0x12, 0xFF, 0x00, 0x34, 0xFF, 0xD0, 0x56]);
+        b.extend([0xFF, 0xD9]);
+        b
+    }
+
+    /// A real encoder's JPEG (40×24, one colour; the e2e's icon upload).
+    const PHOTO: &str = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAAYACgDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFgEBAQEAAAAAAAAAAAAAAAAAAAYH/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AngEi1YAAAAAAAAAB/9k=";
+
+    /// Goal: a JPEG is whole only as a whole one is laid out; one cut
+    /// short anywhere, or with a part missing or past its end, is not.
+    #[test]
+    fn a_jpeg_is_whole_or_cut_short() {
+        let w = whole(1280, 800);
+        assert!(jpeg_whole(&w));
+        assert_eq!(jpeg_size(&w), Some((1280, 800)));
+        let photo = base64::engine::general_purpose::STANDARD.decode(PHOTO).unwrap();
+        assert!(jpeg_whole(&photo), "a real encoder's");
+        // cut short anywhere: Alex's frame header that ends early among them
+        for n in 0..w.len() {
+            assert!(!jpeg_whole(&w[..n]), "cut at {n}");
+        }
+        assert!(!jpeg_whole(&[0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x03, 0x20, 0x05, 0x00]));
+        assert_eq!(jpeg_size(&[0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x03, 0x20, 0x05, 0x00]), Some((1280, 800)), "which its size reads");
+        // a header and its end, no image
+        let mut header = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x03, 0x20, 0x05, 0x00];
+        header.extend([0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01, 0xFF, 0xD9]);
+        assert!(!jpeg_whole(&header));
+        let mut after = w.clone();
+        after.push(0);
+        assert!(!jpeg_whole(&after), "bytes after its end");
+        // a part missing: each table, the frame, the scan's data
+        let without = |from: usize, len: usize| [&w[..from], &w[from + len..]].concat();
+        let dqt = 2;
+        let sof = dqt + 2 + 0x43;
+        let dht = sof + 2 + 0x11;
+        let sos = dht + 2 + 0x13;
+        let data = sos + 2 + 0x0C;
+        assert!(!jpeg_whole(&without(dqt, 2 + 0x43)), "no quantization table");
+        assert!(!jpeg_whole(&without(sof, 2 + 0x11)), "no frame");
+        assert!(!jpeg_whole(&without(dht, 2 + 0x13)), "no Huffman table");
+        assert!(!jpeg_whole(&without(data, 7)), "a scan with no data");
+        // a part past its end, or not its length
+        let mut long = w.clone();
+        long[dht + 3] = 0xFF;
+        assert!(!jpeg_whole(&long), "a segment longer than the bytes");
+        let mut frame = w.clone();
+        frame[sof + 9] = 4;
+        assert!(!jpeg_whole(&frame), "a frame naming more components than it holds");
+        let mut twice = w[..data + 7].to_vec();
+        twice.extend(&w[sof..sof + 2 + 0x11]);
+        twice.extend(&w[data + 7..]);
+        assert!(!jpeg_whole(&twice), "two frames");
+        let mut zero = w.clone();
+        zero[sof + 5] = 0;
+        zero[sof + 6] = 0;
+        assert!(!jpeg_whole(&zero), "a frame of no height");
+        assert!(!jpeg_whole(b"\x89PNG\r\n\x1a\n"));
     }
 
     fn image(args: Value) -> AiImage {
