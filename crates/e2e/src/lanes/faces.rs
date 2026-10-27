@@ -326,6 +326,27 @@ pub fn faces(s: &mut Suite, api: &Api) -> Result<()> {
         blank.is_some_and(|d| d.status == 200) && untitled && status.is_null() && asked["title"].is_null() && asked["name"] == label.as_str() && said.as_ref().is_ok_and(|v| v["name"] == label.as_str()),
         json!({ "row": row(api, &paul, &agent), "status": status, "people": asked, "cli": said.map_err(|e| e.to_string()) }),
     );
+    // its job as its computer's sync leaves it: on main, never deployed
+    // (images/hermes/boot/src/sync.rs). Its page reads it there (`__file`,
+    // main first for an agent), with no deploy; an app's file stays live's
+    // until it deploys (Paul, 2026-10-27: his agent's page kept its first job)
+    let write = |name: &str, path: &str, text: &str| api.signed(&paul, "POST", &format!("/api/f/{name}/files"), Some(&json!({ "message": "a change", "files": [{ "path": path, "text": text }] })));
+    let deploy = |name: &str| api.signed(&paul, "POST", &format!("/api/f/{name}/deploy"), Some(&json!({})));
+    let read = |name: &str, path: &str| -> Result<String> {
+        let cookie = site_cookie(api, &session, name)?;
+        Ok(api.page(name, &format!("__file?path={path}"), Some(&format!("fragment_site={cookie}")))?.text)
+    };
+    let (first, second) = ("You keep the garden.\n", "You keep the garden and the bees.\n");
+    let staged = write(&agent, "SOUL.md", first)?.status == 200 && deploy(&agent)?.status == 200 && write(&agent, "SOUL.md", second)?.status == 200;
+    let its_job = read(&agent, "SOUL.md")?;
+    let (one, two) = ("the app's notes, deployed\n", "the app's notes, not yet\n");
+    let app_staged = write(&app, "notes.md", one)?.status == 200 && deploy(&app)?.status == 200 && write(&app, "notes.md", two)?.status == 200;
+    let apps = read(&app, "notes.md")?;
+    s.ok(
+        "an agent's page reads its job as its computer leaves it, on main, with no deploy; an app's page reads its file from live until it deploys",
+        staged && its_job == second && app_staged && apps == one,
+        json!({ "job": its_job, "app": apps }),
+    );
     let bare = s.named(api, &paul, "faces-bare")?;
     let r = api.create_with(&paul, json!({ "name": bare, "template": "agent" }))?;
     anyhow::ensure!(r.status == 200, "an agent with no title: {r}");
