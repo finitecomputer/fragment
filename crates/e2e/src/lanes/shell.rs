@@ -5338,6 +5338,169 @@ fn icon_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str, shots: &std::
 /// path, signed in as its row's window is; a link to anything else gets
 /// none, and a page that asks the shell to open a URL that is no
 /// fragment's opens nothing.
+const APPS_HASH_PROBE: &str = "(() => { const blobs = window.__appsBlobs ??= new Map(); if (!window.__appsObjectURL) { const make = URL.createObjectURL.bind(URL); window.__appsObjectURL = make; URL.createObjectURL = (blob) => { const url = make(blob); blobs.set(url, blob); return url; }; } window.__appsHash = async (value) => { const blob = typeof value === 'string' ? blobs.get(value) ?? await fetch(value, { headers: { 'x-fragment-shell': '1' } }).then((r) => r.blob()) : value; const bytes = await blob.arrayBuffer(); const hash = await crypto.subtle.digest('SHA-256', bytes); return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, '0')).join(''); }; return true; })()";
+
+const APPS_RACE_PROBE: &str = "(() => {
+  const real = window.fetch.bind(window);
+  const revoke = URL.revokeObjectURL;
+  URL.revokeObjectURL = () => {};
+  const pending = { access: [], card: [] };
+  const hold = (kind, url, o) => {
+    const options = kind === 'card' ? { ...o, headers: { ...o?.headers } } : o;
+    if (kind === 'card') delete options.headers['if-none-match'];
+    const answer = real(url, options);
+    return new Promise((resolve) => pending[kind].push({
+      answer,
+      release: async () => { const r = await answer; resolve(r); await new Promise((done) => setTimeout(done, 0)); },
+    }));
+  };
+  window.fetch = (url, o) => {
+    const u = String(url);
+    if (u === '/api/access') return hold('access', url, o);
+    if (/^\\/api\\/f\\/[^/]+\\/card$/.test(u) && (o?.method ?? 'GET') === 'GET') return hold('card', url, o);
+    return real(url, o);
+  };
+  window.__appsRace = {
+    count: (kind) => pending[kind].length,
+    release: async (kind, newest) => {
+      const all = pending[kind].splice(0);
+      if (newest) all.reverse();
+      for (const p of all) await p.release();
+      return true;
+    },
+    restore: () => { window.fetch = real; URL.revokeObjectURL = revoke; return true; },
+  };
+  return true;
+})()";
+
+/// Access and card responses held at the browser, then answered in both
+/// orders around a sharing change and around closing and reopening Apps.
+/// Every answer is the server's own at the time its request was made; the
+/// final text and card's bytes must be the newest visit's and request's.
+fn apps_response_races_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(60);
+    let row = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{app}\"]")));
+    let access = format!("{row}?.querySelector('.app-row-access')?.textContent ?? ''");
+    let card = format!("{row}?.querySelector('.app-row-card')");
+    b.eval(page, APPS_HASH_PROBE)?;
+    b.eval(page, &format!("(async () => {{ window.__appsOriginalCard = await fetch('/api/f/{app}/card', {{ headers: {{ 'x-fragment-shell': '1' }} }}).then((r) => r.blob()); \
+         const bytes = new Uint8Array(await window.__appsOriginalCard.arrayBuffer()); const comment = new TextEncoder().encode('e2e upload'); \
+         const changed = new Uint8Array(6 + comment.length + bytes.length - 2); changed.set([0xff, 0xd8, 0xff, 0xfe, 0, 12]); changed.set(comment, 6); changed.set(bytes.slice(2), 6 + comment.length); \
+         window.__appsChangedCard = new Blob([changed], {{ type: 'image/jpeg' }}); return true; }})()"))?;
+    let original = b.eval(page, "window.__appsHash(window.__appsOriginalCard)")?;
+    let changed_card = b.eval(page, "window.__appsHash(window.__appsChangedCard)")?;
+    let release = |b: &mut Browser, kind: &str, newest: bool| b.eval(page, &format!("window.__appsRace.release({kind:?}, {newest})"));
+    let set_visibility = |b: &mut Browser, visibility: &str| -> Result<Value> {
+        b.eval(page, &format!("fetch('/api/f/{app}/visibility', {{ method: 'PUT', headers: {{ 'x-fragment-shell': '1', 'content-type': 'application/json' }}, body: JSON.stringify({{ visibility: {} }}), credentials: 'same-origin' }}).then((r) => ({{ status: r.status, body: r.json() }}))", js(visibility)))
+    };
+    let put_card = |b: &mut Browser, source: &str| -> Result<Value> {
+        b.eval(page, &format!("(async () => {{ const r = await fetch('/api/f/{app}/card', {{ method: 'PUT', headers: {{ 'x-fragment-shell': '1', 'content-type': 'image/jpeg' }}, body: {source}, credentials: 'same-origin' }}); return {{ status: r.status, body: await r.text() }}; }})()"))
+    };
+    let share = |s: &Suite, b: &mut Browser| -> Result<bool> {
+        b.eval(page, &format!("({row}?.querySelector('[data-action=share]')?.click(), true)"))?;
+        let open = b.until(page, "document.getElementById('sheet').open", wait);
+        let ready = open && s.eventually(wait, || b.eval_in_frame(page, "/share/", "!!document.querySelector('button[data-done]')").ok() == Some(Value::Bool(true)));
+        let _ = b.eval_in_frame(page, "/share/", "(document.querySelector('button[data-done]').click(), true)");
+        Ok(ready && b.until(page, "!document.getElementById('sheet').open", wait))
+    };
+    let revisit = |b: &mut Browser| -> Result<bool> {
+        b.eval(page, "(document.getElementById('settings').click(), true)")?;
+        let closed = b.until(page, "location.pathname === '/settings'", wait);
+        b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
+        Ok(closed && b.until(page, &format!("location.pathname === '/apps' && !!{row}"), wait))
+    };
+
+    // A no-change share sheet asks for the old access view; a real sharing
+    // change asks for the new one. Newest first, then oldest first.
+    b.eval(page, APPS_RACE_PROBE)?;
+    let shared = share(s, b)?;
+    let public = set_visibility(b, "public")?;
+    b.until(page, "window.__appsRace.count('access') >= 2", wait);
+    release(b, "access", true)?;
+    let newest = b.until(page, &format!("{access}.includes('Public')"), wait);
+    release(b, "card", true)?;
+    let shared_again = share(s, b)?;
+    let linked = set_visibility(b, "link")?;
+    b.until(page, "window.__appsRace.count('access') >= 2", wait);
+    release(b, "access", false)?;
+    let oldest = b.until(page, &format!("{access}.includes('Anyone with the link')"), wait);
+    release(b, "card", false)?;
+    b.eval(page, "window.__appsRace.restore()")?;
+    s.ok(
+        "access responses in either completion order around a sharing change end at the newest sharing: newest first Public, oldest first Anyone with the link",
+        shared && shared_again && public["status"] == 200 && linked["status"] == 200 && newest && oldest,
+        json!({ "newest": newest, "oldest": oldest, "access": b.eval(page, &access)? }),
+    );
+
+    // Close and reopen once to make the old visit's reads; while closed,
+    // change sharing and the card's bytes, then reopen into the new visit.
+    for (newest_first, visibility, source, expected_access, expected_card) in [
+        (true, "public", "window.__appsChangedCard", "Public", changed_card.clone()),
+        (false, "link", "window.__appsOriginalCard", "Anyone with the link", original.clone()),
+    ] {
+        b.eval(page, APPS_RACE_PROBE)?;
+        let old_visit = revisit(b)?;
+        b.until(page, "window.__appsRace.count('access') >= 1 && window.__appsRace.count('card') >= 1", wait);
+        b.eval(page, "(document.getElementById('settings').click(), true)")?;
+        b.until(page, "location.pathname === '/settings'", wait);
+        let changed = set_visibility(b, visibility)?;
+        let put = put_card(b, source)?;
+        b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
+        let new_visit = b.until(page, &format!("location.pathname === '/apps' && !!{row} && window.__appsRace.count('access') >= 2 && window.__appsRace.count('card') >= 2"), wait);
+        release(b, "access", newest_first)?;
+        release(b, "card", newest_first)?;
+        let final_access = b.until(page, &format!("{access}.includes({})", js(expected_access)), wait);
+        let mut final_card = Value::Null;
+        let card_settled = s.eventually(wait, || {
+            final_card = b.eval(page, &format!("window.__appsHash({card}?.src).catch((e) => `hash failed: ${{e.message}}`)")).unwrap_or(Value::Null);
+            final_card == expected_card
+        });
+        b.eval(page, "window.__appsRace.restore()")?;
+        s.ok(
+            "closing and reopening Apps with access and card reads held: either completion order leaves the new visit's access text and card bytes",
+            old_visit && new_visit && changed["status"] == 200 && put["status"] == 200 && final_access && card_settled,
+            json!({ "newest_first": newest_first, "access": b.eval(page, &access)?, "card": final_card, "expected": expected_card, "put": put, "image": b.eval(page, &format!("{card}?.outerHTML ?? null"))?, "row": b.eval(page, &format!("{row}?.innerText ?? null"))? }),
+        );
+    }
+    Ok(())
+}
+
+/// An app created while Apps is open appears from the list, and its card is
+/// read then. Its first reads are 404; the bounded retry shows the card the
+/// platform has since made, byte for byte, without another list change.
+fn apps_arrival_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
+    let wait = std::time::Duration::from_secs(60);
+    b.eval(page, APPS_HASH_PROBE)?;
+    b.eval(
+        page,
+        "(() => { const real = window.fetch.bind(window); window.__arriving = { name: null, fail: true, reads: 0 }; \
+         window.fetch = async (url, o) => { const u = String(url); const a = window.__arriving; \
+         if (u === '/api/fragments' && o?.method === 'POST') { const r = await real(url, o); const made = await r.clone().json(); if (made.name?.startsWith('arriving-apps--')) a.name = made.name; return r; } \
+         if (a.name && u === `/api/f/${a.name}/card` && (o?.method ?? 'GET') === 'GET') { a.reads++; if (a.fail) return new Response('{}', { status: 404, headers: { 'content-type': 'application/json' } }); } \
+         return real(url, o); }; window.__arrivingRestore = () => { window.fetch = real; return true; }; return true; })()",
+    )?;
+    let made = b.eval(
+        page,
+        "fetch('/api/fragments', { method: 'POST', headers: { 'x-fragment-shell': '1', 'content-type': 'application/json' }, body: JSON.stringify({ label: 'arriving-apps', template: 'todo', title: 'Arriving app' }), credentials: 'same-origin' }).then(async (r) => ({ status: r.status, body: await r.json() }))",
+    )?;
+    let name = made["body"]["name"].as_str().unwrap_or("").to_string();
+    let row = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{name}\"]")));
+    let unavailable = b.until(page, &format!("window.__arriving.reads > 0 && !!{row} && !{row}.querySelector('.app-row-card')"), wait);
+    b.eval(page, "(window.__arriving.fail = false, true)")?;
+    let arrived = b.until(page, &format!("!!{row}?.querySelector('.app-row-card')?.src.startsWith('blob:')"), wait);
+    let shown = b.eval(page, &format!("window.__appsHash({row}?.querySelector('.app-row-card')?.src)"))?;
+    let server = b.eval(page, &format!("window.__appsHash('/api/f/{name}/card')"))?;
+    s.ok(
+        "an app arriving while Apps is open gets its preview: initially unavailable, a bounded retry shows the server's card bytes with no navigation",
+        made["status"] == 200 && unavailable && arrived && shown == server,
+        json!({ "made": made, "unavailable": unavailable, "reads": b.eval(page, "window.__arriving.reads")?, "shown": shown, "server": server }),
+    );
+    b.eval(page, "window.__arrivingRestore()")?;
+    b.eval(page, &format!("fetch('/api/f/{name}', {{ method: 'DELETE', headers: {{ 'x-fragment-shell': '1' }}, credentials: 'same-origin' }}).then((r) => r.status)"))?;
+    b.until(page, &format!("!{row}"), wait);
+    Ok(())
+}
+
 /// The Apps page (docs/api.md, The shell; #587), from the sidebar's Apps:
 /// the owner's app listed (no chat or skills), with its card and who has
 /// access; a kind this build does not know is listed as Other; its Dock
@@ -5391,6 +5554,9 @@ fn apps_ui(s: &mut Suite, b: &mut Browser, page: &Page, skills: &str, app: &str,
     let back = b.until(page, &format!("{}?.getAttribute('aria-checked') === 'true' && {docked}", control("dock")), wait);
     s.ok("its Dock switch takes it off the dock and puts it back, the switch moving as the list does", on == "true" && off && back, b.eval(page, &format!("{row}?.innerText ?? null"))?);
 
+    apps_response_races_ui(s, b, page, app)?;
+    apps_arrival_ui(s, b, page)?;
+
     // its card shot again; asked again within the minute, refused under its row
     let before = b.eval(page, &format!("{row}?.querySelector('.app-row-card')?.src ?? null"))?;
     b.eval(page, &format!("({}?.click(), true)", control("card")))?;
@@ -5404,17 +5570,37 @@ fn apps_ui(s: &mut Suite, b: &mut Browser, page: &Page, skills: &str, app: &str,
         json!({ "before": before, "after": b.eval(page, &format!("{row}?.querySelector('.app-row-card')?.src ?? null"))?, "row": b.eval(page, &format!("{row}?.innerText ?? null"))? }),
     );
 
-    // an icon made from here, which its row then shows
+    // an icon made here: its first read fails; a share sheet opened and
+    // closed (no fragment change, no navigation) draws the same row again,
+    // whose retry succeeds into the retained row rather than a detached one
     b.eval(page, &format!("({}?.click(), true)", control("icon")))?;
     let sheet = b.until(page, "!!document.querySelector('dialog.icon-sheet[open]')", wait);
     b.eval(page, "(document.querySelector('dialog.icon-sheet .icon-make button[type=submit]')?.click(), true)")?;
     let made = b.until(page, "document.querySelectorAll('dialog.icon-sheet .icon-pick img').length > 0", wait);
+    let reads = format!("*/api/f/{app}/icon?v=*");
+    b.block(page, &[&reads])?;
     b.eval(page, "(document.querySelector('dialog.icon-sheet .icon-pick')?.click(), true)")?;
-    let shown = b.until(page, &format!("(() => {{ const i = {row}?.querySelector('.app-row-art img'); return !!i && i.src.startsWith('blob:') && i.complete && i.naturalWidth === 256; }})()"), wait);
+    let unread = b.until(page, &format!("!!{row}?.querySelector('.app-row-art .app-picture[data-unread] .app-icon') && !{row}?.querySelector('.app-row-art img')"), wait);
+    b.eval(page, "(document.querySelector('dialog.icon-sheet')?.close(), true)")?;
+    std::thread::sleep(std::time::Duration::from_millis(2200));
+    b.block(page, &[])?;
+    b.eval(page, &format!("({}?.click(), true)", control("share")))?;
+    let shared = b.until(page, "document.getElementById('sheet').open", wait);
+    let ready = shared && s.eventually(wait, || b.eval_in_frame(page, "/share/", "!!document.querySelector('button[data-done]')").ok() == Some(Value::Bool(true)));
+    let _ = b.eval_in_frame(page, "/share/", "(document.querySelector('button[data-done]').click(), true)");
+    let closed = b.until(page, "!document.getElementById('sheet').open", wait);
+    let shown = b.until(page, &format!("(() => {{ const i = {row}?.querySelector('.app-row-art img'); return location.pathname === '/apps' && !!i && i.src.startsWith('blob:') && i.complete && i.naturalWidth === 256 && !{row}?.querySelector('.app-row-art [data-unread]'); }})()"), wait);
+    s.ok(
+        "its icon read fails, then the same fragment's next draw retries and shows the loaded picture in place, without navigating",
+        sheet && made && unread && ready && closed && shown,
+        b.eval(page, &format!("{row}?.querySelector('.app-row-art')?.outerHTML.slice(0, 300) ?? null"))?,
+    );
+    b.eval(page, &format!("({}?.click(), true)", control("icon")))?;
+    b.until(page, "!!document.querySelector('dialog.icon-sheet[open]')", wait);
     b.eval(page, "([...document.querySelectorAll('dialog.icon-sheet .icon-actions button')].find((b) => b.textContent === 'Remove')?.click(), true)")?;
     let removed = b.until(page, &format!("!!{row}?.querySelector('.app-row-art .app-icon') && !{row}?.querySelector('.app-row-art img')"), wait);
     b.eval(page, "(document.querySelector('dialog.icon-sheet')?.close(), true)")?;
-    s.ok("its Icon… opens the icon sheet: one made and picked is its row's icon, and removed, its glyph is back", sheet && made && shown && removed, b.eval(page, &format!("{row}?.querySelector('.app-row-art')?.outerHTML.slice(0, 300) ?? null"))?);
+    s.ok("removed, its glyph is back", removed, b.eval(page, &format!("{row}?.querySelector('.app-row-art')?.outerHTML.slice(0, 300) ?? null"))?);
 
     // who has access, changed in its share sheet: Public, then back
     let visibility = |b: &mut Browser, v: &str| -> Result<bool> {

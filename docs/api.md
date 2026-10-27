@@ -2976,9 +2976,10 @@ folded at the end with Unarchive. Each row is its icon, title, kind
 to one of theirs at a glance (Restricted, Anyone with the link or
 Public; the people in it by email, two named and a count past them; the
 invites waiting: `GET /api/access`, read as the page opens, as a share
-sheet closes and as the list says its sharing changed), its preview
-card, and what they may do there, each showing what the server answered
-and nothing before it: an app's or a brain's **Dock** switch (`PUT
+sheet closes and as the list says its sharing changed), its preview card
+(read as the page opens and for a new or changed app, with bounded retries
+while one is not there yet), and what they may do there, each showing what
+the server answered and nothing before it: an app's or a brain's **Dock** switch (`PUT
 /api/fragments/{name}/dock`; it moves once the list says so, any role),
 **New preview** (an editor's, not on a members-only one of theirs:
 `POST /api/f/{name}/card`; "Taking a new preview…" until status's

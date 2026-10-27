@@ -28,6 +28,8 @@ const seg = (s) => encodeURIComponent(s).replace(/%3A/gi, ":");
 const SHELL = { "x-fragment-shell": "1" };
 // how long a preview is waited for here, asked every few seconds
 const SHOT_WAIT_MS = 180_000;
+// a card being generated is read at most this often per row and visit
+const CARD_READS_MAX = 6;
 // how many names a row says of who has access
 const NAMES_SHOWN = 2;
 
@@ -37,9 +39,15 @@ export function createAppsPage(page, h) {
   const busy = new Map();
   const said = new Map();
   const cards = new Map();
+  const cardReads = new Map();
+  const cardAttempts = new Map();
+  const cardRows = new Map();
+  const cardsLoad = { wait: 0, timer: null, batch: 0 };
   const shots = new Map();
   let access = null;
   let accessed = "";
+  let accessRead = 0;
+  let visit = 0;
   let shown = false;
 
   const say = (name, text) => {
@@ -48,22 +56,68 @@ export function createAppsPage(page, h) {
   };
 
   // its card, read with this page's session as the dock's are; "new",
-  // "same" or "none"
-  async function loadCard(name) {
+  // "same", "none" or "stale" (a newer read or visit owns the row)
+  async function loadCard(name, mine) {
+    const request = (cardReads.get(name) ?? 0) + 1;
+    cardReads.set(name, request);
+    const current = () => mine === visit && cardReads.get(name) === request;
     const known = cards.get(name);
     const headers = { ...SHELL, ...(known ? { "if-none-match": known.etag } : {}) };
     const r = await fetch(`/api/f/${seg(name)}/card`, { headers, credentials: "same-origin" });
+    if (!current()) return "stale";
     if (r.status === 304) return "same";
     if (!r.ok) return "none";
-    const url = URL.createObjectURL(await r.blob());
+    const body = await r.blob();
+    if (!current()) return "stale";
+    const url = URL.createObjectURL(body);
     if (known) URL.revokeObjectURL(known.url);
     cards.set(name, { etag: r.headers.get("etag"), url });
     return "new";
   }
 
+  // Every card on open; afterwards, a new or changed row's, and one whose
+  // card is not there yet, asked again with bounded backoff and retries.
+  async function loadCards(all = false) {
+    if (!shown) return;
+    clearTimeout(cardsLoad.timer);
+    const mine = visit;
+    const batch = ++cardsLoad.batch;
+    const rows = h.state.fragments.filter((f) => listed(f) && dockable(f));
+    let fresh = false;
+    const asked = [];
+    for (const f of rows) {
+      const fingerprint = JSON.stringify(f);
+      if (!all && cards.has(f.name) && cardRows.get(f.name) === fingerprint) continue;
+      if (all || cardAttempts.get(f.name)?.fingerprint !== fingerprint) {
+        cardAttempts.set(f.name, { fingerprint, count: 0 });
+        fresh = true;
+      }
+      const attempt = cardAttempts.get(f.name);
+      if (attempt.count < CARD_READS_MAX) {
+        ++attempt.count;
+        asked.push(f);
+      }
+    }
+    if (fresh) cardsLoad.wait = 0;
+    const got = await Promise.all(asked.map(async (f) => [f, await loadCard(f.name, mine).catch(() => "none")]));
+    if (mine !== visit || batch !== cardsLoad.batch) return;
+    for (const [f, result] of got) if (result === "new" || result === "same") cardRows.set(f.name, JSON.stringify(f));
+    if (got.some(([, result]) => result === "new")) render();
+    if (got.some(([, result]) => result === "none") && cardsLoad.wait < 60_000) {
+      cardsLoad.wait = Math.min(60_000, cardsLoad.wait ? cardsLoad.wait * 2 : 2_000);
+      cardsLoad.timer = setTimeout(() => { if (mine === visit) loadCards().catch(() => {}); }, cardsLoad.wait);
+    }
+  }
+
   async function loadAccess() {
-    access = await h.api("GET", "/api/access").catch((e) => ({ error: e.message }));
-    accessed = sharingOf();
+    const mine = visit;
+    const request = ++accessRead;
+    const fingerprint = sharingOf();
+    const next = await h.api("GET", "/api/access").catch((e) => ({ error: e.message }));
+    if (mine !== visit || request !== accessRead) return false;
+    access = next;
+    accessed = fingerprint;
+    return true;
   }
   // what the list says of who is in each of theirs: a change asks again
   const sharingOf = () => JSON.stringify(h.state.fragments.filter((f) => listed(f) && owns(f)).map((f) => [f.name, f.sharing ?? null]));
@@ -152,8 +206,11 @@ export function createAppsPage(page, h) {
       p.setAttribute("role", "status");
       item.append(p);
     }
-    // what it shows, to keep the element (its focus) while that is the same
-    item.dataset.shows = JSON.stringify([f, doing ?? null, words ?? null, card?.url ?? null, shots.has(name), item.querySelector(".app-row-access")?.textContent ?? null]);
+    // what it shows, to keep the element (its focus) while that is the same;
+    // an unread icon's retry must replace the art its old read would update
+    const picture = item.querySelector(".app-row-art .app-picture");
+    const readiness = picture ? [picture.hasAttribute("data-unread"), !!picture.querySelector("img")] : null;
+    item.dataset.shows = JSON.stringify([f, doing ?? null, words ?? null, card?.url ?? null, shots.has(name), item.querySelector(".app-row-access")?.textContent ?? null, readiness]);
     return item;
   }
 
@@ -226,6 +283,7 @@ export function createAppsPage(page, h) {
   // a shot asked for: waited for by its report (status's `page.at` from
   // when it was wanted on), then its card read again
   async function newPreview(name) {
+    const mine = visit;
     busy.set(name, "card");
     say(name, "");
     render();
@@ -233,26 +291,31 @@ export function createAppsPage(page, h) {
     try {
       asked = await h.api("POST", `/api/f/${seg(name)}/card`);
     } catch (e) {
-      say(name, e.message);
+      if (mine === visit) say(name, e.message);
       return;
     } finally {
-      busy.delete(name);
-      render();
+      if (mine === visit) {
+        busy.delete(name);
+        render();
+      }
     }
+    if (mine !== visit) return;
     shots.set(name, asked.since);
     render();
     const until = Date.now() + SHOT_WAIT_MS;
     let wait = 2_000;
     // bounded: until the report comes, the page closes, or SHOT_WAIT_MS
-    while (shown && Date.now() < until) {
+    while (shown && mine === visit && Date.now() < until) {
       await new Promise((r) => setTimeout(r, wait));
       wait = Math.min(wait * 1.5, 10_000);
       const status = await h.api("GET", `/api/f/${seg(name)}/status`).catch(() => null);
       if (status?.page && status.page.at >= asked.since) break;
     }
+    if (mine !== visit) return;
     const done = shown && Date.now() < until;
     shots.delete(name);
-    await loadCard(name).catch(() => "same");
+    await loadCard(name, mine).catch(() => "same");
+    if (mine !== visit) return;
     say(name, done ? "" : "The preview is still being taken.");
     render();
   }
@@ -261,31 +324,35 @@ export function createAppsPage(page, h) {
     // shown at `/apps`: the list as it is, who has access, and each card
     async open() {
       shown = true;
+      ++visit;
       page.replaceChildren();
-      await loadAccess();
+      cardsLoad.wait = 0;
       render();
-      const names = h.state.fragments.filter((f) => listed(f) && dockable(f)).map((f) => f.name);
-      const got = await Promise.all(names.map((n) => loadCard(n).catch(() => "same")));
-      if (got.includes("new")) render();
+      const reading = loadCards(true).catch(() => {});
+      if (await loadAccess()) render();
+      await reading;
     },
     close() {
       shown = false;
+      ++visit;
+      ++cardsLoad.batch;
+      clearTimeout(cardsLoad.timer);
+      shots.clear();
     },
-    // the list changed: drawn again, and who has access asked again when
-    // the list says that changed
+    // the list changed: drawn again, who has access asked again when the
+    // list says that changed, and new or changed apps' cards read
     async listed() {
       if (!shown) return;
       render();
-      if (sharingOf() !== accessed) {
-        await loadAccess();
-        render();
-      }
+      loadCards().catch(() => {});
+      if (sharingOf() !== accessed && await loadAccess()) render();
     },
-    // a share sheet closed: who has access, asked again
+    // a share sheet closed: who has access, and any changed cards, asked again
     async shared() {
       if (!shown) return;
-      await loadAccess();
       render();
+      loadCards().catch(() => {});
+      if (await loadAccess()) render();
     },
   };
 }
