@@ -740,12 +740,15 @@ iframe[data-blocked] { display: none; }
 .icon-make input { flex: 1; min-width: 0; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 9px; font: inherit; color: inherit; background: var(--bg-window); }
 .icon-make button, .icon-actions button { padding: 10px 14px; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--bg-window); color: inherit; font: inherit; }
 .icon-make button[type=submit] { background: var(--text-primary); color: var(--bg-window); border-color: transparent; }
-.icon-make button:disabled { opacity: .55; }
+.icon-make button:disabled, .icon-pick:disabled, .icon-actions button:disabled { opacity: .55; }
 .icon-said { margin: 12px 0 0; color: var(--text-secondary); font-size: 14px; }
 .icon-picks { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
 .icon-picks:empty { display: none; }
 .icon-pick { min-width: 0; aspect-ratio: 1; padding: 6px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--bg-window); }
 .icon-pick img { display: block; width: 100%; height: 100%; min-width: 0; object-fit: contain; }
 .icon-pick.picked { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+/* what is being kept or removed, until the platform answers (the rest wait, disabled) */
+.icon-sheet button[aria-busy=true] { opacity: 1; }
+.icon-pick[aria-busy=true] { outline: 2px dashed var(--border-strong); outline-offset: 2px; }
 .icon-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
 .icon-actions button:first-child { margin-right: auto; }

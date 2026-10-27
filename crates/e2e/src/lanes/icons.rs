@@ -44,7 +44,7 @@ fn b64() -> base64::engine::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
 }
 
-fn photo() -> Vec<u8> {
+pub(super) fn photo() -> Vec<u8> {
     b64().decode(PHOTO).expect("a fixture JPEG")
 }
 

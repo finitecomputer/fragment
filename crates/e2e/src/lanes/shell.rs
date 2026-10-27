@@ -5077,54 +5077,261 @@ fn app_policy_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, app: &s
     Ok(())
 }
 
+/// What the icon checks read of the page (`window.__icons`): the sheet,
+/// its picks, the dock's art for the app (`DOCK`), an image's pixels drawn
+/// 32×32 (which picture it is, as these checks tell them apart: `null`
+/// while it is not loaded), and the sheet's state as a person sees it.
+const ICON_PROBE: &str = "(window.__icons = {
+  sheet: () => document.querySelector('dialog.icon-sheet'),
+  picks: () => [...document.querySelectorAll('dialog.icon-sheet .icon-pick')],
+  dock: () => document.querySelector(DOCK),
+  dockArt: () => __icons.dock()?.querySelector('.dock-art .app-picture') ?? null,
+  px: (img) => { if (!img?.complete || !img.naturalWidth) return null; const c = document.createElement('canvas'); c.width = c.height = 32; const g = c.getContext('2d'); g.drawImage(img, 0, 0, 32, 32); return g.getImageData(0, 0, 32, 32).data.join(); },
+  pickPx: (i) => __icons.px(__icons.picks()[i]?.querySelector('img')),
+  dockPx: () => __icons.px(__icons.dockArt()?.querySelector('img')),
+  currentPx: () => __icons.px(__icons.sheet()?.querySelector('.icon-current img')),
+  state: () => {
+    const d = __icons.sheet();
+    const q = (s) => d?.querySelector(s);
+    const art = __icons.dockArt();
+    return {
+      open: !!d?.open,
+      picked: __icons.picks().map((b) => b.classList.contains('picked')),
+      disabled: __icons.picks().map((b) => b.disabled),
+      upload: q('.icon-upload')?.disabled ?? null,
+      remove: q('.icon-remove') ? { hidden: q('.icon-remove').hidden, disabled: q('.icon-remove').disabled } : null,
+      said: q('.icon-said') && !q('.icon-said').hidden ? q('.icon-said').textContent : null,
+      role: q('.icon-said')?.getAttribute('role') ?? null,
+      current: q('.icon-current img') ? 'picture' : 'glyph',
+      dock: art ? (art.querySelector('img') ? 'picture' : 'glyph') : 'none',
+    };
+  },
+}, true)";
+
+/// An app's icon as its owner makes one in the shell (docs/api.md, Icons;
+/// the Workers AI fake draws them, local Images fits uploads): its
+/// window's More, Icon…, Make icons, four to pick from. A pick is shown
+/// kept only once the platform kept it; one write goes at a time, every
+/// other control disabled until it answers, in that sheet and in one
+/// reopened meanwhile; a write that fails says why in the sheet, and
+/// nothing once the sheet is closed. An icon read that fails is read again
+/// at the next draw, and the dock shows the newest icon when the list
+/// moves on while an older one is still being read. Remove, and its glyph
+/// is back. The app's window is open. Held writes and reads are the
+/// browser's (`Browser::hold`), refused ones its own (`Browser::block`).
+fn icon_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(60);
+    let dock = format!("document.querySelector({})", js(&format!("#apps [data-key=\"app:{app}\"]")));
+    b.eval(page, &ICON_PROBE.replace("DOCK", &js(&format!("#apps [data-key=\"app:{app}\"]"))))?;
+    let item = "[...document.querySelectorAll('#menu [role=menuitem]')].find((b) => b.textContent === 'Icon…')";
+    let open_sheet = |b: &mut Browser| -> Result<bool> {
+        b.eval(page, "([...document.querySelectorAll('#stack .pane button[aria-label=More]')].pop()?.click(), true)")?;
+        let offered = b.until(page, &format!("!!{item}"), wait);
+        b.eval(page, &format!("({item}?.click(), true)"))?;
+        Ok(offered && b.until(page, "!!document.querySelector('dialog.icon-sheet[open]')", wait))
+    };
+    let click = |b: &mut Browser, what: &str| b.eval(page, &format!("({what}?.click(), true)"));
+    let pick = |i: usize| format!("__icons.picks()[{i}]");
+    let (upload_input, remove, done) = ("dialog.icon-sheet input[type=file]", "__icons.sheet()?.querySelector('.icon-remove')", "__icons.sheet()?.querySelector('.icon-done')");
+    let settle = |b: &mut Browser, ms: u64| b.eval(page, &format!("new Promise((r) => setTimeout(() => r(true), {ms}))"));
+    let state = |b: &mut Browser| b.eval(page, "__icons.state()");
+    let held = |s: &Suite, b: &mut Browser, n: usize| s.eventually(wait, || b.held(page).is_ok_and(|h| h.len() == n));
+    // its writes (a PUT, a DELETE) and its reads (`?v=`), by their URLs
+    let writes = format!("*/api/f/{app}/icon");
+    let reads = format!("*/api/f/{app}/icon?v=*");
+    let photo = shots.join("icon-photo.jpg");
+    std::fs::write(&photo, super::icons::photo())?;
+    let orange = shots.join("icon-orange.png");
+    std::fs::write(&orange, super::faces::orange())?;
+    let words = shots.join("icon-words.txt");
+    std::fs::write(&words, "hello, I am no picture")?;
+
+    let sheet = open_sheet(b)?;
+    b.eval(page, "(document.querySelector('dialog.icon-sheet .icon-make button[type=submit]')?.click(), true)")?;
+    let picks = "[...document.querySelectorAll('dialog.icon-sheet .icon-pick img')]";
+    let four = b.until(page, &format!("{picks}.length === 4 && {picks}.every((i) => i.complete && i.naturalWidth === 256 && i.naturalHeight === 256)"), wait);
+    s.ok(
+        "an app's owner opens its window's More, Icon…, and makes icons: four to pick from, each 256×256",
+        sheet && four,
+        b.eval(page, "document.querySelector('dialog.icon-sheet')?.innerText ?? null")?,
+    );
+    let _ = b.screenshot(page, &shots.join("icon-sheet.png"));
+
+    // a pick kept while its icon cannot be read: the glyph stays, and the
+    // next draw (the same pick kept again) reads it again, with no reload
+    b.block(page, &[&reads])?;
+    click(b, &pick(0))?;
+    let kept = b.until(page, "__icons.state().picked[0] && __icons.state().dock !== 'none'", wait);
+    settle(b, 600)?;
+    let unread = state(b)?;
+    s.ok(
+        "a pick kept while its icon cannot be read: shown kept, saying nothing, and the dock and the sheet keep its glyph",
+        kept && unread["dock"] == "glyph" && unread["current"] == "glyph" && unread["said"].is_null(),
+        &unread,
+    );
+    b.block(page, &[])?;
+    // app-icon.js reads a failed icon again no sooner than RETRY_MS (2 s) after
+    std::thread::sleep(std::time::Duration::from_millis(2200));
+    click(b, &pick(0))?;
+    let healed = b.until(
+        page,
+        &format!("(() => {{ const d = {dock}; const i = __icons.dockArt()?.querySelector('img'); return !!i && i.src.startsWith('blob:') && i.naturalWidth === 256 && !d.querySelector('.app-icon') && __icons.dockPx() === __icons.pickPx(0) && __icons.currentPx() === __icons.dockPx(); }})()"),
+        wait,
+    );
+    s.ok(
+        "read again at the next draw (the same pick kept again), with no reload, it is the app's icon in the dock and the sheet: the object on nothing, no tile, read as a blob URL",
+        healed,
+        json!({ "state": state(b)?, "dock": b.eval(page, &format!("{dock}?.querySelector('.dock-art')?.outerHTML.slice(0, 300) ?? null"))? }),
+    );
+
+    // one write at a time: a pick held unanswered
+    let x = b.eval(page, "__icons.picks().findIndex((_, i) => i > 0 && __icons.pickPx(i) !== __icons.pickPx(0))")?.as_u64().unwrap_or(0) as usize;
+    anyhow::ensure!(x > 0, "two of the four candidates differ");
+    b.hold(page, &[&writes])?;
+    click(b, &pick(x))?;
+    let one = held(s, b, 1);
+    let waiting = state(b)?;
+    let others = if x == 1 { 2 } else { 1 };
+    click(b, &pick(others))?;
+    b.choose_files(page, upload_input, &[&photo])?;
+    settle(b, 400)?;
+    let still = b.held(page)?;
+    let _ = b.screenshot(page, &shots.join("icon-sheet-keeping.png"));
+    let disabled = waiting["disabled"].as_array().is_some_and(|d| d.iter().all(|d| d == true)) && waiting["upload"] == true && waiting["remove"]["disabled"] == true;
+    let shown_kept: Vec<bool> = (0..4).map(|i| waiting["picked"][i] == true).collect();
+    s.ok(
+        "while a pick is being kept, the sheet's picks, Upload and Remove are disabled, another pick or a file chosen asks nothing, and the new pick is not shown kept yet: the one kept before still is",
+        one && disabled && shown_kept == [true, false, false, false] && still.len() == 1,
+        json!({ "waiting": waiting, "held": still }),
+    );
+    b.release(page, false)?;
+    let answered = b.until(
+        page,
+        &format!("(() => {{ const s = __icons.state(); return s.picked.every((p, i) => p === (i === {x})) && s.disabled.every((d) => !d) && !s.upload && !s.remove.disabled; }})() && __icons.dockPx() === __icons.pickPx({x})"),
+        wait,
+    );
+    s.ok("answered, that pick alone is shown kept, the controls are back, and it is the dock's icon", answered, state(b)?);
+    let _ = b.screenshot(page, &shots.join("icon-docked.png"));
+
+    // failures, said in the sheet: an upload the platform refuses (no
+    // image), and a pick and a removal whose connection drops
+    let notice = "({ hidden: document.getElementById('notice').hidden, text: document.getElementById('notice').textContent })";
+    let notice_before = b.eval(page, notice)?;
+    b.choose_files(page, upload_input, &[&words])?;
+    let refused = b.until(page, "(__icons.state().said ?? '').startsWith('The icon was not uploaded: an icon is made from')", wait);
+    let upload_said = state(b)?;
+    b.block(page, &[&writes])?;
+    click(b, &pick(others))?;
+    let unkept = b.until(page, "(__icons.state().said ?? '').startsWith('The icon was not kept: ')", wait);
+    let pick_said = state(b)?;
+    click(b, remove)?;
+    let unremoved = b.until(page, "(__icons.state().said ?? '').startsWith('The icon was not removed: ')", wait);
+    let remove_said = state(b)?;
+    b.block(page, &[])?;
+    let still_x = b.eval(page, &format!("__icons.dockPx() === __icons.pickPx({x})"))?;
+    let notice_after = b.eval(page, notice)?;
+    let only_x = |st: &Value| (0..4).all(|i| st["picked"][i] == (i == x));
+    s.ok(
+        "a pick, an upload and a removal that fail say why in the sheet, as an alert, and not on the page; the pick shown kept, Remove, and the dock's icon stay",
+        refused
+            && unkept
+            && unremoved
+            && [&upload_said, &pick_said, &remove_said].iter().all(|st| st["role"] == "alert" && only_x(st))
+            && remove_said["remove"]["hidden"] == false
+            && still_x == true
+            && notice_after == notice_before,
+        json!({ "upload": upload_said, "pick": pick_said, "remove": remove_said, "notice": notice_after }),
+    );
+    let _ = b.screenshot(page, &shots.join("icon-sheet-failed.png"));
+    // on a phone, the same sheet
+    b.viewport(page, 390, 844, true)?;
+    let fits = b.until(
+        page,
+        "innerWidth === 390 && (() => { const d = __icons.sheet(); const r = d.getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth && r.bottom <= innerHeight && [...d.querySelectorAll('.icon-pick, .icon-actions button, .icon-said, .icon-make input, .icon-make button')].every((e) => { const b = e.getBoundingClientRect(); return b.width > 0 && b.left >= r.left && b.right <= r.right; }); })()",
+        wait,
+    );
+    let _ = b.screenshot(page, &shots.join("phone-390-icon-sheet.png"));
+    let rects = b.eval(page, "[...__icons.sheet().querySelectorAll('.icon-picks, .icon-said, .icon-actions')].map((e) => e.getBoundingClientRect().toJSON())")?;
+    b.viewport(page, 1280, 800, false)?;
+    s.ok("at a phone's width (390 px) the sheet fits the screen: its picks, what it says and its buttons inside it", fits, &rects);
+
+    // the list moving on while the old icon's read is still going
+    b.hold(page, &[&reads])?;
+    b.choose_files(page, upload_input, &[&photo])?;
+    let first = b.until(page, "!!__icons.dockArt() && !__icons.dockArt().querySelector('img') && !__icons.state().upload", wait);
+    let was = b.eval(page, "__icons.dockArt()?.dataset.picture ?? null")?;
+    b.choose_files(page, upload_input, &[&orange])?;
+    let moved = b.until(page, &format!("(() => {{ const a = __icons.dockArt(); return !!a && !a.querySelector('img') && a.dataset.picture !== {was}; }})()"), wait);
+    b.eval(page, "(window.__liveArt = __icons.dockArt(), true)")?;
+    let reading = b.held(page)?;
+    b.release(page, false)?;
+    let newest = b.until(
+        page,
+        "!!window.__liveArt && __icons.dock().contains(window.__liveArt) && __icons.px(window.__liveArt.querySelector('img')) !== null && __icons.px(window.__liveArt.querySelector('img')) === __icons.currentPx()",
+        wait,
+    );
+    s.ok(
+        "the list moving on to a new icon while the old one is still being read: when both answer, the dock shows the new one",
+        first && moved && reading.len() == 2 && newest,
+        json!({ "held": reading, "state": state(b)?, "dock": b.eval(page, &format!("{dock}?.querySelector('.dock-art')?.outerHTML.slice(0, 300) ?? null"))? }),
+    );
+
+    // an upload held unanswered: Remove waits, here and in the sheet reopened after Done
+    b.hold(page, &[&writes])?;
+    b.choose_files(page, upload_input, &[&photo])?;
+    let one = held(s, b, 1);
+    let here = state(b)?;
+    click(b, remove)?;
+    settle(b, 400)?;
+    let still = b.held(page)?;
+    click(b, done)?;
+    let closed = b.until(page, "!document.querySelector('dialog.icon-sheet')", wait);
+    let reopened = open_sheet(b)?;
+    let there = state(b)?;
+    b.release(page, false)?;
+    let after = b.until(
+        page,
+        &format!("(() => {{ const s = __icons.state(); const current = __icons.sheet()?.querySelector('.icon-current .app-picture'); return !s.upload && !s.remove.hidden && !s.remove.disabled && s.said === null && current?.dataset.picture === {was} && __icons.dockArt()?.dataset.picture === {was}; }})() && __icons.currentPx() !== null && __icons.dockPx() === __icons.currentPx()"),
+        wait,
+    );
+    s.ok(
+        "while an upload goes, Remove asks nothing, in its sheet and in the sheet reopened after Done; answered, the upload is the icon in the reopened sheet and the dock",
+        one && here["upload"] == true && here["remove"]["disabled"] == true && still.len() == 1 && closed && reopened && there["upload"] == true && there["remove"]["disabled"] == true && after,
+        json!({ "here": here, "held": still, "reopened": there, "after": state(b)? }),
+    );
+
+    // a removal that fails after Done
+    let notice_before = b.eval(page, notice)?;
+    b.hold(page, &[&writes])?;
+    click(b, remove)?;
+    let one = held(s, b, 1);
+    click(b, done)?;
+    let closed = b.until(page, "!document.querySelector('dialog.icon-sheet')", wait);
+    b.release(page, true)?;
+    settle(b, 600)?;
+    let quiet = b.eval(page, &format!("({{ sheets: document.querySelectorAll('dialog.icon-sheet').length, notice: {notice} }})"))?;
+    let reopened = open_sheet(b)?;
+    let clear = b.until(page, "(() => { const s = __icons.state(); return s.said === null && !s.remove.hidden && !s.remove.disabled && s.current === 'picture' && s.dock === 'picture'; })() && __icons.dockPx() === __icons.currentPx()", wait);
+    s.ok(
+        "a removal that fails after Done says nothing on the page (no notice, no sheet); the next sheet opens clear, the icon still there",
+        one && closed && quiet["sheets"] == 0 && quiet["notice"] == notice_before && reopened && clear,
+        json!({ "quiet": quiet, "before": notice_before, "next": state(b)? }),
+    );
+
+    click(b, remove)?;
+    let back = b.until(page, &format!("!!{dock}?.querySelector('.dock-art .app-icon') && !{dock}?.querySelector('.app-picture')"), wait);
+    click(b, done)?;
+    let closed = b.until(page, "!document.querySelector('dialog.icon-sheet')", wait);
+    s.ok("removed, its glyph is back in the dock; Done closes the sheet", back && closed, b.eval(page, &format!("{dock}?.querySelector('.dock-art')?.outerHTML.slice(0, 300) ?? null"))?);
+    Ok(())
+}
+
 /// An app beside the chat (docs/api.md, The shell; docs/chat-records.md,
 /// "The page"): a link in an agent's reply to another fragment's page gets
 /// "Open", which opens that page in the viewer beside the chat, at its
 /// path, signed in as its row's window is; a link to anything else gets
 /// none, and a page that asks the shell to open a URL that is no
 /// fragment's opens nothing.
-/// An app's icon as its owner makes one in the shell (docs/api.md, Icons;
-/// the Workers AI fake draws them): its window's More, Icon…, Make icons,
-/// four to pick from; one picked is the dock's icon, the object on
-/// nothing (no tile), read with the shell's session as a blob URL; Remove,
-/// and its glyph is back. The app's window is open.
-fn icon_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str, shots: &std::path::Path) -> Result<()> {
-    let wait = std::time::Duration::from_secs(60);
-    let dock = format!("document.querySelector({})", js(&format!("#apps [data-key=\"app:{app}\"]")));
-    let item = "[...document.querySelectorAll('#menu [role=menuitem]')].find((b) => b.textContent === 'Icon…')";
-    b.eval(page, "([...document.querySelectorAll('#stack .pane button[aria-label=More]')].pop()?.click(), true)")?;
-    let offered = b.until(page, &format!("!!{item}"), wait);
-    b.eval(page, &format!("({item}?.click(), true)"))?;
-    let sheet = b.until(page, "!!document.querySelector('dialog.icon-sheet[open]')", wait);
-    b.eval(page, "(document.querySelector('dialog.icon-sheet .icon-make button[type=submit]')?.click(), true)")?;
-    let picks = "[...document.querySelectorAll('dialog.icon-sheet .icon-pick img')]";
-    let four = b.until(page, &format!("{picks}.length === 4 && {picks}.every((i) => i.complete && i.naturalWidth === 256 && i.naturalHeight === 256)"), wait);
-    s.ok(
-        "an app's owner opens its window's More, Icon…, and makes icons: four to pick from, each 256×256",
-        offered && sheet && four,
-        b.eval(page, "document.querySelector('dialog.icon-sheet')?.innerText ?? null")?,
-    );
-    let _ = b.screenshot(page, &shots.join("icon-sheet.png"));
-    b.eval(page, "(document.querySelector('dialog.icon-sheet .icon-pick')?.click(), true)")?;
-    let shown = b.until(
-        page,
-        &format!("(() => {{ const d = {dock}; const i = d?.querySelector('.dock-art .app-picture img'); return !!i && i.src.startsWith('blob:') && i.complete && i.naturalWidth === 256 && !d.querySelector('.app-icon'); }})()"),
-        wait,
-    );
-    s.ok(
-        "one picked is the app's icon in the dock with no reload: the object on nothing, no tile, read as a blob URL",
-        shown,
-        b.eval(page, &format!("{dock}?.querySelector('.dock-art')?.outerHTML.slice(0, 300) ?? null"))?,
-    );
-    let _ = b.screenshot(page, &shots.join("icon-docked.png"));
-    b.eval(page, "([...document.querySelectorAll('dialog.icon-sheet .icon-actions button')].find((b) => b.textContent === 'Remove')?.click(), true)")?;
-    let back = b.until(page, &format!("!!{dock}?.querySelector('.dock-art .app-icon') && !{dock}?.querySelector('.app-picture')"), wait);
-    b.eval(page, "(document.querySelector('dialog.icon-sheet')?.close(), true)")?;
-    let closed = b.until(page, "!document.querySelector('dialog.icon-sheet')", wait);
-    s.ok("removed, its glyph is back in the dock; Done closes the sheet", back && closed, b.eval(page, &format!("{dock}?.querySelector('.dock-art')?.outerHTML.slice(0, 300) ?? null"))?);
-    Ok(())
-}
-
 fn open_beside_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, app: &str, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let agent_wait = std::time::Duration::from_secs(120);

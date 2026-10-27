@@ -42,6 +42,9 @@ pub struct Browser {
     profile: PathBuf,
     /// The events of each watched page (`open_watched`), by its session.
     watched: HashMap<String, Watched>,
+    /// Each holding page's held requests (`hold`), by its session: their
+    /// ids and URLs.
+    held: HashMap<String, Vec<(String, String)>>,
 }
 
 /// What a watched page's target said as it loaded and ran (its `Runtime`,
@@ -176,6 +179,44 @@ fn cookie(url: &str, name: &str, value: &str) -> Value {
     }
 }
 
+/// One of Chrome's DevTools messages, read. A request's body in an event
+/// (`Fetch.requestPaused`'s `postData`, a held upload's image) is its bytes
+/// as text, each byte that is no UTF-8 a lone UTF-16 surrogate's `\u`
+/// escape, which serde_json refuses: such a message is read again with
+/// each surrogate's escape as U+FFFD's.
+fn message(t: &str) -> Result<Value> {
+    serde_json::from_str(t).or_else(|_| Ok(serde_json::from_str(&without_surrogates(t))?))
+}
+
+/// JSON text with each `\uD800`…`\uDFFF` escape made `\ufffd`; every other
+/// escape, and every other byte, as it was.
+fn without_surrogates(t: &str) -> String {
+    let b = t.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'\\' {
+            out.push(b[i]);
+            i += 1;
+            continue;
+        }
+        let code = b.get(i + 2..i + 6).filter(|_| b.get(i + 1) == Some(&b'u')).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u16::from_str_radix(h, 16).ok());
+        match code {
+            Some(c) if (0xD800..=0xDFFF).contains(&c) => {
+                out.extend_from_slice(b"\\ufffd");
+                i += 6;
+            }
+            // an escape is two bytes, both ASCII (`\\` among them, so the
+            // backslash it escapes starts nothing)
+            _ => {
+                out.extend_from_slice(&b[i..(i + 2).min(b.len())]);
+                i += 2;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 pub(crate) fn chrome() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("CHROME_BIN") {
         return Some(PathBuf::from(p));
@@ -211,7 +252,7 @@ impl Browser {
         if let MaybeTlsStream::Plain(s) = ws.get_ref() {
             s.set_read_timeout(Some(Duration::from_secs(30)))?;
         }
-        Ok(Some(Browser { child, ws, next: 0, context: None, others: vec![], profile, watched: HashMap::new() }))
+        Ok(Some(Browser { child, ws, next: 0, context: None, others: vec![], profile, watched: HashMap::new(), held: HashMap::new() }))
     }
 
     /// One Chrome, up: its process, its DevTools socket's URL, and its
@@ -317,7 +358,7 @@ impl Browser {
         self.ws.send(Message::Text(msg.to_string().into()))?;
         loop {
             let Message::Text(t) = self.ws.read()? else { continue };
-            let v: Value = serde_json::from_str(&t)?;
+            let v = message(&t)?;
             if v["id"].as_u64() == Some(id) {
                 if !v["error"].is_null() {
                     bail!("{method}: {}", v["error"]);
@@ -328,10 +369,17 @@ impl Browser {
         }
     }
 
-    /// An event of a watched page's, kept (bounded).
+    /// An event of a watched page's, kept (bounded); a request a holding
+    /// page's `hold` paused, held.
     fn keep(&mut self, event: Value) {
         if !event["method"].is_string() {
             return;
+        }
+        if event["method"] == "Fetch.requestPaused" {
+            if let Some(held) = event["sessionId"].as_str().and_then(|s| self.held.get_mut(s)) {
+                let paused = &event["params"];
+                held.push((paused["requestId"].as_str().unwrap_or("").to_string(), paused["request"]["url"].as_str().unwrap_or("").to_string()));
+            }
         }
         if let Some(w) = event["sessionId"].as_str().and_then(|s| self.watched.get_mut(s)) {
             w.keep(event);
@@ -546,7 +594,7 @@ impl Browser {
         let mut found = None;
         while found.is_none() && t0.elapsed() < Duration::from_secs(30) {
             let Message::Text(t) = self.ws.read()? else { continue };
-            let v: Value = serde_json::from_str(&t)?;
+            let v = message(&t)?;
             if v["method"] == "ServiceWorker.workerRegistrationUpdated" {
                 let registrations = v["params"]["registrations"].as_array().cloned().unwrap_or_default();
                 found = registrations.iter().find(|r| r["scopeURL"] == scope && r["isDeleted"] != true).and_then(|r| r["registrationId"].as_str().map(str::to_string));
@@ -748,6 +796,37 @@ impl Browser {
         Ok(())
     }
 
+    /// The page's requests to URLs matching `patterns` (`*` any run of
+    /// characters, `?` any one) held from now on, unsent, as a server that
+    /// has not answered yet holds them, until `release`.
+    pub fn hold(&mut self, page: &Page, patterns: &[&str]) -> Result<()> {
+        let patterns: Vec<Value> = patterns.iter().map(|p| json!({ "urlPattern": p, "requestStage": "Request" })).collect();
+        self.held.insert(page.session.clone(), Vec::new());
+        self.send("Fetch.enable", json!({ "patterns": patterns }), Some(&page.session))?;
+        Ok(())
+    }
+
+    /// The URLs of the requests `hold` holds now.
+    pub fn held(&mut self, page: &Page) -> Result<Vec<String>> {
+        // what Chrome said before this answer is read
+        self.send("Runtime.evaluate", json!({ "expression": "0" }), Some(&page.session))?;
+        Ok(self.held.get(&page.session).into_iter().flatten().map(|(_, url)| url.clone()).collect())
+    }
+
+    /// Every held request sent on, or (`fail`) failed as a dropped
+    /// connection fails one; none held from now on.
+    pub fn release(&mut self, page: &Page, fail: bool) -> Result<()> {
+        self.held(page)?;
+        for (id, _) in self.held.remove(&page.session).unwrap_or_default() {
+            match fail {
+                true => self.send("Fetch.failRequest", json!({ "requestId": id, "errorReason": "ConnectionClosed" }), Some(&page.session))?,
+                false => self.send("Fetch.continueRequest", json!({ "requestId": id }), Some(&page.session))?,
+            };
+        }
+        self.send("Fetch.disable", json!({}), Some(&page.session))?;
+        Ok(())
+    }
+
     pub fn detach(&mut self, frame: Page) -> Result<()> {
         self.send("Target.detachFromTarget", json!({ "sessionId": frame.session }), None)?;
         Ok(())
@@ -812,5 +891,23 @@ mod tests {
         assert_eq!((c["name"].as_str(), c.get("secure")), (Some("fragment_session"), None));
         let c = cookie("https://e2e.finite.place/", "theme", "dark");
         assert_eq!((c["name"].as_str(), c.get("secure")), (Some("theme"), None));
+    }
+
+    /// A message serde_json reads is read as it is; one holding a body's
+    /// bytes as lone surrogates is read with U+FFFD in their place, every
+    /// other escape (an escaped backslash before `ud800` among them) kept;
+    /// one that is no JSON is still refused.
+    #[test]
+    fn a_message_with_a_bodys_bytes_is_read() {
+        let plain = r#"{"id":3,"result":{"s":"a\"b\\c\u00e9"}}"#;
+        assert_eq!(message(plain).unwrap(), serde_json::from_str::<Value>(plain).unwrap());
+        let paused = r#"{"method":"Fetch.requestPaused","params":{"requestId":"interception-job-1.0","request":{"postData":"\u0089PNG\ud800\udc00x\udfff","url":"http://x/icon"}}}"#;
+        assert!(serde_json::from_str::<Value>(paused).is_err(), "serde_json refuses a lone surrogate");
+        let v = message(paused).unwrap();
+        assert_eq!(v["params"]["requestId"], "interception-job-1.0");
+        assert_eq!(v["params"]["request"]["postData"], "\u{89}PNG\u{fffd}\u{fffd}x\u{fffd}");
+        let escaped = r#"{"a":"\\ud800","b":"\udc00"}"#;
+        assert_eq!(message(escaped).unwrap(), json!({ "a": "\\ud800", "b": "\u{fffd}" }));
+        assert!(message(r#"{"id":"#).is_err());
     }
 }
