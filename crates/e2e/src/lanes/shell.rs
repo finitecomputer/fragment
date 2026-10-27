@@ -5597,6 +5597,84 @@ fn apps_arrival_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
     Ok(())
 }
 
+/// Preview actions answered after a navigation or another open: visible
+/// operation state is cleaned up at each visit, an old result never renders,
+/// and an old POST's cleanup never unlocks a newer POST. Responses are gated
+/// here so the four orders do not spend the server's once-a-minute shot.
+fn apps_preview_visit_ui(s: &mut Suite, b: &mut Browser, page: &Page, app: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let row = format!("document.querySelector({})", js(&format!("#apps-page .app-row[data-fragment=\"{app}\"]")));
+    let control = |action: &str| format!("{row}?.querySelector('[data-action={action}]')");
+    let asking = format!("{}?.textContent === 'Asking…' && {0}?.disabled && {}?.disabled && {}?.disabled", control("card"), control("dock"), control("icon"));
+    let taking = format!("{}?.textContent === 'Taking a new preview…' && {0}?.disabled", control("card"));
+    let usable = format!("{}?.textContent === 'New preview' && !{0}?.disabled && !{}?.disabled && !{}?.disabled && !{row}?.querySelector('.app-row-said')", control("card"), control("dock"), control("icon"));
+    b.eval(
+        page,
+        &format!(
+            "(() => {{ const real = window.fetch.bind(window); const posts = [], statuses = []; const answer = (queue, body, status = 200) => {{ const next = queue.shift(); if (!next) return false; next(new Response(JSON.stringify(body), {{ status, headers: {{ 'content-type': 'application/json' }} }})); return true; }}; \
+             window.fetch = (url, o) => {{ const u = String(url); if (u === '/api/f/{app}/card' && o?.method === 'POST') return new Promise((resolve) => posts.push(resolve)); \
+             if (u === '/api/f/{app}/status' && (o?.method ?? 'GET') === 'GET') return new Promise((resolve) => statuses.push(resolve)); return real(url, o); }}; \
+             window.__previewVisit = {{ posts: () => posts.length, statuses: () => statuses.length, post: async (ok) => {{ const answered = answer(posts, ok ? {{ since: Date.now() }} : {{ error: 'rate_limited', message: 'within the minute' }}, ok ? 200 : 429); await new Promise((r) => setTimeout(r, 0)); return answered; }}, \
+             status: async () => {{ const answered = answer(statuses, {{ page: {{ at: Date.now() }} }}); await new Promise((r) => setTimeout(r, 0)); return answered; }}, restore: () => {{ window.fetch = real; return true; }} }}; return true; }})()"
+        ),
+    )?;
+    let post = |b: &mut Browser, ok: bool| b.eval(page, &format!("window.__previewVisit.post({ok})"));
+    let reopen = |b: &mut Browser| -> Result<bool> {
+        b.eval(page, "(document.getElementById('apps-link').click(), true)")?;
+        Ok(b.until(page, &usable, wait))
+    };
+
+    // A success and a refusal, each answered after Apps was left: reopening
+    // has no Asking… or refusal of the old visit, and the controls work.
+    b.eval(page, &format!("({}?.click(), true)", control("card")))?;
+    let asked = b.until(page, &asking, wait);
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    b.until(page, "location.pathname === '/settings'", wait);
+    post(b, true)?;
+    let succeeded = reopen(b)?;
+    b.eval(page, &format!("({}?.click(), true)", control("card")))?;
+    b.until(page, &asking, wait);
+    b.eval(page, "(document.getElementById('settings').click(), true)")?;
+    b.until(page, "location.pathname === '/settings'", wait);
+    post(b, false)?;
+    let refused = reopen(b)?;
+    s.ok(
+        "New preview answered after navigation: success or refusal leaves no old Asking…, refusal or disabled controls on reopen",
+        asked && succeeded && refused,
+        b.eval(page, &format!("{row}?.innerText ?? null"))?,
+    );
+
+    // Another open during the POST clears its Asking…. A newer POST started
+    // before the old one answers stays busy when the old one completes.
+    b.eval(page, &format!("({}?.click(), true)", control("card")))?;
+    b.until(page, &asking, wait);
+    let reopened = reopen(b)?;
+    b.eval(page, &format!("({}?.click(), true)", control("card")))?;
+    let newer = b.until(page, &asking, wait);
+    post(b, true)?;
+    let still_newer = b.eval(page, &asking)?;
+    post(b, true)?;
+    let polling = b.until(page, &taking, wait);
+    let reopened_polling = reopen(b)?;
+    s.ok(
+        "clicking Apps again during the request clears Asking…, and an old completion does not unlock a newer request or leave polling state",
+        reopened && newer && still_newer == true && polling && reopened_polling,
+        b.eval(page, &format!("{row}?.innerText ?? null"))?,
+    );
+
+    // Polling had actually started before the repeated open. Its old status
+    // answer cannot restore Taking… or disable the new visit's controls.
+    b.eval(page, &format!("({}?.click(), true)", control("card")))?;
+    post(b, true)?;
+    b.until(page, "window.__previewVisit.statuses() > 0", wait);
+    let during_poll = reopen(b)?;
+    b.eval(page, "window.__previewVisit.status()")?;
+    let settled = b.eval(page, &usable)?;
+    b.eval(page, "window.__previewVisit.restore()")?;
+    s.ok("clicking Apps again during polling clears Taking…, and the old status answer leaves the new visit usable", during_poll && settled == true, b.eval(page, &format!("{row}?.innerText ?? null"))?);
+    Ok(())
+}
+
 /// The Apps page (docs/api.md, The shell; #587), from the sidebar's Apps:
 /// the owner's app listed (no chat or skills), with its card and who has
 /// access; a kind this build does not know is listed as Other; its Dock
@@ -5652,6 +5730,7 @@ fn apps_ui(s: &mut Suite, b: &mut Browser, page: &Page, skills: &str, app: &str,
 
     apps_response_races_ui(s, b, page, app)?;
     apps_arrival_ui(s, b, page)?;
+    apps_preview_visit_ui(s, b, page, app)?;
 
     // its card shot again; asked again within the minute, refused under its row
     let before = b.eval(page, &format!("{row}?.querySelector('.app-row-card')?.src ?? null"))?;
@@ -5666,29 +5745,33 @@ fn apps_ui(s: &mut Suite, b: &mut Browser, page: &Page, skills: &str, app: &str,
         json!({ "before": before, "after": b.eval(page, &format!("{row}?.querySelector('.app-row-card')?.src ?? null"))?, "row": b.eval(page, &format!("{row}?.innerText ?? null"))? }),
     );
 
-    // an icon made here: its first read fails; a share sheet opened and
-    // closed (no fragment change, no navigation) draws the same row again,
-    // whose retry succeeds into the retained row rather than a detached one
+    // an icon made here: its first read is held until the loading row is in
+    // the DOM, then fails. A share sheet opened and closed (no fragment
+    // change, no navigation) draws again; after its refreshes settle, the
+    // retry has succeeded into the live row rather than detached art
     b.eval(page, &format!("({}?.click(), true)", control("icon")))?;
     let sheet = b.until(page, "!!document.querySelector('dialog.icon-sheet[open]')", wait);
     b.eval(page, "(document.querySelector('dialog.icon-sheet .icon-make button[type=submit]')?.click(), true)")?;
     let made = b.until(page, "document.querySelectorAll('dialog.icon-sheet .icon-pick img').length > 0", wait);
     let reads = format!("*/api/f/{app}/icon?v=*");
-    b.block(page, &[&reads])?;
+    b.hold(page, &[&reads])?;
     b.eval(page, "(document.querySelector('dialog.icon-sheet .icon-pick')?.click(), true)")?;
+    let loading = b.until(page, &format!("!!{row}?.querySelector('.app-row-art .app-picture:not([data-unread]) .app-icon')"), wait) && s.eventually(wait, || b.held(page).is_ok_and(|h| !h.is_empty()));
+    b.release(page, true)?;
     let unread = b.until(page, &format!("!!{row}?.querySelector('.app-row-art .app-picture[data-unread] .app-icon') && !{row}?.querySelector('.app-row-art img')"), wait);
     b.eval(page, "(document.querySelector('dialog.icon-sheet')?.close(), true)")?;
     std::thread::sleep(std::time::Duration::from_millis(2200));
-    b.block(page, &[])?;
     b.eval(page, &format!("({}?.click(), true)", control("share")))?;
     let shared = b.until(page, "document.getElementById('sheet').open", wait);
     let ready = shared && s.eventually(wait, || b.eval_in_frame(page, "/share/", "!!document.querySelector('button[data-done]')").ok() == Some(Value::Bool(true)));
     let _ = b.eval_in_frame(page, "/share/", "(document.querySelector('button[data-done]').click(), true)");
     let closed = b.until(page, "!document.getElementById('sheet').open", wait);
+    let settled = b.until(page, &format!("!!{row}?.querySelector('.app-row-access')?.textContent"), wait);
+    std::thread::sleep(std::time::Duration::from_millis(500));
     let shown = b.until(page, &format!("(() => {{ const i = {row}?.querySelector('.app-row-art img'); return location.pathname === '/apps' && !!i && i.src.startsWith('blob:') && i.complete && i.naturalWidth === 256 && !{row}?.querySelector('.app-row-art [data-unread]'); }})()"), wait);
     s.ok(
-        "its icon read fails, then the same fragment's next draw retries and shows the loaded picture in place, without navigating",
-        sheet && made && unread && ready && closed && shown,
+        "its icon read fails after the loading row is drawn, then the same fragment's next draw retries and shows the loaded picture after refreshes settle",
+        sheet && made && loading && unread && ready && closed && settled && shown,
         b.eval(page, &format!("{row}?.querySelector('.app-row-art')?.outerHTML.slice(0, 300) ?? null"))?,
     );
     b.eval(page, &format!("({}?.click(), true)", control("icon")))?;

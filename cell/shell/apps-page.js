@@ -47,12 +47,21 @@ export function createAppsPage(page, h) {
   let access = null;
   let accessed = "";
   let accessRead = 0;
+  let operation = 0;
   let visit = 0;
   let shown = false;
 
   const say = (name, text) => {
     if (text) said.set(name, text);
     else said.delete(name);
+  };
+  const beginBusy = (name, kind) => {
+    const token = ++operation;
+    busy.set(name, { kind, token });
+    return token;
+  };
+  const endBusy = (name, token) => {
+    if (busy.get(name)?.token === token) busy.delete(name);
   };
 
   // its card, read with this page's session as the dock's are; "new",
@@ -156,7 +165,7 @@ export function createAppsPage(page, h) {
 
   function row(f) {
     const name = f.name;
-    const doing = busy.get(name);
+    const doing = busy.get(name)?.kind;
     const item = h.el("article", "app-row");
     item.dataset.key = name;
     item.dataset.fragment = name;
@@ -206,20 +215,24 @@ export function createAppsPage(page, h) {
       p.setAttribute("role", "status");
       item.append(p);
     }
-    // what it shows, to keep the element (its focus) while that is the same;
-    // an unread icon's retry must replace the art its old read would update
-    const picture = item.querySelector(".app-row-art .app-picture");
-    const readiness = picture ? [picture.hasAttribute("data-unread"), !!picture.querySelector("img")] : null;
-    item.dataset.shows = JSON.stringify([f, doing ?? null, words ?? null, card?.url ?? null, shots.has(name), item.querySelector(".app-row-access")?.textContent ?? null, readiness]);
+    // what it shows, to keep the element (its focus) while that is the same
+    item.dataset.shows = JSON.stringify([f, doing ?? null, words ?? null, card?.url ?? null, shots.has(name), item.querySelector(".app-row-access")?.textContent ?? null]);
+    item.dataset.art = artReadiness(item);
     return item;
   }
 
-  // rows put in place by key, an element kept while it shows the same
+  function artReadiness(item) {
+    const picture = item.querySelector(".app-row-art .app-picture");
+    return JSON.stringify(picture ? [picture.hasAttribute("data-unread"), !!picture.querySelector("img")] : null);
+  }
+
+  // rows put in place by key, an element kept while it shows the same; the
+  // retained art's readiness is read now, not only when its row was made
   function place(box, rows) {
     const was = new Map([...box.children].filter((e) => e.dataset.key).map((e) => [e.dataset.key, e]));
     const next = rows.map((r) => {
       const old = was.get(r.dataset.key);
-      return old && old.dataset.shows === r.dataset.shows ? old : r;
+      return old && old.dataset.shows === r.dataset.shows && artReadiness(old) === r.dataset.art ? old : r;
     });
     box.replaceChildren(...next);
   }
@@ -251,7 +264,7 @@ export function createAppsPage(page, h) {
   }
 
   async function setDock(name, dock) {
-    busy.set(name, "dock");
+    const operation = beginBusy(name, "dock");
     say(name, "");
     render();
     try {
@@ -260,13 +273,13 @@ export function createAppsPage(page, h) {
     } catch (e) {
       say(name, e.message);
     } finally {
-      busy.delete(name);
+      endBusy(name, operation);
       render();
     }
   }
 
   async function unarchive(name) {
-    busy.set(name, "archive");
+    const operation = beginBusy(name, "archive");
     say(name, "");
     render();
     try {
@@ -275,7 +288,7 @@ export function createAppsPage(page, h) {
     } catch (e) {
       say(name, e.message);
     } finally {
-      busy.delete(name);
+      endBusy(name, operation);
       render();
     }
   }
@@ -284,7 +297,7 @@ export function createAppsPage(page, h) {
   // when it was wanted on), then its card read again
   async function newPreview(name) {
     const mine = visit;
-    busy.set(name, "card");
+    const operation = beginBusy(name, "card");
     say(name, "");
     render();
     let asked;
@@ -294,10 +307,8 @@ export function createAppsPage(page, h) {
       if (mine === visit) say(name, e.message);
       return;
     } finally {
-      if (mine === visit) {
-        busy.delete(name);
-        render();
-      }
+      endBusy(name, operation);
+      if (mine === visit) render();
     }
     if (mine !== visit) return;
     shots.set(name, asked.since);
@@ -325,6 +336,8 @@ export function createAppsPage(page, h) {
     async open() {
       shown = true;
       ++visit;
+      busy.clear();
+      shots.clear();
       page.replaceChildren();
       cardsLoad.wait = 0;
       render();
