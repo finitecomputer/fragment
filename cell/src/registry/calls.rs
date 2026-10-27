@@ -444,6 +444,11 @@ pub(crate) enum TestHook {
     /// `TEST_DOWN_FOR_MAX`; 0 answers them again), as `Down` does: a test
     /// fails one call a request makes, and the rest go on.
     DownFor(DownFor),
+    /// The next `times` calls to one path (at most `TEST_DOWN_FOR_MAX`; 0
+    /// answers them again) act, then answer 503 as if their answer were
+    /// lost on its way back: a test sees what a caller does that cannot
+    /// tell whether its call acted.
+    DropFor(DownFor),
     /// Answer the next `times` calls to one path (at most
     /// `TEST_DOWN_FOR_MAX`; 0 answers them again) as an object of another
     /// release (`SKEWED`) would: each refused, 503 `deploying`, before it is
@@ -474,6 +479,14 @@ pub(crate) enum TestHook {
     /// The steps its schema holds (schema.rs `view`), answered by a
     /// registry that refuses its schema too.
     Schema,
+    /// A feedback still sending (its id) made as old as one the alarm
+    /// deletes, and the alarm armed now (`{aged}`: 1, or 0 when none is).
+    FeedbackAge(String),
+    /// The next `n` runs of the alarm's deletes of feedback fail before
+    /// they delete a thing, as when BLOBS does not answer (at most
+    /// `TEST_DOWN_FOR_MAX`; 0 lets them run): a test sees what is left.
+    /// `null` sets nothing; either answers how many are left (`{left}`).
+    FeedbackSweepFails(Option<u32>),
     /// Makes every invite waiting on this email one mailed before invites
     /// waited for a yes (decision 63: no role, title or sharer kept), which
     /// a sign-in as it still meets (`{before}`: how many).

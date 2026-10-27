@@ -4,10 +4,20 @@
 //! it done and open again, and delete it. Valid: a problem with its
 //! screenshots, a message alone. Invalid: each way a form is out of shape,
 //! nothing kept; past a person's day, 429; anyone but its person sends
-//! none, and anyone but an operator reads none. Replay: a mark asked again
-//! changes and logs nothing, a delete asked again is 404. And in Chrome,
-//! Settings' Help sends one with a screenshot picked. What the run sent
-//! is deleted as it ends, so a preview's operators read none of it.
+//! none, and anyone but an operator reads none. Replay: a send asked again
+//! with its id is the same one, mailed once; a mark asked again changes
+//! and logs nothing, a delete asked again is 404, and a delete's bytes go
+//! (BLOBS' keys read through a lever). Failures (a local node's registry
+//! hooks): a send whose answer is lost, once or twice, or that stops
+//! before it is kept, keeps its screenshots and is finished asked again;
+//! one never finished, and a deleted one whose deletes fail, keep their
+//! record through a failed run and a registry's restart until their bytes
+//! are gone. And in Chrome, Settings' Help sends one with a screenshot
+//! picked, and an answer to a dialog closed and opened again changes
+//! nothing of the new one. What the run sent is deleted as it ends, so a
+//! preview's operators read none of it.
+
+use std::time::Duration;
 
 use anyhow::Result;
 use fragment_nip98::Keys;
@@ -73,6 +83,26 @@ fn listed(api: &Api, operator: &Keys, open: bool) -> Result<Vec<Value>> {
 
 fn of(list: &[Value], id: &str) -> Value {
     list.iter().find(|f| f["id"] == id).cloned().unwrap_or(Value::Null)
+}
+
+/// A send's own id, as the shell's dialog makes one.
+fn fresh_id() -> String {
+    Keys::generate().pubkey_hex()[..32].to_string()
+}
+
+/// The keys BLOBS holds under a feedback's prefix (the lever's): its
+/// screenshots' bytes, there or gone.
+fn blob_keys(api: &Api, person: &str, id: &str) -> Result<Vec<String>> {
+    let r = api.unsigned("POST", "/api/test/feedback", Some(&json!({ "person": person, "id": id })))?;
+    anyhow::ensure!(r.status == 200, "the feedback lever: {r}");
+    Ok(r.body["keys"].as_array().into_iter().flatten().filter_map(|k| k.as_str().map(str::to_string)).collect())
+}
+
+/// One of the registry's test hooks (a local node's).
+fn hook(api: &Api, body: Value) -> Result<Reply> {
+    let r = api.unsigned("POST", "/api/test/registry", Some(&body))?;
+    anyhow::ensure!(r.status == 200, "the registry hook {body}: {r}");
+    Ok(r)
 }
 
 pub fn feedback(s: &mut Suite, api: &Api) -> Result<()> {
@@ -143,6 +173,23 @@ pub fn feedback(s: &mut Suite, api: &Api) -> Result<()> {
     let message = of(&listed(api, &operator, true)?, r.body["id"].as_str().unwrap_or(""));
     s.ok("a message alone: no page, no screenshots", r.status == 200 && message["kind"] == "message" && message["page"].is_null() && message["screenshots"] == json!([]), &message);
 
+    // ---- replay: a send asked again with its id (the shell's dialog's) is the same one
+    let mailed = s.mail.sent_to(crate::FEEDBACK_TO).len();
+    let mine = fresh_id();
+    let with_id = || form(&[Field::Text("id", &mine), Field::Text("kind", "message"), Field::Text("message", "Sent twice, kept once."), Field::File("screenshot", "image/png", PNG)]);
+    let (first, again) = (send(api, Some(&ivy), with_id(), FORM)?, send(api, Some(&ivy), with_id(), FORM)?);
+    let kept = listed(api, &operator, false)?.into_iter().filter(|f| f["id"] == mine.as_str()).count();
+    let mails = s.mail.sent_to(crate::FEEDBACK_TO).len() - mailed;
+    s.ok(
+        "a send asked again with its id is the same one: answered as kept, listed once, its screenshot once, and (locally) mailed once",
+        first.status == 200 && again.status == 200 && first.body["id"] == mine.as_str() && again.body == first.body && kept == 1 && blob_keys(api, &ivy_id, &mine)?.len() == 1 && (s.hosted() || mails == 1),
+        json!({ "first": first.body, "again": again.body, "listed": kept, "mailed": mails }),
+    );
+    let stolen = send(api, Some(&api.person()?), with_id(), FORM)?;
+    s.ok("another person's send by its id is refused (409), theirs untouched", stolen.status == 409 && of(&listed(api, &operator, false)?, &mine)["person"] == ivy_id.as_str(), &stolen);
+    let bad_id = send(api, Some(&ivy), form(&[Field::Text("id", "../../x"), Field::Text("kind", "message"), Field::Text("message", "hi")]), FORM)?;
+    s.ok("an id that is not 32 lowercase hex digits is 400", bad_id.status == 400, &bad_id);
+
     // ---- invalid: each refused, nothing kept
     let theirs = |list: &[Value]| list.iter().filter(|f| f["person"] == ivy_id.as_str()).count();
     let before = theirs(&listed(api, &operator, false)?);
@@ -211,13 +258,15 @@ pub fn feedback(s: &mut Suite, api: &Api) -> Result<()> {
         reopened.status == 200 && reopened.body["resolvedAt"].is_null() && reopened.body["resolvedBy"].is_null() && bad.iter().all(|r| r.status == 400) && none.status == 404,
         json!([reopened.body, bad.iter().map(|r| r.status).collect::<Vec<_>>(), none.status]),
     );
+    let held = blob_keys(api, &ivy_id, &id)?.len();
     let deleted = admin("DELETE", &format!("/{id}"), None)?;
     let gone = [admin("GET", &format!("/{id}/screenshots/0"), None)?, admin("DELETE", &format!("/{id}"), None)?];
     let all = listed(api, &operator, false)?;
+    let bytes_gone = s.eventually(Duration::from_secs(15), || blob_keys(api, &ivy_id, &id).is_ok_and(|k| k.is_empty()));
     s.ok(
-        "an operator deletes it, answered as it was: it is no longer listed, its screenshots go, and a delete asked again is 404",
-        deleted.status == 200 && deleted.body["id"] == id.as_str() && of(&all, &id).is_null() && gone.iter().all(|r| r.status == 404),
-        json!({ "deleted": deleted.status, "gone": gone.iter().map(|r| r.status).collect::<Vec<_>>() }),
+        "an operator deletes it, answered as it was: it is no longer listed or served, a delete asked again is 404, and its screenshots' bytes go (BLOBS holds none of its keys)",
+        held == 2 && deleted.status == 200 && deleted.body["id"] == id.as_str() && of(&all, &id).is_null() && gone.iter().all(|r| r.status == 404) && bytes_gone,
+        json!({ "held": held, "deleted": deleted.status, "gone": gone.iter().map(|r| r.status).collect::<Vec<_>>(), "bytesGone": bytes_gone }),
     );
     let log = api.signed(&operator, "GET", "/api/admin/log", None)?;
     let acts: Vec<String> = log.body["entries"].as_array().into_iter().flatten().filter(|e| e["target"] == id.as_str()).filter_map(|e| e["action"].as_str().map(str::to_string)).collect();
@@ -233,13 +282,122 @@ pub fn feedback(s: &mut Suite, api: &Api) -> Result<()> {
     ];
     s.ok("anyone but an operator reads, marks or deletes none (403)", refused.iter().all(|r| r.status == 403), json!(refused.iter().map(|r| r.status).collect::<Vec<_>>()));
 
+    let failing = failures(s, api, &operator)?;
     let ui = shell_ui(s, api, &operator)?;
     // what this run sent goes, so a shared preview's operators read none of it
-    let ours = listed(api, &operator, false)?.into_iter().filter(|f| f["person"] == ivy_id.as_str() || f["person"] == rex_id.as_str() || ui.as_deref().is_some_and(|e| f["email"] == e));
+    let ours = listed(api, &operator, false)?.into_iter().filter(|f| f["person"] == ivy_id.as_str() || f["person"] == rex_id.as_str() || failing.as_deref().is_some_and(|p| f["person"] == p) || ui.as_deref().is_some_and(|e| f["email"] == e));
     for f in ours {
         admin("DELETE", &format!("/{}", f["id"].as_str().unwrap_or("")), None)?;
     }
     Ok(())
+}
+
+/// A send that fails part way, and a delete whose deletes fail, through the
+/// local registry's hooks (a preview's are no route): its answer lost
+/// after it acted (`dropFor`), or it refused before acting (`downFor`); a
+/// run of the alarm's deletes failing (`feedbackSweepFails`), and the
+/// registry restarted (`skewFor` from a release deployed before). Answers
+/// the person it sent as, when it ran.
+fn failures(s: &mut Suite, api: &Api, operator: &Keys) -> Result<Option<String>> {
+    const LABEL: &str = "a send or delete that fails part way keeps a record of its screenshots' bytes until they are gone";
+    if s.hosted() {
+        s.skip(LABEL, "the registry's hooks are a local node's");
+        return Ok(None);
+    }
+    let wait = Duration::from_secs(15);
+    let admin = |method: &str, path: &str| api.signed(operator, method, &format!("/api/admin/feedback{path}"), None);
+    let uma = api.person()?;
+    let uma_id = api.identity(&uma)?;
+    let two = |id: &str, message: &str| form(&[Field::Text("id", id), Field::Text("kind", "problem"), Field::Text("message", message), Field::File("screenshot", "image/png", PNG), Field::File("screenshot", "image/jpeg", JPEG)]);
+    let mailed = |s: &Suite| s.mail.sent_to(crate::FEEDBACK_TO).len();
+    let shots_whole = |id: &str| -> Result<bool> {
+        let (a, b) = (admin("GET", &format!("/{id}/screenshots/0"))?, admin("GET", &format!("/{id}/screenshots/1"))?);
+        Ok(a.status == 200 && a.bytes == PNG && b.status == 200 && b.bytes == JPEG)
+    };
+
+    // its answer lost once, after the registry kept it: the router asks
+    // again, and it is the same send
+    let lost_once = fresh_id();
+    let before = mailed(s);
+    hook(api, json!({ "dropFor": { "path": "/feedback/keep", "times": 1 } }))?;
+    let r = send(api, Some(&uma), two(&lost_once, "Lost once."), FORM)?;
+    s.ok(
+        "a send whose answer is lost once after it was kept is asked again by the router: kept once, its screenshots whole, mailed once",
+        r.status == 200 && r.body["id"] == lost_once.as_str() && shots_whole(&lost_once)? && mailed(s) - before == 1,
+        json!({ "sent": r.body, "mailed": mailed(s) - before }),
+    );
+
+    // lost twice: its sender hears 503, yet it was kept; asked again with
+    // its id, it is answered as kept, nothing put or mailed again
+    let lost_twice = fresh_id();
+    let before = mailed(s);
+    hook(api, json!({ "dropFor": { "path": "/feedback/keep", "times": 2 } }))?;
+    let failed = send(api, Some(&uma), two(&lost_twice, "Lost twice."), FORM)?;
+    let kept_anyway = of(&listed(api, operator, false)?, &lost_twice);
+    let shots_kept = shots_whole(&lost_twice)?;
+    let again = send(api, Some(&uma), two(&lost_twice, "Lost twice."), FORM)?;
+    let listed_once = listed(api, operator, false)?.iter().filter(|f| f["id"] == lost_twice.as_str()).count();
+    s.ok(
+        "a send whose answer is lost twice is 503 to its sender, yet kept with its screenshots whole (none deleted on a failure that may have acted); asked again with its id, it is answered as kept: listed once, mailed once",
+        failed.status == 503 && kept_anyway["id"] == lost_twice.as_str() && shots_kept && again.status == 200 && again.body["id"] == lost_twice.as_str() && listed_once == 1 && shots_whole(&lost_twice)? && mailed(s) - before == 1,
+        json!({ "failed": failed.to_string(), "keptAnyway": !kept_anyway.is_null(), "screenshots": shots_kept, "again": again.body, "listed": listed_once, "mailed": mailed(s) - before }),
+    );
+
+    // stopped before it was kept: its bytes are put and recorded (a row
+    // still sending, not the operators'), and asked again it is finished,
+    // as asked now (one screenshot: the second's bytes go)
+    let stopped = fresh_id();
+    hook(api, json!({ "downFor": { "path": "/feedback/keep", "times": 2 } }))?;
+    let failed = send(api, Some(&uma), two(&stopped, "Stopped."), FORM)?;
+    let (unlisted, put) = (of(&listed(api, operator, false)?, &stopped).is_null(), blob_keys(api, &uma_id, &stopped)?.len());
+    let finished = send(api, Some(&uma), form(&[Field::Text("id", &stopped), Field::Text("kind", "problem"), Field::Text("message", "Stopped, then finished."), Field::File("screenshot", "image/png", PNG)]), FORM)?;
+    let f = of(&listed(api, operator, false)?, &stopped);
+    let left = blob_keys(api, &uma_id, &stopped)?;
+    s.ok(
+        "a send stopped before it was kept is 503, not the operators', its bytes recorded; asked again with its id it is finished as asked now: one screenshot kept, the earlier try's second deleted",
+        failed.status == 503 && unlisted && put == 2 && finished.status == 200 && f["message"] == "Stopped, then finished." && f["screenshots"].as_array().map(Vec::len) == Some(1) && left.len() == 1,
+        json!({ "failed": failed.status, "unlisted": unlisted, "put": put, "finished": finished.body, "kept": f, "left": left }),
+    );
+
+    // never finished: its record outlives a registry's restart and a failed
+    // run of the alarm's deletes, and the next run deletes its bytes, then it
+    let abandoned = fresh_id();
+    hook(api, json!({ "downFor": { "path": "/feedback/keep", "times": 2 } }))?;
+    let failed = send(api, Some(&uma), two(&abandoned, "Abandoned."), FORM)?;
+    hook(api, json!({ "skewFor": { "path": "/feedback/list", "times": fragment_core::release::ASKS * 25, "deployed": 0 } }))?;
+    let restarted = api.signed(operator, "GET", "/api/admin/feedback", None)?;
+    let fresh = hook(api, json!({ "calls": null }))?.body["skewed"] == 0;
+    hook(api, json!({ "feedbackSweepFails": 1 }))?;
+    let aged = hook(api, json!({ "feedbackAge": abandoned }))?.body["aged"] == 1;
+    let ran = s.eventually(wait, || hook(api, json!({ "feedbackSweepFails": null })).is_ok_and(|r| r.body["left"] == 0));
+    let kept_through = blob_keys(api, &uma_id, &abandoned)?.len();
+    hook(api, json!({ "signins": "sweep" }))?;
+    let swept = s.eventually(wait, || blob_keys(api, &uma_id, &abandoned).is_ok_and(|k| k.is_empty()));
+    // its record gone too: its id, sent again, is a new send (while the
+    // record stood it would be 409, deleted)
+    let anew = s.eventually(wait, || send(api, Some(&uma), form(&[Field::Text("id", &abandoned), Field::Text("kind", "message"), Field::Text("message", "Anew.")]), FORM).is_ok_and(|r| r.status == 200));
+    s.ok(
+        "a send never finished outlives a registry's restart and a failed run of the alarm's deletes, its bytes all there; the next run deletes them, then its record",
+        failed.status == 503 && restarted.status == 200 && fresh && aged && ran && kept_through == 2 && swept && anew,
+        json!({ "failed": failed.status, "restarted": restarted.status, "fresh": fresh, "aged": aged, "failedRun": ran, "keptThrough": kept_through, "swept": swept, "sentAnew": anew }),
+    );
+
+    // an operator's delete whose deletes fail: gone to the operators at once,
+    // its bytes recorded until the next run deletes them
+    let deleting = fresh_id();
+    let sent = send(api, Some(&uma), two(&deleting, "Delete me."), FORM)?;
+    hook(api, json!({ "feedbackSweepFails": 1 }))?;
+    let deleted = admin("DELETE", &format!("/{deleting}"))?;
+    let ran = s.eventually(wait, || hook(api, json!({ "feedbackSweepFails": null })).is_ok_and(|r| r.body["left"] == 0));
+    let (shot, again, kept_through) = (admin("GET", &format!("/{deleting}/screenshots/0"))?.status, admin("DELETE", &format!("/{deleting}"))?.status, blob_keys(api, &uma_id, &deleting)?.len());
+    hook(api, json!({ "signins": "sweep" }))?;
+    let swept = s.eventually(wait, || blob_keys(api, &uma_id, &deleting).is_ok_and(|k| k.is_empty()));
+    s.ok(
+        "a delete whose bytes fail to delete is gone to the operators at once (404 served, 404 deleted again), its bytes recorded through the failed run, and the next run deletes them",
+        sent.status == 200 && deleted.status == 200 && ran && shot == 404 && again == 404 && kept_through == 2 && swept,
+        json!({ "deleted": deleted.status, "failedRun": ran, "served": shot, "deletedAgain": again, "keptThrough": kept_through, "swept": swept }),
+    );
+    Ok(Some(uma_id))
 }
 
 /// Settings' Help in Chrome: Report a problem opens the dialog, a
@@ -277,6 +435,33 @@ fn shell_ui(s: &mut Suite, api: &Api, operator: &Keys) -> Result<Option<String>>
         SENT,
         helped && opened && thumbed && thanked && theirs["kind"] == "problem" && theirs["message"] == "The page went blank." && theirs["page"] == "/settings" && theirs["screenshots"].as_array().map(Vec::len) == Some(1),
         json!({ "help": helped, "opened": opened, "thumbnail": thumbed, "thanked": thanked, "kept": theirs, "said": b.eval(&page, "document.getElementById('feedback-error').textContent")? }),
+    );
+
+    // an answer to a dialog closed and opened again since: the page's sends
+    // wait on the test (its fetch stands in), then answer A's send after B
+    // is written, once a success and once an error; B stays as written
+    b.eval(&page, "(() => { window.__fbReal = window.fetch; window.__fbWaiting = []; window.fetch = (u, o) => String(u).includes('/api/feedback') ? new Promise((r) => window.__fbWaiting.push({ r, body: o.body })) : window.__fbReal(u, o); return true })()")?;
+    let mut stale = vec![];
+    for (answer, status) in [(r#"{"id":"00000000000000000000000000000000","screenshots":0}"#, 200), (r#"{"error":"registry_unavailable","message":"A's error"}"#, 503)] {
+        b.eval(&page, "(document.getElementById('feedback-done').click(), document.querySelector('#settings-help [data-action=feedback-problem]').click(), document.getElementById('feedback-message').value = 'A', document.getElementById('feedback-send').click(), true)")?;
+        let pending = b.until(&page, "window.__fbWaiting.length === 1", wait);
+        let a_id = b.eval(&page, "window.__fbWaiting[0].body.get('id')")?;
+        b.eval(&page, "(document.getElementById('feedback-cancel').click(), document.querySelector('#settings-help [data-action=feedback-message]').click(), document.getElementById('feedback-message').value = 'B, written after', true)")?;
+        b.choose_files(&page, "#feedback-file", &[&shot])?;
+        let b_written = b.until(&page, "document.querySelectorAll('#feedback-shots .feedback-shot img').length === 1", wait);
+        let answer = serde_json::to_string(answer)?;
+        b.eval(&page, &format!("(async () => {{ window.__fbWaiting.shift().r(new Response({answer}, {{ status: {status}, headers: {{ 'content-type': 'application/json' }} }})); await new Promise((r) => setTimeout(r, 500)); return true }})()"))?;
+        let b_now = b.eval(&page, "({ open: document.getElementById('feedback-dialog').open, form: !document.getElementById('feedback-form').hidden, thanked: !document.getElementById('feedback-sent').hidden, kind: document.getElementById('feedback-form').elements.kind.value, message: document.getElementById('feedback-message').value, shots: document.querySelectorAll('#feedback-shots .feedback-shot img').length, error: document.getElementById('feedback-error').hidden ? null : document.getElementById('feedback-error').textContent, send: !document.getElementById('feedback-send').disabled })")?;
+        let b_id = b.eval(&page, "(document.getElementById('feedback-send').click(), new Promise((r) => setTimeout(() => r(window.__fbWaiting[0]?.body.get('id')), 300)))")?;
+        b.eval(&page, "(window.__fbWaiting.splice(0).forEach((w) => w.r(new Response('{}', { status: 503 }))), true)")?;
+        let unchanged = b_now == json!({ "open": true, "form": true, "thanked": false, "kind": "message", "message": "B, written after", "shots": 1, "error": null, "send": true });
+        stale.push(json!({ "answer": status, "pending": pending, "written": b_written, "unchanged": unchanged, "b": b_now, "aId": a_id, "bId": b_id, "ownId": a_id.as_str().is_some_and(|a| a.len() == 32) && b_id.as_str().is_some_and(|b| b.len() == 32) && a_id != b_id }));
+    }
+    b.eval(&page, "(window.fetch = window.__fbReal, document.getElementById('feedback-dialog').close(), true)")?;
+    s.ok(
+        "an answer to a send of a dialog since closed and opened again, a success or an error, changes nothing of the new one: its kind, text and screenshot stay, no thanks, no error; each opening sends with an id of its own",
+        stale.iter().all(|c| c["pending"] == true && c["written"] == true && c["unchanged"] == true && c["ownId"] == true),
+        json!(stale),
     );
     Ok(Some(email))
 }
