@@ -9,9 +9,11 @@
 //! and meters it.
 //!
 //! A call is charged after its answer at the length Whisper reports
-//! (`usage_of`; docs/ledger.md), nothing held before it. What reaches the
-//! model is the audio and, when the client sent them, its
-//! language and prompt (`bound`); the client's answer is OpenAI's shape,
+//! (`usage_of`; docs/ledger.md), nothing held before it. A first try that
+//! fails fast for want of capacity is made once more (`again`). What
+//! reaches the model is the audio, its voice-activity filter on, and, when
+//! the client sent them, its language and prompt (`bound`); the client's
+//! answer is OpenAI's shape,
 //! `{"text": …}` or the text alone (`answer`).
 
 use base64::Engine;
@@ -24,8 +26,8 @@ use crate::price::Usage;
 pub const WHISPER: &str = "whisper";
 /// The model, by its Workers AI catalog id
 /// (developers.cloudflare.com/workers-ai/models/whisper-large-v3-turbo/,
-/// read 2026-10-07): `{audio: <base64>, task, language?, initial_prompt?}`
-/// in, `{text, transcription_info: {duration, …}, …}` out.
+/// read 2026-10-07): `{audio: <base64>, task, vad_filter, language?,
+/// initial_prompt?}` in, `{text, transcription_info: {duration, …}, …}` out.
 pub const TRANSCRIBE_MODEL: &str = "@cf/openai/whisper-large-v3-turbo";
 /// Its price (Workers AI's pricing page, read 2026-10-07): 46.63 neurons
 /// per audio minute, which at $0.011 per thousand neurons
@@ -45,6 +47,33 @@ pub const PROMPT_MAX_CHARS: usize = 1_024;
 /// An answer's audio is at most a day long: a duration past it is not
 /// Whisper's, and no usage.
 pub const DURATION_MAX_SECONDS: f64 = 86_400.0;
+/// A try that failed within this long of being sent is made once more
+/// (`again`): a refusal for capacity comes at once, and a voice memo's
+/// client waits 60 s for the whole call (Hermes' `stt.openai.timeout`), so
+/// a slow failure (a long recording timing out) is passed on instead.
+pub const AGAIN_WITHIN_MS: i64 = 15_000;
+/// How long the route waits before that second try.
+pub const AGAIN_AFTER_MS: u64 = 1_000;
+/// The `retry-after` a 429 passed on carries, in seconds, once the second
+/// try was refused too: an OpenAI SDK's own retry waits this long (it reads
+/// the header) instead of half a second.
+pub const RETRY_AFTER_S: u32 = 5;
+
+/// Whether a transcription's first try at Whisper, which answered `status`
+/// (`None`: it never answered) `ms` after it was sent, is made once more:
+/// Workers AI short of capacity (429, its 3040 "Capacity temporarily
+/// exceeded, please try again"), its own failure (5xx) or timeout (408), or
+/// no answer at all, when that came fast. A refusal of the request itself
+/// (any other 4xx) would be the second try's too, and a 200 is the answer.
+/// Nothing is charged for a try that failed: a call is charged after its
+/// answer, at what Whisper heard.
+pub fn again(status: Option<u16>, ms: i64) -> bool {
+    let failed = match status {
+        None => true,
+        Some(s) => s == 408 || s == 429 || (500..=599).contains(&s),
+    };
+    failed && ms <= AGAIN_WITHIN_MS
+}
 
 /// Why a transcription is refused before anything is sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +132,10 @@ fn text<'a>(p: &'a Part<'_>) -> Result<&'a str, Refusal> {
 /// A form's fields, bounded: its audio as Whisper's input, its language
 /// and prompt when it named them, nothing else (OpenAI's `temperature`
 /// and `timestamp_granularities` have no Whisper input, and are let go).
+/// Whisper hears it through its voice-activity filter (`vad_filter`, the
+/// catalog's own input): silence and noise are heard as no words, not as a
+/// phrase Whisper is known to make up in them ("Thank you."), so an agent
+/// asks for the memo again instead of answering what no one said.
 pub fn bound(parts: &[Part<'_>]) -> Result<Bounded, Refusal> {
     let field = |name: &str| parts.iter().find(|p| p.name == name);
     match field("model").map(text).transpose()? {
@@ -118,7 +151,7 @@ pub fn bound(parts: &[Part<'_>]) -> Result<Bounded, Refusal> {
         Some("text") => Format::Text,
         Some(_) => return Err(Refusal::Format),
     };
-    let mut input = json!({ "audio": base64::engine::general_purpose::STANDARD.encode(audio), "task": "transcribe" });
+    let mut input = json!({ "audio": base64::engine::general_purpose::STANDARD.encode(audio), "task": "transcribe", "vad_filter": true });
     if let Some(l) = field("language").map(text).transpose()?.map(str::trim).filter(|l| !l.is_empty()) {
         if !(2..=3).contains(&l.len()) || !l.bytes().all(|b| b.is_ascii_lowercase()) {
             return Err(Refusal::Language);
@@ -203,7 +236,7 @@ mod tests {
     fn a_form_is_whispers_input() {
         let audio = b"OggS\x00voice".to_vec();
         let b = bound(&[part("model", b"whisper"), part("file", &audio), part("response_format", b"json")]).unwrap();
-        assert_eq!(b.input, json!({ "audio": base64::engine::general_purpose::STANDARD.encode(&audio), "task": "transcribe" }), "no language: Whisper detects it");
+        assert_eq!(b.input, json!({ "audio": base64::engine::general_purpose::STANDARD.encode(&audio), "task": "transcribe", "vad_filter": true }), "no language: Whisper detects it, through its voice-activity filter");
         assert_eq!(b.format, Format::Json);
         let b = bound(&[part("model", b" whisper "), part("file", &audio), part("language", b"de"), part("prompt", b"Paul, fragment"), part("response_format", b"text"), part("temperature", b"0")]).unwrap();
         assert_eq!((b.input["language"].clone(), b.input["initial_prompt"].clone(), b.format), (json!("de"), json!("Paul, fragment"), Format::Text));
@@ -253,6 +286,26 @@ mod tests {
         for bad in [json!({}), json!({ "transcription_info": { "duration": "60" } }), json!({ "transcription_info": { "duration": -1.0 } }), json!({ "transcription_info": { "duration": 90_000.0 } })] {
             assert_eq!(usage_of(&bad), None, "{bad}");
         }
+    }
+
+    /// Goal: a voice memo survives Workers AI's passing shortage of
+    /// capacity, and a try is never made twice past what its client waits.
+    /// Method: each kind of failure, fast and slow, and answers that are
+    /// final.
+    #[test]
+    fn a_fast_failure_is_tried_once_more() {
+        for status in [Some(429), Some(500), Some(502), Some(503), Some(504), Some(599), Some(408), None] {
+            assert!(again(status, 0), "{status:?} at once");
+            assert!(again(status, AGAIN_WITHIN_MS), "{status:?} at the bound");
+            assert!(!again(status, AGAIN_WITHIN_MS + 1), "{status:?} past it: its client would wait twice");
+        }
+        for status in [200, 400, 401, 403, 404, 413, 422] {
+            assert!(!again(Some(status), 0), "{status} is final: the second try would answer it too");
+        }
+        // a failure at the bound and the wait leave the second try most of
+        // its client's 60 s
+        assert!(AGAIN_WITHIN_MS + AGAIN_AFTER_MS as i64 <= 20_000);
+        assert!((1..=60).contains(&RETRY_AFTER_S), "an OpenAI SDK honours a retry-after of at most 60 s");
     }
 
     /// The client's answer: OpenAI's json, or the text alone; an answer of

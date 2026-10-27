@@ -47,6 +47,9 @@ const FRAGMENT_CLI: &str = "/usr/local/bin/fragment";
 /// at every start, since a container started from a snapshot carries the
 /// last boot's (S3b).
 const RUN: &str = "/var/lib/fragment-run";
+/// The SimpleX core the image carries (images/hermes/Dockerfile): the
+/// bridge's alone, root's and on no PATH of the agents'.
+const SIMPLEX_CHAT: &str = "/opt/fragment/bin/simplex-chat";
 /// The relay's port, on loopback only: Hermes dials it, nothing else can.
 const RELAY_LISTEN: &str = "127.0.0.1:8650";
 /// The gateway id both sides name.
@@ -170,7 +173,7 @@ fn check_restore() -> ! {
             std::process::exit(1);
         }
     };
-    let dbs = held::databases(Path::new(held::DATA), &[Path::new(held::STAGING), Path::new(hermes::WORK)]).unwrap_or_else(|e| {
+    let dbs = held::databases(Path::new(held::DATA), &[Path::new(held::STAGING), Path::new(hermes::WORK), Path::new(held::SIMPLEX)]).unwrap_or_else(|e| {
         println!("{e}");
         std::process::exit(1)
     });
@@ -371,7 +374,7 @@ struct Copies {
 /// staging made anew, as the hermes user.
 async fn copy_databases(ids: Option<(u32, u32)>) -> Result<Copies, String> {
     let (data, staging) = (Path::new(held::DATA), Path::new(held::STAGING));
-    let found = held::databases(data, &[staging, Path::new(hermes::WORK)]).map_err(|e| e.to_string())?;
+    let found = held::databases(data, &[staging, Path::new(hermes::WORK), Path::new(held::SIMPLEX)]).map_err(|e| e.to_string())?;
     let (dbs, unnamed): (Vec<PathBuf>, Vec<PathBuf>) = found.into_iter().partition(|db| held::nameable(data, db));
     held::make_staging(staging, ids).map_err(|e| e.to_string())?;
     let run = tokio::process::Command::new("/command/s6-setuidgid").args(["hermes", &format!("{OPT}/bin/hermes-boot"), "copy"]).arg(staging).args(&dbs).kill_on_drop(true).output();
@@ -720,9 +723,10 @@ async fn read_title(api: &Api, a: &Agent) -> Result<Option<String>, ()> {
 /// An agent's profile config (`hermes::profile_config`), from its
 /// `agent.json` as the platform answers for it now (its tier, its own
 /// model where its credentials hold that provider's, and its reasoning,
-/// `high` unless it names `low`) and its name (its
-/// `title`, which the config tells it at every turn), written only when it
-/// changed: Hermes reads it again at the agent's next turn and rebuilds the
+/// `high` unless it names `low`, and its owner's home) and its name (its
+/// `title`, which the config tells it at every turn, beside its home),
+/// written only when it changed: Hermes reads it again at the agent's next
+/// turn (a running turn keeps the prompt it started with) and rebuilds the
 /// agent on a new model. A tier the platform did not answer for is said,
 /// and the config last written stays, its model with it: never one the
 /// agent did not choose, but for a profile with no config yet; a title
@@ -731,7 +735,7 @@ async fn read_title(api: &Api, a: &Agent) -> Result<Option<String>, ()> {
 #[allow(clippy::too_many_arguments)]
 async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>, route: &hermes::Route, credential_env: &[String], high_on: bool, title: &Result<Option<String>, ()>) -> Option<hermes::MainModel> {
     let config = dir.join("config.yaml");
-    let answer = api.file(&a.fragment, &a.fragment, "agent.json", 64 * 1024).await;
+    let answer = api.file(&a.fragment, &a.fragment, "agent.json", fragment_bridge::api::AGENT_JSON_MAX_BYTES).await;
     let tier = hermes::Tier::read(&answer, high_on).or_else(|| {
         ev!("profile.tier_unread", { "agent": a.fragment, "error": answer.as_ref().err().map(ToString::to_string), "configKept": config.exists() });
         (!config.exists()).then_some(hermes::DEFAULT_TIER)
@@ -744,13 +748,14 @@ async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>,
     let own = answer.as_ref().ok().and_then(|b| hermes::OwnModel::of(b));
     let (main, unused) = hermes::MainModel::of(a, tier, own.as_ref());
     let reasoning = hermes::Reasoning::of(answer.as_ref().ok().map(|b| b.as_ref()));
-    let text = hermes::profile_config(a, name, &main, reasoning, route, credential_env, &dir.join(hermes::CREDENTIALS_FILE));
+    let home = fragment_bridge::api::Home::of(answer.as_ref().ok().map(|b| b.as_ref()));
+    let text = hermes::profile_config(a, name, home, &main, reasoning, route, credential_env, &dir.join(hermes::CREDENTIALS_FILE));
     if std::fs::read_to_string(&config).ok().as_deref() != Some(text.as_str()) {
         write_whole(&config, &text, ids);
         if let (Some(own), Some(why)) = (&own, &unused) {
             ev!("profile.model_unused", { "agent": a.fragment, "provider": own.provider, "id": own.id, "why": why, "model": main.name() });
         }
-        ev!("profile.model", { "agent": a.fragment, "model": main.name(), "reasoning": reasoning.name() });
+        ev!("profile.model", { "agent": a.fragment, "model": main.name(), "reasoning": reasoning.name(), "home": format!("{home:?}").to_lowercase() });
     }
     Some(main)
 }
@@ -826,6 +831,10 @@ fn spawn_bridge(card_timeout_s: u64) -> Option<Child> {
         // for its first viewer (the agent's fragment is the start's last word).
         .env("BRIDGE_SCREENS_FILE", format!("{RUN}/{SCREENS_FILE}"))
         .env("BRIDGE_SCREEN_START", format!("{OPT}/bin/hermes-boot screen-start"))
+        // SimpleX, for the agents their owners link (the bridge's
+        // simplex/run.rs): the core the image carries. It runs only while
+        // the computer is always on, and only for a linked agent.
+        .env("BRIDGE_SIMPLEX_BIN", SIMPLEX_CHAT)
         // The restore already happened: the bridge reads /data at once.
         .env_remove("RESTORE_PENDING");
     match c.spawn() {
@@ -1189,10 +1198,11 @@ async fn boot_main() {
     let model = env("FRAGMENT_MODEL").unwrap_or_else(|| "http://model.fragment.internal".into());
 
     // The agents to run (GET /api/computer), asked until the platform answers.
+    // The bridge's own reads say the image does SimpleX; the boot's never do.
     let mut backoff = fragment_bridge::net::Backoff::default();
     let started = Instant::now();
     let computer = loop {
-        match api.computer().await {
+        match api.computer(false).await {
             Ok(c) => break c,
             Err(e) if started.elapsed() < Duration::from_secs(120) => {
                 ev!("boot.computer_unread", { "error": e.to_string() });
@@ -1357,7 +1367,7 @@ async fn boot_main() {
             // The computer's agents may change while it runs (docs/computers.md).
             if last_agents.elapsed() >= Duration::from_millis(AGENTS_EVERY_MS) {
                 last_agents = Instant::now();
-                match api.computer().await {
+                match api.computer(false).await {
                     Ok(c) => {
                         agents_unread = false;
                         // the deployment's credential names changed (a release):

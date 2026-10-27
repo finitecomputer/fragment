@@ -380,7 +380,9 @@ export async function billingSections(helpers, ledger, mine, back) {
       sleeps.checked = seat.sleeps;
       sleeps.onchange = async () => {
         try {
-          await h.api("PUT", "/api/seat", { sleeps: sleeps.checked });
+          const mine = await h.api("PUT", "/api/seat", { sleeps: sleeps.checked });
+          // Settings' SimpleX says what this choice means: the seat as answered
+          h.seatIs(mine?.seat ?? null);
         } catch (e) {
           sleeps.checked = !sleeps.checked;
           note(billing, plainly(e, { no_seat: "You don't hold a seat any more. Open Settings again to see where it went." }, "That wasn't changed. Try again in a moment."));

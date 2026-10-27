@@ -116,6 +116,9 @@ impl DurableObject for LedgerCell {
         if let Some(refused) = crate::routed::refused(&req, crate::routed::Own::of(self.cfg), &self.raw)? {
             return Ok(refused);
         }
+        if let Some(probed) = crate::routed::probed(&req, &self.schema)? {
+            return Ok(probed);
+        }
         match self.route(req).await {
             Ok(answer) => Response::from_json(&answer),
             Err(Failed::Refused(why)) => refusal(why, why.message()),

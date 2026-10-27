@@ -14,6 +14,9 @@
 //!   answer quoting what the tool said; `send:
 //!   <command>` runs that, and its answer sends the file the command names
 //!   (`made=<path>` in what it printed) as Hermes' `MEDIA:` tag;
+//!   `narrate: <command>` says words first, in the same response as its
+//!   call (`NARRATED`, a mid-turn answer well past 300 characters, streamed
+//!   before the call as a model streams it), then runs that command;
 //! - `browse: <url>` is a `browser_navigate` call, `look at your screen`
 //!   a `computer_use` capture, `desk: <json>` a `computer_use` call with
 //!   those arguments, `write: <path>` a `write_file` of one line
@@ -210,6 +213,13 @@ fn unhurried(body: &Value) -> bool {
     last_user.contains("take your time")
 }
 
+/// What `narrate: <command>` says before its call: a mid-turn answer, well
+/// past the 300 characters a step's words were once cut to.
+pub fn narrated() -> String {
+    let more = "Each part of it I check against what you asked, so the answer you get is one you can use as it is. ".repeat(12);
+    format!("scripted: here is what I found so far, before I run it. {}", more.trim_end())
+}
+
 /// What `write: <path>` has Hermes' write_file put there.
 pub const WRITTEN: &str = "written by the agent\n";
 /// The image the model's server serves at `/generated/…png`: a 1×1 PNG,
@@ -263,6 +273,9 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     let notify = last_user.lines().find_map(|l| l.split_once("notify: ").map(|(_, c)| c.trim().to_string())).filter(|c| !c.is_empty());
     // `send: <command>`: that command, then the file it names sent
     let send = last_user.lines().find_map(|l| l.split_once("send: ").map(|(_, c)| c.trim().to_string())).filter(|c| !c.is_empty());
+    // `narrate: <command>`: words first (`narrated`), in the response that
+    // calls the terminal with that command
+    let narrate = last_user.lines().find_map(|l| l.split_once("narrate: ").map(|(_, c)| c.trim().to_string())).filter(|c| !c.is_empty());
     // `browse: <url>`: the browser tool goes there; `look at your screen`:
     // computer_use captures it. Each answer quotes what its tool said.
     let browse = last_user.lines().find_map(|l| l.split_once("browse: ").map(|(_, u)| u.trim().to_string())).filter(|u| !u.is_empty());
@@ -289,11 +302,15 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
             let made: String = result.split_once("made=").map(|(_, rest)| rest.chars().take_while(|c| !c.is_whitespace() && !matches!(c, '"' | '\\' | ',')).collect()).unwrap_or_default();
             return (format!("scripted: sent\nMEDIA:{made}"), None);
         }
-        if run.is_some() || start.is_some() || notify.is_some() || browse.is_some() || look || desk.is_some() || write.is_some() || code.is_some() || clarify.is_some() || dm.is_some() || dm_back.is_some() {
+        if run.is_some() || start.is_some() || notify.is_some() || narrate.is_some() || browse.is_some() || look || desk.is_some() || write.is_some() || code.is_some() || clarify.is_some() || dm.is_some() || dm_back.is_some() {
             return (format!("scripted: the tool said: {}", result.chars().take(4000).collect::<String>()), None);
         }
         let ran = if result.contains("tool-ran") { "the tool ran" } else { "the tool said something else" };
         return (format!("scripted: {ran}"), None);
+    }
+    if let (Some(command), true) = (narrate.as_deref(), has_terminal) {
+        let call = json!({ "index": 0, "id": "call_1", "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command }).to_string() } });
+        return (narrated(), Some(call));
     }
     // `image: <url>`: an answer with that image, as a model whose tool made
     // one at its provider gives it (a markdown image, which Hermes sends)
@@ -448,14 +465,14 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Respons
     let chunk = |delta: Value, finish: Value| json!({ "id": "chatcmpl-scripted", "object": "chat.completion.chunk", "created": 0, "model": model, "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }] });
     let mut sse = String::new();
     sse.push_str(&format!("data: {}\n\n", chunk(json!({ "role": "assistant", "content": "" }), Value::Null)));
+    // Its words in a few pieces, so a draft streams; then its call, if any
+    // (words before a call, as a model streams them: `narrate:`).
+    let chars: Vec<char> = text.chars().collect();
+    for piece in chars.chunks(chars.len().div_ceil(3).max(1)) {
+        sse.push_str(&format!("data: {}\n\n", chunk(json!({ "content": piece.iter().collect::<String>() }), Value::Null)));
+    }
     if let Some(t) = tool {
         sse.push_str(&format!("data: {}\n\n", chunk(json!({ "tool_calls": [t] }), Value::Null)));
-    } else {
-        // In a few pieces, so a draft streams.
-        let chars: Vec<char> = text.chars().collect();
-        for piece in chars.chunks(chars.len().div_ceil(3).max(1)) {
-            sse.push_str(&format!("data: {}\n\n", chunk(json!({ "content": piece.iter().collect::<String>() }), Value::Null)));
-        }
     }
     let mut last = chunk(json!({}), json!(finish));
     last["usage"] = usage;
