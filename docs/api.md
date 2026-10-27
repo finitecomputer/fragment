@@ -3058,9 +3058,10 @@ nothing.
 
 **The launcher** (the sidebar's +, a phone's top bar +, and ⌘K or
 Ctrl K, from the chat's frame too: `{fragment: "open-launcher"}`, taken
-only from the focused frame of a listed fragment at its own origin) is one
-input over the desktop's landscape. Empty, it shows nothing. Words ask
-`GET /api/search` (Search, below; its first 8 words and 256 bytes): the
+only from the focused frame of a listed fragment at its own origin;
+cell/shell/launcher.js) is one input over the desktop's landscape.
+Empty, it shows nothing. Words ask `GET /api/search` (Search, below; its
+first 8 words and 256 bytes): the
 chats and apps whose title or label hold them, then the messages, newest
 first, archived ones marked. A chat found opens in the middle column, an
 app in the desktop, a message its chat. For a seat whose agent is made,
