@@ -268,6 +268,8 @@ pub fn icons(s: &mut Suite, api: &Api) -> Result<()> {
     });
     s.ok("its fitting is one Images row on the owner's ledger (`upload`), whoever uploads", paid, json!(entries(api, &owner_id, &prefix).iter().filter(|e| call_of(e) == "upload").collect::<Vec<_>>()));
 
+    favicon(s, api, &owner)?;
+
     // ---- a making whose drawings are all tiles offers none, saying why
     let r = make(api, &owner, &name, json!({ "hint": "a square" }))?;
     made += usize::from(r.status == 200);
@@ -477,6 +479,96 @@ fn read_only(s: &mut Suite, api: &Api) -> Result<()> {
         fitted_once && r.status == 200 && over && refused && s.ai.calls().len() == calls && still.status == 200 && still.bytes == icon_was && uploads() == 1 && row(api, &owner, &name)["picture"] == kept.body["icon"],
         format!("put {p} / delete {d} / {} / {} uploads / {}", still.status, uploads(), ledger(api, &owner)["standing"]),
     );
+    Ok(())
+}
+
+/// A page that names no icon of its own is asked its favicon on the
+/// fragment's origin (`favicon.ico`): the fragment's icon, revalidated by its
+/// hash, to whoever may open its pages (here a share link's holder); a live
+/// with its own favicon.ico serves that; with no icon, none (404).
+fn favicon(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let name = s.named(api, owner, "favicon")?;
+    let c = s.create(api, owner, &name)?;
+    let cookie = format!("fragview={}", c["viewToken"].as_str().unwrap_or(""));
+    s.commit(&c, &[("site/index.html", Some(b"<!doctype html><html><head></head><body>hi</body></html>"))]);
+    s.deploy(&c);
+    let ask = |etag: Option<&str>| {
+        let extra = etag.map(|e| vec![("if-none-match", e.to_string())]).unwrap_or_default();
+        api.call(Call { method: "GET", url: api.site_url(&name, "favicon.ico"), cookie: Some(cookie.clone()), extra, ..Call::default() })
+    };
+    let none = ask(None)?;
+    let kept = put(api, owner, &name, &photo())?;
+    let sha = kept.body["sha256"].as_str().unwrap_or("").to_string();
+    let icon = get(api, owner, &name, None)?;
+    let r = ask(None)?;
+    let again = ask(Some(&format!("\"{sha}\"")))?;
+    s.ok(
+        "a page with no icon of its own is asked favicon.ico on its origin: none before, then the fragment's icon (a PNG, revalidated by its hash: 304)",
+        none.status == 404
+            && kept.status == 200
+            && r.status == 200
+            && r.header("content-type") == icon::MEDIA_TYPE
+            && r.bytes == icon.bytes
+            && r.header("etag") == format!("\"{sha}\"")
+            && r.header("cache-control").contains("no-cache")
+            && again.status == 304,
+        format!("{none} / {r} / {again}"),
+    );
+    s.commit(&c, &[("site/favicon.ico", Some(b"\0\0\x01\0its own"))]);
+    s.deploy(&c);
+    let own = s.eventually(WAIT, || ask(None).is_ok_and(|r| r.status == 200 && r.bytes.ends_with(b"its own")));
+    s.ok("a live with its own favicon.ico serves that, icon or not", own, ask(None)?);
+    s.commit(&c, &[("site/favicon.ico", None)]);
+    s.deploy(&c);
+    let head = || api.call(Call { method: "HEAD", url: api.site_url(&name, "favicon.ico"), cookie: Some(cookie.clone()), ..Call::default() });
+    let headed = s.eventually(WAIT, || {
+        head().is_ok_and(|r| r.status == 200 && r.header("content-type") == icon::MEDIA_TYPE && r.header("etag") == format!("\"{sha}\"") && r.bytes.is_empty())
+    });
+    s.ok("its own favicon.ico gone, a HEAD says the icon's headers and sends no bytes", headed, head().map(|r| format!("{r} {:?}", r.headers))?);
+    api.signed(owner, "DELETE", &route(&name), None)?;
+    let gone = s.eventually(WAIT, || ask(None).is_ok_and(|r| r.status == 404));
+    s.ok("its icon removed, and no favicon.ico of its own, none is served (404)", gone, ask(None)?);
+    app_favicon(s, api, owner)
+}
+
+/// An app that answers `/favicon.ico` from its own route (App.fetch), its
+/// page naming it, with no such file in its live.
+const FAVICON_APP: &str = r#"import { DurableObject } from "cloudflare:workers";
+export class App extends DurableObject {
+  async fetch(request) {
+    if (new URL(request.url).pathname !== "/favicon.ico") return new Response("no such route", { status: 404 });
+    return new Response("the app's own icon", { headers: { "content-type": "image/x-icon", "etag": "\"the-app\"" } });
+  }
+}
+"#;
+
+/// An app's own favicon route wins over the fragment's icon: set, it
+/// changes nothing there (a GET, a HEAD, a GET naming the icon's hash),
+/// and removed, the app still answers.
+fn app_favicon(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let name = s.named(api, owner, "favicon-app")?;
+    let c = s.create(api, owner, &name)?;
+    let cookie = format!("fragview={}", c["viewToken"].as_str().unwrap_or(""));
+    let page: &[u8] = b"<!doctype html><html><head><link rel=\"icon\" href=\"/favicon.ico\"></head><body>hi</body></html>";
+    s.commit(&c, &[("site/index.html", Some(page)), ("app.mjs", Some(FAVICON_APP.as_bytes())), ("fragment.json", Some(br#"{ "name": "favicon-app" }"#))]);
+    s.deploy(&c);
+    let ask = |method: &'static str, etag: Option<&str>| {
+        let extra = etag.map(|e| vec![("if-none-match", e.to_string())]).unwrap_or_default();
+        api.call(Call { method, url: api.site_url(&name, "favicon.ico"), cookie: Some(cookie.clone()), extra, ..Call::default() })
+    };
+    let the_apps = |r: &Reply, head: bool| r.status == 200 && r.header("content-type") == "image/x-icon" && (head || r.bytes == b"the app's own icon");
+    let before = s.eventually(WAIT, || ask("GET", None).is_ok_and(|r| the_apps(&r, false)));
+    let kept = put(api, owner, &name, &photo())?;
+    let sha = kept.body["sha256"].as_str().unwrap_or("").to_string();
+    let (got, head, held) = (ask("GET", None)?, ask("HEAD", None)?, ask("GET", Some(&format!("\"{sha}\"")))?);
+    s.ok(
+        "an app whose own route answers favicon.ico (its page naming it) keeps it with an icon set: a GET, a HEAD and a GET naming the icon's hash are the app's",
+        before && kept.status == 200 && the_apps(&got, false) && the_apps(&head, true) && the_apps(&held, false),
+        format!("{got} / {head} / {held}"),
+    );
+    let gone = api.signed(owner, "DELETE", &route(&name), None)?;
+    let after = ask("GET", None)?;
+    s.ok("its icon removed, the app's route still answers it", gone.status == 200 && the_apps(&after, false), &after);
     Ok(())
 }
 

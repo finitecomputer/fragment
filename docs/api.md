@@ -1686,6 +1686,14 @@ a making or a `PUT` on one answers 400.
   SHA-256>`: a new icon is a new address, so a matching `GET` may be
   cached a day. A stale or unrelated version is 404 with `Cache-Control:
   no-store`, never the current icon's bytes.
+- **Its pages' favicon.** A browser asks a page that names no icon of
+  its own for `favicon.ico` on the fragment's origin. When live has no
+  such file and the app's own route there answers 404 (or it has none),
+  a `GET` or `HEAD` of it is answered the icon (a PNG, which browsers
+  read at that path), to whoever may open its pages, `no-cache` with its
+  SHA-256 as the ETag, so a new icon shows at the next look. A page's own
+  `<link rel="icon">`, a `favicon.ico` file of its own, or its app's
+  answer there wins; with no icon, the path is the app's as before.
 - **Events:** `icon.made` (`{subject, offered, flaws}`), `icon.set`
   (`{sha256, fitted}`), `icon.removed`.
 

@@ -1339,6 +1339,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         &legal,
     );
     release_line_ui(s, api, &mut b, &page)?;
+    settings_navigation_ui(s, &mut b, &page)?;
     // a prompt for Claude Code or Codex naming this platform's own llms.txt,
     // copied whole; the CLI's install folded below it
     let prompt = format!("Read {}/llms.txt and help me build: ", api.base);
@@ -2465,6 +2466,76 @@ const SETTINGS_BOX: &str = "(() => { const p = document.getElementById('settings
 /// settings, which read it first, stay loading.
 const HOLD_LEDGER: &str = "(() => { const real = window.fetch; window.__ledgerHeld = null; window.fetch = async (url, o) => { \
     if (String(url) === '/api/ledger') { window.fetch = real; await new Promise((r) => { window.__ledgerHeld = r; }); } return real(url, o); }; return true; })()";
+
+/// Settings' section navigation, by mouse and by scrolling, on wide and
+/// narrow desktops and a phone: every section can be picked, the last one
+/// included, and a horizontal nav both scrolls and reveals the section the
+/// page scrolls to.
+fn settings_navigation_ui(s: &mut Suite, b: &mut Browser, page: &Page) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    for (layout, width, height, mobile) in [("wide desktop", 1280, 800, false), ("narrow desktop", 1100, 800, false), ("phone", 390, 844, true)] {
+        b.viewport(page, width, height, mobile)?;
+        let listed = b.eval(page, "[...document.querySelectorAll('#settings-page .settings-nav-link:not([hidden])')].map((b) => b.dataset.section)")?;
+        let ids: Vec<String> = listed.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+        let mut picked = Vec::new();
+        for id in ids {
+            let link = format!(".settings-nav-link[data-section={}]", js(&id));
+            if mobile {
+                b.eval(page, &format!("(document.querySelector({link:?})?.click(), true)"))?;
+            } else {
+                b.click(page, &link)?;
+            }
+            let selected = b.until(
+                page,
+                &format!("(() => {{ const b = document.querySelector({link:?}); const s = document.getElementById({id:?}); if (!s) return false; const p = document.getElementById('settings-page'); const r = s.getBoundingClientRect(); const pr = p.getBoundingClientRect(); const top = pr.top + p.clientTop + parseFloat(getComputedStyle(p).scrollPaddingTop) + parseFloat(getComputedStyle(s).scrollMarginTop); return b?.getAttribute('aria-current') === 'location' && Math.abs(r.top - top) < 2 && r.top < innerHeight && r.bottom > 0; }})()"),
+                wait,
+            );
+            picked.push(json!({ "section": id, "selected": selected }));
+        }
+        s.ok(
+            &format!("every Settings nav item selects its section on a {layout}, including Build with Claude Code or Codex and Your data at the end"),
+            !picked.is_empty() && picked.iter().all(|p| p["selected"] == true),
+            json!(picked),
+        );
+    }
+
+    b.viewport(page, 1280, 800, false)?;
+    b.eval(page, "document.getElementById('settings-page').scrollTo({ top: 0, behavior: 'auto' })")?;
+    let account = b.until(page, "document.querySelector('.settings-nav-link[data-section=settings-section-0]')?.getAttribute('aria-current') === 'location'", wait);
+    b.eval(page, "document.getElementById('settings-connections').scrollIntoView({ block: 'start', behavior: 'auto' })")?;
+    let connections = b.until(page, "document.querySelector('.settings-nav-link[data-section=settings-connections]')?.getAttribute('aria-current') === 'location'", wait);
+    b.eval(page, "(() => { const p = document.getElementById('settings-page'); p.scrollTo({ top: p.scrollHeight, behavior: 'auto' }); return true; })()")?;
+    let data = b.until(page, "document.querySelector('.settings-nav-link[data-section=settings-data]')?.getAttribute('aria-current') === 'location'", wait);
+    s.ok(
+        "Settings highlighting follows actual scrolling: Account at the top, Connections in the middle, and Your data at the bottom",
+        account && connections && data,
+        json!({ "account": account, "connections": connections, "yourData": data }),
+    );
+
+    b.viewport(page, 1100, 800, false)?;
+    let horizontal = b.eval(
+        page,
+        "(() => { const n = document.querySelector('#settings-page .settings-nav'); const links = [...n.querySelectorAll('.settings-nav-link:not([hidden])')]; n.scrollLeft = 0; const before = n.scrollLeft; n.scrollLeft = n.scrollWidth; const r = n.getBoundingClientRect(); const last = links.at(-1)?.getBoundingClientRect(); return { overflowing: n.scrollWidth > n.clientWidth, overflowX: getComputedStyle(n).overflowX, scrollbar: getComputedStyle(n).scrollbarWidth, webkitScrollbar: getComputedStyle(n, '::-webkit-scrollbar').display, before, after: n.scrollLeft, lastReachable: !!last && last.left >= r.left - 1 && last.right <= r.right + 1 }; })()",
+    )?;
+    s.ok(
+        "on a narrow desktop the overflowing Settings nav has a visible scrollbar and scrolls horizontally far enough to reach Your data",
+        horizontal["overflowing"] == true && horizontal["overflowX"] == "auto" && horizontal["scrollbar"] == "thin" && horizontal["webkitScrollbar"] != "none" && horizontal["after"].as_f64().is_some_and(|x| x > 0.0) && horizontal["lastReachable"] == true,
+        &horizontal,
+    );
+    b.eval(page, "(() => { const p = document.getElementById('settings-page'); document.querySelector('#settings-page .settings-nav').scrollLeft = 0; p.scrollTo({ top: 0, behavior: 'auto' }); return true; })()")?;
+    b.until(page, "document.querySelector('.settings-nav-link[aria-current=location]')?.dataset.section === 'settings-section-0'", wait);
+    b.eval(page, "(() => { const p = document.getElementById('settings-page'); p.scrollTo({ top: p.scrollHeight, behavior: 'auto' }); return true; })()")?;
+    let revealed = b.until(
+        page,
+        "(() => { const n = document.querySelector('#settings-page .settings-nav'); const b = n.querySelector('[aria-current=location]'); const nr = n.getBoundingClientRect(); const br = b?.getBoundingClientRect(); return b?.dataset.section === 'settings-data' && n.scrollLeft > 0 && !!br && br.left >= nr.left - 1 && br.right <= nr.right + 1; })()",
+        wait,
+    );
+    s.ok("scrolling a narrow desktop to Your data brings its active nav item into view", revealed, b.eval(page, "({ active: document.querySelector('.settings-nav-link[aria-current=location]')?.dataset.section, scrollLeft: document.querySelector('.settings-nav').scrollLeft })")?);
+    b.viewport(page, 1280, 800, false)?;
+    b.eval(page, "document.getElementById('settings-page').scrollTo({ top: 0, behavior: 'auto' })")?;
+    b.until(page, "document.querySelector('.settings-nav-link[aria-current=location]')?.dataset.section === 'settings-section-0'", wait);
+    Ok(())
+}
 
 /// Opens settings by `open` (a script's expression) with their read of
 /// the ledger held (`HOLD_LEDGER`), so they stay loading: their boxes then
