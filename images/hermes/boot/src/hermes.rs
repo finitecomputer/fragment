@@ -205,14 +205,17 @@ impl Route {
 
     /// The model a tier agent's stall falls back to: its route's fallback
     /// by its id (Private's private, Standard's Cloudflare), or, from a
-    /// platform that names no routes, the deployment's fallback.
-    pub fn fallback(&self, tier: Tier) -> &str {
+    /// platform that names no routes, the deployment's fallback. None when
+    /// that is the tier's own model (#527): an id is one model at one place
+    /// (`fragment_core::models::Models::parse`), so the switch would only
+    /// ask the same server again.
+    pub fn fallback(&self, tier: Tier) -> Option<&str> {
         let routed = self.ids.routes.as_ref().and_then(|r| match tier {
             Tier::Cheap => Some(&r.cheap.fallback),
             Tier::Medium => Some(&r.medium.fallback),
             Tier::High => None,
         });
-        routed.unwrap_or(&self.ids.fallback)
+        Some(routed.unwrap_or(&self.ids.fallback).as_str()).filter(|id| *id != self.tier(tier))
     }
 }
 
@@ -574,15 +577,18 @@ pub fn profile_config(agent: &Agent, name: &str, home: Home, main: &MainModel, r
     // no header of ours, so its tier is not said: the id names its slot). The next turn starts on its tier again (Hermes'
     // `restore_primary_runtime`). The route itself falls back when a model
     // answers 429 or a 5xx (cell/src/models.rs); this is for a call that
-    // answers nothing. An owner's own model and the high tier have none.
+    // answers nothing. An owner's own model and the high tier have none,
+    // and nor has a tier whose fallback is its own model (`Route::fallback`).
     if let MainModel::Tier(tier @ (Tier::Cheap | Tier::Medium)) = main {
         y.push_str(&format!("providers:\n  custom:\n    models:\n      {}:\n        stale_timeout_seconds: {STALE_TIMEOUT_S}\n", q(route.tier(*tier))));
-        y.push_str(&format!(
-            "fallback_providers:\n  - provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: {}\n",
-            q(&format!("{base}/v1")),
-            q(route.fallback(*tier)),
-            q(&format!("agent:{}", agent.fragment))
-        ));
+        if let Some(fallback) = route.fallback(*tier) {
+            y.push_str(&format!(
+                "fallback_providers:\n  - provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: {}\n",
+                q(&format!("{base}/v1")),
+                q(fallback),
+                q(&format!("agent:{}", agent.fragment))
+            ));
+        }
     }
     // Stored selections, never inferred by Hermes from credential presence.
     // Only placeholders actually held by this agent count: the catalog's
@@ -1306,14 +1312,23 @@ mod tests {
         // each tier's stall falls back within its route (Paul, 2026-10-24), by its route's fallback's id
         let mut routed = route("http://model.fragment.internal");
         let tier_route = |fallback: &str| fragment_bridge::api::TierRoute { label: None, private: false, fallback: fallback.into(), vision: FALLBACK_ID.into() };
-        routed.ids.routes = Some(fragment_bridge::api::TierRoutes { cheap: tier_route("deepseek-v4-1-flash"), medium: tier_route("@cf/example/standard-fallback") });
+        routed.ids.routes = Some(Box::new(fragment_bridge::api::TierRoutes { cheap: tier_route("deepseek-v4-1-flash"), medium: tier_route("@cf/example/standard-fallback") }));
         for (tier, want) in [(Tier::Cheap, "deepseek-v4-1-flash"), (Tier::Medium, "@cf/example/standard-fallback")] {
-            let config = profile_config(&agent(), "Juniper", &tier.into(), DEFAULT_REASONING, &routed, &[], creds);
+            let config = profile_config(&agent(), "Juniper", Home::Chat, &tier.into(), DEFAULT_REASONING, &routed, &[], creds);
             let stall = format!("fallback_providers:\n  - provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"{want}\"\n    api_key: \"agent:juniper--k3x9\"\n");
             assert!(config.contains(&stall), "the {tier:?} tier's stall falls back to its route's fallback: {config}");
             assert!(config.contains(vision), "its eyes are still the route's `vision`, its tier said: {config}");
         }
-        assert_eq!((routed.fallback(Tier::High), route("http://x").fallback(Tier::Medium)), (FALLBACK_ID, FALLBACK_ID), "none named: the deployment's");
+        assert_eq!((routed.fallback(Tier::High), route("http://x").fallback(Tier::Medium)), (Some(FALLBACK_ID), Some(FALLBACK_ID)), "none named: the deployment's");
+        // a fallback that is the tier's own model is none (#527): one id, one server, asked again
+        let mut own = route("http://model.fragment.internal");
+        own.ids.routes = Some(Box::new(fragment_bridge::api::TierRoutes { cheap: tier_route(CHEAP_ID), medium: tier_route(FALLBACK_ID) }));
+        let (cheap, medium) = (profile_config(&agent(), "Juniper", Home::Chat, &Tier::Cheap.into(), DEFAULT_REASONING, &own, &[], creds), profile_config(&agent(), "Juniper", Home::Chat, &Tier::Medium.into(), DEFAULT_REASONING, &own, &[], creds));
+        assert!(!cheap.contains("fallback_providers") && cheap.contains("stale_timeout_seconds: 20"), "no switch to its own model, its patience kept: {cheap}");
+        assert!(medium.contains(&format!("model: {}\n    api_key", q(FALLBACK_ID))), "another model stays its switch: {medium}");
+        let mut unrouted = route("http://model.fragment.internal");
+        unrouted.ids.fallback = CHEAP_ID.into();
+        assert_eq!(unrouted.fallback(Tier::Cheap), None, "from a platform naming no routes too");
         assert!(!h.contains("fallback_providers") && !h.contains("stale_timeout_seconds") && !h.contains("api_max_retries"), "the high tier has none: {h}");
         assert!(!m.contains("fallback_providers") && !m.contains("stale_timeout_seconds") && !m.contains("api_max_retries"), "a profile's own, never the overlay's: {m}");
         assert!(p.contains("skills:\n  external_dirs: [\"/data/hermes/managed-skills\", \"/var/lib/fragment-run/platform-skills\"]\n"), "the managed skills and the platform skill's view, after its own: {p}");

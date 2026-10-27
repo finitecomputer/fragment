@@ -158,8 +158,9 @@ pub struct ModelIds {
     /// falls back to (Paul: "a fallback on private should fall back to
     /// something private, a fallback on normal should fall back to
     /// something normal").
+    /// Boxed: a computer's view is the bridge's largest message without it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routes: Option<TierRoutes>,
+    pub routes: Option<Box<TierRoutes>>,
 }
 
 /// The two tiers' routes (`ModelIds::routes`).
