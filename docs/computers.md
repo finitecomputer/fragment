@@ -1018,8 +1018,8 @@ expires within 30 days. The container application is the deployment's
     slot runs it (`x-fragment-tier: cheap` or `medium`, optional: the
     intercept sends it on), else on the first slot that does, in that
     order: a tier's before `fallback` and `vision`. The slot is the call's
-    as if it named the slot: its key, its `body`, its fallback (a tier's
-    falls back; `fallback`'s and `vision`'s do not), its price. An id no
+    as if it named the slot: its key, its `body`, its fallback (the
+    slot's own: "A slot's own fallback", below), its price. An id no
     slot runs is refused, 400, the message listing those it may name;
     nothing is charged or sent. The route's names keep naming their slots,
     whatever tier the caller says.
@@ -1205,18 +1205,30 @@ expires within 30 days. The container application is the deployment's
   `"vision"`, each a slot's name: `fallback` and `vision` (the route's
   four's, which it names unless it names others) or a slot of the
   deployment's own beside them (at most 4, named 1 to 24 of a-z, 0-9 and
-  `_`, each some tier's fallback or vision: Standard's `cloudflare`). A
-  tier's call falls back to its route's fallback; a caller that says its
-  tier (`x-fragment-tier`: every call of our Hermes image's tier agents,
-  its auxiliary vision's included) runs `vision` and `fallback` as its
-  route's, a caller that says none the route's four's. A call naming a
-  model by its id runs that model, whatever the caller's route (only the
-  aliases `fallback` and `vision` follow it); a slot of the deployment's
-  own is named so (it is listed with the rest), and such a call has no
-  fallback of its own. The private guard walks each private tier's route,
-  and the route's four's `fallback` too: an image that has not read its
-  route names that fallback for its stall, its tier unsaid, so a
-  deployment with a private tier keeps it private. The computer's view carries each tier's route
+  `_`, each some tier's fallback or vision, or another slot's fallback:
+  Standard's `cloudflare`). A tier's call falls back to its route's
+  fallback; a caller that says its tier (`x-fragment-tier`: every call of
+  our Hermes image's tier agents, its auxiliary vision's included) runs
+  `vision` and `fallback` as its route's, a caller that says none the
+  route's four's. A call naming a model by its id runs that model,
+  whatever the caller's route (only the aliases `fallback` and `vision`
+  follow it); a slot of the deployment's own is named so (it is listed
+  with the rest).
+
+  **A slot's own fallback** (#589's review). Any slot may name
+  `"fallback"`, another slot by its name: its calls are made on it once
+  more when they fail before answering, however the call named the slot
+  (its name, an alias, its model's id: `Models::fallback_of`), and never a
+  third time. Unnamed, a tier's is its route's (above); `vision`'s is
+  `fallback` when that slot says its model reads images, as before; any
+  other slot's is none. A slot images go to (`vision`, or a tier's
+  vision) falls back only to one that reads them, or the deploy is
+  refused. The private guard walks each private tier's route, each slot's
+  own fallback after it, the slot a stall's call runs (named by the
+  fallback's id, its tier unsaid), and the route's four's `fallback` too:
+  an image that has not read its route names that fallback for its stall,
+  its tier unsaid, so a deployment with a private tier keeps it private.
+  The computer's view carries each tier's route
   (`models.routes`: its fallback's and vision model's ids), which our
   Hermes image reads to name its stall's fallback; an image that does not
   names the route's four's `fallback`, on which a Standard agent's stall

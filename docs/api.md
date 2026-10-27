@@ -1963,14 +1963,16 @@ never. Each tier has its route (a tier slot's `"fallback"` and
 `"vision"`; the deployment's `fallback` and `vision` unless it names
 others): a tier's call falls back to its route's fallback, and a caller
 that says its tier (`x-fragment-tier`) runs `vision` and `fallback` as
-its route's. A job's text step falls back the same, and its output's `model`
-names the model that answered.
+its route's. Any slot may name its own `"fallback"` instead, and every
+call falls back as the slot it runs does, however it named it
+(docs/computers.md, "A slot's own fallback"). A job's text step falls
+back the same, and its output's `model` names the model that answered.
 
 `fallback` names the deployment's fallback model itself: a runtime's own
 switch when its model stalls, streaming nothing (our Hermes image's
 `fallback_providers`: docs/computers.md, Models). It is metered as a
-tier's call, has no fallback of its own, and is no tier an agent or a
-job's step may name.
+tier's call, has no fallback of its own unless its slot names one, and
+is no tier an agent or a job's step may name.
 
 A call may name one of those four by its model's own id instead (Paul,
 2026-10-16: "be able to run `/model` with hermes and see the real
