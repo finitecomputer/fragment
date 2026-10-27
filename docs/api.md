@@ -1264,7 +1264,9 @@ title opening its share sheet.
 | `GET /api/f/{name}/file?path=` | viewer | → the bytes at main (`x-fragment-ref`); a pointer's come from the blob store; with none of its own at `path`, a blessed template's data file from the release |
 | `PUT /api/f/{name}/blobs/{sha256}` | editor | the bytes as the body (`content-length` required, at most 256 MiB), streamed through and hashed on the way in: → `{ok, sha, size, stored}`; bytes that hash to anything else are deleted and refused (400). Its `content-type` is what `__blob` serves it as, when that is passive media (Blobs, below) |
 | `GET`, `HEAD /api/f/{name}/blobs/{sha256}` | viewer | → the bytes (ranges answer 206) |
-| `GET /api/f/{name}/card` | viewer | → the fragment's preview card (Cards, below): a 1280×800 JPEG, `ETag` its blob's SHA-256, `Cache-Control: private, no-cache`, `X-Fragment-Ref` the live commit it shows; `If-None-Match` naming the tag is 304. Before the first is made, 404 `not_found` |
+| `GET /api/f/{name}/card` | viewer | → the fragment's preview card (Cards, below): a 1280×800 JPEG, `ETag` its blob's SHA-256, `Cache-Control: private, no-cache`, `X-Fragment-Ref` the live commit it shows (a shot's: an upload shows none, and has none); `If-None-Match` naming the tag is 304. Before the first is made, 404 `not_found` |
+| `POST /api/f/{name}/card` | editor | → `{ok, live, since, joined}`: a shot of the live again, which the fragment's alarm takes as it takes a deploy's and which replaces the card, an upload too (Cards, below: Asked for again); `joined` when a shot of that live was wanted already (that one is it). 400 for a chat, an agent or a members-only fragment, or with nothing deployed; 402 when its owner pays for nothing now; 429 within a minute of the last ask, saying how long is left |
+| `PUT /api/f/{name}/card` | editor | a JPEG of 1280×800, at most 512 KiB, as the body → `{ok, blob, size}`: the card from now until a shot is asked for again or another is uploaded; deploys are still shot, for the page's report, and leave it (Cards, below: Uploaded). 400 for anything else (empty, not a JPEG, another size, a JPEG cut short or with a part missing: `card::check_upload`) and for a chat or an agent, 413 over 512 KiB, 402 past its owner's overdraft |
 | `GET /api/f/{name}/events?since=` or `?tail=` | viewer | → `{events: [{id, at, kind, summary, data}]}`, oldest first: the page after `since`, or the newest `tail` (1-500; 400 otherwise, or with `since`) (500 a page; 10 000 kept, as for `ops`: `limits::AUDIT_KEPT`) |
 | `POST /api/f/{name}/ops/{op}` | the operation's role | `{id, input}` → `{result, replayed}`; for a job, `result` is `{run, status}` (the same id answers the same run) |
 | `GET /api/f/{name}/runs?status=&op=&limit=` | viewer | → `{runs: [{id, op, via, trigger, principal, status, attempt, depth, createdAt, finishedAt, error}], counts: {<status>: n}, paused}` newest first (30, at most 200) |
@@ -1513,8 +1515,10 @@ by its extension, and prints its sha256.
 
 Every move of `live` (a deploy, a rollback, a push to `live`, a
 template's first deploy) wants a **preview card**: a screenshot of the
-fragment's page, which the shell's Apps list shows. The schedule and its
-rules are pure (`fragment_core::card`); cell/src/card.rs runs them.
+fragment's page, which the shell's Apps list shows. Its editors may ask
+for a shot again, or upload an image of their own as the card (below).
+The schedule and its rules are pure (`fragment_core::card`);
+cell/src/card.rs runs them.
 
 - **Never in the deploy's request.** The move records the card it wants;
   the fragment's alarm, after the rest of its work, takes the shot itself
@@ -1563,6 +1567,37 @@ rules are pure (`fragment_core::card`); cell/src/card.rs runs them.
 - **Apps only.** A chat or an agent fragment is not an app (the shell
   lists it elsewhere): its deploys are not shot (`card.skipped`). A
   brain is an app.
+- **Asked for again.** An editor's `POST /api/f/{name}/card` wants a
+  shot of the live as it is now, the one the card shows too (a card shot
+  as the page loaded, or of data since changed): the alarm takes it as it
+  takes a deploy's, with its tries, its report and its meter row, and it
+  replaces the card, an upload too. A shot of that live already wanted (a
+  deploy's, waiting or out) is the one asked for (`joined`), and an
+  upload's next shot replaces it then. At most one ask a minute per
+  fragment (`card::AGAIN_EVERY_MS`: each is a browser session from the
+  account's few, which every fragment's deploys share; a deploy's shot is
+  not counted, nor an ask that joins one): within it, 429 saying how long
+  is left, and nothing changes. Where no shot would be taken it is
+  refused with the reason a deploy's skip gives: a chat or an agent, a
+  members-only fragment (400), an owner who pays for nothing now (402);
+  and with nothing deployed (400).
+- **Uploaded.** An editor's `PUT /api/f/{name}/card` makes their image
+  the card at once. It is held to what a shot is held to (a JPEG of
+  1280×800, at most 512 KiB: every card is one shape, which the shell
+  lays out without asking, so a client resizes first), and whole too: its
+  structure read through to its end, so a JPEG cut short (a header and
+  no image, a frame header that ends early) is 400 and the card stays
+  (`media::jpeg_whole`; its compressed data is not decoded). It is
+  stored as one of the fragment's blobs (`image/jpeg`, kept while it is
+  the card) and
+  served as a shot is, with no `X-Fragment-Ref`: it shows no commit.
+  **It stays until a shot is asked for again or another image is
+  uploaded.** A later deploy is still shot, for the page's report (and
+  billed as one), but its shot leaves the uploaded card, as does a shot
+  out when the upload came: a person's choice outlives their agent's
+  next deploy. A chat or an agent takes none (400); a members-only app
+  does, its page unshot all the same. The same image again changes
+  nothing.
 - **Metered to the owner.** Each try's browser time (acquire to close; a
   close that was lost adds the session's 10 s inactivity timeout) is a
   `browser` row in the fragment's meter outbox,
@@ -1572,11 +1607,13 @@ rules are pure (`fragment_core::card`); cell/src/card.rs runs them.
   create is: a guest pays for nothing and a read-only owner makes nothing
   new, so neither's deploys are shot (`card.skipped`); a ledger that does
   not answer refuses none.
-- **Events:** `card.made` (`{live, blob, attempt}`), `card.skipped`
+- **Events:** `card.made` (`{live, blob, attempt}`), `card.uploaded`
+  (`{blob, size}`), `card.skipped`
   (`{live, why: not_an_app | members_only | owner_pays}`),
   `card.failed` (`{failures}`), and `page.errors` (the report, when it
   has errors; its summary their count and the first one's first line).
-  A retry and a stale shot say nothing.
+  A retry, a stale shot and a shot an upload kept from the card say
+  nothing.
   A page's Open Graph image
   stays `__preview.svg`: the card is its members'.
 
@@ -1620,20 +1657,29 @@ a making or a `PUT` on one answers 400.
   are the ones kept, best first, each `png` the icon's bytes as base64;
   `flaws` counts the refused by flaw. Nothing of a making is kept: its
   asker keeps a candidate by sending its bytes to `PUT`.
-- **Bounded per fragment: 10 makings an hour**, the 11th 429.
+- **Bounded per fragment: 10 makings an hour**, the 11th 429, counted
+  as each is admitted, after the owner's ledger has answered: makings
+  asked at once each count the others'.
 - **Metered to the owner**, one row of the fragment's meter outbox per
-  call that answered, `icon:<fragment>@<incarnation>:<started>:<call>`
-  (`subject`, `draw-<n>`, `cut-<n>`, `fit-<n>`, `flat-<n>`, `check-<n>`,
-  `upload`): the subject and the checks in tokens, a drawing in the
+  call that answered, `icon:<fragment>@<incarnation>:<op>:<call>`, `op`
+  the making's or upload's own name (`<started ms>.<8 hex>`, a nonce of
+  its own: two in one millisecond are two) and `call` one of `subject`,
+  `draw-<n>`, `cut-<n>`, `fit-<n>`, `flat-<n>`, `check-<n>` and
+  `upload`: the subject and the checks in tokens, a drawing in the
   neurons Workers AI says it cost (its `cf-ai-neurons`; 104.2 when it
   says none), each Images transformation as one (docs/ledger.md). The
   owner's ledger is asked first as a job's AI step is: a guest's fragment
-  makes none. A making that fails halfway has paid for what it bought.
+  makes none, and one at its cap makes none for anyone but its owner and
+  their agents (402; docs/ledger.md, Caps). A making that fails halfway
+  has paid for what it bought.
 - **An upload** is a PNG, JPEG, WebP or GIF by its bytes, at most the
   router's 2 MiB (413 past it). A 256×256 PNG of at most 256 KiB (a
   candidate) is kept as it is; any other is fitted inside 256×256 by
   Images, its padding transparent (one transformation, metered as
   `upload`), and refused 413 when that is still over 256 KiB.
+- **Keeping and removing are writes:** while the owner's fragments are
+  read-only (past the overdraft), `PUT` and `DELETE` are 402, before
+  anything is fitted or stored, and the icon stays.
 - **Kept** as one of the fragment's blobs (`image/png`), named in its
   meta, which the blob collection keeps. Its members' lists show it as
   the fragment's `picture`, `/api/f/<name>/icon?v=<12 hex of its

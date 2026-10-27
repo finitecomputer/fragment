@@ -204,7 +204,31 @@ fn a_drawing_is_charged_what_workers_ai_said() {
         assert_eq!(neurons(unknown), Usage::Neurons { milli: DRAWN_MILLI_NEURONS }, "{unknown:?}");
     }
     assert!(neurons(None).validate().is_ok());
-    let r = meter_ref("app--ab12@1729000000000", 1_729_000_001_000, "draw-3");
+    let r = meter_ref("app--ab12@1729000000000", &operation(1_729_000_001_000, [0xff; 4]), "draw-3");
+    assert_eq!(r, "icon:app--ab12@1729000000000:1729000001000.ffffffff:draw-3");
     assert!(crate::price::printable(&r, crate::ledger::ID_MAX_BYTES), "{r}");
+    // the longest: a name at its bound, and the widest call
+    let long = meter_ref(&format!("{}@{}", "a".repeat(fragment_proto::limits::NAME_MAX_BYTES), i64::MAX), &operation(i64::MAX, [0xff; 4]), "check-9");
+    assert!(crate::price::printable(&long, crate::ledger::ID_MAX_BYTES), "{long}");
     assert_eq!(icon_path("app--ab12", &"ab".repeat(32)), "/api/f/app--ab12/icon?v=abababababab");
+}
+
+/// Two makings (or uploads) started in one millisecond are two: none of
+/// one's rows shares a reference with the other's, which the outbox
+/// (`INSERT OR IGNORE` by reference) would drop; one making's calls each
+/// name it the same, so its rows are its own.
+#[test]
+fn makings_in_one_millisecond_are_charged_apart() {
+    let key = "app--ab12@1729000000000";
+    let at = 1_729_000_001_000;
+    let calls: Vec<String> = std::iter::once("subject".to_string())
+        .chain((0..CANDIDATES).flat_map(|n| ["draw", "cut", "fit", "flat", "check"].map(|step| format!("{step}-{n}"))))
+        .chain(std::iter::once("upload".to_string()))
+        .collect();
+    let (a, b) = (operation(at, [0, 0, 0, 1]), operation(at, [0, 0, 0, 2]));
+    assert_ne!(a, b);
+    let refs: std::collections::BTreeSet<String> = [&a, &b].iter().flat_map(|op| calls.iter().map(|c| meter_ref(key, op, c))).collect();
+    assert_eq!(refs.len(), 2 * calls.len(), "every row of both is its own");
+    assert_eq!(meter_ref(key, &a, "draw-0"), meter_ref(key, &a, "draw-0"), "one making's call names it alike");
+    assert!(meter_ref(key, &a, "subject").starts_with(&format!("icon:{key}:{at}.")), "it starts with when it started");
 }

@@ -447,11 +447,20 @@ pub fn judged(answer: &Value) -> Result<f64, Flaw> {
     Ok(object * subject * (1.0 - writing) * (1.0 - tile))
 }
 
-/// The meter row's reference for one call of a making: the fragment's
-/// meter key, when the making started, and the call (`subject`,
-/// `draw-<n>`, `cut-<n>`, `fit-<n>`, `flat-<n>`, `check-<n>`, `upload`).
-pub fn meter_ref(key: &str, started_ms: i64, call: &str) -> String {
-    format!("icon:{key}:{started_ms}:{call}")
+/// A making's or an upload's own name, `<started>.<8 hex>`: when it
+/// started and a nonce of its own, so two that start in one millisecond
+/// are two (the outbox keeps a reference once: a second row of the same
+/// one would be dropped, its usage unbilled).
+pub fn operation(started_ms: i64, nonce: [u8; 4]) -> String {
+    format!("{started_ms}.{:08x}", u32::from_be_bytes(nonce))
+}
+
+/// The meter row's reference for one call of a making or an upload: the
+/// fragment's meter key, the operation's name (`operation`), and the call
+/// (`subject`, `draw-<n>`, `cut-<n>`, `fit-<n>`, `flat-<n>`, `check-<n>`,
+/// `upload`).
+pub fn meter_ref(key: &str, op: &str, call: &str) -> String {
+    format!("icon:{key}:{op}:{call}")
 }
 
 /// Where a fragment's icon is served on the platform's origin: its
