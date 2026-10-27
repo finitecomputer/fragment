@@ -5742,6 +5742,9 @@ fn launch_geometry_ui(s: &mut Suite, b: &mut Browser, page: &Page, shots: &std::
     b.eval(page, "(document.getElementById('search-dialog').dispatchEvent(new Event('cancel')), true)")?;
     b.until(page, closed, wait);
     b.viewport(page, 1280, 800, false)?;
+    Ok(())
+}
+
 /// What the icon checks read of the page (`window.__icons`): the sheet,
 /// its picks, the dock's art for the app (`DOCK`), an image's pixels drawn
 /// 32×32 (which picture it is, as these checks tell them apart: `null`
