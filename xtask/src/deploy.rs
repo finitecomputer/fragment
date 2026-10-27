@@ -107,6 +107,10 @@ struct Deployment {
     /// (`FRAGMENT_SUPPORT_URL`): an `https:` page or a `mailto:` address
     /// (`fragment_core::computer::support_url_ok`), linked from the shell.
     support_url: Option<String>,
+    /// Where the operators are mailed each feedback a person sends
+    /// (`FRAGMENT_FEEDBACK_TO`; docs/api.md, Feedback): one plain address.
+    /// Without it, feedback is read on the admin's page alone.
+    feedback_to: Option<String>,
     /// The address the platform's mail comes from (`FRAGMENT_MAIL_FROM`;
     /// cell/src/mail.rs), on a domain onboarded to Cloudflare Email
     /// Sending (`wrangler email sending enable <domain>`). Without it, the
@@ -645,6 +649,12 @@ fn checked(d: Deployment) -> Result<Deployment> {
     }
     if let Some(f) = &d.mail_from {
         fragment_core::mail::Sender::parse(f).map_err(|e| anyhow::anyhow!("mail_from: {e}"))?;
+    }
+    if let Some(to) = d.feedback_to.as_deref().filter(|to| !fragment_core::mail::valid_address(to)) {
+        bail!("feedback_to: {to:?} is not one plain email address");
+    }
+    if d.feedback_to.is_some() && d.mail_from.is_none() {
+        bail!("feedback_to needs mail_from: a deployment that sends no mail mails no feedback");
     }
     Ok(d)
 }
@@ -1259,6 +1269,9 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
     if let Some(u) = &d.support_url {
         v.insert("FRAGMENT_SUPPORT_URL".into(), json!(u));
     }
+    if let Some(to) = &d.feedback_to {
+        v.insert("FRAGMENT_FEEDBACK_TO".into(), json!(to));
+    }
     if let Some(f) = &d.mail_from {
         v.insert("FRAGMENT_MAIL_FROM".into(), json!(f.trim()));
     }
@@ -1539,6 +1552,7 @@ mod tests {
             models: None,
             default_plan: None,
             support_url: None,
+            feedback_to: None,
             mail_from: None,
             computers: None,
             providers: vec![],
@@ -2234,5 +2248,33 @@ mod tests {
         let d = load(&config_file("support-named", &v)).unwrap();
         let n = names(&d, Some("p5")).unwrap();
         assert_eq!(worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"]["FRAGMENT_SUPPORT_URL"], "mailto:help@example.dev");
+    }
+
+    /// Where the operators are mailed feedback: one plain address, on a
+    /// deployment that sends mail, refused before a deploy otherwise;
+    /// named, it is the cell's `FRAGMENT_FEEDBACK_TO`, and unnamed, none.
+    #[test]
+    fn a_feedback_address_is_checked_and_rendered() {
+        let with = |to: Option<&str>, from: Option<&str>| {
+            let mut d = deployment(None, None);
+            d.feedback_to = to.map(str::to_string);
+            d.mail_from = from.map(str::to_string);
+            d
+        };
+        assert!(checked(with(Some("help@example.dev"), Some("mail@example.dev"))).is_ok() && checked(with(None, None)).is_ok());
+        let refused = |d| checked(d).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        let two = refused(with(Some("a@example.dev, b@example.dev"), Some("mail@example.dev")));
+        assert!(two.contains("feedback_to: \"a@example.dev, b@example.dev\" is not one plain email address"), "{two}");
+        let mute = refused(with(Some("help@example.dev"), None));
+        assert!(mute.contains("feedback_to needs mail_from"), "{mute}");
+        let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
+        let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+        let n = |d: &Deployment| names(d, Some("p5")).unwrap();
+        let none = load(&config_file("feedback-unnamed", &v)).unwrap();
+        assert!(worker_config(&none, &n(&none), "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"].get("FRAGMENT_FEEDBACK_TO").is_none());
+        v["feedback_to"] = json!("help@example.dev");
+        v["mail_from"] = json!("mail@example.dev");
+        let d = load(&config_file("feedback-named", &v)).unwrap();
+        assert_eq!(worker_config(&d, &n(&d), "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"]["FRAGMENT_FEEDBACK_TO"], "help@example.dev");
     }
 }

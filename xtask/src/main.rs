@@ -265,6 +265,8 @@ fn dev(args: &[String]) -> Result<()> {
         // the mail fake, which prints each message (dev never sends real mail)
         mail_url: Some(mailer.url.clone()),
         mail_from: Some(DEV_MAIL_FROM.into()),
+        // each feedback's notice, printed by the mail fake as any mail
+        feedback_to: Some("feedback@fragment.localhost".into()),
         // a dev person is a seat, with the month's included credit
         default_plan: Some("seat".into()),
         delivery_retry_s: None,

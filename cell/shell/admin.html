@@ -14,6 +14,7 @@
     <button data-tab="people" class="on">People</button>
     <button data-tab="orgs">Orgs</button>
     <button data-tab="trials">Trials</button>
+    <button data-tab="feedback">Feedback</button>
     <button data-tab="health">Health</button>
     <button data-tab="log">Log</button>
   </nav>
@@ -43,6 +44,12 @@
       <input name="code" placeholder="code (else one is made)">
       <button>Make a code</button></form>
     <table><thead><tr><th>Code</th><th>Name</th><th>Trial</th><th>Used</th><th>Open</th><th>On</th><th></th></tr></thead><tbody id="trial-rows"></tbody></table>
+  </section>
+  <section id="feedback" hidden>
+    <form id="feedback-filter"><label><input type="checkbox" name="open" checked> only those not done</label></form>
+    <table><thead><tr><th>When</th><th>From</th><th>Kind</th><th>Message</th><th>Page</th><th>Shots</th><th>Done</th></tr></thead><tbody id="feedback-rows"></tbody></table>
+    <button id="feedback-more" hidden>More</button>
+    <aside id="feedback-one" hidden></aside>
   </section>
   <section id="health" hidden><dl id="health-facts"></dl><table><thead><tr><th>Queue</th><th>For</th><th>Tries</th><th>Due</th></tr></thead><tbody id="failing-rows"></tbody></table></section>
   <section id="log" hidden>

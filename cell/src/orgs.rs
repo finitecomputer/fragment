@@ -217,6 +217,7 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
         (Method::Get, ["people", person]) => json_answer(&person_page(env, person).await?),
         (Method::Put, ["people", person, "computer", "image"]) => json_answer(&pin(env, &by, person, &bytes).await?),
         (Method::Get, ["health"]) => json_answer(&ask_registry(env, &admin::Health {}).await?),
+        (method, ["feedback", rest @ ..]) => crate::feedback::admin(env, url, by, method, rest, &bytes).await,
         (Method::Get, ["log"]) => {
             let before = param(url, "before").map(|b| b.parse::<u64>().map_err(|_| CellError::invalid("`before` is an entry's number"))).transpose()?;
             json_answer(&ask_registry(env, &admin::Log { before }).await?)

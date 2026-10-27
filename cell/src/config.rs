@@ -75,6 +75,10 @@ pub struct Config {
     /// a `mailto:` address (`fragment_core::computer::support_url_ok`).
     /// Unset, the shell shows them what to tell whoever runs it.
     pub support_url: Option<String>,
+    /// `FRAGMENT_FEEDBACK_TO` (the deploy config's `feedback_to`): the one
+    /// address the operators are mailed each feedback a person sends at
+    /// (docs/api.md, Feedback). Unset, it is only on the admin's page.
+    pub feedback_to: Option<String>,
     /// `FRAGMENT_POLL_INTERVAL_S`: a busy fragment's pass, and the poll backstop (default 300).
     pub poll_interval_ms: i64,
     /// `FRAGMENT_EGRESS_LOCAL=allow`: jobs may fetch private and loopback
@@ -324,6 +328,10 @@ impl Config {
             support_url: var(env, "FRAGMENT_SUPPORT_URL").map(|u| {
                 assert!(fragment_core::computer::support_url_ok(&u), "FRAGMENT_SUPPORT_URL is an https: page or a mailto: address, not {u:?}");
                 u
+            }),
+            feedback_to: var(env, "FRAGMENT_FEEDBACK_TO").map(|to| {
+                assert!(fragment_core::mail::valid_address(&to), "FRAGMENT_FEEDBACK_TO is one plain email address, not {to:?}");
+                to
             }),
             poll_interval_ms: var(env, "FRAGMENT_POLL_INTERVAL_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(300) * 1000,
             egress_local,

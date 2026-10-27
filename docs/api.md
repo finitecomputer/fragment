@@ -53,6 +53,7 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_DEFAULT_PLAN` | a new person's plan (Ledger, below): `guest` (the default and production's), `seat`, or `seat_always_on`; dev and the e2e set `seat` |
 | `FRAGMENT_COMPUTER_UNSAVED_MAX_MS` | how long a computer whose sleep's save keeps failing stays awake, its container kept, before it sleeps unsaved (the deploy config's `computers.unsaved_max_ms`; default 1800000, thirty minutes; docs/computers.md, "Saves and what a wake restores") |
 | `FRAGMENT_SUPPORT_URL` | where a person whose computer will not start gets help (the deploy config's `support_url`): an `https:` page or a `mailto:` address, at most 512 visible characters, refused at the node's first request otherwise; `GET /api/computers` gives it as `support`, and the shell links it (docs/computers.md, "What its owner is told"). Unset, none |
+| `FRAGMENT_FEEDBACK_TO` | where the operators are mailed each problem reported or message sent from the shell (the deploy config's `feedback_to`; Feedback, below): one plain address, refused at the node's first request otherwise (and before a deploy, as is one without `mail_from`). Unset, feedback is read on `/admin` alone; dev and the e2e name the mail fake's `feedback@fragment.localhost` |
 | `FRAGMENT_OPERATORS` | identities and keys that grant credit and set plans, seats and overdrafts, and wipe a person (Operators, below); a key listed is an operator's whether or not anyone holds it |
 | `FRAGMENT_DEPLOY_ID` | which deployment this is (default `dev`); every answer of the platform's host names it in `x-fragment-deploy` (`GET /healthz`'s among them, which CD checks), and the shell's page in its meta, so a page left open reloads once the platform under it changed (The shell, "A new release"). `cargo xtask deploy` sets the deploy's commit (`git rev-parse --short=12 HEAD`; a tree with uncommitted changes adds `-dirty-<unix seconds>`, so two such deploys differ). It is the release every call between the Worker and its objects carries, and each object admits only its own (docs/MODEL.md, Calls between releases): 1 to 64 of letters, digits, `.`, `_` and `-`, or the isolate does not start |
 | `FRAGMENT_DEPLOYED_AT` | when the release was deployed, whole seconds since 1970 (default none; dev and the e2e: their node's start). `cargo xtask deploy` sets the deploy's second. The shell's page names it in its `fragment-release-deployed` meta, which Settings shows (The shell). Every call between the Worker and its objects carries it beside the release, and an object that refuses a call from a release deployed after its own restarts onto it (docs/MODEL.md, Calls between releases, "An object behind restarts"): 1 to 12 digits, or the isolate does not start |
@@ -166,7 +167,7 @@ sender, an outage) 502. Dev and the e2e send to the mail fake instead
 (`FRAGMENT_MAIL_URL`). On a preview, whose mail is real, a message to an
 e2e person (`<name>@e2e.test`, an address with no mailbox) goes nowhere
 rather than bounce. What it sends: invites by email (Sharing), seats
-and trials (Billing), and a key added to a person (Sign-in: the key's ending, the whole key, how it came (a CLI's code typed: where, when and by what it was asked for, and never to type a code someone sent; or by which of their keys, `POST /api/identities/{id}/keys`), and `fragment keys revoke`; sent on every key added, after the answer, and a key is added whatever becomes of its mail). Each names the platform as its shell does
+and trials (Billing), each feedback to the operators' `feedback_to` (Feedback), and a key added to a person (Sign-in: the key's ending, the whole key, how it came (a CLI's code typed: where, when and by what it was asked for, and never to type a code someone sent; or by which of their keys, `POST /api/identities/{id}/keys`), and `fragment keys revoke`; sent on every key added, after the answer, and a key is added whatever becomes of its mail). Each names the platform as its shell does
 (`fragment_core::mail::PRODUCT`, Finite.Computer, held to the shell's
 page and web manifest by a test). The sender, its address and any name,
 is the deployment's `mail_from`: a name there should say the same.
@@ -503,10 +504,65 @@ learns the page is there. Its API decides again on every call.
 | `PUT /api/admin/people/{npub}/computer/image` | the same | `{image}` → `ComputerView`: their computer pinned to `image`, as its owner's `PUT /api/computers/{id}/image` pins it (a canary, or back to the default): its next start runs it, and awake on another, its owner is told an update is ready. Logged (`pin`, the image its detail). An image the deployment lacks is 400; a person with no computer, 404 |
 | `GET /api/admin/orgs?after=` | the same | → `AdminOrgs {orgs: [AdminOrg {id, name, createdAt, status, customer, subscription, periodEnd, cancelAtEnd, admins, paidSeats, compedSeats, pending}], next}` (`admins`: those who said yes; `pending`: its offers) |
 | `GET /api/admin/health` | the same | → `AdminHealth {orgsPaying, orgsLapsed, seatsPaid, seatsComped, planPushesQueued, quantityPushesQueued, failing: [{queue, target, tries, due}], lastEventAt, oldestCopyAt}` (`queue`: `plan`, `quantity`, or `cancel`, a subscription whose cancel failed) |
-| `GET /api/admin/log?before=` | the same | → `AdminLog {entries: [{n, at, operator, action, target, detail}], next}`, newest first: each comp, comp's kind and end, trial code made, changed and mailed, computer pinned, and ledger command, written in its own turn; the newest 10,000 kept |
+| `GET /api/admin/log?before=` | the same | → `AdminLog {entries: [{n, at, operator, action, target, detail}], next}`, newest first: each comp, comp's kind and end, trial code made, changed and mailed, computer pinned, feedback marked done, opened again or deleted, and ledger command, written in its own turn; the newest 10,000 kept |
+| `GET /api/admin/feedback?before=&open=` | the same | → `FeedbackPage {feedback: [Feedback], next}`: a page of 50, newest first, before `before` (a feedback's `n`); `open=1`, only those not done (Feedback, below) |
+| `GET /api/admin/feedback/{id}/screenshots/{place}` | the same | → its bytes, as they came: its `content-type` read from them, `nosniff`, `content-security-policy: default-src 'none'; sandbox`, never cached. A place it lacks, or no such feedback, is 404 |
+| `PATCH /api/admin/feedback/{id}` | the same | `{resolved}` → `Feedback`: marked done (its `resolvedAt` and `resolvedBy`, the operator), or open again; asked again, it changes and logs nothing (`feedback-done`, `feedback-reopen`) |
+| `DELETE /api/admin/feedback/{id}` | the same | → `Feedback` as it was: it and its screenshots deleted (`feedback-delete`); again, 404 |
 | `POST /api/admin/trials/{id}/send` | the same | `{email}` → `{sent, to}`: mails the code, its days, and `/welcome?trial=<code>`; an ended code is 400 |
 
 Comps, orgs' views and trial codes are under Seats and orgs.
+
+## Feedback
+
+A person reports a problem or sends a message to the deployment's
+operators from the shell: Settings' Help (Report a problem, Send a
+message), and a chat's ⋯ (Report a problem…). It is the shell's dialog:
+a kind, a message, and up to three screenshots, picked, pasted or
+dropped. No vendor's product takes it: Cloudflare offers none
+(Turnstile's feedback is its own challenges'), nor do WorkOS or Stripe,
+and a tracker's widget would run a third party's script in the shell,
+which holds the person's session. The registry keeps it
+(`registry/feedback.rs`), its screenshots' bytes in BLOBS under
+`feedback/<person>/<id>/<place>`; the operators read it on `/admin`'s
+Feedback (Operators: the admin, above), and are mailed each one at the
+deployment's `feedback_to` (`FRAGMENT_FEEDBACK_TO`) when it names one: who
+sent what, its first 2,000 characters, its page, its screenshots counted,
+and a link to `/admin`. The feedback is kept whatever becomes of the
+mail. On a preview, whose mail is real, an e2e person's
+(`<name>@e2e.test`) is not mailed: a hosted run sends a dozen, and
+deletes them as it ends. A wipe of the person deletes theirs, rows and bytes (`pictures`
+step; `found.feedback`).
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `POST /api/feedback` | a person: their session, or a key of theirs (an agent is 403; `for` is not honored) | `multipart/form-data` → `FeedbackSent {id, screenshots}` |
+
+Its form (`fragment_core::feedback::read`): `kind` once, `problem` or
+`message`; `message` once, 1 to 5,000 characters once trimmed (a
+browser's CRLFs kept as newlines; no control character but a newline or
+a tab); `page` at most once, the shell's path it was sent from (`/…`, at
+most 512 characters, no scheme or host), or empty for none; and
+`screenshot` up to three times, each a PNG, JPEG, WebP or GIF by its
+bytes (its part's declared type and file name are not trusted) of at
+most 5 MiB. Any other field, a field twice, or a body that is no form is
+400, saying which; a screenshot past 5 MiB, or a body past 15 MiB and 64
+KiB, 413. A person sends at most 10 in 24 hours (the eleventh is 429),
+and the registry keeps at most 10,000 (past them, 429 until an operator
+deletes some). Nothing refused is kept. The platform adds who sent it
+(their npub, and their latest sign-in's email), their browser's
+`User-Agent` (its first 512 characters), the release that took it, and
+when.
+
+A send is two registry turns, as a picture's is: the first says the
+person may send one now, so no one it does not know, nor anyone past
+their day, stores bytes; the screenshots go to BLOBS; the second keeps
+the row, under an id the router made for the send. A send the second
+refuses deletes what it put.
+
+`Feedback` (`fragment_proto::feedback`) is `{id, n, person, email, kind,
+message, page, userAgent, release, screenshots: [{mime, size}],
+createdAt, resolvedAt, resolvedBy}`.
 
 ## Operators: wiping a person
 
@@ -539,7 +595,7 @@ wipe runs next; `ran`, the steps this call ran, each `{step, done,
 deleted, note?, cleaning?}` (`note` says what a step skipped, waits for, or why it
 failed this time: the next call tries again; `cleaning`, the `cleanup` step's, below); `done`, wiped with nothing
 left. `found` is what the person and their agents hold now: `{signIns,
-keys, sessions, pictures, agents, fragments, memberships, computer,
+keys, sessions, pictures, feedback, agents, fragments, memberships, computer,
 ledger, lists}`, `fragments` (theirs) and `memberships` (theirs and their
 agents' in other people's fragments, `<fragment> (<role>, <identity>)`)
 each `{count, names, more}` (at most 50 names), `computer` `{computer,
@@ -2928,7 +2984,7 @@ of what a guest may do, what a seat gives, and who is signed in
 welcome and whose Use another account switches; the welcome offers the
 seat to any guest, one whose seat ended and
 who keeps their chats too; their settings are their Billing, their
-account, then Your data. Its
+account, Your data, then Help. Its
 settings hold the person's account (who is signed in, their latest
 sign-in's email, beside a POST to `/auth/logout` and one to
 `/auth/switch`, Use another account; their sign-ins when they have
@@ -2961,7 +3017,9 @@ coding agent), and Your data (Export, above: "Export everything", its
 state and progress while it builds, read again every 2 s while the page
 shows it, its size, until when it is kept and its Download once ready,
 which downloads on the click with the platform session, and a refusal's
-reason); its sidebar shows their agent and lists their chats, its
+reason), and Help (Report a problem and Send a message, each opening
+the shell's feedback dialog: Feedback, above; a chat's ⋯ offers Report a
+problem… too, naming that chat's page); its sidebar shows their agent and lists their chats, its
 desktop's dock their apps, each one's share sheet (`/share/<name>`) in a
 dialog (their own's "Share…" or "Invite…"; someone else's "People…",
 where they see who is in and may leave), and the dock's Add shows ways

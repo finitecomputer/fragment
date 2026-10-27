@@ -116,7 +116,7 @@ pub fn print(r: &WipeReport) {
 }
 
 fn print_found(f: &Found) {
-    println!("  sign-ins {}, keys {}, sessions {}, pictures {}", f.sign_ins, f.keys, f.sessions, f.pictures);
+    println!("  sign-ins {}, keys {}, sessions {}, pictures {}, feedback {}", f.sign_ins, f.keys, f.sessions, f.pictures, f.feedback);
     if !f.agents.is_empty() {
         println!("  agents ({}): {}", f.agents.len(), f.agents.join(", "));
     }

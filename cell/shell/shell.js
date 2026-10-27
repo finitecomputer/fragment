@@ -1137,6 +1137,7 @@ function openChatMenu(name, trigger) {
     ...profiles,
     ...screens,
     archiveItem(name),
+    { icon: "flag", text: "Report a problem…", onClick: () => openFeedback("problem") },
   ]);
 }
 // The identity of the person's own agent a direct chat is with (its row's
@@ -2507,7 +2508,7 @@ async function openSettings(push = true, failed = null) {
   // reads its export again while one builds
   if (state.guest) {
     returnSaid(back);
-    renderSettingsPage(page, [...billing, account, dataSection(), ...releaseLine(null)]);
+    renderSettingsPage(page, [...billing, account, dataSection(), helpSection(), ...releaseLine(null)]);
     return tell();
   }
   const standing = ledger?.standing?.standing;
@@ -2581,7 +2582,7 @@ async function openSettings(push = true, failed = null) {
   const skills = await skillsSection();
   if (lost()) return;
   returnSaid(back);
-  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, simplexSection(), buildSection(), dataSection(), ...releaseLine(c)]);
+  renderSettingsPage(page, [account, ...billing, computer, agents, accessSection(access), skills, connections, simplexSection(), buildSection(), dataSection(), helpSection(), ...releaseLine(c)]);
   renderAgentFaces();
   // a home read that answered while these were built shown now they are in
   paintHomes();
@@ -2917,6 +2918,149 @@ function accessSection(access) {
   return s;
 }
 
+// ---- help: a problem reported, or a message, to the deployment's operators
+// (docs/api.md, Feedback), with up to three screenshots, picked, pasted or
+// dropped: from Settings' Help, and a chat's options. It names the page it
+// was opened on (a chat's path, or settings').
+const FEEDBACK_SHOTS_MAX = 3;
+const FEEDBACK_SHOT_MAX_BYTES = 5 * 1024 * 1024;
+const FEEDBACK_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+const FEEDBACK_LABEL = { problem: ["What happened?", "What did you do, what did you expect, and what happened instead?"], message: ["Your message", "Anything you want us to know"] };
+const feedback = { shots: [], page: "/" };
+function helpSection() {
+  const s = section("Help");
+  s.id = "settings-help";
+  s.append(el("p", "muted", "Something not working, or something you want us to know? Write to us here, with screenshots if they help. We read every one."));
+  const ways = el("span", "settings-actions");
+  for (const [kind, text] of [["problem", "Report a problem"], ["message", "Send a message"]]) {
+    const b = el("button", "quiet", text);
+    b.type = "button";
+    b.dataset.action = `feedback-${kind}`;
+    b.onclick = () => openFeedback(kind);
+    ways.append(b);
+  }
+  s.append(actionLine("Feedback", ways));
+  return s;
+}
+function openFeedback(kind) {
+  const form = $("feedback-form");
+  form.reset();
+  form.elements.kind.value = kind;
+  form.hidden = false;
+  $("feedback-sent").hidden = true;
+  feedback.page = location.pathname;
+  feedbackShots([]);
+  feedbackSaid(null);
+  feedbackLabel();
+  $("feedback-dialog").showModal();
+  $("feedback-message").focus();
+}
+function feedbackLabel() {
+  const [label, hint] = FEEDBACK_LABEL[$("feedback-form").elements.kind.value] ?? FEEDBACK_LABEL.problem;
+  $("feedback-label").textContent = label;
+  $("feedback-message").placeholder = hint;
+}
+function feedbackSaid(text) {
+  const said = $("feedback-error");
+  said.textContent = text ?? "";
+  said.hidden = !text;
+}
+// the screenshots it holds, each a thumbnail with its own Remove
+function feedbackShots(files) {
+  for (const s of feedback.shots) URL.revokeObjectURL(s.url);
+  feedback.shots = files.map((file) => ({ file, url: URL.createObjectURL(file) }));
+  $("feedback-shots").replaceChildren(...feedback.shots.map((s, i) => {
+    const shot = el("div", "feedback-shot");
+    const img = el("img");
+    img.src = s.url;
+    img.alt = `Screenshot ${i + 1}`;
+    const remove = el("button");
+    remove.type = "button";
+    remove.setAttribute("aria-label", `Remove screenshot ${i + 1}`);
+    remove.append(icon("x"));
+    remove.onclick = () => feedbackShots(feedback.shots.filter((_, j) => j !== i).map((x) => x.file));
+    shot.append(img, remove);
+    return shot;
+  }));
+  const full = feedback.shots.length >= FEEDBACK_SHOTS_MAX;
+  $("feedback-file").disabled = full;
+  $("feedback-attach").setAttribute("aria-disabled", String(full));
+}
+// screenshots added: what is no image, too large, or past the third is
+// said, and the rest kept
+function addFeedbackShots(files) {
+  const kept = feedback.shots.map((s) => s.file);
+  let refused = null;
+  for (const f of files) {
+    if (!FEEDBACK_TYPES.includes(f.type)) refused = `${f.name || "That file"} is not an image: a PNG, JPEG, WebP or GIF.`;
+    else if (f.size > FEEDBACK_SHOT_MAX_BYTES) refused = `${f.name || "That image"} is larger than 5 MB: crop it, or send a smaller one.`;
+    else if (kept.length >= FEEDBACK_SHOTS_MAX) refused = `At most ${FEEDBACK_SHOTS_MAX} screenshots.`;
+    else kept.push(f);
+  }
+  feedbackShots(kept);
+  feedbackSaid(refused);
+}
+$("feedback-form").elements.kind.forEach((r) => (r.onchange = feedbackLabel));
+$("feedback-file").onchange = () => {
+  addFeedbackShots([...$("feedback-file").files]);
+  $("feedback-file").value = "";
+};
+$("feedback-message").addEventListener("paste", (e) => {
+  const images = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith("image/"));
+  if (!images.length) return;
+  e.preventDefault();
+  addFeedbackShots(images);
+});
+$("feedback-dialog").addEventListener("dragover", (e) => {
+  if (![...(e.dataTransfer?.types ?? [])].includes("Files")) return;
+  e.preventDefault();
+  $("feedback-dialog").classList.add("dropping");
+});
+$("feedback-dialog").addEventListener("dragleave", (e) => {
+  if (!$("feedback-dialog").contains(e.relatedTarget)) $("feedback-dialog").classList.remove("dropping");
+});
+$("feedback-dialog").addEventListener("drop", (e) => {
+  $("feedback-dialog").classList.remove("dropping");
+  if (!e.dataTransfer?.files.length) return;
+  e.preventDefault();
+  addFeedbackShots([...e.dataTransfer.files]);
+});
+$("feedback-dialog").addEventListener("close", () => feedbackShots([]));
+$("feedback-cancel").onclick = () => $("feedback-dialog").close();
+$("feedback-done").onclick = () => $("feedback-dialog").close();
+$("feedback-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const form = $("feedback-form");
+  const body = new FormData();
+  body.append("kind", form.elements.kind.value);
+  body.append("message", $("feedback-message").value);
+  body.append("page", feedback.page);
+  for (const s of feedback.shots) body.append("screenshot", s.file, s.file.name || "screenshot");
+  const send = $("feedback-send");
+  send.disabled = true;
+  send.textContent = "Sending…";
+  feedbackSaid(null);
+  writing++;
+  let r = null;
+  try {
+    r = await fetch("/api/feedback", { method: "POST", headers: { "x-fragment-shell": "1" }, body, credentials: "same-origin" });
+    heard(r);
+  } catch {
+    // no answer: said below, and Send stays to try again
+  } finally {
+    writing--;
+    send.disabled = false;
+    send.textContent = "Send";
+  }
+  if (r?.ok) {
+    feedbackShots([]);
+    form.hidden = true;
+    $("feedback-sent").hidden = false;
+    $("feedback-done").focus();
+    return;
+  }
+  feedbackSaid(r ? (await r.json().catch(() => ({}))).message || "That wasn't sent. Try again." : "We couldn't be reached. Check your connection, and try again.");
+};
 // ---- your data: an export of everything that is the person's (docs/api.md,
 // Export), built in the background, which they are mailed about once it is
 // ready, and which downloads from here (the platform session, on a click

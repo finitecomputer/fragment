@@ -234,8 +234,85 @@ async function log(more = false) {
   $("log-more").hidden = !v.next;
 }
 
+// ---- feedback: what people sent from the shell (docs/api.md, Feedback),
+// newest first; its screenshots fetched with the page's header, each shown
+// from a blob of its own (an <img> sends no header)
+let feedbackNext = null;
+const shotUrls = [];
+
+function cut(text, n) {
+  return text.length > n ? `${text.slice(0, n - 1)}…` : text;
+}
+
+async function feedback(more = false) {
+  const p = new URLSearchParams();
+  if ($("feedback-filter").elements.open.checked) p.set("open", "1");
+  if (more && feedbackNext) p.set("before", String(feedbackNext));
+  const v = await api("GET", `/api/admin/feedback?${p}`);
+  const rows = $("feedback-rows");
+  if (!more) rows.replaceChildren();
+  for (const f of v.feedback) {
+    rows.append(row([when(f.createdAt), f.email || f.person, f.kind, cut(f.message, 120), f.page || "", String(f.screenshots.length), f.resolvedAt ? when(f.resolvedAt) : ""], guard(() => openFeedback(f))));
+  }
+  feedbackNext = v.next;
+  $("feedback-more").hidden = !v.next;
+  say(`${rows.children.length} feedback${v.next ? " (more)" : ""}`);
+}
+
+async function openFeedback(f) {
+  const box = $("feedback-one");
+  for (const u of shotUrls.splice(0)) URL.revokeObjectURL(u);
+  const facts = el("dl");
+  const fact = (k, val) => facts.append(el("dt", k), el("dd", val ?? ""));
+  fact("from", `${f.email || "no email"} (${f.person})`);
+  fact("sent", when(f.createdAt));
+  fact("page", f.page || "none");
+  fact("browser", f.userAgent || "none");
+  fact("release", f.release);
+  fact("done", f.resolvedAt ? `${when(f.resolvedAt)} by ${f.resolvedBy}` : "no");
+  const message = el("p", f.message, "message");
+  const shots = el("div", undefined, "shots");
+  f.screenshots.forEach((s, i) => {
+    const a = el("a", `screenshot ${i + 1} (${s.mime}, ${Math.ceil(s.size / 1024)} KiB)…`);
+    shots.append(a);
+    guard(async () => {
+      const r = await fetch(`/api/admin/feedback/${f.id}/screenshots/${i}`, { headers: { "x-fragment-shell": "1" }, credentials: "same-origin" });
+      if (!r.ok) throw new Error(`screenshot ${i + 1}: ${(await r.json().catch(() => ({}))).message || r.status}`);
+      const url = URL.createObjectURL(await r.blob());
+      shotUrls.push(url);
+      const img = el("img");
+      img.src = url;
+      img.alt = `screenshot ${i + 1}`;
+      a.replaceChildren(img);
+      a.href = url;
+      a.target = "_blank";
+    })();
+  });
+  const done = el("button", f.resolvedAt ? "Open again" : "Mark done");
+  done.addEventListener("click", guard(async () => {
+    const v = await api("PATCH", `/api/admin/feedback/${f.id}`, { resolved: !f.resolvedAt });
+    await feedback();
+    await openFeedback(v);
+    say(v.resolvedAt ? "marked done" : "open again");
+  }));
+  const del = el("button", "Delete");
+  del.addEventListener("click", guard(async () => {
+    if (!confirm(`Delete this ${f.kind} from ${f.email || f.person}, and its screenshots? This can't be undone.`)) return;
+    await api("DELETE", `/api/admin/feedback/${f.id}`);
+    box.hidden = true;
+    await feedback();
+    say("deleted");
+  }));
+  const reply = el("a", "Reply by email");
+  if (f.email) reply.href = `mailto:${encodeURIComponent(f.email)}`;
+  const actions = el("p");
+  actions.append(done, " ", del, ...(f.email ? [" ", reply] : []));
+  box.replaceChildren(el("h2", f.kind === "problem" ? "A problem reported" : "A message"), message, shots, facts, actions);
+  box.hidden = false;
+}
+
 // ---- tabs
-const load = { people: () => people(), orgs: () => orgs(), trials, health, log: () => log() };
+const load = { people: () => people(), orgs: () => orgs(), trials, feedback: () => feedback(), health, log: () => log() };
 
 function show(tab) {
   for (const b of document.querySelectorAll("#tabs button")) b.classList.toggle("on", b.dataset.tab === tab);
@@ -275,5 +352,7 @@ document.addEventListener("DOMContentLoaded", guard(async () => {
   $("people-more").addEventListener("click", guard(() => people(true)));
   $("orgs-more").addEventListener("click", guard(() => orgs(true)));
   $("log-more").addEventListener("click", guard(() => log(true)));
+  $("feedback-more").addEventListener("click", guard(() => feedback(true)));
+  $("feedback-filter").elements.open.addEventListener("change", guard(() => feedback()));
   await show(location.hash.slice(1) in load ? location.hash.slice(1) : "people");
 }));

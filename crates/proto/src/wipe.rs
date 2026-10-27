@@ -63,6 +63,9 @@ pub struct Found {
     pub keys: u64,
     pub sessions: u64,
     pub pictures: u64,
+    /// The feedback they sent the operators (docs/api.md, Feedback).
+    #[serde(default)]
+    pub feedback: u64,
     pub agents: Vec<String>,
     /// The fragments they own (their list's rows they own), and the agent
     /// fragments the registry names.
@@ -108,6 +111,7 @@ impl Found {
             && self.keys == 0
             && self.sessions == 0
             && self.pictures == 0
+            && self.feedback == 0
             && self.agents.is_empty()
             && self.fragments.count == 0
             && self.memberships.count == 0

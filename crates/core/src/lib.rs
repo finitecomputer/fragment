@@ -20,6 +20,7 @@ pub mod egress;
 pub mod export;
 pub mod face;
 pub mod facet;
+pub mod feedback;
 pub mod form;
 pub mod frames;
 pub mod glob;

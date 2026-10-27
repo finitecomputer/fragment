@@ -632,6 +632,11 @@ Checked against finite-mono's code (2026-10-08):
     status, period end, and a link to the customer in Stripe's
     dashboard.
   - **An org's page:** its seats.
+- **Feedback:** what people reported or sent from the shell's Settings
+  (docs/api.md, Feedback), newest first, only those not done unless
+  asked: who sent it, its message, page, browser and release, and its
+  screenshots; mark one done or open again, delete it, or reply by
+  email.
 - **Billing health:** the last webhook, the last reconcile, what it
   fixed, and sync errors.
 - **The audit log:** every admin write is a row (when, which operator,

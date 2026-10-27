@@ -145,6 +145,30 @@
       <div class="rename-actions"><button id="add-agent-cancel" type="button">Cancel</button><button type="submit" id="add-agent-go" disabled>Add</button></div>
     </form>
   </dialog>
+  <!-- a problem reported, or a message, to the deployment's operators, with
+       up to three screenshots: from Settings' Help and a chat's options
+       (shell.js openFeedback; docs/api.md, Feedback) -->
+  <dialog class="rename-agent feedback-dialog" id="feedback-dialog" aria-labelledby="feedback-title">
+    <form id="feedback-form">
+      <h2 id="feedback-title">Send feedback</h2>
+      <div class="feedback-kind" role="radiogroup" aria-label="What is it?">
+        <label><input type="radio" name="kind" value="problem" checked> Report a problem</label>
+        <label><input type="radio" name="kind" value="message"> Send a message</label>
+      </div>
+      <label for="feedback-message" id="feedback-label">What happened?</label>
+      <textarea id="feedback-message" name="message" rows="6" maxlength="5000" required></textarea>
+      <div class="feedback-shots" id="feedback-shots"></div>
+      <label class="quiet feedback-attach" id="feedback-attach"><input type="file" id="feedback-file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>Add screenshots</label>
+      <p class="feedback-note">Paste or drop them here too: up to 3, 5 MB each. We see your email, the page you're on and your browser, so we can follow up.</p>
+      <p id="feedback-error" class="form-error" role="alert" hidden></p>
+      <div class="rename-actions"><button id="feedback-cancel" type="button">Cancel</button><button type="submit" id="feedback-send">Send</button></div>
+    </form>
+    <div id="feedback-sent" hidden>
+      <h2>Thanks</h2>
+      <p>We got it, and we'll read it soon. If we need to know more, we'll write to your email.</p>
+      <div class="rename-actions"><button id="feedback-done" type="button">Close</button></div>
+    </div>
+  </dialog>
   <dialog class="search-dialog" id="search-dialog" aria-label="Ask anything or find a chat">
     <div class="wallpaper" aria-hidden="true"></div>
     <div class="search-panel">

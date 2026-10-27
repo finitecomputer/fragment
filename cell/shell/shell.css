@@ -303,6 +303,24 @@ body.reordering iframe { pointer-events: none; }
 .rename-actions button[type=submit] { background: var(--text-primary); color: var(--bg-window); }
 .rename-actions button[type=submit]:disabled { opacity: .45; }
 button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 3px; }
+/* feedback to the operators (index.html #feedback-dialog): the rename dialog's, wider, with a kind, a message and its screenshots */
+.feedback-dialog { width: min(480px, calc(100vw - 32px)); }
+.feedback-kind { display: flex; gap: 8px; margin: 18px 0 0; }
+.feedback-kind label { display: inline-flex; align-items: center; gap: 7px; margin: 0; padding: 7px 13px; border: 1px solid var(--border); border-radius: 999px; font-size: 13px; cursor: pointer; }
+.feedback-kind label:has(input:checked) { border-color: var(--text-primary); background: var(--bg-active); }
+.feedback-kind input { width: auto; margin: 0; accent-color: var(--text-primary); }
+.feedback-dialog textarea { width: 100%; box-sizing: border-box; min-height: 120px; padding: 12px; border: 1px solid var(--border-strong); border-radius: 9px; font: inherit; font-size: 14px; color: inherit; background: var(--bg-window); resize: vertical; }
+.feedback-dialog textarea:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 3px; }
+.feedback-dialog.dropping textarea { border-style: dashed; border-color: var(--accent-blue); }
+.feedback-shots { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.feedback-shots:empty { display: none; }
+.feedback-shot { position: relative; width: 72px; height: 54px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg-window); }
+.feedback-shot img { width: 100%; height: 100%; object-fit: cover; }
+.feedback-shot button { position: absolute; top: 3px; right: 3px; display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%; background: rgba(0,0,0,.6); color: #fff; }
+.feedback-shot button svg { width: 12px; height: 12px; }
+.rename-agent label.feedback-attach { display: inline-flex; margin: 12px 0 0; cursor: pointer; }
+.feedback-attach[aria-disabled=true] { opacity: .45; cursor: default; }
+.rename-agent p.feedback-note { margin: 8px 0 0; font-size: 12px; color: var(--text-tertiary, var(--text-secondary)); }
 @media (max-width: 760px) { .topbar { min-height: 64px; padding: 8px; gap: 5px; } .agent-heading { max-width: none; flex: 1; padding: 6px 10px; } .topbar .grow { display: none; } }
 
 /* Small, flat favicon-style app marks. */

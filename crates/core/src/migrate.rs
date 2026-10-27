@@ -127,6 +127,7 @@ pub const REGISTRY: Class = Class {
         step!("connection_fences", "registry/0004_connection_fences.sql"),
         step!("invites_answered", "registry/0005_invites_answered.sql"),
         step!("connection_accounts", "registry/0006_connection_accounts.sql"),
+        step!("feedback", "registry/0007_feedback.sql"),
     ],
     variants: &[],
     kept: &[],

@@ -139,7 +139,8 @@ pub async fn admin_page(req: &Request, env: &Env, cfg: &Config, url: &Url) -> Ce
     h.set("cache-control", "no-store")?;
     h.set(
         "content-security-policy",
-        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-src 'none'; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
+        // `blob:`: a feedback's screenshots, fetched with the page's header (admin.js)
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'none'; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
     )?;
     h.set("x-frame-options", "DENY")?;
     h.set("cross-origin-opener-policy", "same-origin")?;

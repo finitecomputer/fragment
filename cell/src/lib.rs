@@ -43,6 +43,7 @@ mod cs;
 mod error;
 mod export;
 mod files;
+mod feedback;
 mod fragment;
 mod icon;
 mod jobs;
@@ -1252,6 +1253,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let rest = rest.to_vec();
             orgs::org(req, env, cfg, &url, &rest).await
         }
+        (Method::Post, ["api", "feedback"]) => feedback::send(req, env, cfg, &url).await,
         (_, ["api", "admin", rest @ ..]) => {
             let rest = rest.to_vec();
             orgs::admin(req, env, cfg, &url, &rest).await
