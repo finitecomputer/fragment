@@ -6,22 +6,30 @@
 //!
 //! Its screenshots' bytes are BLOBS', and a row here is their record until
 //! they are gone (fragment_core::feedback::State), so none is ever left
-//! unrecorded, whatever fails or ends between two steps:
+//! unrecorded, whatever fails, ends, or runs at once:
 //!
-//! - `FeedbackBegin` keeps a send `sending` before the router puts a byte;
-//!   `FeedbackKeep` makes it `kept` once all are. Both are idempotent on
-//!   the send's id, its sender's: a send whose answer was lost is asked
+//! - `FeedbackBegin` keeps a send `sending` before the router puts a byte,
+//!   and makes it a try of its own (`attempt`) each time it is asked: the
+//!   router puts that try's bytes under its own keys, and only the latest
+//!   try may `FeedbackKeep` it, so two tries in flight at once never mix,
+//!   and a stale one cannot touch a kept one's bytes. Both are idempotent
+//!   on the send's id, its sender's: a send whose answer was lost is asked
 //!   again, and is the same one.
+//! - A try starts no put later than `WRITE_WINDOW_MS` after it asked to
+//!   begin, so none of its bytes lands past `FENCE_MS` from its beginning:
+//!   a row's `fenced_until`. Nothing under a row is deleted before it.
 //! - `FeedbackMailed` marks one kept whose operators' notice went, so a
 //!   send asked again mails one that never did, and none twice.
 //! - `FeedbackDelete` makes one `deleting`; so does this cell's alarm, of a
-//!   send not kept in `SENDING_TTL_MS`. The alarm then deletes each
-//!   deleting one's bytes, and only then its row (`feedback_alarm`); a run
-//!   that fails arms the next.
+//!   send not kept in `SENDING_TTL_MS` from its latest try. The alarm then
+//!   deletes each deleting one's bytes once past its fence, and only then
+//!   its row; and, past a kept one's fence, its earlier tries' bytes
+//!   (`feedback_alarm`). A run that fails arms the next.
 //!
-//! A wipe of the person deletes the bytes, then the rows (wipe.rs).
+//! A wipe of the person waits out their fences, deletes the bytes, then
+//! the rows (wipe.rs).
 
-use fragment_core::feedback::{self as rules, State, DAY_MS, KEPT_MAX, PER_DAY_MAX, SENDING_TTL_MS, SWEEP_BATCH};
+use fragment_core::feedback::{self as rules, State, ATTEMPTS_MAX, DAY_MS, FENCE_MS, KEPT_MAX, PER_DAY_MAX, SENDING_TTL_MS, SWEEP_BATCH};
 use fragment_proto::feedback::{Feedback, FeedbackKind, FeedbackPage, Screenshot};
 use serde::de::IgnoredAny;
 use serde::Serialize;
@@ -37,10 +45,11 @@ const SWEEP_AGAIN_MS: i64 = 1000;
 /// not answer): it never ends the deleting.
 const SWEEP_RETRY_MS: i64 = 60 * 1000;
 
-/// `POST /feedback/begin`: a send, before its screenshots' bytes are put:
-/// kept `sending` (a person, under the day's count, the registry not
-/// full), or, asked again with its id, the same send: one still sending is
-/// sent again as asked now, and one kept is answered as it was.
+/// `POST /feedback/begin`: a try of a send, before its screenshots' bytes
+/// are put: a new send kept `sending` (a person, under the day's count,
+/// the registry not full), or, asked again with its id, the same send:
+/// one still sending is a new try, as asked now (the try before can keep
+/// it no longer), and one kept is answered as it was.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct FeedbackBegin {
     pub by: By,
@@ -53,13 +62,13 @@ pub(crate) struct FeedbackBegin {
     pub screenshots: Vec<Screenshot>,
 }
 
-/// Whose it is; whether it was begun before (its earlier try's bytes may
-/// be there); and, once kept, the feedback (nothing more to put, but its
-/// notice, if it never went).
+/// Whose it is, and either the try to put its bytes as and keep it by,
+/// or, kept already, the feedback (nothing more to put, but its notice, if
+/// it never went).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Began {
     pub person: String,
-    pub again: bool,
+    pub attempt: Option<String>,
     pub kept: Option<Kept>,
 }
 
@@ -68,12 +77,14 @@ impl Call for FeedbackBegin {
     type Answer = Began;
 }
 
-/// `POST /feedback/keep`: a send whose screenshots' bytes are all put,
-/// kept. Asked again, it answers the one kept.
+/// `POST /feedback/keep`: a try whose screenshots' bytes are all put
+/// keeps its send, if it is the send's latest. Asked again, or once
+/// another try kept it, it answers the one kept.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct FeedbackKeep {
     pub by: By,
     pub id: String,
+    pub attempt: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -114,15 +125,22 @@ impl Call for FeedbackList {
     type Answer = FeedbackPage;
 }
 
-/// `POST /feedback/get`: one kept, by its id.
+/// `POST /feedback/get`: one kept, by its id, and the try that kept it
+/// (whose keys its screenshots are under).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct FeedbackGet {
     pub id: String,
 }
 
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Got {
+    pub feedback: Feedback,
+    pub attempt: String,
+}
+
 impl Call for FeedbackGet {
     const PATH: &'static str = "/feedback/get";
-    type Answer = Feedback;
+    type Answer = Got;
 }
 
 /// `POST /feedback/resolve`: an operator (`by`) marks one done, or open
@@ -169,10 +187,13 @@ struct Row {
     resolved_at: Option<i64>,
     resolved_by: Option<String>,
     state: String,
+    attempt: String,
+    attempts: i64,
+    fenced_until: Option<i64>,
     mailed_at: Option<i64>,
 }
 
-const SELECT: &str = "SELECT n, id, person, email, kind, message, page, user_agent, release, screenshots, created_at, resolved_at, resolved_by, state, mailed_at FROM feedback";
+const SELECT: &str = "SELECT n, id, person, email, kind, message, page, user_agent, release, screenshots, created_at, resolved_at, resolved_by, state, attempt, attempts, fenced_until, mailed_at FROM feedback";
 
 impl Row {
     /// One kept, as `FeedbackKeep` answers it.
@@ -210,19 +231,24 @@ impl Row {
     }
 }
 
-/// One the alarm deletes: where its bytes are.
+/// One the alarm deletes, or prunes: where its bytes are, the try that
+/// kept it, and its fence as read.
 #[derive(Deserialize)]
 struct Doomed {
     id: String,
     person: String,
+    attempt: String,
+    fenced_until: Option<i64>,
 }
 
-/// When the alarm is next due for feedback: the oldest send's expiry, and
-/// whether any is deleting.
+/// When the alarm is next due for feedback: the oldest send's latest try,
+/// the earliest fence of one deleting (0 for none), and of one kept whose
+/// earlier tries' bytes it prunes.
 #[derive(Deserialize)]
 struct Due {
     sending: Option<i64>,
-    deleting: i64,
+    deleting: Option<i64>,
+    pruning: Option<i64>,
 }
 
 impl RegistryCell {
@@ -280,26 +306,44 @@ impl RegistryCell {
         assert!(b.screenshots.len() <= rules::SCREENSHOTS_MAX, "the router sends a few screenshots");
         // armed before its row is written: a send never kept is never left
         self.arm_feedback(js::now_ms() + SENDING_TTL_MS).await?;
+        let now = js::now_ms();
         let who = self.by(&b.by)?;
+        let attempt = js::random_hex::<8>();
+        assert!(rules::valid_attempt(&attempt), "a try is 16 hex digits");
         let shots = serde_json::to_string(&b.screenshots).map_err(|e| CellError::host(e.to_string()))?;
         let null = |v: Option<String>| v.map_or(SqlStorageValue::Null, Into::into);
         match self.feedback_mine(&b.id, &who)? {
             Some(row) => match row.state()? {
-                State::Kept => Ok(Began { person: who.id, again: true, kept: Some(row.kept()?) }),
-                // the same send, asked again: as it is asked now
+                State::Kept => Ok(Began { person: who.id, attempt: None, kept: Some(row.kept()?) }),
+                // the same send, asked again: a new try, as it is asked now;
+                // its expiry and its fence are this try's
                 State::Sending => {
+                    if row.attempts >= i64::from(ATTEMPTS_MAX) {
+                        return Err(CellError::new(ErrorCode::AlreadyExists, format!("feedback {} was tried {ATTEMPTS_MAX} times: send it again, as a new one", b.id)));
+                    }
                     self.exec(
-                        "UPDATE feedback SET kind = ?, message = ?, page = ?, user_agent = ?, release = ?, screenshots = ? WHERE id = ? AND state = 'sending'",
-                        vec![b.kind.as_str().into(), b.message.into(), null(b.page), null(b.user_agent), b.release.into(), shots.into(), b.id.as_str().into()],
+                        "UPDATE feedback SET kind = ?, message = ?, page = ?, user_agent = ?, release = ?, screenshots = ?, attempt = ?, attempt_at = ?, attempts = attempts + 1, fenced_until = ? WHERE id = ? AND state = 'sending'",
+                        vec![
+                            b.kind.as_str().into(),
+                            b.message.into(),
+                            null(b.page),
+                            null(b.user_agent),
+                            b.release.into(),
+                            shots.into(),
+                            attempt.as_str().into(),
+                            SqlStorageValue::Integer(now),
+                            SqlStorageValue::Integer(now + FENCE_MS),
+                            b.id.as_str().into(),
+                        ],
                     )?;
-                    Ok(Began { person: who.id, again: true, kept: None })
+                    Ok(Began { person: who.id, attempt: Some(attempt), kept: None })
                 }
                 State::Deleting => Err(CellError::new(ErrorCode::AlreadyExists, format!("feedback {} was deleted: send it again, as a new one", b.id))),
             },
             None => {
                 let who = self.feedback_room(&b.by)?;
                 self.exec(
-                    "INSERT INTO feedback (id, person, email, kind, message, page, user_agent, release, screenshots, created_at, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sending')",
+                    "INSERT INTO feedback (id, person, email, kind, message, page, user_agent, release, screenshots, created_at, state, attempt, attempt_at, attempts, fenced_until) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sending', ?, ?, 1, ?)",
                     vec![
                         b.id.as_str().into(),
                         who.id.as_str().into(),
@@ -310,30 +354,61 @@ impl RegistryCell {
                         null(b.user_agent),
                         b.release.into(),
                         shots.into(),
-                        SqlStorageValue::Integer(js::now_ms()),
+                        SqlStorageValue::Integer(now),
+                        attempt.as_str().into(),
+                        SqlStorageValue::Integer(now),
+                        SqlStorageValue::Integer(now + FENCE_MS),
                     ],
                 )?;
-                Ok(Began { person: who.id, again: false, kept: None })
+                Ok(Began { person: who.id, attempt: Some(attempt), kept: None })
             }
         }
     }
 
-    fn feedback_keep(&self, b: FeedbackKeep) -> CellResult<Kept> {
+    async fn feedback_keep(&self, b: FeedbackKeep) -> CellResult<Kept> {
         let who = self.by(&b.by)?;
-        let row = self.feedback_mine(&b.id, &who)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no feedback {} being sent: it took too long, send it again", b.id)))?;
+        let gone = || CellError::new(ErrorCode::NotFound, format!("no feedback {} being sent: it took too long, send it again", b.id));
+        let row = self.feedback_mine(&b.id, &who)?.ok_or_else(gone)?;
         match row.state()? {
+            // whichever try kept it: the send is kept
             State::Kept => row.kept(),
+            State::Sending if row.attempt != b.attempt => Err(CellError::new(ErrorCode::AlreadyExists, format!("a later try of feedback {} is under way: it is that one's to keep", b.id))),
             State::Sending => {
-                self.exec("UPDATE feedback SET state = 'kept' WHERE id = ? AND state = 'sending'", vec![b.id.as_str().into()])?;
+                // its own bytes are all put: with no other try, none can land
+                // later; else an earlier try's may, until the fence, when the
+                // alarm prunes them
+                if row.attempts > 1 {
+                    if let Some(fence) = row.fenced_until {
+                        self.arm_feedback(fence).await?;
+                    }
+                }
+                let kept = self.rows::<IgnoredAny>(
+                    "UPDATE feedback SET state = 'kept', fenced_until = CASE WHEN attempts = 1 THEN NULL ELSE fenced_until END WHERE id = ? AND state = 'sending' AND attempt = ? RETURNING id",
+                    vec![b.id.as_str().into(), b.attempt.as_str().into()],
+                )?;
+                if kept.is_empty() {
+                    // another try came while the alarm was armed
+                    return Err(CellError::new(ErrorCode::AlreadyExists, format!("a later try of feedback {} is under way: it is that one's to keep", b.id)));
+                }
                 self.feedback_row(&b.id)?.ok_or_else(|| CellError::host(format!("feedback {} was kept, and is gone", b.id)))?.kept()
             }
-            State::Deleting => Err(CellError::new(ErrorCode::NotFound, format!("no feedback {} being sent: it took too long, send it again", b.id))),
+            State::Deleting => Err(gone()),
         }
     }
 
     fn feedback_mailed(&self, id: &str) -> CellResult<Value> {
         let marked = self.rows::<IgnoredAny>("UPDATE feedback SET mailed_at = ? WHERE id = ? AND state = 'kept' AND mailed_at IS NULL RETURNING id", vec![SqlStorageValue::Integer(js::now_ms()), id.into()])?;
         Ok(json!({ "marked": !marked.is_empty() }))
+    }
+
+    fn feedback_got(&self, id: &str) -> CellResult<Got> {
+        match self.feedback_row(id)? {
+            Some(row) if row.state()? == State::Kept => {
+                let attempt = row.attempt.clone();
+                Ok(Got { feedback: row.wire()?, attempt })
+            }
+            _ => Err(CellError::new(ErrorCode::NotFound, format!("no feedback {id}"))),
+        }
     }
 
     fn feedback_list(&self, b: FeedbackList) -> CellResult<FeedbackPage> {
@@ -360,9 +435,13 @@ impl RegistryCell {
     }
 
     async fn feedback_delete(&self, b: FeedbackDelete) -> CellResult<Feedback> {
-        let was = self.feedback_of(&b.id)?;
-        // armed before its row changes: a deleting one is never left
-        self.arm_feedback(js::now_ms()).await?;
+        let row = match self.feedback_row(&b.id)? {
+            Some(row) if row.state()? == State::Kept => row,
+            _ => return Err(CellError::new(ErrorCode::NotFound, format!("no feedback {}", b.id))),
+        };
+        // armed before its row changes, by its fence: a deleting one is never left
+        self.arm_feedback(row.fenced_until.unwrap_or(0).max(js::now_ms())).await?;
+        let was = row.wire()?;
         // between the read and here another delete may have come: one log
         let changed = self.rows::<IgnoredAny>("UPDATE feedback SET state = 'deleting' WHERE id = ? AND state = 'kept' RETURNING id", vec![b.id.as_str().into()])?;
         if changed.is_empty() {
@@ -381,18 +460,27 @@ impl RegistryCell {
         }
     }
 
-    /// When the alarm is next due for feedback: now when one is deleting,
-    /// else when the oldest send expires (`None`: nothing to do).
+    /// When the alarm is next due for feedback: when the oldest send
+    /// expires, one deleting is past its fence, or one kept is past the
+    /// fence of its earlier tries (`None`: nothing to do).
     fn feedback_due(&self, now: i64) -> CellResult<Option<i64>> {
         let d = self
-            .row::<Due>("SELECT (SELECT MIN(created_at) FROM feedback WHERE state = 'sending') AS sending, (SELECT COUNT(*) FROM feedback WHERE state = 'deleting') AS deleting", vec![])?
+            .row::<Due>(
+                "SELECT (SELECT MIN(attempt_at) FROM feedback WHERE state = 'sending') AS sending,
+                        (SELECT MIN(COALESCE(fenced_until, 0)) FROM feedback WHERE state = 'deleting') AS deleting,
+                        (SELECT MIN(fenced_until) FROM feedback WHERE state = 'kept' AND fenced_until IS NOT NULL) AS pruning",
+                vec![],
+            )?
             .ok_or_else(|| CellError::host("the feedback's MIN answered no row"))?;
-        Ok(if d.deleting > 0 { Some(now + SWEEP_AGAIN_MS) } else { d.sending.map(|at| (at + SENDING_TTL_MS).max(now + SWEEP_AGAIN_MS)) })
+        let due = [d.sending.map(|at| at + SENDING_TTL_MS), d.deleting, d.pruning].into_iter().flatten().min();
+        Ok(due.map(|at| at.max(now + SWEEP_AGAIN_MS)))
     }
 
-    /// The registry's alarm, for feedback: a send not kept in time is
-    /// deleting; then a batch of deleting ones, each its bytes deleted,
-    /// then its row; then the next run armed.
+    /// The registry's alarm, for feedback: a send not kept in time from its
+    /// latest try is deleting; then a batch of deleting ones past their
+    /// fence, each its bytes deleted, then its row; then a batch of kept
+    /// ones past theirs, each its earlier tries' bytes deleted; then the
+    /// next run armed.
     pub(super) async fn feedback_alarm(&self) -> CellResult<()> {
         let fails = self.feedback_fails.get();
         if fails > 0 {
@@ -400,14 +488,34 @@ impl RegistryCell {
             return Err(CellError::host("the feedback's bytes did not delete (a test hook)"));
         }
         let now = js::now_ms();
-        self.exec("UPDATE feedback SET state = 'deleting' WHERE state = 'sending' AND created_at <= ?", vec![SqlStorageValue::Integer(now - SENDING_TTL_MS)])?;
-        let doomed = self.rows::<Doomed>("SELECT id, person FROM feedback WHERE state = 'deleting' ORDER BY n LIMIT ?", vec![SqlStorageValue::Integer(SWEEP_BATCH.into())])?;
+        self.exec("UPDATE feedback SET state = 'deleting' WHERE state = 'sending' AND attempt_at <= ?", vec![SqlStorageValue::Integer(now - SENDING_TTL_MS)])?;
+        let batch = SqlStorageValue::Integer(SWEEP_BATCH.into());
+        let doomed = self.rows::<Doomed>(
+            "SELECT id, person, attempt, fenced_until FROM feedback WHERE state = 'deleting' AND COALESCE(fenced_until, 0) <= ? ORDER BY n LIMIT ?",
+            vec![SqlStorageValue::Integer(now), batch.clone()],
+        )?;
         assert!(doomed.len() <= SWEEP_BATCH as usize, "a run deletes at most a batch");
         for d in &doomed {
-            // every place under it, whatever a try of the send put
+            // every key under it, whatever try put it: none can land now
             let (_, more) = js::blob_delete_under(&self.env, &rules::feedback_prefix(&d.person, &d.id), 1).await?;
             assert!(!more, "a feedback's screenshots are a page's few");
             self.exec("DELETE FROM feedback WHERE id = ? AND state = 'deleting'", vec![d.id.as_str().into()])?;
+        }
+        let pruned = self.rows::<Doomed>(
+            "SELECT id, person, attempt, fenced_until FROM feedback WHERE state = 'kept' AND fenced_until <= ? ORDER BY fenced_until LIMIT ?",
+            vec![SqlStorageValue::Integer(now), batch],
+        )?;
+        assert!(pruned.len() <= SWEEP_BATCH as usize, "a run prunes at most a batch");
+        for p in &pruned {
+            let (keys, more) = js::blob_list(&self.env, &rules::feedback_prefix(&p.person, &p.id)).await?;
+            assert!(!more, "a feedback's tries' screenshots are a page's few");
+            let own = rules::attempt_prefix(&p.person, &p.id, &p.attempt);
+            let stale: Vec<String> = keys.into_iter().filter(|k| !k.starts_with(&own)).collect();
+            if !stale.is_empty() {
+                js::blob_delete(&self.env, &stale).await?;
+            }
+            let fence = p.fenced_until.map_or(SqlStorageValue::Null, SqlStorageValue::Integer);
+            self.exec("UPDATE feedback SET fenced_until = NULL WHERE id = ? AND state = 'kept' AND fenced_until = ?", vec![p.id.as_str().into(), fence])?;
         }
         match self.feedback_due(js::now_ms())? {
             Some(at) => self.arm_feedback(at).await,
@@ -415,15 +523,29 @@ impl RegistryCell {
         }
     }
 
-    /// The test hook's `FeedbackAge`: a send still sending made as old as
-    /// one the alarm deletes, and the alarm armed now. Answers how many.
-    pub(super) async fn feedback_age(&self, id: &str) -> CellResult<usize> {
-        if !rules::valid_id(id) {
-            return Err(CellError::invalid("a feedback's id is 32 lowercase hex digits"));
+    /// The test hook's `FeedbackAge`: a feedback's latest try, and its
+    /// fence, made `ms` older, and the alarm armed now. Answers how many.
+    pub(super) async fn feedback_age(&self, id: &str, ms: i64) -> CellResult<usize> {
+        if !rules::valid_id(id) || !(0..=SENDING_TTL_MS + FENCE_MS).contains(&ms) {
+            return Err(CellError::invalid("a feedback's id, and at most an hour and its fence of ms"));
         }
-        let aged = self.rows::<IgnoredAny>("UPDATE feedback SET created_at = created_at - ? WHERE id = ? AND state = 'sending' RETURNING id", vec![SqlStorageValue::Integer(SENDING_TTL_MS), id.into()])?;
+        let aged = self.rows::<IgnoredAny>(
+            "UPDATE feedback SET attempt_at = attempt_at - ?, fenced_until = fenced_until - ? WHERE id = ? RETURNING id",
+            vec![SqlStorageValue::Integer(ms), SqlStorageValue::Integer(ms), id.into()],
+        )?;
         self.arm_feedback(js::now_ms()).await?;
         Ok(aged.len())
+    }
+
+    /// The latest a byte of the person's feedback can land, when it is to
+    /// come (a wipe waits it out before it deletes their bytes).
+    pub(super) fn feedback_fenced_until(&self, person: &str) -> CellResult<Option<i64>> {
+        #[derive(Deserialize)]
+        struct Latest {
+            at: Option<i64>,
+        }
+        let r = self.row::<Latest>("SELECT MAX(fenced_until) AS at FROM feedback WHERE person = ? AND fenced_until > ?", vec![person.into(), SqlStorageValue::Integer(js::now_ms())])?;
+        Ok(r.and_then(|r| r.at))
     }
 
     /// After a failed run: the next one, soon, so a failure never ends it.
@@ -437,10 +559,13 @@ impl RegistryCell {
                 Ok(b) => self.feedback_begin(b).await,
                 Err(e) => Err(e),
             }),
-            FeedbackKeep::PATH => reply::<FeedbackKeep>(body(bytes).and_then(|b| self.feedback_keep(b))),
+            FeedbackKeep::PATH => reply::<FeedbackKeep>(match body(bytes) {
+                Ok(b) => self.feedback_keep(b).await,
+                Err(e) => Err(e),
+            }),
             FeedbackMailed::PATH => reply::<FeedbackMailed>(body::<FeedbackMailed>(bytes).and_then(|b| self.feedback_mailed(&b.id))),
             FeedbackList::PATH => reply::<FeedbackList>(body(bytes).and_then(|b| self.feedback_list(b))),
-            FeedbackGet::PATH => reply::<FeedbackGet>(body::<FeedbackGet>(bytes).and_then(|b| self.feedback_of(&b.id))),
+            FeedbackGet::PATH => reply::<FeedbackGet>(body::<FeedbackGet>(bytes).and_then(|b| self.feedback_got(&b.id))),
             FeedbackResolve::PATH => reply::<FeedbackResolve>(body(bytes).and_then(|b| self.feedback_resolve(b))),
             FeedbackDelete::PATH => reply::<FeedbackDelete>(match body(bytes) {
                 Ok(b) => self.feedback_delete(b).await,

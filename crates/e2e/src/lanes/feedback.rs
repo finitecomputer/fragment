@@ -283,9 +283,10 @@ pub fn feedback(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("anyone but an operator reads, marks or deletes none (403)", refused.iter().all(|r| r.status == 403), json!(refused.iter().map(|r| r.status).collect::<Vec<_>>()));
 
     let failing = failures(s, api, &operator)?;
+    let overlapping = overlaps(s, api, &operator)?;
     let ui = shell_ui(s, api, &operator)?;
     // what this run sent goes, so a shared preview's operators read none of it
-    let ours = listed(api, &operator, false)?.into_iter().filter(|f| f["person"] == ivy_id.as_str() || f["person"] == rex_id.as_str() || failing.as_deref().is_some_and(|p| f["person"] == p) || ui.as_deref().is_some_and(|e| f["email"] == e));
+    let ours = listed(api, &operator, false)?.into_iter().filter(|f| f["person"] == ivy_id.as_str() || f["person"] == rex_id.as_str() || failing.as_deref().is_some_and(|p| f["person"] == p) || overlapping.as_deref().is_some_and(|p| f["person"] == p) || ui.as_deref().is_some_and(|e| f["email"] == e));
     for f in ours {
         admin("DELETE", &format!("/{}", f["id"].as_str().unwrap_or("")), None)?;
     }
@@ -345,18 +346,34 @@ fn failures(s: &mut Suite, api: &Api, operator: &Keys) -> Result<Option<String>>
 
     // stopped before it was kept: its bytes are put and recorded (a row
     // still sending, not the operators'), and asked again it is finished,
-    // as asked now (one screenshot: the second's bytes go)
+    // as asked now, by a try of its own (one screenshot, a JPEG); the first
+    // try's two are pruned once no byte of it can land (its fence, brought
+    // to now)
     let stopped = fresh_id();
     hook(api, json!({ "downFor": { "path": "/feedback/keep", "times": 2 } }))?;
     let failed = send(api, Some(&uma), two(&stopped, "Stopped."), FORM)?;
     let (unlisted, put) = (of(&listed(api, operator, false)?, &stopped).is_null(), blob_keys(api, &uma_id, &stopped)?.len());
-    let finished = send(api, Some(&uma), form(&[Field::Text("id", &stopped), Field::Text("kind", "problem"), Field::Text("message", "Stopped, then finished."), Field::File("screenshot", "image/png", PNG)]), FORM)?;
+    let finished = send(api, Some(&uma), form(&[Field::Text("id", &stopped), Field::Text("kind", "problem"), Field::Text("message", "Stopped, then finished."), Field::File("screenshot", "image/jpeg", JPEG)]), FORM)?;
     let f = of(&listed(api, operator, false)?, &stopped);
-    let left = blob_keys(api, &uma_id, &stopped)?;
+    let served = (admin("GET", &format!("/{stopped}/screenshots/0"))?, admin("GET", &format!("/{stopped}/screenshots/1"))?.status);
+    let both = blob_keys(api, &uma_id, &stopped)?.len();
+    hook(api, json!({ "feedbackAge": { "id": stopped, "ms": fragment_core::feedback::FENCE_MS } }))?;
+    let pruned = s.eventually(wait, || blob_keys(api, &uma_id, &stopped).is_ok_and(|k| k.len() == 1));
+    let still = admin("GET", &format!("/{stopped}/screenshots/0"))?;
     s.ok(
-        "a send stopped before it was kept is 503, not the operators', its bytes recorded; asked again with its id it is finished as asked now: one screenshot kept, the earlier try's second deleted",
-        failed.status == 503 && unlisted && put == 2 && finished.status == 200 && f["message"] == "Stopped, then finished." && f["screenshots"].as_array().map(Vec::len) == Some(1) && left.len() == 1,
-        json!({ "failed": failed.status, "unlisted": unlisted, "put": put, "finished": finished.body, "kept": f, "left": left }),
+        "a send stopped before it was kept is 503, not the operators', its bytes recorded; asked again with its id it is finished as asked now, by a try of its own: its JPEG served, never the first try's PNGs, which are pruned past the fence",
+        failed.status == 503
+            && unlisted
+            && put == 2
+            && finished.status == 200
+            && f["message"] == "Stopped, then finished."
+            && f["screenshots"] == json!([{ "mime": "image/jpeg", "size": JPEG.len() }])
+            && served.0.bytes == JPEG
+            && served.1 == 404
+            && both == 3
+            && pruned
+            && still.bytes == JPEG,
+        json!({ "failed": failed.status, "unlisted": unlisted, "put": put, "finished": finished.body, "kept": f, "served": [served.0.status, served.1], "keysBeforePrune": both, "pruned": pruned }),
     );
 
     // never finished: its record outlives a registry's restart and a failed
@@ -368,7 +385,7 @@ fn failures(s: &mut Suite, api: &Api, operator: &Keys) -> Result<Option<String>>
     let restarted = api.signed(operator, "GET", "/api/admin/feedback", None)?;
     let fresh = hook(api, json!({ "calls": null }))?.body["skewed"] == 0;
     hook(api, json!({ "feedbackSweepFails": 1 }))?;
-    let aged = hook(api, json!({ "feedbackAge": abandoned }))?.body["aged"] == 1;
+    let aged = hook(api, json!({ "feedbackAge": { "id": abandoned, "ms": fragment_core::feedback::SENDING_TTL_MS } }))?.body["aged"] == 1;
     let ran = s.eventually(wait, || hook(api, json!({ "feedbackSweepFails": null })).is_ok_and(|r| r.body["left"] == 0));
     let kept_through = blob_keys(api, &uma_id, &abandoned)?.len();
     hook(api, json!({ "signins": "sweep" }))?;
@@ -398,6 +415,151 @@ fn failures(s: &mut Suite, api: &Api, operator: &Keys) -> Result<Option<String>>
         json!({ "deleted": deleted.status, "failedRun": ran, "served": shot, "deletedAgain": again, "keptThrough": kept_through, "swept": swept }),
     );
     Ok(Some(uma_id))
+}
+
+/// Two tries of one send at once, and a try that outlives its send's
+/// expiry or delete, each held between its begin and its puts (`holdAfter`
+/// on `/feedback/begin`): the row, what is served, and BLOBS' keys after
+/// every writer is done, past the fence, and after a registry's restart.
+/// Answers the person it sent as, when it ran.
+fn overlaps(s: &mut Suite, api: &Api, operator: &Keys) -> Result<Option<String>> {
+    const LABEL: &str = "tries of one send at once, or past its expiry or delete, never mix or leave a key no row records";
+    if s.hosted() {
+        s.skip(LABEL, "the registry's hooks are a local node's");
+        return Ok(None);
+    }
+    use fragment_core::feedback::{FENCE_MS, SENDING_TTL_MS};
+    let wait = Duration::from_secs(15);
+    let admin = |method: &str, path: &str| api.signed(operator, method, &format!("/api/admin/feedback{path}"), None);
+    let vic = api.person()?;
+    let vic_id = api.identity(&vic)?;
+    let pngs = |id: &str, message: &str| form(&[Field::Text("id", id), Field::Text("kind", "problem"), Field::Text("message", message), Field::File("screenshot", "image/png", PNG), Field::File("screenshot", "image/png", PNG)]);
+    let jpeg = |id: &str, message: &str| form(&[Field::Text("id", id), Field::Text("kind", "message"), Field::Text("message", message), Field::File("screenshot", "image/jpeg", JPEG)]);
+    // the next begin acts, then is held `ms`; `held` waits until a hold has
+    // begun since `started` answered `before`
+    let hold = |ms: u32| hook(api, json!({ "holdAfter": { "path": "/feedback/begin", "ms": ms } })).map(drop);
+    let started = || hook(api, json!({ "holdAfter": null })).map(|r| r.body["started"].as_u64().unwrap_or(0));
+    let held = |s: &Suite, before: u64| s.eventually(wait, || started().is_ok_and(|n| n > before));
+    // what the operators see of it: its row, and its first two screenshots
+    let seen = |id: &str| -> Result<Value> {
+        let f = of(&listed(api, operator, false)?, id);
+        let (a, b) = (admin("GET", &format!("/{id}/screenshots/0"))?, admin("GET", &format!("/{id}/screenshots/1"))?);
+        let shot = |r: &Reply| if r.status != 200 { json!(r.status) } else if r.bytes == JPEG { json!("jpeg") } else if r.bytes == PNG { json!("png") } else { json!("other") };
+        Ok(json!({ "message": f["message"], "screenshots": f["screenshots"], "served": [shot(&a), shot(&b)] }))
+    };
+    let only_jpeg = |message: &str| json!({ "message": message, "screenshots": [{ "mime": "image/jpeg", "size": JPEG.len() }], "served": ["jpeg", 404] });
+    let keys = |id: &str| blob_keys(api, &vic_id, id).map(|k| k.len()).unwrap_or(usize::MAX);
+    // a fresh instance counts its calls anew: fewer than this run's so far
+    let restart = || -> Result<bool> {
+        let before = hook(api, json!({ "calls": null }))?.body["calls"].as_u64().unwrap_or(0);
+        hook(api, json!("restart"))?;
+        std::thread::sleep(Duration::from_millis(500));
+        let listed = api.signed(operator, "GET", "/api/admin/feedback", None)?;
+        let after = hook(api, json!({ "calls": null }))?.body["calls"].as_u64().unwrap_or(u64::MAX);
+        Ok(listed.status == 200 && after < before)
+    };
+
+    // two tries at once: A (two PNGs) begins and is held; B (one JPEG, its
+    // words) begins, puts and keeps; then A puts under its own try's keys,
+    // and is answered as the send B kept. The row is B's, all of it; A's
+    // bytes, recorded under the send, go past the fence
+    let both = fresh_id();
+    let n = started()?;
+    hold(6000)?;
+    let (a, b, during) = std::thread::scope(|sc| -> Result<_> {
+        let a = sc.spawn(|| send(api, Some(&vic), pngs(&both, "Try A"), FORM));
+        let ok = held(s, n);
+        let b = send(api, Some(&vic), jpeg(&both, "Try B"), FORM)?;
+        let a = a.join().map_err(|_| anyhow::anyhow!("try A panicked"))??;
+        Ok((a, b, ok))
+    })?;
+    let after_writers = (seen(&both)?, keys(&both));
+    hook(api, json!({ "feedbackAge": { "id": both, "ms": FENCE_MS } }))?;
+    let pruned = s.eventually(wait, || keys(&both) == 1);
+    let restarted = restart()?;
+    let after_restart = (seen(&both)?, keys(&both));
+    s.ok(
+        "two tries of one send at once (A: two PNGs, held after it began; B: a JPEG and other words): B keeps it, A is answered as the send B kept, and the row, its screenshots and what is served are B's alone, A's PNGs never; A's keys, recorded under the send, are pruned past the fence; the same after a registry's restart",
+        during
+            && b.status == 200
+            && a.status == 200
+            && a.body == b.body
+            && after_writers.0 == only_jpeg("Try B")
+            && after_writers.1 == 3
+            && pruned
+            && restarted
+            && after_restart == (only_jpeg("Try B"), 1),
+        json!({ "held": during, "a": a.to_string(), "b": b.to_string(), "afterWriters": after_writers.0, "keysAfterWriters": after_writers.1, "pruned": pruned, "restarted": restarted, "afterRestart": after_restart.0, "keysAfterRestart": after_restart.1 }),
+    );
+
+    // a try spanning the send's expiry: a send stopped before it was kept
+    // (two PNGs) is brought to 3 s short of its hour; a retry (a JPEG)
+    // begins, renewing it, and is held past the old hour while the alarm
+    // runs; then it puts and keeps: the send is the retry's, whole
+    let late = fresh_id();
+    hook(api, json!({ "downFor": { "path": "/feedback/keep", "times": 2 } }))?;
+    let stuck = send(api, Some(&vic), pngs(&late, "Stuck"), FORM)?;
+    hook(api, json!({ "feedbackAge": { "id": late, "ms": SENDING_TTL_MS - 3000 } }))?;
+    let n = started()?;
+    hold(7000)?;
+    let (retry, during) = std::thread::scope(|sc| -> Result<_> {
+        let r = sc.spawn(|| send(api, Some(&vic), jpeg(&late, "Retried"), FORM));
+        let ok = held(s, n);
+        std::thread::sleep(Duration::from_secs(4));
+        hook(api, json!({ "signins": "sweep" }))?;
+        Ok((r.join().map_err(|_| anyhow::anyhow!("the retry panicked"))??, ok))
+    })?;
+    let after_writers = (seen(&late)?, keys(&late));
+    hook(api, json!({ "feedbackAge": { "id": late, "ms": FENCE_MS } }))?;
+    let pruned = s.eventually(wait, || keys(&late) == 1);
+    let restarted = restart()?;
+    let after_restart = (seen(&late)?, keys(&late));
+    s.ok(
+        "a retry begun 3 s before its send's hour renews it: held past the old hour while the alarm runs, it puts and keeps, and the send is the retry's alone (its JPEG and words); the stuck try's PNGs are pruned past the fence; the same after a registry's restart",
+        stuck.status == 503 && during && retry.status == 200 && after_writers.0 == only_jpeg("Retried") && after_writers.1 == 3 && pruned && restarted && after_restart == (only_jpeg("Retried"), 1),
+        json!({ "stuck": stuck.status, "held": during, "retry": retry.to_string(), "afterWriters": after_writers.0, "keysAfterWriters": after_writers.1, "pruned": pruned, "restarted": restarted, "afterRestart": after_restart.0, "keysAfterRestart": after_restart.1 }),
+    );
+
+    // a writer spanning a delete: A (two PNGs) is held after it began; B
+    // keeps the send, and an operator deletes it while A waits. The alarm
+    // keeps the row, deleting, past its fence; A then puts and is refused
+    // (404): its keys too are the row's to delete, and go with it
+    let gone = fresh_id();
+    let n = started()?;
+    hold(7000)?;
+    let (a, b, deleted, before_a, during) = std::thread::scope(|sc| -> Result<_> {
+        let a = sc.spawn(|| send(api, Some(&vic), pngs(&gone, "Slow"), FORM));
+        let ok = held(s, n);
+        let b = send(api, Some(&vic), jpeg(&gone, "Fast"), FORM)?;
+        let deleted = admin("DELETE", &format!("/{gone}"))?;
+        hook(api, json!({ "signins": "sweep" }))?;
+        std::thread::sleep(Duration::from_millis(1500));
+        let before_a = keys(&gone);
+        Ok((a.join().map_err(|_| anyhow::anyhow!("try A panicked"))??, b, deleted, before_a, ok))
+    })?;
+    let after_writers = keys(&gone);
+    let unserved = admin("GET", &format!("/{gone}/screenshots/0"))?.status;
+    hook(api, json!({ "feedbackAge": { "id": gone, "ms": FENCE_MS } }))?;
+    let swept = s.eventually(wait, || keys(&gone) == 0);
+    let row_gone = s.eventually(wait, || hook(api, json!({ "feedbackAge": { "id": gone, "ms": 0 } })).is_ok_and(|r| r.body["aged"] == 0));
+    let restarted = restart()?;
+    let after_restart = keys(&gone);
+    s.ok(
+        "a writer held across its send's delete: the deleted send stays recorded (its JPEG's key kept) until its fence while the writer waits; the writer puts, is refused (404), and its keys are recorded too; past the fence the alarm deletes every key, then the row; none after a registry's restart",
+        during
+            && b.status == 200
+            && deleted.status == 200
+            && before_a == 1
+            && a.status == 404
+            && after_writers == 3
+            && unserved == 404
+            && swept
+            && row_gone
+            && restarted
+            && after_restart == 0,
+        json!({ "held": during, "b": b.status, "deleted": deleted.status, "keysWhileHeld": before_a, "a": a.to_string(), "keysAfterWriters": after_writers, "served": unserved, "swept": swept, "rowGone": row_gone, "restarted": restarted, "keysAfterRestart": after_restart }),
+    );
+    Ok(Some(vic_id))
 }
 
 /// Settings' Help in Chrome: Report a problem opens the dialog, a

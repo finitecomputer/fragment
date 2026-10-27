@@ -366,6 +366,11 @@ pub(crate) struct WipeFacts {
     /// The feedback they sent (its screenshots go with their pictures).
     #[serde(default)]
     pub feedback: u64,
+    /// The latest a byte of their feedback's may still land (a try in
+    /// flight: registry/feedback.rs), when it is to come: the `pictures`
+    /// step deletes their screenshots only past it.
+    #[serde(default)]
+    pub feedback_fenced_until: Option<i64>,
     pub done: Option<u32>,
     /// The orgs its `billing` step settles (their own, and any whose
     /// subscription their card pays), and what it does to each.
@@ -479,9 +484,19 @@ pub(crate) enum TestHook {
     /// The steps its schema holds (schema.rs `view`), answered by a
     /// registry that refuses its schema too.
     Schema,
-    /// A feedback still sending (its id) made as old as one the alarm
-    /// deletes, and the alarm armed now (`{aged}`: 1, or 0 when none is).
-    FeedbackAge(String),
+    /// A feedback's latest try, and its fence, made `ms` older (at most an
+    /// hour and a fence), and the alarm armed now (`{aged}`: 1, or 0 when
+    /// there is none): a test brings its expiry or its fence to now.
+    FeedbackAge(FeedbackAge),
+    /// The next call to one path acts, then waits `ms` (at most
+    /// `TEST_HOLD_MAX_MS`) before it is answered, while other calls go on:
+    /// a test holds a request between two of its steps. `null` sets
+    /// nothing; either answers how many such waits have begun (`{started}`).
+    HoldAfter(Option<HoldAfter>),
+    /// The registry ends its instance just after it answers (`{restarting}`),
+    /// as a deploy's restart does; the next call starts another, its hooks
+    /// and counts gone, its storage and alarm as they were.
+    Restart,
     /// The next `n` runs of the alarm's deletes of feedback fail before
     /// they delete a thing, as when BLOBS does not answer (at most
     /// `TEST_DOWN_FOR_MAX`; 0 lets them run): a test sees what is left.
@@ -535,6 +550,22 @@ pub(crate) struct E2ePeopleAnswer {
 
 /// The e2e people one page lists.
 pub(crate) const E2E_PEOPLE_PAGE: u32 = 100;
+
+/// `TestHook::FeedbackAge`: which feedback, and by how much.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FeedbackAge {
+    pub id: String,
+    pub ms: i64,
+}
+
+/// `TestHook::HoldAfter`: which call (a `Call`'s path), and how long.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HoldAfter {
+    pub path: String,
+    pub ms: u32,
+}
 
 /// The longest `TestHook::Hold`.
 pub(crate) const TEST_HOLD_MAX_MS: u32 = 10_000;

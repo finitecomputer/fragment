@@ -114,7 +114,7 @@ registry's are no route (404); a local fleet's reach everything.
 | `POST /api/test/mail` | a local fleet's only (a preview's mail is real): `{to, subject, text}` → `{messageId}`, one message as the platform sends it (Mail, below), to the mail fake |
 | `POST /api/test/feedback` | any fleet with levers (on a preview, an e2e person's alone): `{person, id}` → `{keys, more}`, the keys BLOBS holds under that feedback's prefix, so a test sees its screenshots' bytes there or gone (Feedback, below) |
 | `POST /api/test/export` | `{identity, op, steps?}` (on a preview, an e2e person's): a lever on that person's export (Export, below). `pace` with `steps` lets their build take at most that many more steps (a copy's piece, a page of records, a fragment's facts…), then wait, a second at a time, until it is let go (`steps: null`): a build held part way, as a crash or a restart finds one. `piece` with `steps` (1024 to 8 MiB, or `null`) holds an entry of unknown size that many bytes at a time before putting it aside, so a small export puts its entries aside in many pieces, as a large one does. `cap` with `steps` (bytes, or `null`) makes their archive's limit that many bytes, so a small export meets it → `{pace}`, `{piece}` or `{cap}` |
-| `POST /api/test/registry` | a local fleet's only: `{down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls, skewed}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), and how many it refused for their release (not among `calls`), `{skewFor: {path, times, deployed?}}` makes it answer the next `times` calls (at most 100; 0 answers them again) to one of its inner paths (`/login/exchange`: a sign-in's callback) as a registry of another release would, each refused unread (503 `deploying`) by the check every call into an object meets, as a deploy going out does (docs/MODEL.md, Calls between releases), and with `deployed` (a deploy's seconds, as `FRAGMENT_DEPLOYED_AT`) as one deployed then: before the caller's release (0), it restarts at the first refusal, as an object a deploy replaced does, its hooks and counts gone with it (so the router's next ask is answered); after it, it refuses and stays, `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, `{downFor: {path, times}}` makes it answer 503 to the next `times` calls (at most 100; 0 answers them again) to one of its inner paths (`/orgs/sync`: a computer's making asking for its seat's push), as `{down}` does, the rest answered, `{dropFor: {path, times}}` makes the next `times` calls to one act, then answer 503 as an answer lost on its way back (`/feedback/keep`: a send kept, its sender not told), `{feedbackAge: id}` makes a feedback still sending as old as one its alarm deletes and arms the alarm now (`{aged}`), `{feedbackSweepFails: n|null}` fails the next `n` runs of the alarm's deletes of feedback before they delete a thing (null sets nothing; `{left}`), and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it), `"schema"` answers the steps its schema holds, as the list's `schema` does, on a registry that refuses its schema too, and `{invitesBefore: email}` makes every invite waiting on that email one mailed before invites waited for a yes (decision 63: its role, title and sharer forgotten), which a sign-in as it still meets, answering `{before}`, how many |
+| `POST /api/test/registry` | a local fleet's only: `{down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls, skewed}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), and how many it refused for their release (not among `calls`), `{skewFor: {path, times, deployed?}}` makes it answer the next `times` calls (at most 100; 0 answers them again) to one of its inner paths (`/login/exchange`: a sign-in's callback) as a registry of another release would, each refused unread (503 `deploying`) by the check every call into an object meets, as a deploy going out does (docs/MODEL.md, Calls between releases), and with `deployed` (a deploy's seconds, as `FRAGMENT_DEPLOYED_AT`) as one deployed then: before the caller's release (0), it restarts at the first refusal, as an object a deploy replaced does, its hooks and counts gone with it (so the router's next ask is answered); after it, it refuses and stays, `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, `{downFor: {path, times}}` makes it answer 503 to the next `times` calls (at most 100; 0 answers them again) to one of its inner paths (`/orgs/sync`: a computer's making asking for its seat's push), as `{down}` does, the rest answered, `{dropFor: {path, times}}` makes the next `times` calls to one act, then answer 503 as an answer lost on its way back (`/feedback/keep`: a send kept, its sender not told), `{feedbackAge: {id, ms}}` makes a feedback's latest try and its fence `ms` older and arms the alarm now (`{aged}`), `{holdAfter: {path, ms}\|null}` makes the next call to one path act, then wait `ms` (at most 10 s) before it is answered, while other calls go on (`/feedback/begin`: a send held between its begin and its puts; `{started}`, how many such waits have begun), `"restart"` ends the registry's instance just after it answers, as a deploy's restart does (its hooks and counts gone, its storage and alarm kept), `{feedbackSweepFails: n|null}` fails the next `n` runs of the alarm's deletes of feedback before they delete a thing (null sets nothing; `{left}`), and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it), `"schema"` answers the steps its schema holds, as the list's `schema` does, on a registry that refuses its schema too, and `{invitesBefore: email}` makes every invite waiting on that email one mailed before invites waited for a yes (decision 63: its role, title and sharer forgotten), which a sign-in as it still meets, answering `{before}`, how many |
 
 One hook is no route: on a local fleet with a test secret, a request
 whose `fragment_e2e_release` cookie names a release's id is answered as
@@ -525,7 +525,7 @@ dropped. No vendor's product takes it: Cloudflare offers none
 and a tracker's widget would run a third party's script in the shell,
 which holds the person's session. The registry keeps it
 (`registry/feedback.rs`), its screenshots' bytes in BLOBS under
-`feedback/<person>/<id>/<place>`; the operators read it on `/admin`'s
+`feedback/<person>/<id>/<try>/<place>`; the operators read it on `/admin`'s
 Feedback (Operators: the admin, above), and are mailed each one at the
 deployment's `feedback_to` (`FRAGMENT_FEEDBACK_TO`) when it names one, by
 whichever try of its send learns it is kept and its notice has not gone: who
@@ -561,13 +561,19 @@ when.
 
 A send is two registry turns, each idempotent on its id: the first
 begins it, a row `sending` (so no one it does not know, nor anyone past
-their day, stores bytes, and no byte is put that no row records); the
-screenshots go to BLOBS; the second keeps it. A send asked again with its
-id is the same one: begun and not kept, it is sent again as asked now
-(its earlier try's bytes past its screenshots deleted); kept, it is
-answered as it was (200, `FeedbackSent`), nothing put or kept again,
-and its operators' notice sent then only if it never went (its row marks
-it once it has: at least once, and again only when a mark is lost). Another person's id is 409; a send of an id deleted, or begun and
+their day, stores bytes, and no byte is put that no row records), and
+makes it a try of its own, each time it is asked (at most 8); the
+screenshots go to BLOBS under that try's own keys; the second keeps it,
+if that try is still its latest. Two tries of one send at once never mix:
+the latest one's words and screenshots are what is kept and served, and
+an earlier try's bytes, under its own keys, are never served. A send
+asked again with its id is the same one: begun and not kept, it is a new
+try, as asked now (the try before can keep it no longer: asked to, it is
+409, unless the send is kept by then, when it is answered as kept); kept,
+it is answered as it was (200, `FeedbackSent`), nothing put or kept
+again, and its operators' notice sent then only if it never went (its
+row marks it once it has: at least once, and again only when a mark is
+lost). Another person's id is 409; a send of an id deleted, or begun and
 not kept for an hour (swept, below), is a new one once it is gone (409,
 or 404 at its keeping, until then: the shell makes a new id). The router
 asks a turn again once when its answer was lost (503
@@ -576,14 +582,25 @@ nothing on any failure: the row is its bytes' record, and the registry
 finishes or deletes them. A send its sender heard fail, then, is either
 kept whole or, never kept, deleted with its bytes.
 
+A try starts no put later than a minute after it asked to begin
+(`WRITE_WINDOW_MS`; past it, the send is 502 `upstream_failed`, to send
+again), and a put begun in time lands within nine more (`PUT_MAX_MS`), so
+no byte of a try lands past ten minutes from its beginning (`FENCE_MS`):
+a row with a try that may still be writing (one not kept, or earlier than
+the one that kept it) holds that fence (`fenced_until`), and nothing
+under it is deleted before it.
+
 Its states (`fragment_core::feedback::State`): `sending`, `kept` (the
 operators see no other), and `deleting`. A send not kept within an hour
-(`SENDING_TTL_MS`), and one an operator deletes, are `deleting`; the
-registry's alarm (armed as each is begun or deleted) then deletes each
-one's bytes (everything under its prefix), and only then its row, 16 a
-run; a run that fails (BLOBS not answering) leaves both and arms the next
-a minute on. A row and an alarm are the object's storage: both outlive
-a restart, or a deploy.
+of its latest try (`SENDING_TTL_MS`: a retry renews it), and one an
+operator deletes, are `deleting`; the registry's alarm (armed as each is
+begun, kept or deleted) then deletes each one's bytes (everything under
+its prefix, every try's) once past its fence, and only then its row; and,
+past a kept one's fence, its earlier tries' bytes. 16 of each a run; a
+run that fails (BLOBS not answering) leaves all of it and arms the next a
+minute on. A row and an alarm are the object's storage: both outlive a
+restart, or a deploy. A wipe's `pictures` step waits out the person's
+fences (going on, saying how long) before it deletes their bytes.
 
 `Feedback` (`fragment_proto::feedback`) is `{id, n, person, email, kind,
 message, page, userAgent, release, screenshots: [{mime, size}],

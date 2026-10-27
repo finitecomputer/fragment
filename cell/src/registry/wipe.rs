@@ -158,6 +158,7 @@ impl RegistryCell {
                     sessions: 0,
                     pictures: vec![],
                     feedback: 0,
+                    feedback_fenced_until: None,
                     done: Some(p.done()),
                     orgs: vec![],
                 }),
@@ -209,6 +210,7 @@ impl RegistryCell {
             sessions: held("sessions")?,
             pictures,
             feedback: self.count("SELECT COUNT(*) AS n FROM feedback WHERE person = ?", vec![identity.into()])?,
+            feedback_fenced_until: self.feedback_fenced_until(identity)?,
             done: progress.map(Progress::done),
             orgs: self.orgs_found(identity)?,
         })
